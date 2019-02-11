@@ -5,7 +5,7 @@ ZClassic 2.0.3-rc1
 What is ZClassic?
 --------------
 
-[ZClassic](https://zcl.community/) is an implementation of the "Zerocash" protocol.
+[ZClassic](https://zclassic.org/) is an implementation of the "Zerocash" protocol.
 Based on Bitcoin's code, it intends to offer a far higher standard of privacy
 through a sophisticated zero-knowledge proving scheme that preserves
 confidentiality of transaction metadata. Technical details are available
@@ -52,8 +52,22 @@ Participation in the ZClassic project is subject to a
 
 Build ZClassic along with most dependencies from source by running:
 
+Get dependencies
+```{r, engine='bash'}
+sudo apt-get install \
+      build-essential pkg-config libc6-dev m4 g++-multilib \
+      autoconf libtool ncurses-dev unzip git python \
+      zlib1g-dev wget bsdmainutils automake
 ```
+
+Install
+```{r, engine='bash'}
+# Build
 ./zcutil/build.sh -j$(nproc)
+# fetch key
+./zcutil/fetch-params.sh
+# Run
+./src/zcashd
 ```
 
 Currently only Linux is officially supported.
