@@ -35,9 +35,9 @@ class SignOfflineTest (BitcoinTestFramework):
         privkeys = [self.nodes[0].dumpprivkey(tx['address'])]
 
         create_inputs = [{'txid': txid, 'vout': 0}]
-        sign_inputs = [{'txid': txid, 'vout': 0, 'scriptPubKey': scriptpubkey, 'amount': 10}]
+        sign_inputs = [{'txid': txid, 'vout': 0, 'scriptPubKey': scriptpubkey, 'amount': 12.5}]
 
-        create_hex = self.nodes[0].createrawtransaction(create_inputs, {taddr: 9.9999})
+        create_hex = self.nodes[0].createrawtransaction(create_inputs, {taddr: 12.4999})
 
         # An offline regtest node does not rely on the approx release height of the software
         # to determine the consensus rules to be used for signing.

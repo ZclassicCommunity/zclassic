@@ -49,15 +49,15 @@ class WalletProtectCoinbaseTest (BitcoinTestFramework):
         self.nodes[0].generate(4)
 
         walletinfo = self.nodes[0].getwalletinfo()
-        assert_equal(walletinfo['immature_balance'], 40)
+        assert_equal(walletinfo['immature_balance'], 50)
         assert_equal(walletinfo['balance'], 0)
 
         self.sync_all()
         self.nodes[1].generate(101)
         self.sync_all()
 
-        assert_equal(self.nodes[0].getbalance(), 40)
-        assert_equal(self.nodes[1].getbalance(), 10)
+        assert_equal(self.nodes[0].getbalance(), 50)
+        assert_equal(self.nodes[1].getbalance(), 12.5)
         assert_equal(self.nodes[2].getbalance(), 0)
         assert_equal(self.nodes[3].getbalance(), 0)
 
@@ -107,8 +107,8 @@ class WalletProtectCoinbaseTest (BitcoinTestFramework):
         myviewingkey = self.nodes[0].z_exportviewingkey(myzaddr)
         self.nodes[3].z_importviewingkey(myviewingkey, "no")
 
-        # This send will succeed.  We send two coinbase utxos totalling 20.0 less a fee of 0.00010000, with no change.
-        shieldvalue = Decimal('20.0') - Decimal('0.0001')
+        # This send will succeed.  We send two coinbase utxos totalling 25.0 less a fee of 0.00010000, with no change.
+        shieldvalue = Decimal('25.0') - Decimal('0.0001')
         recipients = []
         recipients.append({"address":myzaddr, "amount": shieldvalue})
         myopid = self.nodes[0].z_sendmany(mytaddr, recipients)

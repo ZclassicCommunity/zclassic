@@ -207,6 +207,23 @@ UniValue getbestblockhash(const UniValue& params, bool fHelp)
     return chainActive.Tip()->GetBlockHash().GetHex();
 }
 
+UniValue getfinalizedblockhash(const UniValue& params, bool fHelp) {
+    if (fHelp || params.size() != 0) {
+        throw std::runtime_error(
+            "getfinalizedblockhash\n"
+            "\nReturns the hash of the currently finalized block\n"
+            "\nResult:\n"
+            "\"hex\"      (string) the block hash hex encoded\n");
+    }
+
+    LOCK(cs_main);
+    const CBlockIndex *blockIndexFinalized = GetFinalizedBlock();
+    if (blockIndexFinalized) {
+        return blockIndexFinalized->GetBlockHash().GetHex();
+    }
+    return UniValue(UniValue::VSTR);
+}
+
 UniValue getdifficulty(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() != 0)
@@ -856,10 +873,11 @@ UniValue getchaintips(const UniValue& params, bool fHelp)
             "]\n"
             "Possible values for status:\n"
             "1.  \"invalid\"               This branch contains at least one invalid block\n"
-            "2.  \"headers-only\"          Not all blocks for this branch are available, but the headers are valid\n"
-            "3.  \"valid-headers\"         All blocks are available for this branch, but they were never fully validated\n"
-            "4.  \"valid-fork\"            This branch is not part of the active chain, but is fully validated\n"
-            "5.  \"active\"                This is the tip of the active main chain, which is certainly valid\n"
+            "2.  \"parked\"                This branch contains at least one parked block\n"
+	    "3.  \"headers-only\"          Not all blocks for this branch are available, but the headers are valid\n"
+            "4.  \"valid-headers\"         All blocks are available for this branch, but they were never fully validated\n"
+            "5.  \"valid-fork\"            This branch is not part of the active chain, but is fully validated\n"
+            "6.  \"active\"                This is the tip of the active main chain, which is certainly valid\n"
             "\nExamples:\n"
             + HelpExampleCli("getchaintips", "")
             + HelpExampleRpc("getchaintips", "")
@@ -901,6 +919,9 @@ UniValue getchaintips(const UniValue& params, bool fHelp)
         } else if (block->nStatus & BLOCK_FAILED_MASK) {
             // This block or one of its ancestors is invalid.
             status = "invalid";
+        } else if (block->nStatus & BLOCK_PARKED_MASK) {
+	        // This block or one of its ancestors is parked.
+	        status = "parked";
         } else if (block->nChainTx == 0) {
             // This block cannot be connected because full block data for it or one of its parents is missing.
             status = "headers-only";
@@ -952,6 +973,46 @@ UniValue getmempoolinfo(const UniValue& params, bool fHelp)
     return mempoolInfoToJSON();
 }
 
+UniValue finalizeblock(const UniValue& params, bool fHelp) {
+    if (fHelp || params.size() != 1) {
+        throw std::runtime_error(
+            "finalizeblock \"blockhash\"\n"
+
+            "\nTreats a block as final. It cannot be reorged. Any chain\n"
+            "that does not contain this block is invalid. Used on a less\n"
+            "work chain, it can effectively PUTS YOU OUT OF CONSENSUS.\n"
+            "USE WITH CAUTION!\n"
+            "\nResult:\n"
+            "\nExamples:\n" +
+            HelpExampleCli("finalizeblock", "\"blockhash\"") +
+            HelpExampleRpc("finalizeblock", "\"blockhash\""));
+    }
+
+    std::string strHash = params[0].get_str();
+    uint256 hash(uint256S(strHash));
+    CValidationState state;
+
+    {
+        LOCK(cs_main);
+        if (mapBlockIndex.count(hash) == 0) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
+        }
+
+        CBlockIndex *pblockindex = mapBlockIndex[hash];
+        FinalizeBlockAndInvalidate(state, pblockindex);
+    }
+
+    if (state.IsValid()) {
+        ActivateBestChain(state);
+    }
+
+    if (!state.IsValid()) {
+        throw JSONRPCError(RPC_DATABASE_ERROR, state.GetRejectReason());
+    }
+
+    return NullUniValue;
+}
+
 UniValue invalidateblock(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() != 1)
@@ -966,8 +1027,8 @@ UniValue invalidateblock(const UniValue& params, bool fHelp)
             + HelpExampleRpc("invalidateblock", "\"blockhash\"")
         );
 
-    std::string strHash = params[0].get_str();
-    uint256 hash(uint256S(strHash));
+    const std::string strHash = params[0].get_str();
+    const uint256 hash(uint256S(strHash));
     CValidationState state;
 
     {
@@ -982,6 +1043,83 @@ UniValue invalidateblock(const UniValue& params, bool fHelp)
     if (state.IsValid()) {
         ActivateBestChain(state);
     }
+
+    if (!state.IsValid()) {
+        throw JSONRPCError(RPC_DATABASE_ERROR, state.GetRejectReason());
+    }
+
+    return NullUniValue;
+}
+
+UniValue parkblock(const UniValue& params, bool fHelp) {
+    if (fHelp || params.size() != 1) {
+        throw std::runtime_error("parkblock \"blockhash\"\n"
+                                 "\nMarks a block as parked.\n"
+                                 "\nArguments:\n"
+                                 "1. \"blockhash\"   (string, required) the "
+                                 "hash of the block to park\n"
+                                 "\nResult:\n"
+                                 "\nExamples:\n" +
+                                 HelpExampleCli("parkblock", "\"blockhash\"") +
+                                 HelpExampleRpc("parkblock", "\"blockhash\""));
+    }
+
+    const std::string strHash = params[0].get_str();
+    const uint256 hash(uint256S(strHash));
+    CValidationState state;
+
+    {
+        LOCK(cs_main);
+        if (mapBlockIndex.count(hash) == 0) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
+        }
+
+        CBlockIndex *pblockindex = mapBlockIndex[hash];
+        ParkBlock(state, pblockindex);
+    }
+
+    if (state.IsValid()) {
+        ActivateBestChain(state);
+    }
+
+    if (!state.IsValid()) {
+        throw JSONRPCError(RPC_DATABASE_ERROR, state.GetRejectReason());
+    }
+
+    return NullUniValue;
+}
+
+UniValue unparkblock(const UniValue& params, bool fHelp) {
+    if (fHelp || params.size() != 1) {
+        throw std::runtime_error(
+            "unparkblock \"blockhash\"\n"
+            "\nRemoves parked status of a block and its descendants, "
+            "reconsider them for activation.\n"
+            "This can be used to undo the effects of parkblock.\n"
+            "\nArguments:\n"
+            "1. \"blockhash\"   (string, required) the hash of the block to "
+            "unpark\n"
+            "\nResult:\n"
+            "\nExamples:\n" +
+            HelpExampleCli("unparkblock", "\"blockhash\"") +
+            HelpExampleRpc("unparkblock", "\"blockhash\""));
+    }
+
+    const std::string strHash = params[0].get_str();
+    const uint256 hash(uint256S(strHash));
+
+    {
+        LOCK(cs_main);
+        if (mapBlockIndex.count(hash) == 0) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
+        }
+
+        CBlockIndex *pblockindex = mapBlockIndex[hash];
+        UnparkBlockAndChildren(pblockindex);
+    }
+
+    CValidationState state;
+    ActivateBestChain(state);
 
     if (!state.IsValid()) {
         throw JSONRPCError(RPC_DATABASE_ERROR, state.GetRejectReason());
@@ -1005,9 +1143,8 @@ UniValue reconsiderblock(const UniValue& params, bool fHelp)
             + HelpExampleRpc("reconsiderblock", "\"blockhash\"")
         );
 
-    std::string strHash = params[0].get_str();
-    uint256 hash(uint256S(strHash));
-    CValidationState state;
+    const std::string strHash = params[0].get_str();
+    const uint256 hash(uint256S(strHash));
 
     {
         LOCK(cs_main);
@@ -1015,12 +1152,11 @@ UniValue reconsiderblock(const UniValue& params, bool fHelp)
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
 
         CBlockIndex* pblockindex = mapBlockIndex[hash];
-        ReconsiderBlock(state, pblockindex);
+        ResetBlockFailureFlags(pblockindex);
     }
 
-    if (state.IsValid()) {
-        ActivateBestChain(state);
-    }
+    CValidationState state;
+    ActivateBestChain(state);
 
     if (!state.IsValid()) {
         throw JSONRPCError(RPC_DATABASE_ERROR, state.GetRejectReason());
@@ -1047,7 +1183,11 @@ static const CRPCCommand commands[] =
     { "blockchain",         "verifychain",            &verifychain,            true  },
 
     /* Not shown in help */
+    { "hidden",             "getfinalizedblockhash",  getfinalizedblockhash,   true  },
+    { "hidden",             "finalizeblock",          finalizeblock,           true  },
     { "hidden",             "invalidateblock",        &invalidateblock,        true  },
+    { "hidden",             "parkblock",              parkblock,               true  },
+    { "hidden",             "unparkblock",            unparkblock,             true  },
     { "hidden",             "reconsiderblock",        &reconsiderblock,        true  },
 };
 

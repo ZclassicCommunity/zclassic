@@ -97,6 +97,15 @@ enum BlockStatus: uint32_t {
     BLOCK_FAILED_MASK        =   BLOCK_FAILED_VALID | BLOCK_FAILED_CHILD,
 
     BLOCK_ACTIVATES_UPGRADE  =   128, //! block activates a network upgrade
+
+    // The block is being parked for some reason. It will be reconsidered if its
+    // chains grows.
+    BLOCK_PARKED_FLAG        =   256,
+    // One of the block's parent is parked.
+    BLOCK_PARKED_PARENT_FLAG =   512,
+
+    // Mask used to check for parked blocks.
+    BLOCK_PARKED_MASK        =   BLOCK_PARKED_FLAG | BLOCK_PARKED_PARENT_FLAG,
 };
 
 //! Short-hand for the highest consensus validity we implement.
@@ -188,6 +197,9 @@ public:
     //! (memory only) Sequential id assigned to distinguish order in which blocks are received.
     uint32_t nSequenceId;
 
+    //! (memory only) block header metadata
+    uint64_t nTimeReceived;
+
     void SetNull()
     {
         phashBlock = NULL;
@@ -214,6 +226,7 @@ public:
         hashMerkleRoot = uint256();
         hashFinalSaplingRoot   = uint256();
         nTime          = 0;
+        nTimeReceived = 0;
         nBits          = 0;
         nNonce         = uint256();
         nSolution.clear();
@@ -232,6 +245,11 @@ public:
         hashMerkleRoot = block.hashMerkleRoot;
         hashFinalSaplingRoot   = block.hashFinalSaplingRoot;
         nTime          = block.nTime;
+        // Default to block time if nTimeReceived is never set, which
+        // in effect assumes that this block is honestly mined.
+        // Note that nTimeReceived isn't written to disk, so blocks read from
+        // disk will be assumed to be honestly mined.
+        nTimeReceived = block.nTime;
         nBits          = block.nBits;
         nNonce         = block.nNonce;
         nSolution      = block.nSolution;
@@ -279,6 +297,8 @@ public:
     {
         return (int64_t)nTime;
     }
+
+    int64_t GetHeaderReceivedTime() const { return nTimeReceived; }
 
     enum { nMedianTimeSpan=11 };
 

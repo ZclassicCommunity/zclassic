@@ -69,7 +69,7 @@ class WalletOverwinterTxTest (BitcoinTestFramework):
         txid_zsendmany = wait_and_assert_operationid_status(self.nodes[2], myopid)
 
         # Node 0 shields to Node 2, a coinbase utxo of value 10.0 less fee 0.00010000
-        zsendamount = Decimal('10.0') - Decimal('0.0001')
+        zsendamount = Decimal('12.5') - Decimal('0.0001')
         recipients = []
         recipients.append({"address":zaddr2, "amount": zsendamount})
         myopid = self.nodes[0].z_sendmany(taddr0, recipients)

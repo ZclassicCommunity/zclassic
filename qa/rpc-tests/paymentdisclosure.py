@@ -38,16 +38,16 @@ class PaymentDisclosureTest (BitcoinTestFramework):
 
         self.nodes[0].generate(4)
         walletinfo = self.nodes[0].getwalletinfo()
-        assert_equal(walletinfo['immature_balance'], 40)
+        assert_equal(walletinfo['immature_balance'], 50)
         assert_equal(walletinfo['balance'], 0)
         self.sync_all()
         self.nodes[2].generate(3)
         self.sync_all()
         self.nodes[1].generate(101)
         self.sync_all()
-        assert_equal(self.nodes[0].getbalance(), 40)
-        assert_equal(self.nodes[1].getbalance(), 10)
-        assert_equal(self.nodes[2].getbalance(), 30)
+        assert_equal(self.nodes[0].getbalance(), 50)
+        assert_equal(self.nodes[1].getbalance(), 12.5)
+        assert_equal(self.nodes[2].getbalance(), 37.5)
 
         mytaddr = get_coinbase_address(self.nodes[0])
         myzaddr = self.nodes[0].z_getnewaddress('sprout')
@@ -69,7 +69,7 @@ class PaymentDisclosureTest (BitcoinTestFramework):
             assert("No information available about transaction" in errorString)
 
         # Shield coinbase utxos from node 0 of value 40, standard fee of 0.00010000
-        recipients = [{"address":myzaddr, "amount":Decimal('40.0')-Decimal('0.0001')}]
+        recipients = [{"address":myzaddr, "amount":Decimal('50.0')-Decimal('0.0001')}]
         myopid = self.nodes[0].z_sendmany(mytaddr, recipients)
         txid = wait_and_assert_operationid_status(self.nodes[0], myopid)
 

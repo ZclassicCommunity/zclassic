@@ -39,9 +39,9 @@ class WalletTreeStateTest (BitcoinTestFramework):
         mytaddr = get_coinbase_address(self.nodes[0])
         myzaddr = self.nodes[0].z_getnewaddress('sprout')
 
-        # Spend coinbase utxos to create three notes of 9.99990000 each
+        # Spend coinbase utxos to create three notes of 12.49990000 each
         recipients = []
-        recipients.append({"address":myzaddr, "amount":Decimal('10.0') - Decimal('0.0001')})
+        recipients.append({"address":myzaddr, "amount":Decimal('12.5') - Decimal('0.0001')})
         myopid = self.nodes[0].z_sendmany(mytaddr, recipients)
         wait_and_assert_operationid_status(self.nodes[0], myopid)
         self.sync_all()
@@ -60,7 +60,7 @@ class WalletTreeStateTest (BitcoinTestFramework):
 
         # Check balance
         resp = self.nodes[0].z_getbalance(myzaddr)
-        assert_equal(Decimal(resp), Decimal('9.9999') * 3 )
+        assert_equal(Decimal(resp), Decimal('12.4999') * 3 )
 
         # We want to test a real-world situation where during the time spent creating a transaction
         # with joinsplits, other transactions containing joinsplits have been mined into new blocks,

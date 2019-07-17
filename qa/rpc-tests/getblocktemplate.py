@@ -54,7 +54,7 @@ class GetBlockTemplateTest(BitcoinTestFramework):
         assert_equal(16, len(tmpl['noncerange']))
 
         # Test 6: coinbasetxn checks
-        assert('foundersreward' in tmpl['coinbasetxn'])
+        #assert('foundersreward' in tmpl['coinbasetxn'])
         assert(tmpl['coinbasetxn']['required'])
 
         # Test 7: hashFinalSaplingRoot checks

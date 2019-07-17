@@ -53,7 +53,7 @@ class MempoolTxInputLimitTest(BitcoinTestFramework):
         # Send three inputs from node 0 taddr to zaddr to get out of coinbase
         node0_taddr = get_coinbase_address(self.nodes[0])
         recipients = []
-        recipients.append({"address":node0_zaddr, "amount":Decimal('30.0')-Decimal('0.0001')}) # utxo amount less fee
+        recipients.append({"address":node0_zaddr, "amount":Decimal('37.5')-Decimal('0.0001')}) # utxo amount less fee
         myopid = self.nodes[0].z_sendmany(node0_taddr, recipients)
 
         # Spend should fail due to -mempooltxinputlimit
@@ -63,7 +63,7 @@ class MempoolTxInputLimitTest(BitcoinTestFramework):
         assert_equal(set(self.nodes[0].getrawmempool()), set())
 
         # Reduce amount to only use two inputs
-        spend_zaddr_amount = Decimal('20.0') - Decimal('0.0001')
+        spend_zaddr_amount = Decimal('25.0') - Decimal('0.0001')
         spend_zaddr_id = self.call_z_sendmany(node0_taddr, node0_zaddr, spend_zaddr_amount) # utxo amount less fee
         self.sync_all()
 

@@ -71,6 +71,9 @@ testScripts=(
     'p2p_node_bloom.py'
     'regtest_signrawtransaction.py'
     'finalsaplingroot.py'
+    'uptime.py'
+    'parkedchain.py'
+    'finalize-block.py'
 );
 testScriptsExt=(
     'getblocktemplate_longpoll.py'
