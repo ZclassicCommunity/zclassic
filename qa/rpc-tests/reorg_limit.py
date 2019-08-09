@@ -13,6 +13,7 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     check_node,
     connect_nodes_bi,
+    start_nodes,
     sync_blocks,
 )
 from time import sleep
@@ -29,6 +30,10 @@ def check_stopped(i, timeout=10):
     return stopped
 
 class ReorgLimitTest(BitcoinTestFramework):
+    def setup_nodes(self):
+        self.num_nodes = 4
+        self.extra_args = [["-noparkdeepreorg"]] * 4
+        return start_nodes(self.num_nodes, self.options.tmpdir, self.extra_args)
 
     def run_test(self):
         assert(self.nodes[0].getblockcount() == 200)

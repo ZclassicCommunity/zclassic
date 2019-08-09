@@ -41,7 +41,7 @@ class WalletListNotes(BitcoinTestFramework):
         assert_equal(201, self.nodes[0].getblockcount())
 
         # Shield coinbase funds (must be a multiple of 10, no change allowed pre-sapling)
-        receive_amount_10 = Decimal('10.0') - Decimal('0.0001')
+        receive_amount_10 = Decimal('12.5') - Decimal('0.0001')
         recipients = [{"address":sproutzaddr, "amount":receive_amount_10}]
         myopid = self.nodes[0].z_sendmany(get_coinbase_address(self.nodes[0]), recipients)
         txid_1 = wait_and_assert_operationid_status(self.nodes[0], myopid)

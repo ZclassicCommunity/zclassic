@@ -13,11 +13,10 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, start_nodes
 
 class GetChainTipsTest (BitcoinTestFramework):
-    def setup_network(self):
+    def setup_nodes(self):
         self.num_nodes = 4
         self.extra_args = [["-noparkdeepreorg"], ["-noparkdeepreorg"], [], []]
-        self.nodes = start_nodes(self.num_nodes, self.options.tmpdir, self.extra_args)
-        self.is_network_split = False
+        return start_nodes(self.num_nodes, self.options.tmpdir, self.extra_args)
 
     def run_test (self):
         BitcoinTestFramework.run_test (self)
