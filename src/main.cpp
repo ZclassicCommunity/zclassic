@@ -3507,14 +3507,18 @@ static bool UnwindBlock(CValidationState& state, CBlockIndex *pindex, bool inval
         it++;
     }
 
-	mempool.removeForReorg(pcoinsTip, chainActive.Tip()->nHeight + 1, STANDARD_LOCKTIME_VERIFY_FLAGS);
-	mempool.removeWithoutBranchId(
-		CurrentEpochBranchId(chainActive.Tip()->nHeight + 1, Params().GetConsensus()));
+    mempool.removeForReorg(pcoinsTip, chainActive.Tip()->nHeight + 1, STANDARD_LOCKTIME_VERIFY_FLAGS);
+    mempool.removeWithoutBranchId(
+        CurrentEpochBranchId(chainActive.Tip()->nHeight + 1, Params().GetConsensus()));
 
     if (invalidate) {
         InvalidChainFound(pindex);
     }
 
+    // Only notify about a new block tip if the active chain was modified.
+    if (pindex_was_in_chain) {
+        uiInterface.NotifyBlockTip(pindex->pprev->GetBlockHash());
+    }
     return true;
 }
 
