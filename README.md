@@ -36,18 +36,6 @@ height.
 
 ## Getting Started
 
-Please see our [user guide](https://zcash.readthedocs.io/en/latest/rtd_pages/rtd_docs/user_guide.html) for joining the main ZClassic network.
-
-### Need Help?
-
-* :blue_book: See the documentation at the [ReadtheDocs](https://zcash.readthedocs.io)
-  for help and more information.
-* :incoming_envelope: Ask for help on the [Zcash](https://forum.z.cash/) forum.
-* :mag: Chat with our support community on [Rocket.Chat](https://chat.zcashcommunity.com/channel/user-support)
-
-Participation in the ZClassic project is subject to a
-[Code of Conduct](code_of_conduct.md).
-
 ### Building
 
 Build ZClassic along with most dependencies from source by running:
@@ -67,7 +55,47 @@ zlib1g-dev wget curl bsdmainutils automake
 ./zcutil/build.sh -j$(nproc)
 # fetch key
 ./zcutil/fetch-params.sh
-# Run
+```
+
+Before running the ZClassic daemon, you need to create a configuration file `zclassic.conf` in `~/.zclassic`. Here's an example.
+```
+gen=0
+equihashsolver=tromp
+listenonion=0
+addnode=95.216.33.111
+addnode=167.114.159.30
+addnode=66.70.180.144
+addnode=35.224.41.104
+addnode=172.104.106.153
+addnode=39.105.17.199
+addnode=185.50.24.14
+addnode=139.162.73.35
+addnode=173.249.20.4
+addnode=34.225.224.198
+addnode=211.43.8.169
+addnode=101.201.239.90
+addnode=75.97.223.8
+addnode=50.225.198.67
+addnode=165.227.209.159
+addnode=95.216.68.52
+addnode=80.151.220.94
+addnode=104.248.171.39
+addnode=185.39.16.10
+addnode=176.9.113.75
+addnode=139.162.66.203
+addnode=172.104.189.59
+addnode=88.198.38.4
+addnode=84.234.52.190
+addnode=47.89.249.220
+addnode=139.162.138.168
+addnode=149.56.135.165
+addnode=95.216.247.54
+addnode=45.79.223.173
+addnode=144.76.220.17
+```
+
+Run
+```{r, engine='bash'}
 ./src/zclassicd
 ```
 
