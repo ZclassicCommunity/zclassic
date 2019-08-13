@@ -3,9 +3,13 @@ language: cpp
 matrix:
   include:
     - os: linux
-      dist: xenial
+      dist: trusty
       sudo: required
       env: LINUX_DEPLOY="true" $TRAVIS_OS_NAME="linux"
+    - os: linux
+      dist: trusty
+      sudo: required
+      env: LINUX_DEPLOY="false" $TRAVIS_OS_NAME="linux" $TRAVIS_BUILD_STAGE_NAME="Test"
 compiler:
   - gcc
 before_install:
@@ -14,10 +18,24 @@ before_install:
   - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get install libgnutls28-dev; fi
   - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get install build-essential pkg-config libcurl3-gnutls-dev libc6-dev libevent-dev m4 g++-multilib autoconf libtool ncurses-dev unzip git python python-pip zlib1g-dev wget bsdmainutils automake libssl-dev libprotobuf-dev protobuf-compiler libdb++-dev ntp ntpdate; fi
   - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then pip install --user pyblake2 flake8 zmq pytest; fi
-
 before_script:
-    - ./zcutil/fetch-params.sh
+  - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then ./zcutil/fetch-params.sh; fi
 script:
-    - ./zcutil/build.sh -j$(nproc)
+  - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then ./zcutil/build.sh -j$(nproc); fi
 after_script:
-    - ./qa/pull-tester/rpc-tests.sh
+  - if [[ "$TRAVIS_BUILD_STAGE_NAME" == "Test" ]]; then ./qa/pull-tester/rpc-tests.sh; fi
+before_deploy:
+  - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then tar cvfz zclassic_linux_$TRAVIS_BRANCH.tar.gz src/zclassicd src/zclassic-cli; fi
+  - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then git tag "$TRAVIS_BRANCH-linux-$(date +'%Y%m%d%H%M')-$(git log --format=%h -1)"; fi
+deploy:
+  - provider: releases
+    api_key:
+      secure: Kq11UEg7CA3W9pQsA/3is0ls57mlHmRUE1Z07FTb5VfheDJ+GO8atr4lTJxxxO21ukc/rV4ynQKIOfrkoWk1Qo60Gf9U+r5NR99B+Bi01Mir216ATZXycWjcJbA4JVV8Jfx6Zkw1RGCYDQzVIawBSwbz1hhntx44kLdpM1mlex3WvxM6aq6+1XTCwaeAl7cZzrCTNsKnINDtuiWIV2f83t+ZbW1Ciigjuyigh5OTk3GTSWs6njZZ5bIUlx1XHpLj85IoyQ0cT4jKhNozVqOs/zgNZdt7KresMto4XGbjPhy6tth8mcyF2nLQ6FNxRjeJI6T13CArgzB1RGuvTlPEeUsBwQluNfzAQrTlf0IclQj8l/DJovCAbPPNFqW5rCXVm6KV1F3fRFn8j5+9XvIxlj1hk+8WX+6GiajPFE71ReG/0nDzQcEe4JID0qa7mt2zekqLzq1RUdackERpBc3dNXk7zhVqmHBwzdMoe8H95Thrx+cSN2MiTsYA4JRIV40ScmOO+Bq/nOuYZ/VsppE3QH0+kKKglFF12/g+zNIa81TesAxCitczyeq9LzRQpLN0A6EK0BQMUaFliv4I/Yh2nENQXH0ZNYkTWpkYMizezAMOyex5m/2MJRtCV9osv3hpwrY7pXTzqUmReqkN5yvjsBWb244U9pbJyZx+8107oj4=
+    name: $TRAVIS_BRANCH
+    prerelease: true
+    file: zclassic_linux_$TRAVIS_BRANCH.tar.gz
+    skip_cleanup: true
+    on:
+      tags: true
+      repo: ZclassicCommunity/zclassic
+      condition: $LINUX_DEPLOY = "true"
