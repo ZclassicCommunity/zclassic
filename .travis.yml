@@ -21,7 +21,7 @@ before_install:
 before_script:
   - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then ./zcutil/fetch-params.sh; fi
 script:
-  - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then ./zcutil/build.sh -j$(nproc); fi
+  - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then ./zcutil/build.sh --disable-tests -j$(nproc); fi
 after_script:
   - if [[ "$TRAVIS_BUILD_STAGE_NAME" == "Test" ]]; then ./qa/pull-tester/rpc-tests.sh; fi
 before_deploy:
