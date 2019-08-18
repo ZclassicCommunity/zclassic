@@ -310,8 +310,7 @@ public:
         vFixedSeeds.clear();
         vSeeds.clear();
 
-        vSeeds.push_back(CDNSSeedData("zclcore.com", "dnsseed.testnet.zclcore.com"));
-        vSeeds.push_back(CDNSSeedData("zcl.community", "dnsseed.testnet.zcl.community"));
+        vSeeds.push_back(CDNSSeedData("testnet_node1", "167.71.172.5"));
 
         // guarantees the first 2 characters, when base58 encoded, are "tm"
         base58Prefixes[PUBKEY_ADDRESS]     = {0x1D,0x25};
