@@ -28,10 +28,49 @@ const struct NUInfo NetworkUpgradeInfo[Consensus::MAX_NETWORK_UPGRADES] = {
         /*.nBranchId =*/ 0x76b809bb,
         /*.strName =*/ "Sapling",
         /*.strInfo =*/ "See https://z.cash/upgrade/sapling.html for details.",
+    },
+    {
+        /*.nBranchId =*/ 0x821a451c,
+        /*.strName =*/ "Bubbles",
+        /*.strInfo =*/ "See ZClassic for details.",
     }
 };
 
 const uint32_t SPROUT_BRANCH_ID = NetworkUpgradeInfo[Consensus::BASE_SPROUT].nBranchId;
+
+/**
+ * General information associating epoch with equihash parameters.
+ * Ordered by Consensus::UpgradeIndex, to match NetworkUpgradeInfo.
+ * TODO: Maybe refactor and include in NetworkUpgradeInfo
+ * TODO: Make this const
+ */
+struct EquihashInfo EquihashUpgradeInfo[Consensus::MAX_NETWORK_UPGRADES] = {
+    // BASE_SPROUT
+    {
+        /* N = */ EquihashInfo::DEFAULT_PARAMS,
+        /* K = */ EquihashInfo::DEFAULT_PARAMS,
+    },
+    // UPGRADE_TESTDUMMY
+    {
+        /* N = */ EquihashInfo::DEFAULT_PARAMS,
+        /* K = */ EquihashInfo::DEFAULT_PARAMS,
+    },
+    // UPGRADE_OVERWINTER
+    {
+        /* N = */ EquihashInfo::DEFAULT_PARAMS,
+        /* K = */ EquihashInfo::DEFAULT_PARAMS,
+    },
+    // UPGRADE_SAPLING
+    {
+        /* N = */ EquihashInfo::DEFAULT_PARAMS,
+        /* K = */ EquihashInfo::DEFAULT_PARAMS,
+    },
+    // UPGRADE_BUBBLES
+    {
+        /* N = */ 192,
+        /* K = */ 7,
+    }
+};
 
 UpgradeState NetworkUpgradeState(
     int nHeight,
