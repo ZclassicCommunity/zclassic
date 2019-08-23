@@ -663,7 +663,8 @@ void static BitcoinMiner(const CChainParams& chainparams)
                 };
 
                 // TODO: factor this out into a function with the same API for each solver.
-                if (solver == "tromp") {
+                // Tromp solver is set to work with 192,7
+                if (solver == "tromp" && n == 192 && k == 7) {
                     // Create solver and initialize it.
                     equi eq(1);
                     eq.setstate(&curr_state);
