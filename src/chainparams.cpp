@@ -139,13 +139,9 @@ public:
         vFixedSeeds.clear();
         vSeeds.clear();
 
-        vSeeds.push_back(CDNSSeedData("zclcore.com", "dnsseed.zclcore.com"));
+        vSeeds.push_back(CDNSSeedData("mainnet_node1", "159.65.179.43"));
+        vSeeds.push_back(CDNSSeedData("mainnet_node2", "165.22.226.216"));
         vSeeds.push_back(CDNSSeedData("zcl.community", "dnsseed.zcl.community"));
-
-        vSeeds.push_back(CDNSSeedData("chains.run", "seed.zcl.chains.run")); //rizkiwicaksono/bitcoin-seeder
-
-        vSeeds.push_back(CDNSSeedData("indieonion.org", "dnsseed.indieonion.org")); // @IndieOnion
-        vSeeds.push_back(CDNSSeedData("rotorproject.org", "dnsseed.rotorproject.org")); // @IndieOnion
 
         // guarantees the first 2 characters, when base58 encoded, are "t1"
         base58Prefixes[PUBKEY_ADDRESS]     = {0x1C,0xB8};
