@@ -41,6 +41,13 @@ height.
 Build ZClassic along with most dependencies from source by running:
 
 
+Clone the repository
+```{r, engine='bash'}
+git clone https://github.com/ZclassicCommunity/zclassic.git
+cd zclassic
+git checkout v2.0.5
+```
+
  Get dependencies
 ```{r, engine='bash'}
 sudo apt-get install \
