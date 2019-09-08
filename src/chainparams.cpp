@@ -96,6 +96,7 @@ public:
         consensus.nPowMaxAdjustUp = 16; // 16% adjustment up
         consensus.nPowTargetSpacing = 2.5 * 60;
         consensus.nPowAllowMinDifficultyBlocksAfterHeight = boost::none;
+        consensus.scaleDifficultyAtUpgradeFork = true;
         consensus.vUpgrades[Consensus::BASE_SPROUT].nProtocolVersion = 170002;
         consensus.vUpgrades[Consensus::BASE_SPROUT].nActivationHeight =
             Consensus::NetworkUpgrade::ALWAYS_ACTIVE;
@@ -108,6 +109,8 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_SAPLING].nActivationHeight = 476969;
         consensus.vUpgrades[Consensus::UPGRADE_BUBBLES].nProtocolVersion = 170009;
         consensus.vUpgrades[Consensus::UPGRADE_BUBBLES].nActivationHeight = 585318;
+        consensus.vUpgrades[Consensus::UPGRADE_DIFFADJ].nProtocolVersion = 170010;
+        consensus.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight = 585322;
 
         // The best chain should have at least this much work.
         consensus.nMinimumChainWork = uint256S("0x000000000000000000000000000000000000000000000000000af996bfd8e482");
@@ -270,6 +273,7 @@ public:
         consensus.nPowMaxAdjustUp = 16; // 16% adjustment up
         consensus.nPowTargetSpacing = 2.5 * 60;
         consensus.nPowAllowMinDifficultyBlocksAfterHeight = 299187;
+        consensus.scaleDifficultyAtUpgradeFork = false;
         consensus.vUpgrades[Consensus::BASE_SPROUT].nProtocolVersion = 170002;
         consensus.vUpgrades[Consensus::BASE_SPROUT].nActivationHeight =
             Consensus::NetworkUpgrade::ALWAYS_ACTIVE;
@@ -282,6 +286,9 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_SAPLING].nActivationHeight = 20;
         consensus.vUpgrades[Consensus::UPGRADE_BUBBLES].nProtocolVersion = 170008;
         consensus.vUpgrades[Consensus::UPGRADE_BUBBLES].nActivationHeight = 6350;
+        consensus.vUpgrades[Consensus::UPGRADE_DIFFADJ].nProtocolVersion = 170009;
+        consensus.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight = 
+            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
 
         // The best chain should have at least this much work.
         consensus.nMinimumChainWork = uint256S("0x0000000000000000000000000000000000000000000000000000000000000000");
@@ -400,6 +407,7 @@ public:
         consensus.nPowMaxAdjustUp = 0; // Turn off adjustment up
         consensus.nPowTargetSpacing = 2.5 * 60;
         consensus.nPowAllowMinDifficultyBlocksAfterHeight = 0;
+        consensus.scaleDifficultyAtUpgradeFork = false;
         consensus.vUpgrades[Consensus::BASE_SPROUT].nProtocolVersion = 170002;
         consensus.vUpgrades[Consensus::BASE_SPROUT].nActivationHeight =
             Consensus::NetworkUpgrade::ALWAYS_ACTIVE;
@@ -414,6 +422,9 @@ public:
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.vUpgrades[Consensus::UPGRADE_BUBBLES].nProtocolVersion = 170008;
         consensus.vUpgrades[Consensus::UPGRADE_BUBBLES].nActivationHeight =
+            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        consensus.vUpgrades[Consensus::UPGRADE_DIFFADJ].nProtocolVersion = 170009;
+        consensus.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight = 
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
 
         // The best chain should have at least this much work.
