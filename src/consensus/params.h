@@ -27,6 +27,7 @@ enum UpgradeIndex {
     UPGRADE_OVERWINTER,
     UPGRADE_SAPLING,
     UPGRADE_BUBBLES,
+    UPGRADE_DIFFADJ,
     // NOTE: Also add new upgrades to NetworkUpgradeInfo in upgrades.cpp
     MAX_NETWORK_UPGRADES
 };
@@ -95,6 +96,7 @@ struct Params {
     /** Proof of work parameters */
     uint256 powLimit;
     boost::optional<uint32_t> nPowAllowMinDifficultyBlocksAfterHeight;
+    bool    scaleDifficultyAtUpgradeFork;
     int64_t nPowAveragingWindow;
     int64_t nPowMaxAdjustDown;
     int64_t nPowMaxAdjustUp;
