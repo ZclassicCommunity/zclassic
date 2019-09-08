@@ -16,6 +16,21 @@
 
 #include "sodium.h"
 
+/**
+ * Manually increase difficulty by a multiplier. Note that because of the use of compact bits, this will 
+ * only be an approx increase, not a 100% precise increase.
+ */
+unsigned int IncreaseDifficultyBy(unsigned int nBits, int64_t multiplier, const Consensus::Params& params) {
+    arith_uint256 target;
+    target.SetCompact(nBits);
+    target /= multiplier;
+    const arith_uint256 pow_limit = UintToArith256(params.powLimit);
+    if (target > pow_limit) {
+        target = pow_limit;
+    }
+    return target.GetCompact();
+}
+
 unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params& params)
 {
     unsigned int nProofOfWorkLimit = UintToArith256(params.powLimit).GetCompact();
@@ -23,7 +38,34 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
     // Genesis block
     if (pindexLast == NULL)
         return nProofOfWorkLimit;
+    
+    int nHeight = pindexLast->nHeight + 1;
 
+    // For upgrade mainnet forks, we'll adjust the difficulty down for the first nPowAveragingWindow blocks
+    if (params.scaleDifficultyAtUpgradeFork && nHeight >= params.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight && 
+            nHeight < params.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight + params.nPowAveragingWindow) {
+        
+        if (pblock && pblock->GetBlockTime() > pindexLast->GetBlockTime() + params.nPowTargetSpacing * 12) {
+            // If > 30 mins, allow min difficulty
+            unsigned int difficulty = IncreaseDifficultyBy(nProofOfWorkLimit, 64, params);
+            LogPrintf("Returning level 1 difficulty\n");
+            return nProofOfWorkLimit;
+        } else if (pblock && pblock->GetBlockTime() > pindexLast->GetBlockTime() + params.nPowTargetSpacing * 6) {
+            // If > 15 mins, allow low estimate difficulty
+            unsigned int difficulty = IncreaseDifficultyBy(nProofOfWorkLimit, 128, params);
+            LogPrintf("Returning level 2 difficulty\n");
+            return difficulty;
+        } else if (pblock && pblock->GetBlockTime() > pindexLast->GetBlockTime() + params.nPowTargetSpacing * 2) {
+            // If > 5 mins, allow high estimate difficulty
+            unsigned int difficulty = IncreaseDifficultyBy(nProofOfWorkLimit, 256, params);
+            LogPrintf("Returning level 3 difficulty\n");
+            return difficulty;
+        } else {
+            // If < 5 mins, fall through, and return the normal difficulty.
+            LogPrintf("Falling through\n");
+        }
+    }
+    
     {
         // Comparing to pindexLast->nHeight with >= because this function
         // returns the work required for the block after pindexLast.
