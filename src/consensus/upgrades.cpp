@@ -33,6 +33,11 @@ const struct NUInfo NetworkUpgradeInfo[Consensus::MAX_NETWORK_UPGRADES] = {
         /*.nBranchId =*/ 0x821a451c,
         /*.strName =*/ "Bubbles",
         /*.strInfo =*/ "See ZClassic for details.",
+    },
+    {
+        /*.nBranchId =*/ 0x930b540d,
+        /*.strName =*/ "Bubbly",
+        /*.strInfo =*/ "See ZClassic for details.",
     }
 };
 
@@ -66,6 +71,11 @@ struct EquihashInfo EquihashUpgradeInfo[Consensus::MAX_NETWORK_UPGRADES] = {
         /* K = */ EquihashInfo::DEFAULT_PARAMS,
     },
     // UPGRADE_BUBBLES
+    {
+        /* N = */ 192,
+        /* K = */ 7,
+    },
+    // UPGRADE_DIFFADJ
     {
         /* N = */ 192,
         /* K = */ 7,
