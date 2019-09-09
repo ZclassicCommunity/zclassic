@@ -47,7 +47,6 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
         
         if (pblock && pblock->GetBlockTime() > pindexLast->GetBlockTime() + params.nPowTargetSpacing * 12) {
             // If > 30 mins, allow min difficulty
-            unsigned int difficulty = IncreaseDifficultyBy(nProofOfWorkLimit, 64, params);
             LogPrintf("Returning level 1 difficulty\n");
             return nProofOfWorkLimit;
         } else if (pblock && pblock->GetBlockTime() > pindexLast->GetBlockTime() + params.nPowTargetSpacing * 6) {
