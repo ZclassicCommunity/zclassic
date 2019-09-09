@@ -1,4 +1,4 @@
-ZClassic 2.0.5-1
+ZClassic 2.0.5-2
 <img align="right" width="120" height="80" src="doc/imgs/logo.png">
 ===========
 
