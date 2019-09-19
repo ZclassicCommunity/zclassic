@@ -1640,8 +1640,6 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
         pool.addUnchecked(hash, entry, !IsInitialBlockDownload());
     }
 
-    SyncWithWallets(tx, NULL);
-
     return true;
 }
 
