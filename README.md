@@ -1,4 +1,4 @@
-ZClassic 2.0.5-2
+ZClassic 2.0.6
 <img align="right" width="120" height="80" src="doc/imgs/logo.png">
 ===========
 
@@ -45,7 +45,7 @@ Clone the repository
 ```{r, engine='bash'}
 git clone https://github.com/ZclassicCommunity/zclassic.git
 cd zclassic
-git checkout v2.0.5-2
+git checkout v2.0.6
 ```
 
  Get dependencies
