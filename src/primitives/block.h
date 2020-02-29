@@ -23,6 +23,7 @@ public:
     // header
     static const size_t HEADER_SIZE=4+32+32+32+4+4+32; // excluding Equihash solution
     static const int32_t CURRENT_VERSION=4;
+    static const int32_t EQUIHASH_VERSION=4;
     int32_t nVersion;
     uint256 hashPrevBlock;
     uint256 hashMerkleRoot;
@@ -30,8 +31,11 @@ public:
     uint32_t nTime;
     uint32_t nBits;
     uint256 nNonce;
+    uint32_t nHeight;
     std::vector<unsigned char> nSolution;
-
+    enum {
+        RANDOMX_BLOCK = ( 1 << 28)
+    };
     CBlockHeader()
     {
         SetNull();
@@ -47,8 +51,12 @@ public:
         READWRITE(hashFinalSaplingRoot);
         READWRITE(nTime);
         READWRITE(nBits);
+        if (nVersion & RANDOMX_BLOCK)
+            READWRITE(nHeight);
         READWRITE(nNonce);
-        READWRITE(nSolution);
+        //Don't readwrite nSolution if the block isnt a RandomX Block
+        if (!(nVersion & RANDOMX_BLOCK))
+            READWRITE(nSolution);
     }
 
     void SetNull()
@@ -59,6 +67,7 @@ public:
         hashFinalSaplingRoot.SetNull();
         nTime = 0;
         nBits = 0;
+        nHeight = 0;
         nNonce = uint256();
         nSolution.clear();
     }
@@ -70,12 +79,16 @@ public:
 
     uint256 GetHash() const;
 
+	bool IsRandomX() const {
+        return nVersion & RANDOMX_BLOCK;
+    }
+    uint256 GetRandomXHeaderHash() const;
+
     int64_t GetBlockTime() const
     {
         return (int64_t)nTime;
     }
 };
-
 
 class CBlock : public CBlockHeader
 {
@@ -121,8 +134,9 @@ public:
         block.hashFinalSaplingRoot   = hashFinalSaplingRoot;
         block.nTime          = nTime;
         block.nBits          = nBits;
+        block.nHeight        = nHeight;
         block.nNonce         = nNonce;
-        block.nSolution      = nSolution;
+        block.nSolution  = nSolution;
         return block;
     }
 
@@ -140,12 +154,12 @@ public:
 
 /**
  * Custom serializer for CBlockHeader that omits the nonce and solution, for use
- * as input to Equihash.
+ * as input to Equihash and randomx.
  */
-class CEquihashInput : private CBlockHeader
+class CBlockhashInput : private CBlockHeader
 {
 public:
-    CEquihashInput(const CBlockHeader &header)
+    CBlockhashInput(const CBlockHeader &header)
     {
         CBlockHeader::SetNull();
         *((CBlockHeader*)this) = header;
@@ -161,6 +175,9 @@ public:
         READWRITE(hashFinalSaplingRoot);
         READWRITE(nTime);
         READWRITE(nBits);
+        //Readwrite nHeight to Header if it is randomX block being created
+        if(this->nVersion & CBlockHeader::RANDOMX_BLOCK)
+            READWRITE(nHeight);
     }
 };
 

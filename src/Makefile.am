@@ -334,6 +334,73 @@ crypto_libbitcoin_crypto_a_SOURCES = \
   crypto/hmac_sha256.h \
   crypto/hmac_sha512.cpp \
   crypto/hmac_sha512.h \
+  crypto/c_threads.h \
+  crypto/RandomX/aes_hash.cpp \
+  crypto/RandomX/aes_hash.hpp \
+  crypto/RandomX/allocator.cpp \
+  crypto/RandomX/allocator.hpp \
+  crypto/RandomX/argon2_avx2.c \
+  crypto/RandomX/argon2.h \
+  crypto/RandomX/argon2_core.c \
+  crypto/RandomX/argon2_core.h \
+  crypto/RandomX/argon2_ref.c \
+  crypto/RandomX/argon2_ssse3.c \
+  crypto/RandomX/assembly_generator_x86.cpp \
+  crypto/RandomX/assembly_generator_x86.hpp \
+  crypto/RandomX/blake2_generator.cpp \
+  crypto/RandomX/blake2_generator.hpp\
+  crypto/RandomX/bytecode_machine.cpp \
+  crypto/RandomX/bytecode_machine.hpp \
+  crypto/RandomX/common.hpp \
+  crypto/RandomX/configuration.h \
+  crypto/RandomX/cpu.cpp \
+  crypto/RandomX/cpu.hpp \
+  crypto/RandomX/dataset.cpp \
+  crypto/RandomX/dataset.hpp \
+  crypto/RandomX/instruction.cpp \
+  crypto/RandomX/instruction.hpp \
+  crypto/RandomX/instruction_weights.hpp \
+  crypto/RandomX/instructions_portable.cpp \
+  crypto/RandomX/intrin_portable.h \
+  crypto/RandomX/jit_compiler.hpp \
+  crypto/RandomX/jit_compiler_fallback.hpp \
+  crypto/RandomX/jit_compiler_x86.cpp \
+  crypto/RandomX/jit_compiler_x86.hpp \
+  crypto/RandomX/jit_compiler_x86_static.asm \
+  crypto/RandomX/jit_compiler_x86_static.hpp \
+  crypto/RandomX/jit_compiler_x86_static.S \
+  crypto/RandomX/program.hpp \
+  crypto/RandomX/randomx.cpp \
+  crypto/RandomX/randomx.h \
+  crypto/RandomX/reciprocal.c \
+  crypto/RandomX/reciprocal.h \
+  crypto/RandomX/soft_aes.cpp \
+  crypto/RandomX/soft_aes.h \
+  crypto/RandomX/superscalar.cpp \
+  crypto/RandomX/superscalar.hpp \
+  crypto/RandomX/superscalar_program.hpp \
+  crypto/RandomX/utility.hpp \
+  crypto/RandomX/virtual_machine.cpp \
+  crypto/RandomX/virtual_machine.hpp \
+  crypto/RandomX/virtual_memory.cpp \
+  crypto/RandomX/virtual_memory.hpp \
+  crypto/RandomX/vm_compiled.cpp \
+  crypto/RandomX/vm_compiled.hpp \
+  crypto/RandomX/vm_compiled_light.cpp \
+  crypto/RandomX/vm_compiled_light.hpp \
+  crypto/RandomX/vm_interpreted.cpp \
+  crypto/RandomX/vm_interpreted.hpp \
+  crypto/RandomX/vm_interpreted_light.cpp \
+  crypto/RandomX/vm_interpreted_light.hpp \
+  crypto/RandomX/blake2/blake2.h \
+  crypto/RandomX/blake2/blake2-impl.h \
+  crypto/RandomX/blake2/blake2b.c \
+  crypto/RandomX/blake2/blamka-round-ref.h \
+  crypto/RandomX/blake2/blamka-round-ssse3.h \
+  crypto/RandomX/blake2/endian.h \
+  crypto/RandomX/asm/configuration.asm \
+  crypto/hash-ops.h \
+  crypto/rx-slow-hash.c \
   crypto/ripemd160.cpp \
   crypto/ripemd160.h \
   crypto/sha1.cpp \
@@ -571,6 +638,8 @@ endif
 #
 
 CLEANFILES = leveldb/libleveldb.a leveldb/libmemenv.a *.gcda *.gcno */*.gcno wallet/*/*.gcno
+CLEANFILES += crypto/RandomX/*.gcda crypto/RandomX/*.gcno
+CLEANFILES += crypto/RandomX/blake2/*.gcda crypto/RandomX/blake2/*.gcno
 
 DISTCLEANFILES = obj/build.h
 

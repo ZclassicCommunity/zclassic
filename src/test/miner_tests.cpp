@@ -191,7 +191,7 @@ BOOST_AUTO_TEST_CASE(CreateNewBlock_validity)
         EhInitialiseState(n, k, eh_state);
 
         // I = the block header minus nonce and solution.
-        CEquihashInput I{*pblock};
+        CBlockhashInput I{*pblock};
         CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
         ss << I;
 

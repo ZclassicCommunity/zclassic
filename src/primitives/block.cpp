@@ -14,6 +14,17 @@ uint256 CBlockHeader::GetHash() const
 {
     return SerializeHash(*this);
 }
+/**
+ * @brief This takes a block header, removes the nNonce and the solution. Then performs a serialized hash of it SHA256D.
+ * This will be used as the input to the RandomX & Equihash function
+ * @note Only to be called and used on RandomX & Equihash block headers
+ */
+uint256 CBlockHeader::GetRandomXHeaderHash() const
+{
+    CBlockhashInput input{*this};
+
+    return SerializeHash(input);
+}
 
 uint256 CBlock::BuildMerkleTree(bool* fMutated) const
 {

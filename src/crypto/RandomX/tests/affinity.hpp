@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2018-2019, tevador <tevador@gmail.com>
+Copyright (c) 2019, jtgrassie
 
 All rights reserved.
 
@@ -26,35 +26,14 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#include <new>
-#include "allocator.hpp"
-#include "intrin_portable.h"
-#include "virtual_memory.hpp"
-#include "common.hpp"
+#pragma once
 
-namespace randomx {
+#include <cstddef>
+#include <thread>
+#include <string>
 
-	template<size_t alignment>
-	void* AlignedAllocator<alignment>::allocMemory(size_t count) {
-		void *mem = rx_aligned_alloc(count, alignment);
-		if (mem == nullptr)
-			throw std::bad_alloc();
-		return mem;
-	}
-
-	template<size_t alignment>
-	void AlignedAllocator<alignment>::freeMemory(void* ptr, size_t count) {
-		rx_aligned_free(ptr);
-	}
-
-	template struct AlignedAllocator<CacheLineSize>;
-
-	void* LargePageAllocator::allocMemory(size_t count) {
-		return allocLargePagesMemory(count);
-	}
-
-	void LargePageAllocator::freeMemory(void* ptr, size_t count) {
-		freePagedMemory(ptr, count);
-	};
-
-}
+int set_thread_affinity(const unsigned &cpuid);
+int set_thread_affinity(std::thread::native_handle_type thread,
+        const unsigned &cpuid);
+unsigned cpuid_from_mask(uint64_t mask, const unsigned &thread_index);
+std::string mask_to_string(uint64_t mask);

@@ -129,9 +129,6 @@ public:
     //! pointer to the index of some further predecessor of this block
     CBlockIndex* pskip;
 
-    //! height of the entry in the chain. The genesis block has height 0
-    int nHeight;
-
     //! Which # file this block is stored in (blk?????.dat)
     int nFile;
 
@@ -193,6 +190,8 @@ public:
     unsigned int nBits;
     uint256 nNonce;
     std::vector<unsigned char> nSolution;
+    //! height of the entry in the chain. The genesis block has height 0
+    int nHeight;
 
     //! (memory only) Sequential id assigned to distinguish order in which blocks are received.
     uint32_t nSequenceId;
@@ -251,6 +250,7 @@ public:
         // disk will be assumed to be honestly mined.
         nTimeReceived = block.nTime;
         nBits          = block.nBits;
+        nHeight        = block.nHeight;
         nNonce         = block.nNonce;
         nSolution      = block.nSolution;
     }
@@ -283,9 +283,14 @@ public:
         block.hashFinalSaplingRoot   = hashFinalSaplingRoot;
         block.nTime          = nTime;
         block.nBits          = nBits;
+        block.nHeight        = nHeight;
         block.nNonce         = nNonce;
         block.nSolution      = nSolution;
         return block;
+    }
+
+    bool IsRandomX(){
+        return nVersion & CBlockHeader::RANDOMX_BLOCK;
     }
 
     uint256 GetBlockHash() const
@@ -297,6 +302,7 @@ public:
     {
         return (int64_t)nTime;
     }
+
 
     int64_t GetHeaderReceivedTime() const { return nTimeReceived; }
 
@@ -408,7 +414,9 @@ public:
         READWRITE(nTime);
         READWRITE(nBits);
         READWRITE(nNonce);
-        READWRITE(nSolution);
+        //Only set nSolution if it isnt a RandomX Block
+        if(!(this->nVersion & CBlockHeader::RANDOMX_BLOCK))
+            READWRITE(nSolution);
 
         // Only read/write nSproutValue if the client version used to create
         // this index was storing them.
@@ -435,6 +443,7 @@ public:
         block.hashFinalSaplingRoot    = hashFinalSaplingRoot;
         block.nTime           = nTime;
         block.nBits           = nBits;
+        block.nHeight         = nHeight;
         block.nNonce          = nNonce;
         block.nSolution       = nSolution;
         return block.GetHash();

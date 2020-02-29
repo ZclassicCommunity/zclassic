@@ -1756,7 +1756,7 @@ bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos)
     }
 
     // Check the header
-    if (!(CheckEquihashSolution(&block, Params()) &&
+    if (!block.IsRandomX() && !(CheckEquihashSolution(&block, Params()) &&
           CheckProofOfWork(block.GetHash(), block.nBits, Params().GetConsensus())))
         return error("ReadBlockFromDisk: Errors in block header at %s", pos.ToString());
 
@@ -2896,12 +2896,12 @@ void static UpdateTip(CBlockIndex *pindexNew) {
         const CBlockIndex* pindex = chainActive.Tip();
         for (int i = 0; i < 100 && pindex != NULL; i++)
         {
-            if (pindex->nVersion > CBlock::CURRENT_VERSION)
+            if (pindex->nVersion > CBlockHeader::RANDOMX_BLOCK && !(pindex->nVersion & CBlockHeader::RANDOMX_BLOCK))
                 ++nUpgraded;
             pindex = pindex->pprev;
         }
         if (nUpgraded > 0)
-            LogPrintf("%s: %d of last 100 blocks above version %d\n", __func__, nUpgraded, (int)CBlock::CURRENT_VERSION);
+            LogPrintf("%s: %d of last 100 blocks above version %d\n", __func__, nUpgraded, (int)CBlockHeader::RANDOMX_BLOCK);
         if (nUpgraded > 100/2)
         {
             // strMiscWarning is read by GetWarnings(), called by the JSON-RPC code to warn the user:
@@ -3921,12 +3921,15 @@ bool CheckBlockHeader(const CBlockHeader& block, CValidationState& state, bool f
                          REJECT_INVALID, "version-too-low");
 
     // Check Equihash solution is valid
-    if (fCheckPOW && !CheckEquihashSolution(&block, Params()))
+    if (fCheckPOW && !block.IsRandomX() && !CheckEquihashSolution(&block, Params()))
         return state.DoS(100, error("CheckBlockHeader(): Equihash solution invalid"),
                          REJECT_INVALID, "invalid-solution");
-
+    // Check RandomX solution is valid
+    if (fCheckPOW && block.IsRandomX() && !CheckRandomXProofOfWork(block,block.nBits, Params().GetConsensus()))
+        return state.DoS(100, error("CheckBlockHeader(): RandomX hash invalid"),
+                         REJECT_INVALID, "invalid-hash-randomx");
     // Check proof of work matches claimed amount
-    if (fCheckPOW && !CheckProofOfWork(block.GetHash(), block.nBits, Params().GetConsensus()))
+    if (fCheckPOW && !block.IsRandomX() && !CheckProofOfWork(block.GetHash(), block.nBits, Params().GetConsensus()))
         return state.DoS(50, error("CheckBlockHeader(): proof of work failed"),
                          REJECT_INVALID, "high-hash");
 

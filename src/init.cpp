@@ -20,6 +20,7 @@
 #include "key.h"
 #ifdef ENABLE_MINING
 #include "key_io.h"
+#include "pow.h"
 #endif
 #include "main.h"
 #include "metrics.h"
@@ -205,6 +206,7 @@ void Shutdown()
 #endif
 #ifdef ENABLE_MINING
     GenerateBitcoins(false, 0, Params());
+    DeallocateRandomXLightCache();
 #endif
     StopNode();
     StopTorControl();

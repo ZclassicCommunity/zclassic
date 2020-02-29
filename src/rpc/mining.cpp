@@ -21,7 +21,6 @@
 #include "txmempool.h"
 #include "util.h"
 #include "validationinterface.h"
-
 #include <stdint.h>
 
 #include <boost/assign/list_of.hpp>
@@ -179,7 +178,6 @@ UniValue generate(const UniValue& params, bool fHelp)
     int nHeightEnd = 0;
     int nHeight = 0;
     int nGenerate = params[0].get_int();
-
     boost::shared_ptr<CReserveScript> coinbaseScript;
     GetMainSignals().ScriptForMining(coinbaseScript);
 
@@ -197,8 +195,6 @@ UniValue generate(const UniValue& params, bool fHelp)
     UniValue blockHashes(UniValue::VARR);
     while (nHeight < nHeightEnd)
     {
-        unsigned int n = Params().EquihashN(nHeight + 1);
-        unsigned int k = Params().EquihashK(nHeight + 1);
 
         std::unique_ptr<CBlockTemplate> pblocktemplate(CreateNewBlock(coinbaseScript->reserveScript));
         if (!pblocktemplate.get())
@@ -209,15 +205,44 @@ UniValue generate(const UniValue& params, bool fHelp)
             IncrementExtraNonce(pblock, chainActive.Tip(), nExtraNonce);
         }
 
+        if(nHeight > Params().GetConsensus().nRandomXActivationHeight){
+            LogPrintf("%s Mining RandomX, %d, keyhash = %s\n", __func__, __LINE__, GetCurrentKeyBlock().GetHex());
+            char hash[RANDOMX_HASH_SIZE];
+            arith_uint256 bnTarget;
+            bool fNegative;
+            bool fOverflow;
+            if(!IsRandomXLightInit())
+                InitRandomXLightCache(nHeight);
+
+            bnTarget.SetCompact(pblock->nBits, &fNegative, &fOverflow);
+
+            while (true) {
+                // RandomX hash
+                uint256 hash_blob = pblock->GetRandomXHeaderHash();
+                randomx_calculate_hash(GetMyMachineMining(), &hash_blob, sizeof uint256(), hash);
+
+                auto uint256Hash = uint256S(hash);
+
+                // Check proof of work matches claimed amount
+                if (UintToArith256(uint256Hash) < bnTarget)
+                    goto endloop;
+
+                pblock->nNonce =   ArithToUint256(UintToArith256(pblock->nNonce) + 1);
+            }
+        }
+        //Do Equihash hashing
+        else
+        {
+        unsigned int n = Params().EquihashN(nHeight + 1);
+        unsigned int k = Params().EquihashK(nHeight + 1);
         // Hash state
         crypto_generichash_blake2b_state eh_state;
         EhInitialiseState(n, k, eh_state);
 
         // I = the block header minus nonce and solution.
-        CEquihashInput I{*pblock};
+        CBlockhashInput I{*pblock};
         CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
         ss << I;
-
         // H(I||...
         crypto_generichash_blake2b_update(&eh_state, (unsigned char*)&ss[0], ss.size());
 
@@ -246,6 +271,7 @@ UniValue generate(const UniValue& params, bool fHelp)
                 goto endloop;
             }
         }
+    }
 endloop:
         CValidationState state;
         if (!ProcessNewBlock(state, NULL, pblock, true, NULL))

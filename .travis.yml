@@ -3,17 +3,16 @@ language: cpp
 matrix:
   include:
     - os: linux
-      dist: trusty
+      dist: bionic
       sudo: required
       env: LINUX_DEPLOY="true" $TRAVIS_OS_NAME="linux"
     - os: linux
-      dist: trusty
+      dist: bionic
       sudo: required
       env: LINUX_DEPLOY="false" $TRAVIS_OS_NAME="linux" $TRAVIS_BUILD_STAGE_NAME="Test"
 compiler:
   - gcc
 before_install:
-  - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo add-apt-repository --yes ppa:ubuntu-sdk-team/ppa; fi
   - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get update -qq; fi
   - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get install libgnutls28-dev; fi
   - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get install build-essential pkg-config libcurl3-gnutls-dev libc6-dev libevent-dev m4 g++-multilib autoconf libtool ncurses-dev unzip git python python-pip zlib1g-dev wget bsdmainutils automake libssl-dev libprotobuf-dev protobuf-compiler libdb++-dev ntp ntpdate; fi

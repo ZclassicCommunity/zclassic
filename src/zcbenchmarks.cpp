@@ -169,7 +169,7 @@ double benchmark_verify_joinsplit(const JSDescription &joinsplit)
 double benchmark_solve_equihash()
 {
     CBlock pblock;
-    CEquihashInput I{pblock};
+    CBlockhashInput I{pblock};
     CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
     ss << I;
 

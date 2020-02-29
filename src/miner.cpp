@@ -428,7 +428,10 @@ CBlockTemplate* CreateNewBlock(const CScript& scriptPubKeyIn)
         pblock->nBits          = GetNextWorkRequired(pindexPrev, pblock, Params().GetConsensus());
         pblock->nSolution.clear();
         pblocktemplate->vTxSigOps[0] = GetLegacySigOpCount(pblock->vtx[0], STANDARD_SCRIPT_VERIFY_FLAGS);
-
+        if(nHeight > Params().GetConsensus().nRandomXActivationHeight){
+            pblock->nHeight   = nHeight;
+            pblock->nVersion |= CBlockHeader::RANDOMX_BLOCK;
+        }
         CValidationState state;
         if (!TestBlockValidity(state, *pblock, pindexPrev, false, false))
             throw std::runtime_error("CreateNewBlock(): TestBlockValidity failed");
@@ -602,12 +605,39 @@ void static BitcoinMiner(const CChainParams& chainparams)
             arith_uint256 hashTarget = arith_uint256().SetCompact(pblock->nBits);
 
             while (true) {
-                // Hash state
+                if(nHeight > chainparams.GetConsensus().nRandomXActivationHeight){
+                    LogPrintf("%s Mining RandomX, %d, keyhash = %s\n", __func__, __LINE__, GetCurrentKeyBlock().GetHex());
+                     char hash[RANDOMX_HASH_SIZE];
+
+                    arith_uint256 bnTarget;
+                    bool fNegative;
+                    bool fOverflow;
+                    bnTarget.SetCompact(pblock->nBits, &fNegative, &fOverflow);
+                    if(!IsRandomXLightInit())
+                        InitRandomXLightCache(nHeight);
+
+                    while (true) {
+                            // ProgPow hash
+                            uint256 hash_blob = pblock->GetRandomXHeaderHash();
+                            randomx_calculate_hash(GetMyMachineMining(), &hash_blob, sizeof uint256(), hash);
+
+                            auto uint256Hash = uint256S(hash);
+
+                            // Check proof of work matches claimed amount
+                            if (UintToArith256(uint256Hash) < bnTarget)
+                                break;
+
+                            pblock->nNonce =   ArithToUint256(UintToArith256(pblock->nNonce) + 1);
+                    }
+                }
+                //Do equihash
+                else{
+                                    // Hash state
                 crypto_generichash_blake2b_state state;
                 EhInitialiseState(n, k, state);
 
                 // I = the block header minus nonce and solution.
-                CEquihashInput I{*pblock};
+                CBlockhashInput I{*pblock};
                 CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
                 ss << I;
 
@@ -710,6 +740,7 @@ void static BitcoinMiner(const CChainParams& chainparams)
                         std::lock_guard<std::mutex> lock{m_cs};
                         cancelSolver = false;
                     }
+                }
                 }
 
                 // Check for stop or if block needs to be rebuilt

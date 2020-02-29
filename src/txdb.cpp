@@ -332,6 +332,7 @@ bool CBlockTreeDB::LoadBlockIndexGuts()
                 pindexNew->nTime          = diskindex.nTime;
                 pindexNew->nBits          = diskindex.nBits;
                 pindexNew->nNonce         = diskindex.nNonce;
+                pindexNew->nHeight        = diskindex.nHeight;
                 pindexNew->nSolution      = diskindex.nSolution;
                 pindexNew->nStatus        = diskindex.nStatus;
                 pindexNew->nCachedBranchId = diskindex.nCachedBranchId;
@@ -344,7 +345,8 @@ bool CBlockTreeDB::LoadBlockIndexGuts()
                 if (header.GetHash() != pindexNew->GetBlockHash())
                     return error("LoadBlockIndex(): block header inconsistency detected: on-disk = %s, in-memory = %s",
                        diskindex.ToString(),  pindexNew->ToString());
-                if (!CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, Params().GetConsensus()))
+                
+                if (!pindexNew->IsRandomX() && !CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, Params().GetConsensus()))
                     return error("LoadBlockIndex(): CheckProofOfWork failed: %s", pindexNew->ToString());
 
                 pcursor->Next();

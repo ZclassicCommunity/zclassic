@@ -26,35 +26,59 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#include <new>
-#include "allocator.hpp"
-#include "intrin_portable.h"
-#include "virtual_memory.hpp"
-#include "common.hpp"
+#pragma once
 
-namespace randomx {
+#include <chrono>
+#include <cstdint>
 
-	template<size_t alignment>
-	void* AlignedAllocator<alignment>::allocMemory(size_t count) {
-		void *mem = rx_aligned_alloc(count, alignment);
-		if (mem == nullptr)
-			throw std::bad_alloc();
-		return mem;
+class Stopwatch {
+public:
+	Stopwatch(bool startNow = false) {
+		reset();
+		if (startNow) {
+			start();
+		}
 	}
-
-	template<size_t alignment>
-	void AlignedAllocator<alignment>::freeMemory(void* ptr, size_t count) {
-		rx_aligned_free(ptr);
+	void reset() {
+		isRunning = false;
+		elapsed = 0;
 	}
-
-	template struct AlignedAllocator<CacheLineSize>;
-
-	void* LargePageAllocator::allocMemory(size_t count) {
-		return allocLargePagesMemory(count);
+	void start() {
+		if (!isRunning) {
+			startMark = std::chrono::high_resolution_clock::now();
+			isRunning = true;
+		}
 	}
+	void restart() {
+		startMark = std::chrono::high_resolution_clock::now();
+		isRunning = true;
+		elapsed = 0;
+	}
+	void stop() {
+		if (isRunning) {
+			chrono_t endMark = std::chrono::high_resolution_clock::now();
+			uint64_t ns = std::chrono::duration_cast<sw_unit>(endMark - startMark).count();
+			elapsed += ns;
+			isRunning = false;
+		}
+	}
+	double getElapsed() const {
+		return getElapsedNanosec() / 1e+9;
+	}
+private:
+	using chrono_t = std::chrono::high_resolution_clock::time_point;
+	using sw_unit = std::chrono::nanoseconds;
+	chrono_t startMark;
+	uint64_t elapsed;
+	bool isRunning;
 
-	void LargePageAllocator::freeMemory(void* ptr, size_t count) {
-		freePagedMemory(ptr, count);
-	};
-
-}
+	uint64_t getElapsedNanosec() const {
+		uint64_t elns = elapsed;
+		if (isRunning) {
+			chrono_t endMark = std::chrono::high_resolution_clock::now();
+			uint64_t ns = std::chrono::duration_cast<sw_unit>(endMark - startMark).count();
+			elns += ns;
+		}
+		return elns;
+	}
+};
