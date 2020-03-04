@@ -42,19 +42,22 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
     int nHeight = pindexLast->nHeight + 1;
 
     // For upgrade mainnet forks, we'll adjust the difficulty down for the first nPowAveragingWindow blocks
-    if (params.scaleDifficultyAtUpgradeFork && nHeight >= params.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight && 
-            nHeight < params.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight + params.nPowAveragingWindow) {
+    if (params.scaleDifficultyAtUpgradeFork &&
+        (nHeight >= params.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight ||
+         nHeight >= params.vUpgrades[Consensus::UPGRADE_BUTTERCUP].nActivationHeight) &&
+            (nHeight < params.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight + params.nPowAveragingWindow ||
+             nHeight < params.vUpgrades[Consensus::UPGRADE_BUTTERCUP].nActivationHeight + params.nPowAveragingWindow)) {
         
-        if (pblock && pblock->GetBlockTime() > pindexLast->GetBlockTime() + params.nPowTargetSpacing * 12) {
+        if (pblock && pblock->GetBlockTime() > pindexLast->GetBlockTime() + params.PoWTargetSpacing(nHeight) * 12) {
             // If > 30 mins, allow min difficulty
             LogPrintf("Returning level 1 difficulty\n");
             return nProofOfWorkLimit;
-        } else if (pblock && pblock->GetBlockTime() > pindexLast->GetBlockTime() + params.nPowTargetSpacing * 6) {
+        } else if (pblock && pblock->GetBlockTime() > pindexLast->GetBlockTime() + params.PoWTargetSpacing(nHeight) * 6) {
             // If > 15 mins, allow low estimate difficulty
             unsigned int difficulty = IncreaseDifficultyBy(nProofOfWorkLimit, 128, params);
             LogPrintf("Returning level 2 difficulty\n");
             return difficulty;
-        } else if (pblock && pblock->GetBlockTime() > pindexLast->GetBlockTime() + params.nPowTargetSpacing * 2) {
+        } else if (pblock && pblock->GetBlockTime() > pindexLast->GetBlockTime() + params.PoWTargetSpacing(nHeight) * 2) {
             // If > 5 mins, allow high estimate difficulty
             unsigned int difficulty = IncreaseDifficultyBy(nProofOfWorkLimit, 256, params);
             LogPrintf("Returning level 3 difficulty\n");
@@ -72,9 +75,9 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
             pindexLast->nHeight >= params.nPowAllowMinDifficultyBlocksAfterHeight.get())
         {
             // Special difficulty rule for testnet:
-            // If the new block's timestamp is more than 6 * 2.5 minutes
+            // If the new block's timestamp is more than 6 * block interval minutes
             // then allow mining of a min-difficulty block.
-            if (pblock && pblock->GetBlockTime() > pindexLast->GetBlockTime() + params.nPowTargetSpacing * 6)
+            if (pblock && pblock->GetBlockTime() > pindexLast->GetBlockTime() + params.PoWTargetSpacing(pindexLast->nHeight + 1) * 6)
                 return nProofOfWorkLimit;
         }
     }
@@ -95,37 +98,44 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
 
     arith_uint256 bnAvg {bnTot / params.nPowAveragingWindow};
 
-    return CalculateNextWorkRequired(bnAvg, pindexLast->GetMedianTimePast(), pindexFirst->GetMedianTimePast(), params);
+    return CalculateNextWorkRequired(bnAvg, pindexLast->GetMedianTimePast(), pindexFirst->GetMedianTimePast(), params, pindexLast->nHeight + 1);
 }
 
 unsigned int CalculateNextWorkRequired(arith_uint256 bnAvg,
                                        int64_t nLastBlockTime, int64_t nFirstBlockTime,
-                                       const Consensus::Params& params)
+                                       const Consensus::Params& params,
+                                       int nextHeight)
 {
+    int64_t averagingWindowTimespan = params.AveragingWindowTimespan(nextHeight);
+    int64_t minActualTimespan = params.MinActualTimespan(nextHeight);
+    int64_t maxActualTimespan = params.MaxActualTimespan(nextHeight);
     // Limit adjustment step
     // Use medians to prevent time-warp attacks
     int64_t nActualTimespan = nLastBlockTime - nFirstBlockTime;
     LogPrint("pow", "  nActualTimespan = %d  before dampening\n", nActualTimespan);
-    nActualTimespan = params.AveragingWindowTimespan() + (nActualTimespan - params.AveragingWindowTimespan())/4;
+    nActualTimespan = averagingWindowTimespan + (nActualTimespan - averagingWindowTimespan)/4;
     LogPrint("pow", "  nActualTimespan = %d  before bounds\n", nActualTimespan);
 
-    if (nActualTimespan < params.MinActualTimespan())
-        nActualTimespan = params.MinActualTimespan();
-    if (nActualTimespan > params.MaxActualTimespan())
-        nActualTimespan = params.MaxActualTimespan();
+    if (nActualTimespan < minActualTimespan) {
+        nActualTimespan = minActualTimespan;
+    }
+    if (nActualTimespan > maxActualTimespan) {
+        nActualTimespan = maxActualTimespan;
+    }
 
     // Retarget
     const arith_uint256 bnPowLimit = UintToArith256(params.powLimit);
     arith_uint256 bnNew {bnAvg};
-    bnNew /= params.AveragingWindowTimespan();
+    bnNew /= averagingWindowTimespan;
     bnNew *= nActualTimespan;
 
-    if (bnNew > bnPowLimit)
+    if (bnNew > bnPowLimit) {
         bnNew = bnPowLimit;
+    }
 
     /// debug print
     LogPrint("pow", "GetNextWorkRequired RETARGET\n");
-    LogPrint("pow", "params.AveragingWindowTimespan() = %d    nActualTimespan = %d\n", params.AveragingWindowTimespan(), nActualTimespan);
+    LogPrint("pow", "params.AveragingWindowTimespan(%d) = %d    nActualTimespan = %d\n", nextHeight, averagingWindowTimespan, nActualTimespan);
     LogPrint("pow", "Current average: %08x  %s\n", bnAvg.GetCompact(), bnAvg.ToString());
     LogPrint("pow", "After:  %08x  %s\n", bnNew.GetCompact(), bnNew.ToString());
 
@@ -221,7 +231,7 @@ int64_t GetBlockProofEquivalentTime(const CBlockIndex& to, const CBlockIndex& fr
         r = from.nChainWork - to.nChainWork;
         sign = -1;
     }
-    r = r * arith_uint256(params.nPowTargetSpacing) / GetBlockProof(tip);
+    r = r * arith_uint256(params.PoWTargetSpacing(tip.nHeight)) / GetBlockProof(tip);
     if (r.bits() > 63) {
         return sign * std::numeric_limits<int64_t>::max();
     }

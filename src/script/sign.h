@@ -7,6 +7,7 @@
 #define BITCOIN_SCRIPT_SIGN_H
 
 #include "script/interpreter.h"
+#include "script/sighashtype.h"
 
 class CKeyID;
 class CKeyStore;
@@ -34,12 +35,12 @@ public:
 class TransactionSignatureCreator : public BaseSignatureCreator {
     const CTransaction* txTo;
     unsigned int nIn;
-    int nHashType;
+    SigHashType sigHashType;
     CAmount amount;
     const TransactionSignatureChecker checker;
 
 public:
-    TransactionSignatureCreator(const CKeyStore* keystoreIn, const CTransaction* txToIn, unsigned int nInIn, const CAmount& amountIn, int nHashTypeIn=SIGHASH_ALL);
+    TransactionSignatureCreator(const CKeyStore* keystoreIn, const CTransaction* txToIn, unsigned int nInIn, const CAmount& amountIn, SigHashType sigHashTypeIn = SigHashType());
     const BaseSignatureChecker& Checker() const { return checker; }
     bool CreateSig(std::vector<unsigned char>& vchSig, const CKeyID& keyid, const CScript& scriptCode, uint32_t consensusBranchId) const;
 };
@@ -48,7 +49,7 @@ class MutableTransactionSignatureCreator : public TransactionSignatureCreator {
     CTransaction tx;
 
 public:
-    MutableTransactionSignatureCreator(const CKeyStore* keystoreIn, const CMutableTransaction* txToIn, unsigned int nInIn, const CAmount& amount, int nHashTypeIn) : TransactionSignatureCreator(keystoreIn, &tx, nInIn, amount, nHashTypeIn), tx(*txToIn) {}
+    MutableTransactionSignatureCreator(const CKeyStore* keystoreIn, const CMutableTransaction* txToIn, unsigned int nInIn, const CAmount& amount, SigHashType sigHashTypeIn) : TransactionSignatureCreator(keystoreIn, &tx, nInIn, amount, sigHashTypeIn), tx(*txToIn) {}
 };
 
 /** A signature creator that just produces 72-byte empty signatures. */
@@ -76,14 +77,14 @@ bool SignSignature(
     CMutableTransaction& txTo,
     unsigned int nIn,
     const CAmount& amount,
-    int nHashType,
+    SigHashType sigHashType,
     uint32_t consensusBranchId);
 bool SignSignature(
     const CKeyStore& keystore,
     const CTransaction& txFrom,
     CMutableTransaction& txTo,
     unsigned int nIn,
-    int nHashType,
+    SigHashType sigHashType,
     uint32_t consensusBranchId);
 
 /** Combine two script signatures using a generic signature checker, intelligently, possibly with OP_0 placeholders. */

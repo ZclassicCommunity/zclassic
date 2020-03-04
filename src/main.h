@@ -69,7 +69,8 @@ static const unsigned int DEFAULT_MIN_RELAY_TX_FEE = 100;
 /** Default for -maxorphantx, maximum number of orphan transactions kept in memory */
 static const unsigned int DEFAULT_MAX_ORPHAN_TRANSACTIONS = 100;
 /** Default for -txexpirydelta, in number of blocks */
-static const unsigned int DEFAULT_TX_EXPIRY_DELTA = 20;
+static const unsigned int DEFAULT_PRE_BUTTERCUP_TX_EXPIRY_DELTA = 20;
+static const unsigned int DEFAULT_POST_BUTTERCUP_TX_EXPIRY_DELTA = DEFAULT_PRE_BUTTERCUP_TX_EXPIRY_DELTA * Consensus::BUTTERCUP_POW_TARGET_SPACING_RATIO;
 /** The number of blocks within expiry height when a tx is considered to be expiring soon */
 static constexpr uint32_t TX_EXPIRING_SOON_THRESHOLD = 3;
 /** The maximum size of a blk?????.dat file (since 0.8) */
@@ -123,9 +124,10 @@ static const int DEFAULT_MAX_REORG_DEPTH = 10;
  * finalization.
  * This value should be >> block propagation and validation time
  */
-static const int64_t DEFAULT_MIN_FINALIZATION_DELAY = 0.5 * 60 * 60;
+static const int64_t DEFAULT_PRE_BUTTERCUP_MIN_FINALIZATION_DELAY = 0.5 * 60 * 60;
+static const int64_t DEFAULT_POST_BUTTERCUP_MIN_FINALIZATION_DELAY = DEFAULT_PRE_BUTTERCUP_MIN_FINALIZATION_DELAY / 2;
 
-extern unsigned int expiryDelta;
+extern boost::optional<unsigned int> expiryDeltaArg;
 extern CScript COINBASE_FLAGS;
 extern CCriticalSection cs_main;
 extern CTxMemPool mempool;
@@ -224,7 +226,7 @@ bool SendMessages(CNode* pto, bool fSendTrickle);
 /** Run an instance of the script checking thread */
 void ThreadScriptCheck();
 /** Try to detect Partition (network isolation) attacks against us */
-void PartitionCheck(bool (*initialDownloadCheck)(), CCriticalSection& cs, const CBlockIndex *const &bestHeader, int64_t nPowTargetSpacing);
+void PartitionCheck(bool (*initialDownloadCheck)(), CCriticalSection& cs, const CBlockIndex *const &bestHeader);
 /** Check whether we are doing an initial block download (synchronizing from disk or network) */
 bool IsInitialBlockDownload();
 /** Format a string that describes several potential problems detected by the core */
@@ -332,7 +334,7 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
  * @return number of sigops this transaction's outputs will produce when spent
  * @see CTransaction::FetchInputs
  */
-unsigned int GetLegacySigOpCount(const CTransaction& tx);
+uint64_t GetLegacySigOpCount(const CTransaction& tx, uint32_t flags);
 
 /**
  * Count ECDSA signature operations in pay-to-script-hash inputs.
@@ -341,7 +343,8 @@ unsigned int GetLegacySigOpCount(const CTransaction& tx);
  * @return maximum number of sigops required to validate this transaction's inputs
  * @see CTransaction::FetchInputs
  */
-unsigned int GetP2SHSigOpCount(const CTransaction& tx, const CCoinsViewCache& mapInputs);
+uint64_t GetP2SHSigOpCount(const CTransaction& tx,
+                           const CCoinsViewCache& mapInputs, uint32_t flags);
 
 /** Convert CValidationState to a human-readable message for logging */
 std::string FormatStateMessage(const CValidationState &state);
@@ -628,7 +631,10 @@ static const unsigned int REJECT_AGAINST_FINALIZED = 0x103;
 
 uint64_t CalculateCurrentUsage();
 
-/** Return a CMutableTransaction with contextual default values based on set of consensus rules at height */
+/** 
+ * Return a CMutableTransaction with contextual default values based on set of consensus rules at nHeight. The expiryDelta will
+ * either be based on the command-line argument '-txexpirydelta' or derived from consensusParams.
+ */
 CMutableTransaction CreateNewContextualCMutableTransaction(const Consensus::Params& consensusParams, int nHeight);
 
 #endif // BITCOIN_MAIN_H

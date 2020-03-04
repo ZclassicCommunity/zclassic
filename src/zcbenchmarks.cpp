@@ -19,6 +19,7 @@
 #include "miner.h"
 #include "pow.h"
 #include "rpc/server.h"
+#include "script/sighashtype.h"
 #include "script/sign.h"
 #include "sodium.h"
 #include "streams.h"
@@ -258,7 +259,7 @@ double benchmark_large_tx(size_t nInputs)
     // Sign for all the inputs
     auto consensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId;
     for (size_t i = 0; i < nInputs; i++) {
-        SignSignature(tempKeystore, prevPubKey, spending_tx, i, 1000000, SIGHASH_ALL, consensusBranchId);
+        SignSignature(tempKeystore, prevPubKey, spending_tx, i, 1000000, SigHashType(), consensusBranchId);
     }
 
     // Spending tx has all its inputs signed and does not need to be mutated anymore

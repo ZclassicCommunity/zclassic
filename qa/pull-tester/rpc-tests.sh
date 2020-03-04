@@ -74,6 +74,7 @@ testScripts=(
     'uptime.py'
     'parkedchain.py'
     'finalize-block.py'
+    'shorter_block_times.py'
 );
 testScriptsExt=(
     'getblocktemplate_longpoll.py'

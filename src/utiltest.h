@@ -43,6 +43,10 @@ const Consensus::Params& RegtestActivateSapling();
 
 void RegtestDeactivateSapling();
 
+const Consensus::Params& RegtestActivateButtercup(bool updatePow, int buttercupActivationHeight = Consensus::NetworkUpgrade::ALWAYS_ACTIVE);
+
+void RegtestDeactivateButtercup();
+
 libzcash::SaplingExtendedSpendingKey GetTestMasterSaplingSpendingKey();
 
 CKey AddTestCKeyToKeyStore(CBasicKeyStore& keyStore);

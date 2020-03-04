@@ -181,9 +181,11 @@
  "P2SH,DISCOURAGE_UPGRADABLE_NOPS", "Discouraged NOP10 in redeemScript"],
 
 ["0x50","1", "P2SH,STRICTENC", "opcode 0x50 is reserved"],
-["1", "IF 0xba ELSE 1 ENDIF", "P2SH,STRICTENC", "opcodes above NOP10 invalid if executed"],
-["1", "IF 0xbb ELSE 1 ENDIF", "P2SH,STRICTENC"],
-["1", "IF 0xbc ELSE 1 ENDIF", "P2SH,STRICTENC"],
+["1", "IF CHECKDATASIG ELSE 1 ENDIF", "P2SH,STRICTENC"],
+["1", "IF CHECKDATASIG ELSE 1 ENDIF", "P2SH,STRICTENC,CHECKDATASIG", "BAD_OPCODE"]
+["1", "IF CHECKDATASIGVERIFY ELSE 1 ENDIF", "P2SH,STRICTENC"],
+["1", "IF CHECKDATASIGVERIFY ELSE 1 ENDIF", "P2SH,STRICTENC,CHECKDATASIG", "BAD_OPCODE"],
+["1", "IF 0xbc ELSE 1 ENDIF", "P2SH,STRICTENC", "opcodes above NOP10 invalid if executed"],
 ["1", "IF 0xbd ELSE 1 ENDIF", "P2SH,STRICTENC"],
 ["1", "IF 0xbe ELSE 1 ENDIF", "P2SH,STRICTENC"],
 ["1", "IF 0xbf ELSE 1 ENDIF", "P2SH,STRICTENC"],
@@ -297,7 +299,7 @@
 ["1","RESERVED", "P2SH,STRICTENC", "OP_RESERVED is reserved"],
 ["1","RESERVED1", "P2SH,STRICTENC", "OP_RESERVED1 is reserved"],
 ["1","RESERVED2", "P2SH,STRICTENC", "OP_RESERVED2 is reserved"],
-["1","0xba", "P2SH,STRICTENC", "0xba == OP_NOP10 + 1"],
+["1","0xbc", "P2SH,STRICTENC", "0xbc == OP_CHECKDATASIGVERIFY + 1"],
 
 ["2147483648", "1ADD 1", "P2SH,STRICTENC", "We cannot do math on 5-byte integers"],
 ["2147483648", "NEGATE 1", "P2SH,STRICTENC", "We cannot do math on 5-byte integers"],

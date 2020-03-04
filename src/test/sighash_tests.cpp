@@ -9,6 +9,7 @@
 #include "random.h"
 #include "script/interpreter.h"
 #include "script/script.h"
+#include "script/sighashtype.h"
 #include "serialize.h"
 #include "test/test_bitcoin.h"
 #include "util.h"
@@ -202,7 +203,7 @@ void static RandomTransaction(CMutableTransaction &tx, bool fSingle, uint32_t co
         // Empty output script.
         CScript scriptCode;
         CTransaction signTx(tx);
-        uint256 dataToBeSigned = SignatureHash(scriptCode, signTx, NOT_AN_INPUT, SIGHASH_ALL, 0, consensusBranchId);
+        uint256 dataToBeSigned = SignatureHash(scriptCode, signTx, NOT_AN_INPUT, SigHashType(), 0, consensusBranchId);
 
         assert(crypto_sign_detached(&tx.joinSplitSig[0], NULL,
                                     dataToBeSigned.begin(), 32,
@@ -229,6 +230,7 @@ BOOST_AUTO_TEST_CASE(sighash_test)
     #endif
     for (int i=0; i<nRandomTests; i++) {
         int nHashType = insecure_rand();
+        SigHashType sigHashType(nHashType);
         uint32_t consensusBranchId = NetworkUpgradeInfo[insecure_rand() % Consensus::MAX_NETWORK_UPGRADES].nBranchId;
         CMutableTransaction txTo;
         RandomTransaction(txTo, (nHashType & 0x1f) == SIGHASH_SINGLE, consensusBranchId);
@@ -238,7 +240,7 @@ BOOST_AUTO_TEST_CASE(sighash_test)
 
         uint256 sh, sho;
         sho = SignatureHashOld(scriptCode, txTo, nIn, nHashType);
-        sh = SignatureHash(scriptCode, txTo, nIn, nHashType, 0, consensusBranchId);
+        sh = SignatureHash(scriptCode, txTo, nIn, sigHashType, 0, consensusBranchId);
         #if defined(PRINT_SIGHASH_JSON)
         CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
         ss << txTo;
@@ -280,7 +282,8 @@ BOOST_AUTO_TEST_CASE(sighash_from_data)
         if (test.size() == 1) continue; // comment
 
         std::string raw_tx, raw_script, sigHashHex;
-        int nIn, nHashType;
+        int nIn;
+        SigHashType sigHashType;
         uint32_t consensusBranchId;
         uint256 sh;
         CTransaction tx;
@@ -291,7 +294,7 @@ BOOST_AUTO_TEST_CASE(sighash_from_data)
           raw_tx = test[0].get_str();
           raw_script = test[1].get_str();
           nIn = test[2].get_int();
-          nHashType = test[3].get_int();
+          sigHashType = SigHashType(test[3].get_int());
           consensusBranchId = test[4].get_int();
           sigHashHex = test[5].get_str();
 
@@ -329,7 +332,7 @@ BOOST_AUTO_TEST_CASE(sighash_from_data)
           continue;
         }
 
-        sh = SignatureHash(scriptCode, tx, nIn, nHashType, 0, consensusBranchId);
+        sh = SignatureHash(scriptCode, tx, nIn, sigHashType, 0, consensusBranchId);
         BOOST_CHECK_MESSAGE(sh.GetHex() == sigHashHex, strTest);
     }
 }

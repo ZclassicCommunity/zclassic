@@ -11,6 +11,7 @@
 #include "keystore.h"
 #include "primitives/transaction.h"
 #include "script/script.h"
+#include "script/sighashtype.h"
 #include "script/sign.h"
 #include <univalue.h>
 #include "util.h"
@@ -174,7 +175,7 @@ static void MutateTxVersion(CMutableTransaction& tx, const std::string& cmdVal)
 static void MutateTxExpiry(CMutableTransaction& tx, const std::string& cmdVal)
 {
     int64_t newExpiry = atoi64(cmdVal);
-    if (newExpiry >= TX_EXPIRY_HEIGHT_THRESHOLD) {
+    if (newExpiry <= 0 || newExpiry >= TX_EXPIRY_HEIGHT_THRESHOLD) {
         throw std::runtime_error("Invalid TX expiry requested");
     }
     tx.nExpiryHeight = (int) newExpiry;
@@ -304,7 +305,7 @@ static const unsigned int N_SIGHASH_OPTS = 6;
 static const struct {
     const char *flagStr;
     int flags;
-} sighashOptions[N_SIGHASH_OPTS] = {
+} sigHashOptions[N_SIGHASH_OPTS] = {
     {"ALL", SIGHASH_ALL},
     {"NONE", SIGHASH_NONE},
     {"SINGLE", SIGHASH_SINGLE},
@@ -313,13 +314,13 @@ static const struct {
     {"SINGLE|ANYONECANPAY", SIGHASH_SINGLE|SIGHASH_ANYONECANPAY},
 };
 
-static bool findSighashFlags(int& flags, const std::string& flagStr)
+static bool findSighashFlags(SigHashType &sigHashType, const std::string& flagStr)
 {
-    flags = 0;
+    sigHashType = SigHashType();
 
     for (unsigned int i = 0; i < N_SIGHASH_OPTS; i++) {
-        if (flagStr == sighashOptions[i].flagStr) {
-            flags = sighashOptions[i].flags;
+        if (flagStr == sigHashOptions[i].flagStr) {
+            sigHashType = SigHashType(sigHashOptions[i].flags);
             return true;
         }
     }
@@ -371,13 +372,13 @@ static void MutateTxSign(CMutableTransaction& tx, const std::string& strInput)
     }
 
     // extract and validate SIGHASH-FLAGS
-    int nHashType = SIGHASH_ALL;
+    SigHashType sigHashType = SigHashType();
     std::string flagStr;
     if (pos != std::string::npos) {
         flagStr = strInput.substr(pos + 1, std::string::npos);
     }
     if (flagStr.size() > 0)
-        if (!findSighashFlags(nHashType, flagStr))
+        if (!findSighashFlags(sigHashType, flagStr))
             throw std::runtime_error("unknown sighash flag/sign option");
 
     std::vector<CTransaction> txVariants;
@@ -461,8 +462,6 @@ static void MutateTxSign(CMutableTransaction& tx, const std::string& strInput)
 
     const CKeyStore& keystore = tempKeystore;
 
-    bool fHashSingle = ((nHashType & ~SIGHASH_ANYONECANPAY) == SIGHASH_SINGLE);
-
     // Grab the consensus branch ID for the given height
     auto consensusBranchId = CurrentEpochBranchId(nHeight, Params().GetConsensus());
 
@@ -479,8 +478,8 @@ static void MutateTxSign(CMutableTransaction& tx, const std::string& strInput)
 
         SignatureData sigdata;
         // Only sign SIGHASH_SINGLE if there's a corresponding output:
-        if (!fHashSingle || (i < mergedTx.vout.size()))
-            ProduceSignature(MutableTransactionSignatureCreator(&keystore, &mergedTx, i, amount, nHashType), prevPubKey, sigdata, consensusBranchId);
+        if ((sigHashType.getBaseType() != BaseSigHashType::SINGLE) || (i < mergedTx.vout.size()))
+            ProduceSignature(MutableTransactionSignatureCreator(&keystore, &mergedTx, i, amount, sigHashType), prevPubKey, sigdata, consensusBranchId);
 
         // ... and merge in other signatures:
         BOOST_FOREACH(const CTransaction& txv, txVariants)

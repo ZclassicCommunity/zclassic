@@ -54,6 +54,14 @@ TransactionBuilder::TransactionBuilder(
     mtx = CreateNewContextualCMutableTransaction(consensusParams, nHeight);
 }
 
+void TransactionBuilder::SetExpiryHeight(uint32_t nExpiryHeight)
+{
+    if (nExpiryHeight < nHeight || nExpiryHeight <= 0 || nExpiryHeight >= TX_EXPIRY_HEIGHT_THRESHOLD) {
+        throw new std::runtime_error("TransactionBuilder::SetExpiryHeight: invalid expiry height");
+    }
+    mtx.nExpiryHeight = nExpiryHeight;
+}
+
 void TransactionBuilder::AddSaplingSpend(
     libzcash::SaplingExpandedSpendingKey expsk,
     libzcash::SaplingNote note,
@@ -270,7 +278,7 @@ TransactionBuilderResult TransactionBuilder::Build()
     uint256 dataToBeSigned;
     CScript scriptCode;
     try {
-        dataToBeSigned = SignatureHash(scriptCode, mtx, NOT_AN_INPUT, SIGHASH_ALL, 0, consensusBranchId);
+        dataToBeSigned = SignatureHash(scriptCode, mtx, NOT_AN_INPUT, SigHashType(), 0, consensusBranchId);
     } catch (std::logic_error ex) {
         librustzcash_sapling_proving_ctx_free(ctx);
         return TransactionBuilderResult("Could not construct signature hash: " + std::string(ex.what()));
@@ -299,7 +307,7 @@ TransactionBuilderResult TransactionBuilder::Build()
         SignatureData sigdata;
         bool signSuccess = ProduceSignature(
             TransactionSignatureCreator(
-                keystore, &txNewConst, nIn, tIn.value, SIGHASH_ALL),
+                keystore, &txNewConst, nIn, tIn.value, SigHashType()),
             tIn.scriptPubKey, sigdata, consensusBranchId);
 
         if (!signSuccess) {

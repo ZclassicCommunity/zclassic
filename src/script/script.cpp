@@ -5,6 +5,7 @@
 
 #include "script.h"
 
+#include "script/script_flags.h"
 #include "tinyformat.h"
 #include "utilstrencodings.h"
 
@@ -128,6 +129,8 @@ const char* GetOpName(opcodetype opcode)
     case OP_CHECKSIGVERIFY         : return "OP_CHECKSIGVERIFY";
     case OP_CHECKMULTISIG          : return "OP_CHECKMULTISIG";
     case OP_CHECKMULTISIGVERIFY    : return "OP_CHECKMULTISIGVERIFY";
+    case OP_CHECKDATASIG           : return "OP_CHECKDATASIG";
+    case OP_CHECKDATASIGVERIFY     : return "OP_CHECKDATASIGVERIFY";
 
     // expansion
     case OP_NOP1                   : return "OP_NOP1";
@@ -153,34 +156,55 @@ const char* GetOpName(opcodetype opcode)
     }
 }
 
-unsigned int CScript::GetSigOpCount(bool fAccurate) const
+unsigned int CScript::GetSigOpCount(uint32_t flags, bool fAccurate) const
 {
-    unsigned int n = 0;
+    uint32_t n = 0;
     const_iterator pc = begin();
     opcodetype lastOpcode = OP_INVALIDOPCODE;
     while (pc < end())
     {
         opcodetype opcode;
-        if (!GetOp(pc, opcode))
+        if (!GetOp(pc, opcode)) {
             break;
-        if (opcode == OP_CHECKSIG || opcode == OP_CHECKSIGVERIFY)
-            n++;
-        else if (opcode == OP_CHECKMULTISIG || opcode == OP_CHECKMULTISIGVERIFY)
-        {
-            if (fAccurate && lastOpcode >= OP_1 && lastOpcode <= OP_16)
-                n += DecodeOP_N(lastOpcode);
-            else
-                n += 20;
         }
+
+        switch (opcode) {
+            case OP_CHECKSIG:
+            case OP_CHECKSIGVERIFY:
+                n++;
+                break;
+
+            case OP_CHECKDATASIG:
+            case OP_CHECKDATASIGVERIFY:
+                if (flags & SCRIPT_VERIFY_CHECKDATASIG_SIGOPS) {
+                    n++;
+                }
+                break;
+
+            case OP_CHECKMULTISIG:
+            case OP_CHECKMULTISIGVERIFY:
+                if (fAccurate && lastOpcode >= OP_1 && lastOpcode <= OP_16) {
+                    n += DecodeOP_N(lastOpcode);
+                } else {
+                    n += 20;
+                }
+                break;
+            default:
+                break;
+        }
+
         lastOpcode = opcode;
     }
+
     return n;
 }
 
-unsigned int CScript::GetSigOpCount(const CScript& scriptSig) const
+uint32_t CScript::GetSigOpCount(uint32_t flags,
+                                const CScript& scriptSig) const
 {
-    if (!IsPayToScriptHash())
-        return GetSigOpCount(true);
+    if ((flags & SCRIPT_VERIFY_P2SH) == 0 || !IsPayToScriptHash()) {
+        return GetSigOpCount(flags, true);
+    }
 
     // This is a pay-to-script-hash scriptPubKey;
     // get the last item that the scriptSig
@@ -190,15 +214,17 @@ unsigned int CScript::GetSigOpCount(const CScript& scriptSig) const
     while (pc < scriptSig.end())
     {
         opcodetype opcode;
-        if (!scriptSig.GetOp(pc, opcode, data))
+        if (!scriptSig.GetOp(pc, opcode, data)) {
             return 0;
-        if (opcode > OP_16)
+        }
+        if (opcode > OP_16) {
             return 0;
+        }
     }
 
     /// ... and return its opcount:
     CScript subscript(data.begin(), data.end());
-    return subscript.GetSigOpCount(true);
+    return subscript.GetSigOpCount(flags, true);
 }
 
 bool CScript::IsPayToScriptHash() const
@@ -221,8 +247,9 @@ bool CScript::IsPushOnly(const_iterator pc) const
         // push-type opcode, however execution of OP_RESERVED fails, so
         // it's not relevant to P2SH/BIP62 as the scriptSig would fail prior to
         // the P2SH special validation code being executed.
-        if (opcode > OP_16)
+        if (opcode > OP_16) {
             return false;
+        }
     }
     return true;
 }

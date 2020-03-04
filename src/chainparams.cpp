@@ -85,7 +85,8 @@ public:
         bip44CoinType = 147; // As registered in https://github.com/satoshilabs/slips/blob/master/slip-0044.md
         consensus.fCoinbaseMustBeProtected = true;
         consensus.nSubsidySlowStartInterval = 2;
-        consensus.nSubsidyHalvingInterval = 840000;
+        consensus.nPreButtercupSubsidyHalvingInterval = Consensus::PRE_BUTTERCUP_HALVING_INTERVAL;
+        consensus.nPostButtercupSubsidyHalvingInterval = Consensus::POST_BUTTERCUP_HALVING_INTERVAL;
         consensus.nMajorityEnforceBlockUpgrade = 750;
         consensus.nMajorityRejectBlockOutdated = 950;
         consensus.nMajorityWindow = 4000;
@@ -94,7 +95,8 @@ public:
         assert(maxUint/UintToArith256(consensus.powLimit) >= consensus.nPowAveragingWindow);
         consensus.nPowMaxAdjustDown = 32; // 32% adjustment down
         consensus.nPowMaxAdjustUp = 16; // 16% adjustment up
-        consensus.nPowTargetSpacing = 2.5 * 60;
+        consensus.nPreButtercupPowTargetSpacing = Consensus::PRE_BUTTERCUP_POW_TARGET_SPACING;
+        consensus.nPostButtercupPowTargetSpacing = Consensus::POST_BUTTERCUP_POW_TARGET_SPACING;
         consensus.nPowAllowMinDifficultyBlocksAfterHeight = boost::none;
         consensus.scaleDifficultyAtUpgradeFork = true;
         consensus.vUpgrades[Consensus::BASE_SPROUT].nProtocolVersion = 170002;
@@ -111,6 +113,8 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_BUBBLES].nActivationHeight = 585318;
         consensus.vUpgrades[Consensus::UPGRADE_DIFFADJ].nProtocolVersion = 170010;
         consensus.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight = 585322;
+        consensus.vUpgrades[Consensus::UPGRADE_BUTTERCUP].nProtocolVersion = 170011;
+        consensus.vUpgrades[Consensus::UPGRADE_BUTTERCUP].nActivationHeight = 707000;
 
         // The best chain should have at least this much work.
         consensus.nMinimumChainWork = uint256S("0x000000000000000000000000000000000000000000000000000af996bfd8e482");
@@ -262,7 +266,8 @@ public:
         bip44CoinType = 1;
         consensus.fCoinbaseMustBeProtected = true;
         consensus.nSubsidySlowStartInterval = 2;
-        consensus.nSubsidyHalvingInterval = 840000;
+        consensus.nPreButtercupSubsidyHalvingInterval = Consensus::PRE_BUTTERCUP_HALVING_INTERVAL;
+        consensus.nPostButtercupSubsidyHalvingInterval = Consensus::POST_BUTTERCUP_HALVING_INTERVAL;
         consensus.nMajorityEnforceBlockUpgrade = 51;
         consensus.nMajorityRejectBlockOutdated = 75;
         consensus.nMajorityWindow = 400;
@@ -271,7 +276,8 @@ public:
         assert(maxUint/UintToArith256(consensus.powLimit) >= consensus.nPowAveragingWindow);
         consensus.nPowMaxAdjustDown = 32; // 32% adjustment down
         consensus.nPowMaxAdjustUp = 16; // 16% adjustment up
-        consensus.nPowTargetSpacing = 2.5 * 60;
+        consensus.nPreButtercupPowTargetSpacing = Consensus::PRE_BUTTERCUP_POW_TARGET_SPACING;
+        consensus.nPostButtercupPowTargetSpacing = Consensus::POST_BUTTERCUP_POW_TARGET_SPACING;
         consensus.nPowAllowMinDifficultyBlocksAfterHeight = 299187;
         consensus.scaleDifficultyAtUpgradeFork = false;
         consensus.vUpgrades[Consensus::BASE_SPROUT].nProtocolVersion = 170002;
@@ -287,8 +293,10 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_BUBBLES].nProtocolVersion = 170008;
         consensus.vUpgrades[Consensus::UPGRADE_BUBBLES].nActivationHeight = 6350;
         consensus.vUpgrades[Consensus::UPGRADE_DIFFADJ].nProtocolVersion = 170009;
-        consensus.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight = 
+        consensus.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        consensus.vUpgrades[Consensus::UPGRADE_BUTTERCUP].nProtocolVersion = 170010;
+        consensus.vUpgrades[Consensus::UPGRADE_BUTTERCUP].nActivationHeight = 78856;
 
         // The best chain should have at least this much work.
         consensus.nMinimumChainWork = uint256S("0x0000000000000000000000000000000000000000000000000000000000000000");
@@ -396,7 +404,8 @@ public:
         bip44CoinType = 1;
         consensus.fCoinbaseMustBeProtected = false;
         consensus.nSubsidySlowStartInterval = 0;
-        consensus.nSubsidyHalvingInterval = 150;
+        consensus.nPreButtercupSubsidyHalvingInterval = Consensus::PRE_BUTTERCUP_REGTEST_HALVING_INTERVAL;
+        consensus.nPostButtercupSubsidyHalvingInterval = Consensus::POST_BUTTERCUP_REGTEST_HALVING_INTERVAL;
         consensus.nMajorityEnforceBlockUpgrade = 750;
         consensus.nMajorityRejectBlockOutdated = 950;
         consensus.nMajorityWindow = 1000;
@@ -405,7 +414,8 @@ public:
         assert(maxUint/UintToArith256(consensus.powLimit) >= consensus.nPowAveragingWindow);
         consensus.nPowMaxAdjustDown = 0; // Turn off adjustment down
         consensus.nPowMaxAdjustUp = 0; // Turn off adjustment up
-        consensus.nPowTargetSpacing = 2.5 * 60;
+        consensus.nPreButtercupPowTargetSpacing = Consensus::PRE_BUTTERCUP_POW_TARGET_SPACING;
+        consensus.nPostButtercupPowTargetSpacing = Consensus::POST_BUTTERCUP_POW_TARGET_SPACING;
         consensus.nPowAllowMinDifficultyBlocksAfterHeight = 0;
         consensus.scaleDifficultyAtUpgradeFork = false;
         consensus.vUpgrades[Consensus::BASE_SPROUT].nProtocolVersion = 170002;
@@ -424,7 +434,10 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_BUBBLES].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.vUpgrades[Consensus::UPGRADE_DIFFADJ].nProtocolVersion = 170009;
-        consensus.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight = 
+        consensus.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight =
+            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        consensus.vUpgrades[Consensus::UPGRADE_BUTTERCUP].nProtocolVersion = 170010;
+        consensus.vUpgrades[Consensus::UPGRADE_BUTTERCUP].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
 
         // The best chain should have at least this much work.
@@ -491,6 +504,13 @@ public:
     {
         assert(idx > Consensus::BASE_SPROUT && idx < Consensus::MAX_NETWORK_UPGRADES);
         consensus.vUpgrades[idx].nActivationHeight = nActivationHeight;
+    }
+
+    void UpdateRegtestPow(int64_t nPowMaxAdjustDown, int64_t nPowMaxAdjustUp, uint256 powLimit)
+    {
+        consensus.nPowMaxAdjustDown = nPowMaxAdjustDown;
+        consensus.nPowMaxAdjustUp = nPowMaxAdjustUp;
+        consensus.powLimit = powLimit;
     }
 };
 static CRegTestParams regTestParams;
@@ -569,6 +589,10 @@ std::string CChainParams::GetFoundersRewardAddressAtIndex(int i) const {
 void UpdateNetworkUpgradeParameters(Consensus::UpgradeIndex idx, int nActivationHeight)
 {
     regTestParams.UpdateNetworkUpgradeParameters(idx, nActivationHeight);
+}
+
+void UpdateRegtestPow(int64_t nPowMaxAdjustDown, int64_t nPowMaxAdjustUp, uint256 powLimit) {
+    regTestParams.UpdateRegtestPow(nPowMaxAdjustDown, nPowMaxAdjustUp, powLimit);
 }
 
 // To help debugging, let developers change the equihash parameters for a network upgrade.

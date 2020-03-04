@@ -181,12 +181,16 @@ BITCOIN_CORE_H = \
   rpc/server.h \
   rpc/register.h \
   scheduler.h \
+  script/sighashtype.h \
   script/interpreter.h \
   script/script.h \
   script/script_error.h \
   script/sigcache.h \
   script/sign.h \
   script/standard.h \
+  script/script_flags.h \
+  script/sigencoding.cpp \
+  script/sigencoding.h \
   serialize.h \
   streams.h \
   support/allocators/secure.h \
@@ -362,6 +366,7 @@ libbitcoin_common_a_SOURCES = \
   chainparams.cpp \
   coins.cpp \
   compressor.cpp \
+  consensus/params.cpp \
   consensus/upgrades.cpp \
   core_read.cpp \
   core_write.cpp \
@@ -549,6 +554,7 @@ libzcashconsensus_la_SOURCES = \
   script/zcashconsensus.cpp \
   script/interpreter.cpp \
   script/script.cpp \
+  script/sigencoding.cpp \
   uint256.cpp \
   utilstrencodings.cpp
 

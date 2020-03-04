@@ -111,7 +111,7 @@ BOOST_DATA_TEST_CASE(sign, boost::unit_test::data::xrange(static_cast<int>(Conse
     }
     for (int i = 0; i < 8; i++)
     {
-        BOOST_CHECK_MESSAGE(SignSignature(keystore, txFrom, txTo[i], 0, SIGHASH_ALL, consensusBranchId), strprintf("SignSignature %d", i));
+        BOOST_CHECK_MESSAGE(SignSignature(keystore, txFrom, txTo[i], 0, SigHashType(), consensusBranchId), strprintf("SignSignature %d", i));
     }
     // All of the above should be OK, and the txTos have valid signatures
     // Check to make sure signature verification fails if we use the wrong ScriptSig:
@@ -215,7 +215,7 @@ BOOST_DATA_TEST_CASE(set, boost::unit_test::data::xrange(static_cast<int>(Consen
     }
     for (int i = 0; i < 4; i++)
     {
-        BOOST_CHECK_MESSAGE(SignSignature(keystore, txFrom, txTo[i], 0, SIGHASH_ALL, consensusBranchId), strprintf("SignSignature %d", i));
+        BOOST_CHECK_MESSAGE(SignSignature(keystore, txFrom, txTo[i], 0, SigHashType(), consensusBranchId), strprintf("SignSignature %d", i));
         BOOST_CHECK_MESSAGE(IsStandardTx(txTo[i], reason), strprintf("txTo[%d].IsStandard", i));
     }
 }
@@ -289,8 +289,9 @@ BOOST_DATA_TEST_CASE(AreInputsStandard, boost::unit_test::data::xrange(static_ca
         key[i].MakeNewKey(true);
         keystore.AddKey(key[i]);
     }
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < 3; i++) {
         keys.push_back(key[i].GetPubKey());
+    }
 
     CMutableTransaction txFrom;
     txFrom.vout.resize(7);
@@ -320,8 +321,9 @@ BOOST_DATA_TEST_CASE(AreInputsStandard, boost::unit_test::data::xrange(static_ca
 
     // vout[4] is max sigops:
     CScript fifteenSigops; fifteenSigops << OP_1;
-    for (unsigned i = 0; i < MAX_P2SH_SIGOPS; i++)
+    for (unsigned i = 0; i < MAX_P2SH_SIGOPS; i++) {
         fifteenSigops << ToByteVector(key[i%3].GetPubKey());
+    }
     fifteenSigops << OP_15 << OP_CHECKMULTISIG;
     keystore.AddCScript(fifteenSigops);
     txFrom.vout[4].scriptPubKey = GetScriptForDestination(CScriptID(fifteenSigops));
@@ -349,9 +351,9 @@ BOOST_DATA_TEST_CASE(AreInputsStandard, boost::unit_test::data::xrange(static_ca
         txTo.vin[i].prevout.n = i;
         txTo.vin[i].prevout.hash = txFrom.GetHash();
     }
-    BOOST_CHECK(SignSignature(keystore, txFrom, txTo, 0, SIGHASH_ALL, consensusBranchId));
-    BOOST_CHECK(SignSignature(keystore, txFrom, txTo, 1, SIGHASH_ALL, consensusBranchId));
-    BOOST_CHECK(SignSignature(keystore, txFrom, txTo, 2, SIGHASH_ALL, consensusBranchId));
+    BOOST_CHECK(SignSignature(keystore, txFrom, txTo, 0, SigHashType(), consensusBranchId));
+    BOOST_CHECK(SignSignature(keystore, txFrom, txTo, 1, SigHashType(), consensusBranchId));
+    BOOST_CHECK(SignSignature(keystore, txFrom, txTo, 2, SigHashType(), consensusBranchId));
     // SignSignature doesn't know how to sign these. We're
     // not testing validating signatures, so just create
     // dummy signatures that DO include the correct P2SH scripts:
@@ -360,8 +362,10 @@ BOOST_DATA_TEST_CASE(AreInputsStandard, boost::unit_test::data::xrange(static_ca
 
     BOOST_CHECK(::AreInputsStandard(txTo, coins, consensusBranchId));
     // 22 P2SH sigops for all inputs (1 for vin[0], 6 for vin[3], 15 for vin[4]
-    BOOST_CHECK_EQUAL(GetP2SHSigOpCount(txTo, coins), 22U);
-
+    BOOST_CHECK_EQUAL(GetP2SHSigOpCount(txTo, coins, STANDARD_SCRIPT_VERIFY_FLAGS), 22U);
+    // Check that no sigops show up when P2SH is not activated.
+    BOOST_CHECK_EQUAL(GetP2SHSigOpCount(CTransaction(txTo), coins, SCRIPT_VERIFY_NONE), 0);
+    
     // Make sure adding crap to the scriptSigs makes them non-standard:
     for (int i = 0; i < 3; i++)
     {
@@ -381,8 +385,12 @@ BOOST_DATA_TEST_CASE(AreInputsStandard, boost::unit_test::data::xrange(static_ca
     txToNonStd1.vin[0].scriptSig << vector<unsigned char>(sixteenSigops.begin(), sixteenSigops.end());
 
     BOOST_CHECK(!::AreInputsStandard(txToNonStd1, coins, consensusBranchId));
-    BOOST_CHECK_EQUAL(GetP2SHSigOpCount(txToNonStd1, coins), 16U);
-
+    BOOST_CHECK_EQUAL(GetP2SHSigOpCount(txToNonStd1, coins, STANDARD_SCRIPT_VERIFY_FLAGS), 16U);
+    // Check that no sigops show up when P2SH is not activated.
+    BOOST_CHECK_EQUAL(
+        GetP2SHSigOpCount(CTransaction(txToNonStd1), coins, SCRIPT_VERIFY_NONE),
+        0);
+    
     CMutableTransaction txToNonStd2;
     txToNonStd2.vout.resize(1);
     txToNonStd2.vout[0].scriptPubKey = GetScriptForDestination(key[1].GetPubKey().GetID());
@@ -393,7 +401,11 @@ BOOST_DATA_TEST_CASE(AreInputsStandard, boost::unit_test::data::xrange(static_ca
     txToNonStd2.vin[0].scriptSig << vector<unsigned char>(twentySigops.begin(), twentySigops.end());
 
     BOOST_CHECK(!::AreInputsStandard(txToNonStd2, coins, consensusBranchId));
-    BOOST_CHECK_EQUAL(GetP2SHSigOpCount(txToNonStd2, coins), 20U);
+    BOOST_CHECK_EQUAL(GetP2SHSigOpCount(txToNonStd2, coins, STANDARD_SCRIPT_VERIFY_FLAGS), 20U);
+    // Check that no sigops show up when P2SH is not activated.
+    BOOST_CHECK_EQUAL(
+        GetP2SHSigOpCount(CTransaction(txToNonStd2), coins, SCRIPT_VERIFY_NONE),
+        0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

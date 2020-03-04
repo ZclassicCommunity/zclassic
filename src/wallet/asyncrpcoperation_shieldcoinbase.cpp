@@ -19,6 +19,7 @@
 #include "wallet.h"
 #include "walletdb.h"
 #include "script/interpreter.h"
+#include "script/sighashtype.h"
 #include "utiltime.h"
 #include "zcash/IncrementalMerkleTree.hpp"
 #include "sodium.h"
@@ -180,7 +181,7 @@ bool AsyncRPCOperation_shieldcoinbase::main_impl() {
     size_t limit = (size_t)GetArg("-mempooltxinputlimit", 0);
     {
         LOCK(cs_main);
-        if (NetworkUpgradeActive(chainActive.Height() + 1, Params().GetConsensus(), Consensus::UPGRADE_OVERWINTER)) {
+        if (Params().GetConsensus().NetworkUpgradeActive(chainActive.Height() + 1, Consensus::UPGRADE_OVERWINTER)) {
             limit = 0;
         }
     }
@@ -438,7 +439,7 @@ UniValue AsyncRPCOperation_shieldcoinbase::perform_joinsplit(ShieldCoinbaseJSInf
     // Empty output script.
     CScript scriptCode;
     CTransaction signTx(mtx);
-    uint256 dataToBeSigned = SignatureHash(scriptCode, signTx, NOT_AN_INPUT, SIGHASH_ALL, 0, consensusBranchId);
+    uint256 dataToBeSigned = SignatureHash(scriptCode, signTx, NOT_AN_INPUT, SigHashType(), 0, consensusBranchId);
 
     // Add the signature
     if (!(crypto_sign_detached(&mtx.joinSplitSig[0], NULL,

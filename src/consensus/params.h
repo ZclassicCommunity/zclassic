@@ -20,7 +20,7 @@ namespace Consensus {
  * The order of these indices MUST match the order of the upgrades on-chain, as
  * several functions depend on the enum being sorted.
  */
-enum UpgradeIndex {
+enum UpgradeIndex : uint32_t {
     // Sprout must be first
     BASE_SPROUT,
     UPGRADE_TESTDUMMY,
@@ -28,6 +28,7 @@ enum UpgradeIndex {
     UPGRADE_SAPLING,
     UPGRADE_BUBBLES,
     UPGRADE_DIFFADJ,
+    UPGRADE_BUTTERCUP,
     // NOTE: Also add new upgrades to NetworkUpgradeInfo in upgrades.cpp
     MAX_NETWORK_UPGRADES
 };
@@ -62,10 +63,27 @@ struct NetworkUpgrade {
     static constexpr int NO_ACTIVATION_HEIGHT = -1;
 };
 
+static const unsigned int PRE_BUTTERCUP_POW_TARGET_SPACING = 150;
+static const unsigned int POST_BUTTERCUP_POW_TARGET_SPACING = 75;
+static_assert(POST_BUTTERCUP_POW_TARGET_SPACING < PRE_BUTTERCUP_POW_TARGET_SPACING, "Buttercup target spacing must be less than pre-Buttercup target spacing.");
+static const unsigned int PRE_BUTTERCUP_HALVING_INTERVAL = 840000;
+static const unsigned int PRE_BUTTERCUP_REGTEST_HALVING_INTERVAL = 150;
+static const int BUTTERCUP_POW_TARGET_SPACING_RATIO = PRE_BUTTERCUP_POW_TARGET_SPACING / POST_BUTTERCUP_POW_TARGET_SPACING;
+static_assert(BUTTERCUP_POW_TARGET_SPACING_RATIO * POST_BUTTERCUP_POW_TARGET_SPACING == PRE_BUTTERCUP_POW_TARGET_SPACING, "Invalid BUTTERCUP_POW_TARGET_SPACING_RATIO");
+static const unsigned int POST_BUTTERCUP_HALVING_INTERVAL = PRE_BUTTERCUP_HALVING_INTERVAL * BUTTERCUP_POW_TARGET_SPACING_RATIO;
+static const unsigned int POST_BUTTERCUP_REGTEST_HALVING_INTERVAL = PRE_BUTTERCUP_REGTEST_HALVING_INTERVAL * BUTTERCUP_POW_TARGET_SPACING_RATIO;
+
 /**
  * Parameters that influence chain consensus.
  */
 struct Params {
+    /**
+     * Returns true if the given network upgrade is active as of the given block
+     * height. Caller must check that the height is >= 0 (and handle unknown
+     * heights).
+     */
+    bool NetworkUpgradeActive(int nHeight, Consensus::UpgradeIndex idx) const;
+
     uint256 hashGenesisBlock;
 
     bool fCoinbaseMustBeProtected;
@@ -80,13 +98,17 @@ struct Params {
      *
      * t_s = nSubsidySlowStartInterval
      * t_r = number of blocks between end of slow start and first halving
-     * t_h = nSubsidyHalvingInterval
+     * t_h = nPreButtercupSubsidyHalvingInterval
      * t_c = SubsidySlowStartShift()
      */
     int SubsidySlowStartShift() const { return nSubsidySlowStartInterval / 2; }
-    int nSubsidyHalvingInterval;
+    int nPreButtercupSubsidyHalvingInterval;
+    int nPostButtercupSubsidyHalvingInterval;
+
+    int Halving(int nHeight) const;
+
     int GetLastFoundersRewardBlockHeight() const {
-        return nSubsidyHalvingInterval + SubsidySlowStartShift() - 1;
+        return nPreButtercupSubsidyHalvingInterval + SubsidySlowStartShift() - 1;
     }
     /** Used to check majorities for block version upgrade */
     int nMajorityEnforceBlockUpgrade;
@@ -100,10 +122,15 @@ struct Params {
     int64_t nPowAveragingWindow;
     int64_t nPowMaxAdjustDown;
     int64_t nPowMaxAdjustUp;
-    int64_t nPowTargetSpacing;
-    int64_t AveragingWindowTimespan() const { return nPowAveragingWindow * nPowTargetSpacing; }
-    int64_t MinActualTimespan() const { return (AveragingWindowTimespan() * (100 - nPowMaxAdjustUp  )) / 100; }
-    int64_t MaxActualTimespan() const { return (AveragingWindowTimespan() * (100 + nPowMaxAdjustDown)) / 100; }
+    int64_t nPreButtercupPowTargetSpacing;
+    int64_t nPostButtercupPowTargetSpacing;
+
+    int64_t PoWTargetSpacing(int nHeight) const;
+
+    int64_t AveragingWindowTimespan(int nHeight) const;
+    int64_t MinActualTimespan(int nHeight) const;
+    int64_t MaxActualTimespan(int nHeight) const;
+    
     uint256 nMinimumChainWork;
 };
 } // namespace Consensus

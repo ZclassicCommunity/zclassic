@@ -59,6 +59,7 @@ BITCOIN_TESTS =\
   test/bip32_tests.cpp \
   test/bloom_tests.cpp \
   test/checkblock_tests.cpp \
+  test/checkdatasig_tests.cpp \
   test/Checkpoints_tests.cpp \
   test/coins_tests.cpp \
   test/compress_tests.cpp \
@@ -89,7 +90,9 @@ BITCOIN_TESTS =\
   test/script_tests.cpp \
   test/scriptnum_tests.cpp \
   test/serialize_tests.cpp \
+  test/sigencoding_tests.cpp \
   test/sighash_tests.cpp \
+  test/sighashtype_tests.cpp \
   test/sigopcount_tests.cpp \
   test/skiplist_tests.cpp \
   test/test_bitcoin.cpp \

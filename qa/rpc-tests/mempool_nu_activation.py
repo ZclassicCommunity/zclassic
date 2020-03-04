@@ -6,9 +6,11 @@
 import sys; assert sys.version_info < (3,), ur"This script does not run under Python 3. Please use Python 2.7.x."
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal, initialize_chain_clean, \
-    start_node, connect_nodes, wait_and_assert_operationid_status, \
+from test_framework.util import (
+    assert_equal, assert_true, initialize_chain_clean,
+    start_node, connect_nodes, wait_and_assert_operationid_status,
     get_coinbase_address
+)
 from test_framework.authproxy import JSONRPCException
 
 from decimal import Decimal
@@ -22,6 +24,10 @@ class MempoolUpgradeActivationTest(BitcoinTestFramework):
         args = ["-checkmempool", "-debug=mempool", "-blockmaxsize=4000",
             "-nuparams=5ba81b19:200", # Overwinter
             "-nuparams=76b809bb:210", # Sapling
+            "-nuparams=821a451c:220", # Bubbles
+            '-eqparams=821a451c:0:0',
+            "-nuparams=211a0dde:230", # Buttercup
+            '-eqparams=211a0dde:0:0',
         ]
         self.nodes = []
         self.nodes.append(start_node(0, self.options.tmpdir, args))
@@ -62,7 +68,7 @@ class MempoolUpgradeActivationTest(BitcoinTestFramework):
             assert_equal(set(self.nodes[0].getrawmempool()), set())
 
             # Check node 0 shielded balance
-            assert_equal(self.nodes[0].z_getbalance(node0_zaddr), Decimal('10'))
+            assert_equal(self.nodes[0].z_getbalance(node0_zaddr), Decimal('12.5'))
 
             # Fill the mempool with twice as many transactions as can fit into blocks
             node0_taddr = self.nodes[0].getnewaddress()
@@ -75,7 +81,8 @@ class MempoolUpgradeActivationTest(BitcoinTestFramework):
                     assert_equal(chaintip_branchid, "00000000")
                 except JSONRPCException:
                     # This fails due to expiring soon threshold, which applies from Overwinter onwards.
-                    assert_equal(info["upgrades"][chaintip_branchid]["name"], "Overwinter")
+                    upgrade_name = info["upgrades"][chaintip_branchid]["name"]
+                    assert_true(upgrade_name in ("Overwinter", "Sapling"), upgrade_name)
                     break
             self.sync_all()
 
@@ -105,7 +112,7 @@ class MempoolUpgradeActivationTest(BitcoinTestFramework):
             self.sync_all()
 
             # Create a shielded Y transaction
-            recipients = [{'address': node0_zaddr, 'amount': Decimal('10')}]
+            recipients = [{'address': node0_zaddr, 'amount': Decimal('12.5')}]
             myopid = self.nodes[0].z_sendmany(node0_zaddr, recipients, 1, Decimal('0'))
             shielded = wait_and_assert_operationid_status(self.nodes[0], myopid)
             assert(shielded != None)
@@ -133,7 +140,7 @@ class MempoolUpgradeActivationTest(BitcoinTestFramework):
             assert_equal(set(self.nodes[0].getrawmempool()), set())
 
             # Node 0 note should be spendable again
-            assert_equal(self.nodes[0].z_getbalance(node0_zaddr), Decimal('10'))
+            assert_equal(self.nodes[0].z_getbalance(node0_zaddr), Decimal('12.5'))
 
             # Reconsider block H - 1.
             self.nodes[0].reconsiderblock(block_hm1)
@@ -155,6 +162,22 @@ class MempoolUpgradeActivationTest(BitcoinTestFramework):
         # Current height = 207
         nu_activation_checks()
         # Current height = 215
+
+        self.nodes[0].generate(2)
+        self.sync_all()
+
+        print('Testing Sapling -> Bubbles activation boundary')
+        # Current height = 217
+        nu_activation_checks()
+        # Current height = 225
+
+        self.nodes[0].generate(2)
+        self.sync_all()
+
+        print('Testing Bubbles -> Buttercup activation boundary')
+        # Current height = 227
+        nu_activation_checks()
+        # Current height = 235
 
 if __name__ == '__main__':
     MempoolUpgradeActivationTest().main()
