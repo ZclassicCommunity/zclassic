@@ -67,26 +67,24 @@ static void CheckTestResultForAllFlags(const stacktype &original_stack,
                                        const CScript &script,
                                        const stacktype &expected) {
     for (uint32_t flags : flagset) {
-        // Make sure that we get a bad opcode when the activation flag is not
-        // passed.
-        CheckError(flags, original_stack, script, SCRIPT_ERR_BAD_OPCODE);
-
-        // The script execute as expected if the opcodes are activated.
-        CheckPass(flags | SCRIPT_VERIFY_CHECKDATASIG_SIGOPS, original_stack, script,
-                  expected);
+        // The script executes as expected regardless of whether or not
+        // SCRIPT_VERIFY_CHECKDATASIG_SIGOPS flag is passed.
+        CheckPass(flags & ~SCRIPT_VERIFY_CHECKDATASIG_SIGOPS, original_stack,
+                  script, expected);
+        CheckPass(flags | SCRIPT_VERIFY_CHECKDATASIG_SIGOPS, original_stack,
+                  script, expected);
     }
 }
 
 static void CheckErrorForAllFlags(const stacktype &original_stack,
                                   const CScript &script, ScriptError expected) {
     for (uint32_t flags : flagset) {
-        // Make sure that we get a bad opcode when the activation flag is not
-        // passed.
-        CheckError(flags, original_stack, script, SCRIPT_ERR_BAD_OPCODE);
-
-        // The script generates the proper error if the opcodes are activated.
-        CheckError(flags | SCRIPT_VERIFY_CHECKDATASIG_SIGOPS, original_stack, script,
-                   expected);
+        // The script generates the proper error regardless of whether or not
+        // SCRIPT_VERIFY_CHECKDATASIG_SIGOPS flag is passed.
+        CheckError(flags & ~SCRIPT_VERIFY_CHECKDATASIG_SIGOPS, original_stack,
+                   script, expected);
+        CheckError(flags | SCRIPT_VERIFY_CHECKDATASIG_SIGOPS, original_stack,
+                   script, expected);
     }
 }
 
@@ -204,20 +202,6 @@ BOOST_AUTO_TEST_CASE(checkdatasig_test) {
             // If we do not enforce low S, then high S sigs are accepted.
             CheckPass(flags, {highSSig, message, pubkey}, script, {});
             CheckError(flags, {highSSig, message, pubkey}, scriptverify,
-                       SCRIPT_ERR_CHECKDATASIGVERIFY);
-        }
-
-        if (flags & (SCRIPT_VERIFY_LOW_S | SCRIPT_VERIFY_STRICTENC)) {
-            // If we get any of the dersig flags, the non canonical dersig
-            // signature fails.
-            CheckError(flags, {nondersig, message, pubkey}, script,
-                       SCRIPT_ERR_SIG_DER);
-            CheckError(flags, {nondersig, message, pubkey}, scriptverify,
-                       SCRIPT_ERR_SIG_DER);
-        } else {
-            // If we do not check, then it is accepted.
-            CheckPass(flags, {nondersig, message, pubkey}, script, {});
-            CheckError(flags, {nondersig, message, pubkey}, scriptverify,
                        SCRIPT_ERR_CHECKDATASIGVERIFY);
         }
     }

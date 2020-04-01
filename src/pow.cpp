@@ -43,9 +43,9 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
 
     // For upgrade mainnet forks, we'll adjust the difficulty down for the first nPowAveragingWindow blocks
     if (params.scaleDifficultyAtUpgradeFork &&
-        (nHeight >= params.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight ||
-         nHeight >= params.vUpgrades[Consensus::UPGRADE_BUTTERCUP].nActivationHeight) &&
-            (nHeight < params.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight + params.nPowAveragingWindow ||
+        (nHeight >= params.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight &&
+         nHeight < params.vUpgrades[Consensus::UPGRADE_DIFFADJ].nActivationHeight + params.nPowAveragingWindow) ||
+            (nHeight >= params.vUpgrades[Consensus::UPGRADE_BUTTERCUP].nActivationHeight &&
              nHeight < params.vUpgrades[Consensus::UPGRADE_BUTTERCUP].nActivationHeight + params.nPowAveragingWindow)) {
         
         if (pblock && pblock->GetBlockTime() > pindexLast->GetBlockTime() + params.PoWTargetSpacing(nHeight) * 12) {

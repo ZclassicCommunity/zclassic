@@ -31,7 +31,7 @@ BOOST_AUTO_TEST_CASE(GetSigOpCount)
 {
     // Test CScript::GetSigOpCount()
     CScript s1;
-    const uint32_t flags = SCRIPT_VERIFY_CHECKDATASIG_SIGOPS;
+    const uint32_t flags = STANDARD_SCRIPT_VERIFY_FLAGS;
     BOOST_CHECK_EQUAL(s1.GetSigOpCount(flags, false), 0U);
     BOOST_CHECK_EQUAL(s1.GetSigOpCount(flags, true), 0U);
 
