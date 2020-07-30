@@ -1,9 +1,8 @@
-ZClassic 2.1.1-1
+ZClassic 2.1.1-2
 <img align="right" width="120" height="80" src="doc/imgs/logo.png">
 ===========
 
-What is ZClassic?
---------------
+## What is ZClassic?
 
 [ZClassic](https://zclassic.org/) is an implementation of the "Zerocash" protocol.
 Based on Bitcoin's code, it intends to offer a far higher standard of privacy
@@ -27,7 +26,7 @@ See important security warnings on the
 
 **ZClassic is experimental and a work-in-progress.** Use at your own risk.
 
-####  :ledger: Deprecation Policy
+#### :ledger: Deprecation Policy
 
 This release is considered deprecated 16 weeks after the release day. There
 is an automatic deprecation shutdown feature which will halt the node some
@@ -40,15 +39,16 @@ height.
 
 Build ZClassic along with most dependencies from source by running:
 
-
 Clone the repository
+
 ```{r, engine='bash'}
 git clone https://github.com/ZclassicCommunity/zclassic.git
 cd zclassic
-git checkout v2.1.1-1
+git checkout v2.1.1-2
 ```
 
- Get dependencies
+Get dependencies
+
 ```{r, engine='bash'}
 sudo apt-get install \
 build-essential pkg-config libc6-dev m4 g++-multilib \
@@ -56,7 +56,8 @@ autoconf libtool ncurses-dev unzip git python python-zmq \
 zlib1g-dev wget curl bsdmainutils automake
 ```
 
- Install
+Install
+
 ```{r, engine='bash'}
 # Build
 ./zcutil/build.sh -j$(nproc)
@@ -65,6 +66,7 @@ zlib1g-dev wget curl bsdmainutils automake
 ```
 
 Before running the ZClassic daemon, you need to create a configuration file `zclassic.conf` in `~/.zclassic`. Here's an example.
+
 ```
 gen=0
 equihashsolver=tromp
@@ -72,13 +74,13 @@ listenonion=0
 ```
 
 Run
+
 ```{r, engine='bash'}
 ./src/zclassicd
 ```
 
 Currently only Linux is officially supported.
 
-License
--------
+## License
 
 For license information see the file [COPYING](COPYING).

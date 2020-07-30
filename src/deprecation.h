@@ -8,12 +8,12 @@
 // Deprecation policy:
 // * Shut down 16 weeks' worth of blocks after the estimated release block height.
 // * A warning is shown during the 2 weeks' worth of blocks prior to shut down.
-static const int APPROX_RELEASE_HEIGHT = 706995;
+static const int APPROX_RELEASE_HEIGHT = 836019;
 static const int WEEKS_UNTIL_DEPRECATION = 32;
-static const int DEPRECATION_HEIGHT = APPROX_RELEASE_HEIGHT + (WEEKS_UNTIL_DEPRECATION * 7 * 24 * 24);
+static const int DEPRECATION_HEIGHT = APPROX_RELEASE_HEIGHT + (WEEKS_UNTIL_DEPRECATION * 7 * 24 * 24 * 2);
 
 // Number of blocks before deprecation to warn users
-static const int DEPRECATION_WARN_LIMIT = 14 * 24 * 24; // 2 weeks
+static const int DEPRECATION_WARN_LIMIT = 30 * 24 * 24 * 2; // 2 weeks
 
 /**
  * Checks whether the node is deprecated based on the current block height, and
@@ -23,6 +23,6 @@ static const int DEPRECATION_WARN_LIMIT = 14 * 24 * 24; // 2 weeks
  *
  * fThread means run -alertnotify in a free-running thread.
  */
-void EnforceNodeDeprecation(int nHeight, bool forceLogging=false, bool fThread=true);
+void EnforceNodeDeprecation(int nHeight, bool forceLogging = false, bool fThread = true);
 
 #endif // ZCASH_DEPRECATION_H
