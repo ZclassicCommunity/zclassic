@@ -74,6 +74,9 @@ listenonion=0
 addnode=54.37.81.148:8033
 addnode=67.183.29.123:8033
 addnode=116.202.13.16:8033
+addnode=[2a01:4f8:c17:7d81::1]:8033
+addnode=[2001:41d0:203:2294::]:8033
+addnode=[2a00:23c6:bf83:a500:2e0:c5ff:fe13:a05f]:8033
 ```
 
 Run
