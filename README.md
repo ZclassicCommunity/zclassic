@@ -23,6 +23,8 @@ sudo apt-get install \
  build-essential pkg-config libc6-dev m4 g++-multilib \
  autoconf libtool ncurses-dev unzip git python3 python3-zmq \
  zlib1g-dev curl bsdmainutils automake libtinfo5 libcurl4-gnutls-dev
+ autotools-dev nsis g++-mingw-w64-x86-64
+
 ```
 
 ```{r, engine='bash'}

@@ -945,7 +945,6 @@ bool InitSanityCheck(void)
 
         // make a temporary blocks directory
         boost::filesystem::path tmp_blocks_dir = data_dir / "tmp-download-blocks";
-        boost::filesystem::remove_all(tmp_blocks_dir);
         boost::filesystem::create_directories(tmp_blocks_dir);
 
         // download blocks to temporary blocks directory
@@ -955,7 +954,6 @@ bool InitSanityCheck(void)
 
         // make a temporary chainstate directory
         boost::filesystem::path tmp_chainstate_dir = data_dir / "tmp-download-chainstate";
-        boost::filesystem::remove_all(tmp_chainstate_dir);
         boost::filesystem::create_directories(tmp_chainstate_dir);
 
 

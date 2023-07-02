@@ -3,6 +3,10 @@
 *.exe
 .nfs*
 
+
+configure~
+src/univalue/configure~
+
 src/bitcoin
 src/zcashd
 src/zcash-cli
