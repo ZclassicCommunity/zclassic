@@ -50,6 +50,8 @@ Copyright:
  2013 Ericsson AB
  2014 AppDynamics Inc.
  2015-2016 Brocade Communications Systems Inc.
+ 2016, 2018 Krzesimir Nowak <qdlacz@gmail.com>
+ 2019 Enji Cooper <yaneurabeya@gmail.com>
 License: LGPL-with-ZeroMQ-exception
 
 Files: depends/sources/google*.tar.gz

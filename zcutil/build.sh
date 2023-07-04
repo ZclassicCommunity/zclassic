@@ -99,7 +99,6 @@ fi
 
 eval "$MAKE" --version
 as --version
-ld -v
 
 HOST="$HOST" BUILD="$BUILD" NO_PROTON="$PROTON_ARG" "$MAKE" "$@" -C ./depends/ V=1
 ./autogen.sh
