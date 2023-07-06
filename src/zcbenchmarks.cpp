@@ -450,6 +450,9 @@ double benchmark_increment_sapling_note_witnesses(size_t nTxs)
     return timer_stop(tv_start);
 }
 
+static const char DB_COINS = 'c';
+
+
 // Fake the input of a given block
 // This class is based on the class CCoinsViewDB, but with limited functionality.
 // The construtor and the functions `GetCoins` and `HaveCoins` come directly from

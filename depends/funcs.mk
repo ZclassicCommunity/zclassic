@@ -126,6 +126,7 @@ $(1)_ldflags+=$($(1)_ldflags_$(release_type))
 $(1)_ldflags+=$($(1)_ldflags_$(host_arch)) $($(1)_ldflags_$(host_arch)_$(release_type))
 $(1)_ldflags+=$($(1)_ldflags_$(host_os)) $($(1)_ldflags_$(host_os)_$(release_type))
 $(1)_ldflags+=$($(1)_ldflags_$(host_arch)_$(host_os)) $($(1)_ldflags_$(host_arch)_$(host_os)_$(release_type))
+$(1)_ldflags+=-L/usr/local/Cellar/zstd/1.5.5/lib
 
 $(1)_build_opts+=$$($(1)_build_opts_$(release_type))
 $(1)_build_opts+=$$($(1)_build_opts_$(host_arch)) $$($(1)_build_opts_$(host_arch)_$(release_type))
