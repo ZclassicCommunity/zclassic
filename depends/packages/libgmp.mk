@@ -3,8 +3,13 @@ $(package)_version=6.1.1
 $(package)_download_path=https://gmplib.org/download/gmp/
 $(package)_file_name=gmp-$($(package)_version).tar.bz2
 $(package)_sha256_hash=a8109865f2893f1373b0a8ed5ff7429de8db696fc451b1036bd7bdf95bbeffd6
-$(package)_dependencies=
+$(package)_dependencies=native_cmake native_clang native_cctools
 $(package)_config_opts=--enable-cxx --disable-shared
+
+
+ifneq ($(host_os),darwin)
+$(package)_dependencies=libcxx
+endif
 
 define $(package)_config_cmds
   $($(package)_autoconf) --host=$(host) --build=$(build)
