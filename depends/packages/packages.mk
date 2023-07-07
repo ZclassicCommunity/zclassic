@@ -36,6 +36,6 @@ rust_packages := rust $(rust_crates) librustzcash
 proton_packages := proton
 zcash_packages := libgmp libsodium
 packages := boost openssl libevent zeromq $(zcash_packages) googletest libcurl
-native_packages := native_ccache
+native_packages := native_clang native_ccache native_cmake native_cxxbridge native_zstd
 
 wallet_packages=bdb
