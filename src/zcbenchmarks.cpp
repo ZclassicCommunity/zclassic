@@ -450,16 +450,16 @@ double benchmark_increment_sapling_note_witnesses(size_t nTxs)
     return timer_stop(tv_start);
 }
 
-static const char DB_COINS = 'c';
 
+
+// The following constant is a duplicate of the one found in txdb.cpp
+static const char DB_COINS = 'c';
 
 // Fake the input of a given block
 // This class is based on the class CCoinsViewDB, but with limited functionality.
 // The construtor and the functions `GetCoins` and `HaveCoins` come directly from
 // CCoinsViewDB, but the rest are either mocks and/or don't really do anything.
 class FakeCoinsViewDB : public CCoinsView {
-    // The following constant is a duplicate of the one found in txdb.cpp
-    static const char DB_COINS = 'c';
 
     CDBWrapper db;
 
