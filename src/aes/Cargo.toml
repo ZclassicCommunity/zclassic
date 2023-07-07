@@ -1,0 +1,22 @@
+[package]
+name = "aes"
+version = "0.2.0"
+authors = ["RustCrypto Developers"]
+license = "MIT OR Apache-2.0"
+description = "Facade for AES (Rijndael) block ciphers implementations"
+documentation = "https://docs.rs/aes"
+repository = "https://github.com/RustCrypto/block-ciphers"
+keywords = ["crypto", "aes", "rijndael", "block-cipher"]
+categories = ["cryptography", "no-std"]
+
+[dependencies]
+block-cipher-trait = { path = "../block-cipher-trait" }
+
+[target.'cfg(not(all(target_feature="aes", target_feature = "sse2", any(target_arch = "x86_64", target_arch = "x86"))))'.dependencies]
+aes-soft = { path = "../aes-soft" }
+
+[target.'cfg(all(target_feature="aes", target_feature = "sse2", any(target_arch = "x86_64", target_arch = "x86")))'.dependencies]
+aesni = { path = "../aesni" }
+
+
+[workspace]

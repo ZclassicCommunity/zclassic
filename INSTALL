@@ -1,5 +1,12 @@
 Building Zcash
 
+sudo apt install libstdc++
+sudo apt install libstdc++-12-dev
+sudo apt-get install -y clang-14 lld-14
+sudo apt-get install libc++-dev
+sudo apt install libomp-dev
+
 See the Zcash github wiki (https://github.com/zcash/zcash/wiki) for instructions on building zcashd,
 the intended-for-services, no-graphical-interface, reference
 implementation of Zcash.
+

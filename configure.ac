@@ -61,8 +61,8 @@ case $host in
      lt_cv_deplibs_check_method="pass_all"
   ;;
 esac
-dnl Require C++11 compiler (no GNU extensions)
-AX_CXX_COMPILE_STDCXX([11], [noext], [mandatory], [nodefault])
+dnl Require C++17 compiler (no GNU extensions)
+AX_CXX_COMPILE_STDCXX([17], [noext], [mandatory])
 dnl Check if -latomic is required for <std::atomic>
 CHECK_ATOMIC
 
@@ -77,11 +77,21 @@ AC_PATH_TOOL(GCOV, gcov)
 AC_PATH_PROG(LCOV, lcov)
 AC_PATH_PROG(GENHTML, genhtml)
 AC_PATH_PROG([GIT], [git])
+AC_PATH_PROG(RUSTC, rustc)
+AC_PATH_PROG(CARGO, cargo)
 AC_PATH_PROG(CCACHE,ccache)
 AC_PATH_PROG(XGETTEXT,xgettext)
 AC_PATH_PROG(HEXDUMP,hexdump)
 AC_PATH_TOOL(READELF,readelf)
 AC_PATH_TOOL(CPPFILT,c++filt)
+
+AC_ARG_ENABLE([online-rust],
+  [AS_HELP_STRING([--enable-online-rust],
+  [enable Rust to fetch dependencies from the network (default is to use vendored dependencies)])],
+  [enable_online_rust=$enableval],
+  [enable_online_rust=no])
+AM_CONDITIONAL(ENABLE_ONLINE_RUST, test "$enable_online_rust" != no)
+
 
 # Enable wallet
 AC_ARG_ENABLE([wallet],
@@ -198,6 +208,103 @@ if test "x$enable_werror" = "xyes"; then
   fi
   ERROR_CXXFLAGS="$ERROR_CXXFLAGS -Werror"
 fi
+
+
+# This enables all warnings and selectively disables some. Individual warnings should be
+# 1. fixed,
+# 2. locally silenced with an explanatory comment, or
+# 3. globally silenced here with an explanatory comment.
+#
+# Justifications
+# • `-Wno-aix-compat`: we don’t want to maintain compatibility with IBM AIX compilers
+# • `-Wno-c++-compat`: this warns about an ABI layout incompatibility between C and C++,
+#    but we don’t need such compatibility except where we use `extern "C"`
+# • `-W*c++*-compat-pedantic`: disables warnings about compatibility with older versions of C++ and
+#    enables warnings about compatibility with newer versions of C++ (we need the explicit enabling,
+#    even with `-Weverything`, because the earlier disabling of older versions removes some warnings
+#    that we do want)
+DESIRED_WARNING_CXXFLAGS="\
+  --system-header-prefix=boost --system-header-prefix=crypto/ctaes --system-header-prefix=db_cxx \
+  --system-header-prefix=event2 --system-header-prefix=gmock --system-header-prefix=gtest \
+  --system-header-prefix=leveldb --system-header-prefix=rust --system-header-prefix=sodium \
+  --system-header-prefix=univalue --system-header-prefix=zmq \
+  -Weverything \
+  -Wno-aix-compat -Wno-c++-compat \
+  -Wno-c++98-compat-pedantic -Wno-c++11-compat-pedantic -Wno-c++14-compat-pedantic \
+  -Wc++17-compat-pedantic -Wc++20-compat-pedantic"
+
+# This list should be incrementally pruned. Each flag should either be enabled or moved to
+# `DESIRED_WARNING_CXXFLAGS` with an explanation as to why it remains disabled.
+#
+# Guidelines for fixing warnings:
+# • fix a small number (perhaps one) at a time
+# • change `-Wno-foo` to `-Wno-error=foo` locally to get the full report of the warning you enabled
+#   (but be careful, as re-running `make` will not recompile files that only warned).
+#
+# Potential justifications:
+# • `-Wno-format-nonliteral`: Bitcoin i18n
+# • `-Wno-old-style-cast`: do after `-W*-conversion` to avoid introducing more conversions
+# • `-Wno-padded`: is this worth the noise of rearranging fields & adding anonymous bitfields?
+# • `-Wno-shadow-field`: conflicts with our style of naming constructor arguments the same as fields
+# • `-Wno-shadow-field-in-constructor`: conflicts with our style of naming constructor arguments the
+#    same as fields
+# • `-Wno-string-conversion`: currently abused to `assert` on strings
+# • `-Wno-tautological-type-limit-compare`: I think isn’t portable because of numeric type sizing
+DISABLED_WARNING_CXXFLAGS="\
+  -Wno-c++20-compat -Wno-cast-align -Wno-cast-qual -Wno-comma -Wno-conditional-uninitialized \
+  -Wno-covered-switch-default -Wno-ctad-maybe-unsupported \
+  -Wno-delete-non-abstract-non-virtual-dtor -Wno-deprecated-copy -Wno-deprecated-copy-dtor \
+  -Wno-deprecated-dynamic-exception-spec -Wno-disabled-macro-expansion -Wno-documentation \
+  -Wno-documentation-unknown-command -Wno-double-promotion -Wno-exit-time-destructors \
+  -Wno-extra-semi -Wno-extra-semi-stmt -Wno-float-conversion -Wno-float-equal \
+  -Wno-format-nonliteral -Wno-global-constructors -Wno-header-hygiene -Wno-ignored-qualifiers \
+  -Wno-implicit-fallthrough -Wno-implicit-int-conversion -Wno-implicit-int-float-conversion \
+  -Wno-inconsistent-missing-destructor-override -Wno-logical-op-parentheses \
+  -Wno-misleading-indentation -Wno-mismatched-tags -Wno-missing-noreturn -Wno-missing-prototypes \
+  -Wno-missing-variable-declarations -Wno-newline-eof -Wno-non-virtual-dtor -Wno-old-style-cast \
+  -Wno-overloaded-virtual -Wno-padded -Wno-pedantic -Wno-range-loop-construct \
+  -Wno-redundant-parens -Wno-reorder-ctor -Wno-reserved-id-macro -Wno-reserved-identifier \
+  -Wno-return-type -Wno-shadow -Wno-shadow-field -Wno-shadow-field-in-constructor \
+  -Wno-shift-sign-overflow -Wno-shorten-64-to-32 -Wno-sign-compare -Wno-sign-conversion \
+  -Wno-string-conversion -Wno-suggest-destructor-override -Wno-suggest-override -Wno-switch-enum \
+  -Wno-tautological-type-limit-compare -Wno-tautological-unsigned-enum-zero-compare \
+  -Wno-tautological-unsigned-zero-compare -Wno-thread-safety-attributes \
+  -Wno-thread-safety-negative -Wno-undef -Wno-undefined-func-template -Wno-uninitialized \
+  -Wno-unreachable-code -Wno-unreachable-code-break -Wno-unreachable-code-return \
+  -Wno-unused-but-set-variable -Wno-unused-exception-parameter -Wno-unused-function \
+  -Wno-unused-macros -Wno-unused-member-function -Wno-unused-parameter -Wno-unused-private-field \
+  -Wno-unused-template -Wno-unused-variable -Wno-used-but-marked-unused -Wno-weak-vtables \
+  -Wno-zero-as-null-pointer-constant"
+
+# These are sub-flags of those in `DISABLED_WARNING_CXXFLAGS` that allow us to temporarily
+# re-enable pieces until the disabling flags are removed.
+REENABLED_WARNING_CXXFLAGS="\
+  -Wbit-int-extension -Wc++11-extra-semi -Wc++11-long-long -Wc++14-attribute-extensions \
+  -Wc++14-binary-literal -Wc++17-attribute-extensions -Wc++20-attribute-extensions \
+  -Wc11-extensions -Wcomplex-component-init -Wdelimited-escape-sequence-extension \
+  -Wdocumentation-deprecated-sync -Wdocumentation-html -Wembedded-directive -Wempty-init-stmt \
+  -Wempty-translation-unit -Wfixed-enum-extension -Wflexible-array-extensions \
+  -Wfloat-overflow-conversion -Wfloat-zero-conversion -Wfuture-attribute-extensions \
+  -Wgnu-auto-type -Wgnu-binary-literal -Wgnu-case-range -Wgnu-complex-integer \
+  -Wgnu-compound-literal-initializer -Wgnu-conditional-omitted-operand -Wgnu-empty-initializer \
+  -Wgnu-empty-struct -Wgnu-flexible-array-initializer -Wgnu-flexible-array-union-member \
+  -Wgnu-imaginary-constant -Wgnu-include-next -Wgnu-label-as-value -Wgnu-line-marker \
+  -Wgnu-null-pointer-arithmetic -Wgnu-pointer-arith -Wgnu-redeclared-enum \
+  -Wgnu-statement-expression -Wgnu-union-cast -Wgnu-zero-line-directive \
+  -Wignored-reference-qualifiers -Wimplicit-const-int-float-conversion \
+  -Wimplicit-fallthrough-per-function -Wimport-preprocessor-directive-pedantic -Winvalid-utf8 \
+  -Wkeyword-macro -Wlanguage-extension-token -Wlong-long -Wmicrosoft-charize \
+  -Wmicrosoft-comment-paste -Wmicrosoft-cpp-macro -Wmicrosoft-end-of-file -Wmicrosoft-enum-value \
+  -Wmicrosoft-fixed-enum -Wmicrosoft-flexible-array -Wmicrosoft-redeclare-static \
+  -Wnested-anon-types -Wnullability-extension -Wobjc-signed-char-bool-implicit-int-conversion \
+  -Woverlength-strings -Wpre-c++2b-compat -Wretained-language-linkage \
+  -Wshadow-field-in-constructor-modified -Wshadow-ivar -Wsometimes-uninitialized \
+  -Wstatic-self-init -Wundefined-internal-type -Wunneeded-member-function \
+  -Wunreachable-code-fallthrough -Wunreachable-code-generic-assoc -Wunreachable-code-loop-increment"
+
+WARNING_CXXFLAGS="$DESIRED_WARNING_CXXFLAGS $DISABLED_WARNING_CXXFLAGS $REENABLED_WARNING_CXXFLAGS"
+
+
 
 if test "x$CXXFLAGS_overridden" = "xno"; then
   AX_CHECK_COMPILE_FLAG([-Wall],[CXXFLAGS="$CXXFLAGS -Wall"],,[[$CXXFLAG_WERROR]])
@@ -742,9 +849,11 @@ AC_CHECK_LIB([gmp],[__gmpn_sub_n],GMP_LIBS=-lgmp, [AC_MSG_ERROR(libgmp missing)]
 AC_CHECK_HEADER([gmpxx.h],,AC_MSG_ERROR(libgmpxx headers missing))
 AC_CHECK_LIB([gmpxx],[main],GMPXX_LIBS=-lgmpxx, [AC_MSG_ERROR(libgmpxx missing)])
 
-RUST_LIBS="-lrustzcash"
+
+RUST_LIBS=""
 case $host in
   *mingw*)
+    RUST_LIBS="$RUST_LIBS -luserenv"
     ;;
   *)
     RUST_LIBS="$RUST_LIBS -ldl"
@@ -885,7 +994,8 @@ AC_SUBST(COPYRIGHT_YEAR, _COPYRIGHT_YEAR)
 AC_SUBST(BITCOIN_DAEMON_NAME)
 AC_SUBST(BITCOIN_CLI_NAME)
 AC_SUBST(BITCOIN_TX_NAME)
-
+AC_SUBST(RUST_TARGET)
+AC_SUBST(RUST_VENDORED_SOURCES)
 AC_SUBST(RELDFLAGS)
 AC_SUBST(ERROR_CXXFLAGS)
 AC_SUBST(SAN_CXXFLAGS)
