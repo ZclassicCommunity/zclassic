@@ -128,7 +128,7 @@ Jack Grigg (83):
       Only enable min-difficulty blocks on testnet from a particular height
       Update wallet_listreceived test for now-correct empty Sapling memos
       Rename min-difficulty flag to remove off-by-one in the name
-      Explicitly check the min-difficulty flag against boost::none
+      Explicitly check the min-difficulty flag against std::nullopt
       Position PoW.MinDifficultyRules test after rule activates
       Fix pyflakes warnings
       Store ExtFVK with encrypted Sapling spending key instead of FVK

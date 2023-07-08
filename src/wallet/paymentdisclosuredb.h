@@ -13,7 +13,7 @@
 #include <future>
 #include <memory>
 
-#include <boost/optional.hpp>
+#include <optional>
 
 #include <leveldb/db.h>
 

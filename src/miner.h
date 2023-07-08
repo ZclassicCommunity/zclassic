@@ -8,7 +8,7 @@
 
 #include "primitives/block.h"
 
-#include <boost/optional.hpp>
+#include <optional>
 #include <stdint.h>
 
 class CBlockIndex;

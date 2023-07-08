@@ -25,6 +25,7 @@
 #include "zcash/zip32.h"
 
 #include <assert.h>
+#include <optional>
 
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem.hpp>
@@ -1380,7 +1381,7 @@ void CWallet::UpdateSaplingNullifierNoteMapWithTx(CWalletTx& wtx) {
             if (item.second.nullifier) {
                 mapSaplingNullifiersToNotes.erase(item.second.nullifier.get());
             }
-            item.second.nullifier = boost::none;
+            item.second.nullifier = std::nullopt;
         }
         else {
             uint64_t position = nd.witnesses.front().position();
@@ -1693,13 +1694,13 @@ void CWallet::EraseFromWallet(const uint256 &hash)
  * Returns a nullifier if the SpendingKey is available
  * Throws std::runtime_error if the decryptor doesn't match this note
  */
-boost::optional<uint256> CWallet::GetSproutNoteNullifier(const JSDescription &jsdesc,
+std::optional<uint256> CWallet::GetSproutNoteNullifier(const JSDescription &jsdesc,
                                                          const libzcash::SproutPaymentAddress &address,
                                                          const ZCNoteDecryption &dec,
                                                          const uint256 &hSig,
                                                          uint8_t n) const
 {
-    boost::optional<uint256> ret;
+    std::optional<uint256> ret;
     auto note_pt = libzcash::SproutNotePlaintext::decrypt(
         dec,
         jsdesc.ciphertexts[n],
@@ -1838,12 +1839,12 @@ bool CWallet::IsSaplingNullifierFromMe(const uint256& nullifier) const
 }
 
 void CWallet::GetSproutNoteWitnesses(std::vector<JSOutPoint> notes,
-                                     std::vector<boost::optional<SproutWitness>>& witnesses,
+                                     std::vector<std::optional<SproutWitness>>& witnesses,
                                      uint256 &final_anchor)
 {
     LOCK(cs_wallet);
     witnesses.resize(notes.size());
-    boost::optional<uint256> rt;
+    std::optional<uint256> rt;
     int i = 0;
     for (JSOutPoint note : notes) {
         if (mapWallet.count(note.hash) &&
@@ -1865,12 +1866,12 @@ void CWallet::GetSproutNoteWitnesses(std::vector<JSOutPoint> notes,
 }
 
 void CWallet::GetSaplingNoteWitnesses(std::vector<SaplingOutPoint> notes,
-                                      std::vector<boost::optional<SaplingWitness>>& witnesses,
+                                      std::vector<std::optional<SaplingWitness>>& witnesses,
                                       uint256 &final_anchor)
 {
     LOCK(cs_wallet);
     witnesses.resize(notes.size());
-    boost::optional<uint256> rt;
+    std::optional<uint256> rt;
     int i = 0;
     for (SaplingOutPoint note : notes) {
         if (mapWallet.count(note.hash) &&
@@ -2344,7 +2345,7 @@ bool CWalletTx::WriteToDisk(CWalletDB *pwalletdb)
 }
 
 void CWallet::WitnessNoteCommitment(std::vector<uint256> commitments,
-                                    std::vector<boost::optional<SproutWitness>>& witnesses,
+                                    std::vector<std::optional<SproutWitness>>& witnesses,
                                     uint256 &final_anchor)
 {
     witnesses.resize(commitments.size());
@@ -2363,7 +2364,7 @@ void CWallet::WitnessNoteCommitment(std::vector<uint256> commitments,
                 {
                     tree.append(note_commitment);
 
-                    BOOST_FOREACH(boost::optional<SproutWitness>& wit, witnesses) {
+                    BOOST_FOREACH(std::optional<SproutWitness>& wit, witnesses) {
                         if (wit) {
                             wit->append(note_commitment);
                         }
@@ -2393,7 +2394,7 @@ void CWallet::WitnessNoteCommitment(std::vector<uint256> commitments,
     // TODO: #93; Select a root via some heuristic.
     final_anchor = tree.root();
 
-    BOOST_FOREACH(boost::optional<SproutWitness>& wit, witnesses) {
+    BOOST_FOREACH(std::optional<SproutWitness>& wit, witnesses) {
         if (wit) {
             assert(final_anchor == wit->root());
         }
@@ -4600,29 +4601,29 @@ bool HaveSpendingKeyForPaymentAddress::operator()(const libzcash::InvalidEncodin
     return false;
 }
 
-boost::optional<libzcash::SpendingKey> GetSpendingKeyForPaymentAddress::operator()(
+std::optional<libzcash::SpendingKey> GetSpendingKeyForPaymentAddress::operator()(
     const libzcash::SproutPaymentAddress &zaddr) const
 {
     libzcash::SproutSpendingKey k;
     if (m_wallet->GetSproutSpendingKey(zaddr, k)) {
         return libzcash::SpendingKey(k);
     } else {
-        return boost::none;
+        return std::nullopt;
     }
 }
 
-boost::optional<libzcash::SpendingKey> GetSpendingKeyForPaymentAddress::operator()(
+std::optional<libzcash::SpendingKey> GetSpendingKeyForPaymentAddress::operator()(
     const libzcash::SaplingPaymentAddress &zaddr) const
 {
     libzcash::SaplingExtendedSpendingKey extsk;
     if (m_wallet->GetSaplingExtendedSpendingKey(zaddr, extsk)) {
         return libzcash::SpendingKey(extsk);
     } else {
-        return boost::none;
+        return std::nullopt;
     }
 }
 
-boost::optional<libzcash::SpendingKey> GetSpendingKeyForPaymentAddress::operator()(
+std::optional<libzcash::SpendingKey> GetSpendingKeyForPaymentAddress::operator()(
     const libzcash::InvalidEncoding& no) const
 {
     // Defaults to InvalidEncoding

@@ -5,6 +5,7 @@
 #include "streams.h"
 
 #include <librustzcash.h>
+#include <optional>
 
 const unsigned char ZCASH_SAPLING_FVFP_PERSONALIZATION[crypto_generichash_blake2b_PERSONALBYTES] =
     {'Z', 'c', 'a', 's', 'h', 'S', 'a', 'p', 'l', 'i', 'n', 'g', 'F', 'V', 'F', 'P'};
@@ -92,20 +93,20 @@ SaplingSpendingKey SaplingSpendingKey::random() {
     }
 }
 
-boost::optional<SaplingPaymentAddress> SaplingIncomingViewingKey::address(diversifier_t d) const {
+std::optional<SaplingPaymentAddress> SaplingIncomingViewingKey::address(diversifier_t d) const {
     uint256 pk_d;
     if (librustzcash_check_diversifier(d.data())) {
         librustzcash_ivk_to_pkd(this->begin(), d.data(), pk_d.begin());
         return SaplingPaymentAddress(d, pk_d);
     } else {
-        return boost::none;
+        return std::nullopt;
     }
 }
 
 SaplingPaymentAddress SaplingSpendingKey::default_address() const {
     // Iterates within default_diversifier to ensure a valid address is returned
     auto addrOpt = full_viewing_key().in_viewing_key().address(default_diversifier(*this));
-    assert(addrOpt != boost::none);
+    assert(addrOpt != std::nullopt);
     return addrOpt.value();
 }
 

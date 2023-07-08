@@ -3,7 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "consensus/upgrades.h"
-
+#include "<optional>"
 /**
  * General information about each network upgrade.
  * Ordered by Consensus::UpgradeIndex.
@@ -174,9 +174,9 @@ bool IsActivationHeightForAnyUpgrade(
     return false;
 }
 
-boost::optional<int> NextEpoch(int nHeight, const Consensus::Params& params) {
+std::optional<int> NextEpoch(int nHeight, const Consensus::Params& params) {
     if (nHeight < 0) {
-        return boost::none;
+        return std::nullopt;
     }
 
     // Sprout is never pending
@@ -186,10 +186,10 @@ boost::optional<int> NextEpoch(int nHeight, const Consensus::Params& params) {
         }
     }
 
-    return boost::none;
+    return std::nullopt;
 }
 
-boost::optional<int> NextActivationHeight(
+std::optional<int> NextActivationHeight(
     int nHeight,
     const Consensus::Params& params)
 {
@@ -197,5 +197,5 @@ boost::optional<int> NextActivationHeight(
     if (idx) {
         return params.vUpgrades[idx.get()].nActivationHeight;
     }
-    return boost::none;
+    return std::nullopt;
 }

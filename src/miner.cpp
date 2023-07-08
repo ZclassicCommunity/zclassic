@@ -32,6 +32,8 @@
 
 #include "sodium.h"
 
+#include <variant>
+
 #include <boost/thread.hpp>
 #include <boost/tuple/tuple.hpp>
 #ifdef ENABLE_MINING
@@ -101,7 +103,7 @@ void UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParams, 
     pblock->nTime = std::max(pindexPrev->GetMedianTimePast()+1, GetAdjustedTime());
 
     // Updating time can change work required on testnet:
-    if (consensusParams.nPowAllowMinDifficultyBlocksAfterHeight != boost::none || 
+    if (consensusParams.nPowAllowMinDifficultyBlocksAfterHeight != std::nullopt || 
         consensusParams.scaleDifficultyAtUpgradeFork) {
         pblock->nBits = GetNextWorkRequired(pindexPrev, pblock, consensusParams);
     }
@@ -727,7 +729,7 @@ void static BitcoinMiner(const CChainParams& chainparams)
                 // Update nNonce and nTime
                 pblock->nNonce = ArithToUint256(UintToArith256(pblock->nNonce) + 1);
                 UpdateTime(pblock, chainparams.GetConsensus(), pindexPrev);
-                if (chainparams.GetConsensus().nPowAllowMinDifficultyBlocksAfterHeight != boost::none || 
+                if (chainparams.GetConsensus().nPowAllowMinDifficultyBlocksAfterHeight != std::nullopt || 
                     chainparams.GetConsensus().scaleDifficultyAtUpgradeFork)
                 {
                     // Changing pblock->nTime can change work required on testnet or mainnet upgrade fork

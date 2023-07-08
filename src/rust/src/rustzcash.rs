@@ -8,6 +8,7 @@ extern crate sapling_crypto;
 extern crate zip32;
 
 mod hashreader;
+mod zip339_ffi;
 
 #[macro_use]
 extern crate lazy_static;
@@ -787,6 +788,20 @@ pub extern "system" fn librustzcash_sapling_check_spend(
         // Any other case
         _ => false,
     }
+}
+
+#[no_mangle]
+pub extern "C" fn librustzcash_sapling_diversifier_index(
+    dk: *const [c_uchar; 32],
+    d: *const [c_uchar; 11],
+    j_ret: *mut [c_uchar; 11],
+) {
+    let dk = zip32::sapling::DiversifierKey::from_bytes(unsafe { *dk });
+    let diversifier = Diversifier(unsafe { *d });
+    let j_ret = unsafe { &mut *j_ret };
+
+    let j = dk.diversifier_index(&diversifier);
+    j_ret.copy_from_slice(&j.0);
 }
 
 #[no_mangle]

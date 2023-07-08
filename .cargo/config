@@ -1,9 +1,0 @@
-[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-linux-gnu-gcc"
-
-[source.crates-io]
-replace-with = "vendored-sources"
-
-[source.vendored-sources]
-# The directory for this source is set to RUST_VENDORED_SOURCES by src/Makefile.am
-directory = "/home/rhett/projects/zclassic/depends/x86_64-unknown-linux-gnu/share/../vendored-sources"

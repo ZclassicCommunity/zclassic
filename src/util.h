@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <string>
 #include <vector>
+#include <optional>
 
 #include <boost/filesystem/path.hpp>
 #include <boost/signals2/signal.hpp>
@@ -59,7 +60,7 @@ extern CTranslationInterface translationInterface;
 [[noreturn]] extern void new_handler_terminate();
 
 /**
- * Translation function: Call Translate signal on UI interface, which returns a boost::optional result.
+ * Translation function: Call Translate signal on UI interface, which returns a std::optional result.
  * If no translation slot is registered, nothing is returned, and simply return the input.
  */
 inline std::string _(const char* psz)

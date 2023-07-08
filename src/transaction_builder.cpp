@@ -25,9 +25,9 @@ TransactionBuilderResult::TransactionBuilderResult(const CTransaction& tx) : may
 
 TransactionBuilderResult::TransactionBuilderResult(const std::string& error) : maybeError(error) {}
 
-bool TransactionBuilderResult::IsTx() { return maybeTx != boost::none; }
+bool TransactionBuilderResult::IsTx() { return maybeTx != std::nullopt; }
 
-bool TransactionBuilderResult::IsError() { return maybeError != boost::none; }
+bool TransactionBuilderResult::IsError() { return maybeError != std::nullopt; }
 
 CTransaction TransactionBuilderResult::GetTxOrThrow() {
     if (maybeTx) {
@@ -127,7 +127,7 @@ void TransactionBuilder::SetFee(CAmount fee)
 void TransactionBuilder::SendChangeTo(libzcash::SaplingPaymentAddress changeAddr, uint256 ovk)
 {
     zChangeAddr = std::make_pair(ovk, changeAddr);
-    tChangeAddr = boost::none;
+    tChangeAddr = std::nullopt;
 }
 
 void TransactionBuilder::SendChangeTo(CTxDestination& changeAddr)
@@ -137,7 +137,7 @@ void TransactionBuilder::SendChangeTo(CTxDestination& changeAddr)
     }
 
     tChangeAddr = changeAddr;
-    zChangeAddr = boost::none;
+    zChangeAddr = std::nullopt;
 }
 
 TransactionBuilderResult TransactionBuilder::Build()

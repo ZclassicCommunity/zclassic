@@ -35,6 +35,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <optional>
 
 #include <boost/unordered_map.hpp>
 
@@ -127,7 +128,7 @@ static const int DEFAULT_MAX_REORG_DEPTH = 10;
 static const int64_t DEFAULT_PRE_BUTTERCUP_MIN_FINALIZATION_DELAY = 0.5 * 60 * 60;
 static const int64_t DEFAULT_POST_BUTTERCUP_MIN_FINALIZATION_DELAY = DEFAULT_PRE_BUTTERCUP_MIN_FINALIZATION_DELAY / 2;
 
-extern boost::optional<unsigned int> expiryDeltaArg;
+extern std::optional<unsigned int> expiryDeltaArg;
 extern CScript COINBASE_FLAGS;
 extern CCriticalSection cs_main;
 extern CTxMemPool mempool;
