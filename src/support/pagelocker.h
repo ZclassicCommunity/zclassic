@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2013 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef BITCOIN_SUPPORT_PAGELOCKER_H
 #define BITCOIN_SUPPORT_PAGELOCKER_H
@@ -156,5 +156,22 @@ private:
     static LockedPageManager* _instance;
     static boost::once_flag init_flag;
 };
+
+//
+// Functions for directly locking/unlocking memory objects.
+// Intended for non-dynamically allocated structures.
+//
+template <typename T>
+void LockObject(const T& t)
+{
+    LockedPageManager::Instance().LockRange((void*)(&t), sizeof(T));
+}
+
+template <typename T>
+void UnlockObject(const T& t)
+{
+    memory_cleanse((void*)(&t), sizeof(T));
+    LockedPageManager::Instance().UnlockRange((void*)(&t), sizeof(T));
+}
 
 #endif // BITCOIN_SUPPORT_PAGELOCKER_H

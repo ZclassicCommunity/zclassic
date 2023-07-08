@@ -18,7 +18,7 @@
 
 #include <univalue.h>
 
-#include <boost/bind/bind.hpp>
+#include <boost/bind.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/foreach.hpp>
 #include <boost/iostreams/concepts.hpp>
@@ -30,7 +30,6 @@
 
 using namespace RPCServer;
 using namespace std;
-using namespace boost::placeholders;
 
 static bool fRPCRunning = false;
 static bool fRPCInWarmup = true;

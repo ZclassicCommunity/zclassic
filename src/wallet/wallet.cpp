@@ -2958,21 +2958,6 @@ static void ApproximateBestSubset(vector<pair<CAmount, pair<const CWalletTx*,uns
     }
 }
 
-
-// std::random_shuffle is removed in C++17.
-template<class RandomIt, class RandomFunc>
-void RandomShuffle(RandomIt first, RandomIt last, RandomFunc&& r)
-{
-    typename std::iterator_traits<RandomIt>::difference_type i, n;
-    n = last - first;
-    for (i = n-1; i > 0; --i) {
-        using std::swap;
-        swap(first[i], first[r(i+1)]);
-    }
-}
-
-
-
 bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, int nConfMine, int nConfTheirs, vector<COutput> vCoins,
                                  set<pair<const CWalletTx*,unsigned int> >& setCoinsRet, CAmount& nValueRet) const
 {
@@ -2986,7 +2971,7 @@ bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, int nConfMine, int
     vector<pair<CAmount, pair<const CWalletTx*,unsigned int> > > vValue;
     CAmount nTotalLower = 0;
 
-    RandomShuffle(vCoins.begin(), vCoins.end(), GetRandInt);
+    random_shuffle(vCoins.begin(), vCoins.end(), GetRandInt);
 
     BOOST_FOREACH(const COutput &output, vCoins)
     {

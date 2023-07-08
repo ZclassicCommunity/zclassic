@@ -56,7 +56,7 @@ fi
 COMMON_FLAGS=
 CROSS_COMPILE=
 PLATFORM_CCFLAGS=
-PLATFORM_CXXFLAGS="-std=c++17"
+PLATFORM_CXXFLAGS="-std=c++11"
 PLATFORM_LDFLAGS=
 PLATFORM_LIBS=
 PLATFORM_SHARED_EXT="so"
@@ -191,7 +191,7 @@ if [ "$CROSS_COMPILE" = "true" ]; then
 else
     CXXOUTPUT="${TMPDIR}/leveldb_build_detect_platform-cxx.$$"
 
-    # As -std=c++17 works, use <atomic> as fallback for when memory barriers
+    # As -std=c++11 works, use <atomic> as fallback for when memory barriers
     # are not available.
     
     COMMON_FLAGS="$COMMON_FLAGS -DLEVELDB_PLATFORM_POSIX -DLEVELDB_ATOMIC_PRESENT"

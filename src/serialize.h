@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include <boost/optional.hpp>
 
 #include "prevector.h"
 

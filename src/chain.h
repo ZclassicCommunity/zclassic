@@ -12,7 +12,6 @@
 #include "tinyformat.h"
 #include "uint256.h"
 
-#include <optional>
 #include <vector>
 
 #include <boost/foreach.hpp>
@@ -160,7 +159,7 @@ public:
     //! Branch ID corresponding to the consensus rules used to validate this block.
     //! Only cached if block validity is BLOCK_VALID_CONSENSUS.
     //! Persisted at each activation height, memory-only for intervening blocks.
-    std::optional<uint32_t> nCachedBranchId;
+    boost::optional<uint32_t> nCachedBranchId;
 
     //! The anchor for the tree state up to the start of this block
     uint256 hashSproutAnchor;
@@ -169,22 +168,22 @@ public:
     uint256 hashFinalSproutRoot;
 
     //! Change in value held by the Sprout circuit over this block.
-    //! Will be std::nullopt for older blocks on old nodes until a reindex has taken place.
-    std::optional<CAmount> nSproutValue;
+    //! Will be boost::none for older blocks on old nodes until a reindex has taken place.
+    boost::optional<CAmount> nSproutValue;
 
     //! (memory only) Total value held by the Sprout circuit up to and including this block.
-    //! Will be std::nullopt for on old nodes until a reindex has taken place.
-    //! Will be std::nullopt if nChainTx is zero.
-    std::optional<CAmount> nChainSproutValue;
+    //! Will be boost::none for on old nodes until a reindex has taken place.
+    //! Will be boost::none if nChainTx is zero.
+    boost::optional<CAmount> nChainSproutValue;
 
     //! Change in value held by the Sapling circuit over this block.
-    //! Not a std::optional because this was added before Sapling activated, so we can
+    //! Not a boost::optional because this was added before Sapling activated, so we can
     //! rely on the invariant that every block before this was added had nSaplingValue = 0.
     CAmount nSaplingValue;
 
     //! (memory only) Total value held by the Sapling circuit up to and including this block.
-    //! Will be std::nullopt if nChainTx is zero.
-    std::optional<CAmount> nChainSaplingValue;
+    //! Will be boost::none if nChainTx is zero.
+    boost::optional<CAmount> nChainSaplingValue;
 
     //! block header
     int nVersion;
@@ -214,14 +213,14 @@ public:
         nTx = 0;
         nChainTx = 0;
         nStatus = 0;
-        nCachedBranchId = std::nullopt;
+        nCachedBranchId = boost::none;
         hashSproutAnchor = uint256();
         hashFinalSproutRoot = uint256();
         nSequenceId = 0;
-        nSproutValue = std::nullopt;
-        nChainSproutValue = std::nullopt;
+        nSproutValue = boost::none;
+        nChainSproutValue = boost::none;
         nSaplingValue = 0;
-        nChainSaplingValue = std::nullopt;
+        nChainSaplingValue = boost::none;
 
         nVersion       = 0;
         hashMerkleRoot = uint256();

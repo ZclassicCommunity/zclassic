@@ -1,6 +1,6 @@
 // Copyright (c) 2009-2014 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef BITCOIN_WALLET_CRYPTER_H
 #define BITCOIN_WALLET_CRYPTER_H
@@ -10,12 +10,12 @@
 #include "streams.h"
 #include "support/allocators/secure.h"
 #include "zcash/Address.hpp"
+#include "zcash/zip32.h"
 
 class uint256;
 
 const unsigned int WALLET_CRYPTO_KEY_SIZE = 32;
 const unsigned int WALLET_CRYPTO_SALT_SIZE = 8;
-const unsigned int WALLET_CRYPTO_IV_SIZE = 16;
 
 /**
  * Private key encryption is done based on a CMasterKey,
@@ -81,45 +81,44 @@ public:
             CBaseDataStream(vchIn, nTypeIn, nVersionIn) { }
 };
 
-namespace wallet_crypto
-{
-    class TestCrypter;
-}
-
 /** Encryption/decryption context with key information */
 class CCrypter
 {
-friend class wallet_crypto::TestCrypter; // for test access to chKey/chIV
 private:
-    std::vector<unsigned char, secure_allocator<unsigned char>> vchKey;
-    std::vector<unsigned char, secure_allocator<unsigned char>> vchIV;
+    unsigned char chKey[WALLET_CRYPTO_KEY_SIZE];
+    unsigned char chIV[WALLET_CRYPTO_KEY_SIZE];
     bool fKeySet;
-
-    int BytesToKeySHA512AES(const std::vector<unsigned char>& chSalt, const SecureString& strKeyData, int count, unsigned char *key,unsigned char *iv) const;
 
 public:
     bool SetKeyFromPassphrase(const SecureString &strKeyData, const std::vector<unsigned char>& chSalt, const unsigned int nRounds, const unsigned int nDerivationMethod);
-    bool Encrypt(const CKeyingMaterial& vchPlaintext, std::vector<unsigned char> &vchCiphertext) const;
-    bool Decrypt(const std::vector<unsigned char>& vchCiphertext, CKeyingMaterial& vchPlaintext) const;
+    bool Encrypt(const CKeyingMaterial& vchPlaintext, std::vector<unsigned char> &vchCiphertext);
+    bool Decrypt(const std::vector<unsigned char>& vchCiphertext, CKeyingMaterial& vchPlaintext);
     bool SetKey(const CKeyingMaterial& chNewKey, const std::vector<unsigned char>& chNewIV);
 
     void CleanKey()
     {
-        memory_cleanse(vchKey.data(), vchKey.size());
-        memory_cleanse(vchIV.data(), vchIV.size());
+        memory_cleanse(chKey, sizeof(chKey));
+        memory_cleanse(chIV, sizeof(chIV));
         fKeySet = false;
     }
 
     CCrypter()
     {
         fKeySet = false;
-        vchKey.resize(WALLET_CRYPTO_KEY_SIZE);
-        vchIV.resize(WALLET_CRYPTO_IV_SIZE);
+
+        // Try to keep the key data out of swap (and be a bit over-careful to keep the IV that we don't even use out of swap)
+        // Note that this does nothing about suspend-to-disk (which will put all our key data on disk)
+        // Note as well that at no point in this program is any attempt made to prevent stealing of keys by reading the memory of the running process.
+        LockedPageManager::Instance().LockRange(&chKey[0], sizeof chKey);
+        LockedPageManager::Instance().LockRange(&chIV[0], sizeof chIV);
     }
 
     ~CCrypter()
     {
         CleanKey();
+
+        LockedPageManager::Instance().UnlockRange(&chKey[0], sizeof chKey);
+        LockedPageManager::Instance().UnlockRange(&chIV[0], sizeof chIV);
     }
 };
 
@@ -158,14 +157,19 @@ public:
 
     bool IsCrypted() const
     {
-        LOCK(cs_KeyStore);
         return fUseCrypto;
     }
 
     bool IsLocked() const
     {
-        LOCK(cs_KeyStore);
-        return fUseCrypto && vMasterKey.empty();
+        if (!IsCrypted())
+            return false;
+        bool result;
+        {
+            LOCK(cs_KeyStore);
+            result = vMasterKey.empty();
+        }
+        return result;
     }
 
     bool Lock();
@@ -179,17 +183,19 @@ public:
     bool AddKeyPubKey(const CKey& key, const CPubKey &pubkey);
     bool HaveKey(const CKeyID &address) const
     {
-        LOCK(cs_KeyStore);
-        if (!fUseCrypto)
-            return CBasicKeyStore::HaveKey(address);
-        return mapCryptedKeys.count(address) > 0;
+        {
+            LOCK(cs_KeyStore);
+            if (!IsCrypted())
+                return CBasicKeyStore::HaveKey(address);
+            return mapCryptedKeys.count(address) > 0;
+        }
+        return false;
     }
     bool GetKey(const CKeyID &address, CKey& keyOut) const;
     bool GetPubKey(const CKeyID &address, CPubKey& vchPubKeyOut) const;
     void GetKeys(std::set<CKeyID> &setAddress) const
     {
-        LOCK(cs_KeyStore);
-        if (!fUseCrypto)
+        if (!IsCrypted())
         {
             CBasicKeyStore::GetKeys(setAddress);
             return;
@@ -209,16 +215,18 @@ public:
     bool AddSproutSpendingKey(const libzcash::SproutSpendingKey &sk);
     bool HaveSproutSpendingKey(const libzcash::SproutPaymentAddress &address) const
     {
-        LOCK(cs_KeyStore);
-        if (!fUseCrypto)
-            return CBasicKeyStore::HaveSproutSpendingKey(address);
-        return mapCryptedSproutSpendingKeys.count(address) > 0;
+        {
+            LOCK(cs_SpendingKeyStore);
+            if (!IsCrypted())
+                return CBasicKeyStore::HaveSproutSpendingKey(address);
+            return mapCryptedSproutSpendingKeys.count(address) > 0;
+        }
+        return false;
     }
     bool GetSproutSpendingKey(const libzcash::SproutPaymentAddress &address, libzcash::SproutSpendingKey &skOut) const;
     void GetSproutPaymentAddresses(std::set<libzcash::SproutPaymentAddress> &setAddress) const
     {
-        LOCK(cs_KeyStore);
-        if (!fUseCrypto)
+        if (!IsCrypted())
         {
             CBasicKeyStore::GetSproutPaymentAddresses(setAddress);
             return;
@@ -234,23 +242,26 @@ public:
     //! Sapling 
     virtual bool AddCryptedSaplingSpendingKey(
         const libzcash::SaplingExtendedFullViewingKey &extfvk,
-        const std::vector<unsigned char> &vchCryptedSecret);
-    bool AddSaplingSpendingKey(const libzcash::SaplingExtendedSpendingKey &sk);
-    bool HaveSaplingSpendingKey(const libzcash::SaplingExtendedFullViewingKey &extfvk) const
+        const std::vector<unsigned char> &vchCryptedSecret,
+        const libzcash::SaplingPaymentAddress &defaultAddr);
+    bool AddSaplingSpendingKey(
+        const libzcash::SaplingExtendedSpendingKey &sk,
+        const libzcash::SaplingPaymentAddress &defaultAddr);
+    bool HaveSaplingSpendingKey(const libzcash::SaplingFullViewingKey &fvk) const
     {
-        LOCK(cs_KeyStore);
-        if (!fUseCrypto)
-            return CBasicKeyStore::HaveSaplingSpendingKey(extfvk);
-        for (auto entry : mapCryptedSaplingSpendingKeys) {
-            if (entry.first == extfvk) {
-                return true;
+        {
+            LOCK(cs_SpendingKeyStore);
+            if (!IsCrypted())
+                return CBasicKeyStore::HaveSaplingSpendingKey(fvk);
+            for (auto entry : mapCryptedSaplingSpendingKeys) {
+                if (entry.first.fvk == fvk) {
+                    return true;
+                }
             }
         }
         return false;
     }
-    bool GetSaplingSpendingKey(
-        const libzcash::SaplingExtendedFullViewingKey &extfvk,
-        libzcash::SaplingExtendedSpendingKey &skOut) const;
+    bool GetSaplingSpendingKey(const libzcash::SaplingFullViewingKey &fvk, libzcash::SaplingExtendedSpendingKey &skOut) const;
 
 
     /**

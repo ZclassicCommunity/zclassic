@@ -11,8 +11,6 @@
 #include "utilstrencodings.h"
 
 #include <assert.h>
-#include <optional>
-#include <variant>
 
 #include <boost/assign/list_of.hpp>
 
@@ -98,7 +96,7 @@ public:
         consensus.nPowMaxAdjustUp = 16; // 16% adjustment up
         consensus.nPreButtercupPowTargetSpacing = Consensus::PRE_BUTTERCUP_POW_TARGET_SPACING;
         consensus.nPostButtercupPowTargetSpacing = Consensus::POST_BUTTERCUP_POW_TARGET_SPACING;
-        consensus.nPowAllowMinDifficultyBlocksAfterHeight = std::nullopt;
+        consensus.nPowAllowMinDifficultyBlocksAfterHeight = boost::none;
         consensus.scaleDifficultyAtUpgradeFork = true;
         consensus.vUpgrades[Consensus::BASE_SPROUT].nProtocolVersion = 170002;
         consensus.vUpgrades[Consensus::BASE_SPROUT].nActivationHeight =
@@ -576,8 +574,8 @@ CScript CChainParams::GetFoundersRewardScriptAtHeight(int nHeight) const {
 
     CTxDestination address = DecodeDestination(GetFoundersRewardAddressAtHeight(nHeight).c_str());
     assert(IsValidDestination(address));
-    assert(std::get<CScriptID>(&address) != nullptr);
-    CScriptID scriptID = std::get<CScriptID>(address); // address is a variant
+    assert(boost::get<CScriptID>(&address) != nullptr);
+    CScriptID scriptID = boost::get<CScriptID>(address); // address is a boost variant
     CScript script = CScript() << OP_HASH160 << ToByteVector(scriptID) << OP_EQUAL;
     return script;
 }

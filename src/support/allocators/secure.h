@@ -1,14 +1,12 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2013 The Bitcoin Core developers
-// Copyright (c) 2019-2023 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
-// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef BITCOIN_SUPPORT_ALLOCATORS_SECURE_H
 #define BITCOIN_SUPPORT_ALLOCATORS_SECURE_H
 
-#include "support/lockedpool.h"
-#include "support/cleanse.h"
+#include "support/pagelocker.h"
 
 #include <string>
 
@@ -41,18 +39,20 @@ struct secure_allocator : public std::allocator<T> {
 
     T* allocate(std::size_t n, const void* hint = 0)
     {
-        T* allocation = static_cast<T*>(LockedPoolManager::Instance().alloc(sizeof(T) * n));
-        if (!allocation) {
-            throw std::bad_alloc();
-        }
-        return allocation;
+        T* p;
+        p = std::allocator<T>::allocate(n, hint);
+        if (p != NULL)
+            LockedPageManager::Instance().LockRange(p, sizeof(T) * n);
+        return p;
     }
 
-    void deallocate(T* p, std::size_t n) noexcept
+    void deallocate(T* p, std::size_t n)
     {
-        assert(p != nullptr);
-        memory_cleanse(p, sizeof(T) * n);
-        LockedPoolManager::Instance().free(p);
+        if (p != NULL) {
+            memory_cleanse(p, sizeof(T) * n);
+            LockedPageManager::Instance().UnlockRange(p, sizeof(T) * n);
+        }
+        std::allocator<T>::deallocate(p, n);
     }
 };
 
