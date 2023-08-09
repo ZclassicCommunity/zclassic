@@ -26,6 +26,12 @@ sudo apt-get install \
 ```
 
 ```{r, engine='bash'}
+# Ubuntu 20.04
+
+sudo apt-get install build-essential pkg-config libc6-dev m4 g++-multilib  autoconf libtool ncurses-dev unzip git zlib1g-dev curl bsdmainutils automake libcurl4-gnutls-dev libevent-dev automake libtool pkg-config
+```
+
+```{r, engine='bash'}
 # Ubuntu 18.04
 
 sudo apt-get install \
