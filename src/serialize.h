@@ -27,7 +27,7 @@
 
 #include "prevector.h"
 
-static const unsigned int MAX_SIZE = 0x02000000;
+static const unsigned int MAX_SIZE = 0x04000000;  // Increased to 64 MB for snapshot chunks
 
 /**
  * Dummy data type to identify deserializing constructors.

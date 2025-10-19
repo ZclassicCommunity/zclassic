@@ -33,6 +33,28 @@ struct CCheckpointData {
 };
 
 /**
+ * Holds configuration for use during UTXO snapshot load and validation.
+ * Adapted from Bitcoin ABC (MIT License)
+ * Copyright (c) 2022 The Bitcoin Core developers
+ * Copyright (c) 2025 The ZClassic developers
+ */
+struct CSnapshotCheckpoint {
+    int nHeight;                // Block height of snapshot
+    uint256 hashBlock;          // Block hash at this height
+    uint256 hashUTXOSet;        // UTXO set hash (MUST match!)
+    uint64_t nChainTx;          // Total transactions in chain
+
+    CSnapshotCheckpoint() : nHeight(0), nChainTx(0) {}
+
+    CSnapshotCheckpoint(int heightIn, const uint256& blockHashIn,
+                       const uint256& utxoHashIn, uint64_t txCountIn)
+        : nHeight(heightIn), hashBlock(blockHashIn),
+          hashUTXOSet(utxoHashIn), nChainTx(txCountIn) {}
+};
+
+typedef std::vector<CSnapshotCheckpoint> SnapshotCheckpointData;
+
+/**
  * CChainParams defines various tweakable parameters of a given instance of the
  * Bitcoin system. There are three: the main network on which people trade goods
  * and services, the public test network which gets reset from time to time and
@@ -98,6 +120,7 @@ public:
     const std::string& Bech32HRP(Bech32Type type) const { return bech32HRPs[type]; }
     const std::vector<SeedSpec6>& FixedSeeds() const { return vFixedSeeds; }
     const CCheckpointData& Checkpoints() const { return checkpointData; }
+    const SnapshotCheckpointData& SnapshotCheckpoints() const { return vSnapshotCheckpoints; }
     /** Return the founder's reward address and script for a given block height */
     std::string GetFoundersRewardAddressAtHeight(int height) const;
     CScript GetFoundersRewardScriptAtHeight(int height) const;
@@ -129,6 +152,7 @@ protected:
     bool fMineBlocksOnDemand = false;
     bool fTestnetToBeDeprecatedFieldRPC = false;
     CCheckpointData checkpointData;
+    SnapshotCheckpointData vSnapshotCheckpoints;
     std::vector<std::string> vFoundersRewardAddress;
 
     CAmount nSproutValuePoolCheckpointHeight = 0;

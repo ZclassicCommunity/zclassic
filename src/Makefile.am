@@ -192,6 +192,7 @@ BITCOIN_CORE_H = \
   script/sigencoding.cpp \
   script/sigencoding.h \
   serialize.h \
+  snapshot.h \
   streams.h \
   support/allocators/secure.h \
   support/allocators/zeroafterfree.h \
@@ -268,6 +269,7 @@ libbitcoin_server_a_SOURCES = \
   pow.cpp \
   rest.cpp \
   sha256.cpp \
+  snapshot.cpp \
   rpc/blockchain.cpp \
   rpc/mining.cpp \
   rpc/misc.cpp \

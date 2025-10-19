@@ -141,6 +141,14 @@ extern CConditionVariable cvBlockChange;
 extern bool fExperimentalMode;
 extern bool fImporting;
 extern bool fReindex;
+
+// Snapshot download globals
+extern bool fSnapshotDownloadActive;
+extern bool fSnapshotDownloadComplete;
+class CSnapshotDownloadState;
+class CSnapshotDownloadCoordinator;
+extern CSnapshotDownloadState* pdownloadstate;
+extern CSnapshotDownloadCoordinator* psnapshotcoordinator;
 extern bool fNoFastSync;
 extern int nScriptCheckThreads;
 extern bool fTxIndex;

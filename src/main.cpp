@@ -21,6 +21,7 @@
 #include "metrics.h"
 #include "net.h"
 #include "pow.h"
+#include "snapshot.h"
 #include "txdb.h"
 #include "txmempool.h"
 #include "ui_interface.h"
@@ -66,6 +67,12 @@ int nScriptCheckThreads = 0;
 bool fExperimentalMode = false;
 bool fImporting = false;
 bool fReindex = false;
+
+// Snapshot download state
+bool fSnapshotDownloadActive = false;
+bool fSnapshotDownloadComplete = false;
+CSnapshotDownloadState* pdownloadstate = NULL;
+CSnapshotDownloadCoordinator* psnapshotcoordinator = NULL;
 bool fNoFastSync = false;
 bool fTxIndex = false;
 bool fHavePruned = false;
@@ -6442,6 +6449,91 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
         // message would be undesirable as we transmit it ourselves.
     }
 
+    else if (strCommand == "getsnapchunk")
+    {
+        LogPrintf("=== HANDLER CALLED: getsnapchunk from peer %d ===\n", pfrom->id);
+
+        // Peer is requesting a snapshot chunk from us
+        CGetSnapshotChunk req;
+        vRecv >> req;
+
+        LogPrintf("=== PARSED REQUEST: chunk %d from peer %d ===\n", req.nChunkNumber, pfrom->id);
+        LogPrint("snapshot", "Received chunk request %d from peer=%d\n", req.nChunkNumber, pfrom->id);
+
+        // Check rate limiter
+        std::string strError;
+        if (!psnapshotratelimiter ||
+            !psnapshotratelimiter->AllowRequest(pfrom->addr, req.nChunkNumber, strError)) {
+            LogPrint("snapshot", "Rejected chunk %d request from %s: %s\n",
+                     req.nChunkNumber, pfrom->addr.ToString(), strError);
+            return true;
+        }
+
+        // Load chunk from disk
+        std::vector<unsigned char> vData;
+        if (psnapshotstore && psnapshotstore->LoadChunk(req.nChunkNumber, vData)) {
+            // Send chunk to peer
+            CSnapshotChunk response(req.nChunkNumber, vData);
+            pfrom->PushMessage("snapchunk", response);
+
+            // Record for rate limiter
+            psnapshotratelimiter->RecordServed(pfrom->addr, req.nChunkNumber, vData.size());
+            psnapshotratelimiter->CompleteTransfer();
+
+            LogPrint("snapshot", "Served chunk %d (%d bytes) to %s\n",
+                     req.nChunkNumber, vData.size(), pfrom->addr.ToString());
+        } else {
+            LogPrint("snapshot", "Failed to load chunk %d for %s\n",
+                     req.nChunkNumber, pfrom->addr.ToString());
+        }
+    }
+
+    else if (strCommand == "snapchunk")
+    {
+        LogPrintf("=== HANDLER CALLED: snapchunk from peer %d ===\n", pfrom->id);
+
+        // We received a snapshot chunk from a peer
+        CSnapshotChunk chunk;
+        vRecv >> chunk;
+
+        LogPrintf("=== PARSED RESPONSE: chunk %d (%d bytes) from peer %d ===\n",
+                 chunk.nChunkNumber, chunk.vData.size(), pfrom->id);
+        LogPrint("snapshot", "Received chunk %d from peer=%d\n", chunk.nChunkNumber, pfrom->id);
+
+        // Verify and save chunk
+        if (psnapshotstore && psnapshotstore->VerifyChunk(chunk.nChunkNumber, chunk.vData)) {
+            if (psnapshotstore->SaveChunk(chunk.nChunkNumber, chunk.vData)) {
+                // Update download state FIRST
+                if (pdownloadstate) {
+                    pdownloadstate->MarkChunkReceived(chunk.nChunkNumber);
+                }
+
+                // Record success with coordinator
+                if (psnapshotcoordinator) {
+                    psnapshotcoordinator->RecordSuccess(pfrom->GetId(), chunk.nChunkNumber);
+                }
+
+                uint32_t received = pdownloadstate ? pdownloadstate->GetReceivedCount() : 0;
+                uint32_t total = psnapshotstore->GetManifest().GetChunkCount();
+
+                LogPrintf("Snapshot: Received chunk %d/%d (%.1f%%)\n",
+                         received, total, received * 100.0 / total);
+
+                // Check if download is complete
+                if (pdownloadstate && pdownloadstate->IsComplete()) {
+                    LogPrintf("Snapshot download complete!\n");
+                    fSnapshotDownloadComplete = true;
+                }
+            }
+        } else {
+            LogPrintf("Snapshot: Chunk %d verification FAILED from peer %d\n",
+                     chunk.nChunkNumber, pfrom->GetId());
+            if (psnapshotcoordinator) {
+                psnapshotcoordinator->RecordFailure(pfrom->GetId(), chunk.nChunkNumber);
+            }
+        }
+    }
+
     else {
         // Ignore unknown commands for extensibility
         LogPrint("net", "Unknown command \"%s\" from peer=%d\n", SanitizeString(strCommand), pfrom->id);
@@ -6829,6 +6921,70 @@ bool SendMessages(CNode* pto, bool fSendTrickle)
             pto->PushMessage("getdata", vGetData);
 
     }
+
+    //
+    // Snapshot download coordinator
+    //
+    static int64_t nLastSnapshotCheck = 0;
+    static int64_t nDebugCounter = 0;
+    if (++nDebugCounter % 10 == 0) {  // Log every 10th call to avoid spam
+        LogPrintf("COORDINATOR CHECK: active=%d, complete=%d, time_since_last=%d, will_enter=%d\n",
+                 fSnapshotDownloadActive, fSnapshotDownloadComplete,
+                 GetTime() - nLastSnapshotCheck,
+                 (fSnapshotDownloadActive && !fSnapshotDownloadComplete && GetTime() - nLastSnapshotCheck > 5) ? 1 : 0);
+    }
+    if (fSnapshotDownloadActive && !fSnapshotDownloadComplete &&
+        GetTime() - nLastSnapshotCheck > 5) {
+
+        nLastSnapshotCheck = GetTime();
+
+        // Check for timed-out requests and mark them for retry
+        if (psnapshotcoordinator) {
+            auto timedOut = psnapshotcoordinator->GetTimedOutRequests();
+            for (auto& pair : timedOut) {
+                LogPrint("snapshot", "Chunk request timed out from peer %d, will retry\n", pair.first);
+            }
+        }
+
+        // Get peers with NODE_SNAPSHOT capability
+        std::vector<NodeId> vSnapshotPeers;
+        {
+            LOCK(cs_vNodes);
+            for (CNode* pnode : vNodes) {
+                LogPrintf("DEBUG: Checking peer %d, services=%d, NODE_SNAPSHOT=%d, has_bit=%d\n",
+                         pnode->GetId(), pnode->nServices, NODE_SNAPSHOT,
+                         (pnode->nServices & NODE_SNAPSHOT) ? 1 : 0);
+                if (pnode->nServices & NODE_SNAPSHOT) {
+                    vSnapshotPeers.push_back(pnode->GetId());
+                }
+            }
+        }
+
+        LogPrintf("DEBUG: Found %d peers with NODE_SNAPSHOT, coordinator=%p, state=%p\n",
+                 vSnapshotPeers.size(), psnapshotcoordinator, pdownloadstate);
+
+        // Request next chunk if we have available peers and download state
+        if (!vSnapshotPeers.empty() && psnapshotcoordinator && pdownloadstate) {
+            uint32_t nChunk;
+            NodeId peer = psnapshotcoordinator->SelectPeerForNextChunk(vSnapshotPeers, nChunk);
+
+            if (peer != -1) {
+                // Find node and send request
+                LOCK(cs_vNodes);
+                for (CNode* pnode : vNodes) {
+                    if (pnode->GetId() == peer) {
+                        CGetSnapshotChunk req(nChunk);
+                        pnode->PushMessage("getsnapchunk", req);
+
+                        psnapshotcoordinator->RecordRequest(peer, nChunk);
+                        LogPrint("snapshot", "Requested chunk %d from peer %d\n", nChunk, peer);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     return true;
 }
 

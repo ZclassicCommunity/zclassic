@@ -1,117 +1,19 @@
-*.tar.gz
-*.deb
-*.exe
-.nfs*
+# Snapshot output directories (too large for git)
+snapshot-output/
+params-output/
 
-src/bitcoin
-src/zcashd
-src/zcash-cli
-src/zcash-gtest
-src/zcash-tx
-src/zclassicd
-src/zclassic-cli
-src/zclassic-gtest
-src/zclassic-tx
-src/test/test_bitcoin
+# Test data and temporary directories
+testdata/
+old-zcl-block-data-snap/
+old-zcl-zcash-params/
+bitcoin-abc/
 
-*zcashTest.pk
-*zcashTest.vk
+# Temporary files
+*~
+*.swp
+*.swo
+*.backup
+*.tmp
 
-# autoreconf
-Makefile.in
-aclocal.m4
-autom4te.cache/
-build-aux/config.guess
-build-aux/config.sub
-build-aux/depcomp
-build-aux/install-sh
-build-aux/ltmain.sh
-build-aux/m4/libtool.m4
-build-aux/m4/lt~obsolete.m4
-build-aux/m4/ltoptions.m4
-build-aux/m4/ltsugar.m4
-build-aux/m4/ltversion.m4
-build-aux/missing
-build-aux/compile
-build-aux/test-driver
-config.log
-config.status
-configure
-libtool
-src/config/bitcoin-config.h
-src/config/bitcoin-config.h.in
-src/config/stamp-h1
-share/setup.nsi
-
-cache/
-venv-mnf/
-src/univalue/gen
-
-.deps
-.dirstamp
-.libs
-.*.swp
-*.*~*
-*.bak
-*.rej
-*.orig
-*.pyc
-*.o
-*.o-*
-.zcash
-*.a
-*.pb.cc
-*.pb.h
-.vscode
-
-*.log
-*.trs
-*.dmg
-
-*.json.h
-*.raw.h
-
-#libtool object files
-*.lo
-*.la
-
-# Compilation
-Makefile
-
-# Unit-tests
-Makefile.test
-src/test/buildenv.py
-
-# Resources cpp
-qrc_*.cpp
-
-# Mac specific
-.DS_Store
-build
-
-#lcov
-*.gcno
-*.gcda
-/*.info
-test_bitcoin.coverage/
-zcash-gtest.coverage/
-total.coverage/
-coverage_percent.txt
-
-#build tests
-linux-coverage-build
-linux-build
-win32-build
-qa/pull-tester/run-bitcoind-for-test.sh
-qa/pull-tester/tests-config.sh
-qa/pull-tester/cache/*
-qa/pull-tester/test.*/*
-
-!src/leveldb*/Makefile
-
-/doc/doxygen/
-
-libzcashconsensus.pc
-
-contrib/debian/files
-contrib/debian/substvars
+# Test scripts (if regenerated)
+test-snapshot.sh
