@@ -2104,8 +2104,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     }
 
     // Check if we need to download blockchain snapshot
-    // Use chainActive.Height() to detect empty/genesis-only blockchain
-    bool needsBlockchain = (chainActive.Height() <= 0);
+    // Activate snapshot download if our height is less than the snapshot height
+    bool needsBlockchain = (chainActive.Height() < SNAPSHOT_CURRENT_HEIGHT);
 
     // Check if we have a complete snapshot that needs to be extracted
     if (needsBlockchain && psnapshotstore) {

@@ -21,7 +21,7 @@ $(package)_archiver_$(host_os)=$($(package)_ar)
 $(package)_toolset_darwin=darwin
 $(package)_archiver_darwin=$($(package)_libtool)
 $(package)_config_libraries=chrono,filesystem,program_options,system,thread,test
-$(package)_cxxflags=-std=c++11 -fvisibility=hidden -Wno-enum-constexpr-conversion
+$(package)_cxxflags=-std=c++11 -fvisibility=hidden -Wno-error=enum-constexpr-conversion
 $(package)_cxxflags_linux=-fPIC
 endef
 
@@ -35,9 +35,9 @@ define $(package)_config_cmds
 endef
 
 define $(package)_build_cmds
-  ./b2 -d2 -j2 -d1 --prefix=$($(package)_staging_prefix_dir) $($(package)_config_opts) cxxflags=-Wno-enum-constexpr-conversion stage
+  CXXFLAGS="$($(package)_cxxflags) $($(package)_cppflags)" ./b2 -d2 -j2 -d1 --prefix=$($(package)_staging_prefix_dir) $($(package)_config_opts) cxxflags="$($(package)_cxxflags)" stage
 endef
 
 define $(package)_stage_cmds
-  ./b2 -d0 -j4 --prefix=$($(package)_staging_prefix_dir) $($(package)_config_opts) cxxflags=-Wno-enum-constexpr-conversion install
+  ./b2 -d0 -j4 --prefix=$($(package)_staging_prefix_dir) $($(package)_config_opts) cxxflags=-Wno-error=enum-constexpr-conversion install
 endef
