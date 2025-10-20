@@ -111,9 +111,14 @@ private:
     std::map<uint32_t, int64_t> mapChunkRequests; // chunk number -> request time
     uint32_t nTotalChunks;
 
+    // Progress tracking
+    int64_t nDownloadStartTime;
+    int64_t nLastProgressTime;
+    uint32_t nLastProgressCount;
+
 public:
-    CSnapshotDownloadState() : nTotalChunks(0) {}
-    explicit CSnapshotDownloadState(uint32_t nTotalChunksIn) : nTotalChunks(nTotalChunksIn) {}
+    CSnapshotDownloadState() : nTotalChunks(0), nDownloadStartTime(0), nLastProgressTime(0), nLastProgressCount(0) {}
+    explicit CSnapshotDownloadState(uint32_t nTotalChunksIn) : nTotalChunks(nTotalChunksIn), nDownloadStartTime(0), nLastProgressTime(0), nLastProgressCount(0) {}
 
     void MarkChunkReceived(uint32_t nChunk);
     bool IsChunkReceived(uint32_t nChunk) const;
@@ -122,6 +127,7 @@ public:
     uint32_t GetReceivedCount() const;
     void RecordChunkRequest(uint32_t nChunk, int64_t nTime);
     bool HasRecentRequest(uint32_t nChunk, int64_t nNow) const;
+    void LogProgress(); // Print progress for users
 };
 
 /** Snapshot storage and retrieval */

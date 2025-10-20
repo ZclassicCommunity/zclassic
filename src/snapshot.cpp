@@ -50,7 +50,70 @@ void CSnapshotDownloadState::MarkChunkReceived(uint32_t nChunk)
 {
     if (nChunk < nTotalChunks) {
         mapChunksReceived[nChunk] = true;
+
+        // Start timer on first chunk
+        if (nDownloadStartTime == 0) {
+            nDownloadStartTime = GetTime();
+            nLastProgressTime = nDownloadStartTime;
+            LogPrintf("Snapshot Download: Starting download of %d chunks (%.2f GB)...\n",
+                     nTotalChunks, (nTotalChunks * SNAPSHOT_CHUNK_SIZE) / (1024.0 * 1024.0 * 1024.0));
+        }
+
+        // Log progress every 10 chunks or every 30 seconds
+        uint32_t nReceived = GetReceivedCount();
+        int64_t nNow = GetTime();
+        bool bShouldLog = (nReceived % 10 == 0) || (nNow - nLastProgressTime >= 30);
+
+        if (bShouldLog && nReceived > nLastProgressCount) {
+            LogProgress();
+            nLastProgressTime = nNow;
+            nLastProgressCount = nReceived;
+        }
+
+        // Log completion message
+        if (IsComplete()) {
+            int64_t nTotalTime = nNow - nDownloadStartTime;
+            LogPrintf("*** Snapshot Download Complete! ***\n");
+            LogPrintf("Downloaded %d chunks (%.2f GB) in %d seconds\n",
+                     nTotalChunks, (nTotalChunks * SNAPSHOT_CHUNK_SIZE) / (1024.0 * 1024.0 * 1024.0), nTotalTime);
+            LogPrintf("Now extracting snapshot... (this may take 30-60 seconds)\n");
+        }
     }
+}
+
+void CSnapshotDownloadState::LogProgress()
+{
+    uint32_t nReceived = GetReceivedCount();
+    if (nReceived == 0 || nTotalChunks == 0) return;
+
+    int64_t nNow = GetTime();
+    double dPercent = (nReceived * 100.0) / nTotalChunks;
+    uint64_t nBytesDownloaded = (uint64_t)nReceived * SNAPSHOT_CHUNK_SIZE;
+    uint64_t nBytesTotal = (uint64_t)nTotalChunks * SNAPSHOT_CHUNK_SIZE;
+    double dGBDownloaded = nBytesDownloaded / (1024.0 * 1024.0 * 1024.0);
+    double dGBTotal = nBytesTotal / (1024.0 * 1024.0 * 1024.0);
+
+    // Calculate ETA
+    std::string strETA = "calculating...";
+    if (nDownloadStartTime > 0 && nReceived > 0) {
+        int64_t nElapsed = nNow - nDownloadStartTime;
+        if (nElapsed > 0) {
+            double dChunksPerSec = (double)nReceived / nElapsed;
+            uint32_t nRemaining = nTotalChunks - nReceived;
+            int64_t nETASeconds = (int64_t)(nRemaining / dChunksPerSec);
+
+            if (nETASeconds < 60) {
+                strETA = strprintf("%d seconds", nETASeconds);
+            } else if (nETASeconds < 3600) {
+                strETA = strprintf("%d minutes", nETASeconds / 60);
+            } else {
+                strETA = strprintf("%d hours %d minutes", nETASeconds / 3600, (nETASeconds % 3600) / 60);
+            }
+        }
+    }
+
+    LogPrintf("Snapshot Download: %d/%d chunks (%.1f%%) - %.2f/%.2f GB - ETA: %s\n",
+             nReceived, nTotalChunks, dPercent, dGBDownloaded, dGBTotal, strETA);
 }
 
 bool CSnapshotDownloadState::IsChunkReceived(uint32_t nChunk) const
