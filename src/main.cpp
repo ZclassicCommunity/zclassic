@@ -6529,7 +6529,58 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
                 // Check if download is complete
                 if (pdownloadstate && pdownloadstate->IsComplete()) {
                     LogPrintf("Snapshot download complete!\n");
+                    LogPrintf("All %d snapshot chunks downloaded - extracting snapshot...\n", total);
+
                     fSnapshotDownloadComplete = true;
+
+                    // Extract snapshot automatically
+                    if (psnapshotstore->ExtractSnapshot(GetDataDir())) {
+                        LogPrintf("*** SNAPSHOT EXTRACTION COMPLETE ***\n");
+                        LogPrintf("*** Blockchain extracted successfully to height %d\n", SNAPSHOT_CURRENT_HEIGHT);
+                        LogPrintf("*** Reloading blockchain database without restart...\n");
+
+                        // Disable snapshot download mode FIRST
+                        fSnapshotDownloadActive = false;
+
+                        // Clean up download state
+                        delete psnapshotcoordinator;
+                        delete pdownloadstate;
+                        psnapshotcoordinator = nullptr;
+                        pdownloadstate = nullptr;
+
+                        // Flush current database state to disk
+                        LogPrintf("*** Flushing database state...\n");
+                        CValidationState flushState;
+                        FlushStateToDisk(flushState, FLUSH_STATE_ALWAYS);
+
+                        // Unload current (empty) blockchain from memory
+                        LogPrintf("*** Unloading current blockchain state...\n");
+                        UnloadBlockIndex();
+
+                        // Reload blockchain from extracted snapshot files
+                        LogPrintf("*** Loading extracted blockchain from disk...\n");
+                        if (!LoadBlockIndex()) {
+                            LogPrintf("ERROR: Failed to load extracted blockchain!\n");
+                            StartShutdown();
+                            return true;
+                        }
+
+                        // Activate the best chain from the loaded blockchain
+                        LogPrintf("*** Activating best chain...\n");
+                        CValidationState activateState;
+                        if (!ActivateBestChain(activateState)) {
+                            LogPrintf("ERROR: Failed to activate best chain: %s\n", activateState.GetRejectReason());
+                            StartShutdown();
+                            return true;
+                        }
+
+                        LogPrintf("*** BLOCKCHAIN RELOAD COMPLETE ***\n");
+                        LogPrintf("*** Node is now synced to height %d (snapshot height: %d)\n",
+                                 chainActive.Height(), SNAPSHOT_CURRENT_HEIGHT);
+                        LogPrintf("*** Continuing with normal block synchronization to latest tip...\n");
+                    } else {
+                        LogPrintf("ERROR: Snapshot extraction failed!\n");
+                    }
                 }
             }
         } else {
