@@ -4267,6 +4267,13 @@ static bool IsSuperMajority(int minVersion, const CBlockIndex* pstart, unsigned 
 
 bool ProcessNewBlock(CValidationState &state, CNode* pfrom, CBlock* pblock, bool fForceProcessing, CDiskBlockPos *dbp)
 {
+    // Skip block processing during snapshot download
+    // We must wait for snapshot to complete before processing blocks from peers
+    if (fSnapshotDownloadActive) {
+        LogPrint("snapshot", "Deferring block processing - snapshot download active\n");
+        return true;  // Return success to avoid peer penalties
+    }
+
     // Preliminary checks
     auto verifier = libzcash::ProofVerifier::Disabled();
     bool checked = CheckBlock(*pblock, state, verifier);
