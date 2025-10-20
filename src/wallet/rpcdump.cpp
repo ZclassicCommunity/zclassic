@@ -13,6 +13,7 @@
 #include "util.h"
 #include "utiltime.h"
 #include "wallet.h"
+#include "txdb.h"
 
 #include <fstream>
 #include <stdint.h>
@@ -137,7 +138,51 @@ UniValue importprivkey(const UniValue& params, bool fHelp)
         pwalletMain->nTimeFirstKey = 1; // 0 would be considered 'no value'
 
         if (fRescan) {
-            pwalletMain->ScanForWalletTransactions(chainActive.Genesis(), true);
+            int nFound = 0;
+
+            // Use address index for instant lookup if available
+            if (fAddressIndex && pblocktree) {
+                LogPrint("wallet", "importprivkey: Using address index for instant lookup\n");
+
+                // Query address index for this key
+                uint160 addrHash = uint160(vchAddress);
+                std::vector<std::pair<CAddressUnspentKey, CAddressUnspentValue>> unspentOutputs;
+
+                if (pblocktree->ReadAddressUnspentIndex(addrHash, 1, unspentOutputs)) {
+                    LogPrint("wallet", "importprivkey: Found %d unspent outputs for address\n", unspentOutputs.size());
+
+                    // Add each UTXO to the wallet
+                    for (const auto& unspent : unspentOutputs) {
+                        uint256 txhash = unspent.first.txhash;
+
+                        // Check if we already have this transaction
+                        if (pwalletMain->mapWallet.count(txhash) == 0) {
+                            // We need to fetch the full transaction
+                            // For now, we'll create a minimal transaction from the UTXO
+                            CMutableTransaction tx;
+                            tx.vout.resize(unspent.first.index + 1);
+                            tx.vout[unspent.first.index] = CTxOut(unspent.second.satoshis, unspent.second.script);
+
+                            CWalletTx walletTx(pwalletMain, CTransaction(tx));
+                            walletTx.nTimeReceived = GetTime();
+                            walletTx.hashBlock = pcoinsTip->GetBestBlock();
+
+                            pwalletMain->AddToWallet(walletTx, false, NULL);
+                            nFound++;
+                        }
+                    }
+
+                    LogPrint("wallet", "importprivkey: Address index lookup found %d new transactions\n", nFound);
+                } else {
+                    LogPrint("wallet", "importprivkey: Address index query returned no results, falling back to UTXO scan\n");
+                    nFound = pwalletMain->ScanUTXOsForWallet();
+                }
+            } else {
+                // Fall back to UTXO scanning if address index not available
+                LogPrint("wallet", "importprivkey: Using fast UTXO scan for imported key\n");
+                nFound = pwalletMain->ScanUTXOsForWallet();
+                LogPrint("wallet", "importprivkey: Fast UTXO scan found %d new transactions\n", nFound);
+            }
         }
     }
 

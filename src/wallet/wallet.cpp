@@ -14,6 +14,7 @@
 #include "key_io.h"
 #include "main.h"
 #include "net.h"
+#include "txdb.h"
 #include "rpc/protocol.h"
 #include "script/script.h"
 #include "script/sighashtype.h"
@@ -2476,6 +2477,118 @@ int CWallet::ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate)
         ShowProgress(_("Rescanning..."), 100); // hide progress dialog in GUI
     }
     return ret;
+}
+
+/**
+ * Fast scan of UTXO database for wallet transactions
+ * Much faster than ScanForWalletTransactions as it only scans the UTXO set, not all blocks
+ * Returns the number of new transactions found
+ */
+int CWallet::ScanUTXOsForWallet()
+{
+    int ret = 0;
+    static const char DB_COINS = 'c'; // Database key for coins
+
+    LogPrintf("FastUTXOScan: Starting fast UTXO scan for wallet transactions...\n");
+
+    LOCK2(cs_main, cs_wallet);
+
+    // Get access to the coins database through pcoinsTip
+    if (!pcoinsTip) {
+        LogPrintf("FastUTXOScan: ERROR - pcoinsTip is NULL\n");
+        return 0;
+    }
+
+    // We need to access the underlying database to iterate
+    // pcoinsTip is a CCoinsViewCache, we need to get to the CCoinsViewDB
+    CCoinsView *base = pcoinsTip;
+
+    // Navigate through the view stack to find the database view
+    while (base) {
+        CCoinsViewBacked *viewBacked = dynamic_cast<CCoinsViewBacked*>(base);
+        if (!viewBacked) break;
+
+        CCoinsViewDB *viewDB = dynamic_cast<CCoinsViewDB*>(viewBacked);
+        if (viewDB) {
+            LogPrintf("FastUTXOScan: Found CCoinsViewDB, creating iterator...\n");
+
+            // Access the database wrapper using the public accessor
+            CDBWrapper& dbWrapper = viewDB->GetDB();
+            boost::scoped_ptr<CDBIterator> pcursor(dbWrapper.NewIterator());
+
+            pcursor->Seek(DB_COINS);
+
+            uint64_t nScanned = 0;
+            uint64_t nRelevant = 0;
+
+            while (pcursor->Valid()) {
+                boost::this_thread::interruption_point();
+
+                std::pair<char, uint256> key;
+                CCoins coins;
+
+                if (pcursor->GetKey(key) && key.first == DB_COINS) {
+                    if (pcursor->GetValue(coins)) {
+                        nScanned++;
+
+                        if (nScanned % 100000 == 0) {
+                            LogPrintf("FastUTXOScan: Scanned %lu transactions, found %lu relevant...\n",
+                                     nScanned, nRelevant);
+                        }
+
+                        // Check if any output belongs to our wallet
+                        bool fRelevant = false;
+                        for (unsigned int i = 0; i < coins.vout.size(); i++) {
+                            const CTxOut &out = coins.vout[i];
+                            if (!out.IsNull() && IsMine(out)) {
+                                fRelevant = true;
+                                break;
+                            }
+                        }
+
+                        if (fRelevant) {
+                            nRelevant++;
+
+                            // Create a transaction from the coins
+                            CMutableTransaction tx;
+                            tx.vin.clear();
+                            tx.vout = coins.vout;
+                            tx.nVersion = coins.nVersion;
+
+                            CTransaction wtx(tx);
+
+                            // Add to wallet if not already there
+                            uint256 hash = key.second;
+                            if (mapWallet.count(hash) == 0) {
+                                LogPrintf("FastUTXOScan: Found new UTXO transaction: %s\n", hash.ToString());
+
+                                // Add the transaction to the wallet
+                                CWalletTx walletTx(this, wtx);
+                                walletTx.nTimeReceived = GetTime();
+                                walletTx.hashBlock = pcoinsTip->GetBestBlock();
+
+                                AddToWallet(walletTx, false, NULL);
+                                ret++;
+                            }
+                        }
+                    }
+                } else {
+                    break;  // No more coins in database
+                }
+
+                pcursor->Next();
+            }
+
+            LogPrintf("FastUTXOScan: Completed! Scanned %lu transactions, found %lu relevant, %d new\n",
+                     nScanned, nRelevant, ret);
+            return ret;
+        }
+
+        base = viewBacked->GetBase();
+    }
+
+    LogPrintf("FastUTXOScan: ERROR - Could not find CCoinsViewDB in view stack\n");
+    return 0;
 }
 
 void CWallet::ReacceptWalletTransactions()

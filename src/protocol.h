@@ -75,6 +75,10 @@ enum {
     // Zcash nodes used to support this by default, without advertising this bit,
     // but no longer do as of protocol version 170004 (= NO_BLOOM_VERSION)
     NODE_BLOOM = (1 << 2),
+    // NODE_SNAPSHOT means the node is capable of serving blockchain snapshot chunks
+    // for fast initial block download. Nodes advertise this if they have snapshot
+    // chunks available and can accept incoming connections to serve them.
+    NODE_SNAPSHOT = (1 << 10),
 
     // Bits 24-31 are reserved for temporary experiments. Just pick a bit that
     // isn't getting used, or one not being used much, and notify the

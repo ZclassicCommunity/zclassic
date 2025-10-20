@@ -21,6 +21,7 @@
 #include "metrics.h"
 #include "net.h"
 #include "pow.h"
+#include "snapshot.h"
 #include "txdb.h"
 #include "txmempool.h"
 #include "ui_interface.h"
@@ -66,8 +67,14 @@ int nScriptCheckThreads = 0;
 bool fExperimentalMode = false;
 bool fImporting = false;
 bool fReindex = false;
-bool fNoFastSync = false;
+
+// Snapshot download state
+bool fSnapshotDownloadActive = false;
+bool fSnapshotDownloadComplete = false;
+CSnapshotDownloadState* pdownloadstate = NULL;
+CSnapshotDownloadCoordinator* psnapshotcoordinator = NULL;
 bool fTxIndex = false;
+bool fAddressIndex = false;
 bool fHavePruned = false;
 bool fPruneMode = false;
 bool fIsBareMultisigStd = true;
@@ -2581,6 +2588,10 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     vPos.reserve(block.vtx.size());
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
 
+    // Address index vectors
+    std::vector<std::pair<CAddressIndexKey, CAmount>> addressIndex;
+    std::vector<std::pair<CAddressUnspentKey, CAddressUnspentValue>> addressUnspentIndex;
+
     // Construct the incremental merkle tree at the current
     // block position,
     auto old_sprout_tree_root = view.GetBestAnchor(SPROUT);
@@ -2670,6 +2681,98 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
         vPos.push_back(std::make_pair(tx.GetHash(), pos));
         pos.nTxOffset += ::GetSerializeSize(tx, SER_DISK, CLIENT_VERSION);
+
+        // Build address index
+        if (fAddressIndex) {
+            // Index transaction outputs
+            for (unsigned int k = 0; k < tx.vout.size(); k++) {
+                const CTxOut &out = tx.vout[k];
+
+                if (out.scriptPubKey.size() > 0) {
+                    txnouttype txType;
+                    std::vector<CTxDestination> addresses;
+                    int nRequired;
+
+                    if (ExtractDestinations(out.scriptPubKey, txType, addresses, nRequired)) {
+                        for (auto const& addr : addresses) {
+                            // Skip CNoDestination
+                            if (addr.which() == 0) continue;
+
+                            uint160 addrHash;
+                            int addressType = 0;
+
+                            if (addr.which() == 1) { // CKeyID (P2PKH)
+                                addrHash = uint160(boost::get<CKeyID>(addr));
+                                addressType = 1;
+                            } else if (addr.which() == 2) { // CScriptID (P2SH)
+                                addrHash = uint160(boost::get<CScriptID>(addr));
+                                addressType = 2;
+                            }
+
+                            if (addressType > 0) {
+                                // Add to address index
+                                addressIndex.push_back(std::make_pair(
+                                    CAddressIndexKey(addrHash, addressType, tx.GetHash(), k, false),
+                                    out.nValue
+                                ));
+
+                                // Add to unspent index
+                                addressUnspentIndex.push_back(std::make_pair(
+                                    CAddressUnspentKey(addrHash, addressType, tx.GetHash(), k),
+                                    CAddressUnspentValue(out.nValue, out.scriptPubKey)
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Index transaction inputs (mark outputs as spent)
+            if (!tx.IsCoinBase()) {
+                for (unsigned int k = 0; k < tx.vin.size(); k++) {
+                    const CTxIn &input = tx.vin[k];
+                    const CTxOut &prevout = view.GetOutputFor(input);
+
+                    if (prevout.scriptPubKey.size() > 0) {
+                        txnouttype txType;
+                        std::vector<CTxDestination> addresses;
+                        int nRequired;
+
+                        if (ExtractDestinations(prevout.scriptPubKey, txType, addresses, nRequired)) {
+                            for (auto const& addr : addresses) {
+                                // Skip CNoDestination
+                                if (addr.which() == 0) continue;
+
+                                uint160 addrHash;
+                                int addressType = 0;
+
+                                if (addr.which() == 1) { // CKeyID (P2PKH)
+                                    addrHash = uint160(boost::get<CKeyID>(addr));
+                                    addressType = 1;
+                                } else if (addr.which() == 2) { // CScriptID (P2SH)
+                                    addrHash = uint160(boost::get<CScriptID>(addr));
+                                    addressType = 2;
+                                }
+
+                                if (addressType > 0) {
+                                    // Add spending record to address index
+                                    addressIndex.push_back(std::make_pair(
+                                        CAddressIndexKey(addrHash, addressType, tx.GetHash(), k, true),
+                                        prevout.nValue * -1
+                                    ));
+
+                                    // Remove from unspent index
+                                    addressUnspentIndex.push_back(std::make_pair(
+                                        CAddressUnspentKey(addrHash, addressType, input.prevout.hash, input.prevout.n),
+                                        CAddressUnspentValue()
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     view.PushAnchor(sprout_tree);
@@ -2740,6 +2843,14 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     if (fTxIndex)
         if (!pblocktree->WriteTxIndex(vPos))
             return AbortNode(state, "Failed to write transaction index");
+
+    // Write address index to database
+    if (fAddressIndex) {
+        if (!pblocktree->WriteAddressIndex(addressIndex))
+            return AbortNode(state, "Failed to write address index");
+        if (!pblocktree->UpdateAddressUnspentIndex(addressUnspentIndex))
+            return AbortNode(state, "Failed to write address unspent index");
+    }
 
     // add this block to the view's block chain
     view.SetBestBlock(pindex->GetBlockHash());
@@ -4260,6 +4371,13 @@ static bool IsSuperMajority(int minVersion, const CBlockIndex* pstart, unsigned 
 
 bool ProcessNewBlock(CValidationState &state, CNode* pfrom, CBlock* pblock, bool fForceProcessing, CDiskBlockPos *dbp)
 {
+    // Skip block processing during snapshot download
+    // We must wait for snapshot to complete before processing blocks from peers
+    if (fSnapshotDownloadActive) {
+        LogPrint("snapshot", "Deferring block processing - snapshot download active\n");
+        return true;  // Return success to avoid peer penalties
+    }
+
     // Preliminary checks
     auto verifier = libzcash::ProofVerifier::Disabled();
     bool checked = CheckBlock(*pblock, state, verifier);
@@ -4962,6 +5080,11 @@ bool InitBlockIndex() {
     // Use the provided setting for -txindex in the new database
     fTxIndex = GetBoolArg("-txindex", false);
     pblocktree->WriteFlag("txindex", fTxIndex);
+
+    // Use the provided setting for -addressindex in the new database
+    fAddressIndex = GetBoolArg("-addressindex", false);
+    pblocktree->WriteFlag("addressindex", fAddressIndex);
+
     LogPrintf("Initializing databases...\n");
 
     // Only add the genesis block if not reindexing (in which case we reuse the one already on disk)
@@ -6442,6 +6565,159 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
         // message would be undesirable as we transmit it ourselves.
     }
 
+    else if (strCommand == "getsnapchunk")
+    {
+        LogPrintf("=== HANDLER CALLED: getsnapchunk from peer %d ===\n", pfrom->id);
+
+        // Peer is requesting a snapshot chunk from us
+        CGetSnapshotChunk req;
+        vRecv >> req;
+
+        LogPrintf("=== PARSED REQUEST: chunk %d from peer %d ===\n", req.nChunkNumber, pfrom->id);
+        LogPrint("snapshot", "Received chunk request %d from peer=%d\n", req.nChunkNumber, pfrom->id);
+
+        // Check rate limiter
+        std::string strError;
+        if (!psnapshotratelimiter ||
+            !psnapshotratelimiter->AllowRequest(pfrom->addr, req.nChunkNumber, strError)) {
+            LogPrint("snapshot", "Rejected chunk %d request from %s: %s\n",
+                     req.nChunkNumber, pfrom->addr.ToString(), strError);
+            return true;
+        }
+
+        // Load chunk from disk
+        std::vector<unsigned char> vData;
+        if (psnapshotstore && psnapshotstore->LoadChunk(req.nChunkNumber, vData)) {
+            // Send chunk to peer
+            CSnapshotChunk response(req.nChunkNumber, vData);
+            pfrom->PushMessage("snapchunk", response);
+
+            // Record for rate limiter
+            psnapshotratelimiter->RecordServed(pfrom->addr, req.nChunkNumber, vData.size());
+            psnapshotratelimiter->CompleteTransfer();
+
+            LogPrint("snapshot", "Served chunk %d (%d bytes) to %s\n",
+                     req.nChunkNumber, vData.size(), pfrom->addr.ToString());
+        } else {
+            LogPrint("snapshot", "Failed to load chunk %d for %s\n",
+                     req.nChunkNumber, pfrom->addr.ToString());
+        }
+    }
+
+    else if (strCommand == "snapchunk")
+    {
+        LogPrintf("=== HANDLER CALLED: snapchunk from peer %d ===\n", pfrom->id);
+
+        // We received a snapshot chunk from a peer
+        CSnapshotChunk chunk;
+        vRecv >> chunk;
+
+        LogPrintf("=== PARSED RESPONSE: chunk %d (%d bytes) from peer %d ===\n",
+                 chunk.nChunkNumber, chunk.vData.size(), pfrom->id);
+        LogPrint("snapshot", "Received chunk %d from peer=%d\n", chunk.nChunkNumber, pfrom->id);
+
+        // Verify and save chunk
+        if (psnapshotstore && psnapshotstore->VerifyChunk(chunk.nChunkNumber, chunk.vData)) {
+            if (psnapshotstore->SaveChunk(chunk.nChunkNumber, chunk.vData)) {
+                // Update download state FIRST
+                if (pdownloadstate) {
+                    pdownloadstate->MarkChunkReceived(chunk.nChunkNumber);
+                }
+
+                // Record success with coordinator
+                if (psnapshotcoordinator) {
+                    psnapshotcoordinator->RecordSuccess(pfrom->GetId(), chunk.nChunkNumber);
+                }
+
+                uint32_t received = pdownloadstate ? pdownloadstate->GetReceivedCount() : 0;
+                uint32_t total = psnapshotstore->GetManifest().GetChunkCount();
+
+                LogPrintf("Snapshot: Received chunk %d/%d (%.1f%%)\n",
+                         received, total, received * 100.0 / total);
+
+                // Check if download is complete
+                if (pdownloadstate && pdownloadstate->IsComplete()) {
+                    LogPrintf("Snapshot download complete!\n");
+                    LogPrintf("All %d snapshot chunks downloaded - extracting snapshot...\n", total);
+
+                    fSnapshotDownloadComplete = true;
+
+                    // Extract snapshot automatically
+                    if (psnapshotstore->ExtractSnapshot(GetDataDir())) {
+                        LogPrintf("*** SNAPSHOT EXTRACTION COMPLETE ***\n");
+                        LogPrintf("*** Blockchain extracted successfully to height %d\n", SNAPSHOT_CURRENT_HEIGHT);
+                        LogPrintf("*** Reloading blockchain database without restart...\n");
+
+                        // Disable snapshot download mode FIRST
+                        fSnapshotDownloadActive = false;
+
+                        // Clean up download state
+                        delete psnapshotcoordinator;
+                        delete pdownloadstate;
+                        psnapshotcoordinator = nullptr;
+                        pdownloadstate = nullptr;
+
+                        // Flush current database state to disk
+                        LogPrintf("*** Flushing database state...\n");
+                        CValidationState flushState;
+                        FlushStateToDisk(flushState, FLUSH_STATE_ALWAYS);
+
+                        // Simple approach: Clear memory and let databases reload from extracted files
+                        // The database objects will automatically read from the new files
+                        LogPrintf("*** Preparing to reload blockchain state...\n");
+                        {
+                            LOCK(cs_main);
+
+                            // Clear in-memory blockchain state
+                            setBlockIndexCandidates.clear();
+                            chainActive.SetTip(NULL);
+                            pindexFinalized = NULL;
+                            pindexBestInvalid = NULL;
+                            pindexBestParked = nullptr;
+                            pindexBestHeader = NULL;
+
+                            // Clear block index map - we'll reload from extracted database
+                            BOOST_FOREACH(BlockMap::value_type& entry, mapBlockIndex) {
+                                delete entry.second;
+                            }
+                            mapBlockIndex.clear();
+                        }
+
+                        // Reload block index from extracted database
+                        LogPrintf("*** Loading block index from extracted database...\n");
+                        if (!LoadBlockIndex()) {
+                            LogPrintf("ERROR: Failed to load extracted block index!\n");
+                            StartShutdown();
+                            return true;
+                        }
+
+                        // Activate the best chain from the loaded blockchain
+                        LogPrintf("*** Activating best chain...\n");
+                        CValidationState activateState;
+                        if (!ActivateBestChain(activateState)) {
+                            LogPrintf("ERROR: Failed to activate best chain: %s\n", activateState.GetRejectReason());
+                            StartShutdown();
+                            return true;
+                        }
+
+                        LogPrintf("*** BLOCKCHAIN RELOAD COMPLETE ***\n");
+                        LogPrintf("*** Node is now synced to height %d (snapshot height: %d)\n",
+                                 chainActive.Height(), SNAPSHOT_CURRENT_HEIGHT);
+                        LogPrintf("*** Continuing with normal block synchronization to latest tip...\n");
+                    } else {
+                        LogPrintf("ERROR: Snapshot extraction failed!\n");
+                    }
+                }
+            }
+        } else {
+            LogPrintf("Snapshot: Chunk %d verification FAILED from peer %d\n",
+                     chunk.nChunkNumber, pfrom->GetId());
+            if (psnapshotcoordinator) {
+                psnapshotcoordinator->RecordFailure(pfrom->GetId(), chunk.nChunkNumber);
+            }
+        }
+    }
+
     else {
         // Ignore unknown commands for extensibility
         LogPrint("net", "Unknown command \"%s\" from peer=%d\n", SanitizeString(strCommand), pfrom->id);
@@ -6829,6 +7105,70 @@ bool SendMessages(CNode* pto, bool fSendTrickle)
             pto->PushMessage("getdata", vGetData);
 
     }
+
+    //
+    // Snapshot download coordinator
+    //
+    static int64_t nLastSnapshotCheck = 0;
+    static int64_t nDebugCounter = 0;
+    if (++nDebugCounter % 10 == 0) {  // Log every 10th call to avoid spam
+        LogPrintf("COORDINATOR CHECK: active=%d, complete=%d, time_since_last=%d, will_enter=%d\n",
+                 fSnapshotDownloadActive, fSnapshotDownloadComplete,
+                 GetTime() - nLastSnapshotCheck,
+                 (fSnapshotDownloadActive && !fSnapshotDownloadComplete && GetTime() - nLastSnapshotCheck > 5) ? 1 : 0);
+    }
+    if (fSnapshotDownloadActive && !fSnapshotDownloadComplete &&
+        GetTime() - nLastSnapshotCheck > 5) {
+
+        nLastSnapshotCheck = GetTime();
+
+        // Check for timed-out requests and mark them for retry
+        if (psnapshotcoordinator) {
+            auto timedOut = psnapshotcoordinator->GetTimedOutRequests();
+            for (auto& pair : timedOut) {
+                LogPrint("snapshot", "Chunk request timed out from peer %d, will retry\n", pair.first);
+            }
+        }
+
+        // Get peers with NODE_SNAPSHOT capability
+        std::vector<NodeId> vSnapshotPeers;
+        {
+            LOCK(cs_vNodes);
+            for (CNode* pnode : vNodes) {
+                LogPrintf("DEBUG: Checking peer %d, services=%d, NODE_SNAPSHOT=%d, has_bit=%d\n",
+                         pnode->GetId(), pnode->nServices, NODE_SNAPSHOT,
+                         (pnode->nServices & NODE_SNAPSHOT) ? 1 : 0);
+                if (pnode->nServices & NODE_SNAPSHOT) {
+                    vSnapshotPeers.push_back(pnode->GetId());
+                }
+            }
+        }
+
+        LogPrintf("DEBUG: Found %d peers with NODE_SNAPSHOT, coordinator=%p, state=%p\n",
+                 vSnapshotPeers.size(), psnapshotcoordinator, pdownloadstate);
+
+        // Request next chunk if we have available peers and download state
+        if (!vSnapshotPeers.empty() && psnapshotcoordinator && pdownloadstate) {
+            uint32_t nChunk;
+            NodeId peer = psnapshotcoordinator->SelectPeerForNextChunk(vSnapshotPeers, nChunk);
+
+            if (peer != -1) {
+                // Find node and send request
+                LOCK(cs_vNodes);
+                for (CNode* pnode : vNodes) {
+                    if (pnode->GetId() == peer) {
+                        CGetSnapshotChunk req(nChunk);
+                        pnode->PushMessage("getsnapchunk", req);
+
+                        psnapshotcoordinator->RecordRequest(peer, nChunk);
+                        LogPrint("snapshot", "Requested chunk %d from peer %d\n", nChunk, peer);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     return true;
 }
 

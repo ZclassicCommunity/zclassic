@@ -192,6 +192,23 @@ public:
                             //   total number of tx / (checkpoint block height / (24 * 24))
         };
 
+        // Snapshot checkpoints for fast sync verification
+        // Adapted from Bitcoin ABC (MIT License)
+        // UTXO hash calculated using gettxoutsetinfo RPC on trusted fully-synced node
+        // See CALCULATE-CHECKPOINT.md for complete instructions
+        //
+        // NOTE: UTXO hash and nChainTx are currently placeholders (all zeros).
+        //       The system works without them but skips UTXO verification.
+        //       For production, calculate real values using gettxoutsetinfo at block 2879438.
+        vSnapshotCheckpoints = {
+            CSnapshotCheckpoint(
+                2879438,  // Snapshot height
+                uint256S("0x000007e8fccb9e4831c7d7376a283b016ead6166491f951f4f083dbe366992b2"),  // Block hash (verified correct)
+                uint256S("0x0000000000000000000000000000000000000000000000000000000000000000"),  // UTXO hash - PLACEHOLDER! Calculate for production
+                0  // nChainTx - PLACEHOLDER! Calculate for production
+            )
+        };
+
         // Founders reward script expects a vector of 2-of-3 multisig addresses
         vFoundersRewardAddress = {
             "t3Vz22vK5z2LcKEdg16Yv4FFneEL1zg9ojd", /* main-index: 0*/
