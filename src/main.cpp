@@ -73,8 +73,8 @@ bool fSnapshotDownloadActive = false;
 bool fSnapshotDownloadComplete = false;
 CSnapshotDownloadState* pdownloadstate = NULL;
 CSnapshotDownloadCoordinator* psnapshotcoordinator = NULL;
-bool fNoFastSync = false;
 bool fTxIndex = false;
+bool fAddressIndex = false;
 bool fHavePruned = false;
 bool fPruneMode = false;
 bool fIsBareMultisigStd = true;
@@ -2588,6 +2588,10 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     vPos.reserve(block.vtx.size());
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
 
+    // Address index vectors
+    std::vector<std::pair<CAddressIndexKey, CAmount>> addressIndex;
+    std::vector<std::pair<CAddressUnspentKey, CAddressUnspentValue>> addressUnspentIndex;
+
     // Construct the incremental merkle tree at the current
     // block position,
     auto old_sprout_tree_root = view.GetBestAnchor(SPROUT);
@@ -2677,6 +2681,98 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
         vPos.push_back(std::make_pair(tx.GetHash(), pos));
         pos.nTxOffset += ::GetSerializeSize(tx, SER_DISK, CLIENT_VERSION);
+
+        // Build address index
+        if (fAddressIndex) {
+            // Index transaction outputs
+            for (unsigned int k = 0; k < tx.vout.size(); k++) {
+                const CTxOut &out = tx.vout[k];
+
+                if (out.scriptPubKey.size() > 0) {
+                    txnouttype txType;
+                    std::vector<CTxDestination> addresses;
+                    int nRequired;
+
+                    if (ExtractDestinations(out.scriptPubKey, txType, addresses, nRequired)) {
+                        for (auto const& addr : addresses) {
+                            // Skip CNoDestination
+                            if (addr.which() == 0) continue;
+
+                            uint160 addrHash;
+                            int addressType = 0;
+
+                            if (addr.which() == 1) { // CKeyID (P2PKH)
+                                addrHash = uint160(boost::get<CKeyID>(addr));
+                                addressType = 1;
+                            } else if (addr.which() == 2) { // CScriptID (P2SH)
+                                addrHash = uint160(boost::get<CScriptID>(addr));
+                                addressType = 2;
+                            }
+
+                            if (addressType > 0) {
+                                // Add to address index
+                                addressIndex.push_back(std::make_pair(
+                                    CAddressIndexKey(addrHash, addressType, tx.GetHash(), k, false),
+                                    out.nValue
+                                ));
+
+                                // Add to unspent index
+                                addressUnspentIndex.push_back(std::make_pair(
+                                    CAddressUnspentKey(addrHash, addressType, tx.GetHash(), k),
+                                    CAddressUnspentValue(out.nValue, out.scriptPubKey)
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Index transaction inputs (mark outputs as spent)
+            if (!tx.IsCoinBase()) {
+                for (unsigned int k = 0; k < tx.vin.size(); k++) {
+                    const CTxIn &input = tx.vin[k];
+                    const CTxOut &prevout = view.GetOutputFor(input);
+
+                    if (prevout.scriptPubKey.size() > 0) {
+                        txnouttype txType;
+                        std::vector<CTxDestination> addresses;
+                        int nRequired;
+
+                        if (ExtractDestinations(prevout.scriptPubKey, txType, addresses, nRequired)) {
+                            for (auto const& addr : addresses) {
+                                // Skip CNoDestination
+                                if (addr.which() == 0) continue;
+
+                                uint160 addrHash;
+                                int addressType = 0;
+
+                                if (addr.which() == 1) { // CKeyID (P2PKH)
+                                    addrHash = uint160(boost::get<CKeyID>(addr));
+                                    addressType = 1;
+                                } else if (addr.which() == 2) { // CScriptID (P2SH)
+                                    addrHash = uint160(boost::get<CScriptID>(addr));
+                                    addressType = 2;
+                                }
+
+                                if (addressType > 0) {
+                                    // Add spending record to address index
+                                    addressIndex.push_back(std::make_pair(
+                                        CAddressIndexKey(addrHash, addressType, tx.GetHash(), k, true),
+                                        prevout.nValue * -1
+                                    ));
+
+                                    // Remove from unspent index
+                                    addressUnspentIndex.push_back(std::make_pair(
+                                        CAddressUnspentKey(addrHash, addressType, input.prevout.hash, input.prevout.n),
+                                        CAddressUnspentValue()
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     view.PushAnchor(sprout_tree);
@@ -2747,6 +2843,14 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     if (fTxIndex)
         if (!pblocktree->WriteTxIndex(vPos))
             return AbortNode(state, "Failed to write transaction index");
+
+    // Write address index to database
+    if (fAddressIndex) {
+        if (!pblocktree->WriteAddressIndex(addressIndex))
+            return AbortNode(state, "Failed to write address index");
+        if (!pblocktree->UpdateAddressUnspentIndex(addressUnspentIndex))
+            return AbortNode(state, "Failed to write address unspent index");
+    }
 
     // add this block to the view's block chain
     view.SetBestBlock(pindex->GetBlockHash());
@@ -4976,6 +5080,11 @@ bool InitBlockIndex() {
     // Use the provided setting for -txindex in the new database
     fTxIndex = GetBoolArg("-txindex", false);
     pblocktree->WriteFlag("txindex", fTxIndex);
+
+    // Use the provided setting for -addressindex in the new database
+    fAddressIndex = GetBoolArg("-addressindex", false);
+    pblocktree->WriteFlag("addressindex", fAddressIndex);
+
     LogPrintf("Initializing databases...\n");
 
     // Only add the genesis block if not reindexing (in which case we reuse the one already on disk)
@@ -6553,14 +6662,31 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
                         CValidationState flushState;
                         FlushStateToDisk(flushState, FLUSH_STATE_ALWAYS);
 
-                        // Unload current (empty) blockchain from memory
-                        LogPrintf("*** Unloading current blockchain state...\n");
-                        UnloadBlockIndex();
+                        // Simple approach: Clear memory and let databases reload from extracted files
+                        // The database objects will automatically read from the new files
+                        LogPrintf("*** Preparing to reload blockchain state...\n");
+                        {
+                            LOCK(cs_main);
 
-                        // Reload blockchain from extracted snapshot files
-                        LogPrintf("*** Loading extracted blockchain from disk...\n");
+                            // Clear in-memory blockchain state
+                            setBlockIndexCandidates.clear();
+                            chainActive.SetTip(NULL);
+                            pindexFinalized = NULL;
+                            pindexBestInvalid = NULL;
+                            pindexBestParked = nullptr;
+                            pindexBestHeader = NULL;
+
+                            // Clear block index map - we'll reload from extracted database
+                            BOOST_FOREACH(BlockMap::value_type& entry, mapBlockIndex) {
+                                delete entry.second;
+                            }
+                            mapBlockIndex.clear();
+                        }
+
+                        // Reload block index from extracted database
+                        LogPrintf("*** Loading block index from extracted database...\n");
                         if (!LoadBlockIndex()) {
-                            LogPrintf("ERROR: Failed to load extracted blockchain!\n");
+                            LogPrintf("ERROR: Failed to load extracted block index!\n");
                             StartShutdown();
                             return true;
                         }

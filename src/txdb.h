@@ -8,6 +8,7 @@
 
 #include "coins.h"
 #include "dbwrapper.h"
+#include "amount.h"
 
 #include <map>
 #include <string>
@@ -18,6 +19,131 @@ class CBlockFileInfo;
 class CBlockIndex;
 struct CDiskTxPos;
 class uint256;
+
+// Address index structures
+struct CAddressIndexKey {
+    uint160 hashBytes;
+    unsigned int type;
+    uint256 txhash;
+    size_t index;
+    bool spending;
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(hashBytes);
+        READWRITE(type);
+        READWRITE(txhash);
+        READWRITE(index);
+        READWRITE(spending);
+    }
+
+    CAddressIndexKey(uint160 addressHash, unsigned int addressType, uint256 txid, size_t outputIndex, bool isSpending) {
+        hashBytes = addressHash;
+        type = addressType;
+        txhash = txid;
+        index = outputIndex;
+        spending = isSpending;
+    }
+
+    CAddressIndexKey() {
+        SetNull();
+    }
+
+    void SetNull() {
+        hashBytes.SetNull();
+        type = 0;
+        txhash.SetNull();
+        index = 0;
+        spending = false;
+    }
+};
+
+struct CAddressIndexIteratorKey {
+    uint160 hashBytes;
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(hashBytes);
+    }
+
+    CAddressIndexIteratorKey(uint160 addressHash) {
+        hashBytes = addressHash;
+    }
+
+    CAddressIndexIteratorKey() {
+        SetNull();
+    }
+
+    void SetNull() {
+        hashBytes.SetNull();
+    }
+};
+
+struct CAddressUnspentKey {
+    uint160 hashBytes;
+    unsigned int type;
+    uint256 txhash;
+    size_t index;
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(hashBytes);
+        READWRITE(type);
+        READWRITE(txhash);
+        READWRITE(index);
+    }
+
+    CAddressUnspentKey(uint160 addressHash, unsigned int addressType, uint256 txid, size_t outputIndex) {
+        hashBytes = addressHash;
+        type = addressType;
+        txhash = txid;
+        index = outputIndex;
+    }
+
+    CAddressUnspentKey() {
+        SetNull();
+    }
+
+    void SetNull() {
+        hashBytes.SetNull();
+        type = 0;
+        txhash.SetNull();
+        index = 0;
+    }
+};
+
+struct CAddressUnspentValue {
+    CAmount satoshis;
+    CScript script;
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(satoshis);
+        READWRITE(script);
+    }
+
+    CAddressUnspentValue(CAmount sats, CScript scriptPubKey) {
+        satoshis = sats;
+        script = scriptPubKey;
+    }
+
+    CAddressUnspentValue() {
+        SetNull();
+    }
+
+    void SetNull() {
+        satoshis = 0;
+        script.clear();
+    }
+};
 
 //! -dbcache default (MiB)
 static const int64_t nDefaultDbCache = 450;
@@ -34,6 +160,9 @@ protected:
     CCoinsViewDB(std::string dbName, size_t nCacheSize, bool fMemory = false, bool fWipe = false);
 public:
     CCoinsViewDB(size_t nCacheSize, bool fMemory = false, bool fWipe = false);
+
+    // Accessor for database (needed for UTXO scanning)
+    CDBWrapper& GetDB() { return db; }
 
     bool GetSproutAnchorAt(const uint256 &rt, SproutMerkleTree &tree) const;
     bool GetSaplingAnchorAt(const uint256 &rt, SaplingMerkleTree &tree) const;
@@ -73,6 +202,14 @@ public:
     bool WriteFlag(const std::string &name, bool fValue);
     bool ReadFlag(const std::string &name, bool &fValue);
     bool LoadBlockIndexGuts();
+    bool WriteAddressIndex(const std::vector<std::pair<CAddressIndexKey, CAmount> > &vect);
+    bool EraseAddressIndex(const std::vector<std::pair<CAddressIndexKey, CAmount> > &vect);
+    bool ReadAddressIndex(uint160 addressHash, int type,
+                          std::vector<std::pair<CAddressIndexKey, CAmount> > &addressIndex,
+                          int start = 0, int end = 0);
+    bool UpdateAddressUnspentIndex(const std::vector<std::pair<CAddressUnspentKey, CAddressUnspentValue> > &vect);
+    bool ReadAddressUnspentIndex(uint160 addressHash, int type,
+                                 std::vector<std::pair<CAddressUnspentKey, CAddressUnspentValue> > &unspentOutputs);
 };
 
 #endif // BITCOIN_TXDB_H
