@@ -7,6 +7,11 @@ $(package)_dependencies=
 $(package)_config_opts=--enable-cxx --disable-shared
 $(package)_config_opts_arm_darwin=--disable-assembly
 
+define $(package)_preprocess_cmds
+  sed -i.orig 's/void g(){}/void g(int a, void* b, unsigned long long c, void* d, void* e, int f){}/g' configure && \
+  sed -i 's/void h(){}/void h(void){}/g' configure
+endef
+
 define $(package)_config_cmds
   $($(package)_autoconf) --host=$(host) --build=$(build)
 endef
