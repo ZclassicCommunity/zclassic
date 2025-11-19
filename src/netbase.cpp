@@ -1,5 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2025 The Zclassic developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -35,6 +36,36 @@
 #define MSG_NOSIGNAL 0
 #endif
 
+#include "crypto/sha3.h"
+
+// Onion v3 address constants
+static const size_t ADDR_TORV3_SIZE = 32;
+
+// Tor v3 address structure according to tor-spec
+namespace torv3 {
+    static const size_t CHECKSUM_LEN = 2;
+    static const unsigned char VERSION[] = {3};
+    static const size_t TOTAL_LEN = ADDR_TORV3_SIZE + CHECKSUM_LEN + sizeof(VERSION);
+
+    // Compute checksum for Tor v3 address
+    static void Checksum(const unsigned char* addr_pubkey, unsigned char (&checksum)[CHECKSUM_LEN])
+    {
+        // TORv3 CHECKSUM = H(".onion checksum" | PUBKEY | VERSION)[:2]
+        static const unsigned char prefix[] = ".onion checksum";
+        static const size_t prefix_len = 15;
+
+        SHA3_256 hasher;
+        hasher.Write(prefix, prefix_len);
+        hasher.Write(addr_pubkey, ADDR_TORV3_SIZE);
+        hasher.Write(VERSION, sizeof(VERSION));
+
+        unsigned char checksum_full[SHA3_256::OUTPUT_SIZE];
+        hasher.Finalize(checksum_full);
+
+        memcpy(checksum, checksum_full, CHECKSUM_LEN);
+    }
+}
+
 // Settings
 static proxyType proxyInfo[NET_MAX];
 static proxyType nameProxy;
@@ -51,7 +82,7 @@ enum Network ParseNetwork(std::string net) {
     boost::to_lower(net);
     if (net == "ipv4") return NET_IPV4;
     if (net == "ipv6") return NET_IPV6;
-    if (net == "tor" || net == "onion")  return NET_TOR;
+    if (net == "tor" || net == "onion")  return NET_ONION;
     return NET_UNROUTABLE;
 }
 
@@ -60,7 +91,7 @@ std::string GetNetworkName(enum Network net) {
     {
     case NET_IPV4: return "ipv4";
     case NET_IPV6: return "ipv6";
-    case NET_TOR: return "onion";
+    case NET_ONION: return "onion";
     default: return "";
     }
 }
@@ -640,6 +671,7 @@ void CNetAddr::Init()
 void CNetAddr::SetIP(const CNetAddr& ipIn)
 {
     memcpy(ip, ipIn.ip, sizeof(ip));
+    torv3_addr = ipIn.torv3_addr;
 }
 
 void CNetAddr::SetRaw(Network network, const uint8_t *ip_in)
@@ -662,14 +694,47 @@ static const unsigned char pchOnionCat[] = {0xFD,0x87,0xD8,0x7E,0xEB,0x43};
 
 bool CNetAddr::SetSpecial(const std::string &strName)
 {
-    if (strName.size()>6 && strName.substr(strName.size() - 6, 6) == ".onion") {
+    if (strName.size() > 6 && strName.substr(strName.size() - 6, 6) == ".onion") {
         std::vector<unsigned char> vchAddr = DecodeBase32(strName.substr(0, strName.size() - 6).c_str());
-        if (vchAddr.size() != 16-sizeof(pchOnionCat))
-            return false;
-        memcpy(ip, pchOnionCat, sizeof(pchOnionCat));
-        for (unsigned int i=0; i<16-sizeof(pchOnionCat); i++)
-            ip[i + sizeof(pchOnionCat)] = vchAddr[i];
-        return true;
+        
+        // Check for onion v3 (56 character base32 = 35 bytes when decoded)
+        if (vchAddr.size() == torv3::TOTAL_LEN) {
+            // Extract components
+            const unsigned char* input_pubkey = vchAddr.data();
+            const unsigned char* input_checksum = vchAddr.data() + ADDR_TORV3_SIZE;
+            const unsigned char* input_version = vchAddr.data() + ADDR_TORV3_SIZE + torv3::CHECKSUM_LEN;
+
+            // Verify version byte
+            if (memcmp(input_version, torv3::VERSION, sizeof(torv3::VERSION)) != 0) {
+                return false;
+            }
+
+            // Verify checksum
+            unsigned char calculated_checksum[torv3::CHECKSUM_LEN];
+            torv3::Checksum(input_pubkey, calculated_checksum);
+
+            if (memcmp(input_checksum, calculated_checksum, torv3::CHECKSUM_LEN) != 0) {
+                return false;
+            }
+
+            // Valid v3 address - store it properly
+            memset(ip, 0, sizeof(ip)); // Zero out to mark as v3
+            
+            // Store full 32-byte address
+            torv3_addr.clear();
+            torv3_addr.insert(torv3_addr.end(), input_pubkey, input_pubkey + ADDR_TORV3_SIZE);
+            
+            return true;
+        }
+        // Old v2 format
+        else if (vchAddr.size() == 16 - sizeof(pchOnionCat)) {
+            torv3_addr.clear(); // Clear any v3 data
+            memcpy(ip, pchOnionCat, sizeof(pchOnionCat));
+            for (unsigned int i = 0; i < 16 - sizeof(pchOnionCat); i++)
+                ip[i + sizeof(pchOnionCat)] = vchAddr[i];
+            return true;
+        }
+        return false;
     }
     return false;
 }
@@ -795,7 +860,17 @@ bool CNetAddr::IsRFC4843() const
 
 bool CNetAddr::IsTor() const
 {
-    return (memcmp(ip, pchOnionCat, sizeof(pchOnionCat)) == 0);
+    // First check if we have v3 data stored
+    if (!torv3_addr.empty() && torv3_addr.size() == ADDR_TORV3_SIZE) {
+        return true;
+    }
+    
+    // Check for v2 onion (OnionCat prefix: FD87:D87E:EB43)
+    if (memcmp(ip, pchOnionCat, sizeof(pchOnionCat)) == 0) {
+        return true;
+    }
+    
+    return false;
 }
 
 bool CNetAddr::IsLocal() const
@@ -868,15 +943,39 @@ enum Network CNetAddr::GetNetwork() const
         return NET_IPV4;
 
     if (IsTor())
-        return NET_TOR;
+        return NET_ONION;
 
     return NET_IPV6;
 }
 
+// Helper function to encode onion v3 address
+static std::string OnionV3ToString(const unsigned char* addr_pubkey)
+{
+    unsigned char checksum[torv3::CHECKSUM_LEN];
+    torv3::Checksum(addr_pubkey, checksum);
+    
+    // TORv3 onion_address = base32(PUBKEY | CHECKSUM | VERSION) + ".onion"
+    std::vector<unsigned char> address;
+    address.insert(address.end(), addr_pubkey, addr_pubkey + ADDR_TORV3_SIZE);
+    address.insert(address.end(), checksum, checksum + torv3::CHECKSUM_LEN);
+    address.insert(address.end(), torv3::VERSION, torv3::VERSION + sizeof(torv3::VERSION));
+    
+    return EncodeBase32(&address[0], address.size()) + ".onion";
+}
+
 std::string CNetAddr::ToStringIP() const
 {
-    if (IsTor())
+    // Check for Tor v3 first (must have torv3_addr populated)
+    if (!torv3_addr.empty() && torv3_addr.size() == ADDR_TORV3_SIZE) {
+        return OnionV3ToString(&torv3_addr[0]);
+    }
+    
+    // Check for Tor v2 (OnionCat prefix)
+    if (memcmp(ip, pchOnionCat, sizeof(pchOnionCat)) == 0) {
         return EncodeBase32(&ip[6], 10) + ".onion";
+    }
+    
+    // Regular IP address handling
     CService serv(*this, 0);
     struct sockaddr_storage sockaddr;
     socklen_t socklen = sizeof(sockaddr);
@@ -974,7 +1073,7 @@ std::vector<unsigned char> CNetAddr::GetGroup() const
     }
     else if (IsTor())
     {
-        nClass = NET_TOR;
+        nClass = NET_ONION;
         nStartByte = 6;
         nBits = 4;
     }
@@ -1052,11 +1151,11 @@ int CNetAddr::GetReachabilityFrom(const CNetAddr *paddrPartner) const
         case NET_IPV4:   return REACH_IPV4;
         case NET_IPV6:   return fTunnel ? REACH_IPV6_WEAK : REACH_IPV6_STRONG; // only prefer giving our IPv6 address if it's not tunnelled
         }
-    case NET_TOR:
+    case NET_ONION:
         switch(ourNet) {
         default:         return REACH_DEFAULT;
         case NET_IPV4:   return REACH_IPV4; // Tor users can connect to IPv4 as well
-        case NET_TOR:    return REACH_PRIVATE;
+        case NET_ONION:    return REACH_PRIVATE;
         }
     case NET_TEREDO:
         switch(ourNet) {
@@ -1073,7 +1172,7 @@ int CNetAddr::GetReachabilityFrom(const CNetAddr *paddrPartner) const
         case NET_TEREDO:  return REACH_TEREDO;
         case NET_IPV6:    return REACH_IPV6_WEAK;
         case NET_IPV4:    return REACH_IPV4;
-        case NET_TOR:     return REACH_PRIVATE; // either from Tor, or don't care about our address
+        case NET_ONION:     return REACH_PRIVATE; // either from Tor, or don't care about our address
         }
     }
 }

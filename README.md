@@ -1,5 +1,4 @@
-
-ZClassic 2.1.1-8
+ZClassic 2.1.2
 
 ## Getting Started
 
@@ -54,6 +53,10 @@ rpcpassword=yourpassword
 ```
 ## What is ZClassic?
 
+<p align="center">
+<img width="669" alt="image" src="https://github.com/user-attachments/assets/20d00ef7-13f9-4811-8973-2c5d4b288eee" />
+</p>
+
 [ZClassic](https://zclassic.org/) is an implementation of the "Zerocash" protocol.
 Based on Bitcoin's code, it intends to offer a far higher standard of privacy
 through a sophisticated zero-knowledge proving scheme that preserves
@@ -64,10 +67,6 @@ This software is the ZClassic client. It downloads and stores the entire history
 of ZClassic transactions; depending on the speed of your computer and network
 connection, the synchronization process could take a day or more once the
 blockchain has reached a significant size.
-
-<p align="center">
-  <img src="doc/imgs/zclassic.png" height="500">
-</p>
 
 #### :lock: Security Warnings
 

@@ -12,7 +12,7 @@ const struct NUInfo NetworkUpgradeInfo[Consensus::MAX_NETWORK_UPGRADES] = {
     {
         /*.nBranchId =*/ 0,
         /*.strName =*/ "Sprout",
-        /*.strInfo =*/ "The Zcash network at launch",
+        /*.strInfo =*/ "The Zclassic network at launch",
     },
     {
         /*.nBranchId =*/ 0x74736554,

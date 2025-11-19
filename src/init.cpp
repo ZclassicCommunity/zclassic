@@ -201,7 +201,7 @@ void Shutdown()
     /// for example if the data directory was found to be locked.
     /// Be sure that anything that writes files or flushes caches only does this if the respective
     /// module was initialized.
-    RenameThread("zcash-shutoff");
+    RenameThread("zcl-shutoff");
     mempool.AddTransactionsUpdated(1);
 
     StopHTTPRPC();
@@ -614,7 +614,7 @@ void CleanupBlockRevFiles()
 
 void ThreadImport(std::vector<boost::filesystem::path> vImportFiles)
 {
-    RenameThread("zcash-loadblk");
+    RenameThread("zcl-loadblk");
     // -reindex
     if (fReindex) {
         CImportingNow imp;
@@ -14336,7 +14336,7 @@ static void ZC_LoadParams(
         uiInterface.ThreadSafeMessageBox(strprintf(
             _("Cannot find the Zcash network parameters in the following directory:\n"
               "%s\n"
-              "Please run 'zcash-fetch-params' or './zcutil/fetch-params.sh' and then restart."),
+              "Please run 'zclassic-fetch-params' or './zcutil/fetch-params.sh' and then restart."),
                 ZC_GetParamsDir()),
             "", CClientUIInterface::MSG_ERROR);
         StartShutdown();
@@ -14833,7 +14833,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     std::string strDataDir = GetDataDir().string();
 #ifdef ENABLE_WALLET
     // Wallet file must be a plain filename without a directory
-    if (strWalletFile != boost::filesystem::basename(strWalletFile) + boost::filesystem::extension(strWalletFile))
+    if (strWalletFile != boost::filesystem::path(strWalletFile).filename().string())
         return InitError(strprintf(_("Wallet %s resides outside data directory %s"), strWalletFile, strDataDir));
 #endif
     // Make sure only a single Bitcoin process is using the data directory.
@@ -14896,7 +14896,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     libsnark::inhibit_profiling_info = true;
     libsnark::inhibit_profiling_counters = true;
 
-    // Initialize Zcash circuit parameters
+    // Initialize Zclassic circuit parameters
     ZC_LoadParams(chainparams);
 
     if (GetBoolArg("-savesproutr1cs", false)) {
@@ -14986,7 +14986,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // -proxy sets a proxy for all outgoing network traffic
     // -noproxy (or -proxy=0) as well as the empty string can be used to not set a proxy, this is the default
     std::string proxyArg = GetArg("-proxy", "");
-    SetLimited(NET_TOR);
+    SetLimited(NET_ONION);
     if (proxyArg != "" && proxyArg != "0") {
         proxyType addrProxy = proxyType(CService(proxyArg, 9050), proxyRandomize);
         if (!addrProxy.IsValid())
@@ -14994,9 +14994,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
         SetProxy(NET_IPV4, addrProxy);
         SetProxy(NET_IPV6, addrProxy);
-        SetProxy(NET_TOR, addrProxy);
+        SetProxy(NET_ONION, addrProxy);
         SetNameProxy(addrProxy);
-        SetLimited(NET_TOR, false); // by default, -proxy sets onion as reachable, unless -noonion later
+        SetLimited(NET_ONION, false); // by default, -proxy sets onion as reachable, unless -noonion later
     }
 
     // -onion can be used to set only a proxy for .onion, or override normal proxy for .onion addresses
@@ -15005,13 +15005,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     std::string onionArg = GetArg("-onion", "");
     if (onionArg != "") {
         if (onionArg == "0") { // Handle -noonion/-onion=0
-            SetLimited(NET_TOR); // set onions as unreachable
+            SetLimited(NET_ONION); // set onions as unreachable
         } else {
             proxyType addrOnion = proxyType(CService(onionArg, 9050), proxyRandomize);
             if (!addrOnion.IsValid())
                 return InitError(strprintf(_("Invalid -onion address: '%s'"), onionArg));
-            SetProxy(NET_TOR, addrOnion);
-            SetLimited(NET_TOR, false);
+            SetProxy(NET_ONION, addrOnion);
+            SetLimited(NET_ONION, false);
         }
     }
 

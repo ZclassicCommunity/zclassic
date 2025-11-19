@@ -9,6 +9,7 @@ define $(package)_set_vars
 $(package)_config_opts=--disable-shared --enable-cxx --disable-replication
 $(package)_config_opts_mingw32=--enable-mingw
 $(package)_config_opts_linux=--with-pic
+
 $(package)_cxxflags=-std=c++11
 $(package)_cxxflags_darwin=$(shell command -v xcrun >/dev/null 2>&1 && echo "-isysroot$$(xcrun --show-sdk-path)")
 $(package)_cflags_darwin=$(shell command -v xcrun >/dev/null 2>&1 && echo "-isysroot$$(xcrun --show-sdk-path)")

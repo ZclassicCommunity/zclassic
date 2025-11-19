@@ -106,7 +106,7 @@ bool AppInit(int argc, char* argv[])
 
         if (!boost::filesystem::is_directory(ZC_GetParamsDir()))
         {
-            // mkdir zcash params directory if it doesn't exist
+            // mkdir zclassic params directory if it doesn't exist
             boost::filesystem::create_directories(ZC_GetParamsDir());
         }
 
@@ -165,7 +165,7 @@ bool AppInit(int argc, char* argv[])
         // Command-line RPC
         bool fCommandLine = false;
         for (int i = 1; i < argc; i++)
-            if (!IsSwitchChar(argv[i][0]) && !boost::algorithm::istarts_with(argv[i], "zcash:"))
+            if (!IsSwitchChar(argv[i][0]) && !boost::algorithm::istarts_with(argv[i], "zclassic:"))
                 fCommandLine = true;
 
         if (fCommandLine)

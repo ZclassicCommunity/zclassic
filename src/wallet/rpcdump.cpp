@@ -81,10 +81,10 @@ UniValue importprivkey(const UniValue& params, bool fHelp)
 
     if (fHelp || params.size() < 1 || params.size() > 3)
         throw runtime_error(
-            "importprivkey \"zcashprivkey\" ( \"label\" rescan )\n"
+            "importprivkey \"zclassicprivkey\" ( \"label\" rescan )\n"
             "\nAdds a private key (as returned by dumpprivkey) to your wallet.\n"
             "\nArguments:\n"
-            "1. \"zcashprivkey\"   (string, required) The private key (see dumpprivkey)\n"
+            "1. \"zclassicprivkey\"   (string, required) The private key (see dumpprivkey)\n"
             "2. \"label\"            (string, optional, default=\"\") An optional label\n"
             "3. rescan               (boolean, optional, default=true) Rescan the wallet for transactions\n"
             "\nNote: This call can take minutes to complete if rescan is true.\n"
@@ -294,7 +294,7 @@ UniValue importwallet_impl(const UniValue& params, bool fHelp, bool fImportZKeys
         if (vstr.size() < 2)
             continue;
 
-        // Let's see if the address is a valid Zcash spending key
+        // Let's see if the address is a valid Zclassic spending key
         if (fImportZKeys) {
             auto spendingkey = DecodeSpendingKey(vstr[0]);
             int64_t nTime = DecodeDumpTime(vstr[1]);
@@ -313,7 +313,7 @@ UniValue importwallet_impl(const UniValue& params, bool fHelp, bool fImportZKeys
                 continue;
             } else {
                 LogPrint("zrpc", "Importing detected an error: invalid spending key. Trying as a transparent key...\n");
-                // Not a valid spending key, so carry on and see if it's a Zcash style t-address.
+                // Not a valid spending key, so carry on and see if it's a Zclassic style t-address.
             }
         }
 

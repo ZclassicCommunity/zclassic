@@ -1066,7 +1066,7 @@ DBErrors CWalletDB::ZapWalletTx(CWallet* pwallet, vector<CWalletTx>& vWtx)
 void ThreadFlushWalletDB(const string& strFile)
 {
     // Make this thread recognisable as the wallet flushing thread
-    RenameThread("zcash-wallet");
+    RenameThread("zcl-wallet");
 
     static bool fOneThread;
     if (fOneThread)
@@ -1147,7 +1147,7 @@ bool BackupWallet(const CWallet& wallet, const string& strDest)
                     pathDest /= wallet.strWalletFile;
 
                 try {
-                    boost::filesystem::copy_file(pathSrc, pathDest, boost::filesystem::copy_option::overwrite_if_exists);
+                    boost::filesystem::copy_file(pathSrc, pathDest, boost::filesystem::copy_options::overwrite_existing);
                     LogPrintf("copied wallet.dat to %s\n", pathDest.string());
                     return true;
                 } catch (const boost::filesystem::filesystem_error& e) {

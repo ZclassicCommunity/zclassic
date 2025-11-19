@@ -26,7 +26,7 @@ bool CPubKey::Verify(const uint256 &hash, const std::vector<unsigned char>& vchS
     if (vchSig.size() == 0) {
         return false;
     }
-    /* Zcash, unlike Bitcoin, has always enforced strict DER signatures. */
+    /* Zclassic, unlike Bitcoin, has always enforced strict DER signatures. */
     if (!secp256k1_ecdsa_signature_parse_der(secp256k1_context_verify, &sig, &vchSig[0], vchSig.size())) {
         return false;
     }
@@ -128,7 +128,7 @@ bool CPubKey::CheckLowS(
     const boost::sliced_range<const std::vector<uint8_t>> &vchSig) {
     secp256k1_ecdsa_signature sig;
 
-    /* Zcash, unlike Bitcoin, has always enforced strict DER signatures. */
+    /* Zclassic, unlike Bitcoin, has always enforced strict DER signatures. */
     if (!secp256k1_ecdsa_signature_parse_der(secp256k1_context_verify, &sig, &vchSig[0], vchSig.size())) {
         return false;
     }

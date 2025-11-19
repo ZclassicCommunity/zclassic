@@ -1,4 +1,5 @@
 // Copyright (c) 2009-2013 The Bitcoin Core developers
+// Copyright (c) 2025 The Zclassic developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -32,22 +33,33 @@ enum Network
     NET_UNROUTABLE = 0,
     NET_IPV4,
     NET_IPV6,
-    NET_TOR,
-
-    NET_MAX,
+    NET_ONION,
+    
+    NET_MAX
 };
-
 /** IP address (IPv6, or IPv4 using mapped IPv6 range (::FFFF:0:0/96)) */
 class CNetAddr
 {
     protected:
         unsigned char ip[16]; // in network byte order
+        std::vector<unsigned char> torv3_addr; // Full 32-byte v3 onion address
 
     public:
         CNetAddr();
         CNetAddr(const struct in_addr& ipv4Addr);
         explicit CNetAddr(const char *pszIp, bool fAllowLookup = false);
         explicit CNetAddr(const std::string &strIp, bool fAllowLookup = false);
+        CNetAddr(const CNetAddr& other) : torv3_addr(other.torv3_addr) {
+            memcpy(ip, other.ip, sizeof(ip));
+        }
+        
+        CNetAddr& operator=(const CNetAddr& other) {
+            if (this != &other) {
+                memcpy(ip, other.ip, sizeof(ip));
+                torv3_addr = other.torv3_addr;
+            }
+            return *this;
+        }
         void Init();
         void SetIP(const CNetAddr& ip);
 

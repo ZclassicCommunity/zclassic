@@ -1,9 +1,8 @@
 package=boost
-$(package)_version=1_80_0
-$(package)_download_path=https://boostorg.jfrog.io/artifactory/main/release/1.80.0/source
+$(package)_version=1_85_0
+$(package)_download_path=https://archives.boost.io/release/1.85.0/source
 $(package)_file_name=$(package)_$($(package)_version).tar.bz2
-$(package)_sha256_hash=1e19565d82e43bc59209a168f5ac899d3ba471d55c7610c677d4ccf2c9c500c0
-$(package)_patches=fix-macos-linker.patch
+$(package)_sha256_hash=7009fe1faa1697476bdc7027703a2badb84e849b7b0baad5086b087b971f8617
 
 define $(package)_set_vars
 $(package)_config_opts_release=variant=release
@@ -26,7 +25,6 @@ $(package)_cxxflags_linux=-fPIC
 endef
 
 define $(package)_preprocess_cmds
-  patch -p1 < $($(package)_patch_dir)/fix-macos-linker.patch && \
   echo "using $(boost_toolset_$(host_os)) : : $($(package)_cxx) : <cxxflags>\"$($(package)_cxxflags) $($(package)_cppflags)\" <linkflags>\"$($(package)_ldflags)\" <archiver>\"$(boost_archiver_$(host_os))\" <striper>\"$(host_STRIP)\"  <ranlib>\"$(host_RANLIB)\" <rc>\"$(host_WINDRES)\" : ;" > user-config.jam
 endef
 

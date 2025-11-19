@@ -1,10 +1,12 @@
-// Copyright (c) 2015-2017 The Bitcoin Core developers
+// Copyright (c) 2015-2019 The Bitcoin Core developers
+// Copyright (c) 2025 The Zclassic developers
 // Copyright (c) 2017 The Zcash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "torcontrol.h"
 #include "utilstrencodings.h"
+#include "netbase.h"
 #include "net.h"
 #include "util.h"
 #include "crypto/hmac_sha256.h"
@@ -430,7 +432,7 @@ private:
     struct event *reconnect_ev;
     float reconnect_timeout;
     CService service;
-    /** Cooie for SAFECOOKIE auth */
+    /** Cookie for SAFECOOKIE auth */
     std::vector<uint8_t> cookie;
     /** ClientNonce for SAFECOOKIE auth */
     std::vector<uint8_t> clientNonce;
@@ -504,8 +506,18 @@ void TorController::add_onion_cb(TorControlConnection& conn, const TorControlRep
             return;
         }
 
-        service = CService(service_id+".onion", GetListenPort(), false);
-        LogPrintf("tor: Got service ID %s, advertizing service %s\n", service_id, service.ToString());
+        // Construct CNetAddr from onion address
+        CNetAddr onion_addr;
+        std::string onion_address = service_id + ".onion";
+        if (!onion_addr.SetSpecial(onion_address)) {
+            LogPrintf("tor: Error: failed to parse onion address %s\n", onion_address);
+            return;
+        }
+
+        // Create CService with the onion address and port
+        service = CService(onion_addr, GetListenPort());
+        LogPrintf("tor: Got service ID %s, advertising service %s\n", service_id, service.ToString());
+
         if (WriteBinaryFile(GetPrivateKeyFile(), private_key)) {
             LogPrint("tor", "tor: Cached service private key to %s\n", GetPrivateKeyFile());
         } else {
@@ -529,13 +541,14 @@ void TorController::auth_cb(TorControlConnection& conn, const TorControlReply& r
         // if -onion isn't set to something else.
         if (GetArg("-onion", "") == "") {
             proxyType addrOnion = proxyType(CService("127.0.0.1", 9050), true);
-            SetProxy(NET_TOR, addrOnion);
-            SetLimited(NET_TOR, false);
+            SetProxy(NET_ONION, addrOnion);
+            SetLimited(NET_ONION, false);
         }
 
         // Finally - now create the service
-        if (private_key.empty()) // No private key, generate one
-            private_key = "NEW:RSA1024"; // Explicitly request RSA1024 - see issue #9214
+        if (private_key.empty()) { // No private key, generate one
+            private_key = "NEW:ED25519-V3"; // Request ED25519-V3 for onion v3
+        }
         // Request hidden service, redirect port.
         // Note that the 'virtual' port doesn't have to be the same as our internal port, but this is just a convenient
         // choice.  TODO; refactor the shutdown sequence some day.
@@ -721,7 +734,7 @@ void TorController::Reconnect()
 
 std::string TorController::GetPrivateKeyFile()
 {
-    return (GetDataDir() / "onion_private_key").string();
+    return (GetDataDir() / "onion_v3_private_key").string();
 }
 
 void TorController::reconnect_cb(evutil_socket_t fd, short what, void *arg)
@@ -774,4 +787,3 @@ void StopTorControl()
         gBase = 0;
     }
 }
-

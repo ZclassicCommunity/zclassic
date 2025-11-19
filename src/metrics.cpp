@@ -445,7 +445,7 @@ bool enableVTMode()
 void ThreadShowMetricsScreen()
 {
     // Make this thread recognisable as the metrics screen thread
-    RenameThread("zcash-metrics-screen");
+    RenameThread("zcl-metrics");
 
 #ifdef WIN32
     bool clearedAfterLoaded = false;
@@ -542,7 +542,7 @@ void ThreadShowMetricsScreen()
             // Explain how to exit
             std::cout << "[";
 #ifdef WIN32
-            std::cout << _("'zcash-cli.exe stop' to exit");
+            std::cout << _("'zclassic-cli.exe stop' to exit");
 #else
             std::cout << _("Press Ctrl+C to exit");
 #endif
