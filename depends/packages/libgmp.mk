@@ -7,6 +7,13 @@ $(package)_dependencies=
 $(package)_config_opts=--enable-cxx --disable-shared
 $(package)_config_opts_arm_darwin=--disable-assembly
 
+# to build on Arch Manjaro (Rhett Creighton commit https://github.com/ZclassicCommunity/zclassic/commit/3ebf6e0367443517a02fb4950bda9ab9b14edc0e)
+define $(package)_preprocess_cmds
+  sed -i.orig 's/void g(){}/void g(int a, void* b, unsigned long long c, void* d, void* e, int f){}/g' configure && \
+  sed -i 's/void h(){}/void h(void){}/g' configure
+endef
+##
+
 define $(package)_config_cmds
   $($(package)_autoconf) --host=$(host) --build=$(build)
 endef
