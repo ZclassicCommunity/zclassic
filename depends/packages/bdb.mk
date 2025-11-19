@@ -10,7 +10,7 @@ $(package)_config_opts=--disable-shared --enable-cxx --disable-replication
 $(package)_config_opts_mingw32=--enable-mingw
 $(package)_config_opts_linux=--with-pic
 
-# to build on Arch Manjaro
+# to build on Arch Manjaro (Rhett Creighton commit https://github.com/ZclassicCommunity/zclassic/commit/3ebf6e0367443517a02fb4950bda9ab9b14edc0e)
 $(package)_cflags=-Wno-incompatible-pointer-types
 # 
 
