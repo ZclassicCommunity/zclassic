@@ -21,6 +21,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <random>
 
 
 /* Introduction text for doxygen: */
@@ -123,11 +124,25 @@ bool AppInit(int argc, char* argv[])
         } catch (const std::exception& e) {
             boost::filesystem::path config_file_path = GetConfigFile();
 
+            // Generate random RPC credentials for security
+            std::random_device rd;
+            std::mt19937 gen(rd());
+            std::uniform_int_distribution<> dis(0, 61);
+            const char* charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+            std::string rpcuser = "zcluser_";
+            std::string rpcpassword = "";
+            for (int i = 0; i < 8; i++) rpcuser += charset[dis(gen)];
+            for (int i = 0; i < 32; i++) rpcpassword += charset[dis(gen)];
+
             std::ofstream basic_conf_file (config_file_path.string());
             basic_conf_file << "txindex=1" << std::endl;
-            basic_conf_file << "rpcuser=zcluser" << std::endl;
-            basic_conf_file << "rpcpassword=zclpass" << std::endl;
+            basic_conf_file << "rpcuser=" << rpcuser << std::endl;
+            basic_conf_file << "rpcpassword=" << rpcpassword << std::endl;
             basic_conf_file.close();
+
+            fprintf(stderr, "WARNING: Generated random RPC credentials in %s\n", config_file_path.string().c_str());
+            fprintf(stderr, "Please review and secure your configuration file.\n");
 
         }        
 
