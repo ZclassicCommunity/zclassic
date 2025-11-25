@@ -20,6 +20,10 @@
 #include <stdint.h>
 
 #include <boost/assign/list_of.hpp>
+#include <boost/filesystem.hpp>
+
+#include <fstream>
+#include <cstring>
 
 #include <univalue.h>
 
@@ -483,6 +487,270 @@ UniValue setmocktime(const UniValue& params, bool fHelp)
     return NullUniValue;
 }
 
+/**
+ * Securely shred a file using DoD 5220.22-M style overwrite pattern
+ * 
+ * SECURITY: This function performs a secure wipe by:
+ * 1. Overwriting the entire file with 0xFF (all 1s)
+ * 2. Overwriting the entire file with 0xAA (10101010 pattern)
+ * 3. Overwriting the entire file with 0x00 (all 0s)
+ * 4. Flushing to disk after each pass
+ * 5. Renaming to obscure original filename
+ * 6. Deleting the file
+ * 
+ * @param filepath The path to the file to securely destroy
+ * @param progressCallback Optional callback for progress updates (0-100)
+ * @return true if successful, false otherwise
+ */
+static bool SecureShredFile(const boost::filesystem::path& filepath, 
+                            std::function<void(int)> progressCallback = nullptr)
+{
+    if (!boost::filesystem::exists(filepath)) {
+        return false;
+    }
+
+    try {
+        // Get file size
+        uintmax_t fileSize = boost::filesystem::file_size(filepath);
+        if (fileSize == 0) {
+            // Empty file, just delete it
+            boost::filesystem::remove(filepath);
+            return true;
+        }
+
+        // Allocate buffer for overwriting (use 64KB chunks for efficiency)
+        const size_t BUFFER_SIZE = 65536;
+        std::vector<unsigned char> buffer(BUFFER_SIZE);
+
+        // Three-pass overwrite pattern (DoD 5220.22-M inspired)
+        const unsigned char patterns[3] = {
+            0xFF,  // Pass 1: All 1s (11111111)
+            0xAA,  // Pass 2: Alternating (10101010)
+            0x00   // Pass 3: All 0s (00000000)
+        };
+
+        // Total work = 3 passes * fileSize
+        uintmax_t totalWork = fileSize * 3;
+        uintmax_t completedWork = 0;
+
+        for (int pass = 0; pass < 3; pass++) {
+            // Fill buffer with current pattern
+            std::memset(&buffer[0], patterns[pass], BUFFER_SIZE);
+
+            // Open file for binary writing
+            std::ofstream file(filepath.string().c_str(), 
+                              std::ios::binary | std::ios::in | std::ios::out);
+            if (!file.is_open()) {
+                return false;
+            }
+
+            // Overwrite entire file
+            uintmax_t remaining = fileSize;
+            while (remaining > 0) {
+                size_t toWrite = (remaining > BUFFER_SIZE) ? BUFFER_SIZE : static_cast<size_t>(remaining);
+                file.write(reinterpret_cast<char*>(&buffer[0]), toWrite);
+                if (!file.good()) {
+                    file.close();
+                    return false;
+                }
+                remaining -= toWrite;
+                completedWork += toWrite;
+
+                // Report progress
+                if (progressCallback) {
+                    int percent = static_cast<int>((completedWork * 100) / totalWork);
+                    progressCallback(percent);
+                }
+            }
+
+            // Flush to ensure data is written to disk
+            file.flush();
+            file.close();
+
+            // Force sync to disk (platform-specific)
+            FILE* fp = fopen(filepath.string().c_str(), "rb");
+            if (fp) {
+#ifdef WIN32
+                _commit(_fileno(fp));
+#else
+                fsync(fileno(fp));
+#endif
+                fclose(fp);
+            }
+        }
+
+        // Rename to obscure original filename before deletion
+        boost::filesystem::path obscuredPath = filepath.parent_path() / "00000000000000000000000000000000";
+        
+        // Handle case where obscured name already exists
+        int counter = 0;
+        boost::filesystem::path finalObscuredPath = obscuredPath;
+        while (boost::filesystem::exists(finalObscuredPath)) {
+            finalObscuredPath = filepath.parent_path() / 
+                ("00000000000000000000000000000000_" + std::to_string(counter++));
+        }
+
+        boost::filesystem::rename(filepath, finalObscuredPath);
+
+        // Delete the file
+        boost::filesystem::remove(finalObscuredPath);
+
+        return true;
+
+    } catch (const boost::filesystem::filesystem_error& e) {
+        return false;
+    } catch (const std::exception& e) {
+        return false;
+    }
+}
+
+UniValue shredlogs(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 0)
+        throw runtime_error(
+            "shredlogs\n"
+            "\nSecurely destroy debug.log and db.log files in the data directory.\n"
+            "\nThis command performs a secure 3-pass overwrite before deletion:\n"
+            "  Pass 1: Overwrite with 0xFF (all 1s)\n"
+            "  Pass 2: Overwrite with 0xAA (10101010 pattern)\n"
+            "  Pass 3: Overwrite with 0x00 (all 0s)\n"
+            "\nAfter overwriting, files are renamed to obscure the original filename,\n"
+            "then deleted. Shredding is important because the debug.log file may contain \n"
+            "sensitive transaction metadata, it should ONLY be used for debugging.\n"
+            "\nWARNING: This operation is irreversible!\n"
+            "\nResult:\n"
+            "{\n"
+            "  \"debug.log\": { \"status\": \"shredded\"|\"not found\"|\"failed\", \"size\": n, \"progress\": 100 },\n"
+            "  \"db.log\": { \"status\": \"shredded\"|\"not found\"|\"failed\", \"size\": n, \"progress\": 100 }\n"
+            "}\n"
+            "\nExamples:\n"
+            + HelpExampleCli("shredlogs", "")
+            + HelpExampleRpc("shredlogs", "")
+        );
+
+    UniValue result(UniValue::VOBJ);
+    boost::filesystem::path dataDir = GetDataDir();
+
+    // Temporarily disable debug log file writing
+    bool wasLoggingToFile = fPrintToDebugLog;
+    fPrintToDebugLog = false;
+
+    // Shred debug.log
+    boost::filesystem::path debugLogPath = dataDir / "debug.log";
+    UniValue debugResult(UniValue::VOBJ);
+    
+    if (boost::filesystem::exists(debugLogPath)) {
+        uintmax_t fileSize = boost::filesystem::file_size(debugLogPath);
+        debugResult.push_back(Pair("size", (int64_t)fileSize));
+        
+        int lastProgress = -1;
+        auto progressCb = [&lastProgress, &debugResult](int progress) {
+            lastProgress = progress;
+        };
+        
+        if (SecureShredFile(debugLogPath, progressCb)) {
+            debugResult.push_back(Pair("status", "shredded"));
+            debugResult.push_back(Pair("progress", 100));
+        } else {
+            debugResult.push_back(Pair("status", "failed"));
+            debugResult.push_back(Pair("progress", lastProgress));
+        }
+    } else {
+        debugResult.push_back(Pair("status", "not found"));
+        debugResult.push_back(Pair("size", 0));
+        debugResult.push_back(Pair("progress", 0));
+    }
+    result.push_back(Pair("debug.log", debugResult));
+
+    // Shred db.log
+    boost::filesystem::path dbLogPath = dataDir / "db.log";
+    UniValue dbResult(UniValue::VOBJ);
+    
+    if (boost::filesystem::exists(dbLogPath)) {
+        uintmax_t fileSize = boost::filesystem::file_size(dbLogPath);
+        dbResult.push_back(Pair("size", (int64_t)fileSize));
+        
+        int lastProgress = -1;
+        auto progressCb = [&lastProgress](int progress) {
+            lastProgress = progress;
+        };
+        
+        if (SecureShredFile(dbLogPath, progressCb)) {
+            dbResult.push_back(Pair("status", "shredded"));
+            dbResult.push_back(Pair("progress", 100));
+        } else {
+            dbResult.push_back(Pair("status", "failed"));
+            dbResult.push_back(Pair("progress", lastProgress));
+        }
+    } else {
+        dbResult.push_back(Pair("status", "not found"));
+        dbResult.push_back(Pair("size", 0));
+        dbResult.push_back(Pair("progress", 0));
+    }
+    result.push_back(Pair("db.log", dbResult));
+
+    // DO NOT re-enable logging - keep it disabled so no new debug.log is created
+
+    return result;
+}
+
+UniValue shredonion(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 0)
+        throw runtime_error(
+            "shredonion\n"
+            "\nSecurely destroy the Tor onion service private key file.\n"
+            "\nThis command securely wipes the 'onion_v3_private_key' file\n"
+            "in the data directory using a 3-pass overwrite pattern:\n"
+            "  Pass 1: Overwrite with 0xFF (all 1s)\n"
+            "  Pass 2: Overwrite with 0xAA (10101010 pattern)\n"
+            "  Pass 3: Overwrite with 0x00 (all 0s)\n"
+            "\nAfter overwriting, the file is renamed to obscure the original\n"
+            "filename, then deleted.\n"
+            "\nWARNING: This operation is irreversible! Your node will generate\n"
+            "a new .onion address on next restart with Tor enabled.\n"
+            "\nResult:\n"
+            "{\n"
+            "  \"onion_v3_private_key\": { \"status\": \"shredded\"|\"not found\"|\"failed\", \"size\": n, \"progress\": 100 }\n"
+            "}\n"
+            "\nExamples:\n"
+            + HelpExampleCli("shredonion", "")
+            + HelpExampleRpc("shredonion", "")
+        );
+
+    UniValue result(UniValue::VOBJ);
+    boost::filesystem::path dataDir = GetDataDir();
+    boost::filesystem::path onionKeyPath = dataDir / "onion_v3_private_key";
+
+    UniValue onionResult(UniValue::VOBJ);
+
+    if (boost::filesystem::exists(onionKeyPath)) {
+        uintmax_t fileSize = boost::filesystem::file_size(onionKeyPath);
+        onionResult.push_back(Pair("size", (int64_t)fileSize));
+        
+        int lastProgress = -1;
+        auto progressCb = [&lastProgress](int progress) {
+            lastProgress = progress;
+        };
+        
+        if (SecureShredFile(onionKeyPath, progressCb)) {
+            onionResult.push_back(Pair("status", "shredded"));
+            onionResult.push_back(Pair("progress", 100));
+        } else {
+            onionResult.push_back(Pair("status", "failed"));
+            onionResult.push_back(Pair("progress", lastProgress));
+        }
+    } else {
+        onionResult.push_back(Pair("status", "not found"));
+        onionResult.push_back(Pair("size", 0));
+        onionResult.push_back(Pair("progress", 0));
+    }
+    
+    result.push_back(Pair("onion_v3_private_key", onionResult));
+
+    return result;
+}
+
 static const CRPCCommand commands[] =
 { //  category              name                      actor (function)         okSafeMode
   //  --------------------- ------------------------  -----------------------  ----------
@@ -491,6 +759,10 @@ static const CRPCCommand commands[] =
     { "util",               "z_validateaddress",      &z_validateaddress,      true  }, /* uses wallet if enabled */
     { "util",               "createmultisig",         &createmultisig,         true  },
     { "util",               "verifymessage",          &verifymessage,          true  },
+    
+    /* Privacy commands */
+    { "privacy",            "shredlogs",              &shredlogs,              true  },
+    { "privacy",            "shredonion",             &shredonion,             true  },
 
     /* Not shown in help */
     { "hidden",             "setmocktime",            &setmocktime,            true  },
