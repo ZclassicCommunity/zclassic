@@ -24,8 +24,17 @@
 
 #include <fstream>
 #include <cstring>
+#include <functional>
 
 #include <univalue.h>
+
+#ifdef WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#endif
 
 #include "zcash/Address.hpp"
 
@@ -505,79 +514,199 @@ UniValue setmocktime(const UniValue& params, bool fHelp)
 static bool SecureShredFile(const boost::filesystem::path& filepath, 
                             std::function<void(int)> progressCallback = nullptr)
 {
-    if (!boost::filesystem::exists(filepath)) {
-        return false;
-    }
-
     try {
-        // Get file size
-        uintmax_t fileSize = boost::filesystem::file_size(filepath);
-        if (fileSize == 0) {
-            // Empty file, just delete it
+        // Open file immediately with read+write access to avoid TOCTOU race condition
+        // This also acquires an exclusive handle to the file
+#ifdef WIN32
+        // Windows: Open with exclusive access to lock the file
+        HANDLE hFile = CreateFileW(
+            filepath.wstring().c_str(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,  // No sharing - exclusive access
+            NULL,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            NULL
+        );
+        
+        if (hFile == INVALID_HANDLE_VALUE) {
+            DWORD err = GetLastError();
+            if (err == ERROR_FILE_NOT_FOUND) {
+                return false;  // File doesn't exist
+            }
+            return false;  // Could not open/lock file
+        }
+        
+        // Get file size using the open handle (avoids TOCTOU)
+        LARGE_INTEGER fileSize;
+        if (!GetFileSizeEx(hFile, &fileSize)) {
+            CloseHandle(hFile);
+            return false;
+        }
+        
+        uintmax_t size = static_cast<uintmax_t>(fileSize.QuadPart);
+        
+        if (size == 0) {
+            // Empty file, just close and delete it
+            CloseHandle(hFile);
             boost::filesystem::remove(filepath);
             return true;
         }
-
+        
         // Allocate buffer for overwriting (use 64KB chunks for efficiency)
         const size_t BUFFER_SIZE = 65536;
         std::vector<unsigned char> buffer(BUFFER_SIZE);
-
+        
         // Three-pass overwrite pattern (DoD 5220.22-M inspired)
         const unsigned char patterns[3] = {
             0xFF,  // Pass 1: All 1s (11111111)
             0xAA,  // Pass 2: Alternating (10101010)
             0x00   // Pass 3: All 0s (00000000)
         };
-
+        
         // Total work = 3 passes * fileSize
-        uintmax_t totalWork = fileSize * 3;
+        uintmax_t totalWork = size * 3;
         uintmax_t completedWork = 0;
-
+        
         for (int pass = 0; pass < 3; pass++) {
             // Fill buffer with current pattern
             std::memset(&buffer[0], patterns[pass], BUFFER_SIZE);
-
-            // Open file for binary writing
-            std::ofstream file(filepath.string().c_str(), 
-                              std::ios::binary | std::ios::in | std::ios::out);
-            if (!file.is_open()) {
+            
+            // Seek to beginning of file
+            LARGE_INTEGER zero;
+            zero.QuadPart = 0;
+            if (!SetFilePointerEx(hFile, zero, NULL, FILE_BEGIN)) {
+                CloseHandle(hFile);
                 return false;
             }
-
+            
             // Overwrite entire file
-            uintmax_t remaining = fileSize;
+            uintmax_t remaining = size;
             while (remaining > 0) {
-                size_t toWrite = (remaining > BUFFER_SIZE) ? BUFFER_SIZE : static_cast<size_t>(remaining);
-                file.write(reinterpret_cast<char*>(&buffer[0]), toWrite);
-                if (!file.good()) {
-                    file.close();
+                DWORD toWrite = (remaining > BUFFER_SIZE) ? BUFFER_SIZE : static_cast<DWORD>(remaining);
+                DWORD bytesWritten;
+                if (!WriteFile(hFile, &buffer[0], toWrite, &bytesWritten, NULL) || bytesWritten != toWrite) {
+                    CloseHandle(hFile);
                     return false;
                 }
-                remaining -= toWrite;
-                completedWork += toWrite;
-
+                remaining -= bytesWritten;
+                completedWork += bytesWritten;
+                
                 // Report progress
                 if (progressCallback) {
                     int percent = static_cast<int>((completedWork * 100) / totalWork);
                     progressCallback(percent);
                 }
             }
-
-            // Flush to ensure data is written to disk
-            file.flush();
-            file.close();
-
-            // Force sync to disk (platform-specific)
-            FILE* fp = fopen(filepath.string().c_str(), "rb");
-            if (fp) {
-#ifdef WIN32
-                _commit(_fileno(fp));
-#else
-                fsync(fileno(fp));
-#endif
-                fclose(fp);
+            
+            // Flush to disk using the SAME handle we wrote to
+            if (!FlushFileBuffers(hFile)) {
+                CloseHandle(hFile);
+                return false;
             }
         }
+        
+        // Close the file handle BEFORE rename/delete
+        CloseHandle(hFile);
+        hFile = INVALID_HANDLE_VALUE;
+        
+#else
+        // POSIX: Open with exclusive lock
+        int fd = open(filepath.string().c_str(), O_RDWR);
+        if (fd < 0) {
+            if (errno == ENOENT) {
+                return false;  // File doesn't exist
+            }
+            return false;  // Could not open file
+        }
+        
+        // Acquire exclusive lock on the file
+        struct flock fl;
+        fl.l_type = F_WRLCK;     // Exclusive write lock
+        fl.l_whence = SEEK_SET;
+        fl.l_start = 0;
+        fl.l_len = 0;            // Lock entire file
+        
+        if (fcntl(fd, F_SETLK, &fl) < 0) {
+            // Could not acquire lock - file may be in use
+            close(fd);
+            return false;
+        }
+        
+        // Get file size using fstat on the open descriptor (avoids TOCTOU)
+        struct stat st;
+        if (fstat(fd, &st) < 0) {
+            close(fd);
+            return false;
+        }
+        
+        uintmax_t size = static_cast<uintmax_t>(st.st_size);
+        
+        if (size == 0) {
+            // Empty file, just close and delete it
+            close(fd);
+            boost::filesystem::remove(filepath);
+            return true;
+        }
+        
+        // Allocate buffer for overwriting (use 64KB chunks for efficiency)
+        const size_t BUFFER_SIZE = 65536;
+        std::vector<unsigned char> buffer(BUFFER_SIZE);
+        
+        // Three-pass overwrite pattern (DoD 5220.22-M inspired)
+        const unsigned char patterns[3] = {
+            0xFF,  // Pass 1: All 1s (11111111)
+            0xAA,  // Pass 2: Alternating (10101010)
+            0x00   // Pass 3: All 0s (00000000)
+        };
+        
+        // Total work = 3 passes * fileSize
+        uintmax_t totalWork = size * 3;
+        uintmax_t completedWork = 0;
+        
+        for (int pass = 0; pass < 3; pass++) {
+            // Fill buffer with current pattern
+            std::memset(&buffer[0], patterns[pass], BUFFER_SIZE);
+            
+            // Seek to beginning of file
+            if (lseek(fd, 0, SEEK_SET) < 0) {
+                close(fd);
+                return false;
+            }
+            
+            // Overwrite entire file
+            uintmax_t remaining = size;
+            while (remaining > 0) {
+                size_t toWrite = (remaining > BUFFER_SIZE) ? BUFFER_SIZE : static_cast<size_t>(remaining);
+                ssize_t bytesWritten = write(fd, &buffer[0], toWrite);
+                if (bytesWritten < 0 || static_cast<size_t>(bytesWritten) != toWrite) {
+                    close(fd);
+                    return false;
+                }
+                remaining -= bytesWritten;
+                completedWork += bytesWritten;
+                
+                // Report progress
+                if (progressCallback) {
+                    int percent = static_cast<int>((completedWork * 100) / totalWork);
+                    progressCallback(percent);
+                }
+            }
+            
+            // Flush to disk using the SAME file descriptor we wrote to
+            if (fsync(fd) < 0) {
+                close(fd);
+                return false;
+            }
+        }
+        
+        // Release the lock and close the file descriptor BEFORE rename/delete
+        fl.l_type = F_UNLCK;
+        fcntl(fd, F_SETLK, &fl);
+        close(fd);
+        fd = -1;
+        
+#endif
 
         // Rename to obscure original filename before deletion
         boost::filesystem::path obscuredPath = filepath.parent_path() / "00000000000000000000000000000000";
