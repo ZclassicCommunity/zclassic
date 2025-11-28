@@ -774,13 +774,19 @@ void CWallet::CleanupForUnload()
     mapSproutZKeyMetadata.clear();
     mapSaplingZKeyMetadata.clear();
 
-    // Clear master keys (securely wipe)
+    // Clear master keys (securely wipe and explicitly clear vectors)
     for (auto& entry : mapMasterKeys) {
         if (!entry.second.vchCryptedKey.empty()) {
             memory_cleanse(entry.second.vchCryptedKey.data(), entry.second.vchCryptedKey.size());
+            entry.second.vchCryptedKey.clear();
         }
         if (!entry.second.vchSalt.empty()) {
             memory_cleanse(entry.second.vchSalt.data(), entry.second.vchSalt.size());
+            entry.second.vchSalt.clear();
+        }
+        if (!entry.second.vchOtherDerivationParameters.empty()) {
+            memory_cleanse(entry.second.vchOtherDerivationParameters.data(), entry.second.vchOtherDerivationParameters.size());
+            entry.second.vchOtherDerivationParameters.clear();
         }
     }
     mapMasterKeys.clear();

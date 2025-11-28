@@ -567,10 +567,11 @@ void CCryptoKeyStore::CleanupKeys()
         }
         cryptedHDSeed.first.SetNull();
 
-        // Clear crypted keys
+        // Clear crypted keys (securely wipe and explicitly clear)
         for (auto& entry : mapCryptedKeys) {
             if (!entry.second.second.empty()) {
                 memory_cleanse(entry.second.second.data(), entry.second.second.size());
+                entry.second.second.clear();
             }
         }
         mapCryptedKeys.clear();
@@ -579,6 +580,7 @@ void CCryptoKeyStore::CleanupKeys()
         for (auto& entry : mapCryptedSproutSpendingKeys) {
             if (!entry.second.empty()) {
                 memory_cleanse(entry.second.data(), entry.second.size());
+                entry.second.clear();
             }
         }
         mapCryptedSproutSpendingKeys.clear();
@@ -587,6 +589,7 @@ void CCryptoKeyStore::CleanupKeys()
         for (auto& entry : mapCryptedSaplingSpendingKeys) {
             if (!entry.second.empty()) {
                 memory_cleanse(entry.second.data(), entry.second.size());
+                entry.second.clear();
             }
         }
         mapCryptedSaplingSpendingKeys.clear();

@@ -4762,14 +4762,10 @@ UniValue unloadwallet(const UniValue& params, bool fHelp)
     // Unregister node signals
     UnregisterNodeSignals(GetNodeSignals());
 
-    // Flush wallet to disk (non-shutdown flush first)
+    // Flush wallet to disk
     if (pwalletMain) {
-        pwalletMain->Flush(false);
-    }
-
-    // Shutdown flush
-    if (pwalletMain) {
-        pwalletMain->Flush(true);
+        pwalletMain->Flush(false);  // Non-shutdown flush
+        pwalletMain->Flush(true);   // Shutdown flush
     }
 
     // Unregister validation interface
