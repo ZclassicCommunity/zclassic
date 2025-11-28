@@ -246,3 +246,38 @@ bool CBasicKeyStore::GetSaplingExtendedSpendingKey(const libzcash::SaplingPaymen
             GetSaplingFullViewingKey(ivk, fvk) &&
             GetSaplingSpendingKey(fvk, extskOut);
 }
+
+void CBasicKeyStore::CleanupKeys()
+{
+    LOCK2(cs_KeyStore, cs_SpendingKeyStore);
+
+    // Clear HD seed securely
+    hdSeed = HDSeed();
+
+    // Clear all keys - CKey destructor will securely wipe key material
+    mapKeys.clear();
+
+    // Clear scripts
+    mapScripts.clear();
+
+    // Clear watch-only set
+    setWatchOnly.clear();
+
+    // Clear Sprout spending keys
+    mapSproutSpendingKeys.clear();
+
+    // Clear Sprout viewing keys
+    mapSproutViewingKeys.clear();
+
+    // Clear note decryptors
+    mapNoteDecryptors.clear();
+
+    // Clear Sapling spending keys
+    mapSaplingSpendingKeys.clear();
+
+    // Clear Sapling full viewing keys
+    mapSaplingFullViewingKeys.clear();
+
+    // Clear Sapling incoming viewing keys
+    mapSaplingIncomingViewingKeys.clear();
+}

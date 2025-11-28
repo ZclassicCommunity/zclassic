@@ -9,6 +9,7 @@
 #include "init.h"
 #include "key_io.h"
 #include "main.h"
+#include "miner.h"
 #include "net.h"
 #include "netbase.h"
 #include "rpc/server.h"
@@ -18,6 +19,7 @@
 #include "utilmoneystr.h"
 #include "wallet.h"
 #include "walletdb.h"
+#include "wallet/db.h"
 #include "primitives/transaction.h"
 #include "zcbenchmarks.h"
 #include "script/interpreter.h"
@@ -36,6 +38,7 @@
 #include <stdint.h>
 
 #include <boost/assign/list_of.hpp>
+#include <boost/filesystem.hpp>
 
 #include <univalue.h>
 
@@ -4600,6 +4603,198 @@ extern UniValue z_importwallet(const UniValue& params, bool fHelp);
 extern UniValue z_getpaymentdisclosure(const UniValue& params, bool fHelp); // in rpcdisclosure.cpp
 extern UniValue z_validatepaymentdisclosure(const UniValue &params, bool fHelp);
 
+UniValue loadwallet(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 1)
+        throw runtime_error(
+            "loadwallet \"filename\"\n"
+            "\nLoads a wallet from a wallet file.\n"
+            "Note that a blockchain rescan is performed to find transactions for the wallet's addresses.\n"
+            "\nArguments:\n"
+            "1. \"filename\"    (string, required) The wallet file to load (relative to datadir)\n"
+            "\nResult:\n"
+            "{\n"
+            "  \"name\" :    <wallet_name>,   (string) The wallet name if loaded successfully.\n"
+            "  \"warning\" : <warning>,       (string) Any warning messages that occurred during loading.\n"
+            "}\n"
+            "\nExamples:\n"
+            + HelpExampleCli("loadwallet", "\"backup-wallet.dat\"")
+            + HelpExampleRpc("loadwallet", "\"backup-wallet.dat\"")
+        );
+
+    // Check if node is still in warmup
+    string statusOut;
+    if (RPCIsInWarmup(&statusOut))
+        throw JSONRPCError(RPC_IN_WARMUP, "Node is still warming up: " + statusOut);
+
+    // Check if shutdown is requested
+    if (ShutdownRequested())
+        throw JSONRPCError(RPC_MISC_ERROR, "Node is shutting down");
+
+    // Check if a wallet is already loaded
+    if (pwalletMain != NULL)
+        throw JSONRPCError(RPC_WALLET_ERROR, "A wallet is already loaded. Please unload it first using unloadwallet.");
+
+    string strWalletFile = params[0].get_str();
+
+    // Check if wallet file exists
+    boost::filesystem::path pathWalletFile = GetDataDir() / strWalletFile;
+    if (!boost::filesystem::exists(pathWalletFile))
+        throw JSONRPCError(RPC_WALLET_ERROR, "Wallet file not found: " + strWalletFile);
+
+    string warningString;
+    string errorString;
+
+    // Verify wallet file
+    if (!CWallet::Verify(strWalletFile, warningString, errorString)) {
+        if (!errorString.empty())
+            throw JSONRPCError(RPC_WALLET_ERROR, errorString);
+    }
+
+    LogPrintf("loadwallet: Loading wallet %s\n", strWalletFile);
+
+    // Create and load the wallet
+    bool fFirstRun = true;
+    pwalletMain = new CWallet(strWalletFile);
+    DBErrors nLoadWalletRet = pwalletMain->LoadWallet(fFirstRun);
+
+    if (nLoadWalletRet != DB_LOAD_OK) {
+        string strError;
+        if (nLoadWalletRet == DB_CORRUPT)
+            strError = "Error loading wallet: Wallet corrupted";
+        else if (nLoadWalletRet == DB_NONCRITICAL_ERROR) {
+            warningString += "Warning: error reading wallet! All keys read correctly, but transaction data or address book entries might be missing or incorrect.";
+        }
+        else if (nLoadWalletRet == DB_TOO_NEW)
+            strError = "Error loading wallet: Wallet requires newer version of ZClassic";
+        else if (nLoadWalletRet == DB_NEED_REWRITE)
+            strError = "Wallet needed to be rewritten: restart ZClassic to complete";
+        else
+            strError = "Error loading wallet";
+
+        if (!strError.empty()) {
+            delete pwalletMain;
+            pwalletMain = NULL;
+            throw JSONRPCError(RPC_WALLET_ERROR, strError);
+        }
+    }
+
+    // Generate HD seed if needed
+    if (!pwalletMain->HaveHDSeed()) {
+        pwalletMain->GenerateNewSeed();
+    }
+
+    // Set default key if first run
+    if (fFirstRun) {
+        CPubKey newDefaultKey;
+        if (pwalletMain->GetKeyFromPool(newDefaultKey)) {
+            pwalletMain->SetDefaultKey(newDefaultKey);
+            pwalletMain->SetAddressBook(pwalletMain->vchDefaultKey.GetID(), "", "receive");
+        }
+        pwalletMain->SetBestChain(chainActive.GetLocator());
+    }
+
+    // Register the wallet as a validation interface
+    RegisterValidationInterface(pwalletMain);
+
+    // Perform blockchain rescan to find transactions for all addresses (required for z-addresses)
+    LogPrintf("loadwallet: Rescanning blockchain for wallet transactions...\n");
+    {
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        pwalletMain->ClearNoteWitnessCache();
+        CBlockIndex* pindexRescan = chainActive.Genesis();
+        pwalletMain->ScanForWalletTransactions(pindexRescan, true);
+        pwalletMain->SetBestChain(chainActive.GetLocator());
+    }
+
+    // Re-enable mining if configured
+#ifdef ENABLE_MINING
+    if (pwalletMain || !GetArg("-mineraddress", "").empty())
+        GenerateBitcoins(GetBoolArg("-gen", false), GetArg("-genproclimit", 1), Params());
+#endif
+
+    LogPrintf("loadwallet: Wallet %s loaded successfully\n", strWalletFile);
+
+    UniValue result(UniValue::VOBJ);
+    result.push_back(Pair("name", strWalletFile));
+    if (!warningString.empty())
+        result.push_back(Pair("warning", warningString));
+
+    return result;
+}
+
+UniValue unloadwallet(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 0)
+        throw runtime_error(
+            "unloadwallet\n"
+            "\nUnloads the currently loaded wallet.\n"
+            "Waits for any pending async operations to complete before unloading.\n"
+            "\nResult:\n"
+            "\"message\"    (string) Confirmation message.\n"
+            "\nExamples:\n"
+            + HelpExampleCli("unloadwallet", "")
+            + HelpExampleRpc("unloadwallet", "")
+        );
+
+    // Check if shutdown is requested
+    if (ShutdownRequested())
+        throw JSONRPCError(RPC_MISC_ERROR, "Node is shutting down");
+
+    // Check if a wallet is loaded
+    if (pwalletMain == NULL)
+        throw JSONRPCError(RPC_WALLET_ERROR, "No wallet is currently loaded.");
+
+    LogPrintf("unloadwallet: Starting wallet unload...\n");
+
+    // Wait for all pending async operations to complete
+    std::shared_ptr<AsyncRPCQueue> q = getAsyncRPCQueue();
+    if (q->getOperationCount() > 0) {
+        LogPrintf("unloadwallet: Waiting for %d pending async operations to complete...\n", q->getOperationCount());
+        q->finishAndWait();
+    }
+
+    // Stop mining if running
+#ifdef ENABLE_MINING
+    GenerateBitcoins(false, 0, Params());
+#endif
+
+    // Unregister node signals
+    UnregisterNodeSignals(GetNodeSignals());
+
+    // Flush wallet to disk (non-shutdown flush first)
+    if (pwalletMain) {
+        pwalletMain->Flush(false);
+    }
+
+    // Shutdown flush
+    if (pwalletMain) {
+        pwalletMain->Flush(true);
+    }
+
+    // Unregister validation interface
+    UnregisterValidationInterface(pwalletMain);
+
+    // Cleanup wallet (securely wipe sensitive data)
+    if (pwalletMain) {
+        pwalletMain->CleanupForUnload();
+    }
+
+    // Delete the wallet object
+    delete pwalletMain;
+    pwalletMain = NULL;
+
+    // Reset the BerkeleyDB environment
+    bitdb.Reset();
+
+    // Re-register node signals
+    RegisterNodeSignals(GetNodeSignals());
+
+    LogPrintf("unloadwallet: Wallet unloaded successfully\n");
+
+    return "Wallet unloaded successfully.";
+}
+
 static const CRPCCommand commands[] =
 { //  category              name                        actor (function)           okSafeMode
     //  --------------------- ------------------------    -----------------------    ----------
@@ -4633,6 +4828,7 @@ static const CRPCCommand commands[] =
     { "wallet",             "listsinceblock",           &listsinceblock,           false },
     { "wallet",             "listtransactions",         &listtransactions,         false },
     { "wallet",             "listunspent",              &listunspent,              false },
+    { "wallet",             "loadwallet",               &loadwallet,               true  },
     { "wallet",             "lockunspent",              &lockunspent,              true  },
     { "wallet",             "move",                     &movecmd,                  false },
     { "wallet",             "sendfrom",                 &sendfrom,                 false },
@@ -4641,6 +4837,7 @@ static const CRPCCommand commands[] =
     { "wallet",             "setaccount",               &setaccount,               true  },
     { "wallet",             "settxfee",                 &settxfee,                 true  },
     { "wallet",             "signmessage",              &signmessage,              true  },
+    { "wallet",             "unloadwallet",             &unloadwallet,             true  },
     { "wallet",             "walletlock",               &walletlock,               true  },
     { "wallet",             "walletpassphrasechange",   &walletpassphrasechange,   true  },
     { "wallet",             "walletpassphrase",         &walletpassphrase,         true  },

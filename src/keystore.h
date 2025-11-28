@@ -98,6 +98,9 @@ public:
     virtual bool GetSproutViewingKey(
         const libzcash::SproutPaymentAddress &address,
         libzcash::SproutViewingKey& vkOut) const =0;
+
+    //! Securely wipe all keys from memory
+    virtual void CleanupKeys() =0;
 };
 
 typedef std::map<CKeyID, CKey> KeyMap;
@@ -304,6 +307,9 @@ public:
     virtual bool GetSproutViewingKey(
         const libzcash::SproutPaymentAddress &address,
         libzcash::SproutViewingKey& vkOut) const;
+
+    //! Securely wipe all keys from memory
+    void CleanupKeys();
 };
 
 typedef std::vector<unsigned char, secure_allocator<unsigned char> > CKeyingMaterial;

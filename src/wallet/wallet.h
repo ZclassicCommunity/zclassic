@@ -1241,6 +1241,9 @@ public:
 
     //! Verify the wallet database and perform salvage if required
     static bool Verify(const std::string& walletFile, std::string& warningString, std::string& errorString);
+
+    //! Cleanup wallet for unloading (securely wipe sensitive data)
+    void CleanupForUnload();
     
     /** 
      * Address book entry changed.

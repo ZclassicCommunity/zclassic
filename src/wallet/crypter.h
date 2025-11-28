@@ -263,6 +263,9 @@ public:
     }
     bool GetSaplingSpendingKey(const libzcash::SaplingFullViewingKey &fvk, libzcash::SaplingExtendedSpendingKey &skOut) const;
 
+    //! Securely wipe all keys from memory (override base class)
+    void CleanupKeys();
+
 
     /**
      * Wallet status (encrypted, locked) changed.

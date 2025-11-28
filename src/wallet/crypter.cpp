@@ -7,6 +7,7 @@
 #include "script/script.h"
 #include "script/standard.h"
 #include "streams.h"
+#include "support/cleanse.h"
 #include "util.h"
 
 #include <string>
@@ -546,6 +547,53 @@ bool CCryptoKeyStore::GetSaplingSpendingKey(const libzcash::SaplingFullViewingKe
         }
     }
     return false;
+}
+
+void CCryptoKeyStore::CleanupKeys()
+{
+    {
+        LOCK2(cs_KeyStore, cs_SpendingKeyStore);
+
+        // Securely wipe the master key
+        if (!vMasterKey.empty()) {
+            memory_cleanse(vMasterKey.data(), vMasterKey.size());
+            vMasterKey.clear();
+        }
+
+        // Clear crypted HD seed
+        if (!cryptedHDSeed.second.empty()) {
+            memory_cleanse(cryptedHDSeed.second.data(), cryptedHDSeed.second.size());
+            cryptedHDSeed.second.clear();
+        }
+        cryptedHDSeed.first.SetNull();
+
+        // Clear crypted keys
+        for (auto& entry : mapCryptedKeys) {
+            if (!entry.second.second.empty()) {
+                memory_cleanse(entry.second.second.data(), entry.second.second.size());
+            }
+        }
+        mapCryptedKeys.clear();
+
+        // Clear crypted Sprout spending keys
+        for (auto& entry : mapCryptedSproutSpendingKeys) {
+            if (!entry.second.empty()) {
+                memory_cleanse(entry.second.data(), entry.second.size());
+            }
+        }
+        mapCryptedSproutSpendingKeys.clear();
+
+        // Clear crypted Sapling spending keys
+        for (auto& entry : mapCryptedSaplingSpendingKeys) {
+            if (!entry.second.empty()) {
+                memory_cleanse(entry.second.data(), entry.second.size());
+            }
+        }
+        mapCryptedSaplingSpendingKeys.clear();
+    }
+
+    // Call base class cleanup
+    CBasicKeyStore::CleanupKeys();
 }
 
 bool CCryptoKeyStore::EncryptKeys(CKeyingMaterial& vMasterKeyIn)

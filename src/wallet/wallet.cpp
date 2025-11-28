@@ -18,6 +18,7 @@
 #include "script/script.h"
 #include "script/sighashtype.h"
 #include "script/sign.h"
+#include "support/cleanse.h"
 #include "timedata.h"
 #include "utilmoneystr.h"
 #include "zcash/Note.hpp"
@@ -749,6 +750,57 @@ set<uint256> CWallet::GetConflicts(const uint256& txid) const
 void CWallet::Flush(bool shutdown)
 {
     bitdb.Flush(shutdown);
+}
+
+void CWallet::CleanupForUnload()
+{
+    LOCK(cs_wallet);
+
+    // Clear wallet transactions
+    mapWallet.clear();
+
+    // Clear nullifier maps
+    mapSproutNullifiersToNotes.clear();
+    mapSaplingNullifiersToNotes.clear();
+
+    // Clear address book
+    mapAddressBook.clear();
+
+    // Clear key pool
+    setKeyPool.clear();
+
+    // Clear key metadata
+    mapKeyMetadata.clear();
+    mapSproutZKeyMetadata.clear();
+    mapSaplingZKeyMetadata.clear();
+
+    // Clear master keys (securely wipe)
+    for (auto& entry : mapMasterKeys) {
+        if (!entry.second.vchCryptedKey.empty()) {
+            memory_cleanse(entry.second.vchCryptedKey.data(), entry.second.vchCryptedKey.size());
+        }
+        if (!entry.second.vchSalt.empty()) {
+            memory_cleanse(entry.second.vchSalt.data(), entry.second.vchSalt.size());
+        }
+    }
+    mapMasterKeys.clear();
+
+    // Clear locked coins/notes
+    setLockedCoins.clear();
+    setLockedSproutNotes.clear();
+    setLockedSaplingNotes.clear();
+
+    // Clear request count
+    mapRequestCount.clear();
+
+    // Clear default key
+    vchDefaultKey = CPubKey();
+
+    // Clear witness cache
+    ClearNoteWitnessCache();
+
+    // Call base class cleanup to wipe all cryptographic keys
+    CleanupKeys();
 }
 
 bool CWallet::Verify(const string& walletFile, string& warningString, string& errorString)
