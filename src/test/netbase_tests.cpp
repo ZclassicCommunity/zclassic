@@ -104,6 +104,31 @@ BOOST_AUTO_TEST_CASE(onioncat_test)
     BOOST_CHECK(addr1.IsRoutable());
 }
 
+BOOST_AUTO_TEST_CASE(onion_v3_test)
+{
+    // Test V3 onion address (56 character base32-encoded address)
+    // This is a valid V3 onion address format
+    CNetAddr addr1("pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion");
+    BOOST_CHECK(addr1.IsTor());
+    BOOST_CHECK(addr1.IsValid());
+    BOOST_CHECK(addr1.IsRoutable());
+    BOOST_CHECK(addr1.GetNetwork() == NET_ONION);
+    BOOST_CHECK(addr1.ToStringIP() == "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion");
+
+    // Test that V3 address survives round-trip through string conversion
+    CNetAddr addr2(addr1.ToStringIP());
+    BOOST_CHECK(addr2.IsTor());
+    BOOST_CHECK(addr2.IsValid());
+    BOOST_CHECK(addr2.IsRoutable());
+
+    // Test CService with V3 onion address
+    CService svc(addr1, 8333);
+    BOOST_CHECK(svc.IsValid());
+    BOOST_CHECK(svc.IsTor());
+    BOOST_CHECK(svc.IsRoutable());
+    BOOST_CHECK(svc.GetPort() == 8333);
+}
+
 BOOST_AUTO_TEST_CASE(subnet_test)
 {
     BOOST_CHECK(CSubNet("1.2.3.0/24") == CSubNet("1.2.3.0/255.255.255.0"));
