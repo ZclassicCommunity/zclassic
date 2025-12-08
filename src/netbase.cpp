@@ -895,6 +895,11 @@ bool CNetAddr::IsMulticast() const
 
 bool CNetAddr::IsValid() const
 {
+    // Tor v3 addresses are valid if they have a properly-sized pubkey stored
+    // V3 onion addresses store data in torv3_addr (32 bytes), not in ip[16]
+    if (!torv3_addr.empty()) {
+        return torv3_addr.size() == ADDR_TORV3_SIZE;
+    }
     // Cleanup 3-byte shifted addresses caused by garbage in size field
     // of addr messages from versions before 0.2.9 checksum.
     // Two consecutive addr messages look like this:
