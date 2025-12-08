@@ -106,7 +106,7 @@ map<string, string> mapArgs;
 map<string, vector<string> > mapMultiArgs;
 bool fDebug = false;
 bool fPrintToConsole = false;
-bool fPrintToDebugLog = true;
+bool fPrintToDebugLog = false;
 bool fDaemon = false;
 bool fServer = false;
 string strMiscWarning;
