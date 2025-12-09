@@ -451,12 +451,16 @@ public:
                 // We'll read raw bytes and parse them with an addrv2 stream
                 // Since CAddrInfo size is variable in addrv2, we need to parse field by field
 
-                // CAddrInfo contains: CAddress (nTime, nServices, CService) + source + nLastSuccess + nAttempts
-                // CAddress: nTime(4) + nServices(CompactSize) + CService(addrv2)
+                // CAddrInfo contains: CAddress (nVersion, nTime, nServices, CService) + source + nLastSuccess + nAttempts
+                // CAddress with SER_DISK: nVersion(4) + nTime(4) + nServices(CompactSize) + CService(addrv2)
                 // CService: CNetAddr(addrv2) + port(2)
                 // CNetAddr(addrv2): net_id(1) + addr_len(CompactSize) + addr(variable)
 
                 // Read CAddress part with addrv2 format
+                // First read the version (SER_DISK includes version)
+                int nAddrVersion;
+                s >> nAddrVersion;
+
                 unsigned int nAddrTime;
                 s >> nAddrTime;
                 info.nTime = nAddrTime;
@@ -543,6 +547,10 @@ public:
             CAddrInfo info;
             if (fUseAddrV2) {
                 // Same addrv2 parsing as above
+                // First read the version (SER_DISK includes version)
+                int nAddrVersion;
+                s >> nAddrVersion;
+
                 unsigned int nAddrTime;
                 s >> nAddrTime;
                 info.nTime = nAddrTime;

@@ -191,6 +191,16 @@ class CNetAddr
             } else {
                 // Legacy format: 16-byte IPv6-mapped address
                 READWRITE(FLATDATA(ip));
+                // After reading legacy format, detect and set m_net based on IP content
+                if (ser_action.ForRead()) {
+                    if (IsIPv4()) {
+                        m_net = NET_IPV4;
+                    } else if (IsTor()) {
+                        m_net = NET_ONION;
+                    } else {
+                        m_net = NET_IPV6;
+                    }
+                }
             }
         }
 
