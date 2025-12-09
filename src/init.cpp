@@ -14998,8 +14998,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         SetProxy(NET_IPV4, addrProxy);
         SetProxy(NET_IPV6, addrProxy);
         SetProxy(NET_ONION, addrProxy);
+        SetProxy(NET_TORV3, addrProxy);  // BIP155: Also set proxy for Tor v3
         SetNameProxy(addrProxy);
         SetLimited(NET_ONION, false); // by default, -proxy sets onion as reachable, unless -noonion later
+        SetLimited(NET_TORV3, false); // BIP155: Also set Tor v3 as reachable
     }
 
     // -onion can be used to set only a proxy for .onion, or override normal proxy for .onion addresses
@@ -15009,12 +15011,15 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     if (onionArg != "") {
         if (onionArg == "0") { // Handle -noonion/-onion=0
             SetLimited(NET_ONION); // set onions as unreachable
+            SetLimited(NET_TORV3); // BIP155: Also disable Tor v3
         } else {
             proxyType addrOnion = proxyType(CService(onionArg, 9050), proxyRandomize);
             if (!addrOnion.IsValid())
                 return InitError(strprintf(_("Invalid -onion address: '%s'"), onionArg));
             SetProxy(NET_ONION, addrOnion);
+            SetProxy(NET_TORV3, addrOnion);  // BIP155: Also set proxy for Tor v3
             SetLimited(NET_ONION, false);
+            SetLimited(NET_TORV3, false);    // BIP155: Also enable Tor v3
         }
     }
 
