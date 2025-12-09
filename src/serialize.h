@@ -179,6 +179,8 @@ enum
     SER_NETWORK         = (1 << 0),
     SER_DISK            = (1 << 1),
     SER_GETHASH         = (1 << 2),
+    // BIP155: Use addrv2 format for address serialization
+    SER_ADDRV2          = (1 << 3),
 };
 
 #define READWRITE(obj)      (::SerReadWrite(s, (obj), ser_action))

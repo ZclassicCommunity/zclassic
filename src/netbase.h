@@ -153,7 +153,45 @@ class CNetAddr
 
         template <typename Stream, typename Operation>
         inline void SerializationOp(Stream& s, Operation ser_action) {
-            READWRITE(FLATDATA(ip));
+            if (s.GetType() & SER_ADDRV2) {
+                // BIP155 addrv2 format: network_id(1) + addr_len(CompactSize) + addr(variable)
+                if (ser_action.ForRead()) {
+                    uint8_t net_id;
+                    READWRITE(net_id);
+
+                    uint64_t addr_len;
+                    READWRITE(COMPACTSIZE(addr_len));
+
+                    if (addr_len > ADDR_MAX_SIZE) {
+                        throw std::ios_base::failure("Address too long");
+                    }
+
+                    std::vector<uint8_t> addr_bytes(addr_len);
+                    if (addr_len > 0) {
+                        s.read((char*)addr_bytes.data(), addr_len);
+                    }
+
+                    // Convert BIP155 network ID to internal representation
+                    if (!SetFromBIP155(static_cast<BIP155Network>(net_id), addr_bytes)) {
+                        throw std::ios_base::failure("Invalid address for network");
+                    }
+                } else {
+                    // Writing
+                    uint8_t net_id = static_cast<uint8_t>(GetBIP155Network());
+                    READWRITE(net_id);
+
+                    std::vector<uint8_t> addr_bytes = GetAddrBytes();
+                    uint64_t addr_len = addr_bytes.size();
+                    READWRITE(COMPACTSIZE(addr_len));
+
+                    if (addr_len > 0) {
+                        s.write((const char*)addr_bytes.data(), addr_len);
+                    }
+                }
+            } else {
+                // Legacy format: 16-byte IPv6-mapped address
+                READWRITE(FLATDATA(ip));
+            }
         }
 
         friend class CSubNet;
@@ -218,11 +256,22 @@ class CService : public CNetAddr
 
         template <typename Stream, typename Operation>
         inline void SerializationOp(Stream& s, Operation ser_action) {
-            READWRITE(FLATDATA(ip));
-            unsigned short portN = htons(port);
-            READWRITE(FLATDATA(portN));
-            if (ser_action.ForRead())
-                 port = ntohs(portN);
+            if (s.GetType() & SER_ADDRV2) {
+                // BIP155 addrv2 format: serialize CNetAddr in addrv2 format + port
+                READWRITE(*(CNetAddr*)this);
+                // Port is serialized in big-endian (network byte order)
+                unsigned short portN = htons(port);
+                READWRITE(FLATDATA(portN));
+                if (ser_action.ForRead())
+                    port = ntohs(portN);
+            } else {
+                // Legacy format: 16-byte IPv6-mapped address + port
+                READWRITE(FLATDATA(ip));
+                unsigned short portN = htons(port);
+                READWRITE(FLATDATA(portN));
+                if (ser_action.ForRead())
+                     port = ntohs(portN);
+            }
         }
 };
 

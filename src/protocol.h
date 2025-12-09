@@ -107,7 +107,17 @@ public:
         if ((s.GetType() & SER_DISK) ||
             (nVersion >= CADDR_TIME_VERSION && !(s.GetType() & SER_GETHASH)))
             READWRITE(nTime);
-        READWRITE(nServices);
+
+        if (s.GetType() & SER_ADDRV2) {
+            // BIP155 addrv2: services as CompactSize
+            uint64_t nServicesCompact = nServices;
+            READWRITE(COMPACTSIZE(nServicesCompact));
+            if (ser_action.ForRead())
+                nServices = nServicesCompact;
+        } else {
+            // Legacy format: services as uint64_t
+            READWRITE(nServices);
+        }
         READWRITE(*(CService*)this);
     }
 
