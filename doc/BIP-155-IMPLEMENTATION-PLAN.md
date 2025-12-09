@@ -168,17 +168,27 @@ else if (strCommand == "sendaddrv2") {
 - `src/init.cpp` - `-enablebip155` help message
 - `src/version.h` - PROTOCOL_VERSION 170012, BIP155_VERSION constant
 
-**peers.dat Format:**
+**peers.dat Format (Bitcoin Core compatible):**
 ```
-Version 1 (current): [magic][keysize=32][nKey][nNew][nTried][buckets...]
-Version 2 (new):     [magic][keysize=0xFFFFFFFF][version=2][nKey][nNew][nTried][buckets...]
+Legacy:    [magic(4)][format=0x01][compat=0x20(32)]... (keysize=32)
+V3_BIP155: [magic(4)][format=0x03][compat=0x23(35)]... (INCOMPATIBILITY_BASE + 3)
 ```
 
+**Versioning Scheme (from Bitcoin Core PR #19954, #20284):**
+- Byte 0 after magic: Format version (V1_DETERMINISTIC=1, V3_BIP155=3)
+- Byte 1 after magic: INCOMPATIBILITY_BASE(32) + lowest_compatible_version
+- Old nodes see keysize=35 which is != 32, fail gracefully with "Corrupt peers.dat"
+- New nodes detect format by checking if compat >= INCOMPATIBILITY_BASE
+
 **Migration Strategy:**
-1. On load, check keysize field
-2. If keysize == 0xFFFFFFFF, read version field, use new format
-3. If keysize == 32, use legacy format (read-only)
-4. On save, always use new format with version=2
+1. On load, check compat byte at offset 5
+2. If compat == 32 (legacy): read V1 format, set m_net from IP content
+3. If compat >= 32: extract version = compat - 32, use addrv2 format
+4. On save, always use V3_BIP155 format with addrv2 serialization
+
+**Critical Bug Fixes Applied:**
+1. Missing nVersion read in CAddress deserialization (SER_DISK writes version first)
+2. m_net field detection after legacy format read (IsIPv4/IsTor/IPv6)
 
 **Deliverable:** Tor v3 addresses persist across restarts
 
@@ -247,12 +257,47 @@ void RelayAddress(const CAddress& addr) {
 
 ---
 
-## 6. Rollback Plan
+## 6. Upgrade Instructions
+
+### Before Upgrading to BIP-155
+
+**IMPORTANT:** Backup your peers.dat before upgrading!
+
+```bash
+# 1. Stop the daemon
+zclassic-cli stop
+
+# 2. Wait for shutdown
+sleep 5
+
+# 3. Backup peers.dat (REQUIRED)
+cp ~/Library/Application\ Support/ZClassic/peers.dat \
+   ~/Library/Application\ Support/ZClassic/peers.dat.preBIP155
+
+# 4. Install new version with BIP-155 support
+
+# 5. Start daemon
+zclassicd -daemon
+```
+
+The new daemon will:
+1. Load your legacy peers.dat (`01 20` format)
+2. On first flush (~15 min), write addrv2 format (`03 23`)
+3. Subsequent restarts will use the new format
+
+### Rollback Plan
 
 If issues are discovered post-deployment:
 
-1. **Soft rollback:** Disable `sendaddrv2` sending via config flag
-2. **Hard rollback:** Revert to previous version
+1. **Soft rollback:** Disable `sendaddrv2` sending via config flag (`-enablebip155=0`)
+2. **Hard rollback:** Revert to previous version and restore backup:
+   ```bash
+   zclassic-cli stop
+   cp ~/Library/Application\ Support/ZClassic/peers.dat.preBIP155 \
+      ~/Library/Application\ Support/ZClassic/peers.dat
+   # Install previous version
+   zclassicd -daemon
+   ```
 3. **Data recovery:** peers.dat v2 can be deleted; node re-discovers peers
 
 ---
@@ -292,3 +337,4 @@ If issues are discovered post-deployment:
 |---------|------|--------|---------|
 | 1.0 | 2025-12-09 | ZipherX/Claude | Initial plan based on Bitcoin/Zcash research |
 | 2.0 | 2025-12-09 | ZipherX/Claude | Implementation completed & tested |
+| 2.1 | 2025-12-09 | ZipherX/Claude | peers.dat persistence with Bitcoin Core compatible versioning |
