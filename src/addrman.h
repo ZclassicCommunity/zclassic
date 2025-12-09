@@ -298,18 +298,12 @@ public:
         V0_HISTORICAL = 0,    // Historic format, before deterministic
         V1_DETERMINISTIC = 1, // Deterministic bucket assignment
         V2_RESERVED = 2,      // Reserved (asmap in Bitcoin)
-        V3_BIP155 = 3,        // BIP155 addrv2 format
+        V3_BIP155 = 3,        // BIP155 addrv2 format (current version)
     };
-
-    //! The maximum format version we can read
-    static const Format FILE_FORMAT = V3_BIP155;
-
-    //! The minimum format version that can read FILE_FORMAT
-    static const Format LOWEST_COMPATIBLE = V3_BIP155;
 
     //! Base value for incompatibility detection (matches Bitcoin Core)
     //! Old software expects keysize=32, so we use 32 as base
-    static const uint8_t INCOMPATIBILITY_BASE = 32;
+    enum { INCOMPATIBILITY_BASE = 32 };
 
     template<typename Stream>
     void Serialize(Stream &s) const
@@ -317,13 +311,13 @@ public:
         LOCK(cs);
 
         // Write format version byte
-        uint8_t nFormat = FILE_FORMAT;
+        uint8_t nFormat = V3_BIP155;
         s << nFormat;
 
         // Write compatibility byte: INCOMPATIBILITY_BASE + lowest_compatible
         // Old software sees this as "keysize" and fails if != 32
         // For V3_BIP155, this is 32 + 3 = 35, which triggers the error
-        uint8_t nCompat = INCOMPATIBILITY_BASE + LOWEST_COMPATIBLE;
+        uint8_t nCompat = INCOMPATIBILITY_BASE + V3_BIP155;
         s << nCompat;
 
         // Write the key (256 bits)
@@ -347,7 +341,7 @@ public:
                 assert(nIds != nNew); // this means nNew was wrong, oh ow
                 ssAddr.clear();
                 ssAddr << info;
-                s.write(ssAddr.data(), ssAddr.size());
+                s.write(&ssAddr[0], ssAddr.size());
                 nIds++;
             }
         }
@@ -358,7 +352,7 @@ public:
                 assert(nIds != nTried); // this means nTried was wrong, oh ow
                 ssAddr.clear();
                 ssAddr << info;
-                s.write(ssAddr.data(), ssAddr.size());
+                s.write(&ssAddr[0], ssAddr.size());
                 nIds++;
             }
         }
@@ -408,11 +402,11 @@ public:
             uint8_t lowest_compatible = nCompat - INCOMPATIBILITY_BASE;
 
             // Check if this file requires a newer version than we support
-            if (lowest_compatible > FILE_FORMAT) {
+            if (lowest_compatible > V3_BIP155) {
                 throw std::ios_base::failure(
                     strprintf("Unsupported format of addrman database: %d (requires %d, we support up to %d). "
                               "You can delete peers.dat to start fresh.",
-                              nFormat, lowest_compatible, FILE_FORMAT));
+                              (int)nFormat, (int)lowest_compatible, (int)V3_BIP155));
             }
 
             // Use addrv2 format for V3_BIP155 and later
