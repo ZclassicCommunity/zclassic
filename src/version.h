@@ -9,7 +9,7 @@
  * network protocol versioning
  */
 
-static const int PROTOCOL_VERSION = 170011;
+static const int PROTOCOL_VERSION = 170012;
 
 //! initial proto version, to be increased after version/verack negotiation
 static const int INIT_PROTO_VERSION = 209;
@@ -32,5 +32,8 @@ static const int MEMPOOL_GD_VERSION = 60002;
 
 //! "filter*" commands are disabled without NODE_BLOOM after and including this version
 static const int NO_BLOOM_VERSION = 170004;
+
+//! BIP155 (addrv2) is enabled starting with this version
+static const int BIP155_VERSION = 170012;
 
 #endif // BITCOIN_VERSION_H

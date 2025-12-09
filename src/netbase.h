@@ -33,30 +33,55 @@ enum Network
     NET_UNROUTABLE = 0,
     NET_IPV4,
     NET_IPV6,
-    NET_ONION,
-    
+    NET_ONION,      // Tor v2 (deprecated) - kept for backward compatibility
+    NET_TORV3,      // Tor v3 (BIP155)
+    NET_I2P,        // I2P (BIP155)
+    NET_CJDNS,      // CJDNS (BIP155)
+    NET_INTERNAL,   // Internal use only
+
     NET_MAX
 };
+
+/** BIP155 network IDs - private enum for serialization */
+enum BIP155Network : uint8_t {
+    BIP155_IPV4 = 0x01,
+    BIP155_IPV6 = 0x02,
+    BIP155_TORV2 = 0x03,  // Deprecated
+    BIP155_TORV3 = 0x04,
+    BIP155_I2P = 0x05,
+    BIP155_CJDNS = 0x06,
+};
+
+/** BIP155 address sizes */
+static const size_t ADDR_IPV4_SIZE = 4;
+static const size_t ADDR_IPV6_SIZE = 16;
+static const size_t ADDR_TORV2_SIZE = 10;
+static const size_t ADDR_TORV3_SIZE = 32;
+static const size_t ADDR_I2P_SIZE = 32;
+static const size_t ADDR_CJDNS_SIZE = 16;
+static const size_t ADDR_MAX_SIZE = 512;  // Maximum address size for safety
 /** IP address (IPv6, or IPv4 using mapped IPv6 range (::FFFF:0:0/96)) */
 class CNetAddr
 {
     protected:
         unsigned char ip[16]; // in network byte order
         std::vector<unsigned char> torv3_addr; // Full 32-byte v3 onion address
+        Network m_net{NET_IPV4}; // BIP155: Network type for variable-length addresses
 
     public:
         CNetAddr();
         CNetAddr(const struct in_addr& ipv4Addr);
         explicit CNetAddr(const char *pszIp, bool fAllowLookup = false);
         explicit CNetAddr(const std::string &strIp, bool fAllowLookup = false);
-        CNetAddr(const CNetAddr& other) : torv3_addr(other.torv3_addr) {
+        CNetAddr(const CNetAddr& other) : torv3_addr(other.torv3_addr), m_net(other.m_net) {
             memcpy(ip, other.ip, sizeof(ip));
         }
-        
+
         CNetAddr& operator=(const CNetAddr& other) {
             if (this != &other) {
                 memcpy(ip, other.ip, sizeof(ip));
                 torv3_addr = other.torv3_addr;
+                m_net = other.m_net;
             }
             return *this;
         }
@@ -86,11 +111,29 @@ class CNetAddr
         bool IsRFC6052() const; // IPv6 well-known prefix (64:FF9B::/96)
         bool IsRFC6145() const; // IPv6 IPv4-translated address (::FFFF:0:0:0/96)
         bool IsTor() const;
+        bool IsTorV3() const;
+        bool IsI2P() const;
+        bool IsCJDNS() const;
         bool IsLocal() const;
         bool IsRoutable() const;
         bool IsValid() const;
         bool IsMulticast() const;
         enum Network GetNetwork() const;
+
+        /** BIP155: Returns true if this address requires addrv2 format */
+        bool IsAddrV2() const { return IsTorV3() || IsI2P() || IsCJDNS(); }
+
+        /** BIP155: Get the BIP155 network ID for this address */
+        BIP155Network GetBIP155Network() const;
+
+        /** BIP155: Get the expected address size for a BIP155 network ID */
+        static size_t GetBIP155AddrSize(BIP155Network net_id);
+
+        /** BIP155: Set address from BIP155 format */
+        bool SetFromBIP155(BIP155Network net_id, const std::vector<uint8_t>& addr_bytes);
+
+        /** BIP155: Get address bytes for serialization */
+        std::vector<uint8_t> GetAddrBytes() const;
         std::string ToString() const;
         std::string ToStringIP() const;
         unsigned int GetByte(int n) const;

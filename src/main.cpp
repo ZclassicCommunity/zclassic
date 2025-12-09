@@ -30,6 +30,7 @@
 #include "validationinterface.h"
 #include "wallet/asyncrpcoperation_sendmany.h"
 #include "wallet/asyncrpcoperation_shieldcoinbase.h"
+#include "version.h"
 
 #include <algorithm>
 #include <atomic>
@@ -5631,6 +5632,13 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
         // Potentially mark this peer as a preferred download peer.
         UpdatePreferredDownload(pfrom, State(pfrom->GetId()));
 
+        // BIP155: Send sendaddrv2 BEFORE verack to signal addrv2 support
+        // This must be sent before verack per BIP155 specification
+        if (GetBoolArg("-enablebip155", true) && pfrom->nVersion >= BIP155_VERSION) {
+            pfrom->PushMessage("sendaddrv2");
+            LogPrint("net", "sending sendaddrv2 to peer=%d\n", pfrom->id);
+        }
+
         // Change version
         pfrom->PushMessage("verack");
         pfrom->ssSend.SetVersion(min(pfrom->nVersion, PROTOCOL_VERSION));
@@ -5708,6 +5716,35 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
             LOCK(cs_main);
             State(pfrom->GetId())->fCurrentlyConnected = true;
         }
+    }
+
+
+    // BIP155: Handle sendaddrv2 message
+    // This message signals that the peer wants to receive addrv2 messages
+    // Per BIP155, this must be sent between version and verack
+    else if (strCommand == "sendaddrv2")
+    {
+        // Ignore if BIP155 is disabled
+        if (!GetBoolArg("-enablebip155", true)) {
+            LogPrint("net", "peer=%d sent sendaddrv2 but BIP155 is disabled, ignoring\n", pfrom->id);
+            return true;
+        }
+
+        // Ignore from peers with old protocol version (they shouldn't send this)
+        if (pfrom->nVersion < BIP155_VERSION) {
+            LogPrint("net", "peer=%d (version %d) sent unexpected sendaddrv2, ignoring\n",
+                     pfrom->id, pfrom->nVersion);
+            return true;
+        }
+
+        // Ignore if connection is already fully established (sendaddrv2 must come before verack)
+        if (pfrom->fSuccessfullyConnected) {
+            LogPrint("net", "peer=%d sent sendaddrv2 after connection established, ignoring\n", pfrom->id);
+            return true;
+        }
+
+        pfrom->m_wants_addrv2 = true;
+        LogPrint("net", "peer=%d supports addrv2 (protocol version %d)\n", pfrom->id, pfrom->nVersion);
     }
 
 
@@ -5791,6 +5828,140 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
             pfrom->fGetAddr = false;
         if (pfrom->fOneShot)
             pfrom->fDisconnect = true;
+    }
+
+
+    // BIP155: Handle addrv2 message with variable-length addresses
+    else if (strCommand == "addrv2")
+    {
+        // Only process if BIP155 is enabled
+        if (!GetBoolArg("-enablebip155", true)) {
+            LogPrint("net", "peer=%d sent addrv2 but BIP155 is disabled, ignoring\n", pfrom->id);
+            return true;
+        }
+
+        // Reject addrv2 from peers running old protocol (they shouldn't send this)
+        if (pfrom->nVersion < BIP155_VERSION) {
+            LogPrint("net", "peer=%d (version %d) sent unexpected addrv2, ignoring\n",
+                     pfrom->id, pfrom->nVersion);
+            return true;
+        }
+
+        // Read count using CompactSize
+        uint64_t nCount;
+        vRecv >> COMPACTSIZE(nCount);
+
+        if (nCount > MAX_ADDRV2_COUNT) {
+            Misbehaving(pfrom->GetId(), 20);
+            return error("message addrv2 size() = %llu", (unsigned long long)nCount);
+        }
+
+        // Don't want addr from older versions unless seeding
+        if (pfrom->nVersion < CADDR_TIME_VERSION && addrman.size() > 1000)
+            return true;
+
+        vector<CAddress> vAddrOk;
+        int64_t nNow = GetAdjustedTime();
+        int64_t nSince = nNow - 10 * 60;
+
+        for (uint64_t i = 0; i < nCount; i++) {
+            // Read time (4 bytes, unsigned)
+            uint32_t nTime;
+            vRecv >> nTime;
+
+            // Read services using CompactSize
+            uint64_t nServices;
+            vRecv >> COMPACTSIZE(nServices);
+
+            // Read network ID (1 byte)
+            uint8_t networkID;
+            vRecv >> networkID;
+
+            // Read address length using CompactSize
+            uint64_t addrLen;
+            vRecv >> COMPACTSIZE(addrLen);
+
+            // Safety check for address length
+            if (addrLen > ADDR_MAX_SIZE) {
+                Misbehaving(pfrom->GetId(), 10);
+                return error("addrv2 address length too large: %llu", (unsigned long long)addrLen);
+            }
+
+            // Read address bytes
+            std::vector<uint8_t> addrBytes(addrLen);
+            vRecv >> REF(CFlatData(addrBytes));
+
+            // Read port (2 bytes, big endian)
+            uint16_t nPort;
+            vRecv >> nPort;
+            nPort = ntohs(nPort);
+
+            // Create CAddress and set from BIP155 format
+            CAddress addr;
+            BIP155Network bip155Net = static_cast<BIP155Network>(networkID);
+
+            // Validate address length matches expected for network type
+            size_t expectedSize = CNetAddr::GetBIP155AddrSize(bip155Net);
+            if (expectedSize != 0 && addrLen != expectedSize) {
+                LogPrint("net", "addrv2: address size mismatch for network %d: got %llu, expected %zu\n",
+                         networkID, (unsigned long long)addrLen, expectedSize);
+                continue; // Skip this address but continue processing
+            }
+
+            if (!addr.SetFromBIP155(bip155Net, addrBytes)) {
+                LogPrint("net", "addrv2: failed to parse address for network %d\n", networkID);
+                continue; // Skip invalid addresses
+            }
+
+            addr.SetPort(nPort);
+            addr.nTime = nTime;
+            addr.nServices = nServices;
+
+            // Adjust timestamp if invalid
+            if (addr.nTime <= 100000000 || addr.nTime > nNow + 10 * 60)
+                addr.nTime = nNow - 5 * 24 * 60 * 60;
+
+            pfrom->AddAddressKnown(addr);
+            bool fReachable = IsReachable(addr);
+
+            if (addr.nTime > nSince && !pfrom->fGetAddr && nCount <= 10 && addr.IsRoutable()) {
+                // Relay to a limited number of other nodes
+                LOCK(cs_vNodes);
+                static uint256 hashSalt;
+                if (hashSalt.IsNull())
+                    hashSalt = GetRandHash();
+                uint64_t hashAddr = addr.GetHash();
+                uint256 hashRand = ArithToUint256(UintToArith256(hashSalt) ^ (hashAddr<<32) ^ ((GetTime()+hashAddr)/(24*60*60)));
+                hashRand = Hash(BEGIN(hashRand), END(hashRand));
+                multimap<uint256, CNode*> mapMix;
+                BOOST_FOREACH(CNode* pnode, vNodes) {
+                    if (pnode->nVersion < CADDR_TIME_VERSION)
+                        continue;
+                    // Only relay to peers that support addrv2 if address requires it
+                    if (addr.IsAddrV2() && !pnode->m_wants_addrv2)
+                        continue;
+                    unsigned int nPointer;
+                    memcpy(&nPointer, &pnode, sizeof(nPointer));
+                    uint256 hashKey = ArithToUint256(UintToArith256(hashRand) ^ nPointer);
+                    hashKey = Hash(BEGIN(hashKey), END(hashKey));
+                    mapMix.insert(make_pair(hashKey, pnode));
+                }
+                int nRelayNodes = fReachable ? 2 : 1;
+                for (multimap<uint256, CNode*>::iterator mi = mapMix.begin(); mi != mapMix.end() && nRelayNodes-- > 0; ++mi)
+                    ((*mi).second)->PushAddress(addr);
+            }
+
+            if (fReachable)
+                vAddrOk.push_back(addr);
+        }
+
+        addrman.Add(vAddrOk, pfrom->addr, 2 * 60 * 60);
+        if (nCount < 1000)
+            pfrom->fGetAddr = false;
+        if (pfrom->fOneShot)
+            pfrom->fDisconnect = true;
+
+        LogPrint("net", "received addrv2: %llu addresses from peer=%d\n", (unsigned long long)nCount, pfrom->id);
     }
 
 
@@ -6574,6 +6745,68 @@ bool ProcessMessages(CNode* pfrom)
     return fOk;
 }
 
+/**
+ * BIP155: Push an addrv2 message to a peer with addresses in BIP155 format
+ *
+ * The addrv2 format is:
+ * - count (CompactSize)
+ * - For each address:
+ *   - time (4 bytes, uint32_t)
+ *   - services (CompactSize)
+ *   - networkID (1 byte, BIP155Network enum)
+ *   - addr_length (CompactSize)
+ *   - addr (variable length based on network)
+ *   - port (2 bytes, big endian)
+ */
+static void PushAddrV2Message(CNode* pto, const std::vector<CAddress>& vAddr)
+{
+    if (vAddr.empty())
+        return;
+
+    try {
+        pto->BeginMessage("addrv2");
+
+        // Write count as CompactSize
+        uint64_t nCount = vAddr.size();
+        pto->ssSend << COMPACTSIZE(nCount);
+
+        for (const CAddress& addr : vAddr) {
+            // Time (4 bytes)
+            uint32_t nTime = addr.nTime;
+            pto->ssSend << nTime;
+
+            // Services as CompactSize
+            uint64_t nServices = addr.nServices;
+            pto->ssSend << COMPACTSIZE(nServices);
+
+            // Network ID (1 byte)
+            BIP155Network netId = addr.GetBIP155Network();
+            pto->ssSend << static_cast<uint8_t>(netId);
+
+            // Address bytes
+            std::vector<uint8_t> addrBytes = addr.GetAddrBytes();
+
+            // Address length as CompactSize
+            uint64_t addrLen = addrBytes.size();
+            pto->ssSend << COMPACTSIZE(addrLen);
+
+            // Address data
+            pto->ssSend << CFlatData(addrBytes);
+
+            // Port (2 bytes, big endian)
+            uint16_t portBE = htons(addr.GetPort());
+            pto->ssSend << portBE;
+        }
+
+        pto->EndMessage();
+        LogPrint("net", "sent addrv2: %zu addresses to peer=%d\n", vAddr.size(), pto->id);
+    }
+    catch (...) {
+        pto->AbortMessage();
+        throw;
+    }
+}
+
 
 bool SendMessages(CNode* pto, bool fSendTrickle)
 {
@@ -6635,29 +6868,66 @@ bool SendMessages(CNode* pto, bool fSendTrickle)
         }
 
         //
-        // Message: addr
+        // Message: addr / addrv2
         //
         if (fSendTrickle)
         {
-            vector<CAddress> vAddr;
+            vector<CAddress> vAddr;      // Legacy addr for v1 peers
+            vector<CAddress> vAddrV2;    // BIP155 addrv2 for v2 peers
             vAddr.reserve(pto->vAddrToSend.size());
+            vAddrV2.reserve(pto->vAddrToSend.size());
+
+            // Separate addresses based on peer support and address type
+            bool bip155Enabled = GetBoolArg("-enablebip155", true);
+            bool peerWantsAddrV2 = bip155Enabled && pto->m_wants_addrv2;
+
             BOOST_FOREACH(const CAddress& addr, pto->vAddrToSend)
             {
                 if (!pto->addrKnown.contains(addr.GetKey()))
                 {
                     pto->addrKnown.insert(addr.GetKey());
-                    vAddr.push_back(addr);
-                    // receiver rejects addr messages larger than 1000
-                    if (vAddr.size() >= 1000)
-                    {
-                        pto->PushMessage("addr", vAddr);
-                        vAddr.clear();
+
+                    // BIP155: Addresses that require addrv2 format can only be sent to
+                    // peers that support it. Other addresses can go to either.
+                    if (addr.IsAddrV2()) {
+                        // Tor v3, I2P, CJDNS - only send if peer supports addrv2
+                        if (peerWantsAddrV2) {
+                            vAddrV2.push_back(addr);
+                            if (vAddrV2.size() >= MAX_ADDRV2_COUNT) {
+                                // Send addrv2 in BIP155 format
+                                PushAddrV2Message(pto, vAddrV2);
+                                vAddrV2.clear();
+                            }
+                        }
+                        // Otherwise skip - can't send to legacy peers
+                    } else {
+                        // IPv4, IPv6, legacy Tor v2 - send via addrv2 if supported, else addr
+                        if (peerWantsAddrV2) {
+                            vAddrV2.push_back(addr);
+                            if (vAddrV2.size() >= MAX_ADDRV2_COUNT) {
+                                PushAddrV2Message(pto, vAddrV2);
+                                vAddrV2.clear();
+                            }
+                        } else {
+                            vAddr.push_back(addr);
+                            // receiver rejects addr messages larger than 1000
+                            if (vAddr.size() >= 1000) {
+                                pto->PushMessage("addr", vAddr);
+                                vAddr.clear();
+                            }
+                        }
                     }
                 }
             }
             pto->vAddrToSend.clear();
+
+            // Send remaining legacy addr messages
             if (!vAddr.empty())
                 pto->PushMessage("addr", vAddr);
+
+            // Send remaining addrv2 messages
+            if (!vAddrV2.empty())
+                PushAddrV2Message(pto, vAddrV2);
         }
 
         CNodeState &state = *State(pto->GetId());

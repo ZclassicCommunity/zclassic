@@ -51,6 +51,8 @@ static const unsigned int MAX_ADDR_TO_SEND = 1000;
 static const unsigned int MAX_PROTOCOL_MESSAGE_LENGTH = 2 * 1024 * 1024;
 /** Maximum length of strSubVer in `version` message */
 static const unsigned int MAX_SUBVERSION_LENGTH = 256;
+/** Maximum number of addresses in addrv2 message */
+static const unsigned int MAX_ADDRV2_COUNT = 1000;
 /** -listen default */
 static const bool DEFAULT_LISTEN = true;
 /** The maximum number of entries in mapAskFor */
@@ -282,6 +284,8 @@ public:
     //    until it has initialized its bloom filter.
     bool fRelayTxes;
     bool fSentAddr;
+    // BIP155: Peer supports addrv2 message
+    bool m_wants_addrv2{false};
     CSemaphoreGrant grantOutbound;
     CCriticalSection cs_filter;
     CBloomFilter* pfilter;

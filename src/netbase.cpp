@@ -38,10 +38,8 @@
 
 #include "crypto/sha3.h"
 
-// Onion v3 address constants
-static const size_t ADDR_TORV3_SIZE = 32;
-
 // Tor v3 address structure according to tor-spec
+// Note: ADDR_TORV3_SIZE is defined in netbase.h
 namespace torv3 {
     static const size_t CHECKSUM_LEN = 2;
     static const unsigned char VERSION[] = {3};
@@ -83,6 +81,9 @@ enum Network ParseNetwork(std::string net) {
     if (net == "ipv4") return NET_IPV4;
     if (net == "ipv6") return NET_IPV6;
     if (net == "tor" || net == "onion")  return NET_ONION;
+    if (net == "torv3") return NET_TORV3;
+    if (net == "i2p") return NET_I2P;
+    if (net == "cjdns") return NET_CJDNS;
     return NET_UNROUTABLE;
 }
 
@@ -92,6 +93,10 @@ std::string GetNetworkName(enum Network net) {
     case NET_IPV4: return "ipv4";
     case NET_IPV6: return "ipv6";
     case NET_ONION: return "onion";
+    case NET_TORV3: return "torv3";
+    case NET_I2P: return "i2p";
+    case NET_CJDNS: return "cjdns";
+    case NET_INTERNAL: return "internal";
     default: return "";
     }
 }
@@ -864,13 +869,151 @@ bool CNetAddr::IsTor() const
     if (!torv3_addr.empty() && torv3_addr.size() == ADDR_TORV3_SIZE) {
         return true;
     }
-    
+
     // Check for v2 onion (OnionCat prefix: FD87:D87E:EB43)
     if (memcmp(ip, pchOnionCat, sizeof(pchOnionCat)) == 0) {
         return true;
     }
-    
+
     return false;
+}
+
+bool CNetAddr::IsTorV3() const
+{
+    return m_net == NET_TORV3 || (!torv3_addr.empty() && torv3_addr.size() == ADDR_TORV3_SIZE);
+}
+
+bool CNetAddr::IsI2P() const
+{
+    return m_net == NET_I2P;
+}
+
+bool CNetAddr::IsCJDNS() const
+{
+    return m_net == NET_CJDNS;
+}
+
+BIP155Network CNetAddr::GetBIP155Network() const
+{
+    switch (m_net) {
+        case NET_IPV4:
+            return BIP155_IPV4;
+        case NET_IPV6:
+            return BIP155_IPV6;
+        case NET_ONION:
+            return BIP155_TORV2;
+        case NET_TORV3:
+            return BIP155_TORV3;
+        case NET_I2P:
+            return BIP155_I2P;
+        case NET_CJDNS:
+            return BIP155_CJDNS;
+        default:
+            // Fallback based on content
+            if (IsIPv4()) return BIP155_IPV4;
+            if (IsTorV3()) return BIP155_TORV3;
+            if (IsTor()) return BIP155_TORV2;
+            return BIP155_IPV6;
+    }
+}
+
+size_t CNetAddr::GetBIP155AddrSize(BIP155Network net_id)
+{
+    switch (net_id) {
+        case BIP155_IPV4:
+            return ADDR_IPV4_SIZE;
+        case BIP155_IPV6:
+            return ADDR_IPV6_SIZE;
+        case BIP155_TORV2:
+            return ADDR_TORV2_SIZE;
+        case BIP155_TORV3:
+            return ADDR_TORV3_SIZE;
+        case BIP155_I2P:
+            return ADDR_I2P_SIZE;
+        case BIP155_CJDNS:
+            return ADDR_CJDNS_SIZE;
+        default:
+            return 0;
+    }
+}
+
+bool CNetAddr::SetFromBIP155(BIP155Network net_id, const std::vector<uint8_t>& addr_bytes)
+{
+    size_t expected_size = GetBIP155AddrSize(net_id);
+    if (expected_size == 0 || addr_bytes.size() != expected_size) {
+        return false;
+    }
+
+    Init();  // Clear existing data
+
+    switch (net_id) {
+        case BIP155_IPV4:
+            m_net = NET_IPV4;
+            memcpy(ip, pchIPv4, sizeof(pchIPv4));
+            memcpy(ip + 12, addr_bytes.data(), ADDR_IPV4_SIZE);
+            break;
+
+        case BIP155_IPV6:
+            m_net = NET_IPV6;
+            memcpy(ip, addr_bytes.data(), ADDR_IPV6_SIZE);
+            break;
+
+        case BIP155_TORV2:
+            m_net = NET_ONION;
+            memcpy(ip, pchOnionCat, sizeof(pchOnionCat));
+            memcpy(ip + sizeof(pchOnionCat), addr_bytes.data(), ADDR_TORV2_SIZE);
+            break;
+
+        case BIP155_TORV3:
+            m_net = NET_TORV3;
+            torv3_addr.assign(addr_bytes.begin(), addr_bytes.end());
+            break;
+
+        case BIP155_I2P:
+            m_net = NET_I2P;
+            torv3_addr.assign(addr_bytes.begin(), addr_bytes.end());  // Reuse torv3_addr for I2P
+            break;
+
+        case BIP155_CJDNS:
+            m_net = NET_CJDNS;
+            memcpy(ip, addr_bytes.data(), ADDR_CJDNS_SIZE);
+            break;
+
+        default:
+            return false;
+    }
+
+    return true;
+}
+
+std::vector<uint8_t> CNetAddr::GetAddrBytes() const
+{
+    std::vector<uint8_t> result;
+
+    switch (GetBIP155Network()) {
+        case BIP155_IPV4:
+            result.assign(ip + 12, ip + 16);
+            break;
+
+        case BIP155_IPV6:
+            result.assign(ip, ip + 16);
+            break;
+
+        case BIP155_TORV2:
+            result.assign(ip + sizeof(pchOnionCat), ip + sizeof(pchOnionCat) + ADDR_TORV2_SIZE);
+            break;
+
+        case BIP155_TORV3:
+        case BIP155_I2P:
+            result = std::vector<uint8_t>(torv3_addr.begin(), torv3_addr.end());
+            break;
+
+        case BIP155_CJDNS:
+            result.assign(ip, ip + 16);
+            break;
+    }
+
+    return result;
 }
 
 bool CNetAddr::IsLocal() const
