@@ -1,9 +1,10 @@
 # BIP-155 (addrv2) Implementation for Zclassic
 
-> **Document Version:** 2.0
+> **Document Version:** 2.1
 > **Date:** December 9, 2025
 > **Branch:** `feature/bip-155`
-> **Status:** ✅ IMPLEMENTED & TESTED
+> **Status:** ✅ IMPLEMENTED & TESTED (macOS only)
+> **WARNING:** Tested only on macOS ARM64. Requires further testing on Linux/Windows before mainnet release.
 
 ---
 
@@ -192,7 +193,7 @@ V3_BIP155: [magic(4)][format=0x03][compat=0x23(35)]... (INCOMPATIBILITY_BASE + 3
 
 **Deliverable:** Tor v3 addresses persist across restarts
 
-### Phase 4: Testing & Hardening ✅ COMPLETED
+### Phase 4: Testing & Hardening ✅ COMPLETED (macOS only)
 
 **Objective:** Production readiness
 
@@ -200,13 +201,18 @@ V3_BIP155: [magic(4)][format=0x03][compat=0x23(35)]... (INCOMPATIBILITY_BASE + 3
 - [x] Mixed network test (upgraded + legacy nodes)
 - [x] Edge case handling (malformed messages, unexpected sendaddrv2)
 - [x] Documentation updates
+- [ ] **TODO:** Linux build and test
+- [ ] **TODO:** Windows build and test
+- [ ] **TODO:** Extended testnet validation before mainnet release
 
-**Test Results (from debug.log):**
+**Test Results (from debug.log on macOS ARM64):**
 1. ✅ Node advertises protocol version 170012
 2. ✅ Legacy peer (170011) receives legacy `addr` messages
 3. ✅ Unexpected sendaddrv2 from 170011 peer correctly rejected
 4. ✅ Tor v3 onion address correctly advertised
 5. ✅ Block sync works normally with mixed peers
+6. ✅ peers.dat legacy → addrv2 migration successful
+7. ✅ peers.dat addrv2 reload successful (2059 addresses)
 
 ---
 
