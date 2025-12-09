@@ -5721,7 +5721,8 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
 
     // BIP155: Handle sendaddrv2 message
     // This message signals that the peer wants to receive addrv2 messages
-    // Per BIP155, this must be sent between version and verack
+    // Per BIP155, this should be sent between version and verack, but we accept it
+    // anytime before addresses are exchanged for better compatibility
     else if (strCommand == "sendaddrv2")
     {
         // Ignore if BIP155 is disabled
@@ -5737,12 +5738,7 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
             return true;
         }
 
-        // Ignore if connection is already fully established (sendaddrv2 must come before verack)
-        if (pfrom->fSuccessfullyConnected) {
-            LogPrint("net", "peer=%d sent sendaddrv2 after connection established, ignoring\n", pfrom->id);
-            return true;
-        }
-
+        // Accept sendaddrv2 - set the flag so we use addrv2 format for this peer
         pfrom->m_wants_addrv2 = true;
         LogPrint("net", "peer=%d supports addrv2 (protocol version %d)\n", pfrom->id, pfrom->nVersion);
     }
