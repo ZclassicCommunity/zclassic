@@ -41,9 +41,6 @@ enum Network
     NET_MAX
 };
 
-// Compatibility alias: NET_ONION -> NET_TORV3 (v2 is deprecated/removed)
-#define NET_ONION NET_TORV3
-
 /** BIP155 network IDs - private enum for serialization */
 enum BIP155Network : uint8_t {
     BIP155_IPV4 = 0x01,
@@ -197,7 +194,7 @@ class CNetAddr
                     if (IsIPv4()) {
                         m_net = NET_IPV4;
                     } else if (IsTor()) {
-                        m_net = NET_ONION;
+                        m_net = NET_TORV3;
                     } else {
                         m_net = NET_IPV6;
                     }

@@ -541,10 +541,8 @@ void TorController::auth_cb(TorControlConnection& conn, const TorControlReply& r
         // if -onion isn't set to something else.
         if (GetArg("-onion", "") == "") {
             proxyType addrOnion = proxyType(CService("127.0.0.1", 9050), true);
-            SetProxy(NET_ONION, addrOnion);
-            SetProxy(NET_TORV3, addrOnion);  // BIP155: Also set proxy for Tor v3
-            SetLimited(NET_ONION, false);
-            SetLimited(NET_TORV3, false);    // BIP155: Also enable Tor v3
+            SetProxy(NET_TORV3, addrOnion);
+            SetLimited(NET_TORV3, false);
         }
 
         // Finally - now create the service

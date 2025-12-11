@@ -107,7 +107,7 @@ BOOST_AUTO_TEST_CASE(onion_v3_test)
     BOOST_CHECK(addr1.IsTor());
     BOOST_CHECK(addr1.IsValid());
     BOOST_CHECK(addr1.IsRoutable());
-    BOOST_CHECK(addr1.GetNetwork() == NET_ONION);
+    BOOST_CHECK(addr1.GetNetwork() == NET_TORV3);
     BOOST_CHECK(addr1.ToStringIP() == "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion");
 
     // Test that V3 address survives round-trip through string conversion

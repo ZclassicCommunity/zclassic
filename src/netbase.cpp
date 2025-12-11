@@ -80,8 +80,7 @@ enum Network ParseNetwork(std::string net) {
     boost::to_lower(net);
     if (net == "ipv4") return NET_IPV4;
     if (net == "ipv6") return NET_IPV6;
-    if (net == "tor" || net == "onion")  return NET_ONION;
-    if (net == "torv3") return NET_TORV3;
+    if (net == "tor" || net == "onion" || net == "torv3") return NET_TORV3;
     if (net == "i2p") return NET_I2P;
     if (net == "cjdns") return NET_CJDNS;
     return NET_UNROUTABLE;
@@ -1068,7 +1067,7 @@ enum Network CNetAddr::GetNetwork() const
         return NET_IPV4;
 
     if (IsTor())
-        return NET_ONION;
+        return NET_TORV3;
 
     return NET_IPV6;
 }
@@ -1193,7 +1192,7 @@ std::vector<unsigned char> CNetAddr::GetGroup() const
     }
     else if (IsTor())
     {
-        nClass = NET_ONION;
+        nClass = NET_TORV3;
         nStartByte = 6;
         nBits = 4;
     }

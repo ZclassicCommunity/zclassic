@@ -1,10 +1,16 @@
 # BIP-155 (addrv2) Implementation for Zclassic
 
-> **Document Version:** 2.1
-> **Date:** December 9, 2025
-> **Branch:** `feature/bip-155`
-> **Status:** ✅ IMPLEMENTED & TESTED (macOS only)
+> **Document Version:** 3.0
+> **Date:** December 11, 2025
+> **Branch:** `feature/onion-v3-cleanup`
+> **Status:** ✅ IMPLEMENTED, TESTED & CLEANED UP (macOS only)
 > **WARNING:** Tested only on macOS ARM64. Requires further testing on Linux/Windows before mainnet release.
+
+## What's New in v3.0
+
+- **NET_ONION removed** - All references replaced with `NET_TORV3`
+- **Tor v2 code removed** - `pchOnionCat` constant and 16-char .onion parsing deleted
+- **Cleaner codebase** - No more dual enum confusion (NET_ONION vs NET_TORV3)
 
 ---
 
@@ -205,6 +211,40 @@ V3_BIP155: [magic(4)][format=0x03][compat=0x23(35)]... (INCOMPATIBILITY_BASE + 3
 - [ ] **TODO:** Windows build and test
 - [ ] **TODO:** Extended testnet validation before mainnet release
 
+### Phase 5: Onion v2 Cleanup ✅ COMPLETED
+
+**Objective:** Remove deprecated Tor v2 code, unify to NET_TORV3
+
+**Files Modified:**
+| File | Changes |
+|------|---------|
+| `src/netbase.h` | Removed `#define NET_ONION NET_TORV3` alias |
+| `src/netbase.cpp` | Removed `pchOnionCat[]`, v2 16-char parsing, v2 ToStringIP encoding |
+| `src/init.cpp` | Replaced 6x `NET_ONION` → `NET_TORV3`, cleaned up duplicate calls |
+| `src/torcontrol.cpp` | Replaced 2x `NET_ONION` → `NET_TORV3` |
+| `src/test/netbase_tests.cpp` | Updated tests to use `NET_TORV3`, removed onioncat test |
+
+**What Was Removed:**
+```cpp
+// REMOVED from netbase.cpp
+static const unsigned char pchOnionCat[] = {0xFD,0x87,0xD8,0x7E,0xEB,0x43};
+
+// REMOVED: 16-char v2 onion parsing in SetSpecial()
+else if (vchAddr.size() == 10) {
+    memcpy(ip, pchOnionCat, sizeof(pchOnionCat));
+    // v2 onion encoding...
+}
+
+// REMOVED: v2 ToStringIP encoding
+if (memcmp(ip, pchOnionCat, sizeof(pchOnionCat)) == 0)
+    return EncodeBase32(&ip[6], 10) + ".onion";
+```
+
+**Result:**
+- Clean codebase with only `NET_TORV3` (no dual enum)
+- All Tor v2 legacy code removed
+- Code is easier to maintain and understand
+
 **Test Results (from debug.log on macOS ARM64):**
 1. ✅ Node advertises protocol version 170012
 2. ✅ Legacy peer (170011) receives legacy `addr` messages
@@ -344,3 +384,4 @@ If issues are discovered post-deployment:
 | 1.0 | 2025-12-09 | ZipherX/Claude | Initial plan based on Bitcoin/Zcash research |
 | 2.0 | 2025-12-09 | ZipherX/Claude | Implementation completed & tested |
 | 2.1 | 2025-12-09 | ZipherX/Claude | peers.dat persistence with Bitcoin Core compatible versioning |
+| 3.0 | 2025-12-11 | ZipherX/Claude | NET_ONION → NET_TORV3 migration, Tor v2 code removal |

@@ -14989,7 +14989,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // -proxy sets a proxy for all outgoing network traffic
     // -noproxy (or -proxy=0) as well as the empty string can be used to not set a proxy, this is the default
     std::string proxyArg = GetArg("-proxy", "");
-    SetLimited(NET_ONION);
+    SetLimited(NET_TORV3);
     if (proxyArg != "" && proxyArg != "0") {
         proxyType addrProxy = proxyType(CService(proxyArg, 9050), proxyRandomize);
         if (!addrProxy.IsValid())
@@ -14997,11 +14997,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
         SetProxy(NET_IPV4, addrProxy);
         SetProxy(NET_IPV6, addrProxy);
-        SetProxy(NET_ONION, addrProxy);
-        SetProxy(NET_TORV3, addrProxy);  // BIP155: Also set proxy for Tor v3
+        SetProxy(NET_TORV3, addrProxy);
         SetNameProxy(addrProxy);
-        SetLimited(NET_ONION, false); // by default, -proxy sets onion as reachable, unless -noonion later
-        SetLimited(NET_TORV3, false); // BIP155: Also set Tor v3 as reachable
+        SetLimited(NET_TORV3, false); // by default, -proxy sets onion as reachable, unless -noonion later
     }
 
     // -onion can be used to set only a proxy for .onion, or override normal proxy for .onion addresses
@@ -15010,16 +15008,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     std::string onionArg = GetArg("-onion", "");
     if (onionArg != "") {
         if (onionArg == "0") { // Handle -noonion/-onion=0
-            SetLimited(NET_ONION); // set onions as unreachable
-            SetLimited(NET_TORV3); // BIP155: Also disable Tor v3
+            SetLimited(NET_TORV3); // set onions as unreachable
         } else {
             proxyType addrOnion = proxyType(CService(onionArg, 9050), proxyRandomize);
             if (!addrOnion.IsValid())
                 return InitError(strprintf(_("Invalid -onion address: '%s'"), onionArg));
-            SetProxy(NET_ONION, addrOnion);
-            SetProxy(NET_TORV3, addrOnion);  // BIP155: Also set proxy for Tor v3
-            SetLimited(NET_ONION, false);
-            SetLimited(NET_TORV3, false);    // BIP155: Also enable Tor v3
+            SetProxy(NET_TORV3, addrOnion);
+            SetLimited(NET_TORV3, false);
         }
     }
 
