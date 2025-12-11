@@ -92,8 +92,7 @@ std::string GetNetworkName(enum Network net) {
     {
     case NET_IPV4: return "ipv4";
     case NET_IPV6: return "ipv6";
-    case NET_ONION: return "onion";
-    case NET_TORV3: return "torv3";
+    case NET_TORV3: return "onion";  // Unified Tor (v3 only)
     case NET_I2P: return "i2p";
     case NET_CJDNS: return "cjdns";
     case NET_INTERNAL: return "internal";
@@ -695,14 +694,13 @@ void CNetAddr::SetRaw(Network network, const uint8_t *ip_in)
     }
 }
 
-static const unsigned char pchOnionCat[] = {0xFD,0x87,0xD8,0x7E,0xEB,0x43};
-
 bool CNetAddr::SetSpecial(const std::string &strName)
 {
     if (strName.size() > 6 && strName.substr(strName.size() - 6, 6) == ".onion") {
         std::vector<unsigned char> vchAddr = DecodeBase32(strName.substr(0, strName.size() - 6).c_str());
-        
-        // Check for onion v3 (56 character base32 = 35 bytes when decoded)
+
+        // Only Tor v3 is supported (56 character base32 = 35 bytes when decoded)
+        // Tor v2 (16-char .onion) is deprecated and no longer accepted
         if (vchAddr.size() == torv3::TOTAL_LEN) {
             // Extract components
             const unsigned char* input_pubkey = vchAddr.data();
@@ -724,21 +722,14 @@ bool CNetAddr::SetSpecial(const std::string &strName)
 
             // Valid v3 address - store it properly
             memset(ip, 0, sizeof(ip)); // Zero out to mark as v3
-            
+
             // Store full 32-byte address
             torv3_addr.clear();
             torv3_addr.insert(torv3_addr.end(), input_pubkey, input_pubkey + ADDR_TORV3_SIZE);
-            
+
             return true;
         }
-        // Old v2 format
-        else if (vchAddr.size() == 16 - sizeof(pchOnionCat)) {
-            torv3_addr.clear(); // Clear any v3 data
-            memcpy(ip, pchOnionCat, sizeof(pchOnionCat));
-            for (unsigned int i = 0; i < 16 - sizeof(pchOnionCat); i++)
-                ip[i + sizeof(pchOnionCat)] = vchAddr[i];
-            return true;
-        }
+        // Reject v2 and any other .onion format
         return false;
     }
     return false;
@@ -865,17 +856,8 @@ bool CNetAddr::IsRFC4843() const
 
 bool CNetAddr::IsTor() const
 {
-    // First check if we have v3 data stored
-    if (!torv3_addr.empty() && torv3_addr.size() == ADDR_TORV3_SIZE) {
-        return true;
-    }
-
-    // Check for v2 onion (OnionCat prefix: FD87:D87E:EB43)
-    if (memcmp(ip, pchOnionCat, sizeof(pchOnionCat)) == 0) {
-        return true;
-    }
-
-    return false;
+    // Unified: IsTor() now only checks for v3 (v2 is deprecated/removed)
+    return IsTorV3();
 }
 
 bool CNetAddr::IsTorV3() const
@@ -900,8 +882,6 @@ BIP155Network CNetAddr::GetBIP155Network() const
             return BIP155_IPV4;
         case NET_IPV6:
             return BIP155_IPV6;
-        case NET_ONION:
-            return BIP155_TORV2;
         case NET_TORV3:
             return BIP155_TORV3;
         case NET_I2P:
@@ -912,7 +892,6 @@ BIP155Network CNetAddr::GetBIP155Network() const
             // Fallback based on content
             if (IsIPv4()) return BIP155_IPV4;
             if (IsTorV3()) return BIP155_TORV3;
-            if (IsTor()) return BIP155_TORV2;
             return BIP155_IPV6;
     }
 }
@@ -925,7 +904,7 @@ size_t CNetAddr::GetBIP155AddrSize(BIP155Network net_id)
         case BIP155_IPV6:
             return ADDR_IPV6_SIZE;
         case BIP155_TORV2:
-            return ADDR_TORV2_SIZE;
+            return 0; // v2 deprecated, reject
         case BIP155_TORV3:
             return ADDR_TORV3_SIZE;
         case BIP155_I2P:
@@ -959,10 +938,8 @@ bool CNetAddr::SetFromBIP155(BIP155Network net_id, const std::vector<uint8_t>& a
             break;
 
         case BIP155_TORV2:
-            m_net = NET_ONION;
-            memcpy(ip, pchOnionCat, sizeof(pchOnionCat));
-            memcpy(ip + sizeof(pchOnionCat), addr_bytes.data(), ADDR_TORV2_SIZE);
-            break;
+            // v2 is deprecated/rejected - should not reach here due to size check
+            return false;
 
         case BIP155_TORV3:
             m_net = NET_TORV3;
@@ -1000,7 +977,7 @@ std::vector<uint8_t> CNetAddr::GetAddrBytes() const
             break;
 
         case BIP155_TORV2:
-            result.assign(ip + sizeof(pchOnionCat), ip + sizeof(pchOnionCat) + ADDR_TORV2_SIZE);
+            // v2 deprecated - should not reach here
             break;
 
         case BIP155_TORV3:
@@ -1113,16 +1090,11 @@ static std::string OnionV3ToString(const unsigned char* addr_pubkey)
 
 std::string CNetAddr::ToStringIP() const
 {
-    // Check for Tor v3 first (must have torv3_addr populated)
+    // Check for Tor v3 (only supported onion format)
     if (!torv3_addr.empty() && torv3_addr.size() == ADDR_TORV3_SIZE) {
         return OnionV3ToString(&torv3_addr[0]);
     }
-    
-    // Check for Tor v2 (OnionCat prefix)
-    if (memcmp(ip, pchOnionCat, sizeof(pchOnionCat)) == 0) {
-        return EncodeBase32(&ip[6], 10) + ".onion";
-    }
-    
+
     // Regular IP address handling
     CService serv(*this, 0);
     struct sockaddr_storage sockaddr;
@@ -1299,11 +1271,11 @@ int CNetAddr::GetReachabilityFrom(const CNetAddr *paddrPartner) const
         case NET_IPV4:   return REACH_IPV4;
         case NET_IPV6:   return fTunnel ? REACH_IPV6_WEAK : REACH_IPV6_STRONG; // only prefer giving our IPv6 address if it's not tunnelled
         }
-    case NET_ONION:
+    case NET_TORV3:
         switch(ourNet) {
         default:         return REACH_DEFAULT;
         case NET_IPV4:   return REACH_IPV4; // Tor users can connect to IPv4 as well
-        case NET_ONION:    return REACH_PRIVATE;
+        case NET_TORV3:  return REACH_PRIVATE;
         }
     case NET_TEREDO:
         switch(ourNet) {
@@ -1320,7 +1292,7 @@ int CNetAddr::GetReachabilityFrom(const CNetAddr *paddrPartner) const
         case NET_TEREDO:  return REACH_TEREDO;
         case NET_IPV6:    return REACH_IPV6_WEAK;
         case NET_IPV4:    return REACH_IPV4;
-        case NET_ONION:     return REACH_PRIVATE; // either from Tor, or don't care about our address
+        case NET_TORV3:     return REACH_PRIVATE; // either from Tor, or don't care about our address
         }
     }
 }

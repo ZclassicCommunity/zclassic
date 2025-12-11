@@ -33,14 +33,16 @@ enum Network
     NET_UNROUTABLE = 0,
     NET_IPV4,
     NET_IPV6,
-    NET_ONION,      // Tor v2 (deprecated) - kept for backward compatibility
-    NET_TORV3,      // Tor v3 (BIP155)
+    NET_TORV3,      // Tor v3 (BIP155) - unified Tor network type
     NET_I2P,        // I2P (BIP155)
     NET_CJDNS,      // CJDNS (BIP155)
     NET_INTERNAL,   // Internal use only
 
     NET_MAX
 };
+
+// Compatibility alias: NET_ONION -> NET_TORV3 (v2 is deprecated/removed)
+#define NET_ONION NET_TORV3
 
 /** BIP155 network IDs - private enum for serialization */
 enum BIP155Network : uint8_t {
@@ -55,7 +57,6 @@ enum BIP155Network : uint8_t {
 /** BIP155 address sizes */
 static const size_t ADDR_IPV4_SIZE = 4;
 static const size_t ADDR_IPV6_SIZE = 16;
-static const size_t ADDR_TORV2_SIZE = 10;
 static const size_t ADDR_TORV3_SIZE = 32;
 static const size_t ADDR_I2P_SIZE = 32;
 static const size_t ADDR_CJDNS_SIZE = 16;
