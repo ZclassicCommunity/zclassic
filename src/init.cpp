@@ -775,8 +775,8 @@ bool Download(std::string url, std::string filename, std::string hash)
         char errorbuf[CURL_ERROR_SIZE] = "";
         curl_easy_setopt(curl_handle, CURLOPT_ERRORBUFFER, errorbuf);
     
-        curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYPEER, 0L);
-        curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST, 0L);
+        curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYPEER, 1L);
+        curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST, 2L);
       
         LogPrintf("Downloading %s\n", url.c_str());
         LogPrintf("Curl File Download: %s\n", filename.c_str());
