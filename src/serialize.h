@@ -30,6 +30,15 @@
 static const unsigned int MAX_SIZE = 0x02000000;
 
 /**
+ * Maximum element count accepted during deserialization of untrusted data.
+ * Set to 2 MiB (matching MAX_PROTOCOL_MESSAGE_LENGTH from net.h) since no
+ * single P2P message can carry more data than this on the wire.
+ * Disk serialization (SER_DISK) callers can bypass this via the original
+ * ReadCompactSize which still uses MAX_SIZE.
+ */
+static const unsigned int MAX_DESER_ELEMENTS = 2 * 1024 * 1024;
+
+/**
  * Dummy data type to identify deserializing constructors.
  *
  * By convention, a constructor of a type T with signature
@@ -164,7 +173,6 @@ inline float ser_uint32_to_float(uint32_t y)
     return tmp.x;
 }
 
-
 /////////////////////////////////////////////////////////////////
 //
 // Templates for serializing to anything that looks like a stream,
@@ -226,11 +234,6 @@ template<typename Stream> inline void Unserialize(Stream& s, double& a  ) { a = 
 
 template<typename Stream> inline void Serialize(Stream& s, bool a)    { char f=a; ser_writedata8(s, f); }
 template<typename Stream> inline void Unserialize(Stream& s, bool& a) { char f=ser_readdata8(s); a=f; }
-
-
-
-
-
 
 /**
  * Compact Size
@@ -306,6 +309,23 @@ uint64_t ReadCompactSize(Stream& is)
 }
 
 /**
+ * ReadCompactSize with a caller-specified upper bound.
+ * Use this instead of bare ReadCompactSize() when deserializing containers
+ * from untrusted data (P2P network) to prevent memory exhaustion attacks.
+ *
+ * @param nMaxElements  The maximum element count to accept.
+ * @throws std::ios_base::failure if the decoded size exceeds nMaxElements.
+ */
+template<typename Stream>
+uint64_t ReadCompactSizeWithLimit(Stream& is, uint64_t nMaxElements)
+{
+    uint64_t nSizeRet = ReadCompactSize(is);
+    if (nSizeRet > nMaxElements)
+        throw std::ios_base::failure("ReadCompactSize(): element count exceeds context limit");
+    return nSizeRet;
+}
+
+/**
  * Variable-length integers: bytes are a MSB base-128 encoding of the number.
  * The high bit in each byte signifies whether another digit follows. To make
  * sure the encoding is one-to-one, one is subtracted from all but the last digit.
@@ -366,8 +386,19 @@ template<typename Stream, typename I>
 I ReadVarInt(Stream& is)
 {
     I n = 0;
+    // Maximum possible VarInt encoding length for type I:
+    // Each byte encodes 7 bits, so sizeof(I)*8 bits needs at most
+    // ceil(sizeof(I)*8/7) bytes. Add 1 for safety.
+    const unsigned int max_iters = (sizeof(I) * 8 + 6) / 7;
+    unsigned int count = 0;
     while(true) {
+        if (++count > max_iters)
+            throw std::ios_base::failure("ReadVarInt(): too many bytes");
         unsigned char chData = ser_readdata8(is);
+        // Overflow check: if n already uses the top 7 bits, shifting
+        // left by 7 more would overflow type I.
+        if (n > (std::numeric_limits<I>::max() >> 7))
+            throw std::ios_base::failure("ReadVarInt(): overflow");
         n = (n << 7) | (chData & 0x7F);
         if (chData & 0x80)
             n++;
@@ -570,8 +601,6 @@ template<typename Stream, typename T> void Unserialize(Stream& os, std::shared_p
 template<typename Stream, typename T> void Serialize(Stream& os, const std::unique_ptr<const T>& p);
 template<typename Stream, typename T> void Unserialize(Stream& os, std::unique_ptr<const T>& p);
 
-
-
 /**
  * If none of the specialized versions above matched, default to calling member function.
  */
@@ -587,10 +616,6 @@ inline void Unserialize(Stream& is, T& a)
     a.Unserialize(is);
 }
 
-
-
-
-
 /**
  * string
  */
@@ -605,13 +630,11 @@ void Serialize(Stream& os, const std::basic_string<C>& str)
 template<typename Stream, typename C>
 void Unserialize(Stream& is, std::basic_string<C>& str)
 {
-    unsigned int nSize = ReadCompactSize(is);
+    unsigned int nSize = ReadCompactSizeWithLimit(is, MAX_DESER_ELEMENTS);
     str.resize(nSize);
     if (nSize != 0)
         is.read((char*)&str[0], nSize * sizeof(str[0]));
 }
-
-
 
 /**
  * prevector
@@ -638,13 +661,12 @@ inline void Serialize(Stream& os, const prevector<N, T>& v)
     Serialize_impl(os, v, T());
 }
 
-
 template<typename Stream, unsigned int N, typename T>
 void Unserialize_impl(Stream& is, prevector<N, T>& v, const unsigned char&)
 {
     // Limit size per read so bogus size value won't cause out of memory
     v.clear();
-    unsigned int nSize = ReadCompactSize(is);
+    unsigned int nSize = ReadCompactSizeWithLimit(is, MAX_DESER_ELEMENTS);
     unsigned int i = 0;
     while (i < nSize)
     {
@@ -659,7 +681,7 @@ template<typename Stream, unsigned int N, typename T, typename V>
 void Unserialize_impl(Stream& is, prevector<N, T>& v, const V&)
 {
     v.clear();
-    unsigned int nSize = ReadCompactSize(is);
+    unsigned int nSize = ReadCompactSizeWithLimit(is, MAX_DESER_ELEMENTS);
     unsigned int i = 0;
     unsigned int nMid = 0;
     while (nMid < nSize)
@@ -678,8 +700,6 @@ inline void Unserialize(Stream& is, prevector<N, T>& v)
 {
     Unserialize_impl(is, v, T());
 }
-
-
 
 /**
  * vector
@@ -706,13 +726,12 @@ inline void Serialize(Stream& os, const std::vector<T, A>& v)
     Serialize_impl(os, v, T());
 }
 
-
 template<typename Stream, typename T, typename A>
 void Unserialize_impl(Stream& is, std::vector<T, A>& v, const unsigned char&)
 {
     // Limit size per read so bogus size value won't cause out of memory
     v.clear();
-    unsigned int nSize = ReadCompactSize(is);
+    unsigned int nSize = ReadCompactSizeWithLimit(is, MAX_DESER_ELEMENTS);
     unsigned int i = 0;
     while (i < nSize)
     {
@@ -727,7 +746,7 @@ template<typename Stream, typename T, typename A, typename V>
 void Unserialize_impl(Stream& is, std::vector<T, A>& v, const V&)
 {
     v.clear();
-    unsigned int nSize = ReadCompactSize(is);
+    unsigned int nSize = ReadCompactSizeWithLimit(is, MAX_DESER_ELEMENTS);
     unsigned int i = 0;
     unsigned int nMid = 0;
     while (nMid < nSize)
@@ -746,8 +765,6 @@ inline void Unserialize(Stream& is, std::vector<T, A>& v)
 {
     Unserialize_impl(is, v, T());
 }
-
-
 
 /**
  * optional
@@ -784,8 +801,6 @@ void Unserialize(Stream& is, boost::optional<T>& item)
     }
 }
 
-
-
 /**
  * array
  */
@@ -805,7 +820,6 @@ void Unserialize(Stream& is, std::array<T, N>& item)
     }
 }
 
-
 /**
  * pair
  */
@@ -823,8 +837,6 @@ void Unserialize(Stream& is, std::pair<K, T>& item)
     Unserialize(is, item.second);
 }
 
-
-
 /**
  * map
  */
@@ -840,7 +852,7 @@ template<typename Stream, typename K, typename T, typename Pred, typename A>
 void Unserialize(Stream& is, std::map<K, T, Pred, A>& m)
 {
     m.clear();
-    unsigned int nSize = ReadCompactSize(is);
+    unsigned int nSize = ReadCompactSizeWithLimit(is, MAX_DESER_ELEMENTS);
     typename std::map<K, T, Pred, A>::iterator mi = m.begin();
     for (unsigned int i = 0; i < nSize; i++)
     {
@@ -849,8 +861,6 @@ void Unserialize(Stream& is, std::map<K, T, Pred, A>& m)
         mi = m.insert(mi, item);
     }
 }
-
-
 
 /**
  * set
@@ -867,7 +877,7 @@ template<typename Stream, typename K, typename Pred, typename A>
 void Unserialize(Stream& is, std::set<K, Pred, A>& m)
 {
     m.clear();
-    unsigned int nSize = ReadCompactSize(is);
+    unsigned int nSize = ReadCompactSizeWithLimit(is, MAX_DESER_ELEMENTS);
     typename std::set<K, Pred, A>::iterator it = m.begin();
     for (unsigned int i = 0; i < nSize; i++)
     {
@@ -876,8 +886,6 @@ void Unserialize(Stream& is, std::set<K, Pred, A>& m)
         it = m.insert(it, key);
     }
 }
-
-
 
 /**
  * list
@@ -894,7 +902,7 @@ template<typename Stream, typename T, typename A>
 void Unserialize(Stream& is, std::list<T, A>& l)
 {
     l.clear();
-    unsigned int nSize = ReadCompactSize(is);
+    unsigned int nSize = ReadCompactSizeWithLimit(is, MAX_DESER_ELEMENTS);
     typename std::list<T, A>::iterator it = l.begin();
     for (unsigned int i = 0; i < nSize; i++)
     {
@@ -903,8 +911,6 @@ void Unserialize(Stream& is, std::list<T, A>& l)
         l.push_back(item);
     }
 }
-
-
 
 /**
  * unique_ptr
@@ -921,8 +927,6 @@ void Unserialize(Stream& is, std::unique_ptr<const T>& p)
     p.reset(new T(deserialize, is));
 }
 
-
-
 /**
  * shared_ptr
  */
@@ -937,8 +941,6 @@ void Unserialize(Stream& is, std::shared_ptr<const T>& p)
 {
     p = std::make_shared<const T>(deserialize, is);
 }
-
-
 
 /**
  * Support for ADD_SERIALIZE_METHODS and READWRITE macro
@@ -963,14 +965,6 @@ inline void SerReadWrite(Stream& s, T& obj, CSerActionUnserialize ser_action)
 {
     ::Unserialize(s, obj);
 }
-
-
-
-
-
-
-
-
 
 /* ::GetSerializeSize implementations
  *
