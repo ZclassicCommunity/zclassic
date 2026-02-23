@@ -1457,6 +1457,26 @@ void ThreadOpenAddedConnections()
 
         list<vector<CService> > lservAddressesToAdd(0);
         BOOST_FOREACH(const std::string& strAddNode, lAddresses) {
+            // Detect .onion addresses — they cannot be DNS-resolved.
+            // Route them through the NET_ONION proxy (set by -onion=) if available,
+            // using the string-based ConnectSocketByName path.
+            {
+                std::string strHost;
+                int nPort = Params().GetDefaultPort();
+                SplitHostPort(strAddNode, nPort, strHost);
+                if (strHost.size() > 6 &&
+                    strHost.substr(strHost.size() - 6) == ".onion")
+                {
+                    proxyType onionProxy;
+                    if (GetProxy(NET_ONION, onionProxy)) {
+                        CSemaphoreGrant grant(*semOutbound);
+                        OpenNetworkConnection(CAddress(), &grant, strAddNode.c_str());
+                        MilliSleep(500);
+                    }
+                    continue;
+                }
+            }
+
             vector<CService> vservNode(0);
             if(Lookup(strAddNode.c_str(), vservNode, Params().GetDefaultPort(), fNameLookup, 0))
             {
