@@ -1,5 +1,5 @@
-linux_CFLAGS=-pipe
-linux_CXXFLAGS=$(linux_CFLAGS)
+linux_CFLAGS=-pipe -std=gnu17
+linux_CXXFLAGS=-pipe -std=gnu++17
 
 linux_release_CFLAGS=-O1
 linux_release_CXXFLAGS=$(linux_release_CFLAGS)

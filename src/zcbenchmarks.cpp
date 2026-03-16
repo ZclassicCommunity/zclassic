@@ -456,7 +456,7 @@ double benchmark_increment_sapling_note_witnesses(size_t nTxs)
 // CCoinsViewDB, but the rest are either mocks and/or don't really do anything.
 class FakeCoinsViewDB : public CCoinsView {
     // The following constant is a duplicate of the one found in txdb.cpp
-    static const char DB_COINS = 'c';
+    static constexpr char DB_COINS = 'c';
 
     CDBWrapper db;
 
@@ -488,11 +488,13 @@ public:
     }
 
     bool GetCoins(const uint256 &txid, CCoins &coins) const {
-        return db.Read(std::make_pair(DB_COINS, txid), coins);
+        char key = DB_COINS;
+        return db.Read(std::make_pair(key, txid), coins);
     }
 
     bool HaveCoins(const uint256 &txid) const {
-        return db.Exists(std::make_pair(DB_COINS, txid));
+        char key = DB_COINS;
+        return db.Exists(std::make_pair(key, txid));
     }
 
     uint256 GetBestBlock() const {

@@ -26,7 +26,7 @@ if [ -f /etc/os-release ]; then
     . /etc/os-release
     OS=$ID
 else
-    echo "Cannot detect OS. This script supports Ubuntu/Debian."
+    echo "Cannot detect OS. This script supports Ubuntu/Debian and Arch-based distributions."
     exit 1
 fi
 
@@ -111,14 +111,47 @@ install_mingw_toolchain() {
     echo "✓ mingw-w64 toolchain installed ($(x86_64-w64-mingw32-g++ -dumpversion 2>/dev/null), thread model: $(x86_64-w64-mingw32-g++ -v 2>&1 | sed -n 's/^Thread model: //p'))"
 }
 
+install_arch() {
+    echo "Installing dependencies for Arch/Manjaro..."
+    echo ""
+
+    PACKAGES=(
+        base-devel
+        autoconf
+        automake
+        libtool
+        pkgconf
+        gmp
+        db
+        libsodium
+        curl
+        git
+        python
+        wget
+        openssl
+        libevent
+    )
+
+    echo "Installing packages: ${PACKAGES[*]}"
+    echo ""
+
+    $SUDO pacman -S --needed --noconfirm "${PACKAGES[@]}"
+
+    echo ""
+    echo "All dependencies installed successfully!"
+}
+
 case "$OS" in
     ubuntu|debian|linuxmint|pop)
         install_ubuntu_debian
         [ "$WITH_MINGW" -eq 1 ] && install_mingw_toolchain
         ;;
+    arch|manjaro|endeavouros|garuda)
+        install_arch
+        ;;
     *)
         echo "Unsupported OS: $OS"
-        echo "This script currently supports Ubuntu and Debian-based distributions."
+        echo "This script supports Ubuntu/Debian and Arch-based distributions."
         echo ""
         echo "Required packages:"
         echo "  - build-essential, autoconf, libtool, automake"
