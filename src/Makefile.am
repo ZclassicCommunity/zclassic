@@ -470,8 +470,7 @@ zclassicd_LDADD += \
   $(ZMQ_LIBS) \
   $(PROTON_LIBS) \
   $(LIBBITCOIN_CRYPTO) \
-  $(LIBZCASH_LIBS) \
-  -lcurl
+  $(LIBZCASH_LIBS)
 
 # bitcoin-cli binary #
 zclassic_cli_SOURCES = bitcoin-cli.cpp

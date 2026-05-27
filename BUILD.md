@@ -37,7 +37,7 @@ sudo apt-get update
 sudo apt-get install -y \
     build-essential pkg-config libc6-dev m4 g++-multilib \
     autoconf libtool automake \
-    libgmp-dev libdb++-dev libsodium-dev libcurl4-openssl-dev \
+    libgmp-dev libdb++-dev libsodium-dev \
     git python3 wget curl \
     zlib1g-dev libssl-dev libevent-dev
 ```
@@ -49,7 +49,6 @@ Install equivalent packages for your distribution. The key dependencies are:
 - **libgmp-dev** - GNU Multiple Precision library
 - **libdb++-dev** - Berkeley DB (for wallet support)
 - **libsodium-dev** - Cryptography library
-- **libcurl4-openssl-dev** - HTTP client library
 
 ### 2. Build Process
 

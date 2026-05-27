@@ -57,6 +57,11 @@ set and that its SHA-256 and SHA3-256 anchor digests match the compiled values.
 After importing the files, normal database verification and peer sync resume
 from the snapshot tip.
 
+Treat snapshots as trusted input. The compiled anchor prevents importing a
+snapshot for the wrong chain point, and the receiver verifies every file hash
+advertised by the serving peer, but the serving peer still chooses the snapshot
+contents. Use `-bootstrappeer` only with a peer you control or otherwise trust.
+
 ## Network Service Direction
 
 This branch has the first node-to-node network pieces:
@@ -98,3 +103,8 @@ after LevelDB is open. It runs as a pre-database bootstrap phase:
 This follows the same broad model as Bitcoin AssumeUTXO, Geth snap sync, Cosmos
 state sync, and Mithril-certified snapshots: fast state acquisition first,
 normal validation after the trusted hash point.
+
+For public serving, prefer a stopped-node copy or filesystem snapshot owned by a
+different administrative user. The daemon preflights the manifest before
+advertising `NODE_BOOTSTRAP` and refuses chunk reads if a listed file changes
+size or modification time after the manifest is built.

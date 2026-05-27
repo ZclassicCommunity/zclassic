@@ -56,7 +56,6 @@ install_ubuntu_debian() {
         libgmp-dev          # GNU Multiple Precision library
         libdb++-dev         # Berkeley DB (for wallet support)
         libsodium-dev       # Cryptography library
-        libcurl4-openssl-dev # HTTP client library
 
         # Additional utilities
         git
@@ -89,7 +88,7 @@ case "$OS" in
         echo ""
         echo "Required packages:"
         echo "  - build-essential, autoconf, libtool, automake"
-        echo "  - libgmp-dev, libdb++-dev, libsodium-dev, libcurl4-openssl-dev"
+        echo "  - libgmp-dev, libdb++-dev, libsodium-dev"
         echo ""
         echo "Please install these manually for your distribution."
         exit 1

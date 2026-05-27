@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <exception>
 #include <limits>
+#include <map>
 #include <set>
 #include <stdio.h>
 #include <string.h>
@@ -26,15 +27,26 @@
 #include <boost/filesystem.hpp>
 #include <boost/thread.hpp>
 
+#include <sys/stat.h>
+#if defined(WIN32)
+#include <io.h>
+#endif
+
 static CCriticalSection cs_bootstrap_snapshot;
 static boost::filesystem::path bootstrapSnapshotCacheSource;
 static std::vector<CBootstrapSnapshotFile> bootstrapSnapshotCacheFiles;
+static std::map<std::string, std::time_t> bootstrapSnapshotCacheMtimes;
 static uint64_t bootstrapSnapshotCacheBytes = 0;
 static const unsigned int BOOTSTRAP_MAX_REJECT_MESSAGE_LENGTH = 111;
 
 static bool IsSafeBootstrapSnapshotPath(const boost::filesystem::path& relative);
 static bool IsBootstrapSnapshotDataPath(const boost::filesystem::path& relative);
 static bool HashBootstrapSnapshotFile(const boost::filesystem::path& path, uint256& hash, std::string& error);
+static bool StatOpenBootstrapSnapshotFile(FILE* fp, uint64_t& size, std::time_t& mtime);
+static FILE* OpenBootstrapSnapshotFile(const boost::filesystem::path& source,
+                                       const CBootstrapSnapshotFile& file,
+                                       const std::map<std::string, std::time_t>& mtimes,
+                                       std::string& error);
 
 static bool IsRetryableSocketError(int err)
 {
@@ -794,9 +806,15 @@ static bool HashBootstrapSnapshotFile(const boost::filesystem::path& path, uint2
     return true;
 }
 
-static bool CollectBootstrapSnapshotFiles(const boost::filesystem::path& root, bool hash_files, std::vector<CBootstrapSnapshotFile>& files, uint64_t& total_bytes, std::string& error)
+static bool CollectBootstrapSnapshotFiles(const boost::filesystem::path& root,
+                                          bool hash_files,
+                                          std::vector<CBootstrapSnapshotFile>& files,
+                                          std::map<std::string, std::time_t>& mtimes,
+                                          uint64_t& total_bytes,
+                                          std::string& error)
 {
     files.clear();
+    mtimes.clear();
     total_bytes = 0;
 
     if (!BootstrapSnapshotPathsExist(root)) {
@@ -835,6 +853,7 @@ static bool CollectBootstrapSnapshotFiles(const boost::filesystem::path& root, b
             if (hash_files && !HashBootstrapSnapshotFile(current, file.hashSha256, error)) {
                 return false;
             }
+            mtimes[file.strPath] = boost::filesystem::last_write_time(current);
             if (file.nSize > std::numeric_limits<uint64_t>::max() - total_bytes) {
                 error = "bootstrap snapshot byte size overflow";
                 return false;
@@ -859,7 +878,7 @@ static bool GetBootstrapSnapshotFileList(const boost::filesystem::path& source, 
     LOCK(cs_bootstrap_snapshot);
 
     if (bootstrapSnapshotCacheSource != source || bootstrapSnapshotCacheFiles.empty()) {
-        if (!CollectBootstrapSnapshotFiles(source, true, bootstrapSnapshotCacheFiles, bootstrapSnapshotCacheBytes, error)) {
+        if (!CollectBootstrapSnapshotFiles(source, true, bootstrapSnapshotCacheFiles, bootstrapSnapshotCacheMtimes, bootstrapSnapshotCacheBytes, error)) {
             return false;
         }
         bootstrapSnapshotCacheSource = source;
@@ -906,6 +925,91 @@ bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::str
     return true;
 }
 
+bool PreflightBootstrapSnapshotService(std::string& error)
+{
+    CBootstrapSnapshotManifest manifest;
+    if (!GetBootstrapSnapshotManifest(manifest, error)) {
+        return false;
+    }
+    if (!ValidateBootstrapSnapshotManifest(manifest, error)) {
+        return false;
+    }
+    if (manifest.vFiles.empty()) {
+        error = "bootstrap snapshot manifest has no files";
+        return false;
+    }
+    return true;
+}
+
+static bool StatOpenBootstrapSnapshotFile(FILE* fp, uint64_t& size, std::time_t& mtime)
+{
+#if defined(WIN32)
+    struct _stat64 st;
+    if (_fstat64(_fileno(fp), &st) != 0) {
+        return false;
+    }
+#else
+    struct stat st;
+    if (fstat(fileno(fp), &st) != 0) {
+        return false;
+    }
+#endif
+    if (st.st_size < 0) {
+        return false;
+    }
+    size = (uint64_t)st.st_size;
+    mtime = st.st_mtime;
+    return true;
+}
+
+static FILE* OpenBootstrapSnapshotFile(const boost::filesystem::path& source,
+                                       const CBootstrapSnapshotFile& file,
+                                       const std::map<std::string, std::time_t>& mtimes,
+                                       std::string& error)
+{
+    const boost::filesystem::path relative(file.strPath);
+    if (!IsBootstrapSnapshotDataPath(relative)) {
+        error = strprintf("bootstrap snapshot manifest contains unsafe path: %s", file.strPath);
+        return NULL;
+    }
+
+    const boost::filesystem::path path = source / relative;
+    if (!boost::filesystem::is_regular_file(path) || !IsSafeBootstrapEntry(path)) {
+        error = strprintf("bootstrap snapshot file is not a regular file: %s", path.string());
+        return NULL;
+    }
+    std::map<std::string, std::time_t>::const_iterator mtime = mtimes.find(file.strPath);
+    if (mtime == mtimes.end()) {
+        error = strprintf("bootstrap snapshot file mtime missing from manifest cache: %s", file.strPath);
+        return NULL;
+    }
+
+    FILE* fp = fopen(path.string().c_str(), "rb");
+    if (!fp) {
+        error = strprintf("could not open bootstrap snapshot file: %s", path.string());
+        return NULL;
+    }
+
+    uint64_t file_size = 0;
+    std::time_t file_mtime = 0;
+    if (!StatOpenBootstrapSnapshotFile(fp, file_size, file_mtime)) {
+        fclose(fp);
+        error = strprintf("could not stat bootstrap snapshot file: %s", path.string());
+        return NULL;
+    }
+    if (file_size != file.nSize) {
+        fclose(fp);
+        error = strprintf("bootstrap snapshot file size changed after manifest creation: %s", file.strPath);
+        return NULL;
+    }
+    if (file_mtime != mtime->second) {
+        fclose(fp);
+        error = strprintf("bootstrap snapshot file changed after manifest creation: %s", file.strPath);
+        return NULL;
+    }
+    return fp;
+}
+
 bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request, CBootstrapSnapshotChunk& chunk, std::string& error)
 {
     if (!GetBoolArg("-bootstrapserve", false)) {
@@ -923,9 +1027,17 @@ bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request, C
 
     const boost::filesystem::path source = boost::filesystem::system_complete(mapArgs["-bootstrapsourcedir"]);
     std::vector<CBootstrapSnapshotFile> files;
-    uint64_t total_bytes = 0;
-    if (!GetBootstrapSnapshotFileList(source, files, total_bytes, error)) {
-        return false;
+    std::map<std::string, std::time_t> mtimes;
+    {
+        LOCK(cs_bootstrap_snapshot);
+        if (bootstrapSnapshotCacheSource != source || bootstrapSnapshotCacheFiles.empty()) {
+            if (!CollectBootstrapSnapshotFiles(source, true, bootstrapSnapshotCacheFiles, bootstrapSnapshotCacheMtimes, bootstrapSnapshotCacheBytes, error)) {
+                return false;
+            }
+            bootstrapSnapshotCacheSource = source;
+        }
+        files = bootstrapSnapshotCacheFiles;
+        mtimes = bootstrapSnapshotCacheMtimes;
     }
     if (request.nFileIndex >= files.size()) {
         error = strprintf("bootstrap chunk file index out of range: %u", request.nFileIndex);
@@ -933,40 +1045,29 @@ bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request, C
     }
 
     const CBootstrapSnapshotFile& file = files[request.nFileIndex];
+    FILE* fp = OpenBootstrapSnapshotFile(source, file, mtimes, error);
+    if (!fp) {
+        return false;
+    }
     if (request.nOffset > file.nSize || request.nLength > file.nSize - request.nOffset) {
+        fclose(fp);
         error = "bootstrap chunk range exceeds file size";
         return false;
     }
     if (request.nOffset % BOOTSTRAP_SNAPSHOT_CHUNK_SIZE != 0) {
+        fclose(fp);
         error = "bootstrap chunk offset is not aligned";
         return false;
     }
     const uint32_t expected_length = std::min<uint64_t>(BOOTSTRAP_SNAPSHOT_CHUNK_SIZE, file.nSize - request.nOffset);
     if (request.nLength != expected_length) {
+        fclose(fp);
         error = strprintf("bootstrap chunk length must be %u", expected_length);
-        return false;
-    }
-
-    const boost::filesystem::path relative(file.strPath);
-    if (!IsBootstrapSnapshotDataPath(relative)) {
-        error = strprintf("bootstrap snapshot manifest contains unsafe path: %s", file.strPath);
-        return false;
-    }
-
-    const boost::filesystem::path path = source / relative;
-    if (!boost::filesystem::is_regular_file(path) || !IsSafeBootstrapEntry(path)) {
-        error = strprintf("bootstrap snapshot file is not a regular file: %s", path.string());
-        return false;
-    }
-
-    FILE* fp = fopen(path.string().c_str(), "rb");
-    if (!fp) {
-        error = strprintf("could not open bootstrap snapshot file: %s", path.string());
         return false;
     }
     if (fseek(fp, request.nOffset, SEEK_SET) != 0) {
         fclose(fp);
-        error = strprintf("could not seek bootstrap snapshot file: %s", path.string());
+        error = strprintf("could not seek bootstrap snapshot file: %s", file.strPath);
         return false;
     }
 
@@ -977,7 +1078,7 @@ bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request, C
     const size_t nRead = fread(&chunk.vData[0], 1, request.nLength, fp);
     fclose(fp);
     if (nRead != request.nLength) {
-        error = strprintf("could not read requested bootstrap snapshot chunk: %s", path.string());
+        error = strprintf("could not read requested bootstrap snapshot chunk: %s", file.strPath);
         return false;
     }
 

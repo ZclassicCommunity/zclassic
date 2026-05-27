@@ -370,8 +370,8 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-reindex", _("Rebuild block chain index from current blk000??.dat files on startup"));
     strUsage += HelpMessageOpt("-bootstrapdatadir=<dir>", _("Import blocks/ and chainstate/ from a prepared snapshot directory before opening databases"));
     strUsage += HelpMessageOpt("-bootstrapforce", _("When used with -bootstrapdatadir, move existing blocks/ and chainstate/ to a timestamped backup before import"));
-    strUsage += HelpMessageOpt("-bootstrappeer=<host>", _("Download an initial bootstrap snapshot from a NODE_BOOTSTRAP peer into a fresh datadir before opening databases (experimental)"));
-    strUsage += HelpMessageOpt("-bootstrapserve", _("Advertise bootstrap snapshot service to peers (requires -bootstrapsourcedir)"));
+    strUsage += HelpMessageOpt("-bootstrappeer=<host>", _("Download an initial bootstrap snapshot from a trusted NODE_BOOTSTRAP peer into a fresh datadir before opening databases (experimental)"));
+    strUsage += HelpMessageOpt("-bootstrapserve", _("Advertise bootstrap snapshot service to peers after validating -bootstrapsourcedir"));
     strUsage += HelpMessageOpt("-bootstrapsourcedir=<dir>", _("Prepared snapshot directory containing blocks/ and chainstate/ to serve to bootstrap peers"));
 #if !defined(WIN32)
     strUsage += HelpMessageOpt("-sysperms", _("Create new files with system default permissions, instead of umask 077 (only effective with disabled wallet functionality)"));
@@ -1572,10 +1572,17 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             return InitError(_("-bootstrapserve requires -bootstrapsourcedir=<dir>"));
         }
         const boost::filesystem::path bootstrap_source = boost::filesystem::system_complete(mapArgs["-bootstrapsourcedir"]);
+        std::string bootstrap_error;
         if (!BootstrapSnapshotPathsExist(bootstrap_source)) {
             return InitError(strprintf(
                 _("-bootstrapsourcedir must contain blocks/, blocks/index/, and chainstate/: %s"),
                 bootstrap_source.string()));
+        }
+        if (!PreflightBootstrapSnapshotService(bootstrap_error)) {
+            return InitError(strprintf(
+                _("Bootstrap snapshot service preflight failed for %s: %s"),
+                bootstrap_source.string(),
+                bootstrap_error));
         }
         nLocalServices |= NODE_BOOTSTRAP;
     }
@@ -1609,6 +1616,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             return InitError(bootstrap_error);
         }
 
+        InitWarning(_("Bootstrap peer snapshots are trusted input; use -bootstrappeer only with a peer you control."));
         if (!BootstrapFromPeer(mapArgs["-bootstrappeer"], GetDataDir(), bootstrap_error)) {
             return InitError(bootstrap_error);
         }

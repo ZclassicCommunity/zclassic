@@ -29,6 +29,7 @@ bool BootstrapFromPeer(const std::string& peer,
                        std::string& error);
 
 bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::string& error);
+bool PreflightBootstrapSnapshotService(std::string& error);
 bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request,
                                 CBootstrapSnapshotChunk& chunk,
                                 std::string& error);

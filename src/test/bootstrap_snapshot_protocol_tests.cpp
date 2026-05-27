@@ -461,6 +461,7 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_and_chunk_service_helpers)
 
     CBootstrapSnapshotManifest manifest;
     std::string error;
+    BOOST_REQUIRE(PreflightBootstrapSnapshotService(error));
     BOOST_REQUIRE(GetBootstrapSnapshotManifest(manifest, error));
     BOOST_CHECK(ValidateBootstrapSnapshotManifest(manifest, error));
     BOOST_REQUIRE_EQUAL(manifest.vFiles.size(), 3);
@@ -494,6 +495,13 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_and_chunk_service_helpers)
     request.nLength = 1;
     BOOST_CHECK(!ReadBootstrapSnapshotChunk(request, chunk, error));
     BOOST_CHECK(error.find("out of range") != std::string::npos);
+
+    WriteFixtureFile(root / "blocks" / "blk00000.dat", "abcdef-mutated");
+    request.nFileIndex = 0;
+    request.nOffset = 0;
+    request.nLength = manifest.vFiles[0].nSize;
+    BOOST_CHECK(!ReadBootstrapSnapshotChunk(request, chunk, error));
+    BOOST_CHECK(error.find("changed after manifest creation") != std::string::npos);
 
     RestoreArg("-bootstrapserve", hadServe, oldServe);
     RestoreArg("-bootstrapsourcedir", hadSource, oldSource);
