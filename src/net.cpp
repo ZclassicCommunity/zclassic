@@ -2054,7 +2054,10 @@ bool CAddrDB::Read(CAddrMan& addr)
 
 unsigned int ReceiveFloodSize() { return 1000*GetArg("-maxreceivebuffer", 5*1000); }
 unsigned int SendBufferSize() { return 1000*GetArg("-maxsendbuffer", 1*1000); }
-static const size_t MAX_BOOTSTRAP_CHUNK_REQUESTS_PER_PEER = 2;
+// Bounds how many bootstrap chunk requests a peer may have queued at once.
+// This caps the client's in-flight pipeline window; each queued request can
+// cost up to BOOTSTRAP_SNAPSHOT_CHUNK_SIZE (512 KiB) of buffered send data.
+static const size_t MAX_BOOTSTRAP_CHUNK_REQUESTS_PER_PEER = 32;
 
 CNode::CNode(SOCKET hSocketIn, const CAddress& addrIn, const std::string& addrNameIn, bool fInboundIn) :
     ssSend(SER_NETWORK, INIT_PROTO_VERSION),

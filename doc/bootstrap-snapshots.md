@@ -12,6 +12,23 @@ The imported snapshot contains only:
 It must not contain `wallet.dat`, `zclassic.conf`, peers, logs, or wallet
 database files.
 
+### Match the snapshot's `-txindex` setting
+
+The `chainstate/` database records whether the source node was built with
+`-txindex`. The receiving node must start with the **same** `-txindex` setting
+as the node that produced the snapshot. If they differ, the daemon refuses to
+open the imported database and exits with:
+
+```text
+You need to rebuild the database using -reindex to change -txindex.
+```
+
+If you do not know how the snapshot was produced, prefer matching the serving
+node. ZClassic infrastructure snapshots are typically built with `txindex=1`,
+so set `txindex=1` in the receiving node's `zclassic.conf` (or pass
+`-txindex`) before importing. Changing `-txindex` afterwards requires a full
+`-reindex`, which discards the speed benefit of the snapshot.
+
 ## Import From A Prepared Datadir
 
 Create the source from a stopped node or a filesystem snapshot of a synced node.
@@ -77,12 +94,28 @@ This branch has the first node-to-node network pieces:
   manifest, downloads chunks into staging, verifies per-file SHA-256 hashes,
   and installs only `blocks/` and `chainstate/`.
 
+`-bootstrappeer` accepts either `host` or `host:port`. When no port is given it
+uses the network default P2P port (mainnet `8033`). If the serving node listens
+on a non-default port, give it explicitly, e.g.
+`-bootstrappeer=192.0.2.10:8033`.
+
 Start a serving node with:
 
 ```bash
 ./src/zclassicd \
     -bootstrapserve \
     -bootstrapsourcedir=/path/to/prepared-snapshot
+```
+
+Download progress is written to the log as it runs. The daemon does not write
+`debug.log` by default, so pass `-printtoconsole` or `-debuglogfile` to watch
+the transfer:
+
+```bash
+./src/zclassicd \
+    -datadir="$HOME/.zclassic-fresh" \
+    -bootstrappeer=192.0.2.10:8033 \
+    -printtoconsole
 ```
 
 The node-to-node path does not install chain files through normal block relay

@@ -16,6 +16,7 @@
 #include "utilstrencodings.h"
 
 #include <algorithm>
+#include <deque>
 #include <exception>
 #include <limits>
 #include <map>
@@ -507,81 +508,213 @@ static bool VerifyBootstrapDownloadedFile(const boost::filesystem::path& path, c
     return true;
 }
 
-static bool DownloadBootstrapFile(SOCKET socket, const CBootstrapSnapshotManifest& manifest, uint32_t file_index, const boost::filesystem::path& staging, int timeout_ms, std::string& error)
+// Pipeline window: how many chunk requests the client keeps in flight at once.
+// This hides per-chunk round-trip latency, which otherwise caps throughput on
+// high-latency links. It must not exceed the server's per-peer queue limit
+// (MAX_BOOTSTRAP_CHUNK_REQUESTS_PER_PEER in net.cpp).
+static const size_t BOOTSTRAP_PIPELINE_DEPTH = 16;
+
+static bool SendBootstrapChunkRequest(SOCKET socket, const CBootstrapSnapshotChunkRequest& request, int timeout_ms, std::string& error)
 {
-    const CBootstrapSnapshotFile& file = manifest.vFiles[file_index];
-    const boost::filesystem::path relative(file.strPath);
-    if (!IsBootstrapSnapshotDataPath(relative)) {
-        error = strprintf("bootstrap manifest has unsafe file path: %s", file.strPath);
-        return false;
-    }
+    CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
+    payload << request;
+    return SendBootstrapMessage(socket, NetMsgType::GETBSCHK, payload, timeout_ms, error);
+}
 
-    const boost::filesystem::path path = staging / relative;
-    const boost::filesystem::path part_path = boost::filesystem::path(path.string() + ".part");
-    boost::filesystem::create_directories(path.parent_path());
-
-    FILE* fp = fopen(part_path.string().c_str(), "wb");
-    if (!fp) {
-        error = strprintf("could not create bootstrap staging file: %s", part_path.string());
-        return false;
-    }
-
-    uint64_t offset = 0;
-    while (offset < file.nSize) {
-        CBootstrapSnapshotChunkRequest request;
-        request.nFileIndex = file_index;
-        request.nOffset = offset;
-        request.nLength = std::min<uint64_t>(manifest.nChunkSize, file.nSize - offset);
-
-        CDataStream requestPayload(SER_NETWORK, PROTOCOL_VERSION);
-        requestPayload << request;
-        if (!SendBootstrapMessage(socket, NetMsgType::GETBSCHK, requestPayload, timeout_ms, error)) {
-            fclose(fp);
+// Zero-length files are never requested over the wire (they produce no chunks),
+// so create and verify them directly in staging.
+static bool CreateEmptyBootstrapFiles(const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, std::string& error)
+{
+    for (size_t i = 0; i < manifest.vFiles.size(); ++i) {
+        const CBootstrapSnapshotFile& file = manifest.vFiles[i];
+        if (file.nSize != 0) {
+            continue;
+        }
+        const boost::filesystem::path relative(file.strPath);
+        if (!IsBootstrapSnapshotDataPath(relative)) {
+            error = strprintf("bootstrap manifest has unsafe file path: %s", file.strPath);
             return false;
         }
+        const boost::filesystem::path path = staging / relative;
+        boost::filesystem::create_directories(path.parent_path());
+        FILE* fp = fopen(path.string().c_str(), "wb");
+        if (!fp) {
+            error = strprintf("could not create bootstrap staging file: %s", path.string());
+            return false;
+        }
+        fclose(fp);
+        if (!VerifyBootstrapDownloadedFile(path, file, error)) {
+            return false;
+        }
+    }
+    return true;
+}
 
+// Download every file in the manifest into staging using a pipelined request
+// window across the whole snapshot. Chunk requests are issued in file/offset
+// order; the peer replies on a single ordered stream, so responses match the
+// in-flight queue front-to-back. Files are verified (per-file SHA-256) and
+// renamed from their .part path as their final chunk arrives.
+static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, int timeout_ms, const std::string& peer, std::string& error)
+{
+    LogPrintf("Bootstrap: downloading snapshot from peer %s: %u files, %llu bytes (height %d)\n",
+        peer,
+        (unsigned int)manifest.vFiles.size(),
+        (unsigned long long)manifest.nSnapshotBytes,
+        manifest.nHeight);
+
+    if (!CreateEmptyBootstrapFiles(manifest, staging, error)) {
+        return false;
+    }
+
+    std::vector<uint32_t> order;
+    for (size_t i = 0; i < manifest.vFiles.size(); ++i) {
+        if (manifest.vFiles[i].nSize > 0) {
+            order.push_back((uint32_t)i);
+        }
+    }
+
+    // Request cursor over (position in `order`, byte offset within that file).
+    size_t reqPos = 0;
+    uint64_t reqOffset = 0;
+    auto nextRequest =
+        [&](CBootstrapSnapshotChunkRequest& request) -> bool {
+            while (reqPos < order.size()) {
+                const CBootstrapSnapshotFile& f = manifest.vFiles[order[reqPos]];
+                if (reqOffset >= f.nSize) {
+                    ++reqPos;
+                    reqOffset = 0;
+                    continue;
+                }
+                request.nFileIndex = order[reqPos];
+                request.nOffset = reqOffset;
+                request.nLength = (uint32_t)std::min<uint64_t>(manifest.nChunkSize, f.nSize - reqOffset);
+                reqOffset += request.nLength;
+                return true;
+            }
+            return false;
+        };
+
+    std::deque<CBootstrapSnapshotChunkRequest> inflight;
+    for (size_t i = 0; i < BOOTSTRAP_PIPELINE_DEPTH; ++i) {
+        CBootstrapSnapshotChunkRequest request;
+        if (!nextRequest(request)) {
+            break;
+        }
+        if (!SendBootstrapChunkRequest(socket, request, timeout_ms, error)) {
+            return false;
+        }
+        inflight.push_back(request);
+    }
+
+    FILE* fp = NULL;
+    boost::filesystem::path open_path;
+    boost::filesystem::path open_part;
+    uint64_t received_total = 0;
+    int last_logged_percent = -1;
+    const int64_t download_started = GetTimeMillis();
+    bool ok = true;
+
+    while (ok && !inflight.empty()) {
         CDataStream chunkPayload(SER_NETWORK, PROTOCOL_VERSION);
         if (!ReceiveExpectedBootstrapMessage(socket, NetMsgType::BSCHK, chunkPayload, timeout_ms, error)) {
-            fclose(fp);
-            return false;
+            ok = false;
+            break;
         }
 
         CBootstrapSnapshotChunk chunk;
         try {
             chunkPayload >> chunk;
         } catch (const std::exception& e) {
-            fclose(fp);
             error = strprintf("could not decode bootstrap chunk: %s", e.what());
-            return false;
+            ok = false;
+            break;
         }
 
+        const CBootstrapSnapshotChunkRequest request = inflight.front();
+        inflight.pop_front();
         if (chunk.nFileIndex != request.nFileIndex ||
             chunk.nOffset != request.nOffset ||
             chunk.vData.size() != request.nLength) {
-            fclose(fp);
             error = "bootstrap peer returned an unexpected chunk";
-            return false;
-        }
-        if (!WriteBootstrapChunkToFile(part_path, chunk, fp, error)) {
-            fclose(fp);
-            return false;
+            ok = false;
+            break;
         }
 
-        offset += request.nLength;
+        const CBootstrapSnapshotFile& file = manifest.vFiles[request.nFileIndex];
+        if (!fp) {
+            const boost::filesystem::path relative(file.strPath);
+            if (!IsBootstrapSnapshotDataPath(relative)) {
+                error = strprintf("bootstrap manifest has unsafe file path: %s", file.strPath);
+                ok = false;
+                break;
+            }
+            open_path = staging / relative;
+            open_part = boost::filesystem::path(open_path.string() + ".part");
+            boost::filesystem::create_directories(open_path.parent_path());
+            fp = fopen(open_part.string().c_str(), "wb");
+            if (!fp) {
+                error = strprintf("could not create bootstrap staging file: %s", open_part.string());
+                ok = false;
+                break;
+            }
+        }
+
+        if (!WriteBootstrapChunkToFile(open_part, chunk, fp, error)) {
+            ok = false;
+            break;
+        }
+        received_total += chunk.vData.size();
+
+        // Finalize the file once its final chunk has been written.
+        if (request.nOffset + request.nLength >= file.nSize) {
+            FileCommit(fp);
+            const bool closed = (fclose(fp) == 0);
+            fp = NULL;
+            if (!closed) {
+                error = strprintf("could not close bootstrap staging file: %s", open_part.string());
+                ok = false;
+                break;
+            }
+            if (!VerifyBootstrapDownloadedFile(open_part, file, error)) {
+                ok = false;
+                break;
+            }
+            boost::filesystem::rename(open_part, open_path);
+        }
+
+        // Log on each whole-percent advance so an operator watching the console
+        // (-printtoconsole) or debug.log sees steady progress during what can be
+        // a multi-gigabyte transfer.
+        const int percent = manifest.nSnapshotBytes > 0
+            ? (int)((received_total * 100) / manifest.nSnapshotBytes)
+            : 100;
+        if (percent != last_logged_percent) {
+            last_logged_percent = percent;
+            const int64_t elapsed_ms = std::max<int64_t>(1, GetTimeMillis() - download_started);
+            LogPrintf("Bootstrap: downloaded %d%% (%llu/%llu bytes, %.1f MB/s)\n",
+                percent,
+                (unsigned long long)received_total,
+                (unsigned long long)manifest.nSnapshotBytes,
+                (received_total / 1048576.0) / (elapsed_ms / 1000.0));
+        }
+
+        // Refill the pipeline window.
+        CBootstrapSnapshotChunkRequest refill;
+        if (nextRequest(refill)) {
+            if (!SendBootstrapChunkRequest(socket, refill, timeout_ms, error)) {
+                ok = false;
+                break;
+            }
+            inflight.push_back(refill);
+        }
     }
 
-    FileCommit(fp);
-    if (fclose(fp) != 0) {
-        error = strprintf("could not close bootstrap staging file: %s", part_path.string());
-        return false;
+    if (fp) {
+        fclose(fp);
+        fp = NULL;
     }
-
-    if (!VerifyBootstrapDownloadedFile(part_path, file, error)) {
-        return false;
-    }
-
-    boost::filesystem::rename(part_path, path);
-    return true;
+    return ok;
 }
 
 static bool BootstrapHandshake(SOCKET socket, const CService& peer_address, int timeout_ms, std::string& error)
@@ -715,12 +848,10 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
             return false;
         }
 
-        for (uint32_t i = 0; i < manifest.vFiles.size(); ++i) {
-            if (!DownloadBootstrapFile(socket, manifest, i, staging, nConnectTimeout, error)) {
-                CloseSocket(socket);
-                boost::filesystem::remove_all(staging);
-                return false;
-            }
+        if (!DownloadBootstrapSnapshot(socket, manifest, staging, nConnectTimeout, peer, error)) {
+            CloseSocket(socket);
+            boost::filesystem::remove_all(staging);
+            return false;
         }
 
         CloseSocket(socket);

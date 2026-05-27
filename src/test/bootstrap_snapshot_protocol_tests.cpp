@@ -186,36 +186,42 @@ BOOST_AUTO_TEST_CASE(bootstrap_snapshot_chunk_request_queue)
 {
     CNode node(INVALID_SOCKET, CAddress(CService("127.0.0.1", 0)), "", true);
 
-    CBootstrapSnapshotChunkRequest first;
-    first.nFileIndex = 1;
-    first.nOffset = 0;
-    first.nLength = 512 * 1024;
+    // Fill the queue until the per-peer cap rejects a request. The cap bounds
+    // the bootstrap client's in-flight pipeline window; this test does not hard
+    // code its value so it tracks net.cpp's MAX_BOOTSTRAP_CHUNK_REQUESTS_PER_PEER.
+    const size_t kSanityCap = 4096;
+    size_t accepted = 0;
+    for (size_t i = 0; i < kSanityCap; ++i) {
+        CBootstrapSnapshotChunkRequest request;
+        request.nFileIndex = 1;
+        request.nOffset = (uint64_t)i * 512 * 1024;
+        request.nLength = 512 * 1024;
+        if (!node.QueueBootstrapChunkRequest(request)) {
+            break;
+        }
+        ++accepted;
+    }
+    // The cap must allow real pipelining (more than one) but stay bounded.
+    BOOST_CHECK_GT(accepted, 1u);
+    BOOST_CHECK_LT(accepted, kSanityCap);
 
-    CBootstrapSnapshotChunkRequest second;
-    second.nFileIndex = 1;
-    second.nOffset = 512 * 1024;
-    second.nLength = 512 * 1024;
+    // A further request is rejected while the queue is full.
+    CBootstrapSnapshotChunkRequest overflow;
+    overflow.nFileIndex = 1;
+    overflow.nOffset = (uint64_t)accepted * 512 * 1024;
+    overflow.nLength = 512 * 1024;
+    BOOST_CHECK(!node.QueueBootstrapChunkRequest(overflow));
 
-    CBootstrapSnapshotChunkRequest third;
-    third.nFileIndex = 1;
-    third.nOffset = 1024 * 1024;
-    third.nLength = 512 * 1024;
-
-    BOOST_CHECK(node.QueueBootstrapChunkRequest(first));
-    BOOST_CHECK(node.QueueBootstrapChunkRequest(second));
-    BOOST_CHECK(!node.QueueBootstrapChunkRequest(third));
+    // Requests pop in FIFO order, and the queue empties after `accepted` pops.
+    for (size_t i = 0; i < accepted; ++i) {
+        CBootstrapSnapshotChunkRequest popped;
+        BOOST_REQUIRE(node.PopBootstrapChunkRequest(popped));
+        BOOST_CHECK_EQUAL(popped.nFileIndex, 1u);
+        BOOST_CHECK_EQUAL(popped.nOffset, (uint64_t)i * 512 * 1024);
+        BOOST_CHECK_EQUAL(popped.nLength, (uint32_t)(512 * 1024));
+    }
 
     CBootstrapSnapshotChunkRequest popped;
-    BOOST_CHECK(node.PopBootstrapChunkRequest(popped));
-    BOOST_CHECK_EQUAL(popped.nFileIndex, first.nFileIndex);
-    BOOST_CHECK_EQUAL(popped.nOffset, first.nOffset);
-    BOOST_CHECK_EQUAL(popped.nLength, first.nLength);
-
-    BOOST_CHECK(node.PopBootstrapChunkRequest(popped));
-    BOOST_CHECK_EQUAL(popped.nFileIndex, second.nFileIndex);
-    BOOST_CHECK_EQUAL(popped.nOffset, second.nOffset);
-    BOOST_CHECK_EQUAL(popped.nLength, second.nLength);
-
     BOOST_CHECK(!node.PopBootstrapChunkRequest(popped));
 }
 
