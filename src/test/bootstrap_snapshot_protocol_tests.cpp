@@ -225,6 +225,60 @@ BOOST_AUTO_TEST_CASE(bootstrap_snapshot_chunk_request_queue)
     BOOST_CHECK(!node.PopBootstrapChunkRequest(popped));
 }
 
+BOOST_AUTO_TEST_CASE(bootstrap_serve_quota_throttle_and_stop)
+{
+    const bool hadCap = mapArgs.count("-bootstrapservemaxbytesperday");
+    const bool hadKbps = mapArgs.count("-bootstrapservethrottlekbps");
+    const std::string oldCap = hadCap ? mapArgs["-bootstrapservemaxbytesperday"] : "";
+    const std::string oldKbps = hadKbps ? mapArgs["-bootstrapservethrottlekbps"] : "";
+
+    const int64_t t0 = 1000000;
+    const std::string ip = "203.0.113.7";
+    bool stop = false;
+
+    // --- Hard-stop mode: throttle rate 0, cap 1000 bytes ---
+    ClearBootstrapServeQuota();
+    mapArgs["-bootstrapservemaxbytesperday"] = "1000";
+    mapArgs["-bootstrapservethrottlekbps"] = "0";
+
+    BOOST_CHECK(BootstrapServeAllowChunk(ip, false, t0, stop));        // nothing served yet
+    BootstrapServeChargeBytes(ip, false, t0, 600);
+    BOOST_CHECK(BootstrapServeAllowChunk(ip, false, t0, stop));        // 600 < 1000
+    BOOST_CHECK(!stop);
+    BootstrapServeChargeBytes(ip, false, t0, 600);                    // now 1200 >= 1000
+    BOOST_CHECK(!BootstrapServeAllowChunk(ip, false, t0, stop));       // over cap, stop
+    BOOST_CHECK(stop);
+
+    // Whitelisted peers bypass the quota entirely.
+    BOOST_CHECK(BootstrapServeAllowChunk(ip, true, t0, stop));
+    BOOST_CHECK(!stop);
+
+    // Window rollover clears the cap.
+    BOOST_CHECK(BootstrapServeAllowChunk(ip, false, t0 + 24 * 60 * 60 * 1000LL, stop));
+
+    // --- Throttle mode: 1 KiB/s, cap 1000 bytes ---
+    ClearBootstrapServeQuota();
+    mapArgs["-bootstrapservemaxbytesperday"] = "1000";
+    mapArgs["-bootstrapservethrottlekbps"] = "1"; // 1024 bytes/s
+
+    BootstrapServeChargeBytes(ip, false, t0, 1000);                   // reaches cap; bytes=1024B/s
+    // 1000 bytes at 1024 B/s schedules the next send ~976ms out.
+    BOOST_CHECK(!BootstrapServeAllowChunk(ip, false, t0 + 500, stop)); // too soon
+    BOOST_CHECK(!stop);                                                // throttled, not stopped
+    BOOST_CHECK(BootstrapServeAllowChunk(ip, false, t0 + 1000, stop)); // gap elapsed
+
+    // --- Unlimited: cap 0 ---
+    ClearBootstrapServeQuota();
+    mapArgs["-bootstrapservemaxbytesperday"] = "0";
+    BootstrapServeChargeBytes(ip, false, t0, 1000000000);
+    BOOST_CHECK(BootstrapServeAllowChunk(ip, false, t0, stop));
+    BOOST_CHECK(!stop);
+
+    ClearBootstrapServeQuota();
+    RestoreArg("-bootstrapservemaxbytesperday", hadCap, oldCap);
+    RestoreArg("-bootstrapservethrottlekbps", hadKbps, oldKbps);
+}
+
 BOOST_AUTO_TEST_CASE(bootstrap_network_message_roundtrip)
 {
     CBootstrapSnapshotChunkRequest request;

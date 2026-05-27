@@ -137,6 +137,23 @@ This follows the same broad model as Bitcoin AssumeUTXO, Geth snap sync, Cosmos
 state sync, and Mithril-certified snapshots: fast state acquisition first,
 normal validation after the trusted hash point.
 
+## Serving Limits (Bandwidth Abuse)
+
+A serving node caps how much one IP can download per rolling 24-hour window:
+
+- `-bootstrapservemaxbytesperday=<n>` — bytes one address may download before it
+  is throttled. Default `107374182400` (100 GiB), which still allows several
+  full snapshot downloads per IP per day. `0` disables the cap.
+- `-bootstrapservethrottlekbps=<n>` — the rate (KiB/s) to serve an address that
+  is over its daily cap. Default `1024` (1 MiB/s). `0` stops serving that
+  address until its window resets, instead of slowing it down.
+
+Throttling is enforced without blocking the network thread: an over-cap address
+is simply served at most one chunk per scheduled interval, so other peers are
+unaffected. The cap is tracked per IP, so opening multiple connections from one
+address does not raise its limit. Whitelisted peers (`-whitelist`) bypass the
+quota.
+
 For public serving, prefer a stopped-node copy or filesystem snapshot owned by a
 different administrative user. The daemon preflights the manifest before
 advertising `NODE_BOOTSTRAP` and refuses chunk reads if a listed file changes

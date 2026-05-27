@@ -18,6 +18,11 @@ class CNode;
 static const uint32_t BOOTSTRAP_SNAPSHOT_CHUNK_SIZE = 512 * 1024;
 static const uint32_t BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE = 512 * 1024;
 
+// Default per-IP serve quota: bytes one address may download per 24h before the
+// serving node throttles it, and the throttled rate to fall back to.
+static const int64_t BOOTSTRAP_SERVE_DEFAULT_MAX_BYTES_PER_DAY = 100LL * 1024 * 1024 * 1024; // 100 GiB
+static const int64_t BOOTSTRAP_SERVE_DEFAULT_THROTTLE_KBPS = 1024;                            // 1 MiB/s
+
 bool BootstrapSnapshotPathsExist(const boost::filesystem::path& root);
 bool IsBootstrapFreshChainDatadir(const boost::filesystem::path& data_dir, std::string& error);
 bool ImportBootstrapDatadir(const boost::filesystem::path& source_root,
@@ -38,6 +43,18 @@ bool EnqueueBootstrapSnapshotChunkRequest(CNode* pfrom,
                                           const CBootstrapSnapshotChunkRequest& request,
                                           std::string& error);
 bool SendQueuedBootstrapSnapshotChunk(CNode* pto);
+
+// Per-IP serve quota. Limits how many snapshot bytes one address can pull per
+// rolling 24h window before the serving node throttles (or stops) it. These
+// take an explicit current time so they are deterministic to test.
+//! Returns true if a chunk may be served to `ip` at `now_ms`. When the address
+//! is over its daily cap and throttling is disabled, returns false and sets
+//! `stop` (so the caller can reject rather than defer).
+bool BootstrapServeAllowChunk(const std::string& ip, bool whitelisted, int64_t now_ms, bool& stop);
+//! Account `bytes` served to `ip` at `now_ms`, resetting the window when it rolls over.
+void BootstrapServeChargeBytes(const std::string& ip, bool whitelisted, int64_t now_ms, uint64_t bytes);
+//! Drop all tracked per-IP quota state (used by tests).
+void ClearBootstrapServeQuota();
 
 bool BuildBootstrapNetworkMessage(const char* command,
                                   const CDataStream& payload,

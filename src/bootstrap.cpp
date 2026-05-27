@@ -1290,10 +1290,120 @@ bool EnqueueBootstrapSnapshotChunkRequest(CNode* pfrom, const CBootstrapSnapshot
     return true;
 }
 
+// --- Per-IP serve quota / throttle (bandwidth abuse limiting) ---
+
+static const int64_t BOOTSTRAP_SERVE_WINDOW_MS = 24 * 60 * 60 * 1000LL;
+static const size_t BOOTSTRAP_SERVE_MAX_TRACKED_IPS = 16384;
+
+struct BootstrapServeQuota {
+    int64_t windowStartMs;
+    uint64_t bytesServed;
+    int64_t nextAllowedMs;
+    BootstrapServeQuota() : windowStartMs(0), bytesServed(0), nextAllowedMs(0) {}
+};
+
+static CCriticalSection cs_bootstrap_serve_quota;
+static std::map<std::string, BootstrapServeQuota> bootstrapServeQuota;
+
+static int64_t BootstrapServeMaxBytesPerDay()
+{
+    return GetArg("-bootstrapservemaxbytesperday", BOOTSTRAP_SERVE_DEFAULT_MAX_BYTES_PER_DAY);
+}
+
+static int64_t BootstrapServeThrottleKBps()
+{
+    return GetArg("-bootstrapservethrottlekbps", BOOTSTRAP_SERVE_DEFAULT_THROTTLE_KBPS);
+}
+
+void ClearBootstrapServeQuota()
+{
+    LOCK(cs_bootstrap_serve_quota);
+    bootstrapServeQuota.clear();
+}
+
+bool BootstrapServeAllowChunk(const std::string& ip, bool whitelisted, int64_t now_ms, bool& stop)
+{
+    stop = false;
+    const int64_t cap = BootstrapServeMaxBytesPerDay();
+    if (whitelisted || cap <= 0) {
+        return true;
+    }
+
+    LOCK(cs_bootstrap_serve_quota);
+    std::map<std::string, BootstrapServeQuota>::iterator it = bootstrapServeQuota.find(ip);
+    if (it == bootstrapServeQuota.end()) {
+        return true; // nothing served to this address yet
+    }
+    BootstrapServeQuota& q = it->second;
+    if (now_ms - q.windowStartMs >= BOOTSTRAP_SERVE_WINDOW_MS) {
+        return true; // window has rolled over; the next charge resets it
+    }
+    if (q.bytesServed < (uint64_t)cap) {
+        return true; // still under the daily cap
+    }
+    // Over the daily cap.
+    if (BootstrapServeThrottleKBps() <= 0) {
+        stop = true; // operator chose a hard stop instead of a slow trickle
+        return false;
+    }
+    return now_ms >= q.nextAllowedMs; // throttled: serve only once the gap has elapsed
+}
+
+void BootstrapServeChargeBytes(const std::string& ip, bool whitelisted, int64_t now_ms, uint64_t bytes)
+{
+    const int64_t cap = BootstrapServeMaxBytesPerDay();
+    if (whitelisted || cap <= 0) {
+        return;
+    }
+
+    LOCK(cs_bootstrap_serve_quota);
+    BootstrapServeQuota& q = bootstrapServeQuota[ip];
+    if (q.windowStartMs == 0 || now_ms - q.windowStartMs >= BOOTSTRAP_SERVE_WINDOW_MS) {
+        q.windowStartMs = now_ms;
+        q.bytesServed = 0;
+        q.nextAllowedMs = 0;
+    }
+    q.bytesServed += bytes;
+    if (q.bytesServed >= (uint64_t)cap) {
+        const int64_t kbps = BootstrapServeThrottleKBps();
+        if (kbps > 0) {
+            // Space out the next send so the over-cap rate approximates `kbps`.
+            const int64_t delayMs = (int64_t)((bytes * 1000) / ((uint64_t)kbps * 1024));
+            q.nextAllowedMs = now_ms + std::max<int64_t>(1, delayMs);
+        }
+    }
+
+    // Bound memory: drop entries whose window has fully expired.
+    if (bootstrapServeQuota.size() > BOOTSTRAP_SERVE_MAX_TRACKED_IPS) {
+        for (std::map<std::string, BootstrapServeQuota>::iterator it = bootstrapServeQuota.begin(); it != bootstrapServeQuota.end();) {
+            if (now_ms - it->second.windowStartMs >= BOOTSTRAP_SERVE_WINDOW_MS) {
+                bootstrapServeQuota.erase(it++);
+            } else {
+                ++it;
+            }
+        }
+    }
+}
+
 bool SendQueuedBootstrapSnapshotChunk(CNode* pto)
 {
     CBootstrapSnapshotChunkRequest request;
     if (!pto->PopBootstrapChunkRequest(request)) {
+        return true;
+    }
+
+    // Apply the per-IP daily serve quota only once we have a request to serve,
+    // so peers with no bootstrap traffic never touch the quota lock.
+    const std::string ip = pto->addr.ToStringIP();
+    bool stop = false;
+    if (!BootstrapServeAllowChunk(ip, pto->fWhitelisted, GetTimeMillis(), stop)) {
+        if (stop) {
+            LogPrint("net", "bootstrap serve quota exceeded for peer=%d (%s); rejecting chunk request\n", pto->id, ip);
+            pto->PushMessage("reject", std::string(NetMsgType::GETBSCHK), REJECT_INVALID, std::string("bootstrap serve quota exceeded"));
+        } else {
+            // Throttled: put the request back and try again on a later cycle.
+            pto->RequeueBootstrapChunkRequest(request);
+        }
         return true;
     }
 
@@ -1311,5 +1421,6 @@ bool SendQueuedBootstrapSnapshotChunk(CNode* pto)
         (unsigned int)chunk.vData.size(),
         pto->id);
     pto->PushMessage(NetMsgType::BSCHK, chunk);
+    BootstrapServeChargeBytes(ip, pto->fWhitelisted, GetTimeMillis(), chunk.vData.size());
     return true;
 }

@@ -2171,6 +2171,15 @@ bool CNode::QueueBootstrapChunkRequest(const CBootstrapSnapshotChunkRequest& req
     return true;
 }
 
+void CNode::RequeueBootstrapChunkRequest(const CBootstrapSnapshotChunkRequest& request)
+{
+    // Put a popped-but-deferred request back at the front so order is preserved
+    // when the serving side throttles. Bypasses the size cap because the slot it
+    // occupies was just freed by the pop that preceded it.
+    LOCK(cs_bootstrap_requests);
+    vBootstrapChunkRequests.push_front(request);
+}
+
 bool CNode::PopBootstrapChunkRequest(CBootstrapSnapshotChunkRequest& request)
 {
     LOCK(cs_bootstrap_requests);

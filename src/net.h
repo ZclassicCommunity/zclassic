@@ -320,6 +320,7 @@ public:
     std::multimap<int64_t, CInv> mapAskFor;
 
     bool QueueBootstrapChunkRequest(const CBootstrapSnapshotChunkRequest& request);
+    void RequeueBootstrapChunkRequest(const CBootstrapSnapshotChunkRequest& request);
     bool PopBootstrapChunkRequest(CBootstrapSnapshotChunkRequest& request);
     bool fBootstrapManifestSent;
 
