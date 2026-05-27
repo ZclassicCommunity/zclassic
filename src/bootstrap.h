@@ -33,6 +33,10 @@ bool BootstrapFromPeer(const std::string& peer,
                        const boost::filesystem::path& data_dir,
                        std::string& error);
 
+//! Effective bootstrap peer list: -bootstrappeer if set, else the compiled
+//! per-network defaults (CChainParams::BootstrapPeers).
+std::vector<std::string> GetBootstrapPeerList();
+
 // --- Zcash parameter (.params) distribution over the bootstrap protocol ---
 //! Build the manifest of zk-SNARK parameter files this node can serve (those
 //! present in the params dir whose names/hashes match the compiled set).

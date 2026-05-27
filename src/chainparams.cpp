@@ -197,6 +197,10 @@ public:
         fastSyncAnchorData.hashAnchorSha256 = uint256S("0x30108749a1f58963922e66e973129a36237639a229219ccc2d766a72d443ffba");
         fastSyncAnchorData.hashAnchorSha3 = uint256S("0x036df249ba73e1090c639b8afee4145db040eeb7619cf96310ed83fa97e81433");
 
+        // Default NODE_BOOTSTRAP peers a fresh node fetches params and the chain
+        // snapshot from. Overridable with -bootstrappeer, disable with -bootstrap=0.
+        vBootstrapPeers.push_back("74.50.74.102:8034");
+
         // Founders reward script expects a vector of 2-of-3 multisig addresses
         vFoundersRewardAddress = {
             "t3Vz22vK5z2LcKEdg16Yv4FFneEL1zg9ojd", /* main-index: 0*/

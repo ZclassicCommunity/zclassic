@@ -378,7 +378,8 @@ std::string HelpMessage(HelpMessageMode mode)
 #if !defined(WIN32)
     strUsage += HelpMessageOpt("-sysperms", _("Create new files with system default permissions, instead of umask 077 (only effective with disabled wallet functionality)"));
 #endif
-    strUsage += HelpMessageOpt("-txindex", strprintf(_("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)"), 0));
+    strUsage += HelpMessageOpt("-txindex", strprintf(_("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)"), 1));
+    strUsage += HelpMessageOpt("-bootstrap", strprintf(_("On a fresh datadir, fetch zk-SNARK params and the chain snapshot from a bootstrap peer before normal sync (default: %u)"), 1));
 
     strUsage += HelpMessageGroup(_("Connection options:"));
     strUsage += HelpMessageOpt("-addnode=<ip>", _("Add a node to connect to and attempt to keep the connection open"));
@@ -740,18 +741,21 @@ bool InitSanityCheck(void)
     boost::filesystem::path pk_path = ZC_GetParamsDir() / "sprout-proving.key";
     boost::filesystem::path vk_path = ZC_GetParamsDir() / "sprout-verifying.key";
 
-    // If parameters are missing and a bootstrap peer is configured, fetch them
-    // from that peer over the P2P protocol (verified against compiled hashes)
-    // instead of requiring an external download.
-    if (!ZcashParamsPresentAndValid() && mapArgs.count("-bootstrappeer")) {
-        const std::string peer = mapArgs["-bootstrappeer"];
-        fprintf(stdout, "Fetching Zcash parameters from peer %s...\n", peer.c_str());
-        LogPrintf("Fetching Zcash parameters from bootstrap peer %s...\n", peer);
-        std::string paramError;
-        if (!FetchZcashParamsFromPeer(peer, paramError)) {
-            InitError(strprintf("Could not fetch Zcash parameters from peer %s: %s", peer, paramError));
-            return false;
+    // If parameters are missing, fetch them from a bootstrap peer over the P2P
+    // protocol (verified against compiled hashes) instead of requiring an
+    // external download. Uses -bootstrappeer if set, else the compiled default
+    // peers; disable with -bootstrap=0.
+    if (!ZcashParamsPresentAndValid() && GetBoolArg("-bootstrap", true)) {
+        std::string paramError = "no bootstrap peer configured";
+        BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
+            fprintf(stdout, "Fetching Zcash parameters from peer %s...\n", peer.c_str());
+            LogPrintf("Fetching Zcash parameters from bootstrap peer %s...\n", peer);
+            if (FetchZcashParamsFromPeer(peer, paramError)) {
+                break;
+            }
+            LogPrintf("Zcash param fetch from %s failed: %s\n", peer, paramError);
         }
+        // If it still failed, the existence check below reports the error.
     }
 
     if (!(
@@ -1058,7 +1062,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // if using block pruning, then disable txindex
     // also disable the wallet (for now, until SPV support is implemented in wallet)
     if (GetArg("-prune", 0)) {
-        if (GetBoolArg("-txindex", false))
+        if (GetBoolArg("-txindex", true))
             return InitError(_("Prune mode is incompatible with -txindex."));
 #ifdef ENABLE_WALLET
         if (!GetBoolArg("-disablewallet", false)) {
@@ -1611,30 +1615,49 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
     }
 
-    if (mapArgs.count("-bootstrappeer")) {
-        if (mapArgs.count("-bootstrapdatadir")) {
-            return InitError(_("-bootstrappeer cannot be used with -bootstrapdatadir"));
-        }
-        if (GetBoolArg("-reindex", false)) {
-            return InitError(_("-bootstrappeer cannot be used with -reindex"));
-        }
-        if (!mapMultiArgs["-loadblock"].empty()) {
-            return InitError(_("-bootstrappeer cannot be used with -loadblock"));
+    // Fetch the chain snapshot from a bootstrap peer. This runs automatically on
+    // a fresh datadir using the compiled default peers; -bootstrappeer overrides
+    // the peer and -bootstrap=0 disables it. An explicit -bootstrappeer makes a
+    // failure fatal; the automatic path is best-effort and falls back to normal
+    // peer-to-peer sync if no bootstrap peer is reachable.
+    {
+        const bool explicit_peer = mapArgs.count("-bootstrappeer");
+        const bool enabled = GetBoolArg("-bootstrap", true) && !GetBootstrapPeerList().empty();
+        const bool conflicts = mapArgs.count("-bootstrapdatadir") ||
+                               GetBoolArg("-reindex", false) ||
+                               !mapMultiArgs["-loadblock"].empty();
+
+        if (explicit_peer && conflicts) {
+            return InitError(_("-bootstrappeer cannot be used with -bootstrapdatadir, -reindex, or -loadblock"));
         }
 
-        const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
-        if (anchor.nHeight < 0 || anchor.hashBlock.IsNull()) {
-            return InitError(_("-bootstrappeer requires a compiled fast-sync anchor"));
-        }
-
-        std::string bootstrap_error;
-        if (!IsBootstrapFreshChainDatadir(GetDataDir(), bootstrap_error)) {
-            return InitError(bootstrap_error);
-        }
-
-        InitWarning(_("Bootstrap peer snapshots are trusted input; use -bootstrappeer only with a peer you control."));
-        if (!BootstrapFromPeer(mapArgs["-bootstrappeer"], GetDataDir(), bootstrap_error)) {
-            return InitError(bootstrap_error);
+        if (enabled && !conflicts) {
+            const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
+            std::string bootstrap_error;
+            if (anchor.nHeight < 0 || anchor.hashBlock.IsNull()) {
+                if (explicit_peer)
+                    return InitError(_("-bootstrappeer requires a compiled fast-sync anchor"));
+            } else if (!IsBootstrapFreshChainDatadir(GetDataDir(), bootstrap_error)) {
+                // Datadir already has chain data: skip silently unless the user
+                // explicitly asked to bootstrap into it.
+                if (explicit_peer)
+                    return InitError(bootstrap_error);
+            } else {
+                InitWarning(_("Bootstrap snapshots are trusted input; the snapshot tip is verified against the compiled anchor."));
+                bool done = false;
+                BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
+                    if (BootstrapFromPeer(peer, GetDataDir(), bootstrap_error)) {
+                        done = true;
+                        break;
+                    }
+                    LogPrintf("Bootstrap snapshot from %s failed: %s\n", peer, bootstrap_error);
+                }
+                if (!done) {
+                    if (explicit_peer)
+                        return InitError(bootstrap_error);
+                    LogPrintf("Bootstrap snapshot unavailable; continuing with normal peer-to-peer sync: %s\n", bootstrap_error);
+                }
+            }
         }
     }
 
@@ -1674,7 +1697,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     nTotalCache = std::max(nTotalCache, nMinDbCache << 20); // total cache cannot be less than nMinDbCache
     nTotalCache = std::min(nTotalCache, nMaxDbCache << 20); // total cache cannot be greated than nMaxDbcache
     int64_t nBlockTreeDBCache = nTotalCache / 8;
-    if (nBlockTreeDBCache > (1 << 21) && !GetBoolArg("-txindex", false))
+    if (nBlockTreeDBCache > (1 << 21) && !GetBoolArg("-txindex", true))
         nBlockTreeDBCache = (1 << 21); // block tree db cache shouldn't be larger than 2 MiB
     nTotalCache -= nBlockTreeDBCache;
     int64_t nCoinDBCache = std::min(nTotalCache / 2, (nTotalCache / 4) + (1 << 23)); // use 25%-50% of the remainder for disk cache
@@ -1732,7 +1755,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 }
 
                 // Check for changed -txindex state
-                if (fTxIndex != GetBoolArg("-txindex", false)) {
+                if (fTxIndex != GetBoolArg("-txindex", true)) {
                     strLoadError = _("You need to rebuild the database using -reindex to change -txindex");
                     break;
                 }

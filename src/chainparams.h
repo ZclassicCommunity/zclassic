@@ -106,6 +106,8 @@ public:
     const std::vector<SeedSpec6>& FixedSeeds() const { return vFixedSeeds; }
     const CCheckpointData& Checkpoints() const { return checkpointData; }
     const CFastSyncAnchorData& FastSyncAnchor() const { return fastSyncAnchorData; }
+    /** Default peers (host:port) a fresh node fetches params and snapshot from */
+    const std::vector<std::string>& BootstrapPeers() const { return vBootstrapPeers; }
     /** Return the founder's reward address and script for a given block height */
     std::string GetFoundersRewardAddressAtHeight(int height) const;
     CScript GetFoundersRewardScriptAtHeight(int height) const;
@@ -138,6 +140,7 @@ protected:
     bool fTestnetToBeDeprecatedFieldRPC = false;
     CCheckpointData checkpointData;
     CFastSyncAnchorData fastSyncAnchorData;
+    std::vector<std::string> vBootstrapPeers;
     std::vector<std::string> vFoundersRewardAddress;
 
     CAmount nSproutValuePoolCheckpointHeight = 0;

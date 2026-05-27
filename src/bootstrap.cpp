@@ -39,6 +39,18 @@ static std::vector<CBootstrapSnapshotFile> bootstrapSnapshotCacheFiles;
 static std::map<std::string, std::time_t> bootstrapSnapshotCacheMtimes;
 static uint64_t bootstrapSnapshotCacheBytes = 0;
 static const unsigned int BOOTSTRAP_MAX_REJECT_MESSAGE_LENGTH = 111;
+// Per-message network timeout for bootstrap transfers. Independent of the much
+// shorter default -timeout (nConnectTimeout, 5s) used for ordinary connects, so
+// a fresh node does not need -timeout=... on the command line.
+static const int BOOTSTRAP_NET_TIMEOUT_MS = 60000;
+
+std::vector<std::string> GetBootstrapPeerList()
+{
+    if (mapArgs.count("-bootstrappeer")) {
+        return std::vector<std::string>(1, mapArgs["-bootstrappeer"]);
+    }
+    return Params().BootstrapPeers();
+}
 
 static bool IsSafeBootstrapSnapshotPath(const boost::filesystem::path& relative);
 static bool IsBootstrapSnapshotDataPath(const boost::filesystem::path& relative);
@@ -812,21 +824,21 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
         boost::filesystem::remove_all(staging);
         boost::filesystem::create_directories(staging);
 
-        if (!BootstrapHandshake(socket, peerAddress, nConnectTimeout, error)) {
+        if (!BootstrapHandshake(socket, peerAddress, BOOTSTRAP_NET_TIMEOUT_MS, error)) {
             CloseSocket(socket);
             boost::filesystem::remove_all(staging);
             return false;
         }
 
         CDataStream empty(SER_NETWORK, PROTOCOL_VERSION);
-        if (!SendBootstrapMessage(socket, NetMsgType::GETBSMAN, empty, nConnectTimeout, error)) {
+        if (!SendBootstrapMessage(socket, NetMsgType::GETBSMAN, empty, BOOTSTRAP_NET_TIMEOUT_MS, error)) {
             CloseSocket(socket);
             boost::filesystem::remove_all(staging);
             return false;
         }
 
         CDataStream manifestPayload(SER_NETWORK, PROTOCOL_VERSION);
-        if (!ReceiveExpectedBootstrapMessage(socket, NetMsgType::BSMAN, manifestPayload, nConnectTimeout, error)) {
+        if (!ReceiveExpectedBootstrapMessage(socket, NetMsgType::BSMAN, manifestPayload, BOOTSTRAP_NET_TIMEOUT_MS, error)) {
             CloseSocket(socket);
             boost::filesystem::remove_all(staging);
             return false;
@@ -848,7 +860,7 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
             return false;
         }
 
-        if (!DownloadBootstrapSnapshot(socket, manifest, staging, nConnectTimeout, peer, error)) {
+        if (!DownloadBootstrapSnapshot(socket, manifest, staging, BOOTSTRAP_NET_TIMEOUT_MS, peer, error)) {
             CloseSocket(socket);
             boost::filesystem::remove_all(staging);
             return false;
@@ -1317,15 +1329,15 @@ bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error)
 
     bool ok = true;
     try {
-        if (!BootstrapHandshake(socket, peerAddress, nConnectTimeout, error)) {
+        if (!BootstrapHandshake(socket, peerAddress, BOOTSTRAP_NET_TIMEOUT_MS, error)) {
             CloseSocket(socket);
             return false;
         }
 
         CDataStream empty(SER_NETWORK, PROTOCOL_VERSION);
         CDataStream manifestPayload(SER_NETWORK, PROTOCOL_VERSION);
-        if (!SendBootstrapMessage(socket, NetMsgType::GETBSPMAN, empty, nConnectTimeout, error) ||
-            !ReceiveExpectedBootstrapMessage(socket, NetMsgType::BSPMAN, manifestPayload, nConnectTimeout, error)) {
+        if (!SendBootstrapMessage(socket, NetMsgType::GETBSPMAN, empty, BOOTSTRAP_NET_TIMEOUT_MS, error) ||
+            !ReceiveExpectedBootstrapMessage(socket, NetMsgType::BSPMAN, manifestPayload, BOOTSTRAP_NET_TIMEOUT_MS, error)) {
             CloseSocket(socket);
             return false;
         }
@@ -1379,7 +1391,7 @@ bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error)
             LogPrintf("Zcash params: downloading %s (%llu bytes) from peer %s\n", param.name, (unsigned long long)size, peer);
             const boost::filesystem::path part = boost::filesystem::path(dest.string() + ".part");
             boost::filesystem::remove(part);
-            if (!DownloadZcashParamFile(socket, index, size, manifest.nChunkSize, part, nConnectTimeout, error)) {
+            if (!DownloadZcashParamFile(socket, index, size, manifest.nChunkSize, part, BOOTSTRAP_NET_TIMEOUT_MS, error)) {
                 boost::filesystem::remove(part);
                 ok = false;
                 break;
