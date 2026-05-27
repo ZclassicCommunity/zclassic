@@ -17,6 +17,10 @@ const char* GETBSMAN = "getbsman";
 const char* BSMAN = "bsman";
 const char* GETBSCHK = "getbschk";
 const char* BSCHK = "bschk";
+const char* GETBSPMAN = "getbspman";
+const char* BSPMAN = "bspman";
+const char* GETBSPCHK = "getbspchk";
+const char* BSPCHK = "bspchk";
 }
 
 static const char* ppszTypeName[] =

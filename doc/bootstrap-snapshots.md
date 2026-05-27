@@ -137,6 +137,20 @@ This follows the same broad model as Bitcoin AssumeUTXO, Geth snap sync, Cosmos
 state sync, and Mithril-certified snapshots: fast state acquisition first,
 normal validation after the trusted hash point.
 
+## Zcash Parameters Over P2P
+
+A fresh node needs the zk-SNARK parameter files (`sapling-*.params`,
+`sprout-groth16.params`, and the sprout keys) before it can start. Instead of
+running `zcutil/fetch-params.sh` against an external download, a node started
+with `-bootstrappeer=<host>` automatically fetches any missing parameters from
+that peer over the P2P protocol, then continues with the snapshot import.
+
+The expected SHA-256 of every parameter file is compiled into the binary (the
+same hashes enforced at startup), so the serving peer is untrusted: only file
+content matching a compiled hash is installed. A serving node (`-bootstrapserve`)
+answers `getbspman`/`getbspchk` from its own params directory, subject to the
+same per-IP serve quota as snapshots.
+
 ## Serving Limits (Bandwidth Abuse)
 
 A serving node caps how much one IP can download per rolling 24-hour window:

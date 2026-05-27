@@ -1056,6 +1056,360 @@ bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::str
     return true;
 }
 
+// --- Zcash zk-SNARK parameter distribution -------------------------------
+//
+// The parameter files are fixed and identical for every node, with hashes that
+// also gate startup in InitSanityCheck. A fresh node can fetch them from a peer
+// instead of an external download; because the expected SHA-256 of each file is
+// compiled in, the serving peer is untrusted (only content matching a compiled
+// hash is installed).
+
+struct ZcashParamFile {
+    const char* name;
+    const char* sha256hex;
+};
+
+// Listed in compiled order, which is also the served manifest order.
+static const ZcashParamFile ZCASH_PARAM_FILES[] = {
+    {"sapling-output.params", "2f0ebbcbb9bb0bcffe95a397e7eba89c29eb4dde6191c339db88570e3f3fb0e4"},
+    {"sapling-spend.params",  "8e48ffd23abb3a5fd9c5589204f32d9c31285a04b78096ba40a79b75677efc13"},
+    {"sprout-groth16.params", "b685d700c60328498fbde589c8c7c484c722b788b265b72af448a5bf0ee55b50"},
+    {"sprout-proving.key",    "8bc20a7f013b2b58970cddd2e7ea028975c88ae7ceb9259a5344a16bc2c0eef7"},
+    {"sprout-verifying.key",  "4bd498dae0aacfd8e98dc306338d017d9c08dd0918ead18172bd0aec2fc5df82"},
+};
+static const size_t ZCASH_PARAM_FILE_COUNT = sizeof(ZCASH_PARAM_FILES) / sizeof(ZCASH_PARAM_FILES[0]);
+
+static const ZcashParamFile* FindZcashParam(const std::string& name)
+{
+    for (size_t i = 0; i < ZCASH_PARAM_FILE_COUNT; ++i) {
+        if (name == ZCASH_PARAM_FILES[i].name) {
+            return &ZCASH_PARAM_FILES[i];
+        }
+    }
+    return NULL;
+}
+
+static uint256 ZcashParamExpectedHash(const ZcashParamFile& param)
+{
+    return uint256S(std::string("0x") + param.sha256hex);
+}
+
+bool ZcashParamsPresentAndValid()
+{
+    const boost::filesystem::path dir = ZC_GetParamsDir();
+    for (size_t i = 0; i < ZCASH_PARAM_FILE_COUNT; ++i) {
+        if (!boost::filesystem::is_regular_file(dir / ZCASH_PARAM_FILES[i].name)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool GetZcashParamManifest(CBootstrapSnapshotManifest& manifest, std::string& error)
+{
+    if (!GetBoolArg("-bootstrapserve", false)) {
+        error = "bootstrap snapshot service is not enabled";
+        return false;
+    }
+
+    const boost::filesystem::path dir = ZC_GetParamsDir();
+    manifest.SetNull();
+    manifest.strNetwork = Params().NetworkIDString();
+
+    uint64_t total = 0;
+    for (size_t i = 0; i < ZCASH_PARAM_FILE_COUNT; ++i) {
+        const boost::filesystem::path path = dir / ZCASH_PARAM_FILES[i].name;
+        if (!boost::filesystem::is_regular_file(path) || !IsSafeBootstrapEntry(path)) {
+            continue; // only advertise parameter files we actually hold
+        }
+        CBootstrapSnapshotFile file;
+        file.strPath = ZCASH_PARAM_FILES[i].name;
+        file.nSize = boost::filesystem::file_size(path);
+        file.hashSha256 = ZcashParamExpectedHash(ZCASH_PARAM_FILES[i]);
+        if (file.nSize > std::numeric_limits<uint64_t>::max() - total) {
+            error = "zcash parameter byte size overflow";
+            return false;
+        }
+        manifest.vFiles.push_back(file);
+        total += file.nSize;
+    }
+
+    if (manifest.vFiles.empty()) {
+        error = "no zcash parameters available to serve";
+        return false;
+    }
+    manifest.nSnapshotBytes = total;
+    manifest.nChunkSize = BOOTSTRAP_SNAPSHOT_CHUNK_SIZE;
+    return true;
+}
+
+bool ReadZcashParamChunk(const CBootstrapSnapshotChunkRequest& request, CBootstrapSnapshotChunk& chunk, std::string& error)
+{
+    if (!GetBoolArg("-bootstrapserve", false)) {
+        error = "bootstrap snapshot service is not enabled";
+        return false;
+    }
+    if (request.nLength == 0 || request.nLength > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
+        error = strprintf("invalid zcash param chunk length: %u", request.nLength);
+        return false;
+    }
+
+    CBootstrapSnapshotManifest manifest;
+    if (!GetZcashParamManifest(manifest, error)) {
+        return false;
+    }
+    if (request.nFileIndex >= manifest.vFiles.size()) {
+        error = strprintf("zcash param chunk file index out of range: %u", request.nFileIndex);
+        return false;
+    }
+
+    const CBootstrapSnapshotFile& file = manifest.vFiles[request.nFileIndex];
+    if (!FindZcashParam(file.strPath)) {
+        error = strprintf("unknown zcash param file: %s", file.strPath);
+        return false;
+    }
+
+    const boost::filesystem::path path = ZC_GetParamsDir() / file.strPath;
+    FILE* fp = fopen(path.string().c_str(), "rb");
+    if (!fp) {
+        error = strprintf("could not open zcash param file: %s", path.string());
+        return false;
+    }
+    uint64_t file_size = 0;
+    std::time_t file_mtime = 0;
+    if (!StatOpenBootstrapSnapshotFile(fp, file_size, file_mtime) || file_size != file.nSize) {
+        fclose(fp);
+        error = strprintf("zcash param file changed: %s", file.strPath);
+        return false;
+    }
+    if (request.nOffset > file.nSize || request.nLength > file.nSize - request.nOffset) {
+        fclose(fp);
+        error = "zcash param chunk range exceeds file size";
+        return false;
+    }
+    if (request.nOffset % BOOTSTRAP_SNAPSHOT_CHUNK_SIZE != 0) {
+        fclose(fp);
+        error = "zcash param chunk offset is not aligned";
+        return false;
+    }
+    const uint32_t expected_length = std::min<uint64_t>(BOOTSTRAP_SNAPSHOT_CHUNK_SIZE, file.nSize - request.nOffset);
+    if (request.nLength != expected_length) {
+        fclose(fp);
+        error = strprintf("zcash param chunk length must be %u", expected_length);
+        return false;
+    }
+    if (fseek(fp, request.nOffset, SEEK_SET) != 0) {
+        fclose(fp);
+        error = strprintf("could not seek zcash param file: %s", file.strPath);
+        return false;
+    }
+
+    chunk.SetNull();
+    chunk.nFileIndex = request.nFileIndex;
+    chunk.nOffset = request.nOffset;
+    chunk.vData.resize(request.nLength);
+    const size_t nRead = fread(&chunk.vData[0], 1, request.nLength, fp);
+    fclose(fp);
+    if (nRead != request.nLength) {
+        error = strprintf("could not read requested zcash param chunk: %s", file.strPath);
+        return false;
+    }
+    return true;
+}
+
+static bool DownloadZcashParamFile(SOCKET socket, uint32_t file_index, uint64_t size, uint32_t chunk_size, const boost::filesystem::path& part_path, int timeout_ms, std::string& error)
+{
+    boost::filesystem::create_directories(part_path.parent_path());
+    FILE* fp = fopen(part_path.string().c_str(), "wb");
+    if (!fp) {
+        error = strprintf("could not create zcash param staging file: %s", part_path.string());
+        return false;
+    }
+
+    std::deque<CBootstrapSnapshotChunkRequest> inflight;
+    uint64_t next_offset = 0;
+    bool ok = true;
+
+    // Prime the pipeline window.
+    for (size_t i = 0; i < BOOTSTRAP_PIPELINE_DEPTH && next_offset < size; ++i) {
+        CBootstrapSnapshotChunkRequest request;
+        request.nFileIndex = file_index;
+        request.nOffset = next_offset;
+        request.nLength = (uint32_t)std::min<uint64_t>(chunk_size, size - next_offset);
+        CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
+        payload << request;
+        if (!SendBootstrapMessage(socket, NetMsgType::GETBSPCHK, payload, timeout_ms, error)) {
+            ok = false;
+            break;
+        }
+        inflight.push_back(request);
+        next_offset += request.nLength;
+    }
+
+    while (ok && !inflight.empty()) {
+        CDataStream chunkPayload(SER_NETWORK, PROTOCOL_VERSION);
+        if (!ReceiveExpectedBootstrapMessage(socket, NetMsgType::BSPCHK, chunkPayload, timeout_ms, error)) {
+            ok = false;
+            break;
+        }
+        CBootstrapSnapshotChunk chunk;
+        try {
+            chunkPayload >> chunk;
+        } catch (const std::exception& e) {
+            error = strprintf("could not decode zcash param chunk: %s", e.what());
+            ok = false;
+            break;
+        }
+        const CBootstrapSnapshotChunkRequest req = inflight.front();
+        inflight.pop_front();
+        if (chunk.nFileIndex != req.nFileIndex || chunk.nOffset != req.nOffset || chunk.vData.size() != req.nLength) {
+            error = "zcash param peer returned an unexpected chunk";
+            ok = false;
+            break;
+        }
+        if (!WriteBootstrapChunkToFile(part_path, chunk, fp, error)) {
+            ok = false;
+            break;
+        }
+        if (next_offset < size) {
+            CBootstrapSnapshotChunkRequest refill;
+            refill.nFileIndex = file_index;
+            refill.nOffset = next_offset;
+            refill.nLength = (uint32_t)std::min<uint64_t>(chunk_size, size - next_offset);
+            CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
+            payload << refill;
+            if (!SendBootstrapMessage(socket, NetMsgType::GETBSPCHK, payload, timeout_ms, error)) {
+                ok = false;
+                break;
+            }
+            inflight.push_back(refill);
+            next_offset += refill.nLength;
+        }
+    }
+
+    if (ok) {
+        FileCommit(fp);
+    }
+    if (fclose(fp) != 0 && ok) {
+        error = strprintf("could not close zcash param staging file: %s", part_path.string());
+        return false;
+    }
+    return ok;
+}
+
+bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error)
+{
+    const boost::filesystem::path dir = ZC_GetParamsDir();
+    try {
+        boost::filesystem::create_directories(dir);
+    } catch (const boost::filesystem::filesystem_error& e) {
+        error = e.what();
+        return false;
+    }
+
+    CService peerAddress;
+    SOCKET socket = INVALID_SOCKET;
+    bool proxyConnectionFailed = false;
+    if (!ConnectSocketByName(peerAddress, socket, peer.c_str(), Params().GetDefaultPort(), nConnectTimeout, &proxyConnectionFailed)) {
+        error = proxyConnectionFailed ? "zcash param peer proxy connection failed" : strprintf("could not connect to zcash param peer: %s", peer);
+        return false;
+    }
+
+    bool ok = true;
+    try {
+        if (!BootstrapHandshake(socket, peerAddress, nConnectTimeout, error)) {
+            CloseSocket(socket);
+            return false;
+        }
+
+        CDataStream empty(SER_NETWORK, PROTOCOL_VERSION);
+        CDataStream manifestPayload(SER_NETWORK, PROTOCOL_VERSION);
+        if (!SendBootstrapMessage(socket, NetMsgType::GETBSPMAN, empty, nConnectTimeout, error) ||
+            !ReceiveExpectedBootstrapMessage(socket, NetMsgType::BSPMAN, manifestPayload, nConnectTimeout, error)) {
+            CloseSocket(socket);
+            return false;
+        }
+
+        CBootstrapSnapshotManifest manifest;
+        try {
+            manifestPayload >> manifest;
+        } catch (const std::exception& e) {
+            CloseSocket(socket);
+            error = strprintf("could not decode zcash param manifest: %s", e.what());
+            return false;
+        }
+        if (manifest.nChunkSize == 0 || manifest.nChunkSize > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
+            CloseSocket(socket);
+            error = "zcash param manifest has invalid chunk size";
+            return false;
+        }
+
+        for (size_t i = 0; i < ZCASH_PARAM_FILE_COUNT && ok; ++i) {
+            const ZcashParamFile& param = ZCASH_PARAM_FILES[i];
+            const boost::filesystem::path dest = dir / param.name;
+            const uint256 expected = ZcashParamExpectedHash(param);
+
+            // Skip files already present and valid.
+            if (boost::filesystem::is_regular_file(dest)) {
+                uint256 have;
+                std::string hashError;
+                if (HashBootstrapSnapshotFile(dest, have, hashError) && have == expected) {
+                    continue;
+                }
+            }
+
+            // Locate the file in the peer's manifest.
+            uint32_t index = 0;
+            uint64_t size = 0;
+            bool found = false;
+            for (uint32_t j = 0; j < manifest.vFiles.size(); ++j) {
+                if (manifest.vFiles[j].strPath == param.name) {
+                    index = j;
+                    size = manifest.vFiles[j].nSize;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                error = strprintf("zcash param peer does not serve %s", param.name);
+                ok = false;
+                break;
+            }
+
+            LogPrintf("Zcash params: downloading %s (%llu bytes) from peer %s\n", param.name, (unsigned long long)size, peer);
+            const boost::filesystem::path part = boost::filesystem::path(dest.string() + ".part");
+            boost::filesystem::remove(part);
+            if (!DownloadZcashParamFile(socket, index, size, manifest.nChunkSize, part, nConnectTimeout, error)) {
+                boost::filesystem::remove(part);
+                ok = false;
+                break;
+            }
+
+            uint256 have;
+            if (!HashBootstrapSnapshotFile(part, have, error)) {
+                boost::filesystem::remove(part);
+                ok = false;
+                break;
+            }
+            if (have != expected) {
+                boost::filesystem::remove(part);
+                error = strprintf("zcash param hash mismatch for %s: got %s expected %s", param.name, have.ToString(), expected.ToString());
+                ok = false;
+                break;
+            }
+            boost::filesystem::rename(part, dest);
+            LogPrintf("Zcash params: installed %s\n", param.name);
+        }
+    } catch (const boost::filesystem::filesystem_error& e) {
+        CloseSocket(socket);
+        error = e.what();
+        return false;
+    }
+
+    CloseSocket(socket);
+    return ok;
+}
+
 bool PreflightBootstrapSnapshotService(std::string& error)
 {
     CBootstrapSnapshotManifest manifest;

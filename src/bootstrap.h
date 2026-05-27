@@ -33,6 +33,21 @@ bool BootstrapFromPeer(const std::string& peer,
                        const boost::filesystem::path& data_dir,
                        std::string& error);
 
+// --- Zcash parameter (.params) distribution over the bootstrap protocol ---
+//! Build the manifest of zk-SNARK parameter files this node can serve (those
+//! present in the params dir whose names/hashes match the compiled set).
+bool GetZcashParamManifest(CBootstrapSnapshotManifest& manifest, std::string& error);
+//! Read a bounded chunk from a served parameter file (indexed into the manifest).
+bool ReadZcashParamChunk(const CBootstrapSnapshotChunkRequest& request,
+                         CBootstrapSnapshotChunk& chunk,
+                         std::string& error);
+//! Download any missing/invalid Zcash parameters from `peer` into the params
+//! dir, verifying each against its compiled SHA-256 before installing. The peer
+//! is untrusted: only files matching a compiled hash are accepted.
+bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error);
+//! True when every required compiled parameter file is present and hash-valid.
+bool ZcashParamsPresentAndValid();
+
 bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::string& error);
 bool PreflightBootstrapSnapshotService(std::string& error);
 bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request,

@@ -5792,6 +5792,61 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
             pfrom->id);
     }
 
+    else if (strCommand == NetMsgType::GETBSPMAN)
+    {
+        CBootstrapSnapshotManifest manifest;
+        std::string error;
+        if (!GetZcashParamManifest(manifest, error)) {
+            LogPrint("net", "could not build zcash param manifest for peer=%d: %s\n", pfrom->id, error);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("zcash params unavailable"));
+            return true;
+        }
+        pfrom->PushMessage(NetMsgType::BSPMAN, manifest);
+    }
+
+    else if (strCommand == NetMsgType::BSPMAN)
+    {
+        CBootstrapSnapshotManifest manifest;
+        vRecv >> manifest; // client drives param fetch over its own socket; ignore here
+        LogPrint("net", "received unsolicited zcash param manifest from peer=%d\n", pfrom->id);
+    }
+
+    else if (strCommand == NetMsgType::GETBSPCHK)
+    {
+        CBootstrapSnapshotChunkRequest request;
+        vRecv >> request;
+
+        const std::string ip = pfrom->addr.ToStringIP();
+        bool stop = false;
+        if (!BootstrapServeAllowChunk(ip, pfrom->fWhitelisted, GetTimeMillis(), stop)) {
+            LogPrint("net", "zcash param serve quota exceeded for peer=%d (%s)\n", pfrom->id, ip);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("zcash param serve quota exceeded"));
+            return true;
+        }
+
+        CBootstrapSnapshotChunk chunk;
+        std::string error;
+        if (!ReadZcashParamChunk(request, chunk, error)) {
+            LogPrint("net", "could not read zcash param chunk for peer=%d: %s\n", pfrom->id, error);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid zcash param chunk request"));
+            return true;
+        }
+        pfrom->PushMessage(NetMsgType::BSPCHK, chunk);
+        BootstrapServeChargeBytes(ip, pfrom->fWhitelisted, GetTimeMillis(), chunk.vData.size());
+    }
+
+    else if (strCommand == NetMsgType::BSPCHK)
+    {
+        CBootstrapSnapshotChunk chunk;
+        vRecv >> chunk;
+        if (chunk.vData.empty() || chunk.vData.size() > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid zcash param chunk size"));
+            return true;
+        }
+        LogPrint("net", "received zcash param chunk file=%u offset=%llu bytes=%u peer=%d\n",
+            chunk.nFileIndex, (unsigned long long)chunk.nOffset, (unsigned int)chunk.vData.size(), pfrom->id);
+    }
+
 
     // Disconnect existing peer connection when:
     // 1. The version message has been received

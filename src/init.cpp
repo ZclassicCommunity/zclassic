@@ -740,6 +740,20 @@ bool InitSanityCheck(void)
     boost::filesystem::path pk_path = ZC_GetParamsDir() / "sprout-proving.key";
     boost::filesystem::path vk_path = ZC_GetParamsDir() / "sprout-verifying.key";
 
+    // If parameters are missing and a bootstrap peer is configured, fetch them
+    // from that peer over the P2P protocol (verified against compiled hashes)
+    // instead of requiring an external download.
+    if (!ZcashParamsPresentAndValid() && mapArgs.count("-bootstrappeer")) {
+        const std::string peer = mapArgs["-bootstrappeer"];
+        fprintf(stdout, "Fetching Zcash parameters from peer %s...\n", peer.c_str());
+        LogPrintf("Fetching Zcash parameters from bootstrap peer %s...\n", peer);
+        std::string paramError;
+        if (!FetchZcashParamsFromPeer(peer, paramError)) {
+            InitError(strprintf("Could not fetch Zcash parameters from peer %s: %s", peer, paramError));
+            return false;
+        }
+    }
+
     if (!(
         boost::filesystem::exists(pk_path) &&
         boost::filesystem::exists(vk_path) &&
@@ -748,7 +762,7 @@ bool InitSanityCheck(void)
         boost::filesystem::exists(sprout_groth16)
     )) {
         InitError(strprintf(
-            "Zcash parameter files are missing from %s. Run zcutil/fetch-params.sh before starting zclassicd.",
+            "Zcash parameter files are missing from %s. Run zcutil/fetch-params.sh before starting zclassicd, or pass -bootstrappeer=<host> to fetch them from a peer.",
             ZC_GetParamsDir().string()));
         return false;
     }
