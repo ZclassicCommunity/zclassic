@@ -704,11 +704,23 @@ static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotMan
         if (percent != last_logged_percent) {
             last_logged_percent = percent;
             const int64_t elapsed_ms = std::max<int64_t>(1, GetTimeMillis() - download_started);
+            const double mbps = (received_total / 1048576.0) / (elapsed_ms / 1000.0);
             LogPrintf("Bootstrap: downloaded %d%% (%llu/%llu bytes, %.1f MB/s)\n",
                 percent,
                 (unsigned long long)received_total,
                 (unsigned long long)manifest.nSnapshotBytes,
-                (received_total / 1048576.0) / (elapsed_ms / 1000.0));
+                mbps);
+            // Live progress to the console so a bare foreground run shows it
+            // updating without -printtoconsole/-debuglogfile.
+            fprintf(stdout, "\rBootstrap snapshot: %3d%%  %.2f / %.2f GB  %.1f MB/s    ",
+                percent,
+                received_total / 1073741824.0,
+                manifest.nSnapshotBytes / 1073741824.0,
+                mbps);
+            if (percent >= 100) {
+                fprintf(stdout, "\n");
+            }
+            fflush(stdout);
         }
 
         // Refill the pipeline window.
@@ -1229,7 +1241,7 @@ bool ReadZcashParamChunk(const CBootstrapSnapshotChunkRequest& request, CBootstr
     return true;
 }
 
-static bool DownloadZcashParamFile(SOCKET socket, uint32_t file_index, uint64_t size, uint32_t chunk_size, const boost::filesystem::path& part_path, int timeout_ms, std::string& error)
+static bool DownloadZcashParamFile(SOCKET socket, uint32_t file_index, uint64_t size, uint32_t chunk_size, const boost::filesystem::path& part_path, const std::string& display_name, int timeout_ms, std::string& error)
 {
     boost::filesystem::create_directories(part_path.parent_path());
     FILE* fp = fopen(part_path.string().c_str(), "wb");
@@ -1240,6 +1252,9 @@ static bool DownloadZcashParamFile(SOCKET socket, uint32_t file_index, uint64_t 
 
     std::deque<CBootstrapSnapshotChunkRequest> inflight;
     uint64_t next_offset = 0;
+    uint64_t received = 0;
+    int last_percent = -1;
+    const int64_t started = GetTimeMillis();
     bool ok = true;
 
     // Prime the pipeline window.
@@ -1282,6 +1297,20 @@ static bool DownloadZcashParamFile(SOCKET socket, uint32_t file_index, uint64_t 
         if (!WriteBootstrapChunkToFile(part_path, chunk, fp, error)) {
             ok = false;
             break;
+        }
+        received += chunk.vData.size();
+        const int percent = size > 0 ? (int)((received * 100) / size) : 100;
+        if (percent != last_percent) {
+            last_percent = percent;
+            const int64_t elapsed_ms = std::max<int64_t>(1, GetTimeMillis() - started);
+            fprintf(stdout, "\rFetching params %-22s %3d%%  %.1f MB/s    ",
+                display_name.c_str(),
+                percent,
+                (received / 1048576.0) / (elapsed_ms / 1000.0));
+            if (percent >= 100) {
+                fprintf(stdout, "\n");
+            }
+            fflush(stdout);
         }
         if (next_offset < size) {
             CBootstrapSnapshotChunkRequest refill;
@@ -1391,7 +1420,7 @@ bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error)
             LogPrintf("Zcash params: downloading %s (%llu bytes) from peer %s\n", param.name, (unsigned long long)size, peer);
             const boost::filesystem::path part = boost::filesystem::path(dest.string() + ".part");
             boost::filesystem::remove(part);
-            if (!DownloadZcashParamFile(socket, index, size, manifest.nChunkSize, part, BOOTSTRAP_NET_TIMEOUT_MS, error)) {
+            if (!DownloadZcashParamFile(socket, index, size, manifest.nChunkSize, part, param.name, BOOTSTRAP_NET_TIMEOUT_MS, error)) {
                 boost::filesystem::remove(part);
                 ok = false;
                 break;
