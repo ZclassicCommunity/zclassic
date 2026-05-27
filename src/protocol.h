@@ -17,6 +17,7 @@
 
 #include <stdint.h>
 #include <string>
+#include <vector>
 
 #define MESSAGE_START_SIZE 4
 
@@ -75,6 +76,10 @@ enum {
     // Zclassic nodes used to support this by default, without advertising this bit,
     // but no longer do as of protocol version 170004 (= NO_BLOOM_VERSION)
     NODE_BLOOM = (1 << 2),
+
+    // NODE_BOOTSTRAP means the node can serve bootstrap snapshot metadata and
+    // chunks for an explicitly configured, immutable snapshot source.
+    NODE_BOOTSTRAP = (1 << 24),
 
     // Bits 24-31 are reserved for temporary experiments. Just pick a bit that
     // isn't getting used, or one not being used much, and notify the
@@ -155,5 +160,146 @@ enum {
     // MSG_FILTERED_BLOCK should not appear in any invs except as a part of getdata.
     MSG_FILTERED_BLOCK,
 };
+
+struct CBootstrapSnapshotFile
+{
+    std::string strPath;
+    uint64_t nSize;
+    uint256 hashSha256;
+
+    CBootstrapSnapshotFile()
+    {
+        SetNull();
+    }
+
+    void SetNull()
+    {
+        strPath.clear();
+        nSize = 0;
+        hashSha256.SetNull();
+    }
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action)
+    {
+        READWRITE(strPath);
+        READWRITE(nSize);
+        READWRITE(hashSha256);
+    }
+};
+
+struct CBootstrapSnapshotManifest
+{
+    int nVersion;
+    std::string strNetwork;
+    int nHeight;
+    uint256 hashBlock;
+    uint256 hashAnchorSha256;
+    uint256 hashAnchorSha3;
+    uint64_t nSnapshotBytes;
+    uint32_t nChunkSize;
+    std::vector<CBootstrapSnapshotFile> vFiles;
+
+    CBootstrapSnapshotManifest()
+    {
+        SetNull();
+    }
+
+    void SetNull()
+    {
+        nVersion = 1;
+        strNetwork.clear();
+        nHeight = -1;
+        hashBlock.SetNull();
+        hashAnchorSha256.SetNull();
+        hashAnchorSha3.SetNull();
+        nSnapshotBytes = 0;
+        nChunkSize = 0;
+        vFiles.clear();
+    }
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action)
+    {
+        READWRITE(nVersion);
+        READWRITE(strNetwork);
+        READWRITE(nHeight);
+        READWRITE(hashBlock);
+        READWRITE(hashAnchorSha256);
+        READWRITE(hashAnchorSha3);
+        READWRITE(nSnapshotBytes);
+        READWRITE(nChunkSize);
+        READWRITE(vFiles);
+    }
+};
+
+struct CBootstrapSnapshotChunkRequest
+{
+    uint32_t nFileIndex;
+    uint64_t nOffset;
+    uint32_t nLength;
+
+    CBootstrapSnapshotChunkRequest()
+    {
+        SetNull();
+    }
+
+    void SetNull()
+    {
+        nFileIndex = 0;
+        nOffset = 0;
+        nLength = 0;
+    }
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action)
+    {
+        READWRITE(nFileIndex);
+        READWRITE(nOffset);
+        READWRITE(nLength);
+    }
+};
+
+struct CBootstrapSnapshotChunk
+{
+    uint32_t nFileIndex;
+    uint64_t nOffset;
+    std::vector<unsigned char> vData;
+
+    CBootstrapSnapshotChunk()
+    {
+        SetNull();
+    }
+
+    void SetNull()
+    {
+        nFileIndex = 0;
+        nOffset = 0;
+        vData.clear();
+    }
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action)
+    {
+        READWRITE(nFileIndex);
+        READWRITE(nOffset);
+        READWRITE(vData);
+    }
+};
+
+namespace NetMsgType {
+extern const char* GETBSMAN;
+extern const char* BSMAN;
+extern const char* GETBSCHK;
+extern const char* BSCHK;
+}
 
 #endif // BITCOIN_PROTOCOL_H

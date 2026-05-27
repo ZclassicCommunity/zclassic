@@ -2054,6 +2054,7 @@ bool CAddrDB::Read(CAddrMan& addr)
 
 unsigned int ReceiveFloodSize() { return 1000*GetArg("-maxreceivebuffer", 5*1000); }
 unsigned int SendBufferSize() { return 1000*GetArg("-maxsendbuffer", 1*1000); }
+static const size_t MAX_BOOTSTRAP_CHUNK_REQUESTS_PER_PEER = 2;
 
 CNode::CNode(SOCKET hSocketIn, const CAddress& addrIn, const std::string& addrNameIn, bool fInboundIn) :
     ssSend(SER_NETWORK, INIT_PROTO_VERSION),
@@ -2088,6 +2089,7 @@ CNode::CNode(SOCKET hSocketIn, const CAddress& addrIn, const std::string& addrNa
     fGetAddr = false;
     fRelayTxes = false;
     fSentAddr = false;
+    fBootstrapManifestSent = false;
     pfilter = new CBloomFilter();
     nPingNonceSent = 0;
     nPingUsecStart = 0;
@@ -2154,6 +2156,27 @@ void CNode::AskFor(const CInv& inv)
     else
         mapAlreadyAskedFor.insert(std::make_pair(inv, nRequestTime));
     mapAskFor.insert(std::make_pair(nRequestTime, inv));
+}
+
+bool CNode::QueueBootstrapChunkRequest(const CBootstrapSnapshotChunkRequest& request)
+{
+    LOCK(cs_bootstrap_requests);
+    if (vBootstrapChunkRequests.size() >= MAX_BOOTSTRAP_CHUNK_REQUESTS_PER_PEER) {
+        return false;
+    }
+    vBootstrapChunkRequests.push_back(request);
+    return true;
+}
+
+bool CNode::PopBootstrapChunkRequest(CBootstrapSnapshotChunkRequest& request)
+{
+    LOCK(cs_bootstrap_requests);
+    if (vBootstrapChunkRequests.empty()) {
+        return false;
+    }
+    request = vBootstrapChunkRequests.front();
+    vBootstrapChunkRequests.pop_front();
+    return true;
 }
 
 void CNode::BeginMessage(const char* pszCommand) EXCLUSIVE_LOCK_FUNCTION(cs_vSend)

@@ -192,6 +192,11 @@ public:
                             //   total number of tx / (checkpoint block height / (24 * 24))
         };
 
+        fastSyncAnchorData.nHeight = 2879438;
+        fastSyncAnchorData.hashBlock = uint256S("0x000007e8fccb9e4831c7d7376a283b016ead6166491f951f4f083dbe366992b2");
+        fastSyncAnchorData.hashAnchorSha256 = uint256S("0x30108749a1f58963922e66e973129a36237639a229219ccc2d766a72d443ffba");
+        fastSyncAnchorData.hashAnchorSha3 = uint256S("0x036df249ba73e1090c639b8afee4145db040eeb7619cf96310ed83fa97e81433");
+
         // Founders reward script expects a vector of 2-of-3 multisig addresses
         vFoundersRewardAddress = {
             "t3Vz22vK5z2LcKEdg16Yv4FFneEL1zg9ojd", /* main-index: 0*/
@@ -621,4 +626,3 @@ unsigned int CChainParams::EquihashK(int nHeight) const {
     }
     return k;
 }
-

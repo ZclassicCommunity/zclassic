@@ -18,12 +18,20 @@ using namespace std;
 
 BOOST_FIXTURE_TEST_SUITE(Checkpoints_tests, BasicTestingSetup)
 
-// TODO: checkpoints have been removed for now.
-/*
-BOOST_AUTO_TEST_CASE(sanity)
+BOOST_AUTO_TEST_CASE(fast_sync_anchor_mainnet)
 {
-    const CCheckpointData& checkpoints = Params(CBaseChainParams::MAIN).Checkpoints();
-    BOOST_CHECK(Checkpoints::GetTotalBlocksEstimate(checkpoints) >= 134444);
+    std::string error;
+    BOOST_CHECK(Checkpoints::ValidateFastSyncAnchor(Params(CBaseChainParams::MAIN), error));
+    BOOST_CHECK(error.empty());
 }
-*/
+
+BOOST_AUTO_TEST_CASE(fast_sync_anchor_disabled_networks)
+{
+    std::string error;
+    BOOST_CHECK(Checkpoints::ValidateFastSyncAnchor(Params(CBaseChainParams::TESTNET), error));
+    BOOST_CHECK(error.empty());
+    BOOST_CHECK(Checkpoints::ValidateFastSyncAnchor(Params(CBaseChainParams::REGTEST), error));
+    BOOST_CHECK(error.empty());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

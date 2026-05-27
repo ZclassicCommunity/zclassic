@@ -32,6 +32,13 @@ struct CCheckpointData {
     double fTransactionsPerDay;
 };
 
+struct CFastSyncAnchorData {
+    int nHeight = -1;
+    uint256 hashBlock;
+    uint256 hashAnchorSha256;
+    uint256 hashAnchorSha3;
+};
+
 /**
  * CChainParams defines various tweakable parameters of a given instance of the
  * Bitcoin system. There are three: the main network on which people trade goods
@@ -98,6 +105,7 @@ public:
     const std::string& Bech32HRP(Bech32Type type) const { return bech32HRPs[type]; }
     const std::vector<SeedSpec6>& FixedSeeds() const { return vFixedSeeds; }
     const CCheckpointData& Checkpoints() const { return checkpointData; }
+    const CFastSyncAnchorData& FastSyncAnchor() const { return fastSyncAnchorData; }
     /** Return the founder's reward address and script for a given block height */
     std::string GetFoundersRewardAddressAtHeight(int height) const;
     CScript GetFoundersRewardScriptAtHeight(int height) const;
@@ -129,6 +137,7 @@ protected:
     bool fMineBlocksOnDemand = false;
     bool fTestnetToBeDeprecatedFieldRPC = false;
     CCheckpointData checkpointData;
+    CFastSyncAnchorData fastSyncAnchorData;
     std::vector<std::string> vFoundersRewardAddress;
 
     CAmount nSproutValuePoolCheckpointHeight = 0;

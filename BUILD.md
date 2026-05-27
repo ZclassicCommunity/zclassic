@@ -80,15 +80,16 @@ If you don't need wallet functionality:
 make -j$(nproc)
 ```
 
-## First Run and Fast Sync
+## First Run and Bootstrap Snapshots
 
-When you first run `zclassicd`, it will automatically:
+Before you first run `zclassicd`:
 
-1. **Download ZCash Parameters** (~1.6 GB) - Required cryptographic parameters
-2. **Download Initial Blockchain State** (~8.8 GB) - Fast-sync from Arweave
-3. **Create default configuration** - Basic `zclassic.conf` file
+1. **Fetch ZCash Parameters** (~1.6 GB): `./zcutil/fetch-params.sh`
+2. **Create configuration**: add your `zclassic.conf` under the selected datadir
 
-This "fast sync" feature downloads a recent blockchain snapshot instead of syncing from genesis, saving hours of initial sync time.
+For faster initial sync, install a bootstrap snapshot from a trusted synced node
+at daemon startup with `-bootstrapdatadir=<dir>`. See
+[Bootstrap Snapshots](doc/bootstrap-snapshots.md).
 
 ### Running ZClassic
 
@@ -126,12 +127,14 @@ The snark (zero-knowledge proof library) compilation is CPU-intensive. You can:
 - Build on a machine with more CPU cores
 - Be patient - this step can take 15-30 minutes
 
-### Download Failures
+### Snapshot Install Failures
 
-If Arweave downloads fail during first run:
-- Check your internet connection
-- The daemon will retry automatically
-- You can delete partial downloads and restart
+If bootstrap snapshot installation fails:
+- Ensure the source directory contains `blocks/`, `blocks/index/`, and
+  `chainstate/`.
+- Install into an empty datadir, or use `-bootstrapforce` to preserve existing
+  `blocks/` and `chainstate/` first.
+- Stop the source node before copying, or copy from a filesystem snapshot.
 
 ## Advanced Build Options
 

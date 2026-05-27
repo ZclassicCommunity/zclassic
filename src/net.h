@@ -319,6 +319,10 @@ public:
     std::set<uint256> setAskFor;
     std::multimap<int64_t, CInv> mapAskFor;
 
+    bool QueueBootstrapChunkRequest(const CBootstrapSnapshotChunkRequest& request);
+    bool PopBootstrapChunkRequest(CBootstrapSnapshotChunkRequest& request);
+    bool fBootstrapManifestSent;
+
     // Ping time measurement:
     // The pong reply we're expecting, or 0 if no pong expected.
     uint64_t nPingNonceSent;
@@ -330,6 +334,9 @@ public:
     int64_t nMinPingUsecTime;
     // Whether a ping is requested.
     bool fPingQueued;
+
+    std::deque<CBootstrapSnapshotChunkRequest> vBootstrapChunkRequests;
+    CCriticalSection cs_bootstrap_requests;
 
     CNode(SOCKET hSocketIn, const CAddress &addrIn, const std::string &addrNameIn = "", bool fInboundIn = false);
     ~CNode();

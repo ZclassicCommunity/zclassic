@@ -10,6 +10,7 @@
 #include "addrman.h"
 #include "alert.h"
 #include "arith_uint256.h"
+#include "bootstrap.h"
 #include "chainparams.h"
 #include "checkpoints.h"
 #include "checkqueue.h"
@@ -66,7 +67,6 @@ int nScriptCheckThreads = 0;
 bool fExperimentalMode = false;
 bool fImporting = false;
 bool fReindex = false;
-bool fNoFastSync = false;
 bool fTxIndex = false;
 bool fHavePruned = false;
 bool fPruneMode = false;
@@ -5710,6 +5710,88 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
         }
     }
 
+    else if (strCommand == NetMsgType::GETBSMAN)
+    {
+        CBootstrapSnapshotManifest manifest;
+        std::string error;
+        if (!GetBootstrapSnapshotManifest(manifest, error)) {
+            LogPrint("net", "could not build bootstrap snapshot manifest for peer=%d: %s\n", pfrom->id, error);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("bootstrap snapshot unavailable"));
+            return true;
+        }
+
+        LogPrint("net", "sending bootstrap snapshot manifest height=%d hash=%s bytes=%llu peer=%d\n",
+            manifest.nHeight,
+            manifest.hashBlock.ToString(),
+            (unsigned long long)manifest.nSnapshotBytes,
+            pfrom->id);
+        pfrom->PushMessage(NetMsgType::BSMAN, manifest);
+        pfrom->fBootstrapManifestSent = true;
+    }
+
+    else if (strCommand == NetMsgType::BSMAN)
+    {
+        CBootstrapSnapshotManifest manifest;
+        vRecv >> manifest;
+
+        std::string error;
+        if (!ValidateBootstrapSnapshotManifest(manifest, error)) {
+            LogPrint("net", "received invalid bootstrap snapshot manifest from peer=%d: %s\n", pfrom->id, error);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid bootstrap snapshot manifest"));
+            return true;
+        }
+
+        LogPrintf("received bootstrap snapshot manifest: network=%s height=%d block=%s bytes=%llu chunk=%u files=%u peer=%d\n",
+            manifest.strNetwork,
+            manifest.nHeight,
+            manifest.hashBlock.ToString(),
+            (unsigned long long)manifest.nSnapshotBytes,
+            manifest.nChunkSize,
+            (unsigned int)manifest.vFiles.size(),
+            pfrom->id);
+    }
+
+    else if (strCommand == NetMsgType::GETBSCHK)
+    {
+        CBootstrapSnapshotChunkRequest request;
+        vRecv >> request;
+
+        if (!pfrom->fBootstrapManifestSent) {
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("bootstrap manifest required"));
+            return true;
+        }
+
+        std::string error;
+        if (!EnqueueBootstrapSnapshotChunkRequest(pfrom, request, error)) {
+            LogPrint("net", "rejected bootstrap snapshot chunk request from peer=%d: %s\n", pfrom->id, error);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid bootstrap chunk request"));
+            return true;
+        }
+
+        LogPrint("net", "queued bootstrap snapshot chunk request file=%u offset=%llu bytes=%u peer=%d\n",
+            request.nFileIndex,
+            (unsigned long long)request.nOffset,
+            request.nLength,
+            pfrom->id);
+    }
+
+    else if (strCommand == NetMsgType::BSCHK)
+    {
+        CBootstrapSnapshotChunk chunk;
+        vRecv >> chunk;
+
+        if (chunk.vData.empty() || chunk.vData.size() > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid bootstrap snapshot chunk size"));
+            return true;
+        }
+
+        LogPrint("net", "received bootstrap snapshot chunk file=%u offset=%llu bytes=%u peer=%d\n",
+            chunk.nFileIndex,
+            (unsigned long long)chunk.nOffset,
+            (unsigned int)chunk.vData.size(),
+            pfrom->id);
+    }
+
 
     // Disconnect existing peer connection when:
     // 1. The version message has been received
@@ -6611,6 +6693,8 @@ bool SendMessages(CNode* pto, bool fSendTrickle)
                 pto->PushMessage("ping");
             }
         }
+
+        SendQueuedBootstrapSnapshotChunk(pto);
 
         TRY_LOCK(cs_main, lockMain); // Acquire cs_main for IsInitialBlockDownload() and CNodeState()
         if (!lockMain)

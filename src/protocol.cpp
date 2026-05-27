@@ -12,6 +12,13 @@
 # include <arpa/inet.h>
 #endif
 
+namespace NetMsgType {
+const char* GETBSMAN = "getbsman";
+const char* BSMAN = "bsman";
+const char* GETBSCHK = "getbschk";
+const char* BSCHK = "bschk";
+}
+
 static const char* ppszTypeName[] =
 {
     "ERROR",
