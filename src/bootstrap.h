@@ -16,8 +16,14 @@
 
 class CNode;
 
-static const uint32_t BOOTSTRAP_SNAPSHOT_CHUNK_SIZE = 512 * 1024;
-static const uint32_t BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE = 512 * 1024;
+// Snapshot/param transfer chunk size. 1 MiB keeps the BSCHK/BSPCHK message well
+// under MAX_PROTOCOL_MESSAGE_LENGTH (2 MiB) while halving the per-chunk round
+// trips and serve-loop iterations versus 512 KiB. The server advertises this in
+// the manifest's nChunkSize and the client sizes its requests from the manifest,
+// so a client built with a larger value still downloads correctly from a server
+// built with a smaller one.
+static const uint32_t BOOTSTRAP_SNAPSHOT_CHUNK_SIZE = 1024 * 1024;
+static const uint32_t BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE = 1024 * 1024;
 
 // Upper bounds for client-side acceptance of a peer-supplied manifest. A peer
 // is untrusted until per-file SHA-256 verification succeeds, so without a cap
