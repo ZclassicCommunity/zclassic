@@ -72,10 +72,25 @@ if [ ! -f "$CONFIG_SITE_FILE" ]; then
     exit 1
 fi
 
+# Detect whether the tree was last configured for a DIFFERENT host. The in-tree
+# static libs (leveldb, univalue, snark) key off their own sources, not
+# config.h, so a plain `make` will NOT rebuild them on a host switch and the
+# link mixes object architectures (e.g. COFF libs into an ELF binary). Capture
+# the previous host before ./configure overwrites config.log.
+PREV_HOST=""
+[ -f config.log ] && PREV_HOST="$(sed -n 's/.*host_alias *= *\([^ ]*\).*/\1/p' config.log | head -1)"
+
 echo "==> [2/4] autogen + configure"
 ./autogen.sh
 # shellcheck disable=SC2086
 CONFIG_SITE="$CONFIG_SITE_FILE" ./configure --prefix=/ --disable-tests --disable-bench $CONFIGURE_FLAGS
+
+if [ -n "$PREV_HOST" ] && [ "$PREV_HOST" != "$HOST" ]; then
+    echo "==> host changed ($PREV_HOST -> $HOST): cleaning stale build outputs to avoid mixing object architectures"
+    "$MAKE" clean || true
+    # snark is in EXTRA_DIST (not SUBDIRS) so the top-level clean misses it.
+    "$MAKE" -C src/snark clean || true
+fi
 
 echo "==> [3/4] building zclassicd / zclassic-cli / zclassic-tx"
 "$MAKE" "${MAKEARGS[@]}"
