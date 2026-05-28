@@ -196,7 +196,7 @@ BOOST_AUTO_TEST_CASE(bootstrap_snapshot_chunk_request_queue)
         request.nFileIndex = 1;
         request.nOffset = (uint64_t)i * 512 * 1024;
         request.nLength = 512 * 1024;
-        if (!node.QueueBootstrapChunkRequest(request)) {
+        if (!node.QueueBootstrapChunkRequest(CNode::BOOTSTRAP_CHUNK_SNAPSHOT, request)) {
             break;
         }
         ++accepted;
@@ -205,24 +205,152 @@ BOOST_AUTO_TEST_CASE(bootstrap_snapshot_chunk_request_queue)
     BOOST_CHECK_GT(accepted, 1u);
     BOOST_CHECK_LT(accepted, kSanityCap);
 
-    // A further request is rejected while the queue is full.
+    // A further request is rejected while the queue is full. Param chunks also
+    // share the cap (snapshot + params drain through the same queue).
     CBootstrapSnapshotChunkRequest overflow;
     overflow.nFileIndex = 1;
     overflow.nOffset = (uint64_t)accepted * 512 * 1024;
     overflow.nLength = 512 * 1024;
-    BOOST_CHECK(!node.QueueBootstrapChunkRequest(overflow));
+    BOOST_CHECK(!node.QueueBootstrapChunkRequest(CNode::BOOTSTRAP_CHUNK_SNAPSHOT, overflow));
+    BOOST_CHECK(!node.QueueBootstrapChunkRequest(CNode::BOOTSTRAP_CHUNK_PARAMS, overflow));
 
-    // Requests pop in FIFO order, and the queue empties after `accepted` pops.
+    // Requests pop in FIFO order with their kind tag preserved, and the queue
+    // empties after `accepted` pops.
     for (size_t i = 0; i < accepted; ++i) {
+        CNode::BootstrapChunkKind poppedKind = CNode::BOOTSTRAP_CHUNK_PARAMS;
         CBootstrapSnapshotChunkRequest popped;
-        BOOST_REQUIRE(node.PopBootstrapChunkRequest(popped));
+        BOOST_REQUIRE(node.PopBootstrapChunkRequest(poppedKind, popped));
+        BOOST_CHECK_EQUAL((int)poppedKind, (int)CNode::BOOTSTRAP_CHUNK_SNAPSHOT);
         BOOST_CHECK_EQUAL(popped.nFileIndex, 1u);
         BOOST_CHECK_EQUAL(popped.nOffset, (uint64_t)i * 512 * 1024);
         BOOST_CHECK_EQUAL(popped.nLength, (uint32_t)(512 * 1024));
     }
 
+    CNode::BootstrapChunkKind emptyKind = CNode::BOOTSTRAP_CHUNK_SNAPSHOT;
     CBootstrapSnapshotChunkRequest popped;
-    BOOST_CHECK(!node.PopBootstrapChunkRequest(popped));
+    BOOST_CHECK(!node.PopBootstrapChunkRequest(emptyKind, popped));
+}
+
+BOOST_AUTO_TEST_CASE(bootstrap_param_chunk_request_queue_preserves_kind_and_order)
+{
+    CNode node(INVALID_SOCKET, CAddress(CService("127.0.0.1", 0)), "", true);
+
+    // Interleave snapshot and param chunk requests, then verify the consumer
+    // sees each one with its original kind and request fields. This is the
+    // contract SendQueuedBootstrapSnapshotChunk relies on to route to the right
+    // serve function.
+    CBootstrapSnapshotChunkRequest r1;
+    r1.nFileIndex = 0; r1.nOffset = 0; r1.nLength = 512 * 1024;
+    CBootstrapSnapshotChunkRequest r2;
+    r2.nFileIndex = 7; r2.nOffset = 512 * 1024; r2.nLength = 512 * 1024;
+    CBootstrapSnapshotChunkRequest r3;
+    r3.nFileIndex = 1; r3.nOffset = 1024 * 1024; r3.nLength = 512 * 1024;
+
+    BOOST_REQUIRE(node.QueueBootstrapChunkRequest(CNode::BOOTSTRAP_CHUNK_SNAPSHOT, r1));
+    BOOST_REQUIRE(node.QueueBootstrapChunkRequest(CNode::BOOTSTRAP_CHUNK_PARAMS, r2));
+    BOOST_REQUIRE(node.QueueBootstrapChunkRequest(CNode::BOOTSTRAP_CHUNK_SNAPSHOT, r3));
+
+    CNode::BootstrapChunkKind k = CNode::BOOTSTRAP_CHUNK_PARAMS;
+    CBootstrapSnapshotChunkRequest got;
+    BOOST_REQUIRE(node.PopBootstrapChunkRequest(k, got));
+    BOOST_CHECK_EQUAL((int)k, (int)CNode::BOOTSTRAP_CHUNK_SNAPSHOT);
+    BOOST_CHECK_EQUAL(got.nFileIndex, 0u);
+
+    BOOST_REQUIRE(node.PopBootstrapChunkRequest(k, got));
+    BOOST_CHECK_EQUAL((int)k, (int)CNode::BOOTSTRAP_CHUNK_PARAMS);
+    BOOST_CHECK_EQUAL(got.nFileIndex, 7u);
+
+    // Requeue must preserve kind too: the front of the queue becomes the
+    // requeued item, and a subsequent pop returns it with the same kind tag.
+    node.RequeueBootstrapChunkRequest(CNode::BOOTSTRAP_CHUNK_PARAMS, r2);
+    BOOST_REQUIRE(node.PopBootstrapChunkRequest(k, got));
+    BOOST_CHECK_EQUAL((int)k, (int)CNode::BOOTSTRAP_CHUNK_PARAMS);
+    BOOST_CHECK_EQUAL(got.nFileIndex, 7u);
+
+    BOOST_REQUIRE(node.PopBootstrapChunkRequest(k, got));
+    BOOST_CHECK_EQUAL((int)k, (int)CNode::BOOTSTRAP_CHUNK_SNAPSHOT);
+    BOOST_CHECK_EQUAL(got.nFileIndex, 1u);
+}
+
+BOOST_AUTO_TEST_CASE(bootstrap_param_chunk_enqueue_validates_envelope)
+{
+    const bool hadServe = mapArgs.count("-bootstrapserve");
+    const std::string oldServe = hadServe ? mapArgs["-bootstrapserve"] : "";
+
+    CNode node(INVALID_SOCKET, CAddress(CService("127.0.0.1", 0)), "", true);
+
+    // Without -bootstrapserve the enqueue is refused regardless of fields.
+    mapArgs.erase("-bootstrapserve");
+    std::string error;
+    CBootstrapSnapshotChunkRequest request;
+    request.nFileIndex = 0;
+    request.nOffset = 0;
+    request.nLength = 512 * 1024;
+    BOOST_CHECK(!EnqueueBootstrapParamChunkRequest(&node, request, error));
+    BOOST_CHECK(error.find("not enabled") != std::string::npos);
+
+    // With service enabled, length and offset are validated symmetrically with
+    // the snapshot enqueue path (param files use the same alignment).
+    mapArgs["-bootstrapserve"] = "1";
+
+    request.nLength = 0;
+    BOOST_CHECK(!EnqueueBootstrapParamChunkRequest(&node, request, error));
+    BOOST_CHECK(error.find("length") != std::string::npos);
+
+    request.nLength = BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE + 1;
+    BOOST_CHECK(!EnqueueBootstrapParamChunkRequest(&node, request, error));
+    BOOST_CHECK(error.find("length") != std::string::npos);
+
+    request.nLength = 512 * 1024;
+    request.nOffset = 1; // misaligned
+    BOOST_CHECK(!EnqueueBootstrapParamChunkRequest(&node, request, error));
+    BOOST_CHECK(error.find("aligned") != std::string::npos);
+
+    // A well-formed request enqueues with the PARAMS kind tag so the drain
+    // routes to ReadZcashParamChunk rather than ReadBootstrapSnapshotChunk.
+    request.nOffset = 0;
+    BOOST_REQUIRE(EnqueueBootstrapParamChunkRequest(&node, request, error));
+    CNode::BootstrapChunkKind k = CNode::BOOTSTRAP_CHUNK_SNAPSHOT;
+    CBootstrapSnapshotChunkRequest popped;
+    BOOST_REQUIRE(node.PopBootstrapChunkRequest(k, popped));
+    BOOST_CHECK_EQUAL((int)k, (int)CNode::BOOTSTRAP_CHUNK_PARAMS);
+
+    RestoreArg("-bootstrapserve", hadServe, oldServe);
+}
+
+BOOST_AUTO_TEST_CASE(bootstrap_param_chunk_drains_through_serve_quota)
+{
+    // Param chunks served via the queue path go through the same per-IP
+    // BootstrapServeChargeBytes accounting as snapshot chunks. We can't easily
+    // call SendQueuedBootstrapSnapshotChunk in a unit test (it pushes on a
+    // socket), but we can verify the quota path itself accumulates the same
+    // way for any caller -- snapshot or params -- by charging both kinds and
+    // checking the cumulative ledger.
+    const bool hadCap = mapArgs.count("-bootstrapservemaxbytesperday");
+    const bool hadKbps = mapArgs.count("-bootstrapservethrottlekbps");
+    const std::string oldCap = hadCap ? mapArgs["-bootstrapservemaxbytesperday"] : "";
+    const std::string oldKbps = hadKbps ? mapArgs["-bootstrapservethrottlekbps"] : "";
+
+    ClearBootstrapServeQuota();
+    mapArgs["-bootstrapservemaxbytesperday"] = "1000";
+    mapArgs["-bootstrapservethrottlekbps"] = "0"; // hard stop
+
+    const int64_t t0 = 1000000;
+    const std::string ip = "198.51.100.3";
+    bool stop = false;
+
+    // Snapshot bytes and param bytes accumulate against the same daily cap.
+    BootstrapServeChargeBytes(ip, /*whitelisted=*/false, t0, 400);   // snapshot serve
+    BootstrapServeChargeBytes(ip, /*whitelisted=*/false, t0, 400);   // param serve
+    BOOST_CHECK(BootstrapServeAllowChunk(ip, false, t0, stop));       // 800 < 1000
+    BOOST_CHECK(!stop);
+    BootstrapServeChargeBytes(ip, /*whitelisted=*/false, t0, 400);   // 1200 >= 1000
+    BOOST_CHECK(!BootstrapServeAllowChunk(ip, false, t0, stop));      // over cap
+    BOOST_CHECK(stop);
+
+    ClearBootstrapServeQuota();
+    RestoreArg("-bootstrapservemaxbytesperday", hadCap, oldCap);
+    RestoreArg("-bootstrapservethrottlekbps", hadKbps, oldKbps);
 }
 
 BOOST_AUTO_TEST_CASE(bootstrap_serve_quota_throttle_and_stop)

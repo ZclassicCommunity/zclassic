@@ -5802,6 +5802,9 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
             return true;
         }
         pfrom->PushMessage(NetMsgType::BSPMAN, manifest);
+        // Only after we successfully advertised the param manifest is the peer
+        // allowed to ask for chunks via GETBSPCHK (mirrors the snapshot gate).
+        pfrom->fBootstrapParamManifestSent = true;
     }
 
     else if (strCommand == NetMsgType::BSPMAN)
@@ -5816,23 +5819,27 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
         CBootstrapSnapshotChunkRequest request;
         vRecv >> request;
 
-        const std::string ip = pfrom->addr.ToStringIP();
-        bool stop = false;
-        if (!BootstrapServeAllowChunk(ip, pfrom->fWhitelisted, GetTimeMillis(), stop)) {
-            LogPrint("net", "zcash param serve quota exceeded for peer=%d (%s)\n", pfrom->id, ip);
-            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("zcash param serve quota exceeded"));
+        // Gate on having advertised the param manifest first. Peers that skip
+        // GETBSPMAN are either buggy or probing; treat them like the snapshot
+        // path treats GETBSCHK without GETBSMAN, plus a small misbehavior bump.
+        if (!pfrom->fBootstrapParamManifestSent) {
+            Misbehaving(pfrom->GetId(), 10);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("zcash param manifest required"));
             return true;
         }
 
-        CBootstrapSnapshotChunk chunk;
         std::string error;
-        if (!ReadZcashParamChunk(request, chunk, error)) {
-            LogPrint("net", "could not read zcash param chunk for peer=%d: %s\n", pfrom->id, error);
+        if (!EnqueueBootstrapParamChunkRequest(pfrom, request, error)) {
+            LogPrint("net", "rejected zcash param chunk request from peer=%d: %s\n", pfrom->id, error);
             pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid zcash param chunk request"));
             return true;
         }
-        pfrom->PushMessage(NetMsgType::BSPCHK, chunk);
-        BootstrapServeChargeBytes(ip, pfrom->fWhitelisted, GetTimeMillis(), chunk.vData.size());
+
+        LogPrint("net", "queued zcash param chunk request file=%u offset=%llu bytes=%u peer=%d\n",
+            request.nFileIndex,
+            (unsigned long long)request.nOffset,
+            request.nLength,
+            pfrom->id);
     }
 
     else if (strCommand == NetMsgType::BSPCHK)

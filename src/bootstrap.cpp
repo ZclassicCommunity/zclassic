@@ -1807,7 +1807,31 @@ bool EnqueueBootstrapSnapshotChunkRequest(CNode* pfrom, const CBootstrapSnapshot
         return false;
     }
 
-    if (!pfrom->QueueBootstrapChunkRequest(request)) {
+    if (!pfrom->QueueBootstrapChunkRequest(CNode::BOOTSTRAP_CHUNK_SNAPSHOT, request)) {
+        error = "too many pending bootstrap chunk requests";
+        return false;
+    }
+    return true;
+}
+
+bool EnqueueBootstrapParamChunkRequest(CNode* pfrom, const CBootstrapSnapshotChunkRequest& request, std::string& error)
+{
+    // Same validation envelope as snapshot chunks: param files are also read
+    // in aligned BOOTSTRAP_SNAPSHOT_CHUNK_SIZE chunks (see ReadZcashParamChunk).
+    if (!GetBoolArg("-bootstrapserve", false)) {
+        error = "bootstrap snapshot service is not enabled";
+        return false;
+    }
+    if (request.nLength == 0 || request.nLength > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
+        error = strprintf("invalid zcash param chunk length: %u", request.nLength);
+        return false;
+    }
+    if (request.nOffset % BOOTSTRAP_SNAPSHOT_CHUNK_SIZE != 0) {
+        error = "zcash param chunk offset is not aligned";
+        return false;
+    }
+
+    if (!pfrom->QueueBootstrapChunkRequest(CNode::BOOTSTRAP_CHUNK_PARAMS, request)) {
         error = "too many pending bootstrap chunk requests";
         return false;
     }
@@ -1911,10 +1935,18 @@ void BootstrapServeChargeBytes(const std::string& ip, bool whitelisted, int64_t 
 
 bool SendQueuedBootstrapSnapshotChunk(CNode* pto)
 {
+    CNode::BootstrapChunkKind kind = CNode::BOOTSTRAP_CHUNK_SNAPSHOT;
     CBootstrapSnapshotChunkRequest request;
-    if (!pto->PopBootstrapChunkRequest(request)) {
+    if (!pto->PopBootstrapChunkRequest(kind, request)) {
         return true;
     }
+
+    // Select the right command name and serve function based on the request
+    // kind. Snapshot and parameter chunks share queue/throttle/quota, but each
+    // reads from its own backing file set.
+    const char* getCmd = (kind == CNode::BOOTSTRAP_CHUNK_PARAMS) ? NetMsgType::GETBSPCHK : NetMsgType::GETBSCHK;
+    const char* respCmd = (kind == CNode::BOOTSTRAP_CHUNK_PARAMS) ? NetMsgType::BSPCHK : NetMsgType::BSCHK;
+    const char* chunkLabel = (kind == CNode::BOOTSTRAP_CHUNK_PARAMS) ? "zcash param" : "bootstrap snapshot";
 
     // Apply the per-IP daily serve quota only once we have a request to serve,
     // so peers with no bootstrap traffic never touch the quota lock.
@@ -1923,28 +1955,32 @@ bool SendQueuedBootstrapSnapshotChunk(CNode* pto)
     if (!BootstrapServeAllowChunk(ip, pto->fWhitelisted, GetTimeMillis(), stop)) {
         if (stop) {
             LogPrint("net", "bootstrap serve quota exceeded for peer=%d (%s); rejecting chunk request\n", pto->id, ip);
-            pto->PushMessage("reject", std::string(NetMsgType::GETBSCHK), REJECT_INVALID, std::string("bootstrap serve quota exceeded"));
+            pto->PushMessage("reject", std::string(getCmd), REJECT_INVALID, std::string("bootstrap serve quota exceeded"));
         } else {
             // Throttled: put the request back and try again on a later cycle.
-            pto->RequeueBootstrapChunkRequest(request);
+            pto->RequeueBootstrapChunkRequest(kind, request);
         }
         return true;
     }
 
     CBootstrapSnapshotChunk chunk;
     std::string error;
-    if (!ReadBootstrapSnapshotChunk(request, chunk, error)) {
-        LogPrint("net", "could not read bootstrap snapshot chunk for peer=%d: %s\n", pto->id, error);
-        pto->PushMessage("reject", std::string(NetMsgType::GETBSCHK), REJECT_INVALID, std::string("invalid bootstrap chunk request"));
+    const bool ok = (kind == CNode::BOOTSTRAP_CHUNK_PARAMS)
+        ? ReadZcashParamChunk(request, chunk, error)
+        : ReadBootstrapSnapshotChunk(request, chunk, error);
+    if (!ok) {
+        LogPrint("net", "could not read %s chunk for peer=%d: %s\n", chunkLabel, pto->id, error);
+        pto->PushMessage("reject", std::string(getCmd), REJECT_INVALID, std::string("invalid bootstrap chunk request"));
         return true;
     }
 
-    LogPrint("net", "sending bootstrap snapshot chunk file=%u offset=%llu bytes=%u peer=%d\n",
+    LogPrint("net", "sending %s chunk file=%u offset=%llu bytes=%u peer=%d\n",
+        chunkLabel,
         chunk.nFileIndex,
         (unsigned long long)chunk.nOffset,
         (unsigned int)chunk.vData.size(),
         pto->id);
-    pto->PushMessage(NetMsgType::BSCHK, chunk);
+    pto->PushMessage(respCmd, chunk);
     BootstrapServeChargeBytes(ip, pto->fWhitelisted, GetTimeMillis(), chunk.vData.size());
     return true;
 }

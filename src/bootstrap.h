@@ -86,6 +86,11 @@ bool ValidateBootstrapSnapshotManifest(const CBootstrapSnapshotManifest& manifes
 bool EnqueueBootstrapSnapshotChunkRequest(CNode* pfrom,
                                           const CBootstrapSnapshotChunkRequest& request,
                                           std::string& error);
+//! Validate and queue a zk-SNARK parameter chunk request for later async serve.
+//! Shares the per-peer queue cap, throttle, and quota path with snapshot chunks.
+bool EnqueueBootstrapParamChunkRequest(CNode* pfrom,
+                                       const CBootstrapSnapshotChunkRequest& request,
+                                       std::string& error);
 bool SendQueuedBootstrapSnapshotChunk(CNode* pto);
 
 // Per-IP serve quota. Limits how many snapshot bytes one address can pull per

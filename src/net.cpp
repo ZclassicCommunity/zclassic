@@ -2093,6 +2093,7 @@ CNode::CNode(SOCKET hSocketIn, const CAddress& addrIn, const std::string& addrNa
     fRelayTxes = false;
     fSentAddr = false;
     fBootstrapManifestSent = false;
+    fBootstrapParamManifestSent = false;
     pfilter = new CBloomFilter();
     nPingNonceSent = 0;
     nPingUsecStart = 0;
@@ -2161,32 +2162,40 @@ void CNode::AskFor(const CInv& inv)
     mapAskFor.insert(std::make_pair(nRequestTime, inv));
 }
 
-bool CNode::QueueBootstrapChunkRequest(const CBootstrapSnapshotChunkRequest& request)
+bool CNode::QueueBootstrapChunkRequest(BootstrapChunkKind kind, const CBootstrapSnapshotChunkRequest& request)
 {
     LOCK(cs_bootstrap_requests);
     if (vBootstrapChunkRequests.size() >= MAX_BOOTSTRAP_CHUNK_REQUESTS_PER_PEER) {
         return false;
     }
-    vBootstrapChunkRequests.push_back(request);
+    BootstrapChunkQueueItem item;
+    item.kind = kind;
+    item.request = request;
+    vBootstrapChunkRequests.push_back(item);
     return true;
 }
 
-void CNode::RequeueBootstrapChunkRequest(const CBootstrapSnapshotChunkRequest& request)
+void CNode::RequeueBootstrapChunkRequest(BootstrapChunkKind kind, const CBootstrapSnapshotChunkRequest& request)
 {
     // Put a popped-but-deferred request back at the front so order is preserved
     // when the serving side throttles. Bypasses the size cap because the slot it
     // occupies was just freed by the pop that preceded it.
     LOCK(cs_bootstrap_requests);
-    vBootstrapChunkRequests.push_front(request);
+    BootstrapChunkQueueItem item;
+    item.kind = kind;
+    item.request = request;
+    vBootstrapChunkRequests.push_front(item);
 }
 
-bool CNode::PopBootstrapChunkRequest(CBootstrapSnapshotChunkRequest& request)
+bool CNode::PopBootstrapChunkRequest(BootstrapChunkKind& kind, CBootstrapSnapshotChunkRequest& request)
 {
     LOCK(cs_bootstrap_requests);
     if (vBootstrapChunkRequests.empty()) {
         return false;
     }
-    request = vBootstrapChunkRequests.front();
+    const BootstrapChunkQueueItem& item = vBootstrapChunkRequests.front();
+    kind = item.kind;
+    request = item.request;
     vBootstrapChunkRequests.pop_front();
     return true;
 }
