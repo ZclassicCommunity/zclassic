@@ -106,6 +106,19 @@ static bool IsSafeBootstrapSnapshotPath(const boost::filesystem::path& relative)
 static bool IsBootstrapSnapshotDataPath(const boost::filesystem::path& relative);
 static bool HashBootstrapSnapshotFile(const boost::filesystem::path& path, uint256& hash, std::string& error);
 static bool StatOpenBootstrapSnapshotFile(FILE* fp, uint64_t& size, std::time_t& mtime);
+
+// Portable 64-bit seek. fseek()'s `long` second argument wraps on 32-bit
+// platforms and on Windows (where `long` is 32 bits), so bootstrap files
+// larger than 2 GiB would be truncated. Mirror the Windows-vs-POSIX split
+// already used in StatOpenBootstrapSnapshotFile.
+static bool BootstrapFseek64(FILE* fp, int64_t off)
+{
+#if defined(WIN32)
+    return _fseeki64(fp, off, SEEK_SET) == 0;
+#else
+    return fseeko(fp, (off_t)off, SEEK_SET) == 0;
+#endif
+}
 static FILE* OpenBootstrapSnapshotFile(const boost::filesystem::path& source,
                                        const CBootstrapSnapshotFile& file,
                                        const std::map<std::string, std::time_t>& mtimes,
@@ -543,7 +556,7 @@ bool ImportBootstrapDatadir(const boost::filesystem::path& source_root, const bo
 
 static bool WriteBootstrapChunkToFile(const boost::filesystem::path& path, const CBootstrapSnapshotChunk& chunk, FILE* file, std::string& error)
 {
-    if (fseek(file, chunk.nOffset, SEEK_SET) != 0) {
+    if (!BootstrapFseek64(file, (int64_t)chunk.nOffset)) {
         error = strprintf("could not seek bootstrap staging file: %s", path.string());
         return false;
     }
@@ -1310,7 +1323,7 @@ bool ReadZcashParamChunk(const CBootstrapSnapshotChunkRequest& request, CBootstr
         error = strprintf("zcash param chunk length must be %u", expected_length);
         return false;
     }
-    if (fseek(fp, request.nOffset, SEEK_SET) != 0) {
+    if (!BootstrapFseek64(fp, (int64_t)request.nOffset)) {
         fclose(fp);
         error = strprintf("could not seek zcash param file: %s", file.strPath);
         return false;
@@ -1679,7 +1692,7 @@ bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request, C
         error = strprintf("bootstrap chunk length must be %u", expected_length);
         return false;
     }
-    if (fseek(fp, request.nOffset, SEEK_SET) != 0) {
+    if (!BootstrapFseek64(fp, (int64_t)request.nOffset)) {
         fclose(fp);
         error = strprintf("could not seek bootstrap snapshot file: %s", file.strPath);
         return false;
