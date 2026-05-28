@@ -8,7 +8,11 @@ define $(package)_set_vars
   $(package)_config_opts=--without-documentation --disable-shared --disable-curve
   $(package)_config_opts_linux=--with-pic
   $(package)_cflags_darwin=$(shell command -v xcrun >/dev/null 2>&1 && echo "-isysroot$$(xcrun --show-sdk-path)")
-  $(package)_cxxflags=-std=c++11
+  # zeromq 4.3.5 builds with -Werror; its proxy.cpp `stats_proxy stats = {0};`
+  # trips -Wmissing-braces on modern Apple clang. Don't let a third-party dep's
+  # pedantic warnings fail our build. -Wno-error lands after zeromq's own
+  # -Werror on the command line, so it wins.
+  $(package)_cxxflags=-std=c++11 -Wno-error
   $(package)_cxxflags_darwin=$(shell command -v xcrun >/dev/null 2>&1 && echo "-isysroot$$(xcrun --show-sdk-path)")
 endef
 
