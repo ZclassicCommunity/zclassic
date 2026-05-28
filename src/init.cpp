@@ -1831,8 +1831,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     break;
                 }
 
-                // Check for changed -txindex state
-                if (fTxIndex != GetBoolArg("-txindex", true)) {
+                // Check for changed -txindex state. Only treat it as a change
+                // when the user explicitly passed -txindex: the default flipped
+                // to true (a bootstrap snapshot ships a txindex'd chainstate),
+                // so comparing against the default alone would force a spurious
+                // full reindex on every existing node that ran with the old
+                // default (which persisted txindex=0 and is read back here).
+                if (mapArgs.count("-txindex") && fTxIndex != GetBoolArg("-txindex", true)) {
                     strLoadError = _("You need to rebuild the database using -reindex to change -txindex");
                     break;
                 }

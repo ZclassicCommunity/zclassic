@@ -47,7 +47,13 @@ static bool BootstrapMetricsScreenActive()
 #else
     const bool is_tty = (isatty(fileno(stdout)) != 0);
 #endif
-    return GetBoolArg("-showmetrics", is_tty) && GetBoolArg("-metricsui", is_tty);
+    // Mirror exactly the condition under which AppInit2 starts the metrics
+    // screen thread (see init.cpp). If these drift, progress is either routed
+    // to InitMessage when no screen is running, or written to stdout while the
+    // screen is redrawing (flicker).
+    return (Params().NetworkIDString() != "regtest") &&
+           GetBoolArg("-showmetrics", is_tty) &&
+           !fPrintToConsole && !GetBoolArg("-daemon", false);
 }
 
 // Emit a single in-place-updating progress line to the console. On a TTY it
