@@ -625,6 +625,27 @@ static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotMan
         (unsigned long long)manifest.nSnapshotBytes,
         manifest.nHeight);
 
+    // Refuse to start if the staging filesystem cannot fit the manifest plus
+    // a safety margin. Cheaper to fail fast than to fill the disk and then
+    // discover the last chunk's hash is wrong.
+    try {
+        boost::filesystem::create_directories(staging);
+        boost::filesystem::space_info si = boost::filesystem::space(staging);
+        const uint64_t need = manifest.nSnapshotBytes + (uint64_t)BOOTSTRAP_SNAPSHOT_DISK_SAFETY_MARGIN_BYTES;
+        if (si.available < need) {
+            error = strprintf(
+                "insufficient free space in %s for bootstrap snapshot: need %llu bytes (including %lld safety margin), have %llu",
+                staging.string(),
+                (unsigned long long)need,
+                (long long)BOOTSTRAP_SNAPSHOT_DISK_SAFETY_MARGIN_BYTES,
+                (unsigned long long)si.available);
+            return false;
+        }
+    } catch (const boost::filesystem::filesystem_error& e) {
+        error = strprintf("could not query free space in bootstrap staging dir %s: %s", staging.string(), e.what());
+        return false;
+    }
+
     if (!CreateEmptyBootstrapFiles(manifest, staging, error)) {
         return false;
     }
@@ -1715,6 +1736,13 @@ bool ValidateBootstrapSnapshotManifest(const CBootstrapSnapshotManifest& manifes
             error = strprintf("Bootstrap manifest file is missing SHA-256: %s", it->strPath);
             return false;
         }
+        // Per-file cap: bound any single advertised file so a malicious peer
+        // cannot point us at a single huge "file" before we ever hash it.
+        if (it->nSize > (uint64_t)BOOTSTRAP_SNAPSHOT_MAX_FILE_BYTES) {
+            error = strprintf("Bootstrap manifest file exceeds per-file cap: %s (%llu bytes)",
+                it->strPath, (unsigned long long)it->nSize);
+            return false;
+        }
         if (it->nSize > std::numeric_limits<uint64_t>::max() - total_bytes) {
             error = "Bootstrap manifest byte size overflow";
             return false;
@@ -1724,6 +1752,15 @@ bool ValidateBootstrapSnapshotManifest(const CBootstrapSnapshotManifest& manifes
 
     if (total_bytes != manifest.nSnapshotBytes) {
         error = "Bootstrap manifest file sizes do not match total snapshot size";
+        return false;
+    }
+
+    // Aggregate cap: reject any manifest whose total exceeds the compiled
+    // ceiling. Without this the per-file cap could be multiplied across many
+    // files to still exhaust disk before any chunk is verified.
+    if (total_bytes > (uint64_t)BOOTSTRAP_SNAPSHOT_MAX_TOTAL_BYTES) {
+        error = strprintf("Bootstrap manifest exceeds total snapshot cap: %llu bytes",
+            (unsigned long long)total_bytes);
         return false;
     }
 

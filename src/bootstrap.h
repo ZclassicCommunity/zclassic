@@ -18,6 +18,18 @@ class CNode;
 static const uint32_t BOOTSTRAP_SNAPSHOT_CHUNK_SIZE = 512 * 1024;
 static const uint32_t BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE = 512 * 1024;
 
+// Upper bounds for client-side acceptance of a peer-supplied manifest. A peer
+// is untrusted until per-file SHA-256 verification succeeds, so without a cap
+// a malicious peer can claim arbitrary nSnapshotBytes / nSize and fill the
+// staging disk before the first hash mismatch is detected. These limits are
+// generous relative to today's real snapshot size (a few GiB) but small enough
+// that even an attacker maximizing them cannot exhaust a typical disk.
+static const int64_t BOOTSTRAP_SNAPSHOT_MAX_TOTAL_BYTES = 200LL * 1024 * 1024 * 1024; // 200 GiB
+static const int64_t BOOTSTRAP_SNAPSHOT_MAX_FILE_BYTES  = 32LL  * 1024 * 1024 * 1024; // 32 GiB
+// Safety margin reserved over and above the manifest total when checking the
+// staging directory's free space.
+static const int64_t BOOTSTRAP_SNAPSHOT_DISK_SAFETY_MARGIN_BYTES = 1LL * 1024 * 1024 * 1024; // 1 GiB
+
 // Default per-IP serve quota: bytes one address may download per 24h before the
 // serving node throttles it, and the throttled rate to fall back to.
 static const int64_t BOOTSTRAP_SERVE_DEFAULT_MAX_BYTES_PER_DAY = 100LL * 1024 * 1024 * 1024; // 100 GiB

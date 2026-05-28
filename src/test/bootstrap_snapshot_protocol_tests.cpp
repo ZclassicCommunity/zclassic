@@ -492,6 +492,43 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_rejects_bad_metadata)
     BOOST_CHECK(error.find("duplicate") != std::string::npos);
 }
 
+BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_rejects_oversize)
+{
+    std::string error;
+
+    // Per-file cap: a single advertised file larger than the compiled ceiling
+    // is rejected before any chunk is requested.
+    {
+        CBootstrapSnapshotManifest manifest = ValidBootstrapManifest();
+        manifest.vFiles[0].nSize = (uint64_t)BOOTSTRAP_SNAPSHOT_MAX_FILE_BYTES + 1ULL;
+        manifest.nSnapshotBytes = manifest.vFiles[0].nSize;
+        BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error));
+        BOOST_CHECK(error.find("per-file cap") != std::string::npos);
+    }
+
+    // Aggregate cap: a manifest whose total exceeds the compiled total cap
+    // is rejected even when each individual file is within the per-file cap.
+    {
+        CBootstrapSnapshotManifest manifest = ValidBootstrapManifest();
+        manifest.vFiles.clear();
+
+        const uint64_t per_file = (uint64_t)BOOTSTRAP_SNAPSHOT_MAX_FILE_BYTES;
+        const uint64_t files_needed = ((uint64_t)BOOTSTRAP_SNAPSHOT_MAX_TOTAL_BYTES / per_file) + 1;
+        uint64_t total = 0;
+        for (uint64_t i = 0; i < files_needed; ++i) {
+            CBootstrapSnapshotFile file;
+            file.strPath = strprintf("blocks/blk%05u.dat", (unsigned int)i);
+            file.nSize = per_file;
+            file.hashSha256 = uint256S("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
+            manifest.vFiles.push_back(file);
+            total += file.nSize;
+        }
+        manifest.nSnapshotBytes = total;
+        BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error));
+        BOOST_CHECK(error.find("total snapshot cap") != std::string::npos);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(bootstrap_manifest_and_chunk_service_helpers)
 {
     const bool hadServe = mapArgs.count("-bootstrapserve");
