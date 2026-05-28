@@ -31,7 +31,42 @@
 #include <sys/stat.h>
 #if defined(WIN32)
 #include <io.h>
+#else
+#include <unistd.h>
 #endif
+
+// Emit a single in-place-updating progress line to the console. On a TTY it
+// rewrites one line (carriage return + clear-to-end-of-line), throttled so it
+// does not flicker; when piped/redirected it prints occasional plain lines. The
+// caller passes done=true for the final state, which always prints + newline.
+static void EmitBootstrapProgress(const std::string& line, int percent, bool done, int64_t& last_emit_ms, int& last_emit_decile)
+{
+#if defined(WIN32)
+    static const bool is_tty = (_isatty(_fileno(stdout)) != 0);
+#else
+    static const bool is_tty = (isatty(fileno(stdout)) != 0);
+#endif
+    if (is_tty) {
+        const int64_t now = GetTimeMillis();
+        if (!done && now - last_emit_ms < 200) {
+            return; // throttle to ~5 updates/sec to avoid flicker
+        }
+        last_emit_ms = now;
+        fprintf(stdout, "\r%s\x1b[K", line.c_str());
+        if (done) {
+            fprintf(stdout, "\n");
+        }
+    } else {
+        // Not a terminal: avoid carriage-return spam; one plain line per 10%.
+        const int decile = percent / 10;
+        if (!done && decile == last_emit_decile) {
+            return;
+        }
+        last_emit_decile = decile;
+        fprintf(stdout, "%s\n", line.c_str());
+    }
+    fflush(stdout);
+}
 
 static CCriticalSection cs_bootstrap_snapshot;
 static boost::filesystem::path bootstrapSnapshotCacheSource;
@@ -624,6 +659,8 @@ static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotMan
     boost::filesystem::path open_part;
     uint64_t received_total = 0;
     int last_logged_percent = -1;
+    int64_t last_emit_ms = 0;
+    int last_emit_decile = -1;
     const int64_t download_started = GetTimeMillis();
     bool ok = true;
 
@@ -710,17 +747,15 @@ static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotMan
                 (unsigned long long)received_total,
                 (unsigned long long)manifest.nSnapshotBytes,
                 mbps);
-            // Live progress to the console so a bare foreground run shows it
+            // Live, throttled console progress so a bare foreground run shows it
             // updating without -printtoconsole/-debuglogfile.
-            fprintf(stdout, "\rBootstrap snapshot: %3d%%  %.2f / %.2f GB  %.1f MB/s    ",
-                percent,
-                received_total / 1073741824.0,
-                manifest.nSnapshotBytes / 1073741824.0,
-                mbps);
-            if (percent >= 100) {
-                fprintf(stdout, "\n");
-            }
-            fflush(stdout);
+            EmitBootstrapProgress(
+                strprintf("Bootstrap snapshot: %3d%%  %.2f / %.2f GB  %.1f MB/s",
+                    percent,
+                    received_total / 1073741824.0,
+                    manifest.nSnapshotBytes / 1073741824.0,
+                    mbps),
+                percent, percent >= 100, last_emit_ms, last_emit_decile);
         }
 
         // Refill the pipeline window.
@@ -1254,6 +1289,8 @@ static bool DownloadZcashParamFile(SOCKET socket, uint32_t file_index, uint64_t 
     uint64_t next_offset = 0;
     uint64_t received = 0;
     int last_percent = -1;
+    int64_t last_emit_ms = 0;
+    int last_emit_decile = -1;
     const int64_t started = GetTimeMillis();
     bool ok = true;
 
@@ -1303,14 +1340,12 @@ static bool DownloadZcashParamFile(SOCKET socket, uint32_t file_index, uint64_t 
         if (percent != last_percent) {
             last_percent = percent;
             const int64_t elapsed_ms = std::max<int64_t>(1, GetTimeMillis() - started);
-            fprintf(stdout, "\rFetching params %-22s %3d%%  %.1f MB/s    ",
-                display_name.c_str(),
-                percent,
-                (received / 1048576.0) / (elapsed_ms / 1000.0));
-            if (percent >= 100) {
-                fprintf(stdout, "\n");
-            }
-            fflush(stdout);
+            EmitBootstrapProgress(
+                strprintf("Fetching params %-22s %3d%%  %.1f MB/s",
+                    display_name.c_str(),
+                    percent,
+                    (received / 1048576.0) / (elapsed_ms / 1000.0)),
+                percent, percent >= 100, last_emit_ms, last_emit_decile);
         }
         if (next_offset < size) {
             CBootstrapSnapshotChunkRequest refill;
