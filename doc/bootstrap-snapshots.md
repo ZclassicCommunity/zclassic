@@ -79,6 +79,30 @@ snapshot for the wrong chain point, and the receiver verifies every file hash
 advertised by the serving peer, but the serving peer still chooses the snapshot
 contents. Use `-bootstrappeer` only with a peer you control or otherwise trust.
 
+### Fast-sync trust model: snapshot peers are trusted like the binary
+
+> **Important:** The post-import `VerifyDB` pass only re-checks the most recent
+> blocks. UTXOs in the imported `chainstate/` that are deeper than `-checkblocks`
+> (default `288`) blocks below the tip are **not** re-derived from block data —
+> they are trusted as-is from the snapshot peer.
+
+Because of this, **a snapshot peer must be trusted at the same level as the
+binary itself.** A malicious snapshot could embed spendable but bogus UTXOs that
+are older than the `-checkblocks` horizon, and they would pass validation: the
+verification pass never revisits chainstate entries below that depth, so it would
+not detect them. The per-file SHA-256 checks only confirm that you received the
+bytes the serving peer advertised — they say nothing about whether those bytes
+describe a legitimate chain history.
+
+A cautious operator can reduce this exposure when bootstrapping for the first
+time by:
+
+- raising `-checkblocks` (up to `0`, which checks all blocks) and/or
+  `-checklevel` so more of the imported chainstate is re-verified against block
+  data, at the cost of a longer startup; or
+- only bootstrapping from a peer or operator they trust to have produced the
+  snapshot honestly.
+
 ## Network Service Direction
 
 This branch has the first node-to-node network pieces:

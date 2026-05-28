@@ -20,6 +20,12 @@
 // exercise the Misbehaving paths added for malformed bootstrap-snapshot messages.
 extern bool ProcessMessage(CNode* pfrom, std::string strCommand, CDataStream& vRecv, int64_t nTimeReceived);
 
+// Test-only accessor (defined in bootstrap.cpp, not the public header) for the
+// per-IP quota tracked-address cap, so the hard-cap eviction test can size its
+// flood without hardcoding the constant. Declared at global scope so it links
+// against the global-namespace definition.
+extern const size_t BootstrapServeMaxTrackedIpsForTest();
+
 static CBootstrapSnapshotFile TestBootstrapSnapshotFile()
 {
     CBootstrapSnapshotFile file;
@@ -405,6 +411,59 @@ BOOST_AUTO_TEST_CASE(bootstrap_serve_quota_throttle_and_stop)
     mapArgs["-bootstrapservemaxbytesperday"] = "0";
     BootstrapServeChargeBytes(ip, false, t0, 1000000000);
     BOOST_CHECK(BootstrapServeAllowChunk(ip, false, t0, stop));
+    BOOST_CHECK(!stop);
+
+    ClearBootstrapServeQuota();
+    RestoreArg("-bootstrapservemaxbytesperday", hadCap, oldCap);
+    RestoreArg("-bootstrapservethrottlekbps", hadKbps, oldKbps);
+}
+
+BOOST_AUTO_TEST_CASE(bootstrap_serve_quota_hard_caps_tracked_ips)
+{
+    // The per-IP quota map must stay bounded even when every tracked window is
+    // still active (an attacker cycling through many distinct source IPs within
+    // the same 24h window). The old eviction sweep only dropped fully-expired
+    // windows, so this exercised the new hard-cap eviction of the oldest-window
+    // entry. The map size is file-local in bootstrap.cpp, so we observe the
+    // bound behaviorally: a "victim" IP charged over the cap at the earliest
+    // window must be evicted once enough newer IPs are tracked, after which it
+    // is no longer rate-limited (AllowChunk returns true because it is gone).
+    const bool hadCap = mapArgs.count("-bootstrapservemaxbytesperday");
+    const bool hadKbps = mapArgs.count("-bootstrapservethrottlekbps");
+    const std::string oldCap = hadCap ? mapArgs["-bootstrapservemaxbytesperday"] : "";
+    const std::string oldKbps = hadKbps ? mapArgs["-bootstrapservethrottlekbps"] : "";
+
+    ClearBootstrapServeQuota();
+    mapArgs["-bootstrapservemaxbytesperday"] = "1000";
+    mapArgs["-bootstrapservethrottlekbps"] = "0"; // hard stop once over cap
+
+    const int64_t tVictim = 1000000;     // earliest window -> oldest, evicted first
+    const int64_t tFlood = tVictim + 1;  // 1ms later: still well within the 24h window
+    const std::string victim = "198.51.100.123";
+
+    // Charge the victim over the daily cap; it is now tracked and rate-limited.
+    BootstrapServeChargeBytes(victim, /*whitelisted=*/false, tVictim, 2000);
+    bool stop = false;
+    BOOST_CHECK(!BootstrapServeAllowChunk(victim, false, tVictim, stop)); // over cap
+    BOOST_CHECK(stop);
+
+    // Flood the map with strictly more than the cap of distinct, active IPs.
+    // None of these windows have expired (same tFlood), so only the new
+    // hard-cap eviction can keep the map bounded -- and the victim (oldest
+    // windowStartMs) is the one that must be dropped.
+    const size_t cap_ips = BootstrapServeMaxTrackedIpsForTest();
+    for (size_t i = 0; i <= cap_ips; ++i) {
+        BootstrapServeChargeBytes(strprintf("10.%u.%u.%u",
+                                            (unsigned)((i >> 16) & 0xff),
+                                            (unsigned)((i >> 8) & 0xff),
+                                            (unsigned)(i & 0xff)),
+                                  /*whitelisted=*/false, tFlood, 1);
+    }
+
+    // The victim has been evicted: it is no longer tracked, so it is treated as
+    // a fresh address and allowed again despite having been charged over cap.
+    stop = false;
+    BOOST_CHECK(BootstrapServeAllowChunk(victim, false, tFlood, stop));
     BOOST_CHECK(!stop);
 
     ClearBootstrapServeQuota();

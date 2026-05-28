@@ -1387,6 +1387,11 @@ bool ReadZcashParamChunk(const CBootstrapSnapshotChunkRequest& request, CBootstr
         error = "zcash param chunk range exceeds file size";
         return false;
     }
+    // Same invariant as the snapshot serve path: alignment/length are validated
+    // against the compile-time BOOTSTRAP_SNAPSHOT_CHUNK_SIZE because the server
+    // always advertises nChunkSize == BOOTSTRAP_SNAPSHOT_CHUNK_SIZE
+    // (BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE == BOOTSTRAP_SNAPSHOT_CHUNK_SIZE in
+    // bootstrap.h). Keep these equal if chunk size ever becomes configurable.
     if (request.nOffset % BOOTSTRAP_SNAPSHOT_CHUNK_SIZE != 0) {
         fclose(fp);
         error = "zcash param chunk offset is not aligned";
@@ -1764,6 +1769,13 @@ bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request, C
         error = "bootstrap chunk range exceeds file size";
         return false;
     }
+    // Offsets must be aligned to the served chunk size. We validate against the
+    // compile-time constant rather than the manifest's nChunkSize because the
+    // server always advertises nChunkSize == BOOTSTRAP_SNAPSHOT_CHUNK_SIZE
+    // (see manifest construction; BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE ==
+    // BOOTSTRAP_SNAPSHOT_CHUNK_SIZE in bootstrap.h). If the chunk size ever
+    // becomes configurable, this check (and expected_length below) must use the
+    // manifest's nChunkSize instead.
     if (request.nOffset % BOOTSTRAP_SNAPSHOT_CHUNK_SIZE != 0) {
         fclose(fp);
         error = "bootstrap chunk offset is not aligned";
@@ -1934,6 +1946,14 @@ static int64_t BootstrapServeThrottleKBps()
     return GetArg("-bootstrapservethrottlekbps", BOOTSTRAP_SERVE_DEFAULT_THROTTLE_KBPS);
 }
 
+// Test-only accessor for the tracked-IP cap. Declared extern (not in
+// bootstrap.h) so unit tests can exercise the hard-cap eviction without
+// hardcoding the constant or exposing it on the public header.
+const size_t BootstrapServeMaxTrackedIpsForTest()
+{
+    return BOOTSTRAP_SERVE_MAX_TRACKED_IPS;
+}
+
 void ClearBootstrapServeQuota()
 {
     LOCK(cs_bootstrap_serve_quota);
@@ -2001,6 +2021,22 @@ void BootstrapServeChargeBytes(const std::string& ip, bool whitelisted, int64_t 
                 ++it;
             }
         }
+    }
+
+    // Hard-enforce the bound: if every tracked window is still active (so the
+    // expired-entry sweep above freed nothing), evict the entry with the oldest
+    // (least-recently-reset) window until the map is back within the cap. This
+    // guarantees the map can never grow without bound even under an attacker
+    // cycling through >BOOTSTRAP_SERVE_MAX_TRACKED_IPS distinct, all-active IPs.
+    // Each call adds at most one entry, so this loop normally erases at most one.
+    while (bootstrapServeQuota.size() > BOOTSTRAP_SERVE_MAX_TRACKED_IPS) {
+        std::map<std::string, BootstrapServeQuota>::iterator oldest = bootstrapServeQuota.begin();
+        for (std::map<std::string, BootstrapServeQuota>::iterator it = bootstrapServeQuota.begin(); it != bootstrapServeQuota.end(); ++it) {
+            if (it->second.windowStartMs < oldest->second.windowStartMs) {
+                oldest = it;
+            }
+        }
+        bootstrapServeQuota.erase(oldest);
     }
 }
 
