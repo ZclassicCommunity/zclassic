@@ -726,6 +726,58 @@ static bool check_file_hash(const std::string& path, const std::string& hash)
     return true;
 }
 
+static bool VerifyImportedBootstrapAnchor(std::string& error)
+{
+    const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
+    if (anchor.nHeight < 0 || anchor.hashBlock.IsNull()) {
+        error = "bootstrap snapshot verification requires a compiled fast-sync anchor";
+        return false;
+    }
+    if (chainActive.Tip() == NULL) {
+        error = "bootstrap snapshot verification failed: active chain is empty";
+        return false;
+    }
+    if (chainActive.Height() != anchor.nHeight) {
+        error = strprintf(
+            "bootstrap snapshot verification failed: imported tip height is %d, expected %d",
+            chainActive.Height(),
+            anchor.nHeight);
+        return false;
+    }
+    CBlockIndex* pindex = chainActive[anchor.nHeight];
+    if (pindex == NULL || pindex->GetBlockHash() != anchor.hashBlock) {
+        error = strprintf(
+            "bootstrap snapshot verification failed: imported anchor hash is %s, expected %s",
+            pindex ? pindex->GetBlockHash().ToString() : std::string("missing"),
+            anchor.hashBlock.ToString());
+        return false;
+    }
+    return true;
+}
+
+static void CloseBootstrapChainDatabases()
+{
+    UnloadBlockIndex();
+    delete pcoinsTip;
+    pcoinsTip = NULL;
+    delete pcoinscatcher;
+    pcoinscatcher = NULL;
+    delete pcoinsdbview;
+    pcoinsdbview = NULL;
+    delete pblocktree;
+    pblocktree = NULL;
+}
+
+static void RemoveFailedPeerBootstrapChainData(const boost::filesystem::path& data_dir)
+{
+    try {
+        boost::filesystem::remove_all(data_dir / "blocks");
+        boost::filesystem::remove_all(data_dir / "chainstate");
+    } catch (const boost::filesystem::filesystem_error& e) {
+        LogPrintf("Failed to remove rejected bootstrap chain data from %s: %s\n", data_dir.string(), e.what());
+    }
+}
+
 
 
 /** Sanity checks
@@ -1837,6 +1889,19 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 return InitError(strLoadError);
             }
         }
+    }
+
+    if (bootstrap_snapshot_ran) {
+        std::string bootstrap_anchor_error;
+        if (!VerifyImportedBootstrapAnchor(bootstrap_anchor_error)) {
+            LogPrintf("%s\n", bootstrap_anchor_error);
+            CloseBootstrapChainDatabases();
+            RemoveFailedPeerBootstrapChainData(GetDataDir());
+            return InitError(bootstrap_anchor_error);
+        }
+        LogPrintf("Bootstrap snapshot verified at height %d (%s)\n",
+            Params().FastSyncAnchor().nHeight,
+            Params().FastSyncAnchor().hashBlock.ToString());
     }
 
     // As LoadBlockIndex can take several minutes, it's possible the user

@@ -106,6 +106,9 @@ static bool IsSafeBootstrapSnapshotPath(const boost::filesystem::path& relative)
 static bool IsBootstrapSnapshotDataPath(const boost::filesystem::path& relative);
 static bool HashBootstrapSnapshotFile(const boost::filesystem::path& path, uint256& hash, std::string& error);
 static bool StatOpenBootstrapSnapshotFile(FILE* fp, uint64_t& size, std::time_t& mtime);
+static bool InstallStagedBootstrapChainData(const boost::filesystem::path& staging,
+                                            const boost::filesystem::path& data_dir,
+                                            std::string& error);
 
 // Portable 64-bit seek. fseek()'s `long` second argument wraps on 32-bit
 // platforms and on Windows (where `long` is 32 bits), so bootstrap files
@@ -532,8 +535,9 @@ bool ImportBootstrapDatadir(const boost::filesystem::path& source_root, const bo
             return false;
         }
 
+        boost::filesystem::path backup;
         if (has_existing) {
-            const boost::filesystem::path backup = data_dir / strprintf("bootstrap-backup-%d", GetTime());
+            backup = data_dir / boost::filesystem::unique_path(strprintf("bootstrap-backup-%d-%%%%-%%%%-%%%%", GetTime()));
             boost::filesystem::create_directories(backup);
             if (boost::filesystem::exists(blocks_dir))
                 boost::filesystem::rename(blocks_dir, backup / "blocks");
@@ -542,9 +546,23 @@ bool ImportBootstrapDatadir(const boost::filesystem::path& source_root, const bo
             LogPrintf("Moved existing chain data to %s\n", backup.string());
         }
 
-        boost::filesystem::rename(staging / "blocks", blocks_dir);
-        boost::filesystem::rename(staging / "chainstate", chainstate_dir);
-        boost::filesystem::remove_all(staging);
+        if (!InstallStagedBootstrapChainData(staging, data_dir, error)) {
+            if (!backup.empty()) {
+                try {
+                    boost::filesystem::remove_all(blocks_dir);
+                    boost::filesystem::remove_all(chainstate_dir);
+                    if (boost::filesystem::exists(backup / "blocks"))
+                        boost::filesystem::rename(backup / "blocks", blocks_dir);
+                    if (boost::filesystem::exists(backup / "chainstate"))
+                        boost::filesystem::rename(backup / "chainstate", chainstate_dir);
+                    boost::filesystem::remove_all(backup);
+                } catch (const boost::filesystem::filesystem_error& e) {
+                    error = strprintf("%s; additionally failed to restore bootstrap backup: %s", error, e.what());
+                }
+            }
+            boost::filesystem::remove_all(staging);
+            return false;
+        }
     } catch (const boost::filesystem::filesystem_error& e) {
         error = e.what();
         return false;
@@ -552,6 +570,47 @@ bool ImportBootstrapDatadir(const boost::filesystem::path& source_root, const bo
 
     LogPrintf("Imported bootstrap chain data from %s\n", source_root.string());
     return true;
+}
+
+static bool InstallStagedBootstrapChainData(const boost::filesystem::path& staging,
+                                            const boost::filesystem::path& data_dir,
+                                            std::string& error)
+{
+    const boost::filesystem::path blocks_dir = data_dir / "blocks";
+    const boost::filesystem::path chainstate_dir = data_dir / "chainstate";
+    bool installed_blocks = false;
+    bool installed_chainstate = false;
+
+    try {
+        if (!BootstrapSnapshotPathsExist(staging)) {
+            error = "staged bootstrap data is incomplete";
+            return false;
+        }
+        if (boost::filesystem::exists(blocks_dir) || boost::filesystem::exists(chainstate_dir)) {
+            error = strprintf("%s already has blocks/ or chainstate/", data_dir.string());
+            return false;
+        }
+
+        boost::filesystem::rename(staging / "blocks", blocks_dir);
+        installed_blocks = true;
+        boost::filesystem::rename(staging / "chainstate", chainstate_dir);
+        installed_chainstate = true;
+        boost::filesystem::remove_all(staging);
+        return true;
+    } catch (const boost::filesystem::filesystem_error& e) {
+        try {
+            if (installed_blocks)
+                boost::filesystem::remove_all(blocks_dir);
+            if (installed_chainstate)
+                boost::filesystem::remove_all(chainstate_dir);
+            boost::filesystem::remove_all(staging);
+        } catch (const boost::filesystem::filesystem_error& cleanup) {
+            error = strprintf("bootstrap install failed: %s; cleanup failed: %s", e.what(), cleanup.what());
+            return false;
+        }
+        error = strprintf("bootstrap install failed: %s", e.what());
+        return false;
+    }
 }
 
 static bool WriteBootstrapChunkToFile(const boost::filesystem::path& path, const CBootstrapSnapshotChunk& chunk, FILE* file, std::string& error)
@@ -969,6 +1028,7 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
         }
 
         CloseSocket(socket);
+        socket = INVALID_SOCKET;
 
         if (!BootstrapSnapshotPathsExist(staging)) {
             boost::filesystem::remove_all(staging);
@@ -980,9 +1040,9 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
             return false;
         }
 
-        boost::filesystem::rename(staging / "blocks", data_dir / "blocks");
-        boost::filesystem::rename(staging / "chainstate", data_dir / "chainstate");
-        boost::filesystem::remove_all(staging);
+        if (!InstallStagedBootstrapChainData(staging, data_dir, error)) {
+            return false;
+        }
     } catch (const boost::filesystem::filesystem_error& e) {
         CloseSocket(socket);
         boost::filesystem::remove_all(staging);
@@ -1183,11 +1243,11 @@ bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::str
 // re-used by InitSanityCheck via GetZcashParamSpecs() so the startup hash
 // check and the bootstrap-protocol hash check can never disagree.
 static const ZcashParamSpec ZCASH_PARAM_FILES_RAW[] = {
-    {"sapling-output.params", "2f0ebbcbb9bb0bcffe95a397e7eba89c29eb4dde6191c339db88570e3f3fb0e4"},
-    {"sapling-spend.params",  "8e48ffd23abb3a5fd9c5589204f32d9c31285a04b78096ba40a79b75677efc13"},
-    {"sprout-groth16.params", "b685d700c60328498fbde589c8c7c484c722b788b265b72af448a5bf0ee55b50"},
-    {"sprout-proving.key",    "8bc20a7f013b2b58970cddd2e7ea028975c88ae7ceb9259a5344a16bc2c0eef7"},
-    {"sprout-verifying.key",  "4bd498dae0aacfd8e98dc306338d017d9c08dd0918ead18172bd0aec2fc5df82"},
+    {"sapling-output.params", "2f0ebbcbb9bb0bcffe95a397e7eba89c29eb4dde6191c339db88570e3f3fb0e4", 3592860ULL},
+    {"sapling-spend.params",  "8e48ffd23abb3a5fd9c5589204f32d9c31285a04b78096ba40a79b75677efc13", 47958396ULL},
+    {"sprout-groth16.params", "b685d700c60328498fbde589c8c7c484c722b788b265b72af448a5bf0ee55b50", 725523612ULL},
+    {"sprout-proving.key",    "8bc20a7f013b2b58970cddd2e7ea028975c88ae7ceb9259a5344a16bc2c0eef7", 910173851ULL},
+    {"sprout-verifying.key",  "4bd498dae0aacfd8e98dc306338d017d9c08dd0918ead18172bd0aec2fc5df82", 1449ULL},
 };
 static const size_t ZCASH_PARAM_FILE_COUNT = sizeof(ZCASH_PARAM_FILES_RAW) / sizeof(ZCASH_PARAM_FILES_RAW[0]);
 
@@ -1262,6 +1322,9 @@ bool GetZcashParamManifest(CBootstrapSnapshotManifest& manifest, std::string& er
         CBootstrapSnapshotFile file;
         file.strPath = ZcashParamAt(i).name;
         file.nSize = boost::filesystem::file_size(path);
+        if (file.nSize != ZcashParamAt(i).nSize) {
+            continue;
+        }
         file.hashSha256 = ZcashParamExpectedHash(ZcashParamAt(i));
         if (file.nSize > std::numeric_limits<uint64_t>::max() - total) {
             error = "zcash parameter byte size overflow";
@@ -1526,6 +1589,14 @@ bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error)
             }
             if (!found) {
                 error = strprintf("zcash param peer does not serve %s", param.name);
+                ok = false;
+                break;
+            }
+            if (size != param.nSize) {
+                error = strprintf("zcash param peer advertised invalid size for %s: got %llu expected %llu",
+                    param.name,
+                    (unsigned long long)size,
+                    (unsigned long long)param.nSize);
                 ok = false;
                 break;
             }

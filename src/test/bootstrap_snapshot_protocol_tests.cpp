@@ -662,6 +662,23 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_rejects_oversize)
     }
 }
 
+BOOST_AUTO_TEST_CASE(zcash_param_specs_pin_expected_sizes)
+{
+    const std::vector<ZcashParamSpec>& specs = GetZcashParamSpecs();
+    BOOST_REQUIRE_EQUAL(specs.size(), 5);
+
+    BOOST_CHECK_EQUAL(specs[0].name, "sapling-output.params");
+    BOOST_CHECK_EQUAL(specs[0].nSize, 3592860ULL);
+    BOOST_CHECK_EQUAL(specs[1].name, "sapling-spend.params");
+    BOOST_CHECK_EQUAL(specs[1].nSize, 47958396ULL);
+    BOOST_CHECK_EQUAL(specs[2].name, "sprout-groth16.params");
+    BOOST_CHECK_EQUAL(specs[2].nSize, 725523612ULL);
+    BOOST_CHECK_EQUAL(specs[3].name, "sprout-proving.key");
+    BOOST_CHECK_EQUAL(specs[3].nSize, 910173851ULL);
+    BOOST_CHECK_EQUAL(specs[4].name, "sprout-verifying.key");
+    BOOST_CHECK_EQUAL(specs[4].nSize, 1449ULL);
+}
+
 BOOST_AUTO_TEST_CASE(bootstrap_manifest_and_chunk_service_helpers)
 {
     const bool hadServe = mapArgs.count("-bootstrapserve");

@@ -58,6 +58,7 @@ std::vector<std::string> GetBootstrapPeerList();
 struct ZcashParamSpec {
     const char* name;
     const char* sha256hex;
+    uint64_t nSize;
 };
 //! Authoritative table of required zk-SNARK parameter files. Ordering is the
 //! same order the bootstrap manifest advertises and serves them.
