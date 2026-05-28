@@ -1178,7 +1178,18 @@ bool ZcashParamsPresentAndValid()
 {
     const boost::filesystem::path dir = ZC_GetParamsDir();
     for (size_t i = 0; i < ZCASH_PARAM_FILE_COUNT; ++i) {
-        if (!boost::filesystem::is_regular_file(dir / ZCASH_PARAM_FILES[i].name)) {
+        const boost::filesystem::path path = dir / ZCASH_PARAM_FILES[i].name;
+        if (!boost::filesystem::is_regular_file(path)) {
+            return false;
+        }
+        uint256 have;
+        std::string hashError;
+        if (!HashBootstrapSnapshotFile(path, have, hashError)) {
+            // Unreadable / I/O error -> treat as not valid so the auto-fetch
+            // path (or a clear error from InitSanityCheck) gets a chance to run.
+            return false;
+        }
+        if (have != ZcashParamExpectedHash(ZCASH_PARAM_FILES[i])) {
             return false;
         }
     }
