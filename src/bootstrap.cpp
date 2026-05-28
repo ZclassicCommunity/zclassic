@@ -12,6 +12,7 @@
 #include "net.h"
 #include "netbase.h"
 #include "sync.h"
+#include "ui_interface.h"
 #include "util.h"
 #include "utilstrencodings.h"
 
@@ -34,6 +35,20 @@
 #else
 #include <unistd.h>
 #endif
+
+// True when the persistent metrics screen owns the console. It clears and
+// redraws the whole screen every second, so progress must go through
+// uiInterface.InitMessage (which the screen renders on a managed line) rather
+// than writing to stdout directly, or the two fight and flicker.
+static bool BootstrapMetricsScreenActive()
+{
+#if defined(WIN32)
+    const bool is_tty = (_isatty(_fileno(stdout)) != 0);
+#else
+    const bool is_tty = (isatty(fileno(stdout)) != 0);
+#endif
+    return GetBoolArg("-showmetrics", is_tty) && GetBoolArg("-metricsui", is_tty);
+}
 
 // Emit a single in-place-updating progress line to the console. On a TTY it
 // rewrites one line (carriage return + clear-to-end-of-line), throttled so it
@@ -747,15 +762,21 @@ static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotMan
                 (unsigned long long)received_total,
                 (unsigned long long)manifest.nSnapshotBytes,
                 mbps);
-            // Live, throttled console progress so a bare foreground run shows it
-            // updating without -printtoconsole/-debuglogfile.
-            EmitBootstrapProgress(
-                strprintf("Bootstrap snapshot: %3d%%  %.2f / %.2f GB  %.1f MB/s",
-                    percent,
-                    received_total / 1073741824.0,
-                    manifest.nSnapshotBytes / 1073741824.0,
-                    mbps),
-                percent, percent >= 100, last_emit_ms, last_emit_decile);
+            // Live progress. The snapshot download overlaps the metrics screen
+            // thread, so when that owns the console feed it through InitMessage
+            // (rendered cleanly on the screen's managed line); otherwise write a
+            // throttled single line to stdout directly.
+            const std::string progress = strprintf(
+                "Bootstrap snapshot: %3d%%  %.2f / %.2f GB  %.1f MB/s",
+                percent,
+                received_total / 1073741824.0,
+                manifest.nSnapshotBytes / 1073741824.0,
+                mbps);
+            if (BootstrapMetricsScreenActive()) {
+                uiInterface.InitMessage(progress);
+            } else {
+                EmitBootstrapProgress(progress, percent, percent >= 100, last_emit_ms, last_emit_decile);
+            }
         }
 
         // Refill the pipeline window.
