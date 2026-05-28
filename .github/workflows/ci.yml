@@ -1,5 +1,12 @@
 name: Continuous Integration
 
+# A push to a branch with an open PR triggers both `push` and `pull_request`
+# runs for the same commit. Group them so only the latest commit's run survives;
+# superseded runs are cancelled instead of piling up in the queue.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     paths-ignore:
@@ -37,7 +44,7 @@ jobs:
         include:
           - name: x86_64-linux-dbg
             host: x86_64-unknown-linux-gnu
-            os: ubuntu-20.04
+            os: ubuntu-22.04
             packages: bc python3-zmq
             run-tests: true
             dep-opts: "DEBUG=1"
@@ -61,10 +68,10 @@ jobs:
         run: ${{ matrix.postinstall }}
 
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Dependency cache
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         env:
           cache-name: depends
         with:
@@ -75,7 +82,7 @@ jobs:
         run: |
           make $MAKEJOBS -C depends HOST=${{ matrix.host }} ${{ matrix.dep-opts }}
       - name: CCache
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         env:
           cache-name: ccache
         with:
@@ -86,7 +93,7 @@ jobs:
         run: |
            bash zcutil/build-linux-ci.sh ${{ matrix.goal }} || ( echo "Build failure. Verbose build follows." && make ${{ matrix.goal }} V=1 ; false )
       - name: Upload artifacts
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: Zclassic-Wallet-${{ github.sha }}-${{ matrix.name }}
           path: |
