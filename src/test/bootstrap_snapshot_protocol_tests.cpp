@@ -5,12 +5,17 @@
 #include "protocol.h"
 #include "bootstrap.h"
 #include "chainparams.h"
+#include "crypto/sha256.h"
 #include "main.h"
 #include "net.h"
 #include "streams.h"
 #include "test/test_bitcoin.h"
 #include "util.h"
 #include "utilstrencodings.h"
+
+#include <algorithm>
+#include <iterator>
+#include <map>
 
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
@@ -84,6 +89,34 @@ static void WriteFixtureFile(const boost::filesystem::path& path, const std::str
     boost::filesystem::create_directories(path.parent_path());
     boost::filesystem::ofstream file(path);
     file << contents;
+}
+
+// SHA-256 over a byte buffer, computed exactly the way bootstrap.cpp hashes
+// snapshot files (CSHA256 -> hex -> uint256), so the round-trip test can check a
+// reassembled file against the manifest's per-file hash.
+static uint256 Sha256OfBytes(const std::vector<unsigned char>& data)
+{
+    CSHA256 hasher;
+    if (!data.empty()) {
+        hasher.Write(&data[0], data.size());
+    }
+    unsigned char digest[CSHA256::OUTPUT_SIZE];
+    hasher.Finalize(digest);
+    return uint256S("0x" + HexStr(digest, digest + CSHA256::OUTPUT_SIZE));
+}
+
+// Deterministic pseudo-random bytes so fixtures are reproducible without
+// Math.random/time. Distinct `seed`s give distinct file contents.
+static std::string DeterministicBytes(size_t n, unsigned int seed)
+{
+    std::string s;
+    s.resize(n);
+    unsigned int x = seed * 2654435761u + 1u;
+    for (size_t i = 0; i < n; ++i) {
+        x = x * 1664525u + 1013904223u;
+        s[i] = (char)((x >> 16) & 0xff);
+    }
+    return s;
 }
 
 BOOST_FIXTURE_TEST_SUITE(bootstrap_snapshot_protocol_tests, BasicTestingSetup)
@@ -1021,6 +1054,126 @@ BOOST_FIXTURE_TEST_CASE(bootstrap_getbsman_trailing_bytes_misbehaves, TestingSet
     CNodeStateStats after;
     BOOST_REQUIRE(GetNodeStateStats(node.GetId(), after));
     BOOST_CHECK_GE(after.nMisbehavior - before.nMisbehavior, 20);
+}
+
+// End-to-end snapshot transfer: serve -> chunked pull -> reassemble -> verify
+// -> install. This is the integration path the helper-level tests above don't
+// cover. It drives the real serve entrypoints (GetBootstrapSnapshotManifest +
+// ReadBootstrapSnapshotChunk) the way a downloading peer does -- fetch the
+// manifest, then pull every file one BOOTSTRAP_SNAPSHOT_CHUNK_SIZE chunk at a
+// time (including a file that spans multiple chunks) -- reassembles each file,
+// checks it against the manifest's per-file SHA-256 (the integrity binding the
+// client trusts), confirms a single flipped byte breaks that hash, then
+// ImportBootstrapDatadir()s the staged result into a fresh datadir and verifies
+// the installed bytes match the originals end to end.
+//
+// We can use synthetic chainstate files because the compiled fast-sync anchor
+// (which binds the chain *tip*) is copied into the manifest verbatim and is not
+// recomputed from the served bytes -- so the manifest validates against the MAIN
+// anchor that BasicTestingSetup selects, while the per-file SHA-256 still binds
+// the actual transferred content. A two-node regtest test cannot exercise this:
+// a regtest chainstate would never match the mainnet anchor digest.
+BOOST_AUTO_TEST_CASE(bootstrap_snapshot_full_transfer_roundtrip)
+{
+    const bool hadServe = mapArgs.count("-bootstrapserve");
+    const bool hadSource = mapArgs.count("-bootstrapsourcedir");
+    const std::string oldServe = hadServe ? mapArgs["-bootstrapserve"] : "";
+    const std::string oldSource = hadSource ? mapArgs["-bootstrapsourcedir"] : "";
+
+    namespace fs = boost::filesystem;
+    const fs::path root    = fs::temp_directory_path() / fs::unique_path("zclassic-bs-e2e-src-%%%%-%%%%-%%%%");
+    const fs::path dest    = fs::temp_directory_path() / fs::unique_path("zclassic-bs-e2e-dst-%%%%-%%%%-%%%%");
+    const fs::path staging = fs::temp_directory_path() / fs::unique_path("zclassic-bs-e2e-stg-%%%%-%%%%-%%%%");
+
+    fs::create_directories(root / "blocks" / "index");
+    fs::create_directories(root / "chainstate");
+
+    // A spread of sizes: a tiny file, an exactly-one-chunk file, and a file that
+    // spans multiple chunks (forces the offset/length tiling in the serve path).
+    std::map<std::string, std::string> originals;
+    originals["blocks/blk00000.dat"]     = DeterministicBytes(37, 1);
+    originals["blocks/index/000001.ldb"] = DeterministicBytes(BOOTSTRAP_SNAPSHOT_CHUNK_SIZE, 2);
+    originals["chainstate/000003.ldb"]   = DeterministicBytes((size_t)BOOTSTRAP_SNAPSHOT_CHUNK_SIZE * 2 + 1234, 3);
+    for (std::map<std::string, std::string>::const_iterator it = originals.begin(); it != originals.end(); ++it) {
+        fs::ofstream f(root / fs::path(it->first), std::ios::binary);
+        f.write(it->second.data(), (std::streamsize)it->second.size());
+    }
+
+    mapArgs["-bootstrapserve"] = "1";
+    mapArgs["-bootstrapsourcedir"] = root.string();
+
+    std::string error;
+    CBootstrapSnapshotManifest manifest;
+    BOOST_REQUIRE_MESSAGE(GetBootstrapSnapshotManifest(manifest, error), error);
+    BOOST_REQUIRE_MESSAGE(ValidateBootstrapSnapshotManifest(manifest, error), error);
+    BOOST_REQUIRE_EQUAL(manifest.vFiles.size(), originals.size());
+
+    // Pull every file in BOOTSTRAP_SNAPSHOT_CHUNK_SIZE pieces through the real
+    // serve entrypoint and reassemble, exactly as the download client does.
+    fs::create_directories(staging);
+    bool sawMultiChunkFile = false;
+    for (uint32_t i = 0; i < manifest.vFiles.size(); ++i) {
+        const CBootstrapSnapshotFile& mf = manifest.vFiles[i];
+        std::vector<unsigned char> assembled;
+        assembled.reserve(mf.nSize);
+        uint64_t chunks = 0;
+        for (uint64_t off = 0; off < mf.nSize; off += BOOTSTRAP_SNAPSHOT_CHUNK_SIZE) {
+            CBootstrapSnapshotChunkRequest req;
+            req.nFileIndex = i;
+            req.nOffset = off;
+            req.nLength = (uint32_t)std::min<uint64_t>(BOOTSTRAP_SNAPSHOT_CHUNK_SIZE, mf.nSize - off);
+
+            CBootstrapSnapshotChunk chunk;
+            BOOST_REQUIRE_MESSAGE(ReadBootstrapSnapshotChunk(req, chunk, error), error);
+            BOOST_CHECK_EQUAL(chunk.nFileIndex, i);
+            BOOST_CHECK_EQUAL(chunk.nOffset, off);
+            BOOST_CHECK_EQUAL(chunk.vData.size(), req.nLength);
+            assembled.insert(assembled.end(), chunk.vData.begin(), chunk.vData.end());
+            ++chunks;
+        }
+        if (mf.nSize > BOOTSTRAP_SNAPSHOT_CHUNK_SIZE) {
+            BOOST_CHECK_GT(chunks, 1u); // the big file genuinely spanned >1 chunk
+            sawMultiChunkFile = true;
+        }
+
+        // Reassembled bytes match what we served, and the manifest's per-file
+        // SHA-256 binds those exact bytes (the integrity check a client trusts).
+        const std::string& want = originals[mf.strPath];
+        BOOST_REQUIRE_EQUAL(assembled.size(), want.size());
+        BOOST_CHECK(std::equal(assembled.begin(), assembled.end(), (const unsigned char*)want.data()));
+        BOOST_CHECK_MESSAGE(Sha256OfBytes(assembled) == mf.hashSha256, "manifest hash mismatch for " + mf.strPath);
+
+        // Tamper detection: a single flipped byte must break the manifest hash,
+        // which is exactly what makes a corrupt/malicious chunk detectable.
+        std::vector<unsigned char> tampered = assembled;
+        tampered[tampered.size() / 2] ^= 0x01;
+        BOOST_CHECK(Sha256OfBytes(tampered) != mf.hashSha256);
+
+        // Stage the verified file at its manifest-relative path.
+        const fs::path out = staging / fs::path(mf.strPath);
+        fs::create_directories(out.parent_path());
+        fs::ofstream of(out, std::ios::binary);
+        of.write((const char*)&assembled[0], (std::streamsize)assembled.size());
+    }
+    BOOST_CHECK(sawMultiChunkFile);
+    BOOST_REQUIRE(BootstrapSnapshotPathsExist(staging));
+
+    // Install the staged snapshot into a fresh datadir and confirm every file
+    // round-tripped intact end to end.
+    BOOST_REQUIRE_MESSAGE(ImportBootstrapDatadir(staging, dest, false, error), error);
+    for (std::map<std::string, std::string>::const_iterator it = originals.begin(); it != originals.end(); ++it) {
+        const fs::path installed = dest / fs::path(it->first);
+        BOOST_REQUIRE_MESSAGE(fs::exists(installed), it->first);
+        fs::ifstream in(installed, std::ios::binary);
+        const std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        BOOST_CHECK_MESSAGE(got == it->second, "installed content mismatch for " + it->first);
+    }
+
+    RestoreArg("-bootstrapserve", hadServe, oldServe);
+    RestoreArg("-bootstrapsourcedir", hadSource, oldSource);
+    fs::remove_all(root);
+    fs::remove_all(dest);
+    fs::remove_all(staging);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
