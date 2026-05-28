@@ -26,6 +26,12 @@ extern bool ProcessMessage(CNode* pfrom, std::string strCommand, CDataStream& vR
 // against the global-namespace definition.
 extern const size_t BootstrapServeMaxTrackedIpsForTest();
 
+// Windowed minimum-throughput watchdog (defined in bootstrap.cpp, not the
+// public header). Declared at global scope so it links against the
+// global-namespace definition. Caller keeps windowStartMs/bytesAtWindowStart
+// as locals; returns true to abort when a full window stayed below the floor.
+extern bool BootstrapDownloadTooSlow(int64_t&, uint64_t&, uint64_t, int64_t);
+
 static CBootstrapSnapshotFile TestBootstrapSnapshotFile()
 {
     CBootstrapSnapshotFile file;
@@ -469,6 +475,80 @@ BOOST_AUTO_TEST_CASE(bootstrap_serve_quota_hard_caps_tracked_ips)
     ClearBootstrapServeQuota();
     RestoreArg("-bootstrapservemaxbytesperday", hadCap, oldCap);
     RestoreArg("-bootstrapservethrottlekbps", hadKbps, oldKbps);
+}
+
+BOOST_AUTO_TEST_CASE(bootstrap_download_throughput_watchdog)
+{
+    // BootstrapDownloadTooSlow is a windowed minimum-throughput watchdog the
+    // bootstrap *client* runs while downloading a snapshot. The caller keeps
+    // windowStartMs/bytesAtWindowStart as locals (seeded to the download start
+    // time and 0) and calls after each chunk with cumulative bytes and now.
+    // It returns true only when a full window elapsed below the byte/sec floor.
+    //
+    // The exact floor (~32 KiB/s) and window (~60s) are file-local constants in
+    // bootstrap.cpp and not visible here, so every case below uses rates and
+    // elapsed times that are obviously above/below or larger/smaller than any
+    // plausible value, so the test does not depend on the precise constants.
+    const int64_t t0 = 1000000;
+
+    // (a) Before a window completes, it never aborts. A zero-elapsed call and a
+    // small elapsed clearly under any plausible window both return false even
+    // with no bytes received -- there is no completed window to judge yet.
+    {
+        int64_t ws = t0;
+        uint64_t bws = 0;
+        BOOST_CHECK(!BootstrapDownloadTooSlow(ws, bws, 0, t0));          // elapsed 0
+        BOOST_CHECK(!BootstrapDownloadTooSlow(ws, bws, 0, t0 + 1000));   // 1s, far under window
+    }
+
+    // (b) Trickle: a full window (well over any plausible window) elapses with
+    // almost no bytes -- ~1.7 B/s for 1 KiB over 10 minutes -- far below any
+    // plausible floor, so the watchdog aborts. Fresh state so (a) cannot leak in.
+    {
+        int64_t ws = t0;
+        uint64_t bws = 0;
+        const int64_t now = t0 + 10 * 60 * 1000; // 10 minutes
+        BOOST_CHECK(BootstrapDownloadTooSlow(ws, bws, 1024, now)); // ~1.7 B/s -> abort
+    }
+
+    // (c) Healthy window: a full window elapses with plenty of bytes (~1 MiB/s
+    // over 10 minutes), far above any plausible floor, so it does not abort and
+    // it advances the window bookkeeping to the current point.
+    {
+        int64_t ws = t0;
+        uint64_t bws = 0;
+        const int64_t now = t0 + 10 * 60 * 1000;               // 600s
+        const uint64_t total = (uint64_t)600 * 1024 * 1024;    // 600 MiB (~1 MiB/s)
+        BOOST_CHECK(!BootstrapDownloadTooSlow(ws, bws, total, now));
+        // A healthy completed window resets the baseline to "now" so the next
+        // window is measured from here forward.
+        BOOST_CHECK_EQUAL(ws, now);
+        BOOST_CHECK_EQUAL(bws, total);
+    }
+
+    // (d) Late stall caught despite a fast start. This is the key case proving
+    // the watchdog is windowed, not a cumulative average: a peer cannot bank
+    // early speed to cover a later stall.
+    {
+        int64_t ws = t0;
+        uint64_t bws = 0;
+
+        // First window is healthy (~1 MiB/s), so no abort and the baseline
+        // advances to (now1, 600 MiB).
+        const int64_t now1 = t0 + 600 * 1000;                  // +600s
+        const uint64_t bytes1 = (uint64_t)600 * 1024 * 1024;   // 600 MiB
+        BOOST_CHECK(!BootstrapDownloadTooSlow(ws, bws, bytes1, now1));
+        BOOST_CHECK_EQUAL(ws, now1);
+        BOOST_CHECK_EQUAL(bws, bytes1);
+
+        // Second window: another full window elapses but only 1 KiB more arrives
+        // *within that new window*. Even though the cumulative average over the
+        // whole download is still ~0.5 MiB/s, the new window alone is ~1.7 B/s,
+        // so the watchdog aborts.
+        const int64_t now2 = now1 + 600 * 1000;                // another +600s
+        const uint64_t bytes2 = bytes1 + 1024;                 // +1 KiB only
+        BOOST_CHECK(BootstrapDownloadTooSlow(ws, bws, bytes2, now2)); // late stall -> abort
+    }
 }
 
 BOOST_AUTO_TEST_CASE(bootstrap_network_message_roundtrip)

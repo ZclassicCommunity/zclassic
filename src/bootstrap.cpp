@@ -100,6 +100,38 @@ static const unsigned int BOOTSTRAP_MAX_REJECT_MESSAGE_LENGTH = 111;
 // a fresh node does not need -timeout=... on the command line.
 static const int BOOTSTRAP_NET_TIMEOUT_MS = 60000;
 
+// Minimum sustained download rate for a bootstrap transfer. If a peer delivers
+// less than this on average across a full throughput window, the download is
+// aborted (it would otherwise hang init for hours/days). 32 KiB/s is far below
+// any real link but well above a chunk-per-60s trickle (~8.7 KiB/s).
+static const int64_t BOOTSTRAP_MIN_THROUGHPUT_BYTES_PER_SEC = 32 * 1024;
+static const int64_t BOOTSTRAP_THROUGHPUT_WINDOW_MS = 60 * 1000;
+
+// Windowed minimum-throughput watchdog for bootstrap downloads. The caller keeps
+// windowStartMs/bytesAtWindowStart as locals, initialized to (download start
+// time, 0), and calls this after each received chunk with the cumulative bytes
+// received and the current time (GetTimeMillis()). Returns true => abort: a full
+// BOOTSTRAP_THROUGHPUT_WINDOW_MS elapsed during which the peer delivered less
+// than BOOTSTRAP_MIN_THROUGHPUT_BYTES_PER_SEC on average. On a healthy window it
+// advances the window and returns false; before a window completes it returns
+// false (lets the transfer ramp up). Exposed (non-static) for unit tests.
+bool BootstrapDownloadTooSlow(int64_t& windowStartMs, uint64_t& bytesAtWindowStart,
+                              uint64_t totalBytesReceived, int64_t nowMs)
+{
+    const int64_t elapsedMs = nowMs - windowStartMs;
+    if (elapsedMs < BOOTSTRAP_THROUGHPUT_WINDOW_MS) {
+        return false; // window not complete yet
+    }
+    const uint64_t bytesThisWindow = totalBytesReceived - bytesAtWindowStart;
+    const uint64_t requiredBytes = (uint64_t)BOOTSTRAP_MIN_THROUGHPUT_BYTES_PER_SEC * (uint64_t)(elapsedMs / 1000);
+    if (bytesThisWindow < requiredBytes) {
+        return true; // sustained below the floor for a full window
+    }
+    windowStartMs = nowMs;
+    bytesAtWindowStart = totalBytesReceived;
+    return false;
+}
+
 std::vector<std::string> GetBootstrapPeerList()
 {
     if (mapArgs.count("-bootstrappeer")) {
@@ -776,6 +808,8 @@ static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotMan
     int64_t last_emit_ms = 0;
     int last_emit_decile = -1;
     const int64_t download_started = GetTimeMillis();
+    int64_t throughputWindowStartMs = download_started;
+    uint64_t throughputBytesAtWindowStart = 0;
     bool ok = true;
 
     while (ok && !inflight.empty()) {
@@ -828,6 +862,13 @@ static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotMan
             break;
         }
         received_total += chunk.vData.size();
+
+        if (BootstrapDownloadTooSlow(throughputWindowStartMs, throughputBytesAtWindowStart,
+                                     received_total, GetTimeMillis())) {
+            error = "bootstrap snapshot download too slow (peer stalled or throttling); aborting";
+            ok = false;
+            break;
+        }
 
         // Finalize the file once its final chunk has been written.
         if (request.nOffset + request.nLength >= file.nSize) {
@@ -1444,6 +1485,8 @@ static bool DownloadZcashParamFile(SOCKET socket, uint32_t file_index, uint64_t 
     int64_t last_emit_ms = 0;
     int last_emit_decile = -1;
     const int64_t started = GetTimeMillis();
+    int64_t throughputWindowStartMs = started;
+    uint64_t throughputBytesAtWindowStart = 0;
     bool ok = true;
 
     // Prime the pipeline window.
@@ -1488,6 +1531,12 @@ static bool DownloadZcashParamFile(SOCKET socket, uint32_t file_index, uint64_t 
             break;
         }
         received += chunk.vData.size();
+        if (BootstrapDownloadTooSlow(throughputWindowStartMs, throughputBytesAtWindowStart,
+                                     received, GetTimeMillis())) {
+            error = "zcash param download too slow (peer stalled or throttling); aborting";
+            ok = false;
+            break;
+        }
         const int percent = size > 0 ? (int)((received * 100) / size) : 100;
         if (percent != last_percent) {
             last_percent = percent;
