@@ -279,7 +279,9 @@ case $host in
 
      CPPFLAGS="$CPPFLAGS -D_MT -DWIN32 -D_WINDOWS -DBOOST_THREAD_USE_LIB "
      LEVELDB_TARGET_FLAGS="TARGET_OS=OS_WINDOWS_CROSSCOMPILE"
-     LIBS="$LIBS -lcrypt32"
+     # -lbcrypt: modern Boost (filesystem unique_path / boost.uuid random
+     # provider) pulls in the Windows BCryptGenRandom API on mingw.
+     LIBS="$LIBS -lcrypt32 -lbcrypt"
      if test "x$CXXFLAGS_overridden" = "xno"; then
        CXXFLAGS="$CXXFLAGS -w"
      fi
