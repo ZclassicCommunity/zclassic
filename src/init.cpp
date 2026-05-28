@@ -752,6 +752,26 @@ static bool VerifyImportedBootstrapAnchor(std::string& error)
             anchor.hashBlock.ToString());
         return false;
     }
+    // Content-trust check: recompute the commitment over the whole imported UTXO
+    // set and compare it to the value compiled into this binary. A malicious or
+    // compromised serving peer cannot substitute a forged chainstate, because it
+    // cannot reproduce a UTXO set that hashes to the compiled commitment. A null
+    // commitment (no value compiled in yet for this release) skips the check.
+    if (!anchor.hashChainstateSerialized.IsNull()) {
+        CCoinsStats stats;
+        if (!pcoinsTip->GetStats(stats)) {
+            error = "bootstrap snapshot verification failed: could not compute imported chainstate hash";
+            return false;
+        }
+        if (stats.hashSerialized != anchor.hashChainstateSerialized) {
+            error = strprintf(
+                "bootstrap snapshot verification failed: imported chainstate hash is %s, expected %s",
+                stats.hashSerialized.ToString(),
+                anchor.hashChainstateSerialized.ToString());
+            return false;
+        }
+        LogPrintf("Bootstrap snapshot chainstate commitment verified: %s\n", stats.hashSerialized.ToString());
+    }
     return true;
 }
 

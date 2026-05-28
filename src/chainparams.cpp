@@ -184,18 +184,26 @@ public:
             ( 160000, uint256S("0x000000065093005a1a46ee95d6d66c2b07008220ca64dd3b3a93bbd1945480c0"))
             ( 468200, uint256S("0x000000009bd5548c851c2b237894d6807a53bf1e2808402545e27a995ae4f3c3"))
             ( 2013514, uint256S("0x000019679aa2ea97a3f18bd9265bc91a09929ea0b1acc0fc5ef77cdf3cf906e7"))
-            ( 2879438, uint256S("0x000007e8fccb9e4831c7d7376a283b016ead6166491f951f4f083dbe366992b2")),
-            1729305135,     // * UNIX timestamp of last checkpoint block (Oct 19, 2025)
+            ( 2879438, uint256S("0x000007e8fccb9e4831c7d7376a283b016ead6166491f951f4f083dbe366992b2"))
+            ( 3126937, uint256S("0x00000663e40f1fe0bc32a7e7282fac25de5fe8ecefd9c627e2fd948d388f7053")),
+            1779903078,     // * UNIX timestamp of last checkpoint block (May 27, 2026)
             5293850,        // * total number of transactions between genesis and last checkpoint
                             //   (estimated based on block height progression)
             1060            // * estimated number of transactions per day after checkpoint
                             //   total number of tx / (checkpoint block height / (24 * 24))
         };
 
-        fastSyncAnchorData.nHeight = 2879438;
-        fastSyncAnchorData.hashBlock = uint256S("0x000007e8fccb9e4831c7d7376a283b016ead6166491f951f4f083dbe366992b2");
-        fastSyncAnchorData.hashAnchorSha256 = uint256S("0x30108749a1f58963922e66e973129a36237639a229219ccc2d766a72d443ffba");
-        fastSyncAnchorData.hashAnchorSha3 = uint256S("0x036df249ba73e1090c639b8afee4145db040eeb7619cf96310ed83fa97e81433");
+        fastSyncAnchorData.nHeight = 3126937;
+        fastSyncAnchorData.hashBlock = uint256S("0x00000663e40f1fe0bc32a7e7282fac25de5fe8ecefd9c627e2fd948d388f7053");
+        fastSyncAnchorData.hashAnchorSha256 = uint256S("0x376d6d5e6f7d02459b89ae0988f5c51bb1deaf2a3e4b3a1de745e4f2e3bb279d");
+        fastSyncAnchorData.hashAnchorSha3 = uint256S("0x0f7d542e5c662c9652b93eef8eb98e386e8bdbd2f848eba0e99c6451eb2ef0bd");
+        // UTXO-set commitment (gettxoutsetinfo's hash_serialized) at the anchor
+        // height. After a peer fast-sync the node recomputes this over the
+        // imported chainstate and rejects the snapshot unless it matches, so a
+        // malicious/compromised serving peer cannot substitute a forged UTXO set
+        // (the fast-sync then trusts only this binary, not the peer). Generated
+        // from the prepared snapshot at this height via gettxoutsetinfo.
+        fastSyncAnchorData.hashChainstateSerialized = uint256S("0x75b95c7680394d6063498609e8a8d05a06d9d52e8f6981055c76cbd107dda478");
 
         // Default NODE_BOOTSTRAP peers a fresh node fetches params and the chain
         // snapshot from. Overridable with -bootstrappeer, disable with -bootstrap=0.
