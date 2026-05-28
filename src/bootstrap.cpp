@@ -1178,32 +1178,44 @@ bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::str
 // compiled in, the serving peer is untrusted (only content matching a compiled
 // hash is installed).
 
-struct ZcashParamFile {
-    const char* name;
-    const char* sha256hex;
-};
-
-// Listed in compiled order, which is also the served manifest order.
-static const ZcashParamFile ZCASH_PARAM_FILES[] = {
+// Single source of truth for the compiled Zcash parameter SHA-256s.
+// Listed in compiled order, which is also the served manifest order. Also
+// re-used by InitSanityCheck via GetZcashParamSpecs() so the startup hash
+// check and the bootstrap-protocol hash check can never disagree.
+static const ZcashParamSpec ZCASH_PARAM_FILES_RAW[] = {
     {"sapling-output.params", "2f0ebbcbb9bb0bcffe95a397e7eba89c29eb4dde6191c339db88570e3f3fb0e4"},
     {"sapling-spend.params",  "8e48ffd23abb3a5fd9c5589204f32d9c31285a04b78096ba40a79b75677efc13"},
     {"sprout-groth16.params", "b685d700c60328498fbde589c8c7c484c722b788b265b72af448a5bf0ee55b50"},
     {"sprout-proving.key",    "8bc20a7f013b2b58970cddd2e7ea028975c88ae7ceb9259a5344a16bc2c0eef7"},
     {"sprout-verifying.key",  "4bd498dae0aacfd8e98dc306338d017d9c08dd0918ead18172bd0aec2fc5df82"},
 };
-static const size_t ZCASH_PARAM_FILE_COUNT = sizeof(ZCASH_PARAM_FILES) / sizeof(ZCASH_PARAM_FILES[0]);
+static const size_t ZCASH_PARAM_FILE_COUNT = sizeof(ZCASH_PARAM_FILES_RAW) / sizeof(ZCASH_PARAM_FILES_RAW[0]);
 
-static const ZcashParamFile* FindZcashParam(const std::string& name)
+const std::vector<ZcashParamSpec>& GetZcashParamSpecs()
+{
+    static const std::vector<ZcashParamSpec> specs(
+        ZCASH_PARAM_FILES_RAW,
+        ZCASH_PARAM_FILES_RAW + ZCASH_PARAM_FILE_COUNT);
+    return specs;
+}
+
+// Internal indexed access: avoids paying for the vector copy on every chunk.
+static const ZcashParamSpec& ZcashParamAt(size_t i)
+{
+    return ZCASH_PARAM_FILES_RAW[i];
+}
+
+static const ZcashParamSpec* FindZcashParam(const std::string& name)
 {
     for (size_t i = 0; i < ZCASH_PARAM_FILE_COUNT; ++i) {
-        if (name == ZCASH_PARAM_FILES[i].name) {
-            return &ZCASH_PARAM_FILES[i];
+        if (name == ZCASH_PARAM_FILES_RAW[i].name) {
+            return &ZCASH_PARAM_FILES_RAW[i];
         }
     }
     return NULL;
 }
 
-static uint256 ZcashParamExpectedHash(const ZcashParamFile& param)
+static uint256 ZcashParamExpectedHash(const ZcashParamSpec& param)
 {
     return uint256S(std::string("0x") + param.sha256hex);
 }
@@ -1212,7 +1224,7 @@ bool ZcashParamsPresentAndValid()
 {
     const boost::filesystem::path dir = ZC_GetParamsDir();
     for (size_t i = 0; i < ZCASH_PARAM_FILE_COUNT; ++i) {
-        const boost::filesystem::path path = dir / ZCASH_PARAM_FILES[i].name;
+        const boost::filesystem::path path = dir / ZcashParamAt(i).name;
         if (!boost::filesystem::is_regular_file(path)) {
             return false;
         }
@@ -1223,7 +1235,7 @@ bool ZcashParamsPresentAndValid()
             // path (or a clear error from InitSanityCheck) gets a chance to run.
             return false;
         }
-        if (have != ZcashParamExpectedHash(ZCASH_PARAM_FILES[i])) {
+        if (have != ZcashParamExpectedHash(ZcashParamAt(i))) {
             return false;
         }
     }
@@ -1243,14 +1255,14 @@ bool GetZcashParamManifest(CBootstrapSnapshotManifest& manifest, std::string& er
 
     uint64_t total = 0;
     for (size_t i = 0; i < ZCASH_PARAM_FILE_COUNT; ++i) {
-        const boost::filesystem::path path = dir / ZCASH_PARAM_FILES[i].name;
+        const boost::filesystem::path path = dir / ZcashParamAt(i).name;
         if (!boost::filesystem::is_regular_file(path) || !IsSafeBootstrapEntry(path)) {
             continue; // only advertise parameter files we actually hold
         }
         CBootstrapSnapshotFile file;
-        file.strPath = ZCASH_PARAM_FILES[i].name;
+        file.strPath = ZcashParamAt(i).name;
         file.nSize = boost::filesystem::file_size(path);
-        file.hashSha256 = ZcashParamExpectedHash(ZCASH_PARAM_FILES[i]);
+        file.hashSha256 = ZcashParamExpectedHash(ZcashParamAt(i));
         if (file.nSize > std::numeric_limits<uint64_t>::max() - total) {
             error = "zcash parameter byte size overflow";
             return false;
@@ -1487,7 +1499,7 @@ bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error)
         }
 
         for (size_t i = 0; i < ZCASH_PARAM_FILE_COUNT && ok; ++i) {
-            const ZcashParamFile& param = ZCASH_PARAM_FILES[i];
+            const ZcashParamSpec& param = ZcashParamAt(i);
             const boost::filesystem::path dest = dir / param.name;
             const uint256 expected = ZcashParamExpectedHash(param);
 

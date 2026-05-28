@@ -10,6 +10,7 @@
 
 #include <stdint.h>
 #include <string>
+#include <vector>
 
 #include <boost/filesystem/path.hpp>
 
@@ -50,6 +51,18 @@ bool BootstrapFromPeer(const std::string& peer,
 std::vector<std::string> GetBootstrapPeerList();
 
 // --- Zcash parameter (.params) distribution over the bootstrap protocol ---
+//! Compiled SHA-256 spec for one Zcash zk-SNARK parameter file. This is the
+//! single source of truth used both by the bootstrap-snapshot protocol (which
+//! verifies downloaded chunks) and by InitSanityCheck (which validates the
+//! installed files at startup).
+struct ZcashParamSpec {
+    const char* name;
+    const char* sha256hex;
+};
+//! Authoritative table of required zk-SNARK parameter files. Ordering is the
+//! same order the bootstrap manifest advertises and serves them.
+const std::vector<ZcashParamSpec>& GetZcashParamSpecs();
+
 //! Build the manifest of zk-SNARK parameter files this node can serve (those
 //! present in the params dir whose names/hashes match the compiled set).
 bool GetZcashParamManifest(CBootstrapSnapshotManifest& manifest, std::string& error);
