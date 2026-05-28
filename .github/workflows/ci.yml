@@ -80,7 +80,11 @@ jobs:
 
       - name: Build depends
         run: |
-          make $MAKEJOBS -C depends HOST=${{ matrix.host }} ${{ matrix.dep-opts }}
+          # NO_PROTON=1 skips building Apache Qpid Proton, matching zcutil/build.sh.
+          # Proton (AMQP) is disabled in the zcash build, and proton 0.26.0 fails
+          # to compile under modern gcc (-Werror on generated protocol.h), so
+          # building it here is both pointless and a hard CI failure.
+          make $MAKEJOBS -C depends HOST=${{ matrix.host }} NO_PROTON=1 ${{ matrix.dep-opts }}
       - name: CCache
         uses: actions/cache@v4
         env:
