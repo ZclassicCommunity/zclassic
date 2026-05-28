@@ -1624,6 +1624,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // the peer and -bootstrap=0 disables it. An explicit -bootstrappeer makes a
     // failure fatal; the automatic path is best-effort and falls back to normal
     // peer-to-peer sync if no bootstrap peer is reachable.
+    bool bootstrap_snapshot_ran = false;
     {
         const bool explicit_peer = mapArgs.count("-bootstrappeer");
         const bool enabled = GetBoolArg("-bootstrap", true) && !GetBootstrapPeerList().empty();
@@ -1648,15 +1649,14 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     return InitError(bootstrap_error);
             } else {
                 InitWarning(_("Bootstrap snapshots are trusted input; the snapshot tip is verified against the compiled anchor."));
-                bool done = false;
                 BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
                     if (BootstrapFromPeer(peer, GetDataDir(), bootstrap_error)) {
-                        done = true;
+                        bootstrap_snapshot_ran = true;
                         break;
                     }
                     LogPrintf("Bootstrap snapshot from %s failed: %s\n", peer, bootstrap_error);
                 }
-                if (!done) {
+                if (!bootstrap_snapshot_ran) {
                     if (explicit_peer)
                         return InitError(bootstrap_error);
                     LogPrintf("Bootstrap snapshot unavailable; continuing with normal peer-to-peer sync: %s\n", bootstrap_error);
@@ -1667,13 +1667,20 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     // Keep a persistent connection to the bootstrap peer(s) for ongoing sync, so
     // a freshly bootstrapped node reaches the chain tip even when DNS seeds are
-    // sparse. Skipped if the user pinned peers with -connect or set -bootstrap=0.
-    if (GetBoolArg("-bootstrap", true) && !mapArgs.count("-connect")) {
+    // sparse. Only inject when the snapshot bootstrap actually ran successfully
+    // in this startup: a non-fresh datadir already has a peer addr DB and does
+    // not need the pin. Skipped if the user pinned peers with -connect or set
+    // -bootstrap=0.
+    // TODO: remove the injected -addnode entries once IsInitialBlockDownload()
+    // latches false, so the bootstrap peer does not permanently occupy an
+    // outbound slot. Doing this cleanly requires a hook to drop entries from
+    // the CConnman added-node list without lock-ordering hazards, which does
+    // not exist yet.
+    if (bootstrap_snapshot_ran && !mapArgs.count("-connect")) {
         BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
             std::vector<std::string>& addnodes = mapMultiArgs["-addnode"];
             if (std::find(addnodes.begin(), addnodes.end(), peer) == addnodes.end()) {
                 addnodes.push_back(peer);
-                mapArgs["-addnode"] = peer;
                 LogPrintf("Adding bootstrap peer %s as a persistent sync node\n", peer);
             }
         }
