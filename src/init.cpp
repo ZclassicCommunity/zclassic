@@ -1728,6 +1728,22 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     }
                     LogPrintf("Bootstrap snapshot from %s failed: %s\n", peer, bootstrap_error);
                 }
+                // If the explicit/compiled peers didn't work and the operator did
+                // not pin a specific peer, fall back to peers discovered from the
+                // network's NODE_BOOTSTRAP advertisements, so a fresh node is not
+                // stranded when the compiled IP is down or compromised. The
+                // imported snapshot is still verified against the compiled anchor
+                // and UTXO-set commitment, so a discovered (untrusted) peer cannot
+                // feed a forged chain.
+                if (!bootstrap_snapshot_ran && !explicit_peer) {
+                    BOOST_FOREACH(const std::string& peer, DiscoverBootstrapPeers()) {
+                        if (BootstrapFromPeer(peer, GetDataDir(), bootstrap_error)) {
+                            bootstrap_snapshot_ran = true;
+                            break;
+                        }
+                        LogPrintf("Bootstrap snapshot from discovered peer %s failed: %s\n", peer, bootstrap_error);
+                    }
+                }
                 if (!bootstrap_snapshot_ran) {
                     if (explicit_peer)
                         return InitError(bootstrap_error);

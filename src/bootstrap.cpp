@@ -132,11 +132,198 @@ bool BootstrapDownloadTooSlow(int64_t& windowStartMs, uint64_t& bytesAtWindowSta
     return false;
 }
 
+// Forward declarations for the bootstrap-handshake/message helpers reused by
+// decentralized discovery below; their definitions appear later in this file.
+static bool BootstrapHandshake(SOCKET socket, const CService& peer_address, int timeout_ms, std::string& error);
+static bool SendBootstrapMessage(SOCKET socket, const char* command, const CDataStream& payload, int timeout_ms, std::string& error);
+static bool ReceiveExpectedBootstrapMessage(SOCKET socket, const char* expected_command, CDataStream& payload, int timeout_ms, std::string& error);
+
+// --- Decentralized bootstrap-peer discovery ------------------------------
+//
+// A fresh node should not have to trust a single project-operated IP to
+// fast-sync. As a best-effort fallback (only used when the explicit/compiled
+// peers don't work — see the init bootstrap loop), we ask the network's
+// existing DNS seeds (and, failing those, the compiled fixed seeds) for
+// addresses, dial a few with the same lightweight bootstrap version handshake
+// used for snapshot transfers, then run a getaddr/addr round-trip and keep any
+// advertised peers that set the NODE_BOOTSTRAP service bit. Everything here is
+// strictly bounded and best-effort: it never throws out, respects a short
+// per-message timeout so it cannot hang init, and returns an empty vector on
+// any failure. Safe to fast-sync from a discovered (untrusted) peer because the
+// imported chainstate is verified against the compiled anchor + UTXO commitment.
+
+// How many resolved seed/source addresses to dial looking for an addr reply.
+static const size_t BOOTSTRAP_DISCOVERY_MAX_DIAL = 3;
+// How many distinct DNS seeds to resolve before giving up on resolution.
+static const size_t BOOTSTRAP_DISCOVERY_MAX_SEEDS = 3;
+// Maximum NODE_BOOTSTRAP "ip:port" strings to return.
+static const size_t BOOTSTRAP_DISCOVERY_MAX_RESULTS = 8;
+// Cap on candidate addresses collected from seeds before dialing.
+static const size_t BOOTSTRAP_DISCOVERY_MAX_CANDIDATES = 64;
+// Per-dial timeout for the discovery handshake + getaddr/addr exchange. Kept
+// well under the snapshot transfer timeout: discovery is a quick probe, not a
+// transfer, and we may try several peers back to back during init.
+static const int BOOTSTRAP_DISCOVERY_NET_TIMEOUT_MS = 10000;
+
+// Run the bootstrap handshake against an already-connected socket, then issue
+// a single getaddr and read one addr reply, appending NODE_BOOTSTRAP peers as
+// "ip:port" strings to `out`. Best-effort: any failure just leaves `out`
+// unchanged for this peer. Returns the number of new entries appended.
+static size_t DiscoverBootstrapPeersFromSocket(SOCKET socket, const CService& peerAddress, std::vector<std::string>& out)
+{
+    std::string error;
+    if (!BootstrapHandshake(socket, peerAddress, BOOTSTRAP_DISCOVERY_NET_TIMEOUT_MS, error)) {
+        LogPrint("net", "bootstrap discovery: handshake with %s failed: %s\n", peerAddress.ToStringIPPort(), error);
+        return 0;
+    }
+
+    CDataStream empty(SER_NETWORK, PROTOCOL_VERSION);
+    if (!SendBootstrapMessage(socket, "getaddr", empty, BOOTSTRAP_DISCOVERY_NET_TIMEOUT_MS, error)) {
+        LogPrint("net", "bootstrap discovery: getaddr to %s failed: %s\n", peerAddress.ToStringIPPort(), error);
+        return 0;
+    }
+
+    CDataStream addrPayload(SER_NETWORK, PROTOCOL_VERSION);
+    if (!ReceiveExpectedBootstrapMessage(socket, "addr", addrPayload, BOOTSTRAP_DISCOVERY_NET_TIMEOUT_MS, error)) {
+        LogPrint("net", "bootstrap discovery: no addr reply from %s: %s\n", peerAddress.ToStringIPPort(), error);
+        return 0;
+    }
+
+    std::vector<CAddress> vAddr;
+    try {
+        addrPayload >> vAddr;
+    } catch (const std::exception& e) {
+        LogPrint("net", "bootstrap discovery: malformed addr from %s: %s\n", peerAddress.ToStringIPPort(), e.what());
+        return 0;
+    }
+    // Mirror the addr-message bound enforced by the normal net handler so a
+    // misbehaving peer cannot make us iterate an enormous list.
+    if (vAddr.size() > 1000) {
+        LogPrint("net", "bootstrap discovery: oversized addr (%u) from %s\n", (unsigned int)vAddr.size(), peerAddress.ToStringIPPort());
+        return 0;
+    }
+
+    size_t appended = 0;
+    for (size_t i = 0; i < vAddr.size() && out.size() < BOOTSTRAP_DISCOVERY_MAX_RESULTS; ++i) {
+        const CAddress& addr = vAddr[i];
+        if (!(addr.nServices & NODE_BOOTSTRAP)) {
+            continue;
+        }
+        if (!addr.IsValid()) {
+            continue;
+        }
+        const std::string entry = addr.ToStringIPPort();
+        if (std::find(out.begin(), out.end(), entry) != out.end()) {
+            continue;
+        }
+        out.push_back(entry);
+        ++appended;
+    }
+    return appended;
+}
+
+std::vector<std::string> DiscoverBootstrapPeers()
+{
+    std::vector<std::string> discovered;
+
+    // Wrap the whole thing: discovery must never throw out of init.
+    try {
+        // 1) Gather candidate addresses from the active network's DNS seeds,
+        //    falling back to the compiled fixed seeds. We do not consult addrman
+        //    here because discovery runs in the pre-database init phase, before
+        //    the peer DB / CNode machinery is up.
+        std::vector<CService> candidates;
+
+        const std::vector<CDNSSeedData>& vSeeds = Params().DNSSeeds();
+        const int defaultPort = Params().GetDefaultPort();
+        size_t seedsTried = 0;
+        // Name proxies (e.g. Tor) cannot be resolved to raw addresses for a
+        // direct dial; in that mode skip DNS resolution and rely on fixed seeds.
+        if (!HaveNameProxy()) {
+            for (size_t s = 0; s < vSeeds.size() &&
+                                seedsTried < BOOTSTRAP_DISCOVERY_MAX_SEEDS &&
+                                candidates.size() < BOOTSTRAP_DISCOVERY_MAX_CANDIDATES; ++s) {
+                ++seedsTried;
+                std::vector<CNetAddr> vIPs;
+                if (!LookupHost(vSeeds[s].host.c_str(), vIPs, 0, true)) {
+                    continue;
+                }
+                for (size_t i = 0; i < vIPs.size() && candidates.size() < BOOTSTRAP_DISCOVERY_MAX_CANDIDATES; ++i) {
+                    if (vIPs[i].IsValid()) {
+                        candidates.push_back(CService(vIPs[i], (unsigned short)defaultPort));
+                    }
+                }
+            }
+        }
+
+        if (candidates.empty()) {
+            const std::vector<SeedSpec6>& vFixed = Params().FixedSeeds();
+            for (size_t i = 0; i < vFixed.size() && candidates.size() < BOOTSTRAP_DISCOVERY_MAX_CANDIDATES; ++i) {
+                struct in6_addr ip;
+                memcpy(&ip, vFixed[i].addr, sizeof(ip));
+                CService svc(ip, vFixed[i].port);
+                if (svc.IsValid()) {
+                    candidates.push_back(svc);
+                }
+            }
+        }
+
+        if (candidates.empty()) {
+            return discovered;
+        }
+
+        // 2) Dial a bounded number of candidates and harvest NODE_BOOTSTRAP
+        //    peers from each one's addr reply, stopping early once we have
+        //    enough results.
+        size_t dialed = 0;
+        for (size_t i = 0; i < candidates.size() &&
+                           dialed < BOOTSTRAP_DISCOVERY_MAX_DIAL &&
+                           discovered.size() < BOOTSTRAP_DISCOVERY_MAX_RESULTS; ++i) {
+            const CService& target = candidates[i];
+            if (!target.IsValid()) {
+                continue;
+            }
+            ++dialed;
+
+            SOCKET socket = INVALID_SOCKET;
+            bool proxyConnectionFailed = false;
+            if (!ConnectSocket(target, socket, nConnectTimeout, &proxyConnectionFailed)) {
+                LogPrint("net", "bootstrap discovery: could not connect to %s\n", target.ToStringIPPort());
+                continue;
+            }
+
+            DiscoverBootstrapPeersFromSocket(socket, target, discovered);
+            CloseSocket(socket);
+        }
+    } catch (const std::exception& e) {
+        LogPrint("net", "bootstrap discovery aborted: %s\n", e.what());
+        return std::vector<std::string>();
+    } catch (...) {
+        return std::vector<std::string>();
+    }
+
+    if (!discovered.empty()) {
+        LogPrintf("Bootstrap: discovered %u NODE_BOOTSTRAP peer(s) from network seeds\n", (unsigned int)discovered.size());
+    }
+    return discovered;
+}
+
 std::vector<std::string> GetBootstrapPeerList()
 {
+    // Explicit -bootstrappeer entries (repeatable) take precedence: the operator
+    // asked for exactly these peers.
+    std::map<std::string, std::vector<std::string> >::const_iterator it = mapMultiArgs.find("-bootstrappeer");
+    if (it != mapMultiArgs.end() && !it->second.empty()) {
+        return it->second;
+    }
+    // Backwards-compat: a single -bootstrappeer also lands in mapArgs.
     if (mapArgs.count("-bootstrappeer")) {
         return std::vector<std::string>(1, mapArgs["-bootstrappeer"]);
     }
+    // Otherwise the compiled per-network defaults. Network discovery of
+    // additional NODE_BOOTSTRAP peers (DiscoverBootstrapPeers) is invoked
+    // lazily by the init bootstrap loop only if these fail, so we neither pay
+    // its latency nor dial seed peers when a compiled peer already works.
     return Params().BootstrapPeers();
 }
 

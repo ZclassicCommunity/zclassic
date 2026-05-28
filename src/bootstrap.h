@@ -52,8 +52,16 @@ bool BootstrapFromPeer(const std::string& peer,
                        const boost::filesystem::path& data_dir,
                        std::string& error);
 
-//! Effective bootstrap peer list: -bootstrappeer if set, else the compiled
-//! per-network defaults (CChainParams::BootstrapPeers).
+//! Best-effort decentralized discovery of NODE_BOOTSTRAP peers from the active
+//! network's DNS/fixed seeds, via a bounded bootstrap-handshake + getaddr/addr
+//! probe. Strictly bounded, never hangs (respects per-message timeouts) and
+//! returns an empty vector on any failure. Results are "ip:port" strings.
+//! Invoked lazily by the init bootstrap loop only when the explicit/compiled
+//! peers fail, so it costs nothing when a compiled peer already works.
+std::vector<std::string> DiscoverBootstrapPeers();
+
+//! Effective bootstrap peer list: all -bootstrappeer entries (repeatable) if
+//! set, else the compiled per-network defaults (CChainParams::BootstrapPeers).
 std::vector<std::string> GetBootstrapPeerList();
 
 // --- Zcash parameter (.params) distribution over the bootstrap protocol ---
