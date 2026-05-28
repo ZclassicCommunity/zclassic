@@ -17,7 +17,7 @@ For Ubuntu/Debian users, the fastest way to build is:
 # 1. Install dependencies
 ./zcutil/install-deps.sh
 
-# 2. Build ZClassic
+# 2. Build ZClassic (development build, binaries left in src/)
 ./zcutil/build.sh -j$(nproc)
 ```
 
@@ -25,6 +25,12 @@ The compiled binaries will be in `src/`:
 - `zclassicd` - ZClassic daemon
 - `zclassic-cli` - Command-line interface
 - `zclassic-tx` - Transaction utility
+
+To produce **stripped release binaries** in one step (into `release/<host-triple>/`):
+
+```bash
+./zcutil/build-release.sh linux -j$(nproc)
+```
 
 ## Manual Installation
 
@@ -151,10 +157,29 @@ make -j$(nproc)
 
 ### Cross-Compilation
 
-See `depends/README.md` for cross-compilation instructions for:
-- Windows (x86_64-w64-mingw32)
-- macOS (x86_64-apple-darwin)
-- ARM (aarch64-linux-gnu)
+#### Windows (Win64, x86_64-w64-mingw32)
+
+One-time toolchain setup (Ubuntu/Debian):
+
+```bash
+./zcutil/install-deps.sh --mingw       # or: sudo bash zcutil/setup-mingw-toolchain.sh
+```
+
+Then build stripped `.exe` binaries in one command (into `release/x86_64-w64-mingw32/`):
+
+```bash
+./zcutil/build-release.sh win64 -j$(nproc)
+```
+
+This builds the Windows depends, configures for the mingw host, compiles
+`zclassicd.exe` / `zclassic-cli.exe` / `zclassic-tx.exe`, and strips them.
+
+#### Other targets
+
+The same `HOST=` mechanism drives the depends + configure flow for other
+platforms (see `depends/README.md`):
+- macOS (`x86_64-apple-darwin`)
+- ARM (`aarch64-linux-gnu`)
 
 ### Debug Build
 
