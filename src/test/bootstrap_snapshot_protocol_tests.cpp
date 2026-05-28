@@ -5,6 +5,7 @@
 #include "protocol.h"
 #include "bootstrap.h"
 #include "chainparams.h"
+#include "main.h"
 #include "net.h"
 #include "streams.h"
 #include "test/test_bitcoin.h"
@@ -14,6 +15,10 @@
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <boost/test/unit_test.hpp>
+
+// Non-static handler in main.cpp; exposed so we can drive it directly here to
+// exercise the Misbehaving paths added for malformed bootstrap-snapshot messages.
+extern bool ProcessMessage(CNode* pfrom, std::string strCommand, CDataStream& vRecv, int64_t nTimeReceived);
 
 static CBootstrapSnapshotFile TestBootstrapSnapshotFile()
 {
@@ -731,6 +736,135 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_and_chunk_service_helpers)
     RestoreArg("-bootstrapserve", hadServe, oldServe);
     RestoreArg("-bootstrapsourcedir", hadSource, oldSource);
     boost::filesystem::remove_all(root);
+}
+
+// --- Misbehaviour tests: malformed bootstrap-protocol inputs must ban (issue #6) ---
+//
+// These tests drive ProcessMessage() directly so we can observe the
+// nMisbehavior bump on the peer's CNodeState. We use TestingSetup as a
+// per-case fixture because it RegisterNodeSignals(), which is what hooks
+// CNode construction up to InitializeNode() so State(nodeid) is non-null.
+
+BOOST_FIXTURE_TEST_CASE(bootstrap_getbschk_without_manifest_misbehaves, TestingSetup)
+{
+    CNode node(INVALID_SOCKET, CAddress(CService("127.0.0.1", 0)), "", true);
+    node.nVersion = PROTOCOL_VERSION; // skip the pre-handshake guard in ProcessMessage
+    BOOST_REQUIRE(!node.fBootstrapManifestSent);
+
+    // A well-formed GETBSCHK payload but the peer never asked us for the
+    // manifest -> state violation, must Misbehave (score 20 per main.cpp).
+    CBootstrapSnapshotChunkRequest request;
+    request.nFileIndex = 0;
+    request.nOffset = 0;
+    request.nLength = BOOTSTRAP_SNAPSHOT_CHUNK_SIZE;
+    CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
+    payload << request;
+
+    CNodeStateStats before;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), before));
+
+    BOOST_CHECK(ProcessMessage(&node, NetMsgType::GETBSCHK, payload, GetTime()));
+
+    CNodeStateStats after;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), after));
+    BOOST_CHECK_GE(after.nMisbehavior - before.nMisbehavior, 20);
+}
+
+BOOST_FIXTURE_TEST_CASE(bootstrap_getbschk_oversize_chunk_misbehaves_high, TestingSetup)
+{
+    CNode node(INVALID_SOCKET, CAddress(CService("127.0.0.1", 0)), "", true);
+    node.nVersion = PROTOCOL_VERSION;
+    // Pretend the peer first requested the manifest, so we exercise the
+    // size-overflow path rather than the state-violation path.
+    node.fBootstrapManifestSent = true;
+
+    // nLength larger than BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE is a size overflow
+    // on a small bounded field -> score 100 ("obviously hostile") per main.cpp.
+    CBootstrapSnapshotChunkRequest request;
+    request.nFileIndex = 0;
+    request.nOffset = 0;
+    request.nLength = BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE + 1;
+    CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
+    payload << request;
+
+    CNodeStateStats before;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), before));
+
+    BOOST_CHECK(ProcessMessage(&node, NetMsgType::GETBSCHK, payload, GetTime()));
+
+    CNodeStateStats after;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), after));
+    BOOST_CHECK_GE(after.nMisbehavior - before.nMisbehavior, 100);
+}
+
+BOOST_FIXTURE_TEST_CASE(bootstrap_getbschk_misaligned_offset_misbehaves, TestingSetup)
+{
+    CNode node(INVALID_SOCKET, CAddress(CService("127.0.0.1", 0)), "", true);
+    node.nVersion = PROTOCOL_VERSION;
+    node.fBootstrapManifestSent = true;
+
+    // Offset not aligned to BOOTSTRAP_SNAPSHOT_CHUNK_SIZE is out-of-spec.
+    CBootstrapSnapshotChunkRequest request;
+    request.nFileIndex = 0;
+    request.nOffset = 1; // not aligned
+    request.nLength = BOOTSTRAP_SNAPSHOT_CHUNK_SIZE;
+    CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
+    payload << request;
+
+    CNodeStateStats before;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), before));
+
+    BOOST_CHECK(ProcessMessage(&node, NetMsgType::GETBSCHK, payload, GetTime()));
+
+    CNodeStateStats after;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), after));
+    BOOST_CHECK_GE(after.nMisbehavior - before.nMisbehavior, 20);
+}
+
+BOOST_FIXTURE_TEST_CASE(bootstrap_bschk_oversize_chunk_misbehaves_high, TestingSetup)
+{
+    CNode node(INVALID_SOCKET, CAddress(CService("127.0.0.1", 0)), "", true);
+    node.nVersion = PROTOCOL_VERSION;
+
+    // Build a BSCHK with vData larger than BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE.
+    // This is an unsolicited push AND a size overflow, so we expect at least
+    // 10 (unsolicited) + 100 (oversize) = 110 misbehavior.
+    CBootstrapSnapshotChunk chunk;
+    chunk.nFileIndex = 0;
+    chunk.nOffset = 0;
+    chunk.vData.assign(BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE + 1, 0);
+    CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
+    payload << chunk;
+
+    CNodeStateStats before;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), before));
+
+    BOOST_CHECK(ProcessMessage(&node, NetMsgType::BSCHK, payload, GetTime()));
+
+    CNodeStateStats after;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), after));
+    BOOST_CHECK_GE(after.nMisbehavior - before.nMisbehavior, 100);
+}
+
+BOOST_FIXTURE_TEST_CASE(bootstrap_getbsman_trailing_bytes_misbehaves, TestingSetup)
+{
+    CNode node(INVALID_SOCKET, CAddress(CService("127.0.0.1", 0)), "", true);
+    node.nVersion = PROTOCOL_VERSION;
+
+    // GETBSMAN takes no payload; any bytes are a clear protocol violation.
+    CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
+    payload << uint32_t(0xdeadbeef);
+
+    CNodeStateStats before;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), before));
+
+    // Returns false (return error(...)), but the side effect we care about is
+    // the Misbehaving call.
+    ProcessMessage(&node, NetMsgType::GETBSMAN, payload, GetTime());
+
+    CNodeStateStats after;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), after));
+    BOOST_CHECK_GE(after.nMisbehavior - before.nMisbehavior, 20);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

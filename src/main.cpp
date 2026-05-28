@@ -5544,7 +5544,9 @@ void static ProcessGetData(CNode* pfrom)
     }
 }
 
-bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t nTimeReceived)
+// Not static so unit tests in src/test/bootstrap_snapshot_protocol_tests.cpp can
+// drive individual message handlers directly. Declare it `extern` from those tests.
+bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t nTimeReceived)
 {
     const CChainParams& chainparams = Params();
     LogPrint("net", "received: %s (%u bytes) peer=%d\n", SanitizeString(strCommand), vRecv.size(), pfrom->id);
@@ -5712,10 +5714,16 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
 
     else if (strCommand == NetMsgType::GETBSMAN)
     {
+        if (!vRecv.empty()) {
+            // GETBSMAN takes no payload; trailing bytes are a clear protocol violation.
+            Misbehaving(pfrom->GetId(), 20);
+            return error("getbsman has trailing bytes from peer=%d", pfrom->id);
+        }
+
         CBootstrapSnapshotManifest manifest;
-        std::string error;
-        if (!GetBootstrapSnapshotManifest(manifest, error)) {
-            LogPrint("net", "could not build bootstrap snapshot manifest for peer=%d: %s\n", pfrom->id, error);
+        std::string err;
+        if (!GetBootstrapSnapshotManifest(manifest, err)) {
+            LogPrint("net", "could not build bootstrap snapshot manifest for peer=%d: %s\n", pfrom->id, err);
             pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("bootstrap snapshot unavailable"));
             return true;
         }
@@ -5734,9 +5742,22 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
         CBootstrapSnapshotManifest manifest;
         vRecv >> manifest;
 
-        std::string error;
-        if (!ValidateBootstrapSnapshotManifest(manifest, error)) {
-            LogPrint("net", "received invalid bootstrap snapshot manifest from peer=%d: %s\n", pfrom->id, error);
+        // The bootstrap client driver uses its own socket outside CNode, so any
+        // BSMAN arriving on a CNode connection is unsolicited. Score lightly: a
+        // buggy peer rebroadcasting is plausible, but clearly out of spec.
+        Misbehaving(pfrom->GetId(), 10);
+
+        if (!vRecv.empty()) {
+            // Trailing garbage after a fixed-shape struct is a clear violation.
+            Misbehaving(pfrom->GetId(), 20);
+            return error("bsman has trailing bytes from peer=%d", pfrom->id);
+        }
+
+        std::string err;
+        if (!ValidateBootstrapSnapshotManifest(manifest, err)) {
+            LogPrint("net", "received invalid bootstrap snapshot manifest from peer=%d: %s\n", pfrom->id, err);
+            // Bogus manifest contents are an out-of-spec value, not just unsolicited.
+            Misbehaving(pfrom->GetId(), 10);
             pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid bootstrap snapshot manifest"));
             return true;
         }
@@ -5756,14 +5777,40 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
         CBootstrapSnapshotChunkRequest request;
         vRecv >> request;
 
+        if (!vRecv.empty()) {
+            // Fixed-shape struct: trailing bytes mean a malformed peer.
+            Misbehaving(pfrom->GetId(), 20);
+            return error("getbschk has trailing bytes from peer=%d", pfrom->id);
+        }
+
         if (!pfrom->fBootstrapManifestSent) {
+            // State violation: peer must request the manifest first.
+            Misbehaving(pfrom->GetId(), 20);
             pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("bootstrap manifest required"));
             return true;
         }
 
-        std::string error;
-        if (!EnqueueBootstrapSnapshotChunkRequest(pfrom, request, error)) {
-            LogPrint("net", "rejected bootstrap snapshot chunk request from peer=%d: %s\n", pfrom->id, error);
+        // Validate clear protocol limits before handing to the enqueue helper.
+        // We do this here (not relying on Enqueue's bool return) so we can
+        // distinguish peer misbehaviour from local/transient failures
+        // (service-disabled, queue-full) which must NOT ban.
+        if (request.nLength == 0 || request.nLength > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
+            // Size overflow on a small struct is obviously hostile.
+            Misbehaving(pfrom->GetId(), request.nLength > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE ? 100 : 20);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid bootstrap chunk length"));
+            return true;
+        }
+        if (request.nOffset % BOOTSTRAP_SNAPSHOT_CHUNK_SIZE != 0) {
+            // Out-of-spec value: offset must be chunk-aligned.
+            Misbehaving(pfrom->GetId(), 20);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid bootstrap chunk offset"));
+            return true;
+        }
+
+        std::string err;
+        if (!EnqueueBootstrapSnapshotChunkRequest(pfrom, request, err)) {
+            // Service-disabled or queue-full: our problem / transient. No ban.
+            LogPrint("net", "rejected bootstrap snapshot chunk request from peer=%d: %s\n", pfrom->id, err);
             pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid bootstrap chunk request"));
             return true;
         }
@@ -5780,7 +5827,24 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
         CBootstrapSnapshotChunk chunk;
         vRecv >> chunk;
 
-        if (chunk.vData.empty() || chunk.vData.size() > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
+        // Unsolicited push: the bootstrap client uses its own socket, so any
+        // BSCHK on a CNode connection was never requested by us.
+        Misbehaving(pfrom->GetId(), 10);
+
+        if (!vRecv.empty()) {
+            Misbehaving(pfrom->GetId(), 20);
+            return error("bschk has trailing bytes from peer=%d", pfrom->id);
+        }
+
+        if (chunk.vData.empty()) {
+            // Out-of-spec value: a chunk with no data shouldn't exist on the wire.
+            Misbehaving(pfrom->GetId(), 20);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid bootstrap snapshot chunk size"));
+            return true;
+        }
+        if (chunk.vData.size() > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
+            // Size overflow on a bounded field is obviously hostile.
+            Misbehaving(pfrom->GetId(), 100);
             pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid bootstrap snapshot chunk size"));
             return true;
         }
@@ -5794,10 +5858,16 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
 
     else if (strCommand == NetMsgType::GETBSPMAN)
     {
+        if (!vRecv.empty()) {
+            // GETBSPMAN takes no payload.
+            Misbehaving(pfrom->GetId(), 20);
+            return error("getbspman has trailing bytes from peer=%d", pfrom->id);
+        }
+
         CBootstrapSnapshotManifest manifest;
-        std::string error;
-        if (!GetZcashParamManifest(manifest, error)) {
-            LogPrint("net", "could not build zcash param manifest for peer=%d: %s\n", pfrom->id, error);
+        std::string err;
+        if (!GetZcashParamManifest(manifest, err)) {
+            LogPrint("net", "could not build zcash param manifest for peer=%d: %s\n", pfrom->id, err);
             pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("zcash params unavailable"));
             return true;
         }
@@ -5811,6 +5881,15 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
     {
         CBootstrapSnapshotManifest manifest;
         vRecv >> manifest; // client drives param fetch over its own socket; ignore here
+
+        // Unsolicited push on a CNode socket: light ban.
+        Misbehaving(pfrom->GetId(), 10);
+
+        if (!vRecv.empty()) {
+            Misbehaving(pfrom->GetId(), 20);
+            return error("bspman has trailing bytes from peer=%d", pfrom->id);
+        }
+
         LogPrint("net", "received unsolicited zcash param manifest from peer=%d\n", pfrom->id);
     }
 
@@ -5819,18 +5898,37 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
         CBootstrapSnapshotChunkRequest request;
         vRecv >> request;
 
-        // Gate on having advertised the param manifest first. Peers that skip
-        // GETBSPMAN are either buggy or probing; treat them like the snapshot
-        // path treats GETBSCHK without GETBSMAN, plus a small misbehavior bump.
+        if (!vRecv.empty()) {
+            // Fixed-shape struct: trailing bytes mean a malformed peer.
+            Misbehaving(pfrom->GetId(), 20);
+            return error("getbspchk has trailing bytes from peer=%d", pfrom->id);
+        }
+
         if (!pfrom->fBootstrapParamManifestSent) {
-            Misbehaving(pfrom->GetId(), 10);
+            // State violation: peer must request the param manifest first.
+            Misbehaving(pfrom->GetId(), 20);
             pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("zcash param manifest required"));
             return true;
         }
 
-        std::string error;
-        if (!EnqueueBootstrapParamChunkRequest(pfrom, request, error)) {
-            LogPrint("net", "rejected zcash param chunk request from peer=%d: %s\n", pfrom->id, error);
+        // Validate clear protocol limits before handing to the enqueue helper.
+        // We distinguish peer misbehaviour from local/transient failures
+        // (service-disabled, queue-full) which must NOT ban.
+        if (request.nLength == 0 || request.nLength > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
+            Misbehaving(pfrom->GetId(), request.nLength > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE ? 100 : 20);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid zcash param chunk length"));
+            return true;
+        }
+        if (request.nOffset % BOOTSTRAP_SNAPSHOT_CHUNK_SIZE != 0) {
+            Misbehaving(pfrom->GetId(), 20);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid zcash param chunk offset"));
+            return true;
+        }
+
+        std::string err;
+        if (!EnqueueBootstrapParamChunkRequest(pfrom, request, err)) {
+            // Service-disabled or queue-full: our problem / transient. No ban.
+            LogPrint("net", "rejected zcash param chunk request from peer=%d: %s\n", pfrom->id, err);
             pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid zcash param chunk request"));
             return true;
         }
@@ -5846,7 +5944,23 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
     {
         CBootstrapSnapshotChunk chunk;
         vRecv >> chunk;
-        if (chunk.vData.empty() || chunk.vData.size() > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
+
+        // Unsolicited push on a CNode socket.
+        Misbehaving(pfrom->GetId(), 10);
+
+        if (!vRecv.empty()) {
+            Misbehaving(pfrom->GetId(), 20);
+            return error("bspchk has trailing bytes from peer=%d", pfrom->id);
+        }
+
+        if (chunk.vData.empty()) {
+            Misbehaving(pfrom->GetId(), 20);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid zcash param chunk size"));
+            return true;
+        }
+        if (chunk.vData.size() > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
+            // Size overflow on a bounded field is obviously hostile.
+            Misbehaving(pfrom->GetId(), 100);
             pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid zcash param chunk size"));
             return true;
         }
