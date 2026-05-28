@@ -37,6 +37,14 @@ struct CFastSyncAnchorData {
     uint256 hashBlock;
     uint256 hashAnchorSha256;
     uint256 hashAnchorSha3;
+    //! Commitment to the full UTXO set at the anchor height: the same value the
+    //! gettxoutsetinfo RPC reports as `hash_serialized`. When set, a node that
+    //! fast-syncs recomputes this hash over the imported chainstate and rejects
+    //! the snapshot on mismatch, so a malicious/compromised serving peer cannot
+    //! substitute a forged UTXO set (the assumeutxo model). Left null until a
+    //! value is compiled in for a release, in which case the check is skipped
+    //! and behaviour is unchanged.
+    uint256 hashChainstateSerialized;
 };
 
 /**

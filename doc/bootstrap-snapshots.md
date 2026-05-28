@@ -12,6 +12,59 @@ The imported snapshot contains only:
 It must not contain `wallet.dat`, `zclassic.conf`, peers, logs, or wallet
 database files.
 
+## Choosing how to sync: full validation vs. fast sync
+
+ZClassic gives you two ways to bring a fresh node up to the chain tip. **You
+never have to trust anyone — full validation from genesis is always available**
+and is the recovery path if a bootstrap peer (including the project's own) is
+ever compromised.
+
+### Option A — Full validation (trustless, zero trust in any peer)
+
+Sync the entire chain from genesis, validating every block yourself. This is the
+most secure option and trusts no snapshot, no serving peer, and no project
+infrastructure — only the consensus rules compiled into the open-source binary.
+
+```bash
+./src/zclassicd -datadir="$HOME/.zclassic" -bootstrap=0
+```
+
+`-bootstrap=0` disables the snapshot/param fast-sync entirely; the node fetches
+zk-SNARK params the classic way (`zcutil/fetch-params.sh`) and performs a normal
+initial block download, checking proof-of-work and re-deriving the UTXO set from
+genesis. Slower, but it depends on no one.
+
+**If you fast-synced and later want to verify it yourself**, re-derive the whole
+chainstate from the block data on the next start:
+
+```bash
+./src/zclassicd -checkblocks=0 -checklevel=4   # verify every block at startup
+# or, to rebuild blocks + chainstate from scratch:
+./src/zclassicd -reindex
+```
+
+`-checkblocks=0` re-verifies *all* blocks (default only re-checks the most recent
+`288`), and `-checklevel=4` is the most thorough level. This turns a fast-synced
+node into a fully self-verified one without re-downloading the chain.
+
+### Option B — Fast sync (faster start, with a trust note)
+
+Import a prepared chain snapshot, then sync forward normally. This is the default
+on a fresh datadir. It is much faster, but read the trust model below: until the
+snapshot carries a compiled chainstate commitment (see *Roadmap to trustless
+fast sync*), the serving peer is trusted for the contents of the imported UTXO
+set. Use a peer you trust, or use Option A.
+
+```bash
+./src/zclassicd                                   # default: fast-sync from a bootstrap peer
+./src/zclassicd -bootstrappeer=192.0.2.10:8033    # choose the peer explicitly
+./src/zclassicd -bootstrapdatadir=/path/to/snap   # import from a local prepared dir
+```
+
+The default fast-sync is best-effort: if no bootstrap peer is reachable the node
+silently falls back to Option A (normal sync from genesis), so a compromised or
+offline bootstrap peer can never *prevent* you from syncing trustlessly.
+
 ### Match the snapshot's `-txindex` setting
 
 The `chainstate/` database records whether the source node was built with
@@ -101,7 +154,53 @@ time by:
   `-checklevel` so more of the imported chainstate is re-verified against block
   data, at the cost of a longer startup; or
 - only bootstrapping from a peer or operator they trust to have produced the
-  snapshot honestly.
+  snapshot honestly; or
+- simply using full validation (`-bootstrap=0`), which trusts no one.
+
+### No single point of trust
+
+The project's bootstrap peer is a *convenience*, never a *requirement*. By
+design:
+
+- **Full validation (`-bootstrap=0`) is always available** and trusts only the
+  open-source binary. If the project's bootstrap IP were ever compromised, every
+  user can still sync the chain trustlessly — nothing about the security of the
+  network depends on that server being honest.
+- The default fast-sync **falls back to full validation** if the bootstrap peer
+  is unreachable, so a compromised peer cannot strand a fresh node.
+- A fast-synced node can be **converted to fully self-verified after the fact**
+  with `-checkblocks=0 -checklevel=4` or `-reindex` (see *Choosing how to sync*).
+
+### Roadmap to trustless fast sync
+
+The goal is for fast sync to require trusting *no* peer — only the
+publicly-reviewable binary, the same as full validation. Two pieces get us
+there:
+
+1. **Compiled chainstate commitment.** In addition to the block hash, the binary
+   pins a hash of the entire UTXO set at the anchor height (the same
+   `hash_serialized` value reported by the `gettxoutsetinfo` RPC). After import,
+   the node recomputes this hash over the imported `chainstate/` and **rejects
+   the snapshot if it does not match.** A malicious or compromised peer then
+   cannot substitute a forged UTXO set: the bytes either reproduce the compiled
+   commitment or the snapshot is thrown away. This reduces fast-sync trust to the
+   binary itself — exactly the assumeutxo model. The commitment field exists in
+   the anchor; once a value is compiled in for a release, this check activates
+   automatically (it is skipped while the field is unset, preserving today's
+   behavior).
+
+   To generate the value for a release, load the prepared snapshot at the anchor
+   height and read `gettxoutsetinfo`'s `hash_serialized`; that string is the
+   compiled commitment.
+
+2. **Decentralized peer discovery.** Rather than depending on a hardcoded IP, a
+   fresh node can discover other nodes advertising the `NODE_BOOTSTRAP` service
+   bit through the normal DNS seeds and `getaddr` peer exchange, and fast-sync
+   from any of them. Combined with the compiled commitment above, this is safe
+   even from an untrusted peer, because the content is verified against the
+   binary regardless of *who* served it. Multiple `-bootstrappeer` entries are
+   accepted and tried in order, and anyone can run a serving node
+   (`-bootstrapserve`) to add capacity to the network.
 
 ## Network Service Direction
 
