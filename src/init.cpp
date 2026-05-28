@@ -1661,6 +1661,20 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
     }
 
+    // Keep a persistent connection to the bootstrap peer(s) for ongoing sync, so
+    // a freshly bootstrapped node reaches the chain tip even when DNS seeds are
+    // sparse. Skipped if the user pinned peers with -connect or set -bootstrap=0.
+    if (GetBoolArg("-bootstrap", true) && !mapArgs.count("-connect")) {
+        BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
+            std::vector<std::string>& addnodes = mapMultiArgs["-addnode"];
+            if (std::find(addnodes.begin(), addnodes.end(), peer) == addnodes.end()) {
+                addnodes.push_back(peer);
+                mapArgs["-addnode"] = peer;
+                LogPrintf("Adding bootstrap peer %s as a persistent sync node\n", peer);
+            }
+        }
+    }
+
     // ********************************************************* Step 7: load block chain
 
     fReindex = GetBoolArg("-reindex", false);
