@@ -113,6 +113,10 @@ enum BindFlags {
 };
 
 static const char* FEE_ESTIMATES_FILENAME="fee_estimates.dat";
+// Default for -bootstrapservefreezeinterval: seconds between freezing a fresh
+// self-snapshot of this node's own tip to serve with -bootstrapserve=auto.
+// (The other BOOTSTRAP_SERVE_DEFAULT_* constants live in bootstrap.h.)
+static const int64_t BOOTSTRAP_SERVE_DEFAULT_FREEZE_INTERVAL = 21600;
 CClientUIInterface uiInterface; // Declared but not defined in ui_interface.h
 
 //////////////////////////////////////////////////////////////////////////////
@@ -390,7 +394,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-bootstrapsourcedir=<dir>", _("Prepared snapshot directory containing blocks/ and chainstate/ to serve to bootstrap peers"));
     strUsage += HelpMessageOpt("-bootstrapservemaxbytesperday=<n>", strprintf(_("When serving bootstrap snapshots, bytes one IP may download per 24h before it is throttled (default: %d, 0 = unlimited)"), BOOTSTRAP_SERVE_DEFAULT_MAX_BYTES_PER_DAY));
     strUsage += HelpMessageOpt("-bootstrapservethrottlekbps=<n>", strprintf(_("Rate in KiB/s to serve a bootstrap IP that is over its daily cap (default: %d, 0 = stop serving it until the next day)"), BOOTSTRAP_SERVE_DEFAULT_THROTTLE_KBPS));
-    strUsage += HelpMessageOpt("-bootstrapservefreezeinterval=<n>", strprintf(_("With -bootstrapserve=auto, seconds between freezing a fresh self-snapshot of this node's own tip to serve (EXPERIMENTAL, option B; default: %d, 0 = never self-snapshot, only serve a fast-synced anchor copy)"), 21600));
+    strUsage += HelpMessageOpt("-bootstrapservefreezeinterval=<n>", strprintf(_("With -bootstrapserve=auto, seconds between freezing a fresh self-snapshot of this node's own tip to serve (EXPERIMENTAL, option B; default: %d, 0 = never self-snapshot, only serve a fast-synced anchor copy)"), BOOTSTRAP_SERVE_DEFAULT_FREEZE_INTERVAL));
     strUsage += HelpMessageOpt("-bootstrapmode=<anchor|trustless>", _("How to accept a downloaded bootstrap snapshot: 'anchor' (default) requires it to match the compiled fast-sync anchor; 'trustless' (EXPERIMENTAL, option B) accepts a peer's self-snapshot at its own tip, then re-derives the UTXO set from genesis in the background and reindexes if it does not match."));
 #if !defined(WIN32)
     strUsage += HelpMessageOpt("-sysperms", _("Create new files with system default permissions, instead of umask 077 (only effective with disabled wallet functionality)"));
@@ -817,6 +821,14 @@ static void RemoveFailedPeerBootstrapChainData(const boost::filesystem::path& da
         // (aborted) trustless-validation run, so a rejected snapshot leaves no
         // stale chainstate-verify dir behind for the next start to resume from.
         boost::filesystem::remove_all(data_dir / "chainstate-verify");
+        // With -bootstrapserve=auto the staged chainstate is retained into the
+        // serve dir BEFORE the anchor is verified, so a rejected/forged snapshot
+        // must not leave a serve copy behind to be re-served to peers. Drop the
+        // retained copy and its sibling .anchor/.meta markers as well.
+        const boost::filesystem::path serveSrc = BootstrapAutoServeSourceDir(data_dir);
+        boost::filesystem::remove_all(serveSrc);
+        boost::filesystem::remove(serveSrc.string() + ".anchor");
+        boost::filesystem::remove(serveSrc.string() + ".meta");
     } catch (const boost::filesystem::filesystem_error& e) {
         LogPrintf("Failed to remove rejected bootstrap chain data from %s: %s\n", data_dir.string(), e.what());
     }
@@ -2189,7 +2201,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             // we are still single-threaded before StartNode(). The scheduled freeze
             // task will populate it and advertise NODE_BOOTSTRAP once synced, without
             // ever having to write mapArgs from a background thread.
-            if (GetArg("-bootstrapservefreezeinterval", 21600) > 0) {
+            if (GetArg("-bootstrapservefreezeinterval", BOOTSTRAP_SERVE_DEFAULT_FREEZE_INTERVAL) > 0) {
                 mapArgs["-bootstrapsourcedir"] = BootstrapAutoServeSourceDir(GetDataDir()).string();
                 mapArgs["-bootstrapserve"] = "1";
             }
@@ -2491,7 +2503,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // copy is already near the tip, so the first eligible run self-snapshots once
     // synced and subsequent runs refresh it as the chain advances.
     if (fBootstrapServeAuto) {
-        const int64_t nFreezeInterval = GetArg("-bootstrapservefreezeinterval", 21600);
+        const int64_t nFreezeInterval = GetArg("-bootstrapservefreezeinterval", BOOTSTRAP_SERVE_DEFAULT_FREEZE_INTERVAL);
         if (nFreezeInterval > 0) {
             scheduler.scheduleEvery(boost::bind(&BootstrapServeFreezeCheck), nFreezeInterval);
         }
@@ -2526,7 +2538,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // last, after every other fallible init step, so an AppInit2 failure cannot
     // tear down the chain databases out from under a running validation thread
     // (the startup-failure path interrupts but does not join the thread group).
-    MaybeStartBootstrapValidation(threadGroup, scheduler);
+    MaybeStartBootstrapValidation(scheduler);
 
     return !fRequestShutdown;
 }

@@ -4,6 +4,7 @@
 
 #include "bootstrapvalidation.h"
 
+#include "bootstrap.h"
 #include "chain.h"
 #include "chainparams.h"
 #include "checkpoints.h"
@@ -15,6 +16,7 @@
 #include "serialize.h"
 #include "sync.h"
 #include "txdb.h"
+#include "ui_interface.h"
 #include "util.h"
 
 #include <atomic>
@@ -177,18 +179,27 @@ void BootstrapValidationSetTerminalStateForTest(int state)
 static void QueueReindexAndShutdown()
 {
     LogPrintf("Trustless bootstrap: discarding chainstate and reindexing from local block data\n");
-    if (pblocktree) {
-        pblocktree->WriteReindexing(true);
-    }
     {
         LOCK(cs_bsval);
-        // Clear the record so we do not loop after the reindex rebuilds a correct,
-        // fully-validated chainstate from the (valid) block files.
-        CBootstrapValidationRecord rec;
+        // Crash consistency: clear the durable bsval record BEFORE arming the
+        // reindex flag. The two writes are separate leveldb operations and a crash
+        // can land between them; ordering them this way means the only reachable
+        // intermediate is "record cleared but reindex not yet set", which is
+        // self-correcting (the snapshot state is simply gone and the node proceeds
+        // as a normal, already-validated node). The opposite order would allow
+        // "reindex set while the FAILED record persists", which on the next start
+        // would both reindex AND re-trigger the FAILED handling.
+        //
+        // Erase the key (Read-miss is loaded as the default BVS_DISABLED record by
+        // LoadBootstrapValidationState), so we do not loop after the reindex rebuilds
+        // a correct, fully-validated chainstate from the (valid) block files.
         if (pblocktree) {
-            pblocktree->Write(BOOTSTRAPVAL_DBKEY, rec);
+            pblocktree->Erase(BOOTSTRAPVAL_DBKEY);
         }
         g_status = BootstrapValidationStatus();
+    }
+    if (pblocktree) {
+        pblocktree->WriteReindexing(true);
     }
     try {
         boost::filesystem::remove_all(ScratchDir());
@@ -259,6 +270,49 @@ static void ThreadBootstrapUtxoValidation()
     }
     if (H < 0) {
         return;
+    }
+
+    // Free-space preflight (SCALE-N2): re-deriving genesis..H into the scratch
+    // chainstate writes a full second copy of the UTXO set. Unlike the download
+    // and the freeze paths, the replay has no preflight, so on a near-full disk it
+    // would otherwise fail mid-replay by throwing on a leveldb write — caught
+    // below and retried forever. Estimate the need as the current chainstate size
+    // (a sound proxy for the second copy we are about to write) plus the shared
+    // safety margin, and check it against the datadir's available space. Missing
+    // disk is NOT evidence of forgery, so on a shortfall we park in the same
+    // PROVISIONAL_PRUNED hold the pruned path uses (auto-finalization stays paused,
+    // the snapshot is never marked FAILED) and emit a one-shot loud warning, rather
+    // than looping on the write exception. A measurement error here is non-fatal:
+    // fall through and let the replay proceed (its own catch handles a real ENOSPC).
+    try {
+        uint64_t chainstateBytes = 0;
+        const boost::filesystem::path chainstateDir = GetDataDir() / "chainstate";
+        if (boost::filesystem::is_directory(chainstateDir)) {
+            boost::filesystem::recursive_directory_iterator end;
+            for (boost::filesystem::recursive_directory_iterator it(chainstateDir); it != end; ++it) {
+                if (boost::filesystem::is_regular_file(it->path())) {
+                    chainstateBytes += boost::filesystem::file_size(it->path());
+                }
+            }
+        }
+        boost::filesystem::space_info si = boost::filesystem::space(GetDataDir());
+        const uint64_t needed = chainstateBytes + (uint64_t)BOOTSTRAP_SNAPSHOT_DISK_SAFETY_MARGIN_BYTES;
+        if ((uint64_t)si.available < needed) {
+            // Not enough room for the scratch replay. Hold (do not fail) exactly like
+            // the pruned/missing-data case; do NOT open scratchdb or start the replay.
+            SetMemoryState(BVS_PROVISIONAL_PRUNED);
+            const std::string msg = strprintf(
+                "Trustless bootstrap: WARNING: not enough free disk to re-derive the UTXO set "
+                "(need ~%llu bytes, have %llu); background validation cannot run. The chainstate "
+                "stays PROVISIONAL/UNVERIFIED and auto-finalization is PAUSED. Free up disk and "
+                "restart to complete background validation, or re-bootstrap.",
+                (unsigned long long)needed, (unsigned long long)si.available);
+            LogPrintf("%s\n", msg);
+            uiInterface.ThreadSafeMessageBox(msg, "", CClientUIInterface::MSG_WARNING);
+            return;
+        }
+    } catch (const boost::filesystem::filesystem_error& e) {
+        LogPrintf("Trustless bootstrap: could not preflight free disk for background validation: %s (continuing)\n", e.what());
     }
 
     bool validated = false;
@@ -450,7 +504,7 @@ static void ThreadBootstrapUtxoValidation()
     }
 }
 
-void MaybeStartBootstrapValidation(boost::thread_group& threadGroup, CScheduler& scheduler)
+void MaybeStartBootstrapValidation(CScheduler& scheduler)
 {
     int state;
     {
@@ -490,7 +544,6 @@ void MaybeStartBootstrapValidation(boost::thread_group& threadGroup, CScheduler&
     // Own the thread via a dedicated handle (not the init thread_group) so
     // Shutdown() can interrupt+join EXACTLY this thread before the chain DBs are
     // freed — including on the init-failure path, which skips thread_group join.
-    (void)threadGroup;
     if (g_bsvalThread == NULL) {
         g_bsvalThread = new boost::thread(boost::bind(&ThreadBootstrapUtxoValidation));
     }

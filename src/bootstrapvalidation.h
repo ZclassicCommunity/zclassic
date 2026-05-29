@@ -51,7 +51,7 @@ void BeginBootstrapValidation(int height, const uint256& hashBlock, const uint25
 //! If a snapshot awaits validation (PROVISIONAL) and the node is not pruned, spawn
 //! the background validation thread and register the failure->reindex poll. No-op
 //! otherwise. Call after StartNode().
-void MaybeStartBootstrapValidation(boost::thread_group& threadGroup, CScheduler& scheduler);
+void MaybeStartBootstrapValidation(CScheduler& scheduler);
 
 //! Cheap copy of the current status for RPC/logging.
 BootstrapValidationStatus GetBootstrapValidationStatus();
