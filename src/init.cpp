@@ -2006,6 +2006,21 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // resume below).
     LoadBootstrapValidationState();
 
+    // A previous (unpruned) run may have persisted a PROVISIONAL trustless-bootstrap
+    // record. If this run is pruned, the background re-derivation can never complete
+    // (it parks in PROVISIONAL_PRUNED), so auto-finalization stays PAUSED indefinitely
+    // and the node keeps using a NEVER-VERIFIED UTXO set. Refusing a FRESH
+    // trustless+prune bootstrap is handled earlier (InitError), but a persisted record
+    // can still reach here; warn the operator loudly. No-op for normal/non-provisional
+    // nodes (DISABLED) and for unpruned nodes (validation can still complete).
+    {
+        BootstrapValidationStatus bvStartup = GetBootstrapValidationStatus();
+        if (fPruneMode &&
+            (bvStartup.state == BVS_PROVISIONAL || bvStartup.state == BVS_PROVISIONAL_PRUNED)) {
+            InitWarning(_("WARNING: this node holds a PROVISIONAL trustless-bootstrap snapshot whose UTXO set has NOT been verified, and pruning is enabled, so background validation can never complete and auto-finalization is PAUSED. The chainstate remains unverified. To resolve this, run with an unpruned datadir so background validation can re-derive and confirm the UTXO set, or re-bootstrap. (getblockchaininfo bootstrap_validation reports the current state.)"));
+        }
+    }
+
     if (BootstrapTrustlessPendingExists(GetDataDir())) {
         // Option B: a v2 self-snapshot was downloaded and awaits provisional
         // acceptance. Run the cheap gate (integrity + checkpoints + tip PoW); on

@@ -1710,6 +1710,15 @@ BOOST_AUTO_TEST_CASE(bootstrap_validation_finalization_hold)
     BOOST_CHECK_EQUAL(GetBootstrapValidationStatus().state, BVS_VALIDATED);
     BOOST_CHECK(!BootstrapValidationHoldsFinalization());
 
+    // PROVISIONAL_PRUNED (background validation cannot complete because block data
+    // is pruned/missing) is still an UNVERIFIED chainstate, so the hold MUST stay
+    // engaged — auto-finalization remains paused until validation actually completes.
+    BeginBootstrapValidation(123456, uint256S("0x1111"), uint256S("0x2222"));
+    BOOST_CHECK(BootstrapValidationHoldsFinalization());
+    BootstrapValidationSetTerminalStateForTest(BVS_PROVISIONAL_PRUNED);
+    BOOST_CHECK_EQUAL(GetBootstrapValidationStatus().state, BVS_PROVISIONAL_PRUNED);
+    BOOST_CHECK(BootstrapValidationHoldsFinalization()); // still unverified: keep holding
+
     // A FAILED latch also releases the hold (the node is about to discard and
     // reindex; staying paused would be pointless and would stall finalization).
     BeginBootstrapValidation(123456, uint256S("0x1111"), uint256S("0x2222"));

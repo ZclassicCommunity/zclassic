@@ -209,6 +209,31 @@ static void BootstrapValidationFailedPoll()
     }
 }
 
+// Scheduler poll: while parked in PROVISIONAL_PRUNED, the node is running on an
+// imported UTXO set that has NEVER been re-derived/verified and auto-finalization
+// is paused indefinitely (RefreshFinalizationHoldLocked holds for this state).
+// There is no operator-visible recurring signal otherwise, so emit a LOUD warning
+// at a low duty cycle. Throttled to one line per ~10 minutes so it cannot flood
+// the log. A strict no-op for every other state, so normal nodes never see it.
+static void BootstrapValidationProvisionalPrunedPoll()
+{
+    int state;
+    {
+        LOCK(cs_bsval);
+        state = g_status.state;
+    }
+    if (state != BVS_PROVISIONAL_PRUNED) {
+        return;
+    }
+    static int64_t nLastWarn = 0;
+    const int64_t now = GetTime();
+    if (now - nLastWarn < 600) {
+        return;
+    }
+    nLastWarn = now;
+    LogPrintf("Trustless bootstrap: WARNING: chainstate is PROVISIONAL/UNVERIFIED (background UTXO validation could not complete because block data is pruned/missing); auto-finalization is PAUSED. Run with an unpruned datadir to complete background validation, or re-bootstrap.\n");
+}
+
 // Background worker: re-derive the UTXO set from genesis to H into a private
 // scratch chainstate and compare its digest to S_imported.
 static void ThreadBootstrapUtxoValidation()
@@ -450,6 +475,9 @@ void MaybeStartBootstrapValidation(boost::thread_group& threadGroup, CScheduler&
         try {
             boost::filesystem::remove_all(ScratchDir());
         } catch (...) {}
+        // Periodically remind the operator that this node is serving/using an
+        // unverified chainstate with finalization paused (no other recurring signal).
+        scheduler.scheduleEvery(boost::bind(&BootstrapValidationProvisionalPrunedPoll), 60);
         return;
     }
     // Don't start a background re-derivation if we're already shutting down: the
@@ -467,6 +495,10 @@ void MaybeStartBootstrapValidation(boost::thread_group& threadGroup, CScheduler&
         g_bsvalThread = new boost::thread(boost::bind(&ThreadBootstrapUtxoValidation));
     }
     scheduler.scheduleEvery(boost::bind(&BootstrapValidationFailedPoll), 5);
+    // The re-derivation can itself park in PROVISIONAL_PRUNED mid-run if block
+    // data turns out to be missing; in that case the operator must still be warned
+    // periodically. The poll is a no-op until/unless the state actually parks there.
+    scheduler.scheduleEvery(boost::bind(&BootstrapValidationProvisionalPrunedPoll), 60);
 }
 
 void InterruptBootstrapValidation()
