@@ -210,6 +210,28 @@ A cautious operator can close this gap by:
 The background-validation design (option B) closes this gap automatically; see
 [bootstrap-self-healing-design.md](bootstrap-self-healing-design.md).
 
+### Why the anchor is consensus-safe: it is a checkpoint
+
+Fast sync changes only *how fast* a node reaches a verified tip, never *which
+blocks are valid*: every consensus rule is still checked forward from the anchor
+by the unchanged validation code. This is the assumeutxo model, **not** a
+consensus change.
+
+The anchor is deliberately the **same height and block hash as the highest
+compiled checkpoint** (`chainparams.cpp`: the checkpoint at `3126937` and
+`fastSyncAnchorData` are the same block) — it is just a checkpoint with a
+UTXO-set hash stapled on. It therefore adds **no new trust**: choosing the binary
+already means choosing its checkpoints, and the anchor rides on that same root.
+
+This also makes anchor mode safe under ZClassic's reorg-depth / finalization rule
+(`-maxreorgdepth`, default 10 blocks; deeper reorgs against finalized blocks are
+rejected). Because the import point is a checkpoint — developer-declared canonical
+— there is no ambiguity about which fork the node lands on, and as the chain grows
+the anchor only sinks *deeper* below the live finality window, never interacting
+with it. Anchors must always be cut **below the finality window** (in practice,
+at the checkpoint), never near the tip. (Trustless mode does not have this
+property — see its trust note below.)
+
 ### No single point of trust
 
 The project's bootstrap peer is a *convenience*, never a *requirement*. By
@@ -301,6 +323,18 @@ this automatically, which is one reason the mode is EXPERIMENTAL. This is the
 assumeutxo trust window without a compiled hash — the background validation *is*
 the trust. The gossip/normal-P2P path never triggers trustless acceptance; only an
 explicit `-bootstrappeer`/discovery fast-sync under `-bootstrapmode=trustless` does.
+
+Finality caveat (a second reason this mode is EXPERIMENTAL): unlike an anchor,
+a trustless self-snapshot is taken at the serving peer's **own recent tip**, not
+at a checkpoint buried below the reorg-depth window. ZClassic's finalization rule
+(`-maxreorgdepth`, default 10 blocks) can therefore **finalize the imported fork
+point** within ~10 blocks + the finalization delay — i.e. *before* the background
+genesis→tip re-derivation completes. If that snapshot was on the wrong side of a
+fork, the node would be permanently pinned to it and would reject the honest
+chain, since reorgs past a finalized block are refused. Anchor mode is immune
+(the anchor is a checkpoint, far below the finality window). Before trustless mode
+could ship enabled, finalization of bootstrap-imported heights must be deferred
+until background validation latches `validated`.
 
 To serve trustless self-snapshots, run a synced node with `-bootstrapserve=auto`;
 it freezes a fresh self-snapshot of its own tip every

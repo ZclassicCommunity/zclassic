@@ -188,6 +188,20 @@ background validation itself, so there is nothing to maintain per release.
   defrauded — this is the main reason trustless mode is EXPERIMENTAL/off by
   default. After the latch it is as strong as a full sync (stronger than "trust
   the binary's compiled hash," which is never independently checked).
+- **Finalization pinning (a distinct exposure from the forgery window).** A
+  trustless self-snapshot is taken at the serving peer's *recent tip*, not at a
+  checkpoint buried below the reorg-depth window. ZClassic's finalization rule
+  (`-maxreorgdepth`, default 10) finalizes blocks ~10 deep (plus a short delay)
+  and rejects reorgs past a finalized block. A provisionally-accepted snapshot
+  tip can therefore be **finalized before background validation completes**, so a
+  node that imported a snapshot on the wrong side of a fork would be permanently
+  pinned to it and reject the honest chain. Anchor mode is immune because its
+  import point is a compiled checkpoint far below the finality window. **Hard
+  prerequisite before trustless mode could ship enabled:** defer finalization of
+  bootstrap-imported heights until the `validated` latch (e.g. treat provisional
+  heights as non-finalizable, or refuse to import a snapshot whose tip is within
+  the finality window of the network tip). Until then this is an additional
+  reason the mode stays EXPERIMENTAL/off.
 - **Eclipse.** Snapshot peers are still just peers; normal IBD/header validation
   from other connections applies. Do not pin a snapshot peer as a permanent
   `addnode` after bootstrap (close the existing TODO).
