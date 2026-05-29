@@ -31,7 +31,7 @@ extern bool ProcessMessage(CNode* pfrom, std::string strCommand, CDataStream& vR
 // per-IP quota tracked-address cap, so the hard-cap eviction test can size its
 // flood without hardcoding the constant. Declared at global scope so it links
 // against the global-namespace definition.
-extern const size_t BootstrapServeMaxTrackedIpsForTest();
+extern size_t BootstrapServeMaxTrackedIpsForTest();
 
 // Serve-quota bucket-key helper (defined in bootstrap.cpp; collapses an IPv6 /64
 // to one quota bucket while keeping IPv4 full-address). Declared at global scope
@@ -1357,6 +1357,62 @@ BOOST_FIXTURE_TEST_CASE(bootstrap_bspman_malformed_payload_misbehaves, TestingSe
     CNodeStateStats before;
     BOOST_REQUIRE(GetNodeStateStats(node.GetId(), before));
     ProcessMessage(&node, NetMsgType::BSPMAN, payload, GetTime());
+    CNodeStateStats after;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), after));
+    BOOST_CHECK_GE(after.nMisbehavior - before.nMisbehavior, 20);
+}
+
+// A well-formed v2 self-snapshot manifest at the peer's OWN recent tip (NOT a
+// compiled anchor) must be ACCEPTED only when trustless mode is explicitly
+// allowed, and REJECTED otherwise. The gossip/CNode BSMAN path always validates
+// with fTrustlessAllowed=false (the default), so this is the guardrail that keeps
+// the experimental, off-by-default trustless acceptance from ever being reachable
+// from untrusted gossip. This pins ValidateBootstrapSnapshotManifest's
+// fTrustlessAllowed gate directly — the one decision that separates "anchor-only,
+// safe by compiled constant" from "provisional, verified later by re-derivation".
+BOOST_AUTO_TEST_CASE(bootstrap_manifest_trustless_gate_rejects_self_snapshot_without_opt_in)
+{
+    CBootstrapSnapshotManifest m = ValidBootstrapManifest();
+    m.nVersion = 2;
+    // A tip that is NOT any compiled anchor (different height AND hash), i.e. a
+    // server's own recent self-snapshot — exactly what a forged/untrusted peer
+    // would advertise.
+    m.nHeight = Params().FastSyncAnchor().nHeight + 1000;
+    m.hashBlock = uint256S("0x00000000000000000000000000000000000000000000000000000000feedface");
+    // Non-null commitment (trustless accepts any; it is verified after download by
+    // background re-derivation, not here).
+    m.hashChainstateSerialized = uint256S("0x0000000000000000000000000000000000000000000000000000000012345678");
+
+    std::string err;
+    // Gossip / anchor-mode path (fTrustlessAllowed defaults false): REJECTED.
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(m, err));
+    BOOST_CHECK(!err.empty());
+    // Explicit trustless opt-in: the SAME manifest is acceptable (its tip and
+    // commitment are not trusted here — they are checked post-download).
+    std::string err2;
+    BOOST_CHECK(ValidateBootstrapSnapshotManifest(m, err2, /*fTrustlessAllowed=*/true));
+}
+
+// And the actual gossip handler must Misbehave a peer that pushes such a manifest:
+// +10 (unsolicited BSMAN on a CNode socket) plus +10 (invalid manifest contents,
+// because the handler validates with fTrustlessAllowed=false).
+BOOST_FIXTURE_TEST_CASE(bootstrap_bsman_non_anchor_v2_manifest_misbehaves, TestingSetup)
+{
+    CBootstrapSnapshotManifest m = ValidBootstrapManifest();
+    m.nVersion = 2;
+    m.nHeight = Params().FastSyncAnchor().nHeight + 1000;
+    m.hashBlock = uint256S("0x00000000000000000000000000000000000000000000000000000000feedface");
+    m.hashChainstateSerialized = uint256S("0x0000000000000000000000000000000000000000000000000000000012345678");
+
+    CNode node(INVALID_SOCKET, CAddress(CService("127.0.0.1", 0)), "", true);
+    node.nVersion = PROTOCOL_VERSION;
+
+    CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
+    payload << m;
+
+    CNodeStateStats before;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), before));
+    ProcessMessage(&node, NetMsgType::BSMAN, payload, GetTime());
     CNodeStateStats after;
     BOOST_REQUIRE(GetNodeStateStats(node.GetId(), after));
     BOOST_CHECK_GE(after.nMisbehavior - before.nMisbehavior, 20);
