@@ -50,10 +50,11 @@ node into a fully self-verified one without re-downloading the chain.
 ### Option B — Fast sync (faster start, with a trust note)
 
 Import a prepared chain snapshot, then sync forward normally. This is the default
-on a fresh datadir. It is much faster, but read the trust model below: until the
-snapshot carries a compiled chainstate commitment (see *Roadmap to trustless
-fast sync*), the serving peer is trusted for the contents of the imported UTXO
-set. Use a peer you trust, or use Option A.
+on a fresh datadir. It is much faster, and the imported UTXO set is now verified
+against a commitment compiled into the binary, so the serving peer cannot feed a
+forged ledger state (see the trust model below). One honest gap remains — the
+historical *block files* are not covered by a compiled commitment — so a cautious
+operator can still prefer a trusted peer or use Option A.
 
 ```bash
 ./src/zclassicd                                   # default: fast-sync from a bootstrap peer
@@ -116,46 +117,67 @@ anything other than regular files and directories under `blocks/` and
 ## Anchor
 
 The binary includes a fast-sync anchor tied to the mainnet checkpoint at height
-`2879438`:
+`3126937`:
 
 ```text
-000007e8fccb9e4831c7d7376a283b016ead6166491f951f4f083dbe366992b2
+00000663e40f1fe0bc32a7e7282fac25de5fe8ecefd9c627e2fd948d388f7053
 ```
 
 At startup the daemon verifies that this anchor is present in the checkpoint
 set and that its SHA-256 and SHA3-256 anchor digests match the compiled values.
-After importing the files, normal database verification and peer sync resume
-from the snapshot tip.
+After importing the files, the node also recomputes the UTXO-set commitment over
+the imported chainstate and rejects the snapshot unless it matches the compiled
+value (see the trust model below). Then normal database verification and peer
+sync resume from the snapshot tip.
 
-Treat snapshots as trusted input. The compiled anchor prevents importing a
-snapshot for the wrong chain point, and the receiver verifies every file hash
-advertised by the serving peer, but the serving peer still chooses the snapshot
-contents. Use `-bootstrappeer` only with a peer you control or otherwise trust.
+The compiled anchor prevents importing a snapshot for the wrong chain point, the
+compiled UTXO-set commitment prevents a peer from substituting a forged ledger
+state, and the receiver verifies every file hash advertised by the serving peer.
+The block-file *contents* below the verification horizon are still chosen by the
+peer (see the trust model). For the strongest guarantee, use `-bootstrappeer`
+with a peer you control or use Option A.
 
-### Fast-sync trust model: snapshot peers are trusted like the binary
+### Fast-sync trust model: what is actually verified
 
-> **Important:** The post-import `VerifyDB` pass only re-checks the most recent
-> blocks. UTXOs in the imported `chainstate/` that are deeper than `-checkblocks`
-> (default `288`) blocks below the tip are **not** re-derived from block data —
-> they are trusted as-is from the snapshot peer.
+The imported ledger state is verified against the open-source binary — **not the
+peer.** After import, the daemon recomputes the UTXO-set commitment over the
+whole imported `chainstate/` and compares it to a value compiled into the binary
+(`CFastSyncAnchorData::hashChainstateSerialized`, equal to the `hash_serialized`
+field of the `gettxoutsetinfo` RPC at the anchor height). If it does not match,
+the snapshot is rejected. A malicious or compromised serving peer therefore
+**cannot** substitute a forged UTXO set: it cannot produce a chainstate that
+hashes to the compiled commitment. Fast-sync of the ledger state thus trusts only
+the binary, exactly like full validation — this supersedes the older "snapshot
+peers are trusted like the binary" framing for the UTXO set.
 
-Because of this, **a snapshot peer must be trusted at the same level as the
-binary itself.** A malicious snapshot could embed spendable but bogus UTXOs that
-are older than the `-checkblocks` horizon, and they would pass validation: the
-verification pass never revisits chainstate entries below that depth, so it would
-not detect them. The per-file SHA-256 checks only confirm that you received the
-bytes the serving peer advertised — they say nothing about whether those bytes
-describe a legitimate chain history.
+> **Important — remaining gap (block files are not committed):** the historical
+> **block file** contents are *not* covered by a compiled commitment. The
+> compiled anchor digests (`hashAnchorSha256` / `hashAnchorSha3`) are computed
+> over the string
+> `zclassic-fastsync-anchor-v1|<network>|<height>|<blockhash>` — i.e. they bind
+> the *anchor identity*, not the file set. Block-file integrity rests only on:
+>
+> - the per-file SHA-256 in the manifest, which is supplied **by the peer**, so
+>   it catches transport corruption but **not** a malicious peer; and
+> - the post-import `VerifyDB` pass, which by default re-checks only the most
+>   recent `-checkblocks` (default `288`) blocks.
 
-A cautious operator can reduce this exposure when bootstrapping for the first
-time by:
+Because of this, a malicious peer could serve a **correct** UTXO set (forced by
+the commitment) alongside garbage or altered historical block data older than the
+`-checkblocks` horizon, and it would pass startup. The impact is on deep-reorg
+validation, serving blocks to other peers, and wallet rescans — **not** on the
+node's current balances, which come from the verified UTXO set.
+
+A cautious operator can close this gap by:
 
 - raising `-checkblocks` (up to `0`, which checks all blocks) and/or
-  `-checklevel` so more of the imported chainstate is re-verified against block
-  data, at the cost of a longer startup; or
-- only bootstrapping from a peer or operator they trust to have produced the
-  snapshot honestly; or
+  `-checklevel` so more of the imported block data is re-verified at startup, at
+  the cost of a longer start; or
+- only bootstrapping from a peer or operator they trust; or
 - simply using full validation (`-bootstrap=0`), which trusts no one.
+
+The background-validation design (option B) closes this gap automatically; see
+[bootstrap-self-healing-design.md](bootstrap-self-healing-design.md).
 
 ### No single point of trust
 
@@ -174,40 +196,46 @@ design:
 ### Roadmap to trustless fast sync
 
 The goal is for fast sync to require trusting *no* peer — only the
-publicly-reviewable binary, the same as full validation. Two pieces get us
-there:
+publicly-reviewable binary, the same as full validation.
 
-1. **Compiled chainstate commitment.** In addition to the block hash, the binary
-   pins a hash of the entire UTXO set at the anchor height (the same
+1. **Compiled chainstate commitment (shipped).** In addition to the block hash,
+   the binary pins a hash of the entire UTXO set at the anchor height (the same
    `hash_serialized` value reported by the `gettxoutsetinfo` RPC). After import,
    the node recomputes this hash over the imported `chainstate/` and **rejects
    the snapshot if it does not match.** A malicious or compromised peer then
    cannot substitute a forged UTXO set: the bytes either reproduce the compiled
-   commitment or the snapshot is thrown away. This reduces fast-sync trust to the
-   binary itself — exactly the assumeutxo model. The commitment field exists in
-   the anchor; once a value is compiled in for a release, this check activates
-   automatically (it is skipped while the field is unset, preserving today's
-   behavior).
+   commitment or the snapshot is thrown away. This reduces fast-sync trust *for
+   the ledger state* to the binary itself — exactly the assumeutxo model. (The
+   check is skipped only if the commitment field is left unset, e.g. on a network
+   without a compiled value.)
 
    To generate the value for a release, load the prepared snapshot at the anchor
    height and read `gettxoutsetinfo`'s `hash_serialized`; that string is the
    compiled commitment.
 
-2. **Decentralized peer discovery.** Rather than depending on a hardcoded IP, a
-   fresh node can discover other nodes advertising the `NODE_BOOTSTRAP` service
-   bit through the normal DNS seeds and `getaddr` peer exchange, and fast-sync
-   from any of them. Combined with the compiled commitment above, this is safe
-   even from an untrusted peer, because the content is verified against the
-   binary regardless of *who* served it. Multiple `-bootstrappeer` entries are
-   accepted and tried in order, and anyone can run a serving node
-   (`-bootstrapserve`) to add capacity to the network.
+2. **Decentralized peer discovery (shipped).** Rather than depending on a
+   hardcoded IP, a fresh node can discover other nodes advertising the
+   `NODE_BOOTSTRAP` service bit through peer exchange and fast-sync from any of
+   them. Combined with the compiled commitment above, this is safe even from an
+   untrusted peer, because the ledger state is verified against the binary
+   regardless of *who* served it. Anyone can run a serving node
+   (`-bootstrapserve`, or `-bootstrapserve=auto`) to add capacity.
+
+3. **Background block-file validation (planned, option B).** The one remaining
+   trust gap — historical block files older than the `-checkblocks` horizon are
+   not covered by a compiled commitment — is closed by a self-healing,
+   low-maintenance design that re-derives and repairs block data in the
+   background after fast-sync, removing both the manual-anchor treadmill and the
+   block-file trust assumption. See
+   [bootstrap-self-healing-design.md](bootstrap-self-healing-design.md).
 
 ## Network Service Direction
 
 This branch has the first node-to-node network pieces:
 
 - `NODE_BOOTSTRAP` service advertisement.
-- `-bootstrapserve` and `-bootstrapsourcedir=<dir>` startup options.
+- `-bootstrapserve` (+ `-bootstrapsourcedir=<dir>`) and `-bootstrapserve=auto`
+  startup options (see *Auto-serve* below).
 - `getbsman` / `bsman` P2P messages for requesting and serving the snapshot
   manifest tied to the compiled anchor.
 - `getbschk` / `bschk` P2P messages for bounded chunk reads from files listed
@@ -222,13 +250,48 @@ uses the network default P2P port (mainnet `8033`). If the serving node listens
 on a non-default port, give it explicitly, e.g.
 `-bootstrappeer=192.0.2.10:8033`.
 
-Start a serving node with:
+Start a serving node from a prepared snapshot directory with:
 
 ```bash
 ./src/zclassicd \
     -bootstrapserve \
     -bootstrapsourcedir=/path/to/prepared-snapshot
 ```
+
+### Auto-serve: `-bootstrapserve=auto`
+
+`-bootstrapserve=auto` turns any fast-syncing node into a bootstrap server with
+no prepared directory and no `-bootstrapsourcedir`. After the node fast-syncs, it
+retains an **immutable copy** of the snapshot (at the compiled anchor height)
+under `<datadir>/bootstrap-serve-source` and serves that copy to other peers,
+advertising the `NODE_BOOTSTRAP` service bit. Combined with peer discovery, every
+node that opts in becomes a bootstrap server — a self-sustaining swarm rather than
+one operator-run node.
+
+```bash
+./zclassicd -bootstrapserve=auto      # auto: retain & serve what this node fast-syncs
+```
+
+Contrast with the manual form, which serves a fixed directory you prepared
+yourself:
+
+```bash
+./zclassicd -bootstrapserve -bootstrapsourcedir=<dir>   # manual: serve a prepared snapshot
+```
+
+Cost and behavior:
+
+- **Disk:** the retained copy is a *second* copy of `blocks/` + `chainstate/`, so
+  it roughly **doubles** the on-disk chain size. If free space is insufficient,
+  retaining the copy is skipped with a log warning; the node still finishes its
+  own bootstrap, it just does not serve.
+- **Advertising:** the node advertises `NODE_BOOTSTRAP` **only after** the
+  retained copy is wired up *and* its manifest has been pre-built during startup,
+  so it never announces a service it cannot answer. (The manifest is hashed on the
+  init thread, not on a live peer's first request, to avoid stalling the node.)
+- **Restart:** on restart the retained copy is reused if it still matches the
+  binary's compiled anchor, and **dropped** if the anchor has moved — so a node
+  never serves a snapshot that current clients would download and then reject.
 
 Download progress is written to the log as it runs. The daemon does not write
 `debug.log` by default, so pass `-printtoconsole` or `-debuglogfile` to watch
