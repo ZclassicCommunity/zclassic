@@ -12,6 +12,7 @@
 #include "addrman.h"
 #include "amount.h"
 #include "bootstrap.h"
+#include "bootstrapvalidation.h"
 #include "checkpoints.h"
 #include "compat/sanity.h"
 #include "consensus/upgrades.h"
@@ -375,6 +376,8 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-bootstrapsourcedir=<dir>", _("Prepared snapshot directory containing blocks/ and chainstate/ to serve to bootstrap peers"));
     strUsage += HelpMessageOpt("-bootstrapservemaxbytesperday=<n>", strprintf(_("When serving bootstrap snapshots, bytes one IP may download per 24h before it is throttled (default: %d, 0 = unlimited)"), BOOTSTRAP_SERVE_DEFAULT_MAX_BYTES_PER_DAY));
     strUsage += HelpMessageOpt("-bootstrapservethrottlekbps=<n>", strprintf(_("Rate in KiB/s to serve a bootstrap IP that is over its daily cap (default: %d, 0 = stop serving it until the next day)"), BOOTSTRAP_SERVE_DEFAULT_THROTTLE_KBPS));
+    strUsage += HelpMessageOpt("-bootstrapservefreezeinterval=<n>", strprintf(_("With -bootstrapserve=auto, seconds between freezing a fresh self-snapshot of this node's own tip to serve (EXPERIMENTAL, option B; default: %d, 0 = never self-snapshot, only serve a fast-synced anchor copy)"), 21600));
+    strUsage += HelpMessageOpt("-bootstrapmode=<anchor|trustless>", _("How to accept a downloaded bootstrap snapshot: 'anchor' (default) requires it to match the compiled fast-sync anchor; 'trustless' (EXPERIMENTAL, option B) accepts a peer's self-snapshot at its own tip, then re-derives the UTXO set from genesis in the background and reindexes if it does not match."));
 #if !defined(WIN32)
     strUsage += HelpMessageOpt("-sysperms", _("Create new files with system default permissions, instead of umask 077 (only effective with disabled wallet functionality)"));
 #endif
@@ -795,6 +798,33 @@ static void RemoveFailedPeerBootstrapChainData(const boost::filesystem::path& da
         boost::filesystem::remove_all(data_dir / "chainstate");
     } catch (const boost::filesystem::filesystem_error& e) {
         LogPrintf("Failed to remove rejected bootstrap chain data from %s: %s\n", data_dir.string(), e.what());
+    }
+}
+
+// Periodic self-snapshot for -bootstrapserve=auto (option B): once the node is
+// fully synced, freeze its own chainstate into the serve dir and advertise
+// NODE_BOOTSTRAP. Runs on the scheduler thread. Skips while in IBD and skips a
+// re-copy while the current serve copy is already near the tip. The manifest is
+// pre-built here (off the message-handler thread) so a peer's first request does
+// not trigger a multi-GiB hash on the net thread.
+static const int BOOTSTRAP_SELF_SNAPSHOT_MIN_ADVANCE_BLOCKS = 500;
+static void BootstrapServeFreezeCheck()
+{
+    // Only scheduled when -bootstrapserve=auto with a positive freeze interval, so
+    // no need to re-check the (init-rewritten) -bootstrapserve arg here.
+    std::string err;
+    if (!FreezeLiveChainstateForServe(GetDataDir(), BOOTSTRAP_SELF_SNAPSHOT_MIN_ADVANCE_BLOCKS, err)) {
+        LogPrint("net", "Auto-serve self-snapshot skipped: %s\n", err);
+        return;
+    }
+    if (!PreflightBootstrapSnapshotService(err)) {
+        LogPrintf("Auto-serve: froze a self-snapshot but cannot build its manifest: %s\n", err);
+        return;
+    }
+    // Benign 64-bit store: readers see either value, both valid (advertise or not).
+    if (!(nLocalServices & NODE_BOOTSTRAP)) {
+        nLocalServices |= NODE_BOOTSTRAP;
+        LogPrintf("Auto bootstrap-serve active: now serving a self-snapshot to peers\n");
     }
 }
 
@@ -1717,17 +1747,32 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
         if (enabled && !conflicts) {
             const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
+            // Option B: trustless mode accepts a peer's self-snapshot at its own
+            // tip and verifies it by background re-derivation, so it does NOT
+            // require a compiled fast-sync anchor.
+            const bool fTrustlessMode = (GetArg("-bootstrapmode", "anchor") == "trustless");
+            const bool haveAnchor = (anchor.nHeight >= 0 && !anchor.hashBlock.IsNull());
+            // A pruned node cannot re-derive the UTXO set from genesis, so trustless
+            // background validation can never run — the provisionally-accepted (and
+            // possibly forged) snapshot would be trusted permanently with no
+            // backstop. Refuse the combination outright.
+            if (fTrustlessMode && fPruneMode) {
+                return InitError(_("-bootstrapmode=trustless cannot be used with -prune: a pruned node cannot re-derive the UTXO set to validate the snapshot, so it would never be verified. Use a non-pruned datadir to bootstrap trustlessly, or use -bootstrapmode=anchor."));
+            }
             std::string bootstrap_error;
-            if (anchor.nHeight < 0 || anchor.hashBlock.IsNull()) {
+            if (!fTrustlessMode && !haveAnchor) {
                 if (explicit_peer)
-                    return InitError(_("-bootstrappeer requires a compiled fast-sync anchor"));
+                    return InitError(_("-bootstrappeer requires a compiled fast-sync anchor (or -bootstrapmode=trustless)"));
             } else if (!IsBootstrapFreshChainDatadir(GetDataDir(), bootstrap_error)) {
                 // Datadir already has chain data: skip silently unless the user
                 // explicitly asked to bootstrap into it.
                 if (explicit_peer)
                     return InitError(bootstrap_error);
             } else {
-                InitWarning(_("Bootstrap snapshots are trusted input; the snapshot tip is verified against the compiled anchor."));
+                if (fTrustlessMode)
+                    InitWarning(_("EXPERIMENTAL: -bootstrapmode=trustless accepts a peer's self-snapshot provisionally and re-derives the UTXO set from genesis in the background, reindexing if it does not validate. WARNING: until validation completes (which can take as long as a full sync), the node operates on an UNVERIFIED UTXO set; do not rely on balances or spend received funds until getblockchaininfo reports bootstrap_validation state \"validated\"."));
+                else
+                    InitWarning(_("Bootstrap snapshots are trusted input; the snapshot tip is verified against the compiled anchor."));
                 BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
                     if (BootstrapFromPeer(peer, GetDataDir(), bootstrap_error)) {
                         bootstrap_snapshot_ran = true;
@@ -1939,7 +1984,31 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
     }
 
-    if (bootstrap_snapshot_ran) {
+    // Load any persisted trustless-validation latch now that the chain databases
+    // are open (drives RPC status and lets a previous run's background validation
+    // resume below).
+    LoadBootstrapValidationState();
+
+    if (BootstrapTrustlessPendingExists(GetDataDir())) {
+        // Option B: a v2 self-snapshot was downloaded and awaits provisional
+        // acceptance. Run the cheap gate (integrity + checkpoints + tip PoW); on
+        // success start background full validation, on failure discard + reindex.
+        // The marker is authoritative regardless of the current -bootstrapmode.
+        int bvHeight = -1;
+        uint256 bvHash, bvCommit;
+        std::string bootstrap_trustless_error;
+        if (!ProvisionalAcceptTrustlessSnapshot(GetDataDir(), bvHeight, bvHash, bvCommit, bootstrap_trustless_error)) {
+            LogPrintf("%s\n", bootstrap_trustless_error);
+            CloseBootstrapChainDatabases();
+            RemoveFailedPeerBootstrapChainData(GetDataDir());
+            BootstrapTrustlessPendingClear(GetDataDir());
+            return InitError("trustless bootstrap snapshot failed provisional checks: " + bootstrap_trustless_error);
+        }
+        BeginBootstrapValidation(bvHeight, bvHash, bvCommit);
+        BootstrapTrustlessPendingClear(GetDataDir());
+        LogPrintf("Bootstrap snapshot provisionally accepted at height %d (%s); background validation will confirm it\n",
+            bvHeight, bvHash.ToString());
+    } else if (bootstrap_snapshot_ran) {
         std::string bootstrap_anchor_error;
         if (!VerifyImportedBootstrapAnchor(bootstrap_anchor_error)) {
             LogPrintf("%s\n", bootstrap_anchor_error);
@@ -1972,6 +2041,15 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             LogPrintf("Auto bootstrap-serve active: serving the retained snapshot to peers\n");
         } else {
             LogPrintf("Auto bootstrap-serve idle (not advertising NODE_BOOTSTRAP): %s\n", serve_err);
+            // Option B: when periodic self-snapshotting is enabled, point the serve
+            // machinery at the (possibly not-yet-existing) auto-serve dir now, while
+            // we are still single-threaded before StartNode(). The scheduled freeze
+            // task will populate it and advertise NODE_BOOTSTRAP once synced, without
+            // ever having to write mapArgs from a background thread.
+            if (GetArg("-bootstrapservefreezeinterval", 21600) > 0) {
+                mapArgs["-bootstrapsourcedir"] = BootstrapAutoServeSourceDir(GetDataDir()).string();
+                mapArgs["-bootstrapserve"] = "1";
+            }
         }
     }
 
@@ -2251,6 +2329,18 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                                          boost::ref(cs_main), boost::cref(pindexBestHeader));
     scheduler.scheduleEvery(f, 60);
 
+    // Option B: periodically freeze a self-snapshot of this node's own tip to
+    // serve (EXPERIMENTAL). Only when -bootstrapserve=auto with a positive
+    // interval. The task skips while in IBD and skips a re-copy when the serve
+    // copy is already near the tip, so the first eligible run self-snapshots once
+    // synced and subsequent runs refresh it as the chain advances.
+    if (fBootstrapServeAuto) {
+        const int64_t nFreezeInterval = GetArg("-bootstrapservefreezeinterval", 21600);
+        if (nFreezeInterval > 0) {
+            scheduler.scheduleEvery(boost::bind(&BootstrapServeFreezeCheck), nFreezeInterval);
+        }
+    }
+
 #ifdef ENABLE_MINING
     // Generate coins in the background
     GenerateBitcoins(GetBoolArg("-gen", false), GetArg("-genproclimit", 1), Params());
@@ -2273,6 +2363,14 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     // SENDALERT
     threadGroup.create_thread(boost::bind(ThreadSendAlert));
+
+    // Option B: start (or resume) background full validation of a provisionally
+    // accepted trustless snapshot. Spawns the re-derivation thread and the
+    // failure->reindex poll only when a snapshot is pending validation. Started
+    // last, after every other fallible init step, so an AppInit2 failure cannot
+    // tear down the chain databases out from under a running validation thread
+    // (the startup-failure path interrupts but does not join the thread group).
+    MaybeStartBootstrapValidation(threadGroup, scheduler);
 
     return !fRequestShutdown;
 }

@@ -2486,7 +2486,7 @@ static int64_t nTimeIndex = 0;
 static int64_t nTimeCallbacks = 0;
 static int64_t nTimeTotal = 0;
 
-bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pindex, CCoinsViewCache& view, bool fJustCheck)
+bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pindex, CCoinsViewCache& view, bool fJustCheck, bool fScratchView)
 {
     const CChainParams& chainparams = Params();
     AssertLockHeld(cs_main);
@@ -2707,8 +2707,11 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     if (fJustCheck)
         return true;
 
-    // Write undo information to disk
-    if (pindex->GetUndoPos().IsNull() || !pindex->IsValid(BLOCK_VALID_SCRIPTS))
+    // Write undo information to disk. Skipped for a scratch re-derivation: it
+    // mutates the shared block index (nUndoPos/nStatus/RaiseValidity) and writes
+    // undo files the live node already owns; a forward-only scratch replay never
+    // disconnects, so it needs neither.
+    if (!fScratchView && (pindex->GetUndoPos().IsNull() || !pindex->IsValid(BLOCK_VALID_SCRIPTS)))
     {
         if (pindex->GetUndoPos().IsNull()) {
             CDiskBlockPos pos;
@@ -2737,7 +2740,8 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         setDirtyBlockIndex.insert(pindex);
     }
 
-    if (fTxIndex)
+    // Don't touch the live txindex from a scratch re-derivation.
+    if (fTxIndex && !fScratchView)
         if (!pblocktree->WriteTxIndex(vPos))
             return AbortNode(state, "Failed to write transaction index");
 
@@ -2747,10 +2751,14 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     int64_t nTime3 = GetTimeMicros(); nTimeIndex += nTime3 - nTime2;
     LogPrint("bench", "    - Index writing: %.2fms [%.2fs]\n", 0.001 * (nTime3 - nTime2), nTimeIndex * 0.000001);
 
-    // Watch for changes to the previous coinbase transaction.
-    static uint256 hashPrevBestCoinBase;
-    GetMainSignals().UpdatedTransaction(hashPrevBestCoinBase);
-    hashPrevBestCoinBase = block.vtx[0].GetHash();
+    // Watch for changes to the previous coinbase transaction. Suppressed for a
+    // scratch re-derivation so it neither fires wallet/UI notifications nor
+    // perturbs the static used by the live connection path.
+    if (!fScratchView) {
+        static uint256 hashPrevBestCoinBase;
+        GetMainSignals().UpdatedTransaction(hashPrevBestCoinBase);
+        hashPrevBestCoinBase = block.vtx[0].GetHash();
+    }
 
     int64_t nTime4 = GetTimeMicros(); nTimeCallbacks += nTime4 - nTime3;
     LogPrint("bench", "    - Callbacks: %.2fms [%.2fs]\n", 0.001 * (nTime4 - nTime3), nTimeCallbacks * 0.000001);

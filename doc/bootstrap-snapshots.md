@@ -221,13 +221,60 @@ publicly-reviewable binary, the same as full validation.
    regardless of *who* served it. Anyone can run a serving node
    (`-bootstrapserve`, or `-bootstrapserve=auto`) to add capacity.
 
-3. **Background block-file validation (planned, option B).** The one remaining
-   trust gap — historical block files older than the `-checkblocks` horizon are
-   not covered by a compiled commitment — is closed by a self-healing,
-   low-maintenance design that re-derives and repairs block data in the
-   background after fast-sync, removing both the manual-anchor treadmill and the
-   block-file trust assumption. See
+3. **Background full validation, no compiled anchor (implemented, EXPERIMENTAL — option B).**
+   The remaining trust gap and the manual-anchor treadmill are both removed by a
+   self-healing mode in which servers self-snapshot at their own recent tip and
+   clients accept that snapshot *provisionally*, then re-derive the entire UTXO
+   set from genesis in the background and reindex automatically if it does not
+   match. No compiled anchor is required. This is **off by default and
+   experimental**; see *Trustless mode* below and
    [bootstrap-self-healing-design.md](bootstrap-self-healing-design.md).
+
+### Trustless mode (`-bootstrapmode=trustless`, EXPERIMENTAL — option B)
+
+Default is `-bootstrapmode=anchor` (everything above: a downloaded snapshot must
+match the compiled fast-sync anchor). `-bootstrapmode=trustless` instead lets a
+fresh node fast-sync from a peer's **self-snapshot at the peer's own recent tip**,
+with no compiled anchor:
+
+1. The snapshot's manifest (version 2) carries a UTXO-set commitment
+   (`hash_serialized`). After download, the node checks the imported chainstate's
+   digest equals that commitment, that the tip is on a proof-of-work header chain
+   consistent with the compiled checkpoints, and **provisionally** starts using it.
+2. A background thread re-derives the UTXO set from genesis to the snapshot height
+   using the imported block data and compares it to the commitment captured at
+   import. On a match the snapshot **latches `validated`**; on a mismatch the node
+   logs the divergence, **discards the chainstate, and reindexes from the local
+   block data** — falling back to a fully validated chain with no operator action.
+   A pruned node cannot re-derive and so stays `provisional`.
+3. The latch is durable, so a crash never silently treats an unvalidated snapshot
+   as validated; validation resumes on the next start.
+
+```bash
+./zclassicd -bootstrapmode=trustless -bootstrappeer=<host>   # fresh, non-pruned datadir
+```
+
+Trustless mode cannot be combined with `-prune`: a pruned node cannot re-derive
+the UTXO set from genesis, so it could never complete validation. The node refuses
+the combination at startup.
+
+Watch progress with `getblockchaininfo`, which reports a `bootstrap_validation`
+object: `state` (`disabled` | `provisional` | `provisional_pruned` | `validated`
+| `failed`), the snapshot `height`, `validated_height`, and `progress` `[0..1]`.
+
+Trust note: between provisional accept and the `validated` latch the node operates
+on an **unverified** UTXO set, for as long as a full genesis→tip re-derivation
+takes (roughly a full sync). Do not rely on balances or spend received funds until
+the state reads `validated`. There is not yet a `-bootstrapsafe` option to enforce
+this automatically, which is one reason the mode is EXPERIMENTAL. This is the
+assumeutxo trust window without a compiled hash — the background validation *is*
+the trust. The gossip/normal-P2P path never triggers trustless acceptance; only an
+explicit `-bootstrappeer`/discovery fast-sync under `-bootstrapmode=trustless` does.
+
+To serve trustless self-snapshots, run a synced node with `-bootstrapserve=auto`;
+it freezes a fresh self-snapshot of its own tip every
+`-bootstrapservefreezeinterval` seconds (default 21600 = 6h; `0` disables
+self-snapshotting and only serves a fast-synced anchor copy, if any).
 
 ## Network Service Direction
 

@@ -73,6 +73,21 @@ std::vector<std::string> GetBootstrapPeerList();
 //! it is removed). Lets every fast-synced node become a P2P bootstrap server.
 bool SetupAutoBootstrapServe(const boost::filesystem::path& data_dir, std::string& error);
 
+//! Option B: freeze this node's own live chainstate into the auto-serve dir
+//! (data_dir/bootstrap-serve-source) and record a v2 ".meta" describing it (real
+//! height/block hash + UTXO-set commitment), so the node can serve a trustless
+//! self-snapshot at its own recent tip instead of the compiled anchor. The
+//! served height/hash/commitment are derived from the copy itself, so the
+//! published snapshot is internally consistent. Best-effort — callers must not
+//! treat failure as fatal (the previous serve copy, if any, is left untouched).
+//! minAdvanceBlocks>0 skips the (expensive) re-copy when the existing serve copy
+//! is already within that many blocks of the tip; 0 forces a freeze.
+bool FreezeLiveChainstateForServe(const boost::filesystem::path& data_dir, int minAdvanceBlocks, std::string& error);
+
+//! Path of the auto-serve directory (data_dir/bootstrap-serve-source), exposed so
+//! init can point -bootstrapsourcedir at it before the first self-snapshot freeze.
+boost::filesystem::path BootstrapAutoServeSourceDir(const boost::filesystem::path& data_dir);
+
 // --- Zcash parameter (.params) distribution over the bootstrap protocol ---
 //! Compiled SHA-256 spec for one Zcash zk-SNARK parameter file. This is the
 //! single source of truth used both by the bootstrap-snapshot protocol (which
@@ -106,7 +121,29 @@ bool PreflightBootstrapSnapshotService(std::string& error);
 bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request,
                                 CBootstrapSnapshotChunk& chunk,
                                 std::string& error);
-bool ValidateBootstrapSnapshotManifest(const CBootstrapSnapshotManifest& manifest, std::string& error);
+//! Validate a received manifest. fTrustlessAllowed=false (default) requires the
+//! manifest to match the compiled fast-sync anchor (v1, or a v2 that equals the
+//! anchor). fTrustlessAllowed=true additionally accepts a v2 self-snapshot at a
+//! peer's own tip (its contents are verified after download, not here). The
+//! gossip/CNode path must always pass false; only the explicit bootstrap driver
+//! (and the server validating its own manifest) may pass true.
+bool ValidateBootstrapSnapshotManifest(const CBootstrapSnapshotManifest& manifest, std::string& error, bool fTrustlessAllowed = false);
+
+// --- Option B client side: trustless self-snapshot provisional accept ---------
+//! Record that a v2 self-snapshot was just imported and awaits provisional
+//! acceptance + background validation (a datadir-sibling marker, so it survives a
+//! restart between install and verification).
+void WriteBootstrapTrustlessPending(const boost::filesystem::path& data_dir, int height, const uint256& hashBlock, const uint256& commitment);
+bool BootstrapTrustlessPendingExists(const boost::filesystem::path& data_dir);
+void BootstrapTrustlessPendingClear(const boost::filesystem::path& data_dir);
+//! Cheap provisional gate (integrity + checkpoints + tip PoW) run after a
+//! trustless snapshot is imported and the chain databases are open. NOT full
+//! trust — the background validator re-derives the UTXO set from genesis and
+//! reindexes on mismatch. Returns the (height, block hash, commitment) to hand to
+//! the background validator on success; commitment doubles as S_imported.
+bool ProvisionalAcceptTrustlessSnapshot(const boost::filesystem::path& data_dir,
+                                        int& outHeight, uint256& outHashBlock, uint256& outCommitment,
+                                        std::string& error);
 bool EnqueueBootstrapSnapshotChunkRequest(CNode* pfrom,
                                           const CBootstrapSnapshotChunkRequest& request,
                                           std::string& error);

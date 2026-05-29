@@ -192,6 +192,67 @@ BOOST_AUTO_TEST_CASE(bootstrap_snapshot_manifest_serialization)
     BOOST_CHECK_EQUAL(ss.size(), 0);
 }
 
+BOOST_AUTO_TEST_CASE(bootstrap_snapshot_manifest_serialization_v2)
+{
+    // A version-2 manifest is byte-for-byte a version-1 manifest (same field
+    // order) with the 32-byte UTXO-set commitment appended at the end. This locks
+    // the version-gated wire format so the deployed v1 swarm keeps interoperating:
+    // the only differences from the v1 vector above are the leading version word
+    // (02 vs 01) and the trailing commitment.
+    CBootstrapSnapshotManifest manifest;
+    manifest.nVersion = 2;
+    manifest.strNetwork = "main";
+    manifest.nHeight = 123456;
+    manifest.hashBlock = uint256S("202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f");
+    manifest.hashAnchorSha256 = uint256S("404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f");
+    manifest.hashAnchorSha3 = uint256S("606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f");
+    manifest.nSnapshotBytes = 0x123456789abcdef0ULL;
+    manifest.nChunkSize = 0x00020000U;
+    manifest.vFiles.push_back(TestBootstrapSnapshotFile());
+
+    CBootstrapSnapshotFile file2;
+    file2.strPath = "chainstate/000003.ldb";
+    file2.nSize = 0x0102030405060708ULL;
+    file2.hashSha256 = uint256S("1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100");
+    manifest.vFiles.push_back(file2);
+
+    manifest.hashChainstateSerialized = uint256S("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f");
+
+    const std::string expected =
+        "02000000046d61696e40e20100"
+        "3f3e3d3c3b3a393837363534333231302f2e2d2c2b2a29282726252423222120"
+        "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140"
+        "7f7e7d7c7b7a797877767574737271706f6e6d6c6b6a69686766656463626160"
+        "f0debc9a785634120000020002"
+        "13626c6f636b732f626c6b30303030302e6461748877665544332211"
+        "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100"
+        "15636861696e73746174652f3030303030332e6c6462080706050403020100"
+        "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        "9f9e9d9c9b9a999897969594939291908f8e8d8c8b8a89888786858483828180";
+
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << manifest;
+
+    BOOST_CHECK_EQUAL(HexStr(ss.begin(), ss.end()), expected);
+
+    CBootstrapSnapshotManifest decoded;
+    ss >> decoded;
+
+    BOOST_CHECK_EQUAL(decoded.nVersion, manifest.nVersion);
+    BOOST_CHECK_EQUAL(decoded.strNetwork, manifest.strNetwork);
+    BOOST_CHECK_EQUAL(decoded.nHeight, manifest.nHeight);
+    BOOST_CHECK(decoded.hashBlock == manifest.hashBlock);
+    BOOST_CHECK(decoded.hashAnchorSha256 == manifest.hashAnchorSha256);
+    BOOST_CHECK(decoded.hashAnchorSha3 == manifest.hashAnchorSha3);
+    BOOST_CHECK_EQUAL(decoded.nSnapshotBytes, manifest.nSnapshotBytes);
+    BOOST_CHECK_EQUAL(decoded.nChunkSize, manifest.nChunkSize);
+    BOOST_REQUIRE_EQUAL(decoded.vFiles.size(), manifest.vFiles.size());
+    CheckFileEqual(decoded.vFiles[0], manifest.vFiles[0]);
+    CheckFileEqual(decoded.vFiles[1], manifest.vFiles[1]);
+    BOOST_CHECK(decoded.hashChainstateSerialized == manifest.hashChainstateSerialized);
+    BOOST_CHECK_EQUAL(ss.size(), 0);
+}
+
 BOOST_AUTO_TEST_CASE(bootstrap_snapshot_chunk_request_serialization)
 {
     CBootstrapSnapshotChunkRequest request;
@@ -760,15 +821,32 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_rejects_bad_metadata)
     CBootstrapSnapshotManifest manifest = ValidBootstrapManifest();
     BOOST_CHECK(ValidateBootstrapSnapshotManifest(manifest, error));
 
+    // An unsupported manifest version is rejected as a version error.
     manifest = ValidBootstrapManifest();
-    manifest.nVersion = 2;
+    manifest.nVersion = 3;
     BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error));
     BOOST_CHECK(error.find("version") != std::string::npos);
+
+    // A v2 self-snapshot (commitment present, not equal to the compiled anchor) is
+    // rejected in the default anchor mode, but accepted in trustless mode (its
+    // contents are verified after download, not here).
+    manifest = ValidBootstrapManifest();
+    manifest.nVersion = 2;
+    manifest.hashChainstateSerialized = uint256S("0101010101010101010101010101010101010101010101010101010101010101");
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/false));
+    BOOST_CHECK(ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/true));
+
+    // A v2 manifest missing its commitment is rejected even in trustless mode.
+    manifest = ValidBootstrapManifest();
+    manifest.nVersion = 2;
+    manifest.hashChainstateSerialized.SetNull();
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/true));
+    BOOST_CHECK(error.find("commitment") != std::string::npos);
 
     manifest = ValidBootstrapManifest();
     manifest.strNetwork = "wrong";
     BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error));
-    BOOST_CHECK(error.find("anchor") != std::string::npos);
+    BOOST_CHECK(error.find("network") != std::string::npos);
 
     manifest = ValidBootstrapManifest();
     manifest.nChunkSize = BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE + 1;

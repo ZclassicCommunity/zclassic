@@ -1,9 +1,42 @@
 # Design: Self-healing, low-maintenance P2P bootstrap (option B)
 
-Status: design / not yet implemented. Tracks the evolution of native P2P
-bootstrap (see [bootstrap-snapshots.md](bootstrap-snapshots.md)) from a
+Status: **implemented, EXPERIMENTAL (off by default).** Tracks the evolution of
+native P2P bootstrap (see [bootstrap-snapshots.md](bootstrap-snapshots.md)) from a
 hand-maintained, single-anchor model toward one that needs no ongoing operator
 work and repairs itself.
+
+## Implementation status (this branch)
+
+Phase B is implemented behind off-by-default flags; the compiled-anchor swarm is
+unchanged when they are not set:
+
+- **Server self-snapshot:** `-bootstrapserve=auto` freezes the node's own live
+  chainstate at its current tip on an interval (`-bootstrapservefreezeinterval`,
+  default 6h) and serves it as a **version-2 manifest** carrying the snapshot's
+  real height/hash and a UTXO-set commitment. v1 (compiled-anchor) manifests are
+  byte-for-byte unchanged. (`FreezeLiveChainstateForServe`, `GetBootstrapSnapshotManifest`.)
+- **Client trustless accept:** `-bootstrapmode=trustless` accepts a v2 self-snapshot
+  via a cheap provisional gate (chainstate digest == advertised commitment, tip on
+  a PoW/checkpoint-consistent header chain), then hands off to background validation.
+  (`ProvisionalAcceptTrustlessSnapshot`.)
+- **Background validation + auto-reindex:** a thread re-derives the UTXO set from
+  genesis to the snapshot height into a private scratch chainstate and compares
+  `hash_serialized` to the value captured at import. Match → durable `validated`
+  latch; mismatch → discard chainstate and reindex from local blocks (the existing,
+  tested reindex path). The background replay connects into a private scratch
+  chainstate only (`ConnectBlock(..., fScratchView=true)` suppresses live txindex
+  writes, block-index mutation, and wallet signals). State is persisted in the
+  block-tree DB and resumes after a restart. Trustless mode is refused together
+  with `-prune` (a pruned node cannot re-derive, so it could never validate); an
+  already-pruned node that somehow holds a provisional snapshot stays
+  `provisional` rather than auto-reindexing. (`src/bootstrapvalidation.{h,cpp}`.)
+- **Status:** `getblockchaininfo` reports a `bootstrap_validation` object
+  (`disabled`/`provisional`/`provisional_pruned`/`validated`/`failed` + progress).
+
+Verified on a two-node regtest swarm: a self-snapshotting server, a trustless
+client that fast-syncs and latches `validated`, and a forced-failure run that
+discards and reindexes back to the correct chain. The compiled-anchor path and its
+manifest wire format remain unchanged (regression-tested).
 
 ## 1. Why
 
@@ -90,26 +123,44 @@ serve one immutable dir at the compiled anchor height.
 1. **Discover & fetch.** Use the existing `NODE_BOOTSTRAP` discovery to find
    servers, pick one (or several), download its snapshot at whatever height it
    advertises, verifying per-file hashes from the manifest (transport integrity).
-2. **Provisional acceptance gate (cheap, no compiled per-height secret).** Accept
-   the snapshot to *start using* only if its tip block hash sits on a header
-   chain the node can cheaply justify: contiguous headers with valid
-   proof-of-work and consistent with any compiled checkpoints. This stops an
-   attacker from pointing the node at a tip that isn't real PoW history; it does
-   **not** prove the UTXO set is honest — that is §4.3's job.
+2. **Provisional acceptance gate (cheap, no compiled per-height secret).** As
+   implemented (`ProvisionalAcceptTrustlessSnapshot`), the gate is deliberately
+   weak — it is only a pre-filter to reject an obviously-bogus import before the
+   node spends time on it, **not** a proof of honesty:
+   - *integrity*: the imported chainstate's `hashSerialized` equals the manifest's
+     advertised commitment, and the active tip matches the advertised height/hash;
+   - *checkpoints*: the imported chain agrees with every compiled checkpoint at a
+     height `> 0` and `<=` the tip;
+   - *proof of work*: the tip header satisfies its own target.
+
+   Note the integrity check is **circular** against a malicious server (it
+   authored both the UTXO set and the commitment), and the PoW check covers only
+   the single tip header, not cumulative chain work. So a forged-but-self-
+   consistent UTXO set whose tip is above the highest compiled checkpoint *passes
+   the gate*. That is by design: the gate is not the security boundary — step 3
+   is. (Full per-block PoW/Equihash is re-checked there for every block.)
 3. **Background full validation.** A low-priority thread re-derives the UTXO set
    from genesis using the block data, and compares the result to the imported
-   chainstate (incrementally, and/or a final `hashSerialized` equality via the
-   existing `CCoinsViewDB::GetStats`). On success: latch `fSnapshotValidated`.
-   On mismatch: log loudly, discard the imported chainstate, and reindex from
-   block data (which the node already has) — i.e. fall back to a real sync with
-   no operator involvement.
-4. **Trust-window policy.** Between provisional accept and validation latch the
-   node is using an unverified UTXO set. Policy (configurable):
-   - default: operate normally but surface `validationprogress` and a clear
-     "snapshot not yet fully validated" status in RPC/logs;
-   - optional `-bootstrapsafe=1`: defer wallet spends of coins that exist only in
-     the unvalidated deep chainstate until the latch, eliminating the economic
-     risk of the window for cautious operators.
+   chainstate (a final `hashSerialized` equality via the existing
+   `CCoinsViewDB::GetStats`). On success: latch validated (durable). On mismatch:
+   log loudly, discard the imported chainstate, and reindex from block data (which
+   the node already has) — i.e. fall back to a real sync with no operator
+   involvement. **This re-derivation is the entire trust basis of trustless mode**;
+   if it cannot run (a pruned node — see below), the snapshot is never verified.
+4. **Trust-window policy.** Between provisional accept and the validated latch the
+   node is using an unverified UTXO set, for as long as a full genesis→H
+   re-derivation takes (≈ a full sync). As implemented:
+   - the window is surfaced loudly: a startup `InitWarning` explicitly states that
+     balances are unverified and funds should not be spent until validated, and
+     `getblockchaininfo.bootstrap_validation` reports the live state/progress;
+   - **pruned nodes are refused** at init (`-bootstrapmode=trustless` + `-prune` is
+     an error), because a pruned node can never run the re-derivation and would
+     therefore trust the snapshot forever with no backstop.
+   - *Not yet implemented (planned):* `-bootstrapsafe=1`, which would defer wallet
+     spends of coins that exist only in the unvalidated deep chainstate until the
+     latch, removing the economic risk of the window for cautious operators. Until
+     it exists, the window's economic risk is mitigated only by the warning above
+     — which is why trustless mode is EXPERIMENTAL and off by default.
 
 This is the assumeutxo model, minus the compiled snapshot hash — trust is the
 background validation itself, so there is nothing to maintain per release.
@@ -128,10 +179,13 @@ background validation itself, so there is nothing to maintain per release.
 ## 6. Security analysis
 
 - **Forged chainstate** is caught by background validation; the only exposure is
-  the trust window (§4.4), bounded by validation time and removable per-node with
-  `-bootstrapsafe`. This is a strictly weaker assumption than the shipped model
-  *only* during that window; afterward it is as strong as a full sync (stronger
-  than "trust the binary's compiled hash," which is never independently checked).
+  the trust window (§4.4), bounded by validation time. The window will be
+  removable per-node with `-bootstrapsafe` once that is implemented (deferring
+  wallet spends of deep unvalidated coins); until then it is mitigated only by a
+  loud warning, so an operator who transacts during the window can in principle be
+  defrauded — this is the main reason trustless mode is EXPERIMENTAL/off by
+  default. After the latch it is as strong as a full sync (stronger than "trust
+  the binary's compiled hash," which is never independently checked).
 - **Eclipse.** Snapshot peers are still just peers; normal IBD/header validation
   from other connections applies. Do not pin a snapshot peer as a permanent
   `addnode` after bootstrap (close the existing TODO).

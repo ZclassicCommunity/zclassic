@@ -39,7 +39,11 @@ static const char DB_LAST_BLOCK = 'l';
 CCoinsViewDB::CCoinsViewDB(std::string dbName, size_t nCacheSize, bool fMemory, bool fWipe) : db(GetDataDir() / dbName, nCacheSize, fMemory, fWipe) {
 }
 
-CCoinsViewDB::CCoinsViewDB(size_t nCacheSize, bool fMemory, bool fWipe) : db(GetDataDir() / "chainstate", nCacheSize, fMemory, fWipe) 
+CCoinsViewDB::CCoinsViewDB(size_t nCacheSize, bool fMemory, bool fWipe) : db(GetDataDir() / "chainstate", nCacheSize, fMemory, fWipe)
+{
+}
+
+CCoinsViewDB::CCoinsViewDB(const boost::filesystem::path& path, size_t nCacheSize, bool fMemory, bool fWipe) : db(path, nCacheSize, fMemory, fWipe)
 {
 }
 
@@ -255,7 +259,13 @@ bool CCoinsViewDB::GetStats(CCoinsStats &stats) const {
     }
     {
         LOCK(cs_main);
-        stats.nHeight = mapBlockIndex.find(stats.hashBlock)->second->nHeight;
+        // Defensive: a scratch / frozen-copy chainstate (option B) can carry a
+        // best block this node's index does not (yet) hold. Leave nHeight at its
+        // default rather than dereference end(); the normal chainstate's best
+        // block is always present, so gettxoutsetinfo is unaffected.
+        BlockMap::const_iterator it = mapBlockIndex.find(stats.hashBlock);
+        if (it != mapBlockIndex.end() && it->second)
+            stats.nHeight = it->second->nHeight;
     }
     stats.hashSerialized = ss.GetHash();
     stats.nTotalAmount = nTotalAmount;

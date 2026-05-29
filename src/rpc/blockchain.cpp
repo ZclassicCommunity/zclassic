@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "amount.h"
+#include "bootstrapvalidation.h"
 #include "chain.h"
 #include "chainparams.h"
 #include "checkpoints.h"
@@ -753,6 +754,12 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
             "  \"difficulty\": xxxxxx,     (numeric) the current difficulty\n"
             "  \"verificationprogress\": xxxx, (numeric) estimate of verification progress [0..1]\n"
             "  \"chainwork\": \"xxxx\"     (string) total amount of work in active chain, in hexadecimal\n"
+            "  \"bootstrap_validation\": {  (object) background validation of a trustless (option B) bootstrap snapshot\n"
+            "     \"state\": \"xxxx\",         (string) disabled|provisional|provisional_pruned|validated|failed\n"
+            "     \"height\": n,             (numeric) snapshot tip height (omitted when disabled)\n"
+            "     \"validated_height\": n,   (numeric) highest height re-derived so far\n"
+            "     \"progress\": xxxx         (numeric) re-derivation progress [0..1]\n"
+            "  },\n"
             "  \"size_on_disk\": xxxxxx,       (numeric) the estimated size of the block and undo files on disk\n"
             "  \"commitments\": xxxxxx,    (numeric) the current number of note commitments in the commitment tree\n"
             "  \"softforks\": [            (array) status of softforks in progress\n"
@@ -827,6 +834,35 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
     consensus.push_back(Pair("chaintip", HexInt(CurrentEpochBranchId(tip->nHeight, consensusParams))));
     consensus.push_back(Pair("nextblock", HexInt(CurrentEpochBranchId(tip->nHeight + 1, consensusParams))));
     obj.push_back(Pair("consensus", consensus));
+
+    {
+        // Option B: status of background full-validation of a trustless bootstrap
+        // snapshot. "disabled" unless a self-snapshot was accepted in
+        // -bootstrapmode=trustless.
+        BootstrapValidationStatus bv = GetBootstrapValidationStatus();
+        UniValue bvObj(UniValue::VOBJ);
+        const char* stateStr = "disabled";
+        switch (bv.state) {
+            case BVS_PROVISIONAL:        stateStr = "provisional"; break;
+            case BVS_PROVISIONAL_PRUNED: stateStr = "provisional_pruned"; break;
+            case BVS_VALIDATED:          stateStr = "validated"; break;
+            case BVS_FAILED:             stateStr = "failed"; break;
+            default:                     stateStr = "disabled"; break;
+        }
+        bvObj.push_back(Pair("state", stateStr));
+        if (bv.state != BVS_DISABLED) {
+            bvObj.push_back(Pair("height", bv.height));
+            bvObj.push_back(Pair("validated_height", bv.validatedHeight));
+            bvObj.push_back(Pair("blocks_remaining", std::max(0, bv.height - bv.validatedHeight)));
+            double progress = (bv.height > 0)
+                ? std::min(1.0, std::max(0.0, (double)bv.validatedHeight / (double)bv.height))
+                : 0.0;
+            bvObj.push_back(Pair("progress", progress));
+            bvObj.push_back(Pair("blockhash", bv.hashBlock.GetHex()));
+            bvObj.push_back(Pair("commitment", bv.commitment.GetHex()));
+        }
+        obj.push_back(Pair("bootstrap_validation", bvObj));
+    }
 
     if (fPruneMode)
     {

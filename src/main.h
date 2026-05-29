@@ -470,8 +470,13 @@ bool ReadBlockFromDisk(CBlock& block, const CBlockIndex* pindex);
  *  of problems. Note that in any case, coins may be modified. */
 bool DisconnectBlock(CBlock& block, CValidationState& state, CBlockIndex* pindex, CCoinsViewCache& coins, bool* pfClean = NULL);
 
-/** Apply the effects of this block (with given index) on the UTXO set represented by coins */
-bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pindex, CCoinsViewCache& coins, bool fJustCheck = false);
+/** Apply the effects of this block (with given index) on the UTXO set represented by coins.
+ *  fScratchView: connect into a private/scratch CCoinsViewCache for background
+ *  re-derivation (option B trustless bootstrap). Suppresses side effects on GLOBAL
+ *  state a scratch replay must not touch: writing the live txindex, mutating the
+ *  shared block index (undo write / RaiseValidity), and firing the
+ *  validation-interface signals. Default false => normal connection is unchanged. */
+bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pindex, CCoinsViewCache& coins, bool fJustCheck = false, bool fScratchView = false);
 
 /** Context-independent validity checks */
 bool CheckBlockHeader(const CBlockHeader& block, CValidationState& state, bool fCheckPOW = true);

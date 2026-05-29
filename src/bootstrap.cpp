@@ -5,13 +5,17 @@
 #include "bootstrap.h"
 
 #include "chainparams.h"
+#include "coins.h"
 #include "compat.h"
 #include "consensus/validation.h"
 #include "crypto/sha256.h"
 #include "hash.h"
+#include "main.h"
 #include "net.h"
 #include "netbase.h"
+#include "pow.h"
 #include "sync.h"
+#include "txdb.h"
 #include "ui_interface.h"
 #include "util.h"
 #include "utilstrencodings.h"
@@ -1209,6 +1213,11 @@ static boost::filesystem::path AutoServeSourceDir(const boost::filesystem::path&
     return data_dir / "bootstrap-serve-source";
 }
 
+boost::filesystem::path BootstrapAutoServeSourceDir(const boost::filesystem::path& data_dir)
+{
+    return AutoServeSourceDir(data_dir);
+}
+
 // Sibling marker recording which anchor the retained copy is for. Kept outside
 // the serve dir so it is never picked up by the manifest file scan.
 static boost::filesystem::path AutoServeMarkerPath(const boost::filesystem::path& data_dir)
@@ -1258,14 +1267,252 @@ static bool RetainAutoServeSourceFromStaging(const boost::filesystem::path& stag
     return true;
 }
 
+// --- Option B: self-snapshot at the node's own recent tip -----------------
+//
+// A serve dir produced by freezing this node's own chainstate (rather than a
+// fast-synced copy at the compiled anchor) is described by a sibling ".meta"
+// file recording the real frozen height/block hash and the UTXO-set commitment
+// (hash_serialized) over its chainstate. When present, the snapshot is served as
+// a version-2 manifest carrying that commitment, so a client running in
+// trustless mode can integrity-check the download and then background-validate
+// it — no compiled anchor needed. Absent ".meta" => fall back to the v1
+// compiled-anchor serve. The meta is a sibling (never inside the serve dir) so
+// the manifest file scan never picks it up.
+// Defined later in this file; used by the freeze disk-preflight below.
+static bool CollectBootstrapSnapshotFiles(const boost::filesystem::path& root,
+                                          bool hash_files,
+                                          std::vector<CBootstrapSnapshotFile>& files,
+                                          std::map<std::string, std::time_t>& mtimes,
+                                          uint64_t& total_bytes,
+                                          std::string& error);
+
+struct BootstrapServeMeta
+{
+    int nHeight;
+    uint256 hashBlock;
+    uint256 hashChainstateSerialized;
+    BootstrapServeMeta() : nHeight(-1) {}
+};
+
+static boost::filesystem::path BootstrapServeMetaPath(const boost::filesystem::path& sourcedir)
+{
+    return sourcedir.parent_path() / (sourcedir.filename().string() + ".meta");
+}
+
+static bool ReadBootstrapServeMeta(const boost::filesystem::path& sourcedir, BootstrapServeMeta& meta)
+{
+    FILE* f = fopen(BootstrapServeMetaPath(sourcedir).string().c_str(), "r");
+    if (!f) {
+        return false;
+    }
+    char hbuf[128] = {0};
+    char cbuf[128] = {0};
+    int height = -1;
+    const int n = fscanf(f, "%d %127s %127s", &height, hbuf, cbuf);
+    fclose(f);
+    if (n != 3) {
+        return false;
+    }
+    meta.nHeight = height;
+    meta.hashBlock = uint256S(hbuf);
+    meta.hashChainstateSerialized = uint256S(cbuf);
+    return meta.nHeight >= 0 && !meta.hashBlock.IsNull() && !meta.hashChainstateSerialized.IsNull();
+}
+
+// Freeze this node's live chainstate into the auto-serve directory and record a
+// v2 ".meta" describing it. The served height/hash/commitment are derived from
+// the COPY (by reopening it), not from the live tip, so the published snapshot
+// is internally consistent even though the multi-GiB copy is taken without
+// holding cs_main for its whole duration (which would stall the node). Any
+// inconsistency in the hot copy is self-detected here (open / GetStats /
+// best-block-in-index checks) and the freeze is abandoned, leaving the previous
+// serve copy in place. Best-effort: callers must not treat failure as fatal.
+bool FreezeLiveChainstateForServe(const boost::filesystem::path& data_dir, int minAdvanceBlocks, std::string& error)
+{
+    const boost::filesystem::path serveSrc = AutoServeSourceDir(data_dir);
+    const boost::filesystem::path tmp = serveSrc.parent_path() / (serveSrc.filename().string() + ".new");
+    const boost::filesystem::path blocksSrc = data_dir / "blocks";
+    const boost::filesystem::path chainSrc = data_dir / "chainstate";
+
+    if (!BootstrapSnapshotPathsExist(data_dir)) {
+        error = "datadir has no blocks/chainstate to freeze";
+        return false;
+    }
+
+    // Snapshot the current tip height under cs_main; bail while still in IBD.
+    int tipHeight = -1;
+    {
+        LOCK(cs_main);
+        if (chainActive.Tip() == NULL) {
+            error = "no active chain tip to freeze";
+            return false;
+        }
+        if (IsInitialBlockDownload()) {
+            error = "node is still in initial block download; not freezing";
+            return false;
+        }
+        tipHeight = chainActive.Height();
+    }
+
+    // Skip a needless re-copy when the existing serve copy is already within
+    // minAdvanceBlocks of the tip (a full chain copy is expensive). minAdvance==0
+    // forces a freeze (used by tests and the first activation).
+    if (minAdvanceBlocks > 0 && BootstrapSnapshotPathsExist(serveSrc)) {
+        BootstrapServeMeta existing;
+        if (ReadBootstrapServeMeta(serveSrc, existing) &&
+            tipHeight - existing.nHeight < minAdvanceBlocks) {
+            error = strprintf("serve copy already within %d blocks of tip (height %d)",
+                minAdvanceBlocks, existing.nHeight);
+            return false;
+        }
+    }
+
+    // Disk preflight: a freeze copy roughly doubles the on-disk chain size. Sum
+    // only the blocks/ and chainstate/ trees (the datadir also holds wallet.dat,
+    // .lock, peers.dat, etc. which are not part of the snapshot and would fail the
+    // snapshot-path safety scan).
+    uint64_t chainBytes = 0;
+    try {
+        const boost::filesystem::path roots[2] = { blocksSrc, chainSrc };
+        for (int r = 0; r < 2; ++r) {
+            boost::filesystem::recursive_directory_iterator end;
+            for (boost::filesystem::recursive_directory_iterator it(roots[r]); it != end; ++it) {
+                if (boost::filesystem::is_regular_file(it->path())) {
+                    chainBytes += boost::filesystem::file_size(it->path());
+                }
+            }
+        }
+    } catch (const boost::filesystem::filesystem_error& e) {
+        error = e.what();
+        return false;
+    }
+    boost::filesystem::space_info si = boost::filesystem::space(data_dir);
+    const uint64_t needed = chainBytes + (uint64_t)BOOTSTRAP_SNAPSHOT_DISK_SAFETY_MARGIN_BYTES;
+    if ((uint64_t)si.available < needed) {
+        error = strprintf("not enough free disk to freeze a serve copy: need ~%llu bytes, have %llu",
+            (unsigned long long)needed, (unsigned long long)si.available);
+        return false;
+    }
+
+    // Flush the in-memory coin cache so the on-disk chainstate matches the tip.
+    // Held briefly.
+    {
+        LOCK(cs_main);
+        FlushStateToDisk();
+    }
+
+    try {
+        boost::filesystem::remove_all(tmp);
+    } catch (const boost::filesystem::filesystem_error& e) {
+        error = e.what();
+        return false;
+    }
+    // Copy chainstate BEFORE blocks. The live node may connect a block during the
+    // (unlocked, multi-GiB) copy; copying chainstate first guarantees the later,
+    // newer blocks/ copy is at least as advanced as the frozen chainstate, so the
+    // chainstate's best block always has its block + index data present in the
+    // copied blocks/ tree. The reverse order could freeze a chainstate tip whose
+    // block data was not captured, producing a serve copy that breaks clients.
+    if (!CopyBootstrapDirectory(chainSrc, tmp / "chainstate", error) ||
+        !CopyBootstrapDirectory(blocksSrc, tmp / "blocks", error)) {
+        boost::filesystem::remove_all(tmp);
+        return false;
+    }
+    if (!BootstrapSnapshotPathsExist(tmp)) {
+        boost::filesystem::remove_all(tmp);
+        error = "frozen serve copy is incomplete";
+        return false;
+    }
+
+    // Derive height/hash/commitment from the COPY (reopen its chainstate). This
+    // validates the hot copy: a torn/inconsistent leveldb either fails to open
+    // or yields a best block we can't place in our index.
+    BootstrapServeMeta meta;
+    {
+        CCoinsViewDB copydb(tmp / "chainstate", 1 << 23, false, false);
+        const uint256 best = copydb.GetBestBlock();
+        if (best.IsNull()) {
+            boost::filesystem::remove_all(tmp);
+            error = "frozen chainstate has no best block";
+            return false;
+        }
+        {
+            LOCK(cs_main);
+            BlockMap::iterator it = mapBlockIndex.find(best);
+            if (it == mapBlockIndex.end() || it->second == NULL) {
+                boost::filesystem::remove_all(tmp);
+                error = "frozen best block is not in this node's block index";
+                return false;
+            }
+            meta.nHeight = it->second->nHeight;
+        }
+        CCoinsStats stats;
+        if (!copydb.GetStats(stats)) {
+            boost::filesystem::remove_all(tmp);
+            error = "could not hash frozen chainstate";
+            return false;
+        }
+        meta.hashBlock = best;
+        meta.hashChainstateSerialized = stats.hashSerialized;
+    } // copydb destructed here -> releases its leveldb lock before we serve
+
+    // Atomic swap: replace the live serve dir with the validated copy, then write
+    // the v2 meta and drop any stale v1 anchor marker.
+    try {
+        boost::filesystem::remove_all(serveSrc);
+        boost::filesystem::rename(tmp, serveSrc);
+    } catch (const boost::filesystem::filesystem_error& e) {
+        boost::filesystem::remove_all(tmp);
+        error = strprintf("could not install frozen serve copy: %s", e.what());
+        return false;
+    }
+
+    FILE* mf = fopen(BootstrapServeMetaPath(serveSrc).string().c_str(), "w");
+    if (!mf) {
+        error = "could not write serve meta file";
+        return false;
+    }
+    fprintf(mf, "%d %s %s\n", meta.nHeight, meta.hashBlock.ToString().c_str(),
+        meta.hashChainstateSerialized.ToString().c_str());
+    fclose(mf);
+    boost::filesystem::remove(AutoServeMarkerPath(data_dir));
+
+    // The serve dir changed; drop the cached manifest so it is rebuilt.
+    {
+        LOCK(cs_bootstrap_snapshot);
+        bootstrapSnapshotCacheSource.clear();
+        bootstrapSnapshotCacheFiles.clear();
+        bootstrapSnapshotCacheMtimes.clear();
+        bootstrapSnapshotCacheBytes = 0;
+    }
+
+    LogPrintf("Auto-serve: froze a self-snapshot at height %d (%s), commitment %s\n",
+        meta.nHeight, meta.hashBlock.ToString(), meta.hashChainstateSerialized.ToString());
+    return true;
+}
+
 bool SetupAutoBootstrapServe(const boost::filesystem::path& data_dir, std::string& error)
 {
+    const boost::filesystem::path serveSrc = AutoServeSourceDir(data_dir);
+
+    // Option B: a self-snapshot serve dir (described by a sibling .meta) needs no
+    // compiled anchor — it is served as a v2 manifest carrying its own commitment.
+    {
+        BootstrapServeMeta meta;
+        if (BootstrapSnapshotPathsExist(serveSrc) && ReadBootstrapServeMeta(serveSrc, meta)) {
+            mapArgs["-bootstrapsourcedir"] = serveSrc.string();
+            mapArgs["-bootstrapserve"] = "1";
+            LogPrintf("Auto-serve: serving self-snapshot at height %d (%s)\n",
+                meta.nHeight, meta.hashBlock.ToString());
+            return true;
+        }
+    }
+
     const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
     if (anchor.nHeight < 0 || anchor.hashBlock.IsNull()) {
         error = "no compiled fast-sync anchor to serve";
         return false;
     }
-    const boost::filesystem::path serveSrc = AutoServeSourceDir(data_dir);
     if (!BootstrapSnapshotPathsExist(serveSrc)) {
         // No serve dir: drop any orphaned marker so it can't confuse a later run.
         boost::filesystem::remove(AutoServeMarkerPath(data_dir));
@@ -1304,11 +1551,145 @@ bool SetupAutoBootstrapServe(const boost::filesystem::path& data_dir, std::strin
     return true;
 }
 
+// --- Option B client side: provisional accept of a trustless self-snapshot ----
+//
+// When a v2 self-snapshot is downloaded in -bootstrapmode=trustless, the manifest
+// values (real height, block hash, UTXO commitment) are recorded in a pending
+// marker so the post-database-open init step can run the provisional gate even
+// across a restart between install and verification. The marker is a sibling file
+// in the datadir; cleared once the background validator's durable state takes over.
+static boost::filesystem::path BootstrapTrustlessPendingPath(const boost::filesystem::path& data_dir)
+{
+    return data_dir / "bootstrap-trustless-pending";
+}
+
+void WriteBootstrapTrustlessPending(const boost::filesystem::path& data_dir, int height, const uint256& hashBlock, const uint256& commitment)
+{
+    FILE* f = fopen(BootstrapTrustlessPendingPath(data_dir).string().c_str(), "w");
+    if (!f) {
+        LogPrintf("Trustless bootstrap: could not write pending marker\n");
+        return;
+    }
+    fprintf(f, "%d %s %s\n", height, hashBlock.ToString().c_str(), commitment.ToString().c_str());
+    fclose(f);
+}
+
+bool BootstrapTrustlessPendingExists(const boost::filesystem::path& data_dir)
+{
+    return boost::filesystem::exists(BootstrapTrustlessPendingPath(data_dir));
+}
+
+void BootstrapTrustlessPendingClear(const boost::filesystem::path& data_dir)
+{
+    boost::filesystem::remove(BootstrapTrustlessPendingPath(data_dir));
+}
+
+static bool ReadBootstrapTrustlessPending(const boost::filesystem::path& data_dir, BootstrapServeMeta& meta)
+{
+    FILE* f = fopen(BootstrapTrustlessPendingPath(data_dir).string().c_str(), "r");
+    if (!f) {
+        return false;
+    }
+    char hbuf[128] = {0};
+    char cbuf[128] = {0};
+    int height = -1;
+    const int n = fscanf(f, "%d %127s %127s", &height, hbuf, cbuf);
+    fclose(f);
+    if (n != 3) {
+        return false;
+    }
+    meta.nHeight = height;
+    meta.hashBlock = uint256S(hbuf);
+    meta.hashChainstateSerialized = uint256S(cbuf);
+    return meta.nHeight >= 0 && !meta.hashBlock.IsNull() && !meta.hashChainstateSerialized.IsNull();
+}
+
+// Cheap provisional gate run after a trustless snapshot is imported and the chain
+// databases are open. It does NOT establish full trust — that is the background
+// validator's job (it re-derives the UTXO set from genesis and reindexes on
+// mismatch). The gate just rejects an obviously-bogus snapshot before the node
+// spends time operating on it:
+//   1. Integrity: the imported chainstate's hash_serialized equals the manifest's
+//      advertised commitment, and the active tip matches the advertised height/hash.
+//   2. Checkpoints: the imported chain agrees with every compiled checkpoint at or
+//      below the tip (catches a chain that diverges before a checkpoint).
+//   3. Proof of work: the tip header satisfies its target.
+// On success, returns the (height, block hash, commitment) to hand to the
+// background validator; the commitment doubles as S_imported.
+bool ProvisionalAcceptTrustlessSnapshot(const boost::filesystem::path& data_dir,
+                                        int& outHeight, uint256& outHashBlock, uint256& outCommitment,
+                                        std::string& error)
+{
+    BootstrapServeMeta pending;
+    if (!ReadBootstrapTrustlessPending(data_dir, pending)) {
+        error = "no pending trustless snapshot to accept";
+        return false;
+    }
+
+    LOCK(cs_main);
+    CBlockIndex* tip = chainActive.Tip();
+    if (tip == NULL) {
+        error = "trustless accept: active chain is empty";
+        return false;
+    }
+    if (chainActive.Height() != pending.nHeight || tip->GetBlockHash() != pending.hashBlock) {
+        error = strprintf("trustless accept: imported tip %d/%s does not match manifest %d/%s",
+            chainActive.Height(), tip->GetBlockHash().ToString(), pending.nHeight, pending.hashBlock.ToString());
+        return false;
+    }
+
+    // (1) Integrity: chainstate content must equal the advertised commitment.
+    CCoinsStats stats;
+    if (!pcoinsTip->GetStats(stats)) {
+        error = "trustless accept: could not hash imported chainstate";
+        return false;
+    }
+    if (stats.hashSerialized != pending.hashChainstateSerialized) {
+        error = strprintf("trustless accept: imported chainstate hash %s != advertised commitment %s",
+            stats.hashSerialized.ToString(), pending.hashChainstateSerialized.ToString());
+        return false;
+    }
+
+    // (2) Checkpoints: agree with every compiled checkpoint at or below the tip.
+    const MapCheckpoints& checkpoints = Params().Checkpoints().mapCheckpoints;
+    for (MapCheckpoints::const_iterator it = checkpoints.begin(); it != checkpoints.end(); ++it) {
+        // Skip the genesis checkpoint: the genesis is already pinned by consensus
+        // (the node refuses any other genesis), and some networks carry a stale
+        // height-0 placeholder hash in the checkpoint table.
+        if (it->first <= 0 || it->first > chainActive.Height()) {
+            continue;
+        }
+        CBlockIndex* atCp = chainActive[it->first];
+        if (atCp == NULL || atCp->GetBlockHash() != it->second) {
+            error = strprintf("trustless accept: imported chain disagrees with checkpoint at height %d", it->first);
+            return false;
+        }
+    }
+
+    // (3) Proof of work on the tip header.
+    if (!CheckProofOfWork(tip->GetBlockHash(), tip->nBits, Params().GetConsensus())) {
+        error = "trustless accept: imported tip does not satisfy proof of work";
+        return false;
+    }
+
+    outHeight = pending.nHeight;
+    outHashBlock = pending.hashBlock;
+    outCommitment = stats.hashSerialized;
+    LogPrintf("Trustless bootstrap: provisional accept of snapshot at height %d (%s); background validation will confirm or reindex\n",
+        outHeight, outHashBlock.ToString());
+    return true;
+}
+
 bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& data_dir, std::string& error)
 {
     if (!IsBootstrapFreshChainDatadir(data_dir, error)) {
         return false;
     }
+
+    // Option B: in trustless mode we may accept a peer's self-snapshot at its own
+    // tip (verified after download + by background validation) rather than only a
+    // snapshot matching the compiled anchor.
+    const bool fTrustless = (GetArg("-bootstrapmode", "anchor") == "trustless");
 
     CService peerAddress;
     SOCKET socket = INVALID_SOCKET;
@@ -1353,7 +1734,7 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
             return false;
         }
 
-        if (!ValidateBootstrapSnapshotManifest(manifest, error)) {
+        if (!ValidateBootstrapSnapshotManifest(manifest, error, fTrustless)) {
             CloseSocket(socket);
             boost::filesystem::remove_all(staging);
             return false;
@@ -1401,6 +1782,18 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
 
         if (!InstallStagedBootstrapChainData(staging, data_dir, error)) {
             return false;
+        }
+
+        // Option B: a v2 self-snapshot accepted in TRUSTLESS mode is accepted only
+        // provisionally. Record the advertised height/hash/commitment so the
+        // post-database-open init step can run the provisional gate and start
+        // background validation (survives a restart between install and
+        // verification). In anchor mode a v2 manifest only validates if it equals
+        // the compiled anchor, so it goes through the normal anchor-verify path
+        // (VerifyImportedBootstrapAnchor) instead — don't write the marker.
+        if (fTrustless && manifest.nVersion >= 2) {
+            WriteBootstrapTrustlessPending(data_dir, manifest.nHeight, manifest.hashBlock,
+                manifest.hashChainstateSerialized);
         }
     } catch (const boost::filesystem::filesystem_error& e) {
         CloseSocket(socket);
@@ -1568,6 +1961,26 @@ bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::str
     if (!BootstrapSnapshotPathsExist(source)) {
         error = strprintf("bootstrap snapshot source is incomplete: %s", source.string());
         return false;
+    }
+
+    // Option B: a self-snapshot serve dir is described by a sibling .meta. Serve
+    // it as a version-2 manifest carrying its real height/block hash and the
+    // UTXO-set commitment — no compiled anchor involved.
+    BootstrapServeMeta meta;
+    if (ReadBootstrapServeMeta(source, meta)) {
+        manifest.SetNull();
+        manifest.nVersion = 2;
+        manifest.strNetwork = Params().NetworkIDString();
+        manifest.nHeight = meta.nHeight;
+        manifest.hashBlock = meta.hashBlock;
+        // hashAnchorSha256/Sha3 are decorative anchor-string hashes with no trust
+        // weight; a self-snapshot has no compiled anchor, so leave them null.
+        manifest.hashChainstateSerialized = meta.hashChainstateSerialized;
+        if (!GetBootstrapSnapshotFileList(source, manifest.vFiles, manifest.nSnapshotBytes, error)) {
+            return false;
+        }
+        manifest.nChunkSize = BOOTSTRAP_SNAPSHOT_CHUNK_SIZE;
+        return true;
     }
 
     const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
@@ -2013,7 +2426,8 @@ bool PreflightBootstrapSnapshotService(std::string& error)
     if (!GetBootstrapSnapshotManifest(manifest, error)) {
         return false;
     }
-    if (!ValidateBootstrapSnapshotManifest(manifest, error)) {
+    // We are validating our OWN manifest (self-snapshots are v2); allow them.
+    if (!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/true)) {
         return false;
     }
     if (manifest.vFiles.empty()) {
@@ -2174,21 +2588,54 @@ bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request, C
     return true;
 }
 
-bool ValidateBootstrapSnapshotManifest(const CBootstrapSnapshotManifest& manifest, std::string& error)
+bool ValidateBootstrapSnapshotManifest(const CBootstrapSnapshotManifest& manifest, std::string& error, bool fTrustlessAllowed)
 {
-    if (manifest.nVersion != 1) {
+    if (manifest.nVersion != 1 && manifest.nVersion != 2) {
         error = "Bootstrap manifest has unsupported version";
+        return false;
+    }
+    if (manifest.strNetwork != Params().NetworkIDString()) {
+        error = "Bootstrap manifest is for a different network";
         return false;
     }
 
     const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
-    if (manifest.strNetwork != Params().NetworkIDString() ||
-        manifest.nHeight != anchor.nHeight ||
-        manifest.hashBlock != anchor.hashBlock ||
-        manifest.hashAnchorSha256 != anchor.hashAnchorSha256 ||
-        manifest.hashAnchorSha3 != anchor.hashAnchorSha3) {
-        error = "Bootstrap manifest does not match local fast-sync anchor";
-        return false;
+    if (manifest.nVersion == 1) {
+        // v1: must equal the compiled fast-sync anchor (original, trustless-by-
+        // compiled-constant behavior — unchanged).
+        if (manifest.nHeight != anchor.nHeight ||
+            manifest.hashBlock != anchor.hashBlock ||
+            manifest.hashAnchorSha256 != anchor.hashAnchorSha256 ||
+            manifest.hashAnchorSha3 != anchor.hashAnchorSha3) {
+            error = "Bootstrap manifest does not match local fast-sync anchor";
+            return false;
+        }
+    } else if (!fTrustlessAllowed) {
+        // v2 (self-snapshot) received in anchor mode: only acceptable if it is in
+        // fact exactly the compiled anchor (height/hash) and commits to the
+        // compiled UTXO commitment — otherwise we have no compiled value to verify
+        // it against, so reject before downloading.
+        if (anchor.nHeight < 0 || anchor.hashBlock.IsNull() ||
+            manifest.nHeight != anchor.nHeight ||
+            manifest.hashBlock != anchor.hashBlock ||
+            anchor.hashChainstateSerialized.IsNull() ||
+            manifest.hashChainstateSerialized != anchor.hashChainstateSerialized) {
+            error = "Bootstrap manifest is a self-snapshot but -bootstrapmode is not 'trustless'";
+            return false;
+        }
+    } else {
+        // v2 in trustless mode: accept a peer's self-snapshot at its own recent
+        // tip. Its height/block hash and UTXO commitment are NOT trusted here;
+        // they are verified after download by the provisional header/PoW/
+        // checkpoint gate, the integrity check, and background full validation.
+        if (manifest.hashChainstateSerialized.IsNull()) {
+            error = "Bootstrap v2 manifest is missing its chainstate commitment";
+            return false;
+        }
+        if (manifest.nHeight < 0 || manifest.hashBlock.IsNull()) {
+            error = "Bootstrap v2 manifest has no tip height/hash";
+            return false;
+        }
     }
     if (manifest.nChunkSize == 0 || manifest.nChunkSize > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
         error = "Bootstrap manifest has invalid chunk size";

@@ -201,6 +201,14 @@ struct CBootstrapSnapshotManifest
     uint64_t nSnapshotBytes;
     uint32_t nChunkSize;
     std::vector<CBootstrapSnapshotFile> vFiles;
+    //! Commitment to the full UTXO set of this snapshot: the same value the
+    //! gettxoutsetinfo RPC reports as `hash_serialized` (CCoinsViewDB::GetStats).
+    //! Only present in version-2+ manifests (a self-snapshot at the server's own
+    //! recent tip, which has no compiled anchor a client could check against).
+    //! A version-1 manifest serializes without this field, byte-for-byte identical
+    //! to the original wire format, so the deployed compiled-anchor swarm is
+    //! unaffected. Null in a v1 manifest.
+    uint256 hashChainstateSerialized;
 
     CBootstrapSnapshotManifest()
     {
@@ -218,6 +226,7 @@ struct CBootstrapSnapshotManifest
         nSnapshotBytes = 0;
         nChunkSize = 0;
         vFiles.clear();
+        hashChainstateSerialized.SetNull();
     }
 
     ADD_SERIALIZE_METHODS;
@@ -234,6 +243,13 @@ struct CBootstrapSnapshotManifest
         READWRITE(nSnapshotBytes);
         READWRITE(nChunkSize);
         READWRITE(vFiles);
+        // Version-gated append: nVersion is (de)serialized first, so on read this
+        // condition reflects the wire version. Never reorder these fields or make
+        // the new field unconditional — that would break v1 interop with the
+        // deployed swarm.
+        if (nVersion >= 2) {
+            READWRITE(hashChainstateSerialized);
+        }
     }
 };
 
