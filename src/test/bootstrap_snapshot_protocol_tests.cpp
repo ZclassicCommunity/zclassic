@@ -1176,4 +1176,173 @@ BOOST_AUTO_TEST_CASE(bootstrap_snapshot_full_transfer_roundtrip)
     fs::remove_all(staging);
 }
 
+// --- Auto-serve activation: a node only re-serves a retained snapshot copy when
+// its sibling anchor marker still matches the binary's compiled anchor (issue #4). ---
+//
+// SetupAutoBootstrapServe looks for <data_dir>/bootstrap-serve-source (a complete
+// blocks/index + chainstate tree per BootstrapSnapshotPathsExist) plus a sibling
+// <data_dir>/bootstrap-serve-source.anchor marker file whose content equals
+// "<anchor.nHeight> <anchor.hashBlock.ToString()>" (AutoServeAnchorMarker). On a
+// match it points the serve machinery at the retained copy via mapArgs; on a
+// stale/missing marker it removes the copy so we never serve bytes clients will
+// reject.
+
+// Build the marker line the way bootstrap.cpp's AutoServeAnchorMarker() does, so
+// the "matching" case mirrors what a real retained copy would have written.
+static std::string ExpectedAutoServeMarker()
+{
+    const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
+    return strprintf("%d %s", anchor.nHeight, anchor.hashBlock.ToString());
+}
+
+BOOST_AUTO_TEST_CASE(bootstrap_auto_serve_activates_on_matching_marker)
+{
+    const bool hadServe = mapArgs.count("-bootstrapserve");
+    const bool hadSource = mapArgs.count("-bootstrapsourcedir");
+    const std::string oldServe = hadServe ? mapArgs["-bootstrapserve"] : "";
+    const std::string oldSource = hadSource ? mapArgs["-bootstrapsourcedir"] : "";
+
+    namespace fs = boost::filesystem;
+    const fs::path data_dir = fs::temp_directory_path() / fs::unique_path("zclassic-bootstrap-autoserve-ok-%%%%-%%%%-%%%%");
+    const fs::path serveSrc = data_dir / "bootstrap-serve-source";
+    // Empty dirs satisfy BootstrapSnapshotPathsExist (it only checks the tree).
+    fs::create_directories(serveSrc / "blocks" / "index");
+    fs::create_directories(serveSrc / "chainstate");
+    BOOST_REQUIRE(BootstrapSnapshotPathsExist(serveSrc));
+
+    // Correct marker, written as a sibling file next to the serve dir.
+    WriteFixtureFile(data_dir / "bootstrap-serve-source.anchor", ExpectedAutoServeMarker() + "\n");
+
+    // Start from a clean slate so we can assert the function set them.
+    mapArgs.erase("-bootstrapserve");
+    mapArgs.erase("-bootstrapsourcedir");
+
+    std::string error;
+    BOOST_CHECK(SetupAutoBootstrapServe(data_dir, error));
+    BOOST_CHECK_EQUAL(mapArgs["-bootstrapsourcedir"], serveSrc.string());
+    BOOST_CHECK_EQUAL(mapArgs["-bootstrapserve"], "1");
+    // The retained copy must survive a successful activation.
+    BOOST_CHECK(BootstrapSnapshotPathsExist(serveSrc));
+
+    RestoreArg("-bootstrapserve", hadServe, oldServe);
+    RestoreArg("-bootstrapsourcedir", hadSource, oldSource);
+    fs::remove_all(data_dir);
+}
+
+BOOST_AUTO_TEST_CASE(bootstrap_auto_serve_rejects_stale_anchor)
+{
+    const bool hadServe = mapArgs.count("-bootstrapserve");
+    const bool hadSource = mapArgs.count("-bootstrapsourcedir");
+    const std::string oldServe = hadServe ? mapArgs["-bootstrapserve"] : "";
+    const std::string oldSource = hadSource ? mapArgs["-bootstrapsourcedir"] : "";
+
+    namespace fs = boost::filesystem;
+    const fs::path data_dir = fs::temp_directory_path() / fs::unique_path("zclassic-bootstrap-autoserve-stale-%%%%-%%%%-%%%%");
+    const fs::path serveSrc = data_dir / "bootstrap-serve-source";
+    fs::create_directories(serveSrc / "blocks" / "index");
+    fs::create_directories(serveSrc / "chainstate");
+    BOOST_REQUIRE(BootstrapSnapshotPathsExist(serveSrc));
+
+    // A marker for a different (older) anchor than this binary's compiled one.
+    WriteFixtureFile(data_dir / "bootstrap-serve-source.anchor",
+                     "1 0000000000000000000000000000000000000000000000000000000000000000\n");
+
+    mapArgs.erase("-bootstrapserve");
+    mapArgs.erase("-bootstrapsourcedir");
+
+    std::string error;
+    BOOST_CHECK(!SetupAutoBootstrapServe(data_dir, error));
+    // A stale copy must be removed so we never serve bytes clients will reject.
+    BOOST_CHECK(!BootstrapSnapshotPathsExist(serveSrc));
+
+    RestoreArg("-bootstrapserve", hadServe, oldServe);
+    RestoreArg("-bootstrapsourcedir", hadSource, oldSource);
+    fs::remove_all(data_dir);
+}
+
+BOOST_AUTO_TEST_CASE(bootstrap_auto_serve_no_serve_dir)
+{
+    const bool hadServe = mapArgs.count("-bootstrapserve");
+    const bool hadSource = mapArgs.count("-bootstrapsourcedir");
+    const std::string oldServe = hadServe ? mapArgs["-bootstrapserve"] : "";
+    const std::string oldSource = hadSource ? mapArgs["-bootstrapsourcedir"] : "";
+
+    namespace fs = boost::filesystem;
+    const fs::path data_dir = fs::temp_directory_path() / fs::unique_path("zclassic-bootstrap-autoserve-noserve-%%%%-%%%%-%%%%");
+    fs::create_directories(data_dir);
+    const fs::path marker = data_dir / "bootstrap-serve-source.anchor";
+    // An orphan marker with no serve dir alongside it.
+    WriteFixtureFile(marker, ExpectedAutoServeMarker() + "\n");
+    BOOST_REQUIRE(fs::exists(marker));
+    BOOST_REQUIRE(!BootstrapSnapshotPathsExist(data_dir / "bootstrap-serve-source"));
+
+    mapArgs.erase("-bootstrapserve");
+    mapArgs.erase("-bootstrapsourcedir");
+
+    std::string error;
+    BOOST_CHECK(!SetupAutoBootstrapServe(data_dir, error));
+    // The orphan marker must be dropped so it can't confuse a later run.
+    BOOST_CHECK(!fs::exists(marker));
+
+    RestoreArg("-bootstrapserve", hadServe, oldServe);
+    RestoreArg("-bootstrapsourcedir", hadSource, oldSource);
+    fs::remove_all(data_dir);
+}
+
+// --- Bootstrap peer selection precedence (GetBootstrapPeerList): repeatable
+// -bootstrappeer (mapMultiArgs) wins, then a single -bootstrappeer (mapArgs),
+// then the compiled per-network defaults (Params().BootstrapPeers()). ---
+BOOST_AUTO_TEST_CASE(bootstrap_peer_list_multi_and_single)
+{
+    const bool hadArg = mapArgs.count("-bootstrappeer");
+    const std::string oldArg = hadArg ? mapArgs["-bootstrappeer"] : "";
+    const bool hadMulti = mapMultiArgs.count("-bootstrappeer");
+    const std::vector<std::string> oldMulti = hadMulti ? mapMultiArgs["-bootstrappeer"] : std::vector<std::string>();
+
+    // (a) Repeatable entries take precedence and are returned in order.
+    {
+        std::vector<std::string> multi;
+        multi.push_back("a:1");
+        multi.push_back("b:2");
+        mapMultiArgs["-bootstrappeer"] = multi;
+        // A stray single value must not override the repeatable list.
+        mapArgs["-bootstrappeer"] = "ignored:0";
+
+        const std::vector<std::string> got = GetBootstrapPeerList();
+        BOOST_REQUIRE_EQUAL(got.size(), 2u);
+        BOOST_CHECK_EQUAL(got[0], "a:1");
+        BOOST_CHECK_EQUAL(got[1], "b:2");
+    }
+
+    // (b) With only a single -bootstrappeer in mapArgs (mapMultiArgs cleared),
+    // that lone value is returned.
+    {
+        mapMultiArgs.erase("-bootstrappeer");
+        mapArgs["-bootstrappeer"] = "c:3";
+
+        const std::vector<std::string> got = GetBootstrapPeerList();
+        BOOST_REQUIRE_EQUAL(got.size(), 1u);
+        BOOST_CHECK_EQUAL(got[0], "c:3");
+    }
+
+    // (c) With neither set, the compiled per-network defaults are returned
+    // (non-empty on mainnet, which BasicTestingSetup selects).
+    {
+        mapMultiArgs.erase("-bootstrappeer");
+        mapArgs.erase("-bootstrappeer");
+
+        const std::vector<std::string> got = GetBootstrapPeerList();
+        BOOST_CHECK(got == Params().BootstrapPeers());
+        BOOST_CHECK(!got.empty());
+    }
+
+    // Restore BOTH containers.
+    if (hadMulti) {
+        mapMultiArgs["-bootstrappeer"] = oldMulti;
+    } else {
+        mapMultiArgs.erase("-bootstrappeer");
+    }
+    RestoreArg("-bootstrappeer", hadArg, oldArg);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
