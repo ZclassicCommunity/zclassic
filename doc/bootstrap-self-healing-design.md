@@ -25,7 +25,9 @@ unchanged when they are not set:
   latch; mismatch → discard chainstate and reindex from local blocks (the existing,
   tested reindex path). The background replay connects into a private scratch
   chainstate only (`ConnectBlock(..., fScratchView=true)` suppresses live txindex
-  writes, block-index mutation, and wallet signals). State is persisted in the
+  writes, block-index mutation — including the per-block Sprout anchor/root fields —
+  undo writes, and wallet signals, so the live `mapBlockIndex` is never touched).
+  State is persisted in the
   block-tree DB and resumes after a restart. Trustless mode is refused together
   with `-prune` (a pruned node cannot re-derive, so it could never validate); an
   already-pruned node that somehow holds a provisional snapshot stays

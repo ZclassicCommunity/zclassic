@@ -796,6 +796,10 @@ static void RemoveFailedPeerBootstrapChainData(const boost::filesystem::path& da
     try {
         boost::filesystem::remove_all(data_dir / "blocks");
         boost::filesystem::remove_all(data_dir / "chainstate");
+        // Also drop any scratch UTXO re-derivation DB left by an earlier
+        // (aborted) trustless-validation run, so a rejected snapshot leaves no
+        // stale chainstate-verify dir behind for the next start to resume from.
+        boost::filesystem::remove_all(data_dir / "chainstate-verify");
     } catch (const boost::filesystem::filesystem_error& e) {
         LogPrintf("Failed to remove rejected bootstrap chain data from %s: %s\n", data_dir.string(), e.what());
     }

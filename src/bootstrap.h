@@ -122,9 +122,16 @@ bool ZcashParamsPresentAndValid();
 //! ready" until an off-thread warmer (init Preflight / the freeze task) rebuilds.
 bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::string& error, bool fAllowBuild = true);
 bool PreflightBootstrapSnapshotService(std::string& error);
+//! fAllowBuild has the same meaning as for GetBootstrapSnapshotManifest: serving
+//! a chunk needs the file-hash cache, and rebuilding it re-hashes the whole
+//! multi-GiB snapshot. The net message-handler thread (SendQueuedBootstrapSnapshotChunk)
+//! must pass false so a request arriving while the cache is cold (e.g. the
+//! window between a freeze clearing the cache and the off-thread warmer
+//! rebuilding it) returns "not ready" instead of stalling all peers.
 bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request,
                                 CBootstrapSnapshotChunk& chunk,
-                                std::string& error);
+                                std::string& error,
+                                bool fAllowBuild = true);
 //! Validate a received manifest. fTrustlessAllowed=false (default) requires the
 //! manifest to match the compiled fast-sync anchor (v1, or a v2 that equals the
 //! anchor). fTrustlessAllowed=true additionally accepts a v2 self-snapshot at a

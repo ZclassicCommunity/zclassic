@@ -2517,11 +2517,17 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     if (block.GetHash() == chainparams.GetConsensus().hashGenesisBlock) {
         if (!fJustCheck) {
             view.SetBestBlock(pindex->GetBlockHash());
-            // Before the genesis block, there was an empty tree
-            SproutMerkleTree tree;
-            pindex->hashSproutAnchor = tree.root();
-            // The genesis block contained no JoinSplits
-            pindex->hashFinalSproutRoot = pindex->hashSproutAnchor;
+            // Don't mutate the shared live block index during a scratch
+            // re-derivation (fScratchView): the background validator replays the
+            // real mapBlockIndex entries into a private view only, so the anchor
+            // roots stay owned by the live connect path.
+            if (!fScratchView) {
+                // Before the genesis block, there was an empty tree
+                SproutMerkleTree tree;
+                pindex->hashSproutAnchor = tree.root();
+                // The genesis block contained no JoinSplits
+                pindex->hashFinalSproutRoot = pindex->hashSproutAnchor;
+            }
         }
         return true;
     }
@@ -2584,8 +2590,9 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     // Construct the incremental merkle tree at the current
     // block position,
     auto old_sprout_tree_root = view.GetBestAnchor(SPROUT);
-    // saving the top anchor in the block index as we go.
-    if (!fJustCheck) {
+    // saving the top anchor in the block index as we go (live path only; a
+    // scratch re-derivation must not write the shared block index).
+    if (!fJustCheck && !fScratchView) {
         pindex->hashSproutAnchor = old_sprout_tree_root;
     }
     SproutMerkleTree sprout_tree;
@@ -2674,7 +2681,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
     view.PushAnchor(sprout_tree);
     view.PushAnchor(sapling_tree);
-    if (!fJustCheck) {
+    if (!fJustCheck && !fScratchView) {
         pindex->hashFinalSproutRoot = sprout_tree.root();
     }
     blockundo.old_sprout_tree_root = old_sprout_tree_root;

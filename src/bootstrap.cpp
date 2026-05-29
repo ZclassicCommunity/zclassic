@@ -2518,7 +2518,7 @@ static FILE* OpenBootstrapSnapshotFile(const boost::filesystem::path& source,
     return fp;
 }
 
-bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request, CBootstrapSnapshotChunk& chunk, std::string& error)
+bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request, CBootstrapSnapshotChunk& chunk, std::string& error, bool fAllowBuild)
 {
     if (!GetBoolArg("-bootstrapserve", false)) {
         error = "bootstrap snapshot service is not enabled";
@@ -2539,6 +2539,13 @@ bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request, C
     {
         LOCK(cs_bootstrap_snapshot);
         if (bootstrapSnapshotCacheSource != source || bootstrapSnapshotCacheFiles.empty()) {
+            // Rebuilding the cache re-hashes the whole snapshot; never do that on
+            // the net message-handler thread (fAllowBuild=false). An off-thread
+            // warmer (init Preflight / the freeze task) keeps it hot.
+            if (!fAllowBuild) {
+                error = "bootstrap snapshot manifest not ready";
+                return false;
+            }
             if (!CollectBootstrapSnapshotFiles(source, true, bootstrapSnapshotCacheFiles, bootstrapSnapshotCacheMtimes, bootstrapSnapshotCacheBytes, error)) {
                 return false;
             }
@@ -2928,9 +2935,13 @@ bool SendQueuedBootstrapSnapshotChunk(CNode* pto)
 
         CBootstrapSnapshotChunk chunk;
         std::string error;
+        // Runs on the message-handler thread: never let a chunk read rebuild the
+        // (cold) snapshot cache inline (fAllowBuild=false) — it would re-hash the
+        // whole multi-GiB snapshot and stall every peer. On "not ready" we reject
+        // this request; the peer retries once the off-thread warmer has rebuilt.
         const bool ok = (kind == CNode::BOOTSTRAP_CHUNK_PARAMS)
             ? ReadZcashParamChunk(request, chunk, error)
-            : ReadBootstrapSnapshotChunk(request, chunk, error);
+            : ReadBootstrapSnapshotChunk(request, chunk, error, /*fAllowBuild=*/false);
         if (!ok) {
             LogPrint("net", "could not read %s chunk for peer=%d: %s\n", chunkLabel, pto->id, error);
             pto->PushMessage("reject", std::string(getCmd), REJECT_INVALID, std::string("invalid bootstrap chunk request"));

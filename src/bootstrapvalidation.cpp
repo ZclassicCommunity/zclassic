@@ -174,6 +174,14 @@ static void ThreadBootstrapUtxoValidation()
 {
     RenameThread("zcl-utxoverify");
 
+    // Bail before touching any globals if a shutdown is already in flight. The
+    // startup-failure path (bitcoind.cpp) interrupts but does NOT join this
+    // thread before Shutdown() frees pblocktree/pcoinsTip/mapBlockIndex, so a
+    // late spawn must not race into cs_main / ReadBlockFromDisk against teardown.
+    if (ShutdownRequested()) {
+        return;
+    }
+
     int H, startProgress;
     uint256 expected, snapshotTip;
     {
@@ -357,6 +365,12 @@ void MaybeStartBootstrapValidation(boost::thread_group& threadGroup, CScheduler&
         try {
             boost::filesystem::remove_all(ScratchDir());
         } catch (...) {}
+        return;
+    }
+    // Don't start a background re-derivation if we're already shutting down: the
+    // failure path interrupts without joining before the chain databases are
+    // freed, so a thread spawned here could outlive them (use-after-free).
+    if (ShutdownRequested()) {
         return;
     }
     threadGroup.create_thread(boost::bind(&ThreadBootstrapUtxoValidation));
