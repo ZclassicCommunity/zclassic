@@ -81,9 +81,8 @@ namespace Checkpoints {
         return NULL;
     }
 
-    static std::string FastSyncAnchorPayload(const CChainParams& chainparams)
+    static std::string FastSyncAnchorPayload(const CChainParams& chainparams, const CFastSyncAnchorData& anchor)
     {
-        const CFastSyncAnchorData& anchor = chainparams.FastSyncAnchor();
         return strprintf("zclassic-fastsync-anchor-v1|%s|%d|%s",
             chainparams.NetworkIDString(),
             anchor.nHeight,
@@ -106,47 +105,54 @@ namespace Checkpoints {
 
     bool ValidateFastSyncAnchor(const CChainParams& chainparams, std::string& strError)
     {
-        const CFastSyncAnchorData& anchor = chainparams.FastSyncAnchor();
-
-        if (anchor.nHeight < 0 || anchor.hashBlock.IsNull()) {
-            return true;
-        }
-
         const MapCheckpoints& checkpoints = chainparams.Checkpoints().mapCheckpoints;
-        MapCheckpoints::const_iterator checkpoint = checkpoints.find(anchor.nHeight);
-        if (checkpoint == checkpoints.end()) {
-            strError = strprintf(
-                "Fast-sync anchor height %d is not present in the checkpoint set",
-                anchor.nHeight);
-            return false;
-        }
 
-        if (checkpoint->second != anchor.hashBlock) {
-            strError = strprintf(
-                "Fast-sync anchor hash mismatch at height %d: anchor=%s checkpoint=%s",
-                anchor.nHeight,
-                anchor.hashBlock.ToString(),
-                checkpoint->second.ToString());
-            return false;
-        }
+        BOOST_FOREACH(const CFastSyncAnchorData& anchor, chainparams.FastSyncAnchors())
+        {
+            if (anchor.nHeight < 0 || anchor.hashBlock.IsNull()) {
+                continue;
+            }
 
-        const std::string payload = FastSyncAnchorPayload(chainparams);
-        const uint256 hashSha256 = HashAnchorSha256(payload);
-        if (hashSha256 != anchor.hashAnchorSha256) {
-            strError = strprintf(
-                "Fast-sync SHA-256 anchor digest mismatch: computed=%s expected=%s",
-                hashSha256.ToString(),
-                anchor.hashAnchorSha256.ToString());
-            return false;
-        }
+            MapCheckpoints::const_iterator checkpoint = checkpoints.find(anchor.nHeight);
+            if (checkpoint == checkpoints.end()) {
+                strError = strprintf(
+                    "Fast-sync anchor height %d (block %s) is not present in the checkpoint set",
+                    anchor.nHeight,
+                    anchor.hashBlock.ToString());
+                return false;
+            }
 
-        const uint256 hashSha3 = HashAnchorSha3(payload);
-        if (hashSha3 != anchor.hashAnchorSha3) {
-            strError = strprintf(
-                "Fast-sync SHA3-256 anchor digest mismatch: computed=%s expected=%s",
-                hashSha3.ToString(),
-                anchor.hashAnchorSha3.ToString());
-            return false;
+            if (checkpoint->second != anchor.hashBlock) {
+                strError = strprintf(
+                    "Fast-sync anchor hash mismatch at height %d: anchor=%s checkpoint=%s",
+                    anchor.nHeight,
+                    anchor.hashBlock.ToString(),
+                    checkpoint->second.ToString());
+                return false;
+            }
+
+            const std::string payload = FastSyncAnchorPayload(chainparams, anchor);
+            const uint256 hashSha256 = HashAnchorSha256(payload);
+            if (hashSha256 != anchor.hashAnchorSha256) {
+                strError = strprintf(
+                    "Fast-sync SHA-256 anchor digest mismatch at height %d (block %s): computed=%s expected=%s",
+                    anchor.nHeight,
+                    anchor.hashBlock.ToString(),
+                    hashSha256.ToString(),
+                    anchor.hashAnchorSha256.ToString());
+                return false;
+            }
+
+            const uint256 hashSha3 = HashAnchorSha3(payload);
+            if (hashSha3 != anchor.hashAnchorSha3) {
+                strError = strprintf(
+                    "Fast-sync SHA3-256 anchor digest mismatch at height %d (block %s): computed=%s expected=%s",
+                    anchor.nHeight,
+                    anchor.hashBlock.ToString(),
+                    hashSha3.ToString(),
+                    anchor.hashAnchorSha3.ToString());
+                return false;
+            }
         }
 
         return true;

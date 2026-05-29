@@ -205,6 +205,19 @@ public:
         // from the prepared snapshot at this height via gettxoutsetinfo.
         fastSyncAnchorData.hashChainstateSerialized = uint256S("0x75b95c7680394d6063498609e8a8d05a06d9d52e8f6981055c76cbd107dda478");
 
+        // The set of anchors a client accepts, newest first. Today this is just
+        // the primary. To roll a new anchor for a release WITHOUT forcing a hard
+        // client/server lockstep, set fastSyncAnchorData above to the NEW anchor,
+        // then list it first here followed by the previous anchor(s) you still
+        // want clients to accept during the transition, e.g.:
+        //     vFastSyncAnchors.push_back(fastSyncAnchorData);   // new (primary)
+        //     CFastSyncAnchorData prev; prev.nHeight = 3126937; prev.hashBlock = ...;
+        //     prev.hashAnchorSha256 = ...; prev.hashAnchorSha3 = ...;
+        //     prev.hashChainstateSerialized = ...; vFastSyncAnchors.push_back(prev);
+        // Every entry is a developer-reviewed commitment, so there is no forgery
+        // window regardless of which compiled anchor a peer serves.
+        vFastSyncAnchors.push_back(fastSyncAnchorData);
+
         // Default NODE_BOOTSTRAP peers a fresh node fetches params and the chain
         // snapshot from. Overridable with -bootstrappeer, disable with -bootstrap=0.
         vBootstrapPeers.push_back("74.50.74.102:8034");
@@ -576,6 +589,16 @@ bool SelectParamsFromCommandLine()
 
 // Block height must be >0 and <=last founders reward block height
 // Index variable i ranges from 0 - (vFoundersRewardAddress.size()-1)
+const CFastSyncAnchorData* CChainParams::FindFastSyncAnchor(int nHeight, const uint256& hashBlock) const {
+    for (std::vector<CFastSyncAnchorData>::const_iterator it = vFastSyncAnchors.begin();
+         it != vFastSyncAnchors.end(); ++it) {
+        if (it->nHeight == nHeight && it->hashBlock == hashBlock) {
+            return &(*it);
+        }
+    }
+    return NULL;
+}
+
 std::string CChainParams::GetFoundersRewardAddressAtHeight(int nHeight) const {
     int maxHeight = consensus.GetLastFoundersRewardBlockHeight();
     assert(nHeight > 0 && nHeight <= maxHeight);

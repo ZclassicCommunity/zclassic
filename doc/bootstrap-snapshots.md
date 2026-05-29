@@ -137,6 +137,37 @@ The block-file *contents* below the verification horizon are still chosen by the
 peer (see the trust model). For the strongest guarantee, use `-bootstrappeer`
 with a peer you control or use Option A.
 
+### Rolling (multi-)anchors — releasing a new anchor without lockstep
+
+The binary accepts a snapshot matching **any** anchor in its compiled set
+(`CChainParams::FastSyncAnchors()`), not just the newest ("primary"). Each entry
+is a developer-reviewed commitment, so accepting several does **not** widen the
+trust model — there is still no forgery window. This removes the hard
+client/server version lockstep: a node fast-synced at an older still-compiled
+anchor keeps both fast-syncing and *serving* it (its retained serve copy records
+the anchor it actually synced from), while newer nodes serve the new anchor, and
+clients of either release interoperate during the transition.
+
+To roll a new anchor for a release:
+
+1. Generate the prepared snapshot at the new height and read its
+   `gettxoutsetinfo.hash_serialized` (the UTXO-set commitment).
+2. In `chainparams.cpp`, set `fastSyncAnchorData` to the NEW anchor
+   (height / block hash / SHA digests / commitment), then in `vFastSyncAnchors`
+   list the new (primary) anchor **first**, followed by the previous anchor(s)
+   you still want clients to accept during the transition (see the worked example
+   in the comment there). Drop an old anchor only once enough of the network has
+   moved past it.
+3. Startup self-checks every compiled anchor against the checkpoint set and its
+   SHA digests (`Checkpoints::ValidateFastSyncAnchor`), so a typo fails fast.
+
+**Drift guard.** A node serving a prepared `-bootstrapsourcedir` snapshot whose
+chainstate tip matches **no** compiled anchor (e.g. an operator regenerated the
+snapshot at a height the binary does not anchor) emits a loud startup
+`InitWarning` and keeps running. This catches the misconfiguration that otherwise
+only surfaces as clients downloading the snapshot and then rejecting it; regenerate
+the snapshot at a compiled anchor height, or run a binary whose anchor matches.
+
 ### Fast-sync trust model: what is actually verified
 
 The imported ledger state is verified against the open-source binary — **not the

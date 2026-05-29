@@ -1225,12 +1225,36 @@ static boost::filesystem::path AutoServeMarkerPath(const boost::filesystem::path
     return data_dir / "bootstrap-serve-source.anchor";
 }
 
-// Identity string recorded alongside a retained auto-serve copy so a later run
-// only serves it while it still matches the binary's compiled anchor.
-static std::string AutoServeAnchorMarker()
+// Identity string ("<height> <blockhash>") recorded alongside a retained
+// auto-serve copy so a later run only serves it while it still matches one of the
+// binary's compiled anchors. It records the anchor THIS node actually fast-synced
+// from (the matched manifest's height/hash), NOT necessarily the current primary,
+// so a node that synced from an older still-compiled anchor advertises the correct
+// identity on a later run; it is matched against the full compiled anchor set.
+static std::string AutoServeAnchorMarkerFor(int nHeight, const uint256& hashBlock)
 {
-    const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
-    return strprintf("%d %s", anchor.nHeight, anchor.hashBlock.ToString());
+    return strprintf("%d %s", nHeight, hashBlock.ToString());
+}
+
+// Parse the (height, block hash) recorded in the sibling ".anchor" marker beside a
+// retained serve copy and return the compiled anchor it matches, or NULL when there
+// is no marker / it parses badly / it matches no compiled anchor. Lets a node that
+// fast-synced from a now-non-primary compiled anchor still advertise the CORRECT
+// anchor identity rather than the binary's primary.
+static const CFastSyncAnchorData* ResolveServedAnchorFromMarker(const boost::filesystem::path& source)
+{
+    const boost::filesystem::path markerPath =
+        source.parent_path() / (source.filename().string() + ".anchor");
+    FILE* mf = fopen(markerPath.string().c_str(), "r");
+    if (!mf) return NULL;
+    char buf[256] = {0};
+    char* got = fgets(buf, sizeof(buf), mf);
+    fclose(mf);
+    if (!got) return NULL;
+    int height = -1;
+    char hashHex[160] = {0};
+    if (sscanf(buf, "%d %159s", &height, hashHex) != 2) return NULL;
+    return Params().FindFastSyncAnchor(height, uint256S(hashHex));
 }
 
 // Auto-serve (-bootstrapserve=auto): retain an immutable copy of the just-
@@ -1238,7 +1262,7 @@ static std::string AutoServeAnchorMarker()
 // from the verified staging files (consistent, and not yet opened by LevelDB)
 // before they are moved into the live datadir. Best-effort: a failure here must
 // not block the node's own bootstrap.
-static bool RetainAutoServeSourceFromStaging(const boost::filesystem::path& staging, const boost::filesystem::path& data_dir, std::string& error)
+static bool RetainAutoServeSourceFromStaging(const boost::filesystem::path& staging, const boost::filesystem::path& data_dir, int syncedHeight, const uint256& syncedHashBlock, std::string& error)
 {
     const boost::filesystem::path serveSrc = AutoServeSourceDir(data_dir);
     LogPrintf("Auto-serve: retaining a serve copy of the bootstrap snapshot (one-time; uses extra disk)...\n");
@@ -1254,7 +1278,7 @@ static bool RetainAutoServeSourceFromStaging(const boost::filesystem::path& stag
         error = "retained auto-serve copy is incomplete";
         return false;
     }
-    const std::string marker = AutoServeAnchorMarker();
+    const std::string marker = AutoServeAnchorMarkerFor(syncedHeight, syncedHashBlock);
     FILE* mf = fopen(AutoServeMarkerPath(data_dir).string().c_str(), "w");
     if (!mf) {
         boost::filesystem::remove_all(serveSrc);
@@ -1530,14 +1554,16 @@ bool SetupAutoBootstrapServe(const boost::filesystem::path& data_dir, std::strin
     while (!got.empty() && (got[got.size() - 1] == '\n' || got[got.size() - 1] == '\r' || got[got.size() - 1] == ' ')) {
         got.resize(got.size() - 1);
     }
-    if (got != AutoServeAnchorMarker()) {
-        // The retained copy is for a different (older) anchor than this binary:
-        // serving it would make clients download then reject. Drop it; this node
-        // can only produce a fresh one by fast-syncing at the new anchor.
-        LogPrintf("Auto-serve: retained serve copy is for a stale anchor (\"%s\"); removing it\n", got);
+    // Accept the retained copy if its recorded anchor matches ANY compiled anchor
+    // (not just the primary), so a node that fast-synced at a still-supported older
+    // anchor keeps serving it across an anchor bump. Only a copy matching no
+    // compiled anchor is stale and removed (serving it would make clients download
+    // then reject); this node can only produce a fresh one by fast-syncing again.
+    if (ResolveServedAnchorFromMarker(serveSrc) == NULL) {
+        LogPrintf("Auto-serve: retained serve copy is for an anchor no longer compiled in (\"%s\"); removing it\n", got);
         boost::filesystem::remove_all(serveSrc);
         boost::filesystem::remove(AutoServeMarkerPath(data_dir));
-        error = "retained serve copy did not match the current anchor";
+        error = "retained serve copy did not match any compiled anchor";
         return false;
     }
 
@@ -1774,7 +1800,11 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
                     (unsigned long long)needed, (unsigned long long)si.available);
             } else {
                 std::string retain_error;
-                if (!RetainAutoServeSourceFromStaging(staging, data_dir, retain_error)) {
+                // Record the identity of the anchor we actually fast-synced from
+                // (the validated manifest's tip), so a later run advertises THIS
+                // anchor — not necessarily the binary's primary — when it matches
+                // a still-compiled anchor.
+                if (!RetainAutoServeSourceFromStaging(staging, data_dir, manifest.nHeight, manifest.hashBlock, retain_error)) {
                     LogPrintf("Auto-serve: could not retain serve copy (continuing without serving): %s\n", retain_error);
                 }
             }
@@ -1958,6 +1988,56 @@ static bool GetBootstrapSnapshotFileList(const boost::filesystem::path& source, 
     return true;
 }
 
+bool BootstrapServeSnapshotMatchesCompiledAnchor(std::string& warning)
+{
+    // Only meaningful for an enabled serve from a prepared source directory.
+    if (!GetBoolArg("-bootstrapserve", false) || !mapArgs.count("-bootstrapsourcedir")) {
+        return true;
+    }
+    const boost::filesystem::path source = boost::filesystem::system_complete(mapArgs["-bootstrapsourcedir"]);
+    if (!BootstrapSnapshotPathsExist(source)) {
+        return true; // nothing retained to serve yet — not a drift condition
+    }
+    // A v2 self-snapshot (sibling .meta) is intentionally NOT a compiled anchor; it
+    // is served only to trustless-mode clients that validate it themselves, so it
+    // is not drift. Leave that path alone.
+    {
+        BootstrapServeMeta meta;
+        if (ReadBootstrapServeMeta(source, meta)) {
+            return true;
+        }
+    }
+    // Read the served chainstate's tip and check it matches a compiled anchor by
+    // block hash. A mismatch is operator drift: the snapshot was (re)generated at a
+    // height this binary does not anchor, so anchor-mode clients would download it
+    // and only then reject it on the per-file hash check.
+    uint256 best;
+    try {
+        CCoinsViewDB servedb(source / "chainstate", 1 << 23, false, false);
+        best = servedb.GetBestBlock();
+    } catch (const std::exception& e) {
+        warning = strprintf("could not read the served snapshot's chainstate to check it against the compiled "
+                            "fast-sync anchors: %s", e.what());
+        return false;
+    }
+    if (best.IsNull()) {
+        warning = "the snapshot in -bootstrapsourcedir has no chainstate best block; clients will reject it";
+        return false;
+    }
+    const std::vector<CFastSyncAnchorData>& anchors = Params().FastSyncAnchors();
+    for (size_t i = 0; i < anchors.size(); ++i) {
+        if (anchors[i].hashBlock == best) {
+            return true;
+        }
+    }
+    warning = strprintf(
+        "the snapshot in -bootstrapsourcedir has chainstate tip %s, which matches no compiled fast-sync anchor; "
+        "anchor-mode clients will download it and then reject it. Regenerate the snapshot at a compiled anchor "
+        "height, or run a binary whose anchor matches this snapshot.",
+        best.ToString());
+    return false;
+}
+
 bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::string& error, bool fAllowBuild)
 {
     if (!GetBoolArg("-bootstrapserve", false)) {
@@ -1995,7 +2075,14 @@ bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::str
         return true;
     }
 
-    const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
+    // Advertise the anchor this serve copy actually corresponds to. For an
+    // auto-serve copy that came from a (possibly now-non-primary) compiled anchor,
+    // the sibling marker tells us which one; otherwise fall back to the primary
+    // (manual -bootstrapsourcedir serve). Advertising the true anchor means an
+    // anchor-mode client accepts or rejects from the small manifest, before
+    // downloading anything.
+    const CFastSyncAnchorData* marked = ResolveServedAnchorFromMarker(source);
+    const CFastSyncAnchorData& anchor = marked ? *marked : Params().FastSyncAnchor();
     if (anchor.nHeight < 0 || anchor.hashBlock.IsNull()) {
         error = "bootstrap snapshot service requires a compiled fast-sync anchor";
         return false;
@@ -2618,27 +2705,28 @@ bool ValidateBootstrapSnapshotManifest(const CBootstrapSnapshotManifest& manifes
         return false;
     }
 
-    const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
     if (manifest.nVersion == 1) {
-        // v1: must equal the compiled fast-sync anchor (original, trustless-by-
-        // compiled-constant behavior — unchanged).
-        if (manifest.nHeight != anchor.nHeight ||
-            manifest.hashBlock != anchor.hashBlock ||
-            manifest.hashAnchorSha256 != anchor.hashAnchorSha256 ||
-            manifest.hashAnchorSha3 != anchor.hashAnchorSha3) {
-            error = "Bootstrap manifest does not match local fast-sync anchor";
+        // v1: must equal one of the compiled fast-sync anchors (trustless-by-
+        // compiled-constant). Accepting ANY compiled anchor (not just the primary)
+        // lets old and new clients/servers interoperate across an anchor bump
+        // without a hard version lockstep; every compiled anchor is still a
+        // developer-reviewed commitment, so there is no forgery window.
+        const CFastSyncAnchorData* anchor = Params().FindFastSyncAnchor(manifest.nHeight, manifest.hashBlock);
+        if (anchor == NULL ||
+            manifest.hashAnchorSha256 != anchor->hashAnchorSha256 ||
+            manifest.hashAnchorSha3 != anchor->hashAnchorSha3) {
+            error = "Bootstrap manifest does not match any compiled fast-sync anchor";
             return false;
         }
     } else if (!fTrustlessAllowed) {
         // v2 (self-snapshot) received in anchor mode: only acceptable if it is in
-        // fact exactly the compiled anchor (height/hash) and commits to the
-        // compiled UTXO commitment — otherwise we have no compiled value to verify
-        // it against, so reject before downloading.
-        if (anchor.nHeight < 0 || anchor.hashBlock.IsNull() ||
-            manifest.nHeight != anchor.nHeight ||
-            manifest.hashBlock != anchor.hashBlock ||
-            anchor.hashChainstateSerialized.IsNull() ||
-            manifest.hashChainstateSerialized != anchor.hashChainstateSerialized) {
+        // fact one of the compiled anchors (height/hash) and commits to THAT
+        // anchor's compiled UTXO commitment — otherwise we have no compiled value
+        // to verify it against, so reject before downloading.
+        const CFastSyncAnchorData* anchor = Params().FindFastSyncAnchor(manifest.nHeight, manifest.hashBlock);
+        if (anchor == NULL ||
+            anchor->hashChainstateSerialized.IsNull() ||
+            manifest.hashChainstateSerialized != anchor->hashChainstateSerialized) {
             error = "Bootstrap manifest is a self-snapshot but -bootstrapmode is not 'trustless'";
             return false;
         }

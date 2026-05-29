@@ -731,46 +731,42 @@ static bool check_file_hash(const std::string& path, const std::string& hash)
 
 static bool VerifyImportedBootstrapAnchor(std::string& error)
 {
-    const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
-    if (anchor.nHeight < 0 || anchor.hashBlock.IsNull()) {
-        error = "bootstrap snapshot verification requires a compiled fast-sync anchor";
-        return false;
-    }
     if (chainActive.Tip() == NULL) {
         error = "bootstrap snapshot verification failed: active chain is empty";
         return false;
     }
-    if (chainActive.Height() != anchor.nHeight) {
+    // Match the imported tip against the full set of compiled fast-sync anchors.
+    // The node accepts a snapshot whose tip matches ANY one of the compiled
+    // anchors (rolling anchors / smooth release rollout), not just the primary.
+    int importedHeight = chainActive.Height();
+    uint256 importedHash = chainActive.Tip()->GetBlockHash();
+    const CFastSyncAnchorData* anchor = Params().FindFastSyncAnchor(importedHeight, importedHash);
+    if (anchor == NULL) {
+        // FindFastSyncAnchor returns NULL both when no anchor is compiled in at
+        // all and when the imported tip matches none of the compiled anchors.
         error = strprintf(
-            "bootstrap snapshot verification failed: imported tip height is %d, expected %d",
-            chainActive.Height(),
-            anchor.nHeight);
-        return false;
-    }
-    CBlockIndex* pindex = chainActive[anchor.nHeight];
-    if (pindex == NULL || pindex->GetBlockHash() != anchor.hashBlock) {
-        error = strprintf(
-            "bootstrap snapshot verification failed: imported anchor hash is %s, expected %s",
-            pindex ? pindex->GetBlockHash().ToString() : std::string("missing"),
-            anchor.hashBlock.ToString());
+            "bootstrap snapshot verification failed: imported tip (height %d, %s) matches no compiled fast-sync anchor",
+            importedHeight,
+            importedHash.ToString());
         return false;
     }
     // Content-trust check: recompute the commitment over the whole imported UTXO
-    // set and compare it to the value compiled into this binary. A malicious or
-    // compromised serving peer cannot substitute a forged chainstate, because it
-    // cannot reproduce a UTXO set that hashes to the compiled commitment. A null
-    // commitment (no value compiled in yet for this release) skips the check.
-    if (!anchor.hashChainstateSerialized.IsNull()) {
+    // set and compare it to the value compiled into this binary for the matched
+    // anchor. A malicious or compromised serving peer cannot substitute a forged
+    // chainstate, because it cannot reproduce a UTXO set that hashes to one of
+    // the compiled commitments. A null commitment (no value compiled in yet for
+    // this anchor) skips the check.
+    if (!anchor->hashChainstateSerialized.IsNull()) {
         CCoinsStats stats;
         if (!pcoinsTip->GetStats(stats)) {
             error = "bootstrap snapshot verification failed: could not compute imported chainstate hash";
             return false;
         }
-        if (stats.hashSerialized != anchor.hashChainstateSerialized) {
+        if (stats.hashSerialized != anchor->hashChainstateSerialized) {
             error = strprintf(
                 "bootstrap snapshot verification failed: imported chainstate hash is %s, expected %s",
                 stats.hashSerialized.ToString(),
-                anchor.hashChainstateSerialized.ToString());
+                anchor->hashChainstateSerialized.ToString());
             return false;
         }
         LogPrintf("Bootstrap snapshot chainstate commitment verified: %s\n", stats.hashSerialized.ToString());
@@ -2021,8 +2017,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             return InitError(bootstrap_anchor_error);
         }
         LogPrintf("Bootstrap snapshot verified at height %d (%s)\n",
-            Params().FastSyncAnchor().nHeight,
-            Params().FastSyncAnchor().hashBlock.ToString());
+            chainActive.Height(),
+            chainActive.Tip() ? chainActive.Tip()->GetBlockHash().ToString() : std::string("unknown"));
     }
 
     // Auto-serve: once this node has a snapshot at the current anchor (just
@@ -2054,6 +2050,19 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 mapArgs["-bootstrapsourcedir"] = BootstrapAutoServeSourceDir(GetDataDir()).string();
                 mapArgs["-bootstrapserve"] = "1";
             }
+        }
+    }
+
+    // Drift check: by this point -bootstrapsourcedir has its final value (after
+    // any SetupAutoBootstrapServe rewrite) and the served files exist on disk.
+    // Warn loudly if this node is serving a prepared snapshot whose chainstate
+    // tip matches no compiled anchor (operator drift) so peers are not handed a
+    // snapshot they will reject on verification. The check is cheap and opens the
+    // served chainstate read-only.
+    {
+        std::string bootstrapServeWarning;
+        if (!BootstrapServeSnapshotMatchesCompiledAnchor(bootstrapServeWarning)) {
+            InitWarning(_("Bootstrap serve: ") + bootstrapServeWarning);
         }
     }
 

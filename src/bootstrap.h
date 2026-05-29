@@ -88,6 +88,14 @@ bool FreezeLiveChainstateForServe(const boost::filesystem::path& data_dir, int m
 //! init can point -bootstrapsourcedir at it before the first self-snapshot freeze.
 boost::filesystem::path BootstrapAutoServeSourceDir(const boost::filesystem::path& data_dir);
 
+//! Drift guard: when serving a prepared anchor snapshot (-bootstrapserve with a
+//! -bootstrapsourcedir that is NOT a v2 self-snapshot), returns false and sets
+//! `warning` if the served chainstate tip matches no compiled fast-sync anchor —
+//! the condition where anchor-mode clients would download the snapshot and only
+//! then reject it. Returns true (no warning) when serving is off, nothing is
+//! retained yet, the source is a v2 self-snapshot, or the tip matches an anchor.
+bool BootstrapServeSnapshotMatchesCompiledAnchor(std::string& warning);
+
 // --- Zcash parameter (.params) distribution over the bootstrap protocol ---
 //! Compiled SHA-256 spec for one Zcash zk-SNARK parameter file. This is the
 //! single source of truth used both by the bootstrap-snapshot protocol (which

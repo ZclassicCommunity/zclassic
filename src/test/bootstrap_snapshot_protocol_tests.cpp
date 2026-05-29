@@ -875,6 +875,68 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_rejects_bad_metadata)
     BOOST_CHECK(error.find("duplicate") != std::string::npos);
 }
 
+BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_matches_compiled_anchor)
+{
+    // The validator matches a manifest against the compiled fast-sync anchor SET
+    // (FindFastSyncAnchor) and accepts ANY compiled anchor, not just the primary.
+    // These run under MAIN params, which compile in one anchor, so they exercise
+    // the lookup + per-anchor field checks against it. (Accepting a genuinely
+    // older second anchor is the same lookup over a longer vector — covered by the
+    // FindFastSyncAnchor unit test below and the two-node regtest E2E.)
+    std::string error;
+    const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
+
+    // A v1 manifest equal to a compiled anchor validates.
+    CBootstrapSnapshotManifest manifest = ValidBootstrapManifest();
+    BOOST_CHECK(ValidateBootstrapSnapshotManifest(manifest, error));
+
+    // Right anchor height but a different block hash matches no compiled anchor.
+    manifest = ValidBootstrapManifest();
+    manifest.hashBlock = uint256S("00000000000000000000000000000000000000000000000000000000deadbeef");
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error));
+    BOOST_CHECK(error.find("anchor") != std::string::npos);
+
+    // Right (height, hash) but a tampered decorative SHA digest is rejected.
+    manifest = ValidBootstrapManifest();
+    manifest.hashAnchorSha256 = uint256S("0101010101010101010101010101010101010101010101010101010101010101");
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error));
+
+    // A v2 manifest in anchor mode is accepted only when it equals a compiled
+    // anchor AND commits to that anchor's compiled UTXO commitment.
+    if (!anchor.hashChainstateSerialized.IsNull()) {
+        manifest = ValidBootstrapManifest();
+        manifest.nVersion = 2;
+        manifest.hashChainstateSerialized = anchor.hashChainstateSerialized;
+        BOOST_CHECK(ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/false));
+
+        // Same anchor identity but the wrong commitment is rejected in anchor mode.
+        manifest.hashChainstateSerialized = uint256S("0202020202020202020202020202020202020202020202020202020202020202");
+        BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/false));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(bootstrap_find_fast_sync_anchor)
+{
+    // The compiled anchor set is non-empty under MAIN params and contains the
+    // primary; the lookup matches on (height, block hash) and rejects anything
+    // else — the property ValidateBootstrapSnapshotManifest relies on to accept
+    // any compiled anchor across an anchor bump.
+    const CChainParams& params = Params();
+    const CFastSyncAnchorData& primary = params.FastSyncAnchor();
+    BOOST_REQUIRE(!params.FastSyncAnchors().empty());
+    BOOST_CHECK_EQUAL(params.FastSyncAnchors().front().nHeight, primary.nHeight);
+
+    const CFastSyncAnchorData* found = params.FindFastSyncAnchor(primary.nHeight, primary.hashBlock);
+    BOOST_REQUIRE(found != NULL);
+    BOOST_CHECK(found->hashBlock == primary.hashBlock);
+    BOOST_CHECK(found->hashChainstateSerialized == primary.hashChainstateSerialized);
+
+    // Wrong height or wrong hash → no match.
+    BOOST_CHECK(params.FindFastSyncAnchor(primary.nHeight + 1, primary.hashBlock) == NULL);
+    BOOST_CHECK(params.FindFastSyncAnchor(primary.nHeight,
+        uint256S("00000000000000000000000000000000000000000000000000000000deadbeef")) == NULL);
+}
+
 BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_rejects_oversize)
 {
     std::string error;

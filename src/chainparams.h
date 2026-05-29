@@ -113,7 +113,18 @@ public:
     const std::string& Bech32HRP(Bech32Type type) const { return bech32HRPs[type]; }
     const std::vector<SeedSpec6>& FixedSeeds() const { return vFixedSeeds; }
     const CCheckpointData& Checkpoints() const { return checkpointData; }
+    //! The primary (newest) compiled fast-sync anchor. Used by the serve build
+    //! and log paths as "the anchor this release was cut for".
     const CFastSyncAnchorData& FastSyncAnchor() const { return fastSyncAnchorData; }
+    //! All compiled fast-sync anchors a client will accept, newest first. Ships
+    //! with just the primary; a release may add the previous anchor(s) so old and
+    //! new clients/servers interoperate across an anchor bump without lockstep.
+    //! Every entry is still a developer-reviewed commitment (zero forgery window).
+    const std::vector<CFastSyncAnchorData>& FastSyncAnchors() const { return vFastSyncAnchors; }
+    //! Return the compiled anchor whose (height, block hash) match, or NULL if the
+    //! given identity matches no compiled anchor. The version-specific extra fields
+    //! (decorative SHA digests / UTXO commitment) are checked by the caller.
+    const CFastSyncAnchorData* FindFastSyncAnchor(int nHeight, const uint256& hashBlock) const;
     /** Default peers (host:port) a fresh node fetches params and snapshot from */
     const std::vector<std::string>& BootstrapPeers() const { return vBootstrapPeers; }
     /** Return the founder's reward address and script for a given block height */
@@ -148,6 +159,7 @@ protected:
     bool fTestnetToBeDeprecatedFieldRPC = false;
     CCheckpointData checkpointData;
     CFastSyncAnchorData fastSyncAnchorData;
+    std::vector<CFastSyncAnchorData> vFastSyncAnchors;
     std::vector<std::string> vBootstrapPeers;
     std::vector<std::string> vFoundersRewardAddress;
 
