@@ -5574,6 +5574,126 @@ void static ProcessGetData(CNode* pfrom)
     }
 }
 
+// Shared serve-side handler for a peer's bootstrap chunk request (GETBSCHK /
+// GETBSPCHK). The snapshot and param variants are byte-for-byte identical apart
+// from the manifest-sent gate, the enqueue helper, and the reject/log strings,
+// which are passed in. strCommand already carries the lowercase command token
+// ("getbschk"/"getbspchk") used in the error()/reject messages.
+// Returns the value ProcessMessage should propagate (false on error(),
+// true on a handled reject or success).
+static bool ServeBootstrapChunkRequest(
+    CNode* pfrom, CDataStream& vRecv, const string& strCommand,
+    bool fManifestSent,
+    bool (*EnqueueFn)(CNode*, const CBootstrapSnapshotChunkRequest&, std::string&),
+    const char* strLogKind, const char* strManifestRequired,
+    const char* strBadLength, const char* strBadOffset, const char* strBadRequest)
+{
+    CBootstrapSnapshotChunkRequest request;
+    try {
+        vRecv >> request;
+    } catch (const std::ios_base::failure&) {
+        // Malformed payload must be scored here; otherwise the throw unwinds
+        // to the generic catch in ProcessMessages() which accrues no ban score.
+        Misbehaving(pfrom->GetId(), 20);
+        return error("%s has malformed payload from peer=%d", strCommand, pfrom->id);
+    }
+
+    if (!vRecv.empty()) {
+        // Fixed-shape struct: trailing bytes mean a malformed peer.
+        Misbehaving(pfrom->GetId(), 20);
+        return error("%s has trailing bytes from peer=%d", strCommand, pfrom->id);
+    }
+
+    if (!fManifestSent) {
+        // State violation: peer must request the manifest first.
+        Misbehaving(pfrom->GetId(), 20);
+        pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string(strManifestRequired));
+        return true;
+    }
+
+    // Validate clear protocol limits before handing to the enqueue helper.
+    // We do this here (not relying on Enqueue's bool return) so we can
+    // distinguish peer misbehaviour from local/transient failures
+    // (service-disabled, queue-full) which must NOT ban.
+    if (request.nLength == 0 || request.nLength > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
+        // Size overflow on a small struct is obviously hostile.
+        Misbehaving(pfrom->GetId(), request.nLength > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE ? 100 : 20);
+        pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string(strBadLength));
+        return true;
+    }
+    if (request.nOffset % BOOTSTRAP_SNAPSHOT_CHUNK_SIZE != 0) {
+        // Out-of-spec value: offset must be chunk-aligned.
+        Misbehaving(pfrom->GetId(), 20);
+        pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string(strBadOffset));
+        return true;
+    }
+
+    std::string err;
+    if (!EnqueueFn(pfrom, request, err)) {
+        // Service-disabled or queue-full: our problem / transient. No ban.
+        LogPrint("net", "rejected %s chunk request from peer=%d: %s\n", strLogKind, pfrom->id, err);
+        pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string(strBadRequest));
+        return true;
+    }
+
+    LogPrint("net", "queued %s chunk request file=%u offset=%llu bytes=%u peer=%d\n",
+        strLogKind,
+        request.nFileIndex,
+        (unsigned long long)request.nOffset,
+        request.nLength,
+        pfrom->id);
+    return true;
+}
+
+// Shared client-side handler for a received bootstrap chunk (BSCHK / BSPCHK).
+// The bootstrap client driver fetches over its own socket, so any chunk arriving
+// on a CNode connection is unsolicited; we only validate it and ban malformed
+// peers. strCommand carries the lowercase token used in error() messages.
+static bool RecvBootstrapChunk(
+    CNode* pfrom, CDataStream& vRecv, const string& strCommand,
+    const char* strLogKind, const char* strBadSize)
+{
+    CBootstrapSnapshotChunk chunk;
+    try {
+        vRecv >> chunk;
+    } catch (const std::ios_base::failure&) {
+        // Malformed payload must be scored here; otherwise the throw unwinds
+        // to the generic catch in ProcessMessages() which accrues no ban score.
+        Misbehaving(pfrom->GetId(), 20);
+        return error("%s has malformed payload from peer=%d", strCommand, pfrom->id);
+    }
+
+    // Unsolicited push: the bootstrap client uses its own socket, so any
+    // chunk on a CNode connection was never requested by us.
+    Misbehaving(pfrom->GetId(), 10);
+
+    if (!vRecv.empty()) {
+        Misbehaving(pfrom->GetId(), 20);
+        return error("%s has trailing bytes from peer=%d", strCommand, pfrom->id);
+    }
+
+    if (chunk.vData.empty()) {
+        // Out-of-spec value: a chunk with no data shouldn't exist on the wire.
+        Misbehaving(pfrom->GetId(), 20);
+        pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string(strBadSize));
+        return true;
+    }
+    if (chunk.vData.size() > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
+        // Size overflow on a bounded field is obviously hostile.
+        Misbehaving(pfrom->GetId(), 100);
+        pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string(strBadSize));
+        return true;
+    }
+
+    LogPrint("net", "received %s chunk file=%u offset=%llu bytes=%u peer=%d\n",
+        strLogKind,
+        chunk.nFileIndex,
+        (unsigned long long)chunk.nOffset,
+        (unsigned int)chunk.vData.size(),
+        pfrom->id);
+    return true;
+}
+
 // Not static so unit tests in src/test/bootstrap_snapshot_protocol_tests.cpp can
 // drive individual message handlers directly. Declare it `extern` from those tests.
 bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t nTimeReceived)
@@ -5814,100 +5934,20 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
 
     else if (strCommand == NetMsgType::GETBSCHK)
     {
-        CBootstrapSnapshotChunkRequest request;
-        try {
-            vRecv >> request;
-        } catch (const std::ios_base::failure&) {
-            // Malformed payload must be scored here; otherwise the throw unwinds
-            // to the generic catch in ProcessMessages() which accrues no ban score.
-            Misbehaving(pfrom->GetId(), 20);
-            return error("getbschk has malformed payload from peer=%d", pfrom->id);
-        }
-
-        if (!vRecv.empty()) {
-            // Fixed-shape struct: trailing bytes mean a malformed peer.
-            Misbehaving(pfrom->GetId(), 20);
-            return error("getbschk has trailing bytes from peer=%d", pfrom->id);
-        }
-
-        if (!pfrom->fBootstrapManifestSent) {
-            // State violation: peer must request the manifest first.
-            Misbehaving(pfrom->GetId(), 20);
-            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("bootstrap manifest required"));
-            return true;
-        }
-
-        // Validate clear protocol limits before handing to the enqueue helper.
-        // We do this here (not relying on Enqueue's bool return) so we can
-        // distinguish peer misbehaviour from local/transient failures
-        // (service-disabled, queue-full) which must NOT ban.
-        if (request.nLength == 0 || request.nLength > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
-            // Size overflow on a small struct is obviously hostile.
-            Misbehaving(pfrom->GetId(), request.nLength > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE ? 100 : 20);
-            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid bootstrap chunk length"));
-            return true;
-        }
-        if (request.nOffset % BOOTSTRAP_SNAPSHOT_CHUNK_SIZE != 0) {
-            // Out-of-spec value: offset must be chunk-aligned.
-            Misbehaving(pfrom->GetId(), 20);
-            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid bootstrap chunk offset"));
-            return true;
-        }
-
-        std::string err;
-        if (!EnqueueBootstrapSnapshotChunkRequest(pfrom, request, err)) {
-            // Service-disabled or queue-full: our problem / transient. No ban.
-            LogPrint("net", "rejected bootstrap snapshot chunk request from peer=%d: %s\n", pfrom->id, err);
-            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid bootstrap chunk request"));
-            return true;
-        }
-
-        LogPrint("net", "queued bootstrap snapshot chunk request file=%u offset=%llu bytes=%u peer=%d\n",
-            request.nFileIndex,
-            (unsigned long long)request.nOffset,
-            request.nLength,
-            pfrom->id);
+        return ServeBootstrapChunkRequest(
+            pfrom, vRecv, strCommand,
+            pfrom->fBootstrapManifestSent,
+            EnqueueBootstrapSnapshotChunkRequest,
+            "bootstrap snapshot", "bootstrap manifest required",
+            "invalid bootstrap chunk length", "invalid bootstrap chunk offset",
+            "invalid bootstrap chunk request");
     }
 
     else if (strCommand == NetMsgType::BSCHK)
     {
-        CBootstrapSnapshotChunk chunk;
-        try {
-            vRecv >> chunk;
-        } catch (const std::ios_base::failure&) {
-            // Malformed payload must be scored here; otherwise the throw unwinds
-            // to the generic catch in ProcessMessages() which accrues no ban score.
-            Misbehaving(pfrom->GetId(), 20);
-            return error("bschk has malformed payload from peer=%d", pfrom->id);
-        }
-
-        // Unsolicited push: the bootstrap client uses its own socket, so any
-        // BSCHK on a CNode connection was never requested by us.
-        Misbehaving(pfrom->GetId(), 10);
-
-        if (!vRecv.empty()) {
-            Misbehaving(pfrom->GetId(), 20);
-            return error("bschk has trailing bytes from peer=%d", pfrom->id);
-        }
-
-        if (chunk.vData.empty()) {
-            // Out-of-spec value: a chunk with no data shouldn't exist on the wire.
-            Misbehaving(pfrom->GetId(), 20);
-            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid bootstrap snapshot chunk size"));
-            return true;
-        }
-        if (chunk.vData.size() > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
-            // Size overflow on a bounded field is obviously hostile.
-            Misbehaving(pfrom->GetId(), 100);
-            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid bootstrap snapshot chunk size"));
-            return true;
-        }
-
-        LogPrint("net", "received bootstrap snapshot chunk file=%u offset=%llu bytes=%u peer=%d\n",
-            chunk.nFileIndex,
-            (unsigned long long)chunk.nOffset,
-            (unsigned int)chunk.vData.size(),
-            pfrom->id);
+        return RecvBootstrapChunk(
+            pfrom, vRecv, strCommand,
+            "bootstrap snapshot", "invalid bootstrap snapshot chunk size");
     }
 
     else if (strCommand == NetMsgType::GETBSPMAN)
@@ -5956,91 +5996,20 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
 
     else if (strCommand == NetMsgType::GETBSPCHK)
     {
-        CBootstrapSnapshotChunkRequest request;
-        try {
-            vRecv >> request;
-        } catch (const std::ios_base::failure&) {
-            // Malformed payload must be scored here; otherwise the throw unwinds
-            // to the generic catch in ProcessMessages() which accrues no ban score.
-            Misbehaving(pfrom->GetId(), 20);
-            return error("getbspchk has malformed payload from peer=%d", pfrom->id);
-        }
-
-        if (!vRecv.empty()) {
-            // Fixed-shape struct: trailing bytes mean a malformed peer.
-            Misbehaving(pfrom->GetId(), 20);
-            return error("getbspchk has trailing bytes from peer=%d", pfrom->id);
-        }
-
-        if (!pfrom->fBootstrapParamManifestSent) {
-            // State violation: peer must request the param manifest first.
-            Misbehaving(pfrom->GetId(), 20);
-            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("zcash param manifest required"));
-            return true;
-        }
-
-        // Validate clear protocol limits before handing to the enqueue helper.
-        // We distinguish peer misbehaviour from local/transient failures
-        // (service-disabled, queue-full) which must NOT ban.
-        if (request.nLength == 0 || request.nLength > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
-            Misbehaving(pfrom->GetId(), request.nLength > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE ? 100 : 20);
-            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid zcash param chunk length"));
-            return true;
-        }
-        if (request.nOffset % BOOTSTRAP_SNAPSHOT_CHUNK_SIZE != 0) {
-            Misbehaving(pfrom->GetId(), 20);
-            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid zcash param chunk offset"));
-            return true;
-        }
-
-        std::string err;
-        if (!EnqueueBootstrapParamChunkRequest(pfrom, request, err)) {
-            // Service-disabled or queue-full: our problem / transient. No ban.
-            LogPrint("net", "rejected zcash param chunk request from peer=%d: %s\n", pfrom->id, err);
-            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid zcash param chunk request"));
-            return true;
-        }
-
-        LogPrint("net", "queued zcash param chunk request file=%u offset=%llu bytes=%u peer=%d\n",
-            request.nFileIndex,
-            (unsigned long long)request.nOffset,
-            request.nLength,
-            pfrom->id);
+        return ServeBootstrapChunkRequest(
+            pfrom, vRecv, strCommand,
+            pfrom->fBootstrapParamManifestSent,
+            EnqueueBootstrapParamChunkRequest,
+            "zcash param", "zcash param manifest required",
+            "invalid zcash param chunk length", "invalid zcash param chunk offset",
+            "invalid zcash param chunk request");
     }
 
     else if (strCommand == NetMsgType::BSPCHK)
     {
-        CBootstrapSnapshotChunk chunk;
-        try {
-            vRecv >> chunk;
-        } catch (const std::ios_base::failure&) {
-            // Malformed payload must be scored here; otherwise the throw unwinds
-            // to the generic catch in ProcessMessages() which accrues no ban score.
-            Misbehaving(pfrom->GetId(), 20);
-            return error("bspchk has malformed payload from peer=%d", pfrom->id);
-        }
-
-        // Unsolicited push on a CNode socket.
-        Misbehaving(pfrom->GetId(), 10);
-
-        if (!vRecv.empty()) {
-            Misbehaving(pfrom->GetId(), 20);
-            return error("bspchk has trailing bytes from peer=%d", pfrom->id);
-        }
-
-        if (chunk.vData.empty()) {
-            Misbehaving(pfrom->GetId(), 20);
-            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid zcash param chunk size"));
-            return true;
-        }
-        if (chunk.vData.size() > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
-            // Size overflow on a bounded field is obviously hostile.
-            Misbehaving(pfrom->GetId(), 100);
-            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid zcash param chunk size"));
-            return true;
-        }
-        LogPrint("net", "received zcash param chunk file=%u offset=%llu bytes=%u peer=%d\n",
-            chunk.nFileIndex, (unsigned long long)chunk.nOffset, (unsigned int)chunk.vData.size(), pfrom->id);
+        return RecvBootstrapChunk(
+            pfrom, vRecv, strCommand,
+            "zcash param", "invalid zcash param chunk size");
     }
 
 
