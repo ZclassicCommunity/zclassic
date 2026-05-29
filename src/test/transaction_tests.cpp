@@ -493,7 +493,10 @@ void test_simple_joinsplit_invalidity(uint32_t consensusBranchId, CMutableTransa
         jsdesc->nullifiers[1] = GetRandHash();
 
         BOOST_CHECK(CheckTransactionWithoutProofVerification(newTx, state));
-        BOOST_CHECK(!ContextualCheckTransaction(newTx, state, 0, 100));
+        // Force non-IBD: ContextualCheckTransaction short-circuits to true during
+        // initial block download (always the case in a unit-test process), which
+        // would skip the joinsplit-signature verification this test exercises.
+        BOOST_CHECK(!ContextualCheckTransaction(newTx, state, 0, 100, [](){ return false; }));
         BOOST_CHECK(state.GetRejectReason() == "bad-txns-invalid-joinsplit-signature");
 
         // Empty output script.
@@ -507,7 +510,7 @@ void test_simple_joinsplit_invalidity(uint32_t consensusBranchId, CMutableTransa
                                     ) == 0);
 
         BOOST_CHECK(CheckTransactionWithoutProofVerification(newTx, state));
-        BOOST_CHECK(ContextualCheckTransaction(newTx, state, 0, 100));
+        BOOST_CHECK(ContextualCheckTransaction(newTx, state, 0, 100, [](){ return false; }));
     }
     {
         // Ensure that values within the joinsplit are well-formed.
@@ -778,12 +781,15 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
     t.vout[0].scriptPubKey = CScript() << OP_1;
     BOOST_CHECK(!IsStandardTx(t, reason));
 
-    // 80-byte TX_NULL_DATA (standard)
-    t.vout[0].scriptPubKey = CScript() << OP_RETURN << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef3804678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38");
+    // ZClassic raises the datacarrier limit to MAX_OP_RETURN_RELAY = 223 bytes of
+    // scriptPubKey (script/standard.h), so the upstream 80/81-byte boundary is now
+    // well under the limit. Test the real ZClassic boundary instead.
+    // 220-byte data -> 223-byte script (OP_RETURN + OP_PUSHDATA1 len + 220) == limit: standard.
+    t.vout[0].scriptPubKey = CScript() << OP_RETURN << std::vector<unsigned char>(220, 0);
     BOOST_CHECK(IsStandardTx(t, reason));
 
-    // 81-byte TX_NULL_DATA (non-standard)
-    t.vout[0].scriptPubKey = CScript() << OP_RETURN << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef3804678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef3800");
+    // 221-byte data -> 224-byte script: exceeds 223, non-standard.
+    t.vout[0].scriptPubKey = CScript() << OP_RETURN << std::vector<unsigned char>(221, 0);
     BOOST_CHECK(!IsStandardTx(t, reason));
 
     // TX_NULL_DATA w/o PUSHDATA
