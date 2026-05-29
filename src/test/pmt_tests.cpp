@@ -34,9 +34,14 @@ BOOST_FIXTURE_TEST_SUITE(pmt_tests, BasicTestingSetup)
 BOOST_AUTO_TEST_CASE(pmt_test1)
 {
     seed_insecure_rand(false);
-    static const unsigned int nTxCounts[] = {1, 4, 7, 17, 56, 100, 127, 256, 312, 513, 1000, 4095};
+    // Largest count is under CPartialMerkleTree's SPV cap (MAX_BLOCK_SIZE/60 =
+    // 200000/60 = 3333; ExtractMatches rejects trees above it -- the upstream 4095
+    // assumed Bitcoin's larger block). 2048 is a power of two, so the all-matched
+    // worst case exactly meets the serialized-size guarantee on line 85 (irregular
+    // sizes like 3000 exceed that tight bound by one flag byte).
+    static const unsigned int nTxCounts[] = {1, 4, 7, 17, 56, 100, 127, 256, 312, 513, 1000, 2048};
 
-    for (int n = 0; n < 12; n++) {
+    for (int n = 0; n < (int)(sizeof(nTxCounts)/sizeof(nTxCounts[0])); n++) {
         unsigned int nTx = nTxCounts[n];
 
         // build a block with some dummy transactions
