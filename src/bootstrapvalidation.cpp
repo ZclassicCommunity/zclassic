@@ -16,6 +16,8 @@
 #include "txdb.h"
 #include "util.h"
 
+#include <atomic>
+
 #include <boost/bind.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/thread.hpp>
@@ -50,6 +52,26 @@ static const std::string BOOTSTRAPVAL_DBKEY = "bootstrapvalidation";
 
 static CCriticalSection cs_bsval;
 static BootstrapValidationStatus g_status;        // guarded by cs_bsval
+
+// Lock-free mirror of "are we holding finalization?" so the consensus path
+// (FindBlockToFinalize, under cs_main) can read it without taking cs_bsval and
+// risking a lock-order inversion. Kept in sync with g_status.state under cs_bsval.
+static std::atomic<bool> g_finalizationHold(false);
+
+// Dedicated handle for the background validation thread (NOT in the init
+// thread_group) so Shutdown() can interrupt+join exactly this thread before the
+// chain DBs are freed, on both the normal and the init-failure path.
+static boost::thread* g_bsvalThread = NULL;
+
+// Recompute the lock-free finalization-hold flag from the current latch state.
+// Hold while an imported snapshot is unvalidated (PROVISIONAL / PROVISIONAL_PRUNED).
+static void RefreshFinalizationHoldLocked()
+{
+    AssertLockHeld(cs_bsval);
+    g_finalizationHold.store(
+        g_status.state == BVS_PROVISIONAL || g_status.state == BVS_PROVISIONAL_PRUNED,
+        std::memory_order_relaxed);
+}
 
 static const int64_t BOOTSTRAPVAL_BATCH_MS = 80;          // cs_main per-batch budget
 static const size_t BOOTSTRAPVAL_FLUSH_CAP = 300 * (1 << 20); // in-mem coin cache cap
@@ -86,6 +108,7 @@ static void SetTerminalState(int state)
 {
     LOCK(cs_bsval);
     g_status.state = state;
+    RefreshFinalizationHoldLocked();
     PersistRecordLocked(state, g_status.validatedHeight);
 }
 
@@ -95,6 +118,7 @@ static void SetMemoryState(int state)
 {
     LOCK(cs_bsval);
     g_status.state = state;
+    RefreshFinalizationHoldLocked();
 }
 
 void LoadBootstrapValidationState()
@@ -110,6 +134,7 @@ void LoadBootstrapValidationState()
     } else {
         g_status = BootstrapValidationStatus();
     }
+    RefreshFinalizationHoldLocked();
 }
 
 void BeginBootstrapValidation(int height, const uint256& hashBlock, const uint256& sImported)
@@ -120,6 +145,7 @@ void BeginBootstrapValidation(int height, const uint256& hashBlock, const uint25
     g_status.hashBlock = hashBlock;
     g_status.commitment = sImported;
     g_status.validatedHeight = 0;
+    RefreshFinalizationHoldLocked();
     PersistRecordLocked(BVS_PROVISIONAL, 0);
     LogPrintf("Trustless bootstrap: snapshot at height %d marked provisional; background UTXO validation pending\n", height);
 }
@@ -128,6 +154,20 @@ BootstrapValidationStatus GetBootstrapValidationStatus()
 {
     LOCK(cs_bsval);
     return g_status;
+}
+
+bool BootstrapValidationHoldsFinalization()
+{
+    return g_finalizationHold.load(std::memory_order_relaxed);
+}
+
+// Test-only seam (deliberately NOT in the public header): drive a terminal latch
+// so unit tests can verify the finalization-hold flag releases on VALIDATED/FAILED
+// without standing up a full chain + background thread. Linked via an extern decl
+// in the test, matching the other test accessors in this module.
+void BootstrapValidationSetTerminalStateForTest(int state)
+{
+    SetTerminalState(state);
 }
 
 // Discard the (forged or unverifiable-as-correct) imported chainstate and queue a
@@ -368,11 +408,35 @@ void MaybeStartBootstrapValidation(boost::thread_group& threadGroup, CScheduler&
         return;
     }
     // Don't start a background re-derivation if we're already shutting down: the
-    // failure path interrupts without joining before the chain databases are
-    // freed, so a thread spawned here could outlive them (use-after-free).
+    // failure path interrupts without joining the init thread_group before the
+    // chain databases are freed, so a thread spawned here could outlive them
+    // (use-after-free).
     if (ShutdownRequested()) {
         return;
     }
-    threadGroup.create_thread(boost::bind(&ThreadBootstrapUtxoValidation));
+    // Own the thread via a dedicated handle (not the init thread_group) so
+    // Shutdown() can interrupt+join EXACTLY this thread before the chain DBs are
+    // freed — including on the init-failure path, which skips thread_group join.
+    (void)threadGroup;
+    if (g_bsvalThread == NULL) {
+        g_bsvalThread = new boost::thread(boost::bind(&ThreadBootstrapUtxoValidation));
+    }
     scheduler.scheduleEvery(boost::bind(&BootstrapValidationFailedPoll), 5);
+}
+
+void InterruptBootstrapValidation()
+{
+    if (g_bsvalThread == NULL) {
+        return;
+    }
+    // The worker polls ShutdownRequested() per batch and hits boost interruption
+    // points between connects, so interrupt()+join() returns promptly (within one
+    // ~80ms batch). Joining here, before Shutdown() frees the chain DBs, closes
+    // the use-after-free window the init-failure path would otherwise leave open.
+    try {
+        g_bsvalThread->interrupt();
+        g_bsvalThread->join();
+    } catch (...) {}
+    delete g_bsvalThread;
+    g_bsvalThread = NULL;
 }

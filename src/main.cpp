@@ -11,6 +11,7 @@
 #include "alert.h"
 #include "arith_uint256.h"
 #include "bootstrap.h"
+#include "bootstrapvalidation.h"
 #include "chainparams.h"
 #include "checkpoints.h"
 #include "checkqueue.h"
@@ -3035,6 +3036,20 @@ static bool FinalizeBlockInternal(CValidationState &state, const CBlockIndex *pi
 
 static const CBlockIndex *FindBlockToFinalize(CBlockIndex *pindexNew) {
     AssertLockHeld(cs_main);
+
+    // Trustless bootstrap (option B): while an imported snapshot is still being
+    // re-derived from genesis in the background (PROVISIONAL), do NOT auto-finalize.
+    // The reorg-depth rule finalizes a block ~maxreorgdepth deep and then rejects
+    // any reorg before it; finalizing on the imported ancestry before validation
+    // completes would permanently pin the node to that — possibly forged or
+    // wrong-fork — chain. Pausing here keeps the node free to switch chains until
+    // its imported state is proven, after which finalization resumes normally.
+    // No effect on a normal node: BootstrapValidationHoldsFinalization() is always
+    // false unless this node accepted a trustless snapshot that is not yet
+    // validated, so the finalization behavior is byte-identical to upstream there.
+    if (BootstrapValidationHoldsFinalization()) {
+        return nullptr;
+    }
 
     const int32_t maxreorgdepth = GetArg("-maxreorgdepth", DEFAULT_MAX_REORG_DEPTH);
     int64_t finalizationdelay = GetArg("-finalizationdelay", DEFAULT_PRE_BUTTERCUP_MIN_FINALIZATION_DELAY);

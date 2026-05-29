@@ -216,6 +216,12 @@ void Shutdown()
     StopTorControl();
     UnregisterNodeSignals(GetNodeSignals());
 
+    // Stop the trustless-bootstrap background validator BEFORE the chain DBs are
+    // freed below. It is not in the init thread_group, so the init-failure path
+    // (which skips thread_group join) would otherwise let it race into freed
+    // pblocktree/pcoinsTip. No-op when no trustless snapshot is being validated.
+    InterruptBootstrapValidation();
+
     if (fFeeEstimatesInitialized)
     {
         boost::filesystem::path est_path = GetDataDir() / FEE_ESTIMATES_FILENAME;

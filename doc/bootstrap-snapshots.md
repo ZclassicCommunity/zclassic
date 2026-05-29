@@ -324,17 +324,21 @@ assumeutxo trust window without a compiled hash — the background validation *i
 the trust. The gossip/normal-P2P path never triggers trustless acceptance; only an
 explicit `-bootstrappeer`/discovery fast-sync under `-bootstrapmode=trustless` does.
 
-Finality caveat (a second reason this mode is EXPERIMENTAL): unlike an anchor,
-a trustless self-snapshot is taken at the serving peer's **own recent tip**, not
-at a checkpoint buried below the reorg-depth window. ZClassic's finalization rule
-(`-maxreorgdepth`, default 10 blocks) can therefore **finalize the imported fork
-point** within ~10 blocks + the finalization delay — i.e. *before* the background
-genesis→tip re-derivation completes. If that snapshot was on the wrong side of a
-fork, the node would be permanently pinned to it and would reject the honest
-chain, since reorgs past a finalized block are refused. Anchor mode is immune
-(the anchor is a checkpoint, far below the finality window). Before trustless mode
-could ship enabled, finalization of bootstrap-imported heights must be deferred
-until background validation latches `validated`.
+Finality interaction (and its mitigation): unlike an anchor, a trustless
+self-snapshot is taken at the serving peer's **own recent tip**, not at a
+checkpoint buried below the reorg-depth window. Left unaddressed, ZClassic's
+finalization rule (`-maxreorgdepth`, default 10 blocks) would **finalize the
+imported fork point** within ~10 blocks + the finalization delay — i.e. *before*
+the background genesis→tip re-derivation completes — and a snapshot on the wrong
+side of a fork would permanently pin the node, since reorgs past a finalized block
+are refused. This is now mitigated: while a node holds an unvalidated provisional
+snapshot, **auto-finalization is paused** (`FindBlockToFinalize` consults
+`BootstrapValidationHoldsFinalization()`), so the node stays free to switch to a
+competing chain until its imported state is proven, after which finalization
+resumes normally. The pause is scoped strictly to a provisional trustless node;
+a normal/anchor node never holds, so its finalization behavior is byte-identical
+to upstream. Anchor mode never needed this — its import point is a checkpoint, far
+below the finality window.
 
 To serve trustless self-snapshots, run a synced node with `-bootstrapserve=auto`;
 it freezes a fresh self-snapshot of its own tip every

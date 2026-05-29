@@ -56,4 +56,19 @@ void MaybeStartBootstrapValidation(boost::thread_group& threadGroup, CScheduler&
 //! Cheap copy of the current status for RPC/logging.
 BootstrapValidationStatus GetBootstrapValidationStatus();
 
+//! True while a trustless-imported snapshot is still PROVISIONAL (not yet
+//! re-derived/validated, including the pruned-and-stuck case). Lock-free, safe to
+//! call from the consensus path under cs_main. Used to PAUSE auto-finalization so
+//! the reorg-depth rule cannot permanently pin the node to an as-yet-unvalidated
+//! (possibly forged/wrong-fork) imported chain before background validation
+//! completes. Always false on a normal node (no trustless snapshot in play), so
+//! the finalization path is byte-identical to upstream there.
+bool BootstrapValidationHoldsFinalization();
+
+//! Interrupt and JOIN the background validation thread (if running). Must be
+//! called during Shutdown() BEFORE the chain databases (pblocktree/pcoinsTip) are
+//! freed, on both the normal and the init-failure path, so the thread cannot race
+//! into freed state (use-after-free). No-op if the thread was never started.
+void InterruptBootstrapValidation();
+
 #endif // BITCOIN_BOOTSTRAPVALIDATION_H

@@ -192,16 +192,20 @@ background validation itself, so there is nothing to maintain per release.
   trustless self-snapshot is taken at the serving peer's *recent tip*, not at a
   checkpoint buried below the reorg-depth window. ZClassic's finalization rule
   (`-maxreorgdepth`, default 10) finalizes blocks ~10 deep (plus a short delay)
-  and rejects reorgs past a finalized block. A provisionally-accepted snapshot
-  tip can therefore be **finalized before background validation completes**, so a
-  node that imported a snapshot on the wrong side of a fork would be permanently
-  pinned to it and reject the honest chain. Anchor mode is immune because its
-  import point is a compiled checkpoint far below the finality window. **Hard
-  prerequisite before trustless mode could ship enabled:** defer finalization of
-  bootstrap-imported heights until the `validated` latch (e.g. treat provisional
-  heights as non-finalizable, or refuse to import a snapshot whose tip is within
-  the finality window of the network tip). Until then this is an additional
-  reason the mode stays EXPERIMENTAL/off.
+  and rejects reorgs past a finalized block. Left unaddressed, a provisionally-
+  accepted snapshot tip would be **finalized before background validation
+  completes**, permanently pinning a node that imported a wrong-fork snapshot.
+  Anchor mode is immune (its import point is a compiled checkpoint far below the
+  finality window). **Mitigation (implemented):** auto-finalization is paused
+  while a node holds an unvalidated provisional snapshot —
+  `FindBlockToFinalize()` returns early when `BootstrapValidationHoldsFinalization()`
+  is true (set under `cs_bsval` on every state transition; lock-free read on the
+  consensus path). The node stays free to switch chains until its imported state
+  is re-derived and latched `validated`, then finalization resumes. The hold is
+  scoped to a provisional trustless node; a normal/anchor node (state `DISABLED`)
+  never holds, so its finalization path is byte-identical to upstream. The
+  validator thread is also joined in `Shutdown()` before the chain DBs are freed
+  (closing the init-failure-path UAF window).
 - **Eclipse.** Snapshot peers are still just peers; normal IBD/header validation
   from other connections applies. Do not pin a snapshot peer as a permanent
   `addnode` after bootstrap (close the existing TODO).

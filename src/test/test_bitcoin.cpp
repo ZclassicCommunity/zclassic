@@ -130,8 +130,11 @@ TestingSetup::~TestingSetup()
 #endif
         UnloadBlockIndex();
         delete pcoinsTip;
+        pcoinsTip = NULL;
         delete pcoinsdbview;
+        pcoinsdbview = NULL;
         delete pblocktree;
+        pblocktree = NULL;
 #ifdef ENABLE_WALLET
         bitdb.Flush(true);
         bitdb.Reset();

@@ -1491,14 +1491,51 @@ bool FreezeLiveChainstateForServe(const boost::filesystem::path& data_dir, int m
         return false;
     }
 
-    FILE* mf = fopen(BootstrapServeMetaPath(serveSrc).string().c_str(), "w");
-    if (!mf) {
+    // Write the v2 meta atomically: emit a temp sidecar, then rename it into
+    // place. The serve dir was just swapped to a fresh self-snapshot at this
+    // node's tip, which is NOT the compiled v1 anchor height; if the meta failed
+    // to land, the next manifest build would fall through to the v1 anchor path
+    // and advertise the compiled anchor while serving files from a non-anchor
+    // height (clients download everything, then fail per-file SHA-256). So on any
+    // meta-write failure we tear down the swapped serve dir entirely and drop the
+    // marker, leaving the node serving nothing rather than mis-serving.
+    const boost::filesystem::path metaPath = BootstrapServeMetaPath(serveSrc);
+    const boost::filesystem::path metaTmp = metaPath.parent_path() / (metaPath.filename().string() + ".new");
+    bool metaOk = false;
+    FILE* mf = fopen(metaTmp.string().c_str(), "w");
+    if (mf) {
+        if (fprintf(mf, "%d %s %s\n", meta.nHeight, meta.hashBlock.ToString().c_str(),
+                meta.hashChainstateSerialized.ToString().c_str()) > 0) {
+            metaOk = (fflush(mf) == 0);
+        }
+        if (fclose(mf) != 0) {
+            metaOk = false;
+        }
+    }
+    if (metaOk) {
+        try {
+            boost::filesystem::rename(metaTmp, metaPath);
+        } catch (const boost::filesystem::filesystem_error&) {
+            metaOk = false;
+        }
+    }
+    if (!metaOk) {
+        // Could not establish a matching identity for the swapped snapshot. Remove
+        // it (and any stale temp meta and marker) so the node serves nothing, and
+        // invalidate the cached manifest so it is not served from the dropped dir.
+        boost::filesystem::remove(metaTmp);
+        boost::filesystem::remove_all(serveSrc);
+        boost::filesystem::remove(AutoServeMarkerPath(data_dir));
+        {
+            LOCK(cs_bootstrap_snapshot);
+            bootstrapSnapshotCacheSource.clear();
+            bootstrapSnapshotCacheFiles.clear();
+            bootstrapSnapshotCacheMtimes.clear();
+            bootstrapSnapshotCacheBytes = 0;
+        }
         error = "could not write serve meta file";
         return false;
     }
-    fprintf(mf, "%d %s %s\n", meta.nHeight, meta.hashBlock.ToString().c_str(),
-        meta.hashChainstateSerialized.ToString().c_str());
-    fclose(mf);
     boost::filesystem::remove(AutoServeMarkerPath(data_dir));
 
     // The serve dir changed; drop the cached manifest so it is rebuilt.

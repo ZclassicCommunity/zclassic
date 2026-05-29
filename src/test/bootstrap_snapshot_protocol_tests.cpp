@@ -4,6 +4,7 @@
 
 #include "protocol.h"
 #include "bootstrap.h"
+#include "bootstrapvalidation.h"
 #include "chainparams.h"
 #include "crypto/sha256.h"
 #include "main.h"
@@ -36,6 +37,11 @@ extern const size_t BootstrapServeMaxTrackedIpsForTest();
 // global-namespace definition. Caller keeps windowStartMs/bytesAtWindowStart
 // as locals; returns true to abort when a full window stayed below the floor.
 extern bool BootstrapDownloadTooSlow(int64_t&, uint64_t&, uint64_t, int64_t);
+
+// Test-only seam (defined in bootstrapvalidation.cpp, not the public header) to
+// drive a terminal latch so we can verify the finalization-hold flag releases on
+// VALIDATED/FAILED without a full chain + background thread.
+extern void BootstrapValidationSetTerminalStateForTest(int state);
 
 static CBootstrapSnapshotFile TestBootstrapSnapshotFile()
 {
@@ -1483,6 +1489,48 @@ BOOST_AUTO_TEST_CASE(bootstrap_peer_list_multi_and_single)
         mapMultiArgs.erase("-bootstrappeer");
     }
     RestoreArg("-bootstrappeer", hadArg, oldArg);
+}
+
+// The trustless-bootstrap finalization hold (option B consensus-safety mitigation):
+// a node holding an as-yet-unvalidated imported snapshot must PAUSE auto-finalization
+// so the reorg-depth rule cannot permanently pin it to an unproven (possibly forged
+// / wrong-fork) chain, then RESUME once the snapshot latches validated. A normal node
+// (no snapshot in play) must never hold, so the consensus path is unchanged there.
+// FindBlockToFinalize() reads BootstrapValidationHoldsFinalization() to do exactly this.
+BOOST_AUTO_TEST_CASE(bootstrap_validation_finalization_hold)
+{
+    // BasicTestingSetup has no pblocktree, so the durable write is a no-op; the
+    // in-memory latch and the lock-free hold flag (the part the consensus path
+    // reads) still transition. Start from a known DISABLED baseline.
+    LoadBootstrapValidationState();
+    BOOST_CHECK_EQUAL(GetBootstrapValidationStatus().state, BVS_DISABLED);
+    BOOST_CHECK(!BootstrapValidationHoldsFinalization()); // normal node: never holds
+
+    // Provisional accept of a trustless snapshot -> hold finalization.
+    BeginBootstrapValidation(123456, uint256S("0x1111"), uint256S("0x2222"));
+    BOOST_CHECK_EQUAL(GetBootstrapValidationStatus().state, BVS_PROVISIONAL);
+    BOOST_CHECK(BootstrapValidationHoldsFinalization());
+
+    // Latch VALIDATED -> finalization resumes.
+    BootstrapValidationSetTerminalStateForTest(BVS_VALIDATED);
+    BOOST_CHECK_EQUAL(GetBootstrapValidationStatus().state, BVS_VALIDATED);
+    BOOST_CHECK(!BootstrapValidationHoldsFinalization());
+
+    // A FAILED latch also releases the hold (the node is about to discard and
+    // reindex; staying paused would be pointless and would stall finalization).
+    BeginBootstrapValidation(123456, uint256S("0x1111"), uint256S("0x2222"));
+    BOOST_CHECK(BootstrapValidationHoldsFinalization());
+    BootstrapValidationSetTerminalStateForTest(BVS_FAILED);
+    BOOST_CHECK_EQUAL(GetBootstrapValidationStatus().state, BVS_FAILED);
+    BOOST_CHECK(!BootstrapValidationHoldsFinalization());
+
+    // Interrupting a validator thread that was never started is a safe no-op.
+    InterruptBootstrapValidation();
+
+    // Leave global state clean for any later test in this process image.
+    LoadBootstrapValidationState();
+    BOOST_CHECK_EQUAL(GetBootstrapValidationStatus().state, BVS_DISABLED);
+    BOOST_CHECK(!BootstrapValidationHoldsFinalization());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
