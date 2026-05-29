@@ -6,6 +6,7 @@
 
 #include "chain.h"
 #include "chainparams.h"
+#include "checkpoints.h"
 #include "coins.h"
 #include "consensus/validation.h"
 #include "init.h"
@@ -275,6 +276,24 @@ static void ThreadBootstrapUtxoValidation()
         int h = (progress <= 0) ? 0 : progress + 1;
         LogPrintf("Trustless bootstrap: background UTXO validation re-deriving genesis..%d (from height %d)\n", H, h);
 
+        // The chain up to the last compiled checkpoint is pinned by hash (the
+        // trustless accept gate requires checkpoint agreement), so the only
+        // range where a forger could splice a low-difficulty fork is ABOVE it.
+        // We re-enforce the difficulty retarget only for those blocks. Doing it
+        // at/below the checkpoint would be pointless (already pinned) and would
+        // also wrongly trip ContextualCheckBlockHeader's own checkpoint-fork
+        // guard (it DoS-rejects nHeight < lastCheckpoint), since the replay
+        // necessarily walks up from genesis. Resolve the boundary once; -1 (no
+        // checkpoint in the index) means "check every non-genesis block", which
+        // is safe because that guard then never fires.
+        int lastCheckpointHeight = -1;
+        {
+            LOCK(cs_main);
+            const CBlockIndex* pcp = Checkpoints::GetLastCheckpoint(Params().Checkpoints());
+            if (pcp != NULL)
+                lastCheckpointHeight = pcp->nHeight;
+        }
+
         while (h <= H) {
             boost::this_thread::interruption_point();
             if (ShutdownRequested()) {
@@ -307,6 +326,25 @@ static void ThreadBootstrapUtxoValidation()
                             break;
                         }
                         CValidationState cvstate;
+                        // ConnectBlock (fScratchView=true) only re-checks context-free
+                        // PoW against the block's CLAIMED nBits; it does NOT re-enforce
+                        // the difficulty retarget. Re-run the contextual header rules
+                        // (notably nBits == GetNextWorkRequired(pprev), main.cpp) for
+                        // every block ABOVE the last checkpoint so a low-difficulty
+                        // forged fork in that (unpinned) range cannot pass background
+                        // validation. pindex is on the active-chain ancestry, so pprev
+                        // and the averaging window are intact; genesis (pprev == NULL)
+                        // has no retarget and is skipped, and blocks at/below the
+                        // checkpoint are skipped (already hash-pinned; see above). A
+                        // failure here is a forgery/invalidity proof for a fully-present,
+                        // on-ancestry block: handle it exactly like a failed ConnectBlock
+                        // (-> FAILED -> auto-reindex).
+                        if (pindex->pprev != NULL &&
+                            pindex->nHeight > lastCheckpointHeight &&
+                            !ContextualCheckBlockHeader(block, cvstate, pindex->pprev)) {
+                            failed = true;
+                            break;
+                        }
                         // fScratchView=true: re-derive into our private view only,
                         // never the live txindex / block index / wallet signals.
                         if (!ConnectBlock(block, cvstate, pindex, view, false, /*fScratchView=*/true)) {
