@@ -64,6 +64,15 @@ std::vector<std::string> DiscoverBootstrapPeers();
 //! set, else the compiled per-network defaults (CChainParams::BootstrapPeers).
 std::vector<std::string> GetBootstrapPeerList();
 
+//! Auto-serve (-bootstrapserve=auto): activate serving from the immutable copy
+//! this node retained when it fast-synced (data_dir/bootstrap-serve-source).
+//! Returns true and points the serve machinery (-bootstrapsourcedir) at that
+//! copy when it exists and still matches the compiled anchor; returns false
+//! (with a reason) when there is nothing valid to serve — e.g. the node has not
+//! bootstrapped yet, or the retained copy is for a stale anchor (in which case
+//! it is removed). Lets every fast-synced node become a P2P bootstrap server.
+bool SetupAutoBootstrapServe(const boost::filesystem::path& data_dir, std::string& error);
+
 // --- Zcash parameter (.params) distribution over the bootstrap protocol ---
 //! Compiled SHA-256 spec for one Zcash zk-SNARK parameter file. This is the
 //! single source of truth used both by the bootstrap-snapshot protocol (which

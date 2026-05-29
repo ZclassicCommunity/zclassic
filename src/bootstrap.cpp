@@ -1200,6 +1200,110 @@ static bool BootstrapHandshake(SOCKET socket, const CService& peer_address, int 
     return true;
 }
 
+// Path of the immutable snapshot copy an auto-serve node retains and serves.
+// This dir must contain ONLY blocks/ and chainstate/ — the serve manifest
+// scanner (CollectBootstrapSnapshotFiles) rejects any other entry as unsafe —
+// so the anchor marker lives in a sibling file, not inside this directory.
+static boost::filesystem::path AutoServeSourceDir(const boost::filesystem::path& data_dir)
+{
+    return data_dir / "bootstrap-serve-source";
+}
+
+// Sibling marker recording which anchor the retained copy is for. Kept outside
+// the serve dir so it is never picked up by the manifest file scan.
+static boost::filesystem::path AutoServeMarkerPath(const boost::filesystem::path& data_dir)
+{
+    return data_dir / "bootstrap-serve-source.anchor";
+}
+
+// Identity string recorded alongside a retained auto-serve copy so a later run
+// only serves it while it still matches the binary's compiled anchor.
+static std::string AutoServeAnchorMarker()
+{
+    const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
+    return strprintf("%d %s", anchor.nHeight, anchor.hashBlock.ToString());
+}
+
+// Auto-serve (-bootstrapserve=auto): retain an immutable copy of the just-
+// downloaded snapshot so this node can in turn serve it to other peers. Copied
+// from the verified staging files (consistent, and not yet opened by LevelDB)
+// before they are moved into the live datadir. Best-effort: a failure here must
+// not block the node's own bootstrap.
+static bool RetainAutoServeSourceFromStaging(const boost::filesystem::path& staging, const boost::filesystem::path& data_dir, std::string& error)
+{
+    const boost::filesystem::path serveSrc = AutoServeSourceDir(data_dir);
+    LogPrintf("Auto-serve: retaining a serve copy of the bootstrap snapshot (one-time; uses extra disk)...\n");
+    boost::filesystem::remove_all(serveSrc);
+    boost::filesystem::create_directories(serveSrc);
+    if (!CopyBootstrapDirectory(staging / "blocks", serveSrc / "blocks", error) ||
+        !CopyBootstrapDirectory(staging / "chainstate", serveSrc / "chainstate", error)) {
+        boost::filesystem::remove_all(serveSrc);
+        return false;
+    }
+    if (!BootstrapSnapshotPathsExist(serveSrc)) {
+        boost::filesystem::remove_all(serveSrc);
+        error = "retained auto-serve copy is incomplete";
+        return false;
+    }
+    const std::string marker = AutoServeAnchorMarker();
+    FILE* mf = fopen(AutoServeMarkerPath(data_dir).string().c_str(), "w");
+    if (!mf) {
+        boost::filesystem::remove_all(serveSrc);
+        error = "could not write auto-serve anchor marker";
+        return false;
+    }
+    fprintf(mf, "%s\n", marker.c_str());
+    fclose(mf);
+    LogPrintf("Auto-serve: retained snapshot at anchor %s for serving\n", marker);
+    return true;
+}
+
+bool SetupAutoBootstrapServe(const boost::filesystem::path& data_dir, std::string& error)
+{
+    const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
+    if (anchor.nHeight < 0 || anchor.hashBlock.IsNull()) {
+        error = "no compiled fast-sync anchor to serve";
+        return false;
+    }
+    const boost::filesystem::path serveSrc = AutoServeSourceDir(data_dir);
+    if (!BootstrapSnapshotPathsExist(serveSrc)) {
+        // No serve dir: drop any orphaned marker so it can't confuse a later run.
+        boost::filesystem::remove(AutoServeMarkerPath(data_dir));
+        error = "no retained serve copy yet (node has not fast-synced a snapshot)";
+        return false;
+    }
+
+    std::string got;
+    FILE* mf = fopen(AutoServeMarkerPath(data_dir).string().c_str(), "r");
+    if (mf) {
+        char buf[256] = {0};
+        if (fgets(buf, sizeof(buf), mf)) got = buf;
+        fclose(mf);
+    }
+    while (!got.empty() && (got[got.size() - 1] == '\n' || got[got.size() - 1] == '\r' || got[got.size() - 1] == ' ')) {
+        got.resize(got.size() - 1);
+    }
+    if (got != AutoServeAnchorMarker()) {
+        // The retained copy is for a different (older) anchor than this binary:
+        // serving it would make clients download then reject. Drop it; this node
+        // can only produce a fresh one by fast-syncing at the new anchor.
+        LogPrintf("Auto-serve: retained serve copy is for a stale anchor (\"%s\"); removing it\n", got);
+        boost::filesystem::remove_all(serveSrc);
+        boost::filesystem::remove(AutoServeMarkerPath(data_dir));
+        error = "retained serve copy did not match the current anchor";
+        return false;
+    }
+
+    // Point the existing serve machinery at the retained copy. NOTE: these
+    // mapArgs writes are unsynchronized (mapArgs is a plain std::map). This is
+    // safe only because the caller runs during init, before StartNode() creates
+    // the message-handler threads that read these keys when serving — do not
+    // call this after the net layer is up.
+    mapArgs["-bootstrapsourcedir"] = serveSrc.string();
+    mapArgs["-bootstrapserve"] = "1";
+    return true;
+}
+
 bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& data_dir, std::string& error)
 {
     if (!IsBootstrapFreshChainDatadir(data_dir, error)) {
@@ -1272,6 +1376,27 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
         if (!IsBootstrapFreshChainDatadir(data_dir, error)) {
             boost::filesystem::remove_all(staging);
             return false;
+        }
+
+        // Auto-serve: retain an immutable serve copy from the verified staging
+        // files BEFORE they are moved into the datadir (so the copy is
+        // consistent and not yet held open by LevelDB). Best-effort — a failure
+        // must not block this node's own bootstrap.
+        if (GetArg("-bootstrapserve", "") == "auto") {
+            // Retaining a serve copy roughly doubles the on-disk chain size. Skip
+            // it (rather than fill the disk) when there isn't room; the node still
+            // bootstraps, it just won't serve.
+            boost::filesystem::space_info si = boost::filesystem::space(data_dir);
+            const uint64_t needed = manifest.nSnapshotBytes + (uint64_t)BOOTSTRAP_SNAPSHOT_DISK_SAFETY_MARGIN_BYTES;
+            if ((uint64_t)si.available < needed) {
+                LogPrintf("Auto-serve: not retaining a serve copy — need ~%llu bytes free, have %llu; this node will not serve\n",
+                    (unsigned long long)needed, (unsigned long long)si.available);
+            } else {
+                std::string retain_error;
+                if (!RetainAutoServeSourceFromStaging(staging, data_dir, retain_error)) {
+                    LogPrintf("Auto-serve: could not retain serve copy (continuing without serving): %s\n", retain_error);
+                }
+            }
         }
 
         if (!InstallStagedBootstrapChainData(staging, data_dir, error)) {
@@ -2301,11 +2426,16 @@ bool SendQueuedBootstrapSnapshotChunk(CNode* pto)
     while (servedBytes < BOOTSTRAP_SERVE_BURST_BYTES) {
         // Backpressure: if the peer's send queue has already grown past the
         // burst budget, stop and let the socket thread drain it before queueing
-        // more. Keeps per-peer buffering bounded on slow links. (We hold
-        // cs_vSend here via SendMessages, so the socket thread can't drain
-        // concurrently — nSendSize only grows within one burst, and drains
-        // between cycles once we release the lock.)
-        if (pto->nSendSize >= BOOTSTRAP_SERVE_BURST_BYTES) {
+        // more. Keeps per-peer buffering bounded on slow links. The socket
+        // thread mutates nSendSize under cs_vSend, so take it briefly for a
+        // consistent read (this is a heuristic gate; correctness of the actual
+        // sends relies only on PushMessage's own internal cs_vSend locking).
+        size_t sendQueueSize;
+        {
+            LOCK(pto->cs_vSend);
+            sendQueueSize = pto->nSendSize;
+        }
+        if (sendQueueSize >= BOOTSTRAP_SERVE_BURST_BYTES) {
             break;
         }
 

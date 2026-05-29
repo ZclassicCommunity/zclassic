@@ -371,7 +371,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-bootstrapdatadir=<dir>", _("Import blocks/ and chainstate/ from a prepared snapshot directory before opening databases"));
     strUsage += HelpMessageOpt("-bootstrapforce", _("When used with -bootstrapdatadir, move existing blocks/ and chainstate/ to a timestamped backup before import"));
     strUsage += HelpMessageOpt("-bootstrappeer=<host>", _("Download an initial bootstrap snapshot from a trusted NODE_BOOTSTRAP peer into a fresh datadir before opening databases (experimental)"));
-    strUsage += HelpMessageOpt("-bootstrapserve", _("Advertise bootstrap snapshot service to peers after validating -bootstrapsourcedir"));
+    strUsage += HelpMessageOpt("-bootstrapserve", _("Serve bootstrap snapshots to peers. Set -bootstrapserve=auto to retain and serve the snapshot this node fast-syncs (no -bootstrapsourcedir needed, uses extra disk); otherwise pass -bootstrapsourcedir=<dir> to serve a prepared snapshot."));
     strUsage += HelpMessageOpt("-bootstrapsourcedir=<dir>", _("Prepared snapshot directory containing blocks/ and chainstate/ to serve to bootstrap peers"));
     strUsage += HelpMessageOpt("-bootstrapservemaxbytesperday=<n>", strprintf(_("When serving bootstrap snapshots, bytes one IP may download per 24h before it is throttled (default: %d, 0 = unlimited)"), BOOTSTRAP_SERVE_DEFAULT_MAX_BYTES_PER_DAY));
     strUsage += HelpMessageOpt("-bootstrapservethrottlekbps=<n>", strprintf(_("Rate in KiB/s to serve a bootstrap IP that is over its daily cap (default: %d, 0 = stop serving it until the next day)"), BOOTSTRAP_SERVE_DEFAULT_THROTTLE_KBPS));
@@ -1663,9 +1663,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     }
 #endif
 
+    const bool fBootstrapServeAuto = (GetArg("-bootstrapserve", "") == "auto");
     if (GetBoolArg("-bootstrapserve", false)) {
+        // Manual serve: a fixed prepared source dir, validated up front.
         if (!mapArgs.count("-bootstrapsourcedir")) {
-            return InitError(_("-bootstrapserve requires -bootstrapsourcedir=<dir>"));
+            return InitError(_("-bootstrapserve requires -bootstrapsourcedir=<dir> (or use -bootstrapserve=auto)"));
         }
         const boost::filesystem::path bootstrap_source = boost::filesystem::system_complete(mapArgs["-bootstrapsourcedir"]);
         std::string bootstrap_error;
@@ -1682,6 +1684,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
         nLocalServices |= NODE_BOOTSTRAP;
     }
+    // Note: for -bootstrapserve=auto we do NOT advertise NODE_BOOTSTRAP here.
+    // A fresh auto node has nothing to serve yet, and advertising before we can
+    // answer manifests would pollute peer discovery with a dead "server". The
+    // bit is set later (after the retained snapshot is wired up AND its manifest
+    // is pre-built) in the SetupAutoBootstrapServe activation below.
 
     if (mapArgs.count("-bootstrapdatadir")) {
         std::string bootstrap_error;
@@ -1943,6 +1950,29 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         LogPrintf("Bootstrap snapshot verified at height %d (%s)\n",
             Params().FastSyncAnchor().nHeight,
             Params().FastSyncAnchor().hashBlock.ToString());
+    }
+
+    // Auto-serve: once this node has a snapshot at the current anchor (just
+    // fast-synced this run, or retained from a previous run), serve it to other
+    // peers so the network becomes a self-sustaining swarm rather than depending
+    // on one operator-run node. Runs whether or not we bootstrapped this run, so
+    // a restarted node keeps serving its retained copy.
+    if (fBootstrapServeAuto) {
+        // Wire the serve machinery to the retained copy, then PRE-BUILD the
+        // manifest here (during init, on this thread) so the expensive one-time
+        // hash of the whole serve source does not happen on the message-handler
+        // thread on a live peer's first request (which would stall the node).
+        // Only advertise NODE_BOOTSTRAP once both succeed, so we never announce a
+        // service we cannot actually answer. This runs before StartNode(), so the
+        // mapArgs writes in SetupAutoBootstrapServe are not racing the net threads.
+        std::string serve_err;
+        if (SetupAutoBootstrapServe(GetDataDir(), serve_err) &&
+            PreflightBootstrapSnapshotService(serve_err)) {
+            nLocalServices |= NODE_BOOTSTRAP;
+            LogPrintf("Auto bootstrap-serve active: serving the retained snapshot to peers\n");
+        } else {
+            LogPrintf("Auto bootstrap-serve idle (not advertising NODE_BOOTSTRAP): %s\n", serve_err);
+        }
     }
 
     // As LoadBlockIndex can take several minutes, it's possible the user
