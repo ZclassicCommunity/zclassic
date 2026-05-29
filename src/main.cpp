@@ -5730,7 +5730,10 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
 
         CBootstrapSnapshotManifest manifest;
         std::string err;
-        if (!GetBootstrapSnapshotManifest(manifest, err)) {
+        // fAllowBuild=false: never hash the multi-GiB snapshot on the net thread.
+        // If the cache is cold (e.g. a self-snapshot freeze just cleared it), the
+        // off-thread warmer rebuilds it; reply "unavailable" so the peer retries.
+        if (!GetBootstrapSnapshotManifest(manifest, err, /*fAllowBuild=*/false)) {
             LogPrint("net", "could not build bootstrap snapshot manifest for peer=%d: %s\n", pfrom->id, err);
             pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("bootstrap snapshot unavailable"));
             return true;

@@ -116,7 +116,11 @@ bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error);
 //! True when every required compiled parameter file is present and hash-valid.
 bool ZcashParamsPresentAndValid();
 
-bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::string& error);
+//! fAllowBuild=true (default): if the manifest/file-hash cache is cold, build it
+//! inline (SHA-256 over the whole snapshot). Call with false on the net
+//! message-handler thread so it never hashes multi-GiB inline — it returns "not
+//! ready" until an off-thread warmer (init Preflight / the freeze task) rebuilds.
+bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::string& error, bool fAllowBuild = true);
 bool PreflightBootstrapSnapshotService(std::string& error);
 bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request,
                                 CBootstrapSnapshotChunk& chunk,

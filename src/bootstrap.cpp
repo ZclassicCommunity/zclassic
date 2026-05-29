@@ -1930,11 +1930,23 @@ static bool CollectBootstrapSnapshotFiles(const boost::filesystem::path& root,
     return true;
 }
 
-static bool GetBootstrapSnapshotFileList(const boost::filesystem::path& source, std::vector<CBootstrapSnapshotFile>& files, uint64_t& total_bytes, std::string& error)
+static bool GetBootstrapSnapshotFileList(const boost::filesystem::path& source, std::vector<CBootstrapSnapshotFile>& files, uint64_t& total_bytes, std::string& error, bool fAllowBuild)
 {
     LOCK(cs_bootstrap_snapshot);
 
     if (bootstrapSnapshotCacheSource != source || bootstrapSnapshotCacheFiles.empty()) {
+        if (!fAllowBuild) {
+            // The cache is cold (e.g. a self-snapshot freeze just cleared it).
+            // Building it SHA-256-hashes the entire multi-GiB snapshot, which must
+            // never run on the net message-handler thread (it would stall message
+            // processing and hold cs_bootstrap_snapshot against the chunk-serve
+            // path for the duration). The off-thread warmers — init's
+            // PreflightBootstrapSnapshotService and the scheduled freeze task —
+            // rebuild it; until then tell the peer the manifest is not ready so it
+            // retries or picks another server.
+            error = "bootstrap snapshot manifest not ready";
+            return false;
+        }
         if (!CollectBootstrapSnapshotFiles(source, true, bootstrapSnapshotCacheFiles, bootstrapSnapshotCacheMtimes, bootstrapSnapshotCacheBytes, error)) {
             return false;
         }
@@ -1946,7 +1958,7 @@ static bool GetBootstrapSnapshotFileList(const boost::filesystem::path& source, 
     return true;
 }
 
-bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::string& error)
+bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::string& error, bool fAllowBuild)
 {
     if (!GetBoolArg("-bootstrapserve", false)) {
         error = "bootstrap snapshot service is not enabled";
@@ -1976,7 +1988,7 @@ bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::str
         // hashAnchorSha256/Sha3 are decorative anchor-string hashes with no trust
         // weight; a self-snapshot has no compiled anchor, so leave them null.
         manifest.hashChainstateSerialized = meta.hashChainstateSerialized;
-        if (!GetBootstrapSnapshotFileList(source, manifest.vFiles, manifest.nSnapshotBytes, error)) {
+        if (!GetBootstrapSnapshotFileList(source, manifest.vFiles, manifest.nSnapshotBytes, error, fAllowBuild)) {
             return false;
         }
         manifest.nChunkSize = BOOTSTRAP_SNAPSHOT_CHUNK_SIZE;
@@ -1995,7 +2007,7 @@ bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::str
     manifest.hashBlock = anchor.hashBlock;
     manifest.hashAnchorSha256 = anchor.hashAnchorSha256;
     manifest.hashAnchorSha3 = anchor.hashAnchorSha3;
-    if (!GetBootstrapSnapshotFileList(source, manifest.vFiles, manifest.nSnapshotBytes, error)) {
+    if (!GetBootstrapSnapshotFileList(source, manifest.vFiles, manifest.nSnapshotBytes, error, fAllowBuild)) {
         return false;
     }
     manifest.nChunkSize = BOOTSTRAP_SNAPSHOT_CHUNK_SIZE;
