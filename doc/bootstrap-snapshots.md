@@ -427,8 +427,11 @@ after LevelDB is open. It runs as a pre-database bootstrap phase:
 - A bootstrapping node requests a manifest for the compiled anchor. The
   manifest lists safe relative files under `blocks/` and `chainstate/`, with
   file sizes and SHA-256 hashes.
-- The receiver downloads fixed-size 512 KiB chunks into a staging directory and
-  verifies every completed file against the manifest SHA-256 hash.
+- The receiver downloads fixed-size 1 MiB chunks into a staging directory and
+  verifies every completed file against the manifest SHA-256 hash. The chunk
+  size is the server-advertised `nChunkSize` from the manifest
+  (`BOOTSTRAP_SNAPSHOT_CHUNK_SIZE`, currently 1 MiB); the client sizes its
+  requests from the manifest so it stays correct if the served value changes.
 - The receiver installs only into a fresh chain datadir. Peer bootstrap never
   overwrites or backs up existing `blocks/`, `chainstate/`, `bootstrap.dat`, or
   legacy root `blk*.dat` files.

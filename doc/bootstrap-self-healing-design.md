@@ -105,10 +105,14 @@ A node opts in with `-bootstrapserve=auto`.
 
 - **Consistency.** A live LevelDB chainstate is mutating; it cannot be served
   directly. The node freezes a copy at a quiescent point: `FlushStateToDisk`,
-  record the current tip (height + hash), then clone `blocks/` + `chainstate/`
-  into a serve directory. Cloning uses a copy-on-write reflink where the
-  filesystem supports it (APFS/Btrfs/ZFS — near-free) and a plain recursive copy
-  otherwise (disk cost ≈ chain size; opt-in covers that choice).
+  record the current tip (height + hash), then copy `blocks/` + `chainstate/`
+  into a serve directory. The current implementation (`CopyBootstrapDirectory`
+  in `src/bootstrap.cpp`) always performs a plain recursive byte copy
+  (`boost::filesystem::copy_file` per file), so the disk and I/O cost is roughly
+  the full chain size; enabling `auto` opts into that cost. A copy-on-write
+  reflink fast path on filesystems that support it (APFS/Btrfs/ZFS, where the
+  clone would be near-free) is a possible future optimization and is **not**
+  implemented today.
 - **Cadence.** Re-freeze on an interval (e.g. every N blocks / T hours) so served
   snapshots track the tip. Old freeze is replaced atomically. A node that does
   not want the disk cost simply does not enable `auto`.
