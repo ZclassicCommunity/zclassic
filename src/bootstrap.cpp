@@ -56,7 +56,12 @@ static bool BootstrapMetricsScreenActive()
     // Mirror exactly the condition under which AppInit2 starts the metrics
     // screen thread (see init.cpp). If these drift, progress is either routed
     // to InitMessage when no screen is running, or written to stdout while the
-    // screen is redrawing (flicker).
+    // screen is redrawing (flicker). This predicate is deliberately duplicated
+    // rather than shared with init.cpp: factoring it into an init.cpp helper
+    // that this file calls would force the test binary (which links bootstrap.o
+    // but stubs init.o's StartShutdown/etc.) to pull the real init.o, breaking
+    // the test link with multiple-definition + ZMQ/AMQP undefined-reference
+    // errors. A 4-line mirrored predicate is cheaper than that coupling.
     return (Params().NetworkIDString() != "regtest") &&
            GetBoolArg("-showmetrics", is_tty) &&
            !fPrintToConsole && !GetBoolArg("-daemon", false);
@@ -100,6 +105,8 @@ static boost::filesystem::path bootstrapSnapshotCacheSource;
 static std::vector<CBootstrapSnapshotFile> bootstrapSnapshotCacheFiles;
 static std::map<std::string, std::time_t> bootstrapSnapshotCacheMtimes;
 static uint64_t bootstrapSnapshotCacheBytes = 0;
+// Clear the snapshot manifest cache statics; caller MUST hold cs_bootstrap_snapshot.
+static void ClearBootstrapSnapshotCacheLocked();
 static const unsigned int BOOTSTRAP_MAX_REJECT_MESSAGE_LENGTH = 111;
 // Per-message network timeout for bootstrap transfers. Independent of the much
 // shorter default -timeout (nConnectTimeout, 5s) used for ordinary connects, so
@@ -1151,7 +1158,7 @@ static bool BootstrapHandshake(SOCKET socket, const CService& peer_address, int 
     GetRandBytes((unsigned char*)&nonce, sizeof(nonce));
 
     CDataStream versionPayload(SER_NETWORK, INIT_PROTO_VERSION);
-    versionPayload << PROTOCOL_VERSION << nLocalServices << GetTime() << addrYou << addrMe
+    versionPayload << PROTOCOL_VERSION << nLocalServices.load() << GetTime() << addrYou << addrMe
                    << nonce << strSubVersion << 0 << true;
     if (!SendBootstrapMessage(socket, "version", versionPayload, timeout_ms, error)) {
         return false;
@@ -1256,7 +1263,9 @@ static std::string AutoServeAnchorMarkerFor(int nHeight, const uint256& hashBloc
 // is no marker / it parses badly / it matches no compiled anchor. Lets a node that
 // fast-synced from a now-non-primary compiled anchor still advertise the CORRECT
 // anchor identity rather than the binary's primary.
-static const CFastSyncAnchorData* ResolveServedAnchorFromMarker(const boost::filesystem::path& source)
+// rawLine (optional) receives the trimmed marker line as read, so a caller can
+// log the offending identity without reopening the file.
+static const CFastSyncAnchorData* ResolveServedAnchorFromMarker(const boost::filesystem::path& source, std::string* rawLine = NULL)
 {
     const boost::filesystem::path markerPath =
         source.parent_path() / (source.filename().string() + ".anchor");
@@ -1266,6 +1275,13 @@ static const CFastSyncAnchorData* ResolveServedAnchorFromMarker(const boost::fil
     char* got = fgets(buf, sizeof(buf), mf);
     fclose(mf);
     if (!got) return NULL;
+    if (rawLine) {
+        std::string line = buf;
+        while (!line.empty() && (line[line.size() - 1] == '\n' || line[line.size() - 1] == '\r' || line[line.size() - 1] == ' ')) {
+            line.resize(line.size() - 1);
+        }
+        *rawLine = line;
+    }
     int height = -1;
     char hashHex[160] = {0};
     if (sscanf(buf, "%d %159s", &height, hashHex) != 2) return NULL;
@@ -1553,10 +1569,7 @@ bool FreezeLiveChainstateForServe(const boost::filesystem::path& data_dir, int m
         boost::filesystem::remove(AutoServeMarkerPath(data_dir));
         {
             LOCK(cs_bootstrap_snapshot);
-            bootstrapSnapshotCacheSource.clear();
-            bootstrapSnapshotCacheFiles.clear();
-            bootstrapSnapshotCacheMtimes.clear();
-            bootstrapSnapshotCacheBytes = 0;
+            ClearBootstrapSnapshotCacheLocked();
         }
         error = "could not write serve meta file";
         return false;
@@ -1566,10 +1579,7 @@ bool FreezeLiveChainstateForServe(const boost::filesystem::path& data_dir, int m
     // The serve dir changed; drop the cached manifest so it is rebuilt.
     {
         LOCK(cs_bootstrap_snapshot);
-        bootstrapSnapshotCacheSource.clear();
-        bootstrapSnapshotCacheFiles.clear();
-        bootstrapSnapshotCacheMtimes.clear();
-        bootstrapSnapshotCacheBytes = 0;
+        ClearBootstrapSnapshotCacheLocked();
     }
 
     LogPrintf("Auto-serve: froze a self-snapshot at height %d (%s), commitment %s\n",
@@ -1606,22 +1616,15 @@ bool SetupAutoBootstrapServe(const boost::filesystem::path& data_dir, std::strin
         return false;
     }
 
-    std::string got;
-    FILE* mf = fopen(AutoServeMarkerPath(data_dir).string().c_str(), "r");
-    if (mf) {
-        char buf[256] = {0};
-        if (fgets(buf, sizeof(buf), mf)) got = buf;
-        fclose(mf);
-    }
-    while (!got.empty() && (got[got.size() - 1] == '\n' || got[got.size() - 1] == '\r' || got[got.size() - 1] == ' ')) {
-        got.resize(got.size() - 1);
-    }
     // Accept the retained copy if its recorded anchor matches ANY compiled anchor
     // (not just the primary), so a node that fast-synced at a still-supported older
     // anchor keeps serving it across an anchor bump. Only a copy matching no
     // compiled anchor is stale and removed (serving it would make clients download
     // then reject); this node can only produce a fresh one by fast-syncing again.
-    if (ResolveServedAnchorFromMarker(serveSrc) == NULL) {
+    // Read the marker line once (via the out-param) so a mismatch can be logged
+    // without reopening the file.
+    std::string got;
+    if (ResolveServedAnchorFromMarker(serveSrc, &got) == NULL) {
         LogPrintf("Auto-serve: retained serve copy is for an anchor no longer compiled in (\"%s\"); removing it\n", got);
         boost::filesystem::remove_all(serveSrc);
         boost::filesystem::remove(AutoServeMarkerPath(data_dir));
@@ -2104,41 +2107,80 @@ static bool CollectBootstrapSnapshotFiles(const boost::filesystem::path& root,
     return true;
 }
 
-// Rebuild the in-memory snapshot manifest cache when it is cold or points at a
-// different source. The caller MUST already hold cs_bootstrap_snapshot for the
-// whole call: this reads and mutates the bootstrapSnapshotCache* statics and
-// takes no lock of its own. Rebuilding SHA-256-hashes the entire multi-GiB
-// snapshot and must never run on the net message-handler thread, which passes
-// fAllowBuild=false and is told "not ready" until an off-thread warmer (init's
-// PreflightBootstrapSnapshotService or the scheduled freeze task) has populated
-// the cache. Returns false (error set) on a cold cache with fAllowBuild=false,
-// or on a CollectBootstrapSnapshotFiles failure.
-static bool EnsureBootstrapSnapshotCache(const boost::filesystem::path& source, bool fAllowBuild, std::string& error)
+// Clear the in-memory snapshot manifest cache statics. The caller MUST already
+// hold cs_bootstrap_snapshot. Used both when the serve dir changes (so a stale
+// manifest is never served) and on a failed freeze.
+static void ClearBootstrapSnapshotCacheLocked()
 {
-    if (bootstrapSnapshotCacheSource != source || bootstrapSnapshotCacheFiles.empty()) {
+    bootstrapSnapshotCacheSource.clear();
+    bootstrapSnapshotCacheFiles.clear();
+    bootstrapSnapshotCacheMtimes.clear();
+    bootstrapSnapshotCacheBytes = 0;
+}
+
+// Load the snapshot cache for `source` (file list, per-file mtimes, total bytes),
+// using the in-memory cache when it is warm and matches `source`.
+//
+// Rebuilding the cache SHA-256-hashes the entire multi-GiB snapshot, which can
+// take minutes. To avoid blocking net-thread chunk reads (ReadBootstrapSnapshotChunk
+// also takes cs_bootstrap_snapshot) for that whole time, the expensive hash is
+// computed into LOCAL variables WITHOUT holding cs_bootstrap_snapshot — the serve
+// source is immutable after the atomic swap, so collecting it lock-free is safe —
+// and the lock is taken only twice, each O(1): once to check the cache and once to
+// publish the freshly built vectors into the statics.
+//
+// fAllowBuild=false (the net message-handler thread) never hashes inline: a cold
+// or stale cache returns "not ready" until an off-thread warmer (init's
+// PreflightBootstrapSnapshotService or the scheduled freeze task) rebuilds it.
+// If two threads race to build for the same source, the last writer wins
+// harmlessly (both produce the same content for an immutable source).
+static bool LoadBootstrapSnapshotCache(const boost::filesystem::path& source, bool fAllowBuild,
+                                       std::vector<CBootstrapSnapshotFile>& files,
+                                       std::map<std::string, std::time_t>& mtimes,
+                                       uint64_t& total_bytes, std::string& error)
+{
+    {
+        LOCK(cs_bootstrap_snapshot);
+        if (bootstrapSnapshotCacheSource == source && !bootstrapSnapshotCacheFiles.empty()) {
+            files = bootstrapSnapshotCacheFiles;
+            mtimes = bootstrapSnapshotCacheMtimes;
+            total_bytes = bootstrapSnapshotCacheBytes;
+            return true;
+        }
         if (!fAllowBuild) {
             error = "bootstrap snapshot manifest not ready";
             return false;
         }
-        if (!CollectBootstrapSnapshotFiles(source, true, bootstrapSnapshotCacheFiles, bootstrapSnapshotCacheMtimes, bootstrapSnapshotCacheBytes, error)) {
-            return false;
-        }
-        bootstrapSnapshotCacheSource = source;
     }
+
+    // Cache is cold/stale and we are allowed to build: do the expensive
+    // per-file SHA-256 into locals WITHOUT the lock so net-thread chunk reads
+    // are not blocked while we hash.
+    std::vector<CBootstrapSnapshotFile> builtFiles;
+    std::map<std::string, std::time_t> builtMtimes;
+    uint64_t builtBytes = 0;
+    if (!CollectBootstrapSnapshotFiles(source, true, builtFiles, builtMtimes, builtBytes, error)) {
+        return false;
+    }
+
+    // Publish the precomputed vectors into the cache statics under the lock
+    // (O(1) swaps). Last writer wins if another thread built concurrently; for
+    // an immutable source the result is identical, so this is harmless.
+    LOCK(cs_bootstrap_snapshot);
+    bootstrapSnapshotCacheFiles.swap(builtFiles);
+    bootstrapSnapshotCacheMtimes.swap(builtMtimes);
+    bootstrapSnapshotCacheBytes = builtBytes;
+    bootstrapSnapshotCacheSource = source;
+    files = bootstrapSnapshotCacheFiles;
+    mtimes = bootstrapSnapshotCacheMtimes;
+    total_bytes = bootstrapSnapshotCacheBytes;
     return true;
 }
 
 static bool GetBootstrapSnapshotFileList(const boost::filesystem::path& source, std::vector<CBootstrapSnapshotFile>& files, uint64_t& total_bytes, std::string& error, bool fAllowBuild)
 {
-    LOCK(cs_bootstrap_snapshot);
-
-    if (!EnsureBootstrapSnapshotCache(source, fAllowBuild, error)) {
-        return false;
-    }
-
-    files = bootstrapSnapshotCacheFiles;
-    total_bytes = bootstrapSnapshotCacheBytes;
-    return true;
+    std::map<std::string, std::time_t> mtimes;
+    return LoadBootstrapSnapshotCache(source, fAllowBuild, files, mtimes, total_bytes, error);
 }
 
 bool BootstrapServeSnapshotMatchesCompiledAnchor(std::string& warning)
@@ -2587,7 +2629,11 @@ bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error)
             error = strprintf("could not decode zcash param manifest: %s", e.what());
             return false;
         }
-        if (manifest.nChunkSize == 0 || manifest.nChunkSize > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
+        // Require the exact compiled chunk size (see ValidateBootstrapSnapshotManifest):
+        // the serve path only handles offsets aligned to BOOTSTRAP_SNAPSHOT_CHUNK_SIZE
+        // and every honest builder hardcodes it, so a non-conforming size is a clean
+        // up-front reject rather than a mid-download stall.
+        if (manifest.nChunkSize != BOOTSTRAP_SNAPSHOT_CHUNK_SIZE) {
             CloseSocket(socket);
             error = "zcash param manifest has invalid chunk size";
             return false;
@@ -2797,13 +2843,9 @@ bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request, C
     const boost::filesystem::path source = boost::filesystem::system_complete(mapArgs["-bootstrapsourcedir"]);
     std::vector<CBootstrapSnapshotFile> files;
     std::map<std::string, std::time_t> mtimes;
-    {
-        LOCK(cs_bootstrap_snapshot);
-        if (!EnsureBootstrapSnapshotCache(source, fAllowBuild, error)) {
-            return false;
-        }
-        files = bootstrapSnapshotCacheFiles;
-        mtimes = bootstrapSnapshotCacheMtimes;
+    uint64_t total_bytes = 0;
+    if (!LoadBootstrapSnapshotCache(source, fAllowBuild, files, mtimes, total_bytes, error)) {
+        return false;
     }
     if (request.nFileIndex >= files.size()) {
         error = strprintf("bootstrap chunk file index out of range: %u", request.nFileIndex);
@@ -2890,7 +2932,11 @@ bool ValidateBootstrapSnapshotManifest(const CBootstrapSnapshotManifest& manifes
             return false;
         }
     }
-    if (manifest.nChunkSize == 0 || manifest.nChunkSize > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
+    // Require the exact compiled chunk size. The serve path only tolerates
+    // offsets aligned to BOOTSTRAP_SNAPSHOT_CHUNK_SIZE and every honest manifest
+    // builder hardcodes nChunkSize = BOOTSTRAP_SNAPSHOT_CHUNK_SIZE, so a
+    // non-conforming size is rejected up front rather than stalling mid-download.
+    if (manifest.nChunkSize != BOOTSTRAP_SNAPSHOT_CHUNK_SIZE) {
         error = "Bootstrap manifest has invalid chunk size";
         return false;
     }
@@ -3016,7 +3062,7 @@ static int64_t BootstrapServeThrottleKBps()
 // Test-only accessor for the tracked-IP cap. Declared extern (not in
 // bootstrap.h) so unit tests can exercise the hard-cap eviction without
 // hardcoding the constant or exposing it on the public header.
-const size_t BootstrapServeMaxTrackedIpsForTest()
+size_t BootstrapServeMaxTrackedIpsForTest()
 {
     return BOOTSTRAP_SERVE_MAX_TRACKED_IPS;
 }
@@ -3027,6 +3073,9 @@ void ClearBootstrapServeQuota()
     bootstrapServeQuota.clear();
 }
 
+// Like BootstrapServeMaxTrackedIpsForTest above, this is a deliberately
+// test-only extern (declared in the test TU, not in bootstrap.h) so the quota
+// keying can be exercised without exposing it on the public header.
 std::string BootstrapServeQuotaKey(const CNetAddr& addr)
 {
     // IPv6: collapse to the /64 network prefix so an attacker rotating through a
@@ -3118,6 +3167,12 @@ void BootstrapServeChargeBytes(const std::string& ip, bool whitelisted, int64_t 
     // guarantees the map can never grow without bound even under an attacker
     // cycling through >BOOTSTRAP_SERVE_MAX_TRACKED_IPS distinct, all-active IPs.
     // Each call adds at most one entry, so this loop normally erases at most one.
+    //
+    // The oldest-entry scan is O(n) in the tracked-IP count, but it only runs
+    // when the map is already saturated, and n is hard-bounded by
+    // BOOTSTRAP_SERVE_MAX_TRACKED_IPS (16384) — a one-off scan of a few thousand
+    // tiny structs on a serving node's quota-accounting path. That cost is
+    // acceptable, so this stays a simple linear scan rather than a heap/LRU.
     while (bootstrapServeQuota.size() > BOOTSTRAP_SERVE_MAX_TRACKED_IPS) {
         std::map<std::string, BootstrapServeQuota>::iterator oldest = bootstrapServeQuota.begin();
         for (std::map<std::string, BootstrapServeQuota>::iterator it = bootstrapServeQuota.begin(); it != bootstrapServeQuota.end(); ++it) {
@@ -3141,6 +3196,18 @@ static const size_t BOOTSTRAP_SERVE_BURST_BYTES =
 
 bool SendQueuedBootstrapSnapshotChunk(CNode* pto)
 {
+    // Cheap early-out: this runs per-peer every SendMessages cycle even on
+    // non-serving nodes, but the overwhelming majority of peers have no queued
+    // bootstrap chunk request. Peek the per-peer request deque under its own
+    // (uncontended on idle peers) lock and bail before touching cs_vSend, so an
+    // idle peer costs nothing more than this empty check.
+    {
+        LOCK(pto->cs_bootstrap_requests);
+        if (pto->vBootstrapChunkRequests.empty()) {
+            return true;
+        }
+    }
+
     // Serve a burst of queued chunks per cycle rather than exactly one. Stops
     // early when the queue drains, the per-IP quota defers/blocks, a request is
     // unreadable, or this peer's send buffer is already deep (backpressure).

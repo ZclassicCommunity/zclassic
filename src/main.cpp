@@ -5862,6 +5862,22 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
         }
     }
 
+
+    // Disconnect existing peer connection when:
+    // 1. The version message has been received
+    // 2. Peer version is below the minimum version for the current epoch
+    else if (pfrom->nVersion < chainparams.GetConsensus().vUpgrades[
+        CurrentEpoch(GetHeight(), chainparams.GetConsensus())].nProtocolVersion)
+    {
+        LogPrintf("peer=%d using obsolete version %i; disconnecting\n", pfrom->id, pfrom->nVersion);
+        pfrom->PushMessage("reject", strCommand, REJECT_OBSOLETE,
+                            strprintf("Version must be %d or greater",
+                            chainparams.GetConsensus().vUpgrades[
+                                CurrentEpoch(GetHeight(), chainparams.GetConsensus())].nProtocolVersion));
+        pfrom->fDisconnect = true;
+        return false;
+    }
+
     else if (strCommand == NetMsgType::GETBSMAN)
     {
         if (!vRecv.empty()) {
@@ -6010,22 +6026,6 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
         return RecvBootstrapChunk(
             pfrom, vRecv, strCommand,
             "zcash param", "invalid zcash param chunk size");
-    }
-
-
-    // Disconnect existing peer connection when:
-    // 1. The version message has been received
-    // 2. Peer version is below the minimum version for the current epoch
-    else if (pfrom->nVersion < chainparams.GetConsensus().vUpgrades[
-        CurrentEpoch(GetHeight(), chainparams.GetConsensus())].nProtocolVersion)
-    {
-        LogPrintf("peer=%d using obsolete version %i; disconnecting\n", pfrom->id, pfrom->nVersion);
-        pfrom->PushMessage("reject", strCommand, REJECT_OBSOLETE,
-                            strprintf("Version must be %d or greater",
-                            chainparams.GetConsensus().vUpgrades[
-                                CurrentEpoch(GetHeight(), chainparams.GetConsensus())].nProtocolVersion));
-        pfrom->fDisconnect = true;
-        return false;
     }
 
 

@@ -19,6 +19,7 @@
 #include "uint256.h"
 #include "utilstrencodings.h"
 
+#include <atomic>
 #include <deque>
 #include <stdint.h>
 
@@ -139,7 +140,11 @@ CAddress GetLocalAddress(const CNetAddr *paddrPeer = NULL);
 
 extern bool fDiscover;
 extern bool fListen;
-extern uint64_t nLocalServices;
+// Atomic: net threads read it (GetLocalAddress, version push) while the bootstrap
+// auto-serve worker may set NODE_BOOTSTRAP on it after sync, so the plain-uint64_t
+// read-modify-write was a formal data race (CONC-N1). All set sites use |=/&=
+// (atomic fetch_or/fetch_and); serialization/format sites use an explicit .load().
+extern std::atomic<uint64_t> nLocalServices;
 extern uint64_t nLocalHostNonce;
 extern CAddrMan addrman;
 /** Maximum number of connections to simultaneously allow (aka connection slots) */
