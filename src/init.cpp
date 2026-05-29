@@ -186,6 +186,8 @@ void Interrupt(boost::thread_group& threadGroup)
     threadGroup.interrupt_all();
 }
 
+static void InterruptBootstrapServeFreeze();
+
 void Shutdown()
 {
     LogPrintf("%s: In progress...\n", __func__);
@@ -221,6 +223,12 @@ void Shutdown()
     // (which skips thread_group join) would otherwise let it race into freed
     // pblocktree/pcoinsTip. No-op when no trustless snapshot is being validated.
     InterruptBootstrapValidation();
+
+    // Likewise stop the -bootstrapserve=auto self-snapshot freeze worker before
+    // the chain DBs are freed: it takes cs_main and reads chainActive/
+    // mapBlockIndex/pcoinsTip, so it must not outlive them. No-op when no freeze
+    // is in flight (and when -bootstrapserve=auto is not in use).
+    InterruptBootstrapServeFreeze();
 
     if (fFeeEstimatesInitialized)
     {
@@ -816,13 +824,42 @@ static void RemoveFailedPeerBootstrapChainData(const boost::filesystem::path& da
 
 // Periodic self-snapshot for -bootstrapserve=auto (option B): once the node is
 // fully synced, freeze its own chainstate into the serve dir and advertise
-// NODE_BOOTSTRAP. Runs on the scheduler thread. Skips while in IBD and skips a
-// re-copy while the current serve copy is already near the tip. The manifest is
-// pre-built here (off the message-handler thread) so a peer's first request does
-// not trigger a multi-GiB hash on the net thread.
+// NODE_BOOTSTRAP. Skips while in IBD and skips a re-copy while the current serve
+// copy is already near the tip. The manifest is pre-built here (off the
+// message-handler thread) so a peer's first request does not trigger a multi-GiB
+// hash on the net thread.
+//
+// The freeze (a multi-GiB recursive copy) and the preflight (a SHA-256 over the
+// whole snapshot) take minutes, so they run on a DEDICATED worker thread rather
+// than the shared scheduler thread; otherwise every freeze interval would starve
+// PartitionCheck and the rest of the scheduled tasks for minutes. The worker is
+// owned by a file-static handle (mirroring g_bsvalThread) so Shutdown() can
+// interrupt+join it before the chain DBs are freed: the freeze takes cs_main and
+// reads chainActive/mapBlockIndex/pcoinsTip, so it must never outlive them.
 static const int BOOTSTRAP_SELF_SNAPSHOT_MIN_ADVANCE_BLOCKS = 500;
-static void BootstrapServeFreezeCheck()
+static boost::thread* g_serveFreezeThread = NULL;
+static std::atomic<bool> g_serveFreezeInProgress(false);
+// Guards the g_serveFreezeThread handle swap only (never held across a join), so
+// the scheduler thread's reap+respawn and Shutdown()'s interrupt+join cannot
+// race into a double-free of the handle. Unlike the one-shot g_bsvalThread, the
+// freeze worker is re-spawned every interval, so the handle is mutated repeatedly.
+static CCriticalSection cs_serveFreeze;
+
+static void BootstrapServeFreezeWorker()
 {
+    // Clear the single-in-flight guard on EVERY exit path (normal return or a
+    // throwing freeze), so an exception can never permanently wedge future
+    // freezes.
+    class InProgressGuard {
+    public:
+        ~InProgressGuard() { g_serveFreezeInProgress.store(false); }
+    } guard;
+
+    // Neutralize a late spawn that raced teardown: if we are already shutting
+    // down, do not touch chainstate (it may be about to be freed).
+    if (ShutdownRequested()) {
+        return;
+    }
     // Only scheduled when -bootstrapserve=auto with a positive freeze interval, so
     // no need to re-check the (init-rewritten) -bootstrapserve arg here.
     std::string err;
@@ -839,6 +876,67 @@ static void BootstrapServeFreezeCheck()
         nLocalServices |= NODE_BOOTSTRAP;
         LogPrintf("Auto bootstrap-serve active: now serving a self-snapshot to peers\n");
     }
+}
+
+// Scheduler poll: returns immediately. Launches the freeze worker only when one
+// is not already running, so a freeze spanning more than one interval does not
+// stack. Runs on the shared scheduler thread; only this (single) thread flips the
+// guard false->true, so there is no double-spawn.
+static void BootstrapServeFreezeCheck()
+{
+    if (ShutdownRequested()) {
+        return;
+    }
+    if (g_serveFreezeInProgress.load()) {
+        return;
+    }
+    boost::thread* reap = NULL;
+    {
+        LOCK(cs_serveFreeze);
+        // Re-check under the lock: InterruptBootstrapServeFreeze() takes the same
+        // lock at shutdown, so this guarantees we never spawn a new worker after
+        // (or concurrently with) the shutdown interrupt+join.
+        if (ShutdownRequested()) {
+            return;
+        }
+        // Claim the previous (finished — in-progress is false here) handle to reap
+        // after we release the lock, so the thread object is not leaked across
+        // intervals and the join (instant, the worker already returned) never runs
+        // under the lock.
+        reap = g_serveFreezeThread;
+        g_serveFreezeInProgress.store(true);
+        g_serveFreezeThread = new boost::thread(boost::bind(&BootstrapServeFreezeWorker));
+    }
+    if (reap != NULL) {
+        try {
+            reap->join();
+        } catch (...) {}
+        delete reap;
+    }
+}
+
+// Interrupt+join the freeze worker before the chain DBs are freed (mirror of
+// InterruptBootstrapValidation). No-op when no freeze worker exists.
+static void InterruptBootstrapServeFreeze()
+{
+    // Claim the handle under the lock, then interrupt+join OUTSIDE the lock (the
+    // join can block for the freeze duration; holding cs_serveFreeze across it
+    // could stall the scheduler thread's launcher).
+    boost::thread* t = NULL;
+    {
+        LOCK(cs_serveFreeze);
+        t = g_serveFreezeThread;
+        g_serveFreezeThread = NULL;
+    }
+    if (t == NULL) {
+        return;
+    }
+    try {
+        t->interrupt();
+        t->join();
+    } catch (...) {}
+    delete t;
+    g_serveFreezeInProgress.store(false);
 }
 
 
