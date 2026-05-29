@@ -336,6 +336,14 @@ static bool IsSafeBootstrapSnapshotPath(const boost::filesystem::path& relative)
 static bool IsBootstrapSnapshotDataPath(const boost::filesystem::path& relative);
 static bool HashBootstrapSnapshotFile(const boost::filesystem::path& path, uint256& hash, std::string& error);
 static bool StatOpenBootstrapSnapshotFile(FILE* fp, uint64_t& size, std::time_t& mtime);
+// Shared chunk range/alignment/length validation for the two serve-read paths
+// (ReadBootstrapSnapshotChunk, ReadZcashParamChunk). Both serve fixed-size
+// chunks aligned to chunkSize; this captures the identical post-open checks
+// (range within fileSize with no overflow, offset alignment, exact expected
+// length). `label` selects the byte-identical error-string prefix used by each
+// caller ("bootstrap" vs "zcash param").
+static bool ValidateBootstrapChunkRange(uint64_t offset, uint64_t length, uint64_t fileSize,
+                                        uint64_t chunkSize, const char* label, std::string& error);
 static bool InstallStagedBootstrapChainData(const boost::filesystem::path& staging,
                                             const boost::filesystem::path& data_dir,
                                             std::string& error);
@@ -1329,9 +1337,14 @@ static boost::filesystem::path BootstrapServeMetaPath(const boost::filesystem::p
     return sourcedir.parent_path() / (sourcedir.filename().string() + ".meta");
 }
 
-static bool ReadBootstrapServeMeta(const boost::filesystem::path& sourcedir, BootstrapServeMeta& meta)
+// Parse a bootstrap-serve meta record from an already-resolved sidecar/marker
+// file: "<height> <blockhash> <chainstate-commitment>". Shared verbatim by the
+// v2 self-snapshot ".meta" reader and the trustless pending-marker reader, which
+// differ only in which path they open. Returns false on missing file, malformed
+// content, or an out-of-range/null field.
+static bool ParseBootstrapServeMetaFile(const boost::filesystem::path& metaPath, BootstrapServeMeta& meta)
 {
-    FILE* f = fopen(BootstrapServeMetaPath(sourcedir).string().c_str(), "r");
+    FILE* f = fopen(metaPath.string().c_str(), "r");
     if (!f) {
         return false;
     }
@@ -1347,6 +1360,11 @@ static bool ReadBootstrapServeMeta(const boost::filesystem::path& sourcedir, Boo
     meta.hashBlock = uint256S(hbuf);
     meta.hashChainstateSerialized = uint256S(cbuf);
     return meta.nHeight >= 0 && !meta.hashBlock.IsNull() && !meta.hashChainstateSerialized.IsNull();
+}
+
+static bool ReadBootstrapServeMeta(const boost::filesystem::path& sourcedir, BootstrapServeMeta& meta)
+{
+    return ParseBootstrapServeMetaFile(BootstrapServeMetaPath(sourcedir), meta);
 }
 
 // Freeze this node's live chainstate into the auto-serve directory and record a
@@ -1655,22 +1673,7 @@ void BootstrapTrustlessPendingClear(const boost::filesystem::path& data_dir)
 
 static bool ReadBootstrapTrustlessPending(const boost::filesystem::path& data_dir, BootstrapServeMeta& meta)
 {
-    FILE* f = fopen(BootstrapTrustlessPendingPath(data_dir).string().c_str(), "r");
-    if (!f) {
-        return false;
-    }
-    char hbuf[128] = {0};
-    char cbuf[128] = {0};
-    int height = -1;
-    const int n = fscanf(f, "%d %127s %127s", &height, hbuf, cbuf);
-    fclose(f);
-    if (n != 3) {
-        return false;
-    }
-    meta.nHeight = height;
-    meta.hashBlock = uint256S(hbuf);
-    meta.hashChainstateSerialized = uint256S(cbuf);
-    return meta.nHeight >= 0 && !meta.hashBlock.IsNull() && !meta.hashChainstateSerialized.IsNull();
+    return ParseBootstrapServeMetaFile(BootstrapTrustlessPendingPath(data_dir), meta);
 }
 
 // Cheap provisional gate run after a trustless snapshot is imported and the chain
@@ -2003,20 +2006,19 @@ static bool CollectBootstrapSnapshotFiles(const boost::filesystem::path& root,
     return true;
 }
 
-static bool GetBootstrapSnapshotFileList(const boost::filesystem::path& source, std::vector<CBootstrapSnapshotFile>& files, uint64_t& total_bytes, std::string& error, bool fAllowBuild)
+// Rebuild the in-memory snapshot manifest cache when it is cold or points at a
+// different source. The caller MUST already hold cs_bootstrap_snapshot for the
+// whole call: this reads and mutates the bootstrapSnapshotCache* statics and
+// takes no lock of its own. Rebuilding SHA-256-hashes the entire multi-GiB
+// snapshot and must never run on the net message-handler thread, which passes
+// fAllowBuild=false and is told "not ready" until an off-thread warmer (init's
+// PreflightBootstrapSnapshotService or the scheduled freeze task) has populated
+// the cache. Returns false (error set) on a cold cache with fAllowBuild=false,
+// or on a CollectBootstrapSnapshotFiles failure.
+static bool EnsureBootstrapSnapshotCache(const boost::filesystem::path& source, bool fAllowBuild, std::string& error)
 {
-    LOCK(cs_bootstrap_snapshot);
-
     if (bootstrapSnapshotCacheSource != source || bootstrapSnapshotCacheFiles.empty()) {
         if (!fAllowBuild) {
-            // The cache is cold (e.g. a self-snapshot freeze just cleared it).
-            // Building it SHA-256-hashes the entire multi-GiB snapshot, which must
-            // never run on the net message-handler thread (it would stall message
-            // processing and hold cs_bootstrap_snapshot against the chunk-serve
-            // path for the duration). The off-thread warmers — init's
-            // PreflightBootstrapSnapshotService and the scheduled freeze task —
-            // rebuild it; until then tell the peer the manifest is not ready so it
-            // retries or picks another server.
             error = "bootstrap snapshot manifest not ready";
             return false;
         }
@@ -2024,6 +2026,16 @@ static bool GetBootstrapSnapshotFileList(const boost::filesystem::path& source, 
             return false;
         }
         bootstrapSnapshotCacheSource = source;
+    }
+    return true;
+}
+
+static bool GetBootstrapSnapshotFileList(const boost::filesystem::path& source, std::vector<CBootstrapSnapshotFile>& files, uint64_t& total_bytes, std::string& error, bool fAllowBuild)
+{
+    LOCK(cs_bootstrap_snapshot);
+
+    if (!EnsureBootstrapSnapshotCache(source, fAllowBuild, error)) {
+        return false;
     }
 
     files = bootstrapSnapshotCacheFiles;
@@ -2290,31 +2302,21 @@ bool ReadZcashParamChunk(const CBootstrapSnapshotChunkRequest& request, CBootstr
         return false;
     }
     uint64_t file_size = 0;
-    std::time_t file_mtime = 0;
-    if (!StatOpenBootstrapSnapshotFile(fp, file_size, file_mtime) || file_size != file.nSize) {
+    // Param chunks are validated by hash (against the compiled ZcashParamExpectedHash
+    // set), not by mtime: GetZcashParamManifest rebuilds and re-stats on every call,
+    // so there is no cached reference mtime to compare against (unlike the cached
+    // snapshot path in OpenBootstrapSnapshotFile). StatOpenBootstrapSnapshotFile still
+    // requires an mtime out-param, so we capture it into an unused local. The file_size
+    // it returns IS used below as the freshness/size guard.
+    std::time_t file_mtime_unused = 0;
+    if (!StatOpenBootstrapSnapshotFile(fp, file_size, file_mtime_unused) || file_size != file.nSize) {
         fclose(fp);
         error = strprintf("zcash param file changed: %s", file.strPath);
         return false;
     }
-    if (request.nOffset > file.nSize || request.nLength > file.nSize - request.nOffset) {
+    if (!ValidateBootstrapChunkRange(request.nOffset, request.nLength, file.nSize,
+                                     BOOTSTRAP_SNAPSHOT_CHUNK_SIZE, "zcash param", error)) {
         fclose(fp);
-        error = "zcash param chunk range exceeds file size";
-        return false;
-    }
-    // Same invariant as the snapshot serve path: alignment/length are validated
-    // against the compile-time BOOTSTRAP_SNAPSHOT_CHUNK_SIZE because the server
-    // always advertises nChunkSize == BOOTSTRAP_SNAPSHOT_CHUNK_SIZE
-    // (BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE == BOOTSTRAP_SNAPSHOT_CHUNK_SIZE in
-    // bootstrap.h). Keep these equal if chunk size ever becomes configurable.
-    if (request.nOffset % BOOTSTRAP_SNAPSHOT_CHUNK_SIZE != 0) {
-        fclose(fp);
-        error = "zcash param chunk offset is not aligned";
-        return false;
-    }
-    const uint32_t expected_length = std::min<uint64_t>(BOOTSTRAP_SNAPSHOT_CHUNK_SIZE, file.nSize - request.nOffset);
-    if (request.nLength != expected_length) {
-        fclose(fp);
-        error = strprintf("zcash param chunk length must be %u", expected_length);
         return false;
     }
     if (!BootstrapFseek64(fp, (int64_t)request.nOffset)) {
@@ -2584,6 +2586,32 @@ bool PreflightBootstrapSnapshotService(std::string& error)
     return true;
 }
 
+static bool ValidateBootstrapChunkRange(uint64_t offset, uint64_t length, uint64_t fileSize,
+                                        uint64_t chunkSize, const char* label, std::string& error)
+{
+    // Range must lie within the file with no offset+length overflow.
+    if (offset > fileSize || length > fileSize - offset) {
+        error = strprintf("%s chunk range exceeds file size", label);
+        return false;
+    }
+    // Offsets must be aligned to the served chunk size. Callers validate against
+    // the compile-time BOOTSTRAP_SNAPSHOT_CHUNK_SIZE because the server always
+    // advertises nChunkSize == BOOTSTRAP_SNAPSHOT_CHUNK_SIZE
+    // (BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE == BOOTSTRAP_SNAPSHOT_CHUNK_SIZE in
+    // bootstrap.h). If the chunk size ever becomes configurable, callers must
+    // pass the manifest's nChunkSize here instead.
+    if (offset % chunkSize != 0) {
+        error = strprintf("%s chunk offset is not aligned", label);
+        return false;
+    }
+    const uint32_t expected_length = std::min<uint64_t>(chunkSize, fileSize - offset);
+    if (length != expected_length) {
+        error = strprintf("%s chunk length must be %u", label, expected_length);
+        return false;
+    }
+    return true;
+}
+
 static bool StatOpenBootstrapSnapshotFile(FILE* fp, uint64_t& size, std::time_t& mtime)
 {
 #if defined(WIN32)
@@ -2673,18 +2701,8 @@ bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request, C
     std::map<std::string, std::time_t> mtimes;
     {
         LOCK(cs_bootstrap_snapshot);
-        if (bootstrapSnapshotCacheSource != source || bootstrapSnapshotCacheFiles.empty()) {
-            // Rebuilding the cache re-hashes the whole snapshot; never do that on
-            // the net message-handler thread (fAllowBuild=false). An off-thread
-            // warmer (init Preflight / the freeze task) keeps it hot.
-            if (!fAllowBuild) {
-                error = "bootstrap snapshot manifest not ready";
-                return false;
-            }
-            if (!CollectBootstrapSnapshotFiles(source, true, bootstrapSnapshotCacheFiles, bootstrapSnapshotCacheMtimes, bootstrapSnapshotCacheBytes, error)) {
-                return false;
-            }
-            bootstrapSnapshotCacheSource = source;
+        if (!EnsureBootstrapSnapshotCache(source, fAllowBuild, error)) {
+            return false;
         }
         files = bootstrapSnapshotCacheFiles;
         mtimes = bootstrapSnapshotCacheMtimes;
@@ -2699,27 +2717,9 @@ bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request, C
     if (!fp) {
         return false;
     }
-    if (request.nOffset > file.nSize || request.nLength > file.nSize - request.nOffset) {
+    if (!ValidateBootstrapChunkRange(request.nOffset, request.nLength, file.nSize,
+                                     BOOTSTRAP_SNAPSHOT_CHUNK_SIZE, "bootstrap", error)) {
         fclose(fp);
-        error = "bootstrap chunk range exceeds file size";
-        return false;
-    }
-    // Offsets must be aligned to the served chunk size. We validate against the
-    // compile-time constant rather than the manifest's nChunkSize because the
-    // server always advertises nChunkSize == BOOTSTRAP_SNAPSHOT_CHUNK_SIZE
-    // (see manifest construction; BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE ==
-    // BOOTSTRAP_SNAPSHOT_CHUNK_SIZE in bootstrap.h). If the chunk size ever
-    // becomes configurable, this check (and expected_length below) must use the
-    // manifest's nChunkSize instead.
-    if (request.nOffset % BOOTSTRAP_SNAPSHOT_CHUNK_SIZE != 0) {
-        fclose(fp);
-        error = "bootstrap chunk offset is not aligned";
-        return false;
-    }
-    const uint32_t expected_length = std::min<uint64_t>(BOOTSTRAP_SNAPSHOT_CHUNK_SIZE, file.nSize - request.nOffset);
-    if (request.nLength != expected_length) {
-        fclose(fp);
-        error = strprintf("bootstrap chunk length must be %u", expected_length);
         return false;
     }
     if (!BootstrapFseek64(fp, (int64_t)request.nOffset)) {
