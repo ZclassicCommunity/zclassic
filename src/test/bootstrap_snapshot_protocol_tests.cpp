@@ -6,6 +6,7 @@
 #include "bootstrap.h"
 #include "bootstrapvalidation.h"
 #include "chainparams.h"
+#include "checkpoints.h"
 #include "crypto/sha256.h"
 #include "main.h"
 #include "net.h"
@@ -908,17 +909,26 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_matches_compiled_anchor)
     BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error));
 
     // A v2 manifest in anchor mode is accepted only when it equals a compiled
-    // anchor AND commits to that anchor's compiled UTXO commitment.
-    if (!anchor.hashChainstateSerialized.IsNull()) {
-        manifest = ValidBootstrapManifest();
-        manifest.nVersion = 2;
-        manifest.hashChainstateSerialized = anchor.hashChainstateSerialized;
-        BOOST_CHECK(ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/false));
+    // anchor AND commits to that anchor's compiled UTXO commitment. Every shipped
+    // anchor is now guaranteed to carry a non-null commitment (enforced at startup
+    // by Checkpoints::ValidateFastSyncAnchor), so this assertion is unconditional.
+    BOOST_REQUIRE(!anchor.hashChainstateSerialized.IsNull());
+    manifest = ValidBootstrapManifest();
+    manifest.nVersion = 2;
+    manifest.hashChainstateSerialized = anchor.hashChainstateSerialized;
+    BOOST_CHECK(ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/false));
 
-        // Same anchor identity but the wrong commitment is rejected in anchor mode.
-        manifest.hashChainstateSerialized = uint256S("0202020202020202020202020202020202020202020202020202020202020202");
-        BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/false));
-    }
+    // Same anchor identity but the wrong commitment is rejected in anchor mode.
+    manifest.hashChainstateSerialized = uint256S("0202020202020202020202020202020202020202020202020202020202020202");
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/false));
+
+    // A v2 anchor-mode manifest carrying a NULL commitment but a valid compiled
+    // anchor identity must be rejected: the node has no compiled value to verify
+    // it against, so it cannot be trusted in anchor mode (SEC-1 surface).
+    manifest = ValidBootstrapManifest();
+    manifest.nVersion = 2;
+    manifest.hashChainstateSerialized.SetNull();
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/false));
 }
 
 BOOST_AUTO_TEST_CASE(bootstrap_find_fast_sync_anchor)
@@ -941,6 +951,20 @@ BOOST_AUTO_TEST_CASE(bootstrap_find_fast_sync_anchor)
     BOOST_CHECK(params.FindFastSyncAnchor(primary.nHeight + 1, primary.hashBlock) == NULL);
     BOOST_CHECK(params.FindFastSyncAnchor(primary.nHeight,
         uint256S("00000000000000000000000000000000000000000000000000000000deadbeef")) == NULL);
+}
+
+BOOST_AUTO_TEST_CASE(bootstrap_validate_fast_sync_anchor_requires_commitment)
+{
+    // Startup guard: ValidateFastSyncAnchor must accept the compiled MAIN anchor
+    // set, which is required to carry a non-null UTXO-set commitment for every
+    // populated entry. This is the positive control for the SEC-1 startup check;
+    // a null-commitment anchor (never shippable now) would make this fail with a
+    // "no chainstate commitment" strError.
+    const CChainParams& params = Params();
+    BOOST_REQUIRE(!params.FastSyncAnchors().front().hashChainstateSerialized.IsNull());
+    std::string strError;
+    BOOST_CHECK(Checkpoints::ValidateFastSyncAnchor(params, strError));
+    BOOST_CHECK(strError.empty());
 }
 
 BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_rejects_oversize)

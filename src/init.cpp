@@ -760,23 +760,30 @@ static bool VerifyImportedBootstrapAnchor(std::string& error)
     // set and compare it to the value compiled into this binary for the matched
     // anchor. A malicious or compromised serving peer cannot substitute a forged
     // chainstate, because it cannot reproduce a UTXO set that hashes to one of
-    // the compiled commitments. A null commitment (no value compiled in yet for
-    // this anchor) skips the check.
-    if (!anchor->hashChainstateSerialized.IsNull()) {
-        CCoinsStats stats;
-        if (!pcoinsTip->GetStats(stats)) {
-            error = "bootstrap snapshot verification failed: could not compute imported chainstate hash";
-            return false;
-        }
-        if (stats.hashSerialized != anchor->hashChainstateSerialized) {
-            error = strprintf(
-                "bootstrap snapshot verification failed: imported chainstate hash is %s, expected %s",
-                stats.hashSerialized.ToString(),
-                anchor->hashChainstateSerialized.ToString());
-            return false;
-        }
-        LogPrintf("Bootstrap snapshot chainstate commitment verified: %s\n", stats.hashSerialized.ToString());
+    // the compiled commitments. A null commitment would silently disable this,
+    // the only forgery check, so a matched anchor MUST carry one (defense in
+    // depth; Checkpoints::ValidateFastSyncAnchor already rejects null-commitment
+    // anchors at startup).
+    if (anchor->hashChainstateSerialized.IsNull()) {
+        error = strprintf(
+            "bootstrap snapshot verification failed: matched anchor (height %d, %s) has no chainstate commitment",
+            importedHeight,
+            importedHash.ToString());
+        return false;
     }
+    CCoinsStats stats;
+    if (!pcoinsTip->GetStats(stats)) {
+        error = "bootstrap snapshot verification failed: could not compute imported chainstate hash";
+        return false;
+    }
+    if (stats.hashSerialized != anchor->hashChainstateSerialized) {
+        error = strprintf(
+            "bootstrap snapshot verification failed: imported chainstate hash is %s, expected %s",
+            stats.hashSerialized.ToString(),
+            anchor->hashChainstateSerialized.ToString());
+        return false;
+    }
+    LogPrintf("Bootstrap snapshot chainstate commitment verified: %s\n", stats.hashSerialized.ToString());
     return true;
 }
 

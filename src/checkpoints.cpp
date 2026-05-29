@@ -113,6 +113,19 @@ namespace Checkpoints {
                 continue;
             }
 
+            // Every shipped anchor MUST carry a UTXO-set commitment: it is the
+            // only thing that detects a forged imported chainstate after a peer
+            // fast-sync (a malicious server can serve real headers matching
+            // height+hash plus a forged chainstate/). A null commitment here
+            // would silently disable that check, so refuse to start.
+            if (anchor.hashChainstateSerialized.IsNull()) {
+                strError = strprintf(
+                    "Fast-sync anchor at height %d (block %s) has no chainstate commitment; refusing to start",
+                    anchor.nHeight,
+                    anchor.hashBlock.ToString());
+                return false;
+            }
+
             MapCheckpoints::const_iterator checkpoint = checkpoints.find(anchor.nHeight);
             if (checkpoint == checkpoints.end()) {
                 strError = strprintf(
