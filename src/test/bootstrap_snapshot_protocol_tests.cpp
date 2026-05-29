@@ -896,9 +896,12 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_rejects_bad_metadata)
 
     // A v2 self-snapshot (commitment present, not equal to the compiled anchor) is
     // rejected in the default anchor mode, but accepted in trustless mode (its
-    // contents are verified after download, not here).
+    // contents are verified after download, not here). The tip must be strictly
+    // above the last compiled checkpoint (SEC-TRUST-1) for trustless to accept it,
+    // so use a height above the anchor/checkpoint.
     manifest = ValidBootstrapManifest();
     manifest.nVersion = 2;
+    manifest.nHeight = Params().FastSyncAnchor().nHeight + 1000;
     manifest.hashChainstateSerialized = uint256S("0101010101010101010101010101010101010101010101010101010101010101");
     BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/false));
     BOOST_CHECK(ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/true));
@@ -917,6 +920,16 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_rejects_bad_metadata)
 
     manifest = ValidBootstrapManifest();
     manifest.nChunkSize = BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE + 1;
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error));
+    BOOST_CHECK(error.find("chunk") != std::string::npos);
+
+    // WIRE-N1: the chunk size must be EXACTLY BOOTSTRAP_SNAPSHOT_CHUNK_SIZE, not
+    // merely <= MAX. A smaller-but-otherwise-valid size would pass the old ceiling
+    // check yet stall mid-download (the serve path only aligns to the compiled
+    // size), so it must be rejected up front. This case is distinct from the
+    // oversize one above precisely because CHUNK_SIZE == MAX_CHUNK_SIZE today.
+    manifest = ValidBootstrapManifest();
+    manifest.nChunkSize = BOOTSTRAP_SNAPSHOT_CHUNK_SIZE / 2;
     BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error));
     BOOST_CHECK(error.find("chunk") != std::string::npos);
 
@@ -1391,6 +1404,24 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_trustless_gate_rejects_self_snapshot_wit
     // commitment are not trusted here — they are checked post-download).
     std::string err2;
     BOOST_CHECK(ValidateBootstrapSnapshotManifest(m, err2, /*fTrustlessAllowed=*/true));
+
+    // SEC-TRUST-1: a trustless self-snapshot AT or BELOW the last compiled
+    // checkpoint is rejected EVEN with trustless allowed — below the checkpoint the
+    // provisional checkpoint loop and the background retarget re-check run zero
+    // iterations, so a forged low-tip snapshot would latch a false VALIDATED. Only
+    // a tip strictly above the last checkpoint is acceptable.
+    const MapCheckpoints& cps = Params().Checkpoints().mapCheckpoints;
+    BOOST_REQUIRE(!cps.empty());
+    const int lastCheckpointHeight = cps.rbegin()->first;
+    CBootstrapSnapshotManifest low = m;
+    low.nHeight = lastCheckpointHeight; // at the checkpoint: needs strictly above
+    std::string err3;
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(low, err3, /*fTrustlessAllowed=*/true));
+    BOOST_CHECK(err3.find("checkpoint") != std::string::npos);
+
+    low.nHeight = lastCheckpointHeight - 1; // below the checkpoint: also rejected
+    std::string err4;
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(low, err4, /*fTrustlessAllowed=*/true));
 }
 
 // And the actual gossip handler must Misbehave a peer that pushes such a manifest:
