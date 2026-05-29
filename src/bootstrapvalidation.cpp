@@ -355,10 +355,16 @@ static void ThreadBootstrapUtxoValidation()
                         boost::this_thread::interruption_point();
                         ++h;
                     }
-                    if (view.DynamicMemoryUsage() > BOOTSTRAPVAL_FLUSH_CAP) {
-                        view.Flush();
-                    }
                 }
+            }
+            // Flush the thread-private scratch view to its thread-private scratch
+            // DB OUTSIDE cs_main: this can be a large leveldb write and the view /
+            // DB are never touched by any other thread, so holding cs_main across
+            // it would only stall the message handler / live block connect for the
+            // flush duration. (BatchWrite reads/writes only this view's caches and
+            // scratchdb; it takes no global lock and no shared state.)
+            if (view.DynamicMemoryUsage() > BOOTSTRAPVAL_FLUSH_CAP) {
+                view.Flush();
             }
             if (failed) {
                 break;
@@ -374,10 +380,11 @@ static void ThreadBootstrapUtxoValidation()
         }
 
         if (!failed) {
-            {
-                LOCK(cs_main);
-                view.Flush();
-            }
+            // Final flush of the thread-private scratch view to its thread-private
+            // scratch DB: no lock needed (see the in-loop flush note above). The
+            // prior LOCK(cs_main) here only stalled live block connect for the
+            // duration of this (potentially large) leveldb write.
+            view.Flush();
             CCoinsStats stats;
             if (!scratchdb.GetStats(stats)) {
                 LogPrintf("Trustless bootstrap: could not hash re-derived chainstate; will retry on restart\n");

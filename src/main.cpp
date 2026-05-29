@@ -5773,7 +5773,14 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
     else if (strCommand == NetMsgType::BSMAN)
     {
         CBootstrapSnapshotManifest manifest;
-        vRecv >> manifest;
+        try {
+            vRecv >> manifest;
+        } catch (const std::ios_base::failure&) {
+            // Malformed payload must be scored here; otherwise the throw unwinds
+            // to the generic catch in ProcessMessages() which accrues no ban score.
+            Misbehaving(pfrom->GetId(), 20);
+            return error("bsman has malformed payload from peer=%d", pfrom->id);
+        }
 
         // The bootstrap client driver uses its own socket outside CNode, so any
         // BSMAN arriving on a CNode connection is unsolicited. Score lightly: a
@@ -5808,7 +5815,14 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
     else if (strCommand == NetMsgType::GETBSCHK)
     {
         CBootstrapSnapshotChunkRequest request;
-        vRecv >> request;
+        try {
+            vRecv >> request;
+        } catch (const std::ios_base::failure&) {
+            // Malformed payload must be scored here; otherwise the throw unwinds
+            // to the generic catch in ProcessMessages() which accrues no ban score.
+            Misbehaving(pfrom->GetId(), 20);
+            return error("getbschk has malformed payload from peer=%d", pfrom->id);
+        }
 
         if (!vRecv.empty()) {
             // Fixed-shape struct: trailing bytes mean a malformed peer.
@@ -5858,7 +5872,14 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
     else if (strCommand == NetMsgType::BSCHK)
     {
         CBootstrapSnapshotChunk chunk;
-        vRecv >> chunk;
+        try {
+            vRecv >> chunk;
+        } catch (const std::ios_base::failure&) {
+            // Malformed payload must be scored here; otherwise the throw unwinds
+            // to the generic catch in ProcessMessages() which accrues no ban score.
+            Misbehaving(pfrom->GetId(), 20);
+            return error("bschk has malformed payload from peer=%d", pfrom->id);
+        }
 
         // Unsolicited push: the bootstrap client uses its own socket, so any
         // BSCHK on a CNode connection was never requested by us.
@@ -5913,7 +5934,14 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
     else if (strCommand == NetMsgType::BSPMAN)
     {
         CBootstrapSnapshotManifest manifest;
-        vRecv >> manifest; // client drives param fetch over its own socket; ignore here
+        try {
+            vRecv >> manifest; // client drives param fetch over its own socket; ignore here
+        } catch (const std::ios_base::failure&) {
+            // Malformed payload must be scored here; otherwise the throw unwinds
+            // to the generic catch in ProcessMessages() which accrues no ban score.
+            Misbehaving(pfrom->GetId(), 20);
+            return error("bspman has malformed payload from peer=%d", pfrom->id);
+        }
 
         // Unsolicited push on a CNode socket: light ban.
         Misbehaving(pfrom->GetId(), 10);
@@ -5929,7 +5957,14 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
     else if (strCommand == NetMsgType::GETBSPCHK)
     {
         CBootstrapSnapshotChunkRequest request;
-        vRecv >> request;
+        try {
+            vRecv >> request;
+        } catch (const std::ios_base::failure&) {
+            // Malformed payload must be scored here; otherwise the throw unwinds
+            // to the generic catch in ProcessMessages() which accrues no ban score.
+            Misbehaving(pfrom->GetId(), 20);
+            return error("getbspchk has malformed payload from peer=%d", pfrom->id);
+        }
 
         if (!vRecv.empty()) {
             // Fixed-shape struct: trailing bytes mean a malformed peer.
@@ -5976,7 +6011,14 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
     else if (strCommand == NetMsgType::BSPCHK)
     {
         CBootstrapSnapshotChunk chunk;
-        vRecv >> chunk;
+        try {
+            vRecv >> chunk;
+        } catch (const std::ios_base::failure&) {
+            // Malformed payload must be scored here; otherwise the throw unwinds
+            // to the generic catch in ProcessMessages() which accrues no ban score.
+            Misbehaving(pfrom->GetId(), 20);
+            return error("bspchk has malformed payload from peer=%d", pfrom->id);
+        }
 
         // Unsolicited push on a CNode socket.
         Misbehaving(pfrom->GetId(), 10);

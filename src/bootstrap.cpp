@@ -10,6 +10,7 @@
 #include "consensus/validation.h"
 #include "crypto/sha256.h"
 #include "hash.h"
+#include "init.h"
 #include "main.h"
 #include "net.h"
 #include "netbase.h"
@@ -1004,6 +1005,11 @@ static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotMan
     bool ok = true;
 
     while (ok && !inflight.empty()) {
+        if (ShutdownRequested()) {
+            error = "bootstrap snapshot download aborted: shutdown requested";
+            ok = false;
+            break;
+        }
         CDataStream chunkPayload(SER_NETWORK, PROTOCOL_VERSION);
         if (!ReceiveExpectedBootstrapMessage(socket, NetMsgType::BSCHK, chunkPayload, timeout_ms, error)) {
             ok = false;
@@ -2367,6 +2373,11 @@ static bool DownloadZcashParamFile(SOCKET socket, uint32_t file_index, uint64_t 
     }
 
     while (ok && !inflight.empty()) {
+        if (ShutdownRequested()) {
+            error = "bootstrap param download aborted: shutdown requested";
+            ok = false;
+            break;
+        }
         CDataStream chunkPayload(SER_NETWORK, PROTOCOL_VERSION);
         if (!ReceiveExpectedBootstrapMessage(socket, NetMsgType::BSPCHK, chunkPayload, timeout_ms, error)) {
             ok = false;
@@ -2918,6 +2929,28 @@ void ClearBootstrapServeQuota()
     bootstrapServeQuota.clear();
 }
 
+std::string BootstrapServeQuotaKey(const CNetAddr& addr)
+{
+    // IPv6: collapse to the /64 network prefix so an attacker rotating through a
+    // (trivially available) /64 -- or a botnet spread across one -- counts as a
+    // single quota bucket instead of getting a fresh bucket per address.
+    // GetByte(n) returns ip[15-n] (network byte order), so the /64 network is
+    // ip[0..7] == GetByte(15)..GetByte(8). We render it as a tagged hex string
+    // that can never alias an IPv4 ToStringIP() (the "v6/64:" prefix and ':'
+    // separators are not produced by the IPv4 dotted-quad form).
+    if (addr.IsIPv6()) {
+        std::string key = "v6/64:";
+        for (int n = 15; n >= 8; --n) {
+            key += strprintf("%02x", addr.GetByte(n) & 0xff);
+        }
+        return key;
+    }
+    // IPv4 (full address) and everything else (Tor, unroutable): full identity.
+    // Full-address IPv4 keying is unchanged from the previous behavior, so
+    // existing IPv4 clients are accounted exactly as before.
+    return addr.ToStringIP();
+}
+
 bool BootstrapServeAllowChunk(const std::string& ip, bool whitelisted, int64_t now_ms, bool& stop)
 {
     stop = false;
@@ -3045,7 +3078,10 @@ bool SendQueuedBootstrapSnapshotChunk(CNode* pto)
 
         // Apply the per-IP daily serve quota only once we have a request to
         // serve, so peers with no bootstrap traffic never touch the quota lock.
-        const std::string ip = pto->addr.ToStringIP();
+        // Key on the address GROUP/prefix (IPv6 /64, full IPv4) so an attacker
+        // rotating through a /64 cannot bypass the per-IP cap; the log still
+        // shows the full address for diagnosis.
+        const std::string ip = BootstrapServeQuotaKey(pto->addr);
         bool stop = false;
         if (!BootstrapServeAllowChunk(ip, pto->fWhitelisted, GetTimeMillis(), stop)) {
             if (stop) {

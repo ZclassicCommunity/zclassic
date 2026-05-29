@@ -1787,6 +1787,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 else
                     InitWarning(_("Bootstrap snapshots are trusted input; the snapshot tip is verified against the compiled anchor."));
                 BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
+                    if (ShutdownRequested())
+                        break;
                     if (BootstrapFromPeer(peer, GetDataDir(), bootstrap_error)) {
                         bootstrap_snapshot_ran = true;
                         break;
@@ -1802,6 +1804,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 // feed a forged chain.
                 if (!bootstrap_snapshot_ran && !explicit_peer) {
                     BOOST_FOREACH(const std::string& peer, DiscoverBootstrapPeers()) {
+                        if (ShutdownRequested())
+                            break;
                         if (BootstrapFromPeer(peer, GetDataDir(), bootstrap_error)) {
                             bootstrap_snapshot_ran = true;
                             break;

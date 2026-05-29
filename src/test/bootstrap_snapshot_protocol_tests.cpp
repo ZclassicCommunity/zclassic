@@ -33,6 +33,12 @@ extern bool ProcessMessage(CNode* pfrom, std::string strCommand, CDataStream& vR
 // against the global-namespace definition.
 extern const size_t BootstrapServeMaxTrackedIpsForTest();
 
+// Serve-quota bucket-key helper (defined in bootstrap.cpp; collapses an IPv6 /64
+// to one quota bucket while keeping IPv4 full-address). Declared at global scope
+// so it links against the global-namespace definition, mirroring the other
+// test-only seams above.
+extern std::string BootstrapServeQuotaKey(const CNetAddr& addr);
+
 // Windowed minimum-throughput watchdog (defined in bootstrap.cpp, not the
 // public header). Declared at global scope so it links against the
 // global-namespace definition. Caller keeps windowStartMs/bytesAtWindowStart
@@ -571,6 +577,60 @@ BOOST_AUTO_TEST_CASE(bootstrap_serve_quota_hard_caps_tracked_ips)
     // a fresh address and allowed again despite having been charged over cap.
     stop = false;
     BOOST_CHECK(BootstrapServeAllowChunk(victim, false, tFlood, stop));
+    BOOST_CHECK(!stop);
+
+    ClearBootstrapServeQuota();
+    RestoreArg("-bootstrapservemaxbytesperday", hadCap, oldCap);
+    RestoreArg("-bootstrapservethrottlekbps", hadKbps, oldKbps);
+}
+
+BOOST_AUTO_TEST_CASE(bootstrap_serve_quota_keys_ipv6_by_64_prefix)
+{
+    // The serve quota must be keyed on the address GROUP/prefix (IPv6 /64, full
+    // IPv4) so an attacker rotating through a trivially-available IPv6 /64 -- or
+    // a botnet spread across one -- shares a single quota bucket instead of
+    // getting a fresh bucket per address.
+
+    // Two distinct hosts in the SAME /64 collapse to one key...
+    const CNetAddr a("2001:db8:abcd:1234::1");
+    const CNetAddr b("2001:db8:abcd:1234:ffff:ffff:ffff:fffe");
+    BOOST_CHECK_EQUAL(BootstrapServeQuotaKey(a), BootstrapServeQuotaKey(b));
+
+    // ...but a DIFFERENT /64 (one bit different in the 8th network byte) does not.
+    const CNetAddr c("2001:db8:abcd:1235::1");
+    BOOST_CHECK(BootstrapServeQuotaKey(a) != BootstrapServeQuotaKey(c));
+
+    // IPv4 stays full-address: two distinct IPv4 hosts must NOT collapse, even in
+    // the same /16 (the GetGroup() granularity we deliberately avoided).
+    const CNetAddr v4a("203.0.113.7");
+    const CNetAddr v4b("203.0.113.8");
+    BOOST_CHECK(BootstrapServeQuotaKey(v4a) != BootstrapServeQuotaKey(v4b));
+    BOOST_CHECK_EQUAL(BootstrapServeQuotaKey(v4a), std::string("203.0.113.7"));
+
+    // Behavioral check: charging one address in the /64 over the cap rate-limits
+    // the OTHER address in the same /64 (shared bucket).
+    const bool hadCap = mapArgs.count("-bootstrapservemaxbytesperday");
+    const bool hadKbps = mapArgs.count("-bootstrapservethrottlekbps");
+    const std::string oldCap = hadCap ? mapArgs["-bootstrapservemaxbytesperday"] : "";
+    const std::string oldKbps = hadKbps ? mapArgs["-bootstrapservethrottlekbps"] : "";
+
+    ClearBootstrapServeQuota();
+    mapArgs["-bootstrapservemaxbytesperday"] = "1000";
+    mapArgs["-bootstrapservethrottlekbps"] = "0"; // hard stop once over cap
+
+    const int64_t t0 = 1000000;
+    bool stop = false;
+    const std::string keyA = BootstrapServeQuotaKey(a);
+    const std::string keyB = BootstrapServeQuotaKey(b);
+    BOOST_CHECK_EQUAL(keyA, keyB);
+
+    BootstrapServeChargeBytes(keyA, /*whitelisted=*/false, t0, 2000); // over cap via host A
+    // Host B in the same /64 is now rate-limited despite never being charged.
+    BOOST_CHECK(!BootstrapServeAllowChunk(keyB, false, t0, stop));
+    BOOST_CHECK(stop);
+
+    // A host in a different /64 is unaffected.
+    BOOST_CHECK(BootstrapServeAllowChunk(BootstrapServeQuotaKey(c), false, t0, stop));
     BOOST_CHECK(!stop);
 
     ClearBootstrapServeQuota();
@@ -1221,6 +1281,116 @@ BOOST_FIXTURE_TEST_CASE(bootstrap_getbsman_trailing_bytes_misbehaves, TestingSet
     // the Misbehaving call.
     ProcessMessage(&node, NetMsgType::GETBSMAN, payload, GetTime());
 
+    CNodeStateStats after;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), after));
+    BOOST_CHECK_GE(after.nMisbehavior - before.nMisbehavior, 20);
+}
+
+// SEC-4: a malformed (truncated/garbage) payload on a bootstrap handler must be
+// scored INSIDE the handler. Before the fix the deserialization throw unwound to
+// the generic ios_base::failure catch in ProcessMessages(), which accrues no ban
+// score. Each case feeds a deliberately too-short / garbage stream and asserts
+// nMisbehavior climbs by at least 20.
+
+BOOST_FIXTURE_TEST_CASE(bootstrap_bsman_malformed_payload_misbehaves, TestingSetup)
+{
+    CNode node(INVALID_SOCKET, CAddress(CService("127.0.0.1", 0)), "", true);
+    node.nVersion = PROTOCOL_VERSION;
+
+    // One stray byte: far too short to deserialize a manifest -> throws.
+    CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
+    payload << uint8_t(0xff);
+
+    CNodeStateStats before;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), before));
+    ProcessMessage(&node, NetMsgType::BSMAN, payload, GetTime());
+    CNodeStateStats after;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), after));
+    BOOST_CHECK_GE(after.nMisbehavior - before.nMisbehavior, 20);
+}
+
+BOOST_FIXTURE_TEST_CASE(bootstrap_getbschk_malformed_payload_misbehaves, TestingSetup)
+{
+    CNode node(INVALID_SOCKET, CAddress(CService("127.0.0.1", 0)), "", true);
+    node.nVersion = PROTOCOL_VERSION;
+    node.fBootstrapManifestSent = true; // get past the state gate to reach deserialize
+
+    // Truncated fixed-shape request: a single byte cannot fill the struct.
+    CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
+    payload << uint8_t(0x01);
+
+    CNodeStateStats before;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), before));
+    ProcessMessage(&node, NetMsgType::GETBSCHK, payload, GetTime());
+    CNodeStateStats after;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), after));
+    BOOST_CHECK_GE(after.nMisbehavior - before.nMisbehavior, 20);
+}
+
+BOOST_FIXTURE_TEST_CASE(bootstrap_bschk_malformed_payload_misbehaves, TestingSetup)
+{
+    CNode node(INVALID_SOCKET, CAddress(CService("127.0.0.1", 0)), "", true);
+    node.nVersion = PROTOCOL_VERSION;
+
+    // Garbage vData length prefix promising far more bytes than provided so the
+    // CDataStream read runs off the end -> ios_base::failure.
+    CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
+    payload << uint32_t(0) << uint64_t(0); // nFileIndex, nOffset
+    payload << uint8_t(0xff);              // truncated vector length / data
+
+    CNodeStateStats before;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), before));
+    ProcessMessage(&node, NetMsgType::BSCHK, payload, GetTime());
+    CNodeStateStats after;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), after));
+    BOOST_CHECK_GE(after.nMisbehavior - before.nMisbehavior, 20);
+}
+
+BOOST_FIXTURE_TEST_CASE(bootstrap_bspman_malformed_payload_misbehaves, TestingSetup)
+{
+    CNode node(INVALID_SOCKET, CAddress(CService("127.0.0.1", 0)), "", true);
+    node.nVersion = PROTOCOL_VERSION;
+
+    CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
+    payload << uint8_t(0xff);
+
+    CNodeStateStats before;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), before));
+    ProcessMessage(&node, NetMsgType::BSPMAN, payload, GetTime());
+    CNodeStateStats after;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), after));
+    BOOST_CHECK_GE(after.nMisbehavior - before.nMisbehavior, 20);
+}
+
+BOOST_FIXTURE_TEST_CASE(bootstrap_getbspchk_malformed_payload_misbehaves, TestingSetup)
+{
+    CNode node(INVALID_SOCKET, CAddress(CService("127.0.0.1", 0)), "", true);
+    node.nVersion = PROTOCOL_VERSION;
+    node.fBootstrapParamManifestSent = true; // get past the state gate
+
+    CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
+    payload << uint8_t(0x01);
+
+    CNodeStateStats before;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), before));
+    ProcessMessage(&node, NetMsgType::GETBSPCHK, payload, GetTime());
+    CNodeStateStats after;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), after));
+    BOOST_CHECK_GE(after.nMisbehavior - before.nMisbehavior, 20);
+}
+
+BOOST_FIXTURE_TEST_CASE(bootstrap_bspchk_malformed_payload_misbehaves, TestingSetup)
+{
+    CNode node(INVALID_SOCKET, CAddress(CService("127.0.0.1", 0)), "", true);
+    node.nVersion = PROTOCOL_VERSION;
+
+    CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
+    payload << uint32_t(0) << uint64_t(0);
+    payload << uint8_t(0xff);
+
+    CNodeStateStats before;
+    BOOST_REQUIRE(GetNodeStateStats(node.GetId(), before));
+    ProcessMessage(&node, NetMsgType::BSPCHK, payload, GetTime());
     CNodeStateStats after;
     BOOST_REQUIRE(GetNodeStateStats(node.GetId(), after));
     BOOST_CHECK_GE(after.nMisbehavior - before.nMisbehavior, 20);
