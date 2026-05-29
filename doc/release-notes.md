@@ -21,5 +21,19 @@ transaction index (used by the `getrawtransaction` RPC) and want the old
 behavior can pass `-txindex=0`. Note that a chainstate imported from a ZClassic
 bootstrap snapshot is txindex'd, so `-txindex=0` is only appropriate for a node
 that syncs from genesis; importing a txindex'd snapshot into a `-txindex=0` node
-will fail to open the database. `-txindex` remains incompatible with `-prune`.
+will fail to open the database. `-txindex` is incompatible with `-prune`: a pruned
+node automatically disables the transaction index (it soft-sets `-txindex=0`), and
+passing `-prune` together with an explicit `-txindex=1` is rejected at startup.
+
+
+Automatic download of `zclassic.conf` has been removed
+------------------------------------------------------
+
+Previous releases, on a fresh datadir with no configuration file, downloaded a
+default `zclassic.conf` over HTTP (from Arweave) during startup. That behavior —
+and the bundled HTTP/`libcurl` dependency it relied on — has been removed along
+with the old Arweave/HTTP bootstrap. A fresh node now starts with built-in
+defaults and never fetches a config file over the network. To customize a node,
+create `zclassic.conf` in the datadir yourself (or pass options on the command
+line / via `-conf=`); see the example configuration and the `-conf` documentation.
 

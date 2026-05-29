@@ -58,9 +58,14 @@ operator can still prefer a trusted peer or use Option A.
 
 ```bash
 ./src/zclassicd                                   # default: fast-sync from a bootstrap peer
-./src/zclassicd -bootstrappeer=192.0.2.10:8033    # choose the peer explicitly
+./src/zclassicd -bootstrappeer=192.0.2.10:8034    # choose the peer explicitly
 ./src/zclassicd -bootstrapdatadir=/path/to/snap   # import from a local prepared dir
 ```
+
+`-bootstrappeer` takes the serving node's actual `host:port`. A bootstrap-serving
+node may listen on a port other than the standard P2P port (8033) — the project's
+compiled default serving peer listens on **8034** — so use the server's real port,
+not 8033, when pointing at one explicitly.
 
 The default fast-sync is best-effort: if no bootstrap peer is reachable the node
 silently falls back to Option A (normal sync from genesis), so a compromised or
@@ -316,8 +321,10 @@ the UTXO set from genesis, so it could never complete validation. The node refus
 the combination at startup.
 
 Watch progress with `getblockchaininfo`, which reports a `bootstrap_validation`
-object: `state` (`disabled` | `provisional` | `provisional_pruned` | `validated`
-| `failed`), the snapshot `height`, `validated_height`, and `progress` `[0..1]`.
+object whose `state` is `disabled` | `provisional` | `provisional_pruned` |
+`validated` | `failed`, plus the snapshot `height`, `blockhash`, `commitment`,
+`validated_height`, `blocks_remaining`, and `progress` `[0..1]` (see the
+`getblockchaininfo` help for the authoritative field list).
 
 Trust note: between provisional accept and the `validated` latch the node operates
 on an **unverified** UTXO set, for as long as a full genesis→tip re-derivation

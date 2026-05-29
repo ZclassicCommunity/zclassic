@@ -83,7 +83,7 @@ PREV_HOST=""
 echo "==> [2/4] autogen + configure"
 ./autogen.sh
 # shellcheck disable=SC2086
-CONFIG_SITE="$CONFIG_SITE_FILE" ./configure --prefix=/ --disable-tests --disable-bench $CONFIGURE_FLAGS
+CONFIG_SITE="$CONFIG_SITE_FILE" ./configure --prefix=/ --disable-tests $CONFIGURE_FLAGS
 
 if [ -n "$PREV_HOST" ] && [ "$PREV_HOST" != "$HOST" ]; then
     echo "==> host changed ($PREV_HOST -> $HOST): cleaning stale build outputs to avoid mixing object architectures"
