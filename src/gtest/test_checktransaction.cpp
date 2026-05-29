@@ -32,11 +32,12 @@ TEST(checktransaction_tests, check_vpub_not_both_nonzero) {
 
 class MockCValidationState : public CValidationState {
 public:
-    MOCK_METHOD5(DoS, bool(int level, bool ret,
-             unsigned int chRejectCodeIn, std::string strRejectReasonIn,
-             bool corruptionIn));
-    MOCK_METHOD3(Invalid, bool(bool ret,
-                 unsigned int _chRejectCode, std::string _strRejectReason));
+    MOCK_METHOD6(DoS, bool(int level, bool ret,
+             unsigned int chRejectCodeIn, const std::string &strRejectReasonIn,
+             bool corruptionIn, const std::string &strDebugMessageIn));
+    MOCK_METHOD4(Invalid, bool(bool ret,
+                 unsigned char _chRejectCode, const std::string &_strRejectReason,
+                 const std::string &_strDebugMessage));
     MOCK_METHOD1(Error, bool(std::string strRejectReasonIn));
     MOCK_CONST_METHOD0(IsValid, bool());
     MOCK_CONST_METHOD0(IsInvalid, bool());
@@ -110,7 +111,7 @@ TEST(checktransaction_tests, BadVersionTooLow) {
 
     CTransaction tx(mtx);
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-version-too-low", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-version-too-low", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -121,7 +122,7 @@ TEST(checktransaction_tests, bad_txns_vin_empty) {
 
     CTransaction tx(mtx);
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(10, false, REJECT_INVALID, "bad-txns-vin-empty", false)).Times(1);
+    EXPECT_CALL(state, DoS(10, false, REJECT_INVALID, "bad-txns-vin-empty", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -133,7 +134,7 @@ TEST(checktransaction_tests, bad_txns_vout_empty) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(10, false, REJECT_INVALID, "bad-txns-vout-empty", false)).Times(1);
+    EXPECT_CALL(state, DoS(10, false, REJECT_INVALID, "bad-txns-vout-empty", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -166,13 +167,20 @@ TEST(checktransaction_tests, BadTxnsOversize) {
         MockCValidationState state;
         EXPECT_TRUE(CheckTransactionWithoutProofVerification(tx, state));
 
-        // ... but fails contextual ones!
-        EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-oversize", false)).Times(1);
-        EXPECT_FALSE(ContextualCheckTransaction(tx, state, 1, 100));
+        // ... but fails contextual ones! (Force IBD off: ZClassic skips
+        // ContextualCheckTransaction during initial block download.)
+        EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-oversize", false, ::testing::_)).Times(1);
+        EXPECT_FALSE(ContextualCheckTransaction(tx, state, 1, 100, []() { return false; }));
     }
 
     {
-        // But should be fine again once Sapling activates!
+        // But a transaction that is oversize under Sprout rules (> the
+        // pre-Sapling limit of MAX_TX_SIZE_BEFORE_SAPLING) can be fine once
+        // Sapling activates, because the limit increases to
+        // MAX_TX_SIZE_AFTER_SAPLING. ZClassic's window between the two limits
+        // is smaller than the Sapling encoding overhead, so we size the
+        // scriptSig so the Sapling form lands inside the (BEFORE, AFTER] window
+        // rather than reusing the exact pre-Sapling transaction.
         RegtestActivateSapling();
 
         mtx.fOverwintered = true;
@@ -184,12 +192,22 @@ TEST(checktransaction_tests, BadTxnsOversize) {
         mtx.vjoinsplit[1].proof = libzcash::GrothProof();
         CreateJoinSplitSignature(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId);
 
+        // Trim the scriptSig until the Sapling transaction is one byte over the
+        // pre-Sapling limit but still within the (larger) post-Sapling limit.
+        const unsigned int target = MAX_TX_SIZE_BEFORE_SAPLING + 1;
+        while (::GetSerializeSize(CTransaction(mtx), SER_NETWORK, PROTOCOL_VERSION) > target
+               && !mtx.vin[0].scriptSig.empty()) {
+            mtx.vin[0].scriptSig.pop_back();
+        }
+
         CTransaction tx(mtx);
-        EXPECT_EQ(::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION), 103713);
+        unsigned int txSize = ::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION);
+        EXPECT_GT(txSize, MAX_TX_SIZE_BEFORE_SAPLING);
+        EXPECT_LE(txSize, MAX_TX_SIZE_AFTER_SAPLING);
 
         MockCValidationState state;
         EXPECT_TRUE(CheckTransactionWithoutProofVerification(tx, state));
-        EXPECT_TRUE(ContextualCheckTransaction(tx, state, 1, 100));
+        EXPECT_TRUE(ContextualCheckTransaction(tx, state, 1, 100, []() { return false; }));
 
         // Revert to default
         RegtestDeactivateSapling();
@@ -209,14 +227,21 @@ TEST(checktransaction_tests, OversizeSaplingTxns) {
     mtx.vjoinsplit[1].proof = libzcash::GrothProof();
     CreateJoinSplitSignature(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId);
 
-    // Transaction just under the limit
+    // Pad vin[0] until the transaction is exactly one byte under the Sapling
+    // size limit. ZClassic uses a smaller MAX_TX_SIZE_AFTER_SAPLING than
+    // upstream Zcash, so the padding is computed dynamically rather than with
+    // hard-coded iteration counts.
     mtx.vin[0].scriptSig = CScript();
     std::vector<unsigned char> vchData(520);
-    for (unsigned int i = 0; i < 3809; ++i)
+    while (::GetSerializeSize(CTransaction(mtx), SER_NETWORK, PROTOCOL_VERSION)
+               + (int)(vchData.size() + 4) <= MAX_TX_SIZE_AFTER_SAPLING - 1) {
         mtx.vin[0].scriptSig << vchData << OP_DROP;
-    std::vector<unsigned char> vchDataRemainder(453);
-    mtx.vin[0].scriptSig << vchDataRemainder << OP_DROP;
-    mtx.vin[0].scriptSig << OP_1;
+    }
+    // Top up with single-byte OP_1 pushes until exactly one byte under limit.
+    while (::GetSerializeSize(CTransaction(mtx), SER_NETWORK, PROTOCOL_VERSION)
+               < MAX_TX_SIZE_AFTER_SAPLING - 1) {
+        mtx.vin[0].scriptSig << OP_1;
+    }
 
     {
         CTransaction tx(mtx);
@@ -245,7 +270,7 @@ TEST(checktransaction_tests, OversizeSaplingTxns) {
         EXPECT_EQ(::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION), MAX_TX_SIZE_AFTER_SAPLING + 1);
 
         MockCValidationState state;
-        EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-oversize", false)).Times(1);
+        EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-oversize", false, ::testing::_)).Times(1);
         EXPECT_FALSE(CheckTransactionWithoutProofVerification(tx, state));
     }
 
@@ -260,7 +285,7 @@ TEST(checktransaction_tests, bad_txns_vout_negative) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-vout-negative", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-vout-negative", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -271,7 +296,7 @@ TEST(checktransaction_tests, bad_txns_vout_toolarge) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-vout-toolarge", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-vout-toolarge", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -283,7 +308,7 @@ TEST(checktransaction_tests, bad_txns_txouttotal_toolarge_outputs) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-txouttotal-toolarge", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-txouttotal-toolarge", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -294,7 +319,7 @@ TEST(checktransaction_tests, ValueBalanceNonZero) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-valuebalance-nonzero", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-valuebalance-nonzero", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -306,7 +331,7 @@ TEST(checktransaction_tests, PositiveValueBalanceTooLarge) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-valuebalance-toolarge", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-valuebalance-toolarge", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -318,7 +343,7 @@ TEST(checktransaction_tests, NegativeValueBalanceTooLarge) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-valuebalance-toolarge", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-valuebalance-toolarge", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -331,7 +356,7 @@ TEST(checktransaction_tests, ValueBalanceOverflowsTotal) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-txouttotal-toolarge", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-txouttotal-toolarge", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -343,7 +368,7 @@ TEST(checktransaction_tests, bad_txns_txouttotal_toolarge_joinsplit) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-txouttotal-toolarge", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-txouttotal-toolarge", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -355,7 +380,7 @@ TEST(checktransaction_tests, bad_txns_txintotal_toolarge_joinsplit) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-txintotal-toolarge", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-txintotal-toolarge", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -366,7 +391,7 @@ TEST(checktransaction_tests, bad_txns_vpub_old_negative) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-vpub_old-negative", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-vpub_old-negative", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -377,7 +402,7 @@ TEST(checktransaction_tests, bad_txns_vpub_new_negative) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-vpub_new-negative", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-vpub_new-negative", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -388,7 +413,7 @@ TEST(checktransaction_tests, bad_txns_vpub_old_toolarge) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-vpub_old-toolarge", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-vpub_old-toolarge", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -399,7 +424,7 @@ TEST(checktransaction_tests, bad_txns_vpub_new_toolarge) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-vpub_new-toolarge", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-vpub_new-toolarge", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -411,7 +436,7 @@ TEST(checktransaction_tests, bad_txns_vpubs_both_nonzero) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-vpubs-both-nonzero", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-vpubs-both-nonzero", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -423,7 +448,7 @@ TEST(checktransaction_tests, bad_txns_inputs_duplicate) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-inputs-duplicate", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-inputs-duplicate", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -435,7 +460,7 @@ TEST(checktransaction_tests, bad_joinsplits_nullifiers_duplicate_same_joinsplit)
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-joinsplits-nullifiers-duplicate", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-joinsplits-nullifiers-duplicate", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -447,7 +472,7 @@ TEST(checktransaction_tests, bad_joinsplits_nullifiers_duplicate_different_joins
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-joinsplits-nullifiers-duplicate", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-joinsplits-nullifiers-duplicate", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -463,7 +488,7 @@ TEST(checktransaction_tests, bad_cb_has_joinsplits) {
     EXPECT_TRUE(tx.IsCoinBase());
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-cb-has-joinsplits", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-cb-has-joinsplits", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -479,7 +504,7 @@ TEST(checktransaction_tests, bad_cb_empty_scriptsig) {
     EXPECT_TRUE(tx.IsCoinBase());
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-cb-length", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-cb-length", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -491,7 +516,7 @@ TEST(checktransaction_tests, bad_txns_prevout_null) {
     EXPECT_FALSE(tx.IsCoinBase());
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(10, false, REJECT_INVALID, "bad-txns-prevout-null", false)).Times(1);
+    EXPECT_CALL(state, DoS(10, false, REJECT_INVALID, "bad-txns-prevout-null", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -503,10 +528,11 @@ TEST(checktransaction_tests, bad_txns_invalid_joinsplit_signature) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    // during initial block download, DoS ban score should be zero, else 100
-    EXPECT_CALL(state, DoS(0, false, REJECT_INVALID, "bad-txns-invalid-joinsplit-signature", false)).Times(1);
-    ContextualCheckTransaction(tx, state, 0, 100, []() { return true; });
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-invalid-joinsplit-signature", false)).Times(1);
+    // ZClassic skips ContextualCheckTransaction entirely during initial block
+    // download (see commit "speed up initial sync"), so no DoS is reported in
+    // IBD. Once IBD has finished, the invalid joinsplit signature is rejected
+    // with the full DoS ban score.
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-invalid-joinsplit-signature", false, ::testing::_)).Times(1);
     ContextualCheckTransaction(tx, state, 0, 100, []() { return false; });
 }
 
@@ -539,10 +565,11 @@ TEST(checktransaction_tests, non_canonical_ed25519_signature) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    // during initial block download, DoS ban score should be zero, else 100
-    EXPECT_CALL(state, DoS(0, false, REJECT_INVALID, "bad-txns-invalid-joinsplit-signature", false)).Times(1);
-    ContextualCheckTransaction(tx, state, 0, 100, []() { return true; });
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-invalid-joinsplit-signature", false)).Times(1);
+    // ZClassic skips ContextualCheckTransaction entirely during initial block
+    // download (see commit "speed up initial sync"), so no DoS is reported in
+    // IBD. Once IBD has finished, the non-canonical signature is rejected with
+    // the full DoS ban score.
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-invalid-joinsplit-signature", false, ::testing::_)).Times(1);
     ContextualCheckTransaction(tx, state, 0, 100, []() { return false; });
 }
 
@@ -677,7 +704,7 @@ TEST(checktransaction_tests, OverwinterExpiryHeight) {
         mtx.nExpiryHeight = TX_EXPIRY_HEIGHT_THRESHOLD;
         CTransaction tx(mtx);
         MockCValidationState state;
-        EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-tx-expiry-height-too-high", false)).Times(1);
+        EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-tx-expiry-height-too-high", false, ::testing::_)).Times(1);
         CheckTransactionWithoutProofVerification(tx, state);
     }
 
@@ -685,7 +712,7 @@ TEST(checktransaction_tests, OverwinterExpiryHeight) {
         mtx.nExpiryHeight = std::numeric_limits<uint32_t>::max();
         CTransaction tx(mtx);
         MockCValidationState state;
-        EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-tx-expiry-height-too-high", false)).Times(1);
+        EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-tx-expiry-height-too-high", false, ::testing::_)).Times(1);
         CheckTransactionWithoutProofVerification(tx, state);
     }
 }
@@ -709,7 +736,7 @@ TEST(checktransaction_tests, SproutTxVersionTooLow) {
 
     CTransaction tx(mtx);
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-version-too-low", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-version-too-low", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -771,7 +798,7 @@ TEST(checktransaction_tests, SaplingSproutInputSumsTooLarge) {
     {
         UNSAFE_CTransaction tx(mtx);
         MockCValidationState state;
-        EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-txintotal-toolarge", false)).Times(1);
+        EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-txintotal-toolarge", false, ::testing::_)).Times(1);
         CheckTransactionWithoutProofVerification(tx, state);
     }
 }
@@ -787,7 +814,7 @@ TEST(checktransaction_tests, OverwinterVersionNumberLow) {
 
     UNSAFE_CTransaction tx(mtx);
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-tx-overwinter-version-too-low", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-tx-overwinter-version-too-low", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -805,8 +832,9 @@ TEST(checktransaction_tests, OverwinterVersionNumberHigh) {
 
     UNSAFE_CTransaction tx(mtx);
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-tx-overwinter-version-too-high", false)).Times(1);
-    ContextualCheckTransaction(tx, state, 1, 100);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-tx-overwinter-version-too-high", false, ::testing::_)).Times(1);
+    // Force IBD off: ZClassic skips ContextualCheckTransaction during IBD.
+    ContextualCheckTransaction(tx, state, 1, 100, []() { return false; });
 
     // Revert to default
     UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
@@ -824,7 +852,7 @@ TEST(checktransaction_tests, OverwinterBadVersionGroupId) {
 
     UNSAFE_CTransaction tx(mtx);
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-tx-version-group-id", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-tx-version-group-id", false, ::testing::_)).Times(1);
     CheckTransactionWithoutProofVerification(tx, state);
 }
 
@@ -840,10 +868,11 @@ TEST(checktransaction_tests, OverwinterNotActive) {
 
     CTransaction tx(mtx);
     MockCValidationState state;
-    // during initial block download, DoS ban score should be zero, else 100
-    EXPECT_CALL(state, DoS(0, false, REJECT_INVALID, "tx-overwinter-not-active", false)).Times(1);
-    ContextualCheckTransaction(tx, state, 1, 100, []() { return true; });
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "tx-overwinter-not-active", false)).Times(1);
+    // ZClassic skips ContextualCheckTransaction entirely during initial block
+    // download (see commit "speed up initial sync"), so no DoS is reported in
+    // IBD. Once IBD has finished, the Overwinter-before-activation transaction
+    // is rejected with the full DoS ban score.
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "tx-overwinter-not-active", false, ::testing::_)).Times(1);
     ContextualCheckTransaction(tx, state, 1, 100, []() { return false; });
 }
 
@@ -860,8 +889,9 @@ TEST(checktransaction_tests, OverwinterFlagNotSet) {
 
     CTransaction tx(mtx);
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "tx-overwinter-flag-not-set", false)).Times(1);
-    ContextualCheckTransaction(tx, state, 1, 100);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "tx-overwinter-flag-not-set", false, ::testing::_)).Times(1);
+    // Force IBD off: ZClassic skips ContextualCheckTransaction during IBD.
+    ContextualCheckTransaction(tx, state, 1, 100, []() { return false; });
 
     // Revert to default
     UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);

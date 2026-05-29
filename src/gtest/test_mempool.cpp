@@ -72,6 +72,32 @@ public:
     }
 };
 
+// RAII helper that installs a synthetic chain tip so that
+// IsInitialBlockDownload() returns false for the duration of a test.
+//
+// ZClassic's ContextualCheckTransaction returns early (accepting the tx)
+// whenever IsInitialBlockDownload() is true (see commit "speed up initial
+// sync"). The gtest environment has no chain, so IBD is true and the
+// Overwinter/Sapling rejection rules in AcceptToMemoryPool never run. Without
+// them the code falls through to CCoinsViewCache::HaveCoins(), which
+// dereferences the uninitialized global pcoinsTip and crashes. Installing a
+// tip with maximal work and a current timestamp makes IBD latch to false so
+// the contextual consensus rules actually reject the transaction first.
+class FakeChainTip {
+public:
+    FakeChainTip() {
+        fakeTip.nChainWork = ~arith_uint256(0);
+        fakeTip.nTime = GetTime();
+        fakeTip.nHeight = 0;
+        chainActive.SetTip(&fakeTip);
+    }
+    ~FakeChainTip() {
+        chainActive.SetTip(NULL);
+    }
+private:
+    CBlockIndex fakeTip;
+};
+
 TEST(Mempool, PriorityStatsDoNotCrash) {
     // Test for security issue 2017-04-11.a
     // https://z.cash/blog/security-announcement-2017-04-12.html
@@ -171,6 +197,10 @@ TEST(Mempool, OverwinterNotActiveYet) {
     SelectParams(CBaseChainParams::REGTEST);
     UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
 
+    // Disable IBD so AcceptToMemoryPool actually runs ContextualCheckTransaction
+    // and rejects the transaction before touching the (uninitialized) coins view.
+    FakeChainTip fakeChainTip;
+
     CTxMemPool pool(::minRelayTxFee);
     bool missingInputs;
     CMutableTransaction mtx = GetValidTransaction();
@@ -217,6 +247,10 @@ TEST(Mempool, SproutV3TxFailsAsExpected) {
 TEST(Mempool, SproutV3TxWhenOverwinterActive) {
     SelectParams(CBaseChainParams::REGTEST);
     UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, Consensus::NetworkUpgrade::ALWAYS_ACTIVE);
+
+    // Disable IBD so AcceptToMemoryPool actually runs ContextualCheckTransaction
+    // and rejects the transaction before touching the (uninitialized) coins view.
+    FakeChainTip fakeChainTip;
 
     CTxMemPool pool(::minRelayTxFee);
     bool missingInputs;
