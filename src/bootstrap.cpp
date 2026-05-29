@@ -38,6 +38,7 @@
 #if defined(WIN32)
 #include <io.h>
 #else
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -1645,20 +1646,58 @@ bool SetupAutoBootstrapServe(const boost::filesystem::path& data_dir, std::strin
 // marker so the post-database-open init step can run the provisional gate even
 // across a restart between install and verification. The marker is a sibling file
 // in the datadir; cleared once the background validator's durable state takes over.
+// Write `contents` to `path` and make it DURABLE: the file's data and its
+// directory entry must survive a power-loss, so a crash immediately afterwards
+// cannot lose it. Used for the bootstrap verification-pending markers, which MUST
+// outlive the install->verify window (see BootstrapFromPeer): if the marker were
+// lost, an imported (possibly forged) UTXO set would be trusted with no further
+// check. Returns false (with `err` set) if the marker could not be made durable.
+static bool WriteDurableDatadirMarker(const boost::filesystem::path& path,
+                                      const std::string& contents, std::string& err)
+{
+    FILE* f = fopen(path.string().c_str(), "w");
+    if (!f) {
+        err = strprintf("could not open %s for writing", path.string());
+        return false;
+    }
+    if (!contents.empty() && fwrite(contents.data(), 1, contents.size(), f) != contents.size()) {
+        fclose(f);
+        err = strprintf("could not write %s", path.string());
+        return false;
+    }
+    FileCommit(f); // fsync the file's data before we rely on it
+    if (fclose(f) != 0) {
+        err = strprintf("could not flush %s", path.string());
+        return false;
+    }
+#ifndef WIN32
+    // fsync the containing directory so the new file's directory entry is durable
+    // (fsync'ing the file alone does not guarantee the link is persisted). Best
+    // effort: on platforms/filesystems where this is unsupported the file fsync
+    // above already covers the common crash window.
+    int dirfd = open(path.parent_path().string().c_str(), O_RDONLY);
+    if (dirfd >= 0) {
+        fsync(dirfd);
+        close(dirfd);
+    }
+#endif
+    return true;
+}
+
 static boost::filesystem::path BootstrapTrustlessPendingPath(const boost::filesystem::path& data_dir)
 {
     return data_dir / "bootstrap-trustless-pending";
 }
 
-void WriteBootstrapTrustlessPending(const boost::filesystem::path& data_dir, int height, const uint256& hashBlock, const uint256& commitment)
+bool WriteBootstrapTrustlessPending(const boost::filesystem::path& data_dir, int height, const uint256& hashBlock, const uint256& commitment)
 {
-    FILE* f = fopen(BootstrapTrustlessPendingPath(data_dir).string().c_str(), "w");
-    if (!f) {
-        LogPrintf("Trustless bootstrap: could not write pending marker\n");
-        return;
+    std::string err;
+    const std::string line = strprintf("%d %s %s\n", height, hashBlock.ToString(), commitment.ToString());
+    if (!WriteDurableDatadirMarker(BootstrapTrustlessPendingPath(data_dir), line, err)) {
+        LogPrintf("Trustless bootstrap: could not write pending marker: %s\n", err);
+        return false;
     }
-    fprintf(f, "%d %s %s\n", height, hashBlock.ToString().c_str(), commitment.ToString().c_str());
-    fclose(f);
+    return true;
 }
 
 bool BootstrapTrustlessPendingExists(const boost::filesystem::path& data_dir)
@@ -1669,6 +1708,41 @@ bool BootstrapTrustlessPendingExists(const boost::filesystem::path& data_dir)
 void BootstrapTrustlessPendingClear(const boost::filesystem::path& data_dir)
 {
     boost::filesystem::remove(BootstrapTrustlessPendingPath(data_dir));
+}
+
+// Anchor-mode counterpart of the trustless pending marker. Its presence means an
+// imported snapshot was installed in anchor mode and still needs its UTXO-set
+// commitment verified against the COMPILED anchor (VerifyImportedBootstrapAnchor).
+// Like the trustless marker it is written (and fsync'd) BEFORE the chainstate is
+// moved into the datadir, so a crash in the install->verify window cannot bypass
+// the only anchor-mode forgery check: on the next start the check runs because the
+// marker is present, even though the in-memory "bootstrap ran this session" flag
+// was lost. height/hashBlock are recorded for diagnostics only; verification
+// always compares the imported chainstate against the compiled anchor.
+static boost::filesystem::path BootstrapAnchorPendingPath(const boost::filesystem::path& data_dir)
+{
+    return data_dir / "bootstrap-anchor-pending";
+}
+
+bool WriteBootstrapAnchorPending(const boost::filesystem::path& data_dir, int height, const uint256& hashBlock)
+{
+    std::string err;
+    const std::string line = strprintf("%d %s\n", height, hashBlock.ToString());
+    if (!WriteDurableDatadirMarker(BootstrapAnchorPendingPath(data_dir), line, err)) {
+        LogPrintf("Bootstrap: could not write anchor pending marker: %s\n", err);
+        return false;
+    }
+    return true;
+}
+
+bool BootstrapAnchorPendingExists(const boost::filesystem::path& data_dir)
+{
+    return boost::filesystem::exists(BootstrapAnchorPendingPath(data_dir));
+}
+
+void BootstrapAnchorPendingClear(const boost::filesystem::path& data_dir)
+{
+    boost::filesystem::remove(BootstrapAnchorPendingPath(data_dir));
 }
 
 static bool ReadBootstrapTrustlessPending(const boost::filesystem::path& data_dir, BootstrapServeMeta& meta)
@@ -1856,20 +1930,44 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
             }
         }
 
-        if (!InstallStagedBootstrapChainData(staging, data_dir, error)) {
-            return false;
+        // Record a DURABLE, fsync'd verification-pending marker BEFORE moving the
+        // chain data into the datadir. The install (rename) is the point of no
+        // return: once blocks/ and chainstate/ exist the datadir is no longer
+        // "fresh", so bootstrap will not re-run on a restart. If a crash struck
+        // between the install and the post-database-open verification, the only
+        // record that the snapshot still needs checking would be the in-memory
+        // bootstrap_snapshot_ran flag (anchor mode) — which a crash loses —
+        // leaving a never-verified, possibly-forged UTXO set trusted forever.
+        // Persisting the marker first makes verification gated on durable state:
+        // the post-database-open init step keys off the marker, not the in-memory
+        // flag. Trustless v2 snapshots record height/hash/commitment for the
+        // provisional gate + background validator; anchor-mode snapshots record a
+        // marker whose presence triggers VerifyImportedBootstrapAnchor.
+        const bool fTrustlessV2 = (fTrustless && manifest.nVersion >= 2);
+        if (fTrustlessV2) {
+            if (!WriteBootstrapTrustlessPending(data_dir, manifest.nHeight, manifest.hashBlock,
+                                                manifest.hashChainstateSerialized)) {
+                boost::filesystem::remove_all(staging);
+                error = "could not persist trustless bootstrap verification marker";
+                return false;
+            }
+        } else {
+            if (!WriteBootstrapAnchorPending(data_dir, manifest.nHeight, manifest.hashBlock)) {
+                boost::filesystem::remove_all(staging);
+                error = "could not persist anchor bootstrap verification marker";
+                return false;
+            }
         }
 
-        // Option B: a v2 self-snapshot accepted in TRUSTLESS mode is accepted only
-        // provisionally. Record the advertised height/hash/commitment so the
-        // post-database-open init step can run the provisional gate and start
-        // background validation (survives a restart between install and
-        // verification). In anchor mode a v2 manifest only validates if it equals
-        // the compiled anchor, so it goes through the normal anchor-verify path
-        // (VerifyImportedBootstrapAnchor) instead — don't write the marker.
-        if (fTrustless && manifest.nVersion >= 2) {
-            WriteBootstrapTrustlessPending(data_dir, manifest.nHeight, manifest.hashBlock,
-                manifest.hashChainstateSerialized);
+        if (!InstallStagedBootstrapChainData(staging, data_dir, error)) {
+            // The install failed and cleaned up any partial data; drop the marker
+            // we just wrote so a restart does not try to verify a snapshot that
+            // was never installed.
+            if (fTrustlessV2)
+                BootstrapTrustlessPendingClear(data_dir);
+            else
+                BootstrapAnchorPendingClear(data_dir);
+            return false;
         }
     } catch (const boost::filesystem::filesystem_error& e) {
         CloseSocket(socket);

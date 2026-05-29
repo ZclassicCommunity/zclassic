@@ -152,9 +152,17 @@ bool ValidateBootstrapSnapshotManifest(const CBootstrapSnapshotManifest& manifes
 //! Record that a v2 self-snapshot was just imported and awaits provisional
 //! acceptance + background validation (a datadir-sibling marker, so it survives a
 //! restart between install and verification).
-void WriteBootstrapTrustlessPending(const boost::filesystem::path& data_dir, int height, const uint256& hashBlock, const uint256& commitment);
+bool WriteBootstrapTrustlessPending(const boost::filesystem::path& data_dir, int height, const uint256& hashBlock, const uint256& commitment);
 bool BootstrapTrustlessPendingExists(const boost::filesystem::path& data_dir);
 void BootstrapTrustlessPendingClear(const boost::filesystem::path& data_dir);
+//! Anchor-mode counterpart: written (and fsync'd) BEFORE an imported snapshot's
+//! chainstate is installed, so VerifyImportedBootstrapAnchor still runs on the next
+//! start if a crash in the install->verify window lost the in-memory "bootstrap ran
+//! this session" flag. Its presence — not an in-memory bool — gates the only
+//! anchor-mode forgery check. See bootstrap.cpp / init.cpp AppInit2.
+bool WriteBootstrapAnchorPending(const boost::filesystem::path& data_dir, int height, const uint256& hashBlock);
+bool BootstrapAnchorPendingExists(const boost::filesystem::path& data_dir);
+void BootstrapAnchorPendingClear(const boost::filesystem::path& data_dir);
 //! Cheap provisional gate (integrity + checkpoints + tip PoW) run after a
 //! trustless snapshot is imported and the chain databases are open. NOT full
 //! trust — the background validator re-derives the UTXO set from genesis and

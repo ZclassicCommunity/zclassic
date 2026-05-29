@@ -1736,4 +1736,76 @@ BOOST_AUTO_TEST_CASE(bootstrap_validation_finalization_hold)
     BOOST_CHECK(!BootstrapValidationHoldsFinalization());
 }
 
+// Crash-safety of the bootstrap install->verify handshake (STAB-N1 regression).
+//
+// The forgery check that makes a bootstrap snapshot safe to accept — anchor mode:
+// VerifyImportedBootstrapAnchor (UTXO commitment vs the compiled anchor); trustless
+// mode: ProvisionalAcceptTrustlessSnapshot + background re-derivation — runs AFTER
+// the chain databases open, while the snapshot's chainstate has already been moved
+// into the datadir. If the only record that "this snapshot still needs verifying"
+// were an in-memory flag, a crash in that window would, on restart, leave the
+// datadir non-fresh (so bootstrap does not re-run) with the flag lost (so the check
+// never runs) — silently trusting a never-verified, possibly-forged UTXO set.
+//
+// The fix makes that record DURABLE: a marker is written (and fsync'd) BEFORE the
+// install, and AppInit2 gates verification on the marker's presence, not on any
+// in-memory flag. This test pins the marker lifecycle that underpins that contract:
+// once written, the marker the post-restart gate keys off exists independently of
+// process state, and survives until verification explicitly clears it.
+BOOST_AUTO_TEST_CASE(bootstrap_pending_markers_are_durable_and_gate_verification)
+{
+    namespace fs = boost::filesystem;
+
+    // --- anchor-mode marker (the production-default path) ---
+    {
+        const fs::path data_dir = fs::temp_directory_path() / fs::unique_path("zclassic-bs-anchor-pending-%%%%-%%%%-%%%%");
+        fs::create_directories(data_dir);
+
+        // A fresh datadir has no pending marker, so a normal (non-bootstrap) start
+        // never runs the anchor-verify gate.
+        BOOST_CHECK(!BootstrapAnchorPendingExists(data_dir));
+
+        // BootstrapFromPeer writes this BEFORE installing the chainstate. It must
+        // be durable and present immediately — this is exactly what a post-crash
+        // restart sees, with no in-memory state carried over.
+        BOOST_REQUIRE(WriteBootstrapAnchorPending(data_dir, 3126937, uint256S("0xabc123")));
+        BOOST_CHECK(BootstrapAnchorPendingExists(data_dir));
+
+        // It is a real on-disk file (durable), not just in-memory state, and it
+        // records the diagnostic height/hash line.
+        const fs::path marker = data_dir / "bootstrap-anchor-pending";
+        BOOST_REQUIRE(fs::exists(marker));
+        BOOST_CHECK(fs::file_size(marker) > 0);
+
+        // Only an explicit clear (which AppInit2 does after the commitment check
+        // passes, or after discarding a rejected snapshot) removes it.
+        BootstrapAnchorPendingClear(data_dir);
+        BOOST_CHECK(!BootstrapAnchorPendingExists(data_dir));
+
+        fs::remove_all(data_dir);
+    }
+
+    // --- trustless-mode marker (off-by-default Option B path) ---
+    {
+        const fs::path data_dir = fs::temp_directory_path() / fs::unique_path("zclassic-bs-trustless-pending-%%%%-%%%%-%%%%");
+        fs::create_directories(data_dir);
+
+        BOOST_CHECK(!BootstrapTrustlessPendingExists(data_dir));
+        // Now returns success/failure (it must, so BootstrapFromPeer can refuse to
+        // install when the verification intent could not be persisted).
+        BOOST_REQUIRE(WriteBootstrapTrustlessPending(data_dir, 4000000,
+            uint256S("0xdef456"), uint256S("0x0789ab")));
+        BOOST_CHECK(BootstrapTrustlessPendingExists(data_dir));
+
+        const fs::path marker = data_dir / "bootstrap-trustless-pending";
+        BOOST_REQUIRE(fs::exists(marker));
+        BOOST_CHECK(fs::file_size(marker) > 0);
+
+        BootstrapTrustlessPendingClear(data_dir);
+        BOOST_CHECK(!BootstrapTrustlessPendingExists(data_dir));
+
+        fs::remove_all(data_dir);
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

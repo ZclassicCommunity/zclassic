@@ -2138,14 +2138,27 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         BootstrapTrustlessPendingClear(GetDataDir());
         LogPrintf("Bootstrap snapshot provisionally accepted at height %d (%s); background validation will confirm it\n",
             bvHeight, bvHash.ToString());
-    } else if (bootstrap_snapshot_ran) {
+    } else if (BootstrapAnchorPendingExists(GetDataDir())) {
+        // An anchor-mode snapshot was installed — either this run, or a previous
+        // run that crashed after installing but before verifying. Verify the
+        // imported UTXO-set commitment against the compiled anchor BEFORE trusting
+        // it. This is gated on the DURABLE marker (written before the install),
+        // NOT the in-memory bootstrap_snapshot_ran flag, so a crash in the
+        // install->verify window cannot silently bypass the only anchor-mode
+        // forgery check (see BootstrapFromPeer / WriteBootstrapAnchorPending).
         std::string bootstrap_anchor_error;
         if (!VerifyImportedBootstrapAnchor(bootstrap_anchor_error)) {
             LogPrintf("%s\n", bootstrap_anchor_error);
             CloseBootstrapChainDatabases();
             RemoveFailedPeerBootstrapChainData(GetDataDir());
+            // The snapshot is gone; clear the marker so the operator can restart
+            // into a normal sync instead of re-failing this check forever.
+            BootstrapAnchorPendingClear(GetDataDir());
             return InitError(bootstrap_anchor_error);
         }
+        // Verified: clear the marker so subsequent restarts skip the (now
+        // redundant) re-verification.
+        BootstrapAnchorPendingClear(GetDataDir());
         LogPrintf("Bootstrap snapshot verified at height %d (%s)\n",
             chainActive.Height(),
             chainActive.Tip() ? chainActive.Tip()->GetBlockHash().ToString() : std::string("unknown"));
