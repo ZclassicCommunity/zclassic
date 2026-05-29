@@ -103,11 +103,19 @@ namespace Checkpoints {
         return uint256S("0x" + HexStr(hash, hash + SHA3_256::OUTPUT_SIZE));
     }
 
-    bool ValidateFastSyncAnchor(const CChainParams& chainparams, std::string& strError)
+    // Core validation over an EXPLICIT anchor list + checkpoint map. The production
+    // entry point below passes chainparams.FastSyncAnchors() and
+    // chainparams.Checkpoints().mapCheckpoints; this overload (external linkage, not
+    // in the public header — unit tests declare it extern) lets tests drive the
+    // negative branches with synthetic anchors that the compiled singletons cannot
+    // express (e.g. a null commitment). chainparams is still needed for the network
+    // string baked into the anchor SHA payload.
+    bool ValidateFastSyncAnchors(const CChainParams& chainparams,
+                                 const std::vector<CFastSyncAnchorData>& anchors,
+                                 const MapCheckpoints& checkpoints,
+                                 std::string& strError)
     {
-        const MapCheckpoints& checkpoints = chainparams.Checkpoints().mapCheckpoints;
-
-        BOOST_FOREACH(const CFastSyncAnchorData& anchor, chainparams.FastSyncAnchors())
+        BOOST_FOREACH(const CFastSyncAnchorData& anchor, anchors)
         {
             if (anchor.nHeight < 0 || anchor.hashBlock.IsNull()) {
                 continue;
@@ -169,6 +177,12 @@ namespace Checkpoints {
         }
 
         return true;
+    }
+
+    bool ValidateFastSyncAnchor(const CChainParams& chainparams, std::string& strError)
+    {
+        return ValidateFastSyncAnchors(chainparams, chainparams.FastSyncAnchors(),
+                                       chainparams.Checkpoints().mapCheckpoints, strError);
     }
 
 } // namespace Checkpoints

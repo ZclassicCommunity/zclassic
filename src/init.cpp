@@ -1291,8 +1291,17 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // if using block pruning, then disable txindex
     // also disable the wallet (for now, until SPV support is implemented in wallet)
     if (GetArg("-prune", 0)) {
-        if (GetBoolArg("-txindex", true))
+        // -txindex now DEFAULTS to true (a bootstrap snapshot ships a txindex'd
+        // chainstate), so a pruned node started with just -prune=N would hard-fail
+        // on the default alone — a regression from upstream, where the default was
+        // false. Mirror the -disablewallet handling below: soft-set -txindex off
+        // under -prune, and only refuse to start when the operator EXPLICITLY asked
+        // for -txindex=1. SoftSetBoolArg also makes the later GetBoolArg("-txindex",
+        // true) reads (block-tree cache cap, fTxIndex) see the pruned value.
+        if (mapArgs.count("-txindex") && GetBoolArg("-txindex", false))
             return InitError(_("Prune mode is incompatible with -txindex."));
+        if (SoftSetBoolArg("-txindex", false))
+            LogPrintf("%s : parameter interaction: -prune -> setting -txindex=0\n", __func__);
 #ifdef ENABLE_WALLET
         if (!GetBoolArg("-disablewallet", false)) {
             if (SoftSetBoolArg("-disablewallet", true))

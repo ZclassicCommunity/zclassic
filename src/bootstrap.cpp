@@ -1787,6 +1787,22 @@ bool ProvisionalAcceptTrustlessSnapshot(const boost::filesystem::path& data_dir,
         return false;
     }
 
+    // (0) Lower height bound (defense in depth; mirrors the manifest-level guard).
+    // The imported tip must be strictly above the last compiled checkpoint, or none
+    // of the forgery checks that make trustless safe — the checkpoint-agreement loop
+    // below and the background validator's per-block retarget re-check — actually
+    // run over it, and a forged low-tip snapshot would latch a false VALIDATED.
+    {
+        const MapCheckpoints& cps = Params().Checkpoints().mapCheckpoints;
+        const int lastCompiledCheckpoint = cps.empty() ? -1 : cps.rbegin()->first;
+        if (pending.nHeight <= lastCompiledCheckpoint) {
+            error = strprintf("trustless accept: imported tip %d is at or below the last compiled "
+                "checkpoint %d; refusing (forgery checks only cover the range above it)",
+                pending.nHeight, lastCompiledCheckpoint);
+            return false;
+        }
+    }
+
     // (1) Integrity: chainstate content must equal the advertised commitment.
     CCoinsStats stats;
     if (!pcoinsTip->GetStats(stats)) {
@@ -2929,6 +2945,25 @@ bool ValidateBootstrapSnapshotManifest(const CBootstrapSnapshotManifest& manifes
         }
         if (manifest.nHeight < 0 || manifest.hashBlock.IsNull()) {
             error = "Bootstrap v2 manifest has no tip height/hash";
+            return false;
+        }
+        // The self-snapshot tip MUST be strictly above the last COMPILED checkpoint.
+        // The forgery checks that make trustless safe all cover only the unpinned
+        // range above the last checkpoint: the provisional checkpoint-agreement loop
+        // and the background validator's per-block retarget re-check
+        // (ContextualCheckBlockHeader, gated on nHeight > lastCheckpointHeight) run
+        // ZERO iterations on a snapshot at or below the checkpoint, so a forged
+        // low-tip self-snapshot would pass every gate and latch a false VALIDATED.
+        // A legitimate trustless self-snapshot is always at the server's recent tip,
+        // far above the checkpoint, so this rejects only the attack case. Uses the
+        // compiled checkpoint height (mapBlockIndex is not yet loaded here).
+        const MapCheckpoints& cps = Params().Checkpoints().mapCheckpoints;
+        const int lastCompiledCheckpoint = cps.empty() ? -1 : cps.rbegin()->first;
+        if (manifest.nHeight <= lastCompiledCheckpoint) {
+            error = strprintf("Bootstrap v2 trustless self-snapshot tip %d is at or below the last "
+                "compiled checkpoint %d; refusing (its UTXO set would bypass the background forgery "
+                "checks, which only cover the range above the last checkpoint)",
+                manifest.nHeight, lastCompiledCheckpoint);
             return false;
         }
     }

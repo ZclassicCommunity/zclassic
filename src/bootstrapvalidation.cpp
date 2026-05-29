@@ -512,6 +512,13 @@ void MaybeStartBootstrapValidation(CScheduler& scheduler)
         state = g_status.state;
     }
     if (state == BVS_DISABLED || state == BVS_VALIDATED) {
+        // The VALIDATED latch is persisted BEFORE the scratch chainstate-verify/ dir
+        // is removed, so a crash in that gap would orphan a multi-GiB scratch dir
+        // forever. Clean it up on the next start (STAB-R1). No-op for DISABLED (no
+        // scratch was ever created) and when already removed.
+        if (state == BVS_VALIDATED) {
+            try { boost::filesystem::remove_all(ScratchDir()); } catch (...) {}
+        }
         return;
     }
     if (state == BVS_FAILED) {
