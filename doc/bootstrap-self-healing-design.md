@@ -211,8 +211,17 @@ background validation itself, so there is nothing to maintain per release.
   validator thread is also joined in `Shutdown()` before the chain DBs are freed
   (closing the init-failure-path UAF window).
 - **Eclipse.** Snapshot peers are still just peers; normal IBD/header validation
-  from other connections applies. Do not pin a snapshot peer as a permanent
-  `addnode` after bootstrap (close the existing TODO).
+  from other connections applies. After a successful snapshot the bootstrap peer
+  **is** pinned as a persistent `-addnode` entry (`init.cpp` injects it once the
+  snapshot import has actually run, unless the user set `-connect` or
+  `-bootstrap=0`), so a freshly bootstrapped node reliably reaches the chain tip
+  even when DNS seeds are sparse. Because it is an `-addnode` (not `-connect`),
+  the node still makes its normal complement of other outbound connections, so
+  header/IBD validation from independent peers is unaffected. Known limitation /
+  documented follow-up: the injected entry is **not yet removed** once IBD
+  completes (`IsInitialBlockDownload()` latches false), so the bootstrap peer
+  keeps occupying one outbound slot for the lifetime of the process; cleanly
+  dropping it needs a `CConnman` hook that does not exist yet.
 - **DoS / sybil serving.** Reuse the shipped per-IP quota, throttle, burst-serve
   backpressure, and `Misbehaving` bans. A flood of fake `NODE_BOOTSTRAP`
   advertisers wastes a client's discovery dials but cannot feed bad data (§4).

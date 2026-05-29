@@ -258,9 +258,13 @@ publicly-reviewable binary, the same as full validation.
    the snapshot if it does not match.** A malicious or compromised peer then
    cannot substitute a forged UTXO set: the bytes either reproduce the compiled
    commitment or the snapshot is thrown away. This reduces fast-sync trust *for
-   the ledger state* to the binary itself — exactly the assumeutxo model. (The
-   check is skipped only if the commitment field is left unset, e.g. on a network
-   without a compiled value.)
+   the ledger state* to the binary itself — exactly the assumeutxo model. A
+   shipped fast-sync anchor **must** carry a non-null UTXO-set commitment
+   (`hashChainstateSerialized`): a null/unset commitment would silently disable
+   this check, so the node **refuses to start** a bootstrap whose anchor lacks
+   one. Both `Checkpoints::ValidateFastSyncAnchor` (at startup) and
+   `VerifyImportedBootstrapAnchor` (after import) hard-fail on a missing
+   commitment rather than skipping the verification.
 
    To generate the value for a release, load the prepared snapshot at the anchor
    height and read `gettxoutsetinfo`'s `hash_serialized`; that string is the

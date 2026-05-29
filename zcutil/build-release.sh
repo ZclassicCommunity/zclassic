@@ -23,7 +23,7 @@ set -euo pipefail
 # cd to repo root regardless of where we're invoked from.
 gprefix() { if type -p "g$1" >/dev/null 2>&1; then echo "g$1"; else echo "$1"; fi; }
 READLINK="$(gprefix readlink)"
-cd "$("$READLINK" -f "$0" | xargs dirname)/.."
+cd "$(dirname "$("$READLINK" -f "$0")")/.."
 
 TARGET="${1:-linux}"
 [ $# -gt 0 ] && shift || true
