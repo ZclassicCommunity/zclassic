@@ -88,6 +88,28 @@ static CBootstrapSnapshotManifest ValidBootstrapManifest()
     return manifest;
 }
 
+// A well-formed v3 (GROWABLE) manifest: identical to ValidBootstrapManifest()
+// except its CHAINSTATE is PINNED at the compiled anchor (nHeight/hashBlock plus
+// the reused hashChainstateSerialized commitment, exactly like an accepted v2),
+// and it additionally advertises a post-anchor block bundle grown to
+// nBlockTipHeight/hashBlockTip. nHeight/hashBlock keep their anchor meaning; the
+// new fields carry NO commitment (the client validates the bundled blocks itself).
+static CBootstrapSnapshotManifest ValidV3BootstrapManifest()
+{
+    const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
+
+    CBootstrapSnapshotManifest manifest = ValidBootstrapManifest();
+    manifest.nVersion = 3;
+    // The anchor's compiled UTXO commitment (reused v2 field), so the anchor
+    // identity matches in both modes.
+    manifest.hashChainstateSerialized = anchor.hashChainstateSerialized;
+    // The grown block-bundle tip: strictly above the pinned anchor height, with a
+    // non-null tip hash.
+    manifest.nBlockTipHeight = anchor.nHeight + 5000;
+    manifest.hashBlockTip = uint256S("00000000000000000000000000000000000000000000000000000000d00dfeed");
+    return manifest;
+}
+
 static void RestoreArg(const std::string& arg, bool had_arg, const std::string& value)
 {
     if (had_arg) {
@@ -264,6 +286,97 @@ BOOST_AUTO_TEST_CASE(bootstrap_snapshot_manifest_serialization_v2)
     CheckFileEqual(decoded.vFiles[1], manifest.vFiles[1]);
     BOOST_CHECK(decoded.hashChainstateSerialized == manifest.hashChainstateSerialized);
     BOOST_CHECK_EQUAL(ss.size(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(bootstrap_snapshot_manifest_serialization_v3)
+{
+    // A version-3 manifest is byte-for-byte a version-2 manifest (same field
+    // order, including the trailing UTXO-set commitment) with two more fields
+    // appended at the very end: the GROWABLE post-anchor block-bundle tip height
+    // (4-byte LE int) and that tip's block hash (32 bytes). This locks the
+    // version-gated wire format so v1 and v2 stay byte-identical: the ONLY
+    // differences from the v2 vector are the leading version word (03 vs 02) and
+    // the two appended fields. nHeight/hashBlock keep their anchor meaning; the
+    // appended fields carry no commitment.
+    CBootstrapSnapshotManifest manifest;
+    manifest.nVersion = 3;
+    manifest.strNetwork = "main";
+    manifest.nHeight = 123456;
+    manifest.hashBlock = uint256S("202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f");
+    manifest.hashAnchorSha256 = uint256S("404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f");
+    manifest.hashAnchorSha3 = uint256S("606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f");
+    manifest.nSnapshotBytes = 0x123456789abcdef0ULL;
+    manifest.nChunkSize = 0x00020000U;
+    manifest.vFiles.push_back(TestBootstrapSnapshotFile());
+
+    CBootstrapSnapshotFile file2;
+    file2.strPath = "chainstate/000003.ldb";
+    file2.nSize = 0x0102030405060708ULL;
+    file2.hashSha256 = uint256S("1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100");
+    manifest.vFiles.push_back(file2);
+
+    manifest.hashChainstateSerialized = uint256S("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f");
+    // 200000 == 0x00030d40 -> little-endian "400d0300".
+    manifest.nBlockTipHeight = 200000;
+    manifest.hashBlockTip = uint256S("a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf");
+
+    const std::string expected =
+        "03000000046d61696e40e20100"
+        "3f3e3d3c3b3a393837363534333231302f2e2d2c2b2a29282726252423222120"
+        "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140"
+        "7f7e7d7c7b7a797877767574737271706f6e6d6c6b6a69686766656463626160"
+        "f0debc9a785634120000020002"
+        "13626c6f636b732f626c6b30303030302e6461748877665544332211"
+        "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100"
+        "15636861696e73746174652f3030303030332e6c6462080706050403020100"
+        "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        "9f9e9d9c9b9a999897969594939291908f8e8d8c8b8a89888786858483828180"
+        "400d0300"
+        "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0";
+
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << manifest;
+
+    BOOST_CHECK_EQUAL(HexStr(ss.begin(), ss.end()), expected);
+
+    CBootstrapSnapshotManifest decoded;
+    ss >> decoded;
+
+    BOOST_CHECK_EQUAL(decoded.nVersion, manifest.nVersion);
+    BOOST_CHECK_EQUAL(decoded.strNetwork, manifest.strNetwork);
+    BOOST_CHECK_EQUAL(decoded.nHeight, manifest.nHeight);
+    BOOST_CHECK(decoded.hashBlock == manifest.hashBlock);
+    BOOST_CHECK(decoded.hashAnchorSha256 == manifest.hashAnchorSha256);
+    BOOST_CHECK(decoded.hashAnchorSha3 == manifest.hashAnchorSha3);
+    BOOST_CHECK_EQUAL(decoded.nSnapshotBytes, manifest.nSnapshotBytes);
+    BOOST_CHECK_EQUAL(decoded.nChunkSize, manifest.nChunkSize);
+    BOOST_REQUIRE_EQUAL(decoded.vFiles.size(), manifest.vFiles.size());
+    CheckFileEqual(decoded.vFiles[0], manifest.vFiles[0]);
+    CheckFileEqual(decoded.vFiles[1], manifest.vFiles[1]);
+    BOOST_CHECK(decoded.hashChainstateSerialized == manifest.hashChainstateSerialized);
+    BOOST_CHECK_EQUAL(decoded.nBlockTipHeight, manifest.nBlockTipHeight);
+    BOOST_CHECK(decoded.hashBlockTip == manifest.hashBlockTip);
+    BOOST_CHECK_EQUAL(ss.size(), 0);
+
+    // The v3 wire format is a strict superset of v2: the v3 bytes begin with the
+    // exact v2 vector (modulo the leading version word) and only append the two
+    // new fields. Re-encoding the SAME manifest as v2 (clearing the v3-only
+    // fields) must reproduce the v2 prefix byte-for-byte, proving v1/v2 vectors
+    // are unchanged and the append is purely additive.
+    CBootstrapSnapshotManifest asV2 = manifest;
+    asV2.nVersion = 2;
+    asV2.nBlockTipHeight = -1;
+    asV2.hashBlockTip.SetNull();
+    CDataStream ssV2(SER_NETWORK, PROTOCOL_VERSION);
+    ssV2 << asV2;
+    const std::string v2Hex = HexStr(ssV2.begin(), ssV2.end());
+    // The appended v3 fields are 4 + 32 = 36 bytes = 72 hex chars.
+    const std::string v3Hex = expected;
+    BOOST_REQUIRE_GE(v3Hex.size(), v2Hex.size());
+    // v3 minus its 72-char tail, with the version word forced back to 02, equals v2.
+    std::string v3Body = v3Hex.substr(0, v3Hex.size() - 72);
+    v3Body.replace(0, 8, "02000000");
+    BOOST_CHECK_EQUAL(v3Body, v2Hex);
 }
 
 BOOST_AUTO_TEST_CASE(bootstrap_snapshot_chunk_request_serialization)
@@ -888,9 +1001,10 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_rejects_bad_metadata)
     CBootstrapSnapshotManifest manifest = ValidBootstrapManifest();
     BOOST_CHECK(ValidateBootstrapSnapshotManifest(manifest, error));
 
-    // An unsupported manifest version is rejected as a version error.
+    // An unsupported manifest version is rejected as a version error. v3 is now a
+    // valid version (the growable post-anchor block bundle), so use 4 here.
     manifest = ValidBootstrapManifest();
-    manifest.nVersion = 3;
+    manifest.nVersion = 4;
     BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error));
     BOOST_CHECK(error.find("version") != std::string::npos);
 
@@ -1002,6 +1116,66 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_matches_compiled_anchor)
     manifest.nVersion = 2;
     manifest.hashChainstateSerialized.SetNull();
     BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/false));
+}
+
+BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_v3_growable)
+{
+    // v3 = GROWABLE snapshot: chainstate PINNED at the compiled anchor (same
+    // identity checks as an accepted v2 — nHeight/hashBlock/hashChainstateSerialized
+    // must equal a compiled anchor) PLUS an append-only post-anchor block bundle
+    // grown to nBlockTipHeight/hashBlockTip. The new tip fields carry NO commitment;
+    // the client validates the bundled post-anchor blocks itself. They only need to
+    // be well-formed here: a tip strictly above the anchor with a non-null hash.
+    std::string error;
+    const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
+    BOOST_REQUIRE(!anchor.hashChainstateSerialized.IsNull());
+
+    // A well-formed v3 manifest pinned at a compiled anchor with a grown tip is
+    // accepted in BOTH modes: its anchor identity matches the compiled anchor (so
+    // anchor mode is satisfied exactly as for v2), and the grown block tip is
+    // unpinned but well-formed.
+    CBootstrapSnapshotManifest manifest = ValidV3BootstrapManifest();
+    BOOST_CHECK(ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/false));
+    BOOST_CHECK(ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/true));
+
+    // Wrong anchor commitment (right height/hash, tampered UTXO commitment) does
+    // not match any compiled anchor -> rejected in both modes.
+    manifest = ValidV3BootstrapManifest();
+    manifest.hashChainstateSerialized = uint256S("0202020202020202020202020202020202020202020202020202020202020202");
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/false));
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/true));
+
+    // Wrong anchor identity (right commitment, but a block hash that matches no
+    // compiled anchor) -> rejected in both modes.
+    manifest = ValidV3BootstrapManifest();
+    manifest.hashBlock = uint256S("00000000000000000000000000000000000000000000000000000000deadbeef");
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/false));
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/true));
+
+    // Wrong anchor height (matches no compiled anchor) -> rejected in both modes.
+    manifest = ValidV3BootstrapManifest();
+    manifest.nHeight = anchor.nHeight + 1;
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/false));
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/true));
+
+    // A grown block tip at or below the pinned anchor height is self-contradictory
+    // (the bundle is anchor+1 .. nBlockTipHeight) -> rejected in both modes.
+    manifest = ValidV3BootstrapManifest();
+    manifest.nBlockTipHeight = anchor.nHeight; // equal: not strictly above
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/false));
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/true));
+
+    manifest = ValidV3BootstrapManifest();
+    manifest.nBlockTipHeight = anchor.nHeight - 1; // below the anchor
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/false));
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/true));
+
+    // A null grown-tip block hash is malformed even when the height is plausible
+    // -> rejected in both modes.
+    manifest = ValidV3BootstrapManifest();
+    manifest.hashBlockTip.SetNull();
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/false));
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error, /*fTrustlessAllowed=*/true));
 }
 
 BOOST_AUTO_TEST_CASE(bootstrap_find_fast_sync_anchor)
@@ -1126,17 +1300,23 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_and_chunk_service_helpers)
     BOOST_REQUIRE(PreflightBootstrapSnapshotService(error));
     BOOST_REQUIRE(GetBootstrapSnapshotManifest(manifest, error));
     BOOST_CHECK(ValidateBootstrapSnapshotManifest(manifest, error));
+    // The serve file list sorts chainstate/ BEFORE blocks/ (so a growable v3 bundle's
+    // appended block files never shift a pinned chainstate file's nFileIndex), then
+    // lexicographically within each group. Client and server both index this same
+    // manifest order, so it is internally consistent.
     BOOST_REQUIRE_EQUAL(manifest.vFiles.size(), 3);
-    BOOST_CHECK_EQUAL(manifest.vFiles[0].strPath, "blocks/blk00000.dat");
-    BOOST_CHECK_EQUAL(manifest.vFiles[1].strPath, "blocks/index/000001.ldb");
-    BOOST_CHECK_EQUAL(manifest.vFiles[2].strPath, "chainstate/000003.ldb");
+    BOOST_CHECK_EQUAL(manifest.vFiles[0].strPath, "chainstate/000003.ldb");
+    BOOST_CHECK_EQUAL(manifest.vFiles[1].strPath, "blocks/blk00000.dat");
+    BOOST_CHECK_EQUAL(manifest.vFiles[2].strPath, "blocks/index/000001.ldb");
     BOOST_CHECK_EQUAL(manifest.nSnapshotBytes, 16);
     BOOST_CHECK(!manifest.vFiles[0].hashSha256.IsNull());
 
+    // Exercise the chunk reader against the blocks file (now index 1, "abcdef", 6 bytes).
+    const unsigned int blkIdx = 1;
     CBootstrapSnapshotChunkRequest request;
-    request.nFileIndex = 0;
+    request.nFileIndex = blkIdx;
     request.nOffset = 0;
-    request.nLength = manifest.vFiles[0].nSize;
+    request.nLength = manifest.vFiles[blkIdx].nSize;
 
     CBootstrapSnapshotChunk chunk;
     BOOST_REQUIRE(ReadBootstrapSnapshotChunk(request, chunk, error));
@@ -1144,7 +1324,7 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_and_chunk_service_helpers)
     BOOST_CHECK_EQUAL(chunk.nOffset, request.nOffset);
     BOOST_CHECK_EQUAL(std::string(chunk.vData.begin(), chunk.vData.end()), "abcdef");
 
-    request.nLength = 5;
+    request.nLength = 5; // != the 6-byte file size -> length mismatch
     BOOST_CHECK(!ReadBootstrapSnapshotChunk(request, chunk, error));
     BOOST_CHECK(error.find("length") != std::string::npos);
 
@@ -1159,9 +1339,9 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_and_chunk_service_helpers)
     BOOST_CHECK(error.find("out of range") != std::string::npos);
 
     WriteFixtureFile(root / "blocks" / "blk00000.dat", "abcdef-mutated");
-    request.nFileIndex = 0;
+    request.nFileIndex = blkIdx;
     request.nOffset = 0;
-    request.nLength = manifest.vFiles[0].nSize;
+    request.nLength = manifest.vFiles[blkIdx].nSize;
     BOOST_CHECK(!ReadBootstrapSnapshotChunk(request, chunk, error));
     BOOST_CHECK(error.find("changed after manifest creation") != std::string::npos);
 
