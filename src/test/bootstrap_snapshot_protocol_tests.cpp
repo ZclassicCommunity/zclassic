@@ -692,6 +692,85 @@ BOOST_AUTO_TEST_CASE(bootstrap_serve_global_aggregate_caps)
     RestoreArg("-bootstrapservemaxpeers", hadPeers, oldPeers);
 }
 
+BOOST_AUTO_TEST_CASE(bootstrap_manifest_limited_string_caps)
+{
+    // C1: strNetwork and per-file strPath are deserialized under LIMITED_STRING bounds, so
+    // an over-long string is rejected on READ (write stays unbounded, identical wire bytes).
+    // Over-cap strPath in a file entry throws on read...
+    {
+        CBootstrapSnapshotFile f;
+        f.strPath = std::string(BOOTSTRAP_SNAPSHOT_MAX_PATH_LEN + 1, 'a');
+        f.nSize = 1;
+        CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+        ss << f;
+        CBootstrapSnapshotFile out;
+        BOOST_CHECK_THROW(ss >> out, std::ios_base::failure);
+    }
+    // ...a path exactly at the cap round-trips fine.
+    {
+        CBootstrapSnapshotFile f;
+        f.strPath = std::string(BOOTSTRAP_SNAPSHOT_MAX_PATH_LEN, 'a');
+        f.nSize = 7;
+        CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+        ss << f;
+        CBootstrapSnapshotFile out;
+        BOOST_CHECK_NO_THROW(ss >> out);
+        BOOST_CHECK_EQUAL(out.strPath.size(), (size_t)BOOTSTRAP_SNAPSHOT_MAX_PATH_LEN);
+    }
+    // Over-cap strNetwork in a manifest throws on read.
+    {
+        CBootstrapSnapshotManifest m;
+        m.strNetwork = std::string(BOOTSTRAP_SNAPSHOT_MAX_NETWORK_LEN + 1, 'n');
+        CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+        ss << m;
+        CBootstrapSnapshotManifest out;
+        BOOST_CHECK_THROW(ss >> out, std::ios_base::failure);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(bootstrap_serve_global_rate_cap_first_chunk_through)
+{
+    // MEDIUM-B1 regression: a single chunk is BOOTSTRAP_SNAPSHOT_CHUNK_SIZE (1 MiB), which
+    // exceeds the per-window byte budget for any kbps below ~8389. Before the token-bucket
+    // fix, the first chunk of every fresh window (g_serveGlobalBytes == 0) always exceeded
+    // budget and was deferred, nothing was ever charged, and the serve livelocked at zero
+    // bytes. The fix lets the first chunk of an otherwise-empty window through.
+    const bool hadKbps = mapArgs.count("-bootstrapservemaxtotalkbps");
+    const bool hadPeers = mapArgs.count("-bootstrapservemaxpeers");
+    const std::string oldKbps = hadKbps ? mapArgs["-bootstrapservemaxtotalkbps"] : "";
+    const std::string oldPeers = hadPeers ? mapArgs["-bootstrapservemaxpeers"] : "";
+    const int64_t t0 = 5000000;
+    const size_t chunk = BOOTSTRAP_SNAPSHOT_CHUNK_SIZE;
+
+    ClearBootstrapServeGlobal();
+    mapArgs["-bootstrapservemaxtotalkbps"] = "1024"; // ~1 Mbit/s: window budget 128000 << 1 MiB
+    mapArgs["-bootstrapservemaxpeers"] = "0";
+
+    // First chunk of the window is allowed despite exceeding the tiny budget (was: livelock).
+    BOOST_CHECK(BootstrapServeGlobalAllow(1, false, chunk, t0));
+    BootstrapServeGlobalCharge(1, false, chunk, t0);
+    // A second chunk in the SAME window is deferred (budget already blown by the first).
+    BOOST_CHECK(!BootstrapServeGlobalAllow(1, false, chunk, t0));
+    // The next window rolls over and again lets one chunk through -> guaranteed progress.
+    BOOST_CHECK(BootstrapServeGlobalAllow(1, false, chunk, t0 + 1000));
+
+    // The startup helper flags this sub-floor cap and reports a floor above the chosen value.
+    int64_t configured = 0, floorKbps = 0;
+    BOOST_CHECK(BootstrapServeRateCapBelowFloor(configured, floorKbps));
+    BOOST_CHECK_EQUAL(configured, 1024);
+    BOOST_CHECK(floorKbps > 1024);
+
+    // A cap comfortably above the floor is not flagged, and unlimited (0) is never flagged.
+    mapArgs["-bootstrapservemaxtotalkbps"] = "100000";
+    BOOST_CHECK(!BootstrapServeRateCapBelowFloor(configured, floorKbps));
+    mapArgs["-bootstrapservemaxtotalkbps"] = "0";
+    BOOST_CHECK(!BootstrapServeRateCapBelowFloor(configured, floorKbps));
+
+    ClearBootstrapServeGlobal();
+    RestoreArg("-bootstrapservemaxtotalkbps", hadKbps, oldKbps);
+    RestoreArg("-bootstrapservemaxpeers", hadPeers, oldPeers);
+}
+
 BOOST_AUTO_TEST_CASE(bootstrap_serve_quota_hard_caps_tracked_ips)
 {
     // The per-IP quota map must stay bounded even when every tracked window is
@@ -747,10 +826,10 @@ BOOST_AUTO_TEST_CASE(bootstrap_serve_quota_hard_caps_tracked_ips)
 
 BOOST_AUTO_TEST_CASE(bootstrap_serve_quota_keys_ipv6_by_64_prefix)
 {
-    // The serve quota must be keyed on the address GROUP/prefix (IPv6 /64, full
-    // IPv4) so an attacker rotating through a trivially-available IPv6 /64 -- or
-    // a botnet spread across one -- shares a single quota bucket instead of
-    // getting a fresh bucket per address.
+    // The serve quota must be keyed on the address GROUP/prefix (IPv6 /64, IPv4 /24)
+    // so an attacker rotating through a trivially-available IPv6 /64 or IPv4 /24 -- or
+    // a botnet spread across one -- shares a single quota bucket instead of getting a
+    // fresh bucket per address.
 
     // Two distinct hosts in the SAME /64 collapse to one key...
     const CNetAddr a("2001:db8:abcd:1234::1");
@@ -761,12 +840,14 @@ BOOST_AUTO_TEST_CASE(bootstrap_serve_quota_keys_ipv6_by_64_prefix)
     const CNetAddr c("2001:db8:abcd:1235::1");
     BOOST_CHECK(BootstrapServeQuotaKey(a) != BootstrapServeQuotaKey(c));
 
-    // IPv4 stays full-address: two distinct IPv4 hosts must NOT collapse, even in
-    // the same /16 (the GetGroup() granularity we deliberately avoided).
+    // IPv4 collapses to /24 (MEDIUM-B3): two distinct hosts in the same /24 share a key...
     const CNetAddr v4a("203.0.113.7");
     const CNetAddr v4b("203.0.113.8");
-    BOOST_CHECK(BootstrapServeQuotaKey(v4a) != BootstrapServeQuotaKey(v4b));
-    BOOST_CHECK_EQUAL(BootstrapServeQuotaKey(v4a), std::string("203.0.113.7"));
+    BOOST_CHECK_EQUAL(BootstrapServeQuotaKey(v4a), BootstrapServeQuotaKey(v4b));
+    BOOST_CHECK_EQUAL(BootstrapServeQuotaKey(v4a), std::string("v4/24:203.0.113"));
+    // ...but a different /24 does not.
+    const CNetAddr v4c("203.0.114.7");
+    BOOST_CHECK(BootstrapServeQuotaKey(v4a) != BootstrapServeQuotaKey(v4c));
 
     // Behavioral check: charging one address in the /64 over the cap rate-limits
     // the OTHER address in the same /64 (shared bucket).

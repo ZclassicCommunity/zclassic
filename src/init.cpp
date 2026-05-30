@@ -1882,13 +1882,15 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 #endif
 
     const bool fBootstrapServeAuto = (GetArg("-bootstrapserve", "") == "auto");
-    // Set true below when a freshly verified GROWABLE v3 snapshot bundled
-    // post-anchor blocks (anchor+1..serverTip) that must be forward-connected and
-    // re-validated by THIS node before they are trusted. Consumed at Step 10, where
-    // the ActivateBestChain that connects them is wrapped in a
-    // CBootstrapForwardConnectGuard so ConnectTip re-runs the contextual header
-    // (retarget) check on each above-checkpoint block. Stays false for every normal
-    // node, manual serve, and pure-anchor (v1/v2) import — Step 10 is unchanged there.
+    // Set true below for ANY verified-anchor bootstrap import (v1/v2/v3). Consumed at
+    // Step 10, where the ActivateBestChain that connects whatever the imported block
+    // index contains is wrapped in a CBootstrapForwardConnectGuard so ConnectTip re-runs
+    // the contextual header (retarget) + contextual block checks on each above-checkpoint
+    // block, rejecting a forged low-difficulty post-anchor fork. Stays false for every
+    // normal node and manual serve — Step 10 is byte-identical there — and is a strict
+    // no-op for a pure-anchor import (nothing above the checkpoint to connect). It is
+    // deliberately NOT keyed on the server-advertised manifest tip; see the security note
+    // at the arming site (CRITICAL-1 / HIGH-1 / HIGH-2).
     bool fBootstrapForwardConnect = false;
     if (GetBoolArg("-bootstrapserve", false)) {
         // Manual serve: a fixed prepared source dir, validated up front.
@@ -1909,6 +1911,19 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 bootstrap_error));
         }
         nLocalServices |= NODE_BOOTSTRAP;
+    }
+    // MEDIUM-B1: warn when the aggregate serve rate cap is set below the floor where its
+    // per-window budget can hold even a single chunk. Below that floor the token-bucket
+    // first-chunk-through still serves ~1 chunk/window, so the EFFECTIVE rate exceeds the
+    // operator's chosen value — tell them rather than silently over-serving (and, before
+    // the B1 fix, silently serving nothing at all).
+    {
+        int64_t configuredKbps = 0, effectiveFloorKbps = 0;
+        if (BootstrapServeRateCapBelowFloor(configuredKbps, effectiveFloorKbps)) {
+            LogPrintf("Warning: -bootstrapservemaxtotalkbps=%d is below the effective floor "
+                "(~%d Kbit/s); the aggregate serve cap will still pass ~one chunk per window\n",
+                (int)configuredKbps, (int)effectiveFloorKbps);
+        }
     }
     // Note: for -bootstrapserve=auto we do NOT advertise NODE_BOOTSTRAP here.
     // A fresh auto node has nothing to serve yet, and advertising before we can
@@ -2288,46 +2303,78 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             return InitError(bootstrap_anchor_error);
         }
         // GROWABLE v3: read the bundle tip the marker recorded (the grown
-        // anchor+1..serverTip range) BEFORE clearing the marker. For a v1 import the
-        // marker holds the anchor itself (== the active tip), so no bundle is detected.
-        int bundleTipHeight = -1;
-        uint256 bundleTipHash;
-        GetBootstrapAnchorPending(GetDataDir(), bundleTipHeight, bundleTipHash);
+        // anchor+1..serverTip range) BEFORE clearing the marker. This is the server's
+        // ADVERTISED tip only — logged for diagnostics, NEVER trusted for arming (see the
+        // security note below); the real tip is discovered from the imported index.
+        int advertisedTipHeight = -1;
+        uint256 advertisedTipHash;
+        GetBootstrapAnchorPending(GetDataDir(), advertisedTipHeight, advertisedTipHash);
         // Verified: clear the marker so subsequent restarts skip the (now
         // redundant) re-verification.
         BootstrapAnchorPendingClear(GetDataDir());
-        LogPrintf("Bootstrap snapshot verified at height %d (%s)\n",
+        LogPrintf("Bootstrap snapshot verified at height %d (%s); server advertised post-anchor tip height %d (%s)\n",
             chainActive.Height(),
-            chainActive.Tip() ? chainActive.Tip()->GetBlockHash().ToString() : std::string("unknown"));
+            chainActive.Tip() ? chainActive.Tip()->GetBlockHash().ToString() : std::string("unknown"),
+            advertisedTipHeight,
+            advertisedTipHash.IsNull() ? std::string("none") : advertisedTipHash.ToString());
 
-        // The verified chainstate is PINNED at the anchor, but a v3 snapshot ALSO
-        // bundles post-anchor blocks (anchor+1..serverTip) whose headers LoadBlockIndexDB
-        // loaded into the block tree. Those blocks carry NO commitment, so THIS node must
-        // validate them itself before trusting the tip. The marker tells us the bundle
-        // tip (NOT pindexBestHeader, which LoadBlockIndexDB leaves at the anchor for an
-        // imported chainstate). If that tip is above the verified anchor AND present in
-        // the block tree descending from it, arm the imported-tip finalization hold at
-        // serverTip (before the first post-anchor ConnectTip) and flag Step 10 to
-        // forward-connect the bundle under the retarget re-check guard. A tip that does
-        // not descend from the verified anchor is a stray sibling — ignore it.
+        // The verified chainstate is PINNED at the anchor, but a snapshot may ALSO bundle
+        // post-anchor blocks (anchor+1..serverTip) whose headers LoadBlockIndexDB loaded
+        // into the block tree. Those blocks carry NO commitment, so THIS node must
+        // validate them itself before trusting the tip.
         {
             LOCK(cs_main);
             const CBlockIndex* pAnchorTip = chainActive.Tip();
-            if (pAnchorTip != NULL && bundleTipHeight > pAnchorTip->nHeight && !bundleTipHash.IsNull()) {
-                BlockMap::iterator it = mapBlockIndex.find(bundleTipHash);
-                const CBlockIndex* pBundleTip = (it != mapBlockIndex.end()) ? it->second : NULL;
-                if (pBundleTip != NULL && pBundleTip->nHeight == bundleTipHeight &&
-                    pBundleTip->GetAncestor(pAnchorTip->nHeight) == pAnchorTip) {
-                    // The bundle tip is above the compiled anchor, which is at-or-below
-                    // the last compiled checkpoint, so serverTip is always above the last
-                    // checkpoint — the case ArmBootstrapTipHold is for. Guard defensively.
+
+            // SECURITY (CRITICAL-1 / HIGH-1 / HIGH-2): arm the forward-connect retarget /
+            // contextual re-check guard UNCONDITIONALLY for ANY verified-anchor import,
+            // and arm the finalization hold on the REAL post-anchor tip we discover in the
+            // block index — NOT on the server-advertised manifest tip (bundleTipHeight/
+            // bundleTipHash). The marker is written verbatim from the wire manifest, whose
+            // nBlockTipHeight/hashBlockTip are NOT bound to the shipped block index
+            // (ValidateBootstrapSnapshotManifest only sanity-checks them). A malicious
+            // server could therefore ship forged low-difficulty post-anchor blocks in
+            // blocks/index/ while pointing hashBlockTip at a hash absent from that index
+            // (or, on the v1 path, at the anchor itself). The old code keyed arming on
+            // that manifest tip resolving in mapBlockIndex and descending from the anchor,
+            // so the guard stayed disarmed while Step-10 ActivateBestChain still selected
+            // and connected the forged higher-work chain through ConnectTip with no
+            // retarget re-check — a silent consensus divergence onto a server-chosen fork.
+            //
+            // The guard is purely additive: ConnectTip only re-checks blocks STRICTLY
+            // ABOVE the last compiled checkpoint (main.cpp), and a pure-anchor import has
+            // nothing above the checkpoint to connect, so arming it is a strict no-op for
+            // an honest v1/v3 import and only ever REJECTS a forged post-anchor fork.
+            fBootstrapForwardConnect = true;
+
+            // Discover the real highest-work descendant of the verified anchor that the
+            // imported block index actually contains (independent of the manifest claim),
+            // and arm the imported-tip finalization hold on THAT. The height/hash only
+            // affect when EvaluateBootstrapTipRelease releases the hold; the hold being
+            // engaged at all (g_tipHoldHeight >= 0) is what pauses auto-finalization so a
+            // difficulty-correct minority/forged post-anchor fork cannot auto-finalize and
+            // permanently pin this node before the live network corroborates the tip.
+            if (pAnchorTip != NULL) {
+                const CBlockIndex* pBestPostAnchor = NULL;
+                for (BlockMap::const_iterator it = mapBlockIndex.begin(); it != mapBlockIndex.end(); ++it) {
+                    const CBlockIndex* pidx = it->second;
+                    if (pidx == NULL || pidx->nHeight <= pAnchorTip->nHeight)
+                        continue; // below/at the anchor — not a post-anchor candidate
+                    if (pidx->GetAncestor(pAnchorTip->nHeight) != pAnchorTip)
+                        continue; // stray sibling fork that does not descend from the anchor
+                    if (pBestPostAnchor == NULL || pidx->nChainWork > pBestPostAnchor->nChainWork)
+                        pBestPostAnchor = pidx;
+                }
+                if (pBestPostAnchor != NULL) {
+                    // The anchor is at-or-below the last compiled checkpoint, so any
+                    // post-anchor tip is above it — the case ArmBootstrapTipHold is for.
+                    // Guard defensively against a future anchor at/above the checkpoint.
                     const CBlockIndex* pcp = Checkpoints::GetLastCheckpoint(Params().Checkpoints());
-                    if (pcp == NULL || bundleTipHeight > pcp->nHeight) {
-                        ArmBootstrapTipHold(bundleTipHeight, bundleTipHash);
+                    if (pcp == NULL || pBestPostAnchor->nHeight > pcp->nHeight) {
+                        ArmBootstrapTipHold(pBestPostAnchor->nHeight, pBestPostAnchor->GetBlockHash());
                     }
-                    fBootstrapForwardConnect = true;
                     LogPrintf("Bootstrap snapshot bundles post-anchor blocks up to height %d (%s); will forward-connect and validate them before trusting the tip\n",
-                        bundleTipHeight, bundleTipHash.ToString());
+                        pBestPostAnchor->nHeight, pBestPostAnchor->GetBlockHash().ToString());
                 }
             }
         }

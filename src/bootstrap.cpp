@@ -2857,6 +2857,63 @@ static bool GetBootstrapSnapshotFileList(const boost::filesystem::path& source, 
     return LoadBootstrapSnapshotCache(source, fAllowBuild, files, mtimes, total_bytes, error);
 }
 
+// Copy out a SINGLE cached file entry + its mtime by index, WITHOUT deep-copying the whole
+// cache (MEDIUM-B2). The serve drain reads up to BOOTSTRAP_PIPELINE_DEPTH chunks per peer
+// per SendMessages cycle, each needing only files[index] and that one file's mtime; the
+// old path copied the entire file-list vector and the full mtime map under the lock every
+// time, an O(files) deep copy multiplied by the burst, on the shared message-handler
+// thread. The serve source is immutable while serving, so a per-index snapshot under the
+// lock is consistent. On a warm-cache hit this copies exactly one struct + one time_t.
+static bool LoadBootstrapSnapshotCachedFile(const boost::filesystem::path& source, bool fAllowBuild,
+                                            uint32_t index, CBootstrapSnapshotFile& outFile,
+                                            std::time_t& outMtime, std::string& error)
+{
+    {
+        LOCK(cs_bootstrap_snapshot);
+        if (bootstrapSnapshotCacheSource == source && !bootstrapSnapshotCacheFiles.empty()) {
+            if (index >= bootstrapSnapshotCacheFiles.size()) {
+                error = strprintf("bootstrap chunk file index out of range: %u", index);
+                return false;
+            }
+            outFile = bootstrapSnapshotCacheFiles[index];
+            std::map<std::string, std::time_t>::const_iterator it =
+                bootstrapSnapshotCacheMtimes.find(outFile.strPath);
+            if (it == bootstrapSnapshotCacheMtimes.end()) {
+                error = strprintf("bootstrap snapshot file mtime missing from manifest cache: %s", outFile.strPath);
+                return false;
+            }
+            outMtime = it->second;
+            return true;
+        }
+        if (!fAllowBuild) {
+            error = "bootstrap snapshot manifest not ready";
+            return false;
+        }
+    }
+
+    // Cold/stale cache and we are allowed to build: do the (rare) full build+publish via
+    // the shared path into locals, then index into them. The hot serve path uses
+    // fAllowBuild=false and never reaches here.
+    std::vector<CBootstrapSnapshotFile> files;
+    std::map<std::string, std::time_t> mtimes;
+    uint64_t total_bytes = 0;
+    if (!LoadBootstrapSnapshotCache(source, fAllowBuild, files, mtimes, total_bytes, error)) {
+        return false;
+    }
+    if (index >= files.size()) {
+        error = strprintf("bootstrap chunk file index out of range: %u", index);
+        return false;
+    }
+    outFile = files[index];
+    std::map<std::string, std::time_t>::const_iterator it = mtimes.find(outFile.strPath);
+    if (it == mtimes.end()) {
+        error = strprintf("bootstrap snapshot file mtime missing from manifest cache: %s", outFile.strPath);
+        return false;
+    }
+    outMtime = it->second;
+    return true;
+}
+
 bool BootstrapServeSnapshotMatchesCompiledAnchor(std::string& warning)
 {
     // Only meaningful for an enabled serve from a prepared source directory.
@@ -3489,7 +3546,7 @@ static bool StatOpenBootstrapSnapshotFile(FILE* fp, uint64_t& size, std::time_t&
 
 static FILE* OpenBootstrapSnapshotFile(const boost::filesystem::path& source,
                                        const CBootstrapSnapshotFile& file,
-                                       const std::map<std::string, std::time_t>& mtimes,
+                                       std::time_t expectedMtime,
                                        std::string& error)
 {
     const boost::filesystem::path relative(file.strPath);
@@ -3501,11 +3558,6 @@ static FILE* OpenBootstrapSnapshotFile(const boost::filesystem::path& source,
     const boost::filesystem::path path = source / relative;
     if (!boost::filesystem::is_regular_file(path) || !IsSafeBootstrapEntry(path)) {
         error = strprintf("bootstrap snapshot file is not a regular file: %s", path.string());
-        return NULL;
-    }
-    std::map<std::string, std::time_t>::const_iterator mtime = mtimes.find(file.strPath);
-    if (mtime == mtimes.end()) {
-        error = strprintf("bootstrap snapshot file mtime missing from manifest cache: %s", file.strPath);
         return NULL;
     }
 
@@ -3527,7 +3579,7 @@ static FILE* OpenBootstrapSnapshotFile(const boost::filesystem::path& source,
         error = strprintf("bootstrap snapshot file size changed after manifest creation: %s", file.strPath);
         return NULL;
     }
-    if (file_mtime != mtime->second) {
+    if (file_mtime != expectedMtime) {
         fclose(fp);
         error = strprintf("bootstrap snapshot file changed after manifest creation: %s", file.strPath);
         return NULL;
@@ -3551,19 +3603,15 @@ bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request, C
     }
 
     const boost::filesystem::path source = boost::filesystem::system_complete(mapArgs["-bootstrapsourcedir"]);
-    std::vector<CBootstrapSnapshotFile> files;
-    std::map<std::string, std::time_t> mtimes;
-    uint64_t total_bytes = 0;
-    if (!LoadBootstrapSnapshotCache(source, fAllowBuild, files, mtimes, total_bytes, error)) {
-        return false;
-    }
-    if (request.nFileIndex >= files.size()) {
-        error = strprintf("bootstrap chunk file index out of range: %u", request.nFileIndex);
+    // Per-index cache access (MEDIUM-B2): copy out only the requested file entry + its
+    // mtime, not the whole cached file list/map, since serving a chunk needs just one.
+    CBootstrapSnapshotFile file;
+    std::time_t fileMtime = 0;
+    if (!LoadBootstrapSnapshotCachedFile(source, fAllowBuild, request.nFileIndex, file, fileMtime, error)) {
         return false;
     }
 
-    const CBootstrapSnapshotFile& file = files[request.nFileIndex];
-    FILE* fp = OpenBootstrapSnapshotFile(source, file, mtimes, error);
+    FILE* fp = OpenBootstrapSnapshotFile(source, file, fileMtime, error);
     if (!fp) {
         return false;
     }
@@ -3855,9 +3903,19 @@ std::string BootstrapServeQuotaKey(const CNetAddr& addr)
         }
         return key;
     }
-    // IPv4 (full address) and everything else (Tor, unroutable): full identity.
-    // Full-address IPv4 keying is unchanged from the previous behavior, so
-    // existing IPv4 clients are accounted exactly as before.
+    // IPv4: collapse to the /24 network (MEDIUM-B3), mirroring the IPv6 /64 collapse so an
+    // attacker rotating through a single /24 counts as ONE quota bucket instead of getting
+    // a fresh BootstrapServeMaxBytesPerDay bucket per address (a trivial 256x multiplier
+    // on the per-IP cap). GetByte(n) returns ip[15-n]; an IPv4 address a.b.c.d maps to
+    // GetByte(3)=a, GetByte(2)=b, GetByte(1)=c, GetByte(0)=d, so the /24 network a.b.c is
+    // GetByte(3),(2),(1). The "v4/24:" tag cannot alias the IPv6 "v6/64:" key or a bare
+    // ToStringIP() form. (Cross-/24 and IPv6 multi-/64 spread are bounded by the opt-in
+    // aggregate caps -bootstrapservemaxtotalkbps / -bootstrapservemaxpeers, not here.)
+    if (addr.IsIPv4()) {
+        return strprintf("v4/24:%u.%u.%u",
+                         addr.GetByte(3) & 0xff, addr.GetByte(2) & 0xff, addr.GetByte(1) & 0xff);
+    }
+    // Everything else (Tor, unroutable): full identity.
     return addr.ToStringIP();
 }
 
@@ -4010,9 +4068,33 @@ bool BootstrapServeGlobalAllow(NodeId nodeId, bool whitelisted, size_t wantBytes
     if (kbps > 0) {
         // bytes permitted this window = (kbps * 1000 bits/s / 8) * (window_ms / 1000 s)
         const int64_t windowBudget = (kbps * 1000 / 8) * BOOTSTRAP_SERVE_GLOBAL_WINDOW_MS / 1000;
-        if (g_serveGlobalBytes + (int64_t)wantBytes > windowBudget) return false;
+        // Token-bucket first-chunk-through (MEDIUM-B1): a single chunk is
+        // BOOTSTRAP_SNAPSHOT_CHUNK_SIZE (1 MiB), larger than the per-window budget for any
+        // kbps below ~8389. With a plain `bytes > budget` test the FIRST chunk of every
+        // fresh window (g_serveGlobalBytes == 0) would always exceed budget, get requeued,
+        // and never charge anything — so g_serveGlobalBytes stays 0 and the node silently
+        // serves ZERO bytes forever. Always letting the first chunk of an otherwise-empty
+        // window through guarantees forward progress; the rate is then enforced in
+        // chunk-sized quanta (effective floor ~1 MiB per window). The startup warning in
+        // AppInit tells the operator when their chosen kbps is below that floor.
+        if (g_serveGlobalBytes > 0 && g_serveGlobalBytes + (int64_t)wantBytes > windowBudget)
+            return false;
     }
     return true;
+}
+
+bool BootstrapServeRateCapBelowFloor(int64_t& configuredKbps, int64_t& effectiveFloorKbps)
+{
+    configuredKbps = BootstrapServeMaxTotalKBps();
+    // Smallest kbps whose per-window budget holds a whole chunk (see windowBudget in
+    // BootstrapServeGlobalAllow): budget = kbps*1000/8 * WINDOW_MS/1000 >= CHUNK_SIZE.
+    effectiveFloorKbps =
+        ((int64_t)BOOTSTRAP_SNAPSHOT_CHUNK_SIZE * 8 * 1000) /
+        ((int64_t)BOOTSTRAP_SERVE_GLOBAL_WINDOW_MS * 1000) + 1;
+    if (configuredKbps <= 0)
+        return false; // unlimited: no floor concern
+    const int64_t windowBudget = (configuredKbps * 1000 / 8) * BOOTSTRAP_SERVE_GLOBAL_WINDOW_MS / 1000;
+    return windowBudget < (int64_t)BOOTSTRAP_SNAPSHOT_CHUNK_SIZE;
 }
 
 void BootstrapServeGlobalCharge(NodeId nodeId, bool whitelisted, size_t bytes, int64_t now_ms)

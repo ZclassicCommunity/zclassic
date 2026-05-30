@@ -234,6 +234,11 @@ void BootstrapServeGlobalCharge(NodeId nodeId, bool whitelisted, size_t bytes, i
 //! Drop all aggregate-serve accounting state (used by tests).
 void ClearBootstrapServeGlobal();
 
+//! True when -bootstrapservemaxtotalkbps is set below the floor where its per-window byte
+//! budget can hold a single chunk; fills in the configured value and the effective floor
+//! (Kbit/s) for an operator warning. Returns false when unlimited (0) or above the floor.
+bool BootstrapServeRateCapBelowFloor(int64_t& configuredKbps, int64_t& effectiveFloorKbps);
+
 bool BuildBootstrapNetworkMessage(const char* command,
                                   const CDataStream& payload,
                                   CSerializeData& message,

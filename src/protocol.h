@@ -161,6 +161,18 @@ enum {
     MSG_FILTERED_BLOCK,
 };
 
+//! Read-side bounds for the attacker-controlled strings in a bootstrap manifest.
+//! These cap only deserialization (LimitedString enforces on read, not write) and use the
+//! identical CompactSize wire encoding, so v1/v2/v3 bytes are unchanged and interop with
+//! the deployed swarm is preserved. They are defense-in-depth: the whole message is
+//! already bounded by MAX_PROTOCOL_MESSAGE_LENGTH, but a plain std::string Unserialize
+//! does a single resize() up to the 32 MiB ReadCompactSize ceiling before the read throws,
+//! so capping here removes that transient over-allocation. Both are generous relative to
+//! any legitimate value (network ids are a few chars; snapshot data paths are short
+//! relative paths like "blocks/index/000005.ldb").
+static const unsigned int BOOTSTRAP_SNAPSHOT_MAX_PATH_LEN = 256;
+static const unsigned int BOOTSTRAP_SNAPSHOT_MAX_NETWORK_LEN = 32;
+
 struct CBootstrapSnapshotFile
 {
     std::string strPath;
@@ -184,7 +196,7 @@ struct CBootstrapSnapshotFile
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action)
     {
-        READWRITE(strPath);
+        READWRITE(LIMITED_STRING(strPath, BOOTSTRAP_SNAPSHOT_MAX_PATH_LEN));
         READWRITE(nSize);
         READWRITE(hashSha256);
     }
@@ -250,7 +262,7 @@ struct CBootstrapSnapshotManifest
     inline void SerializationOp(Stream& s, Operation ser_action)
     {
         READWRITE(nVersion);
-        READWRITE(strNetwork);
+        READWRITE(LIMITED_STRING(strNetwork, BOOTSTRAP_SNAPSHOT_MAX_NETWORK_LEN));
         READWRITE(nHeight);
         READWRITE(hashBlock);
         READWRITE(hashAnchorSha256);
