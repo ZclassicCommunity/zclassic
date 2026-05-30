@@ -68,6 +68,7 @@ int nScriptCheckThreads = 0;
 bool fExperimentalMode = false;
 bool fImporting = false;
 bool fReindex = false;
+bool fReindexChainState = false;
 bool fTxIndex = false;
 bool fHavePruned = false;
 bool fPruneMode = false;

@@ -399,6 +399,7 @@ std::string HelpMessage(HelpMessageMode mode)
             "Warning: Reverting this setting requires re-downloading the entire blockchain. "
             "(default: 0 = disable pruning blocks, >%u = target size in MiB to use for block files)"), MIN_DISK_SPACE_FOR_BLOCK_FILES / 1024 / 1024));
     strUsage += HelpMessageOpt("-reindex", _("Rebuild block chain index from current blk000??.dat files on startup"));
+    strUsage += HelpMessageOpt("-reindex-chainstate", _("Rebuild only the chainstate (UTXO set) from the existing block index and blk000??.dat files on startup, without rebuilding the block index. Much faster than -reindex; use it to recover a corrupted/desynced chainstate when the block index is intact."));
     strUsage += HelpMessageOpt("-bootstrapdatadir=<dir>", _("Import blocks/ and chainstate/ from a prepared snapshot directory before opening databases"));
     strUsage += HelpMessageOpt("-bootstrapforce", _("When used with -bootstrapdatadir, move existing blocks/ and chainstate/ to a timestamped backup before import"));
     strUsage += HelpMessageOpt("-bootstrappeer=<host>", _("Download an initial bootstrap snapshot from a trusted NODE_BOOTSTRAP peer into a fresh datadir before opening databases (experimental)"));
@@ -1932,10 +1933,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         const bool enabled = GetBoolArg("-bootstrap", true) && !GetBootstrapPeerList().empty();
         const bool conflicts = mapArgs.count("-bootstrapdatadir") ||
                                GetBoolArg("-reindex", false) ||
+                               GetBoolArg("-reindex-chainstate", false) ||
                                !mapMultiArgs["-loadblock"].empty();
 
         if (explicit_peer && conflicts) {
-            return InitError(_("-bootstrappeer cannot be used with -bootstrapdatadir, -reindex, or -loadblock"));
+            return InitError(_("-bootstrappeer cannot be used with -bootstrapdatadir, -reindex, -reindex-chainstate, or -loadblock"));
         }
 
         if (enabled && !conflicts) {
@@ -2026,6 +2028,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // ********************************************************* Step 7: load block chain
 
     fReindex = GetBoolArg("-reindex", false);
+    fReindexChainState = GetBoolArg("-reindex-chainstate", false);
+    if (fReindexChainState && fReindex) {
+        return InitError(_("-reindex-chainstate and -reindex are mutually exclusive "
+                           "(-reindex already rebuilds the chainstate)."));
+    }
 
     // Upgrading to 0.8; hard-link the old blknnnn.dat files into /blocks/
     boost::filesystem::path blocksDir = GetDataDir() / "blocks";
@@ -2055,7 +2062,15 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     }
 
     // cache size calculations
-    int64_t nTotalCache = (GetArg("-dbcache", nDefaultDbCache) << 20);
+    int64_t nDbCacheArg = GetArg("-dbcache", nDefaultDbCache);
+    // During a full reindex or chainstate rebuild, a larger UTXO cache means far
+    // fewer leveldb flushes over the genesis..tip replay -- a sizable wall-clock win.
+    // Only raise the default (never override an explicit -dbcache), only on 64-bit
+    // (avoid OOM on 32-bit), and cap modestly to stay clear of low-RAM trouble.
+    if ((fReindex || fReindexChainState) && !mapArgs.count("-dbcache") && sizeof(void*) > 4) {
+        nDbCacheArg = std::max(nDbCacheArg, std::min<int64_t>(nMaxDbCache, 2048));
+    }
+    int64_t nTotalCache = (nDbCacheArg << 20);
     nTotalCache = std::max(nTotalCache, nMinDbCache << 20); // total cache cannot be less than nMinDbCache
     nTotalCache = std::min(nTotalCache, nMaxDbCache << 20); // total cache cannot be greated than nMaxDbcache
     int64_t nBlockTreeDBCache = nTotalCache / 8;
@@ -2074,7 +2089,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     bool fLoaded = false;
     while (!fLoaded) {
-        bool fReset = fReindex;
+        bool fReset = fReindex || fReindexChainState;
         std::string strLoadError;
 
         uiInterface.InitMessage(_("Loading block index..."));
@@ -2088,8 +2103,14 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 delete pcoinscatcher;
                 delete pblocktree;
 
+                // -reindex-chainstate wipes ONLY the coins/UTXO DB (fReindex stays
+                // false, so the block index and blk files are preserved and not
+                // re-read). The wiped coins DB reports a null best block, so the
+                // chainActive starts empty and the Step-10 ActivateBestChain replays
+                // the connected chain from the existing blk files under full
+                // ConnectBlock -- rebuilding the UTXO set without a full reindex.
                 pblocktree = new CBlockTreeDB(nBlockTreeDBCache, false, fReindex);
-                pcoinsdbview = new CCoinsViewDB(nCoinDBCache, false, fReindex);
+                pcoinsdbview = new CCoinsViewDB(nCoinDBCache, false, fReindex || fReindexChainState);
                 pcoinscatcher = new CCoinsViewErrorCatcher(pcoinsdbview);
                 pcoinsTip = new CCoinsViewCache(pcoinscatcher);
 
