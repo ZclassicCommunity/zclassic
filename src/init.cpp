@@ -403,6 +403,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-bootstrapdatadir=<dir>", _("Import blocks/ and chainstate/ from a prepared snapshot directory before opening databases"));
     strUsage += HelpMessageOpt("-bootstrapforce", _("When used with -bootstrapdatadir, move existing blocks/ and chainstate/ to a timestamped backup before import"));
     strUsage += HelpMessageOpt("-bootstrappeer=<host>", _("Download an initial bootstrap snapshot from a trusted NODE_BOOTSTRAP peer into a fresh datadir before opening databases (experimental)"));
+    strUsage += HelpMessageOpt("-bootstrapdiscover", _("If the compiled/explicit bootstrap peer is unavailable, discover NODE_BOOTSTRAP peers from the network and fast-sync from them. Off by default; the imported snapshot is still verified against the compiled anchor, but a default node avoids the discovery network code entirely and simply falls back to normal P2P sync."));
     strUsage += HelpMessageOpt("-bootstrapserve", _("Serve bootstrap snapshots to peers. Set -bootstrapserve=auto to retain and serve the snapshot this node fast-syncs (no -bootstrapsourcedir needed, uses extra disk); otherwise pass -bootstrapsourcedir=<dir> to serve a prepared snapshot."));
     strUsage += HelpMessageOpt("-bootstrapsourcedir=<dir>", _("Prepared snapshot directory containing blocks/ and chainstate/ to serve to bootstrap peers"));
     strUsage += HelpMessageOpt("-bootstrapservemaxbytesperday=<n>", strprintf(_("When serving bootstrap snapshots, bytes one IP may download per 24h before it is throttled (default: %d, 0 = unlimited)"), BOOTSTRAP_SERVE_DEFAULT_MAX_BYTES_PER_DAY));
@@ -1995,13 +1996,20 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     LogPrintf("Bootstrap snapshot from %s failed: %s\n", peer, bootstrap_error);
                 }
                 // If the explicit/compiled peers didn't work and the operator did
-                // not pin a specific peer, fall back to peers discovered from the
-                // network's NODE_BOOTSTRAP advertisements, so a fresh node is not
-                // stranded when the compiled IP is down or compromised. The
-                // imported snapshot is still verified against the compiled anchor
-                // and UTXO-set commitment, so a discovered (untrusted) peer cannot
-                // feed a forged chain.
-                if (!bootstrap_snapshot_ran && !explicit_peer) {
+                // not pin a specific peer, OPTIONALLY fall back to peers discovered
+                // from the network's NODE_BOOTSTRAP advertisements. This is OFF by
+                // default (-bootstrapdiscover=0): the discovery path is a bespoke
+                // pre-database network subsystem (DNS-seed dialing + handshake +
+                // getaddr/addr parsing) that would run against untrusted IPs purely
+                // for fast-sync AVAILABILITY when the compiled peer is down — and the
+                // benign failure path below (continue with normal P2P sync) already
+                // covers that case. Keeping it opt-in keeps a default node off that
+                // code path entirely, shrinking its attack surface. (Even when
+                // enabled, any imported snapshot is still verified against the
+                // compiled anchor + UTXO-set commitment, so a discovered/untrusted
+                // peer cannot feed a forged chain.)
+                if (!bootstrap_snapshot_ran && !explicit_peer &&
+                    GetBoolArg("-bootstrapdiscover", false)) {
                     BOOST_FOREACH(const std::string& peer, DiscoverBootstrapPeers()) {
                         if (ShutdownRequested())
                             break;
@@ -2416,8 +2424,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // any SetupAutoBootstrapServe rewrite) and the served files exist on disk.
     // Warn loudly if this node is serving a prepared snapshot whose chainstate
     // tip matches no compiled anchor (operator drift) so peers are not handed a
-    // snapshot they will reject on verification. The check is cheap and opens the
-    // served chainstate read-only.
+    // snapshot they will reject on verification. The check is cheap: for an
+    // auto-serve / anchor-pinned (v1/v3) dir it reads the ".anchor" sidecar and
+    // never opens the pinned chainstate (opening it with LevelDB would mutate the
+    // frozen serve files and break chunk serving); only a bare, markerless dir
+    // falls back to reading the tip from the chainstate.
     {
         std::string bootstrapServeWarning;
         if (!BootstrapServeSnapshotMatchesCompiledAnchor(bootstrapServeWarning)) {

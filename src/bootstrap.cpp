@@ -2933,35 +2933,56 @@ bool BootstrapServeSnapshotMatchesCompiledAnchor(std::string& warning)
             return true;
         }
     }
-    // Read the served chainstate's tip and check it matches a compiled anchor by
-    // block hash. A mismatch is operator drift: the snapshot was (re)generated at a
-    // height this binary does not anchor, so anchor-mode clients would download it
-    // and only then reject it on the per-file hash check.
-    uint256 best;
-    try {
-        CCoinsViewDB servedb(source / "chainstate", 1 << 23, false, false);
-        best = servedb.GetBestBlock();
-    } catch (const std::exception& e) {
-        warning = strprintf("could not read the served snapshot's chainstate to check it against the compiled "
-                            "fast-sync anchors: %s", e.what());
-        return false;
-    }
-    if (best.IsNull()) {
-        warning = "the snapshot in -bootstrapsourcedir has no chainstate best block; clients will reject it";
-        return false;
-    }
-    const std::vector<CFastSyncAnchorData>& anchors = Params().FastSyncAnchors();
-    for (size_t i = 0; i < anchors.size(); ++i) {
-        if (anchors[i].hashBlock == best) {
-            return true;
+    // Prefer the sidecar ".anchor" marker over opening the chainstate. A v1/v3
+    // anchor-pinned serve dir records its pinned tip (height + block hash) in the
+    // marker, and for a pinned snapshot the chainstate best block IS that anchor,
+    // so we can answer "does the served chainstate tip match a compiled anchor?"
+    // from the marker WITHOUT touching LevelDB.
+    //
+    // This matters for correctness, not just speed: opening the served chainstate
+    // with CCoinsViewDB is NOT read-only. LevelDB takes its directory LOCK, rewrites
+    // CURRENT and rolls a fresh MANIFEST/.log on open, and may schedule a compaction
+    // that rewrites/deletes .ldb files. That mutates the frozen serve files after
+    // the snapshot was pinned, breaking the per-file (mtime,size,existence)
+    // invariant the chunk server enforces in OpenBootstrapSnapshotFile. The result
+    // is a deterministic "invalid bootstrap chunk request" reject partway through a
+    // download and an aborted client (caught by e2e ~3% in). So: never open the
+    // served chainstate in place when a sidecar already tells us the tip.
+    {
+        std::string rawMarker;
+        const CFastSyncAnchorData* matched = ResolveServedAnchorFromMarker(source, &rawMarker);
+        if (matched != NULL) {
+            return true; // marker tip matches a compiled anchor — no drift, no open
         }
+        if (!rawMarker.empty()) {
+            // The marker names an anchor this binary does not compile: real drift.
+            warning = strprintf(
+                "the snapshot in -bootstrapsourcedir is anchored at '%s', which matches no compiled "
+                "fast-sync anchor; anchor-mode clients will download it and then reject it. Regenerate "
+                "the snapshot at a compiled anchor height, or run a binary whose anchor matches it.",
+                rawMarker);
+            return false;
+        }
+        // No sidecar at all: a bare, manually-prepared serve dir (neither .meta nor
+        // .anchor). We deliberately do NOT open the served chainstate to read its tip.
+        // A CCoinsViewDB open is not read-only (it takes the LevelDB lock, rewrites
+        // CURRENT, rolls a fresh MANIFEST/.log, and may compact), which would mutate
+        // the frozen serve files and then trip OpenBootstrapSnapshotFile's per-file
+        // (mtime,size,existence) invariant at serve time — the exact deterministic
+        // "invalid bootstrap chunk request" this drift check exists to prevent. (The
+        // manual serve manifest is also pre-built and cached by
+        // PreflightBootstrapSnapshotService BEFORE this check, so opening here is NOT
+        // safe.) Without a marker we cannot verify the anchor without that destructive
+        // open, so we warn the operator to add one rather than corrupt the snapshot.
+        warning =
+            "the snapshot in -bootstrapsourcedir has no .anchor marker, so its chainstate "
+            "tip cannot be checked against the compiled fast-sync anchors without opening "
+            "(and thereby mutating) the frozen serve files. Ensure it was generated at a "
+            "compiled anchor height; auto-serve (-bootstrapserve=auto) writes the marker "
+            "for you.";
+        return false;
     }
-    warning = strprintf(
-        "the snapshot in -bootstrapsourcedir has chainstate tip %s, which matches no compiled fast-sync anchor; "
-        "anchor-mode clients will download it and then reject it. Regenerate the snapshot at a compiled anchor "
-        "height, or run a binary whose anchor matches this snapshot.",
-        best.ToString());
-    return false;
+    return true;
 }
 
 bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::string& error, bool fAllowBuild)
