@@ -4,6 +4,40 @@ release-notes at release time)
 Notable changes
 ===============
 
+Peer-aware auto-finalization (reduced chain-split risk)
+-------------------------------------------------------
+
+ZClassic auto-finalizes a block once it is `-maxreorgdepth` (default 10) deep and a
+delay has passed, after which the node refuses any reorg before it. That protects
+against deep history rewrites but, on its own, can permanently split the network if a
+partition or deep reorg outlasts the delay (each side finalizes a different block and
+never reconciles). It is also unsafe for a freshly bootstrapped node, which would
+otherwise finalize the chain it just imported from a peer before ever checking it
+against the live network.
+
+This release adds **peer-aware finalization** (`-finalizationrequirepeers`, **default
+on**): before finalizing a block, a node now requires the live network to corroborate
+the chain — at least `-finalizationminpeers` (default 2) independent outbound peers
+(distinct address groups) building on it, a live (received this session) best header at
+the required depth, and no peer advertising a higher-work chain that forks below it.
+If those are not met (a network partition, or being on a minority/forged fork), the
+node simply does not finalize and stays a flexible longest-chain follower, so it
+converges with the majority instead of splitting. It only ever *delays* finalization —
+it never finalizes a block a prior version would not, never changes block validity, and
+is fully compatible with peers that do not run it; it is **local policy, not a consensus
+change.**
+
+Operator notes: a node with fewer than `-finalizationminpeers` independent outbound
+peers will not auto-finalize (it behaves like a plain longest-chain node, which is
+safe). `getblockchaininfo` now reports a `finalization_hold` object (and, for
+bootstrapped nodes, `bootstrap_validation.tip_hold`) so a sustained hold is visible; a
+throttled log warning is emitted while finalization is held. Set
+`-finalizationrequirepeers=0` to restore the previous unconditional behavior.
+
+A freshly bootstrapped node additionally holds finalization until the live network
+confirms its imported tip (durable across restart), so it can never pin itself to a
+bootstrap server's minority/forged fork.
+
 `-txindex` now defaults to on
 -----------------------------
 

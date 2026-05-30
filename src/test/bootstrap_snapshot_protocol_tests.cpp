@@ -1947,4 +1947,111 @@ BOOST_AUTO_TEST_CASE(bootstrap_imported_tip_finalization_hold)
     BOOST_CHECK(!BootstrapValidationHoldsFinalization());
 }
 
+// The peer-aware finalization gate (Deliverable 1, D): a node must only finalize a
+// block once the LIVE network corroborates the chain through it — past IBD, the block
+// on the active chain, our best header a live descendant at the required depth, enough
+// independent OUTBOUND peers building on it, and NO peer advertising a higher-work fork
+// below it. These drive the pure decision core EvaluateTipCorroboration directly with
+// synthetic chains + peer views (the production wrapper LiveNetworkCorroboratesTip just
+// gathers these from globals), so every sub-condition is exercised in isolation.
+namespace {
+// Build a chain vIndex[0..n-1] with ascending height and nChainWork == height (a stand-in
+// for monotonically increasing work), wired via pprev + BuildSkip so GetAncestor works.
+static void BuildChain(std::vector<CBlockIndex>& v, int n, CBlockIndex* base = NULL)
+{
+    v.resize(n);
+    for (int i = 0; i < n; ++i) {
+        v[i].nHeight = (base ? base->nHeight + 1 : 0) + i;
+        v[i].pprev = (i == 0) ? base : &v[i - 1];
+        v[i].nChainWork = arith_uint256(v[i].nHeight);
+        v[i].BuildSkip();
+    }
+}
+static PeerTipView Peer(const CBlockIndex* best, bool inbound, unsigned char group)
+{
+    PeerTipView p;
+    p.bestKnown = best;
+    p.fInbound = inbound;
+    p.group.assign(1, group); // distinct byte == distinct address group
+    return p;
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(finalization_peer_corroboration_gate)
+{
+    // Main chain of 130 blocks. Candidate = height 110 (so a depth-10 corroboration
+    // needs peers/header at >= height 120 on this chain). minDepth=10, minPeers=2.
+    std::vector<CBlockIndex> chain;
+    BuildChain(chain, 130);
+    const CBlockIndex* candidate = &chain[110];
+    const CBlockIndex* header120 = &chain[120];
+    const CBlockIndex* tip = &chain[129];
+    const int minDepth = 10, minPeers = 2;
+    const int64_t startup = 1000;
+    std::string why;
+
+    // Two independent OUTBOUND peers at the tip on this chain, live best header -> RELEASE.
+    std::vector<PeerTipView> good;
+    good.push_back(Peer(tip, /*inbound*/false, 1));
+    good.push_back(Peer(tip, /*inbound*/false, 2));
+    BOOST_CHECK(EvaluateTipCorroboration(candidate, /*isIBD*/false, /*onActive*/true,
+                header120, /*bhRecv*/startup + 5, startup, minDepth, minPeers, good, why));
+
+    // T-IBD: still catching up -> HOLD.
+    BOOST_CHECK(!EvaluateTipCorroboration(candidate, true, true, header120, startup + 5, startup,
+                minDepth, minPeers, good, why));
+    BOOST_CHECK(why.find("initial block download") != std::string::npos);
+
+    // T-offchain: candidate not on the active chain -> HOLD.
+    BOOST_CHECK(!EvaluateTipCorroboration(candidate, false, false, header120, startup + 5, startup,
+                minDepth, minPeers, good, why));
+
+    // T-disk-header: best header was NOT received live this session (recv < startup),
+    // i.e. it was disk-loaded by a bootstrap import -> HOLD (this is the bootstrap case).
+    BOOST_CHECK(!EvaluateTipCorroboration(candidate, false, true, header120, startup - 1, startup,
+                minDepth, minPeers, good, why));
+    BOOST_CHECK(why.find("live") != std::string::npos);
+
+    // T-shallow-header: best header not deep enough above the candidate -> HOLD.
+    const CBlockIndex* header115 = &chain[115];
+    BOOST_CHECK(!EvaluateTipCorroboration(candidate, false, true, header115, startup + 5, startup,
+                minDepth, minPeers, good, why));
+
+    // T-too-few: only one outbound peer corroborates -> HOLD.
+    std::vector<PeerTipView> onePeer;
+    onePeer.push_back(Peer(tip, false, 1));
+    BOOST_CHECK(!EvaluateTipCorroboration(candidate, false, true, header120, startup + 5, startup,
+                minDepth, minPeers, onePeer, why));
+    BOOST_CHECK(why.find("corroborate") != std::string::npos);
+
+    // T-inbound-and-dup-group: inbound peers don't count, and two peers in the SAME group
+    // count once -> still too few -> HOLD.
+    std::vector<PeerTipView> weak;
+    weak.push_back(Peer(tip, /*inbound*/true, 1));  // inbound: ignored
+    weak.push_back(Peer(tip, false, 5));            // group 5
+    weak.push_back(Peer(tip, false, 5));            // same group 5: counted once
+    BOOST_CHECK(!EvaluateTipCorroboration(candidate, false, true, header120, startup + 5, startup,
+                minDepth, minPeers, weak, why));
+
+    // T-fork-veto: a peer (even inbound) advertising a strictly-higher-work chain that
+    // forks BELOW the candidate vetoes finalization, even with enough corroborators.
+    std::vector<CBlockIndex> fork;
+    BuildChain(fork, 80, &chain[50]);     // forks off at height 50 (below the candidate),
+                                          // tip at height 130 (above it, different fork)
+    fork.back().nChainWork = arith_uint256(10000); // strictly heavier than the main tip
+    std::vector<PeerTipView> withFork = good;
+    withFork.push_back(Peer(&fork.back(), /*inbound*/true, 9)); // inbound, still vetoes
+    BOOST_CHECK(!EvaluateTipCorroboration(candidate, false, true, header120, startup + 5, startup,
+                minDepth, minPeers, withFork, why));
+    BOOST_CHECK(why.find("forks below") != std::string::npos);
+
+    // T-higher-work-same-fork-OK: a peer heavier but on the SAME chain (descends from the
+    // candidate) is NOT a veto — it is corroboration.
+    std::vector<PeerTipView> heavySame;
+    heavySame.push_back(Peer(tip, false, 1));
+    heavySame.push_back(Peer(tip, false, 2));
+    BOOST_CHECK(EvaluateTipCorroboration(candidate, false, true, header120, startup + 5, startup,
+                minDepth, minPeers, heavySame, why));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

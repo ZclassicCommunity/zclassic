@@ -631,6 +631,27 @@ bool IsBlockFinalized(const CBlockIndex *pindex);
 bool LiveNetworkCorroboratesTip(const CBlockIndex *pindex, int minDepth, int minPeers,
                                 std::string &reason);
 
+/** One connected peer's view for the peer-aware finalization gate: the best block it
+ *  has announced, whether it is an inbound connection, and its address group. */
+struct PeerTipView {
+    const CBlockIndex* bestKnown;
+    bool fInbound;
+    std::vector<unsigned char> group;
+};
+
+/** Pure decision core of the peer-aware finalization gate (no globals; unit-testable).
+ *  LiveNetworkCorroboratesTip gathers the live arguments and calls this. */
+bool EvaluateTipCorroboration(const CBlockIndex* pindex, bool isIBD, bool pindexOnActiveChain,
+                              const CBlockIndex* bestHeader, int64_t bestHeaderRecvTime,
+                              int64_t startupTime, int minDepth, int minPeers,
+                              const std::vector<PeerTipView>& peers, std::string& reason);
+
+/** Snapshot of the most recent peer-aware finalization hold (D gate): whether the
+ *  node is currently withholding auto-finalization pending live-network corroboration,
+ *  the candidate height, a human-readable reason, and the unix time the hold began
+ *  (0 when not held). For getblockchaininfo / monitoring. Must be called under cs_main. */
+void GetFinalizationHoldInfo(bool& held, int& height, std::string& reason, int64_t& since);
+
 /** The currently-connected chain of blocks (protected by cs_main). */
 extern CChain chainActive;
 

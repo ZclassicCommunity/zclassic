@@ -3039,27 +3039,34 @@ static bool FinalizeBlockInternal(CValidationState &state, const CBlockIndex *pi
     return true;
 }
 
-bool LiveNetworkCorroboratesTip(const CBlockIndex *pindex, int minDepth, int minPeers,
-                                std::string &reason)
+// Pure decision core for the peer-aware finalization gate — no globals, so it is
+// directly unit-testable with synthetic chains and peer views. All ambient state is
+// passed explicitly: isIBD, whether `pindex` is on the active chain, the best header
+// + the time it was received + this run's startup time, and the connected peers'
+// (best-known-block, fInbound, address-group) views. See LiveNetworkCorroboratesTip
+// for the production wrapper that gathers these from globals under cs_main.
+bool EvaluateTipCorroboration(const CBlockIndex* pindex, bool isIBD, bool pindexOnActiveChain,
+                              const CBlockIndex* bestHeader, int64_t bestHeaderRecvTime,
+                              int64_t startupTime, int minDepth, int minPeers,
+                              const std::vector<PeerTipView>& peers, std::string& reason)
 {
-    AssertLockHeld(cs_main);
     if (pindex == NULL) { reason = "no candidate"; return false; }
     // Don't trust local chain state while still catching up.
-    if (IsInitialBlockDownload()) { reason = "still in initial block download"; return false; }
+    if (isIBD) { reason = "still in initial block download"; return false; }
     // The candidate must be on our active chain.
-    if (chainActive[pindex->nHeight] != pindex) { reason = "candidate is not on the active chain"; return false; }
+    if (!pindexOnActiveChain) { reason = "candidate is not on the active chain"; return false; }
 
     const int needHeight = pindex->nHeight + minDepth;
     // Our own best header must be a descendant of the candidate at the required depth,
     // and must have been received LIVE this session (not loaded from disk during a
     // bootstrap import — that is exactly the unconfirmed state we are guarding).
-    if (pindexBestHeader == NULL || pindexBestHeader->nHeight < needHeight) {
+    if (bestHeader == NULL || bestHeader->nHeight < needHeight) {
         reason = "best header is not yet the required depth above the candidate"; return false;
     }
-    if (pindexBestHeader->GetAncestor(pindex->nHeight) != pindex) {
+    if (bestHeader->GetAncestor(pindex->nHeight) != pindex) {
         reason = "best header does not descend from the candidate"; return false;
     }
-    if ((int64_t)pindexBestHeader->GetHeaderReceivedTime() < GetStartupTime()) {
+    if (bestHeaderRecvTime < startupTime) {
         reason = "best header was not received live this session"; return false;
     }
 
@@ -3069,19 +3076,28 @@ bool LiveNetworkCorroboratesTip(const CBlockIndex *pindex, int minDepth, int min
     // candidate (that is the tell-tale of a minority/forged fork — keep following
     // longest-chain instead of pinning).
     std::set<std::vector<unsigned char> > outboundGroups;
-    for (std::map<NodeId, CNodeState>::const_iterator it = mapNodeState.begin();
-         it != mapNodeState.end(); ++it) {
-        const CNodeState &st = it->second;
-        const CBlockIndex *pbest = st.pindexBestKnownBlock;
+    for (size_t i = 0; i < peers.size(); ++i) {
+        const CBlockIndex* pbest = peers[i].bestKnown;
         if (pbest == NULL) continue;
+        // No-better-competing-fork veto. If ANY peer (inbound included) advertises a
+        // strictly-higher-work chain that forks BELOW the candidate, refuse to
+        // finalize: that heavier chain may be the real majority and the candidate a
+        // minority fork. This is a SAFETY check and is intentionally NOT weakened to
+        // "only forks whose bodies we have" — a node must not pin while a heavier
+        // valid-PoW header chain is visible, even if it has not downloaded the bodies
+        // yet. KNOWN, ACCEPTED liveness limit: a peer can keep finalization paused by
+        // advertising a header-only higher-work fork, but forging headers with more
+        // total work than the active chain requires MAJORITY hashpower (headers must
+        // satisfy CheckProofOfWork), and the only effect of the pause is to leave the
+        // node a plain longest-chain follower (no auto-finalization) — which is safe.
         if (pbest->nChainWork > pindex->nChainWork &&
             (pbest->nHeight < pindex->nHeight || pbest->GetAncestor(pindex->nHeight) != pindex)) {
             reason = "a peer advertises a higher-work chain that forks below the candidate";
             return false;
         }
-        if (!st.fInbound && pbest->nHeight >= needHeight &&
+        if (!peers[i].fInbound && pbest->nHeight >= needHeight &&
             pbest->GetAncestor(pindex->nHeight) == pindex) {
-            outboundGroups.insert(st.address.GetGroup());
+            outboundGroups.insert(peers[i].group);
         }
     }
     if ((int)outboundGroups.size() < minPeers) {
@@ -3092,6 +3108,59 @@ bool LiveNetworkCorroboratesTip(const CBlockIndex *pindex, int minDepth, int min
     reason = strprintf("%d independent outbound peers corroborate the chain at depth >=%d",
                        (int)outboundGroups.size(), minDepth);
     return true;
+}
+
+bool LiveNetworkCorroboratesTip(const CBlockIndex *pindex, int minDepth, int minPeers,
+                                std::string &reason)
+{
+    AssertLockHeld(cs_main);
+    std::vector<PeerTipView> peers;
+    peers.reserve(mapNodeState.size());
+    for (std::map<NodeId, CNodeState>::const_iterator it = mapNodeState.begin();
+         it != mapNodeState.end(); ++it) {
+        PeerTipView v;
+        v.bestKnown = it->second.pindexBestKnownBlock;
+        v.fInbound = it->second.fInbound;
+        if (v.bestKnown != NULL) v.group = it->second.address.GetGroup();
+        peers.push_back(v);
+    }
+    const bool onActive = (pindex != NULL && chainActive[pindex->nHeight] == pindex);
+    const int64_t bhRecv = (pindexBestHeader != NULL)
+        ? (int64_t)pindexBestHeader->GetHeaderReceivedTime() : 0;
+    return EvaluateTipCorroboration(pindex, IsInitialBlockDownload(), onActive,
+                                    pindexBestHeader, bhRecv, GetStartupTime(),
+                                    minDepth, minPeers, peers, reason);
+}
+
+// Snapshot of the most recent peer-aware finalization hold (D gate), so operators
+// and monitoring can see WHY a node is not auto-finalizing (e.g. a partition).
+// Updated only inside FindBlockToFinalize under cs_main; read via
+// GetFinalizationHoldInfo (also under cs_main).
+static bool g_finalizationHeld = false;
+static int g_finalizationHeldHeight = -1;
+static std::string g_finalizationHeldReason;
+static int64_t g_finalizationHeldSince = 0;
+
+void GetFinalizationHoldInfo(bool& held, int& height, std::string& reason, int64_t& since)
+{
+    AssertLockHeld(cs_main);
+    held = g_finalizationHeld;
+    height = g_finalizationHeldHeight;
+    reason = g_finalizationHeldReason;
+    since = g_finalizationHeldSince;
+}
+
+static void SetFinalizationHeld(bool held, int height, const std::string& reason)
+{
+    AssertLockHeld(cs_main);
+    if (held && !g_finalizationHeld) {
+        g_finalizationHeldSince = GetTime(); // transition into held: stamp the start
+    } else if (!held) {
+        g_finalizationHeldSince = 0;
+    }
+    g_finalizationHeld = held;
+    g_finalizationHeldHeight = held ? height : -1;
+    g_finalizationHeldReason = held ? reason : std::string();
 }
 
 static const CBlockIndex *FindBlockToFinalize(CBlockIndex *pindexNew) {
@@ -3164,13 +3233,24 @@ static const CBlockIndex *FindBlockToFinalize(CBlockIndex *pindexNew) {
                 if (!LiveNetworkCorroboratesTip(pindex, std::max(maxreorgdepth, 0),
                                                 finalizationMinPeers, reason)) {
                     // Not yet corroborated by the live network: hold finalization this
-                    // round (try again as the chain/peers advance). Logged sparsely to
-                    // avoid spamming during a genuine partition.
-                    LogPrint("bench", "finalization: holding at height %d — %s\n",
-                             pindex->nHeight, reason);
+                    // round (try again as the chain/peers advance). Record the hold so
+                    // getblockchaininfo can surface it, and warn the operator on a
+                    // throttled cadence (once, then every 10 min) so a sustained
+                    // partition/under-connection hold is not invisible.
+                    SetFinalizationHeld(true, pindex->nHeight, reason);
+                    static int64_t nLastFinalizationHoldWarn = 0;
+                    if (now - nLastFinalizationHoldWarn >= 600) {
+                        nLastFinalizationHoldWarn = now;
+                        LogPrintf("WARNING: auto-finalization is paused at height %d — %s. The node "
+                                  "stays a longest-chain follower until the live network corroborates "
+                                  "this chain (set -finalizationrequirepeers=0 to disable this gate).\n",
+                                  pindex->nHeight, reason);
+                    }
                     return nullptr;
                 }
             }
+            // Corroborated (or gate disabled): clear any recorded hold and finalize.
+            SetFinalizationHeld(false, 0, std::string());
             return pindex;
         }
 

@@ -767,6 +767,12 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
             "     \"tip_hold_height\": n,    (numeric) height of the imported tip awaiting corroboration (only when tip_hold is true)\n"
             "     \"tip_hold_blockhash\": \"xxxx\" (string) hash of that imported tip (only when tip_hold is true)\n"
             "  },\n"
+            "  \"finalization_hold\": {     (object) peer-aware finalization hold (all nodes)\n"
+            "     \"held\": true|false,      (boolean) whether auto-finalization is currently paused pending live-network corroboration\n"
+            "     \"height\": n,             (numeric) candidate height being withheld (only when held)\n"
+            "     \"reason\": \"xxxx\",        (string) why finalization is held (only when held)\n"
+            "     \"since\": ttt             (numeric) unix time the hold began (only when held)\n"
+            "  },\n"
             "  \"size_on_disk\": xxxxxx,       (numeric) the estimated size of the block and undo files on disk\n"
             "  \"commitments\": xxxxxx,    (numeric) the current number of note commitments in the commitment tree\n"
             "  \"softforks\": [            (array) status of softforks in progress\n"
@@ -881,6 +887,23 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
             bvObj.push_back(Pair("tip_hold_blockhash", tipHoldHash.GetHex()));
         }
         obj.push_back(Pair("bootstrap_validation", bvObj));
+    }
+
+    {
+        // Peer-aware finalization hold (applies to ALL nodes, not just bootstrapped
+        // ones): whether auto-finalization is currently withheld pending live-network
+        // corroboration of the chain (e.g. during a partition or while under-connected).
+        bool fhHeld = false; int fhHeight = -1; int64_t fhSince = 0;
+        std::string fhReason;
+        GetFinalizationHoldInfo(fhHeld, fhHeight, fhReason, fhSince);
+        UniValue fhObj(UniValue::VOBJ);
+        fhObj.push_back(Pair("held", fhHeld));
+        if (fhHeld) {
+            fhObj.push_back(Pair("height", fhHeight));
+            fhObj.push_back(Pair("reason", fhReason));
+            fhObj.push_back(Pair("since", fhSince));
+        }
+        obj.push_back(Pair("finalization_hold", fhObj));
     }
 
     if (fPruneMode)

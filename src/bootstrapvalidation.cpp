@@ -246,6 +246,13 @@ void GetBootstrapTipHold(int& height, uint256& hashBlock)
 
 void EvaluateBootstrapTipRelease()
 {
+    // This runs on the shared CScheduler thread, which is interrupted but NOT joined
+    // before the chain DBs are freed on the init-failure shutdown path. Bail before
+    // touching anything if shutdown has begun (first line of defence).
+    if (ShutdownRequested()) {
+        return;
+    }
+
     int holdHeight;
     uint256 holdHash;
     GetBootstrapTipHold(holdHeight, holdHash);
@@ -256,14 +263,22 @@ void EvaluateBootstrapTipRelease()
     const int minDepth = std::max((int)GetArg("-maxreorgdepth", DEFAULT_MAX_REORG_DEPTH), 0);
     const int minPeers = std::max((int)GetArg("-finalizationminpeers", DEFAULT_FINALIZATION_MIN_PEERS), 1);
 
-    bool release = false;
+    bool released = false;
     std::string reason;
     {
+        // Hold cs_main across the whole evaluation INCLUDING the durable release write:
+        // Shutdown() frees pblocktree under cs_main (init.cpp), so holding it here makes
+        // the ReleaseBootstrapTipHold -> pblocktree->Erase below atomic with respect to
+        // that delete (LOCK-1). The pblocktree NULL re-check covers the teardown case.
         LOCK(cs_main);
+        if (pblocktree == NULL) {
+            return; // chain DBs being torn down
+        }
         BlockMap::iterator it = mapBlockIndex.find(holdHash);
         CBlockIndex* pTip = (it != mapBlockIndex.end()) ? it->second : NULL;
         const bool stillOnActiveChain =
             pTip != NULL && pTip->nHeight == holdHeight && chainActive[holdHeight] == pTip;
+        bool release = false;
         if (!stillOnActiveChain) {
             // The imported tip is no longer the active chain at that height: a
             // higher-work chain already reorged it away, i.e. the node converged on
@@ -274,10 +289,13 @@ void EvaluateBootstrapTipRelease()
         } else if (LiveNetworkCorroboratesTip(pTip, minDepth, minPeers, reason)) {
             release = true;
         }
+        if (release) {
+            ReleaseBootstrapTipHold(); // durable write happens here, under cs_main
+            released = true;
+        }
     }
 
-    if (release) {
-        ReleaseBootstrapTipHold();
+    if (released) {
         LogPrintf("Bootstrap tip hold: released — %s; auto-finalization resumes\n", reason);
     }
 }
