@@ -192,6 +192,18 @@ void Interrupt(boost::thread_group& threadGroup)
 
 static void InterruptBootstrapServeFreeze();
 
+// GROWABLE v3 server-side helpers. These live in bootstrap.cpp and are part of the
+// shared bootstrap contract; bootstrap.h is the canonical home for their
+// declarations. Declared here too (identical signatures, so the redundant
+// declaration is harmless) so this translation unit always compiles independently:
+//   - ExtendServedBlocksForServe: append-only extend of the retained anchor serve
+//     copy's block bundle toward the live tip, chainstate kept pinned at the anchor.
+//   - BuildAnchorServeSnapshotFromGenesis: for a node that synced from genesis with
+//     no retained chainstate@anchor, re-derive one by replaying genesis..anchor and
+//     install it as a v3-servable ".anchor" serve dir.
+bool ExtendServedBlocksForServe(const boost::filesystem::path& data_dir, int minAdvanceBlocks, std::string& error);
+bool BuildAnchorServeSnapshotFromGenesis(const boost::filesystem::path& data_dir, std::string& error);
+
 void Shutdown()
 {
     LogPrintf("%s: In progress...\n", __func__);
@@ -394,7 +406,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-bootstrapsourcedir=<dir>", _("Prepared snapshot directory containing blocks/ and chainstate/ to serve to bootstrap peers"));
     strUsage += HelpMessageOpt("-bootstrapservemaxbytesperday=<n>", strprintf(_("When serving bootstrap snapshots, bytes one IP may download per 24h before it is throttled (default: %d, 0 = unlimited)"), BOOTSTRAP_SERVE_DEFAULT_MAX_BYTES_PER_DAY));
     strUsage += HelpMessageOpt("-bootstrapservethrottlekbps=<n>", strprintf(_("Rate in KiB/s to serve a bootstrap IP that is over its daily cap (default: %d, 0 = stop serving it until the next day)"), BOOTSTRAP_SERVE_DEFAULT_THROTTLE_KBPS));
-    strUsage += HelpMessageOpt("-bootstrapservefreezeinterval=<n>", strprintf(_("With -bootstrapserve=auto, seconds between freezing a fresh self-snapshot of this node's own tip to serve (EXPERIMENTAL, option B; default: %d, 0 = never self-snapshot, only serve a fast-synced anchor copy)"), BOOTSTRAP_SERVE_DEFAULT_FREEZE_INTERVAL));
+    strUsage += HelpMessageOpt("-bootstrapservefreezeinterval=<n>", strprintf(_("With -bootstrapserve=auto, seconds between refreshing the served snapshot toward this node's live tip (default: %d, 0 = never refresh, serve only the fast-synced anchor copy as-is). In the default anchor mode this EXTENDS the served block bundle append-only while keeping the chainstate pinned at the compiled anchor (GROWABLE v3). Under -bootstrapmode=trustless it instead freezes a fresh self-snapshot at this node's own tip (EXPERIMENTAL, option B)."), BOOTSTRAP_SERVE_DEFAULT_FREEZE_INTERVAL));
     strUsage += HelpMessageOpt("-bootstrapmode=<anchor|trustless>", _("How to accept a downloaded bootstrap snapshot: 'anchor' (default) requires it to match the compiled fast-sync anchor; 'trustless' (EXPERIMENTAL, option B) accepts a peer's self-snapshot at its own tip, then re-derives the UTXO set from genesis in the background and reindexes if it does not match."));
 #if !defined(WIN32)
     strUsage += HelpMessageOpt("-sysperms", _("Create new files with system default permissions, instead of umask 077 (only effective with disabled wallet functionality)"));
@@ -874,19 +886,60 @@ static void BootstrapServeFreezeWorker()
     }
     // Only scheduled when -bootstrapserve=auto with a positive freeze interval, so
     // no need to re-check the (init-rewritten) -bootstrapserve arg here.
+    //
+    // DEFAULT (v3 GROWABLE, anchor mode): EXTEND the retained anchor serve copy's
+    // block bundle append-only toward this node's live tip, keeping its chainstate
+    // PINNED at the compiled anchor (its compiled commitment still verifies on the
+    // client with zero server trust). This fixes SCALE-1: the previous default froze
+    // a fresh chainstate@tip into a v2 self-snapshot that anchor-mode clients reject.
+    // ExtendServedBlocksForServe self-gates: it requires a retained ".anchor" serve
+    // dir, refuses a v2 self-snapshot dir, and skips a re-copy while the served
+    // bundle is already within minAdvanceBlocks of the tip — so it is a clean no-op
+    // (logged at "net") when there is nothing to extend.
+    //
+    // The v2 self-snapshot path (FreezeLiveChainstateForServe, which re-freezes
+    // chainstate at the node's own recent tip with no compiled anchor) is now ONLY
+    // reachable behind the explicit EXPERIMENTAL -bootstrapmode=trustless opt-in.
+    const bool fTrustlessServe = (GetArg("-bootstrapmode", "anchor") == "trustless");
     std::string err;
-    if (!FreezeLiveChainstateForServe(GetDataDir(), BOOTSTRAP_SELF_SNAPSHOT_MIN_ADVANCE_BLOCKS, err)) {
-        LogPrint("net", "Auto-serve self-snapshot skipped: %s\n", err);
-        return;
+    if (fTrustlessServe) {
+        if (!FreezeLiveChainstateForServe(GetDataDir(), BOOTSTRAP_SELF_SNAPSHOT_MIN_ADVANCE_BLOCKS, err)) {
+            LogPrint("net", "Auto-serve self-snapshot skipped: %s\n", err);
+            return;
+        }
+    } else {
+        // SNAPSHOT-AT-ANCHOR: a node that synced from genesis (rather than
+        // fast-syncing a snapshot) has NO retained chainstate@anchor for the extend
+        // to grow on top of. Produce one ONCE by replaying genesis..anchor into a
+        // verified scratch chainstate (BuildAnchorServeSnapshotFromGenesis), so this
+        // node can serve a v3 GROWABLE snapshot too. This is CPU-heavy and holds
+        // cs_main across the replay, which is exactly why it runs HERE on the
+        // dedicated freeze worker thread rather than inline in init — it must never
+        // block normal startup. Best-effort: on failure we just skip serving this
+        // interval and retry next time. Only attempted when nothing is retained yet;
+        // once built, the cheap append-only extend below takes over.
+        if (!BootstrapSnapshotPathsExist(BootstrapAutoServeSourceDir(GetDataDir()))) {
+            std::string buildErr;
+            if (!BuildAnchorServeSnapshotFromGenesis(GetDataDir(), buildErr)) {
+                LogPrint("net", "Auto-serve anchor snapshot build skipped: %s\n", buildErr);
+                return;
+            }
+            LogPrintf("Auto-serve: built a chainstate@anchor serve copy by replaying from genesis; now serving v3 growable snapshots\n");
+        }
+        if (!ExtendServedBlocksForServe(GetDataDir(), BOOTSTRAP_SELF_SNAPSHOT_MIN_ADVANCE_BLOCKS, err)) {
+            LogPrint("net", "Auto-serve block-bundle extend skipped: %s\n", err);
+            return;
+        }
     }
     if (!PreflightBootstrapSnapshotService(err)) {
-        LogPrintf("Auto-serve: froze a self-snapshot but cannot build its manifest: %s\n", err);
+        LogPrintf("Auto-serve: refreshed the served snapshot but cannot build its manifest: %s\n", err);
         return;
     }
     // Benign 64-bit store: readers see either value, both valid (advertise or not).
     if (!(nLocalServices & NODE_BOOTSTRAP)) {
         nLocalServices |= NODE_BOOTSTRAP;
-        LogPrintf("Auto bootstrap-serve active: now serving a self-snapshot to peers\n");
+        LogPrintf("Auto bootstrap-serve active: now serving the %s to peers\n",
+            fTrustlessServe ? "self-snapshot" : "growing anchor snapshot");
     }
 }
 
@@ -1826,6 +1879,14 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 #endif
 
     const bool fBootstrapServeAuto = (GetArg("-bootstrapserve", "") == "auto");
+    // Set true below when a freshly verified GROWABLE v3 snapshot bundled
+    // post-anchor blocks (anchor+1..serverTip) that must be forward-connected and
+    // re-validated by THIS node before they are trusted. Consumed at Step 10, where
+    // the ActivateBestChain that connects them is wrapped in a
+    // CBootstrapForwardConnectGuard so ConnectTip re-runs the contextual header
+    // (retarget) check on each above-checkpoint block. Stays false for every normal
+    // node, manual serve, and pure-anchor (v1/v2) import — Step 10 is unchanged there.
+    bool fBootstrapForwardConnect = false;
     if (GetBoolArg("-bootstrapserve", false)) {
         // Manual serve: a fixed prepared source dir, validated up front.
         if (!mapArgs.count("-bootstrapsourcedir")) {
@@ -2198,6 +2259,42 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         LogPrintf("Bootstrap snapshot verified at height %d (%s)\n",
             chainActive.Height(),
             chainActive.Tip() ? chainActive.Tip()->GetBlockHash().ToString() : std::string("unknown"));
+
+        // GROWABLE v3: the verified chainstate is PINNED at the anchor, but the
+        // imported snapshot may ALSO bundle post-anchor blocks (anchor+1..serverTip)
+        // whose headers LoadBlockIndexDB just loaded into the block tree. pcoinsTip
+        // is still at the anchor (VerifyImportedBootstrapAnchor confirmed the active
+        // tip IS the anchor), so a best header strictly above it that descends from
+        // the verified anchor tip is exactly that bundle. Those blocks carry NO
+        // commitment, so THIS node must validate them itself: arm the imported-tip
+        // finalization hold at serverTip now (before the first post-anchor
+        // ConnectTip) and flag Step 10 to forward-connect them under the retarget
+        // re-check guard. A best header that does NOT descend from the verified
+        // anchor is a stray sibling, not our bundle — ignore it (Step 10 will not
+        // connect across the anchor onto a different chain), so we never arm a hold
+        // for or forward-connect a chain we did not just verify the base of.
+        {
+            LOCK(cs_main);
+            const CBlockIndex* pAnchorTip = chainActive.Tip();
+            if (pAnchorTip != NULL && pindexBestHeader != NULL &&
+                pindexBestHeader->nHeight > pAnchorTip->nHeight &&
+                pindexBestHeader->GetAncestor(pAnchorTip->nHeight) == pAnchorTip) {
+                const int serverTipHeight = pindexBestHeader->nHeight;
+                const uint256 serverTipHash = pindexBestHeader->GetBlockHash();
+                // The bundle tip is above the compiled anchor, which is at-or-below
+                // the last compiled checkpoint, so serverTip is always above the last
+                // checkpoint — the case ArmBootstrapTipHold is for. Guard defensively
+                // anyway (mirrors the trustless path) so a hold is never armed for an
+                // at-or-below-checkpoint tip.
+                const CBlockIndex* pcp = Checkpoints::GetLastCheckpoint(Params().Checkpoints());
+                if (pcp == NULL || serverTipHeight > pcp->nHeight) {
+                    ArmBootstrapTipHold(serverTipHeight, serverTipHash);
+                }
+                fBootstrapForwardConnect = true;
+                LogPrintf("Bootstrap snapshot bundles post-anchor blocks up to height %d (%s); will forward-connect and validate them before trusting the tip\n",
+                    serverTipHeight, serverTipHash.ToString());
+            }
+        }
     }
 
     // Auto-serve: once this node has a snapshot at the current anchor (just
@@ -2474,8 +2571,23 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     uiInterface.InitMessage(_("Activating best chain..."));
     // scan for better chains in the block chain database, that are not yet connected in the active best chain
     CValidationState state;
-    if (!ActivateBestChain(state))
-        strErrors << "Failed to connect best block";
+    {
+        // GROWABLE v3 forward-connect: when a freshly verified snapshot bundled
+        // post-anchor blocks (anchor+1..serverTip) that were NOT validated live,
+        // wrap this ActivateBestChain in the guard so ConnectTip re-runs the
+        // contextual header (retarget) check on each above-checkpoint block, rejecting
+        // a forged low-difficulty post-anchor fork the context-free PoW check would
+        // otherwise accept. The guard is a strict no-op (and is not even constructed)
+        // for every normal node and pure-anchor import, so Step 10 is byte-identical
+        // there. Scoped so the guard is released the instant the forward-connect
+        // returns, before any live block is accepted.
+        boost::scoped_ptr<CBootstrapForwardConnectGuard> forwardConnectGuard;
+        if (fBootstrapForwardConnect) {
+            forwardConnectGuard.reset(new CBootstrapForwardConnectGuard());
+        }
+        if (!ActivateBestChain(state))
+            strErrors << "Failed to connect best block";
+    }
 
     std::vector<boost::filesystem::path> vImportFiles;
     if (mapArgs.count("-loadblock"))

@@ -75,6 +75,16 @@ bool fIsBareMultisigStd = true;
 bool fCheckBlockIndex = false;
 bool fCheckpointsEnabled = true;
 bool fCoinbaseEnforcedProtectionEnabled = true;
+// Set ONLY while init's Step-10 forward-connect activates a chain that includes
+// freshly-imported, above-checkpoint bootstrap blocks (anchor+1..serverTip) that
+// were NOT validated live. While set, ConnectTip re-runs ContextualCheckBlockHeader
+// for each above-checkpoint block so a forged LOW-DIFFICULTY post-anchor fork (whose
+// claimed nBits the context-free CheckProofOfWork on the forward-connect path would
+// otherwise accept) is rejected. Default false => a strict no-op for every normal
+// node and all live sync (where AcceptBlockHeader already ran the contextual checks).
+// Toggled only via the RAII CBootstrapForwardConnectGuard. atomic so the flag write
+// in init (outside cs_main) is well-defined w.r.t. the ConnectTip read (under cs_main).
+std::atomic<bool> g_bootstrapForwardConnect(false);
 size_t nCoinCacheUsage = 5000 * 300;
 uint64_t nPruneTarget = 0;
 bool fAlerts = DEFAULT_ALERTS;
@@ -3290,6 +3300,37 @@ bool static ConnectTip(CValidationState &state, CBlockIndex *pindexNew, CBlock *
     int64_t nTime2 = GetTimeMicros(); nTimeReadFromDisk += nTime2 - nTime1;
     int64_t nTime3;
     LogPrint("bench", "  - Load block from disk: %.2fms [%.2fs]\n", (nTime2 - nTime1) * 0.001, nTimeReadFromDisk * 0.000001);
+    // Bootstrap forward-connect anti-forgery re-check (Option A). The normal connect
+    // path (ConnectBlock -> CheckBlock -> CheckBlockHeader) verifies only context-free
+    // PoW against the block's CLAIMED nBits; the difficulty-RETARGET rule
+    // (nBits == GetNextWorkRequired(pprev)) lives only in ContextualCheckBlockHeader,
+    // which AcceptBlockHeader runs on the live header path but the init Step-10
+    // forward-connect of imported blocks does NOT reach. Without this, a forged
+    // low-difficulty post-anchor fork bundled in a v3 snapshot would be silently
+    // connected. So, ONLY while connecting imported above-checkpoint bootstrap blocks
+    // (g_bootstrapForwardConnect, set by CBootstrapForwardConnectGuard around init's
+    // ActivateBestChain) and ONLY for blocks above the last compiled checkpoint
+    // (at/below it the chain is hash-pinned, and re-checking there would wrongly trip
+    // ContextualCheckBlockHeader's own older-than-checkpoint fork guard), re-run the
+    // contextual header rules. genesis (pprev == NULL) has no retarget and is skipped.
+    // ContextualCheckBlockHeader is called READ-ONLY (no consensus rule changed). A
+    // failure is handled exactly like an invalid ConnectBlock below: mark the block
+    // invalid and fail the connect on the existing invalid-block path. This is a strict
+    // no-op for normal live sync (flag never set; AcceptBlockHeader already ran it).
+    if (g_bootstrapForwardConnect.load(std::memory_order_relaxed) &&
+        pindexNew->pprev != NULL) {
+        int lastCheckpointHeight = -1;
+        const CBlockIndex* pcp = Checkpoints::GetLastCheckpoint(Params().Checkpoints());
+        if (pcp != NULL)
+            lastCheckpointHeight = pcp->nHeight;
+        if (pindexNew->nHeight > lastCheckpointHeight &&
+            !ContextualCheckBlockHeader(*pblock, state, pindexNew->pprev)) {
+            if (state.IsInvalid())
+                InvalidBlockFound(pindexNew, state);
+            return error("ConnectTip(): imported bootstrap block %s failed contextual header check (%s)",
+                         pindexNew->GetBlockHash().ToString(), FormatStateMessage(state));
+        }
+    }
     {
         CCoinsViewCache view(pcoinsTip);
         bool rv = ConnectBlock(*pblock, state, pindexNew, view);
@@ -3349,6 +3390,19 @@ bool static ConnectTip(CValidationState &state, CBlockIndex *pindexNew, CBlock *
     LogPrint("bench", "  - Connect postprocess: %.2fms [%.2fs]\n", (nTime6 - nTime5) * 0.001, nTimePostConnect * 0.000001);
     LogPrint("bench", "- Connect block: %.2fms [%.2fs]\n", (nTime6 - nTime1) * 0.001, nTimeTotal * 0.000001);
     return true;
+}
+
+// Arm/disarm the bootstrap forward-connect contextual re-check (see g_bootstrapForwardConnect
+// and the guard inside ConnectTip). RAII so the flag is always cleared, even if the
+// wrapped ActivateBestChain throws (e.g. a boost::thread interruption during init).
+CBootstrapForwardConnectGuard::CBootstrapForwardConnectGuard()
+{
+    g_bootstrapForwardConnect.store(true, std::memory_order_relaxed);
+}
+
+CBootstrapForwardConnectGuard::~CBootstrapForwardConnectGuard()
+{
+    g_bootstrapForwardConnect.store(false, std::memory_order_relaxed);
 }
 
 /**

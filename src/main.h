@@ -496,6 +496,27 @@ bool ContextualCheckBlock(const CBlock& block, CValidationState& state, CBlockIn
 bool TestBlockValidity(CValidationState &state, const CBlock& block, CBlockIndex *pindexPrev, bool fCheckPOW = true, bool fCheckMerkleRoot = true);
 
 /**
+ * RAII scope guard for init's Step-10 forward-connect of a freshly-imported
+ * bootstrap snapshot (v3 GROWABLE: anchor+1..serverTip blocks that were NOT
+ * validated live). While an instance is alive, ConnectTip re-runs
+ * ContextualCheckBlockHeader for each connected block ABOVE the last compiled
+ * checkpoint, rejecting a forged low-difficulty post-anchor fork that the
+ * forward-connect path's context-free PoW check would otherwise accept. Wrap the
+ * init ActivateBestChain that connects imported above-anchor blocks in this scope.
+ * Outside such a scope it is a strict no-op for every normal node and live sync.
+ * Construct/destroy only on the init thread, before the node accepts live blocks.
+ */
+class CBootstrapForwardConnectGuard
+{
+public:
+    CBootstrapForwardConnectGuard();
+    ~CBootstrapForwardConnectGuard();
+private:
+    CBootstrapForwardConnectGuard(const CBootstrapForwardConnectGuard&);
+    CBootstrapForwardConnectGuard& operator=(const CBootstrapForwardConnectGuard&);
+};
+
+/**
  * Store block on disk.
  * JoinSplit proofs are never verified, because:
  * - AcceptBlock doesn't perform script checks either.
