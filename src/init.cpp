@@ -2155,6 +2155,17 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     break;
                 }
 
+                // -reindex-chainstate replays the UTXO set from the on-disk block index
+                // and blk files. On a pruned datadir the below-horizon blocks are gone,
+                // so the replay could only reach the first pruned block and would silently
+                // leave a truncated chainstate. Refuse rather than rebuild a partial UTXO set.
+                if (fReindexChainState && fHavePruned) {
+                    strLoadError = _("-reindex-chainstate cannot rebuild the UTXO set on a pruned datadir: "
+                                     "blocks below the prune horizon are gone. Use -reindex to redownload, "
+                                     "or run unpruned.");
+                    break;
+                }
+
                 if (!fReindex) {
                     uiInterface.InitMessage(_("Rewinding blocks if needed..."));
                     if (!RewindBlockIndex(chainparams, clearWitnessCaches)) {
