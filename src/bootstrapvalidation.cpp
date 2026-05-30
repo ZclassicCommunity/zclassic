@@ -542,21 +542,25 @@ static void ThreadBootstrapUtxoValidation()
                         }
                         CValidationState cvstate;
                         // ConnectBlock (fScratchView=true) only re-checks context-free
-                        // PoW against the block's CLAIMED nBits; it does NOT re-enforce
-                        // the difficulty retarget. Re-run the contextual header rules
-                        // (notably nBits == GetNextWorkRequired(pprev), main.cpp) for
-                        // every block ABOVE the last checkpoint so a low-difficulty
-                        // forged fork in that (unpinned) range cannot pass background
-                        // validation. pindex is on the active-chain ancestry, so pprev
-                        // and the averaging window are intact; genesis (pprev == NULL)
-                        // has no retarget and is skipped, and blocks at/below the
-                        // checkpoint are skipped (already hash-pinned; see above). A
-                        // failure here is a forgery/invalidity proof for a fully-present,
-                        // on-ancestry block: handle it exactly like a failed ConnectBlock
-                        // (-> FAILED -> auto-reindex).
+                        // rules; it does NOT re-enforce the difficulty retarget nor the
+                        // contextual BLOCK rules a from-genesis node runs in AcceptBlock.
+                        // Re-run BOTH contextual checks for every block ABOVE the last
+                        // checkpoint so a forged fork in that (unpinned) range cannot pass
+                        // background validation:
+                        //   - ContextualCheckBlockHeader: nBits == GetNextWorkRequired
+                        //     (retarget), timestamp, version, equihash size.
+                        //   - ContextualCheckBlock: BIP34 height-in-coinbase, tx finality,
+                        //     per-tx ContextualCheckTransaction (activation/expiry/size).
+                        // pindex is on the active-chain ancestry, so pprev and the
+                        // averaging window are intact; genesis (pprev == NULL) is skipped,
+                        // and blocks at/below the checkpoint are skipped (already
+                        // hash-pinned; see above). A failure here is a forgery/invalidity
+                        // proof for a fully-present, on-ancestry block: handle it exactly
+                        // like a failed ConnectBlock (-> FAILED -> auto-reindex).
                         if (pindex->pprev != NULL &&
                             pindex->nHeight > lastCheckpointHeight &&
-                            !ContextualCheckBlockHeader(block, cvstate, pindex->pprev)) {
+                            (!ContextualCheckBlockHeader(block, cvstate, pindex->pprev) ||
+                             !ContextualCheckBlock(block, cvstate, pindex->pprev))) {
                             failed = true;
                             break;
                         }

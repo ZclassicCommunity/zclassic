@@ -3333,21 +3333,29 @@ bool static ConnectTip(CValidationState &state, CBlockIndex *pindexNew, CBlock *
     LogPrint("bench", "  - Load block from disk: %.2fms [%.2fs]\n", (nTime2 - nTime1) * 0.001, nTimeReadFromDisk * 0.000001);
     // Bootstrap forward-connect anti-forgery re-check (Option A). The normal connect
     // path (ConnectBlock -> CheckBlock -> CheckBlockHeader) verifies only context-free
-    // PoW against the block's CLAIMED nBits; the difficulty-RETARGET rule
-    // (nBits == GetNextWorkRequired(pprev)) lives only in ContextualCheckBlockHeader,
-    // which AcceptBlockHeader runs on the live header path but the init Step-10
-    // forward-connect of imported blocks does NOT reach. Without this, a forged
-    // low-difficulty post-anchor fork bundled in a v3 snapshot would be silently
-    // connected. So, ONLY while connecting imported above-checkpoint bootstrap blocks
+    // rules; the CONTEXTUAL consensus rules a from-genesis node enforces in
+    // AcceptBlock -> ContextualCheckBlockHeader/ContextualCheckBlock are NOT reached by
+    // the init Step-10 forward-connect of imported blocks (they arrive via
+    // LoadBlockIndexDB headers and are connected by ConnectTip only, never AcceptBlock).
+    // Skipped without this re-check:
+    //   - ContextualCheckBlockHeader: nBits == GetNextWorkRequired(pprev) (difficulty
+    //     RETARGET), header timestamp, version, equihash-solution size.
+    //   - ContextualCheckBlock: BIP34 height-in-coinbase, transaction finality
+    //     (IsFinalTx), and per-tx ContextualCheckTransaction (Overwinter/Sapling
+    //     activation flags, expiry, oversize).
+    // Without re-running BOTH, a malicious v3 server could bundle a difficulty-correct
+    // post-anchor block that nonetheless carries a contextually-invalid coinbase/tx; a
+    // from-genesis node rejects it, this node would accept it -> consensus divergence.
+    // So, ONLY while connecting imported above-checkpoint bootstrap blocks
     // (g_bootstrapForwardConnect, set by CBootstrapForwardConnectGuard around init's
     // ActivateBestChain) and ONLY for blocks above the last compiled checkpoint
     // (at/below it the chain is hash-pinned, and re-checking there would wrongly trip
-    // ContextualCheckBlockHeader's own older-than-checkpoint fork guard), re-run the
-    // contextual header rules. genesis (pprev == NULL) has no retarget and is skipped.
-    // ContextualCheckBlockHeader is called READ-ONLY (no consensus rule changed). A
-    // failure is handled exactly like an invalid ConnectBlock below: mark the block
-    // invalid and fail the connect on the existing invalid-block path. This is a strict
-    // no-op for normal live sync (flag never set; AcceptBlockHeader already ran it).
+    // ContextualCheckBlockHeader's own older-than-checkpoint fork guard), re-run both
+    // contextual checks. genesis (pprev == NULL) is skipped. Both are READ-ONLY (no
+    // consensus rule changed). A failure is handled exactly like an invalid ConnectBlock
+    // below: mark the block invalid and fail the connect on the existing invalid-block
+    // path. This is a strict no-op for normal live sync (flag never set; AcceptBlock
+    // already ran both).
     if (g_bootstrapForwardConnect.load(std::memory_order_relaxed) &&
         pindexNew->pprev != NULL) {
         int lastCheckpointHeight = -1;
@@ -3355,10 +3363,11 @@ bool static ConnectTip(CValidationState &state, CBlockIndex *pindexNew, CBlock *
         if (pcp != NULL)
             lastCheckpointHeight = pcp->nHeight;
         if (pindexNew->nHeight > lastCheckpointHeight &&
-            !ContextualCheckBlockHeader(*pblock, state, pindexNew->pprev)) {
+            (!ContextualCheckBlockHeader(*pblock, state, pindexNew->pprev) ||
+             !ContextualCheckBlock(*pblock, state, pindexNew->pprev))) {
             if (state.IsInvalid())
                 InvalidBlockFound(pindexNew, state);
-            return error("ConnectTip(): imported bootstrap block %s failed contextual header check (%s)",
+            return error("ConnectTip(): imported bootstrap block %s failed contextual check (%s)",
                          pindexNew->GetBlockHash().ToString(), FormatStateMessage(state));
         }
     }
