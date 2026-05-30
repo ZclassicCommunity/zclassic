@@ -4890,9 +4890,28 @@ bool static LoadBlockIndexDB()
     }
 
     // Load pointer to end of best chain
-    BlockMap::iterator it = mapBlockIndex.find(pcoinsTip->GetBestBlock());
-    if (it == mapBlockIndex.end())
+    uint256 hashBestChain = pcoinsTip->GetBestBlock();
+    BlockMap::iterator it = mapBlockIndex.find(hashBestChain);
+    if (it == mapBlockIndex.end()) {
+        // A null best block is the normal empty/fresh-datadir case (the chainstate has
+        // never been written), so there is simply nothing to set the tip to yet.
+        //
+        // A NON-null best block that is absent from the block index, however, means the
+        // chainstate's UTXO pointer references a block we do not have indexed: a desynced
+        // or inconsistent datadir (e.g. a half-written, interrupted, or externally-supplied
+        // chainstate). Returning success here would leave chainActive empty, and the
+        // init-time ActivateBestChain would then SIGABRT in ConnectBlock's
+        //   assert(hashPrevBlock == view.GetBestBlock())
+        // with no recovery -- the production crash-loop signature. Fail instead so
+        // LoadBlockIndex() returns false and init's existing recovery path offers (or, for
+        // a headless node, instructs) a -reindex rebuild rather than core-dumping on every
+        // restart.
+        if (!hashBestChain.IsNull())
+            return error("LoadBlockIndexDB(): chainstate best block %s is not in the block "
+                         "index; the datadir is inconsistent and must be rebuilt with -reindex",
+                         hashBestChain.ToString());
         return true;
+    }
     chainActive.SetTip(it->second);
     // Set hashFinalSproutRoot for the end of best chain
     it->second->hashFinalSproutRoot = pcoinsTip->GetBestAnchor(SPROUT);
