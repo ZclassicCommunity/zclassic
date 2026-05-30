@@ -2035,19 +2035,40 @@ BOOST_AUTO_TEST_CASE(bootstrap_pending_markers_are_durable_and_gate_verification
         // BootstrapFromPeer writes this BEFORE installing the chainstate. It must
         // be durable and present immediately — this is exactly what a post-crash
         // restart sees, with no in-memory state carried over.
-        BOOST_REQUIRE(WriteBootstrapAnchorPending(data_dir, 3126937, uint256S("0xabc123")));
+        const uint256 markedHash = uint256S("0x00000000000000000000000000000000000000000000000000000000000abc12");
+        BOOST_REQUIRE(WriteBootstrapAnchorPending(data_dir, 3126937, markedHash));
         BOOST_CHECK(BootstrapAnchorPendingExists(data_dir));
 
         // It is a real on-disk file (durable), not just in-memory state, and it
-        // records the diagnostic height/hash line.
+        // records the height/hash line.
         const fs::path marker = data_dir / "bootstrap-anchor-pending";
         BOOST_REQUIRE(fs::exists(marker));
         BOOST_CHECK(fs::file_size(marker) > 0);
+
+        // The marker's recorded (height, hash) round-trips through GetBootstrapAnchorPending.
+        // For a v3 growable import this is the GROWN BUNDLE TIP that AppInit2 forward-connects
+        // (the fix for the e2e-caught bug where the forward-connect guard never armed because
+        // it keyed off pindexBestHeader, which LoadBlockIndexDB leaves at the anchor). Here we
+        // record a tip ABOVE the anchor, exactly like a v3 import does.
+        int readHeight = -1;
+        uint256 readHash;
+        BOOST_REQUIRE(GetBootstrapAnchorPending(data_dir, readHeight, readHash));
+        BOOST_CHECK_EQUAL(readHeight, 3126937);
+        BOOST_CHECK(readHash == markedHash);
+        // A v3-style marker carrying the grown bundle tip (strictly above the anchor) reads back.
+        const uint256 bundleTip = uint256S("0x0000039d98ad94ad29eb8dde19b8bdf94c3ac547d3e74ca521d72d65c6669f07");
+        BOOST_REQUIRE(WriteBootstrapAnchorPending(data_dir, 3129658, bundleTip));
+        BOOST_REQUIRE(GetBootstrapAnchorPending(data_dir, readHeight, readHash));
+        BOOST_CHECK_EQUAL(readHeight, 3129658);
+        BOOST_CHECK(readHash == bundleTip);
 
         // Only an explicit clear (which AppInit2 does after the commitment check
         // passes, or after discarding a rejected snapshot) removes it.
         BootstrapAnchorPendingClear(data_dir);
         BOOST_CHECK(!BootstrapAnchorPendingExists(data_dir));
+        // After a clear the reader reports no marker.
+        BOOST_CHECK(!GetBootstrapAnchorPending(data_dir, readHeight, readHash));
+        BOOST_CHECK_EQUAL(readHeight, -1);
 
         fs::remove_all(data_dir);
     }

@@ -187,6 +187,12 @@ void BootstrapTrustlessPendingClear(const boost::filesystem::path& data_dir);
 bool WriteBootstrapAnchorPending(const boost::filesystem::path& data_dir, int height, const uint256& hashBlock);
 bool BootstrapAnchorPendingExists(const boost::filesystem::path& data_dir);
 void BootstrapAnchorPendingClear(const boost::filesystem::path& data_dir);
+//! Read the (height, hash) recorded in the anchor-pending marker. For a v3 growable
+//! import this is the GROWN BUNDLE TIP (so the post-import forward-connect can find it
+//! without relying on pindexBestHeader, which LoadBlockIndexDB leaves at the anchor for
+//! an imported chainstate); for a v1 import it is the anchor itself. Returns false if
+//! the marker is absent or malformed.
+bool GetBootstrapAnchorPending(const boost::filesystem::path& data_dir, int& height, uint256& hashBlock);
 //! Cheap provisional gate (integrity + checkpoints + tip PoW) run after a
 //! trustless snapshot is imported and the chain databases are open. NOT full
 //! trust — the background validator re-derives the UTXO set from genesis and

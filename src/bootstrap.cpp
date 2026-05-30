@@ -2354,6 +2354,25 @@ void BootstrapAnchorPendingClear(const boost::filesystem::path& data_dir)
     boost::filesystem::remove(BootstrapAnchorPendingPath(data_dir));
 }
 
+bool GetBootstrapAnchorPending(const boost::filesystem::path& data_dir, int& height, uint256& hashBlock)
+{
+    height = -1;
+    hashBlock.SetNull();
+    FILE* f = fopen(BootstrapAnchorPendingPath(data_dir).string().c_str(), "r");
+    if (!f) return false;
+    char buf[256] = {0};
+    char* got = fgets(buf, sizeof(buf), f);
+    fclose(f);
+    if (!got) return false;
+    char hashHex[160] = {0};
+    if (sscanf(buf, "%d %159s", &height, hashHex) != 2) {
+        height = -1;
+        return false;
+    }
+    hashBlock = uint256S(hashHex);
+    return true;
+}
+
 static bool ReadBootstrapTrustlessPending(const boost::filesystem::path& data_dir, BootstrapServeMeta& meta)
 {
     return ParseBootstrapServeMetaFile(BootstrapTrustlessPendingPath(data_dir), meta);
@@ -2585,7 +2604,19 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
                 return false;
             }
         } else {
-            if (!WriteBootstrapAnchorPending(data_dir, manifest.nHeight, manifest.hashBlock)) {
+            // Anchor path (v1 and v3). For a v3 GROWABLE snapshot, record the GROWN
+            // BUNDLE TIP (nBlockTipHeight/hashBlockTip) in the marker, not the anchor:
+            // the post-import step uses it to forward-connect anchor+1..bundleTip under
+            // the retarget re-check guard. (pindexBestHeader is unreliable for this —
+            // LoadBlockIndexDB leaves it at the anchor for an imported chainstate.) For
+            // v1 there is no bundle, so record the anchor as before.
+            int markerHeight = manifest.nHeight;
+            uint256 markerHash = manifest.hashBlock;
+            if (manifest.nVersion == 3) {
+                markerHeight = manifest.nBlockTipHeight;
+                markerHash = manifest.hashBlockTip;
+            }
+            if (!WriteBootstrapAnchorPending(data_dir, markerHeight, markerHash)) {
                 boost::filesystem::remove_all(staging);
                 error = "could not persist anchor bootstrap verification marker";
                 return false;
