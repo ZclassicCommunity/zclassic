@@ -231,6 +231,15 @@ bool CCoinsViewDB::GetStats(CCoinsStats &stats) const {
     stats.hashBlock = GetBestBlock();
     ss << stats.hashBlock;
     CAmount nTotalAmount = 0;
+    // Per-coin consensus metadata (creation height, coinbase flag, tx version)
+    // accumulated separately so it can be folded into hashSerializedFull WITHOUT
+    // changing hashSerialized (which stays transparent-output-only for RPC/tool
+    // back-compat). hashSerialized binds only nValue+scriptPubKey, but CheckInputs
+    // reads nHeight/fCoinBase verbatim from an imported UTXO set for the
+    // COINBASE_MATURITY rule, so an unbound metadata field lets a bootstrap snapshot
+    // ship forged coinbase-maturity metadata that hashes identically to the honest
+    // set — a consensus partition with no attacker hashpower. Bind it here.
+    CHashWriter ssMeta(SER_GETHASH, PROTOCOL_VERSION);
     while (pcursor->Valid()) {
         boost::this_thread::interruption_point();
         std::pair<char, uint256> key;
@@ -238,6 +247,13 @@ bool CCoinsViewDB::GetStats(CCoinsStats &stats) const {
         if (pcursor->GetKey(key) && key.first == DB_COINS) {
             if (pcursor->GetValue(coins)) {
                 stats.nTransactions++;
+                // Fold the consensus-relevant per-coin metadata (once per CCoins
+                // entry, in leveldb sorted-key order so it is identical on every
+                // node holding the same chainstate). nHeight is always >= 0; the tx
+                // version is a small non-negative value in this chain.
+                ssMeta << VARINT(coins.nHeight);
+                ssMeta << static_cast<uint8_t>(coins.fCoinBase ? 1 : 0);
+                ssMeta << VARINT(static_cast<uint32_t>(coins.nVersion));
                 for (unsigned int i=0; i<coins.vout.size(); i++) {
                     const CTxOut &out = coins.vout[i];
                     if (!out.IsNull()) {
@@ -285,6 +301,10 @@ bool CCoinsViewDB::GetStats(CCoinsStats &stats) const {
     // sorted order, so this digest is identical on every node holding the same chainstate.
     CHashWriter ssFull(SER_GETHASH, PROTOCOL_VERSION);
     ssFull << stats.hashSerialized;
+    // Bind the per-coin consensus metadata digest (height/coinbase-flag/version)
+    // accumulated above, so the bootstrap anchor commitment covers coinbase-maturity
+    // inputs, not just transparent output value+script.
+    ssFull << ssMeta.GetHash();
     ssFull << GetBestAnchor(SPROUT);
     ssFull << GetBestAnchor(SAPLING);
     const char shieldedPrefixes[] = { DB_SPROUT_ANCHOR, DB_SAPLING_ANCHOR,

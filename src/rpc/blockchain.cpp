@@ -543,7 +543,7 @@ UniValue gettxoutsetinfo(const UniValue& params, bool fHelp)
             "  \"txouts\": n,            (numeric) The number of output transactions\n"
             "  \"bytes_serialized\": n,  (numeric) The serialized size\n"
             "  \"hash_serialized\": \"hash\",   (string) The serialized hash of the transparent UTXO set\n"
-            "  \"hash_chainstate_full\": \"hash\", (string) Commitment over the whole chainstate (transparent UTXOs + Sprout/Sapling anchors and nullifier sets); this is the value a bootstrap fast-sync anchor commits to\n"
+            "  \"hash_chainstate_full\": \"hash\", (string) Commitment over the whole chainstate (transparent UTXOs incl. per-coin height/coinbase/version metadata, plus Sprout/Sapling anchors and nullifier sets); this is the value a bootstrap fast-sync anchor commits to\n"
             "  \"total_amount\": x.xxx          (numeric) The total amount\n"
             "}\n"
             "\nExamples:\n"

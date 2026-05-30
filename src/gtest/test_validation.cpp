@@ -322,3 +322,52 @@ TEST(Validation, ChainstateCommitmentBindsShieldedState)
     // And the two commitments are distinct (full folds in shielded state beyond UTXOs).
     EXPECT_NE(after.hashSerialized, after.hashSerializedFull);
 }
+
+// Companion to the shielded test for the TRANSPARENT side: the full commitment must
+// bind each coin's consensus metadata (creation height + coinbase flag + version),
+// not just its output value/script. CheckInputs reads coins.nHeight/fCoinBase verbatim
+// from an imported UTXO set for the COINBASE_MATURITY rule, so if the commitment were
+// blind to them a malicious snapshot could ship coins that match hashSerialized but
+// carry forged maturity metadata — a no-hashpower consensus partition. hashSerialized
+// (transparent outputs only) must stay blind to these flips; hashSerializedFull must not.
+TEST(Validation, ChainstateCommitmentBindsCoinMetadata)
+{
+    CCoinsViewDB db(boost::filesystem::path("mem-chainstate-meta-test"),
+                    1 << 20, /*fMemory=*/true, /*fWipe=*/false);
+    const uint256 best = uint256S("0x99");
+
+    // Re-write the SAME coin (same outputs) with chosen metadata each time.
+    auto writeCoin = [&](bool fCoinBase, int nHeight) {
+        CCoinsMap mapCoins;
+        CCoinsCacheEntry& e = mapCoins[uint256S("0x01")];
+        e.coins.fCoinBase = fCoinBase;
+        e.coins.nVersion = 1;
+        e.coins.nHeight = nHeight;
+        e.coins.vout.resize(1);
+        e.coins.vout[0].nValue = 10 * COIN; // OUTPUT identical across every write
+        e.flags = CCoinsCacheEntry::DIRTY;
+        CAnchorsSproutMap aS; CAnchorsSaplingMap aZ;
+        CNullifiersMap nS, nZ;
+        ASSERT_TRUE(db.BatchWrite(mapCoins, best, uint256(), uint256(), aS, aZ, nS, nZ));
+    };
+
+    writeCoin(/*fCoinBase=*/false, /*nHeight=*/1);
+    CCoinsStats base;
+    ASSERT_TRUE(db.GetStats(base));
+
+    // Flip ONLY the coinbase flag (outputs unchanged): mislabelling a coinbase as
+    // non-coinbase bypasses COINBASE_MATURITY at spend time.
+    writeCoin(/*fCoinBase=*/true, /*nHeight=*/1);
+    CCoinsStats flipCoinBase;
+    ASSERT_TRUE(db.GetStats(flipCoinBase));
+    EXPECT_EQ(base.hashSerialized, flipCoinBase.hashSerialized);
+    EXPECT_NE(base.hashSerializedFull, flipCoinBase.hashSerializedFull);
+
+    // Change ONLY the creation height (outputs + coinbase flag unchanged): a forged
+    // nHeight shifts the maturity window. Same invariant.
+    writeCoin(/*fCoinBase=*/false, /*nHeight=*/500000);
+    CCoinsStats bumpHeight;
+    ASSERT_TRUE(db.GetStats(bumpHeight));
+    EXPECT_EQ(base.hashSerialized, bumpHeight.hashSerialized);
+    EXPECT_NE(base.hashSerializedFull, bumpHeight.hashSerializedFull);
+}
