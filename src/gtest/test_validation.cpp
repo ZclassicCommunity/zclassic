@@ -238,3 +238,30 @@ TEST(Validation, BootstrapForwardConnectRejectsForgedLowDifficulty) {
 
     fCheckpointsEnabled = savedCheckpoints;
 }
+
+// Step-6 safety invariant. ReadBlockFromDisk skips re-verifying the Equihash solution
+// for a block pinned by the checkpoint hash-chain, relying on the GetHash()==index
+// check to detect on-disk tampering instead. That substitution is sound ONLY because a
+// block's hash binds its nSolution: any change to the solution changes GetHash(). Pin
+// that invariant so the optimization can never silently accept a tampered solution.
+TEST(Validation, BlockHashBindsEquihashSolution) {
+    SelectParams(CBaseChainParams::MAIN);
+    CBlock block;
+    block.nVersion = 4;
+    block.hashPrevBlock = uint256S("0x01");
+    block.hashMerkleRoot = uint256S("0x02");
+    block.hashFinalSaplingRoot = uint256S("0x03");
+    block.nTime = 1500000000;
+    block.nBits = 0x1e7fffff;
+    block.nNonce = uint256S("0x04");
+    block.nSolution = std::vector<unsigned char>(1344, 0x00);
+
+    const uint256 h1 = block.GetHash();
+    // Flip one byte of the Equihash solution -> the block hash MUST change, so a pinned
+    // block whose on-disk solution was tampered with fails the GetHash()==index check.
+    block.nSolution[42] ^= 0xff;
+    EXPECT_NE(h1, block.GetHash());
+    // Restoring the solution restores the hash (the hash is a faithful function of it).
+    block.nSolution[42] ^= 0xff;
+    EXPECT_EQ(h1, block.GetHash());
+}

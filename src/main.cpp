@@ -1760,7 +1760,19 @@ bool WriteBlockToDisk(CBlock& block, CDiskBlockPos& pos, const CMessageHeader::M
     return true;
 }
 
-bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos)
+// True iff pindex is an ancestor of (or equal to) the last compiled checkpoint, i.e.
+// its hash is pinned by the checkpoint hash-chain. Uses the ANCESTRY relation (never a
+// bare height compare): a same-height block on a different fork is NOT an ancestor and
+// must keep full verification. Mirrors the fExpensiveChecks gate in ConnectBlock.
+static bool BlockIsAncestorOfLastCheckpoint(const CBlockIndex* pindex)
+{
+    if (!fCheckpointsEnabled || pindex == NULL)
+        return false;
+    CBlockIndex* pcp = Checkpoints::GetLastCheckpoint(Params().Checkpoints());
+    return pcp != NULL && pcp->GetAncestor(pindex->nHeight) == pindex;
+}
+
+bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos, bool fCheckPOW)
 {
     block.SetNull();
 
@@ -1777,8 +1789,11 @@ bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos)
         return error("%s: Deserialize or I/O error - %s at %s", __func__, e.what(), pos.ToString());
     }
 
-    // Check the header
-    if (!(CheckEquihashSolution(&block, Params()) &&
+    // Check the header. fCheckPOW re-verifies the Equihash solution and proof of work;
+    // the caller may skip it for a block whose hash is already pinned (see the pindex
+    // overload below), where re-running Equihash is pure redundant work.
+    if (fCheckPOW &&
+        !(CheckEquihashSolution(&block, Params()) &&
           CheckProofOfWork(block.GetHash(), block.nBits, Params().GetConsensus())))
         return error("ReadBlockFromDisk: Errors in block header at %s", pos.ToString());
 
@@ -1787,7 +1802,13 @@ bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos)
 
 bool ReadBlockFromDisk(CBlock& block, const CBlockIndex* pindex)
 {
-    if (!ReadBlockFromDisk(block, pindex->GetBlockPos()))
+    // For a block pinned by the checkpoint hash-chain, the Equihash/PoW re-check is
+    // redundant: the block's hash commits to its nSolution, so the GetHash()==index
+    // check below already detects any on-disk tampering. Skipping it cuts the dominant
+    // cost of a genesis..tip replay (reindex / -reindex-chainstate / IBD below the last
+    // checkpoint). Above the last checkpoint we keep full verification.
+    const bool fCheckPOW = !BlockIsAncestorOfLastCheckpoint(pindex);
+    if (!ReadBlockFromDisk(block, pindex->GetBlockPos(), fCheckPOW))
         return false;
     if (block.GetHash() != pindex->GetBlockHash())
         return error("ReadBlockFromDisk(CBlock&, CBlockIndex*): GetHash() doesn't match index for %s at %s",
