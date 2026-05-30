@@ -56,14 +56,40 @@ void MaybeStartBootstrapValidation(CScheduler& scheduler);
 //! Cheap copy of the current status for RPC/logging.
 BootstrapValidationStatus GetBootstrapValidationStatus();
 
-//! True while a trustless-imported snapshot is still PROVISIONAL (not yet
-//! re-derived/validated, including the pruned-and-stuck case). Lock-free, safe to
-//! call from the consensus path under cs_main. Used to PAUSE auto-finalization so
-//! the reorg-depth rule cannot permanently pin the node to an as-yet-unvalidated
-//! (possibly forged/wrong-fork) imported chain before background validation
-//! completes. Always false on a normal node (no trustless snapshot in play), so
-//! the finalization path is byte-identical to upstream there.
+//! True while finalization must be PAUSED because of a bootstrap import. Lock-free,
+//! safe to call from the consensus path under cs_main. It is the OR of two
+//! independent conditions:
+//!   (a) a trustless-imported snapshot is still PROVISIONAL (background re-derivation
+//!       not yet complete, including the pruned-and-stuck case); and
+//!   (b) the "imported tip unconfirmed" hold: this node imported blocks ABOVE the
+//!       last compiled checkpoint that it did not validate live, and the live
+//!       network has not yet corroborated that tip (see ArmBootstrapTipHold).
+//! Pausing auto-finalization keeps the reorg-depth rule from permanently pinning the
+//! node to an as-yet-unproven (possibly forged / minority-fork) imported chain before
+//! it has converged with the majority. Always false on a normal node that never
+//! imported an above-checkpoint snapshot, so the finalization path is byte-identical
+//! to upstream there.
 bool BootstrapValidationHoldsFinalization();
+
+//! Arm the "imported tip unconfirmed" finalization hold for a node that just imported
+//! blocks up to (height, hashBlock) ABOVE the last compiled checkpoint (trustless or
+//! growable). Durable: persisted under its own block-tree key and re-armed on restart
+//! until the live network corroborates the tip. No-op (and MUST NOT be called) for a
+//! pure-anchor import whose tip == a compiled checkpoint. Call at accept time, before
+//! the first ConnectTip, while the imported tip is the active tip.
+void ArmBootstrapTipHold(int height, const uint256& hashBlock);
+
+//! Clear the imported-tip hold (live network corroborated the tip, or the imported
+//! chain was reorged away). Idempotent; clears the durable key.
+void ReleaseBootstrapTipHold();
+
+//! The (height, hash) of the armed imported-tip hold, or height<0 if none is armed.
+void GetBootstrapTipHold(int& height, uint256& hashBlock);
+
+//! Scheduler poll (registered when a tip hold is armed): under cs_main, evaluate
+//! whether the live network has corroborated the imported tip and, if so, release the
+//! hold. Safe no-op when no hold is armed.
+void EvaluateBootstrapTipRelease();
 
 //! Interrupt and JOIN the background validation thread (if running). Must be
 //! called during Shutdown() BEFORE the chain databases (pblocktree/pcoinsTip) are

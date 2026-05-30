@@ -1895,4 +1895,56 @@ BOOST_AUTO_TEST_CASE(bootstrap_pending_markers_are_durable_and_gate_verification
     }
 }
 
+// The imported-tip finalization hold (Deliverable 1): a node that imports blocks
+// ABOVE the last compiled checkpoint must PAUSE auto-finalization until the live
+// network corroborates that tip, so the 10-deep finalization rule cannot pin it to
+// the bootstrap server's (possibly minority/forged) fork before it converges with
+// the majority. This pins the arm/hold/release/get lifecycle and its independence
+// from (and OR-ing with) the trustless-validation hold. (BasicTestingSetup has no
+// pblocktree, so the durable persistence is a no-op; the in-memory hold — the part
+// the consensus path reads via BootstrapValidationHoldsFinalization() — transitions.)
+BOOST_AUTO_TEST_CASE(bootstrap_imported_tip_finalization_hold)
+{
+    // Known-clean baseline: no snapshot, no tip hold.
+    LoadBootstrapValidationState();
+    BOOST_CHECK(!BootstrapValidationHoldsFinalization());
+    int h = 0; uint256 hash;
+    GetBootstrapTipHold(h, hash);
+    BOOST_CHECK_EQUAL(h, -1); // no hold armed
+
+    // Arm the tip hold -> finalization is held, and the armed (height, hash) reads back.
+    const uint256 tip = uint256S("0x00000000000000000000000000000000000000000000000000000000feedf00d");
+    ArmBootstrapTipHold(3200000, tip);
+    BOOST_CHECK(BootstrapValidationHoldsFinalization());
+    GetBootstrapTipHold(h, hash);
+    BOOST_CHECK_EQUAL(h, 3200000);
+    BOOST_CHECK(hash == tip);
+
+    // Release -> hold clears (no other hold engaged).
+    ReleaseBootstrapTipHold();
+    BOOST_CHECK(!BootstrapValidationHoldsFinalization());
+    GetBootstrapTipHold(h, hash);
+    BOOST_CHECK_EQUAL(h, -1);
+    // Release is idempotent.
+    ReleaseBootstrapTipHold();
+    BOOST_CHECK(!BootstrapValidationHoldsFinalization());
+
+    // The two holds are independent and OR-ed: with BOTH a trustless-PROVISIONAL
+    // snapshot AND an armed tip hold, the node holds; clearing the tip hold while the
+    // snapshot is still PROVISIONAL keeps the hold engaged; only when BOTH clear does
+    // finalization resume.
+    BeginBootstrapValidation(3200000, tip, uint256S("0x2222")); // -> BVS_PROVISIONAL
+    BOOST_CHECK(BootstrapValidationHoldsFinalization());
+    ArmBootstrapTipHold(3200000, tip);
+    BOOST_CHECK(BootstrapValidationHoldsFinalization());
+    ReleaseBootstrapTipHold();                                  // tip hold cleared...
+    BOOST_CHECK(BootstrapValidationHoldsFinalization());        // ...but snapshot still PROVISIONAL
+    BootstrapValidationSetTerminalStateForTest(BVS_VALIDATED);  // snapshot validated
+    BOOST_CHECK(!BootstrapValidationHoldsFinalization());       // both clear -> resume
+
+    // Leave global state clean for any later test in this process image.
+    LoadBootstrapValidationState();
+    BOOST_CHECK(!BootstrapValidationHoldsFinalization());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

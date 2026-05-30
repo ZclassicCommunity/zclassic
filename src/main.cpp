@@ -301,6 +301,9 @@ struct CNodeState {
     int nBlocksInFlightValidHeaders;
     //! Whether we consider this a preferred download peer.
     bool fPreferredDownload;
+    //! Whether this is an inbound connection (we did not dial it). Used by the
+    //! peer-aware finalization gate to weight independent OUTBOUND corroboration.
+    bool fInbound;
 
     CNodeState() {
         fCurrentlyConnected = false;
@@ -314,6 +317,7 @@ struct CNodeState {
         nBlocksInFlight = 0;
         nBlocksInFlightValidHeaders = 0;
         fPreferredDownload = false;
+        fInbound = false;
     }
 };
 
@@ -355,6 +359,7 @@ void InitializeNode(NodeId nodeid, const CNode *pnode) {
     CNodeState &state = mapNodeState.insert(std::make_pair(nodeid, CNodeState())).first->second;
     state.name = pnode->addrName;
     state.address = pnode->addr;
+    state.fInbound = pnode->fInbound;
 }
 
 void FinalizeNode(NodeId nodeid) {
@@ -3034,6 +3039,61 @@ static bool FinalizeBlockInternal(CValidationState &state, const CBlockIndex *pi
     return true;
 }
 
+bool LiveNetworkCorroboratesTip(const CBlockIndex *pindex, int minDepth, int minPeers,
+                                std::string &reason)
+{
+    AssertLockHeld(cs_main);
+    if (pindex == NULL) { reason = "no candidate"; return false; }
+    // Don't trust local chain state while still catching up.
+    if (IsInitialBlockDownload()) { reason = "still in initial block download"; return false; }
+    // The candidate must be on our active chain.
+    if (chainActive[pindex->nHeight] != pindex) { reason = "candidate is not on the active chain"; return false; }
+
+    const int needHeight = pindex->nHeight + minDepth;
+    // Our own best header must be a descendant of the candidate at the required depth,
+    // and must have been received LIVE this session (not loaded from disk during a
+    // bootstrap import — that is exactly the unconfirmed state we are guarding).
+    if (pindexBestHeader == NULL || pindexBestHeader->nHeight < needHeight) {
+        reason = "best header is not yet the required depth above the candidate"; return false;
+    }
+    if (pindexBestHeader->GetAncestor(pindex->nHeight) != pindex) {
+        reason = "best header does not descend from the candidate"; return false;
+    }
+    if ((int64_t)pindexBestHeader->GetHeaderReceivedTime() < GetStartupTime()) {
+        reason = "best header was not received live this session"; return false;
+    }
+
+    // Tally independent OUTBOUND corroborators (distinct address groups) whose
+    // announced best block descends from the candidate at the required depth, and
+    // refuse if ANY peer advertises a higher-work chain that forks BELOW the
+    // candidate (that is the tell-tale of a minority/forged fork — keep following
+    // longest-chain instead of pinning).
+    std::set<std::vector<unsigned char> > outboundGroups;
+    for (std::map<NodeId, CNodeState>::const_iterator it = mapNodeState.begin();
+         it != mapNodeState.end(); ++it) {
+        const CNodeState &st = it->second;
+        const CBlockIndex *pbest = st.pindexBestKnownBlock;
+        if (pbest == NULL) continue;
+        if (pbest->nChainWork > pindex->nChainWork &&
+            (pbest->nHeight < pindex->nHeight || pbest->GetAncestor(pindex->nHeight) != pindex)) {
+            reason = "a peer advertises a higher-work chain that forks below the candidate";
+            return false;
+        }
+        if (!st.fInbound && pbest->nHeight >= needHeight &&
+            pbest->GetAncestor(pindex->nHeight) == pindex) {
+            outboundGroups.insert(st.address.GetGroup());
+        }
+    }
+    if ((int)outboundGroups.size() < minPeers) {
+        reason = strprintf("only %d independent outbound peers corroborate the chain (need %d)",
+                           (int)outboundGroups.size(), minPeers);
+        return false;
+    }
+    reason = strprintf("%d independent outbound peers corroborate the chain at depth >=%d",
+                       (int)outboundGroups.size(), minDepth);
+    return true;
+}
+
 static const CBlockIndex *FindBlockToFinalize(CBlockIndex *pindexNew) {
     AssertLockHeld(cs_main);
 
@@ -3073,6 +3133,19 @@ static const CBlockIndex *FindBlockToFinalize(CBlockIndex *pindexNew) {
         return nullptr;
     }
 
+    // Peer-aware finalization gate (local policy, default on; -finalizationrequirepeers=0
+    // restores the legacy unconditional behavior). Before pinning a block, require that
+    // the LIVE network corroborates this chain (independent outbound peers building on it,
+    // and no peer advertising a higher-work fork below the candidate). This makes a node
+    // refuse to finalize — and so stay a flexible longest-chain follower — during a
+    // partition or when it is on a minority/forged fork, so it converges with the
+    // majority instead of permanently splitting. It only ever DELAYS finalization, so it
+    // changes no consensus rule and stays compatible with peers that do not run it. A
+    // poorly-connected node simply never finalizes (plain Nakamoto), which is safe.
+    const bool fRequirePeers = GetBoolArg("-finalizationrequirepeers", true);
+    const int finalizationMinPeers =
+        std::max((int)GetArg("-finalizationminpeers", DEFAULT_FINALIZATION_MIN_PEERS), 1);
+
     // While our candidate is not eligible (finalization delay not expired), try
     // the previous one.
     while (pindex && (pindex != pindexFinalized)) {
@@ -3086,6 +3159,18 @@ static const CBlockIndex *FindBlockToFinalize(CBlockIndex *pindexNew) {
 
         // If finalization delay is <= 0, finalization always occurs immediately
         if (now >= (headerReceivedTime + finalizationdelay)) {
+            if (fRequirePeers) {
+                std::string reason;
+                if (!LiveNetworkCorroboratesTip(pindex, std::max(maxreorgdepth, 0),
+                                                finalizationMinPeers, reason)) {
+                    // Not yet corroborated by the live network: hold finalization this
+                    // round (try again as the chain/peers advance). Logged sparsely to
+                    // avoid spamming during a genuine partition.
+                    LogPrint("bench", "finalization: holding at height %d — %s\n",
+                             pindex->nHeight, reason);
+                    return nullptr;
+                }
+            }
             return pindex;
         }
 

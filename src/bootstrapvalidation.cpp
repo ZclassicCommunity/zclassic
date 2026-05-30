@@ -53,12 +53,37 @@ struct CBootstrapValidationRecord
 
 static const std::string BOOTSTRAPVAL_DBKEY = "bootstrapvalidation";
 
+// Durable record for the "imported tip unconfirmed" finalization hold (Deliverable 1),
+// stored under its OWN key so it is independent of the trustless-validation record and
+// of any record-schema change. Presence of the key (with fArmed) means: this node
+// imported blocks up to (nHeight, hashBlock) above the last compiled checkpoint that it
+// did not validate live, and the live network has not yet corroborated that tip. It is
+// re-armed from this record on every restart (fail-closed) until corroboration releases it.
+static const std::string BOOTSTRAPTIPHOLD_DBKEY = "bootstraptiphold";
+struct CBootstrapTipHoldRecord
+{
+    int32_t nHeight;
+    uint256 hashBlock;
+    CBootstrapTipHoldRecord() : nHeight(-1) {}
+    ADD_SERIALIZE_METHODS;
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(nHeight);
+        READWRITE(hashBlock);
+    }
+};
+
 static CCriticalSection cs_bsval;
 static BootstrapValidationStatus g_status;        // guarded by cs_bsval
 
+// Imported-tip hold, guarded by cs_bsval. g_tipHoldHeight < 0 means no hold is armed.
+static int g_tipHoldHeight = -1;
+static uint256 g_tipHoldHash;
+
 // Lock-free mirror of "are we holding finalization?" so the consensus path
 // (FindBlockToFinalize, under cs_main) can read it without taking cs_bsval and
-// risking a lock-order inversion. Kept in sync with g_status.state under cs_bsval.
+// risking a lock-order inversion. It is the OR of the trustless-PROVISIONAL hold and
+// the imported-tip-unconfirmed hold. Kept in sync under cs_bsval.
 static std::atomic<bool> g_finalizationHold(false);
 
 // Dedicated handle for the background validation thread (NOT in the init
@@ -66,14 +91,16 @@ static std::atomic<bool> g_finalizationHold(false);
 // chain DBs are freed, on both the normal and the init-failure path.
 static boost::thread* g_bsvalThread = NULL;
 
-// Recompute the lock-free finalization-hold flag from the current latch state.
-// Hold while an imported snapshot is unvalidated (PROVISIONAL / PROVISIONAL_PRUNED).
+// Recompute the lock-free finalization-hold flag. Hold while EITHER an imported
+// snapshot is still unvalidated (PROVISIONAL / PROVISIONAL_PRUNED) OR an imported-tip
+// hold is armed (above-checkpoint import not yet corroborated by the live network).
 static void RefreshFinalizationHoldLocked()
 {
     AssertLockHeld(cs_bsval);
-    g_finalizationHold.store(
-        g_status.state == BVS_PROVISIONAL || g_status.state == BVS_PROVISIONAL_PRUNED,
-        std::memory_order_relaxed);
+    const bool provisional = g_status.state == BVS_PROVISIONAL ||
+                             g_status.state == BVS_PROVISIONAL_PRUNED;
+    const bool tipHold = g_tipHoldHeight >= 0;
+    g_finalizationHold.store(provisional || tipHold, std::memory_order_relaxed);
 }
 
 static const int64_t BOOTSTRAPVAL_BATCH_MS = 80;          // cs_main per-batch budget
@@ -137,6 +164,17 @@ void LoadBootstrapValidationState()
     } else {
         g_status = BootstrapValidationStatus();
     }
+    // Re-arm the imported-tip hold from its durable record (fail-closed: if a hold was
+    // armed and not yet released, a crash/restart re-loads it as held, so a node can
+    // never skip the live-corroboration wait by restarting).
+    CBootstrapTipHoldRecord tip;
+    if (pblocktree && pblocktree->Read(BOOTSTRAPTIPHOLD_DBKEY, tip) && tip.nHeight >= 0) {
+        g_tipHoldHeight = tip.nHeight;
+        g_tipHoldHash = tip.hashBlock;
+    } else {
+        g_tipHoldHeight = -1;
+        g_tipHoldHash.SetNull();
+    }
     RefreshFinalizationHoldLocked();
 }
 
@@ -162,6 +200,86 @@ BootstrapValidationStatus GetBootstrapValidationStatus()
 bool BootstrapValidationHoldsFinalization()
 {
     return g_finalizationHold.load(std::memory_order_relaxed);
+}
+
+static void PersistTipHoldLocked()
+{
+    AssertLockHeld(cs_bsval);
+    if (!pblocktree) return;
+    if (g_tipHoldHeight >= 0) {
+        CBootstrapTipHoldRecord rec;
+        rec.nHeight = g_tipHoldHeight;
+        rec.hashBlock = g_tipHoldHash;
+        pblocktree->Write(BOOTSTRAPTIPHOLD_DBKEY, rec);
+    } else {
+        pblocktree->Erase(BOOTSTRAPTIPHOLD_DBKEY);
+    }
+}
+
+void ArmBootstrapTipHold(int height, const uint256& hashBlock)
+{
+    LOCK(cs_bsval);
+    g_tipHoldHeight = height;
+    g_tipHoldHash = hashBlock;
+    PersistTipHoldLocked();
+    RefreshFinalizationHoldLocked();
+    LogPrintf("Bootstrap tip hold: armed at height %d (%s); auto-finalization paused "
+              "until the live network corroborates this tip\n", height, hashBlock.ToString());
+}
+
+void ReleaseBootstrapTipHold()
+{
+    LOCK(cs_bsval);
+    if (g_tipHoldHeight < 0) return;
+    g_tipHoldHeight = -1;
+    g_tipHoldHash.SetNull();
+    PersistTipHoldLocked();
+    RefreshFinalizationHoldLocked();
+}
+
+void GetBootstrapTipHold(int& height, uint256& hashBlock)
+{
+    LOCK(cs_bsval);
+    height = g_tipHoldHeight;
+    hashBlock = g_tipHoldHash;
+}
+
+void EvaluateBootstrapTipRelease()
+{
+    int holdHeight;
+    uint256 holdHash;
+    GetBootstrapTipHold(holdHeight, holdHash);
+    if (holdHeight < 0) {
+        return; // no hold armed
+    }
+
+    const int minDepth = std::max((int)GetArg("-maxreorgdepth", DEFAULT_MAX_REORG_DEPTH), 0);
+    const int minPeers = std::max((int)GetArg("-finalizationminpeers", DEFAULT_FINALIZATION_MIN_PEERS), 1);
+
+    bool release = false;
+    std::string reason;
+    {
+        LOCK(cs_main);
+        BlockMap::iterator it = mapBlockIndex.find(holdHash);
+        CBlockIndex* pTip = (it != mapBlockIndex.end()) ? it->second : NULL;
+        const bool stillOnActiveChain =
+            pTip != NULL && pTip->nHeight == holdHeight && chainActive[holdHeight] == pTip;
+        if (!stillOnActiveChain) {
+            // The imported tip is no longer the active chain at that height: a
+            // higher-work chain already reorged it away, i.e. the node converged on
+            // its own. The hold is moot; clear it (no finalize happened on the dead
+            // imported fork because the hold was engaged the whole time).
+            release = true;
+            reason = "imported tip reorged away; node converged on the live network independently";
+        } else if (LiveNetworkCorroboratesTip(pTip, minDepth, minPeers, reason)) {
+            release = true;
+        }
+    }
+
+    if (release) {
+        ReleaseBootstrapTipHold();
+        LogPrintf("Bootstrap tip hold: released — %s; auto-finalization resumes\n", reason);
+    }
 }
 
 // Test-only seam (deliberately NOT in the public header): drive a terminal latch
@@ -506,6 +624,20 @@ static void ThreadBootstrapUtxoValidation()
 
 void MaybeStartBootstrapValidation(CScheduler& scheduler)
 {
+    // Register the imported-tip-hold release poll whenever a hold is armed, regardless
+    // of the trustless-validation state below (a growable/anchor-above-checkpoint
+    // import arms the tip hold without any background re-derivation, so it would
+    // otherwise never be evaluated). The poll is a cheap no-op once the hold clears.
+    {
+        int holdHeight;
+        uint256 holdHash;
+        GetBootstrapTipHold(holdHeight, holdHash);
+        if (holdHeight >= 0) {
+            scheduler.scheduleEvery(boost::bind(&EvaluateBootstrapTipRelease), 45);
+            LogPrintf("Bootstrap tip hold: live-corroboration release poll registered (every 45s)\n");
+        }
+    }
+
     int state;
     {
         LOCK(cs_bsval);

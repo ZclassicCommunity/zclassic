@@ -118,6 +118,10 @@ struct BlockHasher
 
 /** Default for -maxreorgdepth */
 static const int DEFAULT_MAX_REORG_DEPTH = 10;
+/** Default for -finalizationminpeers: independent corroborating peers (distinct
+ *  address groups) required before a finalization candidate is treated as
+ *  live-network-confirmed (peer-aware finalization + bootstrap-tip-hold release). */
+static const int DEFAULT_FINALIZATION_MIN_PEERS = 2;
 /**
  * Default for -finalizationdelay
  * This is the minimum time between a block header reception and the block
@@ -608,6 +612,24 @@ const CBlockIndex *GetFinalizedBlock();
  * Checks if a block is finalized.
  */
 bool IsBlockFinalized(const CBlockIndex *pindex);
+
+/**
+ * Peer-aware finalization gate (local policy; NOT a consensus rule). Returns true
+ * iff the LIVE network corroborates the chain through pindex: the node is past IBD,
+ * pindex is on the active chain, the best known header is a LIVE (received this
+ * session) descendant of pindex at depth >= minDepth, at least minPeers independent
+ * peers (distinct address groups) advertise a best-known block descended from pindex
+ * at that depth, and NO connected peer advertises a higher-work chain that forks
+ * below pindex. On false, `reason` is set to a short human-readable explanation; on
+ * true, `reason` summarizes the corroboration. Must be called with cs_main held.
+ *
+ * Used to (a) release the bootstrap imported-tip hold and (b) gate ordinary
+ * auto-finalization so a node never pins itself to a minority/partition fork before
+ * the majority has confirmed it. It only ever DELAYS finalization, so it changes no
+ * consensus rule and is fully compatible with peers that do not run it.
+ */
+bool LiveNetworkCorroboratesTip(const CBlockIndex *pindex, int minDepth, int minPeers,
+                                std::string &reason);
 
 /** The currently-connected chain of blocks (protected by cs_main). */
 extern CChain chainActive;

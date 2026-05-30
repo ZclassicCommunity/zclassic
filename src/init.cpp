@@ -2156,6 +2156,21 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             return InitError("trustless bootstrap snapshot failed provisional checks: " + bootstrap_trustless_error);
         }
         BeginBootstrapValidation(bvHeight, bvHash, bvCommit);
+        // Arm the imported-tip finalization hold: this snapshot's tip is above the
+        // last compiled checkpoint and was NOT validated live, so auto-finalization
+        // must stay paused until the live network corroborates it (otherwise the
+        // 10-deep finalization rule could permanently pin this node to the bootstrap
+        // server's — possibly minority/forged — fork ~finalizationdelay after start,
+        // before it ever converges with the majority). ProvisionalAcceptTrustless-
+        // Snapshot already required the tip above the last checkpoint (SEC-TRUST-1),
+        // so this is always the above-checkpoint case; guard defensively anyway.
+        {
+            LOCK(cs_main);
+            const CBlockIndex* pcp = Checkpoints::GetLastCheckpoint(Params().Checkpoints());
+            if (pcp == NULL || bvHeight > pcp->nHeight) {
+                ArmBootstrapTipHold(bvHeight, bvHash);
+            }
+        }
         BootstrapTrustlessPendingClear(GetDataDir());
         LogPrintf("Bootstrap snapshot provisionally accepted at height %d (%s); background validation will confirm it\n",
             bvHeight, bvHash.ToString());

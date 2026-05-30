@@ -762,7 +762,10 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
             "     \"blocks_remaining\": n,   (numeric) heights still to re-derive, max(0, height - validated_height) (omitted when disabled)\n"
             "     \"progress\": xxxx,        (numeric) re-derivation progress [0..1] (omitted when disabled)\n"
             "     \"blockhash\": \"xxxx\",     (string) hash of the snapshot tip block (omitted when disabled)\n"
-            "     \"commitment\": \"xxxx\"     (string) snapshot commitment S_imported verified at import (omitted when disabled)\n"
+            "     \"commitment\": \"xxxx\",    (string) snapshot commitment S_imported verified at import (omitted when disabled)\n"
+            "     \"tip_hold\": true|false,  (boolean) whether auto-finalization is paused pending live-network corroboration of an above-checkpoint imported tip\n"
+            "     \"tip_hold_height\": n,    (numeric) height of the imported tip awaiting corroboration (only when tip_hold is true)\n"
+            "     \"tip_hold_blockhash\": \"xxxx\" (string) hash of that imported tip (only when tip_hold is true)\n"
             "  },\n"
             "  \"size_on_disk\": xxxxxx,       (numeric) the estimated size of the block and undo files on disk\n"
             "  \"commitments\": xxxxxx,    (numeric) the current number of note commitments in the commitment tree\n"
@@ -864,6 +867,18 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
             bvObj.push_back(Pair("progress", progress));
             bvObj.push_back(Pair("blockhash", bv.hashBlock.GetHex()));
             bvObj.push_back(Pair("commitment", bv.commitment.GetHex()));
+        }
+        // Imported-tip finalization hold: present (true) while this node imported
+        // blocks above the last compiled checkpoint that the live network has not yet
+        // corroborated, so auto-finalization is paused (it cannot pin to a possibly
+        // minority/forged imported fork until the majority confirms the tip).
+        int tipHoldHeight = -1;
+        uint256 tipHoldHash;
+        GetBootstrapTipHold(tipHoldHeight, tipHoldHash);
+        bvObj.push_back(Pair("tip_hold", tipHoldHeight >= 0));
+        if (tipHoldHeight >= 0) {
+            bvObj.push_back(Pair("tip_hold_height", tipHoldHeight));
+            bvObj.push_back(Pair("tip_hold_blockhash", tipHoldHash.GetHex()));
         }
         obj.push_back(Pair("bootstrap_validation", bvObj));
     }
