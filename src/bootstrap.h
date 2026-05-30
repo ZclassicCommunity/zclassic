@@ -5,6 +5,7 @@
 #ifndef BITCOIN_BOOTSTRAP_H
 #define BITCOIN_BOOTSTRAP_H
 
+#include "net.h"
 #include "protocol.h"
 #include "streams.h"
 
@@ -222,6 +223,16 @@ bool BootstrapServeAllowChunk(const std::string& ip, bool whitelisted, int64_t n
 void BootstrapServeChargeBytes(const std::string& ip, bool whitelisted, int64_t now_ms, uint64_t bytes);
 //! Drop all tracked per-IP quota state (used by tests).
 void ClearBootstrapServeQuota();
+
+//! Process-wide aggregate serve caps (opt-in via -bootstrapservemaxtotalkbps /
+//! -bootstrapservemaxpeers; default unlimited). AllowChunk returns false to DEFER when a
+//! chunk of `wantBytes` to `nodeId` would exceed the global byte-rate or concurrent-peer
+//! cap; Charge accounts a sent chunk and marks the peer actively-served. Whitelisted peers
+//! bypass both. Declared for tests.
+bool BootstrapServeGlobalAllow(NodeId nodeId, bool whitelisted, size_t wantBytes, int64_t now_ms);
+void BootstrapServeGlobalCharge(NodeId nodeId, bool whitelisted, size_t bytes, int64_t now_ms);
+//! Drop all aggregate-serve accounting state (used by tests).
+void ClearBootstrapServeGlobal();
 
 bool BuildBootstrapNetworkMessage(const char* command,
                                   const CDataStream& payload,

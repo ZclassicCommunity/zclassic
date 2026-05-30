@@ -3957,6 +3957,73 @@ void BootstrapServeChargeBytes(const std::string& ip, bool whitelisted, int64_t 
 static const size_t BOOTSTRAP_SERVE_BURST_BYTES =
     BOOTSTRAP_PIPELINE_DEPTH * (size_t)BOOTSTRAP_SNAPSHOT_CHUNK_SIZE;
 
+// ---- S1: process-wide aggregate serve caps -------------------------------------------
+// The per-IP quota above keys on address GROUP (IPv6 /64, full IPv4), so an attacker
+// spread across many distinct /64s can still sum to an unbounded aggregate upload (the
+// operator's worst-case serving cost scales with source-address count). These OPT-IN,
+// process-wide caps bound that cost independent of address count. Both default to 0 =
+// unlimited (no behavior change). Whitelisted peers bypass both.
+static CCriticalSection cs_bootstrap_serve_global;
+static int64_t g_serveGlobalWindowStartMs = 0;
+static int64_t g_serveGlobalBytes = 0;
+static std::map<NodeId, int64_t> g_serveActivePeers; // NodeId -> last-served time (ms)
+
+static const int64_t BOOTSTRAP_SERVE_GLOBAL_WINDOW_MS = 1000; // rolling 1s rate window
+
+static int64_t BootstrapServeMaxTotalKBps() { return GetArg("-bootstrapservemaxtotalkbps", 0); }
+static int64_t BootstrapServeMaxPeers()     { return GetArg("-bootstrapservemaxpeers", 0); }
+
+// Reset the aggregate-serve accounting (test isolation; mirrors ClearBootstrapServeQuota).
+void ClearBootstrapServeGlobal()
+{
+    LOCK(cs_bootstrap_serve_global);
+    g_serveGlobalWindowStartMs = 0;
+    g_serveGlobalBytes = 0;
+    g_serveActivePeers.clear();
+}
+
+// True if a chunk of `wantBytes` may be served to `nodeId` now under the aggregate caps;
+// false => DEFER (caller requeues and retries next cycle). Lazily ages out peers idle past
+// the rolling window so the concurrent-serving-peer count reflects who is actively served.
+// Deliberately NO FinalizeNode eviction hook (that would create a cs_main ->
+// cs_bootstrap_serve_global lock-order edge); this leaf lock is only ever taken alone.
+bool BootstrapServeGlobalAllow(NodeId nodeId, bool whitelisted, size_t wantBytes, int64_t now_ms)
+{
+    if (whitelisted) return true;
+    const int64_t kbps = BootstrapServeMaxTotalKBps();
+    const int64_t maxPeers = BootstrapServeMaxPeers();
+    if (kbps <= 0 && maxPeers <= 0) return true; // both unlimited: zero-cost no-op
+
+    LOCK(cs_bootstrap_serve_global);
+    if (g_serveGlobalWindowStartMs == 0 || now_ms - g_serveGlobalWindowStartMs >= BOOTSTRAP_SERVE_GLOBAL_WINDOW_MS) {
+        g_serveGlobalWindowStartMs = now_ms;
+        g_serveGlobalBytes = 0;
+    }
+    for (std::map<NodeId, int64_t>::iterator it = g_serveActivePeers.begin(); it != g_serveActivePeers.end();) {
+        if (now_ms - it->second >= BOOTSTRAP_SERVE_GLOBAL_WINDOW_MS) g_serveActivePeers.erase(it++);
+        else ++it;
+    }
+    if (maxPeers > 0 && g_serveActivePeers.find(nodeId) == g_serveActivePeers.end() &&
+        (int64_t)g_serveActivePeers.size() >= maxPeers) {
+        return false; // at the concurrent-serving-peer cap and this is a new peer
+    }
+    if (kbps > 0) {
+        // bytes permitted this window = (kbps * 1000 bits/s / 8) * (window_ms / 1000 s)
+        const int64_t windowBudget = (kbps * 1000 / 8) * BOOTSTRAP_SERVE_GLOBAL_WINDOW_MS / 1000;
+        if (g_serveGlobalBytes + (int64_t)wantBytes > windowBudget) return false;
+    }
+    return true;
+}
+
+void BootstrapServeGlobalCharge(NodeId nodeId, bool whitelisted, size_t bytes, int64_t now_ms)
+{
+    if (whitelisted) return;
+    if (BootstrapServeMaxTotalKBps() <= 0 && BootstrapServeMaxPeers() <= 0) return;
+    LOCK(cs_bootstrap_serve_global);
+    g_serveGlobalBytes += (int64_t)bytes;
+    g_serveActivePeers[nodeId] = now_ms;
+}
+
 bool SendQueuedBootstrapSnapshotChunk(CNode* pto)
 {
     // Cheap early-out: this runs per-peer every SendMessages cycle even on
@@ -4037,6 +4104,14 @@ bool SendQueuedBootstrapSnapshotChunk(CNode* pto)
             break; // unreadable request — end the burst this cycle
         }
 
+        // Process-wide aggregate caps (opt-in; default unlimited): defer if serving this
+        // chunk now would exceed the global byte-rate or concurrent-serving-peer cap.
+        // Requeue and retry next cycle, so the transfer slows rather than failing.
+        if (!BootstrapServeGlobalAllow(pto->id, pto->fWhitelisted, chunk.vData.size(), GetTimeMillis())) {
+            pto->RequeueBootstrapChunkRequest(kind, request);
+            break;
+        }
+
         LogPrint("net", "sending %s chunk file=%u offset=%llu bytes=%u peer=%d\n",
             chunkLabel,
             chunk.nFileIndex,
@@ -4046,6 +4121,7 @@ bool SendQueuedBootstrapSnapshotChunk(CNode* pto)
         servedBytes += chunk.vData.size();
         pto->PushMessage(respCmd, chunk);
         BootstrapServeChargeBytes(ip, pto->fWhitelisted, GetTimeMillis(), chunk.vData.size());
+        BootstrapServeGlobalCharge(pto->id, pto->fWhitelisted, chunk.vData.size(), GetTimeMillis());
     }
     return true;
 }

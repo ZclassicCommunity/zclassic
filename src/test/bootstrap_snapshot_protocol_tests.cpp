@@ -644,6 +644,54 @@ BOOST_AUTO_TEST_CASE(bootstrap_serve_quota_throttle_and_stop)
     RestoreArg("-bootstrapservethrottlekbps", hadKbps, oldKbps);
 }
 
+BOOST_AUTO_TEST_CASE(bootstrap_serve_global_aggregate_caps)
+{
+    // The per-IP quota keys on address group, so an attacker spread across many /64s
+    // can still sum to unbounded aggregate upload. The opt-in process-wide caps bound
+    // it. Defaults (0/0) are a no-op; whitelisted peers always bypass.
+    const bool hadKbps = mapArgs.count("-bootstrapservemaxtotalkbps");
+    const bool hadPeers = mapArgs.count("-bootstrapservemaxpeers");
+    const std::string oldKbps = hadKbps ? mapArgs["-bootstrapservemaxtotalkbps"] : "";
+    const std::string oldPeers = hadPeers ? mapArgs["-bootstrapservemaxpeers"] : "";
+    const int64_t t0 = 2000000;
+
+    // --- aggregate byte-rate cap: 8 kbit/s = 1000 bytes over the 1s window ---
+    ClearBootstrapServeGlobal();
+    mapArgs["-bootstrapservemaxtotalkbps"] = "8";
+    mapArgs["-bootstrapservemaxpeers"] = "0"; // peer cap off
+    BOOST_CHECK(BootstrapServeGlobalAllow(1, false, 600, t0));            // 600 <= 1000
+    BootstrapServeGlobalCharge(1, false, 600, t0);
+    BOOST_CHECK(BootstrapServeGlobalAllow(2, false, 400, t0));            // 600+400 == 1000
+    BootstrapServeGlobalCharge(2, false, 400, t0);
+    BOOST_CHECK(!BootstrapServeGlobalAllow(3, false, 1, t0));             // 1001 > 1000 -> defer
+    BOOST_CHECK(BootstrapServeGlobalAllow(3, false, 600, t0 + 1000));     // window rollover clears it
+    BOOST_CHECK(BootstrapServeGlobalAllow(99, true, 1000000000, t0));     // whitelisted bypass
+
+    // --- concurrent-serving-peer cap ---
+    ClearBootstrapServeGlobal();
+    mapArgs["-bootstrapservemaxtotalkbps"] = "0"; // rate cap off
+    mapArgs["-bootstrapservemaxpeers"] = "2";
+    BOOST_CHECK(BootstrapServeGlobalAllow(10, false, 100, t0)); BootstrapServeGlobalCharge(10, false, 100, t0);
+    BOOST_CHECK(BootstrapServeGlobalAllow(11, false, 100, t0)); BootstrapServeGlobalCharge(11, false, 100, t0);
+    BOOST_CHECK(!BootstrapServeGlobalAllow(12, false, 100, t0));          // 3rd new peer deferred (2 active)
+    BOOST_CHECK(BootstrapServeGlobalAllow(10, false, 100, t0));           // already-active peer continues
+    BOOST_CHECK(BootstrapServeGlobalAllow(12, true, 100, t0));            // whitelisted bypass
+    BOOST_CHECK(BootstrapServeGlobalAllow(12, false, 100, t0 + 1000));    // idle peers aged out -> slot frees
+
+    // --- both unlimited (default): never defers, however much is served ---
+    ClearBootstrapServeGlobal();
+    mapArgs["-bootstrapservemaxtotalkbps"] = "0";
+    mapArgs["-bootstrapservemaxpeers"] = "0";
+    for (int i = 0; i < 500; ++i) {
+        BOOST_CHECK(BootstrapServeGlobalAllow(i, false, 1000000, t0));
+        BootstrapServeGlobalCharge(i, false, 1000000, t0);
+    }
+
+    ClearBootstrapServeGlobal();
+    RestoreArg("-bootstrapservemaxtotalkbps", hadKbps, oldKbps);
+    RestoreArg("-bootstrapservemaxpeers", hadPeers, oldPeers);
+}
+
 BOOST_AUTO_TEST_CASE(bootstrap_serve_quota_hard_caps_tracked_ips)
 {
     // The per-IP quota map must stay bounded even when every tracked window is
