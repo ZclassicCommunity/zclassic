@@ -3,6 +3,7 @@
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
 #include "main.h"
+#include "pow.h"
 #include "utiltest.h"
 
 extern ZCJoinSplit* params;
@@ -158,4 +159,82 @@ TEST(Validation, ReceivedBlockTransactions) {
         SCOPED_TRACE("ExpectOptionalAmount call");
         ExpectOptionalAmount(30, fakeIndex2.nChainSproutValue);
     }
+}
+
+// SEC-2 / growable-v3 forward-connect: the load-bearing anti-forgery rule.
+//
+// The growable-v3 bootstrap import connects the server-supplied post-anchor blocks via
+// ConnectTip WITHOUT routing them through AcceptBlockHeader, so the difficulty-RETARGET
+// rule (block.nBits == GetNextWorkRequired) -- which on the live header path lives ONLY
+// in ContextualCheckBlockHeader -- would be skipped, letting a malicious server bundle a
+// forged low-difficulty post-anchor fork that the context-free PoW check (which validates
+// against the block's own CLAIMED nBits) would happily accept. main.cpp:3320-3332 closes
+// that gap by re-running ContextualCheckBlockHeader on every above-checkpoint imported
+// block while CBootstrapForwardConnectGuard is armed. This test pins the exact rule that
+// re-check re-applies: a header claiming an easier-than-required difficulty is rejected
+// with "bad-diffbits", while the honestly-retargeted header at the same height passes.
+TEST(Validation, BootstrapForwardConnectRejectsForgedLowDifficulty) {
+    SelectParams(CBaseChainParams::MAIN);
+    const Consensus::Params& params = Params().GetConsensus();
+
+    // Build a synthetic, evenly-spaced chain long enough for the averaging-window
+    // retarget to have a full history to work from (mirrors test_pow.cpp).
+    const size_t lastBlk = 2 * params.nPowAveragingWindow;
+    std::vector<CBlockIndex> blocks(lastBlk + 1);
+    for (size_t i = 0; i <= lastBlk; i++) {
+        blocks[i].pprev   = i ? &blocks[i - 1] : nullptr;
+        blocks[i].nHeight = i;
+        blocks[i].nTime   = i ? blocks[i - 1].nTime + params.PoWTargetSpacing(i) : 1269211443;
+        blocks[i].nBits   = 0x1e7fffff;
+    }
+    CBlockIndex* pprev = &blocks[lastBlk];
+
+    // The difficulty the network actually requires for the next block here.
+    CBlockHeader probe;
+    probe.nTime = pprev->nTime + params.PoWTargetSpacing(pprev->nHeight + 1);
+    const uint32_t requiredBits = GetNextWorkRequired(pprev, &probe, params);
+
+    // A forged "low difficulty" claim: a 4x-looser target (easier to mine), which a
+    // context-free PoW check against its OWN nBits would accept, but the retarget rule
+    // must reject.
+    arith_uint256 forgedTarget;
+    forgedTarget.SetCompact(requiredBits);
+    forgedTarget *= 4;
+    const uint32_t forgedBits = forgedTarget.GetCompact();
+    ASSERT_NE(forgedBits, requiredBits);
+
+    // Isolate the difficulty rule from the unrelated "older than last checkpoint" guard,
+    // which the synthetic low-height chain would otherwise trip.
+    const bool savedCheckpoints = fCheckpointsEnabled;
+    fCheckpointsEnabled = false;
+
+    auto makeHeader = [&](uint32_t nBits) {
+        CBlockHeader h;
+        h.nVersion     = 4;            // ContextualCheckBlockHeader rejects nVersion < 4
+        h.hashPrevBlock = uint256();   // unused by ContextualCheckBlockHeader
+        h.nTime        = probe.nTime;  // strictly after pprev's median-time-past
+        h.nBits        = nBits;
+        // nSolution left empty -> the equihash solution-size precheck is skipped
+        return h;
+    };
+
+    // Forged easy header: rejected, and specifically for the difficulty bits.
+    {
+        CBlockHeader forged = makeHeader(forgedBits);
+        CValidationState state;
+        EXPECT_FALSE(ContextualCheckBlockHeader(forged, state, pprev));
+        EXPECT_EQ("bad-diffbits", state.GetRejectReason());
+    }
+
+    // Honest header at the required difficulty: passes the same re-check. This proves the
+    // forged header was rejected for its difficulty and not some incidental reason, i.e.
+    // that the guard's re-check is exactly what stands between an imported forged-easy
+    // block and acceptance.
+    {
+        CBlockHeader honest = makeHeader(requiredBits);
+        CValidationState state;
+        EXPECT_TRUE(ContextualCheckBlockHeader(honest, state, pprev));
+    }
+
+    fCheckpointsEnabled = savedCheckpoints;
 }
