@@ -2886,6 +2886,15 @@ bool static FlushStateToDisk(CValidationState &state, FlushStateMode mode) {
         if (!pcoinsTip->Flush())
             return AbortNode(state, "Failed to write to coin database");
         nLastFlush = nNow;
+        // Forensic (opt-in: -debug=flush): after a full flush, the durable block
+        // index must be at-or-ahead of the coins best block. Capturing both tips
+        // here pins down a cross-instance durability gap (e.g. coins persisted past
+        // the last durable block-index write) if one ever occurs. Off by default;
+        // no steady-state log spam.
+        LogPrint("flush", "fullflush: mode=%d chainActive=%s coins-best=%s\n",
+                 (int)mode,
+                 chainActive.Tip() ? chainActive.Tip()->GetBlockHash().ToString() : "(null)",
+                 pcoinsTip->GetBestBlock().ToString());
     }
     if ((mode == FLUSH_STATE_ALWAYS || mode == FLUSH_STATE_PERIODIC) && nNow > nLastSetChain + (int64_t)DATABASE_WRITE_INTERVAL * 1000000) {
         // Update best block in wallet (so we can detect restored wallets).
