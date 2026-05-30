@@ -84,9 +84,33 @@ bool SetupAutoBootstrapServe(const boost::filesystem::path& data_dir, std::strin
 //! is already within that many blocks of the tip; 0 forces a freeze.
 bool FreezeLiveChainstateForServe(const boost::filesystem::path& data_dir, int minAdvanceBlocks, std::string& error);
 
+//! GROWABLE v3 serve-extend: grow the retained anchor serve copy's BLOCK bundle
+//! (blocks/blk+rev*.dat + blocks/index) up to this node's current live tip while
+//! KEEPING its chainstate PINNED at the compiled fast-sync anchor (the chainstate is
+//! hard-linked from the existing serve copy, never re-copied or re-hashed) and
+//! recording a sibling ".blocktip" sidecar at the captured tip. Requires an existing
+//! retained ".anchor" serve dir and a node out of IBD; leaves the previous serve dir
+//! untouched on any failure. Best-effort — callers must not treat failure as fatal.
+//! minAdvanceBlocks>0 skips the re-copy when the served bundle is already within that
+//! many blocks of the tip; 0 forces an extend.
+bool ExtendServedBlocksForServe(const boost::filesystem::path& data_dir, int minAdvanceBlocks, std::string& error);
+
+//! GROWABLE v3: produce a retained ".anchor" serve dir on a node that synced from
+//! genesis (and so has no fast-synced serve copy) by re-deriving the UTXO set at the
+//! compiled anchor height from genesis into a scratch chainstate, self-checking it
+//! against the compiled anchor commitment, installing it plus the live blocks/ tree,
+//! and recording a ".blocktip" at the current tip. Trusts no peer (the commitment is
+//! re-derived and compared to the compiled constant). Requires the active chain to be
+//! past the anchor and out of IBD. Best-effort; init.cpp wires the call.
+bool BuildAnchorServeSnapshotFromGenesis(const boost::filesystem::path& data_dir, std::string& error);
+
 //! Path of the auto-serve directory (data_dir/bootstrap-serve-source), exposed so
 //! init can point -bootstrapsourcedir at it before the first self-snapshot freeze.
 boost::filesystem::path BootstrapAutoServeSourceDir(const boost::filesystem::path& data_dir);
+
+//! Path of the GROWABLE v3 block-bundle tip sidecar (".blocktip", a sibling of the
+//! serve dir, OUTSIDE it like ".anchor"/".meta"), exposed for init/serve wiring.
+boost::filesystem::path BootstrapServeBlockTipPath(const boost::filesystem::path& sourcedir);
 
 //! Drift guard: when serving a prepared anchor snapshot (-bootstrapserve with a
 //! -bootstrapsourcedir that is NOT a v2 self-snapshot), returns false and sets

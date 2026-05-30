@@ -5,6 +5,7 @@
 #include "bootstrap.h"
 
 #include "chainparams.h"
+#include "checkpoints.h"
 #include "coins.h"
 #include "compat.h"
 #include "consensus/validation.h"
@@ -107,6 +108,10 @@ static std::map<std::string, std::time_t> bootstrapSnapshotCacheMtimes;
 static uint64_t bootstrapSnapshotCacheBytes = 0;
 // Clear the snapshot manifest cache statics; caller MUST hold cs_bootstrap_snapshot.
 static void ClearBootstrapSnapshotCacheLocked();
+// Write a datadir-sibling marker durably (data + directory entry fsync'd). Defined
+// further down; forward-declared so the v3 anchor-build helper above it can reuse it.
+static bool WriteDurableDatadirMarker(const boost::filesystem::path& path,
+                                      const std::string& contents, std::string& err);
 static const unsigned int BOOTSTRAP_MAX_REJECT_MESSAGE_LENGTH = 111;
 // Per-message network timeout for bootstrap transfers. Independent of the much
 // shorter default -timeout (nConnectTimeout, 5s) used for ordinary connects, so
@@ -1384,6 +1389,78 @@ static bool ReadBootstrapServeMeta(const boost::filesystem::path& sourcedir, Boo
     return ParseBootstrapServeMetaFile(BootstrapServeMetaPath(sourcedir), meta);
 }
 
+// --- GROWABLE v3: block-bundle tip sidecar -------------------------------------
+//
+// A v3 (growable) serve dir keeps the v1 ".anchor" sidecar (chainstate is PINNED at
+// the compiled fast-sync anchor and verified against the compiled commitment with
+// zero server trust) AND adds a sibling ".blocktip" sidecar recording how far the
+// served blocks/ tree has been EXTENDED past the anchor: "<height> <blockhash>".
+// The block bundle grows append-only toward the serving node's live tip; the tip
+// it currently covers is what ".blocktip" records. Like ".anchor"/".meta" it lives
+// OUTSIDE the serve dir so the manifest file scan never picks it up. It carries NO
+// commitment — its integrity is established solely by the CLIENT re-validating the
+// post-anchor blocks (anchor+1..blockTip) itself before trusting them.
+struct BootstrapServeBlockTip
+{
+    int nHeight;
+    uint256 hashBlock;
+    BootstrapServeBlockTip() : nHeight(-1) {}
+};
+
+boost::filesystem::path BootstrapServeBlockTipPath(const boost::filesystem::path& sourcedir)
+{
+    return sourcedir.parent_path() / (sourcedir.filename().string() + ".blocktip");
+}
+
+static bool ReadBootstrapServeBlockTip(const boost::filesystem::path& sourcedir, BootstrapServeBlockTip& tip)
+{
+    FILE* f = fopen(BootstrapServeBlockTipPath(sourcedir).string().c_str(), "r");
+    if (!f) {
+        return false;
+    }
+    char hbuf[128] = {0};
+    int height = -1;
+    const int n = fscanf(f, "%d %127s", &height, hbuf);
+    fclose(f);
+    if (n != 2) {
+        return false;
+    }
+    tip.nHeight = height;
+    tip.hashBlock = uint256S(hbuf);
+    return tip.nHeight >= 0 && !tip.hashBlock.IsNull();
+}
+
+// Write the ".blocktip" sidecar atomically (temp + rename), mirroring the v2 meta
+// writer. Returns false (with `error` set) if it could not be made to land.
+static bool WriteBootstrapServeBlockTip(const boost::filesystem::path& sourcedir, int height, const uint256& hashBlock, std::string& error)
+{
+    const boost::filesystem::path tipPath = BootstrapServeBlockTipPath(sourcedir);
+    const boost::filesystem::path tipTmp = tipPath.parent_path() / (tipPath.filename().string() + ".new");
+    bool ok = false;
+    FILE* tf = fopen(tipTmp.string().c_str(), "w");
+    if (tf) {
+        if (fprintf(tf, "%d %s\n", height, hashBlock.ToString().c_str()) > 0) {
+            ok = (fflush(tf) == 0);
+        }
+        if (fclose(tf) != 0) {
+            ok = false;
+        }
+    }
+    if (ok) {
+        try {
+            boost::filesystem::rename(tipTmp, tipPath);
+        } catch (const boost::filesystem::filesystem_error&) {
+            ok = false;
+        }
+    }
+    if (!ok) {
+        boost::filesystem::remove(tipTmp);
+        error = strprintf("could not write serve blocktip file: %s", tipPath.string());
+        return false;
+    }
+    return true;
+}
+
 // Freeze this node's live chainstate into the auto-serve directory and record a
 // v2 ".meta" describing it. The served height/hash/commitment are derived from
 // the COPY (by reopening it), not from the live tip, so the published snapshot
@@ -1584,6 +1661,535 @@ bool FreezeLiveChainstateForServe(const boost::filesystem::path& data_dir, int m
 
     LogPrintf("Auto-serve: froze a self-snapshot at height %d (%s), commitment %s\n",
         meta.nHeight, meta.hashBlock.ToString(), meta.hashChainstateSerialized.ToString());
+    return true;
+}
+
+// --- GROWABLE v3: extend the served block bundle toward the live tip -----------
+//
+// Hard-link (never re-copy/re-hash) the existing retained ".anchor" serve copy's
+// PINNED chainstate@anchor into a fresh staging dir, copy the blocks/ tree up to
+// this node's current live tip, then atomically swap that into place and record a
+// ".blocktip" sidecar at the captured tip. The chainstate stays exactly the anchor
+// snapshot (its compiled commitment still verifies on the client with zero server
+// trust); only the block bundle grows, append-only. The client re-validates the
+// post-anchor blocks itself before trusting them, so the new ".blocktip" carries no
+// commitment. Requires an existing ".anchor" serve dir (this node fast-synced and
+// retained it); leaves the previous serve dir untouched on any failure.
+bool ExtendServedBlocksForServe(const boost::filesystem::path& data_dir, int minAdvanceBlocks, std::string& error)
+{
+    const boost::filesystem::path serveSrc = AutoServeSourceDir(data_dir);
+    const boost::filesystem::path tmp = serveSrc.parent_path() / (serveSrc.filename().string() + ".new");
+    const boost::filesystem::path blocksSrc = data_dir / "blocks";
+
+    // Require an existing retained ".anchor" serve dir: v3 grows the block bundle on
+    // top of the PINNED chainstate@anchor, which only the anchor serve copy holds.
+    // A v2 self-snapshot serve dir (sibling .meta) is a different, non-anchor-pinned
+    // shape and must not be extended this way.
+    if (!BootstrapSnapshotPathsExist(serveSrc)) {
+        error = "no retained anchor serve copy to extend (node has not fast-synced a snapshot)";
+        return false;
+    }
+    {
+        BootstrapServeMeta selfMeta;
+        if (ReadBootstrapServeMeta(serveSrc, selfMeta)) {
+            error = "serve copy is a v2 self-snapshot; not extending it as a v3 anchor bundle";
+            return false;
+        }
+    }
+    if (ResolveServedAnchorFromMarker(serveSrc) == NULL) {
+        error = "serve copy does not match any compiled anchor; not extending";
+        return false;
+    }
+    if (!boost::filesystem::is_directory(blocksSrc)) {
+        error = "datadir has no blocks/ to extend the served bundle from";
+        return false;
+    }
+
+    // Capture the live tip under cs_main; bail while still in IBD (the bundle would
+    // be pinned to a still-syncing height).
+    int tipHeight = -1;
+    uint256 tipHash;
+    {
+        LOCK(cs_main);
+        if (chainActive.Tip() == NULL) {
+            error = "no active chain tip to extend toward";
+            return false;
+        }
+        if (IsInitialBlockDownload()) {
+            error = "node is still in initial block download; not extending served bundle";
+            return false;
+        }
+        tipHeight = chainActive.Height();
+        tipHash = chainActive.Tip()->GetBlockHash();
+    }
+
+    // Skip a needless re-copy of the blocks/ tree when the existing .blocktip is
+    // already within minAdvanceBlocks of the tip. minAdvance==0 forces an extend
+    // (used by tests and the first activation).
+    if (minAdvanceBlocks > 0) {
+        BootstrapServeBlockTip existing;
+        if (ReadBootstrapServeBlockTip(serveSrc, existing) &&
+            tipHeight - existing.nHeight < minAdvanceBlocks) {
+            error = strprintf("served block bundle already within %d blocks of tip (height %d)",
+                minAdvanceBlocks, existing.nHeight);
+            return false;
+        }
+    }
+
+    // Disk preflight: only the blocks/ tree is (re)copied — chainstate is
+    // hard-linked, so it costs ~no extra space. Size the blocks/ tree and require it
+    // plus the shared safety margin.
+    uint64_t blocksBytes = 0;
+    try {
+        boost::filesystem::recursive_directory_iterator end;
+        for (boost::filesystem::recursive_directory_iterator it(blocksSrc); it != end; ++it) {
+            if (boost::filesystem::is_regular_file(it->path())) {
+                blocksBytes += boost::filesystem::file_size(it->path());
+            }
+        }
+    } catch (const boost::filesystem::filesystem_error& e) {
+        error = e.what();
+        return false;
+    }
+    boost::filesystem::space_info si = boost::filesystem::space(data_dir);
+    const uint64_t needed = blocksBytes + (uint64_t)BOOTSTRAP_SNAPSHOT_DISK_SAFETY_MARGIN_BYTES;
+    if ((uint64_t)si.available < needed) {
+        error = strprintf("not enough free disk to extend the served block bundle: need ~%llu bytes, have %llu",
+            (unsigned long long)needed, (unsigned long long)si.available);
+        return false;
+    }
+
+    try {
+        boost::filesystem::remove_all(tmp);
+    } catch (const boost::filesystem::filesystem_error& e) {
+        error = e.what();
+        return false;
+    }
+
+    // Hard-link the PINNED chainstate@anchor from the existing serve copy into the
+    // staging dir — NEVER re-copy or re-hash the multi-GiB chainstate. Each regular
+    // file under serveSrc/chainstate is linked into tmp/chainstate; fall back to a
+    // copy on EXDEV (cross-device, where hard links are impossible).
+    try {
+        const boost::filesystem::path chainOld = serveSrc / "chainstate";
+        const boost::filesystem::path chainNew = tmp / "chainstate";
+        boost::filesystem::create_directories(chainNew);
+        boost::filesystem::recursive_directory_iterator end;
+        for (boost::filesystem::recursive_directory_iterator it(chainOld); it != end; ++it) {
+            boost::this_thread::interruption_point();
+            const boost::filesystem::path current = it->path();
+            if (!IsSafeBootstrapEntry(current)) {
+                boost::filesystem::remove_all(tmp);
+                error = strprintf("serve chainstate contains unsafe file type: %s", current.string());
+                return false;
+            }
+            const boost::filesystem::path relative = boost::filesystem::relative(current, chainOld);
+            const boost::filesystem::path target = chainNew / relative;
+            if (boost::filesystem::is_directory(current)) {
+                boost::filesystem::create_directories(target);
+                continue;
+            }
+            boost::filesystem::create_directories(target.parent_path());
+            boost::system::error_code ec;
+            boost::filesystem::create_hard_link(current, target, ec);
+            if (ec) {
+                // EXDEV (or any platform/filesystem that refuses a hard link here):
+                // fall back to a real copy of just this file. Correctness is
+                // preserved; we only lose the space/time saving of the link.
+                boost::filesystem::copy_file(current, target);
+            }
+        }
+    } catch (const boost::filesystem::filesystem_error& e) {
+        boost::filesystem::remove_all(tmp);
+        error = strprintf("could not hard-link served chainstate: %s", e.what());
+        return false;
+    }
+
+    // Copy the blocks/ tree up to the live tip in two phases (SRVEXT-1). The
+    // blocks/index leveldb is consistency-critical: copying it while a block connects
+    // could capture a torn DB (a CURRENT/MANIFEST referencing segments not yet on
+    // disk). So copy the (small, megabytes) index FIRST, UNDER cs_main after a flush,
+    // so it is a consistent snapshot; the index is small enough that the brief lock
+    // hold is fine (unlike the bulk blk/rev copy or the SAA-1 multi-hour replay).
+    try {
+        boost::filesystem::create_directories(tmp / "blocks");
+    } catch (const boost::filesystem::filesystem_error& e) {
+        boost::filesystem::remove_all(tmp);
+        error = e.what();
+        return false;
+    }
+    bool indexCopied = false;
+    {
+        LOCK(cs_main);
+        FlushStateToDisk();
+        indexCopied = CopyBootstrapDirectory(blocksSrc / "index", tmp / "blocks" / "index", error);
+    }
+    if (!indexCopied) {
+        boost::filesystem::remove_all(tmp);
+        return false;
+    }
+    // Then the bulk blk/rev*.dat OUTSIDE cs_main. They are append-only and were written
+    // at/before the flush above, so they contain every block the copied index references
+    // (up to the captured tip); a block connected concurrently only appends trailing
+    // data past the advertised tip, which the client ignores.
+    try {
+        boost::filesystem::directory_iterator end;
+        for (boost::filesystem::directory_iterator it(blocksSrc); it != end; ++it) {
+            boost::this_thread::interruption_point();
+            const boost::filesystem::path p = it->path();
+            if (boost::filesystem::is_directory(p)) continue; // index/ already copied
+            if (!IsSafeBootstrapEntry(p)) {
+                boost::filesystem::remove_all(tmp);
+                error = strprintf("serve blocks contains unsafe file type: %s", p.string());
+                return false;
+            }
+            boost::filesystem::copy_file(p, tmp / "blocks" / p.filename());
+        }
+    } catch (const boost::filesystem::filesystem_error& e) {
+        boost::filesystem::remove_all(tmp);
+        error = strprintf("could not copy served blocks: %s", e.what());
+        return false;
+    }
+    if (!BootstrapSnapshotPathsExist(tmp)) {
+        boost::filesystem::remove_all(tmp);
+        error = "extended serve copy is incomplete";
+        return false;
+    }
+
+    // Atomic swap: replace the live serve dir with the extended copy, KEEPING the
+    // .anchor marker (it still describes the pinned chainstate) and any sibling
+    // sidecars. The .anchor marker is a sibling of serveSrc, so removing serveSrc
+    // itself does not touch it.
+    try {
+        boost::filesystem::remove_all(serveSrc);
+        boost::filesystem::rename(tmp, serveSrc);
+    } catch (const boost::filesystem::filesystem_error& e) {
+        boost::filesystem::remove_all(tmp);
+        error = strprintf("could not install extended serve copy: %s", e.what());
+        return false;
+    }
+
+    // Record how far the bundle now reaches. On failure to land the sidecar, the
+    // serve dir would advertise a v3 manifest with no block-tip — fall back safely
+    // by tearing down the swapped dir + sidecars so the node serves nothing rather
+    // than a malformed bundle (mirrors the freeze meta-write failure handling).
+    if (!WriteBootstrapServeBlockTip(serveSrc, tipHeight, tipHash, error)) {
+        boost::filesystem::remove_all(serveSrc);
+        boost::filesystem::remove(AutoServeMarkerPath(data_dir));
+        boost::filesystem::remove(BootstrapServeBlockTipPath(serveSrc));
+        {
+            LOCK(cs_bootstrap_snapshot);
+            ClearBootstrapSnapshotCacheLocked();
+        }
+        return false;
+    }
+
+    // Drop any stale v2 self-snapshot meta sidecar (a v3 anchor bundle is described
+    // by .anchor + .blocktip, never .meta); a leftover .meta would make the manifest
+    // builder mis-serve this as a v2 self-snapshot.
+    boost::filesystem::remove(BootstrapServeMetaPath(serveSrc));
+
+    // The serve dir changed; drop the cached manifest so it is rebuilt (and rewarm
+    // it off-thread via the existing PreflightBootstrapSnapshotService machinery).
+    {
+        LOCK(cs_bootstrap_snapshot);
+        ClearBootstrapSnapshotCacheLocked();
+    }
+    {
+        std::string warmErr;
+        PreflightBootstrapSnapshotService(warmErr);
+    }
+
+    LogPrintf("Auto-serve: extended served block bundle to height %d (%s) over the pinned anchor chainstate\n",
+        tipHeight, tipHash.ToString());
+    return true;
+}
+
+// --- GROWABLE v3: build a chainstate@anchor from genesis -----------------------
+//
+// A node that synced from genesis (rather than fast-syncing a snapshot) holds no
+// retained ".anchor" serve copy and so cannot serve v3. This helper produces one
+// WITHOUT trusting anyone: it re-derives the UTXO set at the COMPILED anchor height
+// by replaying genesis..anchorHeight into a scratch CCoinsViewDB (the same
+// ConnectBlock(fScratchView=true) + per-block ContextualCheckBlockHeader pattern
+// the trustless background validator uses), checks the resulting commitment equals
+// the compiled anchor's, then installs that scratch chainstate plus the live
+// blocks/ tree as the retained ".anchor" serve dir and records a ".blocktip" at the
+// current tip. The node can then serve a v3 GROWABLE snapshot. Requires the active
+// chain to be past the anchor and out of IBD, and the anchor block to be on the
+// active-chain ancestry with all block data present. Best-effort: a failure leaves
+// any existing serve dir untouched. init.cpp wires the call; this file only
+// provides the function.
+bool BuildAnchorServeSnapshotFromGenesis(const boost::filesystem::path& data_dir, std::string& error)
+{
+    const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
+    if (anchor.nHeight < 0 || anchor.hashBlock.IsNull()) {
+        error = "no compiled fast-sync anchor to build a serve snapshot at";
+        return false;
+    }
+    if (anchor.hashChainstateSerialized.IsNull()) {
+        error = "compiled anchor has no chainstate commitment; cannot self-verify a built snapshot";
+        return false;
+    }
+
+    const boost::filesystem::path serveSrc = AutoServeSourceDir(data_dir);
+    const boost::filesystem::path scratchDir = data_dir / "bootstrap-anchor-build-scratch";
+    const boost::filesystem::path tmp = serveSrc.parent_path() / (serveSrc.filename().string() + ".new");
+    const boost::filesystem::path blocksSrc = data_dir / "blocks";
+
+    // Don't clobber an already-valid retained anchor serve dir.
+    if (BootstrapSnapshotPathsExist(serveSrc) && ResolveServedAnchorFromMarker(serveSrc) != NULL) {
+        BootstrapServeMeta selfMeta;
+        if (!ReadBootstrapServeMeta(serveSrc, selfMeta)) {
+            error = "an anchor serve copy already exists; not rebuilding";
+            return false;
+        }
+    }
+
+    // Capture the live tip and confirm the anchor is on the active-chain ancestry
+    // (so its block data is present and the replay target is a real, connected
+    // block), all under cs_main; bail while still in IBD.
+    int tipHeight = -1;
+    uint256 tipHash;
+    {
+        LOCK(cs_main);
+        CBlockIndex* tip = chainActive.Tip();
+        if (tip == NULL) {
+            error = "no active chain tip";
+            return false;
+        }
+        if (IsInitialBlockDownload()) {
+            error = "node is still in initial block download; not building an anchor snapshot";
+            return false;
+        }
+        tipHeight = chainActive.Height();
+        tipHash = tip->GetBlockHash();
+        if (tipHeight < anchor.nHeight) {
+            error = strprintf("active chain height %d is below the anchor height %d", tipHeight, anchor.nHeight);
+            return false;
+        }
+        CBlockIndex* atAnchor = chainActive[anchor.nHeight];
+        if (atAnchor == NULL || atAnchor->GetBlockHash() != anchor.hashBlock) {
+            error = "the compiled anchor block is not on this node's active chain";
+            return false;
+        }
+        // Flush the live coin cache so the on-disk blocks/ tree we will copy matches
+        // the captured tip.
+        FlushStateToDisk();
+    }
+
+    // Resolve the last-checkpoint boundary once: ContextualCheckBlockHeader is
+    // re-run only ABOVE it (at/below is hash-pinned, and running it there would trip
+    // the checkpoint-fork guard since the replay walks up from genesis). Mirrors the
+    // background validator.
+    int lastCheckpointHeight = -1;
+    {
+        LOCK(cs_main);
+        const CBlockIndex* pcp = Checkpoints::GetLastCheckpoint(Params().Checkpoints());
+        if (pcp != NULL) {
+            lastCheckpointHeight = pcp->nHeight;
+        }
+    }
+
+    // Disk-headroom preflight (SAA-2): the replay writes a full second UTXO set into
+    // the scratch DB, and the final install copies the whole blocks/ tree. Require
+    // (current chainstate size + blocks/ size + the shared safety margin) to be free,
+    // or abort before writing anything rather than exhausting the live datadir disk.
+    try {
+        uint64_t needed = (uint64_t)BOOTSTRAP_SNAPSHOT_DISK_SAFETY_MARGIN_BYTES;
+        boost::filesystem::recursive_directory_iterator endIt;
+        const boost::filesystem::path chainstateDir = data_dir / "chainstate";
+        if (boost::filesystem::is_directory(chainstateDir)) {
+            for (boost::filesystem::recursive_directory_iterator it(chainstateDir); it != endIt; ++it)
+                if (boost::filesystem::is_regular_file(it->path())) needed += boost::filesystem::file_size(it->path());
+        }
+        if (boost::filesystem::is_directory(blocksSrc)) {
+            for (boost::filesystem::recursive_directory_iterator it(blocksSrc); it != endIt; ++it)
+                if (boost::filesystem::is_regular_file(it->path())) needed += boost::filesystem::file_size(it->path());
+        }
+        boost::filesystem::space_info si = boost::filesystem::space(data_dir);
+        if ((uint64_t)si.available < needed) {
+            error = strprintf("not enough free disk to build an anchor serve snapshot "
+                "(need ~%llu bytes, have %llu)", (unsigned long long)needed, (unsigned long long)si.available);
+            return false;
+        }
+    } catch (const boost::filesystem::filesystem_error& e) {
+        LogPrintf("Auto-serve: could not preflight free disk for anchor build: %s (continuing)\n", e.what());
+    }
+
+    // Replay genesis..anchorHeight into a fresh scratch CCoinsViewDB and verify the
+    // commitment. ConnectBlock requires cs_main, but the replay is IBD-equivalent and
+    // multi-hour, so we BATCH the cs_main hold (~80ms) and release it between batches
+    // (SAA-1) — exactly like the background validator — so live block connect, RPC and
+    // the P2P handler are not starved. The scratch view/db are thread-private, so the
+    // periodic flush + yield run OUTSIDE cs_main. Invoked off the message-handler
+    // thread (init/scheduler).
+    try {
+        boost::filesystem::remove_all(scratchDir);
+        CCoinsViewDB scratchdb(scratchDir, 1 << 25, false, /*fWipe=*/true);
+        CCoinsViewCache view(&scratchdb);
+
+        LogPrintf("Auto-serve: re-deriving chainstate@anchor by replaying genesis..%d (this is one-time and CPU-heavy)\n",
+            anchor.nHeight);
+
+        static const int64_t ANCHORBUILD_BATCH_MS = 80;
+        int h = 0;
+        while (h <= anchor.nHeight) {
+            boost::this_thread::interruption_point();
+            if (ShutdownRequested()) {
+                boost::filesystem::remove_all(scratchDir);
+                error = "shutdown requested during anchor snapshot build";
+                return false;
+            }
+            const int64_t batchStart = GetTimeMillis();
+            {
+                LOCK(cs_main);
+                // Re-resolve the anchor on the active chain each batch (a reorg between
+                // batches would invalidate the ancestry walk).
+                CBlockIndex* tip = chainActive.Tip();
+                CBlockIndex* anchorBranch = (tip ? tip->GetAncestor(anchor.nHeight) : NULL);
+                if (anchorBranch == NULL || anchorBranch->GetBlockHash() != anchor.hashBlock) {
+                    boost::filesystem::remove_all(scratchDir);
+                    error = "anchor is no longer on the active chain";
+                    return false;
+                }
+                while (h <= anchor.nHeight) {
+                    CBlockIndex* pindex = anchorBranch->GetAncestor(h);
+                    if (pindex == NULL) {
+                        boost::filesystem::remove_all(scratchDir);
+                        error = strprintf("missing block index at height %d during anchor build", h);
+                        return false;
+                    }
+                    CBlock block;
+                    if (!ReadBlockFromDisk(block, pindex)) {
+                        boost::filesystem::remove_all(scratchDir);
+                        error = strprintf("missing block data at height %d during anchor build", h);
+                        return false;
+                    }
+                    CValidationState cvstate;
+                    if (pindex->pprev != NULL &&
+                        pindex->nHeight > lastCheckpointHeight &&
+                        !ContextualCheckBlockHeader(block, cvstate, pindex->pprev)) {
+                        boost::filesystem::remove_all(scratchDir);
+                        error = strprintf("contextual header check failed at height %d during anchor build", h);
+                        return false;
+                    }
+                    if (!ConnectBlock(block, cvstate, pindex, view, false, /*fScratchView=*/true)) {
+                        boost::filesystem::remove_all(scratchDir);
+                        error = strprintf("ConnectBlock failed at height %d during anchor build", h);
+                        return false;
+                    }
+                    view.SetBestBlock(pindex->GetBlockHash());
+                    ++h;
+                    if (GetTimeMillis() - batchStart >= ANCHORBUILD_BATCH_MS) {
+                        break; // budget elapsed: release cs_main, flush+yield, re-acquire
+                    }
+                }
+            }
+            // Outside cs_main: bound peak memory, then yield so other cs_main users run.
+            if (view.DynamicMemoryUsage() > (64u << 20)) {
+                view.Flush();
+            }
+            boost::this_thread::yield();
+        }
+        view.Flush(); // final flush, outside cs_main
+
+        CCoinsStats stats;
+        if (!scratchdb.GetStats(stats)) {
+            boost::filesystem::remove_all(scratchDir);
+            error = "could not hash re-derived chainstate@anchor";
+            return false;
+        }
+        if (stats.hashSerialized != anchor.hashChainstateSerialized) {
+            boost::filesystem::remove_all(scratchDir);
+            error = strprintf("re-derived chainstate@anchor %s != compiled commitment %s",
+                stats.hashSerialized.ToString(), anchor.hashChainstateSerialized.ToString());
+            return false;
+        }
+    } catch (const std::exception& e) {
+        boost::filesystem::remove_all(scratchDir);
+        error = strprintf("anchor snapshot build error: %s", e.what());
+        return false;
+    }
+    // scratchdb destructed here -> releases its leveldb lock before we move it.
+
+    // Assemble the serve dir: chainstate/ = the verified scratch DB, blocks/ = the
+    // live tree (copied). Build into a .new staging dir, then atomically swap in.
+    try {
+        boost::filesystem::remove_all(tmp);
+        boost::filesystem::create_directories(tmp);
+    } catch (const boost::filesystem::filesystem_error& e) {
+        boost::filesystem::remove_all(scratchDir);
+        error = e.what();
+        return false;
+    }
+    // Move the scratch chainstate into the staging dir (a rename when same-device;
+    // CopyBootstrapDirectory falls back to a copy if it must cross devices — but try
+    // a rename first to avoid re-copying the multi-GiB DB).
+    bool chainstatePlaced = false;
+    try {
+        boost::filesystem::rename(scratchDir, tmp / "chainstate");
+        chainstatePlaced = true;
+    } catch (const boost::filesystem::filesystem_error&) {
+        // Cross-device or otherwise un-renamable: fall back to a copy.
+        if (CopyBootstrapDirectory(scratchDir, tmp / "chainstate", error)) {
+            boost::filesystem::remove_all(scratchDir);
+            chainstatePlaced = true;
+        }
+    }
+    if (!chainstatePlaced) {
+        boost::filesystem::remove_all(scratchDir);
+        boost::filesystem::remove_all(tmp);
+        if (error.empty()) error = "could not place re-derived chainstate into the serve staging dir";
+        return false;
+    }
+    if (!CopyBootstrapDirectory(blocksSrc, tmp / "blocks", error)) {
+        boost::filesystem::remove_all(tmp);
+        return false;
+    }
+    if (!BootstrapSnapshotPathsExist(tmp)) {
+        boost::filesystem::remove_all(tmp);
+        error = "built anchor serve copy is incomplete";
+        return false;
+    }
+
+    // Atomic swap into place.
+    try {
+        boost::filesystem::remove_all(serveSrc);
+        boost::filesystem::rename(tmp, serveSrc);
+    } catch (const boost::filesystem::filesystem_error& e) {
+        boost::filesystem::remove_all(tmp);
+        error = strprintf("could not install built anchor serve copy: %s", e.what());
+        return false;
+    }
+
+    // Write the ".anchor" marker (this serve copy corresponds to the compiled
+    // anchor) and the ".blocktip" sidecar (block bundle reaches the current tip).
+    // Drop any stale ".meta" (this is an anchor-pinned v3 dir, not a v2 self-snapshot).
+    {
+        const std::string markerLine = AutoServeAnchorMarkerFor(anchor.nHeight, anchor.hashBlock);
+        std::string markerErr;
+        if (!WriteDurableDatadirMarker(AutoServeMarkerPath(data_dir), markerLine + "\n", markerErr)) {
+            boost::filesystem::remove_all(serveSrc);
+            error = strprintf("could not write anchor marker for built serve copy: %s", markerErr);
+            return false;
+        }
+    }
+    boost::filesystem::remove(BootstrapServeMetaPath(serveSrc));
+    if (!WriteBootstrapServeBlockTip(serveSrc, tipHeight, tipHash, error)) {
+        boost::filesystem::remove_all(serveSrc);
+        boost::filesystem::remove(AutoServeMarkerPath(data_dir));
+        boost::filesystem::remove(BootstrapServeBlockTipPath(serveSrc));
+        return false;
+    }
+
+    {
+        LOCK(cs_bootstrap_snapshot);
+        ClearBootstrapSnapshotCacheLocked();
+    }
+
+    LogPrintf("Auto-serve: built and installed a v3 anchor serve snapshot (chainstate@%d, blocks to %d)\n",
+        anchor.nHeight, tipHeight);
     return true;
 }
 
@@ -1962,7 +2568,15 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
         // flag. Trustless v2 snapshots record height/hash/commitment for the
         // provisional gate + background validator; anchor-mode snapshots record a
         // marker whose presence triggers VerifyImportedBootstrapAnchor.
-        const bool fTrustlessV2 = (fTrustless && manifest.nVersion >= 2);
+        // Only a v2 self-snapshot routes to the TRUSTLESS pending marker (its UTXO
+        // set has no compiled commitment and is verified after download + by the
+        // background validator). A v3 GROWABLE snapshot's chainstate IS pinned at the
+        // compiled anchor and verifiable against the compiled commitment, so it routes
+        // to the ANCHOR pending marker exactly like v1 (the anchor-mode forgery check
+        // VerifyImportedBootstrapAnchor applies); its grown block bundle is validated
+        // by the normal forward block-validation path. So v3 (and v1) take the anchor
+        // path; only nVersion==2 in trustless mode is the trustless case.
+        const bool fTrustlessV2 = (fTrustless && manifest.nVersion == 2);
         if (fTrustlessV2) {
             if (!WriteBootstrapTrustlessPending(data_dir, manifest.nHeight, manifest.hashBlock,
                                                 manifest.hashChainstateSerialized)) {
@@ -2116,7 +2730,20 @@ static bool CollectBootstrapSnapshotFiles(const boost::filesystem::path& root,
         return false;
     }
 
+    // Order chainstate/ entries BEFORE blocks/ entries, then lexicographically
+    // within each group. This keeps the file order (and therefore each file's
+    // nFileIndex in the served manifest) stable for the PINNED chainstate files as
+    // the GROWABLE v3 block bundle appends new blk/rev*.dat files: blocks/ entries
+    // sort after every chainstate/ entry, so growth only adds indices at the tail
+    // and never shifts a chainstate file's index mid-download. (The hardcoded v1/v2
+    // wire-vector tests build vFiles directly and do not exercise this sort, so the
+    // ordering change does not affect them.)
     std::sort(files.begin(), files.end(), [](const CBootstrapSnapshotFile& a, const CBootstrapSnapshotFile& b) {
+        const bool aChain = (a.strPath.compare(0, 11, "chainstate/") == 0);
+        const bool bChain = (b.strPath.compare(0, 11, "chainstate/") == 0);
+        if (aChain != bChain) {
+            return aChain; // chainstate/ group first
+        }
         return a.strPath < b.strPath;
     });
 
@@ -2297,6 +2924,37 @@ bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::str
     if (anchor.nHeight < 0 || anchor.hashBlock.IsNull()) {
         error = "bootstrap snapshot service requires a compiled fast-sync anchor";
         return false;
+    }
+
+    // GROWABLE v3: a serve dir with both an ".anchor" marker (chainstate PINNED at
+    // the compiled anchor) and a ".blocktip" sidecar (block bundle EXTENDED past the
+    // anchor) is served as a version-3 manifest. nHeight/hashBlock/hashChainstate
+    // describe the ANCHOR (verifiable against the compiled commitment with zero
+    // server trust); nBlockTipHeight/hashBlockTip describe the grown block bundle's
+    // tip (carrying NO commitment — the client revalidates the post-anchor blocks
+    // itself before trusting them). Requires the anchor to carry a compiled
+    // commitment, since a v3 client checks the chainstate half against it.
+    BootstrapServeBlockTip blockTip;
+    if (ReadBootstrapServeBlockTip(source, blockTip) && blockTip.nHeight >= anchor.nHeight) {
+        if (anchor.hashChainstateSerialized.IsNull()) {
+            error = "v3 serve requires a compiled anchor with a chainstate commitment";
+            return false;
+        }
+        manifest.SetNull();
+        manifest.nVersion = 3;
+        manifest.strNetwork = Params().NetworkIDString();
+        manifest.nHeight = anchor.nHeight;
+        manifest.hashBlock = anchor.hashBlock;
+        manifest.hashAnchorSha256 = anchor.hashAnchorSha256;
+        manifest.hashAnchorSha3 = anchor.hashAnchorSha3;
+        manifest.hashChainstateSerialized = anchor.hashChainstateSerialized;
+        manifest.nBlockTipHeight = blockTip.nHeight;
+        manifest.hashBlockTip = blockTip.hashBlock;
+        if (!GetBootstrapSnapshotFileList(source, manifest.vFiles, manifest.nSnapshotBytes, error, fAllowBuild)) {
+            return false;
+        }
+        manifest.nChunkSize = BOOTSTRAP_SNAPSHOT_CHUNK_SIZE;
+        return true;
     }
 
     manifest.SetNull();
@@ -2900,7 +3558,7 @@ bool ReadBootstrapSnapshotChunk(const CBootstrapSnapshotChunkRequest& request, C
 
 bool ValidateBootstrapSnapshotManifest(const CBootstrapSnapshotManifest& manifest, std::string& error, bool fTrustlessAllowed)
 {
-    if (manifest.nVersion != 1 && manifest.nVersion != 2) {
+    if (manifest.nVersion != 1 && manifest.nVersion != 2 && manifest.nVersion != 3) {
         error = "Bootstrap manifest has unsupported version";
         return false;
     }
@@ -2920,6 +3578,40 @@ bool ValidateBootstrapSnapshotManifest(const CBootstrapSnapshotManifest& manifes
             manifest.hashAnchorSha256 != anchor->hashAnchorSha256 ||
             manifest.hashAnchorSha3 != anchor->hashAnchorSha3) {
             error = "Bootstrap manifest does not match any compiled fast-sync anchor";
+            return false;
+        }
+    } else if (manifest.nVersion == 3) {
+        // GROWABLE v3: the CHAINSTATE half is PINNED at a compiled fast-sync anchor
+        // and is fully verifiable here with ZERO server trust — nHeight/hashBlock
+        // must match a compiled anchor, that anchor must carry a non-null compiled
+        // UTXO commitment, the manifest's commitment must equal it, AND the
+        // decorative anchor-string SHA-256/SHA-3 must match the compiled anchor (so a
+        // v3 manifest is as tightly bound to the anchor as a v1 one). Accepted in
+        // BOTH modes (anchor and trustless): the chainstate is anchor-pinned either
+        // way. The BLOCK bundle half (nBlockTipHeight/hashBlockTip) carries no
+        // commitment and is NOT trusted here — only sanity-checked (tip at/above the
+        // anchor, non-null). The client's own forward consensus validation of
+        // anchor+1..blockTip establishes its integrity before it is trusted.
+        const CFastSyncAnchorData* anchor = Params().FindFastSyncAnchor(manifest.nHeight, manifest.hashBlock);
+        if (anchor == NULL ||
+            manifest.hashAnchorSha256 != anchor->hashAnchorSha256 ||
+            manifest.hashAnchorSha3 != anchor->hashAnchorSha3) {
+            error = "Bootstrap v3 manifest chainstate anchor does not match any compiled fast-sync anchor";
+            return false;
+        }
+        if (anchor->hashChainstateSerialized.IsNull() ||
+            manifest.hashChainstateSerialized != anchor->hashChainstateSerialized) {
+            error = "Bootstrap v3 manifest chainstate commitment does not match the compiled anchor";
+            return false;
+        }
+        // Sanity (NOT trust): the grown block bundle is anchor+1..nBlockTipHeight, so
+        // the tip must be STRICTLY above the anchor height (an empty/degenerate bundle
+        // is a v1/v2 anchor snapshot, not a growable v3 one) and have a non-null hash.
+        // These are verified for real later by the client's own forward validation of
+        // the post-anchor blocks, and the forward validator likewise requires
+        // serverTipHeight > anchorHeight.
+        if (manifest.nBlockTipHeight <= manifest.nHeight || manifest.hashBlockTip.IsNull()) {
+            error = "Bootstrap v3 manifest has an invalid block-bundle tip";
             return false;
         }
     } else if (!fTrustlessAllowed) {

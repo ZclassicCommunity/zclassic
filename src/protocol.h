@@ -209,6 +209,19 @@ struct CBootstrapSnapshotManifest
     //! to the original wire format, so the deployed compiled-anchor swarm is
     //! unaffected. Null in a v1 manifest.
     uint256 hashChainstateSerialized;
+    //! Tip of the GROWABLE post-anchor block bundle (assumeutxo-style growable
+    //! snapshot). nHeight/hashBlock above keep their meaning as the PINNED anchor
+    //! (the compiled fast-sync anchor whose chainstate is committed by
+    //! hashChainstateSerialized). nBlockTipHeight/hashBlockTip describe the block
+    //! data this snapshot additionally bundles, which the server appends as it
+    //! grows: anchor+1 .. nBlockTipHeight. These carry NO commitment — their
+    //! integrity is established solely by the client validating the bundled
+    //! post-anchor blocks itself before trusting them. Only present in
+    //! version-3+ manifests; v1 and v2 manifests serialize without these fields,
+    //! byte-for-byte identical to their earlier wire formats. -1/null in a
+    //! pre-v3 manifest.
+    int nBlockTipHeight;
+    uint256 hashBlockTip;
 
     CBootstrapSnapshotManifest()
     {
@@ -227,6 +240,8 @@ struct CBootstrapSnapshotManifest
         nChunkSize = 0;
         vFiles.clear();
         hashChainstateSerialized.SetNull();
+        nBlockTipHeight = -1;
+        hashBlockTip.SetNull();
     }
 
     ADD_SERIALIZE_METHODS;
@@ -249,6 +264,13 @@ struct CBootstrapSnapshotManifest
         // deployed swarm.
         if (nVersion >= 2) {
             READWRITE(hashChainstateSerialized);
+        }
+        // Version-gated append for the GROWABLE post-anchor block bundle. Same
+        // rule as the v2 field above: append-only, never reorder/repurpose, so
+        // v1 and v2 wire bytes stay byte-for-byte identical.
+        if (nVersion >= 3) {
+            READWRITE(nBlockTipHeight);
+            READWRITE(hashBlockTip);
         }
     }
 };
