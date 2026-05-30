@@ -2965,8 +2965,13 @@ bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::str
     // tip (carrying NO commitment — the client revalidates the post-anchor blocks
     // itself before trusting them). Requires the anchor to carry a compiled
     // commitment, since a v3 client checks the chainstate half against it.
+    // Emit v3 only when the block bundle strictly EXTENDS past the anchor. This must
+    // match ValidateBootstrapSnapshotManifest's v3 gate (nBlockTipHeight > nHeight)
+    // exactly: emitting v3 for a bundle parked AT the anchor height would advertise a
+    // manifest every client rejects (an unservable snapshot). At/below the anchor we
+    // fall through to the v1/v2 anchor-only manifest, which all clients accept.
     BootstrapServeBlockTip blockTip;
-    if (ReadBootstrapServeBlockTip(source, blockTip) && blockTip.nHeight >= anchor.nHeight) {
+    if (ReadBootstrapServeBlockTip(source, blockTip) && blockTip.nHeight > anchor.nHeight) {
         if (anchor.hashChainstateSerialized.IsNull()) {
             error = "v3 serve requires a compiled anchor with a chainstate commitment";
             return false;
