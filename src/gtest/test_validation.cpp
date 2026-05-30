@@ -4,6 +4,7 @@
 #include "consensus/validation.h"
 #include "main.h"
 #include "pow.h"
+#include "txdb.h"
 #include "utiltest.h"
 
 extern ZCJoinSplit* params;
@@ -264,4 +265,60 @@ TEST(Validation, BlockHashBindsEquihashSolution) {
     // Restoring the solution restores the hash (the hash is a faithful function of it).
     block.nSolution[42] ^= 0xff;
     EXPECT_EQ(h1, block.GetHash());
+}
+
+// The bootstrap fast-sync anchor commits to CCoinsStats::hashSerializedFull. This test
+// pins the property that makes that commitment safe for a shielded chain: the full
+// commitment binds the Sprout/Sapling nullifier set, whereas the transparent-only
+// hashSerialized does not. Without this, a malicious snapshot could ship honest
+// transparent coins (matching hashSerialized) with a dropped nullifier — enabling a
+// shielded double-spend — and still pass verification.
+TEST(Validation, ChainstateCommitmentBindsShieldedState)
+{
+    // In-memory chainstate (MemEnv: no disk, path is just a label).
+    CCoinsViewDB db(boost::filesystem::path("mem-chainstate-test"),
+                    1 << 20, /*fMemory=*/true, /*fWipe=*/false);
+
+    // Seed one transparent coin and a best block so the transparent commitment is
+    // non-trivial and stable across the two snapshots below.
+    const uint256 best = uint256S("0x99");
+    {
+        CCoinsMap mapCoins;
+        CCoinsCacheEntry& e = mapCoins[uint256S("0x01")];
+        e.coins.fCoinBase = false;
+        e.coins.nVersion = 1;
+        e.coins.nHeight = 1;
+        e.coins.vout.resize(1);
+        e.coins.vout[0].nValue = 10 * COIN;
+        e.flags = CCoinsCacheEntry::DIRTY;
+        CAnchorsSproutMap aS; CAnchorsSaplingMap aZ;
+        CNullifiersMap nS, nZ;
+        ASSERT_TRUE(db.BatchWrite(mapCoins, best, uint256(), uint256(), aS, aZ, nS, nZ));
+    }
+
+    CCoinsStats before;
+    ASSERT_TRUE(db.GetStats(before));
+
+    // Add a single Sprout nullifier — shielded state only; no coin is added or removed,
+    // and the best block is left unchanged (BatchWrite skips a null hashBlock).
+    {
+        CCoinsMap noCoins;
+        CAnchorsSproutMap aS; CAnchorsSaplingMap aZ;
+        CNullifiersMap sproutN, saplingN;
+        CNullifiersCacheEntry& ne = sproutN[uint256S("0x5150")];
+        ne.entered = true;
+        ne.flags = CNullifiersCacheEntry::DIRTY;
+        ASSERT_TRUE(db.BatchWrite(noCoins, uint256(), uint256(), uint256(), aS, aZ, sproutN, saplingN));
+    }
+
+    CCoinsStats after;
+    ASSERT_TRUE(db.GetStats(after));
+
+    // The transparent UTXO set is identical, so the transparent-only commitment is
+    // UNCHANGED — i.e. it is blind to the shielded mutation (the gap being fixed).
+    EXPECT_EQ(before.hashSerialized, after.hashSerialized);
+    // The full-chainstate commitment MUST change: the nullifier set is now bound.
+    EXPECT_NE(before.hashSerializedFull, after.hashSerializedFull);
+    // And the two commitments are distinct (full folds in shielded state beyond UTXOs).
+    EXPECT_NE(after.hashSerialized, after.hashSerializedFull);
 }

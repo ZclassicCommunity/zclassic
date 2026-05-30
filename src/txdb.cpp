@@ -268,6 +268,40 @@ bool CCoinsViewDB::GetStats(CCoinsStats &stats) const {
             stats.nHeight = it->second->nHeight;
     }
     stats.hashSerialized = ss.GetHash();
+
+    // Full-chainstate commitment: fold the transparent commitment together with the
+    // shielded state so the bootstrap anchor binds the Sprout/Sapling note-commitment
+    // tree anchors and the nullifier sets, not just the transparent UTXO set. Without
+    // this, a snapshot could ship honest transparent coins (matching hashSerialized)
+    // alongside a tampered nullifier set or forged anchor and still pass verification —
+    // enabling, e.g., a shielded double-spend on a bootstrapped node.
+    //
+    // We hash the best-anchor roots (the current Sprout/Sapling tree tips) plus the
+    // KEYS of every stored anchor and nullifier. The keys are roots/nullifiers (32-byte
+    // cryptographic commitments), so binding them binds set membership and the accepted
+    // tree tips cheaply, without re-hashing the (large) serialized tree blobs: a tampered
+    // tree stored under an honest root would produce a divergent next-block anchor, which
+    // is itself bound here for the following block. leveldb iterates each key prefix in
+    // sorted order, so this digest is identical on every node holding the same chainstate.
+    CHashWriter ssFull(SER_GETHASH, PROTOCOL_VERSION);
+    ssFull << stats.hashSerialized;
+    ssFull << GetBestAnchor(SPROUT);
+    ssFull << GetBestAnchor(SAPLING);
+    const char shieldedPrefixes[] = { DB_SPROUT_ANCHOR, DB_SAPLING_ANCHOR,
+                                      DB_NULLIFIER, DB_SAPLING_NULLIFIER };
+    for (size_t p = 0; p < sizeof(shieldedPrefixes); p++) {
+        const char prefix = shieldedPrefixes[p];
+        boost::scoped_ptr<CDBIterator> it2(const_cast<CDBWrapper*>(&db)->NewIterator());
+        for (it2->Seek(make_pair(prefix, uint256())); it2->Valid(); it2->Next()) {
+            boost::this_thread::interruption_point();
+            std::pair<char, uint256> key2;
+            if (!it2->GetKey(key2) || key2.first != prefix)
+                break;
+            ssFull << key2.second;
+        }
+    }
+    stats.hashSerializedFull = ssFull.GetHash();
+
     stats.nTotalAmount = nTotalAmount;
     return true;
 }

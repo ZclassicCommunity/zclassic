@@ -542,7 +542,8 @@ UniValue gettxoutsetinfo(const UniValue& params, bool fHelp)
             "  \"transactions\": n,      (numeric) The number of transactions\n"
             "  \"txouts\": n,            (numeric) The number of output transactions\n"
             "  \"bytes_serialized\": n,  (numeric) The serialized size\n"
-            "  \"hash_serialized\": \"hash\",   (string) The serialized hash\n"
+            "  \"hash_serialized\": \"hash\",   (string) The serialized hash of the transparent UTXO set\n"
+            "  \"hash_chainstate_full\": \"hash\", (string) Commitment over the whole chainstate (transparent UTXOs + Sprout/Sapling anchors and nullifier sets); this is the value a bootstrap fast-sync anchor commits to\n"
             "  \"total_amount\": x.xxx          (numeric) The total amount\n"
             "}\n"
             "\nExamples:\n"
@@ -561,6 +562,7 @@ UniValue gettxoutsetinfo(const UniValue& params, bool fHelp)
         ret.push_back(Pair("txouts", (int64_t)stats.nTransactionOutputs));
         ret.push_back(Pair("bytes_serialized", (int64_t)stats.nSerializedSize));
         ret.push_back(Pair("hash_serialized", stats.hashSerialized.GetHex()));
+        ret.push_back(Pair("hash_chainstate_full", stats.hashSerializedFull.GetHex()));
         ret.push_back(Pair("total_amount", ValueFromAmount(stats.nTotalAmount)));
     }
     return ret;

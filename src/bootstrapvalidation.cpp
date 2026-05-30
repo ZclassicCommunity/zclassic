@@ -610,7 +610,7 @@ static void ThreadBootstrapUtxoValidation()
                 PersistProgress(H);
                 return;
             }
-            validated = (stats.hashSerialized == expected);
+            validated = (stats.hashSerializedFull == expected);
             // Test-only seam: force a mismatch verdict to exercise the
             // discard+reindex fallback without having to forge a self-consistent
             // UTXO set. Honored ONLY on regtest so it can never be toggled on a
@@ -624,7 +624,7 @@ static void ThreadBootstrapUtxoValidation()
             failed = !validated;
             if (!validated) {
                 LogPrintf("Trustless bootstrap: VALIDATION MISMATCH at height %d: re-derived %s != imported %s\n",
-                    H, stats.hashSerialized.ToString(), expected.ToString());
+                    H, stats.hashSerializedFull.ToString(), expected.ToString());
             }
         }
     } catch (const std::exception& e) {

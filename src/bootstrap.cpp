@@ -1595,7 +1595,7 @@ bool FreezeLiveChainstateForServe(const boost::filesystem::path& data_dir, int m
             return false;
         }
         meta.hashBlock = best;
-        meta.hashChainstateSerialized = stats.hashSerialized;
+        meta.hashChainstateSerialized = stats.hashSerializedFull;
     } // copydb destructed here -> releases its leveldb lock before we serve
 
     // Atomic swap: replace the live serve dir with the validated copy, then write
@@ -2100,10 +2100,10 @@ bool BuildAnchorServeSnapshotFromGenesis(const boost::filesystem::path& data_dir
             error = "could not hash re-derived chainstate@anchor";
             return false;
         }
-        if (stats.hashSerialized != anchor.hashChainstateSerialized) {
+        if (stats.hashSerializedFull != anchor.hashChainstateSerialized) {
             boost::filesystem::remove_all(scratchDir);
             error = strprintf("re-derived chainstate@anchor %s != compiled commitment %s",
-                stats.hashSerialized.ToString(), anchor.hashChainstateSerialized.ToString());
+                stats.hashSerializedFull.ToString(), anchor.hashChainstateSerialized.ToString());
             return false;
         }
     } catch (const std::exception& e) {
@@ -2434,9 +2434,9 @@ bool ProvisionalAcceptTrustlessSnapshot(const boost::filesystem::path& data_dir,
         error = "trustless accept: could not hash imported chainstate";
         return false;
     }
-    if (stats.hashSerialized != pending.hashChainstateSerialized) {
+    if (stats.hashSerializedFull != pending.hashChainstateSerialized) {
         error = strprintf("trustless accept: imported chainstate hash %s != advertised commitment %s",
-            stats.hashSerialized.ToString(), pending.hashChainstateSerialized.ToString());
+            stats.hashSerializedFull.ToString(), pending.hashChainstateSerialized.ToString());
         return false;
     }
 
@@ -2464,7 +2464,7 @@ bool ProvisionalAcceptTrustlessSnapshot(const boost::filesystem::path& data_dir,
 
     outHeight = pending.nHeight;
     outHashBlock = pending.hashBlock;
-    outCommitment = stats.hashSerialized;
+    outCommitment = stats.hashSerializedFull;
     LogPrintf("Trustless bootstrap: provisional accept of snapshot at height %d (%s); background validation will confirm or reindex\n",
         outHeight, outHashBlock.ToString());
     return true;

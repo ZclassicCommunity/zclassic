@@ -329,7 +329,16 @@ struct CCoinsStats
     uint64_t nTransactions;
     uint64_t nTransactionOutputs;
     uint64_t nSerializedSize;
+    //! Commitment over the transparent UTXO set only (the conventional
+    //! gettxoutsetinfo `hash_serialized`; kept for RPC/back-compat).
     uint256 hashSerialized;
+    //! Commitment over the WHOLE chainstate: hashSerialized folded together with
+    //! the shielded state (Sprout/Sapling best-anchor roots, the set of anchor
+    //! roots, and the Sprout/Sapling nullifier sets). This is what the bootstrap
+    //! fast-sync anchor commits to, so a malicious snapshot cannot tamper the
+    //! shielded pool (e.g. drop a nullifier to enable a shielded double-spend)
+    //! while still matching the transparent-only hash.
+    uint256 hashSerializedFull;
     CAmount nTotalAmount;
 
     CCoinsStats() : nHeight(0), nTransactions(0), nTransactionOutputs(0), nSerializedSize(0), nTotalAmount(0) {}

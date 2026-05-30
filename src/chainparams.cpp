@@ -197,13 +197,15 @@ public:
         fastSyncAnchorData.hashBlock = uint256S("0x00000663e40f1fe0bc32a7e7282fac25de5fe8ecefd9c627e2fd948d388f7053");
         fastSyncAnchorData.hashAnchorSha256 = uint256S("0x376d6d5e6f7d02459b89ae0988f5c51bb1deaf2a3e4b3a1de745e4f2e3bb279d");
         fastSyncAnchorData.hashAnchorSha3 = uint256S("0x0f7d542e5c662c9652b93eef8eb98e386e8bdbd2f848eba0e99c6451eb2ef0bd");
-        // UTXO-set commitment (gettxoutsetinfo's hash_serialized) at the anchor
-        // height. After a peer fast-sync the node recomputes this over the
-        // imported chainstate and rejects the snapshot unless it matches, so a
-        // malicious/compromised serving peer cannot substitute a forged UTXO set
-        // (the fast-sync then trusts only this binary, not the peer). Generated
-        // from the prepared snapshot at this height via gettxoutsetinfo.
-        fastSyncAnchorData.hashChainstateSerialized = uint256S("0x75b95c7680394d6063498609e8a8d05a06d9d52e8f6981055c76cbd107dda478");
+        // Whole-chainstate commitment (gettxoutsetinfo's hash_chainstate_full) at
+        // the anchor height — the transparent UTXO set PLUS the Sprout/Sapling
+        // anchors and nullifier sets. After a peer fast-sync the node recomputes
+        // this over the imported chainstate and rejects the snapshot unless it
+        // matches, so a malicious/compromised serving peer cannot substitute a
+        // forged UTXO set or a tampered shielded pool (the fast-sync then trusts
+        // only this binary, not the peer). Generated from the prepared snapshot at
+        // this height via gettxoutsetinfo's hash_chainstate_full.
+        fastSyncAnchorData.hashChainstateSerialized = uint256S("0x7b2f9bb9edd8d60cb3cee741f48bd305e144d43b65ac7731ee5c0c6321f89075");
 
         // The set of anchors a client accepts, newest first. Today this is just
         // the primary. To roll a new anchor for a release WITHOUT forcing a hard

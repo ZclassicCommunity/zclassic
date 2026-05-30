@@ -803,14 +803,14 @@ static bool VerifyImportedBootstrapAnchor(std::string& error)
         error = "bootstrap snapshot verification failed: could not compute imported chainstate hash";
         return false;
     }
-    if (stats.hashSerialized != anchor->hashChainstateSerialized) {
+    if (stats.hashSerializedFull != anchor->hashChainstateSerialized) {
         error = strprintf(
             "bootstrap snapshot verification failed: imported chainstate hash is %s, expected %s",
-            stats.hashSerialized.ToString(),
+            stats.hashSerializedFull.ToString(),
             anchor->hashChainstateSerialized.ToString());
         return false;
     }
-    LogPrintf("Bootstrap snapshot chainstate commitment verified: %s\n", stats.hashSerialized.ToString());
+    LogPrintf("Bootstrap snapshot chainstate commitment verified: %s\n", stats.hashSerializedFull.ToString());
     return true;
 }
 
