@@ -58,14 +58,15 @@ operator can still prefer a trusted peer or use Option A.
 
 ```bash
 ./src/zclassicd                                   # default: fast-sync from a bootstrap peer
-./src/zclassicd -bootstrappeer=192.0.2.10:8034    # choose the peer explicitly
+./src/zclassicd -bootstrappeer=192.0.2.10         # choose the peer explicitly (default port 8033)
 ./src/zclassicd -bootstrapdatadir=/path/to/snap   # import from a local prepared dir
 ```
 
-`-bootstrappeer` takes the serving node's actual `host:port`. A bootstrap-serving
-node may listen on a port other than the standard P2P port (8033) — the project's
-compiled default serving peer listens on **8034** — so use the server's real port,
-not 8033, when pointing at one explicitly.
+The snapshot is served over the **ordinary P2P connection** (new `BS*` messages on
+the existing socket), not a separate port — a normal full node listening on the
+standard P2P port (mainnet 8033) with `-bootstrapserve` serves it. `-bootstrappeer`
+takes the serving node's `host[:port]` and defaults to the standard P2P port; pass an
+explicit `:port` only if a particular server runs its node on a non-standard port.
 
 The default fast-sync is best-effort: if no bootstrap peer is reachable the node
 silently falls back to Option A (normal sync from genesis), so a compromised or
