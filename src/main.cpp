@@ -3356,7 +3356,23 @@ bool static ConnectTip(CValidationState &state, CBlockIndex *pindexNew, CBlock *
     // below: mark the block invalid and fail the connect on the existing invalid-block
     // path. This is a strict no-op for normal live sync (flag never set; AcceptBlock
     // already ran both).
-    if (g_bootstrapForwardConnect.load(std::memory_order_relaxed) &&
+    //
+    // DURABILITY (crash-restart consensus safety): g_bootstrapForwardConnect is a
+    // one-shot in-memory flag armed only on the importing boot. If the node is killed
+    // uncleanly mid-import — after the anchor-pending marker is cleared (init.cpp) but
+    // before/while Step-10's guarded ActivateBestChain finishes connecting the bundle,
+    // and before the first-boot rejection marks are flushed — a plain restart would skip
+    // arming (marker gone) AND re-evaluate the (unflushed) forged blocks as unknown,
+    // reconnecting a forged low-difficulty post-anchor fork through here with the flag
+    // CLEAR. So ALSO re-check whenever the imported-tip hold is engaged: that hold is
+    // persisted durably and re-armed fail-closed at init (LoadBootstrapValidationState,
+    // BEFORE Step-10), and is armed exactly when an above-checkpoint post-anchor bundle
+    // is pending live corroboration — i.e. exactly when there are imported blocks here
+    // that still need the from-genesis contextual gate. It stays engaged across the
+    // restart until the live network corroborates (and releases) the tip, so the
+    // re-check no longer depends on init phase-ordering or flush timing.
+    if ((g_bootstrapForwardConnect.load(std::memory_order_relaxed) ||
+         BootstrapValidationHoldsFinalization()) &&
         pindexNew->pprev != NULL) {
         int lastCheckpointHeight = -1;
         const CBlockIndex* pcp = Checkpoints::GetLastCheckpoint(Params().Checkpoints());
