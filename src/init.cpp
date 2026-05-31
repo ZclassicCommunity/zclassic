@@ -2044,18 +2044,21 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
     }
 
-    // Keep a persistent connection to the bootstrap peer(s) for ongoing sync, so
-    // a freshly bootstrapped node reaches the chain tip even when DNS seeds are
-    // sparse. Only inject when the snapshot bootstrap actually ran successfully
-    // in this startup: a non-fresh datadir already has a peer addr DB and does
-    // not need the pin. Skipped if the user pinned peers with -connect or set
-    // -bootstrap=0.
+    // Keep a persistent connection to the bootstrap peer(s) for ongoing peer
+    // discovery. ZClassic's DNS seeds are unreliable and the compiled fixed-seed
+    // list can be empty, so a fresh OR peer-starved node -- an interrupted
+    // bootstrap, -bootstrap=0, or a non-fresh datadir whose peers.dat is empty or
+    // stale -- can otherwise end up with zero reachable peers and hang at 0
+    // connections / 0 blocks. The bootstrap peers are ordinary P2P nodes, so
+    // pinning them as -addnode is a safe peer-of-last-resort on every start
+    // (honors an explicit -bootstrappeer; skipped only when the user pinned peers
+    // with -connect). This is what previously only happened when a snapshot ran.
     // TODO: remove the injected -addnode entries once IsInitialBlockDownload()
     // latches false, so the bootstrap peer does not permanently occupy an
     // outbound slot. Doing this cleanly requires a hook to drop entries from
     // the CConnman added-node list without lock-ordering hazards, which does
     // not exist yet.
-    if (bootstrap_snapshot_ran && !mapArgs.count("-connect")) {
+    if (!mapArgs.count("-connect")) {
         BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
             std::vector<std::string>& addnodes = mapMultiArgs["-addnode"];
             if (std::find(addnodes.begin(), addnodes.end(), peer) == addnodes.end()) {

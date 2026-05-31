@@ -147,6 +147,12 @@ public:
 
         vSeeds.push_back(CDNSSeedData("zclnet.net", "dnsseed.zclnet.net"));
         vSeeds.push_back(CDNSSeedData("zslp.org", "dnsseed.zslp.org"));
+        // The community DNS seeds above are frequently unreachable, which can leave
+        // a fresh node with no addresses to dial. Seed the known-good bootstrap
+        // servers directly: CDNSSeedData accepts a literal IP (LookupHost resolves
+        // it as-is), so the seeding path always yields at least these live peers.
+        vSeeds.push_back(CDNSSeedData("seed1.zclassic", "74.50.74.102"));
+        vSeeds.push_back(CDNSSeedData("seed2.zclassic", "205.209.104.118"));
 
         // guarantees the first 2 characters, when base58 encoded, are "t1"
         base58Prefixes[PUBKEY_ADDRESS]     = {0x1C,0xB8};
@@ -235,6 +241,7 @@ public:
         // for this to resolve; until they are moved off 8034, keep them reachable on
         // 8033 (a node binding 8033 serves bootstrap to any standard-port client).
         vBootstrapPeers.push_back("74.50.74.102");
+        vBootstrapPeers.push_back("205.209.104.118");
 
         // Founders reward script expects a vector of 2-of-3 multisig addresses
         vFoundersRewardAddress = {
