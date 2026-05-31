@@ -45,6 +45,15 @@ static const int64_t BOOTSTRAP_SERVE_DEFAULT_THROTTLE_KBPS = 1024;              
 
 bool BootstrapSnapshotPathsExist(const boost::filesystem::path& root);
 bool IsBootstrapFreshChainDatadir(const boost::filesystem::path& data_dir, std::string& error);
+// True if the datadir holds only a genesis-height chainstate (initialized but
+// never synced past genesis); such a datadir carries no real chain.
+bool IsGenesisOnlyChainDatadir(const boost::filesystem::path& data_dir, std::string& error);
+// Move a genesis-only datadir's blocks/ and chainstate/ aside to a timestamped
+// backup so a bootstrap snapshot can be imported into the now-fresh datadir.
+bool BackupGenesisOnlyChainData(const boost::filesystem::path& data_dir, std::string& error);
+// True if a bootstrap snapshot may be imported into data_dir: fresh, or a
+// genesis-only datadir that was successfully backed up (side effect).
+bool BootstrapDatadirEligible(const boost::filesystem::path& data_dir, std::string& error);
 bool ImportBootstrapDatadir(const boost::filesystem::path& source_root,
                             const boost::filesystem::path& data_dir,
                             bool force_backup,
