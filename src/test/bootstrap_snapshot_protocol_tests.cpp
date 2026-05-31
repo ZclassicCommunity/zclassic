@@ -7,8 +7,10 @@
 #include "bootstrapvalidation.h"
 #include "chainparams.h"
 #include "checkpoints.h"
+#include "coins.h"
 #include "crypto/sha256.h"
 #include "main.h"
+#include "txdb.h"
 #include "net.h"
 #include "streams.h"
 #include "test/test_bitcoin.h"
@@ -1071,6 +1073,65 @@ BOOST_AUTO_TEST_CASE(bootstrap_fresh_chain_datadir_checks_chain_files)
     BOOST_CHECK(error.find("legacy block file") != std::string::npos);
 
     boost::filesystem::remove_all(root);
+}
+
+// Write a chainstate leveldb under data_dir/chainstate whose best block is
+// `tip`, then close it. Mirrors how the node persists its chain tip.
+static void WriteChainstateWithTip(const boost::filesystem::path& data_dir, const uint256& tip)
+{
+    CCoinsViewDB db(data_dir / "chainstate", 1 << 20, false, /*fWipe=*/true);
+    CCoinsViewCache cache(&db);
+    cache.SetBestBlock(tip);
+    BOOST_CHECK(cache.Flush());
+}
+
+// A datadir whose chainstate is still at the genesis block (a node that
+// initialized its DBs but never synced) is detected as genesis-only and is made
+// eligible for bootstrap by backing the stale DBs aside — while a datadir with a
+// real, post-genesis tip is left strictly untouched.
+BOOST_AUTO_TEST_CASE(bootstrap_genesis_only_datadir_is_eligible_real_chain_is_not)
+{
+    namespace fs = boost::filesystem;
+    std::string error;
+
+    // ---- genesis-only datadir ----
+    fs::path gen = fs::temp_directory_path() / fs::unique_path("zclassic-bootstrap-genonly-%%%%-%%%%-%%%%");
+    fs::create_directories(gen);
+    WriteChainstateWithTip(gen, Params().GenesisBlock().GetHash());
+    fs::create_directories(gen / "blocks");
+
+    BOOST_CHECK(!IsBootstrapFreshChainDatadir(gen, error)); // has chain data
+    BOOST_CHECK(IsGenesisOnlyChainDatadir(gen, error));      // ...but only genesis
+
+    // Eligible: the stale genesis DBs are moved to a timestamped backup, leaving
+    // the datadir fresh again.
+    BOOST_CHECK(BootstrapDatadirEligible(gen, error));
+    BOOST_CHECK(!fs::exists(gen / "blocks"));
+    BOOST_CHECK(!fs::exists(gen / "chainstate"));
+    BOOST_CHECK(IsBootstrapFreshChainDatadir(gen, error));
+    bool foundBackup = false;
+    for (fs::directory_iterator it(gen), end; it != end; ++it) {
+        if (it->path().filename().string().find("bootstrap-genesis-backup-") == 0 &&
+            fs::exists(it->path() / "chainstate"))
+            foundBackup = true;
+    }
+    BOOST_CHECK(foundBackup);
+
+    // ---- real (post-genesis) chain datadir: must never be clobbered ----
+    fs::path real = fs::temp_directory_path() / fs::unique_path("zclassic-bootstrap-real-%%%%-%%%%-%%%%");
+    fs::create_directories(real);
+    WriteChainstateWithTip(real, uint256S("0x00000000000000000000000000000000000000000000000000000000deadbeef"));
+    fs::create_directories(real / "blocks");
+
+    BOOST_CHECK(!IsBootstrapFreshChainDatadir(real, error));
+    BOOST_CHECK(!IsGenesisOnlyChainDatadir(real, error));
+    BOOST_CHECK(!BootstrapDatadirEligible(real, error));
+    // Untouched — no backup, blocks/ and chainstate/ still present.
+    BOOST_CHECK(fs::exists(real / "blocks"));
+    BOOST_CHECK(fs::exists(real / "chainstate"));
+
+    fs::remove_all(gen);
+    fs::remove_all(real);
 }
 
 BOOST_AUTO_TEST_CASE(bootstrap_import_datadir_refuses_existing_without_force)

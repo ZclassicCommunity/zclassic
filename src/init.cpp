@@ -1977,9 +1977,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             if (!fTrustlessMode && !haveAnchor) {
                 if (explicit_peer)
                     return InitError(_("-bootstrappeer requires a compiled fast-sync anchor (or -bootstrapmode=trustless)"));
-            } else if (!IsBootstrapFreshChainDatadir(GetDataDir(), bootstrap_error)) {
-                // Datadir already has chain data: skip silently unless the user
-                // explicitly asked to bootstrap into it.
+            } else if (!BootstrapDatadirEligible(GetDataDir(), bootstrap_error)) {
+                // Datadir already has real chain data: skip silently unless the
+                // user explicitly asked to bootstrap into it. A datadir holding
+                // only a genesis-height chainstate (a node that initialized its
+                // DBs but never synced — e.g. a prior interrupted bootstrap that
+                // then fell back to peerless P2P sync and hung at 0 blocks) is
+                // backed up by BootstrapDatadirEligible and counts as eligible.
                 if (explicit_peer)
                     return InitError(bootstrap_error);
             } else {
