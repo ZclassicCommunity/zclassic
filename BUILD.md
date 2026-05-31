@@ -4,7 +4,7 @@ This guide will help you build `zclassicd` (ZClassic daemon) from source code.
 
 ## System Requirements
 
-- **Operating System**: Ubuntu 20.04+, Debian 11+, or compatible Linux distribution
+- **Operating System**: Ubuntu 20.04+, Debian 11+, Arch Linux, Manjaro, or compatible Linux distribution
 - **Memory**: At least 4 GB RAM recommended
 - **Disk Space**: 20 GB free space (for build files and blockchain data)
 - **Compiler**: GCC 9+ or Clang 10+
@@ -46,6 +46,15 @@ sudo apt-get install -y \
     libgmp-dev libdb++-dev libsodium-dev \
     git python3 wget curl \
     zlib1g-dev libssl-dev libevent-dev
+```
+
+#### Arch Linux / Manjaro
+
+```bash
+sudo pacman -S --needed \
+    base-devel autoconf automake libtool pkgconf \
+    gmp db libsodium curl \
+    git python wget openssl libevent
 ```
 
 #### Other Distributions
@@ -147,11 +156,15 @@ If bootstrap snapshot installation fails:
 
 ```bash
 # Build only the dependencies
-make -C depends -j$(nproc)
+make -C depends -j$(nproc) NO_PROTON=1
 
 # Then configure with the dependencies
 ./autogen.sh
-CONFIG_SITE=$PWD/depends/x86_64-unknown-linux-gnu/share/config.site ./configure
+DEPS_DIR=$PWD/depends/x86_64-unknown-linux-gnu
+CONFIG_SITE=$DEPS_DIR/share/config.site ./configure \
+    --with-boost=$DEPS_DIR \
+    CPPFLAGS="-I$DEPS_DIR/include" \
+    LDFLAGS="-L$DEPS_DIR/lib"
 make -j$(nproc)
 ```
 
