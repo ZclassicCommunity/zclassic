@@ -315,7 +315,6 @@ public:
     std::vector<CAddress> vAddrToSend;
     CRollingBloomFilter addrKnown;
     bool fGetAddr;
-    std::set<uint256> setKnown;
 
     // inventory based relay
     mruset<CInv> setInventoryKnown;

@@ -147,6 +147,14 @@ boost::filesystem::path GetTempPath();
 void OpenDebugLog();
 void ShrinkDebugFile();
 void runCommand(const std::string& strCommand);
+
+/**
+ * Execute the -alertnotify command (if configured), substituting %s with a
+ * sanitized, shell-safe copy of strMessage. Used for local node warnings such
+ * as version deprecation and large-fork / partition detection. fThread runs the
+ * command in a free-running thread.
+ */
+void AlertNotify(const std::string& strMessage, bool fThread = true);
 const boost::filesystem::path GetExportDir();
 
 /** Returns privacy notice (for -version, -help and metrics screen) */
