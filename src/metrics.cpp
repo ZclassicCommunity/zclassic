@@ -217,7 +217,9 @@ int printStats(bool mining)
     if (IsInitialBlockDownload()) {
         int netheight = currentHeadersHeight == -1 || currentHeadersTime == 0 ?
             0 : EstimateNetHeight(Params().GetConsensus(), currentHeadersHeight, currentHeadersTime);
-        int downloadPercent = height * 100 / netheight;
+        // netheight is 0 until we learn the chain tip from a peer's headers; guard
+        // the division so a fresh / peer-starved node does not crash with SIGFPE.
+        int downloadPercent = netheight > 0 ? height * 100 / netheight : 0;
         std::cout << "     " << _("Downloading blocks") << " | " << height << " / ~" << netheight << " (" << downloadPercent << "%)           " << std::endl;
     } else {
         std::cout << "           " << _("Block height") << " | " << height << "                      " << std::endl;
