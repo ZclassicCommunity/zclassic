@@ -1947,6 +1947,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // failure fatal; the automatic path is best-effort and falls back to normal
     // peer-to-peer sync if no bootstrap peer is reachable.
     bool bootstrap_snapshot_ran = false;
+    // If a genesis-only datadir is moved aside to make room for a fast-sync, this
+    // names the backup directory so we can restore it if the bootstrap fails.
+    boost::filesystem::path genesisBackupDir;
     {
         const bool explicit_peer = mapArgs.count("-bootstrappeer");
         const bool enabled = GetBoolArg("-bootstrap", true) && !GetBootstrapPeerList().empty();
@@ -1977,7 +1980,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             if (!fTrustlessMode && !haveAnchor) {
                 if (explicit_peer)
                     return InitError(_("-bootstrappeer requires a compiled fast-sync anchor (or -bootstrapmode=trustless)"));
-            } else if (!BootstrapDatadirEligible(GetDataDir(), bootstrap_error)) {
+            } else if (!BootstrapDatadirEligible(GetDataDir(), genesisBackupDir, bootstrap_error)) {
                 // Datadir already has real chain data: skip silently unless the
                 // user explicitly asked to bootstrap into it. A datadir holding
                 // only a genesis-height chainstate (a node that initialized its
@@ -2040,6 +2043,20 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     }
                 }
                 if (!bootstrap_snapshot_ran) {
+                    // No snapshot was imported this start. If we moved a genesis-only
+                    // datadir aside to attempt it, move it back so the datadir is left
+                    // exactly as it was found (and no backup dir accumulates). Only a
+                    // genesis-only datadir is ever moved, but restoring rather than
+                    // deleting guarantees we can never destroy chain data even if that
+                    // classification were ever wrong. Done before the explicit-peer
+                    // InitError too, so a failed -bootstrappeer also leaves no mess.
+                    if (!genesisBackupDir.empty()) {
+                        std::string restore_err;
+                        if (!RestoreGenesisOnlyChainData(GetDataDir(), genesisBackupDir, restore_err))
+                            LogPrintf("Bootstrap: could not restore genesis chain data: %s (backup retained at %s)\n",
+                                      restore_err, genesisBackupDir.string());
+                        genesisBackupDir.clear();
+                    }
                     if (explicit_peer)
                         return InitError(bootstrap_error);
                     LogPrintf("Bootstrap snapshot unavailable; continuing with normal peer-to-peer sync: %s\n", bootstrap_error);

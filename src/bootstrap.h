@@ -50,10 +50,17 @@ bool IsBootstrapFreshChainDatadir(const boost::filesystem::path& data_dir, std::
 bool IsGenesisOnlyChainDatadir(const boost::filesystem::path& data_dir, std::string& error);
 // Move a genesis-only datadir's blocks/ and chainstate/ aside to a timestamped
 // backup so a bootstrap snapshot can be imported into the now-fresh datadir.
-bool BackupGenesisOnlyChainData(const boost::filesystem::path& data_dir, std::string& error);
+// On success outBackup is set to the backup directory; the caller restores it
+// with RestoreGenesisOnlyChainData if the bootstrap subsequently fails.
+bool BackupGenesisOnlyChainData(const boost::filesystem::path& data_dir, boost::filesystem::path& outBackup, std::string& error);
+// Move blocks/ and chainstate/ back from a BackupGenesisOnlyChainData backup into
+// data_dir and remove the backup, undoing the move when a bootstrap attempt fails.
+bool RestoreGenesisOnlyChainData(const boost::filesystem::path& data_dir, const boost::filesystem::path& backup, std::string& error);
 // True if a bootstrap snapshot may be imported into data_dir: fresh, or a
-// genesis-only datadir that was successfully backed up (side effect).
-bool BootstrapDatadirEligible(const boost::filesystem::path& data_dir, std::string& error);
+// genesis-only datadir that was successfully backed up (side effect). When a
+// backup was made, outBackupDir names it so the caller can remove it if the
+// bootstrap subsequently fails.
+bool BootstrapDatadirEligible(const boost::filesystem::path& data_dir, boost::filesystem::path& outBackupDir, std::string& error);
 bool ImportBootstrapDatadir(const boost::filesystem::path& source_root,
                             const boost::filesystem::path& data_dir,
                             bool force_backup,

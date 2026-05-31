@@ -1103,19 +1103,15 @@ BOOST_AUTO_TEST_CASE(bootstrap_genesis_only_datadir_is_eligible_real_chain_is_no
     BOOST_CHECK(!IsBootstrapFreshChainDatadir(gen, error)); // has chain data
     BOOST_CHECK(IsGenesisOnlyChainDatadir(gen, error));      // ...but only genesis
 
-    // Eligible: the stale genesis DBs are moved to a timestamped backup, leaving
-    // the datadir fresh again.
-    BOOST_CHECK(BootstrapDatadirEligible(gen, error));
+    // Eligible: the stale genesis DBs are moved to a timestamped backup (reported
+    // via the out-param), leaving the datadir fresh again.
+    fs::path genBackup;
+    BOOST_CHECK(BootstrapDatadirEligible(gen, genBackup, error));
+    BOOST_CHECK(!genBackup.empty());
+    BOOST_CHECK(fs::exists(genBackup / "chainstate"));
     BOOST_CHECK(!fs::exists(gen / "blocks"));
     BOOST_CHECK(!fs::exists(gen / "chainstate"));
     BOOST_CHECK(IsBootstrapFreshChainDatadir(gen, error));
-    bool foundBackup = false;
-    for (fs::directory_iterator it(gen), end; it != end; ++it) {
-        if (it->path().filename().string().find("bootstrap-genesis-backup-") == 0 &&
-            fs::exists(it->path() / "chainstate"))
-            foundBackup = true;
-    }
-    BOOST_CHECK(foundBackup);
 
     // ---- real (post-genesis) chain datadir: must never be clobbered ----
     fs::path real = fs::temp_directory_path() / fs::unique_path("zclassic-bootstrap-real-%%%%-%%%%-%%%%");
@@ -1125,13 +1121,54 @@ BOOST_AUTO_TEST_CASE(bootstrap_genesis_only_datadir_is_eligible_real_chain_is_no
 
     BOOST_CHECK(!IsBootstrapFreshChainDatadir(real, error));
     BOOST_CHECK(!IsGenesisOnlyChainDatadir(real, error));
-    BOOST_CHECK(!BootstrapDatadirEligible(real, error));
+    fs::path realBackup;
+    BOOST_CHECK(!BootstrapDatadirEligible(real, realBackup, error));
+    BOOST_CHECK(realBackup.empty());                    // nothing was moved
     // Untouched — no backup, blocks/ and chainstate/ still present.
     BOOST_CHECK(fs::exists(real / "blocks"));
     BOOST_CHECK(fs::exists(real / "chainstate"));
 
+    // ---- size gate: a genesis-tip chainstate padded past the threshold is
+    //      classified as a real chain WITHOUT opening leveldb (the cheap stat
+    //      walk short-circuits, so a synced node never re-opens its live DB). ----
+    fs::path big = fs::temp_directory_path() / fs::unique_path("zclassic-bootstrap-big-%%%%-%%%%-%%%%");
+    fs::create_directories(big);
+    WriteChainstateWithTip(big, Params().GenesisBlock().GetHash()); // tip == genesis
+    {
+        // Sparse 80 MiB file (> the 64 MiB gate) without writing 80 MiB of data.
+        boost::filesystem::ofstream f(big / "chainstate" / "fat.ldb", std::ios::binary);
+        f.seekp((std::streamoff)(80ULL * 1024 * 1024));
+        f.put('\0');
+    }
+    // Best block is genesis, but the dir is too large to be genesis-only.
+    BOOST_CHECK(!IsGenesisOnlyChainDatadir(big, error));
+
+    // ---- DATA-LOSS GUARD: genesis-tip chainstate but a real, large blocks/
+    //      (e.g. an interrupted -reindex-chainstate: coins DB wiped to genesis
+    //      while blocks/ keeps the full downloaded chain). Must NOT be treated as
+    //      genesis-only, must NOT be eligible, and the real blocks must be left
+    //      strictly in place — never moved aside or deleted. ----
+    fs::path rblocks = fs::temp_directory_path() / fs::unique_path("zclassic-bootstrap-rblocks-%%%%-%%%%-%%%%");
+    fs::create_directories(rblocks);
+    WriteChainstateWithTip(rblocks, Params().GenesisBlock().GetHash()); // chainstate at genesis
+    fs::create_directories(rblocks / "blocks");
+    {
+        // Sparse 80 MiB "blkNNNNN.dat" standing in for a real downloaded chain.
+        boost::filesystem::ofstream f(rblocks / "blocks" / "blk00000.dat", std::ios::binary);
+        f.seekp((std::streamoff)(80ULL * 1024 * 1024));
+        f.put('\0');
+    }
+    BOOST_CHECK(!IsGenesisOnlyChainDatadir(rblocks, error));   // real blocks => not genesis-only
+    fs::path rblocksBackup;
+    BOOST_CHECK(!BootstrapDatadirEligible(rblocks, rblocksBackup, error));
+    BOOST_CHECK(rblocksBackup.empty());                        // nothing moved
+    BOOST_CHECK(fs::exists(rblocks / "blocks" / "blk00000.dat")); // real blocks untouched
+    BOOST_CHECK(fs::exists(rblocks / "chainstate"));
+
     fs::remove_all(gen);
     fs::remove_all(real);
+    fs::remove_all(big);
+    fs::remove_all(rblocks);
 }
 
 BOOST_AUTO_TEST_CASE(bootstrap_import_datadir_refuses_existing_without_force)

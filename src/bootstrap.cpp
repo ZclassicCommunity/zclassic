@@ -763,14 +763,41 @@ bool IsBootstrapFreshChainDatadir(const boost::filesystem::path& data_dir, std::
     return true;
 }
 
+// Sum of regular-file sizes under `dir`, short-circuiting as soon as the running
+// total exceeds `limit` (the returned value is then simply some number > limit;
+// its exact magnitude past the cap is irrelevant). Lets a tiny genesis-only
+// blocks//chainstate be told apart from a real multi-GB one with only a stat walk
+// — no database open. A missing dir counts as zero. Symlinked entries are not
+// recursed into (boost default); a stat error propagates to the caller's catch.
+static uint64_t DirBytesCappedAt(const boost::filesystem::path& dir, uint64_t limit)
+{
+    if (!boost::filesystem::exists(dir))
+        return 0;
+    uint64_t total = 0;
+    for (boost::filesystem::recursive_directory_iterator it(dir), end; it != end; ++it) {
+        if (boost::filesystem::is_regular_file(it->path())) {
+            total += (uint64_t)boost::filesystem::file_size(it->path());
+            if (total > limit)
+                return total;
+        }
+    }
+    return total;
+}
+
 // Returns true if the datadir carries chain data (so IsBootstrapFreshChainDatadir
 // is false) but that data is only a genesis-height chainstate — i.e. a node that
 // created its databases but never synced past genesis. This happens, for example,
 // when a previous bootstrap snapshot download was interrupted, or when a daemon
 // started once, initialized its DBs at genesis, found no peers (sparse DNS seeds)
 // and hung at 0 blocks. Such a datadir holds no real chain, so it is safe to back
-// up and fast-sync into. A datadir with a real (post-genesis) tip returns false
-// and must never be touched.
+// up and fast-sync into.
+//
+// CRITICAL: a datadir with any real chain data must return false and never be
+// touched. Because the backup moves BOTH blocks/ and chainstate/, "genesis-only"
+// is judged over BOTH: a large blocks/ means real downloaded blocks even if the
+// chainstate reads genesis or empty (e.g. an interrupted -reindex-chainstate
+// wipes the coins DB — best block null — while blocks/ keeps the full chain).
+// Either directory exceeding the threshold ⇒ not genesis-only.
 bool IsGenesisOnlyChainDatadir(const boost::filesystem::path& data_dir, std::string& error)
 {
     const boost::filesystem::path chainstate_dir = data_dir / "chainstate";
@@ -780,10 +807,27 @@ bool IsGenesisOnlyChainDatadir(const boost::filesystem::path& data_dir, std::str
         return false;
     }
     try {
-        // Open the chainstate and read its best-block marker, then let the
-        // CCoinsViewDB destruct (releasing the leveldb lock) before the normal
-        // chainstate open later in init. Mirrors the serve-copy probe elsewhere
-        // in this file. We never write through this handle.
+        // Cheap, read-only size gate first. A real synced (or interrupted-reindex)
+        // datadir is gigabytes; a genesis-only one (the interrupted-download /
+        // peerless-first-start case this targets) is a handful of small files plus
+        // the preallocated ~16 MiB genesis block file. Short-circuiting on size
+        // means a healthy node pays only a stat walk and never has to OPEN its live
+        // chainstate on every startup just to learn it is not genesis. The
+        // threshold sits far above any genesis-only datadir and far below any real
+        // one, so it can never produce a false "genesis-only": an over-threshold
+        // dir returns false here without the data ever being moved/deleted; the
+        // best-block probe below is reached only for genuinely tiny datadirs.
+        const uint64_t kGenesisOnlyMaxBytes = 64ULL * 1024 * 1024; // 64 MiB
+        if (DirBytesCappedAt(chainstate_dir, kGenesisOnlyMaxBytes) > kGenesisOnlyMaxBytes)
+            return false; // a real (or recoverable) chainstate
+        if (DirBytesCappedAt(data_dir / "blocks", kGenesisOnlyMaxBytes) > kGenesisOnlyMaxBytes)
+            return false; // real downloaded blocks present — never move/delete these
+        // Small chainstate AND small blocks/: open the chainstate and read its
+        // best-block marker. This is a WRITABLE leveldb open (it takes the LOCK and
+        // may rewrite CURRENT/MANIFEST on recovery), but it only runs for a tiny
+        // genesis-only datadir, never for a healthy synced node (gated out by size
+        // above). The handle is released when the CCoinsViewDB destructs, before
+        // the normal chainstate open later in init. Mirrors the serve-copy probe.
         CCoinsViewDB probe(chainstate_dir, 1 << 23, false, false);
         const uint256 best = probe.GetBestBlock();
         if (best.IsNull())
@@ -800,10 +844,13 @@ bool IsGenesisOnlyChainDatadir(const boost::filesystem::path& data_dir, std::str
 // Move a genesis-only datadir's blocks/ and chainstate/ into a timestamped backup
 // directory so the datadir becomes "fresh" again and a bootstrap snapshot can be
 // imported into it. Mirrors the backup step in ImportBootstrapDatadir. wallet.dat,
-// peers.dat and configuration are left untouched. Reversible: the moved data
-// remains in the backup dir and can be restored by hand.
-bool BackupGenesisOnlyChainData(const boost::filesystem::path& data_dir, std::string& error)
+// peers.dat and configuration are left untouched. On success outBackup is set to
+// the backup directory. If the subsequent bootstrap fails, the caller calls
+// RestoreGenesisOnlyChainData to move the data back, leaving the datadir exactly
+// as it was found (only genesis-only data is ever moved — see IsGenesisOnlyChainDatadir).
+bool BackupGenesisOnlyChainData(const boost::filesystem::path& data_dir, boost::filesystem::path& outBackup, std::string& error)
 {
+    outBackup.clear();
     const boost::filesystem::path blocks_dir = data_dir / "blocks";
     const boost::filesystem::path chainstate_dir = data_dir / "chainstate";
     try {
@@ -814,6 +861,7 @@ bool BackupGenesisOnlyChainData(const boost::filesystem::path& data_dir, std::st
             boost::filesystem::rename(blocks_dir, backup / "blocks");
         if (boost::filesystem::exists(chainstate_dir))
             boost::filesystem::rename(chainstate_dir, backup / "chainstate");
+        outBackup = backup;
         LogPrintf("Bootstrap: moved genesis-only chain data to %s\n", backup.string());
         return true;
     } catch (const boost::filesystem::filesystem_error& e) {
@@ -822,28 +870,63 @@ bool BackupGenesisOnlyChainData(const boost::filesystem::path& data_dir, std::st
     }
 }
 
+// Undo BackupGenesisOnlyChainData: move blocks/ and chainstate/ back from `backup`
+// into data_dir and remove the emptied backup directory, so a failed bootstrap
+// leaves the datadir exactly as it was found. Best-effort; only moves a directory
+// back if the datadir does not already have one (a successful bootstrap install
+// would have placed fresh blocks//chainstate, which must not be overwritten).
+bool RestoreGenesisOnlyChainData(const boost::filesystem::path& data_dir, const boost::filesystem::path& backup, std::string& error)
+{
+    try {
+        if (boost::filesystem::exists(backup / "blocks") && !boost::filesystem::exists(data_dir / "blocks"))
+            boost::filesystem::rename(backup / "blocks", data_dir / "blocks");
+        if (boost::filesystem::exists(backup / "chainstate") && !boost::filesystem::exists(data_dir / "chainstate"))
+            boost::filesystem::rename(backup / "chainstate", data_dir / "chainstate");
+        boost::filesystem::remove_all(backup);
+        LogPrintf("Bootstrap: restored genesis-only chain data from %s\n", backup.string());
+        return true;
+    } catch (const boost::filesystem::filesystem_error& e) {
+        error = strprintf("could not restore genesis-only chain data from %s: %s", backup.string(), e.what());
+        return false;
+    }
+}
+
 // Decide whether a bootstrap snapshot may be imported into data_dir, performing
 // the genesis-only backup as a side effect when applicable. Returns true if the
 // datadir is fresh (no chain data) or held only a genesis-height chainstate that
-// was successfully moved aside. Returns false (with error set) if the datadir
-// carries a real chain or the backup failed — the caller then skips bootstrap.
-bool BootstrapDatadirEligible(const boost::filesystem::path& data_dir, std::string& error)
+// was successfully moved aside; in the latter case outBackupDir is set to the
+// directory the stale DBs were moved to (so the caller can restore it if the
+// bootstrap then fails). Returns false (with error set) if the datadir carries a
+// real chain or the backup failed — the caller then skips bootstrap.
+bool BootstrapDatadirEligible(const boost::filesystem::path& data_dir, boost::filesystem::path& outBackupDir, std::string& error)
 {
+    outBackupDir.clear();
     if (IsBootstrapFreshChainDatadir(data_dir, error))
         return true;
     // Not fresh. The only safe exception is a datadir that holds nothing but a
     // genesis-height chainstate: back it up so the datadir is fresh again.
     std::string genesis_err;
     if (IsGenesisOnlyChainDatadir(data_dir, genesis_err)) {
+        boost::filesystem::path backup;
         std::string backup_err;
-        if (BackupGenesisOnlyChainData(data_dir, backup_err)) {
+        if (BackupGenesisOnlyChainData(data_dir, backup, backup_err)) {
+            // The backup moves only blocks/ + chainstate/. A genesis-only datadir
+            // never carries a top-level bootstrap.dat or legacy blkNNNNN.dat (the
+            // daemon does not create them); in the pathological case one is present
+            // BootstrapFromPeer's own up-front IsBootstrapFreshChainDatadir check
+            // fails fast (before any download) and the caller removes this backup.
+            outBackupDir = backup;
             LogPrintf("Bootstrap: datadir held only a genesis-height chainstate; backed it up to fast-sync into a fresh datadir\n");
             return true;
         }
         error = backup_err;
+        return false;
     }
-    // error retains the IsBootstrapFreshChainDatadir reason (real chain data)
-    // unless the genesis-only backup was attempted and failed.
+    // Not genesis-only: error retains the IsBootstrapFreshChainDatadir reason (real
+    // chain data). Prepend the chainstate-open failure if one occurred, so an
+    // explicit -bootstrappeer InitError shows why the genesis probe could not run.
+    if (!genesis_err.empty())
+        error = genesis_err + "; " + error;
     return false;
 }
 
