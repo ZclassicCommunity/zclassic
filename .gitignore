@@ -14,6 +14,9 @@ src/zclassic-gtest
 src/zclassic-tx
 src/test/test_bitcoin
 
+# Stripped release binaries produced by zcutil/build-release.sh
+/release/
+
 *zcashTest.pk
 *zcashTest.vk
 

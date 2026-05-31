@@ -34,6 +34,9 @@ protected:
     CCoinsViewDB(std::string dbName, size_t nCacheSize, bool fMemory = false, bool fWipe = false);
 public:
     CCoinsViewDB(size_t nCacheSize, bool fMemory = false, bool fWipe = false);
+    //! Open a coin database at an arbitrary path (not under GetDataDir()/chainstate).
+    //! Used to open a frozen serve copy or a private background-validation chainstate.
+    CCoinsViewDB(const boost::filesystem::path& path, size_t nCacheSize, bool fMemory = false, bool fWipe = false);
 
     bool GetSproutAnchorAt(const uint256 &rt, SproutMerkleTree &tree) const;
     bool GetSaplingAnchorAt(const uint256 &rt, SaplingMerkleTree &tree) const;

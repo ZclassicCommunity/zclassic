@@ -7,6 +7,8 @@
 
 #include "test/test_bitcoin.h"
 
+#include <vector>
+
 #include <boost/signals2/signal.hpp>
 #include <boost/test/unit_test.hpp>
 
@@ -15,41 +17,75 @@ BOOST_FIXTURE_TEST_SUITE(main_tests, TestingSetup)
 
 const CAmount INITIAL_SUBSIDY = 12.5 * COIN;
 
-static int GetTotalHalvings(const Consensus::Params& consensusParams) {
-    // This assumes that BUTTERCUP_POW_TARGET_SPACING_RATIO == 2
-    // and treats buttercup activation as a halving event
-    return consensusParams.vUpgrades[Consensus::UPGRADE_BUTTERCUP].nActivationHeight == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT ? 64 : 65;
+// Independently recompute the expected subsidy for a height, mirroring the
+// consensus schedule (Consensus::Params::Halving + GetBlockSubsidy) but written
+// separately here so the test is an oracle, not a tautology. ZClassic's Buttercup
+// upgrade halves the block spacing AND applies a "triple halving" (+3), so at
+// activation the reward drops by BUTTERCUP_POW_TARGET_SPACING_RATIO * 2^3 in one
+// step -- not a single /2 as a naive upstream-Zcash schedule would assume.
+static CAmount ExpectedSubsidy(int nHeight, const Consensus::Params& consensusParams)
+{
+    int shift = consensusParams.SubsidySlowStartShift();
+    int buttercupHeight = consensusParams.vUpgrades[Consensus::UPGRADE_BUTTERCUP].nActivationHeight;
+    bool buttercupActive =
+        buttercupHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT &&
+        nHeight >= buttercupHeight;
+    int halvings = buttercupActive
+        ? (nHeight - shift - buttercupHeight) / consensusParams.nPostButtercupSubsidyHalvingInterval + 3
+        : (nHeight - shift) / consensusParams.nPreButtercupSubsidyHalvingInterval;
+    if (halvings >= 64)
+        return 0;
+    CAmount nSubsidy = INITIAL_SUBSIDY;
+    if (buttercupActive)
+        return (nSubsidy / Consensus::BUTTERCUP_POW_TARGET_SPACING_RATIO) >> halvings;
+    return nSubsidy >> halvings;
 }
 
 static void TestBlockSubsidyHalvings(const Consensus::Params& consensusParams)
 {
-    bool buttercupActive = false;
-    int buttercupActivationHeight = consensusParams.vUpgrades[Consensus::UPGRADE_BUTTERCUP].nActivationHeight;
-    int nHeight = consensusParams.nSubsidySlowStartInterval;
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(nHeight, consensusParams), INITIAL_SUBSIDY);
-    CAmount nPreviousSubsidy = INITIAL_SUBSIDY;
-    for (int nHalvings = 1; nHalvings < GetTotalHalvings(consensusParams); nHalvings++) {
-        if (buttercupActive) {
-            if (nHeight == buttercupActivationHeight) {
-                int preButtercupHeight = (nHalvings - 1) * consensusParams.nPreButtercupSubsidyHalvingInterval + consensusParams.SubsidySlowStartShift();
-                nHeight += (preButtercupHeight - buttercupActivationHeight) * Consensus::BUTTERCUP_POW_TARGET_SPACING_RATIO;
-            } else {
-                nHeight += consensusParams.nPostButtercupSubsidyHalvingInterval;
-            }
-        } else {
-            nHeight = nHalvings * consensusParams.nPreButtercupSubsidyHalvingInterval + consensusParams.SubsidySlowStartShift();
-            if (consensusParams.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_BUTTERCUP)) {
-                nHeight = buttercupActivationHeight;
-                buttercupActive = true;
-            }
-        }
-        BOOST_CHECK_EQUAL(GetBlockSubsidy(nHeight - 1, consensusParams), nPreviousSubsidy);
-        CAmount nSubsidy = GetBlockSubsidy(nHeight, consensusParams);
-        BOOST_CHECK(nSubsidy <= INITIAL_SUBSIDY);
-        BOOST_CHECK_EQUAL(nSubsidy, nPreviousSubsidy / 2);
-        nPreviousSubsidy = nSubsidy;
+    const int shift = consensusParams.SubsidySlowStartShift();
+    const int buttercupHeight = consensusParams.vUpgrades[Consensus::UPGRADE_BUTTERCUP].nActivationHeight;
+    const bool hasButtercup = buttercupHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+
+    // Full reward once the slow-start ramp completes.
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(consensusParams.nSubsidySlowStartInterval, consensusParams), INITIAL_SUBSIDY);
+
+    // First height of each halving level ("boundaries"): the pre-Buttercup steps
+    // that fall before activation, then the Buttercup activation height, then the
+    // post-Buttercup steps.
+    std::vector<int> boundaries;
+    for (int k = 1; k < 64; k++) {
+        int h = shift + k * consensusParams.nPreButtercupSubsidyHalvingInterval;
+        if (hasButtercup && h >= buttercupHeight)
+            break;
+        boundaries.push_back(h);
     }
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(nHeight, consensusParams), 0);
+    if (hasButtercup) {
+        // Level 3 begins exactly at activation. Subsequent post-Buttercup levels
+        // begin at shift + activation + m*postInterval (the slow-start shift offset
+        // matters here just as it does pre-Buttercup).
+        boundaries.push_back(buttercupHeight);
+        for (int j = 1; j < 64; j++)
+            boundaries.push_back(shift + buttercupHeight + j * consensusParams.nPostButtercupSubsidyHalvingInterval);
+    }
+
+    CAmount nPreviousSubsidy = INITIAL_SUBSIDY;
+    for (size_t i = 0; i < boundaries.size(); i++) {
+        int nHeight = boundaries[i];
+        CAmount nSubsidy = GetBlockSubsidy(nHeight, consensusParams);
+        // GetBlockSubsidy matches the independently-computed schedule, at the
+        // boundary and at the block just before it (still the previous level).
+        BOOST_CHECK_EQUAL(nSubsidy, ExpectedSubsidy(nHeight, consensusParams));
+        BOOST_CHECK_EQUAL(GetBlockSubsidy(nHeight - 1, consensusParams), nPreviousSubsidy);
+        // Subsidy never exceeds the initial reward and never increases.
+        BOOST_CHECK(nSubsidy <= INITIAL_SUBSIDY);
+        BOOST_CHECK(nSubsidy <= nPreviousSubsidy);
+        nPreviousSubsidy = nSubsidy;
+        if (nSubsidy == 0)
+            break;
+    }
+    // The schedule eventually reaches zero.
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(boundaries.back(), consensusParams), 0);
 }
 
 static void TestBlockSubsidyHalvings(int nSubsidySlowStartInterval, int nPreButtercupSubsidyHalvingInterval, int buttercupActivationHeight)
@@ -96,18 +132,14 @@ BOOST_AUTO_TEST_CASE(subsidy_limit_test)
         ++nHeight;
     } while (nSubsidy > 0);
 
-    // Changing the block interval from 10 to 2.5 minutes causes truncation
-    // effects to occur earlier (from the 9th halving interval instead of the
-    // 11th), decreasing the total monetary supply by 0.0693 ZEC. If the
-    // transaction output field is widened, this discrepancy will become smaller
-    // or disappear entirely.
-    //BOOST_CHECK_EQUAL(nSum, 2099999997690000ULL);
-    // Reducing the interval further to 1.25 minutes has a similar effect,
-    // decreasing the total monetary supply by another 0.09240 ZEC.
-    // TODO Change this assert when setting the blossom activation height
-    // Note that these numbers may or may not change depending on the activation height
-    BOOST_CHECK_EQUAL(nSum, 2099999990760000ULL);
-    // BOOST_CHECK_EQUAL(nSum, 2099999981520000LL);
+    // ZClassic's total money supply is lower than upstream Zcash's ~21M ZEC. The
+    // Buttercup upgrade halves the block spacing (twice as many blocks) while
+    // cutting the per-block reward by BUTTERCUP_POW_TARGET_SPACING_RATIO * 2^3
+    // (the "triple halving"), so the net emission rate drops and the schedule
+    // sums (deterministically, over every height until the subsidy reaches 0) to
+    // ~11.46M ZEC. This assertion pins ZClassic's intended total emission; the
+    // old ~21M value was an upstream-Zcash leftover.
+    BOOST_CHECK_EQUAL(nSum, 1146248809645000ULL);
 }
 
 bool ReturnFalse() { return false; }

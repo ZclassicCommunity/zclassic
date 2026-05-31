@@ -22,14 +22,17 @@ cd zclassic
 
 The compiled binaries will be in the `src/` directory.
 
-#### First Run - Fast Sync
+#### First Run
 
-On first run, `zclassicd` will automatically:
-- Download ZCash cryptographic parameters (~1.6 GB)
-- Download initial blockchain state from Arweave (~8.8 GB)
-- Create a default configuration file
+Before first run, fetch the required ZCash cryptographic parameters:
 
-This fast-sync feature saves hours compared to syncing from genesis.
+```bash
+./zcutil/fetch-params.sh
+```
+
+For faster initial sync, install a bootstrap snapshot from a trusted synced
+node at daemon startup with `-bootstrapdatadir=<dir>`. See
+[Bootstrap Snapshots](doc/bootstrap-snapshots.md).
 
 ### Running ZClassic
 

@@ -17,6 +17,7 @@
 
 #include <stdint.h>
 #include <string>
+#include <vector>
 
 #define MESSAGE_START_SIZE 4
 
@@ -75,6 +76,10 @@ enum {
     // Zclassic nodes used to support this by default, without advertising this bit,
     // but no longer do as of protocol version 170004 (= NO_BLOOM_VERSION)
     NODE_BLOOM = (1 << 2),
+
+    // NODE_BOOTSTRAP means the node can serve bootstrap snapshot metadata and
+    // chunks for an explicitly configured, immutable snapshot source.
+    NODE_BOOTSTRAP = (1 << 24),
 
     // Bits 24-31 are reserved for temporary experiments. Just pick a bit that
     // isn't getting used, or one not being used much, and notify the
@@ -155,5 +160,203 @@ enum {
     // MSG_FILTERED_BLOCK should not appear in any invs except as a part of getdata.
     MSG_FILTERED_BLOCK,
 };
+
+//! Read-side bounds for the attacker-controlled strings in a bootstrap manifest.
+//! These cap only deserialization (LimitedString enforces on read, not write) and use the
+//! identical CompactSize wire encoding, so v1/v2/v3 bytes are unchanged and interop with
+//! the deployed swarm is preserved. They are defense-in-depth: the whole message is
+//! already bounded by MAX_PROTOCOL_MESSAGE_LENGTH, but a plain std::string Unserialize
+//! does a single resize() up to the 32 MiB ReadCompactSize ceiling before the read throws,
+//! so capping here removes that transient over-allocation. Both are generous relative to
+//! any legitimate value (network ids are a few chars; snapshot data paths are short
+//! relative paths like "blocks/index/000005.ldb").
+static const unsigned int BOOTSTRAP_SNAPSHOT_MAX_PATH_LEN = 256;
+static const unsigned int BOOTSTRAP_SNAPSHOT_MAX_NETWORK_LEN = 32;
+
+struct CBootstrapSnapshotFile
+{
+    std::string strPath;
+    uint64_t nSize;
+    uint256 hashSha256;
+
+    CBootstrapSnapshotFile()
+    {
+        SetNull();
+    }
+
+    void SetNull()
+    {
+        strPath.clear();
+        nSize = 0;
+        hashSha256.SetNull();
+    }
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action)
+    {
+        READWRITE(LIMITED_STRING(strPath, BOOTSTRAP_SNAPSHOT_MAX_PATH_LEN));
+        READWRITE(nSize);
+        READWRITE(hashSha256);
+    }
+};
+
+struct CBootstrapSnapshotManifest
+{
+    int nVersion;
+    std::string strNetwork;
+    int nHeight;
+    uint256 hashBlock;
+    uint256 hashAnchorSha256;
+    uint256 hashAnchorSha3;
+    uint64_t nSnapshotBytes;
+    uint32_t nChunkSize;
+    std::vector<CBootstrapSnapshotFile> vFiles;
+    //! Commitment to the full UTXO set of this snapshot: the same value the
+    //! gettxoutsetinfo RPC reports as `hash_serialized` (CCoinsViewDB::GetStats).
+    //! Only present in version-2+ manifests (a self-snapshot at the server's own
+    //! recent tip, which has no compiled anchor a client could check against).
+    //! A version-1 manifest serializes without this field, byte-for-byte identical
+    //! to the original wire format, so the deployed compiled-anchor swarm is
+    //! unaffected. Null in a v1 manifest.
+    uint256 hashChainstateSerialized;
+    //! Tip of the GROWABLE post-anchor block bundle (assumeutxo-style growable
+    //! snapshot). nHeight/hashBlock above keep their meaning as the PINNED anchor
+    //! (the compiled fast-sync anchor whose chainstate is committed by
+    //! hashChainstateSerialized). nBlockTipHeight/hashBlockTip describe the block
+    //! data this snapshot additionally bundles, which the server appends as it
+    //! grows: anchor+1 .. nBlockTipHeight. These carry NO commitment — their
+    //! integrity is established solely by the client validating the bundled
+    //! post-anchor blocks itself before trusting them. Only present in
+    //! version-3+ manifests; v1 and v2 manifests serialize without these fields,
+    //! byte-for-byte identical to their earlier wire formats. -1/null in a
+    //! pre-v3 manifest.
+    int nBlockTipHeight;
+    uint256 hashBlockTip;
+
+    CBootstrapSnapshotManifest()
+    {
+        SetNull();
+    }
+
+    void SetNull()
+    {
+        nVersion = 1;
+        strNetwork.clear();
+        nHeight = -1;
+        hashBlock.SetNull();
+        hashAnchorSha256.SetNull();
+        hashAnchorSha3.SetNull();
+        nSnapshotBytes = 0;
+        nChunkSize = 0;
+        vFiles.clear();
+        hashChainstateSerialized.SetNull();
+        nBlockTipHeight = -1;
+        hashBlockTip.SetNull();
+    }
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action)
+    {
+        READWRITE(nVersion);
+        READWRITE(LIMITED_STRING(strNetwork, BOOTSTRAP_SNAPSHOT_MAX_NETWORK_LEN));
+        READWRITE(nHeight);
+        READWRITE(hashBlock);
+        READWRITE(hashAnchorSha256);
+        READWRITE(hashAnchorSha3);
+        READWRITE(nSnapshotBytes);
+        READWRITE(nChunkSize);
+        READWRITE(vFiles);
+        // Version-gated append: nVersion is (de)serialized first, so on read this
+        // condition reflects the wire version. Never reorder these fields or make
+        // the new field unconditional — that would break v1 interop with the
+        // deployed swarm.
+        if (nVersion >= 2) {
+            READWRITE(hashChainstateSerialized);
+        }
+        // Version-gated append for the GROWABLE post-anchor block bundle. Same
+        // rule as the v2 field above: append-only, never reorder/repurpose, so
+        // v1 and v2 wire bytes stay byte-for-byte identical.
+        if (nVersion >= 3) {
+            READWRITE(nBlockTipHeight);
+            READWRITE(hashBlockTip);
+        }
+    }
+};
+
+struct CBootstrapSnapshotChunkRequest
+{
+    uint32_t nFileIndex;
+    uint64_t nOffset;
+    uint32_t nLength;
+
+    CBootstrapSnapshotChunkRequest()
+    {
+        SetNull();
+    }
+
+    void SetNull()
+    {
+        nFileIndex = 0;
+        nOffset = 0;
+        nLength = 0;
+    }
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action)
+    {
+        READWRITE(nFileIndex);
+        READWRITE(nOffset);
+        READWRITE(nLength);
+    }
+};
+
+struct CBootstrapSnapshotChunk
+{
+    uint32_t nFileIndex;
+    uint64_t nOffset;
+    std::vector<unsigned char> vData;
+
+    CBootstrapSnapshotChunk()
+    {
+        SetNull();
+    }
+
+    void SetNull()
+    {
+        nFileIndex = 0;
+        nOffset = 0;
+        vData.clear();
+    }
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action)
+    {
+        READWRITE(nFileIndex);
+        READWRITE(nOffset);
+        READWRITE(vData);
+    }
+};
+
+namespace NetMsgType {
+extern const char* GETBSMAN;
+extern const char* BSMAN;
+extern const char* GETBSCHK;
+extern const char* BSCHK;
+// Zcash zk-SNARK parameter distribution (sapling/sprout .params), so a fresh
+// node can fetch the required proving/verifying parameters from a peer instead
+// of an external download.
+extern const char* GETBSPMAN;
+extern const char* BSPMAN;
+extern const char* GETBSPCHK;
+extern const char* BSPCHK;
+}
 
 #endif // BITCOIN_PROTOCOL_H

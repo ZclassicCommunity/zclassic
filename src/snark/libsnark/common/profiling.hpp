@@ -15,6 +15,7 @@
 #define PROFILING_HPP_
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>

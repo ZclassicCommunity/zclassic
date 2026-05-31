@@ -184,13 +184,53 @@ public:
             ( 160000, uint256S("0x000000065093005a1a46ee95d6d66c2b07008220ca64dd3b3a93bbd1945480c0"))
             ( 468200, uint256S("0x000000009bd5548c851c2b237894d6807a53bf1e2808402545e27a995ae4f3c3"))
             ( 2013514, uint256S("0x000019679aa2ea97a3f18bd9265bc91a09929ea0b1acc0fc5ef77cdf3cf906e7"))
-            ( 2879438, uint256S("0x000007e8fccb9e4831c7d7376a283b016ead6166491f951f4f083dbe366992b2")),
-            1729305135,     // * UNIX timestamp of last checkpoint block (Oct 19, 2025)
+            ( 2879438, uint256S("0x000007e8fccb9e4831c7d7376a283b016ead6166491f951f4f083dbe366992b2"))
+            ( 3126937, uint256S("0x00000663e40f1fe0bc32a7e7282fac25de5fe8ecefd9c627e2fd948d388f7053")),
+            1779903078,     // * UNIX timestamp of last checkpoint block (May 27, 2026)
             5293850,        // * total number of transactions between genesis and last checkpoint
                             //   (estimated based on block height progression)
             1060            // * estimated number of transactions per day after checkpoint
                             //   total number of tx / (checkpoint block height / (24 * 24))
         };
+
+        fastSyncAnchorData.nHeight = 3126937;
+        fastSyncAnchorData.hashBlock = uint256S("0x00000663e40f1fe0bc32a7e7282fac25de5fe8ecefd9c627e2fd948d388f7053");
+        fastSyncAnchorData.hashAnchorSha256 = uint256S("0x376d6d5e6f7d02459b89ae0988f5c51bb1deaf2a3e4b3a1de745e4f2e3bb279d");
+        fastSyncAnchorData.hashAnchorSha3 = uint256S("0x0f7d542e5c662c9652b93eef8eb98e386e8bdbd2f848eba0e99c6451eb2ef0bd");
+        // Whole-chainstate commitment (gettxoutsetinfo's hash_chainstate_full) at
+        // the anchor height — the transparent UTXO set (each coin's output value+
+        // script AND its consensus metadata: creation height, coinbase flag, tx
+        // version) PLUS the Sprout/Sapling anchors and nullifier sets. After a peer
+        // fast-sync the node recomputes this over the imported chainstate and rejects
+        // the snapshot unless it matches, so a malicious/compromised serving peer
+        // cannot substitute a forged UTXO set, forged coinbase-maturity metadata
+        // (nHeight/fCoinBase), or a tampered shielded pool (the fast-sync then trusts
+        // only this binary, not the peer). Generated from the prepared snapshot at
+        // this height via gettxoutsetinfo's hash_chainstate_full.
+        fastSyncAnchorData.hashChainstateSerialized = uint256S("0x4efb67005d842e9d5bab21831fef8905a7fcb89e7264e43bd1aa00623f5a585f");
+
+        // The set of anchors a client accepts, newest first. Today this is just
+        // the primary. To roll a new anchor for a release WITHOUT forcing a hard
+        // client/server lockstep, set fastSyncAnchorData above to the NEW anchor,
+        // then list it first here followed by the previous anchor(s) you still
+        // want clients to accept during the transition, e.g.:
+        //     vFastSyncAnchors.push_back(fastSyncAnchorData);   // new (primary)
+        //     CFastSyncAnchorData prev; prev.nHeight = 3126937; prev.hashBlock = ...;
+        //     prev.hashAnchorSha256 = ...; prev.hashAnchorSha3 = ...;
+        //     prev.hashChainstateSerialized = ...; vFastSyncAnchors.push_back(prev);
+        // Every entry is a developer-reviewed commitment, so there is no forgery
+        // window regardless of which compiled anchor a peer serves.
+        vFastSyncAnchors.push_back(fastSyncAnchorData);
+
+        // Default NODE_BOOTSTRAP peers a fresh node fetches params and the chain
+        // snapshot from. Overridable with -bootstrappeer, disable with -bootstrap=0.
+        // No explicit port -> the standard mainnet P2P port (nDefaultPort, 8033):
+        // the snapshot is served over the ordinary P2P connection (the new BS*
+        // messages in ProcessMessage), not a separate socket, so the serving node
+        // needs no dedicated port. DEPLOYMENT: the seed servers must listen on 8033
+        // for this to resolve; until they are moved off 8034, keep them reachable on
+        // 8033 (a node binding 8033 serves bootstrap to any standard-port client).
+        vBootstrapPeers.push_back("74.50.74.102");
 
         // Founders reward script expects a vector of 2-of-3 multisig addresses
         vFoundersRewardAddress = {
@@ -559,6 +599,16 @@ bool SelectParamsFromCommandLine()
 
 // Block height must be >0 and <=last founders reward block height
 // Index variable i ranges from 0 - (vFoundersRewardAddress.size()-1)
+const CFastSyncAnchorData* CChainParams::FindFastSyncAnchor(int nHeight, const uint256& hashBlock) const {
+    for (std::vector<CFastSyncAnchorData>::const_iterator it = vFastSyncAnchors.begin();
+         it != vFastSyncAnchors.end(); ++it) {
+        if (it->nHeight == nHeight && it->hashBlock == hashBlock) {
+            return &(*it);
+        }
+    }
+    return NULL;
+}
+
 std::string CChainParams::GetFoundersRewardAddressAtHeight(int nHeight) const {
     int maxHeight = consensus.GetLastFoundersRewardBlockHeight();
     assert(nHeight > 0 && nHeight <= maxHeight);
@@ -621,4 +671,3 @@ unsigned int CChainParams::EquihashK(int nHeight) const {
     }
     return k;
 }
-

@@ -127,6 +127,8 @@ BITCOIN_CORE_H = \
   asyncrpcqueue.h \
   base58.h \
   bech32.h \
+  bootstrap.h \
+  bootstrapvalidation.h \
   bloom.h \
   chain.h \
   chainparams.h \
@@ -251,6 +253,8 @@ libbitcoin_server_a_SOURCES = \
   alertkeys.h \
   asyncrpcoperation.cpp \
   asyncrpcqueue.cpp \
+  bootstrap.cpp \
+  bootstrapvalidation.cpp \
   bloom.cpp \
   chain.cpp \
   checkpoints.cpp \
@@ -468,8 +472,7 @@ zclassicd_LDADD += \
   $(ZMQ_LIBS) \
   $(PROTON_LIBS) \
   $(LIBBITCOIN_CRYPTO) \
-  $(LIBZCASH_LIBS) \
-  -lcurl
+  $(LIBZCASH_LIBS)
 
 # bitcoin-cli binary #
 zclassic_cli_SOURCES = bitcoin-cli.cpp
