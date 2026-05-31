@@ -48,6 +48,7 @@ extern std::map<std::string, std::string> mapArgs;
 extern std::map<std::string, std::vector<std::string> > mapMultiArgs;
 extern bool fDebug;
 extern bool fPrintToConsole;
+extern bool fVTEnabled; //!< stdout can render ANSI/VT escapes (UTF-8 + VT on Windows); false when redirected or on a legacy console
 extern bool fPrintToDebugLog;
 extern bool fServer;
 extern std::string strMiscWarning;
@@ -68,6 +69,7 @@ inline std::string _(const char* psz)
     return rv ? (*rv) : psz;
 }
 
+void InitConsole();
 void SetupEnvironment();
 bool SetupNetworking();
 

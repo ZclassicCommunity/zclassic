@@ -23,6 +23,7 @@
 #include "utilstrencodings.h"
 
 #include <algorithm>
+#include <atomic>
 #include <deque>
 #include <exception>
 #include <limits>
@@ -85,7 +86,16 @@ static void EmitBootstrapProgress(const std::string& line, int percent, bool don
             return; // throttle to ~5 updates/sec to avoid flicker
         }
         last_emit_ms = now;
-        fprintf(stdout, "\r%s\x1b[K", line.c_str());
+        if (fVTEnabled) {
+            // VT erase-to-end-of-line clears any stale tail of a longer prior line.
+            fprintf(stdout, "\r%s\x1b[K", line.c_str());
+        } else {
+            // Legacy Windows console (TTY but no virtual-terminal processing):
+            // never emit a raw escape — it shows as garbage like "^[[K" and looks
+            // like an error. Carriage-return + space padding rewrites the line in
+            // place and clears the tail of a previously longer line.
+            fprintf(stdout, "\r%-79s", line.c_str());
+        }
         if (done) {
             fprintf(stdout, "\n");
         }
@@ -899,6 +909,15 @@ static bool VerifyBootstrapDownloadedFile(const boost::filesystem::path& path, c
 // (MAX_BOOTSTRAP_CHUNK_REQUESTS_PER_PEER in net.cpp).
 static const size_t BOOTSTRAP_PIPELINE_DEPTH = 16;
 
+// Parallel download streams (connections) the client opens to the bootstrap
+// peer. A single TCP flow is loss-limited: its congestion window collapses on
+// packet loss, capping throughput to roughly MSS/(RTT*sqrt(loss)) regardless of
+// how fast either endpoint or the link is. N independent flows each get their
+// own congestion window, so aggregate throughput scales ~N x on lossy WAN
+// paths. See DownloadBootstrapSnapshotParallel. 1 = legacy single-stream path.
+static const int BOOTSTRAP_DEFAULT_STREAMS = 4;
+static const int BOOTSTRAP_MAX_STREAMS = 16;
+
 static bool SendBootstrapChunkRequest(SOCKET socket, const CBootstrapSnapshotChunkRequest& request, int timeout_ms, std::string& error)
 {
     CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
@@ -940,14 +959,11 @@ static bool CreateEmptyBootstrapFiles(const CBootstrapSnapshotManifest& manifest
 // order; the peer replies on a single ordered stream, so responses match the
 // in-flight queue front-to-back. Files are verified (per-file SHA-256) and
 // renamed from their .part path as their final chunk arrives.
-static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, int timeout_ms, const std::string& peer, std::string& error)
+// Prepare the staging directory for a snapshot download: ensure free space,
+// materialize zero-length files, and pre-create every parent directory so
+// concurrent download streams never race on directory creation.
+static bool DownloadBootstrapPrepareStaging(const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, std::string& error)
 {
-    LogPrintf("Bootstrap: downloading snapshot from peer %s: %u files, %llu bytes (height %d)\n",
-        peer,
-        (unsigned int)manifest.vFiles.size(),
-        (unsigned long long)manifest.nSnapshotBytes,
-        manifest.nHeight);
-
     // Refuse to start if the staging filesystem cannot fit the manifest plus
     // a safety margin. Cheaper to fail fast than to fill the disk and then
     // discover the last chunk's hash is wrong.
@@ -973,13 +989,38 @@ static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotMan
         return false;
     }
 
-    std::vector<uint32_t> order;
-    for (size_t i = 0; i < manifest.vFiles.size(); ++i) {
-        if (manifest.vFiles[i].nSize > 0) {
-            order.push_back((uint32_t)i);
+    // Pre-create all parent directories up front (single-threaded) so parallel
+    // download streams that open files in the same subdir cannot race on
+    // create_directories.
+    try {
+        for (size_t i = 0; i < manifest.vFiles.size(); ++i) {
+            const CBootstrapSnapshotFile& f = manifest.vFiles[i];
+            if (f.nSize == 0) {
+                continue;
+            }
+            const boost::filesystem::path relative(f.strPath);
+            if (!IsBootstrapSnapshotDataPath(relative)) {
+                error = strprintf("bootstrap manifest has unsafe file path: %s", f.strPath);
+                return false;
+            }
+            boost::filesystem::create_directories((staging / relative).parent_path());
         }
+    } catch (const boost::filesystem::filesystem_error& e) {
+        error = strprintf("could not create bootstrap staging directories: %s", e.what());
+        return false;
     }
+    return true;
+}
 
+// Download the chunks for the file indices in `order` over a single connection,
+// using a pipelined request window. Writes each file to a .part path, verifies
+// its SHA-256, and renames it into place as its final chunk arrives. Increments
+// `progressBytes` (shared across parallel streams) for every chunk received and
+// aborts promptly if `abortFlag` is set (sibling stream failure or shutdown).
+// The single-stream caller passes logProgress=true to emit progress inline; the
+// parallel manager logs aggregate progress from its own thread (logProgress=false).
+static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, const std::vector<uint32_t>& order, int timeout_ms, std::atomic<uint64_t>& progressBytes, std::atomic<bool>& abortFlag, bool logProgress, std::string& error)
+{
     // Request cursor over (position in `order`, byte offset within that file).
     size_t reqPos = 0;
     uint64_t reqOffset = 0;
@@ -1016,7 +1057,7 @@ static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotMan
     FILE* fp = NULL;
     boost::filesystem::path open_path;
     boost::filesystem::path open_part;
-    uint64_t received_total = 0;
+    uint64_t stream_received = 0;
     int last_logged_percent = -1;
     int64_t last_emit_ms = 0;
     int last_emit_decile = -1;
@@ -1028,6 +1069,11 @@ static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotMan
     while (ok && !inflight.empty()) {
         if (ShutdownRequested()) {
             error = "bootstrap snapshot download aborted: shutdown requested";
+            ok = false;
+            break;
+        }
+        if (abortFlag.load(std::memory_order_relaxed)) {
+            error = "bootstrap snapshot download canceled (another stream failed)";
             ok = false;
             break;
         }
@@ -1079,10 +1125,12 @@ static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotMan
             ok = false;
             break;
         }
-        received_total += chunk.vData.size();
+        stream_received += chunk.vData.size();
+        const uint64_t total_received =
+            progressBytes.fetch_add(chunk.vData.size(), std::memory_order_relaxed) + chunk.vData.size();
 
         if (BootstrapDownloadTooSlow(throughputWindowStartMs, throughputBytesAtWindowStart,
-                                     received_total, GetTimeMillis())) {
+                                     stream_received, GetTimeMillis())) {
             error = "bootstrap snapshot download too slow (peer stalled or throttling); aborting";
             ok = false;
             break;
@@ -1107,33 +1155,32 @@ static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotMan
 
         // Log on each whole-percent advance so an operator watching the console
         // (-printtoconsole) or debug.log sees steady progress during what can be
-        // a multi-gigabyte transfer.
-        const int percent = manifest.nSnapshotBytes > 0
-            ? (int)((received_total * 100) / manifest.nSnapshotBytes)
-            : 100;
-        if (percent != last_logged_percent) {
-            last_logged_percent = percent;
-            const int64_t elapsed_ms = std::max<int64_t>(1, GetTimeMillis() - download_started);
-            const double mbps = (received_total / 1048576.0) / (elapsed_ms / 1000.0);
-            LogPrintf("Bootstrap: downloaded %d%% (%llu/%llu bytes, %.1f MB/s)\n",
-                percent,
-                (unsigned long long)received_total,
-                (unsigned long long)manifest.nSnapshotBytes,
-                mbps);
-            // Live progress. The snapshot download overlaps the metrics screen
-            // thread, so when that owns the console feed it through InitMessage
-            // (rendered cleanly on the screen's managed line); otherwise write a
-            // throttled single line to stdout directly.
-            const std::string progress = strprintf(
-                "Bootstrap snapshot: %3d%%  %.2f / %.2f GB  %.1f MB/s",
-                percent,
-                received_total / 1073741824.0,
-                manifest.nSnapshotBytes / 1073741824.0,
-                mbps);
-            if (BootstrapMetricsScreenActive()) {
-                uiInterface.InitMessage(progress);
-            } else {
-                EmitBootstrapProgress(progress, percent, percent >= 100, last_emit_ms, last_emit_decile);
+        // a multi-gigabyte transfer. Only the single-stream caller logs here;
+        // the parallel manager logs aggregate progress from its own thread.
+        if (logProgress) {
+            const int percent = manifest.nSnapshotBytes > 0
+                ? (int)((total_received * 100) / manifest.nSnapshotBytes)
+                : 100;
+            if (percent != last_logged_percent) {
+                last_logged_percent = percent;
+                const int64_t elapsed_ms = std::max<int64_t>(1, GetTimeMillis() - download_started);
+                const double mbps = (total_received / 1048576.0) / (elapsed_ms / 1000.0);
+                LogPrintf("Bootstrap: downloaded %d%% (%llu/%llu bytes, %.1f MB/s)\n",
+                    percent,
+                    (unsigned long long)total_received,
+                    (unsigned long long)manifest.nSnapshotBytes,
+                    mbps);
+                const std::string progress = strprintf(
+                    "Bootstrap snapshot: %3d%%  %.2f / %.2f GB  %.1f MB/s",
+                    percent,
+                    total_received / 1073741824.0,
+                    manifest.nSnapshotBytes / 1073741824.0,
+                    mbps);
+                if (BootstrapMetricsScreenActive()) {
+                    uiInterface.InitMessage(progress);
+                } else {
+                    EmitBootstrapProgress(progress, percent, percent >= 100, last_emit_ms, last_emit_decile);
+                }
             }
         }
 
@@ -1153,6 +1200,232 @@ static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotMan
         fp = NULL;
     }
     return ok;
+}
+
+// Single-stream download of the whole snapshot over an already-handshaked
+// socket (the legacy path; used when -bootstrapstreams=1).
+static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, int timeout_ms, const std::string& peer, std::string& error)
+{
+    LogPrintf("Bootstrap: downloading snapshot from peer %s: %u files, %llu bytes (height %d)\n",
+        peer,
+        (unsigned int)manifest.vFiles.size(),
+        (unsigned long long)manifest.nSnapshotBytes,
+        manifest.nHeight);
+
+    if (!DownloadBootstrapPrepareStaging(manifest, staging, error)) {
+        return false;
+    }
+
+    std::vector<uint32_t> order;
+    for (size_t i = 0; i < manifest.vFiles.size(); ++i) {
+        if (manifest.vFiles[i].nSize > 0) {
+            order.push_back((uint32_t)i);
+        }
+    }
+
+    std::atomic<uint64_t> progressBytes(0);
+    std::atomic<bool> abortFlag(false);
+    return DownloadBootstrapFileSubset(socket, manifest, staging, order, timeout_ms,
+                                       progressBytes, abortFlag, /*logProgress=*/true, error);
+}
+
+// Open a fresh connection to the bootstrap peer, handshake, fetch the manifest,
+// and verify it is byte-identical to the master manifest already validated by
+// the caller. Each parallel download stream calls this, so a peer that serves a
+// divergent manifest on a second connection is rejected before any chunk from
+// that stream is trusted.
+static bool OpenBootstrapStreamAndVerifyManifest(const CService& peerAddress, int timeout_ms, const CBootstrapSnapshotManifest& masterManifest, SOCKET& outSocket, std::string& error)
+{
+    SOCKET socket = INVALID_SOCKET;
+    bool proxyConnectionFailed = false;
+    if (!ConnectSocket(peerAddress, socket, nConnectTimeout, &proxyConnectionFailed)) {
+        error = proxyConnectionFailed ? "bootstrap stream proxy connection failed" : "bootstrap stream connection failed";
+        return false;
+    }
+    if (!BootstrapHandshake(socket, peerAddress, timeout_ms, error)) {
+        CloseSocket(socket);
+        return false;
+    }
+    CDataStream empty(SER_NETWORK, PROTOCOL_VERSION);
+    if (!SendBootstrapMessage(socket, NetMsgType::GETBSMAN, empty, timeout_ms, error)) {
+        CloseSocket(socket);
+        return false;
+    }
+    CDataStream manifestPayload(SER_NETWORK, PROTOCOL_VERSION);
+    if (!ReceiveExpectedBootstrapMessage(socket, NetMsgType::BSMAN, manifestPayload, timeout_ms, error)) {
+        CloseSocket(socket);
+        return false;
+    }
+    CBootstrapSnapshotManifest manifest;
+    try {
+        manifestPayload >> manifest;
+    } catch (const std::exception& e) {
+        error = strprintf("could not decode bootstrap manifest on stream: %s", e.what());
+        CloseSocket(socket);
+        return false;
+    }
+    if (SerializeHash(manifest) != SerializeHash(masterManifest)) {
+        error = "bootstrap stream served a manifest that differs from the master manifest";
+        CloseSocket(socket);
+        return false;
+    }
+    outSocket = socket;
+    return true;
+}
+
+// Parallel snapshot download: split the file set across `nStreams` independent
+// connections to the same peer. Defeats single-flow loss-limiting on lossy WAN
+// paths (each flow gets its own congestion window, so aggregate throughput
+// scales ~N x). Each stream owns a disjoint subset of files (no shared file
+// writes, hence no locking) and is independently SHA-256 verified; correctness
+// still rests on the per-file hashes plus the post-import chainstate commitment
+// check, exactly as the single-stream path. Any stream failure aborts the whole
+// download.
+static bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::string& peer, const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, int timeout_ms, int nStreams, std::string& error)
+{
+    LogPrintf("Bootstrap: downloading snapshot from peer %s over %d parallel streams: %u files, %llu bytes (height %d)\n",
+        peer, nStreams,
+        (unsigned int)manifest.vFiles.size(),
+        (unsigned long long)manifest.nSnapshotBytes,
+        manifest.nHeight);
+
+    if (!DownloadBootstrapPrepareStaging(manifest, staging, error)) {
+        return false;
+    }
+
+    // Files to download (zero-length files were materialized by the preamble).
+    std::vector<uint32_t> files;
+    for (size_t i = 0; i < manifest.vFiles.size(); ++i) {
+        if (manifest.vFiles[i].nSize > 0) {
+            files.push_back((uint32_t)i);
+        }
+    }
+    if (files.empty()) {
+        return true; // nothing to fetch over the wire
+    }
+
+    // Balance files across streams by total bytes (greedy: assign the largest
+    // remaining file to the currently-smallest bin). Keeps stream finish times
+    // close even when file sizes vary widely.
+    std::sort(files.begin(), files.end(), [&](uint32_t a, uint32_t b) {
+        return manifest.vFiles[a].nSize > manifest.vFiles[b].nSize;
+    });
+    if (nStreams > (int)files.size()) {
+        nStreams = (int)files.size();
+    }
+    std::vector<std::vector<uint32_t> > groups(nStreams);
+    std::vector<uint64_t> binBytes(nStreams, 0);
+    for (size_t i = 0; i < files.size(); ++i) {
+        int best = 0;
+        for (int b = 1; b < nStreams; ++b) {
+            if (binBytes[b] < binBytes[best]) {
+                best = b;
+            }
+        }
+        groups[best].push_back(files[i]);
+        binBytes[best] += manifest.vFiles[files[i]].nSize;
+    }
+
+    std::atomic<uint64_t> progressBytes(0);
+    std::atomic<bool> abortFlag(false);
+    std::atomic<int> doneCount(0);
+    CCriticalSection csErr;
+    std::string firstError;
+
+    auto recordError = [&](const std::string& e) {
+        {
+            LOCK(csErr);
+            if (firstError.empty()) {
+                firstError = e;
+            }
+        }
+        abortFlag.store(true, std::memory_order_relaxed);
+    };
+
+    boost::thread_group workers;
+    for (int w = 0; w < nStreams; ++w) {
+        workers.create_thread([&, w]() {
+            SOCKET s = INVALID_SOCKET;
+            try {
+                if (!abortFlag.load(std::memory_order_relaxed)) {
+                    std::string e;
+                    if (!OpenBootstrapStreamAndVerifyManifest(peerAddress, timeout_ms, manifest, s, e)) {
+                        recordError(e);
+                    } else {
+                        std::string de;
+                        if (!DownloadBootstrapFileSubset(s, manifest, staging, groups[w], timeout_ms,
+                                                         progressBytes, abortFlag, /*logProgress=*/false, de)) {
+                            recordError(de);
+                        }
+                    }
+                }
+            } catch (const std::exception& ex) {
+                recordError(strprintf("bootstrap stream %d exception: %s", w, ex.what()));
+            } catch (...) {
+                recordError(strprintf("bootstrap stream %d unknown exception", w));
+            }
+            if (s != INVALID_SOCKET) {
+                CloseSocket(s);
+            }
+            doneCount.fetch_add(1, std::memory_order_release);
+        });
+    }
+
+    // This thread reports aggregate progress until every stream has finished.
+    int last_logged_percent = -1;
+    int64_t last_emit_ms = 0;
+    int last_emit_decile = -1;
+    const int64_t download_started = GetTimeMillis();
+    try {
+    while (doneCount.load(std::memory_order_acquire) < nStreams) {
+        if (ShutdownRequested()) {
+            recordError("bootstrap snapshot download aborted: shutdown requested");
+        }
+        const uint64_t total_received = progressBytes.load(std::memory_order_relaxed);
+        const int percent = manifest.nSnapshotBytes > 0
+            ? (int)((total_received * 100) / manifest.nSnapshotBytes)
+            : 100;
+        if (percent != last_logged_percent) {
+            last_logged_percent = percent;
+            const int64_t elapsed_ms = std::max<int64_t>(1, GetTimeMillis() - download_started);
+            const double mbps = (total_received / 1048576.0) / (elapsed_ms / 1000.0);
+            LogPrintf("Bootstrap: downloaded %d%% (%llu/%llu bytes, %.1f MB/s, %d streams)\n",
+                percent,
+                (unsigned long long)total_received,
+                (unsigned long long)manifest.nSnapshotBytes,
+                mbps, nStreams);
+            const std::string progress = strprintf(
+                "Bootstrap snapshot: %3d%%  %.2f / %.2f GB  %.1f MB/s  (%d streams)",
+                percent,
+                total_received / 1073741824.0,
+                manifest.nSnapshotBytes / 1073741824.0,
+                mbps, nStreams);
+            if (BootstrapMetricsScreenActive()) {
+                uiInterface.InitMessage(progress);
+            } else {
+                EmitBootstrapProgress(progress, percent, percent >= 100, last_emit_ms, last_emit_decile);
+            }
+        }
+        MilliSleep(200);
+    }
+    } catch (...) {
+        // Never let an exception (e.g. thread interruption) skip the join below:
+        // the worker threads hold references to this frame's locals (recordError
+        // captures, the atomics, groups). Signal abort and fall through to join.
+        recordError("bootstrap snapshot download interrupted");
+    }
+    {
+        // The join MUST complete before this frame is destroyed, and must not
+        // itself be interrupted while workers still reference our locals.
+        boost::this_thread::disable_interruption noInterrupt;
+        workers.join_all();
+    }
+
+    if (!firstError.empty()) {
+        error = firstError;
+        return false;
+    }
+    return true;
 }
 
 static bool BootstrapHandshake(SOCKET socket, const CService& peer_address, int timeout_ms, std::string& error)
@@ -2530,14 +2803,30 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
             return false;
         }
 
-        if (!DownloadBootstrapSnapshot(socket, manifest, staging, BOOTSTRAP_NET_TIMEOUT_MS, peer, error)) {
+        // Parallel download streams beat single-flow loss-limiting on lossy WAN
+        // paths. -bootstrapstreams=1 keeps the legacy single-stream path. The
+        // master manifest was validated above; each parallel stream re-fetches
+        // and verifies it matches before any of its chunks are trusted.
+        int nStreams = (int)GetArg("-bootstrapstreams", BOOTSTRAP_DEFAULT_STREAMS);
+        if (nStreams < 1) nStreams = 1;
+        if (nStreams > BOOTSTRAP_MAX_STREAMS) nStreams = BOOTSTRAP_MAX_STREAMS;
+
+        bool downloadOk;
+        if (nStreams <= 1) {
+            downloadOk = DownloadBootstrapSnapshot(socket, manifest, staging, BOOTSTRAP_NET_TIMEOUT_MS, peer, error);
             CloseSocket(socket);
+            socket = INVALID_SOCKET;
+        } else {
+            // The parallel downloader opens its own connections; release the
+            // manifest connection (manifest already fetched and validated).
+            CloseSocket(socket);
+            socket = INVALID_SOCKET;
+            downloadOk = DownloadBootstrapSnapshotParallel(peerAddress, peer, manifest, staging, BOOTSTRAP_NET_TIMEOUT_MS, nStreams, error);
+        }
+        if (!downloadOk) {
             boost::filesystem::remove_all(staging);
             return false;
         }
-
-        CloseSocket(socket);
-        socket = INVALID_SOCKET;
 
         if (!BootstrapSnapshotPathsExist(staging)) {
             boost::filesystem::remove_all(staging);
