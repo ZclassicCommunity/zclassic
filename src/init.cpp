@@ -1987,14 +1987,28 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     InitWarning(_("EXPERIMENTAL: -bootstrapmode=trustless accepts a peer's self-snapshot provisionally and re-derives the UTXO set from genesis in the background, reindexing if it does not validate. WARNING: until validation completes (which can take as long as a full sync), the node operates on an UNVERIFIED UTXO set; do not rely on balances or spend received funds until getblockchaininfo reports bootstrap_validation state \"validated\"."));
                 else
                     InitWarning(_("Bootstrap snapshots are trusted input; the snapshot tip is verified against the compiled anchor."));
+                // Retry each peer a few times before giving up. A single transient
+                // hiccup (a brief connection blip, a serve-side snapshot refresh, a
+                // momentary stall on a lossy link) otherwise drops a fresh node
+                // SILENTLY into peerless P2P sync and it appears to hang at 0 blocks.
+                // Each BootstrapFromPeer attempt is self-contained (it stages into a
+                // fresh dir and cleans up on failure), so retrying is safe and cheap.
+                const int nBootstrapAttempts = 3;
                 BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
                     if (ShutdownRequested())
                         break;
-                    if (BootstrapFromPeer(peer, GetDataDir(), bootstrap_error)) {
-                        bootstrap_snapshot_ran = true;
-                        break;
+                    for (int attempt = 1; attempt <= nBootstrapAttempts && !ShutdownRequested(); ++attempt) {
+                        if (BootstrapFromPeer(peer, GetDataDir(), bootstrap_error)) {
+                            bootstrap_snapshot_ran = true;
+                            break;
+                        }
+                        LogPrintf("Bootstrap snapshot from %s failed (attempt %d/%d): %s\n",
+                                  peer, attempt, nBootstrapAttempts, bootstrap_error);
+                        if (attempt < nBootstrapAttempts)
+                            MilliSleep(3000); // brief backoff before retrying
                     }
-                    LogPrintf("Bootstrap snapshot from %s failed: %s\n", peer, bootstrap_error);
+                    if (bootstrap_snapshot_ran)
+                        break;
                 }
                 // If the explicit/compiled peers didn't work and the operator did
                 // not pin a specific peer, OPTIONALLY fall back to peers discovered
