@@ -186,11 +186,15 @@ public:
             ( 2013514, uint256S("0x000019679aa2ea97a3f18bd9265bc91a09929ea0b1acc0fc5ef77cdf3cf906e7"))
             ( 2879438, uint256S("0x000007e8fccb9e4831c7d7376a283b016ead6166491f951f4f083dbe366992b2"))
             ( 3126937, uint256S("0x00000663e40f1fe0bc32a7e7282fac25de5fe8ecefd9c627e2fd948d388f7053")),
-            1779903078,     // * UNIX timestamp of last checkpoint block (May 27, 2026)
-            5293850,        // * total number of transactions between genesis and last checkpoint
-                            //   (estimated based on block height progression)
-            1060            // * estimated number of transactions per day after checkpoint
-                            //   total number of tx / (checkpoint block height / (24 * 24))
+            1780195595,     // * UNIX timestamp of the verificationprogress reference block
+                            //   (mainnet height 3130800, 2026-05-31)
+            5121107,        // * cumulative transactions (nChainTx) at that block, MEASURED off a
+                            //   synced node. Used ONLY by GuessVerificationProgress -- never by
+                            //   consensus, validation, or the fast-sync anchor commitment. The
+                            //   previous value (5293850) was a height-based estimate that overshot
+                            //   the real chain, so a fully-synced node was stuck below this phantom
+                            //   target and verificationprogress capped at ~0.96 forever.
+            1138            // * recent transactions/day (measured: ~1.0 tx/block, ~1138 blocks/day)
         };
 
         fastSyncAnchorData.nHeight = 3126937;

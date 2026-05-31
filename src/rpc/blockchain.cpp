@@ -814,6 +814,14 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
     obj.push_back(Pair("chain",                 Params().NetworkIDString()));
     obj.push_back(Pair("blocks",                (int)chainActive.Height()));
     obj.push_back(Pair("headers",               pindexBestHeader ? pindexBestHeader->nHeight : -1));
+    // Best estimate of the network tip height. Headers sync ahead of blocks during
+    // IBD, so this is >= "blocks" while catching up and equals it once synced. GUI
+    // wallets use blocks/estimatedheight for an accurate, block-based progress bar
+    // (verificationprogress is a coarse tx-count heuristic, poor for a sync bar).
+    int nEstimatedHeight = chainActive.Height();
+    if (pindexBestHeader && pindexBestHeader->nHeight > nEstimatedHeight)
+        nEstimatedHeight = pindexBestHeader->nHeight;
+    obj.push_back(Pair("estimatedheight",       nEstimatedHeight));
     obj.push_back(Pair("bestblockhash",         chainActive.Tip()->GetBlockHash().GetHex()));
     obj.push_back(Pair("mediantime",            (int64_t)chainActive.Tip()->GetMedianTimePast()));
     obj.push_back(Pair("difficulty",            (double)GetNetworkDifficulty()));

@@ -9,6 +9,7 @@
 #include "hash.h"
 #include "main.h"
 #include "pow.h"
+#include "ui_interface.h"
 #include "uint256.h"
 
 #include <stdint.h>
@@ -375,6 +376,8 @@ bool CBlockTreeDB::LoadBlockIndexGuts()
 
     pcursor->Seek(make_pair(DB_BLOCK_INDEX, uint256()));
 
+    int64_t nLoaded = 0;
+
     // Load mapBlockIndex
     while (pcursor->Valid()) {
         boost::this_thread::interruption_point();
@@ -412,6 +415,16 @@ bool CBlockTreeDB::LoadBlockIndexGuts()
                     return error("LoadBlockIndex(): CheckProofOfWork failed: %s", pindexNew->ToString());
 
                 pcursor->Next();
+
+                // The block index holds millions of records; scanning it is the
+                // longest phase of an otherwise-synced startup. Emit a periodic
+                // progress message so neither the console nor a GUI looks frozen.
+                // InitMessage is wired to SetRPCWarmupStatus (init.cpp), so the
+                // climbing count also reaches GUI wallets polling over RPC during
+                // warmup. Trailing "..." matches the wallet's dot-animation. Purely
+                // cosmetic -- it does not change what is loaded.
+                if ((++nLoaded % 50000) == 0)
+                    uiInterface.InitMessage(strprintf(_("Loading block index %d..."), nLoaded));
             } else {
                 return error("LoadBlockIndex() : failed to read value");
             }
