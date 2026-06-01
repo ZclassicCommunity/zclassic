@@ -93,7 +93,34 @@ if [ -n "$PREV_HOST" ] && [ "$PREV_HOST" != "$HOST" ]; then
 fi
 
 echo "==> [3/4] building zclassicd / zclassic-cli / zclassic-tx"
-"$MAKE" "${MAKEARGS[@]}"
+if [ -n "${ZQW_STATIC_GOMP:-}" ]; then
+    # Statically embed libgomp (OpenMP runtime) so the release node does NOT need
+    # libgomp.so.1 installed on the user's machine -- a fresh desktop often lacks it,
+    # which made the GUI's embedded node fail to start ("connection refused"). The
+    # implicit dynamic -lgomp from -fopenmp is dropped by --as-needed once the static
+    # archive (placed in LIBS, after the objects) resolves the OpenMP symbols; -ldl
+    # satisfies libgomp.a's dlopen/dlsym. Read the configured Makefile's LDFLAGS/LIBS
+    # first so the depends -L path and -lanl/-lrt are preserved (not clobbered).
+    # Use the TARGET's compiler so the static libgomp.a matches the binary's ABI:
+    # a win64 cross-build needs the mingw (PE) libgomp.a, not the host (ELF) one.
+    if [ "$TARGET" = "win64" ]; then
+        GOMPA="$(x86_64-w64-mingw32-gcc -print-file-name=libgomp.a 2>/dev/null)"
+    else
+        GOMPA="$(gcc -print-file-name=libgomp.a)"
+    fi
+    if [ ! -f "$GOMPA" ]; then
+        echo "error: ZQW_STATIC_GOMP set but static libgomp.a not found ($GOMPA)" >&2
+        exit 1
+    fi
+    CUR_LDFLAGS="$(sed -n 's/^LDFLAGS = //p' src/Makefile | head -1)"
+    CUR_LIBS="$(sed -n 's/^LIBS = //p' src/Makefile | head -1)"
+    echo "    (static libgomp: $GOMPA)"
+    "$MAKE" "${MAKEARGS[@]}" \
+        LDFLAGS="$CUR_LDFLAGS -Wl,--as-needed" \
+        LIBS="$CUR_LIBS $GOMPA -ldl"
+else
+    "$MAKE" "${MAKEARGS[@]}"
+fi
 
 OUT="release/$HOST"
 mkdir -p "$OUT"
