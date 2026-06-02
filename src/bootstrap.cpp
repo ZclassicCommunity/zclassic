@@ -22,6 +22,8 @@
 #include "util.h"
 #include "utilstrencodings.h"
 
+#include <univalue.h>
+
 #include <algorithm>
 #include <atomic>
 #include <deque>
@@ -109,6 +111,53 @@ static void EmitBootstrapProgress(const std::string& line, int percent, bool don
         fprintf(stdout, "%s\n", line.c_str());
     }
     fflush(stdout);
+}
+
+// --- Read-only live bootstrap status (getbootstrapinfo RPC / GUI) -------------
+// A single lock-guarded snapshot of where the in-process bootstrap stands. It is
+// written at the existing progress/skip/fallback emit sites and copied out (never
+// referenced) by GetBootstrapInfo so the RPC thread never observes a torn read.
+static CCriticalSection g_bootstrapInfoCs;
+static BootstrapInfo g_bootstrapInfo; // default ctor: phase="idle"
+
+BootstrapInfo GetBootstrapInfo()
+{
+    LOCK(g_bootstrapInfoCs);
+    return g_bootstrapInfo; // copy-out
+}
+
+void SetBootstrapInfoPhase(const std::string& phase, const std::string& reason)
+{
+    LOCK(g_bootstrapInfoCs);
+    g_bootstrapInfo.phase = phase;
+    g_bootstrapInfo.reason = reason;
+}
+
+void SetBootstrapInfoProgress(int percent, uint64_t bytesReceived, uint64_t bytesTotal,
+                              double mbps, int streams, const std::string& peer,
+                              int peerIndex, int peerCount, int attempt, int attemptMax,
+                              const std::string& mode, int snapshotVersion)
+{
+    LOCK(g_bootstrapInfoCs);
+    g_bootstrapInfo.phase = "active";
+    // A negative / empty value means "not known at this call site" — keep the
+    // prior value so the init.cpp connect loop (which knows peer/attempt/mode)
+    // and the download loops (which know percent/bytes/streams) can each fill in
+    // only their own fields without clobbering the other's.
+    if (percent >= 0)       g_bootstrapInfo.percent = percent;
+    if (bytesTotal > 0) {
+        g_bootstrapInfo.bytesReceived = bytesReceived;
+        g_bootstrapInfo.bytesTotal = bytesTotal;
+    }
+    if (mbps >= 0.0)        g_bootstrapInfo.mbps = mbps;
+    if (streams > 0)        g_bootstrapInfo.streams = streams;
+    if (!peer.empty())      g_bootstrapInfo.peer = peer;
+    if (peerIndex > 0)      g_bootstrapInfo.peerIndex = peerIndex;
+    if (peerCount > 0)      g_bootstrapInfo.peerCount = peerCount;
+    if (attempt > 0)        g_bootstrapInfo.attempt = attempt;
+    if (attemptMax > 0)     g_bootstrapInfo.attemptMax = attemptMax;
+    if (!mode.empty())      g_bootstrapInfo.mode = mode;
+    if (snapshotVersion > 0) g_bootstrapInfo.snapshotVersion = snapshotVersion;
 }
 
 static CCriticalSection cs_bootstrap_snapshot;
@@ -841,6 +890,206 @@ bool IsGenesisOnlyChainDatadir(const boost::filesystem::path& data_dir, std::str
     }
 }
 
+// --- Abandoned-stub auto-recovery --------------------------------------------
+//
+// A node whose FIRST fast-sync failed, fell back to ordinary P2P sync, downloaded
+// a few thousand real blocks far below the compiled anchor, and then stopped (no
+// peers / slow link) is left with a NON-genesis chain that BootstrapDatadirEligible
+// rejects forever — so it can never re-fast-sync and effectively hangs. This is
+// that "abandoned stub": a tiny, real, but far-below-anchor chain we can safely
+// back up (never delete) and re-bootstrap, bounded so an offline node cannot churn.
+//
+// A genuine abandoned stub validated essentially NOTHING. The SACRED protective
+// gate is the chainstate (validated-state) size cap: a REAL ZClassic partial sync
+// has a hundreds-of-MiB-to-multi-GiB validated UTXO + shielded state well before the
+// anchor, so chainstate/ <= 64 MiB ALONE proves "this node validated almost nothing"
+// and can NEVER match a real chain we must not wipe. (The chain-WIPING hazard a prior
+// reviewer caught was a LOOSE 2 GiB cap + relative-to-anchor margin — that must never
+// be reintroduced.) The blocks/ cap is kept only as a cheap defense-in-depth pre-filter.
+//
+// A block-index-height gate was previously also applied; it was REDUNDANT (the
+// validated-state size already bounds a genuine stub) AND HARMFUL: it wrongly excluded
+// a never-validated stub that had downloaded headers far ahead (high block-index
+// height) or whose foreign-fork block index our daemon cannot parse. The decision
+// below therefore NO LONGER reads the on-disk block index at all (any read is
+// best-effort, for the log line only).
+static const uint64_t kStubMaxBlocksBytes         = 128ULL*1024*1024;  // 128 MiB hard floor for blocks/ (defense-in-depth)
+static const uint64_t kStubMaxChainstateBytes     = 64ULL*1024*1024;   // 64 MiB hard floor for chainstate/ (THE protective gate)
+// Churn guard: bounded attempts + cooldown so an offline node that keeps failing
+// burns a few attempts then idles, never repeatedly backing up (disk-fill) or looping.
+// Non-static (declared extern in bootstrap.h) so init.cpp's attempt-stamp log can
+// reference the same bounds it enforces.
+const int      kStubRecoveryMaxAttempts    = 3;
+const int64_t  kStubRecoveryCooldownSecs   = 6*60*60;                  // 6h
+
+// Returns true iff data_dir holds an ABANDONED STUB chain: a readable chainstate
+// whose best block is non-null and != our genesis, AND whose chainstate/ is under
+// the SACRED validated-state cap (kStubMaxChainstateBytes, 64 MiB) — which alone
+// proves the node validated essentially nothing — AND whose blocks/ is under a
+// cheap defense-in-depth cap. The decision does NOT consult the on-disk block index
+// (a foreign-fork index may be unparseable, or report a high downloaded-header height
+// while validating nothing); outHeight is filled best-effort from the index for the
+// log line only and never gates the decision. All checks are defense-in-depth: each
+// rejecting condition returns false so a real, near-synced, corrupt, or inconsistent
+// datadir is left untouched. On a rejection `error` may carry a human-readable
+// reason; on success outHeight is the stub tip height, or -1 if it could not be read.
+bool IsAbandonedStubChainDatadir(const boost::filesystem::path& data_dir, int& outHeight, std::string& error)
+{
+    outHeight = -1;
+    // 1) No compiled fast-sync anchor => no notion of "far below anchor".
+    const CFastSyncAnchorData anchor = Params().FastSyncAnchor();
+    if (anchor.nHeight < 0 || anchor.hashBlock.IsNull()) {
+        error = "no compiled fast-sync anchor";
+        return false;
+    }
+    // 2) A stub actually synced some real blocks, so it has BOTH dirs. A blocks-only
+    //    or chainstate-only datadir is the genesis-only / partial-install case handled
+    //    elsewhere.
+    const boost::filesystem::path chainstate_dir = data_dir / "chainstate";
+    const boost::filesystem::path blocks_dir = data_dir / "blocks";
+    if (!boost::filesystem::exists(chainstate_dir) || !boost::filesystem::exists(blocks_dir))
+        return false;
+
+    try {
+        // 3) SIZE GATE (cheap, first; short-circuits at the cap). A real mainnet chain
+        //    is ~10 GiB of blocks so it can never pass these floors.
+        if (DirBytesCappedAt(blocks_dir, kStubMaxBlocksBytes) > kStubMaxBlocksBytes) {
+            error = "blocks/ over stub cap (real chain)";
+            return false;
+        }
+        if (DirBytesCappedAt(chainstate_dir, kStubMaxChainstateBytes) > kStubMaxChainstateBytes) {
+            error = "chainstate/ over stub cap (real chain)";
+            return false;
+        }
+        // 4) READABILITY + best block. A throw here means corrupt/unopenable chainstate;
+        //    corruption is NOT a stub (it belongs to the reindex path) — see catch.
+        CCoinsViewDB probe(chainstate_dir, 1 << 23, false, false);
+        const uint256 best = probe.GetBestBlock();
+        // 5) Null/genesis tip is the genesis-only / wiped case, not a stub.
+        if (best.IsNull())
+            return false;
+        if (best == Params().GenesisBlock().GetHash())
+            return false;
+        // 6) DECISION COMPLETE: gates (1)-(5) hold => an abandoned never-validated stub.
+        //    Best-effort, NON-GATING height read for the log line ONLY. The on-disk block
+        //    index may be a foreign fork our daemon cannot parse (ReadDiskBlockIndex throws)
+        //    or report a high downloaded-header height while validating nothing; either way
+        //    it must NOT reject a genuine never-validated stub. outHeight stays -1 on any
+        //    failure, which logs acceptably.
+        try {
+            CBlockTreeDB tree(data_dir / "blocks" / "index", 1 << 22, false, false);
+            CDiskBlockIndex di;
+            if (tree.ReadDiskBlockIndex(best, di))
+                outHeight = di.nHeight;
+        } catch (...) {
+            // foreign/unparseable index is informational only; leave outHeight = -1.
+        }
+    } catch (const std::exception& e) {
+        // Unopenable/torn chainstate: not provably a stub. Leave it for the normal
+        // reindex path. (The block-index read above has its own inner catch and never
+        // reaches here.)
+        error = strprintf("could not probe candidate stub datadir %s: %s", data_dir.string(), e.what());
+        return false;
+    }
+    // 7) Readable, non-null non-genesis tip, chainstate/ under the sacred validated-state
+    //    cap and blocks/ under the defense-in-depth cap. The block index was NOT consulted.
+    return true;
+}
+
+// --- Abandoned-stub recovery churn-guard marker ------------------------------
+//
+// A datadir-sibling JSON marker (bootstrap-stub-recovery.json) records how many
+// recovery attempts have been made against the current anchor and when the last
+// one started. The counter+timestamp are stamped BEFORE any backup/download (see
+// init.cpp) so an offline node that keeps failing cannot churn. anchor_height is
+// recorded so a future compiled-anchor bump resets the counter (a new target, not
+// the same failing loop).
+static boost::filesystem::path BootstrapStubRecoveryMarkerPath(const boost::filesystem::path& data_dir)
+{
+    return data_dir / "bootstrap-stub-recovery.json";
+}
+
+bool ReadStubRecoveryMarker(const boost::filesystem::path& data_dir, StubRecoveryState& out)
+{
+    out = StubRecoveryState();
+    FILE* f = fopen(BootstrapStubRecoveryMarkerPath(data_dir).string().c_str(), "r");
+    if (!f) return false;
+    std::string contents;
+    char buf[512];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+        contents.append(buf, n);
+    fclose(f);
+    try {
+        UniValue root;
+        if (!root.read(contents) || !root.isObject())
+            return false;
+        const UniValue& a = root["attempts"];
+        const UniValue& l = root["last_attempt"];
+        const UniValue& h = root["anchor_height"];
+        if (a.isNum()) out.attempts = a.get_int();
+        if (l.isNum()) out.lastAttempt = (int64_t)l.get_int64();
+        if (h.isNum()) out.anchorHeight = h.get_int();
+        return true;
+    } catch (const std::exception&) {
+        // Unparseable marker: treat as zeroed (out was reset above).
+        out = StubRecoveryState();
+        return false;
+    }
+}
+
+bool WriteStubRecoveryMarker(const boost::filesystem::path& data_dir, const StubRecoveryState& st)
+{
+    // Plain-text JSON kept greppable for headless tests; written durably (data +
+    // directory entry fsync'd) via the shared marker writer. Returns false if the
+    // marker could not be persisted so the caller can FAIL CLOSED (an attempt that
+    // cannot be durably counted must not run, or an offline node would churn).
+    const std::string contents = strprintf(
+        "{\"attempts\": %d, \"last_attempt\": %lld, \"anchor_height\": %d}\n",
+        st.attempts, (long long)st.lastAttempt, st.anchorHeight);
+    std::string err;
+    if (!WriteDurableDatadirMarker(BootstrapStubRecoveryMarkerPath(data_dir), contents, err)) {
+        LogPrintf("Bootstrap: could not write stub-recovery marker: %s\n", err);
+        return false;
+    }
+    return true;
+}
+
+void ClearStubRecoveryMarker(const boost::filesystem::path& data_dir)
+{
+    boost::system::error_code ec;
+    boost::filesystem::remove(BootstrapStubRecoveryMarkerPath(data_dir), ec);
+}
+
+// Decide whether an abandoned-stub recovery may run NOW against `anchorHeight`,
+// applying the bounded-attempts + cooldown churn guard. A changed anchor resets the
+// counter (a new fast-sync target, not the same failing loop). Returns false with a
+// human-readable skipReason when blocked.
+bool StubRecoveryAllowedNow(const boost::filesystem::path& data_dir, int anchorHeight, std::string& skipReason)
+{
+    StubRecoveryState st;
+    ReadStubRecoveryMarker(data_dir, st);
+    // Anchor changed since last run -> fresh target, reset the counter (do not block a
+    // new anchor on old failures).
+    if (st.anchorHeight != anchorHeight) {
+        st.attempts = 0;
+        st.lastAttempt = 0;
+        st.anchorHeight = anchorHeight;
+    }
+    if (st.attempts >= kStubRecoveryMaxAttempts) {
+        skipReason = strprintf("max stub-recovery attempts (%d) reached; leaving for normal P2P sync",
+                               kStubRecoveryMaxAttempts);
+        return false;
+    }
+    const int64_t now = GetTime();
+    if (st.lastAttempt != 0 && (now - st.lastAttempt) < kStubRecoveryCooldownSecs) {
+        skipReason = strprintf("stub recovery in cooldown (%llds since last of %lld)",
+                               (long long)(now - st.lastAttempt), (long long)kStubRecoveryCooldownSecs);
+        return false;
+    }
+    return true;
+}
+
 // Move a genesis-only datadir's blocks/ and chainstate/ into a timestamped backup
 // directory so the datadir becomes "fresh" again and a bootstrap snapshot can be
 // imported into it. Mirrors the backup step in ImportBootstrapDatadir. wallet.dat,
@@ -1343,9 +1592,22 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
                     total_received / 1073741824.0,
                     manifest.nSnapshotBytes / 1073741824.0,
                     mbps);
-                if (BootstrapMetricsScreenActive()) {
-                    uiInterface.InitMessage(progress);
-                } else {
+                // Always feed InitMessage so SetRPCWarmupStatus reflects live
+                // download progress and a GUI child polling getinfo sees it
+                // (noui_InitMessage only LogPrintf's -> no extra console line).
+                // The GUI parses "Bootstrap snapshot: NN%" out of this string;
+                // keep that prefix in sync with zcl-qt-wallet src/connection.cpp.
+                uiInterface.InitMessage(progress);
+                // Mirror the same numbers into the structured getbootstrapinfo
+                // status (peer/attempt/mode are filled in by init.cpp; streams=1
+                // for this single-stream/subset path).
+                SetBootstrapInfoProgress(percent, total_received, manifest.nSnapshotBytes,
+                                         mbps, 1, "", 0, 0, 0, 0, "",
+                                         manifest.nVersion);
+                // Console in-place line only when the metrics screen is NOT
+                // drawing (it renders InitMessage on its own managed line;
+                // writing to stdout too would fight/flicker).
+                if (!BootstrapMetricsScreenActive()) {
                     EmitBootstrapProgress(progress, percent, percent >= 100, last_emit_ms, last_emit_decile);
                 }
             }
@@ -1567,9 +1829,17 @@ static bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const
                 total_received / 1073741824.0,
                 manifest.nSnapshotBytes / 1073741824.0,
                 mbps, nStreams);
-            if (BootstrapMetricsScreenActive()) {
-                uiInterface.InitMessage(progress);
-            } else {
+            // Always feed InitMessage (RPC warmup status -> GUI getinfo). The
+            // GUI parses "Bootstrap snapshot: NN%" out of this; keep the prefix
+            // in sync with zcl-qt-wallet src/connection.cpp. noui_InitMessage
+            // only LogPrintf's, so this adds no console line.
+            uiInterface.InitMessage(progress);
+            // Mirror the same numbers into the structured getbootstrapinfo status
+            // (peer/attempt/mode are filled in by init.cpp's connect loop).
+            SetBootstrapInfoProgress(percent, total_received, manifest.nSnapshotBytes,
+                                     mbps, nStreams, peer, 0, 0, 0, 0, "",
+                                     manifest.nVersion);
+            if (!BootstrapMetricsScreenActive()) {
                 EmitBootstrapProgress(progress, percent, percent >= 100, last_emit_ms, last_emit_decile);
             }
         }
@@ -3097,6 +3367,7 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
     }
 
     LogPrintf("Downloaded bootstrap chain data from peer %s\n", peer);
+    SetBootstrapInfoPhase("succeeded", "");
     return true;
 }
 
@@ -3134,13 +3405,20 @@ static bool HashBootstrapSnapshotFile(const boost::filesystem::path& path, uint2
     }
 
     CSHA256 hasher;
-    unsigned char buffer[1024 * 1024];
+    // The hash buffer MUST be heap-allocated, not on the stack. This function runs on
+    // boost worker threads from the parallel snapshot downloader, whose default stack
+    // is small (512 KiB on macOS), so a 1 MiB on-stack buffer overruns the guard page
+    // and SIGBUSes (EXC_BAD_ACCESS, "thread stack size exceeded") mid bootstrap verify.
+    // Heap, same 1 MiB chunk -> no throughput change. (Fix surfaced by the macOS build;
+    // also at risk on Windows, whose default thread stack is 1 MiB.)
+    const size_t kChunk = 1024 * 1024;
+    std::vector<unsigned char> buffer(kChunk);
     while (true) {
-        size_t nRead = fread(buffer, 1, sizeof(buffer), file);
+        size_t nRead = fread(buffer.data(), 1, buffer.size(), file);
         if (nRead > 0) {
-            hasher.Write(buffer, nRead);
+            hasher.Write(buffer.data(), nRead);
         }
-        if (nRead < sizeof(buffer)) {
+        if (nRead < buffer.size()) {
             if (ferror(file)) {
                 error = strprintf("error reading bootstrap snapshot file: %s", path.string());
                 fclose(file);

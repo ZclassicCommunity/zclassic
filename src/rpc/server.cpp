@@ -446,10 +446,17 @@ std::string JSONRPCExecBatch(const UniValue& vReq)
 
 UniValue CRPCTable::execute(const std::string &strMethod, const UniValue &params) const
 {
-    // Return immediately if in warmup
+    // Return immediately if in warmup, EXCEPT for a small set of methods that
+    // must answer while the node is still starting up. getbootstrapinfo is the
+    // disambiguator a GUI polls during warmup to tell an active bootstrap from a
+    // stalled/idle start; help and stop are the standard escape hatches. All
+    // other methods are still refused with RPC_IN_WARMUP.
     {
         LOCK(cs_rpcWarmup);
-        if (fRPCInWarmup)
+        if (fRPCInWarmup &&
+            strMethod != "getbootstrapinfo" &&
+            strMethod != "help" &&
+            strMethod != "stop")
             throw JSONRPCError(RPC_IN_WARMUP, rpcWarmupStatus);
     }
 

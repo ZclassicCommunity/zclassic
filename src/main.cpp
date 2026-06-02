@@ -8,7 +8,6 @@
 #include "sodium.h"
 
 #include "addrman.h"
-#include "alert.h"
 #include "arith_uint256.h"
 #include "bootstrap.h"
 #include "bootstrapvalidation.h"
@@ -23,6 +22,7 @@
 #include "metrics.h"
 #include "net.h"
 #include "pow.h"
+#include "rpc/server.h"
 #include "txdb.h"
 #include "txmempool.h"
 #include "ui_interface.h"
@@ -88,7 +88,6 @@ bool fCoinbaseEnforcedProtectionEnabled = true;
 std::atomic<bool> g_bootstrapForwardConnect(false);
 size_t nCoinCacheUsage = 5000 * 300;
 uint64_t nPruneTarget = 0;
-bool fAlerts = DEFAULT_ALERTS;
 /* If the tip is older than this (in seconds), the node is considered to be in initial block download.
  */
 int64_t nMaxTipAge = DEFAULT_MAX_TIP_AGE;
@@ -1899,7 +1898,7 @@ void CheckForkWarningConditions()
         {
             std::string warning = std::string("'Warning: Large-work fork detected, forking after block ") +
                 pindexBestForkBase->phashBlock->ToString() + std::string("'");
-            CAlert::Notify(warning, true);
+            AlertNotify(warning, true);
         }
         if (pindexBestForkTip && pindexBestForkBase)
         {
@@ -1912,7 +1911,7 @@ void CheckForkWarningConditions()
         {
             std::string warning = std::string("Warning: Found invalid chain at least ~6 blocks longer than our best chain.\nChain state database corruption likely.");
             LogPrintf("%s: %s\n", warning.c_str(), __func__);
-            CAlert::Notify(warning, true);
+            AlertNotify(warning, true);
             fLargeWorkInvalidChainFound = true;
         }
     }
@@ -2513,7 +2512,7 @@ void PartitionCheck(bool (*initialDownloadCheck)(), CCriticalSection& cs, const 
     if (!strWarning.empty())
     {
         strMiscWarning = strWarning;
-        CAlert::Notify(strWarning, true);
+        AlertNotify(strWarning, true);
         lastAlertTime = now;
     }
 }
@@ -2974,7 +2973,7 @@ void static UpdateTip(CBlockIndex *pindexNew) {
         {
             // strMiscWarning is read by GetWarnings(), called by the JSON-RPC code to warn the user:
             strMiscWarning = _("Warning: This version is obsolete; upgrade required!");
-            CAlert::Notify(strMiscWarning, true);
+            AlertNotify(strMiscWarning, true);
             fWarned = true;
         }
     }
@@ -3616,11 +3615,25 @@ static void PruneBlockIndexCandidates() {
  * Try to make some progress towards making pindexMostWork the active block.
  * pblock is either NULL or a pointer to a CBlock corresponding to pindexMostWork.
  */
+// Throttle (and persist across the repeated ActivateBestChainStep calls that
+// ActivateBestChain makes) the integer percent we last surfaced to the GUI
+// warmup status during the init-time connect replay. Guarded by cs_main, which
+// ActivateBestChainStep always holds.
+static int nLastReplayInitPercent = -1;
+
 static bool ActivateBestChainStep(CValidationState &state, CBlockIndex *pindexMostWork, CBlock *pblock) {
     AssertLockHeld(cs_main);
     bool fInvalidFound = false;
     const CBlockIndex *pindexOldTip = chainActive.Tip();
     const CBlockIndex *pindexFork = chainActive.FindFork(pindexMostWork);
+
+    // Only surface per-block connect progress while still in the RPC warmup
+    // window (i.e. during the init-time ActivateBestChain replay after a
+    // bootstrap import or a mid-sync restart). Outside warmup this is the live
+    // single-block connect path and emitting status there would be noise.
+    const bool fInitReplay = RPCIsInWarmup(NULL) && pindexMostWork != NULL;
+    const int nReplayBase = pindexFork ? pindexFork->nHeight : 0;
+    const int nReplaySpan = pindexMostWork ? (pindexMostWork->nHeight - nReplayBase) : 0;
 
     // - On ChainDB initialization, pindexOldTip will be null, so there are no removable blocks.
     // - If pindexMostWork is in a chain that doesn't have the same genesis block as our chain,
@@ -3689,6 +3702,20 @@ static bool ActivateBestChainStep(CValidationState &state, CBlockIndex *pindexMo
                 }
             } else {
                 PruneBlockIndexCandidates();
+                // During the init-time replay, push a throttled height/percent
+                // into the warmup status so the GUI watchdog's no-progress timer
+                // keeps resetting and the user sees the chain advancing. Only
+                // emit when the integer percent changes, to avoid spam.
+                if (fInitReplay) {
+                    int percentageDone = nReplaySpan > 0
+                        ? std::max(1, std::min(99, (int)(((double)(chainActive.Tip()->nHeight - nReplayBase)) / (double)nReplaySpan * 100)))
+                        : 99;
+                    if (percentageDone != nLastReplayInitPercent) {
+                        uiInterface.InitMessage(strprintf(_("Activating best chain... height %d (%d%%)"),
+                                                          chainActive.Tip()->nHeight, percentageDone));
+                        nLastReplayInitPercent = percentageDone;
+                    }
+                }
                 if (!pindexOldTip || chainActive.Tip()->nChainWork > pindexOldTip->nChainWork) {
                     // We're in a better position than we were. Return temporarily to release the lock.
                     fContinue = false;
@@ -5014,10 +5041,21 @@ bool CVerifyDB::VerifyDB(CCoinsView *coinsview, int nCheckLevel, int nCheckDepth
     CValidationState state;
     // No need to verify JoinSplits twice
     auto verifier = libzcash::ProofVerifier::Disabled();
+    // Mirror the ShowProgress percentage into the warmup status string (via
+    // InitMessage) so the GUI watchdog's no-progress timer keeps resetting and
+    // the user sees real movement during this multi-minute phase; ShowProgress
+    // alone is not routed to the RPC warmup status. Throttle to only emit when
+    // the integer percent changes to avoid spamming the status.
+    int nLastInitPercent = -1;
     for (CBlockIndex* pindex = chainActive.Tip(); pindex && pindex->pprev; pindex = pindex->pprev)
     {
         boost::this_thread::interruption_point();
-        uiInterface.ShowProgress(_("Verifying blocks..."), std::max(1, std::min(99, (int)(((double)(chainActive.Height() - pindex->nHeight)) / (double)nCheckDepth * (nCheckLevel >= 4 ? 50 : 100)))));
+        int percentageDone = std::max(1, std::min(99, (int)(((double)(chainActive.Height() - pindex->nHeight)) / (double)nCheckDepth * (nCheckLevel >= 4 ? 50 : 100))));
+        uiInterface.ShowProgress(_("Verifying blocks..."), percentageDone);
+        if (percentageDone != nLastInitPercent) {
+            uiInterface.InitMessage(strprintf(_("Verifying blocks... (%d%%)"), percentageDone));
+            nLastInitPercent = percentageDone;
+        }
         if (pindex->nHeight < chainActive.Height()-nCheckDepth)
             break;
         CBlock block;
@@ -5061,7 +5099,12 @@ bool CVerifyDB::VerifyDB(CCoinsView *coinsview, int nCheckLevel, int nCheckDepth
         CBlockIndex *pindex = pindexState;
         while (pindex != chainActive.Tip()) {
             boost::this_thread::interruption_point();
-            uiInterface.ShowProgress(_("Verifying blocks..."), std::max(1, std::min(99, 100 - (int)(((double)(chainActive.Height() - pindex->nHeight)) / (double)nCheckDepth * 50))));
+            int percentageDone = std::max(1, std::min(99, 100 - (int)(((double)(chainActive.Height() - pindex->nHeight)) / (double)nCheckDepth * 50)));
+            uiInterface.ShowProgress(_("Verifying blocks..."), percentageDone);
+            if (percentageDone != nLastInitPercent) {
+                uiInterface.InitMessage(strprintf(_("Verifying blocks... (%d%%)"), percentageDone));
+                nLastInitPercent = percentageDone;
+            }
             pindex = chainActive.Next(pindex);
             CBlock block;
             if (!ReadBlockFromDisk(block, pindex))
@@ -5621,12 +5664,11 @@ void static CheckBlockIndex()
 
 //////////////////////////////////////////////////////////////////////////////
 //
-// CAlert
+// Warnings
 //
 
 std::string GetWarnings(const std::string& strFor)
 {
-    int nPriority = 0;
     string strStatusBar;
     string strRPC;
 
@@ -5639,36 +5681,16 @@ std::string GetWarnings(const std::string& strFor)
     // Misc warnings like out of disk space and clock is wrong
     if (strMiscWarning != "")
     {
-        nPriority = 1000;
         strStatusBar = strMiscWarning;
     }
 
     if (fLargeWorkForkFound)
     {
-        nPriority = 2000;
         strStatusBar = strRPC = _("Warning: The network does not appear to fully agree! Some miners appear to be experiencing issues.");
     }
     else if (fLargeWorkInvalidChainFound)
     {
-        nPriority = 2000;
         strStatusBar = strRPC = _("Warning: We do not appear to fully agree with our peers! You may need to upgrade, or other nodes may need to upgrade.");
-    }
-
-    // Alerts
-    {
-        LOCK(cs_mapAlerts);
-        BOOST_FOREACH(PAIRTYPE(const uint256, CAlert)& item, mapAlerts)
-        {
-            const CAlert& alert = item.second;
-            if (alert.AppliesToMe() && alert.nPriority > nPriority)
-            {
-                nPriority = alert.nPriority;
-                strStatusBar = alert.strStatusBar;
-                if (alert.nPriority >= ALERT_PRIORITY_SAFE_MODE) {
-                    strRPC = alert.strRPCError;
-                }
-            }
-        }
     }
 
     if (strFor == "statusbar")
@@ -6111,13 +6133,6 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
                 addrman.Add(addrFrom, addrFrom);
                 addrman.Good(addrFrom);
             }
-        }
-
-        // Relay alerts
-        {
-            LOCK(cs_mapAlerts);
-            BOOST_FOREACH(PAIRTYPE(const uint256, CAlert)& item, mapAlerts)
-                item.second.RelayTo(pfrom);
         }
 
         pfrom->fSuccessfullyConnected = true;
@@ -6912,37 +6927,6 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
         }
         if (bPingFinished) {
             pfrom->nPingNonceSent = 0;
-        }
-    }
-
-
-    else if (fAlerts && strCommand == "alert")
-    {
-        CAlert alert;
-        vRecv >> alert;
-
-        uint256 alertHash = alert.GetHash();
-        if (pfrom->setKnown.count(alertHash) == 0)
-        {
-            if (alert.ProcessAlert(Params().AlertKey()))
-            {
-                // Relay
-                pfrom->setKnown.insert(alertHash);
-                {
-                    LOCK(cs_vNodes);
-                    BOOST_FOREACH(CNode* pnode, vNodes)
-                        alert.RelayTo(pnode);
-                }
-            }
-            else {
-                // Small DoS penalty so peers that send us lots of
-                // duplicate/expired/invalid-signature/whatever alerts
-                // eventually get banned.
-                // This isn't a Misbehaving(100) (immediate ban) because the
-                // peer might be an older or different implementation with
-                // a different signature key, etc.
-                Misbehaving(pfrom->GetId(), 10);
-            }
         }
     }
 

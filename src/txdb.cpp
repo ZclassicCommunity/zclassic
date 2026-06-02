@@ -201,6 +201,13 @@ bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins,
 CBlockTreeDB::CBlockTreeDB(size_t nCacheSize, bool fMemory, bool fWipe) : CDBWrapper(GetDataDir() / "blocks" / "index", nCacheSize, fMemory, fWipe) {
 }
 
+CBlockTreeDB::CBlockTreeDB(const boost::filesystem::path& path, size_t nCacheSize, bool fMemory, bool fWipe) : CDBWrapper(path, nCacheSize, fMemory, fWipe) {
+}
+
+bool CBlockTreeDB::ReadDiskBlockIndex(const uint256& hash, CDiskBlockIndex& diskindex) {
+    return Read(make_pair(DB_BLOCK_INDEX, hash), diskindex);
+}
+
 bool CBlockTreeDB::ReadBlockFileInfo(int nFile, CBlockFileInfo &info) {
     return Read(make_pair(DB_BLOCK_FILES, nFile), info);
 }

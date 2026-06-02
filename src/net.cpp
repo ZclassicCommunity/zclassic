@@ -1239,10 +1239,20 @@ void ThreadSocketHandler()
 }
 
 
+// Below this addrman size we still run DNS seeding even when >=2 peers are
+// connected: a node that can reach ONLY the two pinned bootstrap -addnode peers
+// (init.cpp injects Params().BootstrapPeers() as persistent -addnode on every
+// start) would otherwise satisfy the vNodes>=2 skip and never enrich addrman
+// beyond those two seeded IPs, leaving it permanently dependent on exactly those
+// peers. CNode carries no addnode flag in this tree, so we gate on addrman size:
+// a tiny addrman (only the seeded bootstrap addresses) still seeds once.
+static const unsigned int kMinAddrmanToSkipDnsSeeding = 4;
+
 void ThreadDNSAddressSeed()
 {
-    // goal: only query DNS seeds if address need is acute
-    if ((addrman.size() > 0) &&
+    // goal: only query DNS seeds if address need is acute. Pure availability:
+    // this can only ADD addresses to addrman; it never drops peers.
+    if ((addrman.size() > kMinAddrmanToSkipDnsSeeding) &&
         (!GetBoolArg("-forcednsseed", false))) {
         MilliSleep(11 * 1000);
 
