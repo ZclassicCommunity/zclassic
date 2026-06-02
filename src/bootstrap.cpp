@@ -3134,13 +3134,20 @@ static bool HashBootstrapSnapshotFile(const boost::filesystem::path& path, uint2
     }
 
     CSHA256 hasher;
-    unsigned char buffer[1024 * 1024];
+    // The hash buffer MUST be heap-allocated, not on the stack. This function runs on
+    // boost worker threads from the parallel snapshot downloader, whose default stack
+    // is small (512 KiB on macOS), so a 1 MiB on-stack buffer overruns the guard page
+    // and SIGBUSes (EXC_BAD_ACCESS, "thread stack size exceeded") mid bootstrap verify.
+    // Heap, same 1 MiB chunk -> no throughput change. (Fix surfaced by the macOS build;
+    // also at risk on Windows, whose default thread stack is 1 MiB.)
+    const size_t kChunk = 1024 * 1024;
+    std::vector<unsigned char> buffer(kChunk);
     while (true) {
-        size_t nRead = fread(buffer, 1, sizeof(buffer), file);
+        size_t nRead = fread(buffer.data(), 1, buffer.size(), file);
         if (nRead > 0) {
-            hasher.Write(buffer, nRead);
+            hasher.Write(buffer.data(), nRead);
         }
-        if (nRead < sizeof(buffer)) {
+        if (nRead < buffer.size()) {
             if (ferror(file)) {
                 error = strprintf("error reading bootstrap snapshot file: %s", path.string());
                 fclose(file);
