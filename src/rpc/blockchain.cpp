@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "amount.h"
+#include "bootstrap.h"
 #include "bootstrapvalidation.h"
 #include "chain.h"
 #include "chainparams.h"
@@ -1262,10 +1263,93 @@ UniValue reconsiderblock(const UniValue& params, bool fHelp)
     return NullUniValue;
 }
 
+UniValue getbootstrapinfo(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 0)
+        throw runtime_error(
+            "getbootstrapinfo\n"
+            "\nReturn the status of the fast-sync bootstrap snapshot for this node.\n"
+            "Read-only: it triggers no datadir mutation and answers during RPC\n"
+            "warmup, so a GUI may poll it freely while the node is starting up.\n"
+            "\nResult:\n"
+            "{\n"
+            "  \"phase\": \"xxx\",            (string) one of \"idle\", \"active\", \"succeeded\",\n"
+            "                              \"skipped\", \"failed\", \"normal_sync\"\n"
+            "  \"percent\": n,               (numeric, only when phase==\"active\") 0-100 download progress\n"
+            "  \"bytes_received\": n,        (numeric, only when phase==\"active\")\n"
+            "  \"bytes_total\": n,           (numeric, only when phase==\"active\")\n"
+            "  \"mbps\": x.x,                (numeric, only when phase==\"active\") download throughput\n"
+            "  \"streams\": n,               (numeric, only when phase==\"active\") parallel streams\n"
+            "  \"peer\": \"host:port\",        (string) current/last bootstrap peer (\"\" if none)\n"
+            "  \"peer_index\": n,            (numeric) 1-based index of the peer being tried\n"
+            "  \"peer_count\": n,            (numeric) number of bootstrap peers in the list\n"
+            "  \"attempt\": n,               (numeric) 1-based current attempt against this peer\n"
+            "  \"attempt_max\": n,           (numeric) max attempts per peer\n"
+            "  \"mode\": \"xxx\",             (string) \"anchor\" or \"trustless\"\n"
+            "  \"snapshot_version\": n,      (numeric) snapshot manifest version (1|2|3), 0 if unknown\n"
+            "  \"reason\": \"xxx\",            (string) why skipped/failed (\"\" otherwise)\n"
+            "  \"verify_pending\": true|false, (boolean) an imported snapshot still awaits verification\n"
+            "  \"validation_state\": \"xxx\",  (string) \"disabled\"|\"provisional\"|\"provisional_pruned\"|\n"
+            "                              \"validated\"|\"failed\"\n"
+            "  \"tip_hold\": true|false      (boolean) auto-finalization paused pending tip corroboration\n"
+            "}\n"
+            "\nExamples:\n"
+            + HelpExampleCli("getbootstrapinfo", "")
+            + HelpExampleRpc("getbootstrapinfo", "")
+        );
+
+    BootstrapInfo info = GetBootstrapInfo();
+
+    UniValue obj(UniValue::VOBJ);
+    obj.push_back(Pair("phase", info.phase));
+    if (info.phase == "active") {
+        obj.push_back(Pair("percent", info.percent));
+        obj.push_back(Pair("bytes_received", (uint64_t)info.bytesReceived));
+        obj.push_back(Pair("bytes_total", (uint64_t)info.bytesTotal));
+        obj.push_back(Pair("mbps", info.mbps));
+        obj.push_back(Pair("streams", info.streams));
+    }
+    obj.push_back(Pair("peer", info.peer));
+    obj.push_back(Pair("peer_index", info.peerIndex));
+    obj.push_back(Pair("peer_count", info.peerCount));
+    obj.push_back(Pair("attempt", info.attempt));
+    obj.push_back(Pair("attempt_max", info.attemptMax));
+    obj.push_back(Pair("mode", info.mode));
+    obj.push_back(Pair("snapshot_version", info.snapshotVersion));
+    obj.push_back(Pair("reason", info.reason));
+
+    // Durable across restarts: derive verify_pending / validation_state / tip_hold
+    // live from the on-disk markers and the validation status, so a daemon
+    // restarted mid-verify still reports correctly even though the in-memory
+    // phase above reset to "idle". These reads never mutate the datadir.
+    const bool verifyPending = BootstrapAnchorPendingExists(GetDataDir()) ||
+                               BootstrapTrustlessPendingExists(GetDataDir());
+    obj.push_back(Pair("verify_pending", verifyPending));
+
+    BootstrapValidationStatus bv = GetBootstrapValidationStatus();
+    const char* stateStr = "disabled";
+    switch (bv.state) {
+        case BVS_PROVISIONAL:        stateStr = "provisional"; break;
+        case BVS_PROVISIONAL_PRUNED: stateStr = "provisional_pruned"; break;
+        case BVS_VALIDATED:          stateStr = "validated"; break;
+        case BVS_FAILED:             stateStr = "failed"; break;
+        default:                     stateStr = "disabled"; break;
+    }
+    obj.push_back(Pair("validation_state", stateStr));
+
+    int tipHoldHeight = -1;
+    uint256 tipHoldHash;
+    GetBootstrapTipHold(tipHoldHeight, tipHoldHash);
+    obj.push_back(Pair("tip_hold", tipHoldHeight >= 0));
+
+    return obj;
+}
+
 static const CRPCCommand commands[] =
 { //  category              name                      actor (function)         okSafeMode
   //  --------------------- ------------------------  -----------------------  ----------
     { "blockchain",         "getblockchaininfo",      &getblockchaininfo,      true  },
+    { "blockchain",         "getbootstrapinfo",       &getbootstrapinfo,       true  },
     { "blockchain",         "getbestblockhash",       &getbestblockhash,       true  },
     { "blockchain",         "getblockcount",          &getblockcount,          true  },
     { "blockchain",         "getblock",               &getblock,               true  },

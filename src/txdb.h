@@ -16,6 +16,7 @@
 
 class CBlockFileInfo;
 class CBlockIndex;
+class CDiskBlockIndex;
 struct CDiskTxPos;
 class uint256;
 
@@ -61,6 +62,10 @@ class CBlockTreeDB : public CDBWrapper
 {
 public:
     CBlockTreeDB(size_t nCacheSize, bool fMemory = false, bool fWipe = false);
+    //! Open the block index leveldb at an explicit path (rather than the implicit
+    //! GetDataDir()/blocks/index). Used by the abandoned-stub probe to read a single
+    //! keyed block-index record from a candidate datadir before the live DB is open.
+    CBlockTreeDB(const boost::filesystem::path& path, size_t nCacheSize, bool fMemory = false, bool fWipe = false);
 private:
     CBlockTreeDB(const CBlockTreeDB&);
     void operator=(const CBlockTreeDB&);
@@ -76,6 +81,10 @@ public:
     bool WriteFlag(const std::string &name, bool fValue);
     bool ReadFlag(const std::string &name, bool &fValue);
     bool LoadBlockIndexGuts();
+    //! O(1) keyed point-read of a single CDiskBlockIndex record by block hash,
+    //! without the full LoadBlockIndexGuts scan/PoW-check. Used by the abandoned-stub
+    //! probe to learn a tip's height cheaply. Returns false if the hash is absent.
+    bool ReadDiskBlockIndex(const uint256& hash, CDiskBlockIndex& diskindex);
 };
 
 #endif // BITCOIN_TXDB_H

@@ -48,6 +48,45 @@ bool IsBootstrapFreshChainDatadir(const boost::filesystem::path& data_dir, std::
 // True if the datadir holds only a genesis-height chainstate (initialized but
 // never synced past genesis); such a datadir carries no real chain.
 bool IsGenesisOnlyChainDatadir(const boost::filesystem::path& data_dir, std::string& error);
+// True if the datadir holds an ABANDONED STUB chain: a never-validated chain left by
+// a node whose first fast-sync failed and then fell back to (and stalled in) ordinary
+// P2P sync. The decisive protective gate is the chainstate (validated-state) size cap
+// (kStubMaxChainstateBytes, 64 MiB): a real ZClassic partial sync has a
+// hundreds-of-MiB-to-multi-GiB validated state and can never match it. The on-disk
+// block index is NEVER consulted for the decision (a foreign-fork index may be
+// unparseable or report a high downloaded-header height while validating nothing);
+// outHeight is filled best-effort for logging only, or -1 if it could not be read.
+// Such a datadir is safe to back up (never delete) and re-bootstrap. Defense-in-depth:
+// a real/near-synced (large chainstate), corrupt, or genesis-only datadir returns
+// false and is left untouched.
+bool IsAbandonedStubChainDatadir(const boost::filesystem::path& data_dir, int& outHeight, std::string& error);
+
+// Abandoned-stub recovery churn-guard bounds (defined in bootstrap.cpp). Exposed so
+// the init.cpp attempt-stamp log can reference the same values StubRecoveryAllowedNow
+// enforces.
+extern const int     kStubRecoveryMaxAttempts;
+extern const int64_t kStubRecoveryCooldownSecs;
+
+// Churn-guard marker state for abandoned-stub auto-recovery (bootstrap-stub-recovery.json,
+// a datadir sibling). attempts/lastAttempt bound retries; anchorHeight lets a future
+// compiled-anchor bump reset the counter (a new target, not the same failing loop).
+struct StubRecoveryState {
+    int attempts;
+    int64_t lastAttempt;
+    int anchorHeight;
+    StubRecoveryState() : attempts(0), lastAttempt(0), anchorHeight(-1) {}
+};
+//! Read the stub-recovery marker; false (with out zeroed) if absent or unparseable.
+bool ReadStubRecoveryMarker(const boost::filesystem::path& data_dir, StubRecoveryState& out);
+//! Durable (atomic) write of the stub-recovery marker. Returns false if it could not be
+//! persisted, so the caller can fail closed (a stub recovery must not run uncounted).
+bool WriteStubRecoveryMarker(const boost::filesystem::path& data_dir, const StubRecoveryState& st);
+//! Best-effort removal of the stub-recovery marker (on bootstrap success).
+void ClearStubRecoveryMarker(const boost::filesystem::path& data_dir);
+//! Churn guard: true if a stub recovery against anchorHeight may run now (attempts <
+//! max AND not in cooldown). A changed anchor resets the counter. Sets skipReason
+//! when false.
+bool StubRecoveryAllowedNow(const boost::filesystem::path& data_dir, int anchorHeight, std::string& skipReason);
 // Move a genesis-only datadir's blocks/ and chainstate/ aside to a timestamped
 // backup so a bootstrap snapshot can be imported into the now-fresh datadir.
 // On success outBackup is set to the backup directory; the caller restores it
@@ -210,6 +249,47 @@ void BootstrapAnchorPendingClear(const boost::filesystem::path& data_dir);
 //! an imported chainstate); for a v1 import it is the anchor itself. Returns false if
 //! the marker is absent or malformed.
 bool GetBootstrapAnchorPending(const boost::filesystem::path& data_dir, int& height, uint256& hashBlock);
+
+// --- Read-only live bootstrap status (for the getbootstrapinfo RPC / GUI) ------
+//! A snapshot of where the in-process bootstrap currently stands, updated at the
+//! existing progress/skip/fallback emit sites (bootstrap.cpp download loops,
+//! init.cpp orchestration). All reads/writes go through a single internal
+//! CCriticalSection so the GUI can poll it freely without observing a torn read.
+//! Purely informational — reading or writing it NEVER mutates the datadir.
+struct BootstrapInfo {
+    std::string phase;        //!< "idle"|"active"|"succeeded"|"skipped"|"failed"|"normal_sync"
+    int percent;              //!< 0-100, meaningful only while phase=="active"
+    uint64_t bytesReceived;   //!< meaningful only while phase=="active"
+    uint64_t bytesTotal;      //!< meaningful only while phase=="active"
+    double mbps;              //!< meaningful only while phase=="active"
+    int streams;              //!< meaningful only while phase=="active"
+    std::string peer;         //!< current/last bootstrap peer ("ip:port"), "" if none
+    int peerIndex;            //!< 1-based index of the peer currently being tried
+    int peerCount;            //!< total peers in the attempt list
+    int attempt;              //!< 1-based current attempt against this peer
+    int attemptMax;           //!< max attempts per peer
+    std::string mode;         //!< "anchor"|"trustless"
+    int snapshotVersion;      //!< snapshot manifest version actually in play (1|2|3), 0 if unknown
+    std::string reason;       //!< why skipped/failed (mirrors init.cpp bootstrap_error)
+
+    BootstrapInfo()
+        : phase("idle"), percent(0), bytesReceived(0), bytesTotal(0), mbps(0.0),
+          streams(0), peerIndex(0), peerCount(0), attempt(0), attemptMax(0),
+          mode("anchor"), snapshotVersion(0) {}
+};
+
+//! Copy-out of the current bootstrap status (no torn reads).
+BootstrapInfo GetBootstrapInfo();
+//! Set the terminal/transition phase plus an optional human-readable reason.
+//! Leaves the progress numbers untouched.
+void SetBootstrapInfoPhase(const std::string& phase, const std::string& reason);
+//! Set live download progress; also stamps phase="active". Pass -1 / "" for any
+//! field that is not known at the call site to leave the prior value in place.
+void SetBootstrapInfoProgress(int percent, uint64_t bytesReceived, uint64_t bytesTotal,
+                              double mbps, int streams, const std::string& peer,
+                              int peerIndex, int peerCount, int attempt, int attemptMax,
+                              const std::string& mode, int snapshotVersion);
+
 //! Cheap provisional gate (integrity + checkpoints + tip PoW) run after a
 //! trustless snapshot is imported and the chain databases are open. NOT full
 //! trust — the background validator re-derives the UTXO set from genesis and

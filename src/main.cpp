@@ -23,6 +23,7 @@
 #include "metrics.h"
 #include "net.h"
 #include "pow.h"
+#include "rpc/server.h"
 #include "txdb.h"
 #include "txmempool.h"
 #include "ui_interface.h"
@@ -3616,11 +3617,25 @@ static void PruneBlockIndexCandidates() {
  * Try to make some progress towards making pindexMostWork the active block.
  * pblock is either NULL or a pointer to a CBlock corresponding to pindexMostWork.
  */
+// Throttle (and persist across the repeated ActivateBestChainStep calls that
+// ActivateBestChain makes) the integer percent we last surfaced to the GUI
+// warmup status during the init-time connect replay. Guarded by cs_main, which
+// ActivateBestChainStep always holds.
+static int nLastReplayInitPercent = -1;
+
 static bool ActivateBestChainStep(CValidationState &state, CBlockIndex *pindexMostWork, CBlock *pblock) {
     AssertLockHeld(cs_main);
     bool fInvalidFound = false;
     const CBlockIndex *pindexOldTip = chainActive.Tip();
     const CBlockIndex *pindexFork = chainActive.FindFork(pindexMostWork);
+
+    // Only surface per-block connect progress while still in the RPC warmup
+    // window (i.e. during the init-time ActivateBestChain replay after a
+    // bootstrap import or a mid-sync restart). Outside warmup this is the live
+    // single-block connect path and emitting status there would be noise.
+    const bool fInitReplay = RPCIsInWarmup(NULL) && pindexMostWork != NULL;
+    const int nReplayBase = pindexFork ? pindexFork->nHeight : 0;
+    const int nReplaySpan = pindexMostWork ? (pindexMostWork->nHeight - nReplayBase) : 0;
 
     // - On ChainDB initialization, pindexOldTip will be null, so there are no removable blocks.
     // - If pindexMostWork is in a chain that doesn't have the same genesis block as our chain,
@@ -3689,6 +3704,20 @@ static bool ActivateBestChainStep(CValidationState &state, CBlockIndex *pindexMo
                 }
             } else {
                 PruneBlockIndexCandidates();
+                // During the init-time replay, push a throttled height/percent
+                // into the warmup status so the GUI watchdog's no-progress timer
+                // keeps resetting and the user sees the chain advancing. Only
+                // emit when the integer percent changes, to avoid spam.
+                if (fInitReplay) {
+                    int percentageDone = nReplaySpan > 0
+                        ? std::max(1, std::min(99, (int)(((double)(chainActive.Tip()->nHeight - nReplayBase)) / (double)nReplaySpan * 100)))
+                        : 99;
+                    if (percentageDone != nLastReplayInitPercent) {
+                        uiInterface.InitMessage(strprintf(_("Activating best chain... height %d (%d%%)"),
+                                                          chainActive.Tip()->nHeight, percentageDone));
+                        nLastReplayInitPercent = percentageDone;
+                    }
+                }
                 if (!pindexOldTip || chainActive.Tip()->nChainWork > pindexOldTip->nChainWork) {
                     // We're in a better position than we were. Return temporarily to release the lock.
                     fContinue = false;
@@ -5014,10 +5043,21 @@ bool CVerifyDB::VerifyDB(CCoinsView *coinsview, int nCheckLevel, int nCheckDepth
     CValidationState state;
     // No need to verify JoinSplits twice
     auto verifier = libzcash::ProofVerifier::Disabled();
+    // Mirror the ShowProgress percentage into the warmup status string (via
+    // InitMessage) so the GUI watchdog's no-progress timer keeps resetting and
+    // the user sees real movement during this multi-minute phase; ShowProgress
+    // alone is not routed to the RPC warmup status. Throttle to only emit when
+    // the integer percent changes to avoid spamming the status.
+    int nLastInitPercent = -1;
     for (CBlockIndex* pindex = chainActive.Tip(); pindex && pindex->pprev; pindex = pindex->pprev)
     {
         boost::this_thread::interruption_point();
-        uiInterface.ShowProgress(_("Verifying blocks..."), std::max(1, std::min(99, (int)(((double)(chainActive.Height() - pindex->nHeight)) / (double)nCheckDepth * (nCheckLevel >= 4 ? 50 : 100)))));
+        int percentageDone = std::max(1, std::min(99, (int)(((double)(chainActive.Height() - pindex->nHeight)) / (double)nCheckDepth * (nCheckLevel >= 4 ? 50 : 100))));
+        uiInterface.ShowProgress(_("Verifying blocks..."), percentageDone);
+        if (percentageDone != nLastInitPercent) {
+            uiInterface.InitMessage(strprintf(_("Verifying blocks... (%d%%)"), percentageDone));
+            nLastInitPercent = percentageDone;
+        }
         if (pindex->nHeight < chainActive.Height()-nCheckDepth)
             break;
         CBlock block;
@@ -5061,7 +5101,12 @@ bool CVerifyDB::VerifyDB(CCoinsView *coinsview, int nCheckLevel, int nCheckDepth
         CBlockIndex *pindex = pindexState;
         while (pindex != chainActive.Tip()) {
             boost::this_thread::interruption_point();
-            uiInterface.ShowProgress(_("Verifying blocks..."), std::max(1, std::min(99, 100 - (int)(((double)(chainActive.Height() - pindex->nHeight)) / (double)nCheckDepth * 50))));
+            int percentageDone = std::max(1, std::min(99, 100 - (int)(((double)(chainActive.Height() - pindex->nHeight)) / (double)nCheckDepth * 50)));
+            uiInterface.ShowProgress(_("Verifying blocks..."), percentageDone);
+            if (percentageDone != nLastInitPercent) {
+                uiInterface.InitMessage(strprintf(_("Verifying blocks... (%d%%)"), percentageDone));
+                nLastInitPercent = percentageDone;
+            }
             pindex = chainActive.Next(pindex);
             CBlock block;
             if (!ReadBlockFromDisk(block, pindex))

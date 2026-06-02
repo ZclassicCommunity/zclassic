@@ -800,6 +800,12 @@ static bool VerifyImportedBootstrapAnchor(std::string& error)
             importedHash.ToString());
         return false;
     }
+    // Re-hashing the whole imported UTXO set runs for minutes with no other
+    // status update, so the GUI warmup message would otherwise freeze on the
+    // prior "Verifying blocks..." string and the GUI watchdog could misfire.
+    // Change the status string right before the re-hash so the GUI sees progress
+    // (getbootstrapinfo.verify_pending also stays true throughout this window).
+    uiInterface.InitMessage(_("Verifying downloaded blockchain (this can take a few minutes)..."));
     CCoinsStats stats;
     if (!pcoinsTip->GetStats(stats)) {
         error = "bootstrap snapshot verification failed: could not compute imported chainstate hash";
@@ -1950,7 +1956,34 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // If a genesis-only datadir is moved aside to make room for a fast-sync, this
     // names the backup directory so we can restore it if the bootstrap fails.
     boost::filesystem::path genesisBackupDir;
+    // True when this bootstrap was triggered by abandoned-stub auto-recovery (a
+    // small, real, far-below-anchor chain backed up to fast-sync into). Lets the
+    // success handler clear the stub-recovery churn-guard marker; the existing
+    // genesisBackupDir restore handles failure with no extra code.
+    bool fStubRecovery = false;
     {
+        // D1 crash recovery: InstallStagedBootstrapChainData renames blocks/ then
+        // chainstate/ non-atomically, AFTER the anchor/trustless pending marker has
+        // been written and fsync'd. A kill between the two renames leaves blocks/
+        // present but chainstate/ absent — an incomplete install. On the next start
+        // that blocks-only datadir is NOT genesis-only (IsGenesisOnlyChainDatadir
+        // returns false for a missing/over-size chainstate or a blocks/-only dir),
+        // so without this guard BootstrapDatadirEligible would classify it as real
+        // chain data and silently skip re-bootstrapping, while the verify step never
+        // runs (chainstate/ is gone). Detect the incomplete install by: a pending
+        // marker EXISTS but the installed snapshot paths do NOT, and treat it as a
+        // FAILED import — remove the partial chain data, clear the marker, and let
+        // eligibility re-run below so the node re-bootstraps into a fresh datadir.
+        if ((BootstrapAnchorPendingExists(GetDataDir()) ||
+             BootstrapTrustlessPendingExists(GetDataDir())) &&
+            !BootstrapSnapshotPathsExist(GetDataDir())) {
+            LogPrintf("Bootstrap: a pending-import marker is present but the installed "
+                      "snapshot is incomplete (blocks/ or chainstate/ missing); treating "
+                      "the prior import as failed and re-bootstrapping\n");
+            RemoveFailedPeerBootstrapChainData(GetDataDir());
+            BootstrapAnchorPendingClear(GetDataDir());
+            BootstrapTrustlessPendingClear(GetDataDir());
+        }
         const bool explicit_peer = mapArgs.count("-bootstrappeer");
         const bool enabled = GetBoolArg("-bootstrap", true) && !GetBootstrapPeerList().empty();
         const bool conflicts = mapArgs.count("-bootstrapdatadir") ||
@@ -1977,19 +2010,92 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 return InitError(_("-bootstrapmode=trustless cannot be used with -prune: a pruned node cannot re-derive the UTXO set to validate the snapshot, so it would never be verified. Use a non-pruned datadir to bootstrap trustlessly, or use -bootstrapmode=anchor."));
             }
             std::string bootstrap_error;
+            // Eligibility: fresh / genesis-only (handled by BootstrapDatadirEligible),
+            // OR — as a SECOND chance — an abandoned stub (a small, real, far-below-anchor
+            // chain a failed-then-stalled node was left holding). The stub path backs up
+            // (never deletes) the stub and is bounded by a churn guard so an offline node
+            // cannot loop. genesisBackupDir holds the backup either way; fStubRecovery
+            // tells the success handler to clear the stub-recovery marker.
+            bool fDatadirEligible = false;
             if (!fTrustlessMode && !haveAnchor) {
+                SetBootstrapInfoPhase("skipped", "no compiled fast-sync anchor");
                 if (explicit_peer)
                     return InitError(_("-bootstrappeer requires a compiled fast-sync anchor (or -bootstrapmode=trustless)"));
-            } else if (!BootstrapDatadirEligible(GetDataDir(), genesisBackupDir, bootstrap_error)) {
-                // Datadir already has real chain data: skip silently unless the
-                // user explicitly asked to bootstrap into it. A datadir holding
-                // only a genesis-height chainstate (a node that initialized its
-                // DBs but never synced — e.g. a prior interrupted bootstrap that
-                // then fell back to peerless P2P sync and hung at 0 blocks) is
-                // backed up by BootstrapDatadirEligible and counts as eligible.
-                if (explicit_peer)
-                    return InitError(bootstrap_error);
+            } else if (BootstrapDatadirEligible(GetDataDir(), genesisBackupDir, bootstrap_error)) {
+                fDatadirEligible = true;
             } else {
+                // Not fresh and not genesis-only. Try abandoned-stub auto-recovery: a
+                // node whose first bootstrap failed, fell back to P2P, grabbed a
+                // few-thousand-block tip far below the anchor, and would otherwise NEVER
+                // re-bootstrap (eligibility is false for any non-genesis chain).
+                int stubHeight = -1;
+                std::string stub_err;
+                const CFastSyncAnchorData& anchorForStub = Params().FastSyncAnchor();
+                if (IsAbandonedStubChainDatadir(GetDataDir(), stubHeight, stub_err)) {
+                    std::string skipReason;
+                    if (!StubRecoveryAllowedNow(GetDataDir(), anchorForStub.nHeight, skipReason)) {
+                        SetBootstrapInfoPhase("skipped", skipReason);
+                        LogPrintf("Bootstrap: abandoned-stub recovery skipped: %s\n", skipReason);
+                        if (explicit_peer)
+                            return InitError(skipReason);
+                        // else fall through to normal sync (NOT eligible).
+                    } else {
+                        LogPrintf("Bootstrap: detected an abandoned stub chain (tip height %s, anchor %d); backing up and re-bootstrapping\n",
+                                  (stubHeight >= 0 ? strprintf("%d", stubHeight) : std::string("unknown")), anchorForStub.nHeight);
+                        // Count the attempt BEFORE any backup/download so a crash/offline
+                        // loop can't churn (repeated multi-GiB backups / disk-fill).
+                        StubRecoveryState st;
+                        ReadStubRecoveryMarker(GetDataDir(), st);
+                        if (st.anchorHeight != anchorForStub.nHeight) {
+                            st.attempts = 0;
+                            st.lastAttempt = 0;
+                            st.anchorHeight = anchorForStub.nHeight;
+                        }
+                        st.attempts += 1;
+                        st.lastAttempt = GetTime();
+                        // FAIL CLOSED: if the attempt cannot be durably counted (read-only
+                        // or full datadir), do NOT proceed. Otherwise an offline node would
+                        // read attempts=0 every startup and churn backup->fail->restore
+                        // unbounded. Leave the stub for normal P2P sync instead.
+                        if (!WriteStubRecoveryMarker(GetDataDir(), st)) {
+                            SetBootstrapInfoPhase("skipped", "stub-recovery marker not durably writable; leaving for normal P2P sync");
+                            LogPrintf("Bootstrap: abandoned-stub recovery skipped: churn-guard marker not durably writable\n");
+                            if (explicit_peer)
+                                return InitError("cannot persist stub-recovery state (datadir not writable)");
+                            // else: fDatadirEligible stays false -> normal P2P sync.
+                        } else {
+                            LogPrintf("Bootstrap: abandoned-stub recovery attempt %d of %d (cooldown %lld s)\n",
+                                      st.attempts, kStubRecoveryMaxAttempts, (long long)kStubRecoveryCooldownSecs);
+                            std::string backup_err;
+                            if (BackupGenesisOnlyChainData(GetDataDir(), genesisBackupDir, backup_err)) {
+                                // genesisBackupDir is now set -> the datadir is fresh -> take
+                                // the SAME download path the eligible branch uses. On failure
+                                // the existing genesisBackupDir restore puts the stub back; on
+                                // success fStubRecovery clears the marker.
+                                fStubRecovery = true;
+                                fDatadirEligible = true;
+                            } else {
+                                SetBootstrapInfoPhase("skipped", backup_err);
+                                LogPrintf("Bootstrap: abandoned-stub backup failed: %s\n", backup_err);
+                                if (explicit_peer)
+                                    return InitError(backup_err);
+                            }
+                        }
+                    }
+                } else {
+                    // Genuinely real chain (or corrupt -> reindex path): existing behavior.
+                    SetBootstrapInfoPhase("skipped", bootstrap_error.empty() ? "datadir not eligible" : bootstrap_error);
+                    // Datadir already has real chain data: skip silently unless the
+                    // user explicitly asked to bootstrap into it. A datadir holding
+                    // only a genesis-height chainstate (a node that initialized its
+                    // DBs but never synced — e.g. a prior interrupted bootstrap that
+                    // then fell back to peerless P2P sync and hung at 0 blocks) is
+                    // backed up by BootstrapDatadirEligible and counts as eligible.
+                    if (explicit_peer)
+                        return InitError(bootstrap_error);
+                }
+            }
+            if (fDatadirEligible) {
                 if (fTrustlessMode)
                     InitWarning(_("EXPERIMENTAL: -bootstrapmode=trustless accepts a peer's self-snapshot provisionally and re-derives the UTXO set from genesis in the background, reindexing if it does not validate. WARNING: until validation completes (which can take as long as a full sync), the node operates on an UNVERIFIED UTXO set; do not rely on balances or spend received funds until getblockchaininfo reports bootstrap_validation state \"validated\"."));
                 else
@@ -2001,10 +2107,29 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 // Each BootstrapFromPeer attempt is self-contained (it stages into a
                 // fresh dir and cleans up on failure), so retrying is safe and cheap.
                 const int nBootstrapAttempts = 3;
-                BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
+                const std::vector<std::string> bootstrapPeers = GetBootstrapPeerList();
+                const int nBootstrapPeers = (int)bootstrapPeers.size();
+                int peerIndex = 0;
+                BOOST_FOREACH(const std::string& peer, bootstrapPeers) {
+                    ++peerIndex;
                     if (ShutdownRequested())
                         break;
                     for (int attempt = 1; attempt <= nBootstrapAttempts && !ShutdownRequested(); ++attempt) {
+                        // Keep the UI alive during connect/handshake/failover. The GUI
+                        // surfaces this warmup status via getinfo; without it a dead or
+                        // stalled peer leaves the wallet frozen on the prior message
+                        // (e.g. "Verifying wallet...") for the whole failover window.
+                        uiInterface.InitMessage(strprintf(
+                            _("Connecting to bootstrap server %d of %d (attempt %d of %d)..."),
+                            peerIndex, nBootstrapPeers, attempt, nBootstrapAttempts));
+                        // Stamp the structured getbootstrapinfo status with the
+                        // peer/attempt/mode this iteration is trying (the download
+                        // loops fill in percent/bytes/streams). phase becomes
+                        // "active"; mode mirrors the anchor/trustless choice.
+                        SetBootstrapInfoProgress(-1, 0, 0, -1.0, 0, peer,
+                                                 peerIndex, nBootstrapPeers,
+                                                 attempt, nBootstrapAttempts,
+                                                 fTrustlessMode ? "trustless" : "anchor", 0);
                         if (BootstrapFromPeer(peer, GetDataDir(), bootstrap_error)) {
                             bootstrap_snapshot_ran = true;
                             break;
@@ -2043,6 +2168,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     }
                 }
                 if (!bootstrap_snapshot_ran) {
+                    // Tell the user we're switching strategies so a fresh node that
+                    // couldn't fast-sync doesn't appear frozen during slow normal sync.
+                    uiInterface.InitMessage(_("Bootstrap fast-sync unavailable; falling back to normal peer-to-peer sync (this may be slow)..."));
+                    // The node self-transitioned to normal P2P sync. Record this as
+                    // the (correct, self-healed) terminal state so the GUI surfaces
+                    // "fast-sync unavailable, syncing normally" rather than an error.
+                    SetBootstrapInfoPhase("normal_sync", bootstrap_error);
                     // No snapshot was imported this start. If we moved a genesis-only
                     // datadir aside to attempt it, move it back so the datadir is left
                     // exactly as it was found (and no backup dir accumulates). Only a
@@ -2060,17 +2192,35 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     if (explicit_peer)
                         return InitError(bootstrap_error);
                     LogPrintf("Bootstrap snapshot unavailable; continuing with normal peer-to-peer sync: %s\n", bootstrap_error);
+                } else if (fStubRecovery) {
+                    // Abandoned-stub recovery succeeded: clear the churn-guard marker so a
+                    // future, legitimately-different stub (e.g. years later, post-anchor-bump,
+                    // after a fresh failed sync) is recoverable again. The stub backup
+                    // (genesisBackupDir) is intentionally left on disk, matching the
+                    // genesis-only path's keep-on-success behavior.
+                    ClearStubRecoveryMarker(GetDataDir());
+                    LogPrintf("Bootstrap: abandoned-stub recovery succeeded; cleared stub-recovery marker\n");
                 }
             }
+        } else {
+            // Bootstrap was not attempted at all this start: -bootstrap=0, an empty
+            // peer list, or a conflicting flag (-reindex / -reindex-chainstate /
+            // -loadblock). Record why so the GUI can distinguish "skipped on
+            // purpose" from "never ran" (idle).
+            SetBootstrapInfoPhase("skipped",
+                conflicts ? "conflicting flag (-reindex/-reindex-chainstate/-loadblock)"
+                          : (!GetBoolArg("-bootstrap", true) ? "-bootstrap=0"
+                                                             : "no bootstrap peers configured"));
         }
     }
 
     // Keep a persistent connection to the bootstrap peer(s) for ongoing peer
     // discovery. ZClassic's DNS seeds are unreliable and the compiled fixed-seed
     // list can be empty, so a fresh OR peer-starved node -- an interrupted
-    // bootstrap, -bootstrap=0, or a non-fresh datadir whose peers.dat is empty or
-    // stale -- can otherwise end up with zero reachable peers and hang at 0
-    // connections / 0 blocks. The bootstrap peers are ordinary P2P nodes, so
+    // bootstrap, -bootstrap=0, a foreign-fork chain copy, or a non-fresh datadir
+    // whose peers.dat is empty or stale -- can otherwise end up with zero reachable
+    // peers and hang at 0 connections / 0 blocks. The bootstrap peers are ordinary
+    // P2P nodes, so
     // pinning them as -addnode is a safe peer-of-last-resort on every start
     // (honors an explicit -bootstrappeer; skipped only when the user pinned peers
     // with -connect). This is what previously only happened when a snapshot ran.
