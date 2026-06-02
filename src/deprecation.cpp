@@ -4,7 +4,6 @@
 
 #include "deprecation.h"
 
-#include "alert.h"
 #include "clientversion.h"
 #include "init.h"
 #include "ui_interface.h"
@@ -32,7 +31,7 @@ void EnforceNodeDeprecation(int nHeight, bool forceLogging, bool fThread) {
                                  DEPRECATION_HEIGHT) + " " +
                        _("You should upgrade to the latest version of Zclassic.");
             LogPrintf("*** %s\n", msg);
-            CAlert::Notify(msg, fThread);
+            AlertNotify(msg, fThread);
             uiInterface.ThreadSafeMessageBox(msg, "", CClientUIInterface::MSG_ERROR);
         }
         StartShutdown();
@@ -42,7 +41,7 @@ void EnforceNodeDeprecation(int nHeight, bool forceLogging, bool fThread) {
                             DEPRECATION_HEIGHT) + " " +
                   _("You should upgrade to the latest version of Zclassic.");
         LogPrintf("*** %s\n", msg);
-        CAlert::Notify(msg, fThread);
+        AlertNotify(msg, fThread);
         uiInterface.ThreadSafeMessageBox(msg, "", CClientUIInterface::MSG_WARNING);
     }
 }
