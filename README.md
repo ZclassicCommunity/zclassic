@@ -1,4 +1,4 @@
-# ZClassic 2.1.2-beta2
+# ZClassic 2.1.2-beta5
 
 ZClassic is an Equihash-based proof-of-work implementation of the Zerocash protocol. It offers privacy through shielded transactions using zero-knowledge proofs that preserve transaction confidentiality. Based on Bitcoin's code and derived from Zcash, ZClassic builds three main binaries: **zclassicd** (daemon), **zclassic-cli** (RPC client), and **zclassic-tx** (transaction utility).
 
@@ -10,7 +10,7 @@ ZClassic is an Equihash-based proof-of-work implementation of the Zerocash proto
 
 This software is the ZClassic client. It synchronizes the entire blockchain history to your computer.
 
-**Security Warning:** ZClassic is experimental and a work-in-progress. Use at your own risk. See the [Security Information page](https://z.cash/support/security/) for important security details.
+**Security Warning:** ZClassic is experimental and a work-in-progress. Use at your own risk. For a security issue, please [open an issue](https://github.com/ZclassicCommunity/zclassic/issues); see also the [upstream Zcash security background](https://z.cash/support/security/).
 
 **Deprecation Policy:** A release is considered deprecated approximately 70 weeks after its release; an automatic shutdown then halts the node at a block height past that point. Keep your node updated.
 
