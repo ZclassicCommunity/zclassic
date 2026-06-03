@@ -4401,6 +4401,45 @@ bool CMerkleTx::AcceptToMemoryPool(bool fLimitFree, bool fRejectAbsurdFee)
  * Find notes in the wallet filtered by payment address, min depth and ability to spend.
  * These notes are decrypted and added to the output parameter vector, outEntries.
  */
+/**
+ * Shared per-Sapling-note spendability predicate. See the header for the full
+ * contract. Applies only the checks that do NOT require the decrypted note
+ * plaintext (spent / spending-key / locked); the address filter is the caller's
+ * responsibility because it requires a decrypt.
+ */
+bool CWallet::SaplingNotePassesSpendFilter(
+    const SaplingOutPoint& op,
+    const SaplingNoteData& nd,
+    bool ignoreSpent,
+    bool requireSpendingKey,
+    bool ignoreLocked) const
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs_wallet);
+
+    // skip note which has been spent
+    if (ignoreSpent && nd.nullifier && IsSaplingSpent(*nd.nullifier)) {
+        return false;
+    }
+
+    // skip notes which cannot be spent
+    if (requireSpendingKey) {
+        libzcash::SaplingIncomingViewingKey ivk = nd.ivk;
+        libzcash::SaplingFullViewingKey fvk;
+        if (!(GetSaplingFullViewingKey(ivk, fvk) &&
+              HaveSaplingSpendingKey(fvk))) {
+            return false;
+        }
+    }
+
+    // skip locked notes
+    if (ignoreLocked && IsLockedNote(op)) {
+        return false;
+    }
+
+    return true;
+}
+
 void CWallet::GetFilteredNotes(
     std::vector<CSproutNotePlaintextEntry>& sproutEntries,
     std::vector<SaplingNoteEntry>& saplingEntries,
@@ -4519,27 +4558,16 @@ void CWallet::GetFilteredNotes(
             auto pa = maybe_pa.get();
 
             // skip notes which belong to a different payment address in the wallet
+            // (this is the only filter that requires the decrypted address, so it
+            // stays here rather than in the shared SaplingNotePassesSpendFilter)
             if (!(filterAddresses.empty() || filterAddresses.count(pa))) {
                 continue;
             }
 
-            if (ignoreSpent && nd.nullifier && IsSaplingSpent(*nd.nullifier)) {
-                continue;
-            }
-
-            // skip notes which cannot be spent
-            if (requireSpendingKey) {
-                libzcash::SaplingIncomingViewingKey ivk;
-                libzcash::SaplingFullViewingKey fvk;
-                if (!(GetSaplingIncomingViewingKey(pa, ivk) &&
-                    GetSaplingFullViewingKey(ivk, fvk) &&
-                    HaveSaplingSpendingKey(fvk))) {
-                    continue;
-                }
-            }
-
-            // skip locked notes
-            if (ignoreLocked && IsLockedNote(op)) {
+            // Apply the shared spent / spending-key / locked filter. The cached
+            // balance accessor (GetSaplingBalanceCached) uses this SAME helper so
+            // the two paths can never diverge.
+            if (!SaplingNotePassesSpendFilter(op, nd, ignoreSpent, requireSpendingKey, ignoreLocked)) {
                 continue;
             }
 
@@ -4548,6 +4576,66 @@ void CWallet::GetFilteredNotes(
                 op, pa, note, notePt.memo(), wtx.GetDepthInMainChain() });
         }
     }
+}
+
+/**
+ * Cached Sapling balance accessor. Returns the SAME Sapling total as the
+ * unfiltered (no-address) GetFilteredNotes slow path, but reads the memory-only
+ * SaplingNoteData::value cache instead of decrypting every note. On a cache miss
+ * (value == boost::none, e.g. a fresh wallet load) it decrypts the note to obtain
+ * the value and populates the cache (decrypt-fallback); a none value is NEVER
+ * treated as zero. Only a non-invertible CAmount is read; no key material leaks.
+ */
+CAmount CWallet::GetSaplingBalanceCached(int minDepth, bool requireSpendingKey, bool ignoreLocked)
+{
+    LOCK2(cs_main, cs_wallet);
+
+    CAmount balance = 0;
+
+    for (auto & p : mapWallet) {
+        CWalletTx& wtx = p.second;
+
+        // Per-transaction filter — IDENTICAL to GetFilteredNotes (minDepth only;
+        // maxDepth is effectively INT_MAX for a balance read).
+        if (!CheckFinalTx(wtx) ||
+            wtx.GetBlocksToMaturity() > 0 ||
+            wtx.GetDepthInMainChain() < minDepth) {
+            continue;
+        }
+
+        for (auto & pair : wtx.mapSaplingNoteData) {
+            const SaplingOutPoint& op = pair.first;
+            SaplingNoteData& nd = pair.second;  // by reference: may populate the cache
+
+            // Shared spent / spending-key / locked filter. The address filter
+            // from GetFilteredNotes is intentionally NOT applied here (it needs a
+            // decrypt); this accessor is for the unfiltered wallet total only.
+            // ignoreSpent is always true for a balance.
+            if (!SaplingNotePassesSpendFilter(op, nd, true, requireSpendingKey, ignoreLocked)) {
+                continue;
+            }
+
+            if (nd.value) {
+                // Cache hit: read the cached plaintext value (CAmount only).
+                balance += nd.value.get();
+            } else {
+                // Cache miss (memory-only cache, e.g. fresh load): decrypt to
+                // obtain the value — the same decrypt GetFilteredNotes performs —
+                // then populate the cache. NEVER treat none as zero.
+                auto maybe_pt = SaplingNotePlaintext::decrypt(
+                    wtx.vShieldedOutput[op.n].encCiphertext,
+                    nd.ivk,
+                    wtx.vShieldedOutput[op.n].ephemeralKey,
+                    wtx.vShieldedOutput[op.n].cm);
+                assert(static_cast<bool>(maybe_pt));
+                CAmount value = CAmount(maybe_pt.get().value());
+                nd.value = value;  // populate the memory-only cache
+                balance += value;
+            }
+        }
+    }
+
+    return balance;
 }
 
 

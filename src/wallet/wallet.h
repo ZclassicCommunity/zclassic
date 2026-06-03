@@ -851,6 +851,25 @@ private:
     template <class T>
     void SyncMetaData(std::pair<typename TxSpendMap<T>::iterator, typename TxSpendMap<T>::iterator>);
 
+    /**
+     * Shared per-Sapling-note spendability predicate used by BOTH GetFilteredNotes
+     * and GetSaplingBalanceCached so the two paths can never diverge.
+     *
+     * Applies the spent / spending-key / locked checks (everything that does NOT
+     * require the decrypted note plaintext). It deliberately does NOT apply the
+     * address filter, because recovering a note's payment address requires a
+     * decrypt; callers that filter by address must do that themselves after
+     * decrypting (as GetFilteredNotes does). Returns true if the note passes.
+     *
+     * Caller must hold cs_main and cs_wallet.
+     */
+    bool SaplingNotePassesSpendFilter(
+        const SaplingOutPoint& op,
+        const SaplingNoteData& nd,
+        bool ignoreSpent,
+        bool requireSpendingKey,
+        bool ignoreLocked) const;
+
 protected:
     bool UpdatedNoteData(const CWalletTx& wtxIn, CWalletTx& wtx);
     void MarkAffectedTransactionsDirty(const CTransaction& tx);
@@ -1325,6 +1344,24 @@ public:
                           bool ignoreSpent=true,
                           bool requireSpendingKey=true,
                           bool ignoreLocked=true);
+
+    /**
+     * Sum of the wallet's spendable Sapling note values, using the MEMORY-ONLY
+     * cached SaplingNoteData::value to avoid re-decrypting every note on a
+     * balance read. Applies the SAME per-note filter as GetFilteredNotes (via
+     * SaplingNotePassesSpendFilter), so it returns an IDENTICAL Sapling total to
+     * the slow GetFilteredNotes path for the unfiltered wallet (no address
+     * filter — recovering an address requires a decrypt).
+     *
+     * The cache is memory-only, so on a fresh load a note's value may be
+     * boost::none; in that case this DECRYPTS the note to obtain the value and
+     * populates the cache (decrypt-fallback). A none value is NEVER treated as 0.
+     *
+     * Only a non-invertible CAmount is read/summed; no key material is exposed.
+     */
+    CAmount GetSaplingBalanceCached(int minDepth = 1,
+                                    bool requireSpendingKey = true,
+                                    bool ignoreLocked = true);
 };
 
 /** A key allocated from the key pool. */

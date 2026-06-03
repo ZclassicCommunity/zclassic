@@ -2122,3 +2122,327 @@ TEST(WalletTests, SaplingNoteLocking) {
     EXPECT_FALSE(wallet.IsLockedNote(sop1));
     EXPECT_FALSE(wallet.IsLockedNote(sop2));
 }
+
+// ---------------------------------------------------------------------------
+// W2-4: cached Sapling balance accessor (GetSaplingBalanceCached) tests.
+//
+// The cached accessor must return an IDENTICAL Sapling total to the existing
+// slow GetFilteredNotes path, must decrypt-and-fill on a boost::none cache
+// entry (never treat none as 0), and must exclude spent notes.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Slow-path reference: the Sapling total computed exactly as getBalanceZaddr
+// does, via the unfiltered GetFilteredNotes (ignoreSpent=true).
+CAmount SlowSaplingTotal(CWallet& wallet, int minDepth) {
+    std::vector<CSproutNotePlaintextEntry> sproutEntries;
+    std::vector<SaplingNoteEntry> saplingEntries;
+    wallet.GetFilteredNotes(sproutEntries, saplingEntries, "", minDepth, true, true);
+    CAmount total = 0;
+    for (auto& entry : saplingEntries) {
+        total += CAmount(entry.note.value());
+    }
+    return total;
+}
+
+} // namespace
+
+TEST(WalletTests, SaplingCachedTotalEqualsSlowPath) {
+    auto consensusParams = RegtestActivateSapling();
+
+    TestWallet wallet;
+
+    auto sk = GetTestMasterSaplingSpendingKey();
+    auto expsk = sk.expsk;
+    auto fvk = expsk.full_viewing_key();
+    auto pk = sk.DefaultAddress();
+
+    ASSERT_TRUE(wallet.AddSaplingZKey(sk, pk));
+    ASSERT_TRUE(wallet.HaveSaplingSpendingKey(fvk));
+
+    CBasicKeyStore keystore;
+    CKey tsk = AddTestCKeyToKeyStore(keystore);
+    auto scriptPubKey = GetScriptForDestination(tsk.GetPubKey().GetID());
+
+    // --- Block 0: shield 40000 into a Sapling note A ---
+    SaplingMerkleTree saplingTree;
+    SproutMerkleTree sproutTree;
+
+    auto builderA = TransactionBuilder(consensusParams, 1, &keystore);
+    builderA.AddTransparentInput(COutPoint(uint256S("0000000000000000000000000000000000000000000000000000000000000001"), 0), scriptPubKey, 50000);
+    builderA.AddSaplingOutput(fvk.ovk, pk, 40000, {});
+    auto txA = builderA.Build().GetTxOrThrow();
+
+    CWalletTx wtxA {&wallet, txA};
+    EXPECT_EQ(-1, chainActive.Height());
+    CBlock blockA;
+    blockA.vtx.push_back(wtxA);
+    blockA.hashMerkleRoot = blockA.BuildMerkleTree();
+    auto blockHashA = blockA.GetHash();
+    CBlockIndex fakeIndexA {blockA};
+    fakeIndexA.nHeight = 0;
+    mapBlockIndex.insert(std::make_pair(blockHashA, &fakeIndexA));
+    chainActive.SetTip(&fakeIndexA);
+    ASSERT_EQ(0, chainActive.Height());
+
+    auto ndA = wallet.FindMySaplingNotes(wtxA).first;
+    ASSERT_EQ(1, ndA.size());
+    wtxA.SetSaplingNoteData(ndA);
+    wtxA.SetMerkleBranch(blockA);
+    wallet.AddToWallet(wtxA, true, NULL);
+    wallet.IncrementNoteWitnesses(&fakeIndexA, &blockA, sproutTree, saplingTree);
+    wallet.UpdateSaplingNullifierNoteMapForBlock(&blockA);
+
+    // --- Block 1: shield 30000 into a Sapling note B ---
+    auto builderB = TransactionBuilder(consensusParams, 2, &keystore);
+    builderB.AddTransparentInput(COutPoint(uint256S("0000000000000000000000000000000000000000000000000000000000000001"), 0), scriptPubKey, 40000);
+    builderB.AddSaplingOutput(fvk.ovk, pk, 30000, {});
+    auto txB = builderB.Build().GetTxOrThrow();
+
+    CWalletTx wtxB {&wallet, txB};
+    CBlock blockB;
+    blockB.vtx.push_back(wtxB);
+    blockB.hashMerkleRoot = blockB.BuildMerkleTree();
+    blockB.hashPrevBlock = blockHashA;
+    auto blockHashB = blockB.GetHash();
+    CBlockIndex fakeIndexB {blockB};
+    fakeIndexB.nHeight = 1;
+    fakeIndexB.pprev = &fakeIndexA;
+    mapBlockIndex.insert(std::make_pair(blockHashB, &fakeIndexB));
+    chainActive.SetTip(&fakeIndexB);
+    ASSERT_EQ(1, chainActive.Height());
+
+    auto ndB = wallet.FindMySaplingNotes(wtxB).first;
+    ASSERT_EQ(1, ndB.size());
+    wtxB.SetSaplingNoteData(ndB);
+    wtxB.SetMerkleBranch(blockB);
+    wallet.AddToWallet(wtxB, true, NULL);
+    wallet.IncrementNoteWitnesses(&fakeIndexB, &blockB, sproutTree, saplingTree);
+    wallet.UpdateSaplingNullifierNoteMapForBlock(&blockB);
+
+    // Two mature, unspent Sapling notes at heights 0 (depth 2) and 1 (depth 1).
+    // For each minDepth the cached accessor must equal the slow path exactly.
+    for (int minDepth : {0, 1, 5}) {
+        CAmount slow = SlowSaplingTotal(wallet, minDepth);
+        CAmount cached = wallet.GetSaplingBalanceCached(minDepth);
+        EXPECT_EQ(slow, cached) << "minDepth=" << minDepth;
+    }
+
+    // Sanity: at minDepth<=1 both notes count (70000); at minDepth=2 only
+    // note A (depth 2) counts (40000); at minDepth=5 nothing counts (0).
+    EXPECT_EQ(CAmount(70000), wallet.GetSaplingBalanceCached(0));
+    EXPECT_EQ(CAmount(70000), wallet.GetSaplingBalanceCached(1));
+    EXPECT_EQ(CAmount(40000), wallet.GetSaplingBalanceCached(2));
+    EXPECT_EQ(SlowSaplingTotal(wallet, 2), wallet.GetSaplingBalanceCached(2));
+    EXPECT_EQ(CAmount(0), wallet.GetSaplingBalanceCached(5));
+
+    // Tear down
+    chainActive.SetTip(NULL);
+    mapBlockIndex.erase(blockHashA);
+    mapBlockIndex.erase(blockHashB);
+
+    RegtestDeactivateSapling();
+}
+
+TEST(WalletTests, SaplingCachedDecryptFallbackOnNone) {
+    auto consensusParams = RegtestActivateSapling();
+
+    TestWallet wallet;
+
+    auto sk = GetTestMasterSaplingSpendingKey();
+    auto expsk = sk.expsk;
+    auto fvk = expsk.full_viewing_key();
+    auto pk = sk.DefaultAddress();
+
+    ASSERT_TRUE(wallet.AddSaplingZKey(sk, pk));
+    ASSERT_TRUE(wallet.HaveSaplingSpendingKey(fvk));
+
+    CBasicKeyStore keystore;
+    CKey tsk = AddTestCKeyToKeyStore(keystore);
+    auto scriptPubKey = GetScriptForDestination(tsk.GetPubKey().GetID());
+
+    SaplingMerkleTree saplingTree;
+    SproutMerkleTree sproutTree;
+
+    auto builder = TransactionBuilder(consensusParams, 1, &keystore);
+    builder.AddTransparentInput(COutPoint(uint256S("0000000000000000000000000000000000000000000000000000000000000001"), 0), scriptPubKey, 50000);
+    builder.AddSaplingOutput(fvk.ovk, pk, 40000, {});
+    auto tx = builder.Build().GetTxOrThrow();
+
+    CWalletTx wtx {&wallet, tx};
+    CBlock block;
+    block.vtx.push_back(wtx);
+    block.hashMerkleRoot = block.BuildMerkleTree();
+    auto blockHash = block.GetHash();
+    CBlockIndex fakeIndex {block};
+    fakeIndex.nHeight = 0;
+    mapBlockIndex.insert(std::make_pair(blockHash, &fakeIndex));
+    chainActive.SetTip(&fakeIndex);
+    ASSERT_EQ(0, chainActive.Height());
+
+    auto nd = wallet.FindMySaplingNotes(wtx).first;
+    ASSERT_EQ(1, nd.size());
+    wtx.SetSaplingNoteData(nd);
+    wtx.SetMerkleBranch(block);
+    wallet.AddToWallet(wtx, true, NULL);
+    wallet.IncrementNoteWitnesses(&fakeIndex, &block, sproutTree, saplingTree);
+    wallet.UpdateSaplingNullifierNoteMapForBlock(&block);
+
+    uint256 hash = wtx.GetHash();
+    SaplingOutPoint op {hash, 0};
+
+    // Sanity: the note was decrypted on receipt, so the cache is populated.
+    ASSERT_TRUE((bool)wallet.mapWallet[hash].mapSaplingNoteData[op].value);
+    CAmount expected = SlowSaplingTotal(wallet, 1);
+    ASSERT_EQ(CAmount(40000), expected);
+
+    // Simulate a fresh wallet load: the memory-only cache is empty (boost::none).
+    wallet.mapWallet[hash].mapSaplingNoteData[op].value = boost::none;
+    ASSERT_FALSE((bool)wallet.mapWallet[hash].mapSaplingNoteData[op].value);
+
+    // The accessor must NOT treat none as 0: it decrypts to recover the value.
+    CAmount cached = wallet.GetSaplingBalanceCached(1);
+    EXPECT_EQ(expected, cached);
+
+    // ...and it must have repopulated the cache as a side effect.
+    EXPECT_TRUE((bool)wallet.mapWallet[hash].mapSaplingNoteData[op].value);
+    EXPECT_EQ(CAmount(40000), wallet.mapWallet[hash].mapSaplingNoteData[op].value.get());
+
+    // Tear down
+    chainActive.SetTip(NULL);
+    mapBlockIndex.erase(blockHash);
+
+    RegtestDeactivateSapling();
+}
+
+TEST(WalletTests, SaplingCachedExcludesSpent) {
+    auto consensusParams = RegtestActivateSapling();
+
+    TestWallet wallet;
+
+    auto sk = GetTestMasterSaplingSpendingKey();
+    auto expsk = sk.expsk;
+    auto fvk = expsk.full_viewing_key();
+    auto ivk = fvk.in_viewing_key();
+    auto pk = sk.DefaultAddress();
+
+    ASSERT_TRUE(wallet.AddSaplingZKey(sk, pk));
+    ASSERT_TRUE(wallet.HaveSaplingSpendingKey(fvk));
+
+    CBasicKeyStore keystore;
+    CKey tsk = AddTestCKeyToKeyStore(keystore);
+    auto scriptPubKey = GetScriptForDestination(tsk.GetPubKey().GetID());
+
+    SaplingMerkleTree saplingTree;
+    SproutMerkleTree sproutTree;
+
+    // --- Block 0: shield 40000 into note A ---
+    auto builder = TransactionBuilder(consensusParams, 1, &keystore);
+    builder.AddTransparentInput(COutPoint(uint256S("0000000000000000000000000000000000000000000000000000000000000001"), 0), scriptPubKey, 50000);
+    builder.AddSaplingOutput(fvk.ovk, pk, 40000, {});
+    auto tx1 = builder.Build().GetTxOrThrow();
+
+    CWalletTx wtx {&wallet, tx1};
+    CBlock block;
+    block.vtx.push_back(wtx);
+    block.hashMerkleRoot = block.BuildMerkleTree();
+    auto blockHash = block.GetHash();
+    CBlockIndex fakeIndex {block};
+    fakeIndex.nHeight = 0;
+    mapBlockIndex.insert(std::make_pair(blockHash, &fakeIndex));
+    chainActive.SetTip(&fakeIndex);
+    ASSERT_EQ(0, chainActive.Height());
+
+    auto ndMap = wallet.FindMySaplingNotes(wtx).first;
+    ASSERT_EQ(1, ndMap.size());
+    wtx.SetSaplingNoteData(ndMap);
+    wtx.SetMerkleBranch(block);
+    wallet.AddToWallet(wtx, true, NULL);
+    wallet.IncrementNoteWitnesses(&fakeIndex, &block, sproutTree, saplingTree);
+    wallet.UpdateSaplingNullifierNoteMapForBlock(&block);
+
+    uint256 hash = wtx.GetHash();
+    SaplingOutPoint op {hash, 0};
+
+    // Before spending: note A is counted, and equals the slow path.
+    EXPECT_EQ(CAmount(40000), wallet.GetSaplingBalanceCached(1));
+    EXPECT_EQ(SlowSaplingTotal(wallet, 1), wallet.GetSaplingBalanceCached(1));
+
+    // Record the cached value so we can confirm the spend does NOT mutate it.
+    ASSERT_TRUE((bool)wallet.mapWallet[hash].mapSaplingNoteData[op].value);
+    CAmount valueBeforeSpend = wallet.mapWallet[hash].mapSaplingNoteData[op].value.get();
+    ASSERT_EQ(CAmount(40000), valueBeforeSpend);
+
+    // --- Block 1: spend note A ---
+    auto maybe_pt = libzcash::SaplingNotePlaintext::decrypt(
+        tx1.vShieldedOutput[0].encCiphertext, ivk,
+        tx1.vShieldedOutput[0].ephemeralKey, tx1.vShieldedOutput[0].cm);
+    ASSERT_TRUE(static_cast<bool>(maybe_pt));
+    auto maybe_note = maybe_pt.get().note(ivk);
+    ASSERT_TRUE(static_cast<bool>(maybe_note));
+    auto note = maybe_note.get();
+    auto anchor = saplingTree.root();
+    auto witness = wallet.mapWallet[hash].mapSaplingNoteData[op].witnesses.front();
+
+    auto builder2 = TransactionBuilder(consensusParams, 2);
+    builder2.AddSaplingSpend(expsk, note, anchor, witness);
+    builder2.AddSaplingOutput(fvk.ovk, pk, 25000, {});
+    auto tx2 = builder2.Build().GetTxOrThrow();
+
+    CWalletTx wtx2 {&wallet, tx2};
+    CBlock block2;
+    block2.vtx.push_back(wtx2);
+    block2.hashMerkleRoot = block2.BuildMerkleTree();
+    block2.hashPrevBlock = blockHash;
+    auto blockHash2 = block2.GetHash();
+    CBlockIndex fakeIndex2 {block2};
+    fakeIndex2.nHeight = 1;
+    fakeIndex2.pprev = &fakeIndex;
+    mapBlockIndex.insert(std::make_pair(blockHash2, &fakeIndex2));
+    chainActive.SetTip(&fakeIndex2);
+    ASSERT_EQ(1, chainActive.Height());
+
+    auto nd2 = wallet.FindMySaplingNotes(wtx2).first;
+    ASSERT_TRUE(nd2.size() > 0);
+    wtx2.SetSaplingNoteData(nd2);
+    wtx2.SetMerkleBranch(block2);
+    // AddToWallet -> AddToSpends marks note A's nullifier as spent.
+    wallet.AddToWallet(wtx2, true, NULL);
+    wallet.IncrementNoteWitnesses(&fakeIndex2, &block2, sproutTree, saplingTree);
+    wallet.UpdateSaplingNullifierNoteMapForBlock(&block2);
+
+    // Note A is now spent; confirm via the nullifier.
+    auto nfA = wallet.mapWallet[hash].mapSaplingNoteData[op].nullifier;
+    ASSERT_TRUE((bool)nfA);
+    EXPECT_TRUE(wallet.IsSaplingSpent(*nfA));
+
+    // Spent note A must be excluded from the cached total, which must still
+    // equal the slow (ignoreSpent) path exactly.
+    CAmount slowAfter = SlowSaplingTotal(wallet, 1);
+    CAmount cachedAfter = wallet.GetSaplingBalanceCached(1);
+    EXPECT_EQ(slowAfter, cachedAfter);
+
+    // Prove note A is actually excluded (fee-independently): the same wallet
+    // counted WITH spent notes included must be larger by exactly note A's
+    // 40000, since A is the only spent note.
+    std::vector<CSproutNotePlaintextEntry> sproutEntriesAll;
+    std::vector<SaplingNoteEntry> saplingEntriesAll;
+    wallet.GetFilteredNotes(sproutEntriesAll, saplingEntriesAll, "", 1, false, true);
+    CAmount totalIncludingSpent = 0;
+    for (auto& e : saplingEntriesAll) {
+        totalIncludingSpent += CAmount(e.note.value());
+    }
+    EXPECT_EQ(totalIncludingSpent - CAmount(40000), cachedAfter);
+
+    // The per-note cached value of A is immutable — it was NOT zeroed by spending.
+    EXPECT_TRUE((bool)wallet.mapWallet[hash].mapSaplingNoteData[op].value);
+    EXPECT_EQ(valueBeforeSpend, wallet.mapWallet[hash].mapSaplingNoteData[op].value.get());
+
+    // Tear down
+    chainActive.SetTip(NULL);
+    mapBlockIndex.erase(blockHash);
+    mapBlockIndex.erase(blockHash2);
+
+    RegtestDeactivateSapling();
+}
