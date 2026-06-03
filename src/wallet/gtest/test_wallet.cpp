@@ -2,6 +2,9 @@
 #include <gtest/gtest.h>
 #include <sodium.h>
 
+#include <iostream>
+#include <sys/time.h>
+
 #include "base58.h"
 #include "chainparams.h"
 #include "key_io.h"
@@ -77,6 +80,9 @@ public:
     }
     void SetScanSaplingBatch(const std::map<SaplingOutPoint, SaplingOutputMatch>* p) {
         pScanSaplingBatch = p;
+    }
+    bool ScanBatchIsNull() const {
+        return pScanSaplingBatch == nullptr;
     }
 };
 
@@ -744,6 +750,255 @@ TEST(WalletTests, ParallelSaplingScanBatchViewingKeyDiscovery) {
         // Note set identical too.
         ASSERT_EQ(serial.first.size(), par.first.size()) << "workers=" << w;
     }
+
+    RegtestDeactivateSapling();
+}
+
+// ====================================================================
+// Windowed parallel rescan coverage (multi-window + reorg) + a benchmark.
+//
+// NOTE ON SCOPE: A direct gtest of CWallet::ScanForWalletTransactions is
+// infeasible here — its windowed loop reads blocks via ReadBlockFromDisk and
+// its applyBlock asserts on pcoinsTip->GetSproutAnchorAt, and pcoinsTip is
+// uninitialized in the gtest harness. These tests instead reproduce the EXACT
+// data flow the production loop performs around the parallel batch, over a
+// multi-block chain that spans MULTIPLE windows and across a reorg, and prove
+// it is bit-identical to the serial path for W in {1,2,4,8}. They use only the
+// existing TestWallet wrappers + fixtures; no production code, no pcoinsTip,
+// no disk I/O. (Witness/anchor/ChainTip correctness is orthogonal and covered
+// by the CachedWitnessesChainTip tests.) Window split points are driven locally
+// because the production WALLET_SCAN_WINDOW_* are file-static; the loop
+// guarantees results are invariant of where windows split, which we assert.
+// ====================================================================
+namespace {
+
+// One CTransaction with a wallet-owned Sapling output (to `pa`) plus `nPad`
+// corrupted, non-decryptable outputs (corrupt encCiphertext so ka_agree still
+// runs but the AEAD fails -> non-match), so each block carries an owned+foreign
+// mix and the batch crosses the parallel threshold.
+static CTransaction MakeSaplingTxWithPadding(
+    const Consensus::Params& consensusParams,
+    const libzcash::SaplingExtendedSpendingKey& sk,
+    const libzcash::SaplingPaymentAddress& pa,
+    size_t nPad)
+{
+    auto expsk = sk.expsk;
+    auto fvk = expsk.full_viewing_key();
+    auto testNote = GetTestSaplingNote(pa, 50000);
+    auto builder = TransactionBuilder(consensusParams, 1);
+    builder.AddSaplingSpend(expsk, testNote.note, testNote.tree.root(), testNote.tree.witness());
+    builder.AddSaplingOutput(fvk.ovk, pa, 25000, {});
+    auto baseTx = builder.Build().GetTxOrThrow();
+
+    CMutableTransaction mtx(baseTx);
+    for (size_t k = 0; k < nPad; ++k) {
+        OutputDescription corrupt = baseTx.vShieldedOutput[0];
+        corrupt.encCiphertext[0] ^= 0xFF;
+        corrupt.encCiphertext[1] ^= 0xAA;
+        mtx.vShieldedOutput.push_back(corrupt);
+    }
+    return CTransaction(mtx);
+}
+
+struct ScanResult {
+    std::map<SaplingOutPoint, std::pair<libzcash::SaplingIncomingViewingKey, CAmount>> notes;
+    std::map<libzcash::SaplingPaymentAddress, libzcash::SaplingIncomingViewingKey> discovered;
+};
+
+// Pure SERIAL ground truth (batch pointer null, like the serial scan branch).
+static ScanResult ScanSerial(TestWallet& wallet,
+                             const std::vector<std::pair<CBlockIndex*, CBlock>>& chain)
+{
+    wallet.SetScanSaplingBatch(nullptr);
+    ScanResult r;
+    for (const auto& wb : chain) {
+        for (const CTransaction& tx : wb.second.vtx) {
+            CWalletTx wtx{&wallet, tx};
+            auto found = wallet.FindMySaplingNotes(wtx);
+            for (const auto& kv : found.first)
+                r.notes[kv.first] = std::make_pair(kv.second.ivk, kv.second.value.get());
+            for (const auto& kv : found.second)
+                r.discovered[kv.first] = kv.second;
+        }
+    }
+    return r;
+}
+
+// WINDOWED PARALLEL path: chunk into windows of `windowBlocks`, reproducing the
+// production loop body — per-window BuildSaplingScanBatch, set pScanSaplingBatch,
+// per-block FindMySaplingNotes apply, reset pointer per window (ScanBatchPtrGuard).
+static ScanResult ScanWindowedParallel(TestWallet& wallet,
+                                       const std::vector<std::pair<CBlockIndex*, CBlock>>& chain,
+                                       int nWorkers,
+                                       size_t windowBlocks)
+{
+    ScanResult r;
+    size_t i = 0;
+    while (i < chain.size()) {
+        std::vector<std::pair<CBlockIndex*, CBlock>> window;
+        for (size_t j = 0; j < windowBlocks && i < chain.size(); ++j, ++i)
+            window.push_back(chain[i]);
+
+        std::map<SaplingOutPoint, SaplingOutputMatch> batchMatches;
+        wallet.CallBuildSaplingScanBatch(window, nWorkers, batchMatches);
+
+        wallet.SetScanSaplingBatch(&batchMatches);
+        for (const auto& wb : window) {
+            for (const CTransaction& tx : wb.second.vtx) {
+                CWalletTx wtx{&wallet, tx};
+                auto found = wallet.FindMySaplingNotes(wtx);
+                for (const auto& kv : found.first)
+                    r.notes[kv.first] = std::make_pair(kv.second.ivk, kv.second.value.get());
+                for (const auto& kv : found.second)
+                    r.discovered[kv.first] = kv.second;
+            }
+        }
+        wallet.SetScanSaplingBatch(nullptr); // per-window reset (ScanBatchPtrGuard)
+    }
+    return r;
+}
+
+static void ExpectScanResultsEqual(const ScanResult& a, const ScanResult& b, const std::string& ctx)
+{
+    ASSERT_EQ(a.notes.size(), b.notes.size()) << ctx;
+    for (const auto& kv : a.notes) {
+        auto it = b.notes.find(kv.first);
+        ASSERT_TRUE(it != b.notes.end()) << ctx << ": missing owned outpoint";
+        EXPECT_TRUE(kv.second.first == it->second.first) << ctx << ": ivk mismatch";
+        EXPECT_EQ(kv.second.second, it->second.second) << ctx << ": value mismatch";
+    }
+    ASSERT_EQ(a.discovered.size(), b.discovered.size()) << ctx;
+    for (const auto& kv : a.discovered) {
+        auto it = b.discovered.find(kv.first);
+        ASSERT_TRUE(it != b.discovered.end()) << ctx << ": missing discovered addr";
+        EXPECT_TRUE(kv.second == it->second) << ctx;
+    }
+}
+
+// In-memory chain of `nBlocks` blocks, each with one padded Sapling tx. The
+// CBlockIndex* is null: BuildSaplingScanBatch and the apply step here read only
+// block.vtx, and these indexes are never inserted into mapBlockIndex.
+static std::vector<std::pair<CBlockIndex*, CBlock>> BuildChain(
+    const Consensus::Params& consensusParams,
+    const libzcash::SaplingExtendedSpendingKey& sk,
+    const libzcash::SaplingPaymentAddress& pa,
+    size_t nBlocks, size_t nPadPerTx)
+{
+    std::vector<std::pair<CBlockIndex*, CBlock>> chain;
+    for (size_t h = 0; h < nBlocks; ++h) {
+        CBlock block;
+        block.vtx.push_back(MakeSaplingTxWithPadding(consensusParams, sk, pa, nPadPerTx));
+        chain.push_back(std::make_pair((CBlockIndex*)nullptr, block));
+    }
+    return chain;
+}
+
+} // namespace
+
+// Multi-window equivalence: a chain longer than one window must yield exactly
+// the serial result, for every worker count, regardless of where windows split.
+TEST(WalletTests, ParallelSaplingScanWindowedMultiWindowParity) {
+    auto consensusParams = RegtestActivateSapling();
+    TestWallet wallet;
+
+    auto sk = GetTestMasterSaplingSpendingKey();
+    auto pa = sk.DefaultAddress();
+    ASSERT_TRUE(wallet.AddSaplingZKey(sk, pa));
+
+    // 10 blocks, each tx padded with 64 corrupted outputs (~650 cells total),
+    // comfortably above the (nWorkers*4) parallel threshold even at W=8.
+    auto chain = BuildChain(consensusParams, sk, pa, /*nBlocks=*/10, /*nPad=*/64);
+
+    ScanResult serial = ScanSerial(wallet, chain);
+    ASSERT_GT(serial.notes.size(), (size_t)0);
+
+    for (size_t windowBlocks : {(size_t)1, (size_t)3, (size_t)4, (size_t)7, (size_t)10}) {
+        for (int w : {1, 2, 4, 8}) {
+            ScanResult par = ScanWindowedParallel(wallet, chain, w, windowBlocks);
+            std::string ctx = "windowBlocks=" + std::to_string(windowBlocks) +
+                              " workers=" + std::to_string(w);
+            ExpectScanResultsEqual(serial, par, ctx);
+        }
+    }
+
+    EXPECT_TRUE(wallet.ScanBatchIsNull()); // pointer left clean after windows
+    RegtestDeactivateSapling();
+}
+
+// Reorg/rescan equivalence: scan an old chain (windowed), then a divergent new
+// chain (windowed); the result must converge to the serial scan of the new
+// chain, proving no stale window state leaks across the per-window reset.
+TEST(WalletTests, ParallelSaplingScanWindowedReorgParity) {
+    auto consensusParams = RegtestActivateSapling();
+    TestWallet wallet;
+
+    auto sk = GetTestMasterSaplingSpendingKey();
+    auto pa = sk.DefaultAddress();
+    ASSERT_TRUE(wallet.AddSaplingZKey(sk, pa));
+
+    auto chainA = BuildChain(consensusParams, sk, pa, /*nBlocks=*/5, /*nPad=*/32);
+    auto chainB = BuildChain(consensusParams, sk, pa, /*nBlocks=*/3, /*nPad=*/32);
+    {
+        auto extra = BuildChain(consensusParams, sk, pa, /*nBlocks=*/4, /*nPad=*/48);
+        for (auto& wb : extra) chainB.push_back(wb);
+    }
+
+    ScanResult serialB = ScanSerial(wallet, chainB);
+    ASSERT_GT(serialB.notes.size(), (size_t)0);
+
+    (void)ScanWindowedParallel(wallet, chainA, /*workers=*/4, /*windowBlocks=*/2);
+    for (int w : {1, 2, 4, 8}) {
+        ScanResult parB = ScanWindowedParallel(wallet, chainB, w, /*windowBlocks=*/2);
+        ExpectScanResultsEqual(serialB, parB, "reorg workers=" + std::to_string(w));
+    }
+    EXPECT_TRUE(wallet.ScanBatchIsNull());
+
+    RegtestDeactivateSapling();
+}
+
+// Microbenchmark: serial-vs-parallel speedup of the Sapling trial-decryption
+// batch. Times BuildSaplingScanBatch only (the parallelized work) on one large
+// synthetic window; prints the speedup ratio. No hard timing assertion.
+TEST(WalletTests, ParallelSaplingScanBenchmark) {
+    auto consensusParams = RegtestActivateSapling();
+    TestWallet wallet;
+
+    auto sk = GetTestMasterSaplingSpendingKey();
+    auto pa = sk.DefaultAddress();
+    ASSERT_TRUE(wallet.AddSaplingZKey(sk, pa));
+
+    const size_t kPad = 16000; // one real proof, then cheap non-matching pads
+    CTransaction tx = MakeSaplingTxWithPadding(consensusParams, sk, pa, kPad);
+    CBlock block;
+    block.vtx.push_back(tx);
+    std::vector<std::pair<CBlockIndex*, CBlock>> window;
+    window.push_back(std::make_pair((CBlockIndex*)nullptr, block));
+    const size_t cells = tx.vShieldedOutput.size();
+
+    auto timeBatch = [&](int workers) -> double {
+        std::map<SaplingOutPoint, SaplingOutputMatch> batch;
+        struct timeval tv0; gettimeofday(&tv0, 0);
+        wallet.CallBuildSaplingScanBatch(window, workers, batch);
+        struct timeval tv1; gettimeofday(&tv1, 0);
+        EXPECT_GT(batch.size(), (size_t)0) << "workers=" << workers;
+        return (tv1.tv_sec - tv0.tv_sec) + (tv1.tv_usec - tv0.tv_usec) / 1e6;
+    };
+
+    double tSerial = timeBatch(1);
+    std::cout << "[ParallelSaplingScanBenchmark] cells=" << cells << "\n";
+    std::cout << "  workers=1  time=" << tSerial << "s  speedup=1.00x (baseline)\n";
+    RecordProperty("cells", (int)cells);
+    RecordProperty("serial_seconds_x1000", (int)(tSerial * 1000));
+
+    for (int w : {2, 4, 8}) {
+        double t = timeBatch(w);
+        double speedup = (t > 0.0) ? tSerial / t : 0.0;
+        std::cout << "  workers=" << w << "  time=" << t
+                  << "s  speedup=" << speedup << "x\n";
+        RecordProperty(("speedup_x" + std::to_string(w) + "_x100").c_str(),
+                       (int)(speedup * 100));
+    }
+    std::cout.flush();
 
     RegtestDeactivateSapling();
 }
