@@ -69,6 +69,15 @@ public:
     void MarkAffectedTransactionsDirty(const CTransaction& tx) {
         CWallet::MarkAffectedTransactionsDirty(tx);
     }
+    void CallBuildSaplingScanBatch(
+        const std::vector<std::pair<CBlockIndex*, CBlock>>& window,
+        int nWorkers,
+        std::map<SaplingOutPoint, SaplingOutputMatch>& out) {
+        CWallet::BuildSaplingScanBatch(window, nWorkers, out);
+    }
+    void SetScanSaplingBatch(const std::map<SaplingOutPoint, SaplingOutputMatch>* p) {
+        pScanSaplingBatch = p;
+    }
 };
 
 CWalletTx GetValidSproutReceive(const libzcash::SproutSpendingKey& sk, CAmount value, bool randomInputs, int32_t version = 2) {
@@ -581,6 +590,161 @@ TEST(WalletTests, FindMySaplingNotes) {
     EXPECT_EQ(2, noteMap.size());
 
     // Revert to default
+    RegtestDeactivateSapling();
+}
+
+// The windowed parallel rescan path (BuildSaplingScanBatch + the
+// pScanSaplingBatch read in FindMySaplingNotes) must be bit-identical to the
+// serial path for every worker count, and must never miss an owned note
+// (no false negatives) — across uneven thread partitioning of a large batch.
+TEST(WalletTests, ParallelSaplingScanBatchParity) {
+    auto consensusParams = RegtestActivateSapling();
+
+    TestWallet wallet;
+
+    auto sk = GetTestMasterSaplingSpendingKey();
+    auto expsk = sk.expsk;
+    auto fvk = expsk.full_viewing_key();
+    auto pa = sk.DefaultAddress();
+    ASSERT_TRUE(wallet.AddSaplingZKey(sk, pa));
+
+    // A real transaction with Sapling outputs owned by the wallet (the explicit
+    // output plus change, both to pa).
+    auto testNote = GetTestSaplingNote(pa, 50000);
+    auto builder = TransactionBuilder(consensusParams, 1);
+    builder.AddSaplingSpend(expsk, testNote.note, testNote.tree.root(), testNote.tree.witness());
+    builder.AddSaplingOutput(fvk.ovk, pa, 25000, {});
+    auto baseTx = builder.Build().GetTxOrThrow();
+    ASSERT_GE(baseTx.vShieldedOutput.size(), (size_t)2);
+    const size_t nReal = baseTx.vShieldedOutput.size();
+
+    // Pad with many corrupted (non-decryptable) copies so the batch crosses the
+    // parallel threshold and is split unevenly across workers. Corrupting the
+    // AEAD ciphertext guarantees a non-match while leaving a valid ephemeralKey,
+    // so ka_agree still runs (exercises the real per-cell decrypt path).
+    CMutableTransaction mtx(baseTx);
+    const size_t nPad = 256;
+    for (size_t k = 0; k < nPad; ++k) {
+        OutputDescription corrupt = baseTx.vShieldedOutput[0];
+        corrupt.encCiphertext[0] ^= 0xFF;
+        corrupt.encCiphertext[1] ^= 0xAA;
+        mtx.vShieldedOutput.push_back(corrupt);
+    }
+    CTransaction paddedTx(mtx);
+    CWalletTx wtx {&wallet, paddedTx};
+
+    // Ground truth: the serial path (pScanSaplingBatch == nullptr).
+    wallet.SetScanSaplingBatch(nullptr);
+    auto serial = wallet.FindMySaplingNotes(wtx);
+    EXPECT_EQ(nReal, serial.first.size());
+    EXPECT_EQ((size_t)0, serial.second.size()); // ivk already in wallet
+
+    // One-block window holding the padded tx (BuildSaplingScanBatch ignores the
+    // CBlockIndex*, so a null index is fine).
+    CBlock block;
+    block.vtx.push_back(paddedTx);
+    std::vector<std::pair<CBlockIndex*, CBlock>> window;
+    window.push_back(std::make_pair((CBlockIndex*)nullptr, block));
+
+    for (int w : {1, 2, 3, 4, 8}) {
+        std::map<SaplingOutPoint, SaplingOutputMatch> batch;
+        wallet.CallBuildSaplingScanBatch(window, w, batch);
+
+        // Only the genuinely owned outputs match — the corrupted pad never does.
+        EXPECT_EQ(nReal, batch.size()) << "workers=" << w;
+
+        wallet.SetScanSaplingBatch(&batch);
+        auto par = wallet.FindMySaplingNotes(wtx);
+        wallet.SetScanSaplingBatch(nullptr);
+
+        // Bit-identical to the serial path: same outpoints, same ivk, same value.
+        ASSERT_EQ(serial.first.size(), par.first.size()) << "workers=" << w;
+        for (const auto& kv : serial.first) {
+            auto it = par.first.find(kv.first);
+            ASSERT_TRUE(it != par.first.end()) << "missing owned outpoint, workers=" << w;
+            EXPECT_TRUE(kv.second.ivk == it->second.ivk);
+            EXPECT_EQ(kv.second.value, it->second.value);
+        }
+        EXPECT_EQ(serial.second.size(), par.second.size()) << "workers=" << w;
+    }
+
+    RegtestDeactivateSapling();
+}
+
+// Watch-only equivalence: when the wallet holds only a full viewing key and the
+// incoming-viewing-key/address mapping is DISCOVERED during the scan, the batch
+// path must produce the same discovered viewing-key set (viewingKeysToAdd) as
+// the serial path, across worker counts. The other parity test pre-adds the
+// spending key, so it never exercises this discovery branch.
+TEST(WalletTests, ParallelSaplingScanBatchViewingKeyDiscovery) {
+    auto consensusParams = RegtestActivateSapling();
+
+    TestWallet wallet;
+
+    auto sk = GetTestMasterSaplingSpendingKey();
+    auto expsk = sk.expsk;
+    auto fvk = expsk.full_viewing_key();
+    auto ivk = fvk.in_viewing_key();
+    auto pa = sk.DefaultAddress();
+
+    // Register the key with ONLY its default address pa.
+    ASSERT_TRUE(wallet.AddSaplingZKey(sk, pa));
+
+    // Derive a SECOND diversified address (same ivk, different diversifier) that
+    // the wallet has NOT registered, so scanning an output to it must DISCOVER
+    // the address -> populate viewingKeysToAdd (the branch the other test skips).
+    libzcash::SaplingPaymentAddress pa2;
+    bool found2 = false;
+    for (unsigned int t = 1; t < 512 && !found2; ++t) {
+        libzcash::diversifier_t d;
+        d.fill(0);
+        d[0] = (unsigned char)(t & 0xff);
+        d[1] = (unsigned char)((t >> 8) & 0xff);
+        auto addr = ivk.address(d);
+        if (addr && !(addr.get() == pa)) {
+            pa2 = addr.get();
+            found2 = true;
+        }
+    }
+    ASSERT_TRUE(found2);
+
+    // Real tx with a Sapling output to the unregistered diversified address pa2.
+    auto testNote = GetTestSaplingNote(pa, 50000);
+    auto builder = TransactionBuilder(consensusParams, 1);
+    builder.AddSaplingSpend(expsk, testNote.note, testNote.tree.root(), testNote.tree.witness());
+    builder.AddSaplingOutput(fvk.ovk, pa2, 25000, {});
+    auto tx = builder.Build().GetTxOrThrow();
+    CWalletTx wtx {&wallet, tx};
+
+    wallet.SetScanSaplingBatch(nullptr);
+    auto serial = wallet.FindMySaplingNotes(wtx);
+    ASSERT_GT(serial.first.size(), (size_t)0);
+    ASSERT_GT(serial.second.size(), (size_t)0); // at least one discovered viewing key
+
+    CBlock block;
+    block.vtx.push_back(tx);
+    std::vector<std::pair<CBlockIndex*, CBlock>> window;
+    window.push_back(std::make_pair((CBlockIndex*)nullptr, block));
+
+    for (int w : {1, 2, 4}) {
+        std::map<SaplingOutPoint, SaplingOutputMatch> batch;
+        wallet.CallBuildSaplingScanBatch(window, w, batch);
+
+        wallet.SetScanSaplingBatch(&batch);
+        auto par = wallet.FindMySaplingNotes(wtx);
+        wallet.SetScanSaplingBatch(nullptr);
+
+        // Discovered viewing-key set identical to serial.
+        ASSERT_EQ(serial.second.size(), par.second.size()) << "workers=" << w;
+        for (const auto& kv : serial.second) {
+            auto it = par.second.find(kv.first);
+            ASSERT_TRUE(it != par.second.end()) << "missing discovered address, workers=" << w;
+            EXPECT_TRUE(kv.second == it->second);
+        }
+        // Note set identical too.
+        ASSERT_EQ(serial.first.size(), par.first.size()) << "workers=" << w;
+    }
+
     RegtestDeactivateSapling();
 }
 

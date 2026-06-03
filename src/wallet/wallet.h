@@ -346,6 +346,24 @@ public:
 typedef std::map<JSOutPoint, SproutNoteData> mapSproutNoteData_t;
 typedef std::map<SaplingOutPoint, SaplingNoteData> mapSaplingNoteData_t;
 
+/**
+ * Result of trial-decrypting a single Sapling output against the wallet's
+ * incoming viewing keys. A plain value type with NO key-derivation material:
+ * the ivk is the matching incoming viewing key (already in the wallet), the
+ * value is the note's non-invertible plaintext CAmount, and address is the
+ * note's payment address (recovered from the diversifier). Used to carry the
+ * outcome of the (parallel) rescan trial-decryption back to the serial
+ * note-data assembly, so the expensive ka_agree trial-decryption can run off
+ * the wallet-apply thread. KEY-1: holds only an ivk the wallet already owns;
+ * never serialized, never leaves the process.
+ */
+struct SaplingOutputMatch
+{
+    libzcash::SaplingIncomingViewingKey ivk;
+    CAmount value;
+    boost::optional<libzcash::SaplingPaymentAddress> address;
+};
+
 /** Decrypted note, its location in a transaction, and number of confirmations. */
 struct CSproutNotePlaintextEntry
 {
@@ -886,6 +904,44 @@ private:
         bool ignoreSpent,
         bool requireSpendingKey,
         bool ignoreLocked) const;
+
+protected:
+    /**
+     * Trial-decrypt ONE Sapling output against an ordered snapshot of incoming
+     * viewing keys, returning the first match (in snapshot order, exactly like
+     * the serial FindMySaplingNotes break) or boost::none. Pure and lock-free:
+     * it touches no CWallet members and acquires no locks, so it is safe to call
+     * concurrently from rescan worker threads. The per-cell match predicate is
+     * the unchanged SaplingNotePlaintext::decrypt, so results are bit-identical
+     * to the serial path.
+     */
+    boost::optional<SaplingOutputMatch> TrialDecryptSaplingOutput(
+        const OutputDescription& output,
+        const std::vector<libzcash::SaplingIncomingViewingKey>& ivks) const;
+
+    /**
+     * Trial-decrypt every Sapling output across a window of blocks in parallel
+     * (reusing the script-check thread budget), filling `out` keyed by outpoint
+     * with the wallet's matches. The ivk set is snapshotted once under
+     * cs_SpendingKeyStore and frozen for the whole window, so the "first
+     * matching ivk wins" result is identical regardless of which thread computed
+     * which cell. Non-matches are simply absent from `out`. Below a small cell
+     * threshold (or with <2 workers) it falls back to a single-threaded fill.
+     * Caller must hold cs_wallet (the window's blocks must outlive this call).
+     */
+    void BuildSaplingScanBatch(
+        const std::vector<std::pair<CBlockIndex*, CBlock>>& window,
+        int nWorkers,
+        std::map<SaplingOutPoint, SaplingOutputMatch>& out) const;
+
+    /**
+     * Transient rescan state, set ONLY by ScanForWalletTransactions while
+     * cs_wallet is held: a precomputed (parallel) map of which Sapling outputs
+     * in the current window decrypt to this wallet. When non-null,
+     * FindMySaplingNotes reads matches from here instead of trial-decrypting on
+     * the calling thread. Always null outside an active windowed rescan.
+     */
+    const std::map<SaplingOutPoint, SaplingOutputMatch>* pScanSaplingBatch = nullptr;
 
 protected:
     bool UpdatedNoteData(const CWalletTx& wtxIn, CWalletTx& wtx);

@@ -26,6 +26,8 @@
 
 #include <assert.h>
 
+#include <atomic>
+
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/thread.hpp>
@@ -1809,6 +1811,35 @@ mapSproutNoteData_t CWallet::FindMySproutNotes(const CTransaction &tx) const
  * the result of FindMySaplingNotes (for the addresses available at the time) will
  * already have been cached in CWalletTx.mapSaplingNoteData.
  */
+/**
+ * Pure, lock-free trial-decryption of a single Sapling output against an
+ * ordered ivk snapshot. Mirrors the inner ivk loop of FindMySaplingNotes
+ * (first match in snapshot order wins, exactly like the serial `break`), but
+ * touches no CWallet members and takes no locks, so rescan worker threads can
+ * call it concurrently. The match predicate is the unchanged
+ * SaplingNotePlaintext::decrypt — the sole ownership oracle — so results are
+ * bit-identical to the serial path.
+ */
+boost::optional<SaplingOutputMatch> CWallet::TrialDecryptSaplingOutput(
+    const OutputDescription& output,
+    const std::vector<SaplingIncomingViewingKey>& ivks) const
+{
+    for (const SaplingIncomingViewingKey& ivk : ivks) {
+        auto result = SaplingNotePlaintext::decrypt(output.encCiphertext, ivk, output.ephemeralKey, output.cm);
+        if (!result) {
+            continue;
+        }
+        SaplingOutputMatch m;
+        m.ivk = ivk;
+        // Cache the note's plaintext value (a non-invertible CAmount only;
+        // no key material) so balance reads can avoid a re-decrypt.
+        m.value = CAmount(result.get().value());
+        m.address = ivk.address(result.get().d);
+        return m;
+    }
+    return boost::none;
+}
+
 std::pair<mapSaplingNoteData_t, SaplingIncomingViewingKeyMap> CWallet::FindMySaplingNotes(const CTransaction &tx) const
 {
     LOCK(cs_SpendingKeyStore);
@@ -1817,30 +1848,47 @@ std::pair<mapSaplingNoteData_t, SaplingIncomingViewingKeyMap> CWallet::FindMySap
     mapSaplingNoteData_t noteData;
     SaplingIncomingViewingKeyMap viewingKeysToAdd;
 
+    // Snapshot the wallet's incoming viewing keys in deterministic (map-key)
+    // order so "first matching ivk wins" reproduces the serial loop's order.
+    // Only needed on the serial (non-batched) path.
+    std::vector<SaplingIncomingViewingKey> ivks;
+    if (pScanSaplingBatch == nullptr) {
+        ivks.reserve(mapSaplingFullViewingKeys.size());
+        for (const auto& it : mapSaplingFullViewingKeys) {
+            ivks.push_back(it.first);
+        }
+    }
+
     // Protocol Spec: 4.19 Block Chain Scanning (Sapling)
     for (uint32_t i = 0; i < tx.vShieldedOutput.size(); ++i) {
-        const OutputDescription output = tx.vShieldedOutput[i];
-        for (auto it = mapSaplingFullViewingKeys.begin(); it != mapSaplingFullViewingKeys.end(); ++it) {
-            SaplingIncomingViewingKey ivk = it->first;
-            auto result = SaplingNotePlaintext::decrypt(output.encCiphertext, ivk, output.ephemeralKey, output.cm);
-            if (!result) {
-                continue;
+        SaplingOutPoint op {hash, i};
+
+        // During a windowed rescan the (output x ivk) trial-decryption was
+        // already done in parallel; read the precomputed match instead of
+        // paying the ka_agree EC op on this (apply) thread. Outside rescan
+        // (pScanSaplingBatch == nullptr) this decrypts serially as before.
+        boost::optional<SaplingOutputMatch> match;
+        if (pScanSaplingBatch != nullptr) {
+            auto bit = pScanSaplingBatch->find(op);
+            if (bit != pScanSaplingBatch->end()) {
+                match = bit->second;
             }
-            auto address = ivk.address(result.get().d);
-            if (address && mapSaplingIncomingViewingKeys.count(address.get()) == 0) {
-                viewingKeysToAdd[address.get()] = ivk;
-            }
-            // We don't cache the nullifier here as computing it requires knowledge of the note position
-            // in the commitment tree, which can only be determined when the transaction has been mined.
-            SaplingOutPoint op {hash, i};
-            SaplingNoteData nd;
-            nd.ivk = ivk;
-            // Cache the note's plaintext value (a non-invertible CAmount only;
-            // no key material) so balance reads can avoid a re-decrypt.
-            nd.value = CAmount(result.get().value());
-            noteData.insert(std::make_pair(op, nd));
-            break;
+        } else {
+            match = TrialDecryptSaplingOutput(tx.vShieldedOutput[i], ivks);
         }
+        if (!match) {
+            continue;
+        }
+
+        if (match->address && mapSaplingIncomingViewingKeys.count(match->address.get()) == 0) {
+            viewingKeysToAdd[match->address.get()] = match->ivk;
+        }
+        // We don't cache the nullifier here as computing it requires knowledge of the note position
+        // in the commitment tree, which can only be determined when the transaction has been mined.
+        SaplingNoteData nd;
+        nd.ivk = match->ivk;
+        nd.value = match->value;
+        noteData.insert(std::make_pair(op, nd));
     }
 
     return std::make_pair(noteData, viewingKeysToAdd);
@@ -2438,6 +2486,132 @@ void CWallet::WitnessNoteCommitment(std::vector<uint256> commitments,
  * from or to us. If fUpdate is true, found transactions that already
  * exist in the wallet will be updated.
  */
+// Rescan windowing: read a bounded window of blocks ahead, trial-decrypt all
+// their Sapling outputs as one parallel batch, then apply each block serially.
+// Bounded by BYTES so peak memory stays modest regardless of block sizes, and
+// by a block count so the cell/flatten pass stays cheap on tiny blocks.
+static const size_t WALLET_SCAN_WINDOW_BLOCKS = 4096;
+static const size_t WALLET_SCAN_WINDOW_BYTES  = 32 * 1024 * 1024; // 32 MiB
+
+void CWallet::BuildSaplingScanBatch(
+    const std::vector<std::pair<CBlockIndex*, CBlock>>& window,
+    int nWorkers,
+    std::map<SaplingOutPoint, SaplingOutputMatch>& out) const
+{
+    // Freeze the ivk set once for the whole window, in deterministic map-key
+    // order. mapSaplingFullViewingKeys does not change during a rescan (no
+    // spending/full keys are imported mid-scan), so this is equivalent to the
+    // serial path reading it per output, and "first matching ivk wins" is
+    // reproduced identically regardless of which thread computes which cell.
+    std::vector<SaplingIncomingViewingKey> ivks;
+    {
+        LOCK(cs_SpendingKeyStore);
+        ivks.reserve(mapSaplingFullViewingKeys.size());
+        for (const auto& it : mapSaplingFullViewingKeys) {
+            ivks.push_back(it.first);
+        }
+    }
+    if (ivks.empty()) {
+        return; // no Sapling viewing keys -> no possible matches
+    }
+
+    // Flatten every Sapling output in the window into a cell list. The output
+    // pointers reference the caller-owned blocks, which outlive this call.
+    struct Cell { SaplingOutPoint op; const OutputDescription* output; };
+    std::vector<Cell> cells;
+    for (const auto& wb : window) {
+        for (const CTransaction& tx : wb.second.vtx) {
+            if (tx.vShieldedOutput.empty()) {
+                continue;
+            }
+            const uint256 hash = tx.GetHash();
+            for (uint32_t i = 0; i < tx.vShieldedOutput.size(); ++i) {
+                cells.push_back(Cell{ SaplingOutPoint{hash, i}, &tx.vShieldedOutput[i] });
+            }
+        }
+    }
+    if (cells.empty()) {
+        return;
+    }
+
+    std::vector<boost::optional<SaplingOutputMatch>> results(cells.size());
+
+    // Parallelize only when it pays off: the dominant per-cell cost is the
+    // ka_agree EC op (tens of microseconds), so even a few dozen cells amortize
+    // the one-time per-window thread spawn.
+    if (nWorkers >= 2 && cells.size() >= (size_t)(nWorkers * 4)) {
+        // W workers pull cell indices from a shared atomic counter; each writes
+        // its OWN results slot (no shared mutable state -> no mutex). Workers
+        // take NO locks (the ivk snapshot is a local copy), so they cannot
+        // deadlock against the caller's held LOCK2(cs_main, cs_wallet).
+        std::atomic<size_t> next(0);
+        std::atomic<size_t> nErrors(0);
+        const int W = std::min<int>(nWorkers, (int)cells.size());
+
+        auto worker = [&]() {
+            for (;;) {
+                size_t idx = next.fetch_add(1);
+                if (idx >= cells.size()) break;
+                try {
+                    results[idx] = TrialDecryptSaplingOutput(*cells[idx].output, ivks);
+                } catch (const boost::thread_interrupted&) {
+                    throw; // propagate shutdown promptly
+                } catch (...) {
+                    nErrors.fetch_add(1);
+                    results[idx] = boost::none;
+                }
+            }
+        };
+
+        boost::thread_group group;
+        for (int w = 0; w < W - 1; ++w) {
+            group.create_thread(worker);
+        }
+        // Always join spawned workers, even if this thread's share throws
+        // (a ~thread_group with unjoined threads would std::terminate). Today
+        // the only escapee is a re-thrown boost::thread_interrupted, which
+        // cannot occur on the non-interruptible rescan thread, but this keeps
+        // the invariant if rescans ever move onto an interruptible thread.
+        try {
+            worker(); // this thread takes a share too
+        } catch (...) {
+            group.join_all();
+            throw;
+        }
+        group.join_all();
+
+        if (nErrors.load() > 0) {
+            // Unreachable for a genuinely owned note (decrypt returns none on a
+            // non-match and never throws); logged loudly so a pathological
+            // failure (e.g. bad_alloc) is never silently swallowed.
+            LogPrintf("BuildSaplingScanBatch: WARNING %u Sapling trial-decrypt cell(s) raised an unexpected exception and were treated as non-matches\n",
+                      (unsigned)nErrors.load());
+        }
+    } else {
+        // Single-threaded fill (tiny window or concurrency disabled).
+        for (size_t k = 0; k < cells.size(); ++k) {
+            results[k] = TrialDecryptSaplingOutput(*cells[k].output, ivks);
+        }
+    }
+
+    for (size_t k = 0; k < cells.size(); ++k) {
+        if (results[k]) {
+            out.emplace(cells[k].op, results[k].get());
+        }
+    }
+}
+
+namespace {
+// RAII: clear the wallet's transient scan-batch pointer on EVERY exit from a
+// window's apply phase (normal return OR exception unwinding), so it can never
+// be left dangling past the stack-local batchMatches it points at. Declared
+// AFTER batchMatches so it destructs first (reverse declaration order).
+struct ScanBatchPtrGuard {
+    const std::map<SaplingOutPoint, SaplingOutputMatch>** slot;
+    ~ScanBatchPtrGuard() { *slot = nullptr; }
+};
+} // namespace
+
 int CWallet::ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate)
 {
     int ret = 0;
@@ -2459,13 +2633,17 @@ int CWallet::ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate)
         ShowProgress(_("Rescanning..."), 0); // show rescan progress in GUI as dialog or on splashscreen, if -rescan on startup
         double dProgressStart = Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), pindex, false);
         double dProgressTip = Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), chainActive.Tip(), false);
-        while (pindex)
-        {
-            if (pindex->nHeight % 100 == 0 && dProgressTip - dProgressStart > 0.0)
-                ShowProgress(_("Rescanning..."), std::max(1, std::min(99, (int)((Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), pindex, false) - dProgressStart) / (dProgressTip - dProgressStart) * 100))));
 
-            CBlock block;
-            ReadBlockFromDisk(block, pindex);
+        // Worker budget for parallel trial-decryption: reuse the script-check
+        // thread budget (0 when concurrency is disabled, else 2..MAX).
+        // -nowalletparallel forces the original byte-for-byte serial scan.
+        int nWorkers = GetBoolArg("-nowalletparallel", false) ? 0 : nScriptCheckThreads;
+
+        // Apply one already-read block. This is the original per-block loop
+        // body verbatim, shared by both the serial and windowed paths so there
+        // is exactly one apply implementation (witness construction, anchors,
+        // and ChainTip ordering are unchanged).
+        auto applyBlock = [&](CBlockIndex* pidx, CBlock& block) {
             BOOST_FOREACH(CTransaction& tx, block.vtx)
             {
                 if (AddToWalletIfInvolvingMe(tx, &block, fUpdate)) {
@@ -2478,19 +2656,66 @@ int CWallet::ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate)
             SaplingMerkleTree saplingTree;
             // This should never fail: we should always be able to get the tree
             // state on the path to the tip of our chain
-            assert(pcoinsTip->GetSproutAnchorAt(pindex->hashSproutAnchor, sproutTree));
-            if (pindex->pprev) {
-                if (Params().GetConsensus().NetworkUpgradeActive(pindex->pprev->nHeight, Consensus::UPGRADE_SAPLING)) {
-                    assert(pcoinsTip->GetSaplingAnchorAt(pindex->pprev->hashFinalSaplingRoot, saplingTree));
+            assert(pcoinsTip->GetSproutAnchorAt(pidx->hashSproutAnchor, sproutTree));
+            if (pidx->pprev) {
+                if (Params().GetConsensus().NetworkUpgradeActive(pidx->pprev->nHeight, Consensus::UPGRADE_SAPLING)) {
+                    assert(pcoinsTip->GetSaplingAnchorAt(pidx->pprev->hashFinalSaplingRoot, saplingTree));
                 }
             }
             // Increment note witness caches
-            ChainTip(pindex, &block, sproutTree, saplingTree, true);
+            ChainTip(pidx, &block, sproutTree, saplingTree, true);
+        };
 
-            pindex = chainActive.Next(pindex);
+        auto reportProgress = [&](CBlockIndex* pidx) {
+            if (pidx->nHeight % 100 == 0 && dProgressTip - dProgressStart > 0.0)
+                ShowProgress(_("Rescanning..."), std::max(1, std::min(99, (int)((Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), pidx, false) - dProgressStart) / (dProgressTip - dProgressStart) * 100))));
             if (GetTime() >= nNow + 60) {
                 nNow = GetTime();
-                LogPrintf("Still rescanning. At block %d. Progress=%f\n", pindex->nHeight, Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), pindex));
+                LogPrintf("Still rescanning. At block %d. Progress=%f\n", pidx->nHeight, Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), pidx));
+            }
+        };
+
+        if (nWorkers >= 2) {
+            // Windowed parallel path: read a bounded window of blocks, trial-
+            // decrypt all their Sapling outputs in parallel off the apply
+            // thread, then apply each block serially in chain order. The apply
+            // phase reads the precomputed matches via pScanSaplingBatch, so the
+            // expensive ka_agree EC ops never run on the apply thread.
+            while (pindex) {
+                std::vector<std::pair<CBlockIndex*, CBlock>> window;
+                size_t windowBytes = 0;
+                while (pindex &&
+                       window.size() < WALLET_SCAN_WINDOW_BLOCKS &&
+                       windowBytes < WALLET_SCAN_WINDOW_BYTES) {
+                    window.emplace_back();
+                    window.back().first = pindex;
+                    ReadBlockFromDisk(window.back().second, pindex);
+                    windowBytes += ::GetSerializeSize(window.back().second, SER_DISK, CLIENT_VERSION);
+                    pindex = chainActive.Next(pindex);
+                }
+
+                std::map<SaplingOutPoint, SaplingOutputMatch> batchMatches;
+                BuildSaplingScanBatch(window, nWorkers, batchMatches);
+
+                pScanSaplingBatch = &batchMatches;
+                // Reset on EVERY exit (incl. an exception out of applyBlock),
+                // before batchMatches is destroyed, so the pointer can't dangle.
+                ScanBatchPtrGuard batchGuard{&pScanSaplingBatch};
+                for (auto& wb : window) {
+                    applyBlock(wb.first, wb.second);
+                    reportProgress(wb.first);
+                }
+            }
+        } else {
+            // Serial path (also taken with -nowalletparallel or -par=0):
+            // equivalent to the pre-existing scan loop.
+            while (pindex)
+            {
+                reportProgress(pindex);
+                CBlock block;
+                ReadBlockFromDisk(block, pindex);
+                applyBlock(pindex, block);
+                pindex = chainActive.Next(pindex);
             }
         }
 
