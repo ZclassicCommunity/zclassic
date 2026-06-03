@@ -1392,6 +1392,13 @@ void CWallet::UpdateSaplingNullifierNoteMapWithTx(CWalletTx& wtx) {
                 // otherwise the item would not exist in the first place.
                 assert(false);
             }
+            // Lazily backfill the cached note value for old wallets that pre-date
+            // the value field. This re-decrypt already runs for every mined wallet
+            // note, so old wallets backfill on the next block connect with no
+            // forced rescan. Only a non-invertible CAmount is cached here.
+            if (!item.second.value) {
+                item.second.value = CAmount(optPlaintext.get().value());
+            }
             auto optNote = optPlaintext.get().note(nd.ivk);
             if (!optNote) {
                 assert(false);
@@ -1805,6 +1812,9 @@ std::pair<mapSaplingNoteData_t, SaplingIncomingViewingKeyMap> CWallet::FindMySap
             SaplingOutPoint op {hash, i};
             SaplingNoteData nd;
             nd.ivk = ivk;
+            // Cache the note's plaintext value (a non-invertible CAmount only;
+            // no key material) so balance reads can avoid a re-decrypt.
+            nd.value = CAmount(result.get().value());
             noteData.insert(std::make_pair(op, nd));
             break;
         }

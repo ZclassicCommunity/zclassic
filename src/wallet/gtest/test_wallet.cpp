@@ -167,6 +167,63 @@ TEST(WalletTests, SproutNoteDataSerialisation) {
     EXPECT_EQ(noteData[jsoutpt].witnesses, noteData2[jsoutpt].witnesses);
 }
 
+// 'value' is a MEMORY-ONLY cache: it is intentionally NOT serialized, so the
+// on-disk SaplingNoteData layout is byte-for-byte unchanged (old and new wallets
+// interoperate, no CLIENT_VERSION bump). Confirm a round-trip does NOT persist it.
+TEST(WalletTests, SaplingNoteDataValueIsMemoryOnly) {
+    SaplingNoteData nd;
+    nd.value = CAmount(123456789);
+
+    CDataStream ss(SER_DISK, CLIENT_VERSION);
+    ss << nd;
+
+    SaplingNoteData nd2;
+    ss >> nd2;
+
+    // Not serialized => comes back unset; readers decrypt-and-fill on demand.
+    EXPECT_FALSE((bool)nd2.value);
+}
+
+// A note decrypted via FindMySaplingNotes must end up with the cached value
+// equal to the known plaintext value.
+TEST(WalletTests, SaplingCacheValueOnDecrypt) {
+    auto consensusParams = RegtestActivateSapling();
+
+    TestWallet wallet;
+
+    auto sk = GetTestMasterSaplingSpendingKey();
+    auto expsk = sk.expsk;
+    auto fvk = expsk.full_viewing_key();
+    auto pa = sk.DefaultAddress();
+
+    auto testNote = GetTestSaplingNote(pa, 50000);
+
+    // Build a transaction with a single Sapling output of a known value.
+    auto builder = TransactionBuilder(consensusParams, 1);
+    builder.AddSaplingSpend(expsk, testNote.note, testNote.tree.root(), testNote.tree.witness());
+    builder.AddSaplingOutput(fvk.ovk, pa, 25000, {});
+    auto tx = builder.Build().GetTxOrThrow();
+
+    CWalletTx wtx {&wallet, tx};
+    ASSERT_TRUE(wallet.AddSaplingZKey(sk, pa));
+    ASSERT_TRUE(wallet.HaveSaplingSpendingKey(fvk));
+
+    auto noteMap = wallet.FindMySaplingNotes(wtx).first;
+    ASSERT_EQ(2, noteMap.size());
+
+    // Every decrypted note must carry its cached plaintext value.
+    bool sawChangeOutput = false;
+    for (const auto& item : noteMap) {
+        ASSERT_TRUE((bool)item.second.value);
+        if (item.second.value.get() == CAmount(25000)) {
+            sawChangeOutput = true;
+        }
+    }
+    EXPECT_TRUE(sawChangeOutput);
+
+    RegtestDeactivateSapling();
+}
+
 
 TEST(WalletTests, FindUnspentSproutNotes) {
     SelectParams(CBaseChainParams::TESTNET);

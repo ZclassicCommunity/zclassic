@@ -277,14 +277,29 @@ public:
      * We initialize the height to -1 for the same reason as we do in SproutNoteData.
      * See the comment in that class for a full description.
      */
-    SaplingNoteData() : witnessHeight {-1}, nullifier() { }
-    SaplingNoteData(libzcash::SaplingIncomingViewingKey ivk) : ivk {ivk}, witnessHeight {-1}, nullifier() { }
-    SaplingNoteData(libzcash::SaplingIncomingViewingKey ivk, uint256 n) : ivk {ivk}, witnessHeight {-1}, nullifier(n) { }
+    SaplingNoteData() : witnessHeight {-1}, nullifier(), value(boost::none) { }
+    SaplingNoteData(libzcash::SaplingIncomingViewingKey ivk) : ivk {ivk}, witnessHeight {-1}, nullifier(), value(boost::none) { }
+    SaplingNoteData(libzcash::SaplingIncomingViewingKey ivk, uint256 n) : ivk {ivk}, witnessHeight {-1}, nullifier(n), value(boost::none) { }
 
     std::list<SaplingWitness> witnesses;
     int witnessHeight;
     libzcash::SaplingIncomingViewingKey ivk;
     boost::optional<uint256> nullifier;
+    /**
+     * The note's plaintext value, cached so balance reads do not re-decrypt.
+     * Non-invertible CAmount only; never any key material.
+     *
+     * MEMORY-ONLY by design: it is intentionally NOT serialized to wallet.dat,
+     * so the on-disk SaplingNoteData layout is byte-for-byte unchanged — old and
+     * new wallets interoperate with ZERO risk and no CLIENT_VERSION bump. It is
+     * populated when a note is decrypted (FindMySaplingNotes, and the per-block
+     * UpdateSaplingNullifierNoteMapWithTx backfill); boost::none until then, in
+     * which case balance readers decrypt-and-fill on demand. The user-visible
+     * startup balance is already instant via the GUI's cached-balance paint, so
+     * persistence buys only one first-decrypt per launch — not worth a wallet.dat
+     * format change. (Sprout's cache is memory-only for the same reason.)
+     */
+    boost::optional<CAmount> value;
 
     ADD_SERIALIZE_METHODS;
 
@@ -298,6 +313,8 @@ public:
         READWRITE(nullifier);
         READWRITE(witnesses);
         READWRITE(witnessHeight);
+        // 'value' is deliberately NOT serialized (memory-only cache) — keeps the
+        // on-disk layout identical to pre-cache wallets.
     }
 
     friend bool operator==(const SaplingNoteData& a, const SaplingNoteData& b) {
