@@ -1324,12 +1324,20 @@ bool CWallet::UpdateNullifierNoteMap()
                         auto i = item.first.js;
                         auto hSig = wtxItem.second.vjoinsplit[i].h_sig(
                             *pzcashParams, wtxItem.second.joinSplitPubKey);
+                        // Opportunistically backfill the memory-only value cache
+                        // during the same decrypt (a non-invertible CAmount only;
+                        // no key material). Harmless if it was already set.
+                        boost::optional<CAmount> noteValue;
                         item.second.nullifier = GetSproutNoteNullifier(
                             wtxItem.second.vjoinsplit[i],
                             item.second.address,
                             dec,
                             hSig,
-                            item.first.n);
+                            item.first.n,
+                            &noteValue);
+                        if (noteValue) {
+                            item.second.value = noteValue;
+                        }
                     }
                 }
             }
@@ -1704,7 +1712,8 @@ boost::optional<uint256> CWallet::GetSproutNoteNullifier(const JSDescription &js
                                                          const libzcash::SproutPaymentAddress &address,
                                                          const ZCNoteDecryption &dec,
                                                          const uint256 &hSig,
-                                                         uint8_t n) const
+                                                         uint8_t n,
+                                                         boost::optional<CAmount>* valueOut) const
 {
     boost::optional<uint256> ret;
     auto note_pt = libzcash::SproutNotePlaintext::decrypt(
@@ -1718,6 +1727,13 @@ boost::optional<uint256> CWallet::GetSproutNoteNullifier(const JSDescription &js
     // Check note plaintext against note commitment
     if (note.cm() != jsdesc.commitments[n]) {
         throw libzcash::note_decryption_failed();
+    }
+
+    // Surface the decrypted plaintext value (a non-invertible CAmount; no key
+    // material) so callers can cache it. Only after the commitment check above,
+    // so we never hand back a value for a note that failed to decrypt.
+    if (valueOut != nullptr) {
+        *valueOut = CAmount(note.value());
     }
 
     // SpendingKeys are only available if:
@@ -1751,16 +1767,23 @@ mapSproutNoteData_t CWallet::FindMySproutNotes(const CTransaction &tx) const
                 try {
                     auto address = item.first;
                     JSOutPoint jsoutpt {hash, i, j};
+                    // Capture the note's plaintext value during the same decrypt
+                    // used to compute the nullifier, so we can cache it (a
+                    // non-invertible CAmount only; no key material).
+                    boost::optional<CAmount> noteValue;
                     auto nullifier = GetSproutNoteNullifier(
                         tx.vjoinsplit[i],
                         address,
                         item.second,
-                        hSig, j);
+                        hSig, j,
+                        &noteValue);
                     if (nullifier) {
                         SproutNoteData nd {address, *nullifier};
+                        nd.value = noteValue;
                         noteData.insert(std::make_pair(jsoutpt, nd));
                     } else {
                         SproutNoteData nd {address};
+                        nd.value = noteValue;
                         noteData.insert(std::make_pair(jsoutpt, nd));
                     }
                     break;
@@ -4631,6 +4654,94 @@ CAmount CWallet::GetSaplingBalanceCached(int minDepth, bool requireSpendingKey, 
                 CAmount value = CAmount(maybe_pt.get().value());
                 nd.value = value;  // populate the memory-only cache
                 balance += value;
+            }
+        }
+    }
+
+    return balance;
+}
+
+/**
+ * Cached Sprout balance accessor. Returns the SAME Sprout total as the
+ * unfiltered (no-address) GetFilteredNotes slow path, but reads the memory-only
+ * SproutNoteData::value cache instead of decrypting every note. Sprout's payment
+ * address is stored in the note data (nd.address), so the spent / spending-key /
+ * locked filter needs NO decrypt. On a cache miss (value == boost::none, e.g. a
+ * fresh wallet load) it decrypts the note to obtain the value and populates the
+ * cache (decrypt-fallback) — using the SAME SproutNotePlaintext::decrypt that
+ * GetFilteredNotes uses; a none value is NEVER treated as zero. Only a
+ * non-invertible CAmount is read; no key material leaks.
+ */
+CAmount CWallet::GetSproutBalanceCached(int minDepth, bool requireSpendingKey, bool ignoreLocked)
+{
+    LOCK2(cs_main, cs_wallet);
+
+    CAmount balance = 0;
+
+    for (auto & p : mapWallet) {
+        CWalletTx& wtx = p.second;
+
+        // Per-transaction filter — IDENTICAL to GetFilteredNotes (minDepth only;
+        // maxDepth is effectively INT_MAX for a balance read).
+        if (!CheckFinalTx(wtx) ||
+            wtx.GetBlocksToMaturity() > 0 ||
+            wtx.GetDepthInMainChain() < minDepth) {
+            continue;
+        }
+
+        for (auto & pair : wtx.mapSproutNoteData) {
+            const JSOutPoint& jsop = pair.first;
+            SproutNoteData& nd = pair.second;  // by reference: may populate the cache
+            const SproutPaymentAddress& pa = nd.address;
+
+            // Per-note filter — IDENTICAL to the Sprout branch of GetFilteredNotes
+            // (the address filter is intentionally omitted: this accessor is the
+            // unfiltered wallet total). ignoreSpent is always true for a balance.
+            if (nd.nullifier && IsSproutSpent(*nd.nullifier)) {
+                continue;
+            }
+            if (requireSpendingKey && !HaveSproutSpendingKey(pa)) {
+                continue;
+            }
+            if (ignoreLocked && IsLockedNote(jsop)) {
+                continue;
+            }
+
+            if (nd.value) {
+                // Cache hit: read the cached plaintext value (CAmount only).
+                balance += nd.value.get();
+            } else {
+                // Cache miss (memory-only cache, e.g. fresh load): decrypt to
+                // obtain the value — the same decrypt GetFilteredNotes performs —
+                // then populate the cache. NEVER treat none as zero.
+                int i = jsop.js; // index into CTransaction.vjoinsplit
+                int j = jsop.n;  // index into JSDescription.ciphertexts
+
+                ZCNoteDecryption decryptor;
+                if (!GetNoteDecryptor(pa, decryptor)) {
+                    // Note decryptors are created when the wallet is loaded, so
+                    // it should always exist (mirrors GetFilteredNotes).
+                    throw std::runtime_error(strprintf("Could not find note decryptor for payment address %s", EncodePaymentAddress(pa)));
+                }
+                auto hSig = wtx.vjoinsplit[i].h_sig(*pzcashParams, wtx.joinSplitPubKey);
+                // Mirror GetFilteredNotes' error contract: Sprout decrypt() THROWS on
+                // failure (unlike Sapling's optional), so wrap it — a decrypt error must
+                // surface as a runtime_error, never crash the RPC process.
+                try {
+                    SproutNotePlaintext plaintext = SproutNotePlaintext::decrypt(
+                        decryptor,
+                        wtx.vjoinsplit[i].ciphertexts[j],
+                        wtx.vjoinsplit[i].ephemeralKey,
+                        hSig,
+                        (unsigned char) j);
+                    CAmount value = CAmount(plaintext.value());
+                    nd.value = value;  // populate the memory-only cache
+                    balance += value;
+                } catch (const note_decryption_failed &err) {
+                    throw std::runtime_error(strprintf("Could not decrypt note for payment address %s", EncodePaymentAddress(pa)));
+                } catch (const std::exception &exc) {
+                    throw std::runtime_error(strprintf("Error while decrypting note for payment address %s: %s", EncodePaymentAddress(pa), exc.what()));
+                }
             }
         }
     }

@@ -2446,3 +2446,143 @@ TEST(WalletTests, SaplingCachedExcludesSpent) {
 
     RegtestDeactivateSapling();
 }
+
+// ---------------------------------------------------------------------------
+// W2-5: cached Sprout balance accessor (GetSproutBalanceCached) tests.
+//
+// Mirrors the Sapling cached-balance tests. The cached accessor must return an
+// IDENTICAL Sprout total to the slow GetFilteredNotes path, and must decrypt-
+// and-fill on a boost::none cache entry (never treat none as 0). The notes are
+// funded with NON-NULL, NON-coinbase outpoints (GetValidSproutReceive with
+// randomInputs=false uses prevouts ...01 / ...02), so maturity never excludes
+// them; we rely on cached==slow as the primary, fee/maturity-independent check.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Slow-path reference: the Sprout total computed exactly as getBalanceZaddr
+// does, via the unfiltered GetFilteredNotes (ignoreSpent=true).
+CAmount SlowSproutTotal(CWallet& wallet, int minDepth) {
+    std::vector<CSproutNotePlaintextEntry> sproutEntries;
+    std::vector<SaplingNoteEntry> saplingEntries;
+    wallet.GetFilteredNotes(sproutEntries, saplingEntries, "", minDepth, true, true);
+    CAmount total = 0;
+    for (auto& entry : sproutEntries) {
+        total += CAmount(entry.plaintext.value());
+    }
+    return total;
+}
+
+} // namespace
+
+TEST(WalletTests, SproutCachedTotalEqualsSlowPath) {
+    SelectParams(CBaseChainParams::REGTEST);
+
+    TestWallet wallet;
+    auto sk = libzcash::SproutSpendingKey::random();
+    wallet.AddSproutSpendingKey(sk);
+
+    // GetValidSproutReceive(value) creates TWO notes of `value` each (js 0,
+    // outputs 0 and 1) sent to sk.address(). randomInputs=false => non-null,
+    // non-coinbase prevouts, so the tx is never treated as immature coinbase.
+    auto wtx = GetValidSproutReceive(sk, 10, false);
+
+    // FindMySproutNotes decrypts both notes and caches their plaintext value.
+    auto noteData = wallet.FindMySproutNotes(wtx);
+    ASSERT_EQ(2, noteData.size());
+    for (const auto& item : noteData) {
+        ASSERT_TRUE((bool)item.second.value);
+        EXPECT_EQ(CAmount(10), item.second.value.get());
+    }
+    wtx.SetSproutNoteData(noteData);
+
+    // Fake-mine the receive at height 0 (depth 1 at tip).
+    EXPECT_EQ(-1, chainActive.Height());
+    CBlock block;
+    block.vtx.push_back(wtx);
+    block.hashMerkleRoot = block.BuildMerkleTree();
+    auto blockHash = block.GetHash();
+    CBlockIndex fakeIndex {block};
+    fakeIndex.nHeight = 0;
+    mapBlockIndex.insert(std::make_pair(blockHash, &fakeIndex));
+    chainActive.SetTip(&fakeIndex);
+    ASSERT_EQ(0, chainActive.Height());
+
+    wtx.SetMerkleBranch(block);
+    wallet.AddToWallet(wtx, true, NULL);
+
+    // For each minDepth the cached accessor must equal the slow path exactly.
+    for (int minDepth : {0, 1, 2}) {
+        CAmount slow = SlowSproutTotal(wallet, minDepth);
+        CAmount cached = wallet.GetSproutBalanceCached(minDepth);
+        EXPECT_EQ(slow, cached) << "minDepth=" << minDepth;
+    }
+
+    // Sanity: at minDepth<=1 both 10-value notes count (20); at minDepth=2
+    // (the note is only at depth 1) nothing counts (0).
+    EXPECT_EQ(CAmount(20), wallet.GetSproutBalanceCached(0));
+    EXPECT_EQ(CAmount(20), wallet.GetSproutBalanceCached(1));
+    EXPECT_EQ(CAmount(0), wallet.GetSproutBalanceCached(2));
+
+    // Tear down
+    chainActive.SetTip(NULL);
+    mapBlockIndex.erase(blockHash);
+}
+
+TEST(WalletTests, SproutCachedDecryptFallbackOnNone) {
+    SelectParams(CBaseChainParams::REGTEST);
+
+    TestWallet wallet;
+    auto sk = libzcash::SproutSpendingKey::random();
+    wallet.AddSproutSpendingKey(sk);
+
+    auto wtx = GetValidSproutReceive(sk, 10, false);
+    auto noteData = wallet.FindMySproutNotes(wtx);
+    ASSERT_EQ(2, noteData.size());
+    wtx.SetSproutNoteData(noteData);
+
+    // Fake-mine the receive at height 0 (depth 1 at tip).
+    EXPECT_EQ(-1, chainActive.Height());
+    CBlock block;
+    block.vtx.push_back(wtx);
+    block.hashMerkleRoot = block.BuildMerkleTree();
+    auto blockHash = block.GetHash();
+    CBlockIndex fakeIndex {block};
+    fakeIndex.nHeight = 0;
+    mapBlockIndex.insert(std::make_pair(blockHash, &fakeIndex));
+    chainActive.SetTip(&fakeIndex);
+    ASSERT_EQ(0, chainActive.Height());
+
+    wtx.SetMerkleBranch(block);
+    wallet.AddToWallet(wtx, true, NULL);
+
+    uint256 hash = wtx.GetHash();
+
+    // Sanity: the notes were decrypted on receipt, so every cache entry is set.
+    for (auto& pair : wallet.mapWallet[hash].mapSproutNoteData) {
+        ASSERT_TRUE((bool)pair.second.value);
+    }
+    CAmount expected = SlowSproutTotal(wallet, 1);
+    ASSERT_EQ(CAmount(20), expected);
+
+    // Simulate a fresh wallet load: the memory-only cache is empty (boost::none).
+    for (auto& pair : wallet.mapWallet[hash].mapSproutNoteData) {
+        pair.second.value = boost::none;
+        ASSERT_FALSE((bool)pair.second.value);
+    }
+
+    // The accessor must NOT treat none as 0: it decrypts to recover the value,
+    // returning the same total as the slow path.
+    CAmount cached = wallet.GetSproutBalanceCached(1);
+    EXPECT_EQ(expected, cached);
+
+    // ...and it must have repopulated the cache as a side effect.
+    for (auto& pair : wallet.mapWallet[hash].mapSproutNoteData) {
+        EXPECT_TRUE((bool)pair.second.value);
+        EXPECT_EQ(CAmount(10), pair.second.value.get());
+    }
+
+    // Tear down
+    chainActive.SetTip(NULL);
+    mapBlockIndex.erase(blockHash);
+}

@@ -3528,9 +3528,9 @@ UniValue getwalletsummary(const UniValue& params, bool fHelp)
             "metadata, intended for lightweight polling by GUIs. Emits ONLY aggregate\n"
             "amounts and chain metadata: no addresses, no per-note data, no keys.\n"
             "\nThe transparent fields are sourced from cheap in-memory accessors. The\n"
-            "private/total fields currently use the same (slower) scan as\n"
-            "z_gettotalbalance, so \"shieldedcached\" is reported as false; a future\n"
-            "cached path will flip it to true without changing the values.\n"
+            "private/total fields are read from the cached shielded balance path,\n"
+            "which returns the same values as z_gettotalbalance without re-decrypting\n"
+            "every note, so \"shieldedcached\" is reported as true.\n"
             "\nArguments:\n"
             "1. minconf          (numeric, optional, default=1) Only include private and transparent transactions confirmed at least this many times.\n"
             "2. includeWatchonly (bool, optional, default=false) Also include balance in watchonly addresses (see 'importaddress' and 'z_importviewingkey')\n"
@@ -3541,7 +3541,7 @@ UniValue getwalletsummary(const UniValue& params, bool fHelp)
             "  \"transparentimmature\": x,    (numeric) the immature (coinbase) balance of transparent funds\n"
             "  \"private\": xxxxx,            (numeric) the total balance of private funds (Sprout and Sapling)\n"
             "  \"total\": xxxxx,              (numeric) the total balance of transparent (confirmed) and private funds\n"
-            "  \"shieldedcached\": false,     (bool) whether the private/total values came from the cached fast path\n"
+            "  \"shieldedcached\": true,      (bool) whether the private/total values came from the cached fast path\n"
             "  \"txcount\": xxxxxxx,          (numeric) the total number of transactions in the wallet\n"
             "  \"height\": xxxxx,             (numeric) the height of the active chain tip\n"
             "  \"bestblockhash\": \"hash\"      (string) the hash of the active chain tip\n"
@@ -3575,9 +3575,17 @@ UniValue getwalletsummary(const UniValue& params, bool fHelp)
     // accessors. These are aggregate CAmounts only -- no per-note or key data.
     CAmount nUnconfirmed = pwalletMain->GetUnconfirmedBalance();
     CAmount nImmature = pwalletMain->GetImmatureBalance();
-    // Private/total: compute via the existing (slow) scan so the RPC is correct
-    // from day one. The cached fast path is a later wave; signal which we used.
-    CAmount nPrivateBalance = getBalanceZaddr("", nMinDepth, !fIncludeWatchonly);
+    // Private/total: shielded total is the Sprout + Sapling balance at minconf,
+    // exactly as getBalanceZaddr("", ...) composes it from GetFilteredNotes —
+    // but read from the MEMORY-ONLY cached accessors (decrypt-fallback on a cache
+    // miss) so we avoid re-decrypting every note. Same minconf / includeWatchonly
+    // semantics: getBalanceZaddr's ignoreUnspendable maps to requireSpendingKey,
+    // i.e. requireSpendingKey = !fIncludeWatchonly; ignoreLocked stays default.
+    // These accessors return an IDENTICAL total to the slow scan, so the values
+    // are unchanged — only "shieldedcached" flips to true.
+    CAmount nSproutBalance = pwalletMain->GetSproutBalanceCached(nMinDepth, !fIncludeWatchonly);
+    CAmount nSaplingBalance = pwalletMain->GetSaplingBalanceCached(nMinDepth, !fIncludeWatchonly);
+    CAmount nPrivateBalance = nSproutBalance + nSaplingBalance;
     CAmount nTotalBalance = nBalance + nPrivateBalance;
 
     UniValue result(UniValue::VOBJ);
@@ -3586,7 +3594,7 @@ UniValue getwalletsummary(const UniValue& params, bool fHelp)
     result.push_back(Pair("transparentimmature", FormatMoney(nImmature)));
     result.push_back(Pair("private", FormatMoney(nPrivateBalance)));
     result.push_back(Pair("total", FormatMoney(nTotalBalance)));
-    result.push_back(Pair("shieldedcached", false));
+    result.push_back(Pair("shieldedcached", true));
     result.push_back(Pair("txcount", (int)pwalletMain->mapWallet.size()));
     result.push_back(Pair("height", chainActive.Height()));
     result.push_back(Pair("bestblockhash", chainActive.Tip()->GetBlockHash().GetHex()));

@@ -240,11 +240,25 @@ public:
      */
     int witnessHeight;
 
-    SproutNoteData() : address(), nullifier(), witnessHeight {-1} { }
+    /**
+     * The note's plaintext value, cached so balance reads do not re-decrypt.
+     * Non-invertible CAmount only; never any key material.
+     *
+     * MEMORY-ONLY by design: it is intentionally NOT serialized (it is absent
+     * from SerializationOp below). SproutNoteData has NO serialization version,
+     * so adding it to the wire format would silently break the on-disk layout
+     * and every existing wallet.dat. It is populated when a note is decrypted
+     * (FindMySproutNotes); boost::none until then, in which case balance readers
+     * decrypt-and-fill on demand. Sprout is legacy / low-volume, so a memory-only
+     * cache rebuilt on load is the correct trade-off (same as Sapling's value).
+     */
+    boost::optional<CAmount> value;
+
+    SproutNoteData() : address(), nullifier(), witnessHeight {-1}, value(boost::none) { }
     SproutNoteData(libzcash::SproutPaymentAddress a) :
-            address {a}, nullifier(), witnessHeight {-1} { }
+            address {a}, nullifier(), witnessHeight {-1}, value(boost::none) { }
     SproutNoteData(libzcash::SproutPaymentAddress a, uint256 n) :
-            address {a}, nullifier {n}, witnessHeight {-1} { }
+            address {a}, nullifier {n}, witnessHeight {-1}, value(boost::none) { }
 
     ADD_SERIALIZE_METHODS;
 
@@ -254,6 +268,9 @@ public:
         READWRITE(nullifier);
         READWRITE(witnesses);
         READWRITE(witnessHeight);
+        // 'value' is deliberately NOT serialized (memory-only cache). Unlike
+        // SaplingNoteData there is no version field here, so the on-disk layout
+        // MUST stay exactly address/nullifier/witnesses/witnessHeight.
     }
 
     friend bool operator<(const SproutNoteData& a, const SproutNoteData& b) {
@@ -1192,7 +1209,13 @@ public:
         const libzcash::SproutPaymentAddress& address,
         const ZCNoteDecryption& dec,
         const uint256& hSig,
-        uint8_t n) const;
+        uint8_t n,
+        // Optional out-param: if non-null, receives the decrypted note's
+        // plaintext value (a non-invertible CAmount). Surfaced so
+        // FindMySproutNotes can populate SproutNoteData::value without a second
+        // decrypt. The nullifier behaviour is unchanged whether or not this is
+        // supplied. Defaulted so existing 5-arg callers are unaffected.
+        boost::optional<CAmount>* valueOut = nullptr) const;
     mapSproutNoteData_t FindMySproutNotes(const CTransaction& tx) const;
     std::pair<mapSaplingNoteData_t, SaplingIncomingViewingKeyMap> FindMySaplingNotes(const CTransaction& tx) const;
     bool IsSproutNullifierFromMe(const uint256& nullifier) const;
@@ -1362,6 +1385,26 @@ public:
     CAmount GetSaplingBalanceCached(int minDepth = 1,
                                     bool requireSpendingKey = true,
                                     bool ignoreLocked = true);
+
+    /**
+     * Sum of the wallet's spendable Sprout note values, using the MEMORY-ONLY
+     * cached SproutNoteData::value to avoid re-decrypting every note on a
+     * balance read. Applies the SAME per-note filter as GetFilteredNotes
+     * (ignoreSpent via IsSproutSpent, requireSpendingKey via
+     * HaveSproutSpendingKey, ignoreLocked via IsLockedNote), so it returns an
+     * IDENTICAL Sprout total to the slow GetFilteredNotes path for the
+     * unfiltered wallet. Sprout's payment address lives in the note data
+     * (nd.address), so NO decrypt is needed for the filter.
+     *
+     * The cache is memory-only, so on a fresh load a note's value may be
+     * boost::none; in that case this DECRYPTS the note to obtain the value and
+     * populates the cache (decrypt-fallback). A none value is NEVER treated as 0.
+     *
+     * Only a non-invertible CAmount is read/summed; no key material is exposed.
+     */
+    CAmount GetSproutBalanceCached(int minDepth = 1,
+                                   bool requireSpendingKey = true,
+                                   bool ignoreLocked = true);
 };
 
 /** A key allocated from the key pool. */
