@@ -3868,14 +3868,44 @@ static uint256 ZcashParamExpectedHash(const ZcashParamSpec& param)
     return uint256S(std::string("0x") + param.sha256hex);
 }
 
+bool ZcashParamsPresentInDir(const boost::filesystem::path& dir)
+{
+    for (size_t i = 0; i < ZCASH_PARAM_FILE_COUNT; ++i) {
+        const boost::filesystem::path path = dir / ZcashParamAt(i).name;
+        boost::system::error_code ec;
+        if (!boost::filesystem::is_regular_file(path, ec) || ec) {
+            return false;
+        }
+        // Size mismatch (truncated / partially-fetched file) -> treat as not
+        // present so the auto-fetch path re-downloads it. The compared size is
+        // the COMPILED ZcashParamAt(i).nSize from ZCASH_PARAM_FILES_RAW above,
+        // NEVER a disk- or peer-supplied size; only file_size() comes from disk,
+        // and a wrong on-disk size only ever causes MORE checking (a re-fetch),
+        // never less. This is the same size gate the served manifest uses
+        // (GetZcashParamManifest).
+        const uint64_t haveSize = (uint64_t)boost::filesystem::file_size(path, ec);
+        if (ec || haveSize != ZcashParamAt(i).nSize) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ZcashParamsPresent()
+{
+    return ZcashParamsPresentInDir(ZC_GetParamsDir());
+}
+
 bool ZcashParamsPresentAndValid()
 {
     const boost::filesystem::path dir = ZC_GetParamsDir();
+    // Cheap gate first: if any file is absent or the wrong size there is no
+    // point hashing -- short-circuit before touching multi-GiB of data.
+    if (!ZcashParamsPresentInDir(dir)) {
+        return false;
+    }
     for (size_t i = 0; i < ZCASH_PARAM_FILE_COUNT; ++i) {
         const boost::filesystem::path path = dir / ZcashParamAt(i).name;
-        if (!boost::filesystem::is_regular_file(path)) {
-            return false;
-        }
         uint256 have;
         std::string hashError;
         if (!HashBootstrapSnapshotFile(path, have, hashError)) {

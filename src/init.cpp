@@ -33,6 +33,7 @@
 #include "script/sigcache.h"
 #include "scheduler.h"
 #include "txdb.h"
+#include "mapport.h"
 #include "torcontrol.h"
 #include "ui_interface.h"
 #include "util.h"
@@ -47,6 +48,10 @@
 
 #ifndef WIN32
 #include <signal.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 #include <boost/algorithm/string/classification.hpp>
@@ -75,6 +80,7 @@
 #include <chrono>
 #include "librustzcash.h"
 #include "sha256.h"
+#include "startuptimer.h"
 
 using namespace std;
 
@@ -185,6 +191,7 @@ void Interrupt(boost::thread_group& threadGroup)
     InterruptRPC();
     InterruptREST();
     InterruptTorControl();
+    InterruptMapPort();
     threadGroup.interrupt_all();
 }
 
@@ -230,6 +237,7 @@ void Shutdown()
 #endif
     StopNode();
     StopTorControl();
+    StopMapPort();
     UnregisterNodeSignals(GetNodeSignals());
 
     // Stop the trustless-bootstrap background validator BEFORE the chain DBs are
@@ -429,6 +437,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-forcednsseed", strprintf(_("Always query for peer addresses via DNS lookup (default: %u)"), 0));
     strUsage += HelpMessageOpt("-listen", _("Accept connections from outside (default: 1 if no -proxy or -connect)"));
     strUsage += HelpMessageOpt("-listenonion", strprintf(_("Automatically create Tor hidden service (default: %d)"), DEFAULT_LISTEN_ONION));
+    strUsage += HelpMessageOpt("-natpmp", strprintf(_("Open the listen port on the router automatically via NAT-PMP/PCP, so peers can reach you (no UPnP). Maps only your own listen port (default: %d)"), DEFAULT_NATPMP));
     strUsage += HelpMessageOpt("-maxconnections=<n>", strprintf(_("Maintain at most <n> connections to peers (default: %u)"), DEFAULT_MAX_PEER_CONNECTIONS));
     strUsage += HelpMessageOpt("-maxreceivebuffer=<n>", strprintf(_("Maximum per-connection receive buffer, <n>*1000 bytes (default: %u)"), 5000));
     strUsage += HelpMessageOpt("-maxsendbuffer=<n>", strprintf(_("Maximum per-connection send buffer, <n>*1000 bytes (default: %u)"), 1000));
@@ -736,15 +745,28 @@ static bool check_file_hash(const std::string& path, const std::string& hash)
               "%s\n"),
                 path),
             "", CClientUIInterface::MSG_ERROR);
-        StartShutdown();
+        // NB: do NOT StartShutdown() here. check_file_hash() runs inside the
+        // self-heal loop in InitSanityCheck(); returning false lets that loop
+        // re-fetch the param from a bootstrap peer and re-verify. The caller
+        // aborts (via InitError) only if the file is STILL bad after the heal.
+        // Calling StartShutdown() here latches the sticky shutdown flag, so the
+        // node would exit even after a successful self-heal (heals-then-exits).
         return false;
     }
-    char buffer[1024];
+    // Hash in large blocks rather than 1 KiB at a time. The param files total
+    // ~1.69 GB; a 1024-byte buffer issues ~1.65M read() syscalls, each of which
+    // is ptrace-intercepted under proot, dominating cold start. A 256 KiB block
+    // feeds the SAME bytes in the SAME order to the SAME incremental SHA-256, so
+    // the resulting hash and the verification semantics are byte-for-byte
+    // identical; only the disk buffering changes. Heap-allocated to keep the
+    // stack small.
+    static const size_t kHashReadBufSize = 256 * 1024;
+    std::vector<char> buffer(kHashReadBufSize);
     size_t size;
     SHA256 buff;
     while (!feof(file)){
-        size = fread(buffer, 1, 1024, file);
-        buff.update(buffer, size);
+        size = fread(buffer.data(), 1, kHashReadBufSize, file);
+        buff.update(buffer.data(), size);
     }
     std::string buff_hash = buff.hash();
     LogPrintf("%s: %s\n", path, buff_hash);
@@ -754,13 +776,167 @@ static bool check_file_hash(const std::string& path, const std::string& hash)
               "%s\n\n expecting:\n%s\n"),
                 path, buff_hash, hash),
             "", CClientUIInterface::MSG_ERROR);
-        StartShutdown();
+        // See the note in the fopen branch above: the caller (InitSanityCheck's
+        // self-heal loop) owns the abort decision, so a corrupted-but-healable
+        // param re-fetches and re-verifies instead of latching shutdown here.
         fclose(file);
         return false;
     }
     fclose(file);
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// Verified-params cache (params-verify.cache, 0600 in DATADIR)
+//
+// PURPOSE: turn the dominant cold-start cost -- re-hashing ~1.69 GB of zk-SNARK
+// params on EVERY launch (param-hash-loop ~= 5.1 s / 80.8% of AppInit2) -- into
+// ~stat-cost on the common, unchanged case, WITHOUT ever loading an unverified
+// param.
+//
+// SAFETY INVARIANT (load-bearing): a re-hash is SKIPPED for a param ONLY when
+// ALL of these hold, otherwise we run the FULL check_file_hash exactly as today:
+//   (a) file_size(path) == spec.nSize                 (the COMPILED size)
+//   (b) cache record exists with size==cur_size AND mtime==cur_mtime
+//   (c) record.verifiedHash == spec.sha256hex          (the LIVE COMPILED hash)
+//   (d) cache file's binary-epoch == this binary's compiled-table epoch
+//   (e) cache file is owner-only (st_uid==geteuid, no group/other write bits)
+// The cache NEVER supplies a hash to trust: (c) compares the cached hash to the
+// compiled constant (.rodata, not attacker-writable). The cache only answers
+// "did THIS (size,mtime) already hash to the value the binary already requires".
+// Forging a skip-and-load of malicious identical-size content requires a SHA-256
+// second preimage (infeasible). A different-uid planted cache is rejected by (e).
+//
+// KNOWN, ACCEPTED RESIDUAL: a bit-rot/torn write that preserves BOTH size AND
+// mtime is skipped and the corrupt param loads -- a regression of today's
+// every-launch hash. This is BOUNDED and NON-CONSENSUS: zk params are firewalled
+// from block/tx/PoW; a corrupt param makes a shielded proof FAIL/REJECT (never
+// forges one or forks the chain), fails LOUDLY at use, and self-heals via the
+// existing bootstrap re-fetch. Pass -noparamcache to force today's full hash.
+namespace {
+
+struct ParamCacheRecord {
+    uint64_t size;
+    int64_t  mtime;            // std::time_t, 1s granularity (boost last_write_time)
+    std::string verifiedHash;  // 64-hex lowercase
+};
+
+// Cheap epoch over the COMPILED spec table: name|hash|size per file. A binary
+// with any different compiled hash/size yields a different epoch, invalidating
+// the entire cache (Model 4: downgrade / multi-version).
+static std::string CompiledParamEpoch()
+{
+    std::string acc;
+    BOOST_FOREACH(const ZcashParamSpec& s, GetZcashParamSpecs()) {
+        acc += s.name;
+        acc += '|';
+        acc += s.sha256hex;
+        acc += '|';
+        acc += std::to_string((unsigned long long)s.nSize);
+        acc += '\n';
+    }
+    return SHA256::hashString(acc);
+}
+
+static boost::filesystem::path ParamVerifyCachePath()
+{
+    return GetDataDir() / "params-verify.cache";
+}
+
+// Returns true and fills `out` ONLY if the cache file is present, owner-only
+// (st_uid==geteuid, no group/other WRITE bits), strictly well-formed, and its
+// stored epoch equals the freshly-computed compiled epoch. ANY doubt => false
+// (caller treats as a cold cache and full-hashes every file).
+static bool LoadVerifiedParamCache(std::map<std::string, ParamCacheRecord>& out)
+{
+    out.clear();
+    const boost::filesystem::path p = ParamVerifyCachePath();
+#ifndef WIN32
+    // Mandatory on-READ ownership/mode gate: a cache writable by anyone other
+    // than us (group/other-writable, or owned by a different uid) is ignored.
+    // 0600-on-write is not enough; an attacker of a DIFFERENT uid must never be
+    // able to plant a honored cache in a misconfigured/shared DATADIR.
+    struct stat st;
+    if (::stat(p.string().c_str(), &st) != 0) return false;
+    if (!S_ISREG(st.st_mode)) return false;
+    if (st.st_uid != geteuid()) return false;
+    if (st.st_mode & (S_IWGRP | S_IWOTH)) return false;
+#endif
+    std::ifstream in(p.string().c_str());
+    if (!in.good()) return false;
+
+    std::string line;
+    bool epochOk = false;
+    const std::string wantEpoch = CompiledParamEpoch();
+    std::map<std::string, ParamCacheRecord> recs;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        std::istringstream ls(line);
+        std::string key;
+        if (!(ls >> key)) return false;
+        if (key == "v") {
+            std::string v;
+            if (!(ls >> v) || v != "1") return false;  // unknown format => fail closed
+        } else if (key == "epoch") {
+            std::string e;
+            if (!(ls >> e) || e.size() != 64) return false;
+            epochOk = (e == wantEpoch);                 // mismatch => discard whole cache
+        } else if (key == "p") {
+            std::string name, hash;
+            unsigned long long sz; long long mt;
+            if (!(ls >> name >> sz >> mt >> hash)) return false;
+            if (hash.size() != 64) return false;
+            for (char c : hash)
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+            if (recs.count(name)) return false;          // duplicate => malformed
+            ParamCacheRecord r;
+            r.size = (uint64_t)sz;
+            r.mtime = (int64_t)mt;
+            r.verifiedHash = hash;
+            recs[name] = r;
+        } else {
+            return false;                                // unknown key => fail closed
+        }
+    }
+    if (!epochOk) return false;                          // missing or wrong epoch line
+    out.swap(recs);
+    return true;
+}
+
+// Atomically rewrite the whole cache 0600 in DATADIR: tmp (O_CREAT|O_WRONLY|
+// O_TRUNC, 0600) -> FileCommit(fdatasync) -> RenameOver. A kill mid-write can
+// never leave a half-record a future parse misreads as a valid skip.
+static void StoreVerifiedParamCache(const std::map<std::string, ParamCacheRecord>& recs)
+{
+    const boost::filesystem::path finalPath = ParamVerifyCachePath();
+    const boost::filesystem::path tmpPath = finalPath.string() + ".tmp";
+#ifndef WIN32
+    int fd = ::open(tmpPath.string().c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (fd < 0) return;
+    FILE* f = fdopen(fd, "wb");
+    if (!f) { ::close(fd); return; }
+#else
+    FILE* f = fopen(tmpPath.string().c_str(), "wb");
+    if (!f) return;
+#endif
+    fprintf(f, "v 1\n");
+    fprintf(f, "epoch %s\n", CompiledParamEpoch().c_str());
+    for (std::map<std::string, ParamCacheRecord>::const_iterator it = recs.begin();
+         it != recs.end(); ++it) {
+        fprintf(f, "p %s %llu %lld %s\n",
+                it->first.c_str(),
+                (unsigned long long)it->second.size,
+                (long long)it->second.mtime,
+                it->second.verifiedHash.c_str());
+    }
+    FileCommit(f);
+    fclose(f);
+    if (!RenameOver(tmpPath, finalPath)) {
+        boost::filesystem::remove(tmpPath);
+    }
+}
+
+} // anonymous namespace
 
 static bool VerifyImportedBootstrapAnchor(std::string& error)
 {
@@ -1032,7 +1208,16 @@ bool InitSanityCheck(void)
     // protocol (verified against compiled hashes) instead of requiring an
     // external download. Uses -bootstrappeer if set, else the compiled default
     // peers; disable with -bootstrap=0.
-    if (!ZcashParamsPresentAndValid() && GetBoolArg("-bootstrap", true)) {
+    // Use the cheap existence+size predicate here (no hashing): this only gates
+    // whether we trigger the bootstrap-peer auto-fetch. The size it compares is
+    // the COMPILED ZcashParamAt(i).nSize, never a disk/peer-supplied size. The
+    // authoritative per-file SHA-256 verification is the GetZcashParamSpecs()
+    // check_file_hash loop below, run on every required file before
+    // ZC_LoadParams loads them -- so each param is still hash-verified exactly
+    // once before use. A corrupted-but-correct-size param slips past this gate
+    // but is caught by that loop, which then re-fetches (self-heal) before
+    // failing.
+    if (!ZcashParamsPresent() && GetBoolArg("-bootstrap", true)) {
         std::string paramError = "no bootstrap peer configured";
         BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
             fprintf(stdout, "Fetching Zcash parameters from peer %s...\n", peer.c_str());
@@ -1062,16 +1247,123 @@ bool InitSanityCheck(void)
     // Validate every required Zcash parameter file against the single
     // compiled SHA-256 table in bootstrap.cpp. Keeping one source of truth
     // means a future hash update can't silently disagree between startup
-    // validation and the bootstrap-snapshot fetch path.
+    // validation and the bootstrap-snapshot fetch path. This GetZcashParamSpecs()
+    // check_file_hash loop is the SOLE pre-load hash barrier: ZC_LoadParams only
+    // does exists() on the files, so every param must be hash-verified here
+    // before it is handed to the prover/verifier.
+    //
+    // Self-heal: because the auto-fetch gate above is now a cheap presence+size
+    // check (it does NOT hash), a corrupted-but-correct-size param file reaches
+    // this loop without having triggered a re-fetch. To preserve the old
+    // auto-heal behavior, on a hash mismatch -- if -bootstrap is enabled and we
+    // have not already retried -- trigger FetchZcashParamsFromPeer once. That
+    // fetch re-hashes each on-disk file and only re-downloads the one(s) that do
+    // not match the compiled hash, then we re-run this loop and fail only if the
+    // file is still bad. On the healthy path each file is still hashed exactly
+    // once.
     const std::vector<ZcashParamSpec>& zcash_param_specs = GetZcashParamSpecs();
+    bool fParamRefetched = false;
+
+    // Verified-params cache (see helpers above check_file_hash). Load once; an
+    // empty map (missing/garbage/foreign-owner/epoch-mismatch cache, or the
+    // -noparamcache escape hatch) means every file is full-hashed exactly as
+    // before. A SKIP is permitted ONLY when current size==compiled size AND a
+    // record's (size,mtime) matches the file AND record.verifiedHash equals the
+    // LIVE compiled spec.sha256hex -- the cache can never widen what counts as
+    // valid, only avoid recomputing a match it already proved.
+    const bool fUseParamCache = GetBoolArg("-paramcache", true) && !GetBoolArg("-noparamcache", false);
+    std::map<std::string, ParamCacheRecord> paramCache;
+    if (fUseParamCache) {
+        (void)LoadVerifiedParamCache(paramCache); // empty on any doubt
+    }
+    std::map<std::string, ParamCacheRecord> verifiedRecords;
+    bool fCacheDirty = false;
+    int nSkipped = 0, nHashed = 0;
+
     for (size_t i = 0; i < zcash_param_specs.size(); ++i) {
         const ZcashParamSpec& spec = zcash_param_specs[i];
-        if (!check_file_hash((ZC_GetParamsDir() / spec.name).string(), spec.sha256hex)) {
+        const boost::filesystem::path path = ZC_GetParamsDir() / spec.name;
+
+        if (fUseParamCache) {
+            boost::system::error_code ec1, ec2;
+            const uintmax_t curSize = boost::filesystem::file_size(path, ec1);
+            const std::time_t curMtime = boost::filesystem::last_write_time(path, ec2);
+            std::map<std::string, ParamCacheRecord>::const_iterator it = paramCache.find(spec.name);
+            std::string compiledHash(spec.sha256hex);
+            std::transform(compiledHash.begin(), compiledHash.end(), compiledHash.begin(), ::tolower);
+            if (!ec1 && !ec2 &&
+                (uint64_t)curSize == spec.nSize &&            // (a) compiled size
+                it != paramCache.end() &&
+                it->second.size == (uint64_t)curSize &&       // (b) unchanged since verify
+                it->second.mtime == (int64_t)curMtime &&
+                it->second.verifiedHash == compiledHash) {    // (c) == LIVE compiled hash
+                verifiedRecords[spec.name] = it->second;      // carry forward, no re-hash
+                ++nSkipped;
+                continue;
+            }
+        }
+
+        if (!check_file_hash(path.string(), spec.sha256hex)) {
+            // A present, correct-size, but wrong-hash (corrupted/forged) file.
+            // Self-heal once via the bootstrap-peer fetch, then re-verify.
+            if (!fParamRefetched && GetBoolArg("-bootstrap", true)) {
+                fParamRefetched = true;
+                std::string paramError = "no bootstrap peer configured";
+                BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
+                    fprintf(stdout, "Re-fetching corrupted Zcash parameter from peer %s...\n", peer.c_str());
+                    LogPrintf("Param hash mismatch for %s; re-fetching from bootstrap peer %s...\n",
+                              spec.name, peer);
+                    if (FetchZcashParamsFromPeer(peer, paramError)) {
+                        break;
+                    }
+                    LogPrintf("Zcash param re-fetch from %s failed: %s\n", peer, paramError);
+                }
+                // Restart the verification from the first file: the re-fetch
+                // re-hashes and may have repaired any of them. Drop staged
+                // records: a healed file is re-stat'd/re-hashed on the restart.
+                verifiedRecords.clear();
+                nSkipped = 0;
+                nHashed = 0;
+                i = (size_t)-1; // ++i -> 0 on the next iteration
+                continue;
+            }
             return false;
+        }
+
+        // Full hash passed: stage a fresh record from the file's CURRENT
+        // (size,mtime), pinning the verifiedHash to the COMPILED hash we just
+        // matched. last_write_time is re-read post-verify so a file rewritten
+        // during this run records its new mtime.
+        {
+            boost::system::error_code ec1, ec2;
+            const uintmax_t curSize = boost::filesystem::file_size(path, ec1);
+            const std::time_t curMtime = boost::filesystem::last_write_time(path, ec2);
+            if (!ec1 && !ec2) {
+                std::string compiledHash(spec.sha256hex);
+                std::transform(compiledHash.begin(), compiledHash.end(), compiledHash.begin(), ::tolower);
+                ParamCacheRecord r;
+                r.size = (uint64_t)curSize;
+                r.mtime = (int64_t)curMtime;
+                r.verifiedHash = compiledHash;
+                verifiedRecords[spec.name] = r;
+            }
+            fCacheDirty = true;
+            ++nHashed;
         }
     }
 
+    // Persist the cache only when something was (re)hashed or the on-disk set
+    // differs from what we verified this run (also rewrites a stale/cold cache).
+    if (fUseParamCache &&
+        (fCacheDirty || verifiedRecords.size() != paramCache.size())) {
+        StoreVerifiedParamCache(verifiedRecords);
+    }
+    LogPrintf("param-cache: %d skipped, %d hashed (cache %s)\n",
+              nSkipped, nHashed, fUseParamCache ? "on" : "off");
 
+    // Isolate the param SHA-256 hashing (the dominant cost in InitSanityCheck)
+    // from the cheap tail below (fast-sync anchor validate + ECC/glibc sanity).
+    g_startupTimer.mark("param-hash-loop");
 
     boost::filesystem::path data_dir = GetDataDir();
     if (!boost::filesystem::is_directory(data_dir)){
@@ -1199,6 +1491,11 @@ bool AppInitServers(boost::thread_group& threadGroup)
  */
 bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 {
+    // ALWAYS-ON startup instrumentation: anchor the cumulative baseline at
+    // AppInit2 entry. Each g_startupTimer.mark() below records the time since
+    // the previous mark; g_startupTimer.summary() at "Done loading" prints the
+    // per-phase table. Pure instrumentation -- no behavior change.
+    g_startupTimer.begin();
     // ********************************************************* Step 1: setup
 #ifdef _MSC_VER
     // Turn off Microsoft heap dump noise
@@ -1617,6 +1914,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
     }
 
+    g_startupTimer.mark("setup+flags(1-3)");
     // ********************************************************* Step 4: application initialization: dir lock, daemonize, pidfile, debug log
 
     // Initialize libsodium
@@ -1628,10 +1926,16 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     ECC_Start();
     globalVerifyHandle.reset(new ECCVerifyHandle());
 
+    // Split the former coarse "ecc+sodium+sanity" mark: this isolates ECC_Start()'s
+    // secp256k1 table precompute from InitSanityCheck() (which hashes the ~1.69 GB
+    // of Zcash params). Proves which half the ~8.9s actually lives in.
+    g_startupTimer.mark("ecc-start");
+
     // Sanity check
     if (!InitSanityCheck())
         return InitError(_("Initialization sanity check failed. ZClassic is shutting down."));
 
+    g_startupTimer.mark("sanity-tail");
     std::string strDataDir = GetDataDir().string();
 #ifdef ENABLE_WALLET
     // Wallet file must be a plain filename without a directory
@@ -1698,8 +2002,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     libsnark::inhibit_profiling_info = true;
     libsnark::inhibit_profiling_counters = true;
 
+    g_startupTimer.mark("datadir-lock+threads");
     // Initialize Zclassic circuit parameters
     ZC_LoadParams(chainparams);
+    g_startupTimer.mark("zk-snark params");
 
     if (GetBoolArg("-savesproutr1cs", false)) {
         boost::filesystem::path r1cs_path = ZC_GetParamsDir() / "r1cs";
@@ -1720,6 +2026,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         if (!AppInitServers(threadGroup))
             return InitError(_("Unable to start HTTP server. See debug log for details."));
     }
+    g_startupTimer.mark("rpc/http servers");
 
     int64_t nStart;
 
@@ -1742,6 +2049,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     } // (!fDisableWallet)
 #endif // ENABLE_WALLET
+    g_startupTimer.mark("wallet db verify");
     // ********************************************************* Step 6: network initialization
 
     RegisterNodeSignals(GetNodeSignals());
@@ -1848,6 +2156,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
         if (!fBound)
             return InitError(_("Failed to listen on any port. Use -listen=0 if you want this."));
+
+        // Opt-in (default off): ask the router to forward our own listen port via
+        // NAT-PMP/PCP so NAT/firewalled peers become reachable for inbound
+        // connections. This is pure net plumbing (zero consensus surface) and can
+        // only ever map THIS node's own address — never any other host.
+        if (GetBoolArg("-natpmp", DEFAULT_NATPMP))
+            StartMapPort(threadGroup, scheduler);
     }
 
     if (mapArgs.count("-externalip")) {
@@ -1861,6 +2176,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     BOOST_FOREACH(const std::string& strDest, mapMultiArgs["-seednode"])
         AddOneShot(strDest);
+
+    // Sub-mark: pure network-arg setup (UA/proxy/onion/listen-bind/seednode).
+    // With -listen=0 the bind block is skipped, so this should be ~0ms on any node;
+    // it isolates in-memory arg setup from the bootstrap-snapshot work that follows.
+    g_startupTimer.mark(".net-setup");
 
 #if ENABLE_ZMQ
     pzmqNotificationInterface = CZMQNotificationInterface::CreateWithArguments(mapArgs);
@@ -1949,6 +2269,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // failure fatal; the automatic path is best-effort and falls back to normal
     // peer-to-peer sync if no bootstrap peer is reachable.
     bool bootstrap_snapshot_ran = false;
+    // Sub-mark: everything between net-setup and the auto bootstrap-snapshot
+    // decision -- ZMQ/Proton interface create, the -bootstrapserve preflight, and
+    // the optional -bootstrapdatadir manual import. On a -connect=0 -listen=0 node
+    // with no -bootstrapserve these are all cheap, so this row should be ~0ms.
+    g_startupTimer.mark(".pre-bootstrap-snapshot");
     // If a genesis-only datadir is moved aside to make room for a fast-sync, this
     // names the backup directory so we can restore it if the bootstrap fails.
     boost::filesystem::path genesisBackupDir;
@@ -2235,6 +2560,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
     }
 
+    // This now measures ONLY the bootstrap-snapshot decision + (when the datadir
+    // was fresh/genesis-only/stub eligible) the actual BootstrapFromPeer download &
+    // install. On a genuinely SYNCED datadir this is the cheap ineligible path (one
+    // exists() stat + a size-capped stat walk) and should be ~0ms; a large value
+    // here means a real fast-sync ran (a fresh/eligible datadir) -- network+import
+    // work, NOT synced-restart startup overhead. This was the misleading "42.7s".
+    g_startupTimer.mark("network+bootstrap");
     // ********************************************************* Step 7: load block chain
 
     fReindex = GetBoolArg("-reindex", false);
@@ -2337,6 +2669,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     strLoadError = _("Error loading block database");
                     break;
                 }
+                g_startupTimer.mark(".loadblockindex-db");
 
                 // If the loaded chain has a wrong genesis, bail out immediately
                 // (we're likely using a testnet datadir, or the other way around).
@@ -2385,6 +2718,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                         break;
                     }
                 }
+                g_startupTimer.mark(".rewindblockindex");
 
                 uiInterface.InitMessage(_("Verifying blocks..."));
                 if (fHavePruned && GetArg("-checkblocks", 288) > MIN_BLOCKS_TO_KEEP) {
@@ -2396,6 +2730,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     strLoadError = _("Corrupted block database detected");
                     break;
                 }
+                g_startupTimer.mark(".verifydb");
             } catch (const std::exception& e) {
                 if (fDebug) LogPrintf("%s\n", e.what());
                 strLoadError = _("Error opening block database");
@@ -2632,6 +2967,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         return false;
     }
     LogPrintf(" block index %15dms\n", GetTimeMillis() - nStart);
+    g_startupTimer.mark("block index (step7)");
 
     boost::filesystem::path est_path = GetDataDir() / FEE_ESTIMATES_FILENAME;
     CAutoFile est_filein(fopen(est_path.string().c_str(), "rb"), SER_DISK, CLIENT_VERSION);
@@ -2639,6 +2975,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     if (!est_filein.IsNull())
         mempool.ReadFeeEstimates(est_filein);
     fFeeEstimatesInitialized = true;
+    g_startupTimer.mark("fee estimates");
 
 
     // ********************************************************* Step 8: load wallet
@@ -2730,6 +3067,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
         LogPrintf("%s", strErrors.str());
         LogPrintf(" wallet      %15dms\n", GetTimeMillis() - nStart);
+        g_startupTimer.mark("load wallet");
 
         RegisterValidationInterface(pwalletMain);
 
@@ -2755,6 +3093,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             nStart = GetTimeMillis();
             pwalletMain->ScanForWalletTransactions(pindexRescan, true);
             LogPrintf(" rescan      %15dms\n", GetTimeMillis() - nStart);
+            g_startupTimer.mark("rescan");
             pwalletMain->SetBestChain(chainActive.GetLocator());
             nWalletDBUpdated++;
 
@@ -2869,6 +3208,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         if (!ActivateBestChain(state))
             strErrors << "Failed to connect best block";
     }
+    g_startupTimer.mark("activate best chain");
 
     std::vector<boost::filesystem::path> vImportFiles;
     if (mapArgs.count("-loadblock"))
@@ -2908,6 +3248,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         StartTorControl(threadGroup, scheduler);
 
     StartNode(threadGroup, scheduler);
+    g_startupTimer.mark("start node");
 
     // Monitor the chain every minute, and alert if we get blocks much quicker or slower than expected.
     CScheduler::Function f = boost::bind(&PartitionCheck, &IsInitialBlockDownload,
@@ -2935,6 +3276,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     SetRPCWarmupFinished();
     uiInterface.InitMessage(_("Done loading"));
+    g_startupTimer.mark("done (step11)");
+    g_startupTimer.summary();
 
 #ifdef ENABLE_WALLET
     if (pwalletMain) {

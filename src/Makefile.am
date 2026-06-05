@@ -155,12 +155,14 @@ BITCOIN_CORE_H = \
   httprpc.h \
   httpserver.h \
   init.h \
+  startuptimer.h \
   key.h \
   key_io.h \
   keystore.h \
   dbwrapper.h \
   limitedmap.h \
   main.h \
+  mapport.h \
   memusage.h \
   merkleblock.h \
   metrics.h \
@@ -258,8 +260,10 @@ libbitcoin_server_a_SOURCES = \
   httprpc.cpp \
   httpserver.cpp \
   init.cpp \
+  startuptimer.cpp \
   dbwrapper.cpp \
   main.cpp \
+  mapport.cpp \
   merkleblock.cpp \
   metrics.cpp \
   miner.cpp \

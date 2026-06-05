@@ -201,7 +201,18 @@ bool ReadZcashParamChunk(const CBootstrapSnapshotChunkRequest& request,
 //! dir, verifying each against its compiled SHA-256 before installing. The peer
 //! is untrusted: only files matching a compiled hash are accepted.
 bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error);
+//! Cheap presence/size check for one params directory: true iff every required
+//! compiled parameter file exists as a regular file AND its on-disk byte size
+//! matches the compiled nSize. Does NOT hash file contents -- callers that need
+//! cryptographic validity must still hash (e.g. check_file_hash in init.cpp).
+bool ZcashParamsPresentInDir(const boost::filesystem::path& dir);
+//! Cheap presence/size check against the active params dir (ZC_GetParamsDir()).
+//! Used to decide whether to trigger the bootstrap-peer auto-fetch; it does NOT
+//! hash, so it must not be relied on as a substitute for the authoritative
+//! per-file hash verification performed before the params are loaded/used.
+bool ZcashParamsPresent();
 //! True when every required compiled parameter file is present and hash-valid.
+//! Performs a full SHA-256 over every file; NOT on the hot startup path.
 bool ZcashParamsPresentAndValid();
 
 //! fAllowBuild=true (default): if the manifest/file-hash cache is cold, build it

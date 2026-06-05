@@ -413,11 +413,23 @@ bool CBlockTreeDB::LoadBlockIndexGuts()
                 pindexNew->nSproutValue   = diskindex.nSproutValue;
                 pindexNew->nSaplingValue  = diskindex.nSaplingValue;
 
-                // Consistency checks
-                auto header = pindexNew->GetBlockHeader();
-                if (header.GetHash() != pindexNew->GetBlockHash())
-                    return error("LoadBlockIndex(): block header inconsistency detected: on-disk = %s, in-memory = %s",
-                       diskindex.ToString(),  pindexNew->ToString());
+                // Consistency check.
+                //
+                // pindexNew->GetBlockHash() is the hash produced by
+                // diskindex.GetBlockHash() above (used to key this entry in
+                // mapBlockIndex). That call already builds a CBlockHeader from the
+                // SAME deserialized header fields {nVersion, hashPrev,
+                // hashMerkleRoot, hashFinalSaplingRoot, nTime, nBits, nNonce,
+                // nSolution} that the lines above copied verbatim into pindexNew, and
+                // double-SHA256s it. Re-deriving the header from pindexNew and
+                // hashing it a second time (the old `header.GetHash() !=
+                // GetBlockHash()` check) compares a recompute against a recompute of
+                // identical, unmutated inputs (pprev->GetBlockHash() == the map key
+                // == diskindex.hashPrev): it can never fail and just doubles the
+                // per-record header hashing cost across millions of records. The PoW
+                // check below consumes the same already-computed hash, so removing
+                // the duplicate rehash is a no-op for consensus and for the set of
+                // detectable on-disk corruptions.
                 if (!CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, Params().GetConsensus()))
                     return error("LoadBlockIndex(): CheckProofOfWork failed: %s", pindexNew->ToString());
 

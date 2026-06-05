@@ -40,6 +40,7 @@ zcash_gtest_SOURCES += \
 	gtest/test_circuit.cpp \
 	gtest/test_txid.cpp \
 	gtest/test_libzcash_utils.cpp \
+	gtest/test_param_presence.cpp \
 	gtest/test_proofs.cpp \
 	gtest/test_pedersen_hash.cpp \
 	gtest/test_checkblock.cpp \
