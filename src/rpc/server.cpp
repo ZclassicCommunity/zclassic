@@ -435,8 +435,15 @@ static UniValue JSONRPCExecOne(const UniValue& req)
     return rpc_result;
 }
 
+// Maximum number of requests permitted in a single JSON-RPC batch, to guard
+// against a single connection queuing an unbounded amount of work.
+static const size_t MAX_BATCH_SIZE = 100;
+
 std::string JSONRPCExecBatch(const UniValue& vReq)
 {
+    if (vReq.size() > MAX_BATCH_SIZE)
+        throw JSONRPCError(RPC_INVALID_REQUEST, "Batch request size exceeds maximum");
+
     UniValue ret(UniValue::VARR);
     for (size_t reqIdx = 0; reqIdx < vReq.size(); reqIdx++)
         ret.push_back(JSONRPCExecOne(vReq[reqIdx]));

@@ -39,6 +39,11 @@
 #include <boost/foreach.hpp>
 #include <boost/scoped_ptr.hpp>
 
+/** Maximum size (in bytes) of an HTTP request body we will accept. The RPC
+ * interface never needs anywhere near MAX_SIZE; cap it to bound memory use
+ * from a single connection. */
+static const size_t MAX_HTTP_REQUEST_SIZE = 10 * 1024 * 1024;
+
 /** HTTP request work item */
 class HTTPWorkItem : public HTTPClosure
 {
@@ -419,7 +424,7 @@ bool InitHTTPServer()
     }
 
     evhttp_set_timeout(http, GetArg("-rpcservertimeout", DEFAULT_HTTP_SERVER_TIMEOUT));
-    evhttp_set_max_body_size(http, MAX_SIZE);
+    evhttp_set_max_body_size(http, MAX_HTTP_REQUEST_SIZE);
     evhttp_set_gencb(http, http_request_cb, NULL);
 
     if (!HTTPBindAddresses(http)) {
