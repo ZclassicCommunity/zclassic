@@ -16,6 +16,17 @@ This software is the ZClassic client. It synchronizes the entire blockchain hist
 
 ---
 
+## Consensus Hardening (ZipherX builds)
+
+These builds advertise the network subversion `/ZipherX:2.1.2-ZIP209-beta6/` and carry two consensus-validation fixes on top of upstream ZClassic:
+
+- **ZIP-209 shielded turnstile (mainnet).** A block that would drive the Sprout or Sapling shielded value-pool balance negative is rejected as invalid. This bounds the damage of any shielded soundness bug: value forged inside a pool cannot be withdrawn past the pool boundary undetected. Enforcement starts from a hardcoded Sprout value-pool checkpoint — see [doc/zip209-mainnet-reactivation.md](doc/zip209-mainnet-reactivation.md).
+- **CR-01 — contextual checks during initial block download.** `ContextualCheckTransaction()` no longer returns early while the node is in initial block download / import / reindex. Transaction version and network-upgrade activation enforcement, JoinSplit Ed25519 signature verification, and all Sapling spend/output/binding checks now run in every node state, closing a node-state-dependent validation bypass. DoS ban scores stay reduced while syncing; only the checks are no longer skipped.
+
+**Deployment notes.** Both are rule-tightenings (soft-fork class) and want a coordinated upgrade. Because the CR-01 fix changes how blocks are validated during sync, run a `-reindex` on a CR-01-fixed binary to re-validate existing chain state (a reindex on an *un*fixed binary does not re-validate, since reindex keeps the node in IBD). Full validation is correspondingly slower; fresh nodes can still use anchor-pinned fast-sync.
+
+---
+
 ## Quick Start
 
 ### Release Binaries

@@ -167,8 +167,8 @@ TEST(checktransaction_tests, BadTxnsOversize) {
         MockCValidationState state;
         EXPECT_TRUE(CheckTransactionWithoutProofVerification(tx, state));
 
-        // ... but fails contextual ones! (Force IBD off: ZClassic skips
-        // ContextualCheckTransaction during initial block download.)
+        // ... but fails contextual ones! (isInitBlockDownload() is forced false
+        // here; with the CR-01 fix the contextual checks also run during IBD.)
         EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-oversize", false, ::testing::_)).Times(1);
         EXPECT_FALSE(ContextualCheckTransaction(tx, state, 1, 100, []() { return false; }));
     }
@@ -528,10 +528,9 @@ TEST(checktransaction_tests, bad_txns_invalid_joinsplit_signature) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    // ZClassic skips ContextualCheckTransaction entirely during initial block
-    // download (see commit "speed up initial sync"), so no DoS is reported in
-    // IBD. Once IBD has finished, the invalid joinsplit signature is rejected
-    // with the full DoS ban score.
+    // Contextual checks now run during IBD too (CR-01 fix); only the DoS ban
+    // score is reduced while syncing. The invalid joinsplit signature is
+    // rejected with the full DoS ban score.
     EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-invalid-joinsplit-signature", false, ::testing::_)).Times(1);
     ContextualCheckTransaction(tx, state, 0, 100, []() { return false; });
 }
@@ -565,10 +564,9 @@ TEST(checktransaction_tests, non_canonical_ed25519_signature) {
     CTransaction tx(mtx);
 
     MockCValidationState state;
-    // ZClassic skips ContextualCheckTransaction entirely during initial block
-    // download (see commit "speed up initial sync"), so no DoS is reported in
-    // IBD. Once IBD has finished, the non-canonical signature is rejected with
-    // the full DoS ban score.
+    // Contextual checks now run during IBD too (CR-01 fix); only the DoS ban
+    // score is reduced while syncing. The non-canonical signature is rejected
+    // with the full DoS ban score.
     EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-invalid-joinsplit-signature", false, ::testing::_)).Times(1);
     ContextualCheckTransaction(tx, state, 0, 100, []() { return false; });
 }

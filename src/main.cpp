@@ -955,9 +955,14 @@ bool ContextualCheckTransaction(
         const int dosLevel,
         bool (*isInitBlockDownload)())
 {
-    if (isInitBlockDownload()) {
-        return true;
-    }
+    // CR-01 fix: never skip contextual consensus checks during IBD / import /
+    // reindex. The previous early return here (when isInitBlockDownload() was
+    // true) bypassed tx version/activation enforcement, JoinSplit Ed25519
+    // signature verification, and ALL Sapling spend/output/binding checks — a
+    // node-state-dependent consensus validation bypass (a syncing node could
+    // accept a block path a fully-synced node would reject). The DoS ban scores
+    // below stay reduced while syncing (isInitBlockDownload() ? 0 : ...), but
+    // the consensus checks themselves now always run.
     bool overwinterActive = Params().GetConsensus().NetworkUpgradeActive(nHeight, Consensus::UPGRADE_OVERWINTER);
     bool saplingActive = Params().GetConsensus().NetworkUpgradeActive(nHeight, Consensus::UPGRADE_SAPLING);
     bool isSprout = !overwinterActive;
