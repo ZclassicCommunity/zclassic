@@ -9,6 +9,7 @@
 #ifndef BITCOIN_UTILSTRENCODINGS_H
 #define BITCOIN_UTILSTRENCODINGS_H
 
+#include <algorithm>
 #include <stdint.h>
 #include <string>
 #include <vector>
@@ -113,16 +114,19 @@ std::string FormatParagraph(const std::string& in, size_t width = 79, size_t ind
 
 /**
  * Timing-attack-resistant comparison.
- * Takes time proportional to length
- * of first argument.
+ * Takes time proportional to the longer of the two arguments, so that the
+ * comparison length does not depend on which argument is shorter (the previous
+ * implementation looped a.size() times and indexed b[i%b.size()], leaking the
+ * relative lengths through timing).
  */
 template <typename T>
 bool TimingResistantEqual(const T& a, const T& b)
 {
     if (b.size() == 0) return a.size() == 0;
     size_t accumulator = a.size() ^ b.size();
-    for (size_t i = 0; i < a.size(); i++)
-        accumulator |= a[i] ^ b[i%b.size()];
+    size_t n = std::max(a.size(), b.size());
+    for (size_t i = 0; i < n; i++)
+        accumulator |= (size_t)((i < a.size() ? a[i] : 0) ^ (i < b.size() ? b[i] : 0));
     return accumulator == 0;
 }
 

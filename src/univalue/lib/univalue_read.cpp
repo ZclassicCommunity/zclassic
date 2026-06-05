@@ -10,6 +10,10 @@
 
 using namespace std;
 
+// Maximum nesting depth of objects/arrays accepted by the parser, to guard
+// against stack exhaustion from deeply-nested untrusted JSON input.
+static const size_t MAX_JSON_DEPTH = 512;
+
 static bool json_isdigit(int ch)
 {
     return ((ch >= '0') && (ch <= '9'));
@@ -315,6 +319,8 @@ bool UniValue::read(const char *raw, size_t size)
                     setObject();
                 else
                     setArray();
+                if (stack.size() >= MAX_JSON_DEPTH)
+                    return false;
                 stack.push_back(this);
             } else {
                 UniValue tmpVal(utyp);
@@ -322,6 +328,8 @@ bool UniValue::read(const char *raw, size_t size)
                 top->values.push_back(tmpVal);
 
                 UniValue *newTop = &(top->values.back());
+                if (stack.size() >= MAX_JSON_DEPTH)
+                    return false;
                 stack.push_back(newTop);
             }
 
