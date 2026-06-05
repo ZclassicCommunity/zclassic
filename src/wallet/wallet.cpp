@@ -27,6 +27,8 @@
 #include <assert.h>
 
 #include <atomic>
+#include <exception>
+#include <mutex>
 
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem.hpp>
@@ -2545,8 +2547,21 @@ void CWallet::BuildSaplingScanBatch(
         // take NO locks (the ivk snapshot is a local copy), so they cannot
         // deadlock against the caller's held LOCK2(cs_main, cs_wallet).
         std::atomic<size_t> next(0);
-        std::atomic<size_t> nErrors(0);
         const int W = std::min<int>(nWorkers, (int)cells.size());
+
+        // First exception raised by any worker, captured for re-throw after the
+        // group is joined. TrialDecryptSaplingOutput returns boost::none on a
+        // normal non-match and NEVER throws for one (SaplingNotePlaintext::decrypt
+        // returns an empty optional on every miss), so a throw here is always a
+        // genuine failure (e.g. std::bad_alloc). The serial path (FindMySaplingNotes
+        // calls TrialDecryptSaplingOutput with no catch) lets such a failure abort
+        // the rescan; we reproduce that fail-loud behaviour instead of swallowing it
+        // into a non-match, which would silently drop a real note -> a too-low local
+        // shielded balance. Capturing rather than letting a *spawned* thread's
+        // exception escape its functor (which would std::terminate) lets all workers
+        // surface a clean throw identically to the serial path.
+        std::mutex errMutex;
+        std::exception_ptr firstError;
 
         auto worker = [&]() {
             for (;;) {
@@ -2555,10 +2570,13 @@ void CWallet::BuildSaplingScanBatch(
                 try {
                     results[idx] = TrialDecryptSaplingOutput(*cells[idx].output, ivks);
                 } catch (const boost::thread_interrupted&) {
-                    throw; // propagate shutdown promptly
+                    throw; // propagate shutdown promptly (handled by the caller)
                 } catch (...) {
-                    nErrors.fetch_add(1);
-                    results[idx] = boost::none;
+                    std::lock_guard<std::mutex> lock(errMutex);
+                    if (!firstError) {
+                        firstError = std::current_exception();
+                    }
+                    return; // stop pulling more cells; the run is aborting
                 }
             }
         };
@@ -2568,10 +2586,10 @@ void CWallet::BuildSaplingScanBatch(
             group.create_thread(worker);
         }
         // Always join spawned workers, even if this thread's share throws
-        // (a ~thread_group with unjoined threads would std::terminate). Today
-        // the only escapee is a re-thrown boost::thread_interrupted, which
-        // cannot occur on the non-interruptible rescan thread, but this keeps
-        // the invariant if rescans ever move onto an interruptible thread.
+        // (a ~thread_group with unjoined threads would std::terminate). The only
+        // escapee here is a re-thrown boost::thread_interrupted, which cannot occur
+        // on the non-interruptible rescan thread, but this keeps the invariant if
+        // rescans ever move onto an interruptible thread.
         try {
             worker(); // this thread takes a share too
         } catch (...) {
@@ -2580,12 +2598,10 @@ void CWallet::BuildSaplingScanBatch(
         }
         group.join_all();
 
-        if (nErrors.load() > 0) {
-            // Unreachable for a genuinely owned note (decrypt returns none on a
-            // non-match and never throws); logged loudly so a pathological
-            // failure (e.g. bad_alloc) is never silently swallowed.
-            LogPrintf("BuildSaplingScanBatch: WARNING %u Sapling trial-decrypt cell(s) raised an unexpected exception and were treated as non-matches\n",
-                      (unsigned)nErrors.load());
+        // Re-raise the first genuine failure (if any) after every worker has
+        // joined, so the rescan aborts loudly exactly like the serial path.
+        if (firstError) {
+            std::rethrow_exception(firstError);
         }
     } else {
         // Single-threaded fill (tiny window or concurrency disabled).

@@ -1284,7 +1284,19 @@ bool InitSanityCheck(void)
         const ZcashParamSpec& spec = zcash_param_specs[i];
         const boost::filesystem::path path = ZC_GetParamsDir() / spec.name;
 
-        if (fUseParamCache) {
+        // FOLLOW-UP C: sprout-verifying.key is the SOLE consensus-relevant zk param
+        // whose only pre-load integrity gate is the SHA-256 below (the 3 Sapling/
+        // Groth16 params have an independent BLAKE2b gate in librustzcash; the
+        // 910 MB sprout-proving.key is prove-only / local-liveness). The vk is
+        // tiny (1449 bytes), so re-hashing it every launch is free, and it is the
+        // key consumed by JoinSplit verify() during tx/block validation -- so we
+        // never honor a cached skip for it: a same-size+same-mtime silent on-disk
+        // corruption must be re-detected here, not loaded unverified. This keeps
+        // the cache (and ~all of the startup speedup) for the other four params.
+        const bool fAllowCacheSkip =
+            std::string(spec.name) != "sprout-verifying.key";
+
+        if (fUseParamCache && fAllowCacheSkip) {
             boost::system::error_code ec1, ec2;
             const uintmax_t curSize = boost::filesystem::file_size(path, ec1);
             const std::time_t curMtime = boost::filesystem::last_write_time(path, ec2);

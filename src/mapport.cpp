@@ -444,13 +444,13 @@ void StartMapPort(boost::thread_group& threadGroup, CScheduler& scheduler)
 {
     (void)threadGroup; // worker is privately joined for a deterministic shutdown
     (void)scheduler;
+    if (g_mapport_thread.joinable()) {
+        // Already running; leave the live worker (and its interrupt flag) alone.
+        return;
+    }
     {
         boost::unique_lock<boost::mutex> lock(g_mapport_mutex);
         g_mapport_interrupt = false;
-    }
-    if (g_mapport_thread.joinable()) {
-        // Already running; nothing to do.
-        return;
     }
     g_mapport_thread = boost::thread(
         boost::bind(&TraceThread<void (*)()>, "mapport", &ThreadMapPort));
