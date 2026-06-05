@@ -664,6 +664,7 @@ void CleanupBlockRevFiles()
 void ThreadImport(std::vector<boost::filesystem::path> vImportFiles)
 {
     RenameThread("zcl-loadblk");
+    try {
     // -reindex
     if (fReindex) {
         CImportingNow imp;
@@ -716,6 +717,9 @@ void ThreadImport(std::vector<boost::filesystem::path> vImportFiles)
     if (GetBoolArg("-stopafterblockimport", false)) {
         LogPrintf("Stopping after block import\n");
         StartShutdown();
+    }
+    } catch (const std::exception& e) {
+        LogPrintf("%s: failed: %s\n", __func__, e.what());
     }
 }
 
