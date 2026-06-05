@@ -371,7 +371,7 @@ file release/x86_64-w64-mingw32/zclassicd.exe
 
 ```bash
 ./release/x86_64-unknown-linux-gnu/zclassicd --version | head -1
-#   -> ZClassic Daemon version v2.1.2-beta5-<hash>
+#   -> ZClassic Daemon version v2.1.2-beta6-<hash>
 ```
 
 Version source of truth: `configure.ac:9` `_CLIENT_VERSION_BUILD = 4` and
