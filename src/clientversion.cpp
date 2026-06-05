@@ -103,7 +103,7 @@ const std::string CLIENT_DATE(BUILD_DATE);
 std::string FormatVersion(int nVersion)
 {
     if (nVersion % 100 < 25)
-        return strprintf("%d.%d.%d-beta%d", nVersion / 1000000, (nVersion / 10000) % 100, (nVersion / 100) % 100, (nVersion % 100)+1);
+        return strprintf("%d.%d.%d-ZIP209-beta%d", nVersion / 1000000, (nVersion / 10000) % 100, (nVersion / 100) % 100, (nVersion % 100)+1);
     if (nVersion % 100 < 50)
         return strprintf("%d.%d.%d-rc%d", nVersion / 1000000, (nVersion / 10000) % 100, (nVersion / 100) % 100, (nVersion % 100)-24);
     else if (nVersion % 100 == 50)

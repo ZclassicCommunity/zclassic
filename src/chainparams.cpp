@@ -242,6 +242,24 @@ public:
         vBootstrapPeers.push_back("74.50.74.102");
         vBootstrapPeers.push_back("205.209.104.118");
 
+        // ZIP-209: reject any block that drives a shielded value pool balance
+        // negative (turnstile enforcement). Previously enabled on testnet only;
+        // this mirrors that configuration for mainnet.
+        //
+        // The hardcoded Sprout fallback below re-seeds nChainSproutValue for
+        // nodes whose block index predates pool monitoring (#2795), so they can
+        // enforce from this height forward WITHOUT a full reindex. Nodes that
+        // tracked the pool from genesis instead assert that their computed
+        // balance equals this value (see FallbackSproutValuePoolBalance in
+        // main.cpp), so it MUST be the exact genesis-derived Sprout balance at
+        // this block. Verified against a synced mainnet node on 2026-06-05:
+        //   getblock 0000038aee939c8017f4ad353e3fd1313c6a0da565bbc1d3269bbe855fe33505
+        //   -> valuePools[id=sprout].chainValueZat == 1316412375709  (height 3000000)
+        nSproutValuePoolCheckpointHeight = 3000000;
+        nSproutValuePoolCheckpointBalance = 1316412375709;
+        fZIP209Enabled = true;
+        hashSproutValuePoolCheckpointBlock = uint256S("0000038aee939c8017f4ad353e3fd1313c6a0da565bbc1d3269bbe855fe33505");
+
         // Founders reward script expects a vector of 2-of-3 multisig addresses
         vFoundersRewardAddress = {
             "t3Vz22vK5z2LcKEdg16Yv4FFneEL1zg9ojd", /* main-index: 0*/
