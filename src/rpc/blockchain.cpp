@@ -4,6 +4,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "amount.h"
+#include "bootstrap.h"
+#include "bootstrapvalidation.h"
 #include "chain.h"
 #include "chainparams.h"
 #include "checkpoints.h"
@@ -541,7 +543,8 @@ UniValue gettxoutsetinfo(const UniValue& params, bool fHelp)
             "  \"transactions\": n,      (numeric) The number of transactions\n"
             "  \"txouts\": n,            (numeric) The number of output transactions\n"
             "  \"bytes_serialized\": n,  (numeric) The serialized size\n"
-            "  \"hash_serialized\": \"hash\",   (string) The serialized hash\n"
+            "  \"hash_serialized\": \"hash\",   (string) The serialized hash of the transparent UTXO set\n"
+            "  \"hash_chainstate_full\": \"hash\", (string) Commitment over the whole chainstate (transparent UTXOs incl. per-coin height/coinbase/version metadata, plus Sprout/Sapling anchors and nullifier sets); this is the value a bootstrap fast-sync anchor commits to\n"
             "  \"total_amount\": x.xxx          (numeric) The total amount\n"
             "}\n"
             "\nExamples:\n"
@@ -560,6 +563,7 @@ UniValue gettxoutsetinfo(const UniValue& params, bool fHelp)
         ret.push_back(Pair("txouts", (int64_t)stats.nTransactionOutputs));
         ret.push_back(Pair("bytes_serialized", (int64_t)stats.nSerializedSize));
         ret.push_back(Pair("hash_serialized", stats.hashSerialized.GetHex()));
+        ret.push_back(Pair("hash_chainstate_full", stats.hashSerializedFull.GetHex()));
         ret.push_back(Pair("total_amount", ValueFromAmount(stats.nTotalAmount)));
     }
     return ret;
@@ -753,6 +757,25 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
             "  \"difficulty\": xxxxxx,     (numeric) the current difficulty\n"
             "  \"verificationprogress\": xxxx, (numeric) estimate of verification progress [0..1]\n"
             "  \"chainwork\": \"xxxx\"     (string) total amount of work in active chain, in hexadecimal\n"
+            "  \"bootstrap_validation\": {  (object) background validation of a trustless (option B) bootstrap snapshot;\n"
+            "                                 only \"state\" is present when disabled\n"
+            "     \"state\": \"xxxx\",         (string) disabled|provisional|provisional_pruned|validated|failed\n"
+            "     \"height\": n,             (numeric) snapshot tip height (omitted when disabled)\n"
+            "     \"validated_height\": n,   (numeric) highest height re-derived so far (omitted when disabled)\n"
+            "     \"blocks_remaining\": n,   (numeric) heights still to re-derive, max(0, height - validated_height) (omitted when disabled)\n"
+            "     \"progress\": xxxx,        (numeric) re-derivation progress [0..1] (omitted when disabled)\n"
+            "     \"blockhash\": \"xxxx\",     (string) hash of the snapshot tip block (omitted when disabled)\n"
+            "     \"commitment\": \"xxxx\",    (string) snapshot commitment S_imported verified at import (omitted when disabled)\n"
+            "     \"tip_hold\": true|false,  (boolean) whether auto-finalization is paused pending live-network corroboration of an above-checkpoint imported tip\n"
+            "     \"tip_hold_height\": n,    (numeric) height of the imported tip awaiting corroboration (only when tip_hold is true)\n"
+            "     \"tip_hold_blockhash\": \"xxxx\" (string) hash of that imported tip (only when tip_hold is true)\n"
+            "  },\n"
+            "  \"finalization_hold\": {     (object) peer-aware finalization hold (all nodes)\n"
+            "     \"held\": true|false,      (boolean) whether auto-finalization is currently paused pending live-network corroboration\n"
+            "     \"height\": n,             (numeric) candidate height being withheld (only when held)\n"
+            "     \"reason\": \"xxxx\",        (string) why finalization is held (only when held)\n"
+            "     \"since\": ttt             (numeric) unix time the hold began (only when held)\n"
+            "  },\n"
             "  \"size_on_disk\": xxxxxx,       (numeric) the estimated size of the block and undo files on disk\n"
             "  \"commitments\": xxxxxx,    (numeric) the current number of note commitments in the commitment tree\n"
             "  \"softforks\": [            (array) status of softforks in progress\n"
@@ -792,6 +815,14 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
     obj.push_back(Pair("chain",                 Params().NetworkIDString()));
     obj.push_back(Pair("blocks",                (int)chainActive.Height()));
     obj.push_back(Pair("headers",               pindexBestHeader ? pindexBestHeader->nHeight : -1));
+    // Best estimate of the network tip height. Headers sync ahead of blocks during
+    // IBD, so this is >= "blocks" while catching up and equals it once synced. GUI
+    // wallets use blocks/estimatedheight for an accurate, block-based progress bar
+    // (verificationprogress is a coarse tx-count heuristic, poor for a sync bar).
+    int nEstimatedHeight = chainActive.Height();
+    if (pindexBestHeader && pindexBestHeader->nHeight > nEstimatedHeight)
+        nEstimatedHeight = pindexBestHeader->nHeight;
+    obj.push_back(Pair("estimatedheight",       nEstimatedHeight));
     obj.push_back(Pair("bestblockhash",         chainActive.Tip()->GetBlockHash().GetHex()));
     obj.push_back(Pair("mediantime",            (int64_t)chainActive.Tip()->GetMedianTimePast()));
     obj.push_back(Pair("difficulty",            (double)GetNetworkDifficulty()));
@@ -827,6 +858,64 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
     consensus.push_back(Pair("chaintip", HexInt(CurrentEpochBranchId(tip->nHeight, consensusParams))));
     consensus.push_back(Pair("nextblock", HexInt(CurrentEpochBranchId(tip->nHeight + 1, consensusParams))));
     obj.push_back(Pair("consensus", consensus));
+
+    {
+        // Option B: status of background full-validation of a trustless bootstrap
+        // snapshot. "disabled" unless a self-snapshot was accepted in
+        // -bootstrapmode=trustless.
+        BootstrapValidationStatus bv = GetBootstrapValidationStatus();
+        UniValue bvObj(UniValue::VOBJ);
+        const char* stateStr = "disabled";
+        switch (bv.state) {
+            case BVS_PROVISIONAL:        stateStr = "provisional"; break;
+            case BVS_PROVISIONAL_PRUNED: stateStr = "provisional_pruned"; break;
+            case BVS_VALIDATED:          stateStr = "validated"; break;
+            case BVS_FAILED:             stateStr = "failed"; break;
+            default:                     stateStr = "disabled"; break;
+        }
+        bvObj.push_back(Pair("state", stateStr));
+        if (bv.state != BVS_DISABLED) {
+            bvObj.push_back(Pair("height", bv.height));
+            bvObj.push_back(Pair("validated_height", bv.validatedHeight));
+            bvObj.push_back(Pair("blocks_remaining", std::max(0, bv.height - bv.validatedHeight)));
+            double progress = (bv.height > 0)
+                ? std::min(1.0, std::max(0.0, (double)bv.validatedHeight / (double)bv.height))
+                : 0.0;
+            bvObj.push_back(Pair("progress", progress));
+            bvObj.push_back(Pair("blockhash", bv.hashBlock.GetHex()));
+            bvObj.push_back(Pair("commitment", bv.commitment.GetHex()));
+        }
+        // Imported-tip finalization hold: present (true) while this node imported
+        // blocks above the last compiled checkpoint that the live network has not yet
+        // corroborated, so auto-finalization is paused (it cannot pin to a possibly
+        // minority/forged imported fork until the majority confirms the tip).
+        int tipHoldHeight = -1;
+        uint256 tipHoldHash;
+        GetBootstrapTipHold(tipHoldHeight, tipHoldHash);
+        bvObj.push_back(Pair("tip_hold", tipHoldHeight >= 0));
+        if (tipHoldHeight >= 0) {
+            bvObj.push_back(Pair("tip_hold_height", tipHoldHeight));
+            bvObj.push_back(Pair("tip_hold_blockhash", tipHoldHash.GetHex()));
+        }
+        obj.push_back(Pair("bootstrap_validation", bvObj));
+    }
+
+    {
+        // Peer-aware finalization hold (applies to ALL nodes, not just bootstrapped
+        // ones): whether auto-finalization is currently withheld pending live-network
+        // corroboration of the chain (e.g. during a partition or while under-connected).
+        bool fhHeld = false; int fhHeight = -1; int64_t fhSince = 0;
+        std::string fhReason;
+        GetFinalizationHoldInfo(fhHeld, fhHeight, fhReason, fhSince);
+        UniValue fhObj(UniValue::VOBJ);
+        fhObj.push_back(Pair("held", fhHeld));
+        if (fhHeld) {
+            fhObj.push_back(Pair("height", fhHeight));
+            fhObj.push_back(Pair("reason", fhReason));
+            fhObj.push_back(Pair("since", fhSince));
+        }
+        obj.push_back(Pair("finalization_hold", fhObj));
+    }
 
     if (fPruneMode)
     {
@@ -1174,10 +1263,93 @@ UniValue reconsiderblock(const UniValue& params, bool fHelp)
     return NullUniValue;
 }
 
+UniValue getbootstrapinfo(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 0)
+        throw runtime_error(
+            "getbootstrapinfo\n"
+            "\nReturn the status of the fast-sync bootstrap snapshot for this node.\n"
+            "Read-only: it triggers no datadir mutation and answers during RPC\n"
+            "warmup, so a GUI may poll it freely while the node is starting up.\n"
+            "\nResult:\n"
+            "{\n"
+            "  \"phase\": \"xxx\",            (string) one of \"idle\", \"active\", \"succeeded\",\n"
+            "                              \"skipped\", \"failed\", \"normal_sync\"\n"
+            "  \"percent\": n,               (numeric, only when phase==\"active\") 0-100 download progress\n"
+            "  \"bytes_received\": n,        (numeric, only when phase==\"active\")\n"
+            "  \"bytes_total\": n,           (numeric, only when phase==\"active\")\n"
+            "  \"mbps\": x.x,                (numeric, only when phase==\"active\") download throughput\n"
+            "  \"streams\": n,               (numeric, only when phase==\"active\") parallel streams\n"
+            "  \"peer\": \"host:port\",        (string) current/last bootstrap peer (\"\" if none)\n"
+            "  \"peer_index\": n,            (numeric) 1-based index of the peer being tried\n"
+            "  \"peer_count\": n,            (numeric) number of bootstrap peers in the list\n"
+            "  \"attempt\": n,               (numeric) 1-based current attempt against this peer\n"
+            "  \"attempt_max\": n,           (numeric) max attempts per peer\n"
+            "  \"mode\": \"xxx\",             (string) \"anchor\" or \"trustless\"\n"
+            "  \"snapshot_version\": n,      (numeric) snapshot manifest version (1|2|3), 0 if unknown\n"
+            "  \"reason\": \"xxx\",            (string) why skipped/failed (\"\" otherwise)\n"
+            "  \"verify_pending\": true|false, (boolean) an imported snapshot still awaits verification\n"
+            "  \"validation_state\": \"xxx\",  (string) \"disabled\"|\"provisional\"|\"provisional_pruned\"|\n"
+            "                              \"validated\"|\"failed\"\n"
+            "  \"tip_hold\": true|false      (boolean) auto-finalization paused pending tip corroboration\n"
+            "}\n"
+            "\nExamples:\n"
+            + HelpExampleCli("getbootstrapinfo", "")
+            + HelpExampleRpc("getbootstrapinfo", "")
+        );
+
+    BootstrapInfo info = GetBootstrapInfo();
+
+    UniValue obj(UniValue::VOBJ);
+    obj.push_back(Pair("phase", info.phase));
+    if (info.phase == "active") {
+        obj.push_back(Pair("percent", info.percent));
+        obj.push_back(Pair("bytes_received", (uint64_t)info.bytesReceived));
+        obj.push_back(Pair("bytes_total", (uint64_t)info.bytesTotal));
+        obj.push_back(Pair("mbps", info.mbps));
+        obj.push_back(Pair("streams", info.streams));
+    }
+    obj.push_back(Pair("peer", info.peer));
+    obj.push_back(Pair("peer_index", info.peerIndex));
+    obj.push_back(Pair("peer_count", info.peerCount));
+    obj.push_back(Pair("attempt", info.attempt));
+    obj.push_back(Pair("attempt_max", info.attemptMax));
+    obj.push_back(Pair("mode", info.mode));
+    obj.push_back(Pair("snapshot_version", info.snapshotVersion));
+    obj.push_back(Pair("reason", info.reason));
+
+    // Durable across restarts: derive verify_pending / validation_state / tip_hold
+    // live from the on-disk markers and the validation status, so a daemon
+    // restarted mid-verify still reports correctly even though the in-memory
+    // phase above reset to "idle". These reads never mutate the datadir.
+    const bool verifyPending = BootstrapAnchorPendingExists(GetDataDir()) ||
+                               BootstrapTrustlessPendingExists(GetDataDir());
+    obj.push_back(Pair("verify_pending", verifyPending));
+
+    BootstrapValidationStatus bv = GetBootstrapValidationStatus();
+    const char* stateStr = "disabled";
+    switch (bv.state) {
+        case BVS_PROVISIONAL:        stateStr = "provisional"; break;
+        case BVS_PROVISIONAL_PRUNED: stateStr = "provisional_pruned"; break;
+        case BVS_VALIDATED:          stateStr = "validated"; break;
+        case BVS_FAILED:             stateStr = "failed"; break;
+        default:                     stateStr = "disabled"; break;
+    }
+    obj.push_back(Pair("validation_state", stateStr));
+
+    int tipHoldHeight = -1;
+    uint256 tipHoldHash;
+    GetBootstrapTipHold(tipHoldHeight, tipHoldHash);
+    obj.push_back(Pair("tip_hold", tipHoldHeight >= 0));
+
+    return obj;
+}
+
 static const CRPCCommand commands[] =
 { //  category              name                      actor (function)         okSafeMode
   //  --------------------- ------------------------  -----------------------  ----------
     { "blockchain",         "getblockchaininfo",      &getblockchaininfo,      true  },
+    { "blockchain",         "getbootstrapinfo",       &getbootstrapinfo,       true  },
     { "blockchain",         "getbestblockhash",       &getbestblockhash,       true  },
     { "blockchain",         "getblockcount",          &getblockcount,          true  },
     { "blockchain",         "getblock",               &getblock,               true  },

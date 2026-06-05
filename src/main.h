@@ -54,10 +54,6 @@ static const unsigned int DEFAULT_BLOCK_MAX_SIZE = MAX_BLOCK_SIZE;
 static const unsigned int DEFAULT_BLOCK_MIN_SIZE = 0;
 /** Default for -blockprioritysize, maximum space for zero/low-fee transactions **/
 static const unsigned int DEFAULT_BLOCK_PRIORITY_SIZE = DEFAULT_BLOCK_MAX_SIZE / 2;
-/** Default for accepting alerts from the P2P network. */
-static const bool DEFAULT_ALERTS = true;
-/** Minimum alert priority for enabling safe mode. */
-static const int ALERT_PRIORITY_SAFE_MODE = 4000;
 /** Maximum reorg length we will accept before we shut down and alert the user. */
 static const unsigned int MAX_REORG_LENGTH = COINBASE_MATURITY - 1;
 /** Maximum number of signature check operations in an IsStandard() P2SH script */
@@ -80,7 +76,7 @@ static const unsigned int BLOCKFILE_CHUNK_SIZE = 0x1000000; // 16 MiB
 /** The pre-allocation chunk size for rev?????.dat files (since 0.8) */
 static const unsigned int UNDOFILE_CHUNK_SIZE = 0x100000; // 1 MiB
 /** Maximum number of script-checking threads allowed */
-static const int MAX_SCRIPTCHECK_THREADS = 16;
+static const int MAX_SCRIPTCHECK_THREADS = 64;
 /** -par default (number of script-checking threads, 0 = auto) */
 static const int DEFAULT_SCRIPTCHECK_THREADS = 0;
 /** Number of blocks that can be requested at any given time from a single peer. */
@@ -118,6 +114,10 @@ struct BlockHasher
 
 /** Default for -maxreorgdepth */
 static const int DEFAULT_MAX_REORG_DEPTH = 10;
+/** Default for -finalizationminpeers: independent corroborating peers (distinct
+ *  address groups) required before a finalization candidate is treated as
+ *  live-network-confirmed (peer-aware finalization + bootstrap-tip-hold release). */
+static const int DEFAULT_FINALIZATION_MIN_PEERS = 2;
 /**
  * Default for -finalizationdelay
  * This is the minimum time between a block header reception and the block
@@ -141,7 +141,10 @@ extern CConditionVariable cvBlockChange;
 extern bool fExperimentalMode;
 extern bool fImporting;
 extern bool fReindex;
-extern bool fNoFastSync;
+/** Rebuild only the UTXO/chainstate from the existing (intact) block index and
+ *  blk files, without re-reading/rebuilding the block index. Faster than -reindex
+ *  and the right recovery for a desynced chainstate (block index intact). */
+extern bool fReindexChainState;
 extern int nScriptCheckThreads;
 extern bool fTxIndex;
 extern bool fIsBareMultisigStd;
@@ -152,7 +155,6 @@ extern bool fCheckpointsEnabled;
 extern bool fCoinbaseEnforcedProtectionEnabled;
 extern size_t nCoinCacheUsage;
 extern CFeeRate minRelayTxFee;
-extern bool fAlerts;
 extern int64_t nMaxTipAge;
 
 /** Best header we've seen so far (used for getheaders queries' starting points). */
@@ -459,7 +461,7 @@ public:
 
 /** Functions for disk access for blocks */
 bool WriteBlockToDisk(CBlock& block, CDiskBlockPos& pos, const CMessageHeader::MessageStartChars& messageStart);
-bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos);
+bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos, bool fCheckPOW = true);
 bool ReadBlockFromDisk(CBlock& block, const CBlockIndex* pindex);
 
 
@@ -471,8 +473,13 @@ bool ReadBlockFromDisk(CBlock& block, const CBlockIndex* pindex);
  *  of problems. Note that in any case, coins may be modified. */
 bool DisconnectBlock(CBlock& block, CValidationState& state, CBlockIndex* pindex, CCoinsViewCache& coins, bool* pfClean = NULL);
 
-/** Apply the effects of this block (with given index) on the UTXO set represented by coins */
-bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pindex, CCoinsViewCache& coins, bool fJustCheck = false);
+/** Apply the effects of this block (with given index) on the UTXO set represented by coins.
+ *  fScratchView: connect into a private/scratch CCoinsViewCache for background
+ *  re-derivation (option B trustless bootstrap). Suppresses side effects on GLOBAL
+ *  state a scratch replay must not touch: writing the live txindex, mutating the
+ *  shared block index (undo write / RaiseValidity), and firing the
+ *  validation-interface signals. Default false => normal connection is unchanged. */
+bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pindex, CCoinsViewCache& coins, bool fJustCheck = false, bool fScratchView = false);
 
 /** Context-independent validity checks */
 bool CheckBlockHeader(const CBlockHeader& block, CValidationState& state, bool fCheckPOW = true);
@@ -486,6 +493,27 @@ bool ContextualCheckBlock(const CBlock& block, CValidationState& state, CBlockIn
 
 /** Check a block is completely valid from start to finish (only works on top of our current best block, with cs_main held) */
 bool TestBlockValidity(CValidationState &state, const CBlock& block, CBlockIndex *pindexPrev, bool fCheckPOW = true, bool fCheckMerkleRoot = true);
+
+/**
+ * RAII scope guard for init's Step-10 forward-connect of a freshly-imported
+ * bootstrap snapshot (v3 GROWABLE: anchor+1..serverTip blocks that were NOT
+ * validated live). While an instance is alive, ConnectTip re-runs
+ * ContextualCheckBlockHeader for each connected block ABOVE the last compiled
+ * checkpoint, rejecting a forged low-difficulty post-anchor fork that the
+ * forward-connect path's context-free PoW check would otherwise accept. Wrap the
+ * init ActivateBestChain that connects imported above-anchor blocks in this scope.
+ * Outside such a scope it is a strict no-op for every normal node and live sync.
+ * Construct/destroy only on the init thread, before the node accepts live blocks.
+ */
+class CBootstrapForwardConnectGuard
+{
+public:
+    CBootstrapForwardConnectGuard();
+    ~CBootstrapForwardConnectGuard();
+private:
+    CBootstrapForwardConnectGuard(const CBootstrapForwardConnectGuard&);
+    CBootstrapForwardConnectGuard& operator=(const CBootstrapForwardConnectGuard&);
+};
 
 /**
  * Store block on disk.
@@ -604,6 +632,45 @@ const CBlockIndex *GetFinalizedBlock();
  * Checks if a block is finalized.
  */
 bool IsBlockFinalized(const CBlockIndex *pindex);
+
+/**
+ * Peer-aware finalization gate (local policy; NOT a consensus rule). Returns true
+ * iff the LIVE network corroborates the chain through pindex: the node is past IBD,
+ * pindex is on the active chain, the best known header is a LIVE (received this
+ * session) descendant of pindex at depth >= minDepth, at least minPeers independent
+ * peers (distinct address groups) advertise a best-known block descended from pindex
+ * at that depth, and NO connected peer advertises a higher-work chain that forks
+ * below pindex. On false, `reason` is set to a short human-readable explanation; on
+ * true, `reason` summarizes the corroboration. Must be called with cs_main held.
+ *
+ * Used to (a) release the bootstrap imported-tip hold and (b) gate ordinary
+ * auto-finalization so a node never pins itself to a minority/partition fork before
+ * the majority has confirmed it. It only ever DELAYS finalization, so it changes no
+ * consensus rule and is fully compatible with peers that do not run it.
+ */
+bool LiveNetworkCorroboratesTip(const CBlockIndex *pindex, int minDepth, int minPeers,
+                                std::string &reason);
+
+/** One connected peer's view for the peer-aware finalization gate: the best block it
+ *  has announced, whether it is an inbound connection, and its address group. */
+struct PeerTipView {
+    const CBlockIndex* bestKnown;
+    bool fInbound;
+    std::vector<unsigned char> group;
+};
+
+/** Pure decision core of the peer-aware finalization gate (no globals; unit-testable).
+ *  LiveNetworkCorroboratesTip gathers the live arguments and calls this. */
+bool EvaluateTipCorroboration(const CBlockIndex* pindex, bool isIBD, bool pindexOnActiveChain,
+                              const CBlockIndex* bestHeader, int64_t bestHeaderRecvTime,
+                              int64_t startupTime, int minDepth, int minPeers,
+                              const std::vector<PeerTipView>& peers, std::string& reason);
+
+/** Snapshot of the most recent peer-aware finalization hold (D gate): whether the
+ *  node is currently withholding auto-finalization pending live-network corroboration,
+ *  the candidate height, a human-readable reason, and the unix time the hold began
+ *  (0 when not held). For getblockchaininfo / monitoring. Must be called under cs_main. */
+void GetFinalizationHoldInfo(bool& held, int& height, std::string& reason, int64_t& since);
 
 /** The currently-connected chain of blocks (protected by cs_main). */
 extern CChain chainActive;

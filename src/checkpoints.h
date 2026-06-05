@@ -8,8 +8,10 @@
 #include "uint256.h"
 
 #include <map>
+#include <string>
 
 class CBlockIndex;
+class CChainParams;
 struct CCheckpointData;
 
 /**
@@ -26,6 +28,9 @@ int GetTotalBlocksEstimate(const CCheckpointData& data);
 CBlockIndex* GetLastCheckpoint(const CCheckpointData& data);
 
 double GuessVerificationProgress(const CCheckpointData& data, CBlockIndex* pindex, bool fSigchecks = true);
+
+//! Validate the compiled fast-sync anchor against the checkpoint set and digest fields.
+bool ValidateFastSyncAnchor(const CChainParams& chainparams, std::string& strError);
 
 } //namespace Checkpoints
 

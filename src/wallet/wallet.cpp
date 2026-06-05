@@ -26,6 +26,10 @@
 
 #include <assert.h>
 
+#include <atomic>
+#include <exception>
+#include <mutex>
+
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/thread.hpp>
@@ -1324,12 +1328,20 @@ bool CWallet::UpdateNullifierNoteMap()
                         auto i = item.first.js;
                         auto hSig = wtxItem.second.vjoinsplit[i].h_sig(
                             *pzcashParams, wtxItem.second.joinSplitPubKey);
+                        // Opportunistically backfill the memory-only value cache
+                        // during the same decrypt (a non-invertible CAmount only;
+                        // no key material). Harmless if it was already set.
+                        boost::optional<CAmount> noteValue;
                         item.second.nullifier = GetSproutNoteNullifier(
                             wtxItem.second.vjoinsplit[i],
                             item.second.address,
                             dec,
                             hSig,
-                            item.first.n);
+                            item.first.n,
+                            &noteValue);
+                        if (noteValue) {
+                            item.second.value = noteValue;
+                        }
                     }
                 }
             }
@@ -1391,6 +1403,13 @@ void CWallet::UpdateSaplingNullifierNoteMapWithTx(CWalletTx& wtx) {
                 // An item in mapSaplingNoteData must have already been successfully decrypted,
                 // otherwise the item would not exist in the first place.
                 assert(false);
+            }
+            // Lazily backfill the cached note value for old wallets that pre-date
+            // the value field. This re-decrypt already runs for every mined wallet
+            // note, so old wallets backfill on the next block connect with no
+            // forced rescan. Only a non-invertible CAmount is cached here.
+            if (!item.second.value) {
+                item.second.value = CAmount(optPlaintext.get().value());
             }
             auto optNote = optPlaintext.get().note(nd.ivk);
             if (!optNote) {
@@ -1697,7 +1716,8 @@ boost::optional<uint256> CWallet::GetSproutNoteNullifier(const JSDescription &js
                                                          const libzcash::SproutPaymentAddress &address,
                                                          const ZCNoteDecryption &dec,
                                                          const uint256 &hSig,
-                                                         uint8_t n) const
+                                                         uint8_t n,
+                                                         boost::optional<CAmount>* valueOut) const
 {
     boost::optional<uint256> ret;
     auto note_pt = libzcash::SproutNotePlaintext::decrypt(
@@ -1711,6 +1731,13 @@ boost::optional<uint256> CWallet::GetSproutNoteNullifier(const JSDescription &js
     // Check note plaintext against note commitment
     if (note.cm() != jsdesc.commitments[n]) {
         throw libzcash::note_decryption_failed();
+    }
+
+    // Surface the decrypted plaintext value (a non-invertible CAmount; no key
+    // material) so callers can cache it. Only after the commitment check above,
+    // so we never hand back a value for a note that failed to decrypt.
+    if (valueOut != nullptr) {
+        *valueOut = CAmount(note.value());
     }
 
     // SpendingKeys are only available if:
@@ -1744,16 +1771,23 @@ mapSproutNoteData_t CWallet::FindMySproutNotes(const CTransaction &tx) const
                 try {
                     auto address = item.first;
                     JSOutPoint jsoutpt {hash, i, j};
+                    // Capture the note's plaintext value during the same decrypt
+                    // used to compute the nullifier, so we can cache it (a
+                    // non-invertible CAmount only; no key material).
+                    boost::optional<CAmount> noteValue;
                     auto nullifier = GetSproutNoteNullifier(
                         tx.vjoinsplit[i],
                         address,
                         item.second,
-                        hSig, j);
+                        hSig, j,
+                        &noteValue);
                     if (nullifier) {
                         SproutNoteData nd {address, *nullifier};
+                        nd.value = noteValue;
                         noteData.insert(std::make_pair(jsoutpt, nd));
                     } else {
                         SproutNoteData nd {address};
+                        nd.value = noteValue;
                         noteData.insert(std::make_pair(jsoutpt, nd));
                     }
                     break;
@@ -1779,6 +1813,35 @@ mapSproutNoteData_t CWallet::FindMySproutNotes(const CTransaction &tx) const
  * the result of FindMySaplingNotes (for the addresses available at the time) will
  * already have been cached in CWalletTx.mapSaplingNoteData.
  */
+/**
+ * Pure, lock-free trial-decryption of a single Sapling output against an
+ * ordered ivk snapshot. Mirrors the inner ivk loop of FindMySaplingNotes
+ * (first match in snapshot order wins, exactly like the serial `break`), but
+ * touches no CWallet members and takes no locks, so rescan worker threads can
+ * call it concurrently. The match predicate is the unchanged
+ * SaplingNotePlaintext::decrypt — the sole ownership oracle — so results are
+ * bit-identical to the serial path.
+ */
+boost::optional<SaplingOutputMatch> CWallet::TrialDecryptSaplingOutput(
+    const OutputDescription& output,
+    const std::vector<SaplingIncomingViewingKey>& ivks) const
+{
+    for (const SaplingIncomingViewingKey& ivk : ivks) {
+        auto result = SaplingNotePlaintext::decrypt(output.encCiphertext, ivk, output.ephemeralKey, output.cm);
+        if (!result) {
+            continue;
+        }
+        SaplingOutputMatch m;
+        m.ivk = ivk;
+        // Cache the note's plaintext value (a non-invertible CAmount only;
+        // no key material) so balance reads can avoid a re-decrypt.
+        m.value = CAmount(result.get().value());
+        m.address = ivk.address(result.get().d);
+        return m;
+    }
+    return boost::none;
+}
+
 std::pair<mapSaplingNoteData_t, SaplingIncomingViewingKeyMap> CWallet::FindMySaplingNotes(const CTransaction &tx) const
 {
     LOCK(cs_SpendingKeyStore);
@@ -1787,27 +1850,47 @@ std::pair<mapSaplingNoteData_t, SaplingIncomingViewingKeyMap> CWallet::FindMySap
     mapSaplingNoteData_t noteData;
     SaplingIncomingViewingKeyMap viewingKeysToAdd;
 
+    // Snapshot the wallet's incoming viewing keys in deterministic (map-key)
+    // order so "first matching ivk wins" reproduces the serial loop's order.
+    // Only needed on the serial (non-batched) path.
+    std::vector<SaplingIncomingViewingKey> ivks;
+    if (pScanSaplingBatch == nullptr) {
+        ivks.reserve(mapSaplingFullViewingKeys.size());
+        for (const auto& it : mapSaplingFullViewingKeys) {
+            ivks.push_back(it.first);
+        }
+    }
+
     // Protocol Spec: 4.19 Block Chain Scanning (Sapling)
     for (uint32_t i = 0; i < tx.vShieldedOutput.size(); ++i) {
-        const OutputDescription output = tx.vShieldedOutput[i];
-        for (auto it = mapSaplingFullViewingKeys.begin(); it != mapSaplingFullViewingKeys.end(); ++it) {
-            SaplingIncomingViewingKey ivk = it->first;
-            auto result = SaplingNotePlaintext::decrypt(output.encCiphertext, ivk, output.ephemeralKey, output.cm);
-            if (!result) {
-                continue;
+        SaplingOutPoint op {hash, i};
+
+        // During a windowed rescan the (output x ivk) trial-decryption was
+        // already done in parallel; read the precomputed match instead of
+        // paying the ka_agree EC op on this (apply) thread. Outside rescan
+        // (pScanSaplingBatch == nullptr) this decrypts serially as before.
+        boost::optional<SaplingOutputMatch> match;
+        if (pScanSaplingBatch != nullptr) {
+            auto bit = pScanSaplingBatch->find(op);
+            if (bit != pScanSaplingBatch->end()) {
+                match = bit->second;
             }
-            auto address = ivk.address(result.get().d);
-            if (address && mapSaplingIncomingViewingKeys.count(address.get()) == 0) {
-                viewingKeysToAdd[address.get()] = ivk;
-            }
-            // We don't cache the nullifier here as computing it requires knowledge of the note position
-            // in the commitment tree, which can only be determined when the transaction has been mined.
-            SaplingOutPoint op {hash, i};
-            SaplingNoteData nd;
-            nd.ivk = ivk;
-            noteData.insert(std::make_pair(op, nd));
-            break;
+        } else {
+            match = TrialDecryptSaplingOutput(tx.vShieldedOutput[i], ivks);
         }
+        if (!match) {
+            continue;
+        }
+
+        if (match->address && mapSaplingIncomingViewingKeys.count(match->address.get()) == 0) {
+            viewingKeysToAdd[match->address.get()] = match->ivk;
+        }
+        // We don't cache the nullifier here as computing it requires knowledge of the note position
+        // in the commitment tree, which can only be determined when the transaction has been mined.
+        SaplingNoteData nd;
+        nd.ivk = match->ivk;
+        nd.value = match->value;
+        noteData.insert(std::make_pair(op, nd));
     }
 
     return std::make_pair(noteData, viewingKeysToAdd);
@@ -2405,6 +2488,146 @@ void CWallet::WitnessNoteCommitment(std::vector<uint256> commitments,
  * from or to us. If fUpdate is true, found transactions that already
  * exist in the wallet will be updated.
  */
+// Rescan windowing: read a bounded window of blocks ahead, trial-decrypt all
+// their Sapling outputs as one parallel batch, then apply each block serially.
+// Bounded by BYTES so peak memory stays modest regardless of block sizes, and
+// by a block count so the cell/flatten pass stays cheap on tiny blocks.
+static const size_t WALLET_SCAN_WINDOW_BLOCKS = 4096;
+static const size_t WALLET_SCAN_WINDOW_BYTES  = 32 * 1024 * 1024; // 32 MiB
+
+void CWallet::BuildSaplingScanBatch(
+    const std::vector<std::pair<CBlockIndex*, CBlock>>& window,
+    int nWorkers,
+    std::map<SaplingOutPoint, SaplingOutputMatch>& out) const
+{
+    // Freeze the ivk set once for the whole window, in deterministic map-key
+    // order. mapSaplingFullViewingKeys does not change during a rescan (no
+    // spending/full keys are imported mid-scan), so this is equivalent to the
+    // serial path reading it per output, and "first matching ivk wins" is
+    // reproduced identically regardless of which thread computes which cell.
+    std::vector<SaplingIncomingViewingKey> ivks;
+    {
+        LOCK(cs_SpendingKeyStore);
+        ivks.reserve(mapSaplingFullViewingKeys.size());
+        for (const auto& it : mapSaplingFullViewingKeys) {
+            ivks.push_back(it.first);
+        }
+    }
+    if (ivks.empty()) {
+        return; // no Sapling viewing keys -> no possible matches
+    }
+
+    // Flatten every Sapling output in the window into a cell list. The output
+    // pointers reference the caller-owned blocks, which outlive this call.
+    struct Cell { SaplingOutPoint op; const OutputDescription* output; };
+    std::vector<Cell> cells;
+    for (const auto& wb : window) {
+        for (const CTransaction& tx : wb.second.vtx) {
+            if (tx.vShieldedOutput.empty()) {
+                continue;
+            }
+            const uint256 hash = tx.GetHash();
+            for (uint32_t i = 0; i < tx.vShieldedOutput.size(); ++i) {
+                cells.push_back(Cell{ SaplingOutPoint{hash, i}, &tx.vShieldedOutput[i] });
+            }
+        }
+    }
+    if (cells.empty()) {
+        return;
+    }
+
+    std::vector<boost::optional<SaplingOutputMatch>> results(cells.size());
+
+    // Parallelize only when it pays off: the dominant per-cell cost is the
+    // ka_agree EC op (tens of microseconds), so even a few dozen cells amortize
+    // the one-time per-window thread spawn.
+    if (nWorkers >= 2 && cells.size() >= (size_t)(nWorkers * 4)) {
+        // W workers pull cell indices from a shared atomic counter; each writes
+        // its OWN results slot (no shared mutable state -> no mutex). Workers
+        // take NO locks (the ivk snapshot is a local copy), so they cannot
+        // deadlock against the caller's held LOCK2(cs_main, cs_wallet).
+        std::atomic<size_t> next(0);
+        const int W = std::min<int>(nWorkers, (int)cells.size());
+
+        // First exception raised by any worker, captured for re-throw after the
+        // group is joined. TrialDecryptSaplingOutput returns boost::none on a
+        // normal non-match and NEVER throws for one (SaplingNotePlaintext::decrypt
+        // returns an empty optional on every miss), so a throw here is always a
+        // genuine failure (e.g. std::bad_alloc). The serial path (FindMySaplingNotes
+        // calls TrialDecryptSaplingOutput with no catch) lets such a failure abort
+        // the rescan; we reproduce that fail-loud behaviour instead of swallowing it
+        // into a non-match, which would silently drop a real note -> a too-low local
+        // shielded balance. Capturing rather than letting a *spawned* thread's
+        // exception escape its functor (which would std::terminate) lets all workers
+        // surface a clean throw identically to the serial path.
+        std::mutex errMutex;
+        std::exception_ptr firstError;
+
+        auto worker = [&]() {
+            for (;;) {
+                size_t idx = next.fetch_add(1);
+                if (idx >= cells.size()) break;
+                try {
+                    results[idx] = TrialDecryptSaplingOutput(*cells[idx].output, ivks);
+                } catch (const boost::thread_interrupted&) {
+                    throw; // propagate shutdown promptly (handled by the caller)
+                } catch (...) {
+                    std::lock_guard<std::mutex> lock(errMutex);
+                    if (!firstError) {
+                        firstError = std::current_exception();
+                    }
+                    return; // stop pulling more cells; the run is aborting
+                }
+            }
+        };
+
+        boost::thread_group group;
+        for (int w = 0; w < W - 1; ++w) {
+            group.create_thread(worker);
+        }
+        // Always join spawned workers, even if this thread's share throws
+        // (a ~thread_group with unjoined threads would std::terminate). The only
+        // escapee here is a re-thrown boost::thread_interrupted, which cannot occur
+        // on the non-interruptible rescan thread, but this keeps the invariant if
+        // rescans ever move onto an interruptible thread.
+        try {
+            worker(); // this thread takes a share too
+        } catch (...) {
+            group.join_all();
+            throw;
+        }
+        group.join_all();
+
+        // Re-raise the first genuine failure (if any) after every worker has
+        // joined, so the rescan aborts loudly exactly like the serial path.
+        if (firstError) {
+            std::rethrow_exception(firstError);
+        }
+    } else {
+        // Single-threaded fill (tiny window or concurrency disabled).
+        for (size_t k = 0; k < cells.size(); ++k) {
+            results[k] = TrialDecryptSaplingOutput(*cells[k].output, ivks);
+        }
+    }
+
+    for (size_t k = 0; k < cells.size(); ++k) {
+        if (results[k]) {
+            out.emplace(cells[k].op, results[k].get());
+        }
+    }
+}
+
+namespace {
+// RAII: clear the wallet's transient scan-batch pointer on EVERY exit from a
+// window's apply phase (normal return OR exception unwinding), so it can never
+// be left dangling past the stack-local batchMatches it points at. Declared
+// AFTER batchMatches so it destructs first (reverse declaration order).
+struct ScanBatchPtrGuard {
+    const std::map<SaplingOutPoint, SaplingOutputMatch>** slot;
+    ~ScanBatchPtrGuard() { *slot = nullptr; }
+};
+} // namespace
+
 int CWallet::ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate)
 {
     int ret = 0;
@@ -2426,13 +2649,17 @@ int CWallet::ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate)
         ShowProgress(_("Rescanning..."), 0); // show rescan progress in GUI as dialog or on splashscreen, if -rescan on startup
         double dProgressStart = Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), pindex, false);
         double dProgressTip = Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), chainActive.Tip(), false);
-        while (pindex)
-        {
-            if (pindex->nHeight % 100 == 0 && dProgressTip - dProgressStart > 0.0)
-                ShowProgress(_("Rescanning..."), std::max(1, std::min(99, (int)((Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), pindex, false) - dProgressStart) / (dProgressTip - dProgressStart) * 100))));
 
-            CBlock block;
-            ReadBlockFromDisk(block, pindex);
+        // Worker budget for parallel trial-decryption: reuse the script-check
+        // thread budget (0 when concurrency is disabled, else 2..MAX).
+        // -nowalletparallel forces the original byte-for-byte serial scan.
+        int nWorkers = GetBoolArg("-nowalletparallel", false) ? 0 : nScriptCheckThreads;
+
+        // Apply one already-read block. This is the original per-block loop
+        // body verbatim, shared by both the serial and windowed paths so there
+        // is exactly one apply implementation (witness construction, anchors,
+        // and ChainTip ordering are unchanged).
+        auto applyBlock = [&](CBlockIndex* pidx, CBlock& block) {
             BOOST_FOREACH(CTransaction& tx, block.vtx)
             {
                 if (AddToWalletIfInvolvingMe(tx, &block, fUpdate)) {
@@ -2445,19 +2672,66 @@ int CWallet::ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate)
             SaplingMerkleTree saplingTree;
             // This should never fail: we should always be able to get the tree
             // state on the path to the tip of our chain
-            assert(pcoinsTip->GetSproutAnchorAt(pindex->hashSproutAnchor, sproutTree));
-            if (pindex->pprev) {
-                if (Params().GetConsensus().NetworkUpgradeActive(pindex->pprev->nHeight, Consensus::UPGRADE_SAPLING)) {
-                    assert(pcoinsTip->GetSaplingAnchorAt(pindex->pprev->hashFinalSaplingRoot, saplingTree));
+            assert(pcoinsTip->GetSproutAnchorAt(pidx->hashSproutAnchor, sproutTree));
+            if (pidx->pprev) {
+                if (Params().GetConsensus().NetworkUpgradeActive(pidx->pprev->nHeight, Consensus::UPGRADE_SAPLING)) {
+                    assert(pcoinsTip->GetSaplingAnchorAt(pidx->pprev->hashFinalSaplingRoot, saplingTree));
                 }
             }
             // Increment note witness caches
-            ChainTip(pindex, &block, sproutTree, saplingTree, true);
+            ChainTip(pidx, &block, sproutTree, saplingTree, true);
+        };
 
-            pindex = chainActive.Next(pindex);
+        auto reportProgress = [&](CBlockIndex* pidx) {
+            if (pidx->nHeight % 100 == 0 && dProgressTip - dProgressStart > 0.0)
+                ShowProgress(_("Rescanning..."), std::max(1, std::min(99, (int)((Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), pidx, false) - dProgressStart) / (dProgressTip - dProgressStart) * 100))));
             if (GetTime() >= nNow + 60) {
                 nNow = GetTime();
-                LogPrintf("Still rescanning. At block %d. Progress=%f\n", pindex->nHeight, Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), pindex));
+                LogPrintf("Still rescanning. At block %d. Progress=%f\n", pidx->nHeight, Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), pidx));
+            }
+        };
+
+        if (nWorkers >= 2) {
+            // Windowed parallel path: read a bounded window of blocks, trial-
+            // decrypt all their Sapling outputs in parallel off the apply
+            // thread, then apply each block serially in chain order. The apply
+            // phase reads the precomputed matches via pScanSaplingBatch, so the
+            // expensive ka_agree EC ops never run on the apply thread.
+            while (pindex) {
+                std::vector<std::pair<CBlockIndex*, CBlock>> window;
+                size_t windowBytes = 0;
+                while (pindex &&
+                       window.size() < WALLET_SCAN_WINDOW_BLOCKS &&
+                       windowBytes < WALLET_SCAN_WINDOW_BYTES) {
+                    window.emplace_back();
+                    window.back().first = pindex;
+                    ReadBlockFromDisk(window.back().second, pindex);
+                    windowBytes += ::GetSerializeSize(window.back().second, SER_DISK, CLIENT_VERSION);
+                    pindex = chainActive.Next(pindex);
+                }
+
+                std::map<SaplingOutPoint, SaplingOutputMatch> batchMatches;
+                BuildSaplingScanBatch(window, nWorkers, batchMatches);
+
+                pScanSaplingBatch = &batchMatches;
+                // Reset on EVERY exit (incl. an exception out of applyBlock),
+                // before batchMatches is destroyed, so the pointer can't dangle.
+                ScanBatchPtrGuard batchGuard{&pScanSaplingBatch};
+                for (auto& wb : window) {
+                    applyBlock(wb.first, wb.second);
+                    reportProgress(wb.first);
+                }
+            }
+        } else {
+            // Serial path (also taken with -nowalletparallel or -par=0):
+            // equivalent to the pre-existing scan loop.
+            while (pindex)
+            {
+                reportProgress(pindex);
+                CBlock block;
+                ReadBlockFromDisk(block, pindex);
+                applyBlock(pindex, block);
+                pindex = chainActive.Next(pindex);
             }
         }
 
@@ -4391,6 +4665,45 @@ bool CMerkleTx::AcceptToMemoryPool(bool fLimitFree, bool fRejectAbsurdFee)
  * Find notes in the wallet filtered by payment address, min depth and ability to spend.
  * These notes are decrypted and added to the output parameter vector, outEntries.
  */
+/**
+ * Shared per-Sapling-note spendability predicate. See the header for the full
+ * contract. Applies only the checks that do NOT require the decrypted note
+ * plaintext (spent / spending-key / locked); the address filter is the caller's
+ * responsibility because it requires a decrypt.
+ */
+bool CWallet::SaplingNotePassesSpendFilter(
+    const SaplingOutPoint& op,
+    const SaplingNoteData& nd,
+    bool ignoreSpent,
+    bool requireSpendingKey,
+    bool ignoreLocked) const
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs_wallet);
+
+    // skip note which has been spent
+    if (ignoreSpent && nd.nullifier && IsSaplingSpent(*nd.nullifier)) {
+        return false;
+    }
+
+    // skip notes which cannot be spent
+    if (requireSpendingKey) {
+        libzcash::SaplingIncomingViewingKey ivk = nd.ivk;
+        libzcash::SaplingFullViewingKey fvk;
+        if (!(GetSaplingFullViewingKey(ivk, fvk) &&
+              HaveSaplingSpendingKey(fvk))) {
+            return false;
+        }
+    }
+
+    // skip locked notes
+    if (ignoreLocked && IsLockedNote(op)) {
+        return false;
+    }
+
+    return true;
+}
+
 void CWallet::GetFilteredNotes(
     std::vector<CSproutNotePlaintextEntry>& sproutEntries,
     std::vector<SaplingNoteEntry>& saplingEntries,
@@ -4509,27 +4822,16 @@ void CWallet::GetFilteredNotes(
             auto pa = maybe_pa.get();
 
             // skip notes which belong to a different payment address in the wallet
+            // (this is the only filter that requires the decrypted address, so it
+            // stays here rather than in the shared SaplingNotePassesSpendFilter)
             if (!(filterAddresses.empty() || filterAddresses.count(pa))) {
                 continue;
             }
 
-            if (ignoreSpent && nd.nullifier && IsSaplingSpent(*nd.nullifier)) {
-                continue;
-            }
-
-            // skip notes which cannot be spent
-            if (requireSpendingKey) {
-                libzcash::SaplingIncomingViewingKey ivk;
-                libzcash::SaplingFullViewingKey fvk;
-                if (!(GetSaplingIncomingViewingKey(pa, ivk) &&
-                    GetSaplingFullViewingKey(ivk, fvk) &&
-                    HaveSaplingSpendingKey(fvk))) {
-                    continue;
-                }
-            }
-
-            // skip locked notes
-            if (ignoreLocked && IsLockedNote(op)) {
+            // Apply the shared spent / spending-key / locked filter. The cached
+            // balance accessor (GetSaplingBalanceCached) uses this SAME helper so
+            // the two paths can never diverge.
+            if (!SaplingNotePassesSpendFilter(op, nd, ignoreSpent, requireSpendingKey, ignoreLocked)) {
                 continue;
             }
 
@@ -4538,6 +4840,154 @@ void CWallet::GetFilteredNotes(
                 op, pa, note, notePt.memo(), wtx.GetDepthInMainChain() });
         }
     }
+}
+
+/**
+ * Cached Sapling balance accessor. Returns the SAME Sapling total as the
+ * unfiltered (no-address) GetFilteredNotes slow path, but reads the memory-only
+ * SaplingNoteData::value cache instead of decrypting every note. On a cache miss
+ * (value == boost::none, e.g. a fresh wallet load) it decrypts the note to obtain
+ * the value and populates the cache (decrypt-fallback); a none value is NEVER
+ * treated as zero. Only a non-invertible CAmount is read; no key material leaks.
+ */
+CAmount CWallet::GetSaplingBalanceCached(int minDepth, bool requireSpendingKey, bool ignoreLocked)
+{
+    LOCK2(cs_main, cs_wallet);
+
+    CAmount balance = 0;
+
+    for (auto & p : mapWallet) {
+        CWalletTx& wtx = p.second;
+
+        // Per-transaction filter — IDENTICAL to GetFilteredNotes (minDepth only;
+        // maxDepth is effectively INT_MAX for a balance read).
+        if (!CheckFinalTx(wtx) ||
+            wtx.GetBlocksToMaturity() > 0 ||
+            wtx.GetDepthInMainChain() < minDepth) {
+            continue;
+        }
+
+        for (auto & pair : wtx.mapSaplingNoteData) {
+            const SaplingOutPoint& op = pair.first;
+            SaplingNoteData& nd = pair.second;  // by reference: may populate the cache
+
+            // Shared spent / spending-key / locked filter. The address filter
+            // from GetFilteredNotes is intentionally NOT applied here (it needs a
+            // decrypt); this accessor is for the unfiltered wallet total only.
+            // ignoreSpent is always true for a balance.
+            if (!SaplingNotePassesSpendFilter(op, nd, true, requireSpendingKey, ignoreLocked)) {
+                continue;
+            }
+
+            if (nd.value) {
+                // Cache hit: read the cached plaintext value (CAmount only).
+                balance += nd.value.get();
+            } else {
+                // Cache miss (memory-only cache, e.g. fresh load): decrypt to
+                // obtain the value — the same decrypt GetFilteredNotes performs —
+                // then populate the cache. NEVER treat none as zero.
+                auto maybe_pt = SaplingNotePlaintext::decrypt(
+                    wtx.vShieldedOutput[op.n].encCiphertext,
+                    nd.ivk,
+                    wtx.vShieldedOutput[op.n].ephemeralKey,
+                    wtx.vShieldedOutput[op.n].cm);
+                assert(static_cast<bool>(maybe_pt));
+                CAmount value = CAmount(maybe_pt.get().value());
+                nd.value = value;  // populate the memory-only cache
+                balance += value;
+            }
+        }
+    }
+
+    return balance;
+}
+
+/**
+ * Cached Sprout balance accessor. Returns the SAME Sprout total as the
+ * unfiltered (no-address) GetFilteredNotes slow path, but reads the memory-only
+ * SproutNoteData::value cache instead of decrypting every note. Sprout's payment
+ * address is stored in the note data (nd.address), so the spent / spending-key /
+ * locked filter needs NO decrypt. On a cache miss (value == boost::none, e.g. a
+ * fresh wallet load) it decrypts the note to obtain the value and populates the
+ * cache (decrypt-fallback) — using the SAME SproutNotePlaintext::decrypt that
+ * GetFilteredNotes uses; a none value is NEVER treated as zero. Only a
+ * non-invertible CAmount is read; no key material leaks.
+ */
+CAmount CWallet::GetSproutBalanceCached(int minDepth, bool requireSpendingKey, bool ignoreLocked)
+{
+    LOCK2(cs_main, cs_wallet);
+
+    CAmount balance = 0;
+
+    for (auto & p : mapWallet) {
+        CWalletTx& wtx = p.second;
+
+        // Per-transaction filter — IDENTICAL to GetFilteredNotes (minDepth only;
+        // maxDepth is effectively INT_MAX for a balance read).
+        if (!CheckFinalTx(wtx) ||
+            wtx.GetBlocksToMaturity() > 0 ||
+            wtx.GetDepthInMainChain() < minDepth) {
+            continue;
+        }
+
+        for (auto & pair : wtx.mapSproutNoteData) {
+            const JSOutPoint& jsop = pair.first;
+            SproutNoteData& nd = pair.second;  // by reference: may populate the cache
+            const SproutPaymentAddress& pa = nd.address;
+
+            // Per-note filter — IDENTICAL to the Sprout branch of GetFilteredNotes
+            // (the address filter is intentionally omitted: this accessor is the
+            // unfiltered wallet total). ignoreSpent is always true for a balance.
+            if (nd.nullifier && IsSproutSpent(*nd.nullifier)) {
+                continue;
+            }
+            if (requireSpendingKey && !HaveSproutSpendingKey(pa)) {
+                continue;
+            }
+            if (ignoreLocked && IsLockedNote(jsop)) {
+                continue;
+            }
+
+            if (nd.value) {
+                // Cache hit: read the cached plaintext value (CAmount only).
+                balance += nd.value.get();
+            } else {
+                // Cache miss (memory-only cache, e.g. fresh load): decrypt to
+                // obtain the value — the same decrypt GetFilteredNotes performs —
+                // then populate the cache. NEVER treat none as zero.
+                int i = jsop.js; // index into CTransaction.vjoinsplit
+                int j = jsop.n;  // index into JSDescription.ciphertexts
+
+                ZCNoteDecryption decryptor;
+                if (!GetNoteDecryptor(pa, decryptor)) {
+                    // Note decryptors are created when the wallet is loaded, so
+                    // it should always exist (mirrors GetFilteredNotes).
+                    throw std::runtime_error(strprintf("Could not find note decryptor for payment address %s", EncodePaymentAddress(pa)));
+                }
+                auto hSig = wtx.vjoinsplit[i].h_sig(*pzcashParams, wtx.joinSplitPubKey);
+                // Mirror GetFilteredNotes' error contract: Sprout decrypt() THROWS on
+                // failure (unlike Sapling's optional), so wrap it — a decrypt error must
+                // surface as a runtime_error, never crash the RPC process.
+                try {
+                    SproutNotePlaintext plaintext = SproutNotePlaintext::decrypt(
+                        decryptor,
+                        wtx.vjoinsplit[i].ciphertexts[j],
+                        wtx.vjoinsplit[i].ephemeralKey,
+                        hSig,
+                        (unsigned char) j);
+                    CAmount value = CAmount(plaintext.value());
+                    nd.value = value;  // populate the memory-only cache
+                    balance += value;
+                } catch (const note_decryption_failed &err) {
+                    throw std::runtime_error(strprintf("Could not decrypt note for payment address %s", EncodePaymentAddress(pa)));
+                } catch (const std::exception &exc) {
+                    throw std::runtime_error(strprintf("Error while decrypting note for payment address %s: %s", EncodePaymentAddress(pa), exc.what()));
+                }
+            }
+        }
+    }
+
+    return balance;
 }
 
 

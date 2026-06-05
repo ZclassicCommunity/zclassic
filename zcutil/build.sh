@@ -103,5 +103,14 @@ ld -v
 
 HOST="$HOST" BUILD="$BUILD" NO_PROTON="$PROTON_ARG" "$MAKE" "$@" -C ./depends/ V=1
 ./autogen.sh
-CONFIG_SITE="$PWD/depends/$HOST/share/config.site" ./configure "$HARDENING_ARG" "$LCOV_ARG" "$TEST_ARG" "$MINING_ARG" "$PROTON_ARG" $CONFIGURE_FLAGS CXXFLAGS='-g'
+
+DEPS_DIR="$PWD/depends/$HOST"
+CONFIG_SITE="$DEPS_DIR/share/config.site" ./configure \
+  "$HARDENING_ARG" "$LCOV_ARG" "$TEST_ARG" "$MINING_ARG" "$PROTON_ARG" \
+  --with-boost="$DEPS_DIR" \
+  $CONFIGURE_FLAGS \
+  CXXFLAGS='-g' \
+  CPPFLAGS="-I$DEPS_DIR/include" \
+  LDFLAGS="-L$DEPS_DIR/lib"
+
 "$MAKE" "$@" V=1

@@ -3,7 +3,19 @@
 set -eu -o pipefail
 
 # ZClassic Dependency Installation Script
-# Installs required system packages for building zclassicd
+# Installs required system packages for building zclassicd.
+#
+# Usage:
+#   ./zcutil/install-deps.sh           # native (Linux) build deps
+#   ./zcutil/install-deps.sh --mingw   # also install the Win64 cross toolchain
+
+WITH_MINGW=0
+for arg in "$@"; do
+    case "$arg" in
+        --mingw) WITH_MINGW=1 ;;
+        *) echo "unknown option: $arg" >&2; exit 1 ;;
+    esac
+done
 
 echo "ZClassic Build Dependencies Installer"
 echo "======================================"
@@ -14,7 +26,7 @@ if [ -f /etc/os-release ]; then
     . /etc/os-release
     OS=$ID
 else
-    echo "Cannot detect OS. This script supports Ubuntu/Debian."
+    echo "Cannot detect OS. This script supports Ubuntu/Debian and Arch-based distributions."
     exit 1
 fi
 
@@ -56,7 +68,6 @@ install_ubuntu_debian() {
         libgmp-dev          # GNU Multiple Precision library
         libdb++-dev         # Berkeley DB (for wallet support)
         libsodium-dev       # Cryptography library
-        libcurl4-openssl-dev # HTTP client library
 
         # Additional utilities
         git
@@ -79,17 +90,73 @@ install_ubuntu_debian() {
     echo "✓ All dependencies installed successfully!"
 }
 
+install_mingw_toolchain() {
+    echo ""
+    echo "Installing the mingw-w64 (Win64) cross toolchain..."
+    echo ""
+
+    # Base packages pull gcc/g++/binutils/headers and both thread models.
+    $SUDO apt-get install -y \
+        g++-mingw-w64-x86-64 \
+        gcc-mingw-w64-x86-64 \
+        binutils-mingw-w64-x86-64 \
+        mingw-w64-x86-64-dev \
+        mingw-w64-tools
+
+    # The C++ code needs the POSIX thread model (std::thread / std::mutex).
+    $SUDO update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix || true
+    $SUDO update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix || true
+
+    echo ""
+    echo "✓ mingw-w64 toolchain installed ($(x86_64-w64-mingw32-g++ -dumpversion 2>/dev/null), thread model: $(x86_64-w64-mingw32-g++ -v 2>&1 | sed -n 's/^Thread model: //p'))"
+}
+
+install_arch() {
+    echo "Installing dependencies for Arch/Manjaro..."
+    echo ""
+
+    PACKAGES=(
+        base-devel
+        autoconf
+        automake
+        libtool
+        pkgconf
+        gmp
+        db
+        libsodium
+        curl
+        git
+        python
+        wget
+        openssl
+        libevent
+    )
+
+    echo "Installing packages: ${PACKAGES[*]}"
+    echo ""
+
+    $SUDO pacman -S --needed --noconfirm "${PACKAGES[@]}"
+
+    echo ""
+    echo "All dependencies installed successfully!"
+}
+
 case "$OS" in
     ubuntu|debian|linuxmint|pop)
         install_ubuntu_debian
+        [ "$WITH_MINGW" -eq 1 ] && install_mingw_toolchain
+        ;;
+    arch|manjaro|endeavouros|garuda)
+        install_arch
         ;;
     *)
         echo "Unsupported OS: $OS"
-        echo "This script currently supports Ubuntu and Debian-based distributions."
+        echo "This script supports Ubuntu/Debian and Arch-based distributions."
         echo ""
         echo "Required packages:"
         echo "  - build-essential, autoconf, libtool, automake"
-        echo "  - libgmp-dev, libdb++-dev, libsodium-dev, libcurl4-openssl-dev"
+        echo "  - libgmp-dev, libdb++-dev, libsodium-dev"
+        echo "  - (Win64 cross) g++-mingw-w64-x86-64-posix, mingw-w64-x86-64-dev"
         echo ""
         echo "Please install these manually for your distribution."
         exit 1
@@ -98,4 +165,7 @@ esac
 
 echo ""
 echo "You can now build ZClassic by running:"
-echo "  ./zcutil/build.sh -j\$(nproc)"
+echo "  ./zcutil/build-release.sh linux -j\$(nproc)      # stripped Linux binaries"
+if [ "$WITH_MINGW" -eq 1 ]; then
+    echo "  ./zcutil/build-release.sh win64 -j\$(nproc)      # stripped Win64 .exe binaries"
+fi

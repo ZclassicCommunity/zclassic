@@ -76,6 +76,7 @@
 #include <boost/algorithm/string/case_conv.hpp> // for to_lower()
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/predicate.hpp> // for startswith() and endswith()
+#include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <boost/foreach.hpp>
@@ -106,6 +107,7 @@ map<string, string> mapArgs;
 map<string, vector<string> > mapMultiArgs;
 bool fDebug = false;
 bool fPrintToConsole = false;
+bool fVTEnabled = false;
 bool fPrintToDebugLog = false;
 bool fDaemon = false;
 bool fServer = false;
@@ -846,6 +848,25 @@ void runCommand(const std::string& strCommand)
         LogPrintf("runCommand error: system(%s) returned %d\n", strCommand, nErr);
 }
 
+void AlertNotify(const std::string& strMessage, bool fThread)
+{
+    std::string strCmd = GetArg("-alertnotify", "");
+    if (strCmd.empty()) return;
+
+    // Alert text should be plain ascii coming from a trusted source, but to
+    // be safe we first strip anything not in safeChars, then add single quotes around
+    // the whole string before passing it to the shell:
+    std::string singleQuote("'");
+    std::string safeStatus = SanitizeString(strMessage);
+    safeStatus = singleQuote+safeStatus+singleQuote;
+    boost::replace_all(strCmd, "%s", safeStatus);
+
+    if (fThread)
+        boost::thread t(runCommand, strCmd); // thread runs free
+    else
+        runCommand(strCmd);
+}
+
 void RenameThread(const char* name)
 {
 #if defined(PR_SET_NAME)
@@ -862,8 +883,41 @@ void RenameThread(const char* name)
 #endif
 }
 
+// One-time console setup. On Windows this switches the console to UTF-8 (so
+// non-ASCII text renders instead of OEM-codepage mojibake) and tries to enable
+// virtual-terminal processing so ANSI escapes work on Windows 10+. fVTEnabled
+// records whether it is safe to emit ANSI/VT escape sequences to stdout: true
+// only when stdout is a real terminal AND (on Windows) VT processing is on.
+// Legacy Windows consoles, and any redirected/piped stdout, leave it false so
+// callers fall back to plain ASCII and never leak raw escapes onto the screen
+// or into log files.
+void InitConsole()
+{
+#ifdef WIN32
+    // Render UTF-8 byte output as text rather than the legacy OEM codepage.
+    // Harmless no-op when the process has no attached console (service/daemon).
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+    if (_isatty(_fileno(stdout))) {
+        HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD mode = 0;
+        if (hOut != INVALID_HANDLE_VALUE && GetConsoleMode(hOut, &mode)) {
+            const DWORD kEnableVT = 0x0004; // ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            if (SetConsoleMode(hOut, mode | kEnableVT)) {
+                fVTEnabled = true; // modern Win10+ console: ANSI escapes work
+            }
+            // else: legacy console -> fVTEnabled stays false (ASCII fallback)
+        }
+    }
+#else
+    fVTEnabled = (isatty(fileno(stdout)) != 0);
+#endif
+}
+
 void SetupEnvironment()
 {
+    // Set up the console (UTF-8 + VT) before any banner/progress/metrics output.
+    InitConsole();
     // On most POSIX systems (e.g. Linux, but not BSD) the environment's locale
     // may be invalid, in which case the "C" locale is used as fallback.
 #if !defined(WIN32) && !defined(MAC_OSX) && !defined(__FreeBSD__) && !defined(__OpenBSD__)

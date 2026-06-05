@@ -160,30 +160,20 @@ BOOST_AUTO_TEST_CASE(checksignatureencoding_test) {
             CheckSignatureEncodingWithSigHashType(highSSig, flags);
         }
 
+        // ZClassic (like Zcash) ALWAYS enforces strict-DER signature encoding:
+        // SCRIPT_VERIFY_DERSIG is implicit and non-strict-DER validation is not
+        // implemented on this fork (see script_flags.h). So a non-DER data
+        // signature is rejected with SCRIPT_ERR_SIG_DER under EVERY flag
+        // combination -- unlike upstream Bitcoin-ABC, where the DER check is gated
+        // behind a flag and a non-DER sig is accepted when no such flag is set.
         for (const valtype &nonDERSig : nonDERSigs) {
-            if (flags & (SCRIPT_VERIFY_LOW_S | SCRIPT_VERIFY_STRICTENC)) {
-                // If we get any of the dersig flags, the non canonical dersig
-                // signature fails.
-                BOOST_CHECK(
-                    !CheckDataSignatureEncoding(nonDERSig, flags, &err));
-                BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SIG_DER);
-            } else {
-                // If we do not check, then it is accepted.
-                BOOST_CHECK(CheckDataSignatureEncoding(nonDERSig, flags, &err));
-            }
+            BOOST_CHECK(!CheckDataSignatureEncoding(nonDERSig, flags, &err));
+            BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SIG_DER);
         }
 
         for (const valtype &nonDERSig : nonParsableSigs) {
-            if (flags & (SCRIPT_VERIFY_LOW_S | SCRIPT_VERIFY_STRICTENC)) {
-                // If we get any of the dersig flags, the high S but non dersig
-                // signature fails.
-                BOOST_CHECK(
-                    !CheckDataSignatureEncoding(nonDERSig, flags, &err));
-                BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SIG_DER);
-            } else {
-                // If we do not check, then it is accepted.
-                BOOST_CHECK(CheckDataSignatureEncoding(nonDERSig, flags, &err));
-            }
+            BOOST_CHECK(!CheckDataSignatureEncoding(nonDERSig, flags, &err));
+            BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SIG_DER);
         }
     }
 }

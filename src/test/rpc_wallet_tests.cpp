@@ -273,13 +273,20 @@ BOOST_AUTO_TEST_CASE(rpc_wallet)
     UniValue obj = retValue.get_obj();
     BOOST_CHECK_EQUAL(find_value(obj, "miner").get_real(), 12.5);
     BOOST_CHECK_EQUAL(find_value(obj, "founders").get_real(), 0.0);
+    // ZClassic's Buttercup upgrade (mainnet height >= 707000) halves the block
+    // spacing and applies a triple-halving, so the post-Buttercup subsidy schedule
+    // diverges from upstream Zcash: subsidy = (12.5/2) >> (halvings+3), with a
+    // post-Buttercup halving interval of 1,680,000 starting at 707000 (next
+    // boundary at height 2,387,001). The two heights below straddle that boundary,
+    // exercising two distinct post-Buttercup eras. "miner" equals the full subsidy
+    // because ZClassic has no founders' reward (so "founders" is always 0).
     BOOST_CHECK_NO_THROW(retValue = CallRPC("getblocksubsidy 1000000"));
     obj = retValue.get_obj();
-    BOOST_CHECK_EQUAL(find_value(obj, "miner").get_real(), 6.25);
+    BOOST_CHECK_EQUAL(find_value(obj, "miner").get_real(), 0.78125);   // (12.5/2) >> 3
     BOOST_CHECK_EQUAL(find_value(obj, "founders").get_real(), 0.0);
-    BOOST_CHECK_NO_THROW(retValue = CallRPC("getblocksubsidy 2000000"));
+    BOOST_CHECK_NO_THROW(retValue = CallRPC("getblocksubsidy 2400000"));
     obj = retValue.get_obj();
-    BOOST_CHECK_EQUAL(find_value(obj, "miner").get_real(), 3.125);
+    BOOST_CHECK_EQUAL(find_value(obj, "miner").get_real(), 0.390625);  // (12.5/2) >> 4
     BOOST_CHECK_EQUAL(find_value(obj, "founders").get_real(), 0.0);
 
     /*

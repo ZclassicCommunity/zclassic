@@ -94,7 +94,13 @@ TEST(PoW, MinDifficultyRules) {
     for (int i = 0; i <= lastBlk; i++) {
         blocks[i].pprev = i ? &blocks[i - 1] : nullptr;
         blocks[i].nHeight = params.nPowAllowMinDifficultyBlocksAfterHeight.get() + i;
-        blocks[i].nTime = i ? blocks[i - 1].nTime + params.PoWTargetSpacing(i) : 1269211443;
+        // Space blocks by the target spacing for their actual HEIGHT, not the loop
+        // index. ZClassic's Buttercup upgrade makes PoWTargetSpacing height-dependent
+        // (150s -> 75s); these blocks sit at post-Buttercup testnet heights
+        // (nPowAllowMinDifficultyBlocksAfterHeight = 299187 > Buttercup 78856), so
+        // using the index would space them at the pre-Buttercup 150s while the
+        // retarget expects 75s, spuriously easing the computed difficulty.
+        blocks[i].nTime = i ? blocks[i - 1].nTime + params.PoWTargetSpacing(blocks[i].nHeight) : 1269211443;
         blocks[i].nBits = 0x1e7fffff; /* target 0x007fffff000... */
         blocks[i].nChainWork = i ? blocks[i - 1].nChainWork + GetBlockProof(blocks[i - 1]) : arith_uint256(0);
     }

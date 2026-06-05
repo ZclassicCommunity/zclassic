@@ -4,7 +4,7 @@ This guide will help you build `zclassicd` (ZClassic daemon) from source code.
 
 ## System Requirements
 
-- **Operating System**: Ubuntu 20.04+, Debian 11+, or compatible Linux distribution
+- **Operating System**: Ubuntu 20.04+, Debian 11+, Arch Linux, Manjaro, or compatible Linux distribution
 - **Memory**: At least 4 GB RAM recommended
 - **Disk Space**: 20 GB free space (for build files and blockchain data)
 - **Compiler**: GCC 9+ or Clang 10+
@@ -17,7 +17,7 @@ For Ubuntu/Debian users, the fastest way to build is:
 # 1. Install dependencies
 ./zcutil/install-deps.sh
 
-# 2. Build ZClassic
+# 2. Build ZClassic (development build, binaries left in src/)
 ./zcutil/build.sh -j$(nproc)
 ```
 
@@ -25,6 +25,12 @@ The compiled binaries will be in `src/`:
 - `zclassicd` - ZClassic daemon
 - `zclassic-cli` - Command-line interface
 - `zclassic-tx` - Transaction utility
+
+To produce **stripped release binaries** in one step (into `release/<host-triple>/`):
+
+```bash
+./zcutil/build-release.sh linux -j$(nproc)
+```
 
 ## Manual Installation
 
@@ -37,9 +43,18 @@ sudo apt-get update
 sudo apt-get install -y \
     build-essential pkg-config libc6-dev m4 g++-multilib \
     autoconf libtool automake \
-    libgmp-dev libdb++-dev libsodium-dev libcurl4-openssl-dev \
+    libgmp-dev libdb++-dev libsodium-dev \
     git python3 wget curl \
     zlib1g-dev libssl-dev libevent-dev
+```
+
+#### Arch Linux / Manjaro
+
+```bash
+sudo pacman -S --needed \
+    base-devel autoconf automake libtool pkgconf \
+    gmp db libsodium curl \
+    git python wget openssl libevent
 ```
 
 #### Other Distributions
@@ -49,7 +64,6 @@ Install equivalent packages for your distribution. The key dependencies are:
 - **libgmp-dev** - GNU Multiple Precision library
 - **libdb++-dev** - Berkeley DB (for wallet support)
 - **libsodium-dev** - Cryptography library
-- **libcurl4-openssl-dev** - HTTP client library
 
 ### 2. Build Process
 
@@ -80,15 +94,16 @@ If you don't need wallet functionality:
 make -j$(nproc)
 ```
 
-## First Run and Fast Sync
+## First Run and Bootstrap Snapshots
 
-When you first run `zclassicd`, it will automatically:
+Before you first run `zclassicd`:
 
-1. **Download ZCash Parameters** (~1.6 GB) - Required cryptographic parameters
-2. **Download Initial Blockchain State** (~8.8 GB) - Fast-sync from Arweave
-3. **Create default configuration** - Basic `zclassic.conf` file
+1. **Fetch ZCash Parameters** (~1.6 GB): `./zcutil/fetch-params.sh`
+2. **Create configuration**: add your `zclassic.conf` under the selected datadir
 
-This "fast sync" feature downloads a recent blockchain snapshot instead of syncing from genesis, saving hours of initial sync time.
+For faster initial sync, install a bootstrap snapshot from a trusted synced node
+at daemon startup with `-bootstrapdatadir=<dir>`. See
+[Bootstrap Snapshots](doc/bootstrap-snapshots.md).
 
 ### Running ZClassic
 
@@ -126,12 +141,14 @@ The snark (zero-knowledge proof library) compilation is CPU-intensive. You can:
 - Build on a machine with more CPU cores
 - Be patient - this step can take 15-30 minutes
 
-### Download Failures
+### Snapshot Install Failures
 
-If Arweave downloads fail during first run:
-- Check your internet connection
-- The daemon will retry automatically
-- You can delete partial downloads and restart
+If bootstrap snapshot installation fails:
+- Ensure the source directory contains `blocks/`, `blocks/index/`, and
+  `chainstate/`.
+- Install into an empty datadir, or use `-bootstrapforce` to preserve existing
+  `blocks/` and `chainstate/` first.
+- Stop the source node before copying, or copy from a filesystem snapshot.
 
 ## Advanced Build Options
 
@@ -139,20 +156,43 @@ If Arweave downloads fail during first run:
 
 ```bash
 # Build only the dependencies
-make -C depends -j$(nproc)
+make -C depends -j$(nproc) NO_PROTON=1
 
 # Then configure with the dependencies
 ./autogen.sh
-CONFIG_SITE=$PWD/depends/x86_64-unknown-linux-gnu/share/config.site ./configure
+DEPS_DIR=$PWD/depends/x86_64-unknown-linux-gnu
+CONFIG_SITE=$DEPS_DIR/share/config.site ./configure \
+    --with-boost=$DEPS_DIR \
+    CPPFLAGS="-I$DEPS_DIR/include" \
+    LDFLAGS="-L$DEPS_DIR/lib"
 make -j$(nproc)
 ```
 
 ### Cross-Compilation
 
-See `depends/README.md` for cross-compilation instructions for:
-- Windows (x86_64-w64-mingw32)
-- macOS (x86_64-apple-darwin)
-- ARM (aarch64-linux-gnu)
+#### Windows (Win64, x86_64-w64-mingw32)
+
+One-time toolchain setup (Ubuntu/Debian):
+
+```bash
+./zcutil/install-deps.sh --mingw       # or: sudo bash zcutil/setup-mingw-toolchain.sh
+```
+
+Then build stripped `.exe` binaries in one command (into `release/x86_64-w64-mingw32/`):
+
+```bash
+./zcutil/build-release.sh win64 -j$(nproc)
+```
+
+This builds the Windows depends, configures for the mingw host, compiles
+`zclassicd.exe` / `zclassic-cli.exe` / `zclassic-tx.exe`, and strips them.
+
+#### Other targets
+
+The same `HOST=` mechanism drives the depends + configure flow for other
+platforms (see `depends/README.md`):
+- macOS (`x86_64-apple-darwin`)
+- ARM (`aarch64-linux-gnu`)
 
 ### Debug Build
 

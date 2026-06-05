@@ -8,11 +8,12 @@
 
 class MockCValidationState : public CValidationState {
 public:
-    MOCK_METHOD5(DoS, bool(int level, bool ret,
-             unsigned int chRejectCodeIn, std::string strRejectReasonIn,
-             bool corruptionIn));
-    MOCK_METHOD3(Invalid, bool(bool ret,
-                 unsigned int _chRejectCode, std::string _strRejectReason));
+    MOCK_METHOD6(DoS, bool(int level, bool ret,
+             unsigned int chRejectCodeIn, const std::string &strRejectReasonIn,
+             bool corruptionIn, const std::string &strDebugMessageIn));
+    MOCK_METHOD4(Invalid, bool(bool ret,
+                 unsigned char _chRejectCode, const std::string &_strRejectReason,
+                 const std::string &_strDebugMessage));
     MOCK_METHOD1(Error, bool(std::string strRejectReasonIn));
     MOCK_CONST_METHOD0(IsValid, bool());
     MOCK_CONST_METHOD0(IsInvalid, bool());
@@ -30,7 +31,7 @@ TEST(CheckBlock, VersionTooLow) {
     block.nVersion = 1;
 
     MockCValidationState state;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "version-too-low", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "version-too-low", false, ::testing::_)).Times(1);
     EXPECT_FALSE(CheckBlock(block, state, verifier, false, false));
 }
 
@@ -63,18 +64,33 @@ TEST(CheckBlock, BlockSproutRejectsBadVersion) {
 
     auto verifier = libzcash::ProofVerifier::Strict();
 
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-version-too-low", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-version-too-low", false, ::testing::_)).Times(1);
     EXPECT_FALSE(CheckBlock(block, state, verifier, false, false));
 }
 
 
 class ContextualCheckBlockTest : public ::testing::Test {
 protected:
+    CBlockIndex fakeTip;
+
     virtual void SetUp() {
         SelectParams(CBaseChainParams::MAIN);
+
+        // ContextualCheckBlock delegates the Overwinter/Sapling tx-version
+        // consensus rules to ContextualCheckTransaction, which ZClassic skips
+        // entirely while IsInitialBlockDownload() is true (see commit "speed
+        // up initial sync"). The gtest environment has no chain, so IBD would
+        // otherwise be true and the rejection rules would never run. Install a
+        // synthetic chain tip with maximal work and a current timestamp so IBD
+        // latches to false and these consensus rules are actually exercised.
+        fakeTip.nChainWork = ~arith_uint256(0);
+        fakeTip.nTime = GetTime();
+        fakeTip.nHeight = 1;
+        chainActive.SetTip(&fakeTip);
     }
 
     virtual void TearDown() {
+        chainActive.SetTip(NULL);
         // Revert to test default. No-op on mainnet params.
         RegtestDeactivateSapling();
     }
@@ -134,7 +150,7 @@ protected:
 
         // We now expect this to be an invalid block, for the given reason.
         MockCValidationState state;
-        EXPECT_CALL(state, DoS(level, false, REJECT_INVALID, reason, false)).Times(1);
+        EXPECT_CALL(state, DoS(level, false, REJECT_INVALID, reason, false, ::testing::_)).Times(1);
         EXPECT_FALSE(ContextualCheckBlock(block, state, &indexPrev));
     }
 
@@ -165,14 +181,14 @@ TEST_F(ContextualCheckBlockTest, BadCoinbaseHeight) {
     CBlock prev;
     CBlockIndex indexPrev {prev};
     indexPrev.nHeight = 0;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-cb-height", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-cb-height", false, ::testing::_)).Times(1);
     EXPECT_FALSE(ContextualCheckBlock(block, state, &indexPrev));
 
     // Setting to an incorrect height should fail
     mtx.vin[0].scriptSig = CScript() << 2 << OP_0;
     CTransaction tx3 {mtx};
     block.vtx[0] = tx3;
-    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-cb-height", false)).Times(1);
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-cb-height", false, ::testing::_)).Times(1);
     EXPECT_FALSE(ContextualCheckBlock(block, state, &indexPrev));
 
     // After correcting the scriptSig, should pass
@@ -252,7 +268,9 @@ TEST_F(ContextualCheckBlockTest, BlockSproutRulesRejectOtherTx) {
 
     {
         SCOPED_TRACE("BlockSproutRulesRejectOverwinterTx");
-        ExpectInvalidBlockFromTx(CTransaction(mtx), 0, "tx-overwinter-not-active");
+        // ContextualCheckBlock passes dosLevel=100; outside IBD the full ban
+        // score applies.
+        ExpectInvalidBlockFromTx(CTransaction(mtx), 100, "tx-overwinter-not-active");
     }
 
     // Make it a Sapling transaction
@@ -262,7 +280,7 @@ TEST_F(ContextualCheckBlockTest, BlockSproutRulesRejectOtherTx) {
 
     {
         SCOPED_TRACE("BlockSproutRulesRejectSaplingTx");
-        ExpectInvalidBlockFromTx(CTransaction(mtx), 0, "tx-overwinter-not-active");
+        ExpectInvalidBlockFromTx(CTransaction(mtx), 100, "tx-overwinter-not-active");
     }
 };
 
@@ -290,7 +308,7 @@ TEST_F(ContextualCheckBlockTest, BlockOverwinterRulesRejectOtherTx) {
 
     {
         SCOPED_TRACE("BlockOverwinterRulesRejectSaplingTx");
-        ExpectInvalidBlockFromTx(CTransaction(mtx), 0, "bad-overwinter-tx-version-group-id");
+        ExpectInvalidBlockFromTx(CTransaction(mtx), 100, "bad-overwinter-tx-version-group-id");
     }
 }
 
@@ -318,6 +336,6 @@ TEST_F(ContextualCheckBlockTest, BlockSaplingRulesRejectOtherTx) {
 
     {
         SCOPED_TRACE("BlockSaplingRulesRejectOverwinterTx");
-        ExpectInvalidBlockFromTx(CTransaction(mtx), 0, "bad-sapling-tx-version-group-id");
+        ExpectInvalidBlockFromTx(CTransaction(mtx), 100, "bad-sapling-tx-version-group-id");
     }
 }

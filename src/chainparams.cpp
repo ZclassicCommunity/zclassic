@@ -125,7 +125,6 @@ public:
         pchMessageStart[1] = 0xe9;
         pchMessageStart[2] = 0x27;
         pchMessageStart[3] = 0x64;
-        vAlertPubKey = ParseHex("04a60129fc1915c0e35d92328cbc27cba5dc367dd0eaf7059616aa455afc3f7622161572e1197af352baff0d6563bb75316d095241dd94f809d7f6eefb49dbdff4");
         nDefaultPort = 8033;
         nPruneAfterHeight = 100000;
         const size_t N = 200, K = 9;
@@ -147,6 +146,12 @@ public:
 
         vSeeds.push_back(CDNSSeedData("zclnet.net", "dnsseed.zclnet.net"));
         vSeeds.push_back(CDNSSeedData("zslp.org", "dnsseed.zslp.org"));
+        // The community DNS seeds above are frequently unreachable, which can leave
+        // a fresh node with no addresses to dial. Seed the known-good bootstrap
+        // servers directly: CDNSSeedData accepts a literal IP (LookupHost resolves
+        // it as-is), so the seeding path always yields at least these live peers.
+        vSeeds.push_back(CDNSSeedData("seed1.zclassic", "74.50.74.102"));
+        vSeeds.push_back(CDNSSeedData("seed2.zclassic", "205.209.104.118"));
 
         // guarantees the first 2 characters, when base58 encoded, are "t1"
         base58Prefixes[PUBKEY_ADDRESS]     = {0x1C,0xB8};
@@ -184,13 +189,58 @@ public:
             ( 160000, uint256S("0x000000065093005a1a46ee95d6d66c2b07008220ca64dd3b3a93bbd1945480c0"))
             ( 468200, uint256S("0x000000009bd5548c851c2b237894d6807a53bf1e2808402545e27a995ae4f3c3"))
             ( 2013514, uint256S("0x000019679aa2ea97a3f18bd9265bc91a09929ea0b1acc0fc5ef77cdf3cf906e7"))
-            ( 2879438, uint256S("0x000007e8fccb9e4831c7d7376a283b016ead6166491f951f4f083dbe366992b2")),
-            1729305135,     // * UNIX timestamp of last checkpoint block (Oct 19, 2025)
-            5293850,        // * total number of transactions between genesis and last checkpoint
-                            //   (estimated based on block height progression)
-            1060            // * estimated number of transactions per day after checkpoint
-                            //   total number of tx / (checkpoint block height / (24 * 24))
+            ( 2879438, uint256S("0x000007e8fccb9e4831c7d7376a283b016ead6166491f951f4f083dbe366992b2"))
+            ( 3126937, uint256S("0x00000663e40f1fe0bc32a7e7282fac25de5fe8ecefd9c627e2fd948d388f7053")),
+            1780195595,     // * UNIX timestamp of the verificationprogress reference block
+                            //   (mainnet height 3130800, 2026-05-31)
+            5121107,        // * cumulative transactions (nChainTx) at that block, MEASURED off a
+                            //   synced node. Used ONLY by GuessVerificationProgress -- never by
+                            //   consensus, validation, or the fast-sync anchor commitment. The
+                            //   previous value (5293850) was a height-based estimate that overshot
+                            //   the real chain, so a fully-synced node was stuck below this phantom
+                            //   target and verificationprogress capped at ~0.96 forever.
+            1138            // * recent transactions/day (measured: ~1.0 tx/block, ~1138 blocks/day)
         };
+
+        fastSyncAnchorData.nHeight = 3126937;
+        fastSyncAnchorData.hashBlock = uint256S("0x00000663e40f1fe0bc32a7e7282fac25de5fe8ecefd9c627e2fd948d388f7053");
+        fastSyncAnchorData.hashAnchorSha256 = uint256S("0x376d6d5e6f7d02459b89ae0988f5c51bb1deaf2a3e4b3a1de745e4f2e3bb279d");
+        fastSyncAnchorData.hashAnchorSha3 = uint256S("0x0f7d542e5c662c9652b93eef8eb98e386e8bdbd2f848eba0e99c6451eb2ef0bd");
+        // Whole-chainstate commitment (gettxoutsetinfo's hash_chainstate_full) at
+        // the anchor height — the transparent UTXO set (each coin's output value+
+        // script AND its consensus metadata: creation height, coinbase flag, tx
+        // version) PLUS the Sprout/Sapling anchors and nullifier sets. After a peer
+        // fast-sync the node recomputes this over the imported chainstate and rejects
+        // the snapshot unless it matches, so a malicious/compromised serving peer
+        // cannot substitute a forged UTXO set, forged coinbase-maturity metadata
+        // (nHeight/fCoinBase), or a tampered shielded pool (the fast-sync then trusts
+        // only this binary, not the peer). Generated from the prepared snapshot at
+        // this height via gettxoutsetinfo's hash_chainstate_full.
+        fastSyncAnchorData.hashChainstateSerialized = uint256S("0x4efb67005d842e9d5bab21831fef8905a7fcb89e7264e43bd1aa00623f5a585f");
+
+        // The set of anchors a client accepts, newest first. Today this is just
+        // the primary. To roll a new anchor for a release WITHOUT forcing a hard
+        // client/server lockstep, set fastSyncAnchorData above to the NEW anchor,
+        // then list it first here followed by the previous anchor(s) you still
+        // want clients to accept during the transition, e.g.:
+        //     vFastSyncAnchors.push_back(fastSyncAnchorData);   // new (primary)
+        //     CFastSyncAnchorData prev; prev.nHeight = 3126937; prev.hashBlock = ...;
+        //     prev.hashAnchorSha256 = ...; prev.hashAnchorSha3 = ...;
+        //     prev.hashChainstateSerialized = ...; vFastSyncAnchors.push_back(prev);
+        // Every entry is a developer-reviewed commitment, so there is no forgery
+        // window regardless of which compiled anchor a peer serves.
+        vFastSyncAnchors.push_back(fastSyncAnchorData);
+
+        // Default NODE_BOOTSTRAP peers a fresh node fetches params and the chain
+        // snapshot from. Overridable with -bootstrappeer, disable with -bootstrap=0.
+        // No explicit port -> the standard mainnet P2P port (nDefaultPort, 8033):
+        // the snapshot is served over the ordinary P2P connection (the new BS*
+        // messages in ProcessMessage), not a separate socket, so the serving node
+        // needs no dedicated port. DEPLOYMENT: the seed servers must listen on 8033
+        // for this to resolve; until they are moved off 8034, keep them reachable on
+        // 8033 (a node binding 8033 serves bootstrap to any standard-port client).
+        vBootstrapPeers.push_back("74.50.74.102");
+        vBootstrapPeers.push_back("205.209.104.118");
 
         // Founders reward script expects a vector of 2-of-3 multisig addresses
         vFoundersRewardAddress = {
@@ -305,7 +355,6 @@ public:
         pchMessageStart[1] = 0x1a;
         pchMessageStart[2] = 0xf9;
         pchMessageStart[3] = 0xbf;
-        vAlertPubKey = ParseHex("044d71d7faa4e6d77c08d3a1e8c27fafc922de9ec8c91e809bb0c4788058301ec18a68d9fe42b6ec0467bb7ca7f7ecaecbc05c0b6437d9de21a59232fd917a8803");
         nDefaultPort = 18033;
         nPruneAfterHeight = 1000;
         const size_t N = 200, K = 9;
@@ -559,6 +608,16 @@ bool SelectParamsFromCommandLine()
 
 // Block height must be >0 and <=last founders reward block height
 // Index variable i ranges from 0 - (vFoundersRewardAddress.size()-1)
+const CFastSyncAnchorData* CChainParams::FindFastSyncAnchor(int nHeight, const uint256& hashBlock) const {
+    for (std::vector<CFastSyncAnchorData>::const_iterator it = vFastSyncAnchors.begin();
+         it != vFastSyncAnchors.end(); ++it) {
+        if (it->nHeight == nHeight && it->hashBlock == hashBlock) {
+            return &(*it);
+        }
+    }
+    return NULL;
+}
+
 std::string CChainParams::GetFoundersRewardAddressAtHeight(int nHeight) const {
     int maxHeight = consensus.GetLastFoundersRewardBlockHeight();
     assert(nHeight > 0 && nHeight <= maxHeight);
@@ -621,4 +680,3 @@ unsigned int CChainParams::EquihashK(int nHeight) const {
     }
     return k;
 }
-

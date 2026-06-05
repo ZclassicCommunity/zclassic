@@ -63,7 +63,7 @@ namespace {
 //
 bool fDiscover = true;
 bool fListen = true;
-uint64_t nLocalServices = NODE_NETWORK;
+std::atomic<uint64_t> nLocalServices(NODE_NETWORK);
 CCriticalSection cs_mapLocalHost;
 map<CNetAddr, LocalServiceInfo> mapLocalHost;
 static bool vfLimited[NET_MAX] = {};
@@ -435,7 +435,7 @@ void CNode::PushVersion()
         LogPrint("net", "send version message: version %d, blocks=%d, us=%s, them=%s, peer=%d\n", PROTOCOL_VERSION, nBestHeight, addrMe.ToString(), addrYou.ToString(), id);
     else
         LogPrint("net", "send version message: version %d, blocks=%d, us=%s, peer=%d\n", PROTOCOL_VERSION, nBestHeight, addrMe.ToString(), id);
-    PushMessage("version", PROTOCOL_VERSION, nLocalServices, nTime, addrYou, addrMe,
+    PushMessage("version", PROTOCOL_VERSION, nLocalServices.load(), nTime, addrYou, addrMe,
                 nLocalHostNonce, strSubVersion, nBestHeight, true);
 }
 
@@ -1239,10 +1239,20 @@ void ThreadSocketHandler()
 }
 
 
+// Below this addrman size we still run DNS seeding even when >=2 peers are
+// connected: a node that can reach ONLY the two pinned bootstrap -addnode peers
+// (init.cpp injects Params().BootstrapPeers() as persistent -addnode on every
+// start) would otherwise satisfy the vNodes>=2 skip and never enrich addrman
+// beyond those two seeded IPs, leaving it permanently dependent on exactly those
+// peers. CNode carries no addnode flag in this tree, so we gate on addrman size:
+// a tiny addrman (only the seeded bootstrap addresses) still seeds once.
+static const unsigned int kMinAddrmanToSkipDnsSeeding = 4;
+
 void ThreadDNSAddressSeed()
 {
-    // goal: only query DNS seeds if address need is acute
-    if ((addrman.size() > 0) &&
+    // goal: only query DNS seeds if address need is acute. Pure availability:
+    // this can only ADD addresses to addrman; it never drops peers.
+    if ((addrman.size() > kMinAddrmanToSkipDnsSeeding) &&
         (!GetBoolArg("-forcednsseed", false))) {
         MilliSleep(11 * 1000);
 
@@ -2054,6 +2064,10 @@ bool CAddrDB::Read(CAddrMan& addr)
 
 unsigned int ReceiveFloodSize() { return 1000*GetArg("-maxreceivebuffer", 5*1000); }
 unsigned int SendBufferSize() { return 1000*GetArg("-maxsendbuffer", 1*1000); }
+// Bounds how many bootstrap chunk requests a peer may have queued at once.
+// This caps the client's in-flight pipeline window; each queued request can
+// cost up to BOOTSTRAP_SNAPSHOT_CHUNK_SIZE (1 MiB) of buffered send data.
+static const size_t MAX_BOOTSTRAP_CHUNK_REQUESTS_PER_PEER = 32;
 
 CNode::CNode(SOCKET hSocketIn, const CAddress& addrIn, const std::string& addrNameIn, bool fInboundIn) :
     ssSend(SER_NETWORK, INIT_PROTO_VERSION),
@@ -2088,6 +2102,8 @@ CNode::CNode(SOCKET hSocketIn, const CAddress& addrIn, const std::string& addrNa
     fGetAddr = false;
     fRelayTxes = false;
     fSentAddr = false;
+    fBootstrapManifestSent = false;
+    fBootstrapParamManifestSent = false;
     pfilter = new CBloomFilter();
     nPingNonceSent = 0;
     nPingUsecStart = 0;
@@ -2154,6 +2170,52 @@ void CNode::AskFor(const CInv& inv)
     else
         mapAlreadyAskedFor.insert(std::make_pair(inv, nRequestTime));
     mapAskFor.insert(std::make_pair(nRequestTime, inv));
+}
+
+bool CNode::QueueBootstrapChunkRequest(BootstrapChunkKind kind, const CBootstrapSnapshotChunkRequest& request)
+{
+    LOCK(cs_bootstrap_requests);
+    if (vBootstrapChunkRequests.size() >= MAX_BOOTSTRAP_CHUNK_REQUESTS_PER_PEER) {
+        return false;
+    }
+    BootstrapChunkQueueItem item;
+    item.kind = kind;
+    item.request = request;
+    vBootstrapChunkRequests.push_back(item);
+    return true;
+}
+
+void CNode::RequeueBootstrapChunkRequest(BootstrapChunkKind kind, const CBootstrapSnapshotChunkRequest& request)
+{
+    // Put a popped-but-deferred request back at the front so order is preserved
+    // when the serving side throttles. The slot it occupies was normally freed
+    // by the pop that preceded it, so re-adding it keeps the queue at its prior
+    // size. But a concurrent enqueue into that freed slot can push the queue to
+    // the cap before we requeue; in that case adding here would transiently
+    // exceed MAX_BOOTSTRAP_CHUNK_REQUESTS_PER_PEER. If the queue is already at
+    // or over the cap, drop this requeue instead of overflowing it. Dropping is
+    // safe: the client treats an unanswered chunk as missing and re-requests it.
+    LOCK(cs_bootstrap_requests);
+    if (vBootstrapChunkRequests.size() >= MAX_BOOTSTRAP_CHUNK_REQUESTS_PER_PEER) {
+        return;
+    }
+    BootstrapChunkQueueItem item;
+    item.kind = kind;
+    item.request = request;
+    vBootstrapChunkRequests.push_front(item);
+}
+
+bool CNode::PopBootstrapChunkRequest(BootstrapChunkKind& kind, CBootstrapSnapshotChunkRequest& request)
+{
+    LOCK(cs_bootstrap_requests);
+    if (vBootstrapChunkRequests.empty()) {
+        return false;
+    }
+    const BootstrapChunkQueueItem& item = vBootstrapChunkRequests.front();
+    kind = item.kind;
+    request = item.request;
+    vBootstrapChunkRequests.pop_front();
+    return true;
 }
 
 void CNode::BeginMessage(const char* pszCommand) EXCLUSIVE_LOCK_FUNCTION(cs_vSend)

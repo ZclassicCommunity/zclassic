@@ -3516,6 +3516,91 @@ UniValue z_gettotalbalance(const UniValue& params, bool fHelp)
     return result;
 }
 
+UniValue getwalletsummary(const UniValue& params, bool fHelp)
+{
+    if (!EnsureWalletIsAvailable(fHelp))
+        return NullUniValue;
+
+    if (fHelp || params.size() > 2)
+        throw runtime_error(
+            "getwalletsummary ( minconf includeWatchonly )\n"
+            "\nReturn a fast, aggregate summary of the wallet's balances plus chain\n"
+            "metadata, intended for lightweight polling by GUIs. Emits ONLY aggregate\n"
+            "amounts and chain metadata: no addresses, no per-note data, no keys.\n"
+            "\nThe transparent fields are sourced from cheap in-memory accessors. The\n"
+            "private/total fields are read from the cached shielded balance path,\n"
+            "which returns the same values as z_gettotalbalance without re-decrypting\n"
+            "every note, so \"shieldedcached\" is reported as true.\n"
+            "\nArguments:\n"
+            "1. minconf          (numeric, optional, default=1) Only include private and transparent transactions confirmed at least this many times.\n"
+            "2. includeWatchonly (bool, optional, default=false) Also include balance in watchonly addresses (see 'importaddress' and 'z_importviewingkey')\n"
+            "\nResult:\n"
+            "{\n"
+            "  \"transparent\": xxxxx,        (numeric) the confirmed balance of transparent funds\n"
+            "  \"transparentunconfirmed\": x, (numeric) the unconfirmed balance of transparent funds\n"
+            "  \"transparentimmature\": x,    (numeric) the immature (coinbase) balance of transparent funds\n"
+            "  \"private\": xxxxx,            (numeric) the total balance of private funds (Sprout and Sapling)\n"
+            "  \"total\": xxxxx,              (numeric) the total balance of transparent (confirmed) and private funds\n"
+            "  \"shieldedcached\": true,      (bool) whether the private/total values came from the cached fast path\n"
+            "  \"txcount\": xxxxxxx,          (numeric) the total number of transactions in the wallet\n"
+            "  \"height\": xxxxx,             (numeric) the height of the active chain tip\n"
+            "  \"bestblockhash\": \"hash\"      (string) the hash of the active chain tip\n"
+            "}\n"
+            "\nExamples:\n"
+            + HelpExampleCli("getwalletsummary", "")
+            + HelpExampleCli("getwalletsummary", "5")
+            + HelpExampleRpc("getwalletsummary", "5")
+        );
+
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+
+    int nMinDepth = 1;
+    if (params.size() > 0) {
+        nMinDepth = params[0].get_int();
+    }
+    if (nMinDepth < 0) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Minimum number of confirmations cannot be less than 0");
+    }
+
+    bool fIncludeWatchonly = false;
+    if (params.size() > 1) {
+        fIncludeWatchonly = params[1].get_bool();
+    }
+
+    // Transparent confirmed balance is computed exactly as z_gettotalbalance
+    // does, so getwalletsummary.transparent == z_gettotalbalance(minconf).transparent
+    // (and, at the default minconf=1, == getbalance() == getwalletinfo().balance).
+    CAmount nBalance = getBalanceTaddr("", nMinDepth, !fIncludeWatchonly);
+    // Unconfirmed / immature transparent balances come from the cheap in-memory
+    // accessors. These are aggregate CAmounts only -- no per-note or key data.
+    CAmount nUnconfirmed = pwalletMain->GetUnconfirmedBalance();
+    CAmount nImmature = pwalletMain->GetImmatureBalance();
+    // Private/total: shielded total is the Sprout + Sapling balance at minconf,
+    // exactly as getBalanceZaddr("", ...) composes it from GetFilteredNotes —
+    // but read from the MEMORY-ONLY cached accessors (decrypt-fallback on a cache
+    // miss) so we avoid re-decrypting every note. Same minconf / includeWatchonly
+    // semantics: getBalanceZaddr's ignoreUnspendable maps to requireSpendingKey,
+    // i.e. requireSpendingKey = !fIncludeWatchonly; ignoreLocked stays default.
+    // These accessors return an IDENTICAL total to the slow scan, so the values
+    // are unchanged — only "shieldedcached" flips to true.
+    CAmount nSproutBalance = pwalletMain->GetSproutBalanceCached(nMinDepth, !fIncludeWatchonly);
+    CAmount nSaplingBalance = pwalletMain->GetSaplingBalanceCached(nMinDepth, !fIncludeWatchonly);
+    CAmount nPrivateBalance = nSproutBalance + nSaplingBalance;
+    CAmount nTotalBalance = nBalance + nPrivateBalance;
+
+    UniValue result(UniValue::VOBJ);
+    result.push_back(Pair("transparent", FormatMoney(nBalance)));
+    result.push_back(Pair("transparentunconfirmed", FormatMoney(nUnconfirmed)));
+    result.push_back(Pair("transparentimmature", FormatMoney(nImmature)));
+    result.push_back(Pair("private", FormatMoney(nPrivateBalance)));
+    result.push_back(Pair("total", FormatMoney(nTotalBalance)));
+    result.push_back(Pair("shieldedcached", true));
+    result.push_back(Pair("txcount", (int)pwalletMain->mapWallet.size()));
+    result.push_back(Pair("height", chainActive.Height()));
+    result.push_back(Pair("bestblockhash", chainActive.Tip()->GetBlockHash().GetHex()));
+    return result;
+}
+
 UniValue z_getoperationresult(const UniValue& params, bool fHelp)
 {
     if (!EnsureWalletIsAvailable(fHelp))
@@ -4621,6 +4706,7 @@ static const CRPCCommand commands[] =
     { "wallet",             "gettransaction",           &gettransaction,           false },
     { "wallet",             "getunconfirmedbalance",    &getunconfirmedbalance,    false },
     { "wallet",             "getwalletinfo",            &getwalletinfo,            false },
+    { "wallet",             "getwalletsummary",         &getwalletsummary,         false },
     { "wallet",             "importprivkey",            &importprivkey,            true  },
     { "wallet",             "importwallet",             &importwallet,             true  },
     { "wallet",             "importaddress",            &importaddress,            true  },

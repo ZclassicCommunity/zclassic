@@ -9,6 +9,7 @@
 #include "hash.h"
 #include "main.h"
 #include "pow.h"
+#include "ui_interface.h"
 #include "uint256.h"
 
 #include <stdint.h>
@@ -39,7 +40,11 @@ static const char DB_LAST_BLOCK = 'l';
 CCoinsViewDB::CCoinsViewDB(std::string dbName, size_t nCacheSize, bool fMemory, bool fWipe) : db(GetDataDir() / dbName, nCacheSize, fMemory, fWipe) {
 }
 
-CCoinsViewDB::CCoinsViewDB(size_t nCacheSize, bool fMemory, bool fWipe) : db(GetDataDir() / "chainstate", nCacheSize, fMemory, fWipe) 
+CCoinsViewDB::CCoinsViewDB(size_t nCacheSize, bool fMemory, bool fWipe) : db(GetDataDir() / "chainstate", nCacheSize, fMemory, fWipe)
+{
+}
+
+CCoinsViewDB::CCoinsViewDB(const boost::filesystem::path& path, size_t nCacheSize, bool fMemory, bool fWipe) : db(path, nCacheSize, fMemory, fWipe)
 {
 }
 
@@ -196,6 +201,13 @@ bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins,
 CBlockTreeDB::CBlockTreeDB(size_t nCacheSize, bool fMemory, bool fWipe) : CDBWrapper(GetDataDir() / "blocks" / "index", nCacheSize, fMemory, fWipe) {
 }
 
+CBlockTreeDB::CBlockTreeDB(const boost::filesystem::path& path, size_t nCacheSize, bool fMemory, bool fWipe) : CDBWrapper(path, nCacheSize, fMemory, fWipe) {
+}
+
+bool CBlockTreeDB::ReadDiskBlockIndex(const uint256& hash, CDiskBlockIndex& diskindex) {
+    return Read(make_pair(DB_BLOCK_INDEX, hash), diskindex);
+}
+
 bool CBlockTreeDB::ReadBlockFileInfo(int nFile, CBlockFileInfo &info) {
     return Read(make_pair(DB_BLOCK_FILES, nFile), info);
 }
@@ -227,6 +239,15 @@ bool CCoinsViewDB::GetStats(CCoinsStats &stats) const {
     stats.hashBlock = GetBestBlock();
     ss << stats.hashBlock;
     CAmount nTotalAmount = 0;
+    // Per-coin consensus metadata (creation height, coinbase flag, tx version)
+    // accumulated separately so it can be folded into hashSerializedFull WITHOUT
+    // changing hashSerialized (which stays transparent-output-only for RPC/tool
+    // back-compat). hashSerialized binds only nValue+scriptPubKey, but CheckInputs
+    // reads nHeight/fCoinBase verbatim from an imported UTXO set for the
+    // COINBASE_MATURITY rule, so an unbound metadata field lets a bootstrap snapshot
+    // ship forged coinbase-maturity metadata that hashes identically to the honest
+    // set — a consensus partition with no attacker hashpower. Bind it here.
+    CHashWriter ssMeta(SER_GETHASH, PROTOCOL_VERSION);
     while (pcursor->Valid()) {
         boost::this_thread::interruption_point();
         std::pair<char, uint256> key;
@@ -234,6 +255,13 @@ bool CCoinsViewDB::GetStats(CCoinsStats &stats) const {
         if (pcursor->GetKey(key) && key.first == DB_COINS) {
             if (pcursor->GetValue(coins)) {
                 stats.nTransactions++;
+                // Fold the consensus-relevant per-coin metadata (once per CCoins
+                // entry, in leveldb sorted-key order so it is identical on every
+                // node holding the same chainstate). nHeight is always >= 0; the tx
+                // version is a small non-negative value in this chain.
+                ssMeta << VARINT(coins.nHeight);
+                ssMeta << static_cast<uint8_t>(coins.fCoinBase ? 1 : 0);
+                ssMeta << VARINT(static_cast<uint32_t>(coins.nVersion));
                 for (unsigned int i=0; i<coins.vout.size(); i++) {
                     const CTxOut &out = coins.vout[i];
                     if (!out.IsNull()) {
@@ -255,9 +283,53 @@ bool CCoinsViewDB::GetStats(CCoinsStats &stats) const {
     }
     {
         LOCK(cs_main);
-        stats.nHeight = mapBlockIndex.find(stats.hashBlock)->second->nHeight;
+        // Defensive: a scratch / frozen-copy chainstate (option B) can carry a
+        // best block this node's index does not (yet) hold. Leave nHeight at its
+        // default rather than dereference end(); the normal chainstate's best
+        // block is always present, so gettxoutsetinfo is unaffected.
+        BlockMap::const_iterator it = mapBlockIndex.find(stats.hashBlock);
+        if (it != mapBlockIndex.end() && it->second)
+            stats.nHeight = it->second->nHeight;
     }
     stats.hashSerialized = ss.GetHash();
+
+    // Full-chainstate commitment: fold the transparent commitment together with the
+    // shielded state so the bootstrap anchor binds the Sprout/Sapling note-commitment
+    // tree anchors and the nullifier sets, not just the transparent UTXO set. Without
+    // this, a snapshot could ship honest transparent coins (matching hashSerialized)
+    // alongside a tampered nullifier set or forged anchor and still pass verification —
+    // enabling, e.g., a shielded double-spend on a bootstrapped node.
+    //
+    // We hash the best-anchor roots (the current Sprout/Sapling tree tips) plus the
+    // KEYS of every stored anchor and nullifier. The keys are roots/nullifiers (32-byte
+    // cryptographic commitments), so binding them binds set membership and the accepted
+    // tree tips cheaply, without re-hashing the (large) serialized tree blobs: a tampered
+    // tree stored under an honest root would produce a divergent next-block anchor, which
+    // is itself bound here for the following block. leveldb iterates each key prefix in
+    // sorted order, so this digest is identical on every node holding the same chainstate.
+    CHashWriter ssFull(SER_GETHASH, PROTOCOL_VERSION);
+    ssFull << stats.hashSerialized;
+    // Bind the per-coin consensus metadata digest (height/coinbase-flag/version)
+    // accumulated above, so the bootstrap anchor commitment covers coinbase-maturity
+    // inputs, not just transparent output value+script.
+    ssFull << ssMeta.GetHash();
+    ssFull << GetBestAnchor(SPROUT);
+    ssFull << GetBestAnchor(SAPLING);
+    const char shieldedPrefixes[] = { DB_SPROUT_ANCHOR, DB_SAPLING_ANCHOR,
+                                      DB_NULLIFIER, DB_SAPLING_NULLIFIER };
+    for (size_t p = 0; p < sizeof(shieldedPrefixes); p++) {
+        const char prefix = shieldedPrefixes[p];
+        boost::scoped_ptr<CDBIterator> it2(const_cast<CDBWrapper*>(&db)->NewIterator());
+        for (it2->Seek(make_pair(prefix, uint256())); it2->Valid(); it2->Next()) {
+            boost::this_thread::interruption_point();
+            std::pair<char, uint256> key2;
+            if (!it2->GetKey(key2) || key2.first != prefix)
+                break;
+            ssFull << key2.second;
+        }
+    }
+    stats.hashSerializedFull = ssFull.GetHash();
+
     stats.nTotalAmount = nTotalAmount;
     return true;
 }
@@ -311,6 +383,8 @@ bool CBlockTreeDB::LoadBlockIndexGuts()
 
     pcursor->Seek(make_pair(DB_BLOCK_INDEX, uint256()));
 
+    int64_t nLoaded = 0;
+
     // Load mapBlockIndex
     while (pcursor->Valid()) {
         boost::this_thread::interruption_point();
@@ -339,15 +413,37 @@ bool CBlockTreeDB::LoadBlockIndexGuts()
                 pindexNew->nSproutValue   = diskindex.nSproutValue;
                 pindexNew->nSaplingValue  = diskindex.nSaplingValue;
 
-                // Consistency checks
-                auto header = pindexNew->GetBlockHeader();
-                if (header.GetHash() != pindexNew->GetBlockHash())
-                    return error("LoadBlockIndex(): block header inconsistency detected: on-disk = %s, in-memory = %s",
-                       diskindex.ToString(),  pindexNew->ToString());
+                // Consistency check.
+                //
+                // pindexNew->GetBlockHash() is the hash produced by
+                // diskindex.GetBlockHash() above (used to key this entry in
+                // mapBlockIndex). That call already builds a CBlockHeader from the
+                // SAME deserialized header fields {nVersion, hashPrev,
+                // hashMerkleRoot, hashFinalSaplingRoot, nTime, nBits, nNonce,
+                // nSolution} that the lines above copied verbatim into pindexNew, and
+                // double-SHA256s it. Re-deriving the header from pindexNew and
+                // hashing it a second time (the old `header.GetHash() !=
+                // GetBlockHash()` check) compares a recompute against a recompute of
+                // identical, unmutated inputs (pprev->GetBlockHash() == the map key
+                // == diskindex.hashPrev): it can never fail and just doubles the
+                // per-record header hashing cost across millions of records. The PoW
+                // check below consumes the same already-computed hash, so removing
+                // the duplicate rehash is a no-op for consensus and for the set of
+                // detectable on-disk corruptions.
                 if (!CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, Params().GetConsensus()))
                     return error("LoadBlockIndex(): CheckProofOfWork failed: %s", pindexNew->ToString());
 
                 pcursor->Next();
+
+                // The block index holds millions of records; scanning it is the
+                // longest phase of an otherwise-synced startup. Emit a periodic
+                // progress message so neither the console nor a GUI looks frozen.
+                // InitMessage is wired to SetRPCWarmupStatus (init.cpp), so the
+                // climbing count also reaches GUI wallets polling over RPC during
+                // warmup. Trailing "..." matches the wallet's dot-animation. Purely
+                // cosmetic -- it does not change what is loaded.
+                if ((++nLoaded % 50000) == 0)
+                    uiInterface.InitMessage(strprintf(_("Loading block index %d..."), nLoaded));
             } else {
                 return error("LoadBlockIndex() : failed to read value");
             }

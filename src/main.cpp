@@ -8,8 +8,9 @@
 #include "sodium.h"
 
 #include "addrman.h"
-#include "alert.h"
 #include "arith_uint256.h"
+#include "bootstrap.h"
+#include "bootstrapvalidation.h"
 #include "chainparams.h"
 #include "checkpoints.h"
 #include "checkqueue.h"
@@ -21,6 +22,7 @@
 #include "metrics.h"
 #include "net.h"
 #include "pow.h"
+#include "rpc/server.h"
 #include "txdb.h"
 #include "txmempool.h"
 #include "ui_interface.h"
@@ -66,7 +68,7 @@ int nScriptCheckThreads = 0;
 bool fExperimentalMode = false;
 bool fImporting = false;
 bool fReindex = false;
-bool fNoFastSync = false;
+bool fReindexChainState = false;
 bool fTxIndex = false;
 bool fHavePruned = false;
 bool fPruneMode = false;
@@ -74,9 +76,18 @@ bool fIsBareMultisigStd = true;
 bool fCheckBlockIndex = false;
 bool fCheckpointsEnabled = true;
 bool fCoinbaseEnforcedProtectionEnabled = true;
+// Set ONLY while init's Step-10 forward-connect activates a chain that includes
+// freshly-imported, above-checkpoint bootstrap blocks (anchor+1..serverTip) that
+// were NOT validated live. While set, ConnectTip re-runs ContextualCheckBlockHeader
+// for each above-checkpoint block so a forged LOW-DIFFICULTY post-anchor fork (whose
+// claimed nBits the context-free CheckProofOfWork on the forward-connect path would
+// otherwise accept) is rejected. Default false => a strict no-op for every normal
+// node and all live sync (where AcceptBlockHeader already ran the contextual checks).
+// Toggled only via the RAII CBootstrapForwardConnectGuard. atomic so the flag write
+// in init (outside cs_main) is well-defined w.r.t. the ConnectTip read (under cs_main).
+std::atomic<bool> g_bootstrapForwardConnect(false);
 size_t nCoinCacheUsage = 5000 * 300;
 uint64_t nPruneTarget = 0;
-bool fAlerts = DEFAULT_ALERTS;
 /* If the tip is older than this (in seconds), the node is considered to be in initial block download.
  */
 int64_t nMaxTipAge = DEFAULT_MAX_TIP_AGE;
@@ -300,6 +311,9 @@ struct CNodeState {
     int nBlocksInFlightValidHeaders;
     //! Whether we consider this a preferred download peer.
     bool fPreferredDownload;
+    //! Whether this is an inbound connection (we did not dial it). Used by the
+    //! peer-aware finalization gate to weight independent OUTBOUND corroboration.
+    bool fInbound;
 
     CNodeState() {
         fCurrentlyConnected = false;
@@ -313,6 +327,7 @@ struct CNodeState {
         nBlocksInFlight = 0;
         nBlocksInFlightValidHeaders = 0;
         fPreferredDownload = false;
+        fInbound = false;
     }
 };
 
@@ -354,6 +369,7 @@ void InitializeNode(NodeId nodeid, const CNode *pnode) {
     CNodeState &state = mapNodeState.insert(std::make_pair(nodeid, CNodeState())).first->second;
     state.name = pnode->addrName;
     state.address = pnode->addr;
+    state.fInbound = pnode->fInbound;
 }
 
 void FinalizeNode(NodeId nodeid) {
@@ -1743,7 +1759,19 @@ bool WriteBlockToDisk(CBlock& block, CDiskBlockPos& pos, const CMessageHeader::M
     return true;
 }
 
-bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos)
+// True iff pindex is an ancestor of (or equal to) the last compiled checkpoint, i.e.
+// its hash is pinned by the checkpoint hash-chain. Uses the ANCESTRY relation (never a
+// bare height compare): a same-height block on a different fork is NOT an ancestor and
+// must keep full verification. Mirrors the fExpensiveChecks gate in ConnectBlock.
+static bool BlockIsAncestorOfLastCheckpoint(const CBlockIndex* pindex)
+{
+    if (!fCheckpointsEnabled || pindex == NULL)
+        return false;
+    CBlockIndex* pcp = Checkpoints::GetLastCheckpoint(Params().Checkpoints());
+    return pcp != NULL && pcp->GetAncestor(pindex->nHeight) == pindex;
+}
+
+bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos, bool fCheckPOW)
 {
     block.SetNull();
 
@@ -1760,8 +1788,11 @@ bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos)
         return error("%s: Deserialize or I/O error - %s at %s", __func__, e.what(), pos.ToString());
     }
 
-    // Check the header
-    if (!(CheckEquihashSolution(&block, Params()) &&
+    // Check the header. fCheckPOW re-verifies the Equihash solution and proof of work;
+    // the caller may skip it for a block whose hash is already pinned (see the pindex
+    // overload below), where re-running Equihash is pure redundant work.
+    if (fCheckPOW &&
+        !(CheckEquihashSolution(&block, Params()) &&
           CheckProofOfWork(block.GetHash(), block.nBits, Params().GetConsensus())))
         return error("ReadBlockFromDisk: Errors in block header at %s", pos.ToString());
 
@@ -1770,7 +1801,13 @@ bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos)
 
 bool ReadBlockFromDisk(CBlock& block, const CBlockIndex* pindex)
 {
-    if (!ReadBlockFromDisk(block, pindex->GetBlockPos()))
+    // For a block pinned by the checkpoint hash-chain, the Equihash/PoW re-check is
+    // redundant: the block's hash commits to its nSolution, so the GetHash()==index
+    // check below already detects any on-disk tampering. Skipping it cuts the dominant
+    // cost of a genesis..tip replay (reindex / -reindex-chainstate / IBD below the last
+    // checkpoint). Above the last checkpoint we keep full verification.
+    const bool fCheckPOW = !BlockIsAncestorOfLastCheckpoint(pindex);
+    if (!ReadBlockFromDisk(block, pindex->GetBlockPos(), fCheckPOW))
         return false;
     if (block.GetHash() != pindex->GetBlockHash())
         return error("ReadBlockFromDisk(CBlock&, CBlockIndex*): GetHash() doesn't match index for %s at %s",
@@ -1861,7 +1898,7 @@ void CheckForkWarningConditions()
         {
             std::string warning = std::string("'Warning: Large-work fork detected, forking after block ") +
                 pindexBestForkBase->phashBlock->ToString() + std::string("'");
-            CAlert::Notify(warning, true);
+            AlertNotify(warning, true);
         }
         if (pindexBestForkTip && pindexBestForkBase)
         {
@@ -1874,7 +1911,7 @@ void CheckForkWarningConditions()
         {
             std::string warning = std::string("Warning: Found invalid chain at least ~6 blocks longer than our best chain.\nChain state database corruption likely.");
             LogPrintf("%s: %s\n", warning.c_str(), __func__);
-            CAlert::Notify(warning, true);
+            AlertNotify(warning, true);
             fLargeWorkInvalidChainFound = true;
         }
     }
@@ -2475,7 +2512,7 @@ void PartitionCheck(bool (*initialDownloadCheck)(), CCriticalSection& cs, const 
     if (!strWarning.empty())
     {
         strMiscWarning = strWarning;
-        CAlert::Notify(strWarning, true);
+        AlertNotify(strWarning, true);
         lastAlertTime = now;
     }
 }
@@ -2486,7 +2523,7 @@ static int64_t nTimeIndex = 0;
 static int64_t nTimeCallbacks = 0;
 static int64_t nTimeTotal = 0;
 
-bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pindex, CCoinsViewCache& view, bool fJustCheck)
+bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pindex, CCoinsViewCache& view, bool fJustCheck, bool fScratchView)
 {
     const CChainParams& chainparams = Params();
     AssertLockHeld(cs_main);
@@ -2517,11 +2554,17 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     if (block.GetHash() == chainparams.GetConsensus().hashGenesisBlock) {
         if (!fJustCheck) {
             view.SetBestBlock(pindex->GetBlockHash());
-            // Before the genesis block, there was an empty tree
-            SproutMerkleTree tree;
-            pindex->hashSproutAnchor = tree.root();
-            // The genesis block contained no JoinSplits
-            pindex->hashFinalSproutRoot = pindex->hashSproutAnchor;
+            // Don't mutate the shared live block index during a scratch
+            // re-derivation (fScratchView): the background validator replays the
+            // real mapBlockIndex entries into a private view only, so the anchor
+            // roots stay owned by the live connect path.
+            if (!fScratchView) {
+                // Before the genesis block, there was an empty tree
+                SproutMerkleTree tree;
+                pindex->hashSproutAnchor = tree.root();
+                // The genesis block contained no JoinSplits
+                pindex->hashFinalSproutRoot = pindex->hashSproutAnchor;
+            }
         }
         return true;
     }
@@ -2584,8 +2627,9 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     // Construct the incremental merkle tree at the current
     // block position,
     auto old_sprout_tree_root = view.GetBestAnchor(SPROUT);
-    // saving the top anchor in the block index as we go.
-    if (!fJustCheck) {
+    // saving the top anchor in the block index as we go (live path only; a
+    // scratch re-derivation must not write the shared block index).
+    if (!fJustCheck && !fScratchView) {
         pindex->hashSproutAnchor = old_sprout_tree_root;
     }
     SproutMerkleTree sprout_tree;
@@ -2674,7 +2718,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
     view.PushAnchor(sprout_tree);
     view.PushAnchor(sapling_tree);
-    if (!fJustCheck) {
+    if (!fJustCheck && !fScratchView) {
         pindex->hashFinalSproutRoot = sprout_tree.root();
     }
     blockundo.old_sprout_tree_root = old_sprout_tree_root;
@@ -2707,8 +2751,11 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     if (fJustCheck)
         return true;
 
-    // Write undo information to disk
-    if (pindex->GetUndoPos().IsNull() || !pindex->IsValid(BLOCK_VALID_SCRIPTS))
+    // Write undo information to disk. Skipped for a scratch re-derivation: it
+    // mutates the shared block index (nUndoPos/nStatus/RaiseValidity) and writes
+    // undo files the live node already owns; a forward-only scratch replay never
+    // disconnects, so it needs neither.
+    if (!fScratchView && (pindex->GetUndoPos().IsNull() || !pindex->IsValid(BLOCK_VALID_SCRIPTS)))
     {
         if (pindex->GetUndoPos().IsNull()) {
             CDiskBlockPos pos;
@@ -2737,7 +2784,8 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         setDirtyBlockIndex.insert(pindex);
     }
 
-    if (fTxIndex)
+    // Don't touch the live txindex from a scratch re-derivation.
+    if (fTxIndex && !fScratchView)
         if (!pblocktree->WriteTxIndex(vPos))
             return AbortNode(state, "Failed to write transaction index");
 
@@ -2747,10 +2795,14 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     int64_t nTime3 = GetTimeMicros(); nTimeIndex += nTime3 - nTime2;
     LogPrint("bench", "    - Index writing: %.2fms [%.2fs]\n", 0.001 * (nTime3 - nTime2), nTimeIndex * 0.000001);
 
-    // Watch for changes to the previous coinbase transaction.
-    static uint256 hashPrevBestCoinBase;
-    GetMainSignals().UpdatedTransaction(hashPrevBestCoinBase);
-    hashPrevBestCoinBase = block.vtx[0].GetHash();
+    // Watch for changes to the previous coinbase transaction. Suppressed for a
+    // scratch re-derivation so it neither fires wallet/UI notifications nor
+    // perturbs the static used by the live connection path.
+    if (!fScratchView) {
+        static uint256 hashPrevBestCoinBase;
+        GetMainSignals().UpdatedTransaction(hashPrevBestCoinBase);
+        hashPrevBestCoinBase = block.vtx[0].GetHash();
+    }
 
     int64_t nTime4 = GetTimeMicros(); nTimeCallbacks += nTime4 - nTime3;
     LogPrint("bench", "    - Callbacks: %.2fms [%.2fs]\n", 0.001 * (nTime4 - nTime3), nTimeCallbacks * 0.000001);
@@ -2855,6 +2907,15 @@ bool static FlushStateToDisk(CValidationState &state, FlushStateMode mode) {
         if (!pcoinsTip->Flush())
             return AbortNode(state, "Failed to write to coin database");
         nLastFlush = nNow;
+        // Forensic (opt-in: -debug=flush): after a full flush, the durable block
+        // index must be at-or-ahead of the coins best block. Capturing both tips
+        // here pins down a cross-instance durability gap (e.g. coins persisted past
+        // the last durable block-index write) if one ever occurs. Off by default;
+        // no steady-state log spam.
+        LogPrint("flush", "fullflush: mode=%d chainActive=%s coins-best=%s\n",
+                 (int)mode,
+                 chainActive.Tip() ? chainActive.Tip()->GetBlockHash().ToString() : "(null)",
+                 pcoinsTip->GetBestBlock().ToString());
     }
     if ((mode == FLUSH_STATE_ALWAYS || mode == FLUSH_STATE_PERIODIC) && nNow > nLastSetChain + (int64_t)DATABASE_WRITE_INTERVAL * 1000000) {
         // Update best block in wallet (so we can detect restored wallets).
@@ -2912,7 +2973,7 @@ void static UpdateTip(CBlockIndex *pindexNew) {
         {
             // strMiscWarning is read by GetWarnings(), called by the JSON-RPC code to warn the user:
             strMiscWarning = _("Warning: This version is obsolete; upgrade required!");
-            CAlert::Notify(strMiscWarning, true);
+            AlertNotify(strMiscWarning, true);
             fWarned = true;
         }
     }
@@ -3018,8 +3079,146 @@ static bool FinalizeBlockInternal(CValidationState &state, const CBlockIndex *pi
     return true;
 }
 
+// Pure decision core for the peer-aware finalization gate — no globals, so it is
+// directly unit-testable with synthetic chains and peer views. All ambient state is
+// passed explicitly: isIBD, whether `pindex` is on the active chain, the best header
+// + the time it was received + this run's startup time, and the connected peers'
+// (best-known-block, fInbound, address-group) views. See LiveNetworkCorroboratesTip
+// for the production wrapper that gathers these from globals under cs_main.
+bool EvaluateTipCorroboration(const CBlockIndex* pindex, bool isIBD, bool pindexOnActiveChain,
+                              const CBlockIndex* bestHeader, int64_t bestHeaderRecvTime,
+                              int64_t startupTime, int minDepth, int minPeers,
+                              const std::vector<PeerTipView>& peers, std::string& reason)
+{
+    if (pindex == NULL) { reason = "no candidate"; return false; }
+    // Don't trust local chain state while still catching up.
+    if (isIBD) { reason = "still in initial block download"; return false; }
+    // The candidate must be on our active chain.
+    if (!pindexOnActiveChain) { reason = "candidate is not on the active chain"; return false; }
+
+    const int needHeight = pindex->nHeight + minDepth;
+    // Our own best header must be a descendant of the candidate at the required depth,
+    // and must have been received LIVE this session (not loaded from disk during a
+    // bootstrap import — that is exactly the unconfirmed state we are guarding).
+    if (bestHeader == NULL || bestHeader->nHeight < needHeight) {
+        reason = "best header is not yet the required depth above the candidate"; return false;
+    }
+    if (bestHeader->GetAncestor(pindex->nHeight) != pindex) {
+        reason = "best header does not descend from the candidate"; return false;
+    }
+    if (bestHeaderRecvTime < startupTime) {
+        reason = "best header was not received live this session"; return false;
+    }
+
+    // Tally independent OUTBOUND corroborators (distinct address groups) whose
+    // announced best block descends from the candidate at the required depth, and
+    // refuse if ANY peer advertises a higher-work chain that forks BELOW the
+    // candidate (that is the tell-tale of a minority/forged fork — keep following
+    // longest-chain instead of pinning).
+    std::set<std::vector<unsigned char> > outboundGroups;
+    for (size_t i = 0; i < peers.size(); ++i) {
+        const CBlockIndex* pbest = peers[i].bestKnown;
+        if (pbest == NULL) continue;
+        // No-better-competing-fork veto. If ANY peer (inbound included) advertises a
+        // strictly-higher-work chain that forks BELOW the candidate, refuse to
+        // finalize: that heavier chain may be the real majority and the candidate a
+        // minority fork. This is a SAFETY check and is intentionally NOT weakened to
+        // "only forks whose bodies we have" — a node must not pin while a heavier
+        // valid-PoW header chain is visible, even if it has not downloaded the bodies
+        // yet. KNOWN, ACCEPTED liveness limit: a peer can keep finalization paused by
+        // advertising a header-only higher-work fork, but forging headers with more
+        // total work than the active chain requires MAJORITY hashpower (headers must
+        // satisfy CheckProofOfWork), and the only effect of the pause is to leave the
+        // node a plain longest-chain follower (no auto-finalization) — which is safe.
+        if (pbest->nChainWork > pindex->nChainWork &&
+            (pbest->nHeight < pindex->nHeight || pbest->GetAncestor(pindex->nHeight) != pindex)) {
+            reason = "a peer advertises a higher-work chain that forks below the candidate";
+            return false;
+        }
+        if (!peers[i].fInbound && pbest->nHeight >= needHeight &&
+            pbest->GetAncestor(pindex->nHeight) == pindex) {
+            outboundGroups.insert(peers[i].group);
+        }
+    }
+    if ((int)outboundGroups.size() < minPeers) {
+        reason = strprintf("only %d independent outbound peers corroborate the chain (need %d)",
+                           (int)outboundGroups.size(), minPeers);
+        return false;
+    }
+    reason = strprintf("%d independent outbound peers corroborate the chain at depth >=%d",
+                       (int)outboundGroups.size(), minDepth);
+    return true;
+}
+
+bool LiveNetworkCorroboratesTip(const CBlockIndex *pindex, int minDepth, int minPeers,
+                                std::string &reason)
+{
+    AssertLockHeld(cs_main);
+    std::vector<PeerTipView> peers;
+    peers.reserve(mapNodeState.size());
+    for (std::map<NodeId, CNodeState>::const_iterator it = mapNodeState.begin();
+         it != mapNodeState.end(); ++it) {
+        PeerTipView v;
+        v.bestKnown = it->second.pindexBestKnownBlock;
+        v.fInbound = it->second.fInbound;
+        if (v.bestKnown != NULL) v.group = it->second.address.GetGroup();
+        peers.push_back(v);
+    }
+    const bool onActive = (pindex != NULL && chainActive[pindex->nHeight] == pindex);
+    const int64_t bhRecv = (pindexBestHeader != NULL)
+        ? (int64_t)pindexBestHeader->GetHeaderReceivedTime() : 0;
+    return EvaluateTipCorroboration(pindex, IsInitialBlockDownload(), onActive,
+                                    pindexBestHeader, bhRecv, GetStartupTime(),
+                                    minDepth, minPeers, peers, reason);
+}
+
+// Snapshot of the most recent peer-aware finalization hold (D gate), so operators
+// and monitoring can see WHY a node is not auto-finalizing (e.g. a partition).
+// Updated only inside FindBlockToFinalize under cs_main; read via
+// GetFinalizationHoldInfo (also under cs_main).
+static bool g_finalizationHeld = false;
+static int g_finalizationHeldHeight = -1;
+static std::string g_finalizationHeldReason;
+static int64_t g_finalizationHeldSince = 0;
+
+void GetFinalizationHoldInfo(bool& held, int& height, std::string& reason, int64_t& since)
+{
+    AssertLockHeld(cs_main);
+    held = g_finalizationHeld;
+    height = g_finalizationHeldHeight;
+    reason = g_finalizationHeldReason;
+    since = g_finalizationHeldSince;
+}
+
+static void SetFinalizationHeld(bool held, int height, const std::string& reason)
+{
+    AssertLockHeld(cs_main);
+    if (held && !g_finalizationHeld) {
+        g_finalizationHeldSince = GetTime(); // transition into held: stamp the start
+    } else if (!held) {
+        g_finalizationHeldSince = 0;
+    }
+    g_finalizationHeld = held;
+    g_finalizationHeldHeight = held ? height : -1;
+    g_finalizationHeldReason = held ? reason : std::string();
+}
+
 static const CBlockIndex *FindBlockToFinalize(CBlockIndex *pindexNew) {
     AssertLockHeld(cs_main);
+
+    // Trustless bootstrap (option B): while an imported snapshot is still being
+    // re-derived from genesis in the background (PROVISIONAL), do NOT auto-finalize.
+    // The reorg-depth rule finalizes a block ~maxreorgdepth deep and then rejects
+    // any reorg before it; finalizing on the imported ancestry before validation
+    // completes would permanently pin the node to that — possibly forged or
+    // wrong-fork — chain. Pausing here keeps the node free to switch chains until
+    // its imported state is proven, after which finalization resumes normally.
+    // No effect on a normal node: BootstrapValidationHoldsFinalization() is always
+    // false unless this node accepted a trustless snapshot that is not yet
+    // validated, so the finalization behavior is byte-identical to upstream there.
+    if (BootstrapValidationHoldsFinalization()) {
+        return nullptr;
+    }
 
     const int32_t maxreorgdepth = GetArg("-maxreorgdepth", DEFAULT_MAX_REORG_DEPTH);
     int64_t finalizationdelay = GetArg("-finalizationdelay", DEFAULT_PRE_BUTTERCUP_MIN_FINALIZATION_DELAY);
@@ -3043,6 +3242,19 @@ static const CBlockIndex *FindBlockToFinalize(CBlockIndex *pindexNew) {
         return nullptr;
     }
 
+    // Peer-aware finalization gate (local policy, default on; -finalizationrequirepeers=0
+    // restores the legacy unconditional behavior). Before pinning a block, require that
+    // the LIVE network corroborates this chain (independent outbound peers building on it,
+    // and no peer advertising a higher-work fork below the candidate). This makes a node
+    // refuse to finalize — and so stay a flexible longest-chain follower — during a
+    // partition or when it is on a minority/forged fork, so it converges with the
+    // majority instead of permanently splitting. It only ever DELAYS finalization, so it
+    // changes no consensus rule and stays compatible with peers that do not run it. A
+    // poorly-connected node simply never finalizes (plain Nakamoto), which is safe.
+    const bool fRequirePeers = GetBoolArg("-finalizationrequirepeers", true);
+    const int finalizationMinPeers =
+        std::max((int)GetArg("-finalizationminpeers", DEFAULT_FINALIZATION_MIN_PEERS), 1);
+
     // While our candidate is not eligible (finalization delay not expired), try
     // the previous one.
     while (pindex && (pindex != pindexFinalized)) {
@@ -3056,6 +3268,29 @@ static const CBlockIndex *FindBlockToFinalize(CBlockIndex *pindexNew) {
 
         // If finalization delay is <= 0, finalization always occurs immediately
         if (now >= (headerReceivedTime + finalizationdelay)) {
+            if (fRequirePeers) {
+                std::string reason;
+                if (!LiveNetworkCorroboratesTip(pindex, std::max(maxreorgdepth, 0),
+                                                finalizationMinPeers, reason)) {
+                    // Not yet corroborated by the live network: hold finalization this
+                    // round (try again as the chain/peers advance). Record the hold so
+                    // getblockchaininfo can surface it, and warn the operator on a
+                    // throttled cadence (once, then every 10 min) so a sustained
+                    // partition/under-connection hold is not invisible.
+                    SetFinalizationHeld(true, pindex->nHeight, reason);
+                    static int64_t nLastFinalizationHoldWarn = 0;
+                    if (now - nLastFinalizationHoldWarn >= 600) {
+                        nLastFinalizationHoldWarn = now;
+                        LogPrintf("WARNING: auto-finalization is paused at height %d — %s. The node "
+                                  "stays a longest-chain follower until the live network corroborates "
+                                  "this chain (set -finalizationrequirepeers=0 to disable this gate).\n",
+                                  pindex->nHeight, reason);
+                    }
+                    return nullptr;
+                }
+            }
+            // Corroborated (or gate disabled): clear any recorded hold and finalize.
+            SetFinalizationHeld(false, 0, std::string());
             return pindex;
         }
 
@@ -3095,6 +3330,62 @@ bool static ConnectTip(CValidationState &state, CBlockIndex *pindexNew, CBlock *
     int64_t nTime2 = GetTimeMicros(); nTimeReadFromDisk += nTime2 - nTime1;
     int64_t nTime3;
     LogPrint("bench", "  - Load block from disk: %.2fms [%.2fs]\n", (nTime2 - nTime1) * 0.001, nTimeReadFromDisk * 0.000001);
+    // Bootstrap forward-connect anti-forgery re-check (Option A). The normal connect
+    // path (ConnectBlock -> CheckBlock -> CheckBlockHeader) verifies only context-free
+    // rules; the CONTEXTUAL consensus rules a from-genesis node enforces in
+    // AcceptBlock -> ContextualCheckBlockHeader/ContextualCheckBlock are NOT reached by
+    // the init Step-10 forward-connect of imported blocks (they arrive via
+    // LoadBlockIndexDB headers and are connected by ConnectTip only, never AcceptBlock).
+    // Skipped without this re-check:
+    //   - ContextualCheckBlockHeader: nBits == GetNextWorkRequired(pprev) (difficulty
+    //     RETARGET), header timestamp, version, equihash-solution size.
+    //   - ContextualCheckBlock: BIP34 height-in-coinbase, transaction finality
+    //     (IsFinalTx), and per-tx ContextualCheckTransaction (Overwinter/Sapling
+    //     activation flags, expiry, oversize).
+    // Without re-running BOTH, a malicious v3 server could bundle a difficulty-correct
+    // post-anchor block that nonetheless carries a contextually-invalid coinbase/tx; a
+    // from-genesis node rejects it, this node would accept it -> consensus divergence.
+    // So, ONLY while connecting imported above-checkpoint bootstrap blocks
+    // (g_bootstrapForwardConnect, set by CBootstrapForwardConnectGuard around init's
+    // ActivateBestChain) and ONLY for blocks above the last compiled checkpoint
+    // (at/below it the chain is hash-pinned, and re-checking there would wrongly trip
+    // ContextualCheckBlockHeader's own older-than-checkpoint fork guard), re-run both
+    // contextual checks. genesis (pprev == NULL) is skipped. Both are READ-ONLY (no
+    // consensus rule changed). A failure is handled exactly like an invalid ConnectBlock
+    // below: mark the block invalid and fail the connect on the existing invalid-block
+    // path. This is a strict no-op for normal live sync (flag never set; AcceptBlock
+    // already ran both).
+    //
+    // DURABILITY (crash-restart consensus safety): g_bootstrapForwardConnect is a
+    // one-shot in-memory flag armed only on the importing boot. If the node is killed
+    // uncleanly mid-import — after the anchor-pending marker is cleared (init.cpp) but
+    // before/while Step-10's guarded ActivateBestChain finishes connecting the bundle,
+    // and before the first-boot rejection marks are flushed — a plain restart would skip
+    // arming (marker gone) AND re-evaluate the (unflushed) forged blocks as unknown,
+    // reconnecting a forged low-difficulty post-anchor fork through here with the flag
+    // CLEAR. So ALSO re-check whenever the imported-tip hold is engaged: that hold is
+    // persisted durably and re-armed fail-closed at init (LoadBootstrapValidationState,
+    // BEFORE Step-10), and is armed exactly when an above-checkpoint post-anchor bundle
+    // is pending live corroboration — i.e. exactly when there are imported blocks here
+    // that still need the from-genesis contextual gate. It stays engaged across the
+    // restart until the live network corroborates (and releases) the tip, so the
+    // re-check no longer depends on init phase-ordering or flush timing.
+    if ((g_bootstrapForwardConnect.load(std::memory_order_relaxed) ||
+         BootstrapValidationHoldsFinalization()) &&
+        pindexNew->pprev != NULL) {
+        int lastCheckpointHeight = -1;
+        const CBlockIndex* pcp = Checkpoints::GetLastCheckpoint(Params().Checkpoints());
+        if (pcp != NULL)
+            lastCheckpointHeight = pcp->nHeight;
+        if (pindexNew->nHeight > lastCheckpointHeight &&
+            (!ContextualCheckBlockHeader(*pblock, state, pindexNew->pprev) ||
+             !ContextualCheckBlock(*pblock, state, pindexNew->pprev))) {
+            if (state.IsInvalid())
+                InvalidBlockFound(pindexNew, state);
+            return error("ConnectTip(): imported bootstrap block %s failed contextual check (%s)",
+                         pindexNew->GetBlockHash().ToString(), FormatStateMessage(state));
+        }
+    }
     {
         CCoinsViewCache view(pcoinsTip);
         bool rv = ConnectBlock(*pblock, state, pindexNew, view);
@@ -3154,6 +3445,19 @@ bool static ConnectTip(CValidationState &state, CBlockIndex *pindexNew, CBlock *
     LogPrint("bench", "  - Connect postprocess: %.2fms [%.2fs]\n", (nTime6 - nTime5) * 0.001, nTimePostConnect * 0.000001);
     LogPrint("bench", "- Connect block: %.2fms [%.2fs]\n", (nTime6 - nTime1) * 0.001, nTimeTotal * 0.000001);
     return true;
+}
+
+// Arm/disarm the bootstrap forward-connect contextual re-check (see g_bootstrapForwardConnect
+// and the guard inside ConnectTip). RAII so the flag is always cleared, even if the
+// wrapped ActivateBestChain throws (e.g. a boost::thread interruption during init).
+CBootstrapForwardConnectGuard::CBootstrapForwardConnectGuard()
+{
+    g_bootstrapForwardConnect.store(true, std::memory_order_relaxed);
+}
+
+CBootstrapForwardConnectGuard::~CBootstrapForwardConnectGuard()
+{
+    g_bootstrapForwardConnect.store(false, std::memory_order_relaxed);
 }
 
 /**
@@ -3311,11 +3615,25 @@ static void PruneBlockIndexCandidates() {
  * Try to make some progress towards making pindexMostWork the active block.
  * pblock is either NULL or a pointer to a CBlock corresponding to pindexMostWork.
  */
+// Throttle (and persist across the repeated ActivateBestChainStep calls that
+// ActivateBestChain makes) the integer percent we last surfaced to the GUI
+// warmup status during the init-time connect replay. Guarded by cs_main, which
+// ActivateBestChainStep always holds.
+static int nLastReplayInitPercent = -1;
+
 static bool ActivateBestChainStep(CValidationState &state, CBlockIndex *pindexMostWork, CBlock *pblock) {
     AssertLockHeld(cs_main);
     bool fInvalidFound = false;
     const CBlockIndex *pindexOldTip = chainActive.Tip();
     const CBlockIndex *pindexFork = chainActive.FindFork(pindexMostWork);
+
+    // Only surface per-block connect progress while still in the RPC warmup
+    // window (i.e. during the init-time ActivateBestChain replay after a
+    // bootstrap import or a mid-sync restart). Outside warmup this is the live
+    // single-block connect path and emitting status there would be noise.
+    const bool fInitReplay = RPCIsInWarmup(NULL) && pindexMostWork != NULL;
+    const int nReplayBase = pindexFork ? pindexFork->nHeight : 0;
+    const int nReplaySpan = pindexMostWork ? (pindexMostWork->nHeight - nReplayBase) : 0;
 
     // - On ChainDB initialization, pindexOldTip will be null, so there are no removable blocks.
     // - If pindexMostWork is in a chain that doesn't have the same genesis block as our chain,
@@ -3384,6 +3702,20 @@ static bool ActivateBestChainStep(CValidationState &state, CBlockIndex *pindexMo
                 }
             } else {
                 PruneBlockIndexCandidates();
+                // During the init-time replay, push a throttled height/percent
+                // into the warmup status so the GUI watchdog's no-progress timer
+                // keeps resetting and the user sees the chain advancing. Only
+                // emit when the integer percent changes, to avoid spam.
+                if (fInitReplay) {
+                    int percentageDone = nReplaySpan > 0
+                        ? std::max(1, std::min(99, (int)(((double)(chainActive.Tip()->nHeight - nReplayBase)) / (double)nReplaySpan * 100)))
+                        : 99;
+                    if (percentageDone != nLastReplayInitPercent) {
+                        uiInterface.InitMessage(strprintf(_("Activating best chain... height %d (%d%%)"),
+                                                          chainActive.Tip()->nHeight, percentageDone));
+                        nLastReplayInitPercent = percentageDone;
+                    }
+                }
                 if (!pindexOldTip || chainActive.Tip()->nChainWork > pindexOldTip->nChainWork) {
                     // We're in a better position than we were. Return temporarily to release the lock.
                     fContinue = false;
@@ -4641,9 +4973,28 @@ bool static LoadBlockIndexDB()
     }
 
     // Load pointer to end of best chain
-    BlockMap::iterator it = mapBlockIndex.find(pcoinsTip->GetBestBlock());
-    if (it == mapBlockIndex.end())
+    uint256 hashBestChain = pcoinsTip->GetBestBlock();
+    BlockMap::iterator it = mapBlockIndex.find(hashBestChain);
+    if (it == mapBlockIndex.end()) {
+        // A null best block is the normal empty/fresh-datadir case (the chainstate has
+        // never been written), so there is simply nothing to set the tip to yet.
+        //
+        // A NON-null best block that is absent from the block index, however, means the
+        // chainstate's UTXO pointer references a block we do not have indexed: a desynced
+        // or inconsistent datadir (e.g. a half-written, interrupted, or externally-supplied
+        // chainstate). Returning success here would leave chainActive empty, and the
+        // init-time ActivateBestChain would then SIGABRT in ConnectBlock's
+        //   assert(hashPrevBlock == view.GetBestBlock())
+        // with no recovery -- the production crash-loop signature. Fail instead so
+        // LoadBlockIndex() returns false and init's existing recovery path offers (or, for
+        // a headless node, instructs) a -reindex rebuild rather than core-dumping on every
+        // restart.
+        if (!hashBestChain.IsNull())
+            return error("LoadBlockIndexDB(): chainstate best block %s is not in the block "
+                         "index; the datadir is inconsistent and must be rebuilt with -reindex",
+                         hashBestChain.ToString());
         return true;
+    }
     chainActive.SetTip(it->second);
     // Set hashFinalSproutRoot for the end of best chain
     it->second->hashFinalSproutRoot = pcoinsTip->GetBestAnchor(SPROUT);
@@ -4690,10 +5041,21 @@ bool CVerifyDB::VerifyDB(CCoinsView *coinsview, int nCheckLevel, int nCheckDepth
     CValidationState state;
     // No need to verify JoinSplits twice
     auto verifier = libzcash::ProofVerifier::Disabled();
+    // Mirror the ShowProgress percentage into the warmup status string (via
+    // InitMessage) so the GUI watchdog's no-progress timer keeps resetting and
+    // the user sees real movement during this multi-minute phase; ShowProgress
+    // alone is not routed to the RPC warmup status. Throttle to only emit when
+    // the integer percent changes to avoid spamming the status.
+    int nLastInitPercent = -1;
     for (CBlockIndex* pindex = chainActive.Tip(); pindex && pindex->pprev; pindex = pindex->pprev)
     {
         boost::this_thread::interruption_point();
-        uiInterface.ShowProgress(_("Verifying blocks..."), std::max(1, std::min(99, (int)(((double)(chainActive.Height() - pindex->nHeight)) / (double)nCheckDepth * (nCheckLevel >= 4 ? 50 : 100)))));
+        int percentageDone = std::max(1, std::min(99, (int)(((double)(chainActive.Height() - pindex->nHeight)) / (double)nCheckDepth * (nCheckLevel >= 4 ? 50 : 100))));
+        uiInterface.ShowProgress(_("Verifying blocks..."), percentageDone);
+        if (percentageDone != nLastInitPercent) {
+            uiInterface.InitMessage(strprintf(_("Verifying blocks... (%d%%)"), percentageDone));
+            nLastInitPercent = percentageDone;
+        }
         if (pindex->nHeight < chainActive.Height()-nCheckDepth)
             break;
         CBlock block;
@@ -4737,7 +5099,12 @@ bool CVerifyDB::VerifyDB(CCoinsView *coinsview, int nCheckLevel, int nCheckDepth
         CBlockIndex *pindex = pindexState;
         while (pindex != chainActive.Tip()) {
             boost::this_thread::interruption_point();
-            uiInterface.ShowProgress(_("Verifying blocks..."), std::max(1, std::min(99, 100 - (int)(((double)(chainActive.Height() - pindex->nHeight)) / (double)nCheckDepth * 50))));
+            int percentageDone = std::max(1, std::min(99, 100 - (int)(((double)(chainActive.Height() - pindex->nHeight)) / (double)nCheckDepth * 50)));
+            uiInterface.ShowProgress(_("Verifying blocks..."), percentageDone);
+            if (percentageDone != nLastInitPercent) {
+                uiInterface.InitMessage(strprintf(_("Verifying blocks... (%d%%)"), percentageDone));
+                nLastInitPercent = percentageDone;
+            }
             pindex = chainActive.Next(pindex);
             CBlock block;
             if (!ReadBlockFromDisk(block, pindex))
@@ -4962,7 +5329,7 @@ bool InitBlockIndex() {
         return true;
 
     // Use the provided setting for -txindex in the new database
-    fTxIndex = GetBoolArg("-txindex", false);
+    fTxIndex = GetBoolArg("-txindex", true);
     pblocktree->WriteFlag("txindex", fTxIndex);
     LogPrintf("Initializing databases...\n");
 
@@ -5297,12 +5664,11 @@ void static CheckBlockIndex()
 
 //////////////////////////////////////////////////////////////////////////////
 //
-// CAlert
+// Warnings
 //
 
 std::string GetWarnings(const std::string& strFor)
 {
-    int nPriority = 0;
     string strStatusBar;
     string strRPC;
 
@@ -5315,36 +5681,16 @@ std::string GetWarnings(const std::string& strFor)
     // Misc warnings like out of disk space and clock is wrong
     if (strMiscWarning != "")
     {
-        nPriority = 1000;
         strStatusBar = strMiscWarning;
     }
 
     if (fLargeWorkForkFound)
     {
-        nPriority = 2000;
         strStatusBar = strRPC = _("Warning: The network does not appear to fully agree! Some miners appear to be experiencing issues.");
     }
     else if (fLargeWorkInvalidChainFound)
     {
-        nPriority = 2000;
         strStatusBar = strRPC = _("Warning: We do not appear to fully agree with our peers! You may need to upgrade, or other nodes may need to upgrade.");
-    }
-
-    // Alerts
-    {
-        LOCK(cs_mapAlerts);
-        BOOST_FOREACH(PAIRTYPE(const uint256, CAlert)& item, mapAlerts)
-        {
-            const CAlert& alert = item.second;
-            if (alert.AppliesToMe() && alert.nPriority > nPriority)
-            {
-                nPriority = alert.nPriority;
-                strStatusBar = alert.strStatusBar;
-                if (alert.nPriority >= ALERT_PRIORITY_SAFE_MODE) {
-                    strRPC = alert.strRPCError;
-                }
-            }
-        }
     }
 
     if (strFor == "statusbar")
@@ -5544,7 +5890,129 @@ void static ProcessGetData(CNode* pfrom)
     }
 }
 
-bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t nTimeReceived)
+// Shared serve-side handler for a peer's bootstrap chunk request (GETBSCHK /
+// GETBSPCHK). The snapshot and param variants are byte-for-byte identical apart
+// from the manifest-sent gate, the enqueue helper, and the reject/log strings,
+// which are passed in. strCommand already carries the lowercase command token
+// ("getbschk"/"getbspchk") used in the error()/reject messages.
+// Returns the value ProcessMessage should propagate (false on error(),
+// true on a handled reject or success).
+static bool ServeBootstrapChunkRequest(
+    CNode* pfrom, CDataStream& vRecv, const string& strCommand,
+    bool fManifestSent,
+    bool (*EnqueueFn)(CNode*, const CBootstrapSnapshotChunkRequest&, std::string&),
+    const char* strLogKind, const char* strManifestRequired,
+    const char* strBadLength, const char* strBadOffset, const char* strBadRequest)
+{
+    CBootstrapSnapshotChunkRequest request;
+    try {
+        vRecv >> request;
+    } catch (const std::ios_base::failure&) {
+        // Malformed payload must be scored here; otherwise the throw unwinds
+        // to the generic catch in ProcessMessages() which accrues no ban score.
+        Misbehaving(pfrom->GetId(), 20);
+        return error("%s has malformed payload from peer=%d", strCommand, pfrom->id);
+    }
+
+    if (!vRecv.empty()) {
+        // Fixed-shape struct: trailing bytes mean a malformed peer.
+        Misbehaving(pfrom->GetId(), 20);
+        return error("%s has trailing bytes from peer=%d", strCommand, pfrom->id);
+    }
+
+    if (!fManifestSent) {
+        // State violation: peer must request the manifest first.
+        Misbehaving(pfrom->GetId(), 20);
+        pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string(strManifestRequired));
+        return true;
+    }
+
+    // Validate clear protocol limits before handing to the enqueue helper.
+    // We do this here (not relying on Enqueue's bool return) so we can
+    // distinguish peer misbehaviour from local/transient failures
+    // (service-disabled, queue-full) which must NOT ban.
+    if (request.nLength == 0 || request.nLength > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
+        // Size overflow on a small struct is obviously hostile.
+        Misbehaving(pfrom->GetId(), request.nLength > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE ? 100 : 20);
+        pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string(strBadLength));
+        return true;
+    }
+    if (request.nOffset % BOOTSTRAP_SNAPSHOT_CHUNK_SIZE != 0) {
+        // Out-of-spec value: offset must be chunk-aligned.
+        Misbehaving(pfrom->GetId(), 20);
+        pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string(strBadOffset));
+        return true;
+    }
+
+    std::string err;
+    if (!EnqueueFn(pfrom, request, err)) {
+        // Service-disabled or queue-full: our problem / transient. No ban.
+        LogPrint("net", "rejected %s chunk request from peer=%d: %s\n", strLogKind, pfrom->id, err);
+        pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string(strBadRequest));
+        return true;
+    }
+
+    LogPrint("net", "queued %s chunk request file=%u offset=%llu bytes=%u peer=%d\n",
+        strLogKind,
+        request.nFileIndex,
+        (unsigned long long)request.nOffset,
+        request.nLength,
+        pfrom->id);
+    return true;
+}
+
+// Shared client-side handler for a received bootstrap chunk (BSCHK / BSPCHK).
+// The bootstrap client driver fetches over its own socket, so any chunk arriving
+// on a CNode connection is unsolicited; we only validate it and ban malformed
+// peers. strCommand carries the lowercase token used in error() messages.
+static bool RecvBootstrapChunk(
+    CNode* pfrom, CDataStream& vRecv, const string& strCommand,
+    const char* strLogKind, const char* strBadSize)
+{
+    CBootstrapSnapshotChunk chunk;
+    try {
+        vRecv >> chunk;
+    } catch (const std::ios_base::failure&) {
+        // Malformed payload must be scored here; otherwise the throw unwinds
+        // to the generic catch in ProcessMessages() which accrues no ban score.
+        Misbehaving(pfrom->GetId(), 20);
+        return error("%s has malformed payload from peer=%d", strCommand, pfrom->id);
+    }
+
+    // Unsolicited push: the bootstrap client uses its own socket, so any
+    // chunk on a CNode connection was never requested by us.
+    Misbehaving(pfrom->GetId(), 10);
+
+    if (!vRecv.empty()) {
+        Misbehaving(pfrom->GetId(), 20);
+        return error("%s has trailing bytes from peer=%d", strCommand, pfrom->id);
+    }
+
+    if (chunk.vData.empty()) {
+        // Out-of-spec value: a chunk with no data shouldn't exist on the wire.
+        Misbehaving(pfrom->GetId(), 20);
+        pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string(strBadSize));
+        return true;
+    }
+    if (chunk.vData.size() > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
+        // Size overflow on a bounded field is obviously hostile.
+        Misbehaving(pfrom->GetId(), 100);
+        pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string(strBadSize));
+        return true;
+    }
+
+    LogPrint("net", "received %s chunk file=%u offset=%llu bytes=%u peer=%d\n",
+        strLogKind,
+        chunk.nFileIndex,
+        (unsigned long long)chunk.nOffset,
+        (unsigned int)chunk.vData.size(),
+        pfrom->id);
+    return true;
+}
+
+// Not static so unit tests in src/test/bootstrap_snapshot_protocol_tests.cpp can
+// drive individual message handlers directly. Declare it `extern` from those tests.
+bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t nTimeReceived)
 {
     const CChainParams& chainparams = Params();
     LogPrint("net", "received: %s (%u bytes) peer=%d\n", SanitizeString(strCommand), vRecv.size(), pfrom->id);
@@ -5667,13 +6135,6 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
             }
         }
 
-        // Relay alerts
-        {
-            LOCK(cs_mapAlerts);
-            BOOST_FOREACH(PAIRTYPE(const uint256, CAlert)& item, mapAlerts)
-                item.second.RelayTo(pfrom);
-        }
-
         pfrom->fSuccessfullyConnected = true;
 
         string remoteAddr;
@@ -5724,6 +6185,156 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
                                 CurrentEpoch(GetHeight(), chainparams.GetConsensus())].nProtocolVersion));
         pfrom->fDisconnect = true;
         return false;
+    }
+
+    else if (strCommand == NetMsgType::GETBSMAN)
+    {
+        if (!vRecv.empty()) {
+            // GETBSMAN takes no payload; trailing bytes are a clear protocol violation.
+            Misbehaving(pfrom->GetId(), 20);
+            return error("getbsman has trailing bytes from peer=%d", pfrom->id);
+        }
+
+        CBootstrapSnapshotManifest manifest;
+        std::string err;
+        // fAllowBuild=false: never hash the multi-GiB snapshot on the net thread.
+        // If the cache is cold (e.g. a self-snapshot freeze just cleared it), the
+        // off-thread warmer rebuilds it; reply "unavailable" so the peer retries.
+        if (!GetBootstrapSnapshotManifest(manifest, err, /*fAllowBuild=*/false)) {
+            LogPrint("net", "could not build bootstrap snapshot manifest for peer=%d: %s\n", pfrom->id, err);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("bootstrap snapshot unavailable"));
+            return true;
+        }
+
+        LogPrint("net", "sending bootstrap snapshot manifest height=%d hash=%s bytes=%llu peer=%d\n",
+            manifest.nHeight,
+            manifest.hashBlock.ToString(),
+            (unsigned long long)manifest.nSnapshotBytes,
+            pfrom->id);
+        pfrom->PushMessage(NetMsgType::BSMAN, manifest);
+        pfrom->fBootstrapManifestSent = true;
+    }
+
+    else if (strCommand == NetMsgType::BSMAN)
+    {
+        CBootstrapSnapshotManifest manifest;
+        try {
+            vRecv >> manifest;
+        } catch (const std::ios_base::failure&) {
+            // Malformed payload must be scored here; otherwise the throw unwinds
+            // to the generic catch in ProcessMessages() which accrues no ban score.
+            Misbehaving(pfrom->GetId(), 20);
+            return error("bsman has malformed payload from peer=%d", pfrom->id);
+        }
+
+        // The bootstrap client driver uses its own socket outside CNode, so any
+        // BSMAN arriving on a CNode connection is unsolicited. Score lightly: a
+        // buggy peer rebroadcasting is plausible, but clearly out of spec.
+        Misbehaving(pfrom->GetId(), 10);
+
+        if (!vRecv.empty()) {
+            // Trailing garbage after a fixed-shape struct is a clear violation.
+            Misbehaving(pfrom->GetId(), 20);
+            return error("bsman has trailing bytes from peer=%d", pfrom->id);
+        }
+
+        std::string err;
+        if (!ValidateBootstrapSnapshotManifest(manifest, err)) {
+            LogPrint("net", "received invalid bootstrap snapshot manifest from peer=%d: %s\n", pfrom->id, err);
+            // Bogus manifest contents are an out-of-spec value, not just unsolicited.
+            Misbehaving(pfrom->GetId(), 10);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("invalid bootstrap snapshot manifest"));
+            return true;
+        }
+
+        LogPrintf("received bootstrap snapshot manifest: network=%s height=%d block=%s bytes=%llu chunk=%u files=%u peer=%d\n",
+            manifest.strNetwork,
+            manifest.nHeight,
+            manifest.hashBlock.ToString(),
+            (unsigned long long)manifest.nSnapshotBytes,
+            manifest.nChunkSize,
+            (unsigned int)manifest.vFiles.size(),
+            pfrom->id);
+    }
+
+    else if (strCommand == NetMsgType::GETBSCHK)
+    {
+        return ServeBootstrapChunkRequest(
+            pfrom, vRecv, strCommand,
+            pfrom->fBootstrapManifestSent,
+            EnqueueBootstrapSnapshotChunkRequest,
+            "bootstrap snapshot", "bootstrap manifest required",
+            "invalid bootstrap chunk length", "invalid bootstrap chunk offset",
+            "invalid bootstrap chunk request");
+    }
+
+    else if (strCommand == NetMsgType::BSCHK)
+    {
+        return RecvBootstrapChunk(
+            pfrom, vRecv, strCommand,
+            "bootstrap snapshot", "invalid bootstrap snapshot chunk size");
+    }
+
+    else if (strCommand == NetMsgType::GETBSPMAN)
+    {
+        if (!vRecv.empty()) {
+            // GETBSPMAN takes no payload.
+            Misbehaving(pfrom->GetId(), 20);
+            return error("getbspman has trailing bytes from peer=%d", pfrom->id);
+        }
+
+        CBootstrapSnapshotManifest manifest;
+        std::string err;
+        if (!GetZcashParamManifest(manifest, err)) {
+            LogPrint("net", "could not build zcash param manifest for peer=%d: %s\n", pfrom->id, err);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("zcash params unavailable"));
+            return true;
+        }
+        pfrom->PushMessage(NetMsgType::BSPMAN, manifest);
+        // Only after we successfully advertised the param manifest is the peer
+        // allowed to ask for chunks via GETBSPCHK (mirrors the snapshot gate).
+        pfrom->fBootstrapParamManifestSent = true;
+    }
+
+    else if (strCommand == NetMsgType::BSPMAN)
+    {
+        CBootstrapSnapshotManifest manifest;
+        try {
+            vRecv >> manifest; // client drives param fetch over its own socket; ignore here
+        } catch (const std::ios_base::failure&) {
+            // Malformed payload must be scored here; otherwise the throw unwinds
+            // to the generic catch in ProcessMessages() which accrues no ban score.
+            Misbehaving(pfrom->GetId(), 20);
+            return error("bspman has malformed payload from peer=%d", pfrom->id);
+        }
+
+        // Unsolicited push on a CNode socket: light ban.
+        Misbehaving(pfrom->GetId(), 10);
+
+        if (!vRecv.empty()) {
+            Misbehaving(pfrom->GetId(), 20);
+            return error("bspman has trailing bytes from peer=%d", pfrom->id);
+        }
+
+        LogPrint("net", "received unsolicited zcash param manifest from peer=%d\n", pfrom->id);
+    }
+
+    else if (strCommand == NetMsgType::GETBSPCHK)
+    {
+        return ServeBootstrapChunkRequest(
+            pfrom, vRecv, strCommand,
+            pfrom->fBootstrapParamManifestSent,
+            EnqueueBootstrapParamChunkRequest,
+            "zcash param", "zcash param manifest required",
+            "invalid zcash param chunk length", "invalid zcash param chunk offset",
+            "invalid zcash param chunk request");
+    }
+
+    else if (strCommand == NetMsgType::BSPCHK)
+    {
+        return RecvBootstrapChunk(
+            pfrom, vRecv, strCommand,
+            "zcash param", "invalid zcash param chunk size");
     }
 
 
@@ -6320,37 +6931,6 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
     }
 
 
-    else if (fAlerts && strCommand == "alert")
-    {
-        CAlert alert;
-        vRecv >> alert;
-
-        uint256 alertHash = alert.GetHash();
-        if (pfrom->setKnown.count(alertHash) == 0)
-        {
-            if (alert.ProcessAlert(Params().AlertKey()))
-            {
-                // Relay
-                pfrom->setKnown.insert(alertHash);
-                {
-                    LOCK(cs_vNodes);
-                    BOOST_FOREACH(CNode* pnode, vNodes)
-                        alert.RelayTo(pnode);
-                }
-            }
-            else {
-                // Small DoS penalty so peers that send us lots of
-                // duplicate/expired/invalid-signature/whatever alerts
-                // eventually get banned.
-                // This isn't a Misbehaving(100) (immediate ban) because the
-                // peer might be an older or different implementation with
-                // a different signature key, etc.
-                Misbehaving(pfrom->GetId(), 10);
-            }
-        }
-    }
-
-
     else if (!(nLocalServices & NODE_BLOOM) &&
               (strCommand == "filterload" ||
                strCommand == "filteradd"))
@@ -6611,6 +7191,8 @@ bool SendMessages(CNode* pto, bool fSendTrickle)
                 pto->PushMessage("ping");
             }
         }
+
+        SendQueuedBootstrapSnapshotChunk(pto);
 
         TRY_LOCK(cs_main, lockMain); // Acquire cs_main for IsInitialBlockDownload() and CNodeState()
         if (!lockMain)

@@ -115,7 +115,6 @@ LIBZCASH_H = \
 # bitcoin core #
 BITCOIN_CORE_H = \
   addrman.h \
-  alert.h \
   amount.h \
   amqp/amqpabstractnotifier.h \
   amqp/amqpconfig.h \
@@ -127,6 +126,8 @@ BITCOIN_CORE_H = \
   asyncrpcqueue.h \
   base58.h \
   bech32.h \
+  bootstrap.h \
+  bootstrapvalidation.h \
   bloom.h \
   chain.h \
   chainparams.h \
@@ -154,12 +155,14 @@ BITCOIN_CORE_H = \
   httprpc.h \
   httpserver.h \
   init.h \
+  startuptimer.h \
   key.h \
   key_io.h \
   keystore.h \
   dbwrapper.h \
   limitedmap.h \
   main.h \
+  mapport.h \
   memusage.h \
   merkleblock.h \
   metrics.h \
@@ -245,12 +248,11 @@ libbitcoin_util_a-clientversion.$(OBJEXT): obj/build.h
 libbitcoin_server_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES) $(EVENT_CFLAGS) $(EVENT_PTHREADS_CFLAGS)
 libbitcoin_server_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 libbitcoin_server_a_SOURCES = \
-  sendalert.cpp \
   addrman.cpp \
-  alert.cpp \
-  alertkeys.h \
   asyncrpcoperation.cpp \
   asyncrpcqueue.cpp \
+  bootstrap.cpp \
+  bootstrapvalidation.cpp \
   bloom.cpp \
   chain.cpp \
   checkpoints.cpp \
@@ -258,8 +260,10 @@ libbitcoin_server_a_SOURCES = \
   httprpc.cpp \
   httpserver.cpp \
   init.cpp \
+  startuptimer.cpp \
   dbwrapper.cpp \
   main.cpp \
+  mapport.cpp \
   merkleblock.cpp \
   metrics.cpp \
   miner.cpp \
@@ -468,8 +472,7 @@ zclassicd_LDADD += \
   $(ZMQ_LIBS) \
   $(PROTON_LIBS) \
   $(LIBBITCOIN_CRYPTO) \
-  $(LIBZCASH_LIBS) \
-  -lcurl
+  $(LIBZCASH_LIBS)
 
 # bitcoin-cli binary #
 zclassic_cli_SOURCES = bitcoin-cli.cpp

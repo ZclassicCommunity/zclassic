@@ -48,6 +48,7 @@ extern std::map<std::string, std::string> mapArgs;
 extern std::map<std::string, std::vector<std::string> > mapMultiArgs;
 extern bool fDebug;
 extern bool fPrintToConsole;
+extern bool fVTEnabled; //!< stdout can render ANSI/VT escapes (UTF-8 + VT on Windows); false when redirected or on a legacy console
 extern bool fPrintToDebugLog;
 extern bool fServer;
 extern std::string strMiscWarning;
@@ -68,6 +69,7 @@ inline std::string _(const char* psz)
     return rv ? (*rv) : psz;
 }
 
+void InitConsole();
 void SetupEnvironment();
 bool SetupNetworking();
 
@@ -145,6 +147,14 @@ boost::filesystem::path GetTempPath();
 void OpenDebugLog();
 void ShrinkDebugFile();
 void runCommand(const std::string& strCommand);
+
+/**
+ * Execute the -alertnotify command (if configured), substituting %s with a
+ * sanitized, shell-safe copy of strMessage. Used for local node warnings such
+ * as version deprecation and large-fork / partition detection. fThread runs the
+ * command in a free-running thread.
+ */
+void AlertNotify(const std::string& strMessage, bool fThread = true);
 const boost::filesystem::path GetExportDir();
 
 /** Returns privacy notice (for -version, -help and metrics screen) */

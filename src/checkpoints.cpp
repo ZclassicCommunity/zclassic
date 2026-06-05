@@ -5,8 +5,11 @@
 #include "checkpoints.h"
 
 #include "chainparams.h"
+#include "crypto/sha256.h"
+#include "crypto/sha3.h"
 #include "main.h"
 #include "uint256.h"
+#include "utilstrencodings.h"
 
 #include <stdint.h>
 
@@ -76,6 +79,110 @@ namespace Checkpoints {
                 return t->second;
         }
         return NULL;
+    }
+
+    static std::string FastSyncAnchorPayload(const CChainParams& chainparams, const CFastSyncAnchorData& anchor)
+    {
+        return strprintf("zclassic-fastsync-anchor-v1|%s|%d|%s",
+            chainparams.NetworkIDString(),
+            anchor.nHeight,
+            anchor.hashBlock.ToString());
+    }
+
+    static uint256 HashAnchorSha256(const std::string& payload)
+    {
+        unsigned char hash[CSHA256::OUTPUT_SIZE];
+        CSHA256().Write((const unsigned char*)payload.data(), payload.size()).Finalize(hash);
+        return uint256S("0x" + HexStr(hash, hash + CSHA256::OUTPUT_SIZE));
+    }
+
+    static uint256 HashAnchorSha3(const std::string& payload)
+    {
+        unsigned char hash[SHA3_256::OUTPUT_SIZE];
+        SHA3_256().Write((const unsigned char*)payload.data(), payload.size()).Finalize(hash);
+        return uint256S("0x" + HexStr(hash, hash + SHA3_256::OUTPUT_SIZE));
+    }
+
+    // Core validation over an EXPLICIT anchor list + checkpoint map. The production
+    // entry point below passes chainparams.FastSyncAnchors() and
+    // chainparams.Checkpoints().mapCheckpoints; this overload (external linkage, not
+    // in the public header — unit tests declare it extern) lets tests drive the
+    // negative branches with synthetic anchors that the compiled singletons cannot
+    // express (e.g. a null commitment). chainparams is still needed for the network
+    // string baked into the anchor SHA payload.
+    bool ValidateFastSyncAnchors(const CChainParams& chainparams,
+                                 const std::vector<CFastSyncAnchorData>& anchors,
+                                 const MapCheckpoints& checkpoints,
+                                 std::string& strError)
+    {
+        BOOST_FOREACH(const CFastSyncAnchorData& anchor, anchors)
+        {
+            if (anchor.nHeight < 0 || anchor.hashBlock.IsNull()) {
+                continue;
+            }
+
+            // Every shipped anchor MUST carry a UTXO-set commitment: it is the
+            // only thing that detects a forged imported chainstate after a peer
+            // fast-sync (a malicious server can serve real headers matching
+            // height+hash plus a forged chainstate/). A null commitment here
+            // would silently disable that check, so refuse to start.
+            if (anchor.hashChainstateSerialized.IsNull()) {
+                strError = strprintf(
+                    "Fast-sync anchor at height %d (block %s) has no chainstate commitment; refusing to start",
+                    anchor.nHeight,
+                    anchor.hashBlock.ToString());
+                return false;
+            }
+
+            MapCheckpoints::const_iterator checkpoint = checkpoints.find(anchor.nHeight);
+            if (checkpoint == checkpoints.end()) {
+                strError = strprintf(
+                    "Fast-sync anchor height %d (block %s) is not present in the checkpoint set",
+                    anchor.nHeight,
+                    anchor.hashBlock.ToString());
+                return false;
+            }
+
+            if (checkpoint->second != anchor.hashBlock) {
+                strError = strprintf(
+                    "Fast-sync anchor hash mismatch at height %d: anchor=%s checkpoint=%s",
+                    anchor.nHeight,
+                    anchor.hashBlock.ToString(),
+                    checkpoint->second.ToString());
+                return false;
+            }
+
+            const std::string payload = FastSyncAnchorPayload(chainparams, anchor);
+            const uint256 hashSha256 = HashAnchorSha256(payload);
+            if (hashSha256 != anchor.hashAnchorSha256) {
+                strError = strprintf(
+                    "Fast-sync SHA-256 anchor digest mismatch at height %d (block %s): computed=%s expected=%s",
+                    anchor.nHeight,
+                    anchor.hashBlock.ToString(),
+                    hashSha256.ToString(),
+                    anchor.hashAnchorSha256.ToString());
+                return false;
+            }
+
+            const uint256 hashSha3 = HashAnchorSha3(payload);
+            if (hashSha3 != anchor.hashAnchorSha3) {
+                strError = strprintf(
+                    "Fast-sync SHA3-256 anchor digest mismatch at height %d (block %s): computed=%s expected=%s",
+                    anchor.nHeight,
+                    anchor.hashBlock.ToString(),
+                    hashSha3.ToString(),
+                    anchor.hashAnchorSha3.ToString());
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool ValidateFastSyncAnchor(const CChainParams& chainparams, std::string& strError)
+    {
+        return ValidateFastSyncAnchors(chainparams, chainparams.FastSyncAnchors(),
+                                       chainparams.Checkpoints().mapCheckpoints, strError);
     }
 
 } // namespace Checkpoints

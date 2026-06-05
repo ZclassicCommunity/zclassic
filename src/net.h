@@ -19,6 +19,7 @@
 #include "uint256.h"
 #include "utilstrencodings.h"
 
+#include <atomic>
 #include <deque>
 #include <stdint.h>
 
@@ -139,7 +140,11 @@ CAddress GetLocalAddress(const CNetAddr *paddrPeer = NULL);
 
 extern bool fDiscover;
 extern bool fListen;
-extern uint64_t nLocalServices;
+// Atomic: net threads read it (GetLocalAddress, version push) while the bootstrap
+// auto-serve worker may set NODE_BOOTSTRAP on it after sync, so the plain-uint64_t
+// read-modify-write was a formal data race (CONC-N1). All set sites use |=/&=
+// (atomic fetch_or/fetch_and); serialization/format sites use an explicit .load().
+extern std::atomic<uint64_t> nLocalServices;
 extern uint64_t nLocalHostNonce;
 extern CAddrMan addrman;
 /** Maximum number of connections to simultaneously allow (aka connection slots) */
@@ -310,7 +315,6 @@ public:
     std::vector<CAddress> vAddrToSend;
     CRollingBloomFilter addrKnown;
     bool fGetAddr;
-    std::set<uint256> setKnown;
 
     // inventory based relay
     mruset<CInv> setInventoryKnown;
@@ -318,6 +322,25 @@ public:
     CCriticalSection cs_inventory;
     std::set<uint256> setAskFor;
     std::multimap<int64_t, CInv> mapAskFor;
+
+    // Bootstrap chunk requests are queued and drained from the SendMessages
+    // thread so a slow peer cannot pin the message-handler thread. Both kinds
+    // (snapshot data chunks and zk-SNARK parameter chunks) share the same
+    // queue, throttle, and per-peer cap; the kind tag selects the right serve
+    // function at drain time.
+    enum BootstrapChunkKind {
+        BOOTSTRAP_CHUNK_SNAPSHOT = 0,
+        BOOTSTRAP_CHUNK_PARAMS = 1,
+    };
+    struct BootstrapChunkQueueItem {
+        BootstrapChunkKind kind;
+        CBootstrapSnapshotChunkRequest request;
+    };
+    bool QueueBootstrapChunkRequest(BootstrapChunkKind kind, const CBootstrapSnapshotChunkRequest& request);
+    void RequeueBootstrapChunkRequest(BootstrapChunkKind kind, const CBootstrapSnapshotChunkRequest& request);
+    bool PopBootstrapChunkRequest(BootstrapChunkKind& kind, CBootstrapSnapshotChunkRequest& request);
+    bool fBootstrapManifestSent;
+    bool fBootstrapParamManifestSent;
 
     // Ping time measurement:
     // The pong reply we're expecting, or 0 if no pong expected.
@@ -330,6 +353,9 @@ public:
     int64_t nMinPingUsecTime;
     // Whether a ping is requested.
     bool fPingQueued;
+
+    std::deque<BootstrapChunkQueueItem> vBootstrapChunkRequests;
+    CCriticalSection cs_bootstrap_requests;
 
     CNode(SOCKET hSocketIn, const CAddress &addrIn, const std::string &addrNameIn = "", bool fInboundIn = false);
     ~CNode();
