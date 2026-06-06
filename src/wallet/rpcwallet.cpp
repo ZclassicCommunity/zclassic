@@ -1498,7 +1498,17 @@ UniValue listtransactions(const UniValue& params, bool fHelp)
     UniValue ret(UniValue::VARR);
 
     std::list<CAccountingEntry> acentries;
-    CWallet::TxItems txOrdered = pwalletMain->OrderedTxItems(acentries, strAccount);
+
+    // Perf: we only ever return the newest (nCount+nFrom) rows, so first try a limit-aware
+    // pass that builds only the newest (nCount+nFrom) wallet items instead of the entire
+    // ordered log. A single item can expand to 0..N output rows, so if the limited window is
+    // a strict subset of the wallet and still cannot fill (nCount+nFrom) rows, we fall back
+    // to the full unlimited pass to guarantee byte-identical output.
+    const int nWindow = nCount + nFrom;
+    bool fLimited = nWindow > 0;
+    CWallet::TxItems txOrdered = fLimited
+        ? pwalletMain->OrderedTxItems(acentries, strAccount, nWindow)
+        : pwalletMain->OrderedTxItems(acentries, strAccount);
 
     // iterate backwards until we have nCount items to return:
     for (CWallet::TxItems::reverse_iterator it = txOrdered.rbegin(); it != txOrdered.rend(); ++it)
@@ -1510,7 +1520,27 @@ UniValue listtransactions(const UniValue& params, bool fHelp)
         if (pacentry != 0)
             AcentryToJSON(*pacentry, strAccount, ret);
 
-        if ((int)ret.size() >= (nCount+nFrom)) break;
+        if ((int)ret.size() >= nWindow) break;
+    }
+
+    // If the limited window may have dropped older items that we still needed to fill the
+    // requested rows, redo with the complete ordered log (same result as the original code).
+    if (fLimited && (int)ret.size() < nWindow && (int)txOrdered.size() >= nWindow)
+    {
+        ret.clear();
+        ret.setArray();
+        txOrdered = pwalletMain->OrderedTxItems(acentries, strAccount);
+        for (CWallet::TxItems::reverse_iterator it = txOrdered.rbegin(); it != txOrdered.rend(); ++it)
+        {
+            CWalletTx *const pwtx = (*it).second.first;
+            if (pwtx != 0)
+                ListTransactions(*pwtx, strAccount, 0, true, ret, filter);
+            CAccountingEntry *const pacentry = (*it).second.second;
+            if (pacentry != 0)
+                AcentryToJSON(*pacentry, strAccount, ret);
+
+            if ((int)ret.size() >= nWindow) break;
+        }
     }
     // ret is newest to oldest
 

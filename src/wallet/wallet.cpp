@@ -1274,7 +1274,7 @@ int64_t CWallet::IncOrderPosNext(CWalletDB *pwalletdb)
     return nRet;
 }
 
-CWallet::TxItems CWallet::OrderedTxItems(std::list<CAccountingEntry>& acentries, std::string strAccount)
+CWallet::TxItems CWallet::OrderedTxItems(std::list<CAccountingEntry>& acentries, std::string strAccount, int nLimit)
 {
     AssertLockHeld(cs_wallet); // mapWallet
     CWalletDB walletdb(strWalletFile);
@@ -1282,18 +1282,30 @@ CWallet::TxItems CWallet::OrderedTxItems(std::list<CAccountingEntry>& acentries,
     // First: get all CWalletTx and CAccountingEntry into a sorted-by-order multimap.
     TxItems txOrdered;
 
+    // Perf: when nLimit > 0 the caller only needs the newest nLimit items (largest
+    // nOrderPos), so we trim the smallest as we go and never grow past nLimit. This keeps
+    // the exact same newest-suffix the caller would have iterated, at a fraction of the
+    // memory/insertion cost on large wallets. The full path (nLimit <= 0) is unchanged.
+    // Note: a single item can expand to multiple (or zero) output rows downstream, so the
+    // caller treats a trimmed result as a hint and falls back to an unlimited call if it
+    // cannot fill its window.
+    //
     // Note: maintaining indices in the database of (account,time) --> txid and (account, time) --> acentry
     // would make this much faster for applications that do this a lot.
     for (map<uint256, CWalletTx>::iterator it = mapWallet.begin(); it != mapWallet.end(); ++it)
     {
         CWalletTx* wtx = &((*it).second);
         txOrdered.insert(make_pair(wtx->nOrderPos, TxPair(wtx, (CAccountingEntry*)0)));
+        if (nLimit > 0 && (int)txOrdered.size() > nLimit)
+            txOrdered.erase(txOrdered.begin());
     }
     acentries.clear();
     walletdb.ListAccountCreditDebit(strAccount, acentries);
     BOOST_FOREACH(CAccountingEntry& entry, acentries)
     {
         txOrdered.insert(make_pair(entry.nOrderPos, TxPair((CWalletTx*)0, &entry)));
+        if (nLimit > 0 && (int)txOrdered.size() > nLimit)
+            txOrdered.erase(txOrdered.begin());
     }
 
     return txOrdered;
@@ -3336,9 +3348,16 @@ bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, int nConfMine, int
 bool CWallet::SelectCoins(const CAmount& nTargetValue, set<pair<const CWalletTx*,unsigned int> >& setCoinsRet, CAmount& nValueRet,  bool& fOnlyCoinbaseCoinsRet, bool& fNeedCoinbaseCoinsRet, const CCoinControl* coinControl) const
 {
     // Output parameter fOnlyCoinbaseCoinsRet is set to true when the only available coins are coinbase utxos.
+    // Perf: a single AvailableCoins pass with fIncludeCoinBase=true yields the full set; the
+    // no-coinbase set differs only by excluding coinbase utxos (the lone filter difference in
+    // AvailableCoins is fIncludeCoinBase), so we partition here instead of scanning mapWallet twice.
     vector<COutput> vCoinsNoCoinbase, vCoinsWithCoinbase;
-    AvailableCoins(vCoinsNoCoinbase, true, coinControl, false, false);
     AvailableCoins(vCoinsWithCoinbase, true, coinControl, false, true);
+    vCoinsNoCoinbase.reserve(vCoinsWithCoinbase.size());
+    for (const COutput& out : vCoinsWithCoinbase) {
+        if (!out.tx->IsCoinBase())
+            vCoinsNoCoinbase.push_back(out);
+    }
     fOnlyCoinbaseCoinsRet = vCoinsNoCoinbase.size() == 0 && vCoinsWithCoinbase.size() > 0;
 
     // If coinbase utxos can only be sent to zaddrs, exclude any coinbase utxos from coin selection.
