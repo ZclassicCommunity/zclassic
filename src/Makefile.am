@@ -235,7 +235,10 @@ BITCOIN_CORE_H = \
   zmq/zmqabstractnotifier.h \
   zmq/zmqconfig.h\
   zmq/zmqnotificationinterface.h \
-  zmq/zmqpublishnotifier.h
+  zmq/zmqpublishnotifier.h \
+  zslp/slp.h \
+  zslp/op_return_push.h \
+  zslp/uint256_c.h
 
 
 obj/build.h: FORCE
@@ -395,6 +398,7 @@ libbitcoin_common_a_SOURCES = \
   script/standard.cpp \
   transaction_builder.cpp \
   utiltest.cpp \
+  zslp/slp.c \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
 
