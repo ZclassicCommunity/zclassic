@@ -63,8 +63,13 @@ AsyncRPCOperation_sendmany::AsyncRPCOperation_sendmany(
         std::vector<SendManyRecipient> zOutputs,
         int minDepth,
         CAmount fee,
-        UniValue contextInfo) :
-        tx_(contextualTx), fromaddress_(fromAddress), t_outputs_(tOutputs), z_outputs_(zOutputs), mindepth_(minDepth), fee_(fee), contextinfo_(contextInfo)
+        UniValue contextInfo,
+        bool useInputSelection,
+        std::set<COutPoint> pinnedTransparent,
+        std::set<SaplingOutPoint> pinnedSapling,
+        std::set<JSOutPoint> pinnedSprout) :
+        tx_(contextualTx), fromaddress_(fromAddress), t_outputs_(tOutputs), z_outputs_(zOutputs), mindepth_(minDepth), fee_(fee), contextinfo_(contextInfo),
+        useInputSelection_(useInputSelection), pinnedTransparent_(pinnedTransparent), pinnedSapling_(pinnedSapling), pinnedSprout_(pinnedSprout)
 {
     assert(fee_ >= 0);
 
@@ -296,10 +301,19 @@ bool AsyncRPCOperation_sendmany::main_impl() {
             }
             selectedUTXOAmount += std::get<2>(t);
             selectedTInputs.push_back(t);
+            LogPrint("zrpcunsafe", "%s: spending utxo (txid=%s, vout=%d, amount=%s, coinbase=%d)%s\n",
+                    getId(),
+                    std::get<0>(t).ToString().substr(0, 10),
+                    std::get<1>(t),
+                    FormatMoney(std::get<2>(t)),
+                    (int)std::get<3>(t),
+                    (useInputSelection_ && pinnedTransparent_.count(COutPoint(std::get<0>(t), std::get<1>(t)))) ? " [PINNED]" : "");
             if (selectedUTXOAmount >= targetAmount) {
                 // Select another utxo if there is change less than the dust threshold.
                 dustChange = selectedUTXOAmount - targetAmount;
-                if (dustChange == 0 || dustChange >= dustThreshold) {
+                // When pinning inputs (coin-control), consume ALL pinned UTXOs
+                // and never early-break; the dust-change guard below still applies.
+                if (!useInputSelection_ && (dustChange == 0 || dustChange >= dustThreshold)) {
                     break;
                 }
             }
@@ -790,14 +804,15 @@ bool AsyncRPCOperation_sendmany::main_impl() {
                 wtxHeight = mapBlockIndex[wtx.hashBlock]->nHeight;
                 wtxDepth = wtx.GetDepthInMainChain();
             }
-            LogPrint("zrpcunsafe", "%s: spending note (txid=%s, vjoinsplit=%d, ciphertext=%d, amount=%s, height=%d, confirmations=%d)\n",
+            LogPrint("zrpcunsafe", "%s: spending note (txid=%s, vjoinsplit=%d, ciphertext=%d, amount=%s, height=%d, confirmations=%d)%s\n",
                     getId(),
                     jso.hash.ToString().substr(0, 10),
                     jso.js,
                     int(jso.n), // uint8_t
                     FormatMoney(noteFunds),
                     wtxHeight,
-                    wtxDepth
+                    wtxDepth,
+                    (useInputSelection_ && pinnedSprout_.count(jso)) ? " [PINNED]" : ""
                     );
         }
                     
@@ -1025,6 +1040,32 @@ bool AsyncRPCOperation_sendmany::find_utxos(bool fAcceptCoinbase=false) {
         t_inputs_.push_back(utxo);
     }
 
+    // Coin-control: restrict to exactly the pinned transparent UTXOs.
+    // NON-CONSENSUS: only narrows which already-valid inputs we may select.
+    if (useInputSelection_) {
+        // Build the set of available outpoints for membership / presence checks.
+        std::set<COutPoint> available;
+        for (const SendManyInputUTXO & t : t_inputs_) {
+            available.insert(COutPoint(std::get<0>(t), std::get<1>(t)));
+        }
+        // Every pinned transparent input must be present in the spendable set.
+        for (const COutPoint & op : pinnedTransparent_) {
+            if (!available.count(op)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                    strprintf("Pinned transparent input not available (spendable, confirmed, owned by from-address): %s:%d",
+                        op.hash.ToString(), op.n));
+            }
+        }
+        // Drop any UTXO that was not pinned.
+        std::vector<SendManyInputUTXO> filtered;
+        for (const SendManyInputUTXO & t : t_inputs_) {
+            if (pinnedTransparent_.count(COutPoint(std::get<0>(t), std::get<1>(t)))) {
+                filtered.push_back(t);
+            }
+        }
+        t_inputs_ = filtered;
+    }
+
     // sort in ascending order, so smaller utxos appear first
     std::sort(t_inputs_.begin(), t_inputs_.end(), [](SendManyInputUTXO i, SendManyInputUTXO j) -> bool {
         return ( std::get<2>(i) < std::get<2>(j));
@@ -1054,25 +1095,71 @@ bool AsyncRPCOperation_sendmany::find_unspent_notes() {
     for (CSproutNotePlaintextEntry & entry : sproutEntries) {
         z_sprout_inputs_.push_back(SendManyInputJSOP(entry.jsop, entry.plaintext.note(boost::get<libzcash::SproutPaymentAddress>(frompaymentaddress_)), CAmount(entry.plaintext.value())));
         std::string data(entry.plaintext.memo().begin(), entry.plaintext.memo().end());
-        LogPrint("zrpcunsafe", "%s: found unspent Sprout note (txid=%s, vjoinsplit=%d, ciphertext=%d, amount=%s, memo=%s)\n",
+        LogPrint("zrpcunsafe", "%s: found unspent Sprout note (txid=%s, vjoinsplit=%d, ciphertext=%d, amount=%s, memo=%s)%s\n",
             getId(),
             entry.jsop.hash.ToString().substr(0, 10),
             entry.jsop.js,
             int(entry.jsop.n),  // uint8_t
             FormatMoney(entry.plaintext.value()),
-            HexStr(data).substr(0, 10)
+            HexStr(data).substr(0, 10),
+            (useInputSelection_ && pinnedSprout_.count(entry.jsop)) ? " [PINNED]" : ""
             );
     }
 
     for (auto entry : saplingEntries) {
         z_sapling_inputs_.push_back(entry);
         std::string data(entry.memo.begin(), entry.memo.end());
-        LogPrint("zrpcunsafe", "%s: found unspent Sapling note (txid=%s, vShieldedSpend=%d, amount=%s, memo=%s)\n",
+        LogPrint("zrpcunsafe", "%s: found unspent Sapling note (txid=%s, vShieldedSpend=%d, amount=%s, memo=%s)%s\n",
             getId(),
             entry.op.hash.ToString().substr(0, 10),
             entry.op.n,
             FormatMoney(entry.note.value()),
-            HexStr(data).substr(0, 10));
+            HexStr(data).substr(0, 10),
+            (useInputSelection_ && pinnedSapling_.count(entry.op)) ? " [PINNED]" : "");
+    }
+
+    // Coin-control: restrict to exactly the pinned shielded notes.
+    // NON-CONSENSUS: only narrows which already-valid notes we may select.
+    if (useInputSelection_) {
+        // Sapling: every pinned note must be present in the spendable set.
+        std::set<SaplingOutPoint> availableSapling;
+        for (const SaplingNoteEntry & e : z_sapling_inputs_) {
+            availableSapling.insert(e.op);
+        }
+        for (const SaplingOutPoint & op : pinnedSapling_) {
+            if (!availableSapling.count(op)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                    strprintf("Pinned Sapling note not available (spendable, confirmed, owned by from-address): %s:%d",
+                        op.hash.ToString(), op.n));
+            }
+        }
+        std::vector<SaplingNoteEntry> filteredSapling;
+        for (const SaplingNoteEntry & e : z_sapling_inputs_) {
+            if (pinnedSapling_.count(e.op)) {
+                filteredSapling.push_back(e);
+            }
+        }
+        z_sapling_inputs_ = filteredSapling;
+
+        // Sprout: every pinned note must be present in the spendable set.
+        std::set<JSOutPoint> availableSprout;
+        for (const SendManyInputJSOP & t : z_sprout_inputs_) {
+            availableSprout.insert(std::get<0>(t));
+        }
+        for (const JSOutPoint & op : pinnedSprout_) {
+            if (!availableSprout.count(op)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                    strprintf("Pinned Sprout note not available (spendable, confirmed, owned by from-address): %s:%d:%d",
+                        op.hash.ToString(), (int)op.js, (int)op.n));
+            }
+        }
+        std::vector<SendManyInputJSOP> filteredSprout;
+        for (const SendManyInputJSOP & t : z_sprout_inputs_) {
+            if (pinnedSprout_.count(std::get<0>(t))) {
+                filteredSprout.push_back(t);
+            }
+        }
+        z_sprout_inputs_ = filteredSprout;
     }
 
     if (z_sprout_inputs_.empty() && z_sapling_inputs_.empty()) {
