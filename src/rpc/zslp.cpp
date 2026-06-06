@@ -239,6 +239,8 @@ UniValue zslp_listmytokens(const UniValue& params, bool fHelp)
          it != totals.end(); ++it) {
         if (it->second <= 0)
             continue;
+        if ((int)arr.size() >= ZSLP_LIST_MAX)
+            break; // bound the response size (wallet-size-bound), matching the other list RPCs
         CZSLPToken token;
         store->GetToken(it->first, token);
         UniValue o(UniValue::VOBJ);
