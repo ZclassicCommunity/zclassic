@@ -222,6 +222,7 @@ BITCOIN_CORE_H = \
   validationinterface.h \
   version.h \
   wallet/asyncrpcoperation_mergetoaddress.h \
+  wallet/asyncrpcoperation_senddatafile.h \
   wallet/asyncrpcoperation_sendmany.h \
   wallet/asyncrpcoperation_shieldcoinbase.h \
   wallet/crypter.h \
@@ -232,6 +233,7 @@ BITCOIN_CORE_H = \
   wallet/wallet.h \
   wallet/wallet_ismine.h \
   wallet/walletdb.h \
+  wallet/zslpwallet.h \
   zmq/zmqabstractnotifier.h \
   zmq/zmqconfig.h\
   zmq/zmqnotificationinterface.h \
@@ -241,7 +243,8 @@ BITCOIN_CORE_H = \
   zslp/uint256_c.h \
   zslp/zslpmsg.h \
   zslp/zslpstore.h \
-  zslp/zslpindexer.h
+  zslp/zslpindexer.h \
+  datachannel/zdc.h
 
 
 obj/build.h: FORCE
@@ -286,6 +289,9 @@ libbitcoin_server_a_SOURCES = \
   rpc/rawtransaction.cpp \
   rpc/server.cpp \
   rpc/zslp.cpp \
+  rpc/nftoffer.cpp \
+  rpc/datachannel.cpp \
+  datachannel/zdc.cpp \
   script/sigcache.cpp \
   timedata.cpp \
   torcontrol.cpp \
@@ -323,6 +329,7 @@ libbitcoin_wallet_a_SOURCES = \
   zcbenchmarks.cpp \
   zcbenchmarks.h \
   wallet/asyncrpcoperation_mergetoaddress.cpp \
+  wallet/asyncrpcoperation_senddatafile.cpp \
   wallet/asyncrpcoperation_sendmany.cpp \
   wallet/asyncrpcoperation_shieldcoinbase.cpp \
   wallet/crypter.cpp \
@@ -335,6 +342,7 @@ libbitcoin_wallet_a_SOURCES = \
   wallet/wallet.cpp \
   wallet/wallet_ismine.cpp \
   wallet/walletdb.cpp \
+  wallet/zslpwallet.cpp \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
 

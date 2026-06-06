@@ -22,6 +22,16 @@ static uint64_t be_to_u64(const uint8_t *data, size_t len)
     return val;
 }
 
+/* R-INT-1 / R-10: a quantity whose uint64 value has the high bit set
+ * (>= 2^63) is INVALID for the WHOLE message. The downstream ledger model is
+ * signed int64; a high-bit quantity would cast to a negative amount and corrupt
+ * derived balances, and it is a signed/unsigned fork surface across
+ * implementations. We reject it here in the canonical parser so EVERY consumer
+ * (the bridge, the store, any third-party indexer) treats such a message as
+ * not-SLP identically. Applied to GENESIS initial_quantity, MINT
+ * additional_quantity, and every SEND output quantity. */
+#define SLP_QTY_HIGH_BIT_SET(q)  (((uint64_t)(q)) & (UINT64_C(1) << 63))
+
 /* Write a big-endian uint64 (8 bytes). */
 static void u64_to_be(uint8_t *out, uint64_t val)
 {
@@ -87,9 +97,11 @@ bool slp_parse(const uint8_t *script, size_t script_len,
             msg->document_url[len] = 0;
         }
 
-        /* Field 6: document_hash (0 or 32 bytes) */
+        /* Field 6: document_hash — push length MUST be exactly 0 or 32
+         * (R-8 / R-SCRIPT-6). Any other length rejects the whole GENESIS so a
+         * 31-byte hash can't parse two ways across implementations. */
         p = read_push(p, end, &data, &len);
-        if (!p) return false;
+        if (!p || (len != 0 && len != 32)) return false;
         if (len == 32) {
             memcpy(msg->document_hash, data, 32);
             msg->has_document_hash = true;
@@ -100,18 +112,27 @@ bool slp_parse(const uint8_t *script, size_t script_len,
         if (!p || len != 1 || data[0] > 9) return false;
         msg->decimals = data[0];
 
-        /* Field 8: mint_baton_vout (0 or 1 byte) */
+        /* Field 8: mint_baton_vout — push length 0 (no baton) OR exactly 1
+         * with value >= 2 (R-8 / R-SCRIPT-6). Length 1 value 0/1, and ANY
+         * length > 1, reject the whole message. */
         p = read_push(p, end, &data, &len);
-        if (!p) return false;
+        if (!p || len > 1) return false;
         if (len == 1) {
             if (data[0] < 2) return false; /* vout must be >= 2 */
             msg->mint_baton_vout = data[0];
         }
 
-        /* Field 9: initial_token_mint_quantity (8 bytes) */
+        /* Field 9: initial_token_mint_quantity (exactly 8 bytes) */
         p = read_push(p, end, &data, &len);
         if (!p || len != 8) return false;
         msg->initial_quantity = be_to_u64(data, 8);
+        /* R-INT-1 / R-10: high-bit quantity => whole message INVALID. */
+        if (SLP_QTY_HIGH_BIT_SET(msg->initial_quantity)) return false;
+
+        /* R-7 / R-SCRIPT-5: GENESIS has a fixed field count — the script MUST
+         * be fully consumed. A trailing push makes it not-SLP (a strict parser
+         * rejects; a lenient one would accept => fork). */
+        if (p != end) return false;
 
         return true;
 
@@ -123,18 +144,24 @@ bool slp_parse(const uint8_t *script, size_t script_len,
         if (!p || len != 32) return false;
         memcpy(msg->token_id.data, data, 32);
 
-        /* Field 4: mint_baton_vout */
+        /* Field 4: mint_baton_vout — push length 0 OR exactly 1 with value >= 2
+         * (R-8). Length 1 value 0/1, and ANY length > 1, reject. */
         p = read_push(p, end, &data, &len);
-        if (!p) return false;
+        if (!p || len > 1) return false;
         if (len == 1) {
             if (data[0] < 2) return false;
             msg->mint_baton_vout = data[0];
         }
 
-        /* Field 5: additional_token_quantity (8 bytes) */
+        /* Field 5: additional_token_quantity (exactly 8 bytes) */
         p = read_push(p, end, &data, &len);
         if (!p || len != 8) return false;
         msg->additional_quantity = be_to_u64(data, 8);
+        /* R-INT-1 / R-10: high-bit quantity => whole message INVALID. */
+        if (SLP_QTY_HIGH_BIT_SET(msg->additional_quantity)) return false;
+
+        /* R-7 / R-SCRIPT-5: MINT has a fixed field count — fully consume. */
+        if (p != end) return false;
 
         return true;
 
@@ -146,17 +173,25 @@ bool slp_parse(const uint8_t *script, size_t script_len,
         if (!p || len != 32) return false;
         memcpy(msg->token_id.data, data, 32);
 
-        /* Fields 4+: output quantities (8 bytes each, 1-19 outputs) */
+        /* Fields 4+: output quantities — each an exactly-8-byte BE push,
+         * 1..ZSLP_SEND_MAX_OUTPUTS of them (R-SEND-1 / R-12). Read greedily;
+         * the loop body rejects (returns false) on any malformed/short push or
+         * high-bit quantity. After the cap, the script MUST be fully consumed:
+         * a (ZSLP_SEND_MAX_OUTPUTS+1)-th 8-byte push is trailing data =>
+         * INVALID (NOT "first N win"), and any non-8-byte trailing push is
+         * likewise INVALID. */
         msg->num_outputs = 0;
-        while (msg->num_outputs < 19) {
-            const uint8_t *saved = p;
+        while (p != end) {
+            if (msg->num_outputs >= ZSLP_SEND_MAX_OUTPUTS)
+                return false; /* a 20th quantity push => whole SEND INVALID */
             p = read_push(p, end, &data, &len);
-            if (!p || len != 8) {
-                p = saved; /* restore for check below */
-                break;
-            }
-            msg->output_quantities[msg->num_outputs++] = be_to_u64(data, 8);
+            if (!p || len != 8) return false; /* malformed/short push */
+            uint64_t q = be_to_u64(data, 8);
+            /* R-INT-1 / R-10: high-bit output quantity => whole SEND INVALID. */
+            if (SLP_QTY_HIGH_BIT_SET(q)) return false;
+            msg->output_quantities[msg->num_outputs++] = q;
         }
+        /* R-SEND-1 / R-12: a 0-quantity SEND is INVALID. */
         if (msg->num_outputs < 1) return false;
 
         return true;
@@ -267,7 +302,7 @@ size_t slp_build_send(uint8_t *out, size_t out_len,
                        const struct uint256 *token_id,
                        const uint64_t *quantities, int num_outputs)
 {
-    if (num_outputs < 1 || num_outputs > 19) return 0;
+    if (num_outputs < 1 || num_outputs > ZSLP_SEND_MAX_OUTPUTS) return 0;
     if (out_len < 1) return 0;
 
     size_t off = 0;

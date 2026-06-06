@@ -21,6 +21,10 @@ void RegisterMiningRPCCommands(CRPCTable &tableRPC);
 void RegisterRawTransactionRPCCommands(CRPCTable &tableRPC);
 /** Register ZSLP token read-only RPC commands */
 void RegisterZSLPRPCCommands(CRPCTable &tableRPC);
+/** Register NFT sell/offer RPC commands (non-consensus atomic NFT->ZCL sale) */
+void RegisterNFTOfferRPCCommands(CRPCTable &tableRPC);
+/** Register shielded data-channel RPC commands (only when -datachannel is on) */
+void RegisterDataChannelRPCCommands(CRPCTable &tableRPC);
 
 static inline void RegisterAllCoreRPCCommands(CRPCTable &tableRPC)
 {
@@ -30,6 +34,8 @@ static inline void RegisterAllCoreRPCCommands(CRPCTable &tableRPC)
     RegisterMiningRPCCommands(tableRPC);
     RegisterRawTransactionRPCCommands(tableRPC);
     RegisterZSLPRPCCommands(tableRPC);
+    RegisterNFTOfferRPCCommands(tableRPC);
+    RegisterDataChannelRPCCommands(tableRPC);
 }
 
 #endif

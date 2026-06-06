@@ -16,6 +16,7 @@
 #include "rpc/protocol.h"
 #include "script/standard.h"
 #include "util.h"
+#include "utilstrencodings.h"
 #include "zslp/zslpindexer.h"
 #include "zslp/zslpstore.h"
 
@@ -23,6 +24,11 @@
 #include "init.h"          // pwalletMain
 #include "main.h"          // cs_main
 #include "wallet/wallet.h"
+#include "wallet/zslpwallet.h"
+#include "zslp/zslpmsg.h"  // ZSLPBuild{Genesis,Mint,Send}
+// EnsureWalletIsAvailable is file-extern in wallet/rpcwallet.cpp (not in a
+// header); declare it here. EnsureWalletIsUnlocked is in rpc/server.h.
+extern bool EnsureWalletIsAvailable(bool avoidException);
 #endif
 
 #include <stdint.h>
@@ -260,6 +266,388 @@ UniValue zslp_listmytokens(const UniValue& params, bool fHelp)
     return arr;
 }
 
+#ifdef ENABLE_WALLET
+
+// ── Write-path helpers ──────────────────────────────────────────────
+
+// TokenIdToBE moved to wallet/zslpwallet.h as the shared inline ZSLPTokenIdToBE
+// (DRY: rpc/nftoffer.cpp's sell template needs the exact same reversal). Keep a
+// local alias so the existing mint/send call sites read unchanged.
+static inline void TokenIdToBE(const uint256& tokenId, uint8_t out[32])
+{
+    ZSLPTokenIdToBE(tokenId, out);
+}
+
+// Parse a uint64 quantity from a JSON value that is a STRING or a small integer.
+// Rejects negatives, non-digits, overflow, and the high bit (>= 2^63) which the
+// SLP parser/store treat as INVALID (R-INT-1). Throws on any violation.
+static uint64_t ParseQuantity(const UniValue& v, const std::string& field)
+{
+    std::string s;
+    if (v.isStr())
+        s = v.get_str();
+    else if (v.isNum())
+        s = v.getValStr(); // exact integer text, no double rounding
+    else
+        throw JSONRPCError(RPC_TYPE_ERROR, field + " must be a string or integer");
+    if (s.empty())
+        throw JSONRPCError(RPC_INVALID_PARAMETER, field + " is empty");
+    for (size_t i = 0; i < s.size(); ++i)
+        if (s[i] < '0' || s[i] > '9')
+            throw JSONRPCError(RPC_INVALID_PARAMETER, field + " must be a non-negative integer");
+    errno = 0;
+    char* end = NULL;
+    unsigned long long q = strtoull(s.c_str(), &end, 10);
+    if (errno != 0 || end == NULL || *end != '\0')
+        throw JSONRPCError(RPC_INVALID_PARAMETER, field + " is not a valid integer");
+    if (q >> 63)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, field + " exceeds the maximum (2^63-1)");
+    return (uint64_t)q;
+}
+
+// Decode a t-address to a P2PKH/P2SH script, throwing on an invalid address.
+static CScript ScriptForTAddr(const std::string& addr)
+{
+    CTxDestination dest = DecodeDestination(addr);
+    if (!IsValidDestination(dest))
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
+                           "Invalid transparent address: " + addr);
+    return GetScriptForDestination(dest);
+}
+
+// Reserve a fresh wallet t-address script (for default recipient / token-change).
+static CScript FreshWalletScript()
+{
+    CPubKey vchPubKey;
+    if (!pwalletMain->GetKeyFromPool(vchPubKey))
+        throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT,
+                           "Keypool ran out, call keypoolrefill first");
+    return GetScriptForDestination(vchPubKey.GetID());
+}
+
+UniValue zslp_genesis(const UniValue& params, bool fHelp)
+{
+    if (!EnsureWalletIsAvailable(fHelp))
+        return NullUniValue;
+    if (fHelp || params.size() != 1)
+        throw std::runtime_error(
+            "zslp_genesis '{\"ticker\":?,\"name\":?,\"document_url\":?,"
+            "\"document_hash\":?(64hex),\"decimals\":?(0..9,def 0),"
+            "\"quantity\":?(string,def 1),\"mint_baton_vout\":?(>=2),"
+            "\"to\":?(t-addr),\"nft\":?(bool)}'\n"
+            "\nMint a ZSLP token. An NFT is nft=true (decimals 0, quantity 1, no baton).\n"
+            "Builds ONE OP_RETURN at vout[0] plus a 546-sat token output at vout[1]\n"
+            "(and a baton output if requested); unchanged nodes relay and mine it.\n"
+            "The tx is self-validated against the overlay ledger before broadcast.\n"
+            + HelpRequiringPassphrase() +
+            "\nArguments:\n"
+            "1. \"params\"   (object, required)\n"
+            "     ticker          (string, optional) short symbol\n"
+            "     name            (string, optional) display name\n"
+            "     document_url    (string, optional) short URL/URI\n"
+            "     document_hash   (string, optional) 64 hex chars (32 bytes), file fingerprint\n"
+            "     decimals        (numeric, optional, default 0) 0..9\n"
+            "     quantity        (string|numeric, optional, default 1) initial supply (<2^63)\n"
+            "     mint_baton_vout (numeric, optional) >=2 to issue a re-issue baton\n"
+            "     to              (string, optional) recipient t-address (default: a fresh wallet address)\n"
+            "     nft             (bool, optional) force decimals 0, quantity 1, no baton\n"
+            "\nResult:\n{ \"txid\": \"hex\", \"tokenid\": \"hex\" }   (tokenid == txid)\n"
+            "\nExamples:\n"
+            + HelpExampleCli("zslp_genesis",
+                "'{\"nft\":true,\"name\":\"My Photo #1\",\"document_hash\":\"<64hex>\"}'")
+            + HelpExampleRpc("zslp_genesis",
+                "{\"ticker\":\"GOLD\",\"decimals\":2,\"quantity\":\"100000\",\"mint_baton_vout\":2}"));
+
+    GetZSLPStoreOrThrow(); // fail CLOSED if -zslpindex off
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+
+    const UniValue& o = params[0].get_obj();
+
+    bool nft = false;
+    {
+        const UniValue& v = find_value(o, "nft");
+        if (!v.isNull()) nft = v.get_bool();
+    }
+
+    std::string ticker, name, docUrl;
+    { const UniValue& v = find_value(o, "ticker");       if (v.isStr()) ticker = v.get_str(); }
+    { const UniValue& v = find_value(o, "name");         if (v.isStr()) name   = v.get_str(); }
+    { const UniValue& v = find_value(o, "document_url"); if (v.isStr()) docUrl = v.get_str(); }
+
+    // document_hash: empty or exactly 64 hex (32 raw bytes, NOT reversed).
+    bool hasHash = false;
+    uint8_t hash32[32];
+    {
+        const UniValue& v = find_value(o, "document_hash");
+        if (v.isStr() && !v.get_str().empty()) {
+            std::string h = v.get_str();
+            if (h.size() != 64 || !IsHex(h))
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "document_hash must be 64 hex characters (32 bytes)");
+            std::vector<unsigned char> raw = ParseHex(h);
+            memcpy(hash32, raw.data(), 32);
+            hasHash = true;
+        }
+    }
+
+    int decimals = 0;
+    { const UniValue& v = find_value(o, "decimals"); if (!v.isNull()) decimals = v.get_int(); }
+
+    uint64_t quantity = 1; // default = NFT-style single unit
+    { const UniValue& v = find_value(o, "quantity"); if (!v.isNull()) quantity = ParseQuantity(v, "quantity"); }
+
+    int batonVout = 0; // 0/1 = none
+    { const UniValue& v = find_value(o, "mint_baton_vout"); if (!v.isNull()) batonVout = v.get_int(); }
+
+    if (nft) {
+        // NFT preset: a 1-of-1, indivisible, non-reissuable token. Reject
+        // conflicting explicit values rather than silently overriding.
+        if (find_value(o, "decimals").isNull()) decimals = 0;
+        else if (decimals != 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "an NFT must have decimals 0");
+        if (find_value(o, "quantity").isNull()) quantity = 1;
+        else if (quantity != 1) throw JSONRPCError(RPC_INVALID_PARAMETER, "an NFT must have quantity 1");
+        if (!find_value(o, "mint_baton_vout").isNull() && batonVout >= 2)
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "an NFT cannot have a mint baton");
+        batonVout = 0;
+    }
+
+    if (decimals < 0 || decimals > 9)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "decimals must be 0..9");
+    if (batonVout == 1)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "mint_baton_vout 1 collides with the token output at vout[1]; use 0 (none) or >=2");
+
+    // Recipient script (vout[1]).
+    CScript toScript;
+    { const UniValue& v = find_value(o, "to");
+      if (v.isStr() && !v.get_str().empty()) toScript = ScriptForTAddr(v.get_str());
+      else toScript = FreshWalletScript(); }
+
+    // Layout: vout[1] = token recipient; if a baton is requested, it is the next
+    // token output (vout[2]). The encoder's mint_baton_vout MUST equal that index.
+    uint8_t batonVoutOut = 0;
+    if (batonVout >= 2) {
+        batonVoutOut = 2; // baton placed at vout[2], immediately after the recipient
+    }
+
+    EnsureWalletIsUnlocked();
+
+    std::vector<unsigned char> opret = ZSLPBuildGenesis(
+        ticker, name, docUrl, hasHash ? hash32 : NULL,
+        (uint8_t)decimals, batonVoutOut, quantity);
+    if (opret.empty())
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+            "metadata too large for one OP_RETURN (max 223 bytes); shorten name/ticker/url or move data off-chain");
+
+    ZSLPBuildReq req;
+    req.opret = CScript(opret.begin(), opret.end());
+    ZSLPTokenOut recip; recip.dest = toScript; recip.dustSats = SLP_TOKEN_DUST;
+    req.tokenOuts.push_back(recip);
+    if (batonVoutOut >= 2) {
+        ZSLPTokenOut baton; baton.dest = FreshWalletScript(); baton.dustSats = SLP_TOKEN_DUST;
+        req.tokenOuts.push_back(baton); // becomes vout[2]
+    }
+    req.tokenInputs.clear();              // GENESIS has no token inputs
+    req.isGenesis = true;
+
+    CWalletTx wtx;
+    std::string err;
+    if (!BuildAndCommitZSLP(pwalletMain, req, wtx, err))
+        throw JSONRPCError(RPC_WALLET_ERROR, err);
+
+    UniValue ret(UniValue::VOBJ);
+    std::string txid = wtx.GetHash().GetHex();
+    ret.push_back(Pair("txid", txid));
+    ret.push_back(Pair("tokenid", txid)); // tokenid == genesis txid
+    return ret;
+}
+
+UniValue zslp_mint(const UniValue& params, bool fHelp)
+{
+    if (!EnsureWalletIsAvailable(fHelp))
+        return NullUniValue;
+    if (fHelp || params.size() < 2 || params.size() > 3)
+        throw std::runtime_error(
+            "zslp_mint \"tokenid\" amount ( baton_vout )\n"
+            "\nIssue additional supply of an existing fungible token by spending its\n"
+            "live mint baton (the wallet must hold the baton UTXO). NFTs never use MINT.\n"
+            "Builds an OP_RETURN at vout[0] + a 546-sat output at vout[1] (and a\n"
+            "continued baton if baton_vout>=2); self-validated before broadcast.\n"
+            + HelpRequiringPassphrase() +
+            "\nArguments:\n"
+            "1. \"tokenid\"   (string, required) the token id (hex)\n"
+            "2. amount      (string|numeric, required) additional quantity (<2^63)\n"
+            "3. baton_vout  (numeric, optional, default 2) >=2 to continue the baton; 0 to end it\n"
+            "\nResult:\n{ \"txid\": \"hex\" }\n"
+            "\nExamples:\n"
+            + HelpExampleCli("zslp_mint", "\"<tokenid>\" \"1000\"")
+            + HelpExampleRpc("zslp_mint", "\"<tokenid>\", \"1000\", 2"));
+
+    CZSLPStore* store = GetZSLPStoreOrThrow();
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+
+    uint256 tokenId = ParseHashV(params[0], "tokenid");
+    CZSLPToken token;
+    if (!store->GetToken(tokenId, token))
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Token not found");
+
+    uint64_t amount = ParseQuantity(params[1], "amount");
+    if (amount == 0)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "amount must be > 0");
+
+    int batonVout = 2; // default: continue the baton at vout[2]
+    if (params.size() > 2)
+        batonVout = params[2].get_int();
+    if (batonVout == 1)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "baton_vout 1 collides with the mint output; use 0 (end) or >=2");
+
+    EnsureWalletIsUnlocked();
+
+    // Find the live baton UTXO in the wallet (anti-burn intersection).
+    std::vector<ZSLPWalletUtxo> batons;
+    std::string ferr;
+    if (!ZSLPFindWalletTokenUtxos(pwalletMain, tokenId, /*wantBaton=*/true, batons, ferr))
+        throw JSONRPCError(RPC_WALLET_ERROR, ferr);
+    if (batons.empty())
+        throw JSONRPCError(RPC_WALLET_ERROR,
+            "This wallet does not hold the mint baton for that token (cannot mint)");
+
+    uint8_t tidBE[32]; TokenIdToBE(tokenId, tidBE);
+    uint8_t batonVoutOut = (batonVout >= 2) ? 2 : 0; // continued baton at vout[2]
+
+    std::vector<unsigned char> opret = ZSLPBuildMint(tidBE, batonVoutOut, amount);
+    if (opret.empty())
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "failed to build MINT OP_RETURN");
+
+    ZSLPBuildReq req;
+    req.opret = CScript(opret.begin(), opret.end());
+    ZSLPTokenOut recip; recip.dest = FreshWalletScript(); recip.dustSats = SLP_TOKEN_DUST;
+    req.tokenOuts.push_back(recip); // vout[1] = new supply
+    if (batonVoutOut >= 2) {
+        ZSLPTokenOut nb; nb.dest = FreshWalletScript(); nb.dustSats = SLP_TOKEN_DUST;
+        req.tokenOuts.push_back(nb); // vout[2] = continued baton
+    }
+    req.tokenInputs.push_back(batons[0].outpoint); // pin the baton input
+    req.selfValidateTokenId = tokenId;
+    req.isGenesis = false;
+
+    CWalletTx wtx;
+    std::string err;
+    if (!BuildAndCommitZSLP(pwalletMain, req, wtx, err))
+        throw JSONRPCError(RPC_WALLET_ERROR, err);
+
+    UniValue ret(UniValue::VOBJ);
+    ret.push_back(Pair("txid", wtx.GetHash().GetHex()));
+    return ret;
+}
+
+UniValue zslp_send(const UniValue& params, bool fHelp)
+{
+    if (!EnsureWalletIsAvailable(fHelp))
+        return NullUniValue;
+    if (fHelp || params.size() < 2 || params.size() > 4)
+        throw std::runtime_error(
+            "zslp_send \"tokenid\" \"to_address\" ( amount change_address )\n"
+            "\nTransfer ZSLP token amounts (an NFT gift defaults to amount 1). Selects\n"
+            "the wallet's token UTXOs of tokenid, conserves supply (token-change goes\n"
+            "to a fresh own t-address, or change_address if given), pins token inputs +\n"
+            "anti-burn-filters fee coins, and self-validates before broadcast. Rejects\n"
+            "(clear error) on insufficient token balance — it never burns the token.\n"
+            + HelpRequiringPassphrase() +
+            "\nArguments:\n"
+            "1. \"tokenid\"        (string, required) the token id (hex)\n"
+            "2. \"to_address\"     (string, required) recipient t-address\n"
+            "3. amount           (string|numeric, optional, default 1) amount to send (<2^63)\n"
+            "4. \"change_address\" (string, optional) token-change t-address (default: fresh own address)\n"
+            "\nResult:\n{ \"txid\": \"hex\" }\n"
+            "\nExamples:\n"
+            + HelpExampleCli("zslp_send", "\"<tokenid>\" \"t1...\" 1")
+            + HelpExampleRpc("zslp_send", "\"<tokenid>\", \"t1...\", \"5\""));
+
+    CZSLPStore* store = GetZSLPStoreOrThrow();
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+
+    uint256 tokenId = ParseHashV(params[0], "tokenid");
+    CZSLPToken token;
+    if (!store->GetToken(tokenId, token))
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Token not found");
+
+    CScript toScript = ScriptForTAddr(params[1].get_str());
+
+    uint64_t amount = 1;
+    if (params.size() > 2)
+        amount = ParseQuantity(params[2], "amount");
+    if (amount == 0)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "amount must be > 0");
+
+    bool haveChangeAddr = false;
+    CScript changeScript;
+    if (params.size() > 3 && !params[3].get_str().empty()) {
+        changeScript = ScriptForTAddr(params[3].get_str());
+        haveChangeAddr = true;
+    }
+
+    EnsureWalletIsUnlocked();
+
+    // Enumerate + greedily select token UTXOs (deterministic order).
+    std::vector<ZSLPWalletUtxo> utxos;
+    std::string ferr;
+    if (!ZSLPFindWalletTokenUtxos(pwalletMain, tokenId, /*wantBaton=*/false, utxos, ferr))
+        throw JSONRPCError(RPC_WALLET_ERROR, ferr);
+
+    int64_t availIn = 0;
+    std::vector<COutPoint> chosen;
+    for (size_t i = 0; i < utxos.size(); ++i) {
+        chosen.push_back(utxos[i].outpoint);
+        availIn += utxos[i].amount;
+        if (availIn >= (int64_t)amount)
+            break;
+    }
+    if (availIn < (int64_t)amount)
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
+            strprintf("Insufficient token balance: have %d, need %d", availIn, (int64_t)amount));
+
+    int64_t tokenChange = availIn - (int64_t)amount;
+
+    // Quantities array: recipient first, then (if any) token-change to self.
+    // recipients(1) + change(0/1) <= ZSLP_SEND_MAX_OUTPUTS.
+    std::vector<uint64_t> quantities;
+    quantities.push_back(amount);
+    if (tokenChange > 0)
+        quantities.push_back((uint64_t)tokenChange);
+    if ((int)quantities.size() > ZSLP_MAX_SEND_OUTPUTS)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "too many SEND outputs");
+
+    uint8_t tidBE[32]; TokenIdToBE(tokenId, tidBE);
+    std::vector<unsigned char> opret = ZSLPBuildSend(tidBE, quantities);
+    if (opret.empty())
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "failed to build SEND OP_RETURN");
+
+    ZSLPBuildReq req;
+    req.opret = CScript(opret.begin(), opret.end());
+    ZSLPTokenOut recip; recip.dest = toScript; recip.dustSats = SLP_TOKEN_DUST;
+    req.tokenOuts.push_back(recip);                 // vout[1] = recipient
+    if (tokenChange > 0) {
+        ZSLPTokenOut chg;
+        chg.dest = haveChangeAddr ? changeScript : FreshWalletScript();
+        chg.dustSats = SLP_TOKEN_DUST;
+        req.tokenOuts.push_back(chg);               // vout[2] = token-change to self
+    }
+    req.tokenInputs = chosen;
+    req.selfValidateTokenId = tokenId;
+    req.isGenesis = false;
+
+    CWalletTx wtx;
+    std::string err;
+    if (!BuildAndCommitZSLP(pwalletMain, req, wtx, err))
+        throw JSONRPCError(RPC_WALLET_ERROR, err);
+
+    UniValue ret(UniValue::VOBJ);
+    ret.push_back(Pair("txid", wtx.GetHash().GetHex()));
+    return ret;
+}
+
+#endif // ENABLE_WALLET
+
 static const CRPCCommand commands[] =
 { //  category   name                  actor (function)     okSafeMode
   //  ---------  --------------------  -------------------  ----------
@@ -267,6 +655,11 @@ static const CRPCCommand commands[] =
     { "zslp",    "zslp_listtokens",    &zslp_listtokens,    true },
     { "zslp",    "zslp_listtransfers", &zslp_listtransfers, true },
     { "zslp",    "zslp_listmytokens",  &zslp_listmytokens,  true },
+#ifdef ENABLE_WALLET
+    { "zslp",    "zslp_genesis",       &zslp_genesis,       false },
+    { "zslp",    "zslp_mint",          &zslp_mint,          false },
+    { "zslp",    "zslp_send",          &zslp_send,          false },
+#endif
 };
 
 void RegisterZSLPRPCCommands(CRPCTable& tableRPC)

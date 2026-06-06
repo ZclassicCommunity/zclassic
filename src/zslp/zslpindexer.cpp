@@ -3,18 +3,23 @@
 // ZSLP indexer implementation. See zslpindexer.h.
 //
 // NON-consensus observer: reads connected/disconnected blocks off the
-// validation signal bus and projects ZSLP OP_RETURN messages into the store.
+// validation signal bus and projects ZSLP OP_RETURN messages into the store,
+// enforcing the real SLP Token-Type-1 UTXO-bound rules (conservation).
 
 #include "zslp/zslpindexer.h"
 
 #include "chain.h"
 #include "key_io.h"
+#include "main.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "script/standard.h"
+#include "sync.h"
 #include "util.h"
 #include "zslp/zslpmsg.h"
 #include "zslp/zslpstore.h"
+
+#include <functional>
 
 CZSLPIndexer* g_zslpIndexer = NULL;
 
@@ -26,8 +31,17 @@ void StartZSLPIndexer()
     if (g_zslpIndexer != NULL)
         return;
     g_zslpIndexer = new CZSLPIndexer();
+    // Open + migrate + catch up the historical chain BEFORE going live, so the
+    // replay does not race the validation bus and a re-delivered connect is
+    // caught by the per-block tip idempotence guard.
+    if (!g_zslpIndexer->Init()) {
+        LogPrintf("ZSLP: indexer init failed; disabling token index\n");
+        delete g_zslpIndexer;
+        g_zslpIndexer = NULL;
+        return;
+    }
     RegisterValidationInterface(g_zslpIndexer);
-    LogPrintf("ZSLP: token indexer started (read-only OP_RETURN observation)\n");
+    LogPrintf("ZSLP: token indexer started (UTXO-bound SLP conservation)\n");
 }
 
 void StopZSLPIndexer()
@@ -39,21 +53,94 @@ void StopZSLPIndexer()
     g_zslpIndexer = NULL;
 }
 
-CZSLPIndexer::CZSLPIndexer()
-{
-    boost::filesystem::path path = GetDataDir() / "blocks" / "zslp";
-    store.reset(new CZSLPStore(path, ZSLP_DB_CACHE));
-}
+CZSLPIndexer::CZSLPIndexer() {}
 
 CZSLPIndexer::~CZSLPIndexer() {}
+
+// ── Init / migration / catch-up ─────────────────────────────────────
+
+bool CZSLPIndexer::Init()
+{
+    boost::filesystem::path path = GetDataDir() / "blocks" / "zslp";
+
+    // Open and check the on-disk format stamp. A stale/absent stamp (legacy
+    // credit-only index, or never written) triggers a wipe + full reindex; the
+    // index is fully derivable and behind -zslpindex, so a clean rebuild is the
+    // safe migration.
+    store.reset(new CZSLPStore(path, ZSLP_DB_CACHE));
+    uint32_t version = 0;
+    bool haveVersion = store->ReadIndexVersion(version);
+    bool wiped = false;
+    if (!haveVersion || version < ZSLP_INDEX_VERSION) {
+        LogPrintf("ZSLP: index format %s (have %u, want %u) — wiping + reindexing\n",
+                  haveVersion ? "outdated" : "absent",
+                  haveVersion ? version : 0u, ZSLP_INDEX_VERSION);
+        store.reset(); // close before reopening with fWipe
+        store.reset(new CZSLPStore(path, ZSLP_DB_CACHE, /*fMemory=*/false,
+                                   /*fWipe=*/true));
+        // Stamp the version BEFORE reindexing so a crash mid-reindex resumes
+        // from the per-block tip rather than re-wiping.
+        store->WriteIndexVersion(ZSLP_INDEX_VERSION);
+        wiped = true;
+    }
+    (void)wiped;
+
+    return CatchUp();
+}
+
+bool CZSLPIndexer::CatchUp()
+{
+    CZSLPStore* s = store.get();
+    if (s == NULL)
+        return false;
+
+    LOCK(cs_main);
+
+    int64_t storedHeight = -1;
+    uint256 storedHash;
+    bool haveTip = s->ReadTip(storedHeight, storedHash);
+
+    // Resume one past the stored tip (or from genesis after a wipe / no tip).
+    int resumeHeight = haveTip ? (int)storedHeight + 1 : 0;
+    if (resumeHeight < 0)
+        resumeHeight = 0;
+
+    int tipHeight = chainActive.Height();
+    if (tipHeight < 0)
+        return true; // empty chain: nothing to index yet
+
+    for (int hh = resumeHeight; hh <= tipHeight; ++hh) {
+        const CBlockIndex* pindex = chainActive[hh];
+        if (pindex == NULL)
+            break;
+        CBlock block;
+        if (!ReadBlockFromDisk(block, pindex)) {
+            LogPrintf("ZSLP: catch-up failed to read block at height %d\n", hh);
+            return false;
+        }
+        ConnectBlock(pindex, block);
+    }
+    if (tipHeight >= resumeHeight)
+        LogPrintf("ZSLP: catch-up indexed blocks %d..%d\n", resumeHeight, tipHeight);
+    return true;
+}
 
 // ── Address extraction ─────────────────────────────────────────────
 
 // Decode the t-address paid by a given vout's scriptPubKey, or "" if it is
 // not a standard pay-to-address output (e.g. the OP_RETURN itself).
-static std::string AddressOfVout(const CTransaction& tx, uint32_t voutIdx)
+//
+// DETERMINISM (part of F): the address that keys the derived balance / transfer
+// rows MUST be canonical and deterministic so two implementations key the same
+// holder. ExtractDestination (script/standard.cpp) is a pure function of the
+// scriptPubKey bytes, and EncodeDestination (key_io.cpp) is the canonical
+// base58check encoding under the active CChainParams (fixed per network). A
+// non-standard / undecodable output deterministically yields "" — an empty
+// address never receives a balance credit (recordBalanceDelta skips "") and is
+// stored verbatim on the UTXO, so the result is bit-identical everywhere.
+static std::string AddressOfVout(const CTransaction& tx, int32_t voutIdx)
 {
-    if (voutIdx >= tx.vout.size())
+    if (voutIdx < 0 || (size_t)voutIdx >= tx.vout.size())
         return std::string();
     CTxDestination dest;
     if (!ExtractDestination(tx.vout[voutIdx].scriptPubKey, dest))
@@ -105,9 +192,101 @@ void CZSLPIndexer::ConnectBlock(const CBlockIndex* pindex, const CBlock& block)
         return;
 
     s->ConnectBlockBegin(blockHash);
-    for (size_t i = 0; i < block.vtx.size(); ++i)
+    // R-PARSE-3: skip the coinbase (vtx[0]) for SLP parsing. A coinbase's only
+    // input is the null prevout, which can never reference a token UTXO, so
+    // skipping it consumes/burns nothing and creates nothing — the skip is a
+    // no-op for conservation but is made explicit (and tested) so a coinbase
+    // whose vout[0] happens to begin OP_RETURN is never mistaken for SLP.
+    for (size_t i = 1; i < block.vtx.size(); ++i)
         IndexTransaction(block.vtx[i], pindex);
     s->ConnectBlockEnd(pindex->nHeight, blockHash);
+}
+
+// R-PARSE-1/2 (BLOCKER): parse the SLP message from tx.vout[0] ONLY. A tx is an
+// SLP candidate IFF vout[0] is OP_RETURN and parses as a valid SLP message;
+// OP_RETURNs at vout>=1 are irrelevant by construction (this defeats the
+// message-position fork and the multi-OP_RETURN fork). If vout[0] is not a valid
+// SLP message, the tx has NO SLP message (returns false) — its spent token
+// inputs are still burned by the caller.
+//
+// NOTE: we deliberately do NOT gate on Solver()/TX_NULL_DATA here. The SLP push
+// grammar (read_push, R-SCRIPT-1) is the canonical accept set; it is stricter
+// and policy-independent (R-PARSE-4) — TX_NULL_DATA's -datacarriersize check is
+// consensus-relay policy and must never enter the ledger function.
+// ZSLPParseScript already requires the leading 0x6a and rejects non-SLP scripts.
+//
+// Static + pure (no store / chain state) so the R-VECTORS corpus pins the
+// position rules against this exact code.
+bool CZSLPIndexer::ParseTx(const CTransaction& tx, int64_t height,
+                           CZSLPParsedMsg& parsed, CZSLPToken& genesisMeta,
+                           bool& haveGenesisMeta)
+{
+    haveGenesisMeta = false;
+    if (tx.vout.empty())
+        return false;
+
+    const uint256 txid = tx.GetHash();
+    const CScript& spk = tx.vout[0].scriptPubKey;
+    std::vector<unsigned char> raw(spk.begin(), spk.end());
+
+    ZSLPMessage msg;
+    if (raw.empty() || !ZSLPParseScript(raw.data(), raw.size(), msg))
+        return false;
+
+    switch (msg.type) {
+    case ZSLPMSG_GENESIS: {
+        parsed.type = ZSLP_MSG_GENESIS;
+        parsed.tokenId = txid; // canonical SLP: token id == genesis txid
+        parsed.initialQuantity = (int64_t)msg.initialQuantity;
+        parsed.mintBatonVout = (int32_t)msg.mintBatonVout;
+
+        genesisMeta.tokenId = txid;
+        genesisMeta.ticker = msg.ticker;
+        genesisMeta.name = msg.name;
+        genesisMeta.documentUrl = msg.documentUrl;
+        genesisMeta.hasDocumentHash = msg.hasDocumentHash;
+        if (msg.hasDocumentHash) {
+            // document_hash is an arbitrary 32-byte hash (not a txid).
+            // uint256::GetHex() prints internal bytes reversed, so reverse here
+            // to display the on-chain byte order.
+            std::vector<unsigned char> dh(32);
+            for (int b = 0; b < 32; ++b)
+                dh[b] = msg.documentHash[31 - b];
+            genesisMeta.documentHash = uint256(dh);
+        }
+        genesisMeta.decimals = msg.decimals;
+        genesisMeta.mintBatonVout = msg.mintBatonVout; // store overwrites
+        genesisMeta.genesisHeight = height;
+        haveGenesisMeta = true;
+        return true;
+    }
+    case ZSLPMSG_MINT: {
+        parsed.type = ZSLP_MSG_MINT;
+        parsed.tokenId = TokenIdToUint256(msg.tokenId);
+        parsed.additionalQuantity = (int64_t)msg.additionalQuantity;
+        parsed.mintBatonVout = (int32_t)msg.mintBatonVout;
+        return true;
+    }
+    case ZSLPMSG_SEND: {
+        parsed.type = ZSLP_MSG_SEND;
+        parsed.tokenId = TokenIdToUint256(msg.tokenId);
+        // The parser guarantees 1..ZSLP_SEND_MAX_OUTPUTS (R-SEND-1); a larger
+        // list was already rejected as INVALID, so no clamp is needed — assert
+        // the single shared cap holds across layers.
+        static_assert(ZSLP_MAX_SEND_OUTPUTS == ZSLP_SEND_MAX_OUTPUTS_STORE,
+                      "ZSLP SEND cap mismatch (bridge vs store)");
+        int n = msg.numOutputs;
+        if (n < 0) n = 0;
+        if (n > ZSLP_SEND_MAX_OUTPUTS_STORE)
+            n = ZSLP_SEND_MAX_OUTPUTS_STORE; // defensive; parser-bounded
+        parsed.numOutputs = n;
+        for (int j = 0; j < n; ++j)
+            parsed.outputQuantities[j] = (int64_t)msg.outputQuantities[j];
+        return true;
+    }
+    default:
+        return false;
+    }
 }
 
 void CZSLPIndexer::IndexTransaction(const CTransaction& tx,
@@ -117,78 +296,27 @@ void CZSLPIndexer::IndexTransaction(const CTransaction& tx,
     const int64_t height = pindex->nHeight;
     const uint256 txid = tx.GetHash();
 
-    // Find the first OP_RETURN (TX_NULL_DATA) output and try to parse it.
-    for (size_t vo = 0; vo < tx.vout.size(); ++vo) {
-        const CScript& spk = tx.vout[vo].scriptPubKey;
-        txnouttype whichType;
-        std::vector<std::vector<unsigned char> > solutions;
-        if (!Solver(spk, whichType, solutions) || whichType != TX_NULL_DATA)
-            continue;
+    // (1) Token inputs spent by this tx (prevouts). Even a non-SLP tx must burn
+    //     any token UTXO it spends, so we gather these for EVERY tx.
+    std::vector<COutPoint> vin;
+    vin.reserve(tx.vin.size());
+    for (size_t k = 0; k < tx.vin.size(); ++k)
+        vin.push_back(tx.vin[k].prevout);
 
-        // Raw script bytes for the SLP parser.
-        std::vector<unsigned char> raw(spk.begin(), spk.end());
-        if (raw.empty())
-            continue;
+    // (2) Parse the SLP message from vout[0] only (R-PARSE-1/2). See ParseTx.
+    CZSLPParsedMsg parsed;
+    CZSLPToken genesisMeta;       // only filled for GENESIS
+    bool haveGenesisMeta = false;
+    bool msgPresent = ParseTx(tx, height, parsed, genesisMeta, haveGenesisMeta);
 
-        ZSLPMessage msg;
-        if (!ZSLPParseScript(raw.data(), raw.size(), msg))
-            continue; // not an SLP message; keep scanning other vouts
+    // (3) Apply conservation. addrOfVout closes over this tx so the store needs
+    //     no script knowledge of its own.
+    std::function<std::string(int32_t)> addrOfVout =
+        [&tx](int32_t n) -> std::string { return AddressOfVout(tx, n); };
 
-        switch (msg.type) {
-        case ZSLPMSG_GENESIS: {
-            // Token id == the genesis transaction id (canonical SLP rule).
-            // Minted quantity is paid to vout[1]; baton (if any) to its vout.
-            CZSLPToken token;
-            token.tokenId = txid;
-            token.ticker = msg.ticker;
-            token.name = msg.name;
-            token.documentUrl = msg.documentUrl;
-            token.hasDocumentHash = msg.hasDocumentHash;
-            if (msg.hasDocumentHash) {
-                // document_hash is an arbitrary 32-byte hash (not a txid).
-                // uint256::GetHex() prints internal bytes reversed, so reverse
-                // here to make the RPC display the on-chain byte order.
-                std::vector<unsigned char> dh(32);
-                for (int b = 0; b < 32; ++b)
-                    dh[b] = msg.documentHash[31 - b];
-                token.documentHash = uint256(dh);
-            }
-            token.decimals = msg.decimals;
-            token.mintBatonVout = msg.mintBatonVout;
-            token.genesisHeight = height;
-
-            std::string recipient = AddressOfVout(tx, 1);
-            s->ApplyGenesis(token, recipient, txid, 1,
-                            (int64_t)msg.initialQuantity);
-            return; // one SLP message per tx
-        }
-        case ZSLPMSG_MINT: {
-            uint256 tokenId = TokenIdToUint256(msg.tokenId);
-            std::string recipient = AddressOfVout(tx, 1);
-            bool batonMoved = (msg.mintBatonVout >= 2);
-            s->ApplyMint(tokenId, recipient, txid, height, 1,
-                         (int64_t)msg.additionalQuantity, batonMoved,
-                         msg.mintBatonVout);
-            return;
-        }
-        case ZSLPMSG_SEND: {
-            uint256 tokenId = TokenIdToUint256(msg.tokenId);
-            // outputQuantities[j] is paid to vout[1+j].
-            for (int j = 0; j < msg.numOutputs; ++j) {
-                uint64_t qty = msg.outputQuantities[j];
-                if (qty == 0)
-                    continue;
-                uint32_t voutIdx = (uint32_t)(j + 1);
-                std::string recipient = AddressOfVout(tx, voutIdx);
-                s->ApplySend(tokenId, recipient, txid, height,
-                             (int32_t)voutIdx, (int64_t)qty);
-            }
-            return;
-        }
-        default:
-            return;
-        }
-    }
+    s->ApplyTransaction(vin, msgPresent ? &parsed : NULL, txid, height,
+                        haveGenesisMeta ? &genesisMeta : NULL,
+                        addrOfVout, (int32_t)tx.vout.size());
 }
 
 // ── Disconnect (reorg) ─────────────────────────────────────────────

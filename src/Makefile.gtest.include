@@ -45,8 +45,12 @@ zcash_gtest_SOURCES += \
 	gtest/test_pedersen_hash.cpp \
 	gtest/test_checkblock.cpp \
 	gtest/test_zip32.cpp \
+	gtest/test_zdc.cpp \
 	gtest/test_zslp.cpp \
-	gtest/test_zslp_indexer.cpp
+	gtest/test_zslp_indexer.cpp \
+	gtest/test_zslp_vectors.cpp \
+	gtest/test_zslp_wallet.cpp \
+	gtest/test_nftoffer.cpp
 if ENABLE_WALLET
 zcash_gtest_SOURCES += \
 	wallet/gtest/test_paymentdisclosure.cpp \

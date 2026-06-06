@@ -132,7 +132,30 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "z_importkey", 2 },
     { "z_importviewingkey", 2 },
     { "z_getpaymentdisclosure", 1},
-    { "z_getpaymentdisclosure", 2}
+    { "z_getpaymentdisclosure", 2},
+    // Shielded data-channel RPCs: each takes a single JSON object param, so
+    // convert arg 0 (otherwise zclassic-cli would send a raw string).
+    { "z_senddatafile", 0},     // params object
+    { "z_getdatatransfer", 0},  // params object
+    // ZSLP write/read RPCs: convert the non-string args so zclassic-cli sends
+    // a JSON object/number rather than a raw string the daemon would reject.
+    { "zslp_genesis", 0},       // params object
+    { "zslp_mint", 1},          // amount (string|numeric)
+    { "zslp_mint", 2},          // baton_vout (numeric)
+    { "zslp_send", 2},          // amount (string|numeric)
+    { "zslp_listtokens", 0},    // count
+    { "zslp_listtokens", 1},    // from
+    { "zslp_listtransfers", 1}, // count
+    { "zslp_listtransfers", 2}, // from
+    // NFT sell/offer RPCs: each takes a single JSON object at arg 0; converting
+    // that arg makes zclassic-cli send an object (its string fields ride inside,
+    // no per-field conversion needed) rather than a raw string the daemon rejects.
+    { "nft_makeoffer", 0},      // params object
+    { "nft_verifyoffer", 0},    // params object
+    { "nft_takeoffer", 0},      // params object
+    { "nft_listoffers", 0},     // params object
+    { "nft_canceloffer", 0},    // params object
+    { "nft_requestbuy", 0}      // params object
 };
 
 class CRPCConvertTable

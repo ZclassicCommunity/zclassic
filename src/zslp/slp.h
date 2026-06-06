@@ -26,6 +26,14 @@ extern "C" {
 /* Token type */
 #define SLP_TOKEN_TYPE_1  1
 
+/* Canonical SEND output-quantity cap (R-SEND-1 / R-12). A SEND MUST carry
+ * 1..ZSLP_SEND_MAX_OUTPUTS quantity pushes; a list of more than this (e.g. a
+ * 20th 8-byte push) makes the WHOLE message INVALID — NOT "first N win". This
+ * single constant is shared by the parser, the C++ message bridge, the store,
+ * and every array bound so all layers agree on the cap (a divergence here
+ * forks the ledger). */
+#define ZSLP_SEND_MAX_OUTPUTS  19
+
 /* Transaction types */
 enum slp_tx_type {
     SLP_TX_GENESIS = 1,
@@ -57,7 +65,7 @@ struct slp_message {
 
     /* SEND fields */
     /* token_id reused */
-    uint64_t output_quantities[20]; /* vout[1]..vout[19] + 1 extra */
+    uint64_t output_quantities[ZSLP_SEND_MAX_OUTPUTS]; /* vout[1]..vout[19] */
     int num_outputs;
 };
 
@@ -89,7 +97,8 @@ size_t slp_build_mint(uint8_t *out, size_t out_len,
                        uint64_t additional_quantity);
 
 /* SEND: transfer token amounts. token_id and the quantities array are
- * required; num_outputs must be in 1..19 (returns 0 otherwise). */
+ * required; num_outputs must be in 1..ZSLP_SEND_MAX_OUTPUTS (returns 0
+ * otherwise). */
 size_t slp_build_send(uint8_t *out, size_t out_len,
                        const struct uint256 *token_id,
                        const uint64_t *quantities, int num_outputs);

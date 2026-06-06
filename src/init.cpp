@@ -524,6 +524,7 @@ std::string HelpMessage(HelpMessageMode mode)
         _("If <category> is not supplied or if <category> = 1, output all debugging information.") + " " + _("<category> can be:") + " " + debugCategories + ".");
     strUsage += HelpMessageOpt("-experimentalfeatures", _("Enable use of experimental features"));
     strUsage += HelpMessageOpt("-zslpindex", strprintf(_("Maintain a read-only index of ZSLP token OP_RETURN messages, for the zslp_* RPCs (default: %u)"), 1));
+    strUsage += HelpMessageOpt("-datachannel", strprintf(_("Enable the shielded data-channel RPCs (z_senddatafile etc.) for private file transfer over Sapling memos. Bytes are PERMANENT and public-ciphertext on-chain. (default: %u)"), 0));
     strUsage += HelpMessageOpt("-help-debug", _("Show all debugging options (usage: --help -help-debug)"));
     strUsage += HelpMessageOpt("-logips", strprintf(_("Include IP addresses in debug output (default: %u)"), 0));
     strUsage += HelpMessageOpt("-debuglogfile", _("Write debug output to debug.log file (default: 0, disabled for privacy)"));
