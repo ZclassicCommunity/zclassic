@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <limits>
+#include <map>
+#include <set>
 #include <boost/scoped_ptr.hpp>
 
 // Record-type discriminators (first key byte).
@@ -420,45 +422,80 @@ bool CZSLPStore::DisconnectBlock(const uint256& blockHash, int64_t prevHeight,
 
     CDBBatch batch(db);
 
+    // Accumulate per-token and per-balance changes in memory and write each
+    // record exactly ONCE. A single block can log multiple undo ops against the
+    // same record (a MINT logs both UNDO_MINTED_ADD and UNDO_BATON_SET; several
+    // mints can credit one address). readToken/readBalance see only the committed
+    // DB — not this pending batch — so a per-op read-modify-write would clobber
+    // a sibling op's change (e.g. the baton revert lost behind the minted revert).
+    std::map<uint256, CZSLPToken> tokenMods;
+    std::set<uint256> tokenErased;
+    std::map<std::pair<uint256, std::string>, int64_t> balMods;
+
     for (int i = (int)ops.size() - 1; i >= 0; --i) {
         const CZSLPUndoOp& op = ops[i];
         switch (op.kind) {
         case UNDO_TOKEN_PUT:
             batch.Erase(std::make_pair(DB_TOKEN, op.tokenId));
+            tokenMods.erase(op.tokenId);
+            tokenErased.insert(op.tokenId);
             break;
         case UNDO_TRANSFER_PUT:
             batch.Erase(TransferKey(op.tokenId, op.blockHeight, op.txid, op.vout));
             break;
         case UNDO_BALANCE_ADD: {
-            int64_t bal = readBalance(op.tokenId, op.address);
-            int64_t nv = bal - op.amount;
-            if (nv <= 0)
-                batch.Erase(BalanceKey(op.tokenId, op.address));
-            else
-                batch.Write(BalanceKey(op.tokenId, op.address), nv);
+            std::pair<uint256, std::string> bk(op.tokenId, op.address);
+            std::map<std::pair<uint256, std::string>, int64_t>::iterator bit = balMods.find(bk);
+            if (bit == balMods.end())
+                bit = balMods.insert(std::make_pair(bk, readBalance(op.tokenId, op.address))).first;
+            bit->second -= op.amount;
             break;
         }
         case UNDO_MINTED_ADD: {
-            CZSLPToken token;
-            if (readToken(op.tokenId, token)) {
-                token.totalMinted -= op.amount;
-                if (token.totalMinted < 0)
-                    token.totalMinted = 0;
-                writeTokenBatch(batch, token);
+            if (tokenErased.count(op.tokenId))
+                break;
+            std::map<uint256, CZSLPToken>::iterator mit = tokenMods.find(op.tokenId);
+            if (mit == tokenMods.end()) {
+                CZSLPToken t;
+                if (!readToken(op.tokenId, t))
+                    break;
+                mit = tokenMods.insert(std::make_pair(op.tokenId, t)).first;
             }
+            mit->second.totalMinted -= op.amount;
+            if (mit->second.totalMinted < 0)
+                mit->second.totalMinted = 0;
             break;
         }
         case UNDO_BATON_SET: {
-            CZSLPToken token;
-            if (readToken(op.tokenId, token)) {
-                token.mintBatonVout = op.prevBaton;
-                writeTokenBatch(batch, token);
+            if (tokenErased.count(op.tokenId))
+                break;
+            std::map<uint256, CZSLPToken>::iterator mit = tokenMods.find(op.tokenId);
+            if (mit == tokenMods.end()) {
+                CZSLPToken t;
+                if (!readToken(op.tokenId, t))
+                    break;
+                mit = tokenMods.insert(std::make_pair(op.tokenId, t)).first;
             }
+            mit->second.mintBatonVout = op.prevBaton;
             break;
         }
         default:
             break;
         }
+    }
+
+    // Write each accumulated token modification once (siblings already merged).
+    for (std::map<uint256, CZSLPToken>::const_iterator it2 = tokenMods.begin();
+         it2 != tokenMods.end(); ++it2)
+        writeTokenBatch(batch, it2->second);
+
+    // Write each accumulated balance once (erase if depleted to <= 0).
+    for (std::map<std::pair<uint256, std::string>, int64_t>::const_iterator it3 = balMods.begin();
+         it3 != balMods.end(); ++it3) {
+        if (it3->second <= 0)
+            batch.Erase(BalanceKey(it3->first.first, it3->first.second));
+        else
+            batch.Write(BalanceKey(it3->first.first, it3->first.second), it3->second);
     }
 
     // Drop the undo log for this block.
