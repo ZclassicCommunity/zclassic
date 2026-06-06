@@ -11,8 +11,11 @@
 #include <boost/scoped_ptr.hpp>
 #include <boost/function.hpp>
 
-static const int DEFAULT_HTTP_THREADS=4;
-static const int DEFAULT_HTTP_WORKQUEUE=16;
+// Raised from 4/16 to avoid "Work queue depth exceeded" HTTP 500s under load
+// (e.g. wallet/GUI bursts of concurrent RPC calls). Still user-overridable via
+// -rpcthreads / -rpcworkqueue; config-only, no consensus or value impact.
+static const int DEFAULT_HTTP_THREADS=8;
+static const int DEFAULT_HTTP_WORKQUEUE=256;
 static const int DEFAULT_HTTP_SERVER_TIMEOUT=30;
 
 struct evhttp_request;
