@@ -457,91 +457,134 @@ UniValue z_getdatatransfer(const UniValue& params, bool fHelp)
         (verifyFingerprintHex.size() != 64 || !IsHex(verifyFingerprintHex)))
         throw JSONRPCError(RPC_INVALID_PARAMETER, "verify_fingerprint must be 64 hex chars");
 
-    // Resolve the recorded transfer (holds the authoritative anchor + key).
+    // ── (A) FAST-PATH: a registry record from THIS session (sender) ─────────
+    // The record holds the authoritative anchor + the per-transfer key, so we can
+    // serve verify-before-decrypt even when (rarely) no KEY frame rode on chain.
     ZdcTransferRecord rec;
     bool haveRec = false;
     uint64_t wantId = 0;
-    {
+    if (!transferIdHex.empty()) {
+        if (transferIdHex.size() != 16 || !IsHex(transferIdHex))
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "transfer_id must be 16 hex chars");
+        wantId = strtoull(transferIdHex.c_str(), NULL, 16);
         LOCK(cs_zdc);
         ZdcExpireOld();
-        if (!transferIdHex.empty()) {
-            if (transferIdHex.size() != 16 || !IsHex(transferIdHex))
-                throw JSONRPCError(RPC_INVALID_PARAMETER, "transfer_id must be 16 hex chars");
-            wantId = strtoull(transferIdHex.c_str(), NULL, 16);
-            std::map<uint64_t, ZdcTransferRecord>::const_iterator it = g_zdcTransfers.find(wantId);
-            if (it != g_zdcTransfers.end()) { rec = it->second; haveRec = true; }
-        } else {
-            if (fingerprintHex.size() != 64 || !IsHex(fingerprintHex))
-                throw JSONRPCError(RPC_INVALID_PARAMETER, "fingerprint must be 64 hex chars");
-            for (std::map<uint64_t, ZdcTransferRecord>::const_iterator it = g_zdcTransfers.begin();
-                 it != g_zdcTransfers.end(); ++it) {
-                if (it->second.fingerprintHex == fingerprintHex) {
-                    rec = it->second; haveRec = true; wantId = it->first; break;
-                }
+        std::map<uint64_t, ZdcTransferRecord>::const_iterator it = g_zdcTransfers.find(wantId);
+        if (it != g_zdcTransfers.end()) { rec = it->second; haveRec = true; }
+    } else {
+        if (fingerprintHex.size() != 64 || !IsHex(fingerprintHex))
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "fingerprint must be 64 hex chars");
+        LOCK(cs_zdc);
+        ZdcExpireOld();
+        for (std::map<uint64_t, ZdcTransferRecord>::const_iterator it = g_zdcTransfers.begin();
+             it != g_zdcTransfers.end(); ++it) {
+            if (it->second.fingerprintHex == fingerprintHex) {
+                rec = it->second; haveRec = true; wantId = it->first; break;
             }
         }
     }
-    if (!haveRec)
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
-            "transfer not found in this node's registry (it tracks transfers sent this session)");
 
-    if (address.empty()) address = rec.toAddress;
+    // The address to scan: explicit param > recorded toaddress > all in-wallet
+    // z-addrs (empty string => GetFilteredNotes scans every address we can view).
+    if (address.empty() && haveRec) address = rec.toAddress;
 
-    // Scan the wallet's Sapling notes at the recipient address; feed memos to the
-    // decoder, keeping only frames whose transfer_id matches.
+    // Pull the wallet's Sapling notes. requireSpendingKey=false so a VIEWING-KEY-
+    // ONLY wallet (the recipient with only an ivk) still sees its frames; the ivk
+    // path inside GetFilteredNotes decrypts each Sapling memo to plaintext for us.
+    // No spending key / ivk ever leaves the wallet; we only read decrypted memos.
     std::vector<SaplingNoteEntry> saplingEntries;
     std::vector<CSproutNotePlaintextEntry> sproutEntries;
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
-        pwalletMain->GetFilteredNotes(sproutEntries, saplingEntries, address, /*minDepth=*/0, false, false);
+        pwalletMain->GetFilteredNotes(sproutEntries, saplingEntries, address,
+                                      /*minDepth=*/0, /*ignoreSpent=*/false,
+                                      /*requireSpendingKey=*/false);
     }
 
+    // ── (B) REGISTRY-MISS FALLBACK: reconstruct purely from chain ────────────
+    // No session record for this id/fingerprint (a cross-wallet recipient, or the
+    // sender after a restart). We resolve wantId from the on-chain frames alone:
+    //   * transfer_id query  -> wantId already parsed above.
+    //   * fingerprint query  -> group in-wallet ZDC frames by transfer_id, recompute
+    //                           each group's ciphertext fingerprint, pick the match.
+    // Everything after this point is identical to the fast-path; the ONLY secret we
+    // ever rely on is the on-chain KEY frame (decrypted to us by our own ivk), which
+    // the Decoder consumes automatically in add_frame — we never need rec.key.
+    if (!haveRec && transferIdHex.empty()) {
+        // fingerprint-only, no record: find the transfer_id whose DATA frames hash
+        // to the requested fingerprint. (Bounded by this wallet's note count.)
+        std::map<uint64_t, std::vector<std::vector<uint8_t> > > byId;
+        for (size_t i = 0; i < saplingEntries.size(); ++i) {
+            std::vector<uint8_t> memo(saplingEntries[i].memo.begin(), saplingEntries[i].memo.end());
+            zdc::FrameHeader h;
+            if (zdc::parse_header(&memo[0], h) != zdc::OK) continue; // skip non-ZDC memos
+            byId[h.transfer_id].push_back(memo);
+        }
+        bool foundId = false;
+        for (std::map<uint64_t, std::vector<std::vector<uint8_t> > >::const_iterator
+                 it = byId.begin(); it != byId.end(); ++it) {
+            uint8_t fp[zdc::CONTENT_HASH_LEN];
+            if (zdc::ciphertext_fingerprint(it->second, fp) != zdc::OK) continue;
+            if (BytesToHex(fp, zdc::CONTENT_HASH_LEN) == fingerprintHex) {
+                wantId = it->first; foundId = true; break;
+            }
+        }
+        if (!foundId)
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
+                "transfer not found: no in-wallet Sapling frames hash to that fingerprint "
+                "(this wallet is not the recipient, or the frames have not arrived)");
+    }
+
+    // Feed matching frames to the decoder (it locks to the first transfer_id it
+    // accepts; the on-chain KEY frame, if visible to our ivk, populates the key).
     zdc::Decoder dec;
     uint32_t fed = 0;
     for (size_t i = 0; i < saplingEntries.size(); ++i) {
         std::vector<uint8_t> memo(saplingEntries[i].memo.begin(), saplingEntries[i].memo.end());
-        // Peek the transfer_id before adding so foreign/text memos are skipped
-        // cleanly (decoder locks to the first transfer_id it accepts).
         zdc::FrameHeader h;
-        if (zdc::parse_header(&memo[0], h) != zdc::OK) continue;
+        if (zdc::parse_header(&memo[0], h) != zdc::OK) continue; // foreign/text memo
         if (h.transfer_id != wantId) continue;
-        zdc::Status as = dec.add_frame(memo);
-        if (as == zdc::OK) ++fed;
+        if (dec.add_frame(memo) == zdc::OK) ++fed;
     }
 
     UniValue ret(UniValue::VOBJ);
     ret.push_back(Pair("transfer_id", strprintf("%016x", wantId)));
-    ret.push_back(Pair("fingerprint", rec.fingerprintHex));
+    // Authoritative anchor: registry record if we have one, else the on-chain
+    // recomputed fingerprint (filled below once frames are complete).
+    if (haveRec) ret.push_back(Pair("fingerprint", rec.fingerprintHex));
     ret.push_back(Pair("frames_received", (int)fed));
     ret.push_back(Pair("complete", dec.is_complete()));
 
-    // Gather the frames actually on chain (in seq order) to recompute the anchor.
-    // We recompute over the DATA frames we received and compare to the recorded
-    // anchor BEFORE any decrypt. This is the verify-before-decrypt gate.
+    // VERIFY-BEFORE-DECRYPT: recompute the anchor over the DATA frames we hold and
+    // compare to the EXPECTED anchor BEFORE any decrypt. Expected =
+    //   verify_fingerprint (caller out-of-band) if supplied;
+    //   else rec.fingerprintHex if we have a record;
+    //   else (cross-wallet, no record) the on-chain recompute IS the anchor — there
+    //   is nothing independent to compare to, so "verified" means the frames form a
+    //   self-consistent transfer; a caller wanting a trust anchor passes
+    //   verify_fingerprint (e.g. the published NFT document_hash).
     bool verified = false;
+    std::string onchain;
     if (dec.is_complete()) {
-        // Re-collect DATA frames for fingerprinting. The decoder doesn't expose
-        // raw frames, so re-scan the same memos into a frame vector.
         std::vector<std::vector<uint8_t> > frames;
-        {
-            LOCK2(cs_main, pwalletMain->cs_wallet);
-            for (size_t i = 0; i < saplingEntries.size(); ++i) {
-                std::vector<uint8_t> memo(saplingEntries[i].memo.begin(), saplingEntries[i].memo.end());
-                zdc::FrameHeader h;
-                if (zdc::parse_header(&memo[0], h) != zdc::OK) continue;
-                if (h.transfer_id != wantId) continue;
-                frames.push_back(memo);
-            }
+        for (size_t i = 0; i < saplingEntries.size(); ++i) {
+            std::vector<uint8_t> memo(saplingEntries[i].memo.begin(), saplingEntries[i].memo.end());
+            zdc::FrameHeader h;
+            if (zdc::parse_header(&memo[0], h) != zdc::OK) continue;
+            if (h.transfer_id != wantId) continue;
+            frames.push_back(memo);
         }
         uint8_t fp[zdc::CONTENT_HASH_LEN];
         if (zdc::ciphertext_fingerprint(frames, fp) == zdc::OK) {
-            std::string onchain = BytesToHex(fp, zdc::CONTENT_HASH_LEN);
-            // The anchor we verify the on-chain ciphertext against: the caller's
-            // out-of-band expectation if supplied, else our recorded anchor.
-            const std::string& expected =
-                verifyFingerprintHex.empty() ? rec.fingerprintHex : verifyFingerprintHex;
-            verified = (onchain == expected);
+            onchain = BytesToHex(fp, zdc::CONTENT_HASH_LEN);
+            if (!verifyFingerprintHex.empty())
+                verified = (onchain == verifyFingerprintHex);
+            else if (haveRec)
+                verified = (onchain == rec.fingerprintHex);
+            else
+                verified = true; // no independent anchor to compare against
             ret.push_back(Pair("onchain_fingerprint", onchain));
+            if (!haveRec) ret.push_back(Pair("fingerprint", onchain));
             if (!verifyFingerprintHex.empty())
                 ret.push_back(Pair("expected_fingerprint", verifyFingerprintHex));
         }
@@ -554,29 +597,32 @@ UniValue z_getdatatransfer(const UniValue& params, bool fHelp)
         return ret;
     }
     if (!verified) {
-        // VERIFY-BEFORE-DECRYPT refusal: NEVER attempt decrypt or return plaintext
-        // when the on-chain anchor does not match the expected fingerprint (the
-        // caller-asserted out-of-band anchor if given, else the recorded anchor).
+        // VERIFY-BEFORE-DECRYPT refusal: NEVER decrypt or return plaintext when the
+        // on-chain anchor does not match the expected fingerprint.
         ret.push_back(Pair("error",
             std::string(zdc::status_str(zdc::ERR_HASH_MISMATCH)) +
-            (verifyFingerprintHex.empty()
-                ? " (on-chain fingerprint != recorded anchor; refusing to decrypt)"
-                : " (on-chain fingerprint != caller-asserted verify_fingerprint; refusing to decrypt)")));
+            (!verifyFingerprintHex.empty()
+                ? " (on-chain fingerprint != caller-asserted verify_fingerprint; refusing to decrypt)"
+                : " (on-chain fingerprint != recorded anchor; refusing to decrypt)")));
         return ret;
     }
 
-    // Anchor verified. Supply the key out-of-band from the registry (the on-chain
-    // KEY frame also works, but the registry key is authoritative for the sender)
-    // and decrypt.
-    if (!rec.key.empty())
+    // Anchor verified. The key comes from the on-chain KEY frame the Decoder already
+    // consumed (cross-wallet recipient, or sender-after-restart via its own ovk-
+    // decrypted outgoing memo). If we ALSO hold a registry key, set it as a belt-and-
+    // suspenders authoritative source; assemble() then AEAD-decrypts. No key is ever
+    // returned or logged.
+    if (haveRec && !rec.key.empty())
         dec.set_key(rec.key);
 
     std::vector<uint8_t> out;
     zdc::TransferMeta gotMeta;
     zdc::Status ds = dec.assemble(out, gotMeta);
     if (ds != zdc::OK) {
-        // Surface the DISTINCT codec error honestly (ERR_NO_KEY / ERR_AEAD_FAIL /
-        // ERR_HASH_MISMATCH) — never return plaintext on failure.
+        // Distinct codec error, honestly surfaced (never plaintext on failure):
+        //   ERR_NO_KEY      -> no KEY frame visible to this wallet (not the recipient)
+        //   ERR_AEAD_FAIL   -> tamper / wrong key
+        //   ERR_HASH_MISMATCH -> reassembled plaintext != END content hash
         ret.push_back(Pair("error", zdc::status_str(ds)));
         return ret;
     }
