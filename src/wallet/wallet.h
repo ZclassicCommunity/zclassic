@@ -1212,8 +1212,15 @@ public:
      * Get the wallet's activity log
      * @return multimap of ordered transactions and accounting entries
      * @warning Returned pointers are *only* valid within the scope of passed acentries
+     *
+     * When nLimit > 0, only the newest nLimit items (largest nOrderPos) are returned;
+     * this is a perf hint for callers (e.g. listtransactions) that consume newest-first
+     * and need only a bounded window. Callers MUST treat a result smaller than the
+     * whole wallet as potentially under-supplied and fall back to an unlimited call if
+     * they cannot fill their requested window, since a single tx may yield 0..N output
+     * rows. With nLimit <= 0 (default) the full ordered log is returned, unchanged.
      */
-    TxItems OrderedTxItems(std::list<CAccountingEntry>& acentries, std::string strAccount = "");
+    TxItems OrderedTxItems(std::list<CAccountingEntry>& acentries, std::string strAccount = "", int nLimit = 0);
 
     void MarkDirty();
     bool UpdateNullifierNoteMap();
