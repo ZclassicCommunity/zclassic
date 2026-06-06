@@ -21,7 +21,17 @@ static leveldb::Options GetOptions(size_t nCacheSize)
     options.write_buffer_size = nCacheSize / 4; // up to two write buffers may be held in memory simultaneously
     options.filter_policy = leveldb::NewBloomFilterPolicy(10);
     options.compression = leveldb::kNoCompression;
-    options.max_open_files = 64;
+    // Scale the open-file cache with the configured DB cache so a large block
+    // index doesn't thrash file descriptors (matches Bitcoin Core's later
+    // scaling): 64 for small caches, up to 1000 for large ones. Each ~2MiB
+    // table is held open via these, so this is purely an I/O/FD tuning and
+    // does not change any stored or computed value.
+    options.max_open_files = 1000;
+    if (nCacheSize < 100 * 1048576) {
+        // Use the conservative default for small caches (e.g. unit tests,
+        // low-memory configs) to keep FD usage modest.
+        options.max_open_files = 64;
+    }
     if (leveldb::kMajorVersion > 1 || (leveldb::kMajorVersion == 1 && leveldb::kMinorVersion >= 16)) {
         // LevelDB versions before 1.16 consider short writes to be corruption. Only trigger error
         // on corruption in later versions.
