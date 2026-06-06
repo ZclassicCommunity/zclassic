@@ -433,7 +433,9 @@ bool AsyncRPCOperation_sendmany::main_impl() {
             ops.push_back(t.op);
             notes.push_back(t.note);
             sum += t.note.value();
-            if (sum >= targetAmount) {
+            // Coin control: when the caller pinned exact notes, consume ALL of them
+            // (any surplus becomes shielded change); only auto-selection early-breaks.
+            if (!useInputSelection_ && sum >= targetAmount) {
                 break;
             }
         }
@@ -564,7 +566,9 @@ bool AsyncRPCOperation_sendmany::main_impl() {
     for (auto o : z_sprout_inputs_) {
         zInputsDeque.push_back(o);
         tmp += std::get<2>(o);
-        if (tmp >= targetAmount) {
+        // Coin control: when the caller pinned exact notes, consume ALL of them
+        // (any surplus becomes shielded change); only auto-selection early-breaks.
+        if (!useInputSelection_ && tmp >= targetAmount) {
             break;
         }
     }
