@@ -238,7 +238,10 @@ BITCOIN_CORE_H = \
   zmq/zmqpublishnotifier.h \
   zslp/slp.h \
   zslp/op_return_push.h \
-  zslp/uint256_c.h
+  zslp/uint256_c.h \
+  zslp/zslpmsg.h \
+  zslp/zslpstore.h \
+  zslp/zslpindexer.h
 
 
 obj/build.h: FORCE
@@ -282,12 +285,16 @@ libbitcoin_server_a_SOURCES = \
   rpc/net.cpp \
   rpc/rawtransaction.cpp \
   rpc/server.cpp \
+  rpc/zslp.cpp \
   script/sigcache.cpp \
   timedata.cpp \
   torcontrol.cpp \
   txdb.cpp \
   txmempool.cpp \
   validationinterface.cpp \
+  zslp/zslpmsg.cpp \
+  zslp/zslpstore.cpp \
+  zslp/zslpindexer.cpp \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
 

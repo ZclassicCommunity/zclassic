@@ -39,6 +39,7 @@
 #include "util.h"
 #include "utilmoneystr.h"
 #include "validationinterface.h"
+#include "zslp/zslpindexer.h"
 #ifdef ENABLE_WALLET
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
@@ -282,6 +283,9 @@ void Shutdown()
         pwalletMain->Flush(true);
 #endif
 
+    // ZSLP indexer: unregister from the validation bus and release the store.
+    StopZSLPIndexer();
+
 #if ENABLE_ZMQ
     if (pzmqNotificationInterface) {
         UnregisterValidationInterface(pzmqNotificationInterface);
@@ -519,6 +523,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-debug=<category>", strprintf(_("Output debugging information (default: %u, supplying <category> is optional)"), 0) + ". " +
         _("If <category> is not supplied or if <category> = 1, output all debugging information.") + " " + _("<category> can be:") + " " + debugCategories + ".");
     strUsage += HelpMessageOpt("-experimentalfeatures", _("Enable use of experimental features"));
+    strUsage += HelpMessageOpt("-zslpindex", strprintf(_("Maintain a read-only index of ZSLP token OP_RETURN messages, for the zslp_* RPCs (default: %u)"), 1));
     strUsage += HelpMessageOpt("-help-debug", _("Show all debugging options (usage: --help -help-debug)"));
     strUsage += HelpMessageOpt("-logips", strprintf(_("Include IP addresses in debug output (default: %u)"), 0));
     strUsage += HelpMessageOpt("-debuglogfile", _("Write debug output to debug.log file (default: 0, disabled for privacy)"));
@@ -3261,6 +3266,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     StartNode(threadGroup, scheduler);
     g_startupTimer.mark("start node");
+
+    // ZSLP token indexer (NON-consensus, read-only OP_RETURN observation).
+    // Default ON for this feature branch; opt out with -zslpindex=0.
+    if (GetBoolArg("-zslpindex", true)) {
+        StartZSLPIndexer();
+    }
 
     // Monitor the chain every minute, and alert if we get blocks much quicker or slower than expected.
     CScheduler::Function f = boost::bind(&PartitionCheck, &IsInitialBlockDownload,
