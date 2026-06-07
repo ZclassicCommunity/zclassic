@@ -4080,8 +4080,12 @@ void FallbackSproutValuePoolBalance(
                 // this point onwards (assuming the checkpoint is late enough)
                 pindex->nChainSproutValue = chainparams.SproutValuePoolCheckpointBalance();
             } else {
-                // Apparently we have been. So, we should expect the current
-                // value to match the hardcoded one.
+                // Chain-value recomputation cross-check against the ZIP-209 Sprout checkpoint.
+                // The nChainSproutValue was computed by summing per-block nSproutValue deltas
+                // (via checked arithmetic in ReceivedBlockTransactions + propagation).
+                // It must match the independently known balance at this height.
+                // This is the live recomputation test for the pool accounting (see also
+                // scripts/audit-mainnet-history.py for the full-history version).
                 assert(*pindex->nChainSproutValue == chainparams.SproutValuePoolCheckpointBalance());
                 // And we should expect non-none for the delta stored in the block index here,
                 // or the checkpoint is too early.
@@ -4104,21 +4108,38 @@ bool ReceivedBlockTransactions(const CBlock &block, CValidationState& state, CBl
     pindexNew->nChainTx = 0;
     CAmount sproutValue = 0;
     CAmount saplingValue = 0;
+    bool blockDeltaOk = true;
     for (auto tx : block.vtx) {
         // Negative valueBalance "takes" money from the transparent value pool
         // and adds it to the Sapling value pool. Positive valueBalance "gives"
         // money to the transparent value pool, removing from the Sapling value
         // pool. So we invert the sign here.
-        saplingValue += -tx.valueBalance;
+        if (!CheckedAddTo(saplingValue, -tx.valueBalance)) {
+            blockDeltaOk = false;
+            break;
+        }
 
         for (auto js : tx.vjoinsplit) {
-            sproutValue += js.vpub_old;
-            sproutValue -= js.vpub_new;
+            if (!CheckedAddTo(sproutValue, js.vpub_old) ||
+                !CheckedAddTo(sproutValue, -js.vpub_new)) {
+                blockDeltaOk = false;
+                break;
+            }
         }
+        if (!blockDeltaOk) break;
     }
-    pindexNew->nSproutValue = sproutValue;
+    if (blockDeltaOk) {
+        pindexNew->nSproutValue = sproutValue;
+        pindexNew->nSaplingValue = saplingValue;
+    } else {
+        // Overflow in per-block shielded pool delta (see April-2026 per-pool
+        // signed overflow class). Do not trust this block's delta for chain
+        // value propagation; descendants will get nChain*Value = none until
+        // a later checkpoint or reindex can re-establish a known-good total.
+        pindexNew->nSproutValue = boost::none;
+        pindexNew->nSaplingValue = 0;
+    }
     pindexNew->nChainSproutValue = boost::none;
-    pindexNew->nSaplingValue = saplingValue;
     pindexNew->nChainSaplingValue = boost::none;
     pindexNew->nFile = pos.nFile;
     pindexNew->nDataPos = pos.nPos;
@@ -4139,12 +4160,22 @@ bool ReceivedBlockTransactions(const CBlock &block, CValidationState& state, CBl
             pindex->nChainTx = (pindex->pprev ? pindex->pprev->nChainTx : 0) + pindex->nTx;
             if (pindex->pprev) {
                 if (pindex->pprev->nChainSproutValue && pindex->nSproutValue) {
-                    pindex->nChainSproutValue = *pindex->pprev->nChainSproutValue + *pindex->nSproutValue;
+                    CAmount chainSprout;
+                    if (CheckedAdd(*pindex->pprev->nChainSproutValue, *pindex->nSproutValue, chainSprout)) {
+                        pindex->nChainSproutValue = chainSprout;
+                    } else {
+                        pindex->nChainSproutValue = boost::none;
+                    }
                 } else {
                     pindex->nChainSproutValue = boost::none;
                 }
                 if (pindex->pprev->nChainSaplingValue) {
-                    pindex->nChainSaplingValue = *pindex->pprev->nChainSaplingValue + pindex->nSaplingValue;
+                    CAmount chainSapling;
+                    if (CheckedAdd(*pindex->pprev->nChainSaplingValue, pindex->nSaplingValue, chainSapling)) {
+                        pindex->nChainSaplingValue = chainSapling;
+                    } else {
+                        pindex->nChainSaplingValue = boost::none;
+                    }
                 } else {
                     pindex->nChainSaplingValue = boost::none;
                 }

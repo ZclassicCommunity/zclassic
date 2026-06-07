@@ -8,6 +8,7 @@
 
 #include "serialize.h"
 
+#include <limits>
 #include <stdlib.h>
 #include <string>
 
@@ -29,6 +30,26 @@ extern const std::string CURRENCY_UNIT;
  * */
 static const CAmount MAX_MONEY = 21000000 * COIN;
 inline bool MoneyRange(const CAmount& nValue) { return (nValue >= 0 && nValue <= MAX_MONEY); }
+
+/**
+ * Checked arithmetic helpers for CAmount (signed 64-bit).
+ * These prevent undefined behavior from signed overflow and are used for
+ * shielded value pool delta and chain-value tracking (see ZIP-209 turnstile paths
+ * and the April-2026 signed-integer overflow class in per-pool accounting).
+ */
+inline bool CheckedAdd(CAmount a, CAmount b, CAmount& result) {
+    if (b > 0 && a > std::numeric_limits<CAmount>::max() - b) return false;
+    if (b < 0 && a < std::numeric_limits<CAmount>::min() - b) return false;
+    result = a + b;
+    return true;
+}
+
+inline bool CheckedAddTo(CAmount& a, CAmount b) {
+    CAmount tmp;
+    if (!CheckedAdd(a, b, tmp)) return false;
+    a = tmp;
+    return true;
+}
 
 /** Type-safe wrapper class to for fee rates
  * (how much to pay based on transaction size)
