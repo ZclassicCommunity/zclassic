@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transparent-Value Shielded Pool (TVSP) for Zclassic</title>
+<style>
+  :root{
+    --bg:#f6f5f1; --panel:#ffffff; --ink:#1d2024; --muted:#5b636e;
+    --accent:#b4541f; --accent2:#0b6b5f; --line:#e3e0d8; --code:#f1efe9;
+    --good:#0b6b5f; --warn:#b4541f; --bad:#a3271f;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  .wrap{max-width:880px; margin:0 auto; padding:56px 24px 96px}
+  header.doc{border-bottom:3px solid var(--ink); padding-bottom:22px; margin-bottom:36px}
+  header.doc h1{font-size:30px; line-height:1.2; margin:0 0 10px; letter-spacing:-.3px}
+  header.doc .tagline{font-size:18px; color:var(--ink); font-style:italic; margin:0 0 14px}
+  header.doc .meta{font-size:13.5px; color:var(--muted)}
+  header.doc .meta b{color:var(--ink)}
+  h2{font-size:23px; margin:46px 0 14px; padding-top:10px; letter-spacing:-.2px}
+  h3{font-size:18px; margin:30px 0 10px; color:#2a2e34}
+  h4{font-size:15.5px; margin:22px 0 8px; color:#2a2e34}
+  p{margin:0 0 14px}
+  a{color:var(--accent2)}
+  strong{color:#111}
+  blockquote{
+    margin:18px 0; padding:14px 20px; background:var(--panel);
+    border-left:4px solid var(--accent); border-radius:0 8px 8px 0;
+    font-size:17px; color:#2a2e34;
+  }
+  code{
+    background:var(--code); padding:1.5px 6px; border-radius:5px;
+    font:13.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; color:#3a2a16;
+  }
+  pre{
+    background:#1f2329; color:#e7e3da; padding:16px 18px; border-radius:10px;
+    overflow:auto; margin:16px 0; font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    border:1px solid #2c313a;
+  }
+  pre code{background:none; padding:0; color:inherit; font-size:13px}
+  table{border-collapse:collapse; width:100%; margin:18px 0; font-size:14.5px; background:var(--panel); border-radius:10px; overflow:hidden}
+  th,td{border:1px solid var(--line); padding:9px 12px; text-align:left; vertical-align:top}
+  th{background:#efece4; font-weight:600}
+  tbody tr:nth-child(even){background:#faf9f6}
+  ul,ol{margin:0 0 16px; padding-left:22px}
+  li{margin:5px 0}
+  hr{border:none; border-top:1px solid var(--line); margin:34px 0}
+  .ok{color:var(--good); font-weight:600}
+  .warn{color:var(--warn); font-weight:600}
+  .bad{color:var(--bad); font-weight:600}
+  .pill{display:inline-block; font-size:12px; padding:2px 9px; border-radius:999px; background:#efece4; color:var(--muted); border:1px solid var(--line)}
+  .callout{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 18px; margin:18px 0}
+  .footnote{font-size:13.5px; color:var(--muted)}
+  h2::before{content:""; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <h1>Transparent-Value Shielded Pool (TVSP) for Zclassic</h1>
+  <p class="tagline">A shielded pool that makes per-transaction value conservation public and exact — removing the homomorphic value-balance / binding-signature soundness class — while keeping participant privacy. It narrows, but does not eliminate, proof-system counterfeiting risk.</p>
+  <p class="meta"><b>Status:</b> Draft proposal (v2, corrected security claims) &nbsp;·&nbsp; <b>Target:</b> Zclassic (ZipherX), Sapling/Groth16 lineage &nbsp;·&nbsp; <b>Audience:</b> protocol engineers, reviewers</p>
+</header>
+
+<div class="callout">
+  <strong>What changed in v2.</strong> v1 of this document overclaimed. It said public amounts make the supply &ldquo;provably non-inflatable&rdquo; and that any soundness bug becomes &ldquo;immediately visible.&rdquo; That is false: the privacy that hides <em>which</em> note is spent also hides whether the value claimed for that note is legitimate. Public amounts make value <em>arithmetic</em> public — they do <strong>not</strong> make note <em>existence</em> or <em>uniqueness</em> public. v2 states the honest, narrower claim and is explicit about what remains inside the proof. The Orchard premise is also corrected to match the official Zcash Foundation disclosure.
+</div>
+
+<h2>1. Abstract</h2>
+<p>Every privacy coin that hides transaction <strong>amounts</strong> inside a zero-knowledge proof concentrates a lot of trust in one place: the soundness of the shielded circuit (and, for Groth16, its trusted setup) plus the binding of its value commitments. If the value-conservation argument inside the proof is wrong, value can be forged inside the pool, and because the amounts are hidden the forgery carries no obvious on-chain signature — it is contained, but not necessarily <em>seen</em>, by a turnstile.</p>
+<p>The June-2026 Zcash <strong>Orchard</strong> incident is the reference point, and it is worth stating precisely (see §2.1): it was <em>a soundness bug in the <code>halo2_gadgets</code> Orchard Action circuit</em> that could &ldquo;accept invalid state transitions … potentially permitting <strong>double-spending</strong> of funds within Orchard.&rdquo; The Zcash Foundation was explicit that there was <strong>&ldquo;no ability to inflate the total ZEC supply, which is protected by Zcash's turnstile mechanism.&rdquo;</strong> So the canonical 2026 incident is a <em>double-spend / invalid-state-transition</em> bug whose supply impact was <strong>contained by the turnstile</strong> — not the &ldquo;unlimited undetectable minting&rdquo; of market commentary.</p>
+<p>This proposal takes a deliberate design choice for a <em>new</em> Zclassic shielded pool: <strong>make the note value public, keep the participants private.</strong> The amount of every note is published in the clear; the proof is reduced to <em>spend authority + note membership + value-binding + nullifier correctness</em> and no longer carries a homomorphic value balance. Value conservation becomes ordinary public integer arithmetic enforced by consensus.</p>
+<p>The honest result:</p>
+<ul>
+  <li><span class="ok">Per-transaction value conservation becomes a public, exact, non-circuit consensus check.</span> A transaction that does not conserve value is rejected in the clear. The <em>homomorphic value-balance / binding-signature</em> soundness class — a category of under-constrained in-circuit value arithmetic — is removed by construction. (This is <strong>adjacent to but distinct from</strong> the Orchard Action-circuit bug, which the official record describes as an invalid-state-transition / double-spend bug that TVSP does <em>not</em> fully fix — §6.2.)</li>
+  <li><span class="ok">The proving circuit shrinks</span> to authority + membership + value-binding + nullifier: a strictly smaller, easier-to-audit surface.</li>
+  <li><span class="ok">The pool's net solvency is continuously, publicly auditable</span> — <code>nChainTVSPValue</code> is reconstructible from public data at every height, so the turnstile becomes <em>exact</em> rather than derived from hidden commitments.</li>
+  <li><span class="ok">Sender, receiver, and the input↔output link remain hidden</span> — the proof still hides <em>which</em> note is spent and <em>who</em> owns it.</li>
+</ul>
+<p>And the honest limits (§6 in full):</p>
+<ul>
+  <li><span class="bad">It does NOT make the supply &ldquo;provably non-inflatable.&rdquo;</span> Membership, value-binding, nullifier, and authorization soundness all still live inside the proof. A bug in any of them still injects value, and that injection is <strong>bounded — not detected — by the (now-exact) turnstile, exactly as today.</strong> Public amounts prove arithmetic, not the existence or uniqueness of the notes behind it.</li>
+  <li><span class="bad">Amount privacy is given up</span>, and because public amounts leak linkage via amount-correlation, robust graph privacy requires <strong>fixed denominations</strong> (a mixer-style pool).</li>
+</ul>
+<p>This is a <em>different</em> privacy model than Zcash, not a strictly superior one. It trades amount-confidentiality for a smaller, public, exactly-auditable value surface — with the residual ZK risk <strong>contained, not eliminated</strong>.</p>
+
+<h2>2. Motivation</h2>
+
+<h3>2.1 The Orchard incident, stated correctly</h3>
+<p>The official Zcash Foundation disclosure (Zebra 4.5.3 / 5.0.0 emergency soft fork, NU6.2) describes the bug as:</p>
+<blockquote>&ldquo;a soundness bug in the implementation of the Orchard zero-knowledge proof circuit in the <code>halo2_gadgets</code> crate … could allow the Orchard pool to accept invalid state transitions … potentially permitting <strong>double-spending</strong> of funds within Orchard.&rdquo;</blockquote>
+<p>and, crucially:</p>
+<blockquote>&ldquo;<strong>no ability to inflate the total ZEC supply, which is protected by Zcash's turnstile mechanism</strong> … [the turnstile] tracks the total ZEC balance across all value pools [and] provided a ground truth that ecosystem participants could use to confirm the supply cap remained intact.&rdquo;</blockquote>
+<p>The advisory is tracked as <strong>GHSA-jfw5-j458-pfv6</strong> (Critical), mitigated by a soft fork temporarily disabling Orchard actions. The disclosers' official post-mortem (<em>The Orchard Counterfeiting Vulnerability — And Next Steps</em>) gives the most precise primary root cause: <em>&ldquo;an under-constrained element of the Orchard circuit, because of which it was possible to put arbitrary false inputs into an elliptic curve multiplication and still have the multiplication check pass.&rdquo;</em> No primary source names a specific gadget; the finer &ldquo;variable-base scalar-multiplication&rdquo; attribution circulating in community and third-party write-ups is <strong>not</strong> in any primary disclosure, so this document does not assert it.</p>
+<p>Two lessons for this proposal, and both cut against the v1 framing:</p>
+<ol>
+  <li>The 2026 incident is a <strong>double-spend / invalid-state-transition</strong> bug — exactly the class TVSP does <strong>not</strong> fully fix (see §6.2). It is <em>not</em> an example of undetectable supply inflation.</li>
+  <li>In that incident the <strong>turnstile provided the containment / ground-truth mechanism</strong>; had exploitation occurred, it would have bounded cross-pool extraction at the supply level. The turnstile is not &ldquo;only a seatbelt that proves nothing&rdquo;; it is a real, load-bearing layer — which is precisely why TVSP keeps it (made exact), rather than replacing it.</li>
+</ol>
+<p>For context, the April-2026 Zcash advisories also included a <strong>turnstile-accounting bypass</strong> (a re-seen block header silently overwriting a block index's pool-balance fields with <code>nullopt</code>, disabling enforcement across blocks) and a <strong>signed-integer overflow in per-pool value-delta computation</strong> that &ldquo;could potentially have caused turnstile checks to be skipped, consensus validation to return early, or pool balance values to be computed incorrectly.&rdquo; These are directly relevant to TVSP's implementation surface (§7): TVSP moves <em>more</em> logic into public pool arithmetic, so that arithmetic must be overflow-safe and applied on every path.</p>
+
+<h3>2.2 The structural problem TVSP targets</h3>
+<p>In Sapling (Zclassic's current shielded pool) the value <code>v</code> of a note is never revealed. It is carried in a homomorphic <strong>Pedersen value commitment</strong></p>
+<pre><code>cv = [v]·V + [rcv]·R          (V, R = fixed independent generators)</code></pre>
+<p>and a <strong>binding signature</strong> over the sum of all <code>cv</code> proves</p>
+<pre><code>Σ cv(inputs) − Σ cv(outputs) = [valueBalance]·V</code></pre>
+<p>i.e. that inputs and outputs balance — without revealing any individual <code>v</code>. Conservation therefore rests on <strong>two</strong> in-circuit / commitment properties being simultaneously correct:</p>
+<ol>
+  <li>the value commitment being <strong>binding</strong>, and</li>
+  <li>the Spend/Output <strong>circuit being sound</strong> so the <code>cv</code> matches the note actually owned.</li>
+</ol>
+<p>If either fails, an attacker can make a transaction <em>appear</em> to conserve value when it does not, minting value inside the pool. TVSP removes this specific failure mode by deleting <code>cv</code> and the binding signature and checking conservation as public integers instead (§4.5).</p>
+
+<h3>2.3 What the turnstile does and does not do — precisely</h3>
+<p>A turnstile (Zcash's ZIP-209; the same mechanism Zclassic now enforces — see §2.4) tracks the pool's net balance and <strong>rejects any block that would drive it negative</strong>. It is genuinely valuable (it held supply during the Orchard incident), but its guarantee is <strong>net solvency bounded by liquidity</strong>, not per-note provenance:</p>
+<table>
+  <thead><tr><th>The turnstile <span class="ok">does</span></th><th>The turnstile <span class="bad">does not</span></th></tr></thead>
+  <tbody>
+    <tr><td>Cap the maximum extractable counterfeit at the pool's real liquidity</td><td>Prevent extraction up to that liquidity</td></tr>
+    <tr><td>Detect insolvency <em>at the boundary</em> (when net balance would go negative)</td><td>Detect a counterfeit while the pool stays net-solvent (latent)</td></tr>
+    <tr><td>Contain counterfeit inside the pool boundary</td><td>Recover funds, identify the attacker, or prove no counterfeit exists internally</td></tr>
+  </tbody>
+</table>
+<p>This is true under Sapling <strong>and under TVSP</strong>. TVSP makes the turnstile <em>exact and public</em> (anyone can recompute it), but does <strong>not</strong> change its essential nature: it bounds, it does not detect-per-note. The improvement TVSP brings is to the <em>value-conservation</em> check (§4.5), not to the turnstile's containment semantics.</p>
+
+<h3>2.4 Status in the current Zclassic tree</h3>
+<p>This is no longer aspirational: the current ZipherX tree enables ZIP-209 on mainnet (<code>src/chainparams.cpp</code> — <code>fZIP209Enabled = true</code>, Sprout checkpoint at height 3,000,000, balance <code>1316412375709</code>), and <code>ConnectBlock</code> rejects negative Sprout/Sapling pool balances under <code>if (chainparams.ZIP209Enabled())</code> (<code>src/main.cpp:2590</code>). Sapling nullifier double-spend checks are present (<code>src/coins.cpp:596</code>). An exhaustive <code>--full</code> history scan found <code>negative_pool_events: 0</code> across all ~3.13M blocks, and both pools are net-positive at the tip — strong evidence <strong>no net drain has occurred</strong>, but (as the audit notes themselves state) <strong>not</strong> proof of the absence of a latent, unexploited circuit bug. That gap is exactly what motivates moving value out of the proof.</p>
+
+<h3>2.5 The design goal</h3>
+<blockquote>Keep <strong>who</strong> private. Make <strong>how much</strong> public, conserved by plain arithmetic, and shrink the proof to the smallest authority+membership+nullifier statement.</blockquote>
+
+<h2>3. Design overview</h2>
+<p>We introduce a new shielded transaction type — the <strong>Transparent-Value Shielded Pool (TVSP)</strong> — alongside (not replacing) the existing transparent and Sapling pools. Funds enter via a <em>shield</em> action and leave via an <em>unshield</em> action; internal transfers move value between TV-notes.</p>
+<p>A <strong>TV-note</strong> is the same as a Sapling note <strong>except its value is public</strong>:</p>
+<pre><code>TV-note = ( diversifier d, pk_d, value v, rcm )      // v is published in the clear
+commitment  cm = NoteCommit( g_d, pk_d, v )           // unchanged: cm still commits to v</code></pre>
+<p>Compared to Sapling, the change is surgical:</p>
+<table>
+  <thead><tr><th>Component</th><th>Sapling (today)</th><th>TVSP (proposed)</th></tr></thead>
+  <tbody>
+    <tr><td>Note value <code>v</code></td><td><strong>hidden</strong> (witness)</td><td><strong>public</strong> (in the tx, and a <em>public input</em> to the circuit)</td></tr>
+    <tr><td>Value commitment <code>cv</code></td><td>present (<code>[v]·V+[rcv]·R</code>)</td><td><strong>removed</strong></td></tr>
+    <tr><td>Binding signature</td><td>present (proves Σ<code>cv</code> balances)</td><td><strong>removed</strong></td></tr>
+    <tr><td>Value-conservation check</td><td>homomorphic commitment balance (in-proof)</td><td><strong>plain public arithmetic in consensus</strong></td></tr>
+    <tr><td>Spend circuit proves</td><td>authority + membership + nullifier + value commitment</td><td>authority + membership + nullifier + <strong>value-binding of public <code>v</code> to <code>cm</code></strong></td></tr>
+    <tr><td>Nullifier <code>nf</code></td><td><code>BLAKE2s(nk‖ρ)</code></td><td>unchanged (own domain — see §7)</td></tr>
+    <tr><td>Spend authority <code>rk</code></td><td><code>ak + [ar]·G</code></td><td>unchanged</td></tr>
+    <tr><td>Note encryption</td><td>encrypts <code>v</code> to recipient</td><td>recipient still gets a memo/key; <code>v</code> no longer needs hiding</td></tr>
+  </tbody>
+</table>
+<p>Everything that provides <strong>participant privacy</strong> (membership-hiding spend, hidden spend authority, nullifiers, diversified addresses) is <strong>kept</strong>. The <strong>value commitment and binding signature</strong> are <strong>removed</strong>, and the amount is published and conserved by consensus arithmetic. The value-binding constraint (<code>cm</code> opens to the declared public <code>v</code>) <strong>moves into the proof</strong> and becomes a high-value audit target (§6.2).</p>
+
+<h2>4. Technical specification</h2>
+
+<h3>4.1 Note and commitment</h3>
+<p>A TV-note commits to its value exactly as Sapling does:</p>
+<pre><code>cm = PedersenHash( NoteCommit_personalization, [ value(64 bits) ‖ g_d(256) ‖ pk_d(256) ] ) + [rcm]·NoteCommitRandomness</code></pre>
+<p>The only change is that <code>value</code> is <strong>also revealed in the clear</strong> in the spend/output description, and the circuit takes <code>value</code> as a <strong>public input</strong> (not a private witness). The circuit must prove that the opened <code>cm</code> uses exactly that public <code>value</code>. This binds the public value to the note — <strong>conditional on the NoteCommit gadget and the membership path being sound</strong> (see §6.2; this is <em>not</em> a free public guarantee, it is an in-circuit one).</p>
+
+<h3>4.2 Transaction format</h3>
+<p>A new transaction version <code>TVSP_TX_VERSION</code> (new <code>nVersionGroupId</code>, new consensus branch ID) carries:</p>
+<pre><code>tvSpends[]  : { anchor, nullifier nf, rk, value v_in (PUBLIC), zkproof }      // no cv, no bindingSig
+tvOutputs[] : { cmu, ephemeralKey, encCiphertext, value v_out (PUBLIC), zkproof }
+valueBalanceTVSP : signed integer (net public value leaving the pool to transparent)</code></pre>
+<p><code>v_in</code> and <code>v_out</code> are explicit public integers. There is <strong>no</strong> <code>bindingSig</code>. The sighash must cover all public value fields and <code>valueBalanceTVSP</code>.</p>
+
+<h3>4.3 Spend circuit (TVSP)</h3>
+<p>Identical to the Sapling Spend circuit <strong>minus</strong> the value-commitment gadget. It proves, for a public <code>value v_in</code>:</p>
+<ol>
+  <li>The prover knows <code>ak, nsk</code> ⇒ <code>nk = [nsk]·G</code>, <code>ivk = CRH(ak, nk)</code>.</li>
+  <li><code>rk = ak + [ar]·SpendAuthGenerator</code> is exposed (re-randomized spend-auth key; the spend signature verifies against <code>rk</code>).</li>
+  <li>The note commitment <code>cm = NoteCommit(g_d, pk_d, v_in)</code> opens to the <strong>public</strong> <code>v_in</code> (value-binding constraint).</li>
+  <li><code>cm</code> is a member of the note-commitment tree at the public <code>anchor</code> (Merkle path), gated by <code>v_in ≠ 0</code> (dummy notes exempt).</li>
+  <li><code>nf = PRF^{nf}(nk, ρ)</code> is correctly derived and exposed.</li>
+</ol>
+<p>It does <strong>not</strong> prove anything about a value commitment, and there is no homomorphic value balance inside the proof. Constraints (3), (4), (5) are the residual soundness-critical surface (§6.2).</p>
+
+<h3>4.4 Output circuit (TVSP)</h3>
+<p>Identical to Sapling Output <strong>minus</strong> the value-commitment gadget. It proves, for a public <code>value v_out</code>, that <code>cmu</code> is a correct note commitment to <code>(g_d, pk_d, v_out)</code>.</p>
+
+<h3>4.5 Consensus: value conservation is now public arithmetic</h3>
+<p>TVSP mirrors the existing Sapling convention exactly — it does <strong>not</strong> invent a per-pool fee equation. Define the net public flow as a single signed quantity:</p>
+<pre><code>valueBalanceTVSP  :=  Σ tvSpends[i].v_in  −  Σ tvOutputs[j].v_out</code></pre>
+<p>with the same sign meaning as Sapling's <code>valueBalance</code>: <strong>positive</strong> = value leaving the TVSP pool <em>into</em> the transparent value pool (acts like a transparent input); <strong>negative</strong> = value entering the TVSP pool <em>from</em> transparent (acts like a transparent output). Consensus folds it into the <strong>global</strong> transaction value pool exactly as the code does for Sapling (<code>GetShieldedValueIn()</code> / <code>GetValueOut()</code>):</p>
+<ul>
+  <li><code>GetShieldedValueIn()</code> adds <code>valueBalanceTVSP</code> when it is <strong>positive</strong> (like an input);</li>
+  <li><code>GetValueOut()</code> adds <code>−valueBalanceTVSP</code> when it is <strong>negative</strong> (like an output).</li>
+</ul>
+<p>The <strong>fee is the single global remainder across all value pools</strong>, never attributed to the TVSP component:</p>
+<pre><code>nValueIn  =  Σ(transparent vin)  +  GetShieldedValueIn()     // incl. +valueBalanceTVSP, sprout vpub_new, sapling
+require    nValueIn  ≥  GetValueOut()                         // GetValueOut incl. −valueBalanceTVSP
+fee       =  nValueIn  −  GetValueOut()                       // one global subtraction (CheckTxInputs)</code></pre>
+<p>There is <strong>no</strong> <code>+ fee</code> term inside any per-pool balance equation. (An earlier draft wrote <code>Σ v_in == Σ v_out + fee + valueBalanceTVSP</code>; that wrongly localizes the fee to the shielded pool and is rejected — see <code>src/main.cpp:2135,2140,2146</code> and <code>src/primitives/transaction.cpp:285,309</code>, where the fee is the global remainder spanning transparent + sprout + sapling.) As <code>CheckTransaction</code> does for Sapling (<code>src/main.cpp</code> ~1252–1260), consensus also range-checks <code>|valueBalanceTVSP| ≤ MAX_MONEY</code> and rejects a non-zero <code>valueBalanceTVSP</code> when there are no TVSP spends/outputs.</p>
+<p>The pool-level invariant (an exact, public turnstile) — accumulating the per-block delta as <code>−valueBalanceTVSP</code>, mirroring <code>src/main.cpp:4117</code>, with checked arithmetic (§7):</p>
+<pre><code>nChainTVSPValue  =  Σ (value shielded in)  −  Σ (value unshielded out)   ≥  0   at every height</code></pre>
+<p><strong>What this does and does not guarantee.</strong> The global value-conservation rule is a <em>hard public guarantee</em>: a transaction whose inputs do not cover its outputs (across all value pools) is rejected in the clear, no circuit involved. The pool invariant is <em>net solvency</em>: it is exact and public, but — as §2.3 and §6.2 explain — it bounds counterfeit extraction at the pool's liquidity; it does <strong>not</strong> detect a counterfeit that is balanced internally or extracted within available liquidity. Per-note provenance is not public (privacy hides which note is spent), so the soundness of constraints §4.3(3)–(5) still matters.</p>
+
+<h3>4.6 What is no longer needed</h3>
+<ul>
+  <li>The <strong>binding signature</strong> and its key.</li>
+  <li>The <strong>value-commitment generators</strong> and the <code>[v]·V</code> / <code>[rcv]·R</code> gadgets in both circuits (a real reduction in circuit size and in the soundness-critical surface).</li>
+  <li>Encrypting the value to the recipient is optional (the value is public); the encrypted memo channel is retained for the rest of the note plaintext.</li>
+</ul>
+
+<h2>5. Privacy model — what you keep, what you lose</h2>
+
+<h3>5.1 Kept (participant / graph privacy)</h3>
+<ul>
+  <li><strong>Which note is spent is hidden</strong> — membership-hiding spend, exactly as Sapling.</li>
+  <li><strong>Spender identity is hidden</strong> — only <code>rk</code> (a re-randomization of the spend-auth key) is revealed; unlinkable across spends.</li>
+  <li><strong>Recipient identity is hidden</strong> — outputs reveal only <code>cmu</code> and an ephemeral key.</li>
+  <li><strong>Nullifiers</strong> prevent double-spends without linking to the note.</li>
+</ul>
+
+<h3>5.2 Lost (amount privacy) — and the correlation caveat</h3>
+<ul>
+  <li><strong>Amounts are public.</strong> An observer sees that &ldquo;13.37 ZCL&rdquo; moved (but not who).</li>
+  <li><strong>Public amounts leak linkage.</strong> A spend of <code>13.37</code> and an output of <code>13.37</code> are probably the same flow — <em>amount-correlation</em> re-links inputs to outputs even though the specific note is hidden. With arbitrary values, graph privacy <strong>largely collapses</strong>.</li>
+</ul>
+
+<h3>5.3 The fix: fixed denominations (and segregated denomination trees)</h3>
+<p>To preserve graph privacy with public amounts, TVSP should operate on <strong>fixed denominations</strong> (e.g. notes only in {0.01, 0.1, 1, 10, 100} ZCL). Then every spend and output of a given denomination is identical in value → no amount-correlation, and the anonymity set is &ldquo;all notes of that denomination.&rdquo; This turns TVSP into a <strong>denomination pool / mixer</strong>:</p>
+<ul>
+  <li>Arbitrary amounts are expressed as a <strong>set</strong> of fixed-denomination notes (like cash).</li>
+  <li>The anonymity set for each note is the count of same-denomination notes ever created.</li>
+  <li>UX cost: wallets split/merge into denominations (more notes per transaction); liquidity fragments per bucket; low-volume chains accumulate large anonymity sets slowly. Timing + public value + network observation still permit statistical attacks even with denominations.</li>
+</ul>
+<p><strong>Security bonus:</strong> if each denomination has its <strong>own commitment tree</strong> and a spend declares which tree it draws from, then <code>v_in</code> is <em>structurally</em> fixed to that denomination. This upgrades the &ldquo;open a real note to a higher <code>v</code>&rdquo; defense (§6.2) from circuit-dependent to structural — you cannot spend a denom-1 note as denom-100 because it is not in the denom-100 tree. (Membership-forgery and double-spend <em>within</em> a denom tree still rest on the circuit.) Segregated denomination trees are therefore recommended both for privacy and for narrowing the residual soundness surface.</p>
+<p><strong>Honest core trade-off:</strong> strong graph privacy + public amounts is achievable only via fixed denominations. With free-form amounts you get public conservation but weak graph privacy.</p>
+
+<h2>6. Security analysis (corrected)</h2>
+
+<h3>6.1 What TVSP genuinely fixes</h3>
+<ul>
+  <li><span class="ok">Removes the homomorphic value-balance / binding-signature soundness class.</span> Conservation is checked as public integers; there is no <code>cv</code> to mis-bind and no binding signature to be unsound. A transaction that does not conserve value cannot be validly included — it is rejected in the clear by consensus, not by a circuit. This removes the <em>homomorphic value-balance / binding-signature</em> category of in-circuit value-arithmetic soundness bug. That category is <strong>adjacent to but distinct from</strong> the Orchard Action-circuit bug, which the official record describes as an invalid-state-transition / double-spend bug (an under-constrained element that let false inputs pass an elliptic-curve multiplication check; §2.1) — a class TVSP does <em>not</em> fully fix (§6.2). No primary source attributes the Orchard bug to a specific named gadget, so none is claimed here.</li>
+  <li><span class="ok">Shrinks the proving circuit</span> to authority + membership + value-binding + nullifier — fewer constraints, smaller audit surface, and (relative to Sapling) the deletion of the value gadgets is a net auditing win.</li>
+  <li><span class="ok">Makes net pool solvency continuously and publicly auditable.</span> <code>nChainTVSPValue</code> is exact and recomputable from public data at every block — the <strong>non-negative net pool balance is publicly recomputable</strong> at every height, with no forced migration or &ldquo;prove-supply&rdquo; ceremony required. (This is net balance only; it does <strong>not</strong> certify the absence of a latent, internally-balanced counterfeit, which remains turnstile-bounded, not detected — §6.2.)</li>
+</ul>
+
+<h3>6.2 What TVSP does <span class="bad">not</span> fix (the honest limits)</h3>
+<p>TVSP <strong>does not</strong> make the supply &ldquo;provably non-inflatable,&rdquo; and over-claims are <strong>not</strong> &ldquo;immediately visible.&rdquo; Membership, value-binding, nullifier, and authorization soundness remain inside the proof, and the privacy that hides <em>which</em> note is spent also hides whether its claimed value is legitimate. Therefore:</p>
+<ul>
+  <li><strong>Forged membership (counterfeit note from nothing).</strong> A bug that proves membership of a <code>cm</code> never inserted into the tree, with public <code>v=10</code>, lets you spend it → output a real <code>v=10</code> note. The per-tx equation balances (you control both sides); <code>nChainTVSPValue</code> only drops on unshield, and only goes negative once cumulative fake extraction exceeds the pool's <strong>total real liquidity</strong>. Until then nothing looks wrong. <strong>This is &ldquo;accumulate undetectable fake value, drain later&rdquo; — the seatbelt, not a real-time ledger.</strong></li>
+  <li><strong>Value-binding break (open a real low-<code>v</code> note to a higher <code>v_in</code>).</strong> If §4.3(3) is under-constrained, an attacker spends a real <code>v=5</code> note declaring <code>v_in=10</code>. Consensus cannot catch it, because membership privacy hides <em>which</em> note was spent, so it cannot compare <code>v_in=10</code> to the note's creation value <code>5</code>. Invisible per-tx; bounded only by liquidity. <em>(Segregated denomination trees, §5.3, neutralize this specific sub-case structurally.)</em></li>
+  <li><strong>Double-spend / nullifier soundness.</strong> A bug that lets one note produce two valid nullifiers permits spending it twice; each spend can be internally balanced. The over-extraction is bounded by the turnstile but is <strong>not</strong> visible as a per-tx imbalance. Detectable only as eventual net insolvency, exactly as today.</li>
+  <li><strong>Spend-authority break.</strong> A bug allowing a forged authorization lets an attacker spend notes they don't own — theft up to available liquidity. Value-public does not address this.</li>
+  <li><strong>Trusted-setup residue (if Groth16 is kept for the reduced statement).</strong> A ceremony compromise can no longer forge <em>value</em> (value is public arithmetic) but can still forge spends (theft / double-nullify of real notes). Smaller scope than full value-forgery, still serious. Pairing TVSP with a <strong>transparent-setup</strong> proof system (Halo 2 with the IPA/inner-product commitment, or a STARK) removes the <strong>ceremony-class residual entirely</strong> — no trusted setup, no toxic waste, no parameter-generation ceremony to compromise. It does <strong>not</strong> remove proof-system or circuit (constraint-system) soundness risk, which is independent of how parameters are generated. And transparency ≠ post-quantum: <strong>Halo 2-IPA rests on the elliptic-curve discrete-log assumption and is <em>not</em> post-quantum</strong> (Shor breaks it); only a hash-based <strong>STARK</strong> is plausibly post-quantum.</li>
+</ul>
+<div class="callout">
+  <strong>The correct one-line claim:</strong> TVSP prevents incorrect hidden-value <em>openings</em> and removes the homomorphic-balance soundness class; it <strong>does not</strong> eliminate proof-system counterfeiting as a class. Any residual membership/value-binding/nullifier/authority bug still injects value that is <strong>bounded — not detected — by the (now-exact) turnstile.</strong> The win is a smaller, public, exactly-auditable value surface with the residual ZK risk <em>contained</em>, not eliminated.
+</div>
+
+<h3>6.3 Where TVSP sits on the spectrum</h3>
+<pre><code>Transparent (Bitcoin)   everything public · no privacy · supply trivially auditable · public UTXO arithmetic; no hidden-pool inflation opacity
+TVSP (this proposal)    WHO hidden · HOW MUCH public · per-tx conservation public+exact · net solvency public+exact
+                        · residual membership/nullifier/authority soundness still in-proof, turnstile-bounded
+                        · graph privacy strong only with fixed denominations                              ← here
+Sapling / Orchard       everything hidden · max privacy · supply rests entirely on circuit+binding+setup
+                        · value-forgery AND double-spend risk if a soundness bug exists (turnstile bounds supply)</code></pre>
+<p>TVSP is a coherent <strong>middle point</strong>: it sacrifices amount-confidentiality to make value conservation public/exact and to shrink the proof, while retaining identity/graph privacy and <em>containing</em> (not removing) the residual ZK risk.</p>
+
+<h2>7. Implementation risks — new code, new consensus surface</h2>
+<p>A correct TVSP fork is much more than new fields. Each item below is a place a bug would re-introduce the exact &ldquo;accept bad value flows&rdquo; class that the historical IBD bypass (CR-01) enabled for Sapling.</p>
+<ul>
+  <li><strong>Checked arithmetic everywhere — already started.</strong> The per-pool delta path has already been hardened in the working tree: <code>ReceivedBlockTransactions</code> accumulates the Sprout/Sapling deltas via <code>CheckedAddTo</code> (<code>src/main.cpp:4117</code>, <code>4123–4124</code>; helpers <code>CheckedAdd</code> / <code>CheckedAddTo</code> at <code>src/amount.h:40–52</code>), falling back to <code>boost::none</code> on overflow, and chain-value propagation uses <code>CheckedAdd</code> — mirroring the April-2026 Zcash fix for the signed-integer per-pool-delta overflow class. <em>(As of this writing these changes are uncommitted in the working tree — unbuilt/untested.)</em> TVSP must extend the same <code>CheckedAddTo</code> / <code>CheckedAdd</code> discipline to <code>nChainTVSPValue</code> and every new per-tx check, including the sign handling on <code>valueBalanceTVSP</code>.</li>
+  <li><strong>Separate pool plumbing.</strong> New nullifier set, anchor DB, commitment tree, mempool nullifier maps, and a chain-index running total (<code>nChainTVSPValue</code>) — likely with a block-header commitment analogous to <code>hashFinalSaplingRoot</code> (<code>src/primitives/block.h</code>).</li>
+  <li><strong>Domain separation.</strong> TVSP commitments and nullifiers must use distinct personalization / a strictly separate tree from Sapling, or cross-pool replay/confusion becomes possible.</li>
+  <li><strong>Consensus-enforced denominations.</strong> Wallet-only denominations do not protect privacy or bound the value-binding surface; the denomination set (and, ideally, segregated trees, §5.3) must be a consensus rule.</li>
+  <li><strong>Apply the check on every path.</strong> The per-tx conservation and exact turnstile must run in <code>CheckTransaction</code> / <code>ContextualCheckTransaction</code> / <code>ConnectBlock</code> for <strong>all</strong> node states. Apply the CR-01 discipline (no validation shortcut during IBD/import/reindex) to the new paths from day one. A reindex under a buggy TVSP binary would be dangerous.</li>
+  <li><strong>Reorg / reindex correctness.</strong> <code>nChainTVSPValue</code> and the TVSP nullifier/anchor sets must rewind correctly on reorg and re-accumulate correctly during reindex/IBD.</li>
+  <li><strong>Format surface.</strong> New <code>nVersionGroupId</code>, branch ID, parser/serialization (public value fields, no <code>bindingSig</code>), sighash coverage, RPC encoding, <code>getblocktemplate</code>/miner policy, wallet note structures.</li>
+  <li><strong>Legacy-pool policy.</strong> While Sapling/Sprout shielding remains enabled, global supply still inherits their hidden-pool risk. Draining a legacy pool makes its <em>final net</em> auditable but does <strong>not</strong> retro-prove no prior inflation.</li>
+  <li><strong>Orthogonal hardening still applies.</strong> Bootstrap/fast-sync trust (no signed manifest in the reviewed tree), proving-key/parameter trust, DoS via many small-denom notes or large proofs, side-channels in proof generation — none are solved by TVSP.</li>
+  <li><strong>Not post-quantum by itself.</strong> The retained ZK is still discrete-log / Jubjub / Groth16; transparent ECDSA unchanged. TVSP can be <em>paired</em> with a PQ proof system but does not provide PQ guarantees on its own.</li>
+</ul>
+
+<h2>8. Recommendations (if pursuing TVSP)</h2>
+<ol>
+  <li><strong>First, independently of TVSP:</strong> patch Zclassic's existing pool accounting with checked-delta arithmetic and add chain-value recomputation / checkpoint tests (this also hardens the live ZIP-209 path).</li>
+  <li>Treat the public-conservation and exact-turnstile enforcement as consensus-critical; add property-based / differential tests: replay historical flows, force over-claims and duplicate nullifiers, and assert that invalid TV txs are rejected <strong>even under <code>isInitBlockDownload()</code></strong>.</li>
+  <li>Use <strong>fixed denominations from the start</strong> for any claim of strong privacy, and prefer <strong>segregated denomination trees</strong> (privacy + structural value-binding). Document the anonymity-set math and correlation/timing risks.</li>
+  <li>Regenerate keys for the reduced circuit; strongly prefer a <strong>transparent-setup</strong> proving system for the residual authority+membership+nullifier statement (note: Halo 2-IPA is transparent but <strong>not</strong> post-quantum; only a hash-based STARK is plausibly post-quantum).</li>
+  <li>Separate activation height + a <strong>mixed-pool test matrix</strong> (Sapling spend + TV shield/unshield/internal in one block, reorgs, reindex from genesis).</li>
+  <li>Expose <code>nChainTVSPValue</code> (and the sum of public output values) via <strong>RPC + block explorer</strong> as a live, independently verifiable shielded-supply figure.</li>
+  <li>Commission a <strong>focused audit on the delta</strong>: removed value gadgets vs. added public checks and the value-binding constraint (§4.3(3)) + the new consensus arithmetic. Consider formal methods / circuit-equivalence checks for the retained NoteCommit + membership + nullifier logic.</li>
+  <li><strong>Sunset policy:</strong> Sapling spendable long-term; new shielding into Sapling eventually disabled; users migrate at their pace — bounding ceremony risk for the old pool.</li>
+  <li><strong>Public communication:</strong> this is a deliberate privacy-model shift (identity/graph privacy + public amounts + public conservation + <em>contained</em> residual ZK risk), <strong>not</strong> &ldquo;Zcash but more private&rdquo; and <strong>not</strong> &ldquo;provably non-inflatable supply.&rdquo; Set expectations accordingly.</li>
+  <li>Gate any TVSP work on completing the broader hardening already surfaced in the repo's own audit documents (CR-01 IBD discipline, ZIP-209 correctness, download verification).</li>
+</ol>
+
+<h2>9. Conclusion</h2>
+<p>The Orchard episode showed that putting value <em>inside</em> a ZK proof makes supply integrity rest on the fallible circuit + binding + setup, and that a turnstile contains the blast radius at the supply level (it did, in 2026) without proving the absence of an internal bug. TVSP responds by publishing amounts and proving only <em>authority + membership + value-binding + no-double-spend</em>: per-transaction conservation becomes a public, exact, non-circuit consensus check; the proof shrinks; and net pool solvency is continuously, publicly auditable.</p>
+<p>What TVSP does <strong>not</strong> do is equally important and was overstated in v1: it does not make the supply &ldquo;provably non-inflatable,&rdquo; and it does not make over-claims &ldquo;immediately visible.&rdquo; Membership, value-binding, nullifier, and authorization soundness remain inside the proof, and any bug there still injects value that the (now-exact) turnstile <strong>bounds but does not detect</strong> — the same containment semantics as today. The honest claim is narrower and still worthwhile: <strong>a smaller, public, exactly-auditable value surface, with the residual ZK risk contained rather than eliminated, in exchange for amount confidentiality and a denomination-based UX.</strong></p>
+<p>It is not &ldquo;more private than Zcash.&rdquo; It is <strong>differently private, with public value conservation</strong> — a defensible choice for a chain that wants its shielded value arithmetic in the open and its proving surface as small as possible, while being candid that a latent membership/nullifier/authority bug would still be contained, not impossible.</p>
+
+<hr>
+
+<h3>Appendix A — Why &ldquo;value as a public input&rdquo; binds the amount, and exactly how far that goes</h3>
+<p>Making <code>value</code> a public input and constraining <code>cm = NoteCommit(g_d, pk_d, value)</code> ties the declared public <code>v_in</code> to the specific committed <code>cm</code> — <strong>provided the NoteCommit gadget and the Merkle membership path are sound, and the spent <code>cm</code> is genuinely in the tree.</strong> What this does <em>not</em> provide is a <em>public</em> check that <code>v_in</code> equals the value the note was created with: the spend hides which note it is, so consensus cannot make that comparison. The binding is therefore an <strong>in-circuit</strong> guarantee (as strong as constraints §4.3(3)–(4)), not a free public one. Segregated denomination trees (§5.3) convert the value-binding into a <em>structural</em> public guarantee for the denomination dimension, which is why they are recommended.</p>
+
+<h3>Appendix B — Relationship to the turnstile (ZIP-209)</h3>
+<p>ZIP-209 enforces <code>pool balance ≥ 0</code>. In Sapling those flows are derived from hidden commitments; in TVSP the same constraint is enforced on <strong>public</strong> per-transaction values, so <code>nChainTVSPValue</code> is fully reconstructible from chain data and the turnstile is <em>exact</em>. But &ldquo;exact&rdquo; refers to the <strong>net</strong> balance, not to per-note provenance: TVSP's turnstile, like Sapling's, <strong>bounds</strong> counterfeit extraction at the pool's liquidity and surfaces only <strong>net</strong> insolvency. It is ZIP-209 with the amounts in the open — a better, public, recomputable seatbelt, not a per-note fraud detector.</p>
+
+<h3>Appendix C — Contrast with the Zinnia / STARK direction</h3>
+<p>The <code>doc/zinnia-*</code> proposals aim higher (post-quantum + no trusted setup) by introducing a new AIR circuit, a new hash (RPO256 on Goldilocks), a new Merkle (RpoHash FFI), large proofs (~80–100 KB), and (at the time) acknowledged ZK-completeness gaps on an unaudited Winterfell branch — a larger implementation/audit risk and a block-size impact. TVSP is the more conservative step: it reuses the relatively well-exercised Sapling gadgets <em>minus</em> the value parts, directly targets the value-conservation surface, and does not mandate a block-size jump. The two are compatible — TVSP can later adopt a transparent/PQ proof system for its reduced statement (recommendation 4).</p>
+
+</div>
+</body>
+</html>
