@@ -1216,7 +1216,19 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
     // Size limits
     BOOST_STATIC_ASSERT(MAX_BLOCK_SIZE >= MAX_TX_SIZE_AFTER_SAPLING); // sanity
     BOOST_STATIC_ASSERT(MAX_TX_SIZE_AFTER_SAPLING > MAX_TX_SIZE_BEFORE_SAPLING); // sanity
-    if (::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION) > MAX_TX_SIZE_AFTER_SAPLING)
+    // This is the NON-contextual transaction-size check, so its bound must hold
+    // for EVERY block in chain history. Some historical (pre-reduction) blocks
+    // carry transactions larger than the current MAX_TX_SIZE_AFTER_SAPLING
+    // (102000), so enforcing that tight limit here rejects valid canonical
+    // blocks during -reindex / from-genesis validation (the daemon stalls at
+    // the first such block, ~height 478544, early Sapling era). Use a generous
+    // bound here, exactly mirroring GENEROUS_BLOCK_SIZE_LIMIT in CheckBlock
+    // ("checkpoint validates correctness"). If the tighter MAX_TX_SIZE_AFTER_SAPLING
+    // limit is meant to be a live consensus rule for new blocks, enforce it in
+    // ContextualCheckTransaction (which has nHeight), gated on its activation
+    // height — not in this non-contextual check.
+    const unsigned int GENEROUS_TX_SIZE_LIMIT = 2000000; // 2MB, matches GENEROUS_BLOCK_SIZE_LIMIT
+    if (::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION) > GENEROUS_TX_SIZE_LIMIT)
         return state.DoS(100, error("CheckTransaction(): size limits failed"),
                          REJECT_INVALID, "bad-txns-oversize");
 
