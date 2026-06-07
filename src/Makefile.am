@@ -181,6 +181,7 @@ BITCOIN_CORE_H = \
   random.h \
   reverselock.h \
   rpc/client.h \
+  rpc/nftoffer.h \
   rpc/protocol.h \
   rpc/server.h \
   rpc/register.h \

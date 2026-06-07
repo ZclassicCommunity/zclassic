@@ -7,15 +7,20 @@
 #include "script/standard.h"   // CTxDestination — must precede coincontrol.h
 #include "coincontrol.h"
 #include "consensus/upgrades.h"
+#include "init.h"              // pwalletMain (ZSLPFreshWalletScript)
 #include "key_io.h"
 #include "main.h"
+#include "rpc/protocol.h"      // JSONRPCError + RPC_* codes (shared helpers)
 #include "script/sign.h"
 #include "wallet/wallet.h"
 #include "zslp/zslpindexer.h"
 #include "zslp/zslpmsg.h"
 #include "zslp/zslpstore.h"
 
+#include <errno.h>
+#include <stdlib.h>
 #include <algorithm>
+#include <univalue.h>
 
 // ── Anti-burn coin-lock RAII ────────────────────────────────────────
 //
@@ -477,4 +482,74 @@ bool BuildAndCommitZSLP(CWallet* w, const ZSLPBuildReq& req,
         return false;
     }
     return true;
+}
+
+// ── Shared RPC helpers (B-1/B-2) ────────────────────────────────────
+//
+// ONE canonical copy, formerly duplicated as GetZSLPStoreOrThrow / ScriptForTAddr
+// / FreshWalletScript in rpc/zslp.cpp and Nft*-prefixed twins in rpc/nftoffer.cpp.
+// Behavior is byte-for-byte the pre-refactor logic (same error codes, same
+// messages) — they build the real token-carrier scriptPubKeys + the offer
+// template, so any drift would be load-bearing.
+
+CZSLPStore* ZSLPStoreOrThrow()
+{
+    if (g_zslpIndexer == NULL || g_zslpIndexer->Store() == NULL)
+        throw JSONRPCError(RPC_MISC_ERROR,
+            "ZSLP index is not enabled. Start zclassicd with -zslpindex.");
+    return g_zslpIndexer->Store();
+}
+
+CScript ZSLPScriptForTAddr(const std::string& addr)
+{
+    CTxDestination dest = DecodeDestination(addr);
+    if (!IsValidDestination(dest))
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
+                           "Invalid transparent address: " + addr);
+    return GetScriptForDestination(dest);
+}
+
+CScript ZSLPFreshWalletScript()
+{
+    CPubKey vchPubKey;
+    if (!pwalletMain->GetKeyFromPool(vchPubKey))
+        throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT,
+                           "Keypool ran out, call keypoolrefill first");
+    return GetScriptForDestination(vchPubKey.GetID());
+}
+
+std::string ZSLPAddrFromScript(const CScript& spk)
+{
+    CTxDestination dest;
+    if (ExtractDestination(spk, dest) && IsValidDestination(dest))
+        return EncodeDestination(dest);
+    return std::string();
+}
+
+int64_t ZSLPParseAmountField(const UniValue& v, const std::string& field,
+                             int64_t maxInclusive, const char* what,
+                             const char* unitNote)
+{
+    std::string s;
+    if (v.isStr())
+        s = v.get_str();
+    else if (v.isNum())
+        s = v.getValStr(); // exact integer text, no double rounding
+    else
+        throw JSONRPCError(RPC_TYPE_ERROR, field + " must be a string or integer");
+    if (s.empty())
+        throw JSONRPCError(RPC_INVALID_PARAMETER, field + " is empty");
+    for (size_t i = 0; i < s.size(); ++i)
+        if (s[i] < '0' || s[i] > '9')
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               field + " must be a non-negative integer" + std::string(unitNote));
+    errno = 0;
+    char* end = NULL;
+    unsigned long long q = strtoull(s.c_str(), &end, 10);
+    if (errno != 0 || end == NULL || *end != '\0')
+        throw JSONRPCError(RPC_INVALID_PARAMETER, field + " is not a valid integer");
+    if (maxInclusive < 0 || q > (unsigned long long)maxInclusive)
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           field + " exceeds " + std::string(what));
+    return (int64_t)q;
 }

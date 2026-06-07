@@ -22,7 +22,8 @@
 //   * PERMANENCE CONSENT: z_senddatafile REQUIRES acknowledge_permanent=true.
 //   * transfer_id is RANDOM (8 bytes from libsodium); the on-chain ANCHOR is the
 //     ciphertext fingerprint (= what a ZSLP NFT document_hash would commit to).
-//   * DoS caps: per-file size cap (64 KB), inflight TTL (72h), max inflight
+//   * DoS caps: per-file size cap (ZDC_MAX_FILE_BYTES = 40000 bytes; derived
+//     from the single-tx frame budget below), inflight TTL (72h), max inflight
 //     transfers (256), and a basic per-call rate guard.
 //   * VERIFY-BEFORE-DECRYPT: z_getdatatransfer confirms the on-chain ciphertext
 //     fingerprint matches the recorded anchor BEFORE any AEAD decrypt, and
@@ -32,6 +33,7 @@
 
 #include "rpc/server.h"
 
+#include "rpc/datachannel.h"   // E-2 test seams (de-hidden registry/DoS guards)
 #include "datachannel/zdc.h"
 #include "key_io.h"
 #include "rpc/protocol.h"
@@ -149,7 +151,63 @@ static std::string BytesToHex(const uint8_t* p, size_t n)
     return s;
 }
 
-static const char* ZdcDirToStr(const char* d) { return d; }
+// ── E-2 test seams (declared in rpc/datachannel.h) ───────────────────────────
+//
+// These call the REAL ZdcExpireOld/ZdcRateGuard and touch the REAL file-static
+// registry + rate globals — so the gtest gates the exact production decision
+// logic. They acquire cs_zdc the same way the RPCs do. No production code path
+// changes; these are only reachable from the test binary.
+void ZdcTestExpireOld()
+{
+    LOCK(cs_zdc);
+    ZdcExpireOld();
+}
+
+bool ZdcTestRateGuardAdmits()
+{
+    LOCK(cs_zdc);
+    try {
+        ZdcRateGuard();
+        return true;
+    } catch (const UniValue&) {
+        return false; // JSONRPCError throws a UniValue
+    }
+}
+
+void ZdcTestSeedTransfer(uint64_t transferId, int64_t createdAt)
+{
+    LOCK(cs_zdc);
+    ZdcTransferRecord rec;
+    rec.transferId = transferId;
+    rec.createdAt  = createdAt;
+    rec.frames     = 0;
+    g_zdcTransfers[transferId] = rec;
+}
+
+size_t ZdcTestTransferCount()
+{
+    LOCK(cs_zdc);
+    return g_zdcTransfers.size();
+}
+
+bool ZdcTestHasTransfer(uint64_t transferId)
+{
+    LOCK(cs_zdc);
+    return g_zdcTransfers.find(transferId) != g_zdcTransfers.end();
+}
+
+void ZdcTestReset()
+{
+    LOCK(cs_zdc);
+    for (std::map<uint64_t, ZdcTransferRecord>::iterator it = g_zdcTransfers.begin();
+         it != g_zdcTransfers.end(); ++it) {
+        if (!it->second.key.empty())
+            sodium_memzero(&it->second.key[0], it->second.key.size());
+    }
+    g_zdcTransfers.clear();
+    g_zdcRateWindowStart = 0;
+    g_zdcRateCount = 0;
+}
 
 #ifdef ENABLE_WALLET
 
@@ -377,6 +435,10 @@ UniValue z_listdatatransfers(const UniValue& params, bool fHelp)
         throw std::runtime_error(
             "z_listdatatransfers\n"
             "\nList the data transfers this node knows about (sent this session).\n"
+            "\nIn this build \"direction\" is ALWAYS \"sent\" and \"status\" is ALWAYS\n"
+            "\"recorded\": only the send path is built. The values \"received\" and\n"
+            "\"complete\" are reserved for the unbuilt receive path and never appear\n"
+            "here yet.\n"
             "\nResult: [ { \"transfer_id\", \"fingerprint\", \"direction\",\n"
             "             \"frames\", \"status\", \"toaddress\", \"filename\" }, ... ]\n"
             "\nExamples:\n"
@@ -392,7 +454,9 @@ UniValue z_listdatatransfers(const UniValue& params, bool fHelp)
         UniValue obj(UniValue::VOBJ);
         obj.push_back(Pair("transfer_id", strprintf("%016x", r.transferId)));
         obj.push_back(Pair("fingerprint", r.fingerprintHex));
-        obj.push_back(Pair("direction", ZdcDirToStr(r.direction.c_str())));
+        // direction is always "sent" and status always "recorded" in this build
+        // (the receive path is not built; see the help). No identity wrapper.
+        obj.push_back(Pair("direction", r.direction.c_str()));
         obj.push_back(Pair("frames", (int)r.frames));
         obj.push_back(Pair("status", "recorded"));
         obj.push_back(Pair("fromaddress", r.fromAddress));

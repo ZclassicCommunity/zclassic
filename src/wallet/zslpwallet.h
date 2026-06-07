@@ -28,13 +28,16 @@
 
 #include "amount.h"
 #include "primitives/transaction.h" // COutPoint
+#include "script/script.h"          // CScript (helper return type)
 #include "uint256.h"
 
+#include <stdint.h>
 #include <string>
 #include <vector>
 
 class CWallet;
 class CZSLPStore;
+class UniValue;
 
 // Standard SLP/BCH dust convention: 546 sat per token-bearing output. The
 // 54-sat relay dust floor (transaction.h:452-467 with the default
@@ -102,5 +105,55 @@ bool ZSLPFindWalletTokenUtxos(CWallet* w, const uint256& tokenId,
  */
 bool ZSLPIsProtectedTokenOutpoint(const CWallet* w, CZSLPStore* store,
                                   const COutPoint& op);
+
+// ── Shared RPC helpers (B-1/B-2: ONE canonical copy for both rpc/zslp.cpp and
+//    rpc/nftoffer.cpp) ────────────────────────────────────────────────────
+//
+// These were previously duplicated in each RPC TU (verbatim, only re-prefixed to
+// dodge a symbol clash). They are load-bearing: they build the real scriptPubKeys
+// for token carriers + the sell template and gate every command on the index.
+// Defined once in zslpwallet.cpp so the bound/behavior cannot drift.
+
+/**
+ * The ZSLP token store, or a friendly JSONRPCError(RPC_MISC_ERROR) when the
+ * NON-consensus index is off. Fails CLOSED: every ZSLP/NFT command starts here.
+ */
+CZSLPStore* ZSLPStoreOrThrow();
+
+/**
+ * Decode a transparent (t-) address to its P2PKH/P2SH scriptPubKey. Throws
+ * JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY) on an invalid address.
+ */
+CScript ZSLPScriptForTAddr(const std::string& addr);
+
+/**
+ * Reserve a fresh wallet t-address scriptPubKey (default recipient / token-
+ * change / payout). Throws JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT) if the
+ * keypool is empty. ENABLE_WALLET only.
+ */
+CScript ZSLPFreshWalletScript();
+
+/**
+ * Decode a scriptPubKey back to a t-address string ("" if not a standard,
+ * extractable destination).
+ */
+std::string ZSLPAddrFromScript(const CScript& spk);
+
+/**
+ * Parse a non-negative integer money/quantity field from a JSON value that is a
+ * STRING or a small integer (digits-only, overflow-guarded). The ONE shared
+ * amount parser (B-1): callers pass their own inclusive upper bound and the
+ * "what" phrase used in the over-bound message, so each call site PRESERVES its
+ * historical bound + wording exactly. Throws JSONRPCError on any violation.
+ *
+ *   maxInclusive  the largest accepted value (inclusive)
+ *   what          the upper-bound phrase, e.g. "the maximum (2^63-1)" or
+ *                 "MAX_MONEY" — rendered as: <field> exceeds <what>
+ *   unitNote      optional suffix on the digits-only rejection, e.g. " (zatoshi)"
+ *                 so NftParseZat keeps its exact historical wording ("" by default)
+ */
+int64_t ZSLPParseAmountField(const UniValue& v, const std::string& field,
+                             int64_t maxInclusive, const char* what,
+                             const char* unitNote = "");
 
 #endif // BITCOIN_WALLET_ZSLPWALLET_H

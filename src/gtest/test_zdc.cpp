@@ -14,10 +14,13 @@
 
 #include "datachannel/zdc.h"
 #include "consensus/consensus.h"   // MAX_TX_SIZE_AFTER_SAPLING
+#include "rpc/datachannel.h"       // E-2: ZDC RPC-layer test seams
+#include "utiltime.h"              // SetMockTime / GetTime
 
 #include <sodium.h>
 
 #include <cstring>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -512,4 +515,128 @@ TEST(ZDC, CiphertextFingerprint) {
     uint8_t fp4[CONTENT_HASH_LEN];
     EXPECT_EQ(ciphertext_fingerprint(tampered, fp4), OK);
     EXPECT_NE(std::memcmp(fp1, fp4, CONTENT_HASH_LEN), 0);
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  E-2: the ZDC RPC LAYER above the codec — TTL pruning, the rate guard, and
+//  the registry-miss fingerprint-grouping fallback. These gate the DoS/registry
+//  decision logic that test_zdc's codec tests never reach. The send/list/get
+//  end-to-end paths need a live CWallet + Sapling notes and stay covered by
+//  qa/zslp/zdc-xwallet-regtest.sh (see coverageHonesty).
+// ════════════════════════════════════════════════════════════════════════
+
+// Matches ZDC_INFLIGHT_TTL_SEC in rpc/datachannel.cpp (72h).
+static const int64_t kZdcTtlSec = 72 * 60 * 60;
+
+// TTL pruning: records strictly older than the TTL are dropped; fresh ones stay.
+TEST(ZdcRpcLayer, ExpireOldDropsOnlyRecordsPastTtl)
+{
+    ZdcTestReset();
+    SetMockTime(1000000); // deterministic "now"
+
+    // Three records at increasing ages relative to the TTL boundary.
+    ZdcTestSeedTransfer(0xA1, /*createdAt=*/1000000 - (kZdcTtlSec + 5)); // expired
+    ZdcTestSeedTransfer(0xB2, /*createdAt=*/1000000 - (kZdcTtlSec - 5)); // fresh
+    ZdcTestSeedTransfer(0xC3, /*createdAt=*/1000000);                    // brand new
+    EXPECT_EQ(ZdcTestTransferCount(), (size_t)3);
+
+    ZdcTestExpireOld();
+
+    EXPECT_EQ(ZdcTestTransferCount(), (size_t)2);
+    EXPECT_FALSE(ZdcTestHasTransfer(0xA1)); // pruned
+    EXPECT_TRUE(ZdcTestHasTransfer(0xB2));
+    EXPECT_TRUE(ZdcTestHasTransfer(0xC3));
+
+    // Advance well past the TTL: everything is pruned.
+    SetMockTime(1000000 + kZdcTtlSec + 100);
+    ZdcTestExpireOld();
+    EXPECT_EQ(ZdcTestTransferCount(), (size_t)0);
+
+    SetMockTime(0);   // restore real clock
+    ZdcTestReset();
+}
+
+// Rate guard: ZDC_RATE_MAX_PER_WIN (4) calls admitted per ZDC_RATE_WINDOW_SEC (1s)
+// window; the 5th in the same window is rejected; a new window resets the count.
+TEST(ZdcRpcLayer, RateGuardAdmitsUpToCapThenRejectsWithinWindow)
+{
+    ZdcTestReset();
+    SetMockTime(2000000);
+
+    // First 4 calls in the window are admitted...
+    for (int i = 0; i < 4; ++i)
+        EXPECT_TRUE(ZdcTestRateGuardAdmits()) << "call " << i << " must be admitted";
+    // ...the 5th in the SAME window is rejected (the guard would throw).
+    EXPECT_FALSE(ZdcTestRateGuardAdmits())
+        << "the 5th call within the window must trip the rate guard";
+
+    // A new window (>= ZDC_RATE_WINDOW_SEC later) resets the counter.
+    SetMockTime(2000002);
+    EXPECT_TRUE(ZdcTestRateGuardAdmits())
+        << "a fresh window must admit again";
+
+    SetMockTime(0);
+    ZdcTestReset();
+}
+
+// Registry-miss fingerprint-grouping fallback (datachannel.cpp:518-541): given
+// ONLY on-chain ZDC frames (no session record), group memos by transfer_id, and
+// recompute each group's ciphertext fingerprint to recover the wanted id. We
+// drive the REAL codec ops the fallback uses (parse_header + ciphertext_finger-
+// print) against TWO interleaved transfers, proving the grouping disambiguates.
+TEST(ZdcRpcLayer, FingerprintGroupingFallbackResolvesTransferId)
+{
+    // Build two distinct transfers with different transfer_ids + payloads.
+    std::vector<uint8_t> keyA = make_key();
+    std::vector<uint8_t> keyB = make_key();
+    TransferMeta meta; meta.filename = "a"; meta.content_type = "";
+    meta.total_plaintext_size = 0; meta.chunk_count = 0;
+
+    std::vector<uint8_t> ptA = rand_bytes(900);  // 2 DATA frames
+    std::vector<uint8_t> ptB = rand_bytes(1300); // 3 DATA frames
+    const uint64_t idA = 0x1111111111111111ull;
+    const uint64_t idB = 0x2222222222222222ull;
+
+    std::vector<std::vector<uint8_t> > framesA, framesB;
+    ASSERT_EQ(Encoder::encode(idA, keyA, ptA, meta, /*include_key_frame=*/true, framesA), OK);
+    ASSERT_EQ(Encoder::encode(idB, keyB, ptB, meta, /*include_key_frame=*/true, framesB), OK);
+
+    // The authoritative anchors (what z_getdatatransfer would search for).
+    uint8_t fpA[CONTENT_HASH_LEN], fpB[CONTENT_HASH_LEN];
+    ASSERT_EQ(ciphertext_fingerprint(framesA, fpA), OK);
+    ASSERT_EQ(ciphertext_fingerprint(framesB, fpB), OK);
+
+    // Interleave both transfers' memos as they would appear in one wallet's
+    // GetFilteredNotes output (plus a foreign/text memo the loop must skip).
+    std::vector<std::vector<uint8_t> > wallet;
+    for (size_t i = 0; i < framesA.size(); ++i) wallet.push_back(framesA[i]);
+    std::vector<uint8_t> textMemo(HEADER_SIZE, 0x00); // non-ZDC magic => skipped
+    wallet.push_back(textMemo);
+    for (size_t i = 0; i < framesB.size(); ++i) wallet.push_back(framesB[i]);
+
+    // Replicate the prod fallback EXACTLY (datachannel.cpp:521-536):
+    //   group memos by transfer_id, recompute each group's fingerprint, match.
+    auto resolve = [&](const uint8_t wantFp[CONTENT_HASH_LEN]) -> uint64_t {
+        std::map<uint64_t, std::vector<std::vector<uint8_t> > > byId;
+        for (size_t i = 0; i < wallet.size(); ++i) {
+            FrameHeader h;
+            if (parse_header(&wallet[i][0], h) != OK) continue; // skip non-ZDC
+            byId[h.transfer_id].push_back(wallet[i]);
+        }
+        for (std::map<uint64_t, std::vector<std::vector<uint8_t> > >::const_iterator
+                 it = byId.begin(); it != byId.end(); ++it) {
+            uint8_t fp[CONTENT_HASH_LEN];
+            if (ciphertext_fingerprint(it->second, fp) != OK) continue;
+            if (std::memcmp(fp, wantFp, CONTENT_HASH_LEN) == 0) return it->first;
+        }
+        return 0; // not found
+    };
+
+    EXPECT_EQ(resolve(fpA), idA) << "grouping must recover transfer A by its anchor";
+    EXPECT_EQ(resolve(fpB), idB) << "grouping must recover transfer B by its anchor";
+
+    // A fingerprint that no group hashes to resolves to "not found" (the prod
+    // RPC throws RPC_INVALID_ADDRESS_OR_KEY in that case).
+    uint8_t bogus[CONTENT_HASH_LEN]; std::memset(bogus, 0x7E, CONTENT_HASH_LEN);
+    EXPECT_EQ(resolve(bogus), (uint64_t)0);
 }

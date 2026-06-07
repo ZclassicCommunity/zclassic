@@ -153,7 +153,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "nft_makeoffer", 0},      // params object
     { "nft_verifyoffer", 0},    // params object
     { "nft_takeoffer", 0},      // params object
-    { "nft_listoffers", 0},     // params object
+    // nft_listoffers takes NO args (A-1: the dead 'mine' filter was removed), so
+    // there is nothing to convert.
     { "nft_canceloffer", 0},    // params object
     { "nft_requestbuy", 0}      // params object
 };

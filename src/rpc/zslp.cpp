@@ -31,10 +31,20 @@
 extern bool EnsureWalletIsAvailable(bool avoidException);
 #endif
 
+#include <limits>
 #include <stdint.h>
 #include <univalue.h>
 
-// Return the active store or throw a friendly error when the index is off.
+// Store-or-throw + t-addr script/addr helpers + the amount parser are shared
+// (B-1/B-2): ONE canonical copy in wallet/zslpwallet.{h,cpp} (alongside
+// ZSLPTokenIdToBE), used by both this file and rpc/nftoffer.cpp. For builds
+// WITHOUT a wallet the wallet header still declares ZSLPStoreOrThrow, but the
+// implementation TU (zslpwallet.cpp) is wallet-only — so provide a local
+// store-or-throw for the read-only (non-wallet) commands here.
+#ifdef ENABLE_WALLET
+// wallet/zslpwallet.h is included above (line ~27); it declares ZSLPStoreOrThrow.
+static inline CZSLPStore* GetZSLPStoreOrThrow() { return ZSLPStoreOrThrow(); }
+#else
 static CZSLPStore* GetZSLPStoreOrThrow()
 {
     if (g_zslpIndexer == NULL || g_zslpIndexer->Store() == NULL)
@@ -42,6 +52,7 @@ static CZSLPStore* GetZSLPStoreOrThrow()
             "ZSLP index is not enabled. Start zclassicd with -zslpindex.");
     return g_zslpIndexer->Store();
 }
+#endif
 
 static UniValue TokenToJSON(const CZSLPToken& t)
 {
@@ -100,7 +111,9 @@ UniValue zslp_gettoken(const UniValue& params, bool fHelp)
 
     CZSLPToken token;
     if (!store->GetToken(tokenId, token))
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Token not found");
+        // A-4: align with the nft_* not-found paths (the arg names a thing that
+        // does not exist) — RPC_INVALID_PARAMETER, not RPC_INVALID_ADDRESS_OR_KEY.
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Token not found");
     return TokenToJSON(token);
 }
 
@@ -196,8 +209,12 @@ UniValue zslp_listmytokens(const UniValue& params, bool fHelp)
             "\nLists ZSLP tokens with a positive balance at any of this\n"
             "wallet's transparent addresses (read-only). ZSLP rides\n"
             "transparent dust, so only t-addresses are considered.\n"
-            "\nResult: [ { \"tokenid\", \"ticker\", \"name\", \"decimals\",\n"
-            "             \"balance\", \"addresses\": [ ... ] }, ... ]\n"
+            "\nEach entry is the FULL token object (identical shape to\n"
+            "zslp_gettoken / zslp_listtokens: tokenid, ticker, name,\n"
+            "documenturl, documenthash, decimals, genesisheight, totalminted,\n"
+            "mintbatonvout, hasmintbaton) PLUS this wallet's aggregate\n"
+            "\"balance\" and the per-address \"addresses\" breakdown.\n"
+            "\nResult: [ { ...full token..., \"balance\", \"addresses\": [ ... ] }, ... ]\n"
             "\nExamples:\n"
             + HelpExampleCli("zslp_listmytokens", "")
             + HelpExampleRpc("zslp_listmytokens", ""));
@@ -249,11 +266,11 @@ UniValue zslp_listmytokens(const UniValue& params, bool fHelp)
             break; // bound the response size (wallet-size-bound), matching the other list RPCs
         CZSLPToken token;
         store->GetToken(it->first, token);
-        UniValue o(UniValue::VOBJ);
-        o.push_back(Pair("tokenid", it->first.GetHex()));
-        o.push_back(Pair("ticker", token.ticker));
-        o.push_back(Pair("name", token.name));
-        o.push_back(Pair("decimals", (int)token.decimals));
+        // A-3: embed the FULL token object (same shape as zslp_gettoken /
+        // zslp_listtokens) so the GUI can drop its per-token zslp_gettoken
+        // fan-out, then append the per-wallet balance + addresses[]. tokenid/
+        // ticker/name/decimals remain present (TokenToJSON emits them).
+        UniValue o = TokenToJSON(token);
         o.push_back(Pair("balance", it->second));
         o.push_back(Pair("addresses", tokenAddrs[it->first]));
         arr.push_back(o);
@@ -281,48 +298,29 @@ static inline void TokenIdToBE(const uint256& tokenId, uint8_t out[32])
 // Parse a uint64 quantity from a JSON value that is a STRING or a small integer.
 // Rejects negatives, non-digits, overflow, and the high bit (>= 2^63) which the
 // SLP parser/store treat as INVALID (R-INT-1). Throws on any violation.
+//
+// B-1: the parse/overflow logic now lives ONCE in ZSLPParseAmountField; this is
+// a thin shim that pins THIS family's bound (<= 2^63-1) and its exact over-bound
+// message ("exceeds the maximum (2^63-1)"). INT64_MAX inclusive == rejecting the
+// old `q >> 63` high bit, so behavior is unchanged.
 static uint64_t ParseQuantity(const UniValue& v, const std::string& field)
 {
-    std::string s;
-    if (v.isStr())
-        s = v.get_str();
-    else if (v.isNum())
-        s = v.getValStr(); // exact integer text, no double rounding
-    else
-        throw JSONRPCError(RPC_TYPE_ERROR, field + " must be a string or integer");
-    if (s.empty())
-        throw JSONRPCError(RPC_INVALID_PARAMETER, field + " is empty");
-    for (size_t i = 0; i < s.size(); ++i)
-        if (s[i] < '0' || s[i] > '9')
-            throw JSONRPCError(RPC_INVALID_PARAMETER, field + " must be a non-negative integer");
-    errno = 0;
-    char* end = NULL;
-    unsigned long long q = strtoull(s.c_str(), &end, 10);
-    if (errno != 0 || end == NULL || *end != '\0')
-        throw JSONRPCError(RPC_INVALID_PARAMETER, field + " is not a valid integer");
-    if (q >> 63)
-        throw JSONRPCError(RPC_INVALID_PARAMETER, field + " exceeds the maximum (2^63-1)");
-    return (uint64_t)q;
+    return (uint64_t)ZSLPParseAmountField(
+        v, field, std::numeric_limits<int64_t>::max(), "the maximum (2^63-1)");
 }
 
 // Decode a t-address to a P2PKH/P2SH script, throwing on an invalid address.
-static CScript ScriptForTAddr(const std::string& addr)
+// (B-2) shared with rpc/nftoffer.cpp via wallet/zslpwallet.h.
+static inline CScript ScriptForTAddr(const std::string& addr)
 {
-    CTxDestination dest = DecodeDestination(addr);
-    if (!IsValidDestination(dest))
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
-                           "Invalid transparent address: " + addr);
-    return GetScriptForDestination(dest);
+    return ZSLPScriptForTAddr(addr);
 }
 
 // Reserve a fresh wallet t-address script (for default recipient / token-change).
-static CScript FreshWalletScript()
+// (B-2) shared with rpc/nftoffer.cpp via wallet/zslpwallet.h.
+static inline CScript FreshWalletScript()
 {
-    CPubKey vchPubKey;
-    if (!pwalletMain->GetKeyFromPool(vchPubKey))
-        throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT,
-                           "Keypool ran out, call keypoolrefill first");
-    return GetScriptForDestination(vchPubKey.GetID());
+    return ZSLPFreshWalletScript();
 }
 
 UniValue zslp_genesis(const UniValue& params, bool fHelp)

@@ -21,12 +21,13 @@
 //   nft_makeoffer   {tokenId,priceZat,payoutAddr?,buyerNftAddr,expiryHeight?}
 //   nft_verifyoffer {offerBlob}                         (read-only, mandatory)
 //   nft_takeoffer   {offerBlob,fundingInputs?,changeAddr?,acknowledge?}
-//   nft_listoffers  {mine?}
+//   nft_listoffers  ()                                  (no filter; all are yours)
 //   nft_canceloffer {offerId}
 //   nft_requestbuy  {tokenId|offerId}
 
 #include "rpc/server.h"
 
+#include "rpc/nftoffer.h"  // CNftOfferBlob, NftVerifyResult, NftVerify (E-1)
 #include "base58.h"
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
@@ -62,63 +63,36 @@ extern bool EnsureWalletIsAvailable(bool avoidException);
 #ifdef ENABLE_WALLET
 
 // ── shared helpers ──────────────────────────────────────────────────
+//
+// B-2: the store-or-throw + t-addr script/addr helpers are now ONE canonical
+// copy in wallet/zslpwallet.{h,cpp} (alongside ZSLPTokenIdToBE), used by both
+// this file and rpc/zslp.cpp. These thin shims keep the existing Nft*-prefixed
+// call sites reading unchanged while the byte-for-byte behavior lives in one
+// place (they build the real token-carrier + offer-template scriptPubKeys).
 
-static CZSLPStore* NftGetStoreOrThrow()
-{
-    if (g_zslpIndexer == NULL || g_zslpIndexer->Store() == NULL)
-        throw JSONRPCError(RPC_MISC_ERROR,
-            "ZSLP index is not enabled. Start zclassicd with -zslpindex.");
-    return g_zslpIndexer->Store();
-}
+static inline CZSLPStore* NftGetStoreOrThrow() { return ZSLPStoreOrThrow(); }
 
 // A t-address string -> P2PKH/P2SH script (throws on invalid).
-static CScript NftScriptForTAddr(const std::string& addr)
+static inline CScript NftScriptForTAddr(const std::string& addr)
 {
-    CTxDestination dest = DecodeDestination(addr);
-    if (!IsValidDestination(dest))
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
-                           "Invalid transparent address: " + addr);
-    return GetScriptForDestination(dest);
+    return ZSLPScriptForTAddr(addr);
 }
 
 // Decode a script back to a t-address string ("" if not a standard address).
-static std::string NftAddrFromScript(const CScript& spk)
+static inline std::string NftAddrFromScript(const CScript& spk)
 {
-    CTxDestination dest;
-    if (ExtractDestination(spk, dest) && IsValidDestination(dest))
-        return EncodeDestination(dest);
-    return std::string();
+    return ZSLPAddrFromScript(spk);
 }
 
-static CScript NftFreshWalletScript()
-{
-    CPubKey vchPubKey;
-    if (!pwalletMain->GetKeyFromPool(vchPubKey))
-        throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT,
-                           "Keypool ran out, call keypoolrefill first");
-    return GetScriptForDestination(vchPubKey.GetID());
-}
+static inline CScript NftFreshWalletScript() { return ZSLPFreshWalletScript(); }
 
 // Parse a non-negative zatoshi amount from a JSON string|integer.
+// B-1: the parse/overflow logic is shared (ZSLPParseAmountField); this pins THIS
+// family's bound (<= MAX_MONEY) and its exact wording ("exceeds MAX_MONEY", and
+// the "(zatoshi)" digits-only note) so behavior is unchanged.
 static int64_t NftParseZat(const UniValue& v, const std::string& field)
 {
-    std::string s;
-    if (v.isStr())      s = v.get_str();
-    else if (v.isNum()) s = v.getValStr();
-    else throw JSONRPCError(RPC_TYPE_ERROR, field + " must be a string or integer");
-    if (s.empty())
-        throw JSONRPCError(RPC_INVALID_PARAMETER, field + " is empty");
-    for (size_t i = 0; i < s.size(); ++i)
-        if (s[i] < '0' || s[i] > '9')
-            throw JSONRPCError(RPC_INVALID_PARAMETER, field + " must be a non-negative integer (zatoshi)");
-    errno = 0;
-    char* end = NULL;
-    unsigned long long q = strtoull(s.c_str(), &end, 10);
-    if (errno != 0 || end == NULL || *end != '\0')
-        throw JSONRPCError(RPC_INVALID_PARAMETER, field + " is not a valid integer");
-    if (q > (unsigned long long)MAX_MONEY)
-        throw JSONRPCError(RPC_INVALID_PARAMETER, field + " exceeds MAX_MONEY");
-    return (int64_t)q;
+    return ZSLPParseAmountField(v, field, MAX_MONEY, "MAX_MONEY", " (zatoshi)");
 }
 
 // Fee-rate-derived dust floor for a token-bearing output (§2.2). Never below the
@@ -132,77 +106,41 @@ static CAmount NftTokenDust(const CScript& dest)
 
 // ── offer blob format (base64; §4) ──────────────────────────────────
 //
-// Self-describing, versioned. The header is ADVISORY only — nft_verifyoffer
-// always re-derives every field from offerHex and ignores a header that lies.
-static const unsigned char NFT_OFFER_MAGIC[4] = { 'Z', 'N', 'F', 'T' };
-static const unsigned char NFT_OFFER_VERSION  = 0x01;
+// The class + SerializationOp + the magic/version constants live in
+// rpc/nftoffer.h (so the gtest can construct one for the de-static NftVerify,
+// E-1). Only these three non-template methods are defined here.
 
-class CNftOfferBlob
+std::string CNftOfferBlob::ToBase64() const
 {
-public:
-    uint256 tokenId;          //!< internal order (render reversed)
-    int64_t priceZat;
-    std::string payoutAddr;
-    std::string buyerNftAddr;
-    uint32_t expiryHeight;
-    std::string offerHex;     //!< the partial ALL|ANYONECANPAY tx hex
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << *this;
+    return EncodeBase64((const unsigned char*)&ss[0], ss.size());
+}
 
-    CNftOfferBlob() : priceZat(0), expiryHeight(0) { tokenId.SetNull(); }
+// offerId = first 8 bytes of SHA256(blob) hex; stable content fingerprint.
+std::string CNftOfferBlob::OfferId() const
+{
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << *this;
+    uint256 h = Hash((const unsigned char*)&ss[0],
+                     (const unsigned char*)&ss[0] + ss.size());
+    return h.GetHex().substr(0, 16);
+}
 
-    ADD_SERIALIZE_METHODS;
-    template <typename Stream, typename Operation>
-    inline void SerializationOp(Stream& s, Operation ser_action)
-    {
-        for (int i = 0; i < 4; ++i) {
-            unsigned char m = NFT_OFFER_MAGIC[i];
-            READWRITE(m);
-            if (ser_action.ForRead() && m != NFT_OFFER_MAGIC[i])
-                throw std::ios_base::failure("offer blob: bad magic");
-        }
-        unsigned char ver = NFT_OFFER_VERSION;
-        READWRITE(ver);
-        if (ser_action.ForRead() && ver != NFT_OFFER_VERSION)
-            throw std::ios_base::failure("offer blob: unsupported version");
-        READWRITE(tokenId);
-        READWRITE(priceZat);
-        READWRITE(payoutAddr);
-        READWRITE(buyerNftAddr);
-        READWRITE(expiryHeight);
-        READWRITE(offerHex);
+bool CNftOfferBlob::FromBase64(const std::string& b64, std::string& err)
+{
+    bool invalid = false;
+    std::vector<unsigned char> raw = DecodeBase64(b64.c_str(), &invalid);
+    if (invalid) { err = "offer blob is not valid base64"; return false; }
+    try {
+        CDataStream ss(raw, SER_NETWORK, PROTOCOL_VERSION);
+        ss >> *this;
+    } catch (const std::exception& e) {
+        err = std::string("offer blob decode failed: ") + e.what();
+        return false;
     }
-
-    std::string ToBase64() const
-    {
-        CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
-        ss << *this;
-        return EncodeBase64((const unsigned char*)&ss[0], ss.size());
-    }
-
-    // offerId = first 8 bytes of SHA256(blob) hex; stable content fingerprint.
-    std::string OfferId() const
-    {
-        CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
-        ss << *this;
-        uint256 h = Hash((const unsigned char*)&ss[0],
-                         (const unsigned char*)&ss[0] + ss.size());
-        return h.GetHex().substr(0, 16);
-    }
-
-    bool FromBase64(const std::string& b64, std::string& err)
-    {
-        bool invalid = false;
-        std::vector<unsigned char> raw = DecodeBase64(b64.c_str(), &invalid);
-        if (invalid) { err = "offer blob is not valid base64"; return false; }
-        try {
-            CDataStream ss(raw, SER_NETWORK, PROTOCOL_VERSION);
-            ss >> *this;
-        } catch (const std::exception& e) {
-            err = std::string("offer blob decode failed: ") + e.what();
-            return false;
-        }
-        return true;
-    }
-};
+    return true;
+}
 
 // Strip a "znftoffer:" URI prefix if present, returning the bare base64.
 static std::string NftStripPrefix(const std::string& in)
@@ -285,29 +223,14 @@ static bool NftFindOffer(const std::string& offerId, UniValue& recOut)
 
 // ── decode + verify the partial offer tx (the core safety logic) ────
 //
-// Re-derives every advertised field from offerHex and re-runs the real indexer
-// parse + conservation check + a live-UTXO check on vin[0]. Used by both
-// nft_verifyoffer (read-only) and nft_takeoffer (refuse-if-not-ok).
-//
-// Fills `reasons` with one string per failed check; ok == reasons.empty().
-// Also fills the derived (truth) fields so callers can echo them.
-struct NftVerifyResult {
-    bool ok;
-    uint256 tokenId;
-    int64_t priceZat;
-    std::string payoutAddr;
-    std::string buyerNftAddr;
-    uint32_t expiryHeight;
-    CMutableTransaction tx;     //!< the decoded partial tx (for takeoffer)
-    CScript nftPrevScript;      //!< vin[0]'s prevout scriptPubKey (live)
-    CAmount nftPrevValue;       //!< vin[0]'s prevout value (live)
-    std::vector<std::string> reasons;
-    NftVerifyResult() : ok(false), priceZat(0), expiryHeight(0), nftPrevValue(0)
-    { tokenId.SetNull(); }
-};
-
-static void NftVerify(CZSLPStore* store, const CNftOfferBlob& blob,
-                      NftVerifyResult& r)
+// NftVerifyResult lives in rpc/nftoffer.h. NftVerify is now non-static (E-1) so
+// test_nftoffer.cpp can drive the REAL verifier instead of hand-rolling a copy;
+// its signature + logic are unchanged. It re-derives every advertised field from
+// offerHex and re-runs the real indexer parse + conservation check + a live-UTXO
+// check on vin[0]. Used by nft_verifyoffer (read-only), nft_takeoffer
+// (refuse-if-not-ok), and nft_makeoffer's self-validate.
+void NftVerify(CZSLPStore* store, const CNftOfferBlob& blob,
+               NftVerifyResult& r)
 {
     AssertLockHeld(cs_main);
     r.expiryHeight = blob.expiryHeight;
@@ -982,24 +905,18 @@ UniValue nft_takeoffer(const UniValue& params, bool fHelp)
 
 UniValue nft_listoffers(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() > 1)
+    if (fHelp || params.size() > 0)
         throw std::runtime_error(
-            "nft_listoffers ( {\"mine\":true|false} )\n"
+            "nft_listoffers\n"
             "\nList offers from the local store; status recomputed live against\n"
-            "the UTXO set (open / filled / expired / canceled).\n"
+            "the UTXO set (open / filled / expired / canceled). Every record in\n"
+            "the local store is yours (sent), so there is no filter.\n"
             "\nResult:\n"
             "[ { \"offerId\", \"tokenId\", \"priceZat\", \"expiryHeight\",\n"
             "    \"role\", \"status\" }, ... ]\n");
 
-    CZSLPStore* store = NftGetStoreOrThrow();
+    NftGetStoreOrThrow(); // fail CLOSED if the index is off
     LOCK(cs_main);
-
-    bool onlyMine = false;
-    if (params.size() == 1 && params[0].isObject()) {
-        const UniValue& v = find_value(params[0].get_obj(), "mine");
-        if (v.isBool()) onlyMine = v.get_bool();
-    }
-    (void)onlyMine; // every record in the local store is "mine" (sent/received)
 
     int tip = chainActive.Height();
     UniValue arr = NftLoadStore();
@@ -1039,7 +956,6 @@ UniValue nft_listoffers(const UniValue& params, bool fHelp)
         o.push_back(Pair("status", status));
         out.push_back(o);
     }
-    (void)store;
     return out;
 }
 
