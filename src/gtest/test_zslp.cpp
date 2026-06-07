@@ -358,9 +358,19 @@ TEST(ZSLP, BuildSendTwentyOutputsOverMaxShouldFail)
     EXPECT_EQ(len, 0u); // builder should reject >19 outputs
 }
 
-// ── Large quantity (UINT64_MAX) ───────────────────────────────────
+// ── Large quantity (UINT64_MAX / high-bit) — REJECTED (R-INT-1 / R-10) ──
+//
+// AMENDED: these two cases previously asserted that a UINT64_MAX (high-bit-set,
+// i.e. >= 2^63) quantity PARSES and round-trips. The canonical rule (R-INT-1 /
+// R-10, SECURITY_MODEL.md) now makes any quantity with the high bit set INVALID
+// for the WHOLE message (it would cast to a negative int64 downstream and is a
+// signed/unsigned fork surface). The builders still EMIT such a quantity (they
+// do not enforce the ledger domain), but the canonical PARSER rejects it, so a
+// high-bit GENESIS/MINT creates nothing. The largest VALID quantity is
+// 2^63 - 1. The vector corpus (test_zslp_vectors.cpp) pins 2^63 and 2^64-1 for
+// all three message types.
 
-TEST(ZSLP, BuildGenesisMaxQuantity)
+TEST(ZSLP, BuildGenesisHighBitQuantityRejected)
 {
     uint8_t buf[512];
     size_t len = slp_build_genesis(buf, sizeof(buf),
@@ -368,11 +378,24 @@ TEST(ZSLP, BuildGenesisMaxQuantity)
     ASSERT_GT(len, 0u);
 
     struct slp_message msg;
-    ASSERT_TRUE(slp_parse(buf, len, &msg));
-    EXPECT_EQ(msg.initial_quantity, UINT64_MAX);
+    EXPECT_FALSE(slp_parse(buf, len, &msg)); // high bit set => whole msg INVALID
 }
 
-TEST(ZSLP, BuildMintMaxQuantity)
+TEST(ZSLP, BuildGenesisMaxValidQuantity)
+{
+    // Largest in-domain quantity: 2^63 - 1 (high bit clear) still parses.
+    const uint64_t kMaxValid = (UINT64_C(1) << 63) - 1;
+    uint8_t buf[512];
+    size_t len = slp_build_genesis(buf, sizeof(buf),
+        "MAX", "Max Supply", "", nullptr, 0, 0, kMaxValid);
+    ASSERT_GT(len, 0u);
+
+    struct slp_message msg;
+    ASSERT_TRUE(slp_parse(buf, len, &msg));
+    EXPECT_EQ(msg.initial_quantity, kMaxValid);
+}
+
+TEST(ZSLP, BuildMintHighBitQuantityRejected)
 {
     struct uint256 token_id;
     memset(token_id.data, 0xAA, 32);
@@ -381,8 +404,7 @@ TEST(ZSLP, BuildMintMaxQuantity)
     ASSERT_GT(len, 0u);
 
     struct slp_message msg;
-    ASSERT_TRUE(slp_parse(buf, len, &msg));
-    EXPECT_EQ(msg.additional_quantity, UINT64_MAX);
+    EXPECT_FALSE(slp_parse(buf, len, &msg)); // high bit set => whole msg INVALID
 }
 
 // ── Zero quantity ─────────────────────────────────────────────────
