@@ -4596,7 +4596,14 @@ bool AcceptBlock(CBlock& block, CValidationState& state, CBlockIndex** ppindex, 
     // mark the chain as parked. If it has enough work, it'll unpark
     // automatically. We mark the block as parked at the very last minute so we
     // can make sure everything is ready to be reorged if needed.
-    if (GetBoolArg("-parkdeepreorg", true)) {
+    //
+    // Skip during initial block download / reindex: there, blocks are loaded
+    // from disk out of height order, so the "would cause a deep reorg" test
+    // (fork depth > 1) fires spuriously and parks large swaths of the chain,
+    // stalling the sync (the bug that forces -parkdeepreorg=0 on a from-genesis
+    // reindex). Deep-reorg protection is an at-tip defense; during IBD the node
+    // only follows the best chain forward, so there is nothing to protect.
+    if (GetBoolArg("-parkdeepreorg", true) && !IsInitialBlockDownload()) {
         const CBlockIndex *pindexFork = chainActive.FindFork(pindex);
         if (pindexFork && pindexFork->nHeight + 1 < pindex->nHeight) {
             LogPrintf("Park block %s as it would cause a deep reorg.\n",
