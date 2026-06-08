@@ -1,5 +1,11 @@
 # NFT API / UX / DRY Audit + Refactor Punch List
 
+> **REMOVED — shielded data channel / on-chain private files.** Audit items below that reference
+> the shielded data channel (`z_senddatafile` / `z_listdatatransfers` / `z_getdatatransfer`, the
+> `-datachannel` option, `rpc/datachannel.cpp`, the ZDC1 codec) are **obsolete**: that capability
+> has been **removed entirely** from the daemon. ZClassic deliberately provides **no wallet path to
+> store arbitrary files on-chain**.
+
 Status: read-only audit converted to an actionable, prioritized punch list. No code changed by this document.
 
 Scope:
@@ -46,7 +52,7 @@ Each item lists: the problem, the concrete fix, the file(s). Line numbers are as
 ### P1
 
 **A-2. Naming-family split: object-param vs positional-param surface.** *(API-1)*
-- Problem: three prefixes, two param conventions. `zslp_genesis` takes an object (`src/rpc/zslp.cpp:328`); `zslp_mint`/`zslp_send`/`zslp_listtokens`/`zslp_listtransfers` take POSITIONAL params (`zslp.cpp:464,543,107,142`). All `nft_*` take a single object (`src/rpc/nftoffer.cpp`). All `z_*datafile`/`z_*datatransfer` take a single object (`src/rpc/datachannel.cpp`). A reader cannot predict the shape from the name.
+- Problem: three prefixes, two param conventions. `zslp_genesis` takes an object (`src/rpc/zslp.cpp:326`); `zslp_mint`/`zslp_send`/`zslp_listtokens`/`zslp_listtransfers` take POSITIONAL params (`zslp.cpp:462,541,120,155`). All `nft_*` take a single object (`src/rpc/nftoffer.cpp`). All `z_*datafile`/`z_*datatransfer` take a single object (`src/rpc/datachannel.cpp`). A reader cannot predict the shape from the name.
 - Fix: document the split prominently in each RPC `help` and in `doc/nft/README.md`; longer-term, accept an optional object form for `zslp_mint`/`zslp_send` so the write surface is uniformly object-style. Do NOT break the existing positional form (CLI users depend on it) — add the object form, keep positional.
 - Files: `zclassic/src/rpc/zslp.cpp` (mint `:464`, send `:543`); `zclassic/src/rpc/client.cpp:136-158` (would need new conversion entries if object form is added); `zclassic/doc/nft/README.md`.
 
@@ -77,9 +83,8 @@ Each item lists: the problem, the concrete fix, the file(s). Line numbers are as
 - Fix: until a receive path lands, either drop the `direction`/`status` fields, or document them in help as "always 'sent'/'recorded' in this build; 'received'/'complete' are reserved for the unbuilt receive path." Remove the no-op `ZdcDirToStr` wrapper. Tag this surface **BUILT-CLI-ONLY** with reserved fields.
 - Files: `zclassic/src/rpc/datachannel.cpp` (`:152`, `:356`, `:395-397`).
 
-**A-8. Stale constant comment: ZDC file cap says "64 KB", code enforces 40000 bytes.**
-- Problem: the top-of-file comment describes a 64 KB cap, but the built constant is `ZDC_MAX_FILE_BYTES = 40000` (`datachannel.cpp:84`), enforced at `:243`, `:261`, `:315`. The comment is stale and will mislead.
-- Fix: correct the comment to match `40000`, or hoist the number into the comment via the constant so they cannot drift again.
+**A-8. ZDC file cap = 40000 bytes (RESOLVED — the stale "64 KB" comment is gone).**
+- The built constant is `ZDC_MAX_FILE_BYTES = 40000` (`datachannel.cpp:86`), enforced at `:301` and `:319` (and re-checked in the frame guard at `:373`). The top-of-file comment now correctly states 40000 bytes (`:25`); the earlier "64 KB" comment no longer exists.
 - Files: `zclassic/src/rpc/datachannel.cpp` (header comment block; `:84`).
 
 ---
@@ -150,9 +155,9 @@ Each item lists: the problem, the concrete fix, the file(s). Line numbers are as
 ### P2
 
 **D-3. No GUI caller for `zslp_listtransfers` — provenance is unreachable from the GUI.** *(capability gap; honesty-adjacent)*
-- Problem: the daemon `zslp_listtransfers` exists (`zclassic/src/rpc/zslp.cpp:142`, newest-first, reorg-safe) but no GUI code calls it (grep-confirmed empty in `zcl-qt-wallet/src/`). The detail dialog presents an NFT's identity but a user cannot view the public chain-of-custody history in-app. Status: **DESIGNED-NOT-BUILT (GUI)**. Make sure the detail dialog does not advertise provenance it cannot show.
+- Problem: the daemon `zslp_listtransfers` exists (`zclassic/src/rpc/zslp.cpp:155`, newest-first, reorg-safe) but no GUI code calls it (grep-confirmed empty in `zcl-qt-wallet/src/`). The detail dialog presents an NFT's identity but a user cannot view the public chain-of-custody history in-app. Status: **DESIGNED-NOT-BUILT (GUI)**. Make sure the detail dialog does not advertise provenance it cannot show.
 - Fix: add a provenance list in `NFTDetailDialog` backed by a new `RPC::nftListTransfers` wrapper over `zslp_listtransfers`; until then, ensure no GUI string promises in-app history. (Public-by-design: history is fully visible on-chain — labeling it "public transfer history" is correct and required.)
-- Files: `zcl-qt-wallet/src/nftdetaildialog.{cpp,h}`, `zcl-qt-wallet/src/rpc.cpp` (new wrapper); `zclassic/src/rpc/zslp.cpp:142` (source RPC).
+- Files: `zcl-qt-wallet/src/nftdetaildialog.{cpp,h}`, `zcl-qt-wallet/src/rpc.cpp` (new wrapper); `zclassic/src/rpc/zslp.cpp:155` (source RPC).
 
 ---
 

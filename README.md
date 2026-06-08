@@ -192,25 +192,7 @@ HASH=$(sha256sum my-art.png | cut -d' ' -f1)
 
 > **Honest limits.** A transfer is public and irreversible (a send to the wrong address cannot be undone). The name and image are **not** unique — anyone can mint another token reusing them; only the token id (genesis txid) is one of a kind. The fingerprint proves *which bytes* were minted, never that a creator is "genuine" or "official." ZSLP is a non-consensus overlay (dev/testnet-stage).
 
-### Private files / private NFTs (shielded data channel) — dev/testnet, default-OFF
-
-You can also send a **private file or message** over the shielded pool: the bytes are encrypted, framed into Sapling memos, and carried in one shielded transaction. This is **default-OFF** and experimental — start `zclassicd` with `-experimentalfeatures -datachannel` to enable it (the RPCs return `-32601` when off).
-
-```bash
-# SENDER (both addresses must be Sapling z-addrs in your wallet; acknowledge_permanent is REQUIRED)
-./src/zclassic-cli z_senddatafile '{"fromaddress":"zs1...","toaddress":"zs1...","filepath":"/path/to/secret.png","acknowledge_permanent":true}'
-#   -> { "operationid", "transfer_id", "fingerprint", "frames", "key" }
-#      "fingerprint" is the 32-byte ciphertext anchor (= an NFT's document_hash); "key" is yours to disclose selectively.
-
-# List the transfers this node knows about (sent this session)
-./src/zclassic-cli z_listdatatransfers
-
-# RECIPIENT: reassemble + verify-before-decrypt, then decrypt
-./src/zclassic-cli z_getdatatransfer '{"transfer_id":"<16hex>"}'
-#   -> { "verified", "complete", "frames_received", "hexdata", "filename", "content_type", ... }
-```
-
-> **What this protects / does not.** Hidden: who it's from, who it's to, the amount, the contents. Visible: *that* a private transfer happened, roughly *when*, and roughly *how big*. It is **permanent** on every full node forever and **not deletable** — private ≠ undetectable. Keep files small (per-file cap ~40000 bytes). The recipient verifies the on-chain ciphertext fingerprint **before** decrypting; selectively disclose by handing over the returned `key`, or `z_exportviewingkey` for the receiving z-addr (read/prove only, never spend).
+> **No arbitrary files on-chain.** ZClassic deliberately provides **no wallet path to store files on the blockchain.** An NFT keeps only a 32-byte content hash on-chain; the image lives off-chain. (An earlier experimental shielded "data channel" for sending files was **removed** — by design the wallet does not put file bytes on the chain.)
 
 ### Sell an NFT for ZCL (atomic swap) — dev/testnet
 
@@ -231,7 +213,7 @@ OFFER=$(./src/zclassic-cli nft_makeoffer '{"tokenId":"<txid>","priceZat":"100000
 
 > **Honest limit.** The single-tx swap makes the **coin** legs consensus-atomic, but token attribution is an indexer convention — so this is **trust-minimized, not trustless**. Always run `nft_verifyoffer` before `nft_takeoffer`. No shielded leg can be atomic. (Other SELL RPCs: `nft_listoffers`, `nft_canceloffer`, `nft_requestbuy`.)
 
-For the full design — mint/transfer write path, anti-burn protection, content addressing, the private data channel, and the NFT→ZCL sell design — see [doc/nft/README.md](doc/nft/README.md) (start with `NATIVE_NFT_GUIDE.md`). Runnable end-to-end proofs live in `qa/zslp/` (`zslp-nft-regtest.sh`, `nft-sell-regtest.sh`; see `qa/zslp/README.md`).
+For the full design — mint/transfer write path, anti-burn protection, content addressing, and the NFT→ZCL sell design — see [doc/nft/README.md](doc/nft/README.md) (start with `NATIVE_NFT_GUIDE.md`). Runnable end-to-end proofs live in `qa/zslp/` (`zslp-nft-regtest.sh`, `nft-sell-regtest.sh`; see `qa/zslp/README.md`).
 
 ---
 

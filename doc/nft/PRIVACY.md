@@ -1,10 +1,17 @@
 # ZClassic Private NFTs & Shielded Data Channel
 
+> **REMOVED — HISTORICAL DOCUMENT.** The shielded data-channel / arbitrary-file-transfer
+> capability described here (`z_senddatafile` / `z_listdatatransfers` / `z_getdatatransfer`, the
+> `-datachannel` option, the ZDC1 codec) has been **removed entirely** from the daemon. ZClassic
+> deliberately provides **no wallet path to store arbitrary files on-chain**. NFT content is
+> always off-chain, bound to the token only by a `document_hash` fingerprint. This doc is retained
+> for historical traceability only.
+
 > **READ FIRST — honesty banner (2026-06-06).** This doc predates the build and oversells in places. As-built truth: (1) **NFT ownership is ALWAYS transparent/public** — the token rides a transparent dust UTXO, so who holds an NFT is on-chain and visible. "Private" here means only the data-channel **file contents** are confidential (encrypted), and even those are stored **permanently as public ciphertext on every full node**. There is **no "shielded ownership."** (2) The single-tx file cap is **40000 bytes** (not 64 KB). (3) **"Seal-then-reveal", `z_revealkey`, and `zslp_mint_private` are NOT built.** (4) Cross-wallet/cross-node receive does **not** work yet (the per-transfer key is sender-session-local — see task #117). Authoritative as-built contract: `NATIVE_NFT_GUIDE.md §3.3`; whole-feature status: `NFT_FINAL_REVIEW.md`.
 
-**Status:** Codec BUILT + TESTED **and compiled into the daemon** (`src/Makefile.am:247,294`;
+**Status:** Codec BUILT + TESTED **and compiled into the daemon** (`src/Makefile.am:248,295`;
 25 daemon gtests in `test_zdc.cpp`). The daemon RPCs `z_senddatafile` / `z_listdatatransfers`
-/ `z_getdatatransfer` are **BUILT** (`src/rpc/datachannel.cpp:597-599`), **default-OFF** behind
+/ `z_getdatatransfer` are **BUILT** (`src/rpc/datachannel.cpp:704-711`, register fn at `:713`), **default-OFF** behind
 `-datachannel` (the current daemon gate; `-experimentalfeatures` is NOT required by the as-built code — adding that second gate is a logged hardening option). The GUI binary-safe read path and native UX are still
 DESIGNED here, not yet wired. Ships **default-OFF / opt-in** on its own experimental track,
 decoupled from the beta release pipeline. *(NOTE: the as-built RPC surface differs from the
@@ -314,6 +321,12 @@ true while `assemble()` returns `ERR_NO_KEY` until a KEY frame is accumulated or
 
 ### 3.2 Daemon RPCs (designed; default-OFF behind an opt-in flag)
 
+> **NOT THE AS-BUILT SURFACE.** The RPC shapes in this subsection are the *original design*.
+> The as-built daemon has **no `keymode` option, no `z_revealkey`, no `z_getdatafile`, and no
+> `zslp_mint_private`** — those are **DESIGNED, NOT BUILT (not callable today)**. The as-built
+> cap is **40000 bytes** (no 64 KB-default / 256 KB-hard-cap split). Authoritative as-built
+> contract: `NATIVE_NFT_GUIDE.md §3.3`.
+
 These ride the existing `z_sendmany` binary-memo path **unchanged** — each
 `encode()` frame becomes one shielded output's memo (0.00001 ZCL dust),
 batched at the per-tx output budget. Keys are generated and held in the daemon;
@@ -418,7 +431,11 @@ Three calm states, driven by `is_complete()` + `have_key()`:
   of seal-then-reveal, never an error tone).
 - **Ready** — `assemble()` succeeded; show file / message / NFT.
 
-### 4.3 Reveal the key
+### 4.3 Reveal the key — **DESIGNED, NOT BUILT**
+
+*(`z_revealkey` is not in the as-built RPC surface — not callable today. The as-built daemon
+always emits the KEY frame on send and returns the per-transfer key to the sender. This
+subsection is the original seal-then-reveal design.)*
 
 One tap → `z_revealkey` → `encode_key_frame` → one tiny output. Plus an **"I have
 a key"** paste field → `set_key` for out-of-band delivery.

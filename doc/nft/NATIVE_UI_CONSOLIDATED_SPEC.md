@@ -1,5 +1,12 @@
 # ZClassic NFT — Consolidated Native UI Spec (Audit-A, build-ready)
 
+> **REMOVED — shielded data channel / on-chain private files.** The "Private" tile / ZDC1 shielded
+> channel this spec describes has been **removed entirely** from the daemon (the `z_senddatafile` /
+> `z_listdatatransfers` / `z_getdatatransfer` RPCs, the `-datachannel` option, the ZDC1 codec).
+> ZClassic deliberately provides **no wallet path to store arbitrary files on-chain**. NFT content
+> is always off-chain, bound to the token only by a `document_hash` fingerprint. Treat every
+> Private-tile / ZDC1 section below as **historical** — do not build a private-mint UI.
+
 **Status:** BUILD-READY consolidation. Reconciles `NATIVE_UX.md` (six-screen synthesis) and
 `NATIVE_UI_BUILD_PLAN.md` (detail + mint file-level plan) against the **actual** shipping GUI tree
 on `zcl-qt-wallet@feature/nft-gallery`, the **actual** daemon read RPCs, and the **building-now**

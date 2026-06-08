@@ -294,6 +294,41 @@ initial_quantity == 1. This is a CONVENTION over the same rules, not a separate
 type. Uniqueness of the NFT is uniqueness of its tokenId (genesis txid). There
 is no consensus-level "one of a kind"; see §9.
 
+R-GEN-6 (group/child collection membership — spec-v2, deterministic):
+A GENESIS MAY carry an OPTIONAL trailing field 10, `group_id`: a single 32-byte
+push (on-chain/display order, reversed to the daemon uint256 exactly like
+token_id; R-SCRIPT-6 fixed-length gate — present-but-not-32 rejects the whole
+GENESIS; absent => ungrouped, byte-identical to a legacy GENESIS). The store
+records, on the child's token row, three append-only columns derived PURELY from
+the confirmed chain + the existing UTXO set:
+  - `hasGroup`        = group_id field present (a CLAIM only).
+  - `groupId`         = the claimed parent collection's tokenId.
+  - `groupAuthorized` = `hasGroup AND readToken(groupId) hits AND
+                        (availByToken.count(groupId) || batonInputPresent.count(groupId))`
+                        — i.e. the parent token exists AND the child GENESIS tx
+                        spent a LIVE parent-token UTXO or baton of `groupId` on an
+                        input (the SAME spent-input maps the MINT baton check
+                        uses, populated in the consume pass of §6 BEFORE this
+                        create runs).
+PINNED properties:
+  1. Consume-before-create (R-BURN-3): the authority parent outpoint is BURNED by
+     the consume step, so one outpoint authorizes EXACTLY ONE child (no replay).
+     It is NOT re-emitted by the child message.
+  2. A GENESIS does not conserve unrelated token inputs (it creates the child
+     token; it never owes the burned parent unit back), so the burned authority
+     input never makes the GENESIS invalid.
+  3. Authorization is UTXO-bound + transitively valid (R-SEND-2): a non-owner
+     holds no parent-token outpoint, so `groupAuthorized` is unforgeable. NAMING a
+     group is open (anyone may set group_id; recorded `claimed`/unauthorized) —
+     `claimed` is NEVER membership and NEVER returned by the membership query.
+  4. The `'g'` secondary index (`'g' + groupId + childTokenId -> empty`) lists
+     ONLY authorized children; it is written when an authorized child connects
+     (paired `UNDO_GROUP_INDEX_PUT`) and erased on disconnect — reorg byte-exact.
+  5. Membership is monotonic over confirmed history (no revocation message).
+Determinism: every input is confirmed bytes + the existing UTXO set, so two
+implementations compute the identical `{groupId, groupAuthorized}` and identical
+`'g'` index bit-for-bit.
+
 ## 8. MINT rules
 
 R-MINT-1: MINT of an unknown tokenId (no token row) => invalid, create nothing

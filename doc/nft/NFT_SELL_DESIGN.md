@@ -1,5 +1,11 @@
 # Selling a ZClassic NFT for ZCL — non-consensus sell/trade design
 
+> **REMOVED — shielded data channel / on-chain private files.** Any reference below to a
+> shielded-pool private sale or private negotiation "over the ZDC1 channel" (`src/datachannel/`) is
+> **obsolete**: the ZDC1 / shielded data-channel capability has been **removed entirely** from the
+> daemon. ZClassic deliberately provides **no wallet path to store arbitrary files on-chain**. The
+> sell/offer design itself is unaffected.
+
 **Status:** design + **BUILT** — the daemon SELL RPCs have landed (atomic swap
 regtest-proven; see the status table at the end). Evidence-driven; supersedes the SELL
 sections of `doc/nft/ONCHAIN_TRADES.md` (which is partly wrong about the layout — see §0).
@@ -536,7 +542,7 @@ directly — and (b) the offer-blob (de)serializer + local store.
 | ZSLP UTXO-bound conservation + `WouldBeValid` self-validate seam | **present + tested** (`zslpstore.cpp:413-748`; ~103 ZSLP gtests) |
 | Anti-burn coin-lock | **present** (`zslpwallet.cpp:100-135`; `wallet.cpp` `fExcludeZSLPTokens`) |
 | `createrawtransaction` OP_RETURN | **absent** — builder hand-assembles vout[0] (GAP, but worked around with the existing encoder) |
-| `nft_makeoffer/verifyoffer/takeoffer/listoffers/canceloffer/requestbuy` | **built** (`src/rpc/nftoffer.cpp:1180-1186`; regtest `qa/zslp/nft-sell-regtest.sh`, 6 gtests) |
+| `nft_makeoffer/verifyoffer/takeoffer/listoffers/canceloffer/requestbuy` | **built** (`src/rpc/nftoffer.cpp:1094-1104`, register fn `:1106`; regtest `qa/zslp/nft-sell-regtest.sh`, 6 gtests) |
 | Offer blob (de)serializer + local store | **built** (`src/rpc/nftoffer.cpp`) |
 | GUI sell/buy flow + L0/L1 tests | **unbuilt** (this design); reuses ContentEngine + RPC wrapper + explorer URL |
 | Escrow (mechanism B) | **primitives present + tested; flow unbuilt** |

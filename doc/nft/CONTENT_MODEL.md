@@ -1,5 +1,12 @@
 # ZClassic NFT — Content Model (any file / image / video → NFT)
 
+> **REMOVED — shielded data channel / on-chain private files.** The "private bytes over ZDC1
+> Sapling memos" path referenced below (the `zdc1://` scheme, the ZDC1 data channel) has been
+> **removed entirely** from the daemon. ZClassic deliberately provides **no wallet path to store
+> arbitrary files on-chain** — public *or* private. All NFT content stays off-chain; the chain
+> holds only the 32-byte `document_hash` fingerprint. Treat every ZDC1 / private-bytes mention
+> below as **historical**.
+
 **Status:** design, single source of truth. THIS workflow ships the GUI content engine
 (Section 4 + 6B); the daemon mint RPC (Section 6A) is designed-now / implemented-later.
 

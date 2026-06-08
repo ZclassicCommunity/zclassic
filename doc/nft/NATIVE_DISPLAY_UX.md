@@ -1,5 +1,12 @@
 # ZClassic Native NFT Display & Shield UX — Canonical Design
 
+> **REMOVED — shielded data channel / on-chain private files.** The "Shield" UX and the ZDC1 data
+> channel this doc designs around (`z_senddatafile` / `z_listdatatransfers` / `z_getdatatransfer`,
+> the `-datachannel` option, the ZDC1 codec) have been **removed entirely** from the daemon.
+> ZClassic deliberately provides **no wallet path to store arbitrary files on-chain**. NFT content
+> is always off-chain, bound to the token only by a `document_hash` fingerprint. Treat every Shield
+> / private file / ZDC1 section below as **historical**.
+
 *The single canonical design doc for the **native** (no web browser) NFT display surface in
 the ZClassic wallet: how an owner views, verifies, and privately ships the **file content**
 behind a ZSLP NFT. Status-accurate against the GUI on `feature/nft-gallery`
@@ -401,18 +408,18 @@ older, stale docs.
     revealing them.**
   - **Verify-before-decrypt:** `z_getdatatransfer` recomputes the anchor and compares it to
     the expected anchor **before any decrypt**; it **never returns plaintext on failure.**
-- **Three daemon RPCs — BUILT-CLI-ONLY** (`src/rpc/datachannel.cpp`), registered **only** under
-  `-datachannel` (default OFF, `init.cpp:527`). When off, the dispatcher returns
-  `RPC_METHOD_NOT_FOUND (-32601)`.
+- **Three daemon RPCs — BUILT-CLI-ONLY** (`src/rpc/datachannel.cpp`, registered at `:704-711`,
+  register fn `:713`), registered **only** under `-datachannel` (default OFF, `init.cpp:527`).
+  When off, the dispatcher returns `RPC_METHOD_NOT_FOUND (-32601)`.
 - **Cross-wallet receive — BUILT-CLI-ONLY, unproven by automated E2E.** The current daemon has
-  the registry-free reconstruct-from-chain path (`datachannel.cpp:504-536`,
+  the registry-free reconstruct-from-chain path (`datachannel.cpp:568-600`,
   `GetFilteredNotes(requireSpendingKey=false)` so a **viewing-key-only** wallet can read its
   frames; the ivk decrypts the L1 memos, the on-chain KEY frame populates the L3 key,
   `verify_fingerprint` gates the open). **No ivk/spending key ever leaves the wallet.** The
   stale "#117 structurally impossible" line in `NFT_FINAL_REVIEW.md` / `PRIVACY.md` describes
   an **older** revision — **the code is ahead of those docs.** The remaining real caveat is
   **key delivery**: the in-band KEY frame works (`include_key_frame = true`,
-  `datachannel.cpp:288`); out-of-band/reveal-later is **DESIGNED-NOT-BUILT**.
+  `datachannel.cpp:346`); out-of-band/reveal-later is **DESIGNED-NOT-BUILT**.
 - **Selective disclosure via `z_exportviewingkey` (Sapling ivk) — DESIGNED-NOT-BUILT.**
   `rpcdump.cpp` throws *"Currently, only Sprout zaddrs are supported"* (line 832); the data
   channel is Sapling-only, so the ivk cannot be exported today. **As-built disclosure is via
@@ -515,7 +522,7 @@ Entry points: detail dialog **"Send file privately…"** action, and a Collectio
 ### 6.5 SHIELD — Receive flow (DESIGNED-NOT-BUILT, implementation-ready)
 
 The cross-wallet receive path is **BUILT-CLI-ONLY** in the daemon (registry-free,
-`datachannel.cpp:504`); the GUI is what's missing. Two entry modes:
+`datachannel.cpp:568`); the GUI is what's missing. Two entry modes:
 
 **Mode A — Open a file linked to an NFT you hold.**
 - From the detail view of a token whose `docHashHex` is a known data-channel fingerprint, a
@@ -616,10 +623,11 @@ the transfer is invisible.
 
 **Daemon (`/home/rhett/github/zclassic`):**
 - `src/datachannel/zdc.{h,cpp}` (codec, AEAD, nonce, `ciphertext_fingerprint` at zdc.cpp:523).
-- `src/rpc/datachannel.cpp` (the 3 RPCs; registry-free cross-wallet path at 504-536;
-  `include_key_frame=true` at 288; permanence ack at 206-213; 40000-byte cap at 84).
+- `src/rpc/datachannel.cpp` (the 3 RPCs registered at 704-711, register fn 713; registry-free
+  cross-wallet path at 568-600; `include_key_frame=true` at 346; permanence ack at 269-271;
+  40000-byte cap `ZDC_MAX_FILE_BYTES` at 86).
 - `src/wallet/asyncrpcoperation_senddatafile.{h,cpp}` (one shielded tx, N same-recipient
-  outputs; size re-projection guard).
+  outputs; size re-projection guard; Sapling from/to enforced at 84-105).
 - `src/wallet/rpcdump.cpp:832` (Sapling `z_exportviewingkey` Sprout-only TODO).
 - `src/init.cpp:527` (`-datachannel` default 0).
 - `src/gtest/test_zdc.cpp`, `src/datachannel/test/zdc_test.cpp` (codec tests).

@@ -1,5 +1,11 @@
 # ZClassic NFT — Native UX Design
 
+> **REMOVED — shielded data channel / on-chain private files.** The private-NFT / ZDC1 data-channel
+> read/write paths this doc designs (binary-safe `ZDC1`-magic memo handling, the data-channel inbox)
+> have been **removed entirely** from the daemon. ZClassic deliberately provides **no wallet path to
+> store arbitrary files on-chain**. NFT content is always off-chain, bound to the token only by a
+> `document_hash` fingerprint. Treat every ZDC1 / private-read section below as **historical**.
+
 **Status:** Design spec (synthesis of 6 screen specs). Grounds on real, shipping code.
 **Repos:** daemon `/home/rhett/github/zclassic`; GUI `/home/rhett/github/zcl-qt-wallet` (branch `feature/nft-gallery`).
 **Constraint:** C++14 only (`zcl-qt-wallet.pro CONFIG += c++14`). NO `std::optional` / `std::string_view`. Use empty-`QString` sentinels and default-initialized struct members.

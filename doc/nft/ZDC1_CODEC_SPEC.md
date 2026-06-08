@@ -1,5 +1,11 @@
 # ZDC1 Codec — Implementation-Ready Specification
 
+> **REMOVED — HISTORICAL DOCUMENT.** The ZDC1 shielded data-channel codec and its RPCs
+> (`z_senddatafile` / `z_listdatatransfers` / `z_getdatatransfer`, the `-datachannel` option) have
+> been **removed entirely** from the ZClassic daemon. ZClassic deliberately provides **no wallet
+> path to store arbitrary files on-chain**. This spec is retained for historical traceability
+> only; it does not describe any shipping feature.
+
 **Scope:** the exact, byte-level format and crypto the implementer codes to for the
 ZClassic Shielded Data Channel (ZDC1). This is the **codec** only: pure logic, no
 daemon/chain/Qt dependency, depends only on **libsodium + C++11**. It lives at
@@ -202,8 +208,9 @@ block/insertion order, so chain order is **never trusted**. The `Decoder`:
 5. **`assemble`** (needs complete + key): decrypt START meta, decrypt DATA in seq
    order, recompute + compare END hash, cross-check size. Returns the exact original
    bytes + meta, or a precise error. Idempotent, side-effect-free on stored frames.
-6. **GC (caller's job):** expire incomplete `(zaddr, transfer_id)` after a TTL
-   (default 7 days) to bound memory against START-spam.
+6. **GC (caller's job):** expire incomplete `(zaddr, transfer_id)` after a TTL to bound
+   memory against START-spam. **As built, the daemon uses a 72h TTL** and an inflight cap
+   `ZDC_MAX_INFLIGHT = 256` (`src/rpc/datachannel.cpp:88-89`).
 
 ---
 
@@ -295,10 +302,13 @@ namespace zdc {
 
 ### 8.1 Daemon integration points (no change to the codec)
 
-- **Send:** chunk the (already L3-sealed) frames; each frame's 512 bytes go to
-  `z_sendmany` as a memo via `get_memo_from_hex_string` (it already accepts raw
-  binary up to `ZC_MEMO_SIZE` — `asyncrpcoperation_sendmany.cpp:1321-1343`). Batch
-  ≤107 outputs/tx, ≤210/block. No builder/consensus change.
+- **Send:** chunk the (already L3-sealed) frames; each frame's 512 bytes go out as a
+  Sapling output memo (the send path accepts raw binary up to `ZC_MEMO_SIZE` —
+  `asyncrpcoperation_sendmany.cpp:1321-1343`). **As built, the whole transfer rides ONE
+  shielded tx** (not a multi-tx fan-out): the daemon caps a transfer at
+  `ZDC_MAX_FRAMES_PER_TX = 90` frames and `ZDC_MAX_FILE_BYTES = 40000` bytes
+  (`src/rpc/datachannel.cpp:86-87`); larger files are rejected, not split across txs.
+  No builder/consensus change.
 - **Receive:** the decrypted memo bytes from `z_listreceivedbyaddress`
   (`rpcwallet.cpp:3338-3427`) feed `Decoder::add_frame`. NFT mint path sets ZSLP
   `document_hash = ciphertext_fingerprint(frames)`.

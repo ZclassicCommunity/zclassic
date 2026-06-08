@@ -1,5 +1,12 @@
 # Privacy Technology in the ZClassic NFT Feature
 
+> **REMOVED — HISTORICAL DOCUMENT.** The shielded data-channel / arbitrary-file-transfer
+> capability described here (`z_senddatafile` / `z_listdatatransfers` / `z_getdatatransfer`, the
+> `-datachannel` option, the ZDC1 codec) has been **removed entirely** from the daemon. ZClassic
+> deliberately provides **no wallet path to store arbitrary files on-chain**. NFT content is
+> always off-chain, bound to the token only by a `document_hash` fingerprint. This doc is retained
+> for historical traceability only.
+
 *What privacy technology are we enabling, and exactly what does it protect?*
 
 This document is the canonical answer. It describes **one** privacy technology — the
@@ -146,7 +153,7 @@ A single dedicated async operation, `AsyncRPCOperation_senddatafile`
 ### 2.4 Receive path (reconstruct → verify-before-decrypt)
 
 A recipient wallet reconstructs the transfer **from the chain alone**, even with no
-local session record (`datachannel.cpp:504-548`):
+local session record (`datachannel.cpp:560-600`):
 
 1. `GetFilteredNotes(requireSpendingKey=false)` lets a viewing-key-only wallet (one
    holding just an `ivk`) read its frames.
@@ -167,7 +174,7 @@ reveal-later is **DESIGNED-NOT-BUILT**.)
 
 `z_getdatatransfer` recomputes the ciphertext fingerprint over the received DATA frames
 and compares it to the expected anchor **before any decrypt happens**. It never returns
-plaintext on failure (`datachannel.cpp:558-628`). The distinct, honest error codes:
+plaintext on failure (`datachannel.cpp:622-692`). The distinct, honest error codes:
 
 | Error | Meaning |
 |-------|---------|
@@ -191,7 +198,7 @@ working-but-unproven-by-automation.
 All three RPCs are registered **only** when the daemon runs with `-datachannel`. When the
 flag is off (the default — see §4), the RPCs are not registered at all, so the dispatcher
 returns `RPC_METHOD_NOT_FOUND (-32601)` — indistinguishable from a method that never
-existed (`datachannel.cpp:649-658`). `-experimentalfeatures` is **not** required by the
+existed (registration gate `datachannel.cpp:713-722`). `-experimentalfeatures` is **not** required by the
 as-built code (adding a second gate is a logged hardening option).
 
 CLI argument mapping (so `zclassic-cli` sends a JSON object, not a raw string) lives at
@@ -199,7 +206,7 @@ CLI argument mapping (so `zclassic-cli` sends a JSON object, not a raw string) l
 
 ### z_senddatafile  *(async — returns immediately; poll with `z_getoperationresult`)*
 
-Defined at `datachannel.cpp:157`.
+Defined at `datachannel.cpp:215`.
 
 **Params** — a single object:
 
@@ -240,7 +247,7 @@ non-Sapling or watch-only from-address; `RPC_METHOD_NOT_FOUND (-32601)` when
 
 ### z_listdatatransfers  *(okSafeMode)*
 
-Defined at `datachannel.cpp:372`.
+Defined at `datachannel.cpp:430`.
 
 **Params:** none.
 
@@ -253,7 +260,7 @@ Defined at `datachannel.cpp:372`.
 
 ### z_getdatatransfer  *(okSafeMode — reassemble + verify-before-decrypt)*
 
-Defined at `datachannel.cpp:407`.
+Defined at `datachannel.cpp:471`.
 
 **Params** — a single object:
 
@@ -301,8 +308,10 @@ Defined at `datachannel.cpp:407`.
 - **256** max in-flight tracked transfers; **72-hour** in-flight TTL; a basic rate guard
   (~4 calls/sec).
 - **Default OFF** behind `-datachannel` (`init.cpp:527`, default `0`).
-- **Permanence consent enforced at the daemon** (`datachannel.cpp:206-213`), not the GUI:
-  `z_senddatafile` refuses unless `acknowledge_permanent=true`.
+- **Permanence consent enforced at the daemon** (`datachannel.cpp:269-271`), not the GUI:
+  `z_senddatafile` refuses unless `acknowledge_permanent=true` (*"Refusing: the encrypted bytes
+  are PERMANENT and public-ciphertext on-chain forever. Pass acknowledge_permanent=true to
+  proceed."*).
 
 ### Non-consensus overlay (why this is safe to ship)
 
@@ -330,7 +339,7 @@ observable on-chain (`zdc.h:30-37`):
 cleartext *at L3*; its on-chain confidentiality rests entirely on the L1 Sapling
 encryption to the recipient `ivk`. A compromised `ivk` therefore exposes the key, and
 in-band reveal commits the key on-chain at send time. The as-built daemon **always**
-includes the KEY frame (`datachannel.cpp:287`, `include_key_frame=true`) and also returns
+includes the KEY frame (`datachannel.cpp:346`, `include_key_frame=true`) and also returns
 the key to the sender. Out-of-band / reveal-later key delivery is **DESIGNED-NOT-BUILT**.
 
 **Selective disclosure via viewing-key export — known gap.** The design (`PRIVACY.md §1.3`)
@@ -417,6 +426,6 @@ sentence, it is:
 - `src/rpc/datachannel.cpp` — the three RPCs, safety gates, verify-before-decrypt.
 - `src/wallet/asyncrpcoperation_senddatafile.{h,cpp}` — single-tx multi-output shielded send.
 - `src/gtest/test_zdc.cpp` (25 tests); `src/datachannel/test/zdc_test.cpp` (standalone harness).
-- `src/wallet/rpcdump.cpp:830` — `z_exportviewingkey` Sprout-only gap.
+- `src/wallet/rpcdump.cpp:832` — `z_exportviewingkey` Sprout-only gap.
 - `src/rpc/client.cpp:138-139` — CLI arg mapping; `src/init.cpp:527` — `-datachannel` default-off.
 - `doc/nft/PRIVACY.md`, `doc/nft/NFT_FINAL_REVIEW.md` — design docs (stale on cross-wallet #117; this doc is current).

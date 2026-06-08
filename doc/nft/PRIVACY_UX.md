@@ -1,5 +1,12 @@
 # ZClassic Private NFTs & Shielded Data Channel — Native Privacy UX
 
+> **REMOVED — HISTORICAL DOCUMENT.** The shielded data-channel / arbitrary-file-transfer
+> capability this UX is built around (`z_senddatafile` / `z_listdatatransfers` /
+> `z_getdatatransfer`, the `-datachannel` option, the ZDC1 codec) has been **removed entirely**
+> from the daemon. ZClassic deliberately provides **no wallet path to store arbitrary files
+> on-chain**. NFT content is always off-chain, bound to the token only by a `document_hash`
+> fingerprint. This doc is retained for historical traceability only.
+
 **Status:** Design spec + shipped codec. Grounds on the working ZDC1 codec at
 `src/datachannel/zdc.{h,cpp}` (tested: `src/datachannel/test/`, 800+ checks, 0
 failures) and on the UX contracts in `doc/nft/NATIVE_UX.md`.

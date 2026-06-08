@@ -1,5 +1,11 @@
 # ZClassic NFT — GUI Build Backlog (prioritized)
 
+> **REMOVED — shielded data channel / on-chain private files.** Backlog items below that reference
+> the datachannel RPCs (`z_senddatafile` / `z_listdatatransfers` / `z_getdatatransfer`, the
+> `-datachannel` option, the ZDC1 codec / binary-memo path) are **obsolete**: that capability has
+> been **removed entirely** from the daemon. ZClassic deliberately provides **no wallet path to
+> store arbitrary files on-chain**. Do not build them.
+
 The prioritized, concrete build plan for the native (no-browser) NFT GUI in
 `/home/rhett/github/zcl-qt-wallet` (C++14 — **no** `std::optional`/`string_view`; use
 empty-`QString` sentinels). Companion to [`NFT_FEATURE_CHECKLIST.md`](NFT_FEATURE_CHECKLIST.md)

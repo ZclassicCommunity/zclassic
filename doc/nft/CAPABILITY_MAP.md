@@ -1,5 +1,12 @@
 # ZClassic Native NFTs — The Honest Capability Map
 
+> **REMOVED — shielded data channel / on-chain private files.** Any "Shield" / private-file / ZDC1
+> data-channel capability listed below (`z_senddatafile` / `z_listdatatransfers` /
+> `z_getdatatransfer`, the `-datachannel` option, the ZDC1 codec) has been **removed entirely**
+> from the daemon. ZClassic deliberately provides **no wallet path to store arbitrary files
+> on-chain**. NFT content is always off-chain, bound to the token only by a `document_hash`
+> fingerprint. Treat every such row as **historical**.
+
 *What a user can actually do with NFTs from inside the full-node GUI — every item tagged
 works-now / building-now / next, tied to ground truth in the code, and independently checked
 to require **no consensus change** and to be **secure under the non-consensus model**.*
@@ -43,27 +50,27 @@ workflow is actively writing it against a fixed contract; **next** = designed, n
 
 | What the user does | Mechanism (verified in code) | Requires |
 |---|---|---|
-| **See the NFTs this wallet owns**, in a native dark gallery with a verify badge and public/private pill — no browser | GUI `RPC::refreshNFTs()` calls the real `zslp_listmytokens` then `zslp_gettoken` per token and feeds `NFTGalleryModel`/`nftgallerydelegate` (`zcl-qt-wallet/src/rpc.cpp:863`; gallery files `nftgallery*.{h,cpp}`). The daemon side is `zslp_listmytokens` (`src/rpc/zslp.cpp:191`). | `-zslpindex` (default ON this branch) + wallet build |
+| **See the NFTs this wallet owns**, in a native dark gallery with a verify badge and public/private pill — no browser | GUI `RPC::refreshNFTs()` calls the real `zslp_listmytokens` then `zslp_gettoken` per token and feeds `NFTGalleryModel`/`nftgallerydelegate` (`zcl-qt-wallet/src/rpc.cpp:863`; gallery files `nftgallery*.{h,cpp}`). The daemon side is `zslp_listmytokens` (`src/rpc/zslp.cpp:204`). | `-zslpindex` (default ON this branch) + wallet build |
 | **Verify an image** against its on-chain fingerprint (✓ match / ✗ mismatch / ? pending) — locally, never fetching the remote URL | `ContentEngine` streaming SHA-256 + verify on a worker thread (`zcl-qt-wallet/src/contentengine.{h,cpp}`); badge copy is "matches its on-chain fingerprint" only | local cached bytes |
-| **Look up any public token** by genesis txid: ticker, name, document_url, 32-byte hash, decimals, height, totalMinted, baton state | `zslp_gettoken` -> `CZSLPStore::GetToken` (`src/rpc/zslp.cpp:73`) | `-zslpindex` |
+| **Look up any public token** by genesis txid: ticker, name, document_url, 32-byte hash, decimals, height, totalMinted, baton state | `zslp_gettoken` -> `CZSLPStore::GetToken` (`src/rpc/zslp.cpp:84`, `TokenToJSON` at `:57`) | `-zslpindex` |
 | **Confirm a real 1-of-1 + supply cap** (`totalMinted==1 && hasMintBaton==false`) | baton-less GENESIS; `totalMinted` now counts only created quantity (R-GEN-3) | `-zslpindex` |
-| **Read full public transfer history** (every GENESIS/MINT/SEND, newest-first, reorg-safe) | `zslp_listtransfers` (`src/rpc/zslp.cpp:142`); ordering normative (R-RPC-2) | `-zslpindex` |
-| **Browse all indexed tokens** (bounded paging) | `zslp_listtokens` (`src/rpc/zslp.cpp:107`), clamped to `ZSLP_LIST_MAX=1000` | `-zslpindex` |
+| **Read full public transfer history** (every GENESIS/MINT/SEND, newest-first, reorg-safe) | `zslp_listtransfers` (`src/rpc/zslp.cpp:155`); ordering normative (R-RPC-2) | `-zslpindex` |
+| **Browse all indexed tokens** (bounded paging) | `zslp_listtokens` (`src/rpc/zslp.cpp:120`), clamped to `ZSLP_LIST_MAX=1000` | `-zslpindex` |
 | **Trust the ledger is forgery-proof** (a forged SEND/MINT credits nobody; an NFT can't be duplicated) | UTXO-bound conservation indexer; `vout[0]`-only parse landed (`src/zslp/zslpindexer.cpp:229`), single `ZSLP_SEND_MAX_OUTPUTS=19`, no mempool/0-conf path (`ChainTip`-only, `zslpindexer.h`). ~101 ZSLP gtests across `src/gtest/test_zslp*.cpp` | `-zslpindex` |
 
-### B. Create and move NFTs (the write path) — **works-now (daemon, working tree)**
+### B. Create and move NFTs (the write path) — **works-now (daemon)**
 
-The daemon RPCs are built (working tree on `feature/zslp-nft-indexer`, uncommitted). The GUI
+The daemon RPCs are built, committed, and registered on `feature/zslp-nft-indexer`. The GUI
 dialogs that call them are **designed** (`NATIVE_UI_BUILD_PLAN.md`) and degrade honestly until
 they are wired in a build that carries the RPCs.
 
 | What the user will do | Daemon contract (the exact RPC names/params the UI calls) | State |
 |---|---|---|
-| **Mint a public 1-of-1** (drag a file, hash it locally, fill name, broadcast a baton-less GENESIS) | `zslp_genesis '{nft:true, name, document_url, document_hash, [ticker], [to (t-addr)], [mint_baton_vout]}'` (`nft:true` forces decimals 0/quantity 1/no baton) | built (working tree; `src/rpc/zslp.cpp:330`; encoders `slp_build_genesis` + builder spec `MINT_TRANSFER_SPEC.md`) |
-| **Transfer / gift** an NFT to a recipient's t-address | `zslp_send` (token_id, to_address, amount=1, optional change_address) | built (working tree; `src/rpc/zslp.cpp:545`) |
+| **Mint a public 1-of-1** (drag a file, hash it locally, fill name, broadcast a baton-less GENESIS) | `zslp_genesis '{nft:true, name, document_url, document_hash, [ticker], [to (t-addr)], [mint_baton_vout]}'` (`nft:true` forces decimals 0/quantity 1/no baton) | built (`src/rpc/zslp.cpp:326`, registered `:649-661`; encoders `slp_build_genesis` + builder spec `MINT_TRANSFER_SPEC.md`) |
+| **Transfer / gift** an NFT to a recipient's t-address | `zslp_send` (token_id, to_address, amount=1, optional change_address) | built (`src/rpc/zslp.cpp:541`, registered `:649-661`) |
 | **Airdrop / batch** up to 19 token outputs in one tx | `zslp_send` multi-output (indexer crediting already works) | built |
 | **Limited / numbered editions** ("N of 100") | `zslp_genesis` qty=N baton-OFF, or N separate 1-of-1s + `zslp_send` | built (rides B above) |
-| **Hold an NFT without burning it** — an ordinary send/shield/sweep never spends the carrier dust | Wallet anti-burn: `AvailableCoins` now excludes protected token/dust outpoints by default (`fExcludeZSLPTokens=true`, `wallet.h:1124`; `ZSLPIsProtectedTokenOutpoint`, `wallet.cpp:3197`), built on the primitive `ZSLPFindWalletTokenUtxos` + `SLP_TOKEN_DUST=546` (`src/wallet/zslpwallet.{h,cpp}`); the self-validate-before-broadcast gate (R-WALLET-9) is wired (`zslpwallet.cpp:460`) | built (working tree) — holder safety mechanically complete; becomes the shipped guarantee on commit/merge |
+| **Hold an NFT without burning it** — an ordinary send/shield/sweep never spends the carrier dust | Wallet anti-burn: `AvailableCoins` now excludes protected token/dust outpoints by default (`fExcludeZSLPTokens=true`, `wallet.h:1124`; `ZSLPIsProtectedTokenOutpoint`, `wallet.cpp:3198`), built on the primitive `ZSLPFindWalletTokenUtxos` + `SLP_TOKEN_DUST=546` (`src/wallet/zslpwallet.{h,cpp}`); the self-validate-before-broadcast gate (R-WALLET-9) is wired (`zslpwallet.cpp:465`) | built — holder safety mechanically complete; the shipped guarantee provided spend paths use the default token-excluding `AvailableCoins` |
 
 ### C. Create / mint dialogs and detail view (the native UI) — **next**
 
@@ -77,8 +84,8 @@ they are wired in a build that carries the RPCs.
 
 | What the user will do | Mechanism | State |
 |---|---|---|
-| **The ZDC1 codec itself** (frame/reassemble/AEAD/ciphertext fingerprint) | `src/datachannel/zdc.{h,cpp}` — built + self-tested AND **compiled into the daemon** (`src/Makefile.am:247,294`; 25 daemon gtests in `test_zdc.cpp`, ASan/UBSan-clean, secret-zeroized) | works-now (compiled into the daemon) |
-| **Send a private file / message** (sealed bytes on-chain; selective disclosure via the returned key / viewing key) | Daemon RPCs `z_senddatafile` / `z_listdatatransfers` / `z_getdatatransfer` built + registered (`src/rpc/datachannel.cpp:597-599`); default-OFF behind `-datachannel`, permanence-consent, verify-before-decrypt | works-now (daemon, CLI; native GUI next) |
+| **The ZDC1 codec itself** (frame/reassemble/AEAD/ciphertext fingerprint) | `src/datachannel/zdc.{h,cpp}` — built + self-tested AND **compiled into the daemon** (`src/Makefile.am:248,295`; 25 daemon gtests in `test_zdc.cpp`, ASan/UBSan-clean, secret-zeroized) | works-now (compiled into the daemon) |
+| **Send a private file / message** (sealed bytes on-chain; selective disclosure via the returned key / viewing key) | Daemon RPCs `z_senddatafile` / `z_listdatatransfers` / `z_getdatatransfer` built + registered (`src/rpc/datachannel.cpp:704-711`, register fn `:713`); default-OFF behind `-datachannel`, permanence-consent, verify-before-decrypt | works-now (daemon, CLI; native GUI next) |
 | **Receive a private NFT in the gallery** (decrypt locally, render natively, verify badge) | render half done; needs the GUI binary-memo branch (`rpc.cpp` ~756) + datachannel route | next (binary-memo fix gates all private receive) |
 
 *(A single `zslp_mint_private` RPC and a separate `z_revealkey` seal-then-reveal trigger are
@@ -89,7 +96,7 @@ designed but NOT built; the as-built private-mint path is `z_senddatafile` + an 
 
 | Trade | Honest verdict | State |
 |---|---|---|
-| **Transparent NFT ⇄ transparent ZCL**, atomic single tx | **built** via a fixed-template `SIGHASH_ALL\|ANYONECANPAY` signed offer (seller pins the WHOLE output set — OP_RETURN ZSLP SEND@vout[0] / buyer NFT dust@vout[1] / seller ZCL payout@vout[2]; buyer appends funding inputs); coin legs are consensus-atomic, token attribution is indexer-convention (so **trust-minimized**, not trustless). `SINGLE\|ANYONECANPAY` does NOT work for ZSLP (it would pin vout[0]=OP_RETURN, not the payout, and burn the seller NFT). | built (`nft_makeoffer`/`nft_verifyoffer`/`nft_takeoffer`/`nft_listoffers`/`nft_canceloffer`/`nft_requestbuy`, `src/rpc/nftoffer.cpp:1180-1186`; regtest `qa/zslp/nft-sell-regtest.sh`, 6 gtests); only the GUI offer dialog is pending |
+| **Transparent NFT ⇄ transparent ZCL**, atomic single tx | **built** via a fixed-template `SIGHASH_ALL\|ANYONECANPAY` signed offer (seller pins the WHOLE output set — OP_RETURN ZSLP SEND@vout[0] / buyer NFT dust@vout[1] / seller ZCL payout@vout[2]; buyer appends funding inputs); coin legs are consensus-atomic, token attribution is indexer-convention (so **trust-minimized**, not trustless). `SINGLE\|ANYONECANPAY` does NOT work for ZSLP (it would pin vout[0]=OP_RETURN, not the payout, and burn the seller NFT). | built (`nft_makeoffer`/`nft_verifyoffer`/`nft_takeoffer`/`nft_listoffers`/`nft_canceloffer`/`nft_requestbuy`, `src/rpc/nftoffer.cpp:1094-1104`, register fn `:1106`; regtest `qa/zslp/nft-sell-regtest.sh`, 6 gtests); only the GUI offer dialog is pending |
 | **Any leg shielded**, atomic | **impossible in-codebase** — z-notes carry no script and the Sapling binding sig is single-party over the whole tx (`NFT_SELL_DESIGN.md` §4 / superseded `ONCHAIN_TRADES.md` §4, code-confirmed) | not on roadmap |
 | **Escrowed/disputed sale** | possible via 2-of-3 P2SH multisig, but **trusted** (the arbiter) | next, opt-in only |
 
@@ -145,12 +152,12 @@ I verified each capability against the code on this branch:
 - **Honest UX is achievable and specced.** Badge copy, pending-until-10, name-not-unique cue, and
   "no auto-fetch" are normative in `SECURITY_MODEL.md` R-UX-1..9 and carried verbatim into the UI
   plan's banned-words list.
-- **Holder anti-burn — closed in the working tree** (capability B last row). `AvailableCoins`
+- **Holder anti-burn — closed and committed** (capability B last row). `AvailableCoins`
   now excludes protected token/dust outpoints by default (`fExcludeZSLPTokens=true`,
-  `wallet.h:1124`; `ZSLPIsProtectedTokenOutpoint`, `wallet.cpp:3197`) and the
-  self-validate-before-broadcast gate is wired (`zslpwallet.cpp:460`). Holding is therefore
-  mechanically burn-safe in the working tree; it becomes the shipped guarantee once these
-  uncommitted changes are committed/merged. Do not let UI copy imply burn-proof holding outside
+  `wallet.h:1124`; `ZSLPIsProtectedTokenOutpoint`, `wallet.cpp:3198`) and the
+  self-validate-before-broadcast gate is wired (`zslpwallet.cpp:465`). Holding is therefore
+  mechanically burn-safe; it is the shipped guarantee provided spend paths use the default
+  token-excluding `AvailableCoins`. Do not let UI copy imply burn-proof holding outside
   a build that carries these changes.
 
 ---

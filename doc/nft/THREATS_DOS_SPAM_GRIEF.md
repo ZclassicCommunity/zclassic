@@ -42,7 +42,7 @@ tell the truth). Be honest in the GUI about what is unpreventable.
    self-mined non-standard txs, multiple OP_RETURNs and larger payloads per tx.
    Each looks like a normal tx to consensus.
 2. **Dust outputs:** ZSLP "rides" transparent dust — token quantity lives at a
-   real pay-to-address vout (`zslp_listmytokens` help text, `src/rpc/zslp.cpp:191`).
+   real pay-to-address vout (`zslp_listmytokens` help text, `src/rpc/zslp.cpp:204`).
    An attacker can pay 1 satoshi (or the dust floor) to **any** address and attach
    a token to it.
 3. **Unsolicited token sends:** a valid SEND whose output vout pays the victim's

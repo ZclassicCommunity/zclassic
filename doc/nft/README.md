@@ -1,32 +1,57 @@
 # ZClassic Native NFTs — Documentation Index
 
 This folder specifies **native, no-browser NFTs on ZClassic**: minting any file/image/video,
-holding and verifying it, gifting and atomically trading it, and — uniquely — **private**
-NFTs over the shielded pool. Everything here is designed to ride **unchanged network
-consensus** (old, unmodified nodes relay and mine these transactions; no consensus change is
-ever required). Security comes from a **non-consensus overlay that every honest wallet
-re-validates deterministically** — not from the chain rejecting bad transactions.
+holding and verifying it, gifting and atomically trading it. Everything here is designed to ride
+**unchanged network consensus** (old, unmodified nodes relay and mine these transactions; no
+consensus change is ever required). Security comes from a **non-consensus overlay that every
+honest wallet re-validates deterministically** — not from the chain rejecting bad transactions.
+
+> **Removed:** the former shielded data-channel / arbitrary-file-transfer capability ("private
+> files/NFTs over the shielded data channel", the `z_senddatafile`/`z_listdatatransfers`/
+> `z_getdatatransfer` RPCs, the `-datachannel` option, and the ZDC1 codec) has been **removed
+> entirely** from the daemon. ZClassic deliberately provides **no wallet path to store arbitrary
+> files on-chain**. NFT content is always off-chain, bound to the token only by a `document_hash`
+> fingerprint. Doc sections below that still describe the data channel are historical.
 
 > One-line model: **a forgery can be mined, but it credits nobody** — uniqueness/ownership are
 > a deterministic function of the confirmed chain that every correct implementation computes
 > identically.
 
-> **Build status (dev/testnet):** MINT + VIEW = built (daemon RPCs + native GUI). SHIELD
-> (private files/NFTs over the shielded data channel) and SELL (NFT⇄ZCL atomic swap) = now
-> built in the daemon (CLI, regtest-proven; SHIELD default-OFF behind `-datachannel`); the
-> native GUI for SHIELD/SELL is next. See **NATIVE_NFT_GUIDE §1** for file:line ground truth.
+> **Build status (dev/testnet):** MINT + VIEW = built (daemon RPCs + native GUI). SELL (NFT⇄ZCL
+> atomic swap) = built in the daemon (CLI, regtest-proven); the native GUI for SELL is next.
+> SHIELD (the former on-chain private-file data channel) has been **removed** — ZClassic provides
+> no wallet path to store arbitrary files on-chain. See **NATIVE_NFT_GUIDE §1** for file:line
+> ground truth.
 
 ---
+
+## 🏗 For contributors — how protocols are built (read first)
+
+**[PROTOCOL_STANDARD.md](PROTOCOL_STANDARD.md)** — **NORMATIVE.** The single standard for how
+*any* ZSLP-family overlay feature (fungible tokens, NFTs, collections, the sell/offer
+mechanism) is designed, encoded, versioned, validated, tested, and
+documented. Read it before changing or adding a protocol. It encodes the five hard invariants
+(never affect consensus · never put files on-chain · security = deterministic re-validation ·
+UTXO-bound authority · backward-compatible/append-only), the mandatory layer pipeline
+(parser → bridge → indexer → store+undo → wallet+self-validate → RPC → GUI), the versioning
+rules (`ZSLP_SPEC_VERSION` vs `ZSLP_INDEX_VERSION`), the test/review gates, and a numbered
+repeatable recipe — with collections as the worked example.
 
 ## ⭐ Start here
 
 **[NATIVE_NFT_GUIDE.md](NATIVE_NFT_GUIDE.md)** — the single, canonical, build-ready guide.
 It answers "what can I do" (works-now / building-now / next), gives the per-screen native-Qt UI
-spec (gallery, detail, mint-from-file, send/gift, private NFT, later trade — exact widget trees,
-states, copy, and `zslp_genesis`/`zslp_send` RPC calls), the privacy stack + as-built RPC API
-(`z_senddatafile`/`z_listdatatransfers`/`z_getdatatransfer`, with selective disclosure via the
-returned per-transfer key / `z_exportviewingkey`), and the non-negotiables. **Read this first.
-Everything below is reference depth.**
+spec (gallery, detail, mint-from-file, send/gift, later trade — exact widget trees,
+states, copy, and `zslp_genesis`/`zslp_send` RPC calls), and the non-negotiables. **Read this
+first. Everything below is reference depth.** (The former on-chain private-file data channel has
+been removed; NFT content is always off-chain.)
+
+**[NFT_API_REFERENCE.md](NFT_API_REFERENCE.md)** — the **authoritative per-RPC call-shape
+reference**, generated against the as-built daemon source: every `zslp_*` / `nft_*` RPC
+(and the `z_sendmany` `inputs` coin-control parameter) with its parameters,
+return shape, error codes, runnable `zclassic-cli` examples, the gating-flag table, and an
+end-to-end mint→list→info→transfer→sell→buy walkthrough. Use the guide for "what/why", this for
+"exact call shape". `help <command>` in the daemon remains ground truth.
 
 ## Canonical reference docs (cited by the guide)
 
@@ -46,8 +71,9 @@ After the guide, these remain authoritative for their own domain:
 4. **[CONTENT_MODEL.md](CONTENT_MODEL.md)** — **any file/image/video → NFT** via
    content-addressing: on-chain fingerprint (SHA-256 + Merkle root for large files), off-chain
    bytes, streaming verification (a multi-GB video hashes in bounded memory).
-5. **[ZDC1_CODEC_SPEC.md](ZDC1_CODEC_SPEC.md)** — the shielded data-channel codec reference
-   (frame/reassemble/AEAD/seal-then-reveal/ciphertext fingerprint).
+5. **[ZDC1_CODEC_SPEC.md](ZDC1_CODEC_SPEC.md)** — **HISTORICAL / REMOVED.** The shielded
+   data-channel codec it described is no longer in the daemon; ZClassic provides no on-chain
+   file path. Kept only for historical traceability.
 6. **[NFT_SELL_DESIGN.md](NFT_SELL_DESIGN.md)** — **authoritative for trades.** Selling an NFT
    for ZCL via a fixed-template `SIGHASH_ALL|ANYONECANPAY` signed offer (OP_RETURN ZSLP
    SEND@vout[0] / buyer NFT dust@vout[1] / seller ZCL payout@vout[2]); the mandatory
@@ -67,13 +93,15 @@ These fed the guide and are superseded by it for the role noted; kept for depth/
   the two source UI docs; **superseded by NATIVE_NFT_GUIDE.md §2 + NATIVE_UI_CONSOLIDATED_SPEC.md.**
 - **[PRIVACY_STACK.md](PRIVACY_STACK.md)**, **[PRIVACY.md](PRIVACY.md)**,
   **[PRIVACY_UX.md](PRIVACY_UX.md)** — the privacy normative/UX sources;
-  **superseded by NATIVE_NFT_GUIDE.md §3** (ZDC1_CODEC_SPEC.md kept as the codec reference).
+  **superseded by NATIVE_NFT_GUIDE.md §3.** Their on-chain private-file / data-channel content
+  is **historical**: that capability has been removed from the daemon.
 - **[CAPABILITY_MAP.md](CAPABILITY_MAP.md)** — the code-verified status map;
   **folded into NATIVE_NFT_GUIDE.md §1** (kept for its file:line citations).
 - **[ENABLEMENT.md](ENABLEMENT.md)** — early why/aspirational matrix; **superseded for status by
   NATIVE_NFT_GUIDE.md §1.** Its stale lines (gallery "fed by fixtures / 0 zslp_* calls" —
-  `refreshNFTs` already calls the real RPCs; "no `src/datachannel/`" — the codec exists at
-  `src/datachannel/zdc.{h,cpp}`) are corrected in the guide; trust the guide and the code.
+  `refreshNFTs` already calls the real RPCs) are corrected in the guide; trust the guide and the
+  code. (Note: the data-channel codec it mentions has since been removed; there is no
+  `src/datachannel/`.)
 
 ---
 

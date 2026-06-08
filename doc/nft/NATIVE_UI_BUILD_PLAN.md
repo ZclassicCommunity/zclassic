@@ -1,5 +1,11 @@
 # ZClassic NFT — Native UI Build Plan (Detail View + Mint Dialog)
 
+> **REMOVED — shielded data channel / on-chain private files.** The "private mint" / ZDC1 channel
+> this plan gates on (`isPrivateMintWired()`, the ZDC1 private channel RPC) will never land: that
+> capability has been **removed entirely** from the daemon. ZClassic deliberately provides **no
+> wallet path to store arbitrary files on-chain**. `isPrivateMintWired()` stays permanently false;
+> do not build a private-mint path.
+
 Status: BUILD-READY SPEC (no source edited, no build run — a daemon build is in flight).
 GUI repo: `/home/rhett/github/zcl-qt-wallet` @ branch `feature/nft-gallery`.
 Grounding docs (this repo): `doc/nft/NATIVE_UX.md` (§3.2 detail, §3.3 mint, §2.2 honesty, §6.3 build order),

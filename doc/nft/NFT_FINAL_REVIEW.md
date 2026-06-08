@@ -1,5 +1,12 @@
 # NFT Feature — Final Whole-Feature Review
 
+> **REMOVED — shielded data channel / on-chain private files.** The "Shield" pillar and ZDC1 data
+> channel reviewed below (`z_senddatafile` / `z_listdatatransfers` / `z_getdatatransfer`, the
+> `-datachannel` option, the ZDC1 codec, `src/datachannel/`) have been **removed entirely** from
+> the daemon. ZClassic deliberately provides **no wallet path to store arbitrary files on-chain**.
+> NFT content is always off-chain, bound to the token only by a `document_hash` fingerprint. Treat
+> every Shield / private file / ZDC1 finding below as **historical**.
+
 > **Scope:** The first review possible now that all four pillars coexist in one tree.
 > Coin is **ZCL (ZClassic)**, never ZEC. The NFT system is a **non-consensus ZSLP overlay**:
 > old/unmodified nodes relay and mine every one of these transactions unchanged; security
@@ -17,8 +24,8 @@
 **Overall: dev/testnet-ready. NOT mainnet / real-user / money-at-stake ready.**
 
 All four pillars are real, reachable, and **compiled** (daemon `src/Makefile.am:225-345`;
-GUI `zcl-qt-wallet.pro:49-88`). They are also **all uncommitted** (working-tree only on both
-repos) — nothing can ship from an uncommitted tree.
+GUI `zcl-qt-wallet.pro:49-88`). The **daemon** ZSLP/ZDC/offer code is now **committed** on
+`feature/zslp-nft-indexer`; merging the NFT track into the release line is still pending.
 
 | Pillar | Daemon RPC | Native GUI | Cross-party / cross-node | Tests | Unit verdict |
 |---|---|---|---|---|---|
@@ -76,7 +83,7 @@ The anti-burn fence is correct and defense-in-depth, independent of UI locks.
   any large memo tx). `ZdcRateGuard` (4/s) and `ZDC_MAX_INFLIGHT(256)` are **single-node
   RPC** DoS guards, **not** network/per-block anti-spam. The real mitigation is default-OFF
   `-datachannel`. Document this honestly in PRIVACY/THREATS; do not read the rate guard as
-  consensus/relay protection (`datachannel.cpp:84-89,131-142,608-612`).
+  consensus/relay protection (`datachannel.cpp:86-91` caps, `:133-140` rate guard, `:713-722` registration gate).
 
 ---
 
@@ -161,19 +168,19 @@ the **SHIELD/private** surface and in stale docs:
   daemon doesn't implement.** Guide quotes the gate as `fExperimentalMode && -datachannel`
   with a custom *"Data channel is disabled… -experimentalfeatures -datachannel…"* message
   (`NATIVE_NFT_GUIDE.md:560-563,592`). As built, `RegisterDataChannelRPCCommands` gates only
-  on `-datachannel` (`datachannel.cpp:603-612`), no `-experimentalfeatures`, and when off the
+  on `-datachannel` (`datachannel.cpp:713-722`), no `-experimentalfeatures`, and when off the
   methods are simply **absent** → generic `-32601`, no custom text. **Fix:** make doc and code
   agree (drop `-experimentalfeatures` from the doc, or add it to the code).
 
 **Minor / nit honesty items (stale/front-door docs and help text):**
 - *minor:* `PRIVACY.md:51-53,92` states the file cap as ~64 KB; as-built cap is **40000 bytes**
-  (`datachannel.cpp:84`). Correct to 40000 / ~40 KB.
+  (`datachannel.cpp:86`). Correct to 40000 / ~40 KB.
 - *minor:* `PRIVACY.md:54-59,96-99` lists "Seal now, reveal later" and "Private NFTs
   (ownership shielded)" as capabilities; `z_senddatafile` always sets `include_key_frame=true`
-  (`datachannel.cpp:288`), `z_revealkey` is "designed, not built" (`GUIDE:643-644`), and
+  (`datachannel.cpp:346`), `z_revealkey` is "designed, not built" (GUIDE §3.3), and
   ownership is transparent. Mark designed/not-built or fold PRIVACY.md into the guide.
 - *minor:* `GUIDE §3.2` quotes permanence + shielded-funding error strings the code does not
-  emit (real strings at `datachannel.cpp:211-213` and `asyncrpcoperation_senddatafile.cpp:86-103`;
+  emit (real strings at `datachannel.cpp:269-271` and `asyncrpcoperation_senddatafile.cpp:84-105`;
   the shielded-from check is in the async op, not synchronous). Substance is honest; fix the
   quoted strings/locations.
 - *minor:* `z_getdatatransfer` help reads as general recipient retrieval but the registry gate
@@ -266,7 +273,7 @@ severity and a binary done-criterion.
 
 ### MINOR — quality / completeness, not ship-blocking for a MINT+VIEW v1
 
-10. **VIEW provenance: `zslp_listtransfers` is never called from the GUI** (`zslp.cpp:142`
+10. **VIEW provenance: `zslp_listtransfers` is never called from the GUI** (`zslp.cpp:155`
     built; no GUI caller). Add `RPC::nftTransfers` + a compact timeline; show the Set/Creator
     already read and discarded (`nftdetaildialog.cpp ~326`). **Done when:** the detail dialog
     shows chain-of-custody from `zslp_listtransfers`.
@@ -275,7 +282,7 @@ severity and a binary done-criterion.
     `zslp_burn` + `client.cpp` entry + gtest + a mint-dialog permanence warning above Create.
     **Done when:** `zslp_burn` exists, tested, and the mint dialog warns about permanence.
 12. **SHIELD daemon completeness:** `z_revealkey` (seal-then-reveal) and `zslp_mint_private`
-    are unbuilt (`datachannel.cpp:594-600`); no GUI wrapper over `z_exportviewingkey`.
+    are unbuilt (NOT in the datachannel command table `datachannel.cpp:704-711`); no GUI wrapper over `z_exportviewingkey`.
     **Done when (after #3/#4):** either build them, or document the as-built 2-step path as the
     canonical recipe. *Note: DoS caps ARE built (cap `:84`, inflight `:86`, TTL-GC,
     rate-limit `:88-89`) — re-grade the stale "DoS unbuilt" rows.*
@@ -301,8 +308,9 @@ severity and a binary done-criterion.
 
 ## Appendix — finding tally
 
-- **Blockers: 3** (uncommitted tree; SELL+SHIELD have zero GUI / scope-not-user-ready;
-  SHIELD cross-wallet receive structurally impossible).
+- **Blockers: 1** (SELL+SHIELD have zero GUI / scope-not-user-ready). *(Two earlier
+  "blockers" are now resolved: the daemon tree is committed, and SHIELD cross-wallet receive
+  is built via the registry-free reconstruct-from-chain path, `datachannel.cpp:568-600`.)*
 - **Majors: 8** (verify-before-decrypt unreachable; composition tested nowhere; README
   headline overclaim; GUI shielded-ownership overclaim; GUIDE §3.2 invented gate/error; no CI
   write-path/two-node settlement test; no L1 GUI coverage; #112 unscoped).

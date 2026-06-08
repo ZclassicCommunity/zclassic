@@ -1,9 +1,16 @@
 # ZClassic Private NFTs — The Privacy Stack (ZDC1) and What We Are Enabling
 
+> **REMOVED — HISTORICAL DOCUMENT.** The ZDC1 shielded data-channel / arbitrary-file-transfer
+> capability described here (`z_senddatafile` / `z_listdatatransfers` / `z_getdatatransfer`, the
+> `-datachannel` option, the `src/datachannel/` codec) has been **removed entirely** from the
+> daemon. ZClassic deliberately provides **no wallet path to store arbitrary files on-chain**. NFT
+> content is always off-chain, bound to the token only by a `document_hash` fingerprint. This doc
+> is retained for historical traceability only.
+
 **Status:** the codec (`src/datachannel/zdc.{h,cpp}`) is built, unit-tested, **and compiled into
-the daemon** (`src/Makefile.am:247,294`). The daemon RPCs (`z_senddatafile` /
+the daemon** (`src/Makefile.am:248,295`). The daemon RPCs (`z_senddatafile` /
 `z_listdatatransfers` / `z_getdatatransfer`) are **built, default-OFF** behind `-datachannel`
-(`src/rpc/datachannel.cpp:597-599`); only the native GUI wiring is later. NON-consensus,
+(`src/rpc/datachannel.cpp:704-711`, register fn `:713`); only the native GUI wiring is later. NON-consensus,
 default-OFF, experimental track. Rides UNCHANGED consensus: it uses only the existing Sapling
 shielded pool and the 512-byte encrypted memo that ZClassic already supports. No opcode, no fork,
 no builder change. *(The as-built RPC contract is `NATIVE_NFT_GUIDE.md §3.3`; where this doc's
@@ -20,9 +27,9 @@ We are turning ZClassic's shielded payments into a **private data channel**, and
 that a **private NFT**. Concretely, a user can:
 
 - **Send a private message** that only the recipient can read (`<= ~4 KB`, one transaction).
-- **Send a private file** — an image, a document, a contract (`<= ~64 KB` on-chain is the
-  practical, responsible ceiling; larger files keep the bytes off-chain and put only an
-  encrypted fingerprint on-chain).
+- **Send a private file** — an image, a document, a contract (`<= 40000 bytes` on-chain is the
+  as-built ceiling: `ZDC_MAX_FILE_BYTES`, a single shielded tx per transfer; larger files keep
+  the bytes off-chain and put only an encrypted fingerprint on-chain).
 - **"Seal now, reveal the key later"** — publish the encrypted content immediately, then
   reveal the decryption key whenever you choose. Until you do, *not even the recipient* can
   open it. This is a first-class, on-chain timelock-by-choice.
@@ -233,7 +240,9 @@ Observable (the leakage — state it plainly):
 
 Permanence: **every memo is stored by every full node forever.** Encrypted, but undeletable.
 This is a governance/liability surface (illicit-content storage, unbounded growth on a small
-chain). Hence: default-OFF, opt-in consent, hard 64 KB default cap, local rate limit.
+chain). Hence: default-OFF, opt-in consent, hard 40000-byte per-file cap (`ZDC_MAX_FILE_BYTES`),
+single shielded tx per transfer, an inflight cap (`ZDC_MAX_INFLIGHT = 256`) + 72h TTL, and a
+basic rate guard.
 
 **No consensus enforces any of this.** It is wallet/application policy. `"Private"` means
 *confidential*, not *undetectable*.
@@ -249,8 +258,9 @@ chain). Hence: default-OFF, opt-in consent, hard 64 KB default cap, local rate l
 - `z_listreceivedbyaddress` already emits the full memo as a hex string
   (`HexStr(...)`, `src/wallet/rpcwallet.cpp:3374,3388`). The receive path hex-decodes each
   memo to 512 raw bytes and calls `zdc::Decoder::add_frame`. `ERR_BAD_MAGIC` => ordinary memo.
-- New RPCs (separate task): `z_senddatafile` / `z_listdatatransfers` /
-  `z_getdatatransfer` / `z_receivedatafile`, enforcing caps + rate limit.
+- RPCs (built, default-OFF behind `-datachannel`): `z_senddatafile` / `z_listdatatransfers` /
+  `z_getdatatransfer`, enforcing the caps above. (There is no `z_receivedatafile` — receive is
+  folded into `z_listdatatransfers` + `z_getdatatransfer`.)
 
 **GUI (`/home/rhett/github/zcl-qt-wallet`) — the binary-safe read path (design only):**
 The current code at `src/rpc.cpp` (~756-790) is **lossy** for ZDC1: it does

@@ -1,5 +1,12 @@
 # Everything ZClassic NFTs Will Enable
 
+> **REMOVED — shielded data channel / on-chain private files.** The shielded data-channel /
+> arbitrary-file-transfer capability referenced below (`z_senddatafile` / `z_listdatatransfers` /
+> `z_getdatatransfer`, the `-datachannel` option, the ZDC1 codec, `src/datachannel/`) has been
+> **removed entirely** from the daemon. ZClassic deliberately provides **no wallet path to store
+> arbitrary files on-chain**. NFT content is always off-chain, bound to the token only by a
+> `document_hash` fingerprint. Treat every such reference below as **historical**.
+
 *A definitive enablement map for engineers and product — what's real today, what's a contained build, and what a non-consensus layer can never do.*
 
 > **Status legend** — used throughout this document:

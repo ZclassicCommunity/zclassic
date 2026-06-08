@@ -1,10 +1,18 @@
 # ZClassic NFTs — Capabilities & Vision
 
+> **REMOVED — shielded data channel / on-chain private files.** The "ZDC1 shielded data-channel"
+> / "Shield" pillar described below (the `z_senddatafile` / `z_listdatatransfers` /
+> `z_getdatatransfer` RPCs, the `-datachannel` option, and the ZDC1 codec) has been **removed
+> entirely** from the daemon. ZClassic deliberately provides **no wallet path to store arbitrary
+> files on-chain**. NFT content is always off-chain, bound to the token only by a `document_hash`
+> fingerprint. Treat every "Shield / private file content / ZDC1 / private NFT" claim below as
+> **historical** — it does not reflect the shipping daemon.
+
 > Canonical capability/vision doc. Where this disagrees with `NATIVE_NFT_GUIDE.md` or
 > `NFT_FEATURE_CHECKLIST.md`, **this doc and the code win** — those two are stale-conservative
 > (they still call the Sell GUI greenfield, call image-verify the worst gap, and call the
 > write path untested; all three are now built and tested). Survey-verified against the live
-> working trees: daemon on `feature/zslp-nft-indexer`, GUI on `feature/nft-gallery`.
+> code: daemon on `feature/zslp-nft-indexer` (committed), GUI on `feature/nft-gallery`.
 
 ---
 
@@ -40,7 +48,7 @@ true 1-of-1. The fingerprint (`document_hash`) is what makes the collectible *ve
 zslp_genesis '{"nft":true,"name":"My Piece","document_hash":"<sha256-of-file>","ticker":"SET","document_url":"https://...","to":"<t-addr>"}'
 ```
 Returns `{ "txid", "tokenid" }`. The daemon self-validates the build with `WouldBeValid`
-before it ever broadcasts. (`src/rpc/zslp.cpp:328`)
+before it ever broadcasts. (`zslp_genesis`, `src/rpc/zslp.cpp:326`)
 
 **How you do it (GUI).** `NftMintDialog`: drag a file → it streams a fingerprint → fill name
 and details → choose public (private is gated off, see Pillar 3) → review → **Create**.
@@ -59,7 +67,7 @@ single biggest doc-claimed hole — it is **closed**.
   `mint_baton_vout >= 2`) — same `zslp_genesis` without the `nft` preset.
   **BUILT-CLI-ONLY** (no GUI; covered by the regtest GOLD case).
 - **Re-issue supply** of a fungible token by spending its live mint baton:
-  `zslp_mint "tokenid" amount (baton_vout)` (`zslp.cpp:464`). NFTs never use this.
+  `zslp_mint "tokenid" amount (baton_vout)` (`zslp.cpp:462`). NFTs never use this.
   **BUILT-CLI-ONLY.**
 - **Limited / numbered editions ("N of 100")** — `zslp_genesis` with quantity=N and the baton
   off, or N separate 1-of-1s. **BUILT-CLI-ONLY** (RPC supports it; no GUI affordance;
@@ -85,12 +93,12 @@ fingerprint recorded on-chain. Verification is local-only: the wallet never fetc
 
 **How you do it (CLI).**
 - `zslp_listmytokens` → tokens with a positive balance at your addresses
-  (per-address roll-up, `zslp.cpp:191`).
-- `zslp_gettoken "id"` → full public metadata for one token (`zslp.cpp:73`).
+  (per-address roll-up, `zslp.cpp:204`).
+- `zslp_gettoken "id"` → full public metadata for one token (`zslp.cpp:84`, `TokenToJSON` at `:57`).
 - `zslp_listtokens (count from)` → browse all tokens, clamped to `ZSLP_LIST_MAX=1000`
-  (`zslp.cpp:107`).
+  (`zslp.cpp:120`).
 - `zslp_listtransfers "id" (count from)` → full public provenance, newest-first and
-  reorg-safe (`zslp.cpp:142`).
+  reorg-safe (`zslp.cpp:155`).
 
 **How you do it (GUI).** The gallery (`NFTGalleryModel` / `NFTGalleryDelegate`, fed by
 `RPC::refreshNFTs`, `rpc.cpp:824`) shows each owned NFT with a verify badge and a
@@ -139,14 +147,15 @@ ciphertext instead of a plaintext file.
 
 **How you do it (CLI).**
 - Send: `z_senddatafile '{"fromaddress":"<z>","toaddress":"<z>","filepath":"...","acknowledge_permanent":true}'`
-  → `{ operationid, transfer_id, fingerprint, frames, key }` (`datachannel.cpp:157`). The
-  daemon enforces a required-true `acknowledge_permanent`, shielded from/to addresses, a
-  **per-file cap of 40000 bytes** (`ZDC_MAX_FILE_BYTES`; the file's top comment saying "64 KB"
-  is stale), a 90-frame single-tx ceiling, 256 max in-flight, a 72h TTL, and a basic rate
-  guard.
-- List: `z_listdatatransfers` (`datachannel.cpp:372`).
-- Receive: `z_getdatatransfer '{"transfer_id":"...","verify_fingerprint":true}'`
-  (`datachannel.cpp:407`) — verify-before-decrypt; it refuses to hand back plaintext if the
+  → `{ operationid, transfer_id, fingerprint, frames, key }` (`datachannel.cpp:215`). The
+  daemon enforces a required-true `acknowledge_permanent`, shielded from/to addresses (the
+  z-address requirement is enforced in the async op, not at the RPC entry point), a
+  **per-file cap of 40000 bytes** (`ZDC_MAX_FILE_BYTES`, `datachannel.cpp:86`), a 90-frame
+  single-tx ceiling (`ZDC_MAX_FRAMES_PER_TX`, `:87`), 256 max in-flight (`ZDC_MAX_INFLIGHT`,
+  `:88`), a 72h TTL (`:89`), and a basic rate guard. Single-tx, not multi-tx fan-out.
+- List: `z_listdatatransfers` (`datachannel.cpp:430`).
+- Receive: `z_getdatatransfer '{"transfer_id":"...","verify_fingerprint":"<64-hex anchor>"}'`
+  (`datachannel.cpp:471`) — verify-before-decrypt; it refuses to hand back plaintext if the
   on-chain ciphertext doesn't match the expected anchor, with honest `ERR_NO_KEY` /
   `ERR_AEAD_FAIL` / `ERR_HASH_MISMATCH` errors.
 - Private NFT (the as-built 2-step recipe): `z_senddatafile` for the sealed bytes, then an
@@ -184,7 +193,7 @@ The coin legs are **consensus-atomic** — either the whole swap confirms or non
 Token *attribution* is an indexer convention, so this is **trust-minimized, not trustless**,
 and it is **never private** — price and both addresses settle publicly on-chain.
 
-**How you do it (CLI).** (`src/rpc/nftoffer.cpp:1178-1186`)
+**How you do it (CLI).** (`src/rpc/nftoffer.cpp:1094-1104`, `RegisterNFTOfferRPCCommands` at `:1106`)
 - `nft_makeoffer` — compose an offer (locks the seller's outpoint in the wallet).
 - `nft_verifyoffer` — mandatory pre-pay check; runs `VerifyScript` on vin[0].
 - `nft_takeoffer` — buyer funds and broadcasts (anti-burn applied to buyer funding; no
@@ -223,7 +232,7 @@ before they're lost. The docs still call this greenfield; that is stale — it i
 ## Collections, gifting, and provenance
 
 **Gift / transfer an NFT (one-way, always public).** `zslp_send "tokenid" "to_address"
-(amount change_address)` (`zslp.cpp:543`); GUI `NFTSendDialog` via `RPC::sendNFT`
+(amount change_address)` (`zslp.cpp:541`); GUI `NFTSendDialog` via `RPC::sendNFT`
 (`rpc.cpp:1108`), where a fingerprint-mismatch item hard-disables Send.
 **BUILT+TESTED** (regtest send leg + `nftSend_*` ×4 widget tests). Every transfer is
 transparent and visible on-chain.
@@ -276,14 +285,20 @@ the "no consensus fork" property is not yet test-proven against real mainnet pol
 | `z_revealkey` / `zslp_mint_private` | — | — | — | DESIGNED-NOT-BUILT |
 | Transfer / gift NFT (public) | `zslp_send` | `NFTSendDialog` | regtest + 4 widget | **BUILT+TESTED** |
 | Airdrop / batch (≤19 outputs) | `zslp_send` (builder) | — | — | BUILT-CLI-ONLY |
-| Atomic NFT⇄ZCL swap | `nft_makeoffer`/`verifyoffer`/`takeoffer` | `NFTSellDialog`/`NFTBuyDialog` | 6 gtest + regtest + 9 widget | **BUILT+TESTED** (UNCOMMITTED) |
+| Atomic NFT⇄ZCL swap | `nft_makeoffer`/`verifyoffer`/`takeoffer` | `NFTSellDialog`/`NFTBuyDialog` | 6 gtest + regtest + 9 widget | **BUILT+TESTED** |
 | Collections / card-set board | (`ticker` group) | gallery groups only | — | DESIGNED-NOT-BUILT |
 | Open listings / marketplace | — | — | — | FUTURE-IDEA |
 | Escrowed / disputed sale | (primitives only) | — | P2SH/CLTV tested | FUTURE-IDEA |
 | No-fork (IsStandard) guarantee | builder assert | — | length-assert only | BUILT but UNDER-TESTED |
 
-Flags: `-zslpindex` defaults **ON**; `-datachannel` defaults **OFF** behind
-`-experimentalfeatures`.
+**Gating flags.**
+- `-zslpindex` defaults **ON**. It is required for all `zslp_*` / `nft_*` RPCs; with it off the
+  read commands throw `RPC_MISC_ERROR` (*"ZSLP index is not enabled. Start zclassicd with
+  -zslpindex."*).
+- `-datachannel` defaults **OFF** (typically run alongside `-experimentalfeatures`). When off,
+  the `z_senddatafile` / `z_listdatatransfers` / `z_getdatatransfer` methods are **NOT
+  REGISTERED**, so the dispatcher returns `RPC_METHOD_NOT_FOUND` (`-32601`) — identical to a
+  nonexistent method.
 
 ---
 
@@ -313,8 +328,9 @@ Flags: `-zslpindex` defaults **ON**; `-datachannel` defaults **OFF** behind
    primitives.
 
 **Hardening that gates "ship to mainnet":**
-9. **Commit everything.** All ZSLP/ZDC/offer code is uncommitted (daemon working tree;
-   untracked GUI sell/buy dialogs). This is the highest-priority risk.
+9. **Merge to mainnet line.** The daemon ZSLP/ZDC/offer code is committed on
+   `feature/zslp-nft-indexer`; the GUI sell/buy dialogs live in the `zcl-qt-wallet` repo.
+   Merging the NFT track into the release line is still pending.
 10. **Test the no-fork constraint** against real mainnet `IsStandard` / `-datacarriersize`
     policy, not just the 223-byte builder assert.
 

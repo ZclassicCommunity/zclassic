@@ -3,17 +3,24 @@
 *The single, canonical, build-ready document for native (no-browser) NFTs on ZClassic:
 what you can do, how every screen is built, how privacy works, and the rules nothing may
 break. It is status-accurate against the code on `feature/zslp-nft-indexer` (the branch that
-actually carries ZSLP — `feature/native-bootstrap-sync-review` has none of it), not
-aspirational. Every file:line citation below is against `feature/zslp-nft-indexer`. NOTE: the
-entire write path (mint/transfer RPCs, the tx builder, and the AvailableCoins anti-burn
-exclusion) currently lives in the **working tree** of that branch and is **not yet committed**
-— `git status` shows `M src/rpc/zslp.cpp`, `M src/wallet/wallet.{cpp,h}`, and untracked
-`?? src/wallet/zslpwallet.{h,cpp}`. The committed tip carries only the read path.*
+actually carries ZSLP), not aspirational. Every file:line citation below is against that
+branch. The entire write path (mint/transfer RPCs, the tx builder, and the AvailableCoins
+anti-burn exclusion) is now **committed, compiled, and registered** — `src/rpc/zslp.cpp`,
+`src/wallet/wallet.{cpp,h}`, and `src/wallet/zslpwallet.{h,cpp}` are all tracked and clean.*
 
 > **One-line model:** ZClassic consensus does not know NFTs exist. An NFT is a
 > **non-consensus overlay** every honest wallet re-derives identically from the confirmed
 > chain. The hard consequence, stated honestly everywhere in the UI: **a forgery can be
 > mined, but it credits nobody.** Security is *agreement*, not chain rejection.
+
+> **REMOVED — shielded data channel / on-chain private files.** The "private NFT / shielded
+> data channel" capability described in this guide (the `z_senddatafile` /
+> `z_listdatatransfers` / `z_getdatatransfer` RPCs, the `-datachannel` option, and the ZDC1
+> codec) has been **removed entirely** from the daemon. ZClassic deliberately provides **no
+> wallet path to store arbitrary files on-chain**. NFT content is always off-chain, bound to the
+> token only by a `document_hash` fingerprint. Any section below describing the data channel,
+> `z_senddatafile`, private-content NFTs, or a "private NFT" screen is **historical** and does
+> not reflect the shipping daemon.
 
 ---
 
@@ -68,62 +75,61 @@ You can do all of this today:
 - **See the NFTs this wallet owns** in a native dark gallery with a verify badge and
   public/private pill — no browser. (`RPC::refreshNFTs()` calls the real `zslp_listmytokens`
   then `zslp_gettoken` per token and feeds `NFTGalleryModel`; `zcl-qt-wallet/src/rpc.cpp:863`.
-  Daemon `zslp_listmytokens` at `src/rpc/zslp.cpp:191`.)
+  Daemon `zslp_listmytokens` at `src/rpc/zslp.cpp:204`.)
 - **Verify an image** against its on-chain fingerprint (✓ match / ✗ mismatch / ? pending),
   locally, **never fetching the remote URL**. (`ContentEngine` streaming SHA-256 + verify on a
   worker thread; `zcl-qt-wallet/src/contentengine.{h,cpp}`.)
 - **Look up any public token** by genesis txid (ticker, name, document_url, 32-byte hash,
-  decimals, height, totalMinted, baton state). (`zslp_gettoken`; `src/rpc/zslp.cpp:73`.)
+  decimals, height, totalMinted, baton state). (`zslp_gettoken`; `src/rpc/zslp.cpp:84`,
+  `TokenToJSON` at `:57`.)
 - **Confirm a real 1-of-1 + supply cap** (`totalMinted==1 && hasMintBaton==false`).
 - **Read full public transfer history** (newest-first, reorg-safe). (`zslp_listtransfers`;
-  `src/rpc/zslp.cpp:142`.)
+  `src/rpc/zslp.cpp:155`.)
 - **Browse all indexed tokens** (bounded paging, clamped to `ZSLP_LIST_MAX=1000`).
-  (`zslp_listtokens`; `src/rpc/zslp.cpp:107`.)
+  (`zslp_listtokens`; `src/rpc/zslp.cpp:120`.)
 - **Trust the ledger is forgery-proof** — a forged SEND/MINT credits nobody; an NFT can't be
   duplicated. (UTXO-bound conservation indexer; `vout[0]`-only parse at
   `src/zslp/zslpindexer.cpp:229`; single `ZSLP_SEND_MAX_OUTPUTS=19`; `ChainTip`-only, no
   mempool/0-conf path. ~101 ZSLP gtests across `src/gtest/test_zslp*.cpp`.)
 
-### B. Create and move NFTs (the write path) — **works-now (daemon, working tree); GUI next**
+### B. Create and move NFTs (the write path) — **works-now (daemon); GUI next**
 
-These daemon RPCs are built; they are present in the `feature/zslp-nft-indexer` working tree
-(uncommitted) and not yet exercised by the GUI. The GUI dialogs (§2) are designed and degrade
-honestly until they are wired to call the RPCs in a build that carries them.
+These daemon RPCs are built, committed, and registered in the command table; they are not yet
+exercised by the GUI. The GUI dialogs (§2) are designed and degrade honestly until they are
+wired to call the RPCs.
 
 - **Mint a public 1-of-1** — drag a file, hash it locally, fill in a name, broadcast a
   baton-less GENESIS. → `zslp_genesis '{nft:true, name, document_url, document_hash,
   [ticker], [to (t-addr)]}'` → `{txid, tokenid}`. `nft:true` forces `decimals=0`,
   `quantity=1`, and no mint baton; an optional `mint_baton_vout` (must be `>=2`) issues a
-  re-issue baton for the fungible case. *(RPC implemented in the working tree on
-  `feature/zslp-nft-indexer` — `src/rpc/zslp.cpp:330`, registered in the command table at
-  `:661` — not yet committed/merged; encoders + `MINT_TRANSFER_SPEC.md` ready.)*
+  re-issue baton for the fungible case. *(RPC `zslp_genesis` at `src/rpc/zslp.cpp:326`,
+  registered in the command table at `:649-661` (`RegisterZSLPRPCCommands` at `:663`);
+  encoders + `MINT_TRANSFER_SPEC.md` ready.)*
 - **Transfer / gift** an NFT to a recipient. → `zslp_send(token_id, to_address, amount=1,
-  [change_address])` → `{txid}`. *(RPC implemented in the working tree on
-  `feature/zslp-nft-indexer` — `src/rpc/zslp.cpp:545`, registered at `:663` — not yet
-  committed/merged. `zslp_mint` (fungible re-issue) also lands here at `:466`/`:662`.)*
+  [change_address])` → `{txid}`. *(RPC `zslp_send` at `src/rpc/zslp.cpp:541`, registered in
+  the command table at `:649-661`. `zslp_mint` (fungible re-issue) lands at `:462`.)*
 - **Airdrop / batch** up to 19 token outputs in one tx — rides `zslp_send` multi-output.
 - **Limited / numbered editions** ("N of 100") — `zslp_genesis` qty=N baton-off, or N separate
   1-of-1s.
 - **Hold an NFT without burning it** — an ordinary send/shield/sweep must never spend the
-  carrier dust. Two distinct mechanisms back this, and BOTH are now wired in the working tree
-  on `feature/zslp-nft-indexer` (uncommitted):
+  carrier dust. Two distinct mechanisms back this, and BOTH are now wired and committed:
   - **The write path's own self-validate-before-broadcast gate (R-WALLET-9) IS wired.**
-    `BuildAndCommitZSLP` calls `store->WouldBeValid(...)` (`src/wallet/zslpwallet.cpp:460`)
+    `BuildAndCommitZSLP` calls `store->WouldBeValid(...)` (`src/wallet/zslpwallet.cpp:465`)
     and aborts with *"self-validate: built tx would not be valid in the token ledger (…)"*
-    BEFORE `CommitTransaction` (`:475`). The builder never broadcasts a tx that would not be
+    BEFORE `CommitTransaction` (`:480`). The builder never broadcasts a tx that would not be
     valid in the token ledger.
   - **Ordinary-send anti-burn via `AvailableCoins` token-UTXO exclusion IS wired.**
     `AvailableCoins` now takes `fExcludeZSLPTokens` (default `true`, `wallet.h:1124`) and
     drops protected token/dust outpoints via `ZSLPIsProtectedTokenOutpoint(...)`
-    (`wallet.cpp:3197`), so no ordinary send/shield/sweep coin-selection path picks up a
+    (`wallet.cpp:3198`), so no ordinary send/shield/sweep coin-selection path picks up a
     carrier UTXO (explicitly preset/coin-controlled inputs are exempt so the ZSLP builder can
     still pin its own token inputs). The primitive itself (`ZSLPFindWalletTokenUtxos` +
     `SLP_TOKEN_DUST=546`, `src/wallet/zslpwallet.{h,cpp}`) underpins both.
 
-  Holder safety is therefore mechanically complete in the working tree — see §4. It becomes
-  the shipped guarantee once these uncommitted changes are committed/merged AND the standard
-  spend paths are confirmed to call `AvailableCoins` with the default (token-excluding) value.
-  Do not let any UI copy imply burn-proof holding outside a build that carries these changes.
+  Holder safety is therefore mechanically complete and committed — see §4. It is the shipped
+  guarantee provided the standard spend paths call `AvailableCoins` with the default
+  (token-excluding) value. Do not let any UI copy imply burn-proof holding outside a build that
+  carries these changes.
 
 ### C. Native mint / detail / set UI — **next**
 
@@ -140,19 +146,21 @@ Designed in §2 (and `NATIVE_UI_CONSOLIDATED_SPEC.md`); GUI dialog files not yet
 
 - **The ZDC1 codec itself** (frame / reassemble / AEAD / seal-then-reveal / ciphertext
   fingerprint) is **built + self-tested AND now compiled into the daemon**
-  (`src/datachannel/zdc.{h,cpp}` in `src/Makefile.am:247,294`; codec self-checks +
+  (`src/datachannel/zdc.{h,cpp}` in `src/Makefile.am:248,295`; codec self-checks +
   25 daemon gtests in `test_zdc.cpp`, ASan/UBSan-clean, secret-zeroized).
 - **Send a private file / message** (sealed bytes on-chain, ownership = key possession,
   selective disclosure via viewing key) — daemon RPCs `z_senddatafile` /
   `z_listdatatransfers` / `z_getdatatransfer` ARE present and registered
-  (`src/rpc/datachannel.cpp:597-599`), **default-OFF** behind
-  `-experimentalfeatures -datachannel` (each returns `-32601` when off), with
+  (`src/rpc/datachannel.cpp:704-711`; `RegisterDataChannelRPCCommands` at `:713`),
+  **default-OFF** behind `-datachannel` (typically run alongside `-experimentalfeatures`);
+  when `-datachannel` is off the methods are NOT registered, so each returns
+  `RPC_METHOD_NOT_FOUND` (`-32601`), with
   daemon-enforced `acknowledge_permanent=true` and verify-before-decrypt. They ride the
   existing Sapling binary-memo path; no consensus change. Live round-trip proven. Full
-  as-built contract in §3. *(Private minting — a single `zslp_mint_private` RPC — is
-  designed but NOT built; the built private-mint path today is `z_senddatafile` for the
-  sealed bytes plus an ordinary `zslp_genesis` whose `document_hash` commits to the
-  ciphertext fingerprint. See §3.3.)*
+  as-built contract in §3. *(**Private minting — a single `zslp_mint_private` RPC — is
+  designed but NOT BUILT (not callable today).** The built private-mint path is
+  `z_senddatafile` for the sealed bytes plus an ordinary `zslp_genesis` whose `document_hash`
+  commits to the ciphertext fingerprint. See §3.3.)*
 - **Receive a private NFT in the gallery** (decrypt locally, render natively, verify badge) —
   needs the GUI binary-memo branch fix (`rpc.cpp` ~756) that sniffs the `ZDC1` magic on RAW
   bytes before any `QString` conversion. No native SHIELD GUI exists yet, so SHIELD is
@@ -168,7 +176,8 @@ Designed in §2 (and `NATIVE_UI_CONSOLIDATED_SPEC.md`); GUI dialog files not yet
   consensus-atomic, token attribution is indexer-convention, so **trust-minimized,
   not trustless**. The daemon RPCs `nft_makeoffer` / `nft_verifyoffer` (mandatory) /
   `nft_takeoffer` / `nft_listoffers` / `nft_canceloffer` / `nft_requestbuy` ARE built
-  and registered (`src/rpc/nftoffer.cpp:1180-1186`, compiled `src/Makefile.am:292`),
+  and registered (`src/rpc/nftoffer.cpp:1094-1104`; `RegisterNFTOfferRPCCommands` at
+  `:1106`; compiled `src/Makefile.am:293`),
   regtest-proven at `qa/zslp/nft-sell-regtest.sh` with 6 gtests; see
   `NFT_SELL_DESIGN.md` (authoritative). Only the native GUI offer dialog (§2.8) is
   still pending. **Note:** `SIGHASH_SINGLE|ANYONECANPAY` does
@@ -527,8 +536,9 @@ builder change.
 > Codec reference: `ZDC1_CODEC_SPEC.md`. This section is the AS-BUILT daemon RPC contract
 > plus the (still-pending) native UX, grounded in the live codec (`src/datachannel/zdc.h`,
 > compiled into the daemon) and the built RPCs in `src/rpc/datachannel.cpp`
-> (`z_senddatafile`/`z_listdatatransfers`/`z_getdatatransfer`, registered at `:597-599`,
-> default-OFF behind `-datachannel`). The §3.4 UX is native-GUI design, not yet built — SHIELD
+> (`z_senddatafile`/`z_listdatatransfers`/`z_getdatatransfer`, registered at `:704-711`,
+> `RegisterDataChannelRPCCommands` at `:713`, default-OFF behind `-datachannel`). The §3.4 UX is
+> native-GUI design, not yet built — SHIELD
 > is CLI-only today.
 
 ### 3.1 The four-layer stack, in plain terms
@@ -537,7 +547,7 @@ builder change.
    Consensus already hides who/whom/amount/contents; we add nothing to consensus.
 2. **Framing + reassembly — ZDC1 codec.** A file/message is split into chained frames (START /
    CHUNK / END, optional KEY) with a 4-byte `ZDC1` magic, grouped by `(zaddr, transfer_id)` and
-   reassembled. Built + self-tested AND compiled into the daemon (`src/Makefile.am:247,294`).
+   reassembled. Built + self-tested AND compiled into the daemon (`src/Makefile.am:248,295`).
 3. **Encryption — AEAD + ciphertext fingerprint.** Bytes are sealed with a per-transfer key;
    `ciphertext_fingerprint(frames)` is a 32-byte commitment. **Verify-before-decrypt:** the public
    token's `document_hash` == that fingerprint, so a holder verifies the on-chain anchor before
@@ -546,8 +556,8 @@ builder change.
    returns the per-transfer `key` to the sender, so the sender can selectively disclose by
    handing that key (or, for everything ever sent to a receiving z-addr, the **incoming viewing
    key** via `z_exportviewingkey`) to an auditor/buyer — read/prove only, never spend. *(A
-   separate seal-now / reveal-the-key-later RPC — `z_revealkey` — is designed but NOT built; see
-   §3.3.)*
+   separate seal-now / reveal-the-key-later RPC — `z_revealkey` — is **designed but NOT BUILT
+   (not callable today)**; see §3.3.)*
 
 **Keys live in the daemon, never in the GUI** (Option A). The GUI links no libsodium; it only
 detects the `ZDC1` magic on raw memo bytes and calls the RPCs below.
@@ -557,11 +567,12 @@ detects the `ZDC1` magic on raw memo bytes and calls the RPCs below.
 - **Naming/category:** `z_*` prefix, `"wallet"` category, async `opid` reused through the existing
   `z_getoperationstatus`/`z_getoperationresult` (no new status RPC). Reads are `okSafeMode=true`,
   mutating ops `false`.
-- **Default-OFF master switch:** `fDataChannelEnabled = fExperimentalMode && GetBoolArg(
-  "-datachannel", false)`. When off, EVERY RPC throws **`RPC_METHOD_NOT_FOUND (-32601)`** with
-  *"Data channel is disabled. Start zclassicd with -experimentalfeatures -datachannel to enable
-  private file/message transfers (experimental, default-off)."* — the SAME code an absent method
-  returns, so the GUI's existing `-32601` "feature not present" latch (the one used for
+- **Default-OFF master switch:** registration is gated on `GetBoolArg("-datachannel", false)`
+  (`RegisterDataChannelRPCCommands`, `src/rpc/datachannel.cpp:713-722`); typically run alongside
+  `-experimentalfeatures`. When `-datachannel` is off the three methods are NOT registered at all,
+  so the dispatcher returns **`RPC_METHOD_NOT_FOUND (-32601)`** — literally the SAME code an
+  absent method returns (there is no separate "data channel is disabled" string; the methods are
+  simply gone), so the GUI's existing `-32601` "feature not present" latch (the one used for
   `getwalletsummary` at `zcl-qt-wallet/src/rpc.cpp:1828-1835`) handles it identically and never
   flickers a false error. *(Note: this `-32601` latch is the precedent to reuse here. The ZSLP
   index-off path is a DIFFERENT mechanism — `refreshNFTs` detects index-off via RPC error code
@@ -569,17 +580,21 @@ detects the `ZDC1` magic on raw memo bytes and calls the RPCs below.
   whichever code the daemon actually throws: the data channel throws `-32601`, so it inherits
   the `getwalletsummary`-style latch, not the ZSLP index-off `-1` path.)*
 - **Permanence consent is unbypassable:** every *sending* RPC takes a **REQUIRED-true**
-  `acknowledge_permanent` in its options. Absent/false → `RPC_INVALID_PARAMETER (-8)`: *"This
-  permanently writes encrypted data to every full node forever and is not deletable. Pass
-  acknowledge_permanent=true to confirm."* (Enforced at the daemon, so a raw-RPC caller cannot
-  bypass the honesty contract.)
-- **Shielded-funding required** (sender de-anon foot-gun): `fromaddress` must be a Sapling z-addr;
-  a t-addr → `RPC_INVALID_ADDRESS_OR_KEY (-5)`: *"Private transfers must be funded from a private
-  (shielded) address, or the sender is deanonymized. Use a z-addr."*
+  `acknowledge_permanent` in its options. Absent/false → `RPC_INVALID_PARAMETER (-8)`: *"Refusing:
+  the encrypted bytes are PERMANENT and public-ciphertext on-chain forever. Pass
+  acknowledge_permanent=true to proceed."* (Enforced at the daemon, `src/rpc/datachannel.cpp:269-271`,
+  so a raw-RPC caller cannot bypass the honesty contract.)
+- **Shielded-funding required** (sender de-anon foot-gun): `fromaddress` must be a Sapling z-addr.
+  Note the RPC *entry point* only checks that `fromaddress`/`toaddress` are non-empty
+  (`src/rpc/datachannel.cpp:276-277`, *"fromaddress and toaddress are required"*); the
+  z-address requirement is enforced **later, in the async operation**
+  (`src/wallet/asyncrpcoperation_senddatafile.cpp:84-95`), where a non-Sapling `fromaddress` →
+  `RPC_INVALID_ADDRESS_OR_KEY (-5)`: *"fromaddress must be a Sapling z-address (the data channel
+  rides on Sapling memos)"*.
 - **Shielded recipient required:** `toaddress` must be a Sapling z-addr (a memo can't attach to a
-  t-addr anyway).
+  t-addr anyway); also enforced in the async op (*"toaddress must be a Sapling z-address"*).
 - **DoS governance (as built):** a per-file cap of **40000 bytes** (`ZDC_MAX_FILE_BYTES`,
-  `src/rpc/datachannel.cpp:84` — a clean advertised value below the single-tx frame ceiling;
+  `src/rpc/datachannel.cpp:86` — a clean advertised value below the single-tx frame ceiling;
   larger files are rejected, not fanned out) · a single shielded tx per transfer, hard single-tx
   frame ceiling `ZDC_MAX_FRAMES_PER_TX = 90` (3 control + up to 87 DATA frames) · `ZDC_MAX_INFLIGHT
   = 256` tracked transfers · `72 h` TTL GC of inflight transfers (the codec holds no clock).
@@ -589,8 +604,9 @@ detects the `ZDC1` magic on raw memo bytes and calls the RPCs below.
 
 ### 3.3 The as-built daemon RPC surface
 
-Three RPCs are built and registered (`src/rpc/datachannel.cpp:597-599`), default-OFF behind
-`-experimentalfeatures -datachannel`. Each takes exactly **one JSON object** (not positional
+Three RPCs are built and registered (`src/rpc/datachannel.cpp:704-711`,
+`RegisterDataChannelRPCCommands` at `:713`), default-OFF behind `-datachannel` (typically run
+alongside `-experimentalfeatures`). Each takes exactly **one JSON object** (not positional
 args). Below is the as-built contract; the §3.4 native UX and the seal-then-reveal / private-mint
 RPCs further down are **designed but NOT built** and are marked as such.
 
@@ -634,8 +650,11 @@ anchor BEFORE any AEAD decrypt), then decrypt. Options:
 Returns:
 ```
 { "transfer_id", "fingerprint",
-  "verified" (on-chain anchor == recorded anchor),
-  "complete", "frames_received",
+  "frames_received", "complete",
+  "onchain_fingerprint" (the SHA-256 recomputed over the on-chain DATA frames; present once
+                         the transfer is complete),
+  "expected_fingerprint" (echoed back ONLY when verify_fingerprint was supplied),
+  "verified" (on-chain anchor == expected anchor),
   "hexdata", "size", "filename", "content_type"  (only on a verified+decrypted result),
   "error"  (honest codec error string otherwise) }
 ```
@@ -775,16 +794,15 @@ product copy must never imply otherwise. (The normative validation rules and thr
    small, 40000-byte per-file cap).
 
 5. **Holder safety.** An ordinary send / shield / sweep must **never** spend or burn an NFT's
-   carrier dust UTXO. Two distinct mechanisms back this, and BOTH are now wired in the working
-   tree on `feature/zslp-nft-indexer` (uncommitted, capability B): (a) the write path's own
-   self-validate-before-broadcast gate (R-WALLET-9) IS wired — `BuildAndCommitZSLP` calls
-   `store->WouldBeValid(...)` (`src/wallet/zslpwallet.cpp:460`) and aborts before
-   `CommitTransaction` (`:475`); and (b) ordinary-send anti-burn IS wired — `AvailableCoins`
-   takes `fExcludeZSLPTokens` (default `true`, `wallet.h:1124`) and drops protected token/dust
-   outpoints via `ZSLPIsProtectedTokenOutpoint(...)` (`wallet.cpp:3197`). Holding is therefore
-   mechanically burn-safe in the working tree; it is the shipped guarantee once these changes
-   are committed/merged. No UI copy or doc may imply burn-proof holding outside a build that
-   carries these changes.
+   carrier dust UTXO. Two distinct mechanisms back this, and BOTH are now wired and committed
+   (capability B): (a) the write path's own self-validate-before-broadcast gate (R-WALLET-9) IS
+   wired — `BuildAndCommitZSLP` calls `store->WouldBeValid(...)` (`src/wallet/zslpwallet.cpp:465`)
+   and aborts before `CommitTransaction` (`:480`); and (b) ordinary-send anti-burn IS wired —
+   `AvailableCoins` takes `fExcludeZSLPTokens` (default `true`, `wallet.h:1124`) and drops
+   protected token/dust outpoints via `ZSLPIsProtectedTokenOutpoint(...)` (`wallet.cpp:3198`).
+   Holding is therefore mechanically burn-safe and committed; it is the shipped guarantee
+   provided the standard spend paths use the default token-excluding `AvailableCoins`. No UI copy
+   or doc may imply burn-proof holding outside a build that carries these changes.
 
 ### Structural ceilings a non-consensus overlay can NEVER do (hold the line in UI copy)
 
@@ -800,6 +818,6 @@ undetectable · permanence is permanent on every node forever.
 *Single-sourced from `CAPABILITY_MAP.md`, `NATIVE_UI_CONSOLIDATED_SPEC.md`, the Audit-B privacy
 RPC+UX spec, and verified against the live tree (`zcl-qt-wallet/src` GUI + `src/zslp`/`src/rpc`/
 `src/wallet`/`src/datachannel` daemon) on `feature/zslp-nft-indexer` (the branch that carries
-ZSLP; the write path is present in that branch's working tree, uncommitted). Doc-only — no source
+ZSLP; the write path is committed, compiled, and registered). Doc-only — no source
 touched, no build run. Hard rules upheld: no consensus change, no browser/multimedia, no
 auto-fetch, honest badge, holder safety, C++14.*
