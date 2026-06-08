@@ -34,6 +34,16 @@ class CZSLPStore;
 static const unsigned char NFT_OFFER_MAGIC[4] = { 'Z', 'N', 'F', 'T' };
 static const unsigned char NFT_OFFER_VERSION  = 0x01;
 
+// ── file-smuggling bounds (MARKETPLACE_DESIGN.md §5, release-gating) ──
+// The offer blob is gossiped over an UNTRUSTED P2P transport, so its
+// variable-length fields MUST be hard-bounded on read or the transport becomes
+// an unbounded data/file channel (invariant #2). A legit seller partial is one
+// NFT input + 3 outputs, so these caps are generous: t-addresses are ~35 chars;
+// the seller partial tx hex is a few hundred bytes.
+static const unsigned int NFT_OFFER_MAX_ADDR = 128;   // payoutAddr / buyerNftAddr
+static const unsigned int NFT_OFFER_MAX_HEX  = 4096;  // offerHex (seller partial)
+static const unsigned int NFT_OFFER_MAX_VIN  = 8;     // NftVerify input-count cap
+
 class CNftOfferBlob
 {
 public:
@@ -62,16 +72,23 @@ public:
             throw std::ios_base::failure("offer blob: unsupported version");
         READWRITE(tokenId);
         READWRITE(priceZat);
-        READWRITE(payoutAddr);
-        READWRITE(buyerNftAddr);
+        READWRITE(LIMITED_STRING(payoutAddr, NFT_OFFER_MAX_ADDR));
+        READWRITE(LIMITED_STRING(buyerNftAddr, NFT_OFFER_MAX_ADDR));
         READWRITE(expiryHeight);
-        READWRITE(offerHex);
+        READWRITE(LIMITED_STRING(offerHex, NFT_OFFER_MAX_HEX));
     }
 
     std::string ToBase64() const;
 
-    // offerId = first 8 bytes of SHA256(blob) hex; stable content fingerprint.
+    // offerId = first 8 bytes of Hash(blob) as hex; a SHORT, human-friendly
+    // fingerprint for the local store / display ONLY. It is collision-weak — do
+    // NOT key an adversarial (gossiped) offerpool on it; use OfferHash() there.
     std::string OfferId() const;
+
+    // Full 32-byte content hash of the serialized blob. THIS is the
+    // anti-grind / anti-amplification key for the gossip offerpool — the
+    // advertised offerId == OfferHash() check before insert (§3.7 / §5).
+    uint256 OfferHash() const;
 
     bool FromBase64(const std::string& b64, std::string& err);
 };
@@ -81,6 +98,14 @@ public:
 // fills the derived (truth) fields so callers can echo them.
 struct NftVerifyResult {
     bool ok;
+    // True when verification failed on a STRUCTURAL/cryptographic check (bad
+    // output shape, wrong token/price/recipient, a signature that doesn't bind,
+    // mismatched expiry header, too many inputs) — i.e. forgery / bad faith.
+    // False when the ONLY failures are chain-state races (vin[0] spent, expired,
+    // reorged-out, conservation shortfall). Lets the gossip net handler ban
+    // forgers but NOT honest peers that relayed an offer which just went stale.
+    // Meaningless when ok == true.
+    bool structurallyInvalid;
     uint256 tokenId;
     int64_t priceZat;
     std::string payoutAddr;
@@ -90,7 +115,8 @@ struct NftVerifyResult {
     CScript nftPrevScript;      //!< vin[0]'s prevout scriptPubKey (live)
     CAmount nftPrevValue;       //!< vin[0]'s prevout value (live)
     std::vector<std::string> reasons;
-    NftVerifyResult() : ok(false), priceZat(0), expiryHeight(0), nftPrevValue(0)
+    NftVerifyResult() : ok(false), structurallyInvalid(false), priceZat(0),
+                        expiryHeight(0), nftPrevValue(0)
     { tokenId.SetNull(); }
 };
 

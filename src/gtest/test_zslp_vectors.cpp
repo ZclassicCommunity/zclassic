@@ -23,8 +23,12 @@
 //
 // Rule keys (R-*) reference SECURITY_MODEL.md. Where the prose split (R-SEND-4),
 // SECURITY_MODEL.md §2.6 PINS Reading A (out-of-range positive quantity burns
-// ONLY that quantity; in-range outputs still apply; budget checked first) at
-// ZSLP_SPEC_VERSION = 1 — these vectors are the authoritative tiebreaker.
+// ONLY that quantity; in-range outputs still apply; budget checked first) —
+// these vectors are the authoritative tiebreaker. These ungrouped GENESIS/MINT/
+// SEND vectors are UNCHANGED by ZSLP_SPEC_VERSION = 2 (group/child collections):
+// a legacy GENESIS carries no trailing group_id push, so it still parses
+// byte-identically with has_group_id=false. The group/child rule (R-NFT1) has
+// its own vectors/cases in test_zslp_collections.cpp.
 
 #include <gtest/gtest.h>
 

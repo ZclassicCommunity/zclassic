@@ -39,6 +39,9 @@ bool ZSLPParseScript(const uint8_t* script, size_t scriptLen, ZSLPMessage& out)
         out.decimals = msg.decimals;
         out.mintBatonVout = msg.mint_baton_vout;
         out.initialQuantity = msg.initial_quantity;
+        out.hasGroupId = msg.has_group_id;
+        if (msg.has_group_id)
+            memcpy(out.groupId, msg.group_id, 32);
         return true;
     case SLP_TX_MINT:
         out.type = ZSLPMSG_MINT;
@@ -87,7 +90,8 @@ std::vector<unsigned char> ZSLPBuildGenesis(
     const std::string& ticker, const std::string& name,
     const std::string& documentUrl,
     const uint8_t* documentHash,
-    uint8_t decimals, uint8_t mintBatonVout, uint64_t initialQuantity)
+    uint8_t decimals, uint8_t mintBatonVout, uint64_t initialQuantity,
+    const uint8_t* groupId)
 {
     uint8_t buf[ZSLP_BUILD_BUF];
     size_t n = slp_build_genesis(buf, sizeof(buf),
@@ -95,7 +99,7 @@ std::vector<unsigned char> ZSLPBuildGenesis(
                                  name.empty() ? NULL : name.c_str(),
                                  documentUrl.empty() ? NULL : documentUrl.c_str(),
                                  documentHash, decimals, mintBatonVout,
-                                 initialQuantity);
+                                 initialQuantity, groupId);
     return FinishBuild(buf, n);
 }
 

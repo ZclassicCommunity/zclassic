@@ -684,6 +684,10 @@ TEST(NftVerifyReal, RejectsExpiredOrExpiringSoonOffer)
     NftVerify(nft.store, blob, r);
     EXPECT_FALSE(r.ok);
     EXPECT_TRUE(HasReason(r, "expired or expiring too soon"));
+    // Expiry is a chain-state race (an honest peer may relay a just-expiring
+    // offer), so it must NOT be flagged structural (the gossip handler must not
+    // ban for it). (#8)
+    EXPECT_FALSE(r.structurallyInvalid);
 
     delete nft.store;
 }
@@ -718,6 +722,9 @@ TEST(NftVerifyReal, RejectsWhenNftOutpointIsNotLive)
     NftVerify(nft.store, blob, r);
     EXPECT_FALSE(r.ok);
     EXPECT_TRUE(HasReason(r, "not a live"));
+    // A spent/never-existed NFT input is a chain-state race, NOT forgery: the
+    // gossip handler must drop the offer WITHOUT ban-scoring the relayer. (#8)
+    EXPECT_FALSE(r.structurallyInvalid);
 
     delete nft.store;
 }
@@ -760,6 +767,153 @@ TEST(NftVerifyReal, RejectsBuyerAddrAndPriceFieldLies)
     EXPECT_FALSE(r.ok);
     EXPECT_TRUE(HasReason(r, "NFT recipient"));
     EXPECT_TRUE(HasReason(r, "payout) value"));
+    // A header that lies about its own outputs is forgery: flag structural so the
+    // gossip handler ban-scores the sender. (#8)
+    EXPECT_TRUE(r.structurallyInvalid);
+
+    delete nft.store;
+}
+
+// The expiry header is NOT advisory (unlike buyer/price, which are re-derived AND
+// compared): the offerpool caches blob.expiryHeight for its GC expiry axis, so a
+// blob whose header disagrees with the tx's nExpiryHeight could dodge expiry
+// eviction ("never expires"). NftVerify must reject the mismatch as structural. (#10)
+TEST(NftVerifyReal, RejectsExpiryHeaderNotMatchingTx)
+{
+    SelectParams(CBaseChainParams::REGTEST);
+    uint32_t branchId = CurrentEpochBranchId(11, Params().GetConsensus());
+    CBasicKeyStore ks;
+    CKey sellerKey; sellerKey.MakeNewKey(true);
+    ks.AddKeyPubKey(sellerKey, sellerKey.GetPubKey());
+    CScript nftSpk = GetScriptForDestination(sellerKey.GetPubKey().GetID());
+    SeededNft nft = SeedNftStore(sellerKey, nftSpk);
+    CKey buyerKey; buyerKey.MakeNewKey(true);
+    CKey payoutKey; payoutKey.MakeNewKey(true);
+    std::string buyerAddr = EncodeDestination(buyerKey.GetPubKey().GetID());
+    std::string payoutAddr = EncodeDestination(payoutKey.GetPubKey().GetID());
+
+    // Build a fully valid offer with tx nExpiryHeight = 0 (no expiry), then LIE in
+    // the header only (the offerHex tx is untouched + still validly signed).
+    CNftOfferBlob blob = MakeSignedOffer(
+        ks, nftSpk, SLP_TOKEN_DUST, branchId, nft.tokenId, nft.nftOp,
+        buyerAddr, payoutAddr, 100000000, /*expiry=*/0);
+    blob.expiryHeight = 99; // header claims an expiry the tx does not carry
+
+    NftFakeCoinsView base;
+    CCoinsViewCache cache(&base);
+    SeedCoin(cache, nft.nftOp, nftSpk, SLP_TOKEN_DUST, 1);
+    NftChainStateGuard guard(&cache, /*tipHeight=*/10);
+    LOCK(cs_main);
+    NftVerifyResult r;
+    NftVerify(nft.store, blob, r);
+    EXPECT_FALSE(r.ok);
+    EXPECT_TRUE(HasReason(r, "expiryHeight"));
+    EXPECT_TRUE(r.structurallyInvalid); // lying header = forgery, ban-worthy
+
+    delete nft.store;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  6. P1 FILE-SMUGGLING BOUNDS (MARKETPLACE_DESIGN.md §5): the offer blob is
+//     gossiped over an UNTRUSTED transport, so (a) the variable-length string
+//     fields are LIMITED_STRING-capped on READ (can't be abused as a blob
+//     channel), (b) NftVerify rejects an over-padded input list, and (c) the
+//     full 32-byte OfferHash() is the anti-grind pool key (the 16-hex OfferId
+//     is display-only). These pin the bounds independently of the gossip layer.
+// ════════════════════════════════════════════════════════════════════════
+
+TEST(NftOfferBlobBounds, LimitedStringCapsRejectOversizeFieldsOnRead)
+{
+    // A within-bounds blob round-trips cleanly (positive control).
+    {
+        CNftOfferBlob ok;
+        ok.tokenId = H(0x11); ok.priceZat = 1; ok.expiryHeight = 0;
+        ok.payoutAddr = "t1payout"; ok.buyerNftAddr = "t1buyer"; ok.offerHex = "00";
+        CNftOfferBlob back; std::string err;
+        EXPECT_TRUE(back.FromBase64(ok.ToBase64(), err)) << err;
+        EXPECT_EQ(back.payoutAddr, ok.payoutAddr);
+        EXPECT_EQ(back.offerHex, ok.offerHex);
+    }
+    // payoutAddr over NFT_OFFER_MAX_ADDR (128) -> read rejects.
+    {
+        CNftOfferBlob a;
+        a.tokenId = H(0x12); a.payoutAddr = std::string(200, 'x');
+        a.buyerNftAddr = "t1b"; a.offerHex = "00";
+        CNftOfferBlob b; std::string err;
+        EXPECT_FALSE(b.FromBase64(a.ToBase64(), err));
+        EXPECT_FALSE(err.empty());
+    }
+    // buyerNftAddr over NFT_OFFER_MAX_ADDR (128) -> read rejects.
+    {
+        CNftOfferBlob a;
+        a.tokenId = H(0x13); a.payoutAddr = "t1p";
+        a.buyerNftAddr = std::string(200, 'y'); a.offerHex = "00";
+        CNftOfferBlob b; std::string err;
+        EXPECT_FALSE(b.FromBase64(a.ToBase64(), err));
+    }
+    // offerHex over NFT_OFFER_MAX_HEX (4096) -> read rejects (the real
+    // file-channel guard: no multi-KiB attacker payload survives the wire).
+    {
+        CNftOfferBlob a;
+        a.tokenId = H(0x14); a.payoutAddr = "t1p"; a.buyerNftAddr = "t1b";
+        a.offerHex = std::string(5000, 'a');
+        CNftOfferBlob b; std::string err;
+        EXPECT_FALSE(b.FromBase64(a.ToBase64(), err));
+    }
+}
+
+TEST(NftOfferBlobBounds, OfferHashIsFull32ByteAndOfferIdIsItsPrefix)
+{
+    CNftOfferBlob a;
+    a.tokenId = H(0x22); a.priceZat = 100; a.expiryHeight = 7;
+    a.payoutAddr = "t1payout"; a.buyerNftAddr = "t1buyer"; a.offerHex = "abcd";
+
+    uint256 h = a.OfferHash();
+    EXPECT_FALSE(h.IsNull());
+    EXPECT_EQ(a.OfferHash(), h);                          // deterministic
+    EXPECT_EQ(a.OfferId(), h.GetHex().substr(0, 16));     // OfferId == 16-hex prefix
+    EXPECT_EQ(a.OfferId().size(), (size_t)16);
+
+    // Any field change changes the full hash (so it is a real content key).
+    CNftOfferBlob b = a; b.priceZat = 101;
+    EXPECT_NE(b.OfferHash(), h);
+}
+
+TEST(NftVerifyReal, RejectsTooManyInputs)
+{
+    SelectParams(CBaseChainParams::REGTEST);
+    uint32_t branchId = CurrentEpochBranchId(11, Params().GetConsensus());
+    CBasicKeyStore ks;
+    CKey sellerKey; sellerKey.MakeNewKey(true);
+    ks.AddKeyPubKey(sellerKey, sellerKey.GetPubKey());
+    CScript nftSpk = GetScriptForDestination(sellerKey.GetPubKey().GetID());
+    SeededNft nft = SeedNftStore(sellerKey, nftSpk);
+    CKey buyerKey; buyerKey.MakeNewKey(true);
+    CKey payoutKey; payoutKey.MakeNewKey(true);
+    std::string buyerAddr = EncodeDestination(buyerKey.GetPubKey().GetID());
+    std::string payoutAddr = EncodeDestination(payoutKey.GetPubKey().GetID());
+
+    CNftOfferBlob blob = MakeSignedOffer(
+        ks, nftSpk, SLP_TOKEN_DUST, branchId, nft.tokenId, nft.nftOp,
+        buyerAddr, payoutAddr, 100000000, 0);
+
+    // Pad the partial to 9 inputs (1 NFT + 8 dummies) -> over NFT_OFFER_MAX_VIN.
+    CMutableTransaction mtx;
+    { CTransaction t; ASSERT_TRUE(DecodeHexTx(t, blob.offerHex)); mtx = CMutableTransaction(t); }
+    for (int i = 0; i < 8; ++i)
+        mtx.vin.push_back(CTxIn(COutPoint(H((uint8_t)(0xA0 + i)), 0)));
+    ASSERT_EQ(mtx.vin.size(), (size_t)9);
+    blob.offerHex = EncodeHexTx(CTransaction(mtx));
+
+    // The vin-count cap fires BEFORE any liveness/sig work, so an empty coins
+    // view is sufficient to reach it.
+    NftFakeCoinsView base; CCoinsViewCache cache(&base);
+    NftChainStateGuard guard(&cache, 10);
+    LOCK(cs_main);
+    NftVerifyResult r;
+    NftVerify(nft.store, blob, r);
+    EXPECT_FALSE(r.ok);
+    EXPECT_TRUE(HasReason(r, "too many inputs"));
 
     delete nft.store;
 }

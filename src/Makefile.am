@@ -182,6 +182,7 @@ BITCOIN_CORE_H = \
   reverselock.h \
   rpc/client.h \
   rpc/nftoffer.h \
+  nft/offerpool.h \
   rpc/protocol.h \
   rpc/server.h \
   rpc/register.h \
@@ -208,6 +209,7 @@ BITCOIN_CORE_H = \
   timedata.h \
   tinyformat.h \
   torcontrol.h \
+  torembed.h \
   transaction_builder.h \
   txdb.h \
   txmempool.h \
@@ -223,7 +225,6 @@ BITCOIN_CORE_H = \
   validationinterface.h \
   version.h \
   wallet/asyncrpcoperation_mergetoaddress.h \
-  wallet/asyncrpcoperation_senddatafile.h \
   wallet/asyncrpcoperation_sendmany.h \
   wallet/asyncrpcoperation_shieldcoinbase.h \
   wallet/crypter.h \
@@ -245,7 +246,9 @@ BITCOIN_CORE_H = \
   zslp/zslpmsg.h \
   zslp/zslpstore.h \
   zslp/zslpindexer.h \
-  datachannel/zdc.h
+  zslp/contentfingerprint.h \
+  znam/znam.h \
+  znam/znammsg.h
 
 
 obj/build.h: FORCE
@@ -291,17 +294,19 @@ libbitcoin_server_a_SOURCES = \
   rpc/server.cpp \
   rpc/zslp.cpp \
   rpc/nftoffer.cpp \
-  rpc/datachannel.cpp \
-  datachannel/zdc.cpp \
+  nft/offerpool.cpp \
   script/sigcache.cpp \
   timedata.cpp \
   torcontrol.cpp \
+  torembed.cpp \
   txdb.cpp \
   txmempool.cpp \
   validationinterface.cpp \
   zslp/zslpmsg.cpp \
   zslp/zslpstore.cpp \
   zslp/zslpindexer.cpp \
+  zslp/contentfingerprint.cpp \
+  znam/znammsg.cpp \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
 
@@ -330,7 +335,6 @@ libbitcoin_wallet_a_SOURCES = \
   zcbenchmarks.cpp \
   zcbenchmarks.h \
   wallet/asyncrpcoperation_mergetoaddress.cpp \
-  wallet/asyncrpcoperation_senddatafile.cpp \
   wallet/asyncrpcoperation_sendmany.cpp \
   wallet/asyncrpcoperation_shieldcoinbase.cpp \
   wallet/crypter.cpp \
@@ -415,6 +419,7 @@ libbitcoin_common_a_SOURCES = \
   transaction_builder.cpp \
   utiltest.cpp \
   zslp/slp.c \
+  znam/znam.c \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
 
@@ -483,12 +488,15 @@ zclassicd_LDADD = \
   $(LIBSECP256K1)
 
 zclassicd_LDADD += \
+  $(TOR_LIBS) \
   $(BOOST_LIBS) \
   $(BDB_LIBS) \
   $(SSL_LIBS) \
   $(CRYPTO_LIBS) \
   $(EVENT_PTHREADS_LIBS) \
   $(EVENT_LIBS) \
+  $(ZLIB_LIBS) \
+  $(TOR_SYSTEM_LIBS) \
   $(ZMQ_LIBS) \
   $(PROTON_LIBS) \
   $(LIBBITCOIN_CRYPTO) \

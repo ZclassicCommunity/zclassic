@@ -21,6 +21,12 @@ const char* GETBSPMAN = "getbspman";
 const char* BSPMAN = "bspman";
 const char* GETBSPCHK = "getbspchk";
 const char* BSPCHK = "bspchk";
+// NFT marketplace gossip overlay (MARKETPLACE_DESIGN.md §3.1).
+const char* NFTINV = "nftinv";
+const char* GETNFTOFFER = "getnftoffer";
+const char* NFTOFFER = "nftoffer";
+const char* GETNFTINV = "getnftinv";
+const char* NFTABORT = "nftabort";
 }
 
 static const char* ppszTypeName[] =

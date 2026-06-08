@@ -21,6 +21,9 @@
 
 #include <functional>
 
+#include <boost/bind.hpp>
+#include <boost/thread.hpp>
+
 CZSLPIndexer* g_zslpIndexer = NULL;
 
 // LevelDB cache size for the ZSLP store (modest; this is auxiliary data).
@@ -31,46 +34,61 @@ void StartZSLPIndexer()
     if (g_zslpIndexer != NULL)
         return;
     g_zslpIndexer = new CZSLPIndexer();
-    // Open + migrate + catch up the historical chain BEFORE going live, so the
-    // replay does not race the validation bus and a re-delivered connect is
-    // caught by the per-block tip idempotence guard.
-    if (!g_zslpIndexer->Init()) {
-        LogPrintf("ZSLP: indexer init failed; disabling token index\n");
+    // Open + migrate the store synchronously (cheap: no chain scan, no cs_main),
+    // so the zslp_* RPCs have a live (initially partial) store immediately.
+    if (!g_zslpIndexer->OpenStore()) {
+        LogPrintf("ZSLP: indexer store open failed; disabling token index\n");
         delete g_zslpIndexer;
         g_zslpIndexer = NULL;
         return;
     }
-    RegisterValidationInterface(g_zslpIndexer);
-    LogPrintf("ZSLP: token indexer started (UTXO-bound SLP conservation)\n");
+    // Heavy historical catch-up runs on a BACKGROUND thread in cs_main-yielding
+    // chunks, so startup ("Done loading") and the GUI's RPC polling are never
+    // blocked by a full-chain ZSLP (re)index. The worker registers on the
+    // validation bus atomically at the tip (drain-then-register under one
+    // cs_main hold), so no live block is missed in the hand-off.
+    g_zslpIndexer->StartBackgroundSync();
+    LogPrintf("ZSLP: token indexer store ready; background catch-up running\n");
 }
 
 void StopZSLPIndexer()
 {
     if (g_zslpIndexer == NULL)
         return;
-    UnregisterValidationInterface(g_zslpIndexer);
+    // Stop the catch-up worker (idempotent; usually already joined by
+    // InterruptZSLPIndexerSync() earlier in Shutdown), then unregister + free.
+    g_zslpIndexer->InterruptAndJoinSync();
+    if (g_zslpIndexer->IsSynced())
+        UnregisterValidationInterface(g_zslpIndexer);
     delete g_zslpIndexer;
     g_zslpIndexer = NULL;
 }
 
-CZSLPIndexer::CZSLPIndexer() {}
+void InterruptZSLPIndexerSync()
+{
+    if (g_zslpIndexer != NULL)
+        g_zslpIndexer->InterruptAndJoinSync();
+}
+
+CZSLPIndexer::CZSLPIndexer()
+    : m_syncThread(NULL), m_interrupt(false), m_synced(false) {}
 
 CZSLPIndexer::~CZSLPIndexer() {}
 
-// ── Init / migration / catch-up ─────────────────────────────────────
+// ── Store open / migration ──────────────────────────────────────────
 
-bool CZSLPIndexer::Init()
+bool CZSLPIndexer::OpenStore()
 {
     boost::filesystem::path path = GetDataDir() / "blocks" / "zslp";
 
     // Open and check the on-disk format stamp. A stale/absent stamp (legacy
     // credit-only index, or never written) triggers a wipe + full reindex; the
     // index is fully derivable and behind -zslpindex, so a clean rebuild is the
-    // safe migration.
+    // safe migration. This is cheap (no chain scan) and takes no cs_main, so it
+    // is safe to run on the startup thread before the background catch-up.
     store.reset(new CZSLPStore(path, ZSLP_DB_CACHE));
     uint32_t version = 0;
     bool haveVersion = store->ReadIndexVersion(version);
-    bool wiped = false;
     if (!haveVersion || version < ZSLP_INDEX_VERSION) {
         LogPrintf("ZSLP: index format %s (have %u, want %u) — wiping + reindexing\n",
                   haveVersion ? "outdated" : "absent",
@@ -81,48 +99,122 @@ bool CZSLPIndexer::Init()
         // Stamp the version BEFORE reindexing so a crash mid-reindex resumes
         // from the per-block tip rather than re-wiping.
         store->WriteIndexVersion(ZSLP_INDEX_VERSION);
-        wiped = true;
     }
-    (void)wiped;
-
-    return CatchUp();
+    return store.get() != NULL;
 }
 
-bool CZSLPIndexer::CatchUp()
+// ── Background catch-up ─────────────────────────────────────────────
+
+void CZSLPIndexer::StartBackgroundSync()
 {
-    CZSLPStore* s = store.get();
-    if (s == NULL)
-        return false;
+    m_interrupt.store(false);
+    m_synced.store(false);
+    m_syncThread = new boost::thread(boost::bind(&CZSLPIndexer::SyncWorker, this));
+}
 
-    LOCK(cs_main);
-
-    int64_t storedHeight = -1;
-    uint256 storedHash;
-    bool haveTip = s->ReadTip(storedHeight, storedHash);
-
-    // Resume one past the stored tip (or from genesis after a wipe / no tip).
-    int resumeHeight = haveTip ? (int)storedHeight + 1 : 0;
-    if (resumeHeight < 0)
-        resumeHeight = 0;
-
-    int tipHeight = chainActive.Height();
-    if (tipHeight < 0)
-        return true; // empty chain: nothing to index yet
-
-    for (int hh = resumeHeight; hh <= tipHeight; ++hh) {
-        const CBlockIndex* pindex = chainActive[hh];
-        if (pindex == NULL)
-            break;
-        CBlock block;
-        if (!ReadBlockFromDisk(block, pindex)) {
-            LogPrintf("ZSLP: catch-up failed to read block at height %d\n", hh);
-            return false;
-        }
-        ConnectBlock(pindex, block);
+void CZSLPIndexer::InterruptAndJoinSync()
+{
+    m_interrupt.store(true);
+    if (m_syncThread != NULL) {
+        m_syncThread->interrupt();
+        m_syncThread->join();
+        delete m_syncThread;
+        m_syncThread = NULL;
     }
-    if (tipHeight >= resumeHeight)
-        LogPrintf("ZSLP: catch-up indexed blocks %d..%d\n", resumeHeight, tipHeight);
-    return true;
+}
+
+void CZSLPIndexer::SyncWorker()
+{
+    RenameThread("zcl-zslpsync");
+    try {
+        RunCatchUp();
+    } catch (const boost::thread_interrupted&) {
+        LogPrintf("ZSLP: background catch-up interrupted; will resume next start\n");
+    } catch (const std::exception& e) {
+        LogPrintf("ZSLP: background catch-up error: %s\n", e.what());
+    } catch (...) {
+        LogPrintf("ZSLP: background catch-up unknown error\n");
+    }
+}
+
+// Replay missing blocks from the stored tip up to chainActive, processing a
+// bounded CHUNK of blocks per cs_main acquisition and releasing the lock between
+// chunks so RPC and block validation are never starved by a full reindex. When
+// the active tip is reached WHILE holding cs_main, register on the validation bus
+// and mark synced under that same lock — an atomic hand-off: no live connect can
+// slip in unseen, because every live connect fires ChainTip() under cs_main
+// (which we hold), and only after we release does the next one run, building on
+// the block we just indexed.
+//
+// REORG NOTE: between two chunks (lock released) a reorg could in principle rewind
+// the active chain below our cursor, leaving orphaned rows for the few blocks that
+// were disconnected before we registered (no DisconnectBlock callback is delivered
+// for a disconnect that happens while we are unregistered). This is a vanishingly
+// rare startup-window event, is NON-consensus (a wrong auxiliary balance at worst),
+// and self-heals on the next wipe+reindex (a ZSLP_INDEX_VERSION bump). The
+// pre-registration window of the original synchronous implementation carried the
+// same risk class; we accept it here in exchange for a responsive startup.
+void CZSLPIndexer::RunCatchUp()
+{
+    static const int kChunk = 128; // blocks per cs_main hold (bounded stall)
+    int nextHeight = -1;
+    bool announced = false;
+
+    while (!m_interrupt.load()) {
+        bool atTip = false;
+        {
+            LOCK(cs_main);
+            CZSLPStore* s = store.get();
+            if (s == NULL)
+                return;
+
+            if (nextHeight < 0) {
+                int64_t storedHeight = -1;
+                uint256 storedHash;
+                bool haveTip = s->ReadTip(storedHeight, storedHash);
+                nextHeight = haveTip ? (int)storedHeight + 1 : 0;
+                if (nextHeight < 0)
+                    nextHeight = 0;
+            }
+
+            int tipHeight = chainActive.Height();
+            if (tipHeight < 0) {
+                atTip = true; // empty chain: go live and wait for blocks
+            } else {
+                if (!announced && nextHeight <= tipHeight) {
+                    LogPrintf("ZSLP: background catch-up indexing blocks %d..%d\n",
+                              nextHeight, tipHeight);
+                    announced = true;
+                }
+                int processed = 0;
+                for (; nextHeight <= tipHeight && processed < kChunk;
+                       ++nextHeight, ++processed) {
+                    const CBlockIndex* pindex = chainActive[nextHeight];
+                    if (pindex == NULL)
+                        break;
+                    CBlock block;
+                    if (!ReadBlockFromDisk(block, pindex)) {
+                        LogPrintf("ZSLP: catch-up failed to read block %d; "
+                                  "disabling token index for this run\n", nextHeight);
+                        return; // stays unregistered (disabled); resumes next boot
+                    }
+                    ConnectBlock(pindex, block);
+                }
+                if (nextHeight > tipHeight)
+                    atTip = true;
+            }
+
+            if (atTip) {
+                RegisterValidationInterface(this);
+                m_synced.store(true);
+                LogPrintf("ZSLP: catch-up complete (height %d); now live\n",
+                          chainActive.Height());
+                return;
+            }
+        } // release cs_main between chunks
+
+        boost::this_thread::interruption_point();
+    }
 }
 
 // ── Address extraction ─────────────────────────────────────────────
@@ -257,6 +349,16 @@ bool CZSLPIndexer::ParseTx(const CTransaction& tx, int64_t height,
         genesisMeta.decimals = msg.decimals;
         genesisMeta.mintBatonVout = msg.mintBatonVout; // store overwrites
         genesisMeta.genesisHeight = height;
+        // Group / child collection (spec-v2): the on-chain group_id is big-endian
+        // (display order, same as token_id), so reverse it to the daemon uint256
+        // exactly as TokenIdToUint256 does for MINT/SEND. hasGroup carries the
+        // CLAIM; the store computes the authorization from spent inputs.
+        genesisMeta.hasGroup = msg.hasGroupId;
+        parsed.hasGroup = msg.hasGroupId;
+        if (msg.hasGroupId) {
+            genesisMeta.groupId = TokenIdToUint256(msg.groupId);
+            parsed.groupId = genesisMeta.groupId;
+        }
         haveGenesisMeta = true;
         return true;
     }

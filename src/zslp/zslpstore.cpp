@@ -26,6 +26,7 @@
 static const char DB_TOKEN    = 't';
 static const char DB_TRANSFER = 'x';
 static const char DB_BALANCE  = 'b';
+static const char DB_GROUP    = 'g';
 static const char DB_UNDO     = 'r';
 static const char DB_TIP      = 'T';
 static const char DB_UTXO     = 'u';
@@ -167,6 +168,41 @@ struct UtxoKey {
             for (int i = 3; i >= 0; --i) { vb[i] = (uint8_t)(vu & 0xff); vu >>= 8; }
             for (int i = 0; i < 4; ++i) READWRITE(vb[i]);
         }
+    }
+};
+
+// Group-membership key: 'g' + groupId + childTokenId. Direct-serialized (raw
+// uint256 bytes, no length prefixes) so a Seek to 'g'+groupId is a true byte-
+// prefix of all that group's authorized children, and the empty value keeps the
+// index minimal (the RPC joins childTokenId back to its token row).
+struct GroupKey {
+    char prefix;
+    uint256 groupId;
+    uint256 childTokenId;
+    GroupKey() : prefix(DB_GROUP) {}
+    GroupKey(const uint256& g, const uint256& c)
+        : prefix(DB_GROUP), groupId(g), childTokenId(c) {}
+    ADD_SERIALIZE_METHODS;
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action)
+    {
+        READWRITE(prefix);
+        READWRITE(groupId);
+        READWRITE(childTokenId);
+    }
+};
+
+// Prefix used only for Seek: 'g' + groupId (same leading bytes as GroupKey).
+struct GroupPrefix {
+    char prefix;
+    uint256 groupId;
+    explicit GroupPrefix(const uint256& g) : prefix(DB_GROUP), groupId(g) {}
+    ADD_SERIALIZE_METHODS;
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action)
+    {
+        READWRITE(prefix);
+        READWRITE(groupId);
     }
 };
 
@@ -471,11 +507,46 @@ bool CZSLPStore::ApplyTransaction(
                                     msg->mintBatonVout < voutCount);
                 if (batonIssued)
                     token.mintBatonVout = (uint8_t)msg->mintBatonVout;
+
+                // ── Group / child collection membership (CLOSED/authorized). ──
+                // genesisMeta carries the CLAIM (group_id field). Authorization
+                // is computed from the SAME spent-input maps the MINT baton check
+                // uses, populated by step (a) above. CRITICAL ORDERING: consume
+                // ran before this create, so the parent authority outpoint the
+                // child spent is ALREADY burned (one outpoint = one child, no
+                // replay); it is NOT re-emitted by the child message. A GENESIS
+                // does not conserve unrelated token inputs, so the burned parent
+                // unit is the authorization, never an over-spend.
+                token.groupId = genesisMeta->groupId;
+                token.hasGroup = genesisMeta->hasGroup;
+                token.groupAuthorized = false;
+                if (genesisMeta->hasGroup) {
+                    CZSLPToken parentTok;
+                    bool parentKnown = readToken(genesisMeta->groupId, parentTok);
+                    bool authIn =
+                        availByToken.count(genesisMeta->groupId) ||
+                        batonInputPresent.count(genesisMeta->groupId);
+                    token.groupAuthorized = parentKnown && authIn;
+                }
+
                 writeTokenBatch(batch, token);
                 CZSLPUndoOp tok;
                 tok.kind = UNDO_TOKEN_PUT;
                 tok.tokenId = tokenId;
                 appendUndo(batch, tok);
+
+                // Write the authorized-member 'g' row (and a paired undo) ONLY
+                // for a genuinely authorized child, so the membership index never
+                // lists a name-squatter. A claimed-but-unauthorized child gets a
+                // token row (hasGroup=true) but NO 'g' row.
+                if (token.groupAuthorized) {
+                    batch.Write(GroupKey(token.groupId, tokenId), (char)0);
+                    CZSLPUndoOp gu;
+                    gu.kind = UNDO_GROUP_INDEX_PUT;
+                    gu.tokenId = token.groupId; // groupId
+                    gu.txid = tokenId;          // childTokenId
+                    appendUndo(batch, gu);
+                }
 
                 // Mint output at vout[1] (only when it exists — R-GEN-3).
                 if (createInitial) {
@@ -670,6 +741,27 @@ bool CZSLPStore::WouldBeValid(
             reason = "GENESIS baton vout out of range";
             return false;
         }
+        // Child-collection authorization (parallel to the apply-time authIn
+        // test): a GENESIS that names a group_id is intended as an AUTHORIZED
+        // child, so the wallet must not broadcast it unless the parent token
+        // exists AND a live parent-token UTXO/baton of that group is genuinely on
+        // an input. (genesisMeta carries the claim; availByToken/batonInputPresent
+        // were recomputed read-only above.) This refuses to publish a child that
+        // would land merely "claimed" (groupAuthorized=false).
+        if (genesisMeta->hasGroup) {
+            CZSLPToken parentTok;
+            if (!readToken(genesisMeta->groupId, parentTok)) {
+                reason = "child collection parent token not found";
+                return false;
+            }
+            bool authIn = availByToken.count(genesisMeta->groupId) ||
+                          batonInputPresent.count(genesisMeta->groupId);
+            if (!authIn) {
+                reason = "child collection requires a live parent-token "
+                         "authority input (none spent)";
+                return false;
+            }
+        }
         return true;
     }
     case ZSLP_MSG_MINT: {
@@ -857,6 +949,14 @@ bool CZSLPStore::DisconnectBlock(const uint256& blockHash, int64_t prevHeight,
             utxoMods[std::make_pair(op.txid, op.utxoVout)] = rec;
             break;
         }
+        case UNDO_GROUP_INDEX_PUT:
+            // Reverse of the authorized-member write: erase the 'g' row so a
+            // disconnected child leaves no dangling membership entry. The 'g'
+            // keyspace is independent of token/utxo/balance records, so a plain
+            // erase here is byte-exact (it pairs 1:1 with the connect-time write).
+            // op.tokenId = groupId, op.txid = childTokenId.
+            batch.Erase(GroupKey(op.tokenId, op.txid));
+            break;
         default:
             break;
         }
@@ -1039,4 +1139,104 @@ void CZSLPStore::GetTokensForAddress(
         if (it->GetValue(bal) && bal > 0)
             out.push_back(std::make_pair(key.tokenId, bal));
     }
+}
+
+void CZSLPStore::GetHoldersForToken(
+    const uint256& tokenId, int from, int count,
+    std::vector<std::pair<std::string, int64_t> >& out) const
+{
+    out.clear();
+    if (count <= 0)
+        return;
+    if (count > ZSLP_LIST_MAX)
+        count = ZSLP_LIST_MAX;
+    if (from < 0)
+        from = 0;
+
+    // The balance key is 'b' + tokenId + address (tokenId-first), so a Seek to
+    // BalanceKey(tokenId, "") lands at this token's first holder and we can
+    // break the moment the iterated key's tokenId changes (prefix scan). Window
+    // in the scan: skip the first `from` positive-balance holders, then take up
+    // to `count`, so peak memory is O(count) regardless of `from` (mirrors the
+    // ListTransfers hardening — `from` never flows into an allocation). Holders
+    // iterate in leveldb-key order (address ascending) within the token's
+    // contiguous range, so a given `from` always skips the same prefix and the
+    // windowed result matches the old full-then-window approach element-for-
+    // element (only positive-balance rows count toward `from`/`count`, exactly
+    // as the post-hoc window did over a positive-balance-only vector).
+    int skipped = 0;
+    boost::scoped_ptr<CDBIterator> it(const_cast<CDBWrapper&>(db).NewIterator());
+    for (it->Seek(BalanceKey(tokenId, std::string()));
+         it->Valid() && (int)out.size() < count; it->Next()) {
+        BalanceKey key;
+        if (!it->GetKey(key) || key.prefix != DB_BALANCE)
+            break;
+        if (key.tokenId != tokenId)
+            break; // moved past this token's contiguous balance range
+        int64_t bal = 0;
+        if (!it->GetValue(bal) || bal <= 0)
+            continue;
+        if (skipped < from) {
+            ++skipped;
+            continue;
+        }
+        out.push_back(std::make_pair(key.address, bal));
+    }
+}
+
+void CZSLPStore::GetCollectionMembers(
+    const uint256& groupId, int from, int count,
+    std::vector<uint256>& outChildTokenIds) const
+{
+    outChildTokenIds.clear();
+    if (count <= 0)
+        return;
+    if (count > ZSLP_LIST_MAX)
+        count = ZSLP_LIST_MAX;
+    if (from < 0)
+        from = 0;
+
+    // 'g' + groupId + childTokenId (groupId-first), so a Seek to
+    // GroupPrefix(groupId) lands at this group's first AUTHORIZED child and we
+    // break the moment the iterated key's groupId changes (prefix scan). Only
+    // authorized children are in 'g', so this is the deterministic membership
+    // set — a claimed-but-unauthorized child is never returned. Window in the
+    // scan: skip the first `from` members, then take up to `count`, so peak
+    // memory is O(count) regardless of `from`. Iteration is leveldb-key order
+    // (childTokenId raw bytes ascending), so a given `from` always skips the
+    // same prefix and the windowed result matches the old full-then-window
+    // approach element-for-element.
+    int skipped = 0;
+    boost::scoped_ptr<CDBIterator> it(const_cast<CDBWrapper&>(db).NewIterator());
+    for (it->Seek(GroupPrefix(groupId));
+         it->Valid() && (int)outChildTokenIds.size() < count; it->Next()) {
+        GroupKey key;
+        if (!it->GetKey(key) || key.prefix != DB_GROUP)
+            break;
+        if (key.groupId != groupId)
+            break; // moved past this group's contiguous membership range
+        if (skipped < from) {
+            ++skipped;
+            continue;
+        }
+        outChildTokenIds.push_back(key.childTokenId);
+    }
+}
+
+size_t CZSLPStore::CountCollectionMembers(const uint256& groupId) const
+{
+    // A count is inherently O(members), but it must NOT materialize the ids:
+    // a keys-only prefix-scan of the 'g' index ('g'+groupId+childTokenId) that
+    // increments a counter (mirror TokenCount/UtxoCount). O(1) memory.
+    size_t n = 0;
+    boost::scoped_ptr<CDBIterator> it(const_cast<CDBWrapper&>(db).NewIterator());
+    for (it->Seek(GroupPrefix(groupId)); it->Valid(); it->Next()) {
+        GroupKey key;
+        if (!it->GetKey(key) || key.prefix != DB_GROUP)
+            break;
+        if (key.groupId != groupId)
+            break; // moved past this group's contiguous membership range
+        ++n;
+    }
+    return n;
 }

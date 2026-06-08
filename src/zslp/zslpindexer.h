@@ -15,7 +15,10 @@
 
 #include "zslp/zslpstore.h" // CZSLPParsedMsg, CZSLPToken (for the testable parse seam)
 
+#include <atomic>
 #include <memory>
+
+namespace boost { class thread; }
 
 class CBlock;
 class CBlockIndex;
@@ -28,6 +31,14 @@ extern CZSLPIndexer* g_zslpIndexer;
 /** Init/shutdown helpers, called from init.cpp behind -zslpindex. */
 void StartZSLPIndexer();
 void StopZSLPIndexer();
+
+// Interrupt + join the background catch-up thread WITHOUT unregistering/deleting.
+// Must be called early in Shutdown() — before the chain DBs (pcoinsTip /
+// pblocktree / chainActive) are freed — because the catch-up worker reads them
+// under cs_main and must not outlive them on the init-failure path (which skips
+// the thread_group join). No-op when the index is disabled or already joined.
+// Mirrors InterruptBootstrapValidation()/InterruptBootstrapServeFreeze().
+void InterruptZSLPIndexerSync();
 
 class CZSLPIndexer : public CValidationInterface
 {
@@ -50,11 +61,23 @@ public:
                         CZSLPParsedMsg& parsed, CZSLPToken& genesisMeta,
                         bool& haveGenesisMeta);
 
-    // Open the store, run the version-stamp migration (wipe + reindex when the
-    // on-disk format is stale/absent), then replay any blocks the live tip is
-    // ahead of the stored tip. Must run BEFORE RegisterValidationInterface so
-    // the replay doesn't race live connects. Returns true on success.
-    bool Init();
+    // Open the store and run the version-stamp migration (wipe + reindex when the
+    // on-disk format is stale/absent). Cheap: no chain scan, no cs_main. Returns
+    // true on success. Call before StartBackgroundSync().
+    bool OpenStore();
+
+    // Spawn the background worker that catches the store up to the active tip in
+    // cs_main-yielding chunks and then registers on the validation bus atomically
+    // at the tip. Non-blocking; startup is never stalled by a full (re)index.
+    void StartBackgroundSync();
+
+    // Interrupt + join the background worker (idempotent). Does NOT unregister or
+    // delete — see InterruptZSLPIndexerSync()/StopZSLPIndexer().
+    void InterruptAndJoinSync();
+
+    // True once historical catch-up completed and the indexer went live on the
+    // validation bus. While false, the store may hold only a partial index.
+    bool IsSynced() const { return m_synced.load(); }
 
 protected:
     // CValidationInterface hook: added=true on connect, false on disconnect.
@@ -66,6 +89,11 @@ protected:
 private:
     std::unique_ptr<CZSLPStore> store;
 
+    // Background catch-up worker state.
+    boost::thread* m_syncThread;     // owned; NULL when not running
+    std::atomic<bool> m_interrupt;   // cooperative stop request
+    std::atomic<bool> m_synced;      // true once live on the validation bus
+
     void ConnectBlock(const CBlockIndex* pindex, const CBlock& block);
     void DisconnectBlock(const CBlockIndex* pindex, const CBlock& block);
 
@@ -74,8 +102,11 @@ private:
     // UTXOs it spends).
     void IndexTransaction(const CTransaction& tx, const CBlockIndex* pindex);
 
-    // Replay missing blocks from the stored tip up to chainActive (under cs_main).
-    bool CatchUp();
+    // Background worker entry (sets thread name + exception firewall) and the
+    // chunked catch-up loop it runs (replays stored-tip..chainActive in
+    // cs_main-yielding chunks, then registers atomically at the tip).
+    void SyncWorker();
+    void RunCatchUp();
 };
 
 #endif // BITCOIN_ZSLP_ZSLPINDEXER_H

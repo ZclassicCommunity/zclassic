@@ -63,6 +63,10 @@ namespace {
 //
 bool fDiscover = true;
 bool fListen = true;
+// Embedded-Tor DEANON guard: when true, AddLocal() accepts ONLY NET_ONION addresses,
+// so -externalip / NAT-PMP / interface discovery can never leak the clearnet IP. Set
+// once in init.cpp AppInit2 when -embeddedtor is active. The single advertise chokepoint.
+bool fOnionExclusiveAdvertise = false;
 std::atomic<uint64_t> nLocalServices(NODE_NETWORK);
 CCriticalSection cs_mapLocalHost;
 map<CNetAddr, LocalServiceInfo> mapLocalHost;
@@ -215,6 +219,12 @@ void AdvertizeLocal(CNode *pnode)
 // learn a new local address
 bool AddLocal(const CService& addr, int nScore)
 {
+    // DEANON guard (single chokepoint): while advertising the embedded-Tor .onion
+    // exclusively, never let ANY non-onion local address into mapLocalHost — no caller
+    // (-externalip, NAT-PMP, interface discovery) can bypass this.
+    if (fOnionExclusiveAdvertise && addr.GetNetwork() != NET_ONION)
+        return false;
+
     if (!addr.IsRoutable())
         return false;
 
@@ -2072,8 +2082,10 @@ static const size_t MAX_BOOTSTRAP_CHUNK_REQUESTS_PER_PEER = 32;
 CNode::CNode(SOCKET hSocketIn, const CAddress& addrIn, const std::string& addrNameIn, bool fInboundIn) :
     ssSend(SER_NETWORK, INIT_PROTO_VERSION),
     addrKnown(5000, 0.001),
+    nftOfferKnown(5000, 0.001),
     setInventoryKnown(SendBufferSize() / 1000)
 {
+    fInboundOnion = false;
     nServices = 0;
     hSocket = hSocketIn;
     nRecvVersion = INIT_PROTO_VERSION;
@@ -2104,6 +2116,12 @@ CNode::CNode(SOCKET hSocketIn, const CAddress& addrIn, const std::string& addrNa
     fSentAddr = false;
     fBootstrapManifestSent = false;
     fBootstrapParamManifestSent = false;
+    // NFT gossip per-peer rate limiter (token bucket). Start full so a freshly
+    // connected peer can immediately participate in cold-start sync; the bucket
+    // capacity and refill rate are enforced in main.cpp (NftRateLimitAllow),
+    // which also clamps this initial value to the cap. See MARKETPLACE_DESIGN §5.
+    nNftTokens = 1e9; // clamped to NFT_RATE_BUCKET_MAX on first charge
+    nNftTokensLastTime = GetTime();
     pfilter = new CBloomFilter();
     nPingNonceSent = 0;
     nPingUsecStart = 0;

@@ -45,6 +45,11 @@ struct ZSLPMessage {
     uint8_t decimals;
     uint8_t mintBatonVout;     // 0 = none
     uint64_t initialQuantity;
+    // GENESIS field 10 (OPTIONAL): collection parent group_id (big-endian /
+    // display order, as on chain — same order as tokenId). hasGroupId is false
+    // for a legacy/ungrouped GENESIS. A spec-v2 child-collection feature.
+    bool hasGroupId;
+    uint8_t groupId[32];
 
     // MINT / SEND share tokenId (big-endian display order, as on chain).
     uint8_t tokenId[32];
@@ -56,9 +61,12 @@ struct ZSLPMessage {
 
     ZSLPMessage() : type(ZSLPMSG_INVALID), hasDocumentHash(false),
                     decimals(0), mintBatonVout(0), initialQuantity(0),
+                    hasGroupId(false),
                     additionalQuantity(0), numOutputs(0)
     {
-        for (int i = 0; i < 32; ++i) { documentHash[i] = 0; tokenId[i] = 0; }
+        for (int i = 0; i < 32; ++i) {
+            documentHash[i] = 0; tokenId[i] = 0; groupId[i] = 0;
+        }
         for (int i = 0; i < ZSLP_MAX_SEND_OUTPUTS; ++i) outputQuantities[i] = 0;
     }
 };
@@ -89,12 +97,17 @@ bool ZSLPParseScript(const uint8_t* script, size_t scriptLen, ZSLPMessage& out);
 
 /** GENESIS: ticker/name/documentUrl may be empty (encoded as empty pushes).
  *  documentHash, if non-NULL, points at exactly 32 raw bytes (on-chain order,
- *  NOT reversed). mintBatonVout is emitted only when >= 2. */
+ *  NOT reversed). mintBatonVout is emitted only when >= 2. groupId, if non-NULL,
+ *  points at exactly 32 raw bytes (on-chain order, NOT reversed) and is emitted
+ *  as the optional trailing field-10 push so this GENESIS declares membership in
+ *  the collection whose genesis txid is groupId; NULL omits it (legacy GENESIS).
+ *  An over-cap (>223-byte) result still returns EMPTY (fails closed). */
 std::vector<unsigned char> ZSLPBuildGenesis(
     const std::string& ticker, const std::string& name,
     const std::string& documentUrl,
     const uint8_t* documentHash /* 32 bytes or NULL */,
-    uint8_t decimals, uint8_t mintBatonVout, uint64_t initialQuantity);
+    uint8_t decimals, uint8_t mintBatonVout, uint64_t initialQuantity,
+    const uint8_t* groupId /* 32 bytes or NULL */ = NULL);
 
 /** MINT: tokenIdBE is exactly 32 bytes (on-chain BE order). */
 std::vector<unsigned char> ZSLPBuildMint(

@@ -10,8 +10,14 @@
 
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 #include "zslp/slp.h"
+// The C++ bridge (ZSLPBuildGenesis/ZSLPParseScript) is uint256-free (it carries
+// token/group ids as raw uint8_t[32]), so it coexists with the plain-C slp.h
+// here WITHOUT pulling in the C++ `class uint256` — the collision that forces
+// the store/indexer tests (which DO use class uint256) into their own TUs.
+#include "zslp/zslpmsg.h"
 
 // ── Parse valid GENESIS ───────────────────────────────────────────
 
@@ -20,7 +26,7 @@ TEST(ZSLP, ParseValidGenesis)
     uint8_t buf[512];
     size_t len = slp_build_genesis(buf, sizeof(buf),
         "ZCL", "ZClassic Token", "https://zclassic.org", nullptr,
-        8, 0, 1000000);
+        8, 0, 1000000, nullptr);
     ASSERT_GT(len, 0u);
 
     struct slp_message msg;
@@ -43,7 +49,7 @@ TEST(ZSLP, ParseGenesisWithDocumentHash)
     uint8_t buf[512];
     size_t len = slp_build_genesis(buf, sizeof(buf),
         "TEST", "Test Token", "https://example.com", hash,
-        4, 2, 5000);
+        4, 2, 5000, nullptr);
     ASSERT_GT(len, 0u);
 
     struct slp_message msg;
@@ -162,7 +168,7 @@ TEST(ZSLP, ParseInvalidLokadId)
 {
     uint8_t buf[512];
     size_t len = slp_build_genesis(buf, sizeof(buf),
-        "X", "X", "", nullptr, 0, 0, 1);
+        "X", "X", "", nullptr, 0, 0, 1, nullptr);
     ASSERT_GT(len, 0u);
     // lokad_id is at offset 2 (after OP_RETURN + push opcode)
     buf[2] = 'X'; // corrupt first byte of "SLP\0"
@@ -176,7 +182,7 @@ TEST(ZSLP, ParseWrongTokenType)
 {
     uint8_t buf[512];
     size_t len = slp_build_genesis(buf, sizeof(buf),
-        "X", "X", "", nullptr, 0, 0, 1);
+        "X", "X", "", nullptr, 0, 0, 1, nullptr);
     ASSERT_GT(len, 0u);
     // lokad_id: OP_RETURN(1) + push(1) + 4 bytes = offset 6
     // token_type: push(1) + 1 byte at offset 7
@@ -194,7 +200,7 @@ TEST(ZSLP, BuildGenesisRoundTrip)
     uint8_t buf[512];
     size_t len = slp_build_genesis(buf, sizeof(buf),
         "MYTOKEN", "My Token Name", "https://mytoken.org", hash,
-        6, 3, UINT64_C(1000000000000));
+        6, 3, UINT64_C(1000000000000), nullptr);
     ASSERT_GT(len, 0u);
 
     struct slp_message msg;
@@ -251,7 +257,7 @@ TEST(ZSLP, BuildGenesisEmptyTicker)
 {
     uint8_t buf[512];
     size_t len = slp_build_genesis(buf, sizeof(buf),
-        "", "No Ticker", "", nullptr, 0, 0, 1);
+        "", "No Ticker", "", nullptr, 0, 0, 1, nullptr);
     ASSERT_GT(len, 0u);
 
     struct slp_message msg;
@@ -265,7 +271,7 @@ TEST(ZSLP, BuildGenesisNullTicker)
 {
     uint8_t buf[512];
     size_t len = slp_build_genesis(buf, sizeof(buf),
-        nullptr, "Null Ticker", "", nullptr, 0, 0, 1);
+        nullptr, "Null Ticker", "", nullptr, 0, 0, 1, nullptr);
     ASSERT_GT(len, 0u);
 
     struct slp_message msg;
@@ -281,7 +287,7 @@ TEST(ZSLP, BuildGenesisMaxLengthTicker63Chars)
     long_ticker[63] = '\0';
     uint8_t buf[512];
     size_t len = slp_build_genesis(buf, sizeof(buf),
-        long_ticker, "Long", "", nullptr, 0, 0, 1);
+        long_ticker, "Long", "", nullptr, 0, 0, 1, nullptr);
     ASSERT_GT(len, 0u);
 
     struct slp_message msg;
@@ -296,7 +302,7 @@ TEST(ZSLP, BuildGenesisZeroDecimals)
 {
     uint8_t buf[512];
     size_t len = slp_build_genesis(buf, sizeof(buf),
-        "NDC", "No Decimals Coin", "", nullptr, 0, 0, 100);
+        "NDC", "No Decimals Coin", "", nullptr, 0, 0, 100, nullptr);
     ASSERT_GT(len, 0u);
 
     struct slp_message msg;
@@ -308,7 +314,7 @@ TEST(ZSLP, BuildGenesisEightDecimals)
 {
     uint8_t buf[512];
     size_t len = slp_build_genesis(buf, sizeof(buf),
-        "BTC", "Bitcoin Clone", "", nullptr, 8, 0, 2100000000000000ULL);
+        "BTC", "Bitcoin Clone", "", nullptr, 8, 0, 2100000000000000ULL, nullptr);
     ASSERT_GT(len, 0u);
 
     struct slp_message msg;
@@ -374,7 +380,7 @@ TEST(ZSLP, BuildGenesisHighBitQuantityRejected)
 {
     uint8_t buf[512];
     size_t len = slp_build_genesis(buf, sizeof(buf),
-        "MAX", "Max Supply", "", nullptr, 0, 0, UINT64_MAX);
+        "MAX", "Max Supply", "", nullptr, 0, 0, UINT64_MAX, nullptr);
     ASSERT_GT(len, 0u);
 
     struct slp_message msg;
@@ -387,7 +393,7 @@ TEST(ZSLP, BuildGenesisMaxValidQuantity)
     const uint64_t kMaxValid = (UINT64_C(1) << 63) - 1;
     uint8_t buf[512];
     size_t len = slp_build_genesis(buf, sizeof(buf),
-        "MAX", "Max Supply", "", nullptr, 0, 0, kMaxValid);
+        "MAX", "Max Supply", "", nullptr, 0, 0, kMaxValid, nullptr);
     ASSERT_GT(len, 0u);
 
     struct slp_message msg;
@@ -413,7 +419,7 @@ TEST(ZSLP, BuildGenesisZeroQuantity)
 {
     uint8_t buf[512];
     size_t len = slp_build_genesis(buf, sizeof(buf),
-        "ZERO", "Zero Token", "", nullptr, 0, 0, 0);
+        "ZERO", "Zero Token", "", nullptr, 0, 0, 0, nullptr);
     ASSERT_GT(len, 0u);
 
     struct slp_message msg;
@@ -427,7 +433,7 @@ TEST(ZSLP, ParseTruncatedGenesis)
 {
     uint8_t buf[512];
     size_t len = slp_build_genesis(buf, sizeof(buf),
-        "X", "X", "", nullptr, 0, 0, 1);
+        "X", "X", "", nullptr, 0, 0, 1, nullptr);
     ASSERT_GT(len, 10u);
     // Truncate to remove the last field (initial_quantity)
     struct slp_message msg;
@@ -452,4 +458,123 @@ TEST(ZSLP, BuildSendWithZeroQuantities)
     EXPECT_EQ(msg.output_quantities[0], 0u);
     EXPECT_EQ(msg.output_quantities[1], 0u);
     EXPECT_EQ(msg.output_quantities[2], 0u);
+}
+
+// ── ZSLP collections (group/child) WIRE-LEVEL tests ──────────────
+// (moved here from test_zslp_collections.cpp: these exercise the pure-C
+//  slp_parse/slp_build_genesis + the uint256-free C++ bridge, so they live
+//  in the slp.h TU; the store/membership tests stay in the C++ TU.)
+// ── 8. Legacy GENESIS parses byte-identically (no group) ───────────
+
+TEST(ZSLPCollections, LegacyGenesisParsesByteIdentical)
+{
+    // A pre-feature GENESIS (no trailing group push) builds + parses with
+    // has_group_id == false and is byte-identical to the group_id == NULL build.
+    uint8_t buf[256];
+    size_t len = slp_build_genesis(buf, sizeof(buf),
+        "OLD", "Legacy Token", "https://x", nullptr, 0, 0, 100, /*group=*/nullptr);
+    ASSERT_GT(len, 0u);
+
+    struct slp_message msg;
+    ASSERT_TRUE(slp_parse(buf, len, &msg));
+    EXPECT_EQ(msg.type, SLP_TX_GENESIS);
+    EXPECT_FALSE(msg.has_group_id);
+    EXPECT_EQ(msg.initial_quantity, 100u);
+
+    // The bridge agrees.
+    ZSLPMessage bm;
+    ASSERT_TRUE(ZSLPParseScript(buf, len, bm));
+    EXPECT_EQ(bm.type, ZSLPMSG_GENESIS);
+    EXPECT_FALSE(bm.hasGroupId);
+}
+
+// ── 9. A 31- or 33-byte trailing push rejects the whole GENESIS ────
+
+TEST(ZSLPCollections, GroupPushMustBe32Bytes)
+{
+    // Start from a valid legacy GENESIS, then hand-append a malformed trailing
+    // push (31 bytes, then 33 bytes) and assert the WHOLE message is rejected.
+    uint8_t base[256];
+    size_t baseLen = slp_build_genesis(base, sizeof(base),
+        "G", "G", "", nullptr, 0, 0, 1, /*group=*/nullptr);
+    ASSERT_GT(baseLen, 0u);
+
+    // 31-byte trailing push: opcode 0x1f + 31 bytes.
+    {
+        uint8_t buf[300];
+        memcpy(buf, base, baseLen);
+        size_t n = baseLen;
+        buf[n++] = 0x1f;
+        for (int i = 0; i < 31; ++i) buf[n++] = (uint8_t)i;
+        struct slp_message msg;
+        EXPECT_FALSE(slp_parse(buf, n, &msg)); // wrong length => not SLP
+    }
+    // 33-byte trailing push: opcode 0x21 + 33 bytes.
+    {
+        uint8_t buf[300];
+        memcpy(buf, base, baseLen);
+        size_t n = baseLen;
+        buf[n++] = 0x21;
+        for (int i = 0; i < 33; ++i) buf[n++] = (uint8_t)i;
+        struct slp_message msg;
+        EXPECT_FALSE(slp_parse(buf, n, &msg));
+    }
+    // 32-byte trailing push: ACCEPTED (the canonical group_id field).
+    {
+        uint8_t buf[300];
+        memcpy(buf, base, baseLen);
+        size_t n = baseLen;
+        buf[n++] = 0x20;
+        for (int i = 0; i < 32; ++i) buf[n++] = (uint8_t)(0xA0 + i);
+        struct slp_message msg;
+        ASSERT_TRUE(slp_parse(buf, n, &msg));
+        EXPECT_TRUE(msg.has_group_id);
+        for (int i = 0; i < 32; ++i)
+            EXPECT_EQ(msg.group_id[i], (uint8_t)(0xA0 + i));
+    }
+}
+
+// ── Parser/bridge round-trip: build a child GENESIS with group_id ──
+
+TEST(ZSLPCollections, GroupIdParserRoundTrip)
+{
+    uint8_t group[32];
+    for (int i = 0; i < 32; ++i) group[i] = (uint8_t)(0x10 + i);
+
+    // C builder + C parser.
+    uint8_t buf[256];
+    size_t len = slp_build_genesis(buf, sizeof(buf),
+        "CARD", "Series 1 Card #1", "", nullptr, 0, 0, 1, group);
+    ASSERT_GT(len, 0u);
+
+    struct slp_message msg;
+    ASSERT_TRUE(slp_parse(buf, len, &msg));
+    EXPECT_EQ(msg.type, SLP_TX_GENESIS);
+    EXPECT_TRUE(msg.has_group_id);
+    EXPECT_EQ(memcmp(msg.group_id, group, 32), 0);
+    EXPECT_EQ(msg.initial_quantity, 1u);
+
+    // C++ bridge build + parse.
+    std::vector<unsigned char> built = ZSLPBuildGenesis(
+        "CARD", "Series 1 Card #1", "", nullptr, 0, 0, 1, group);
+    ASSERT_FALSE(built.empty());
+    ZSLPMessage bm;
+    ASSERT_TRUE(ZSLPParseScript(built.data(), built.size(), bm));
+    EXPECT_EQ(bm.type, ZSLPMSG_GENESIS);
+    EXPECT_TRUE(bm.hasGroupId);
+    EXPECT_EQ(memcmp(bm.groupId, group, 32), 0);
+
+    // The two builders agree byte-for-byte.
+    ASSERT_EQ(built.size(), len);
+    EXPECT_EQ(memcmp(built.data(), buf, len), 0);
+
+    // A legacy (no group) build round-trips with hasGroupId false.
+    std::vector<unsigned char> legacy = ZSLPBuildGenesis(
+        "CARD", "Series 1 Card #1", "", nullptr, 0, 0, 1);
+    ASSERT_FALSE(legacy.empty());
+    ZSLPMessage lm;
+    ASSERT_TRUE(ZSLPParseScript(legacy.data(), legacy.size(), lm));
+    EXPECT_FALSE(lm.hasGroupId);
+    // The grouped build is exactly 33 bytes longer (0x20 + 32) than the legacy.
+    EXPECT_EQ(built.size(), legacy.size() + 33);
 }

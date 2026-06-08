@@ -85,6 +85,20 @@ public:
     //! without the full LoadBlockIndexGuts scan/PoW-check. Used by the abandoned-stub
     //! probe to learn a tip's height cheaply. Returns false if the hash is absent.
     bool ReadDiskBlockIndex(const uint256& hash, CDiskBlockIndex& diskindex);
+
+    //! BOOT SPEEDUP — block-index snapshot cache (blocks/blockindex.dat). A purely LOCAL,
+    //! NON-consensus accelerator. WriteBlockIndexCache() dumps the in-memory block index on a
+    //! clean shutdown; LoadBlockIndexFromCache() rehydrates it on the next boot INSTEAD of the
+    //! full leveldb cursor scan (LoadBlockIndexGuts) — but ONLY when the cache is provably
+    //! current (its tip == the authoritative coins-DB best block), intact (whole-file
+    //! checksum), arch/version/network-matched, complete (no dangling parents), and EVERY
+    //! record passes CheckProofOfWork exactly as the leveldb path does. Any mismatch or
+    //! corruption => the loader wipes any partial state and returns false, and the caller
+    //! falls back to LoadBlockIndexGuts(); leveldb remains the SOLE authoritative source. The
+    //! cache can therefore only ever make startup faster or be silently ignored — it can never
+    //! select a different chain. Both calls are best-effort and never fail startup/shutdown.
+    bool WriteBlockIndexCache(const uint256& hashTip, int nTipHeight);
+    bool LoadBlockIndexFromCache(const uint256& hashBestChain);
 };
 
 #endif // BITCOIN_TXDB_H

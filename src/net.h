@@ -129,6 +129,8 @@ bool IsLimited(enum Network net);
 bool IsLimited(const CNetAddr& addr);
 bool AddLocal(const CService& addr, int nScore = LOCAL_NONE);
 bool AddLocal(const CNetAddr& addr, int nScore = LOCAL_NONE);
+/** Embedded-Tor DEANON guard: when true, AddLocal() accepts ONLY NET_ONION addresses. */
+extern bool fOnionExclusiveAdvertise;
 bool RemoveLocal(const CService& addr);
 bool SeenLocal(const CService& addr);
 bool IsLocal(const CService& addr);
@@ -278,6 +280,7 @@ public:
     bool fOneShot;
     bool fClient;
     bool fInbound;
+    bool fInboundOnion; // inbound peer arrived via the embedded-Tor onion (loopback-mapped); for honest "serving N peers over Tor"
     bool fNetworkNode;
     bool fSuccessfullyConnected;
     bool fDisconnect;
@@ -322,6 +325,21 @@ public:
     CCriticalSection cs_inventory;
     std::set<uint256> setAskFor;
     std::multimap<int64_t, CInv> mapAskFor;
+
+    // NFT marketplace gossip overlay (NON-consensus, MARKETPLACE_DESIGN.md §3).
+    // Per-peer set of offer hashes we believe this peer already knows (so we
+    // don't re-announce or re-request what they have). Modeled on addrKnown; a
+    // rolling bloom is fine here because a rare false-positive only suppresses
+    // one redundant announce/request and the offer still re-floods from any
+    // other honest peer. Guarded by cs_inventory.
+    CRollingBloomFilter nftOfferKnown;
+    // Simple per-peer rate limit (token bucket) on the cost-bearing NFT gossip
+    // commands (getnftoffer / nftoffer / nftinv-processing). Refilled lazily on
+    // each charge from elapsed wall-clock; a peer that exceeds it is throttled
+    // (request dropped) rather than banned, since bursts are plausible. Guarded
+    // by cs_inventory.
+    double  nNftTokens;        //!< current token balance
+    int64_t nNftTokensLastTime;//!< last refill timestamp (seconds)
 
     // Bootstrap chunk requests are queued and drained from the SendMessages
     // thread so a slow peer cannot pin the message-handler thread. Both kinds

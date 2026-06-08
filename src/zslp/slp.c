@@ -129,9 +129,23 @@ bool slp_parse(const uint8_t *script, size_t script_len,
         /* R-INT-1 / R-10: high-bit quantity => whole message INVALID. */
         if (SLP_QTY_HIGH_BIT_SET(msg->initial_quantity)) return false;
 
-        /* R-7 / R-SCRIPT-5: GENESIS has a fixed field count — the script MUST
-         * be fully consumed. A trailing push makes it not-SLP (a strict parser
-         * rejects; a lenient one would accept => fork). */
+        /* Field 10 (OPTIONAL): group_id — the parent collection's genesis txid
+         * (spec-v2). If a trailing push is present it MUST be EXACTLY 32 bytes
+         * (a fixed-length gate mirroring the document_hash R-SCRIPT-6 check); any
+         * other length rejects the whole GENESIS so a child id can't parse two
+         * ways across implementations. If NO trailing push is present (legacy /
+         * ungrouped GENESIS), has_group_id stays false and the p==end check below
+         * passes byte-identically. Exactly one optional push is tolerated. */
+        if (p != end) {
+            p = read_push(p, end, &data, &len);
+            if (!p || len != 32) return false;
+            memcpy(msg->group_id, data, 32);
+            msg->has_group_id = true;
+        }
+
+        /* R-7 / R-SCRIPT-5: GENESIS has a fixed field count (plus the single
+         * optional group_id) — the script MUST be fully consumed. Any further
+         * trailing push (beyond the one group_id) makes it not-SLP. */
         if (p != end) return false;
 
         return true;
@@ -207,7 +221,8 @@ size_t slp_build_genesis(uint8_t *out, size_t out_len,
                           const char *document_url,
                           const uint8_t *document_hash,
                           uint8_t decimals, uint8_t mint_baton_vout,
-                          uint64_t initial_quantity)
+                          uint64_t initial_quantity,
+                          const uint8_t *group_id)
 {
     if (out_len < 1) return 0;
     size_t off = 0;
@@ -264,6 +279,13 @@ size_t slp_build_genesis(uint8_t *out, size_t out_len,
     uint8_t qty[8];
     u64_to_be(qty, initial_quantity);
     ok = ok && push_data_checked(out, &off, out_len, qty, 8);
+
+    /* group_id (field 10, OPTIONAL): a child collection-member declares the
+     * parent collection's genesis txid as a trailing 32-byte push. Only the
+     * fixed 32-byte id is ever added to the OP_RETURN — never file/arbitrary
+     * bytes. The caller (bridge FinishBuild) still enforces the 223-byte cap. */
+    if (group_id)
+        ok = ok && push_data_checked(out, &off, out_len, group_id, 32);
 
     return ok ? off : 0;
 }

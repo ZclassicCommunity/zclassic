@@ -57,8 +57,11 @@ static const int ZSLP_SEND_MAX_OUTPUTS_STORE = 19;
 
 /** On-disk index format version. Bump when the schema/semantics change so the
  *  indexer wipes + rebuilds (the index is fully derivable and behind -zslpindex).
- *  v1 = legacy credit-only (absent stamp). v2 = UTXO-bound conservation. */
-static const uint32_t ZSLP_INDEX_VERSION = 2;
+ *  v1 = legacy credit-only (absent stamp). v2 = UTXO-bound conservation.
+ *  v3 = adds the group/child collections columns + the 'g' membership index
+ *  (spec-v2 feature); the bump forces a clean wipe so the new columns populate
+ *  deterministically and no v2 record is ever read with the new schema. */
+static const uint32_t ZSLP_INDEX_VERSION = 3;
 
 /** Parsed SLP message kind, matching ZSLPMsgType, but usable by the store
  *  without pulling in the message bridge header. */
@@ -83,6 +86,19 @@ public:
     int64_t genesisHeight;
     int64_t totalMinted;      //!< running sum of genesis + mint quantities (issued supply)
 
+    // ── Group / child collections (spec-v2; append-only). ──────────────
+    //   groupId         the parent collection's genesis txid this token claims
+    //                   (null when hasGroup is false).
+    //   hasGroup        the GENESIS carried a group_id field (a CLAIM only).
+    //   groupAuthorized the claim is CONFIRMED: the parent token exists AND the
+    //                   child GENESIS tx spent a live parent-token UTXO/baton of
+    //                   groupId (closed/authorized membership). NEVER true for a
+    //                   non-owner; `hasGroup` (claimed) is NEVER surfaced as
+    //                   membership — only `groupAuthorized` is. See the 'g' index.
+    uint256 groupId;
+    bool hasGroup;
+    bool groupAuthorized;
+
     CZSLPToken() { SetNull(); }
 
     void SetNull()
@@ -97,6 +113,9 @@ public:
         mintBatonVout = 0;
         genesisHeight = 0;
         totalMinted = 0;
+        groupId.SetNull();
+        hasGroup = false;
+        groupAuthorized = false;
     }
 
     ADD_SERIALIZE_METHODS;
@@ -114,6 +133,11 @@ public:
         READWRITE(mintBatonVout);
         READWRITE(genesisHeight);
         READWRITE(totalMinted);
+        // Append-only (after totalMinted): the v3 group/child columns. The index
+        // version bump to 3 wipes + rebuilds, so no v2 record is read here.
+        READWRITE(groupId);
+        READWRITE(hasGroup);
+        READWRITE(groupAuthorized);
     }
 };
 
@@ -212,12 +236,15 @@ struct CZSLPParsedMsg {
     int32_t mintBatonVout;           //!< GENESIS/MINT: >=2 to (re)issue a baton, else 0/end
     int numOutputs;                  //!< SEND
     int64_t outputQuantities[ZSLP_SEND_MAX_OUTPUTS_STORE]; //!< SEND: outputQuantities[j] -> vout[1+j]
+    uint256 groupId;                 //!< GENESIS: claimed parent collection (daemon uint256), if hasGroup
+    bool hasGroup;                   //!< GENESIS: a group_id field was present
 
     CZSLPParsedMsg()
         : type(ZSLP_MSG_SEND), initialQuantity(0), additionalQuantity(0),
-          mintBatonVout(0), numOutputs(0)
+          mintBatonVout(0), numOutputs(0), hasGroup(false)
     {
         tokenId.SetNull();
+        groupId.SetNull();
         for (int i = 0; i < ZSLP_SEND_MAX_OUTPUTS_STORE; ++i)
             outputQuantities[i] = 0;
     }
@@ -231,9 +258,15 @@ struct CZSLPParsedMsg {
  *   'u' + txid + BE(vout)                    -> CZSLPTokenUtxo     (token UTXO — TRUTH)
  *   'x' + tokenId + BE(height) + txid + BE(vout) -> CZSLPTransfer  (ordered transfers)
  *   'b' + tokenId + address                  -> int64 balance      (DERIVED view)
+ *   'g' + groupId + childTokenId             -> (empty)            (AUTHORIZED members)
  *   'r' + blockHash + BE(seq)                -> CZSLPUndoOp         (reorg undo log)
  *   'T'                                      -> (height, blockHash) (tip marker)
  *   'M' + 0                                  -> uint32 version      (format stamp)
+ *
+ * The 'g' index lists ONLY authorized children (a child that named the group AND
+ * spent a live parent-token UTXO/baton of it); it is written when an authorized
+ * child GENESIS connects and erased when that GENESIS is disconnected. A claimed-
+ * but-unauthorized child (group named, no parent input) is NEVER in 'g'.
  *
  * The undo log records, per block, exactly which UTXO creates/consumes and
  * derived-balance deltas were applied so that DisconnectBlock can reverse them
@@ -262,6 +295,9 @@ public:
         UNDO_BATON_SET     = 5, //!< token.mintBatonVout changed (old value stored)
         UNDO_UTXO_CREATE   = 6, //!< a token UTXO was created (disconnect: erase it)
         UNDO_UTXO_CONSUME  = 7, //!< a token UTXO was consumed (disconnect: re-write it)
+        UNDO_GROUP_INDEX_PUT = 8, //!< a 'g' membership row was created
+                                  //!< (tokenId=groupId, txid=childTokenId;
+                                  //!<  disconnect: erase that 'g' row)
     };
 
     struct CZSLPUndoOp {
@@ -403,6 +439,39 @@ public:
     /** All (token, balance) pairs with balance>0 for `address`. */
     void GetTokensForAddress(const std::string& address,
                              std::vector<std::pair<uint256, int64_t> >& out) const;
+    /**
+     * (address, balance) pairs with balance>0 holding `tokenId`, windowed: skip
+     * `from`, take up to `count` (clamped to [0, ZSLP_LIST_MAX]). Peak memory is
+     * O(count), independent of `from`, via a single prefix-scan that skips the
+     * first `from` matches and stops after collecting `count` (mirrors the
+     * ListTransfers hardening). Iteration is leveldb-key order (address ascending
+     * within the token's contiguous 'b' range), so the windowing is deterministic.
+     */
+    void GetHoldersForToken(const uint256& tokenId, int from, int count,
+                            std::vector<std::pair<std::string, int64_t> >& out) const;
+
+    /**
+     * AUTHORIZED member child tokenIds of collection `groupId`, windowed: skip
+     * `from`, take up to `count` (clamped to [0, ZSLP_LIST_MAX]), via a prefix-
+     * scan of the 'g' index ('g'+groupId+childTokenId) that skips the first
+     * `from` matches and stops after collecting `count`. Peak memory is O(count),
+     * independent of `from`. Returns child ids ONLY (the RPC joins each to its
+     * token row). Claimed-but-unauthorized children are NEVER in 'g', so this is
+     * the deterministic membership set; a non-owner can never appear here
+     * (authorization burns a real parent input). Iteration is leveldb-key order
+     * (childTokenId raw bytes ascending), so the same `from` always skips the
+     * same prefix and `from`/`count` window the same members the full scan would.
+     */
+    void GetCollectionMembers(const uint256& groupId, int from, int count,
+                              std::vector<uint256>& outChildTokenIds) const;
+
+    /**
+     * Count of AUTHORIZED members of collection `groupId`: a keys-only prefix-
+     * scan of the 'g' index that increments a counter and NEVER materializes the
+     * id vector. O(members) CPU, O(1) memory — for zslp_collectioninfo's
+     * member_count without the id allocation GetCollectionMembers would do.
+     */
+    size_t CountCollectionMembers(const uint256& groupId) const;
 
     int64_t TokenCount() const;
     /** Count of live token UTXOs (test/diagnostic helper). */

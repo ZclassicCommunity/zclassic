@@ -127,6 +127,17 @@ std::string CNftOfferBlob::OfferId() const
     return h.GetHex().substr(0, 16);
 }
 
+// Full 32-byte content fingerprint = Hash(serialized blob). Use THIS (not the
+// truncated OfferId) wherever an adversary could grind collisions — the gossip
+// offerpool key + the advertised offerId == OfferHash() check (§3.7 / §5).
+uint256 CNftOfferBlob::OfferHash() const
+{
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << *this;
+    return Hash((const unsigned char*)&ss[0],
+                (const unsigned char*)&ss[0] + ss.size());
+}
+
 bool CNftOfferBlob::FromBase64(const std::string& b64, std::string& err)
 {
     bool invalid = false;
@@ -240,6 +251,7 @@ void NftVerify(CZSLPStore* store, const CNftOfferBlob& blob,
         CTransaction tmp;
         if (!DecodeHexTx(tmp, blob.offerHex)) {
             r.reasons.push_back("offerHex does not decode as a transaction");
+            r.structurallyInvalid = true; // malformed blob = bad faith
             r.ok = false;
             return;
         }
@@ -248,6 +260,15 @@ void NftVerify(CZSLPStore* store, const CNftOfferBlob& blob,
     r.tx = mtx;
     const CTransaction tx(mtx);
 
+    // The advertised expiry header MUST equal the on-chain tx's nExpiryHeight, or
+    // the offerpool would cache a false expiry (e.g. "never") and skip GC for an
+    // offer the chain considers expired. A lying header is structural bad faith.
+    if (blob.expiryHeight != tx.nExpiryHeight) {
+        r.reasons.push_back(strprintf(
+            "advertised expiryHeight (%u) does not match tx nExpiryHeight (%u)",
+            blob.expiryHeight, tx.nExpiryHeight));
+    }
+
     // Output shape.
     if (tx.vout.size() != 3) {
         r.reasons.push_back(strprintf("expected exactly 3 outputs, got %d",
@@ -255,8 +276,20 @@ void NftVerify(CZSLPStore* store, const CNftOfferBlob& blob,
     }
     if (tx.vin.empty()) {
         r.reasons.push_back("offer has no inputs (vin[0] = NFT missing)");
+        r.structurallyInvalid = true;
         r.ok = false;
         return; // nothing more we can check without vin[0]
+    }
+    // File-smuggling / DoS bound (§5): a seller partial has exactly ONE input
+    // (the NFT UTXO). Cap hard so a malicious blob can't pad many inputs to bloat
+    // the gossiped transport or the verify work.
+    if (tx.vin.size() > NFT_OFFER_MAX_VIN) {
+        r.reasons.push_back(strprintf(
+            "offer has too many inputs (%d > %u) — rejected",
+            (int)tx.vin.size(), NFT_OFFER_MAX_VIN));
+        r.structurallyInvalid = true;
+        r.ok = false;
+        return;
     }
 
     // vout[0] must parse as a ZSLP SEND crediting vout[1] with qty 1.
@@ -295,6 +328,14 @@ void NftVerify(CZSLPStore* store, const CNftOfferBlob& blob,
             r.reasons.push_back("vout[2] (payout) address does not match payoutAddr");
     }
 
+    // Everything pushed up to here is a STRUCTURAL/format failure (forgery / bad
+    // faith). The chain-state checks that follow (vin[0] liveness, token
+    // confirmation, expiry, conservation) are races an HONEST relayer can hit
+    // when an offer is filled/cancelled/reorged, so they must NOT drive the
+    // gossip ban decision. Snapshot the boundary now. (#8)
+    size_t nStructuralReasons = r.reasons.size();
+    bool sigBindFailed = false;
+
     // vin[0] must be the LIVE unspent NFT UTXO for this token (qty 1).
     const COutPoint& nftOp = tx.vin[0].prevout;
     {
@@ -327,6 +368,7 @@ void NftVerify(CZSLPStore* store, const CNftOfferBlob& blob,
                     std::string("seller signature does not validly bind this "
                                 "offer (vin[0] VerifyScript failed: ") +
                     ScriptErrorString(serr) + ")");
+                sigBindFailed = true; // forged/edited binding = structural bad faith
             }
         }
         CZSLPTokenUtxo rec;
@@ -361,6 +403,10 @@ void NftVerify(CZSLPStore* store, const CNftOfferBlob& blob,
         }
     }
 
+    // A forged/edited offer (wrong shape, token, price, recipient, expiry header,
+    // too many inputs, or a signature that doesn't bind) is ban-worthy bad faith;
+    // a pure chain-state race (spent/expired/reorged/conservation) is not. (#8)
+    r.structurallyInvalid = (nStructuralReasons > 0) || sigBindFailed;
     r.ok = r.reasons.empty();
 }
 
@@ -605,7 +651,10 @@ UniValue nft_verifyoffer(const UniValue& params, bool fHelp)
             "\nResult:\n"
             "{ \"ok\":true|false, \"tokenId\":\"hex\", \"priceZat\":n,\n"
             "  \"payoutAddr\":\"t1..\", \"buyerNftAddr\":\"t1..\",\n"
-            "  \"expiryHeight\":n, \"reasons\":[...] }\n"
+            "  \"expiryHeight\":n, \"reasons\":[...],\n"
+            "  \"token\":{ \"name\",\"ticker\",\"documenturl\",\"documenthash\",\n"
+            "             \"decimals\",\"genesisheight\" }   (omitted if the token is\n"
+            "                                                not in the local index) }\n"
             "\nExamples:\n"
             + HelpExampleCli("nft_verifyoffer", "'{\"offerBlob\":\"znftoffer:...\"}'"));
 
@@ -639,6 +688,25 @@ UniValue nft_verifyoffer(const UniValue& params, bool fHelp)
     for (size_t i = 0; i < r.reasons.size(); ++i)
         reasons.push_back(r.reasons[i]);
     ret.push_back(Pair("reasons", reasons));
+
+    // Enrich with the token metadata from the local index, if present. The
+    // resolved tokenId is the verifier's re-derived one (or the blob's if the
+    // verify could not re-derive it). A token absent from the index is NOT an
+    // error here — the offer can still be verified — so we simply omit "token".
+    // (TokenToJSON is static in rpc/zslp.cpp; build the subset inline.)
+    uint256 metaTokenId = r.tokenId.IsNull() ? blob.tokenId : r.tokenId;
+    CZSLPToken token;
+    if (!metaTokenId.IsNull() && store->GetToken(metaTokenId, token)) {
+        UniValue t(UniValue::VOBJ);
+        t.push_back(Pair("name", token.name));
+        t.push_back(Pair("ticker", token.ticker));
+        t.push_back(Pair("documenturl", token.documentUrl));
+        t.push_back(Pair("documenthash",
+            token.hasDocumentHash ? token.documentHash.GetHex() : std::string("")));
+        t.push_back(Pair("decimals", (int)token.decimals));
+        t.push_back(Pair("genesisheight", (int64_t)token.genesisHeight));
+        ret.push_back(Pair("token", t));
+    }
     return ret;
 }
 
@@ -908,12 +976,22 @@ UniValue nft_listoffers(const UniValue& params, bool fHelp)
     if (fHelp || params.size() > 0)
         throw std::runtime_error(
             "nft_listoffers\n"
-            "\nList offers from the local store; status recomputed live against\n"
-            "the UTXO set (open / filled / expired / canceled). Every record in\n"
-            "the local store is yours (sent), so there is no filter.\n"
+            "\nList offers from THIS node's LOCAL offer store (read-only). This is\n"
+            "NOT network discovery: there is no on-chain or peer-to-peer offer feed,\n"
+            "so the list contains only offers this node created or imported. Each\n"
+            "record's status is recomputed live against the UTXO set.\n"
             "\nResult:\n"
-            "[ { \"offerId\", \"tokenId\", \"priceZat\", \"expiryHeight\",\n"
-            "    \"role\", \"status\" }, ... ]\n");
+            "[ {\n"
+            "    \"offerId\": \"hex\",      (the offer's identifier)\n"
+            "    \"tokenId\": \"hex\",      (the NFT/token being offered)\n"
+            "    \"priceZat\": n,         (asking price, in zatoshi)\n"
+            "    \"expiryHeight\": n,     (block height after which the offer expires)\n"
+            "    \"role\": \"seller|buyer\", (this node's side of the offer)\n"
+            "    \"status\": \"open|filled|expired|canceled\" (live-recomputed)\n"
+            "  }, ... ]\n"
+            "\nExamples:\n"
+            + HelpExampleCli("nft_listoffers", "")
+            + HelpExampleRpc("nft_listoffers", ""));
 
     NftGetStoreOrThrow(); // fail CLOSED if the index is off
     LOCK(cs_main);
@@ -1046,11 +1124,22 @@ UniValue nft_requestbuy(const UniValue& params, bool fHelp)
         throw std::runtime_error(
             "nft_requestbuy '{\"tokenId\":\"...\"}'\n"
             "\nProduce a fresh buyer NFT receive address + a request blob for the\n"
-            "buyer-address handshake (so the seller can seal an offer to it).\n"
+            "buyer-address handshake (so the seller can seal an offer to it). This is\n"
+            "an ADDRESS-HANDSHAKE step ONLY: it reserves a fresh own t-address and\n"
+            "encodes it (with the tokenId) into a request blob to hand to the seller.\n"
+            "It does NOT broadcast anything and does NOT lock funds. Accepts EITHER a\n"
+            "tokenId or an offerId (the offerId's tokenId is looked up locally).\n"
             + HelpRequiringPassphrase() +
             "\nArguments:\n"
-            "1. \"params\" (object, required) { \"tokenId\":\"hex\" } (or \"offerId\")\n"
-            "\nResult:\n{ \"buyerNftAddr\":\"t1..\", \"requestBlob\":\"base64\" }\n");
+            "1. \"params\" (object, required) { \"tokenId\":\"hex\" } (or { \"offerId\":\"hex\" })\n"
+            "\nResult:\n"
+            "{\n"
+            "  \"buyerNftAddr\": \"t1..\",   (a fresh own t-address to receive the NFT)\n"
+            "  \"requestBlob\": \"znftreq:..\" (give this to the seller to seal an offer)\n"
+            "}\n"
+            "\nExamples:\n"
+            + HelpExampleCli("nft_requestbuy", "'{\"tokenId\":\"<txid>\"}'")
+            + HelpExampleRpc("nft_requestbuy", "{\"tokenId\":\"<txid>\"}"));
 
     NftGetStoreOrThrow();
     LOCK2(cs_main, pwalletMain->cs_wallet);

@@ -11,8 +11,15 @@
 #include "pow.h"
 #include "ui_interface.h"
 #include "uint256.h"
+#include "util.h"          // GetDataDir, FileCommit, RenameOver
+#include "utiltime.h"      // GetTimeMicros (block-index cache timing)
+#include "streams.h"       // CAutoFile (block-index cache I/O)
+#include "clientversion.h" // CLIENT_VERSION (cache schema pinning)
 
+#include <algorithm>
 #include <stdint.h>
+
+#include <boost/filesystem.hpp>   // exists / file_size / remove for the block-index cache
 
 #include <boost/thread.hpp>
 
@@ -377,6 +384,79 @@ bool CBlockTreeDB::ReadFlag(const std::string &name, bool &fValue) {
     return true;
 }
 
+// ============================================================================
+// BOOT SPEEDUP — block-index snapshot cache.  See txdb.h for the safety contract.
+// ============================================================================
+
+// File header for blocks/blockindex.dat. Serialized with the SAME stream as the body so the
+// whole-file checksum covers it. Fixed-width fields via the stream operators (little-endian
+// normalized by serialize.h) — NO raw struct dump, so it is portable across same-CLIENT_VERSION
+// builds; nPtrSize is a cheap arch sanity tag.
+static const uint32_t BLOCKINDEX_CACHE_MAGIC   = 0x5A434249; // 'Z','C','B','I'
+static const uint32_t BLOCKINDEX_CACHE_VERSION = 1;          // bump to invalidate all old caches
+
+namespace {
+struct BlockIndexCacheHeader {
+    uint32_t nMagic;
+    uint32_t nFormatVersion;
+    int32_t  nClientVersion;
+    uint8_t  nPtrSize;
+    uint256  hashGenesis;
+    uint256  hashTip;
+    int32_t  nTipHeight;
+    uint64_t nCount;
+
+    BlockIndexCacheHeader()
+        : nMagic(0), nFormatVersion(0), nClientVersion(0), nPtrSize(0),
+          nTipHeight(0), nCount(0) {}
+
+    ADD_SERIALIZE_METHODS;
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(nMagic);
+        READWRITE(nFormatVersion);
+        READWRITE(nClientVersion);
+        READWRITE(nPtrSize);
+        READWRITE(hashGenesis);
+        READWRITE(hashTip);
+        READWRITE(nTipHeight);
+        READWRITE(nCount);
+    }
+};
+} // namespace
+
+// Rehydrate ONE on-disk record into the in-memory mapBlockIndex, IDENTICALLY for the leveldb
+// scan and the cache load (single source of truth, so the two paths can never drift). Returns
+// the new/updated index, or NULL if the record fails CheckProofOfWork (the existing
+// LoadBlockIndexGuts behaviour — the caller turns NULL into an error/fallback). pprev is
+// recovered by hash via InsertBlockIndex, so records may be applied in any order.
+static CBlockIndex* ApplyDiskBlockIndex(const CDiskBlockIndex& diskindex)
+{
+    CBlockIndex* pindexNew      = InsertBlockIndex(diskindex.GetBlockHash());
+    pindexNew->pprev            = InsertBlockIndex(diskindex.hashPrev);
+    pindexNew->nHeight          = diskindex.nHeight;
+    pindexNew->nFile            = diskindex.nFile;
+    pindexNew->nDataPos         = diskindex.nDataPos;
+    pindexNew->nUndoPos         = diskindex.nUndoPos;
+    pindexNew->hashSproutAnchor = diskindex.hashSproutAnchor;
+    pindexNew->nVersion         = diskindex.nVersion;
+    pindexNew->hashMerkleRoot   = diskindex.hashMerkleRoot;
+    pindexNew->hashFinalSaplingRoot = diskindex.hashFinalSaplingRoot;
+    pindexNew->nTime            = diskindex.nTime;
+    pindexNew->nBits            = diskindex.nBits;
+    pindexNew->nNonce           = diskindex.nNonce;
+    pindexNew->nSolution        = diskindex.nSolution;
+    pindexNew->nStatus          = diskindex.nStatus;
+    pindexNew->nCachedBranchId  = diskindex.nCachedBranchId;
+    pindexNew->nTx              = diskindex.nTx;
+    pindexNew->nSproutValue     = diskindex.nSproutValue;
+    pindexNew->nSaplingValue    = diskindex.nSaplingValue;
+
+    if (!CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, Params().GetConsensus()))
+        return NULL;
+    return pindexNew;
+}
+
 bool CBlockTreeDB::LoadBlockIndexGuts()
 {
     boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
@@ -392,46 +472,17 @@ bool CBlockTreeDB::LoadBlockIndexGuts()
         if (pcursor->GetKey(key) && key.first == DB_BLOCK_INDEX) {
             CDiskBlockIndex diskindex;
             if (pcursor->GetValue(diskindex)) {
-                // Construct block index object
-                CBlockIndex* pindexNew = InsertBlockIndex(diskindex.GetBlockHash());
-                pindexNew->pprev          = InsertBlockIndex(diskindex.hashPrev);
-                pindexNew->nHeight        = diskindex.nHeight;
-                pindexNew->nFile          = diskindex.nFile;
-                pindexNew->nDataPos       = diskindex.nDataPos;
-                pindexNew->nUndoPos       = diskindex.nUndoPos;
-                pindexNew->hashSproutAnchor     = diskindex.hashSproutAnchor;
-                pindexNew->nVersion       = diskindex.nVersion;
-                pindexNew->hashMerkleRoot = diskindex.hashMerkleRoot;
-                pindexNew->hashFinalSaplingRoot   = diskindex.hashFinalSaplingRoot;
-                pindexNew->nTime          = diskindex.nTime;
-                pindexNew->nBits          = diskindex.nBits;
-                pindexNew->nNonce         = diskindex.nNonce;
-                pindexNew->nSolution      = diskindex.nSolution;
-                pindexNew->nStatus        = diskindex.nStatus;
-                pindexNew->nCachedBranchId = diskindex.nCachedBranchId;
-                pindexNew->nTx            = diskindex.nTx;
-                pindexNew->nSproutValue   = diskindex.nSproutValue;
-                pindexNew->nSaplingValue  = diskindex.nSaplingValue;
-
-                // Consistency check.
-                //
-                // pindexNew->GetBlockHash() is the hash produced by
-                // diskindex.GetBlockHash() above (used to key this entry in
-                // mapBlockIndex). That call already builds a CBlockHeader from the
-                // SAME deserialized header fields {nVersion, hashPrev,
-                // hashMerkleRoot, hashFinalSaplingRoot, nTime, nBits, nNonce,
-                // nSolution} that the lines above copied verbatim into pindexNew, and
-                // double-SHA256s it. Re-deriving the header from pindexNew and
-                // hashing it a second time (the old `header.GetHash() !=
-                // GetBlockHash()` check) compares a recompute against a recompute of
-                // identical, unmutated inputs (pprev->GetBlockHash() == the map key
-                // == diskindex.hashPrev): it can never fail and just doubles the
-                // per-record header hashing cost across millions of records. The PoW
-                // check below consumes the same already-computed hash, so removing
-                // the duplicate rehash is a no-op for consensus and for the set of
-                // detectable on-disk corruptions.
-                if (!CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, Params().GetConsensus()))
-                    return error("LoadBlockIndex(): CheckProofOfWork failed: %s", pindexNew->ToString());
+                // Construct the in-memory block index object from the on-disk record. This is
+                // the SHARED per-record path (ApplyDiskBlockIndex), also used by the snapshot-
+                // cache loader, so the two can never drift. It copies the persisted fields and
+                // runs CheckProofOfWork (the old duplicate header re-hash was removed: it
+                // compared a recompute against a recompute of identical inputs and could never
+                // fail, doubling the per-record hashing cost across millions of records; the PoW
+                // check consumes the same already-computed hash). NULL == PoW failed.
+                CBlockIndex* pindexNew = ApplyDiskBlockIndex(diskindex);
+                if (!pindexNew)
+                    return error("LoadBlockIndex(): CheckProofOfWork failed: %s",
+                                 diskindex.GetBlockHash().ToString());
 
                 pcursor->Next();
 
@@ -452,5 +503,177 @@ bool CBlockTreeDB::LoadBlockIndexGuts()
         }
     }
 
+    return true;
+}
+
+// Write the in-memory block index to blocks/blockindex.dat on a CLEAN shutdown. Best-effort:
+// any error logs a warning and returns false; it NEVER blocks or fails shutdown. Mirrors the
+// proven CAddrDB write idiom (temp file + fsync + atomic rename) but streams records so a
+// multi-GB index is not held in RAM. hashTip MUST be the durable coins-DB best block captured
+// by the caller while pcoinsTip is still valid (the same anchor the next-boot loader checks).
+bool CBlockTreeDB::WriteBlockIndexCache(const uint256& hashTip, int nTipHeight)
+{
+    if (hashTip.IsNull() || mapBlockIndex.empty())
+        return false;   // nothing durable to cache yet
+
+    // Never cache a tree that is mid-(persisted)-reindex: it is not a faithful full index.
+    bool fReindexing = false;
+    if (ReadReindexing(fReindexing) && fReindexing)
+        return false;
+
+    boost::filesystem::path pathTmp   = GetDataDir() / "blocks" / "blockindex.dat.new";
+    boost::filesystem::path pathFinal = GetDataDir() / "blocks" / "blockindex.dat";
+    try {
+        // Snapshot the pointers under the (caller-held) cs_main, sorted by height for
+        // sequential locality + parents-before-children (correctness does not depend on order;
+        // pprev is recovered by hash on load).
+        std::vector<const CBlockIndex*> vByHeight;
+        vByHeight.reserve(mapBlockIndex.size());
+        for (BlockMap::const_iterator it = mapBlockIndex.begin(); it != mapBlockIndex.end(); ++it)
+            vByHeight.push_back(it->second);
+        std::sort(vByHeight.begin(), vByHeight.end(),
+                  [](const CBlockIndex* a, const CBlockIndex* b) { return a->nHeight < b->nHeight; });
+
+        // Refuse on a near-full disk (the file is comparable in size to blocks/index).
+        const uint64_t nEst = (uint64_t)vByHeight.size() * 1500ull + 4096;
+        if (!CheckDiskSpace(nEst))
+            return error("%s: insufficient disk for block-index cache (need ~%uMB)",
+                         __func__, (unsigned)(nEst >> 20));
+
+        CAutoFile fileout(fopen(pathTmp.string().c_str(), "wb"), SER_DISK, CLIENT_VERSION);
+        if (fileout.IsNull())
+            return error("%s: failed to open %s", __func__, pathTmp.string());
+
+        CHashWriter hasher(SER_DISK, CLIENT_VERSION);
+        BlockIndexCacheHeader hdr;
+        hdr.nMagic         = BLOCKINDEX_CACHE_MAGIC;
+        hdr.nFormatVersion = BLOCKINDEX_CACHE_VERSION;
+        hdr.nClientVersion = CLIENT_VERSION;
+        hdr.nPtrSize       = (uint8_t)sizeof(void*);
+        hdr.hashGenesis    = Params().GetConsensus().hashGenesisBlock;
+        hdr.hashTip        = hashTip;
+        hdr.nTipHeight     = nTipHeight;
+        hdr.nCount         = vByHeight.size();
+        fileout << hdr;
+        hasher  << hdr;
+
+        for (size_t i = 0; i < vByHeight.size(); ++i) {
+            CDiskBlockIndex di(vByHeight[i]);
+            fileout << di;   // exactly the bytes leveldb stores as the record value
+            hasher  << di;   // checksum the identical serialization (manual tee)
+        }
+        fileout << hasher.GetHash();   // trailing whole-file checksum
+
+        FileCommit(fileout.Get());     // fsync before the rename
+        fileout.fclose();
+        if (!RenameOver(pathTmp, pathFinal))
+            return error("%s: atomic rename into place failed", __func__);
+
+        LogPrintf("%s: wrote %u block-index records (tip %s height %d)\n",
+                  __func__, (unsigned)hdr.nCount, hashTip.ToString(), nTipHeight);
+        return true;
+    } catch (const std::exception& e) {
+        LogPrintf("%s: block-index cache write failed (%s); continuing\n", __func__, e.what());
+        try { boost::filesystem::remove(pathTmp); } catch (...) {}
+        return false;
+    }
+}
+
+// Rehydrate mapBlockIndex from blocks/blockindex.dat INSTEAD of the full leveldb scan, but only
+// when the cache is provably current + intact + complete. Returns true on a verified hit (caller
+// skips LoadBlockIndexGuts); false on any miss/mismatch/corruption (caller runs the leveldb scan).
+// On any mid-load failure we UnloadBlockIndex() first so no partial state can leak into the
+// fallback. leveldb stays authoritative; this can only ever be a faster equivalent or be ignored.
+bool CBlockTreeDB::LoadBlockIndexFromCache(const uint256& hashBestChain)
+{
+    if (hashBestChain.IsNull())
+        return false;   // empty/fresh datadir -> nothing to accelerate
+
+    // A persisted (interrupted) reindex must rebuild from leveldb, NOT from a cache that
+    // predates it (the readHook only sees the cmdline flags; the durable flag is read later).
+    bool fReindexing = false;
+    if (ReadReindexing(fReindexing) && fReindexing)
+        return false;
+
+    boost::filesystem::path pathCache = GetDataDir() / "blocks" / "blockindex.dat";
+    if (!boost::filesystem::exists(pathCache))
+        return false;
+
+    const int64_t t0 = GetTimeMicros();
+    bool ok = false;
+    uint64_t nLoaded = 0;
+    try {
+        const uint64_t fileSize = (uint64_t)boost::filesystem::file_size(pathCache);
+        CAutoFile filein(fopen(pathCache.string().c_str(), "rb"), SER_DISK, CLIENT_VERSION);
+        if (filein.IsNull())
+            return false;
+
+        CHashWriter hasher(SER_DISK, CLIENT_VERSION);
+        BlockIndexCacheHeader hdr;
+        filein >> hdr;
+        hasher << hdr;
+
+        // ---- header guards (cheap; reject before any record work) ----
+        if (hdr.nMagic != BLOCKINDEX_CACHE_MAGIC)            return false;  // G2 not our file
+        if (hdr.nFormatVersion != BLOCKINDEX_CACHE_VERSION)  return false;  // G2 schema bump
+        if (hdr.nClientVersion != CLIENT_VERSION)            return false;  // G3 record-encoding pin
+        if (hdr.nPtrSize != (uint8_t)sizeof(void*))          return false;  // arch sanity (MF-6)
+        if (hdr.hashGenesis != Params().GetConsensus().hashGenesisBlock)
+            return false;                                                   // G4 wrong network/datadir
+        if (hdr.hashTip != hashBestChain)                    return false;  // G5 staleness anchor
+        // Bound nCount against the file so a corrupt header cannot drive an absurd loop/alloc.
+        // Each record is at least a few dozen bytes; require room for that many.
+        const uint64_t kMinRecBytes = 40;
+        if (hdr.nCount == 0 || hdr.nCount > (fileSize / kMinRecBytes) + 1)
+            return false;
+
+        // ---- bulk load (streaming; PoW-checked per record exactly as leveldb) ----
+        for (uint64_t i = 0; i < hdr.nCount; ++i) {
+            CDiskBlockIndex diskindex;
+            filein >> diskindex;          // throws on short/corrupt -> caught -> fallback
+            hasher << diskindex;          // recompute the whole-file checksum
+            if (!ApplyDiskBlockIndex(diskindex))   // G7 PoW; byte-identical to leveldb path
+                throw std::runtime_error("record failed proof-of-work");
+            ++nLoaded;
+        }
+
+        // ---- whole-file integrity (bit-rot / truncation guard) ----
+        uint256 storedChecksum;
+        filein >> storedChecksum;
+        if (hasher.GetHash() != storedChecksum)            // G6
+            throw std::runtime_error("checksum mismatch");
+
+        // ---- structural / completeness guards ----
+        // G8b: a complete index has every parent present, so InsertBlockIndex created NO stub
+        // parents -> mapBlockIndex holds exactly nCount entries. A mismatch means a dangling
+        // parent (corrupt/forged/partial) -> reject (also blocks the injected-fork boot-loop).
+        if ((uint64_t)mapBlockIndex.size() != hdr.nCount)
+            throw std::runtime_error("dangling parent / record-set incomplete");
+        // G9: the authoritative tip must actually be present (else the later SetTip path errors).
+        BlockMap::iterator tipIt = mapBlockIndex.find(hdr.hashTip);
+        if (tipIt == mapBlockIndex.end())
+            throw std::runtime_error("tip record absent");
+        // Cross-check the single most-consequential record against authoritative leveldb (one
+        // cheap point-read): a forged-but-checksum-valid tip record cannot be trusted.
+        CDiskBlockIndex tipDisk;
+        if (!ReadDiskBlockIndex(hdr.hashTip, tipDisk))
+            throw std::runtime_error("tip record missing from leveldb");
+        CBlockIndex* tip = tipIt->second;
+        if (tipDisk.GetBlockHash() != hdr.hashTip || tipDisk.nHeight != tip->nHeight ||
+            tipDisk.nBits != tip->nBits || tipDisk.nStatus != tip->nStatus)
+            throw std::runtime_error("tip record disagrees with leveldb");
+
+        ok = true;
+    } catch (const std::exception& e) {
+        LogPrintf("LoadBlockIndexFromCache: ignoring block-index cache (%s); using leveldb\n", e.what());
+        ok = false;
+    }
+
+    if (!ok) {
+        UnloadBlockIndex();   // wipe any partial state -> clean slate for the leveldb fallback
+        return false;
+    }
+    LogPrintf("LoadBlockIndexFromCache: block-index cache HIT (%u records in %.2fs)\n",
+              (unsigned)nLoaded, (GetTimeMicros() - t0) * 1e-6);
     return true;
 }

@@ -58,6 +58,16 @@ struct slp_message {
     uint8_t mint_baton_vout;  /* 0 = no baton */
     uint64_t initial_quantity;
 
+    /* GENESIS field 10 (OPTIONAL): group_id — the parent collection's genesis
+     * txid (on-chain big-endian / display order, same as token_id), present on a
+     * child token that claims membership in a collection. has_group_id is false
+     * for a legacy / ungrouped GENESIS (no trailing push). A spec-v2 feature
+     * (doc/nft/SECURITY_MODEL.md §8); a strict v1 parser rejects a child GENESIS
+     * as not-SLP. Closed/authorized membership is computed by the overlay store
+     * (a child must ALSO spend a live parent-token UTXO of group_id). */
+    uint8_t group_id[32];
+    bool has_group_id;
+
     /* MINT fields */
     struct uint256 token_id;
     uint64_t additional_quantity;
@@ -81,13 +91,19 @@ bool slp_parse(const uint8_t *script, size_t script_len,
 
 /* GENESIS: create a token. ticker/name/document_url may be NULL/empty
  * (encoded as empty pushes); document_hash, if non-NULL, is 32 bytes.
- * mint_baton_vout is emitted only when >= 2 (0/1 mean no baton). */
+ * mint_baton_vout is emitted only when >= 2 (0/1 mean no baton).
+ * group_id, if non-NULL, points at exactly 32 bytes (on-chain order) and is
+ * emitted as a trailing 32-byte push (field 10) so this GENESIS declares
+ * membership in the collection whose genesis txid is group_id; NULL omits the
+ * field entirely (byte-identical to a legacy GENESIS). The 32-byte field is
+ * 33 bytes on the wire (0x20 + 32). */
 size_t slp_build_genesis(uint8_t *out, size_t out_len,
                           const char *ticker, const char *name,
                           const char *document_url,
                           const uint8_t *document_hash,
                           uint8_t decimals, uint8_t mint_baton_vout,
-                          uint64_t initial_quantity);
+                          uint64_t initial_quantity,
+                          const uint8_t *group_id /* 32 bytes or NULL */);
 
 /* MINT: issue more of an existing token. token_id is required (32 bytes).
  * mint_baton_vout is emitted only when >= 2 (0/1 mean no baton). */

@@ -666,6 +666,7 @@ bool ConnectSocketByName(CService &addr, SOCKET& hSocketRet, const char *pszDest
 void CNetAddr::Init()
 {
     memset(ip, 0, sizeof(ip));
+    torv3_addr.clear();
 }
 
 void CNetAddr::SetIP(const CNetAddr& ipIn)
@@ -1004,18 +1005,30 @@ std::string CNetAddr::ToString() const
     return ToStringIP();
 }
 
+// A v3 onion stores its identity in torv3_addr (32 bytes), NOT in ip[16] (which is
+// all-zero for v3). Identity/ordering MUST consult torv3_addr or all v3 onions would
+// collapse to one address (== 0.0.0.0) in addrman/dedup. Non-v3 addresses keep using
+// ip[16]. A v3 and a non-v3 address are never equal; for ordering, non-v3 sorts first.
 bool operator==(const CNetAddr& a, const CNetAddr& b)
 {
+    bool aV3 = !a.torv3_addr.empty(), bV3 = !b.torv3_addr.empty();
+    if (aV3 || bV3)
+        return aV3 == bV3 && a.torv3_addr == b.torv3_addr;
     return (memcmp(a.ip, b.ip, 16) == 0);
 }
 
 bool operator!=(const CNetAddr& a, const CNetAddr& b)
 {
-    return (memcmp(a.ip, b.ip, 16) != 0);
+    return !(a == b);
 }
 
 bool operator<(const CNetAddr& a, const CNetAddr& b)
 {
+    bool aV3 = !a.torv3_addr.empty(), bV3 = !b.torv3_addr.empty();
+    if (aV3 || bV3) {
+        if (aV3 != bV3) return bV3;          // non-v3 (false) sorts before v3 (true)
+        return a.torv3_addr < b.torv3_addr;  // both v3: lexicographic on the 32-byte key
+    }
     return (memcmp(a.ip, b.ip, 16) < 0);
 }
 
@@ -1078,6 +1091,14 @@ std::vector<unsigned char> CNetAddr::GetGroup() const
     }
     else if (IsTor())
     {
+        // v3 onion: no subnet structure exists — each onion is its own group
+        // (its identity lives in torv3_addr, and ip[16] is all-zero). Without this,
+        // every v3 onion would land in one bucket-source-group.
+        if (!torv3_addr.empty()) {
+            vchRet.push_back(NET_ONION);
+            vchRet.insert(vchRet.end(), torv3_addr.begin(), torv3_addr.end());
+            return vchRet;
+        }
         nClass = NET_ONION;
         nStartByte = 6;
         nBits = 4;
@@ -1104,7 +1125,10 @@ std::vector<unsigned char> CNetAddr::GetGroup() const
 
 uint64_t CNetAddr::GetHash() const
 {
-    uint256 hash = Hash(&ip[0], &ip[16]);
+    // Hash the v3 onion's real 32-byte identity, not the all-zero ip[16].
+    uint256 hash = !torv3_addr.empty()
+        ? Hash(torv3_addr.begin(), torv3_addr.end())
+        : Hash(&ip[0], &ip[16]);
     uint64_t nRet;
     memcpy(&nRet, &hash, sizeof(nRet));
     return nRet;
@@ -1312,6 +1336,15 @@ bool CService::GetSockAddr(struct sockaddr* paddr, socklen_t *addrlen) const
 std::vector<unsigned char> CService::GetKey() const
 {
      std::vector<unsigned char> vKey;
+     // v3 onion: key off the 32-byte torv3_addr (+port), so addrman buckets each
+     // distinct onion separately instead of collapsing them onto the all-zero ip[16].
+     if (!torv3_addr.empty()) {
+         vKey.resize(ADDR_TORV3_SIZE + 2);
+         memcpy(&vKey[0], &torv3_addr[0], ADDR_TORV3_SIZE);
+         vKey[ADDR_TORV3_SIZE]     = port / 0x100;
+         vKey[ADDR_TORV3_SIZE + 1] = port & 0x0FF;
+         return vKey;
+     }
      vKey.resize(18);
      memcpy(&vKey[0], ip, 16);
      vKey[16] = port / 0x100;
