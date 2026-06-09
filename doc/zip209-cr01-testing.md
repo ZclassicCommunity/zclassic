@@ -1,4 +1,4 @@
-# Testing ZIP-209 + CR-01 (ZipherX consensus hardening)
+# Testing ZIP-209 + CR-01 (ZClassic consensus hardening)
 
 These builds carry two consensus-validation fixes on top of upstream ZClassic:
 
@@ -57,7 +57,7 @@ This only issues read-only RPCs (`getblockchaininfo`, `getblock`,
 ./zcutil/build.sh -j$(nproc)        # macOS: -j$(sysctl -n hw.ncpu)
 ./src/zclassicd
 ./src/zclassic-cli getnetworkinfo | grep subversion
-# Expected:  "/ZipherX:2.1.2-ZIP209-beta6/"
+# Expected:  "/ZClassic:2.1.2-ZIP209-beta6/"
 ```
 
 A clean startup (no `turnstile violation ... shielded value pool` abort) means

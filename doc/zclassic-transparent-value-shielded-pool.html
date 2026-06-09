@@ -65,7 +65,7 @@
 <header class="doc">
   <h1>Transparent-Value Shielded Pool (TVSP) for Zclassic</h1>
   <p class="tagline">A shielded pool that makes per-transaction value conservation public and exact — removing the homomorphic value-balance / binding-signature soundness class — while keeping participant privacy. It narrows, but does not eliminate, proof-system counterfeiting risk.</p>
-  <p class="meta"><b>Status:</b> Draft proposal (v2, corrected security claims) &nbsp;·&nbsp; <b>Target:</b> Zclassic (ZipherX), Sapling/Groth16 lineage &nbsp;·&nbsp; <b>Audience:</b> protocol engineers, reviewers</p>
+  <p class="meta"><b>Status:</b> Draft proposal (v2, corrected security claims) &nbsp;·&nbsp; <b>Target:</b> Zclassic, Sapling/Groth16 lineage &nbsp;·&nbsp; <b>Audience:</b> protocol engineers, reviewers</p>
 </header>
 
 <div class="callout">
@@ -130,7 +130,7 @@
 <p>This is true under Sapling <strong>and under TVSP</strong>. TVSP makes the turnstile <em>exact and public</em> (anyone can recompute it), but does <strong>not</strong> change its essential nature: it bounds, it does not detect-per-note. The improvement TVSP brings is to the <em>value-conservation</em> check (§4.5), not to the turnstile's containment semantics.</p>
 
 <h3>2.4 Status in the current Zclassic tree</h3>
-<p>This is no longer aspirational: the current ZipherX tree enables ZIP-209 on mainnet (<code>src/chainparams.cpp</code> — <code>fZIP209Enabled = true</code>, Sprout checkpoint at height 3,000,000, balance <code>1316412375709</code>), and <code>ConnectBlock</code> rejects negative Sprout/Sapling pool balances under <code>if (chainparams.ZIP209Enabled())</code> (<code>src/main.cpp:2590</code>). Sapling nullifier double-spend checks are present (<code>src/coins.cpp:596</code>). An exhaustive <code>--full</code> history scan found <code>negative_pool_events: 0</code> across all ~3.13M blocks, and both pools are net-positive at the tip — strong evidence <strong>no net drain has occurred</strong>, but (as the audit notes themselves state) <strong>not</strong> proof of the absence of a latent, unexploited circuit bug. That gap is exactly what motivates moving value out of the proof.</p>
+<p>This is no longer aspirational: the current ZClassic tree enables ZIP-209 on mainnet (<code>src/chainparams.cpp</code> — <code>fZIP209Enabled = true</code>, Sprout checkpoint at height 3,000,000, balance <code>1316412375709</code>), and <code>ConnectBlock</code> rejects negative Sprout/Sapling pool balances under <code>if (chainparams.ZIP209Enabled())</code> (<code>src/main.cpp:2590</code>). Sapling nullifier double-spend checks are present (<code>src/coins.cpp:596</code>). An exhaustive <code>--full</code> history scan found <code>negative_pool_events: 0</code> across all ~3.13M blocks, and both pools are net-positive at the tip — strong evidence <strong>no net drain has occurred</strong>, but (as the audit notes themselves state) <strong>not</strong> proof of the absence of a latent, unexploited circuit bug. That gap is exactly what motivates moving value out of the proof.</p>
 
 <h3>2.5 The design goal</h3>
 <blockquote>Keep <strong>who</strong> private. Make <strong>how much</strong> public, conserved by plain arithmetic, and shrink the proof to the smallest authority+membership+nullifier statement.</blockquote>
