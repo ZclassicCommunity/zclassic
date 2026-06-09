@@ -587,10 +587,10 @@ from the authoritative touched-set, INV-3 grep (no offerHex/price fields), the r
 round-trip, documentHash byte-order, and (`#ifdef ENABLE_WALLET`) a price-join smoke test pulling floor from
 `g_offerPool` (never from the catalog). Register in `src/Makefile.gtest.include` after `test_offerpool.cpp` (line 55):
 ```diff
- 	gtest/test_nftoffer.cpp \
- 	gtest/test_offerpool.cpp \
++	gtest/test_nftoffer.cpp \
++	gtest/test_offerpool.cpp \
 +	gtest/test_nftcatalog.cpp \
- 	gtest/test_blockindexcache.cpp
++	gtest/test_blockindexcache.cpp
 ```
 No `zcash_gtest_LDADD` change (server lib + leveldb already on the link line, `Makefile.gtest.include:66`).
 
