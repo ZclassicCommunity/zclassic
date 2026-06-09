@@ -5,6 +5,11 @@ This document records the security work integrated via the merge of
 reviewed behaviour change, one hardening commit, and the status of the
 remaining items from the June-2026 upstream-parity audit.
 
+> Line numbers are accurate as of `master` `9bf04ef32` and drift with later
+> edits. Every reference also names its symbol/function — if a number looks
+> off, grep the named symbol (e.g. `GENEROUS_TX_SIZE_LIMIT`) rather than trust
+> the line.
+
 Scope of the merge (commits, newest first):
 
 | Commit | Summary |
@@ -39,8 +44,8 @@ In `ConnectBlock` (`src/main.cpp`):
 ### Reachability and impact
 Reachable in normal operation: `-par>=2` (default) and a block above the last
 checkpoint (i.e. live blocks near tip). An attacker mines a valid-PoW block
-crafted to fail **late** — e.g. coinbase overpay (`main.cpp:~2758`) or bad
-Sapling root (`main.cpp:~2745`) — after script checks are queued but before the
+crafted to fail **late** — e.g. coinbase overpay (`main.cpp:~2765`) or bad
+Sapling root (`main.cpp:~2754`) — after script checks are queued but before the
 explicit `control.Wait()`. The control destructor then drains those checks
 against freed memory. **Impact: remote DoS (node crash).** RCE is theoretically
 in the UAF class but not demonstrated.
@@ -153,10 +158,11 @@ mismatch; all `Checkpoints_tests` pass and the UAF gtest still passes.
 From the June-2026 upstream-parity audit. Priority order (#2 now done — see §4):
 
 1. **#3 — reindex size band-aids loosen live consensus (High).**
-   `GENEROUS_BLOCK_SIZE_LIMIT = 2MB` (`main.cpp:4364`) vs `MAX_BLOCK_SIZE =
+   `GENEROUS_BLOCK_SIZE_LIMIT = 2MB` (`main.cpp:4370`) vs `MAX_BLOCK_SIZE =
    200000` (`consensus.h:22`); `GENEROUS_TX_SIZE_LIMIT = 2MB` non-contextual
-   (`main.cpp:1230`) with the tight `MAX_TX_SIZE_AFTER_SAPLING = 102000` enforced
-   only **pre-Sapling** (`main.cpp:1039`) → post-Sapling tx size effectively
+   (`main.cpp:1230`) with the tight `MAX_TX_SIZE_AFTER_SAPLING = 102000`
+   (`consensus.h:27`) enforced only inside the **pre-Sapling** `!saplingActive`
+   branch (`main.cpp:1040`) → post-Sapling tx size effectively
    unbounded to 2MB for live blocks. These are local patches, not an intentional
    hardfork. **Load-bearing for reindex** (confirmed: real canonical tx at height
    478544 is 125,811 B; another 122,415 B at 478596 — both exceed 102000). Fix:
@@ -168,16 +174,16 @@ From the June-2026 upstream-parity audit. Priority order (#2 now done — see §
    `nMinimumChainWork`/headers-presync staging. Has `MAX_HEADERS_RESULTS=160` +
    checkpoint fork-rejection. Hardening gap, not a demonstrated exploit.
 
-3. **#5 — timestamp adjustment (Low).** Raw `nTime - GetTime()` (`main.cpp:6208`).
+3. **#5 — timestamp adjustment (Low).** Raw `nTime - GetTime()` (`main.cpp:6225`).
    Self-limiting (200-sample freeze; protective per the in-code issue-#4521
    note). Signed-overflow hardening only.
 
 ### Confirmed sound (no action)
 Value conservation / no-inflation path: coinbase overpay rejected
-(`main.cpp:~2758`), input/value conservation (`main.cpp:~2088`), ZIP-209
-negative-pool checks (`main.cpp:~2589`), Sapling/JoinSplit verification
-(`main.cpp:~951`). Duplicate-input protection (`1336`), CVE-2012-2459 merkle
-malleability (`4340`), Overwinter non-overwintered-tx rejection (`1023`). No
+(`main.cpp:~2765`), input/value conservation (`main.cpp:~2141`), ZIP-209
+negative-pool checks (`main.cpp:~2597`), Sapling/JoinSplit verification
+(`main.cpp:~951`). Duplicate-input protection (`1342`), CVE-2012-2459 merkle
+malleability (`4357`), Overwinter non-overwintered-tx rejection (`1027`). No
 NU5/Orchard code in this fork. Structural block checks **do** run at
-`AcceptBlock` (`CheckBlock` default `fCheckSizeLimits=true`, `main.cpp:4587`) —
+`AcceptBlock` (`CheckBlock` default `fCheckSizeLimits=true`, `main.cpp:4604`) —
 only the redundant `ConnectBlock` re-check skips them below checkpoint.
