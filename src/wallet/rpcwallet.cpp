@@ -1498,7 +1498,17 @@ UniValue listtransactions(const UniValue& params, bool fHelp)
     UniValue ret(UniValue::VARR);
 
     std::list<CAccountingEntry> acentries;
-    CWallet::TxItems txOrdered = pwalletMain->OrderedTxItems(acentries, strAccount);
+
+    // Perf: we only ever return the newest (nCount+nFrom) rows, so first try a limit-aware
+    // pass that builds only the newest (nCount+nFrom) wallet items instead of the entire
+    // ordered log. A single item can expand to 0..N output rows, so if the limited window is
+    // a strict subset of the wallet and still cannot fill (nCount+nFrom) rows, we fall back
+    // to the full unlimited pass to guarantee byte-identical output.
+    const int nWindow = nCount + nFrom;
+    bool fLimited = nWindow > 0;
+    CWallet::TxItems txOrdered = fLimited
+        ? pwalletMain->OrderedTxItems(acentries, strAccount, nWindow)
+        : pwalletMain->OrderedTxItems(acentries, strAccount);
 
     // iterate backwards until we have nCount items to return:
     for (CWallet::TxItems::reverse_iterator it = txOrdered.rbegin(); it != txOrdered.rend(); ++it)
@@ -1510,7 +1520,27 @@ UniValue listtransactions(const UniValue& params, bool fHelp)
         if (pacentry != 0)
             AcentryToJSON(*pacentry, strAccount, ret);
 
-        if ((int)ret.size() >= (nCount+nFrom)) break;
+        if ((int)ret.size() >= nWindow) break;
+    }
+
+    // If the limited window may have dropped older items that we still needed to fill the
+    // requested rows, redo with the complete ordered log (same result as the original code).
+    if (fLimited && (int)ret.size() < nWindow && (int)txOrdered.size() >= nWindow)
+    {
+        ret.clear();
+        ret.setArray();
+        txOrdered = pwalletMain->OrderedTxItems(acentries, strAccount);
+        for (CWallet::TxItems::reverse_iterator it = txOrdered.rbegin(); it != txOrdered.rend(); ++it)
+        {
+            CWalletTx *const pwtx = (*it).second.first;
+            if (pwtx != 0)
+                ListTransactions(*pwtx, strAccount, 0, true, ret, filter);
+            CAccountingEntry *const pacentry = (*it).second.second;
+            if (pacentry != 0)
+                AcentryToJSON(*pacentry, strAccount, ret);
+
+            if ((int)ret.size() >= nWindow) break;
+        }
     }
     // ret is newest to oldest
 
@@ -3722,9 +3752,9 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
     if (!EnsureWalletIsAvailable(fHelp))
         return NullUniValue;
 
-    if (fHelp || params.size() < 2 || params.size() > 4)
+    if (fHelp || params.size() < 2 || params.size() > 5)
         throw runtime_error(
-            "z_sendmany \"fromaddress\" [{\"address\":... ,\"amount\":...},...] ( minconf ) ( fee )\n"
+            "z_sendmany \"fromaddress\" [{\"address\":... ,\"amount\":...},...] ( minconf ) ( fee ) ( inputs )\n"
             "\nSend multiple times. Amounts are decimal numbers with at most 8 digits of precision."
             "\nChange generated from a taddr flows to a new taddr address, while change generated from a zaddr returns to itself."
             "\nWhen sending coinbase UTXOs to a zaddr, change is not allowed. The entire value of the UTXO(s) must be consumed."
@@ -3741,6 +3771,17 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
             "3. minconf               (numeric, optional, default=1) Only use funds confirmed at least this many times.\n"
             "4. fee                   (numeric, optional, default="
             + strprintf("%s", FormatMoney(ASYNC_RPC_OPERATION_DEFAULT_MINERS_FEE)) + ") The fee amount to attach to this transaction.\n"
+            "5. \"inputs\"              (array, optional) Coin-control: restrict the spend to EXACTLY these UTXOs/notes.\n"
+            "                         All inputs must belong to \"fromaddress\" and be of the same pool (no mixing transparent with shielded).\n"
+            "                         PRIVACY WARNING: hand-selecting which shielded notes to spend can reduce your privacy by linking notes; prefer automatic selection unless you understand the consequences.\n"
+            "    [{\n"
+            "      \"type\":type        (string, required) One of \"transparent\", \"sapling\", \"sprout\"\n"
+            "      \"txid\":txid        (string, required) The transaction id (64-char hex)\n"
+            "      \"vout\":n           (numeric, required for transparent) The output index\n"
+            "      \"outindex\":n       (numeric, required for sapling) The Sapling output (vShieldedOutput) index\n"
+            "      \"jsindex\":n        (numeric, required for sprout) The joinsplit (vjoinsplit) index\n"
+            "      \"jsoutindex\":n     (numeric, required for sprout) The joinsplit output index\n"
+            "    }, ... ]\n"
             "\nResult:\n"
             "\"operationid\"          (string) An operationid to pass to z_getoperationstatus to get the result of the operation.\n"
             "\nExamples:\n"
@@ -3959,6 +4000,93 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
 	}
     }
 
+    // Optional coin-control: restrict the spend to EXACTLY the listed UTXOs/notes.
+    // NON-CONSENSUS: this only narrows which already-valid inputs the wallet selects.
+    bool useInputSelection = false;
+    std::set<COutPoint> pinnedTransparent;
+    std::set<SaplingOutPoint> pinnedSapling;
+    std::set<JSOutPoint> pinnedSprout;
+    if (params.size() > 4 && !params[4].isNull()) {
+        UniValue inputs = params[4].get_array();
+        useInputSelection = true;
+        for (const UniValue& in : inputs.getValues()) {
+            if (!in.isObject())
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, expected object in inputs array");
+
+            // Reject unknown keys.
+            for (const string& name_ : in.getKeys()) {
+                if (name_ != "type" && name_ != "txid" && name_ != "vout" &&
+                    name_ != "outindex" && name_ != "jsindex" && name_ != "jsoutindex")
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, string("Invalid parameter, unknown key in inputs: ") + name_);
+            }
+
+            UniValue typeValue = find_value(in, "type");
+            if (!typeValue.isStr())
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, input \"type\" is required (transparent, sapling or sprout)");
+            std::string inputType = typeValue.get_str();
+
+            UniValue txidValue = find_value(in, "txid");
+            if (!txidValue.isStr())
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, input \"txid\" is required");
+            std::string txid = txidValue.get_str();
+            if (txid.length() != 64 || !IsHex(txid))
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, input \"txid\" must be a 64-character hex string");
+
+            if (inputType == "transparent") {
+                // Transparent inputs require a transparent from-address.
+                if (!fromTaddr)
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, transparent input requires a transparent fromaddress");
+                if (!pinnedSapling.empty() || !pinnedSprout.empty())
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, cannot mix transparent and shielded inputs");
+                UniValue voutValue = find_value(in, "vout");
+                if (!voutValue.isNum())
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, transparent input requires \"vout\"");
+                int nOutput = voutValue.get_int();
+                if (nOutput < 0)
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, \"vout\" must be positive");
+                pinnedTransparent.insert(COutPoint(uint256S(txid), nOutput));
+            } else if (inputType == "sapling") {
+                // Sapling inputs require a Sapling from-address.
+                if (!fromSapling)
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, sapling input requires a Sapling fromaddress");
+                if (!pinnedTransparent.empty())
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, cannot mix transparent and shielded inputs");
+                UniValue outindexValue = find_value(in, "outindex");
+                if (!outindexValue.isNum())
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, sapling input requires \"outindex\"");
+                int outIndex = outindexValue.get_int();
+                if (outIndex < 0)
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, \"outindex\" must be positive");
+                pinnedSapling.insert(SaplingOutPoint(uint256S(txid), outIndex));
+            } else if (inputType == "sprout") {
+                // Sprout inputs require a Sprout from-address.
+                if (!fromSprout)
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, sprout input requires a Sprout fromaddress");
+                if (!pinnedTransparent.empty())
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, cannot mix transparent and shielded inputs");
+                UniValue jsindexValue = find_value(in, "jsindex");
+                if (!jsindexValue.isNum())
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, sprout input requires \"jsindex\"");
+                int jsIndex = jsindexValue.get_int();
+                if (jsIndex < 0)
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, \"jsindex\" must be positive");
+                UniValue jsoutindexValue = find_value(in, "jsoutindex");
+                if (!jsoutindexValue.isNum())
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, sprout input requires \"jsoutindex\"");
+                int jsOutIndex = jsoutindexValue.get_int();
+                // Validate range before narrowing to uint8_t.
+                if (jsOutIndex < 0 || jsOutIndex >= ZC_NUM_JS_OUTPUTS)
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Invalid parameter, \"jsoutindex\" must be in [0, %d)", ZC_NUM_JS_OUTPUTS));
+                pinnedSprout.insert(JSOutPoint(uint256S(txid), (uint64_t)jsIndex, (uint8_t)jsOutIndex));
+            } else {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, string("Invalid parameter, unknown input type: ") + inputType);
+            }
+        }
+
+        if (pinnedTransparent.empty() && pinnedSapling.empty() && pinnedSprout.empty())
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, inputs array is empty");
+    }
+
     // Use input parameters as the optional context info to be returned by z_getoperationstatus and z_getoperationresult.
     UniValue o(UniValue::VOBJ);
     o.push_back(Pair("fromaddress", params[0]));
@@ -3983,7 +4111,7 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
 
     // Create operation and add to global queue
     std::shared_ptr<AsyncRPCQueue> q = getAsyncRPCQueue();
-    std::shared_ptr<AsyncRPCOperation> operation( new AsyncRPCOperation_sendmany(builder, contextualTx, fromaddress, taddrRecipients, zaddrRecipients, nMinDepth, nFee, contextInfo) );
+    std::shared_ptr<AsyncRPCOperation> operation( new AsyncRPCOperation_sendmany(builder, contextualTx, fromaddress, taddrRecipients, zaddrRecipients, nMinDepth, nFee, contextInfo, useInputSelection, pinnedTransparent, pinnedSapling, pinnedSprout) );
     q->addOperation(operation);
     AsyncRPCOperationId operationId = operation->getId();
     return operationId;

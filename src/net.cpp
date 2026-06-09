@@ -63,6 +63,10 @@ namespace {
 //
 bool fDiscover = true;
 bool fListen = true;
+// Embedded-Tor DEANON guard: when true, AddLocal() accepts ONLY NET_ONION addresses,
+// so -externalip / NAT-PMP / interface discovery can never leak the clearnet IP. Set
+// once in init.cpp AppInit2 when -embeddedtor is active. The single advertise chokepoint.
+bool fOnionExclusiveAdvertise = false;
 std::atomic<uint64_t> nLocalServices(NODE_NETWORK);
 CCriticalSection cs_mapLocalHost;
 map<CNetAddr, LocalServiceInfo> mapLocalHost;
@@ -215,6 +219,12 @@ void AdvertizeLocal(CNode *pnode)
 // learn a new local address
 bool AddLocal(const CService& addr, int nScore)
 {
+    // DEANON guard (single chokepoint): while advertising the embedded-Tor .onion
+    // exclusively, never let ANY non-onion local address into mapLocalHost — no caller
+    // (-externalip, NAT-PMP, interface discovery) can bypass this.
+    if (fOnionExclusiveAdvertise && addr.GetNetwork() != NET_ONION)
+        return false;
+
     if (!addr.IsRoutable())
         return false;
 
@@ -1466,6 +1476,12 @@ void ThreadOpenAddedConnections()
         }
 
         list<vector<CService> > lservAddressesToAdd(0);
+        // Numeric (IP-literal) -addnode addresses that still need a connection.
+        // Such entries cost no DNS, so a resolution failure can never explain them
+        // being unconnected -- only a transient connect failure can -- and they
+        // should be retried promptly rather than after the full 2-minute
+        // name-resolution backoff.
+        std::vector<CService> vIpLiteralAddrs;
         BOOST_FOREACH(const std::string& strAddNode, lAddresses) {
             vector<CService> vservNode(0);
             if(Lookup(strAddNode.c_str(), vservNode, Params().GetDefaultPort(), fNameLookup, 0))
@@ -1476,6 +1492,19 @@ void ThreadOpenAddedConnections()
                     BOOST_FOREACH(const CService& serv, vservNode)
                         setservAddNodeAddresses.insert(serv);
                 }
+                // Did this entry resolve with no DNS (a bare IP literal)? If so,
+                // track its addresses so we can shorten the retry backoff below.
+                CService servLiteral;
+                if (LookupNumeric(strAddNode.c_str(), servLiteral, Params().GetDefaultPort()))
+                    BOOST_FOREACH(const CService& serv, vservNode)
+                        vIpLiteralAddrs.push_back(serv);
+            }
+            else
+            {
+                // Previously skipped silently, leaving the user with no clue why an
+                // -addnode never connected. A name that fails to resolve here will
+                // be retried on the next loop iteration.
+                LogPrintf("ThreadOpenAddedConnections: could not resolve -addnode=%s; will retry\n", strAddNode);
             }
         }
         // Attempt to connect to each IP for each addnode entry until at least one is successful per addnode entry
@@ -1498,7 +1527,23 @@ void ThreadOpenAddedConnections()
             OpenNetworkConnection(CAddress(vserv[i % vserv.size()]), &grant);
             MilliSleep(500);
         }
-        MilliSleep(120000); // Retry every 2 minutes
+        // Is any IP-literal -addnode still not connected? If so, retry it quickly
+        // (no DNS to wait on); otherwise -- only name entries pending, or all
+        // connected -- keep the longer interval so we don't hammer DNS.
+        bool fHaveIpLiteralPending = false;
+        {
+            LOCK(cs_vNodes);
+            BOOST_FOREACH(const CService& addrLit, vIpLiteralAddrs) {
+                bool fConnected = false;
+                BOOST_FOREACH(CNode* pnode, vNodes)
+                    if (pnode->addr == addrLit) { fConnected = true; break; }
+                if (!fConnected) { fHaveIpLiteralPending = true; break; }
+            }
+        }
+        // IP-literal -addnode entries need no DNS, so retry them quickly instead of
+        // waiting the full 2-minute name-resolution backoff; name entries keep the
+        // longer interval so we don't hammer DNS.
+        MilliSleep(fHaveIpLiteralPending ? 15000 : 120000);
     }
 }
 
@@ -2072,8 +2117,10 @@ static const size_t MAX_BOOTSTRAP_CHUNK_REQUESTS_PER_PEER = 32;
 CNode::CNode(SOCKET hSocketIn, const CAddress& addrIn, const std::string& addrNameIn, bool fInboundIn) :
     ssSend(SER_NETWORK, INIT_PROTO_VERSION),
     addrKnown(5000, 0.001),
+    nftOfferKnown(5000, 0.001),
     setInventoryKnown(SendBufferSize() / 1000)
 {
+    fInboundOnion = false;
     nServices = 0;
     hSocket = hSocketIn;
     nRecvVersion = INIT_PROTO_VERSION;
@@ -2102,8 +2149,15 @@ CNode::CNode(SOCKET hSocketIn, const CAddress& addrIn, const std::string& addrNa
     fGetAddr = false;
     fRelayTxes = false;
     fSentAddr = false;
+    fSentMempool = false;
     fBootstrapManifestSent = false;
     fBootstrapParamManifestSent = false;
+    // NFT gossip per-peer rate limiter (token bucket). Start full so a freshly
+    // connected peer can immediately participate in cold-start sync; the bucket
+    // capacity and refill rate are enforced in main.cpp (NftRateLimitAllow),
+    // which also clamps this initial value to the cap. See MARKETPLACE_DESIGN §5.
+    nNftTokens = 1e9; // clamped to NFT_RATE_BUCKET_MAX on first charge
+    nNftTokensLastTime = GetTime();
     pfilter = new CBloomFilter();
     nPingNonceSent = 0;
     nPingUsecStart = 0;

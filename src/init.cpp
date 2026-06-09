@@ -35,10 +35,12 @@
 #include "txdb.h"
 #include "mapport.h"
 #include "torcontrol.h"
+#include "torembed.h"
 #include "ui_interface.h"
 #include "util.h"
 #include "utilmoneystr.h"
 #include "validationinterface.h"
+#include "zslp/zslpindexer.h"
 #ifdef ENABLE_WALLET
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
@@ -191,6 +193,9 @@ void Interrupt(boost::thread_group& threadGroup)
     InterruptRPC();
     InterruptREST();
     InterruptTorControl();
+#ifdef ENABLE_TOR
+    InterruptEmbeddedTor();
+#endif
     InterruptMapPort();
     threadGroup.interrupt_all();
 }
@@ -237,6 +242,11 @@ void Shutdown()
 #endif
     StopNode();
     StopTorControl();
+#ifdef ENABLE_TOR
+    // Halt + bounded-join embedded Tor BEFORE the chainstate flush below, so a Tor hang
+    // can never block or interleave with the leveldb close (dirty-DB hazard).
+    StopEmbeddedTor();
+#endif
     StopMapPort();
     UnregisterNodeSignals(GetNodeSignals());
 
@@ -251,6 +261,13 @@ void Shutdown()
     // mapBlockIndex/pcoinsTip, so it must not outlive them. No-op when no freeze
     // is in flight (and when -bootstrapserve=auto is not in use).
     InterruptBootstrapServeFreeze();
+
+    // Likewise stop the ZSLP background catch-up worker before the chain DBs are
+    // freed below: while (re)indexing it reads chainActive/mapBlockIndex and the
+    // block files under cs_main, so it must not outlive pcoinsTip/pblocktree (the
+    // init-failure path skips the thread_group join). No-op when -zslpindex is
+    // off or the worker already finished/joined.
+    InterruptZSLPIndexerSync();
 
     if (fFeeEstimatesInitialized)
     {
@@ -267,6 +284,13 @@ void Shutdown()
         LOCK(cs_main);
         if (pcoinsTip != NULL) {
             FlushStateToDisk();
+            // BOOT SPEEDUP: write the block-index snapshot cache here — the ONLY point where
+            // mapBlockIndex and the durable coins tip are provably coherent (right after the
+            // flush, while pcoinsTip + pblocktree are still valid; pcoinsTip is deleted just
+            // below). Tag it with the durable coins best block (the same anchor the next-boot
+            // loader checks). Best-effort: a clean-shutdown-only write that never blocks exit.
+            if (pblocktree != NULL && chainActive.Tip() != NULL)
+                pblocktree->WriteBlockIndexCache(pcoinsTip->GetBestBlock(), chainActive.Height());
         }
         delete pcoinsTip;
         pcoinsTip = NULL;
@@ -281,6 +305,9 @@ void Shutdown()
     if (pwalletMain)
         pwalletMain->Flush(true);
 #endif
+
+    // ZSLP indexer: unregister from the validation bus and release the store.
+    StopZSLPIndexer();
 
 #if ENABLE_ZMQ
     if (pzmqNotificationInterface) {
@@ -519,6 +546,8 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-debug=<category>", strprintf(_("Output debugging information (default: %u, supplying <category> is optional)"), 0) + ". " +
         _("If <category> is not supplied or if <category> = 1, output all debugging information.") + " " + _("<category> can be:") + " " + debugCategories + ".");
     strUsage += HelpMessageOpt("-experimentalfeatures", _("Enable use of experimental features"));
+    strUsage += HelpMessageOpt("-zslpindex", strprintf(_("Maintain a read-only index of ZSLP token OP_RETURN messages, for the zslp_* RPCs (default: %u)"), 1));
+    strUsage += HelpMessageOpt("-nftmarket", strprintf(_("Participate in the NON-consensus NFT marketplace gossip overlay (announce/relay/serve verified sale offers; requires -zslpindex) (default: %u)"), 0));
     strUsage += HelpMessageOpt("-help-debug", _("Show all debugging options (usage: --help -help-debug)"));
     strUsage += HelpMessageOpt("-logips", strprintf(_("Include IP addresses in debug output (default: %u)"), 0));
     strUsage += HelpMessageOpt("-debuglogfile", _("Write debug output to debug.log file (default: 0, disabled for privacy)"));
@@ -664,6 +693,7 @@ void CleanupBlockRevFiles()
 void ThreadImport(std::vector<boost::filesystem::path> vImportFiles)
 {
     RenameThread("zcl-loadblk");
+    try {
     // -reindex
     if (fReindex) {
         CImportingNow imp;
@@ -716,6 +746,9 @@ void ThreadImport(std::vector<boost::filesystem::path> vImportFiles)
     if (GetBoolArg("-stopafterblockimport", false)) {
         LogPrintf("Stopping after block import\n");
         StartShutdown();
+    }
+    } catch (const std::exception& e) {
+        LogPrintf("%s: failed: %s\n", __func__, e.what());
     }
 }
 
@@ -2563,8 +2596,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // the CConnman added-node list without lock-ordering hazards, which does
     // not exist yet.
     if (!mapArgs.count("-connect")) {
+        // Append the bootstrap peers AFTER any user-supplied -addnode entries
+        // (which are already present in this vector from ParseParameters), so
+        // ThreadOpenAddedConnections attempts the user's peers first and the
+        // injected bootstrap peers only as a fallback. De-duplicate: skip any
+        // bootstrap peer the user already pinned. Never starves user entries.
+        std::vector<std::string>& addnodes = mapMultiArgs["-addnode"];
         BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
-            std::vector<std::string>& addnodes = mapMultiArgs["-addnode"];
             if (std::find(addnodes.begin(), addnodes.end(), peer) == addnodes.end()) {
                 addnodes.push_back(peer);
                 LogPrintf("Adding bootstrap peer %s as a persistent sync node\n", peer);
@@ -2669,6 +2707,16 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 pcoinsdbview = new CCoinsViewDB(nCoinDBCache, false, fReindex || fReindexChainState);
                 pcoinscatcher = new CCoinsViewErrorCatcher(pcoinsdbview);
                 pcoinsTip = new CCoinsViewCache(pcoinscatcher);
+
+                // BOOT SPEEDUP: a -reindex / -reindex-chainstate forces a rebuild, so the
+                // block-index snapshot cache (a SIBLING file that the leveldb wipe cannot touch)
+                // must be removed deterministically — never let a stale 2-3GB cache survive a
+                // reset (G5's tip guard already rejects it, but a lingering file is wasteful and
+                // a latent trap). Best-effort unlink before LoadBlockIndex.
+                if (fReset) {
+                    boost::system::error_code _ec;
+                    boost::filesystem::remove(GetDataDir() / "blocks" / "blockindex.dat", _ec);
+                }
 
                 if (fReindex) {
                     pblocktree->WriteReindexing(true);
@@ -3256,11 +3304,63 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // recently added to the mempool.
     threadGroup.create_thread(boost::bind(&TraceThread<void (*)()>, "txnotify", &ThreadNotifyRecentlyAdded));
 
+#ifdef ENABLE_TOR
+    // Embedded Tor (T2): bring up the in-process engine BEFORE StartTorControl so the
+    // control/socks ports exist and -torcontrol is authoritative when torcontrol connects
+    // and runs ADD_ONION (which publishes our .onion and AddLocal()s it). Opt-in (default OFF).
+    if (GetBoolArg("-embeddedtor", false)) {
+        if (mapArgs.count("-torcontrol") || mapArgs.count("-onion"))
+            return InitError(_("-embeddedtor is mutually exclusive with -torcontrol and -onion"));
+        StartEmbeddedTor(GetDataDir().string(), GetListenPort());
+        mapArgs["-torcontrol"] = strprintf("127.0.0.1:%u", GetEmbeddedTorControlPort());
+        // Point -onion at the embedded SOCKS so torcontrol's auth_cb does NOT reset
+        // NET_ONION to the default 127.0.0.1:9050 (it only skips that when -onion is
+        // set). Without this, auth_cb fires async after StartNode and silently
+        // overwrites torembed's SetProxy(socksPort) -> outbound onion dials break.
+        mapArgs["-onion"] = strprintf("127.0.0.1:%u", GetEmbeddedTorSocksPort());
+        // DEANON guard (single chokepoint in net.cpp AddLocal): advertise the .onion
+        // ONLY, so -externalip / NAT-PMP / interface discovery never leak the clearnet IP.
+        fOnionExclusiveAdvertise = true;
+        if (mapArgs.count("-externalip"))
+            InitWarning(_("-externalip is ignored while -embeddedtor is active (advertising .onion only)"));
+    } else if (TorEmbedAvailable()) {
+        LogPrintf("Embedded Tor compiled in (%s); enable with -embeddedtor\n",
+                  TorEmbedProviderVersion().c_str());
+    }
+#endif
+
     if (GetBoolArg("-listenonion", DEFAULT_LISTEN_ONION))
         StartTorControl(threadGroup, scheduler);
 
+    // NFT marketplace gossip overlay (NON-consensus, MARKETPLACE_DESIGN.md §3).
+    // Relay default OFF (interim, P4). Rationale: a node that relays OTHERS' sale
+    // offers over CLEARNET is exposed to the "relaying an order book" legal surface.
+    // The convergence target is to flip this ON once offer gossip rides the node's
+    // embedded-Tor P2P, where a relayer is an unlinkable conduit (see
+    // doc/net/EMBEDDED_TOR_BLUEPRINT.md). Parse the flag BEFORE StartNode so the gate
+    // (NftMarketActive) is authoritative the instant the first inbound peer can send a
+    // marketplace command. The overlay needs the ZSLP store to verify offers; if
+    // -zslpindex is off it stays inert (handlers no-op via NftMarketActive()).
+    fNftMarket = GetBoolArg("-nftmarket", false);
+    if (fNftMarket && !GetBoolArg("-zslpindex", true))
+        LogPrintf("NFT marketplace overlay requested but -zslpindex is off; "
+                  "overlay will stay inert until a ZSLP index is available\n");
+
     StartNode(threadGroup, scheduler);
     g_startupTimer.mark("start node");
+
+    // ZSLP token indexer (NON-consensus, read-only OP_RETURN observation).
+    // Default ON for this feature branch; opt out with -zslpindex=0.
+    if (GetBoolArg("-zslpindex", true)) {
+        StartZSLPIndexer();
+    }
+
+    // NFT marketplace offerpool GC (MARKETPLACE_DESIGN §3.3): evict offers whose
+    // NFT input is spent/missing or whose expiry has passed. Driven from the
+    // scheduler thread (NOT SendMessages — see NftOfferPoolEvictForTip) so it
+    // never acquires cs_main inside a peer's cs_vSend scope and fires even with
+    // zero peers. Self-gates via NftMarketActive() and uses TRY_LOCK(cs_main).
+    scheduler.scheduleEvery(boost::bind(&NftOfferPoolEvictForTip), 60);
 
     // Monitor the chain every minute, and alert if we get blocks much quicker or slower than expected.
     CScheduler::Function f = boost::bind(&PartitionCheck, &IsInitialBlockDownload,
