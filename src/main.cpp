@@ -2294,6 +2294,19 @@ bool AbortNode(CValidationState& state, const std::string& strMessage, const std
 
 } // anon namespace
 
+// Externally-linkable wrapper around the file-local UndoReadFromDisk, so
+// NON-consensus observers (e.g. the ZNAM names indexer) can recover a connected
+// block's spent-input scriptPubKeys without duplicating the undo disk format.
+bool ReadBlockUndoFromDisk(CBlockUndo& blockundo, const CBlockIndex* pindex)
+{
+    if (pindex == NULL || pindex->pprev == NULL)
+        return false; // genesis has no undo data
+    CDiskBlockPos pos = pindex->GetUndoPos();
+    if (pos.IsNull())
+        return false;
+    return UndoReadFromDisk(blockundo, pos, pindex->pprev->GetBlockHash());
+}
+
 /**
  * Apply the undo operation of a CTxInUndo to the given chain state.
  * @param undo The undo object.

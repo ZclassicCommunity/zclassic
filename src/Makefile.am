@@ -249,6 +249,8 @@ BITCOIN_CORE_H = \
   zslp/contentfingerprint.h \
   znam/znam.h \
   znam/znammsg.h \
+  znam/znamstore.h \
+  znam/znamindexer.h \
   zmarket/zmarket_content.h \
   zmarket/zmarket_index.h \
   zmarket/zmarket_onion.h \
@@ -300,6 +302,7 @@ libbitcoin_server_a_SOURCES = \
   rpc/rawtransaction.cpp \
   rpc/server.cpp \
   rpc/zslp.cpp \
+  rpc/znam.cpp \
   rpc/nftoffer.cpp \
   nft/offerpool.cpp \
   script/sigcache.cpp \
@@ -314,6 +317,8 @@ libbitcoin_server_a_SOURCES = \
   zslp/zslpindexer.cpp \
   zslp/contentfingerprint.cpp \
   znam/znammsg.cpp \
+  znam/znamstore.cpp \
+  znam/znamindexer.cpp \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
 

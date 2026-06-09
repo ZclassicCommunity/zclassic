@@ -41,6 +41,7 @@
 #include "utilmoneystr.h"
 #include "validationinterface.h"
 #include "zslp/zslpindexer.h"
+#include "znam/znamindexer.h"
 #ifdef ENABLE_WALLET
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
@@ -268,6 +269,8 @@ void Shutdown()
     // init-failure path skips the thread_group join). No-op when -zslpindex is
     // off or the worker already finished/joined.
     InterruptZSLPIndexerSync();
+    // Same lifetime rule for the ZNAM names indexer (no-op when -znamindex off).
+    InterruptZNAMIndexerSync();
 
     if (fFeeEstimatesInitialized)
     {
@@ -308,6 +311,8 @@ void Shutdown()
 
     // ZSLP indexer: unregister from the validation bus and release the store.
     StopZSLPIndexer();
+    // ZNAM names indexer: same shutdown discipline.
+    StopZNAMIndexer();
 
 #if ENABLE_ZMQ
     if (pzmqNotificationInterface) {
@@ -548,6 +553,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-experimentalfeatures", _("Enable use of experimental features"));
     strUsage += HelpMessageOpt("-zslpindex", strprintf(_("Maintain a read-only index of ZSLP token OP_RETURN messages, for the zslp_* RPCs (default: %u)"), 1));
     strUsage += HelpMessageOpt("-nftmarket", strprintf(_("Participate in the NON-consensus NFT marketplace gossip overlay (announce/relay/serve verified sale offers; requires -zslpindex) (default: %u)"), 0));
+    strUsage += HelpMessageOpt("-znamindex", strprintf(_("Maintain a read-only index of ZNAM (ZCL Names) OP_RETURN records, for the name_* RPCs (default: %u)"), 0));
     strUsage += HelpMessageOpt("-help-debug", _("Show all debugging options (usage: --help -help-debug)"));
     strUsage += HelpMessageOpt("-logips", strprintf(_("Include IP addresses in debug output (default: %u)"), 0));
     strUsage += HelpMessageOpt("-debuglogfile", _("Write debug output to debug.log file (default: 0, disabled for privacy)"));
@@ -3353,6 +3359,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // Default ON for this feature branch; opt out with -zslpindex=0.
     if (GetBoolArg("-zslpindex", true)) {
         StartZSLPIndexer();
+    }
+
+    // ZNAM names indexer (NON-consensus, read-only OP_RETURN observation).
+    // Default OFF / opt-in: the name policy constants are not yet ratified for
+    // mainnet, so a user must explicitly enable -znamindex to build the index.
+    if (GetBoolArg("-znamindex", false)) {
+        StartZNAMIndexer();
     }
 
     // NFT marketplace offerpool GC (MARKETPLACE_DESIGN §3.3): evict offers whose

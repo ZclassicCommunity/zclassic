@@ -40,6 +40,7 @@
 
 class CBlockIndex;
 class CBlockTreeDB;
+class CBlockUndo;
 class CBloomFilter;
 class CInv;
 class CScriptCheck;
@@ -477,6 +478,10 @@ public:
 bool WriteBlockToDisk(CBlock& block, CDiskBlockPos& pos, const CMessageHeader::MessageStartChars& messageStart);
 bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos, bool fCheckPOW = true);
 bool ReadBlockFromDisk(CBlock& block, const CBlockIndex* pindex);
+/** Read the undo data for a connected block by its block index (used by
+ *  NON-consensus observers such as the ZNAM indexer to recover spent-input
+ *  scriptPubKeys). Returns false for genesis / missing undo. */
+bool ReadBlockUndoFromDisk(CBlockUndo& blockundo, const CBlockIndex* pindex);
 
 
 /** Functions for validating blocks and updating the block tree */
