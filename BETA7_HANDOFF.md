@@ -1,11 +1,10 @@
 # ZClassic v2.1.2-beta7 — Developer Handoff
 
-**Date:** 2026-06-08 · **Branch:** `feature/beta7-platform` (daemon repo) · **Coin:** ZClassic / ZCL
+**Date:** 2026-06-08 · **Branch:** `beta7/zmarket-spider-router-index` (daemon repo) · **Coin:** ZClassic / ZCL
 (never ZEC/Zcash in user-facing strings)
 
-This is a **WIP checkpoint** committed so work is not lost and the next developer can take over. It
-bundles the accumulated beta7 platform work. **Master is HELD** — do NOT merge to master or publish a
-release until the repo owner gives an explicit go.
+This is the beta7 daemon handoff. The current branch is intended to merge to
+`master` through the protected-branch PR path after CI and maintainer approval.
 
 ---
 
@@ -25,10 +24,11 @@ release until the repo owner gives an explicit go.
 | **GUI Names/Market/Tor tabs (zcl-qt-wallet)** | NOT started | — | separate repo |
 | **Version macro** | `CLIENT_VERSION_BUILD = 6` (beta7 track) | — | finalize at release |
 
-**Integrated full-tree build status: UNVERIFIED this session.** Each piece was green when built in
-isolation (NFT #122 committed green; ZNAM green this session via the proot gtest; Tor T1/T2/T3-s1 green
-per the build logs). The whole working tree compiling together has NOT been re-verified — that is the
-first thing the next dev / the release-wrap step (task #152) should confirm.
+**Integrated full-tree build status:** verified by the beta7 audit before the
+dependency-source-only CI fix. At daemon head
+`97888f616c5be09651508f8b1789ef1e0a4f8111`, `./src/zcash-gtest` passed 472/472
+executed tests with 1 disabled test. The current PR head adds only the zlib
+source tarball, ignore allowlisting, and source-gate checksum coverage.
 
 ---
 
@@ -54,13 +54,23 @@ full `config.status` → `configure` → "libdb_cxx headers missing" abort + a *
 silently runs (false pass). Always use `./autogen.sh` then
 `CONFIG_SITE=$PFX/share/config.site ./config.status --recheck`.
 
-### Embedded-Tor build prerequisite (IMPORTANT)
-`depends/sources/tor-73bd405.tar.gz` (10 MB) is **git-ignored** and NOT in this commit. To build the
-Tor depends you need it host-side at `/home/rhett/zclbuild/focal/build/daemon/depends/sources/`:
+### Vendored depends source tarballs
+The clean-checkout CI/release path tracks the dependency tarballs that dead or
+restricted upstream mirrors have already broken:
+
+- `depends/sources/tor-73bd405.tar.gz`
+  - source: `github.com/RhettCreighton/tor` branch `dynhost` @ `73bd405` (Tor 0.4.9.2-alpha)
+  - sha256: `178fb8242d5a1066c3535f1328d8b5ef1e4578e318a8e622d6a6732144fa2517`
+- `depends/sources/zlib-1.3.1.tar.gz`
+  - source: `https://zlib.net/fossils/zlib-1.3.1.tar.gz`
+  - sha256: `9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23`
+
+`qa/beta7/check-source-gates.sh` verifies both tarballs from the candidate ref.
+No manual download stamp is required for a clean checkout; depends creates its
+own stamps during the build.
+
+For historical context, the Tor source is:
 - source: `github.com/RhettCreighton/tor` branch `dynhost` @ `73bd405` (Tor 0.4.9.2-alpha)
-- sha256: `178fb8242d5a1066c3535f1328d8b5ef1e4578e318a8e622d6a6732144fa2517`
-- it also needs a matching stamp:
-  `cd depends/sources && sha256sum tor-73bd405.tar.gz > download-stamps/.stamp_fetched-tor-tor-73bd405.tar.gz.hash`
 - depends `make` MUST carry `NO_PROTON=1` (proton/AMQP needs cmake, absent in the focal proot).
 
 ---
@@ -157,5 +167,5 @@ over the embedded-Tor onion conduit; Hashcash PoW-gate gossip (task #143). `-nft
 - **Never disturb the live mainnet node** (datadir `~/.zclassic`). Build in the proot tree; run
   daemons only on throwaway regtest datadirs under /tmp.
 - **One proot build at a time. No non-interactive sudo.**
-- **Master is HELD** until the owner says go. Commit/push to feature branches only.
+- **Master is protected.** Merge beta7 through PR #132 after required checks pass.
 - Determinism IS security for the overlays — every rule a total function; wire bytes are permanent.

@@ -4,8 +4,13 @@ Status: daemon release-candidate handoff.
 Candidate branch: `origin/beta7/zmarket-spider-router-index`
 Candidate head: resolve at final audit time with
 `git rev-parse origin/beta7/zmarket-spider-router-index`.
-Latest local ZMARKET/source-gate verified head:
-`b45cf6225cd760fdf82b80c0468fa7f6583ea1e2`.
+Latest local ZMARKET/source-gate verified non-doc head:
+`3280595b20139b735f28b9f1244d9b360b6367b9`.
+Original daemon code candidate:
+`97888f616c5be09651508f8b1789ef1e0a4f8111`.
+The current head adds only a vendored zlib source tarball, ignore-rule
+allowlisting, and source-gate checksum coverage so GitHub Actions clean
+checkouts do not fail while fetching zlib.
 Base: `origin/master` at `14a83d510ffd109d3fa09bf74ebf8c28854a263f`
 
 ## What This Candidate Contains
@@ -26,9 +31,11 @@ Base: `origin/master` at `14a83d510ffd109d3fa09bf74ebf8c28854a263f`
   - `src/zmarket/zmarket_router.{h,c}`;
   - `src/gtest/test_zmarket_c.cpp`;
   - `src/gtest/test_zmarket_spider_router.cpp`.
-- Clean-checkout Tor source fix:
+- Clean-checkout dependency source fixes:
   - tracked `depends/sources/tor-73bd405.tar.gz`;
-  - SHA256 `178fb8242d5a1066c3535f1328d8b5ef1e4578e318a8e622d6a6732144fa2517`.
+  - SHA256 `178fb8242d5a1066c3535f1328d8b5ef1e4578e318a8e622d6a6732144fa2517`;
+  - tracked `depends/sources/zlib-1.3.1.tar.gz`;
+  - SHA256 `9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23`.
 - Beta7 product, release, AI, social, content mirror, and ZMARKET routing docs.
 - `qa/beta7/check-source-gates.sh` for fast static source verification.
 
@@ -56,6 +63,7 @@ git diff --name-status origin/master..origin/beta7/zmarket-spider-router-index -
   src/consensus src/primitives src/script src/chainparams.cpp src/chainparams.h \
   src/pow.cpp src/pow.h src/coins.cpp src/coins.h src/undo.h
 git show origin/beta7/zmarket-spider-router-index:depends/sources/tor-73bd405.tar.gz | sha256sum
+git show origin/beta7/zmarket-spider-router-index:depends/sources/zlib-1.3.1.tar.gz | sha256sum
 ```
 
 Results:
@@ -64,10 +72,8 @@ Results:
 - `./src/zcash-gtest --gtest_filter='ZMarket*'` passed: 35/35 tests;
 - whitespace diff check passed;
 - no direct consensus-path diff in the listed paths;
-- Tor tarball hash matched;
-- previous dry-run master fast-forward with `--force-with-lease` passed on
-  the earlier source candidate. Rerun the exact dry-run command below after
-  the final audit, using the current candidate branch head.
+- Tor and zlib tarball hashes matched;
+- PR #132 was opened because branch protection rejects direct pushes to master.
 
 ## Required Final Audit Before Master
 
@@ -90,26 +96,30 @@ Then run or confirm:
 - AI is docs/GUI-side only and cannot produce daemon/provider side effects;
 - GUI legacy private file transport is hidden or dev-gated before beta7 GUI release.
 
-## Safe Master Fast-Forward Command
+## Protected Master Merge Path
 
-Do not run this until the final audit passes.
+Direct master push is intentionally blocked by GitHub branch protection:
+
+```text
+remote: error: GH006: Protected branch update failed for refs/heads/master.
+remote: - Changes must be made through a pull request.
+```
+
+Use PR #132 (`beta7/zmarket-spider-router-index` -> `master`). Do not squash,
+rebase, force-push, or tag during the PR merge path. After GitHub checks pass,
+merge only in a way that preserves the beta7 commit history cleanly.
+
+Read-only fast-forward sanity check:
 
 ```bash
 git fetch origin
-MASTER_EXPECTED=14a83d510ffd109d3fa09bf74ebf8c28854a263f
 CANDIDATE=$(git rev-parse origin/beta7/zmarket-spider-router-index)
 
 git merge-base --is-ancestor origin/master origin/beta7/zmarket-spider-router-index
-git push --dry-run \
-  --force-with-lease=refs/heads/master:$MASTER_EXPECTED \
-  origin $CANDIDATE:refs/heads/master
-
-git push \
-  --force-with-lease=refs/heads/master:$MASTER_EXPECTED \
-  origin $CANDIDATE:refs/heads/master
+git diff --name-status origin/master..$CANDIDATE -- \
+  src/consensus src/primitives src/script src/chainparams.cpp src/chainparams.h \
+  src/pow.cpp src/pow.h src/coins.cpp src/coins.h src/undo.h
 ```
-
-This is a fast-forward of `master`; the lease rejects if remote master moved.
 
 ## GUI Release Track
 
