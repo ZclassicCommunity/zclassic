@@ -20,6 +20,8 @@
 #include "script/sign.h"
 #include "timedata.h"
 #include "utilmoneystr.h"
+#include "wallet/zslpwallet.h"      // ZSLPIsProtectedTokenOutpoint (anti-burn)
+#include "zslp/zslpindexer.h"       // g_zslpIndexer (for the ZSLP store handle)
 #include "zcash/Note.hpp"
 #include "crypter.h"
 #include "zcash/zip32.h"
@@ -3160,12 +3162,20 @@ CAmount CWallet::GetImmatureWatchOnlyBalance() const
 /**
  * populate vCoins with vector of available COutputs.
  */
-void CWallet::AvailableCoins(vector<COutput>& vCoins, bool fOnlyConfirmed, const CCoinControl *coinControl, bool fIncludeZeroValue, bool fIncludeCoinBase) const
+void CWallet::AvailableCoins(vector<COutput>& vCoins, bool fOnlyConfirmed, const CCoinControl *coinControl, bool fIncludeZeroValue, bool fIncludeCoinBase, bool fExcludeZSLPTokens) const
 {
     vCoins.clear();
 
     {
         LOCK2(cs_main, cs_wallet);
+
+        // ZSLP anti-burn (R-WALLET-2/4/5): drop token UTXOs / mint batons and
+        // the wallet's own pending token-change so no automatic spend path
+        // burns a token riding ordinary t-dust. The store handle may be NULL
+        // (-zslpindex off) — ZSLPIsProtectedTokenOutpoint still protects the
+        // wallet's own pending ZSLP outputs in that case (fail-safe, R-WALLET-6).
+        CZSLPStore* zslpStore = (g_zslpIndexer != NULL) ? g_zslpIndexer->Store() : NULL;
+
         for (map<uint256, CWalletTx>::const_iterator it = mapWallet.begin(); it != mapWallet.end(); ++it)
         {
             const uint256& wtxid = it->first;
@@ -3192,7 +3202,15 @@ void CWallet::AvailableCoins(vector<COutput>& vCoins, bool fOnlyConfirmed, const
                 if (!(IsSpent(wtxid, i)) && mine != ISMINE_NO &&
                     !IsLockedCoin((*it).first, i) && (pcoin->vout[i].nValue > 0 || fIncludeZeroValue) &&
                     (!coinControl || !coinControl->HasSelected() || coinControl->fAllowOtherInputs || coinControl->IsSelected((*it).first, i)))
-                        vCoins.push_back(COutput(pcoin, i, nDepth, (mine & ISMINE_SPENDABLE) != ISMINE_NO));
+                {
+                    // Never drop an outpoint the caller explicitly preset (the
+                    // ZSLP builder pins its intended token inputs this way).
+                    bool preset = coinControl && coinControl->IsSelected(wtxid, i);
+                    if (fExcludeZSLPTokens && !preset &&
+                        ZSLPIsProtectedTokenOutpoint(this, zslpStore, COutPoint(wtxid, i)))
+                        continue;
+                    vCoins.push_back(COutput(pcoin, i, nDepth, (mine & ISMINE_SPENDABLE) != ISMINE_NO));
+                }
             }
         }
     }

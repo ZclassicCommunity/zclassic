@@ -770,13 +770,47 @@ private:
 };
 
 
-/** 
+/**
+ * Request to the ZSLP OP_RETURN tx builder (src/wallet/zslpwallet.{h,cpp}). One
+ * struct drives GENESIS / MINT / SEND so all three write RPCs share a single,
+ * unit-tested code path. The builder forces the fixed layout vout[0]=OP_RETURN,
+ * vout[1..N]=token recipients, ZEC change strictly after them. See
+ * doc/nft/MINT_TRANSFER_SPEC.md §2.
+ */
+struct ZSLPTokenOut {
+    CScript dest;     //!< P2PKH (or other) recipient script
+    CAmount dustSats; //!< dust value carried (546 by convention)
+};
+struct ZSLPBuildReq {
+    CScript opret;                        //!< the OP_RETURN script (from ZSLPBuild*)
+    std::vector<ZSLPTokenOut> tokenOuts;  //!< canonical order: maps qty j -> vout[1+j]
+    std::vector<COutPoint> tokenInputs;   //!< token/baton UTXOs to FORCE-include
+                                          //!<   GENESIS: empty; MINT: the baton; SEND: chosen token UTXOs
+    uint256 selfValidateTokenId;          //!< token the built tx must conserve (null for GENESIS)
+    bool isGenesis;                       //!< true for GENESIS (txid==tokenId; self-validate vs the new id)
+    ZSLPBuildReq() : isGenesis(false) { selfValidateTokenId.SetNull(); }
+};
+/**
+ * Build, fund (anti-burn), sign, SELF-VALIDATE (real ParseTx + read-only
+ * conservation), and only then CommitTransaction the ZSLP tx described by req.
+ * Returns false (with err set) on ANY failure and broadcasts nothing.
+ * Declared a friend of CWallet to reach the private SelectCoins() seam.
+ */
+bool BuildAndCommitZSLP(CWallet* w, const ZSLPBuildReq& req,
+                        CWalletTx& wtxOut, std::string& err);
+
+/**
  * A CWallet is an extension of a keystore, which also maintains a set of transactions and balances,
  * and provides the ability to create new transactions.
  */
 class CWallet : public CCryptoKeyStore, public CValidationInterface
 {
 private:
+    // The ZSLP OP_RETURN builder needs the private SelectCoins() seam to fund
+    // the fee deterministically while pinning token inputs (anti-burn).
+    friend bool ::BuildAndCommitZSLP(CWallet* w, const ZSLPBuildReq& req,
+                                     CWalletTx& wtxOut, std::string& err);
+
     bool SelectCoins(const CAmount& nTargetValue, std::set<std::pair<const CWalletTx*,unsigned int> >& setCoinsRet, CAmount& nValueRet, bool& fOnlyCoinbaseCoinsRet, bool& fNeedCoinbaseCoinsRet, const CCoinControl *coinControl = NULL) const;
 
     CWalletDB *pwalletdbEncryption;
@@ -1078,7 +1112,16 @@ public:
     //! check whether we are allowed to upgrade (or already support) to the named feature
     bool CanSupportFeature(enum WalletFeature wf) { AssertLockHeld(cs_wallet); return nWalletMaxVersion >= wf; }
 
-    void AvailableCoins(std::vector<COutput>& vCoins, bool fOnlyConfirmed=true, const CCoinControl *coinControl = NULL, bool fIncludeZeroValue=false, bool fIncludeCoinBase=true) const;
+    // fExcludeZSLPTokens (default true): drop ZSLP token UTXOs / mint batons
+    // and the wallet's own pending (0-conf) token-change outputs from the
+    // returned coins, so NO automatic spend path (sendtoaddress, z_sendmany,
+    // z_shieldcoinbase/merge "*", send-max, sweeps) can ride a token dust UTXO
+    // into a burn (R-WALLET-2/4/5). Outpoints explicitly preset via coinControl
+    // are NEVER dropped (the ZSLP SEND/MINT builder pins its token inputs that
+    // way). The ZSLP builder and its enumeration helper pass false to SEE token
+    // coins. The filter consults the ZSLP store + the wallet's pending ZSLP
+    // outputs; with -zslpindex off it still protects pending own-token outputs.
+    void AvailableCoins(std::vector<COutput>& vCoins, bool fOnlyConfirmed=true, const CCoinControl *coinControl = NULL, bool fIncludeZeroValue=false, bool fIncludeCoinBase=true, bool fExcludeZSLPTokens=true) const;
     bool SelectCoinsMinConf(const CAmount& nTargetValue, int nConfMine, int nConfTheirs, std::vector<COutput> vCoins, std::set<std::pair<const CWalletTx*,unsigned int> >& setCoinsRet, CAmount& nValueRet) const;
 
     bool IsSpent(const uint256& hash, unsigned int n) const;

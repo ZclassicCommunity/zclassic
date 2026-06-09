@@ -52,6 +52,17 @@ using namespace std;
 
 #include "librustzcash.h"
 
+// NFT marketplace gossip overlay (NON-consensus, MARKETPLACE_DESIGN.md §3).
+// These headers are wallet-guarded; main.h (included first) pulls in
+// bitcoin-config.h, so ENABLE_WALLET is already defined here. core_io.h gives
+// DecodeHexTx for the per-block liveness check on offerHex's vin[0].
+#ifdef ENABLE_WALLET
+#include "core_io.h"
+#include "nft/offerpool.h"
+#include "rpc/nftoffer.h"
+#include "zslp/zslpindexer.h"
+#endif
+
 /**
  * Global state
  */
@@ -70,6 +81,7 @@ bool fImporting = false;
 bool fReindex = false;
 bool fReindexChainState = false;
 bool fTxIndex = false;
+bool fNftMarket = false; // -nftmarket relay default OFF (interim, P4); flip ON once relay rides embedded Tor (anonymous conduit) — see doc/net/EMBEDDED_TOR_BLUEPRINT.md. set in init.cpp
 bool fHavePruned = false;
 bool fPruneMode = false;
 bool fIsBareMultisigStd = true;
@@ -4827,7 +4839,20 @@ bool static LoadBlockIndexDB()
 {
     const CChainParams& chainparams = Params();
 
-    if (!pblocktree->LoadBlockIndexGuts())
+    // BOOT SPEEDUP: try the block-index snapshot cache (blocks/blockindex.dat) FIRST. It
+    // rehydrates mapBlockIndex without the ~1.9M-record leveldb cursor scan, but ONLY when it
+    // is provably current (its tip == the authoritative coins-DB best block), intact, complete,
+    // and every record passes CheckProofOfWork. On a -reindex/-reindex-chainstate run, or any
+    // miss/mismatch/corruption, it returns false (after wiping any partial state) and we fall
+    // back to the unchanged leveldb scan below; leveldb stays the SOLE authoritative source and
+    // the active chain is reconstructed from pcoinsTip->GetBestBlock() either way.
+    bool fUsedBlockIndexCache = false;
+    if (!fReindex && !fReindexChainState && pcoinsTip != NULL) {
+        uint256 hashBestChain = pcoinsTip->GetBestBlock();   // same anchor used to set the tip below
+        if (!hashBestChain.IsNull())
+            fUsedBlockIndexCache = pblocktree->LoadBlockIndexFromCache(hashBestChain);
+    }
+    if (!fUsedBlockIndexCache && !pblocktree->LoadBlockIndexGuts())
         return false;
 
     boost::this_thread::interruption_point();
@@ -6012,6 +6037,130 @@ static bool RecvBootstrapChunk(
     return true;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// NFT marketplace gossip overlay helpers (NON-consensus, MARKETPLACE_DESIGN §3).
+// All wallet-guarded: when the wallet is disabled these symbols (and the offer
+// blob / offerpool types they touch) do not exist, and the P2P handlers below
+// are likewise compiled out, so the daemon treats marketplace commands as
+// unknown (the old-node fallthrough still applies).
+// ─────────────────────────────────────────────────────────────────────────
+#ifdef ENABLE_WALLET
+
+// Per-peer token-bucket parameters for the cost-bearing NFT gossip commands.
+// Conservative: ~5 requests/sec sustained, burst of 50. A peer that exceeds it
+// is throttled (the offending request is dropped), NOT banned — bursts during
+// cold-start sync are legitimate. Tunable from soak measurement (§12).
+static const double NFT_RATE_BUCKET_MAX  = 50.0;  //!< max accumulated tokens
+static const double NFT_RATE_REFILL_PER_SEC = 5.0; //!< tokens regained per second
+
+// Charge `cost` tokens against pfrom's NFT bucket. Returns true (and deducts) if
+// affordable, false if the peer is over its rate. Caller must hold cs_inventory.
+// Refills lazily from elapsed wall-clock and clamps to the bucket cap (this is
+// also where the ctor's "start full" sentinel is clamped down to the cap).
+static bool NftRateLimitAllow(CNode* pfrom, double cost)
+{
+    AssertLockHeld(pfrom->cs_inventory);
+    int64_t now = GetTime();
+    int64_t elapsed = now - pfrom->nNftTokensLastTime;
+    if (elapsed < 0) elapsed = 0; // clock went backwards; don't refill negatively
+    pfrom->nNftTokensLastTime = now;
+    pfrom->nNftTokens += (double)elapsed * NFT_RATE_REFILL_PER_SEC;
+    if (pfrom->nNftTokens > NFT_RATE_BUCKET_MAX)
+        pfrom->nNftTokens = NFT_RATE_BUCKET_MAX;
+    if (pfrom->nNftTokens < cost)
+        return false;
+    pfrom->nNftTokens -= cost;
+    return true;
+}
+
+// Non-throwing ZSLP store accessor. The offerpool and NftVerify are inert when
+// -zslpindex is off; mirror ZSLPStoreOrThrow()'s null checks WITHOUT throwing so
+// the net thread simply no-ops a marketplace command rather than raising.
+static CZSLPStore* NftGetStoreOrNull()
+{
+    if (g_zslpIndexer == NULL)
+        return NULL;
+    return g_zslpIndexer->Store(); // may itself be NULL; caller checks
+}
+
+// True when the marketplace overlay should act on this node: flag on AND the
+// ZSLP store exists (the offerpool/NftVerify need it). Used to gate every
+// handler, the verack cold-start hook, relay, and per-block eviction.
+static bool NftMarketActive()
+{
+    return fNftMarket && NftGetStoreOrNull() != NULL;
+}
+
+// Decode offerHex's vin[0] and report whether it is still a live (unspent) UTXO
+// per pcoinsTip. Mirrors the live check in rpc/nftoffer.cpp NftVerify (~line 322).
+// REQUIRES cs_main held (pcoinsTip). A blob that doesn't decode / has no input
+// is treated as dead (evictable). Used as the EvictStale liveness oracle.
+static bool NftOfferVinLive(const CNftOfferBlob& blob)
+{
+    AssertLockHeld(cs_main);
+    CTransaction tx;
+    if (!DecodeHexTx(tx, blob.offerHex))
+        return false;
+    if (tx.vin.empty())
+        return false;
+    const COutPoint& op = tx.vin[0].prevout;
+    CCoins coins;
+    return pcoinsTip->GetCoins(op.hash, coins) && coins.IsAvailable(op.n);
+}
+
+#endif // ENABLE_WALLET
+
+void RelayNftOfferInv(const uint256& offerHash)
+{
+#ifdef ENABLE_WALLET
+    if (!NftMarketActive())
+        return;
+    LOCK(cs_vNodes);
+    BOOST_FOREACH(CNode* pnode, vNodes) {
+        LOCK(pnode->cs_inventory);
+        // Skip peers we believe already know this offer (avoids re-announce
+        // storms; a bloom false-positive only drops one redundant announce).
+        if (pnode->nftOfferKnown.contains(offerHash))
+            continue;
+        pnode->nftOfferKnown.insert(offerHash);
+        pnode->PushMessage(NetMsgType::NFTINV, std::vector<uint256>(1, offerHash));
+    }
+#else
+    (void)offerHash;
+#endif
+}
+
+void NftOfferPoolEvictForTip()
+{
+#ifdef ENABLE_WALLET
+    if (!NftMarketActive())
+        return;
+    // Driven from the scheduler thread (init.cpp registers scheduleEvery), NOT
+    // from SendMessages — so it (a) never runs inside a peer's cs_vSend scope
+    // (the old placement blocking-acquired cs_main there, inverting the tree's
+    // cs_main->cs_vSend order = a deadlock window), (b) fires even with zero
+    // peers, and (c) runs once per tick instead of once per peer. Acquire
+    // cs_main NON-blockingly: eviction is idempotent, so on contention we simply
+    // skip and the next tick retries. The static last-height guard makes it a
+    // no-op until the tip actually advances (single scheduler thread => no race).
+    static int nLastEvictHeight = -1;
+    TRY_LOCK(cs_main, lockMain);
+    if (!lockMain)
+        return;
+    int tipHeight = chainActive.Height();
+    if (tipHeight == nLastEvictHeight)
+        return;
+    nLastEvictHeight = tipHeight;
+    // Lock order: cs_main (held) -> cs_pool (taken inside EvictStale). The
+    // injected oracle runs under cs_main, which we already hold.
+    size_t nEvicted = g_offerPool.EvictStale(&NftOfferVinLive, tipHeight);
+    if (nEvicted > 0)
+        LogPrint("net", "nft: evicted %u stale offer(s) at height=%d, pool now %u/%u bytes\n",
+                 (unsigned)nEvicted, tipHeight,
+                 (unsigned)g_offerPool.Count(), (unsigned)g_offerPool.Bytes());
+#endif
+}
+
 // Not static so unit tests in src/test/bootstrap_snapshot_protocol_tests.cpp can
 // drive individual message handlers directly. Declare it `extern` from those tests.
 bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t nTimeReceived)
@@ -6171,6 +6320,18 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
             LOCK(cs_main);
             State(pfrom->GetId())->fCurrentlyConnected = true;
         }
+
+#ifdef ENABLE_WALLET
+        // NFT marketplace cold-start (§3.2): once the handshake is complete, ask
+        // this peer for its offer digest so a freshly (re)started node refills
+        // its RAM-only offerpool without any on-chain listing beacon. No-op when
+        // the overlay is off or the ZSLP store is absent. The peer that lacks the
+        // overlay treats GETNFTINV as an unknown command and ignores it.
+        // IBD guard ([FIX-SEC-high-ibd], P4): a still-syncing node must not solicit
+        // offers it could only verify against a stale tip.
+        if (NftMarketActive() && !IsInitialBlockDownload())
+            pfrom->PushMessage(NetMsgType::GETNFTINV);
+#endif
     }
 
 
@@ -6338,6 +6499,278 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
             pfrom, vRecv, strCommand,
             "zcash param", "invalid zcash param chunk size");
     }
+
+
+    // ── NFT marketplace gossip overlay (NON-consensus, MARKETPLACE_DESIGN §3) ──
+    // 5 dedicated commands. Every handler FIRST short-circuits when the overlay is
+    // inactive (return true, BEFORE any deserialize or ban-scoring) so a node that
+    // has opted out (-nftmarket=0 / no ZSLP store) treats these exactly like an
+    // unknown command and never bans a peer for them. When active: reads are
+    // wrapped in try/catch(ios_base::failure)->Misbehaving(20), trailing bytes ->
+    // Misbehaving(20), the body is size-bounded BEFORE the read, and every
+    // cost-bearing path charges the per-peer token bucket. Old/disabled-at-compile
+    // nodes never reach here (the whole block is #ifdef'd out and falls through to
+    // the unknown-command handler).
+#ifdef ENABLE_WALLET
+
+    else if (strCommand == NetMsgType::GETNFTINV)
+    {
+        if (!NftMarketActive())
+            return true; // overlay off / no store: ignore like an unknown command
+        if (IsInitialBlockDownload())
+            return true; // IBD guard (P4): don't advertise a digest tied to a stale tip
+        // No payload: respond with up to 1000 known offer hashes (our digest).
+        if (!vRecv.empty()) {
+            Misbehaving(pfrom->GetId(), 20);
+            return error("getnftinv has trailing bytes from peer=%d", pfrom->id);
+        }
+        // Rate-limit the SERVE path: an empty ~24-byte request makes us walk the
+        // pool and ship up to ~32 KiB, so throttle a peer that spams it. The one
+        // GETNFTINV per handshake (cold-start hook) fits easily inside the burst.
+        {
+            LOCK(pfrom->cs_inventory);
+            if (!NftRateLimitAllow(pfrom, 1.0)) {
+                LogPrint("net", "nft: getnftinv rate-limited peer=%d\n", pfrom->id);
+                return true; // throttle, do not ban
+            }
+        }
+        std::vector<uint256> vHashes = g_offerPool.AllHashes(1000);
+        // Mark everything we announce as known to this peer so we don't bounce it
+        // straight back when they re-announce.
+        {
+            LOCK(pfrom->cs_inventory);
+            for (size_t i = 0; i < vHashes.size(); ++i)
+                pfrom->nftOfferKnown.insert(vHashes[i]);
+        }
+        pfrom->PushMessage(NetMsgType::NFTINV, vHashes);
+        LogPrint("net", "nft: served getnftinv -> %u hashes peer=%d\n",
+                 (unsigned)vHashes.size(), pfrom->id);
+    }
+
+
+    else if (strCommand == NetMsgType::NFTINV)
+    {
+        if (!NftMarketActive())
+            return true;
+        if (IsInitialBlockDownload())
+            return true; // IBD guard (P4): don't request offers we'd only drop on accept
+        std::vector<uint256> vHashes;
+        try {
+            vRecv >> vHashes;
+        } catch (const std::ios_base::failure&) {
+            Misbehaving(pfrom->GetId(), 20);
+            return error("nftinv has malformed payload from peer=%d", pfrom->id);
+        }
+        if (vHashes.size() > 1000) {
+            // Hard cap (§3.1). An oversize announce is out of spec.
+            Misbehaving(pfrom->GetId(), 20);
+            return error("nftinv size() = %u exceeds cap from peer=%d",
+                         (unsigned)vHashes.size(), pfrom->id);
+        }
+        if (!vRecv.empty()) {
+            Misbehaving(pfrom->GetId(), 20);
+            return error("nftinv has trailing bytes from peer=%d", pfrom->id);
+        }
+
+        // For each announced hash we do not already hold and have not already
+        // marked known for this peer, request the blob — under the per-peer rate
+        // limit so a flood of fresh hashes cannot make us spam getnftoffer.
+        LOCK(pfrom->cs_inventory);
+        for (size_t i = 0; i < vHashes.size(); ++i) {
+            const uint256& h = vHashes[i];
+            // Record that the peer knows it (they announced it).
+            pfrom->nftOfferKnown.insert(h);
+            if (g_offerPool.Has(h))
+                continue; // already have it
+            if (!NftRateLimitAllow(pfrom, 1.0))
+                break;    // over rate: stop requesting from this peer this round
+            pfrom->PushMessage(NetMsgType::GETNFTOFFER, h);
+        }
+    }
+
+
+    else if (strCommand == NetMsgType::GETNFTOFFER)
+    {
+        if (!NftMarketActive())
+            return true;
+        if (IsInitialBlockDownload())
+            return true; // IBD guard (P4): don't serve from a pool tied to a stale tip
+        uint256 hash;
+        try {
+            vRecv >> hash;
+        } catch (const std::ios_base::failure&) {
+            Misbehaving(pfrom->GetId(), 20);
+            return error("getnftoffer has malformed payload from peer=%d", pfrom->id);
+        }
+        if (!vRecv.empty()) {
+            Misbehaving(pfrom->GetId(), 20);
+            return error("getnftoffer has trailing bytes from peer=%d", pfrom->id);
+        }
+
+        // Serving a blob is the cheapest path but still rate-limited so a peer
+        // cannot pull our whole pool repeatedly.
+        {
+            LOCK(pfrom->cs_inventory);
+            if (!NftRateLimitAllow(pfrom, 1.0)) {
+                LogPrint("net", "nft: getnftoffer rate-limited peer=%d\n", pfrom->id);
+                return true; // throttle, do not ban (bursts are legitimate)
+            }
+        }
+        CNftOfferBlob blob;
+        if (g_offerPool.Get(hash, blob))
+            pfrom->PushMessage(NetMsgType::NFTOFFER, blob);
+        // Unknown hash: silently ignore (we may simply not have it / it expired).
+    }
+
+
+    else if (strCommand == NetMsgType::NFTOFFER)
+    {
+        if (!NftMarketActive())
+            return true;
+        // IBD guard ([FIX-SEC-high-ibd], P4): while still syncing we must not run
+        // NftVerify (reads pcoinsTip + the ZSLP store) against a stale tip — it would
+        // spuriously reject live offers. Accept-skip, NO Misbehaving: the relayer is
+        // honest, we simply are not participating in the overlay yet.
+        if (IsInitialBlockDownload())
+            return true;
+        // (a) Body size cap BEFORE the read (§5). The blob is hard-bounded; an
+        //     oversize frame is hostile (also caught by MAX_PROTOCOL_MESSAGE_LENGTH
+        //     at 2 MiB, but we reject far earlier).
+        size_t nBodySize = vRecv.size();
+        if (nBodySize > OFFERPOOL_MAX_OFFER_BYTES) {
+            Misbehaving(pfrom->GetId(), 20);
+            return error("nftoffer body %u exceeds cap %u from peer=%d",
+                         (unsigned)nBodySize, (unsigned)OFFERPOOL_MAX_OFFER_BYTES,
+                         pfrom->id);
+        }
+        // (b) Deserialize (LIMITED_STRING-bounded internally).
+        CNftOfferBlob blob;
+        try {
+            vRecv >> blob;
+        } catch (const std::ios_base::failure&) {
+            Misbehaving(pfrom->GetId(), 20);
+            return error("nftoffer has malformed payload from peer=%d", pfrom->id);
+        }
+        // (c) Trailing-bytes check.
+        if (!vRecv.empty()) {
+            Misbehaving(pfrom->GetId(), 20);
+            return error("nftoffer has trailing bytes from peer=%d", pfrom->id);
+        }
+
+        // Rate-limit the (verify-bearing) accept path. Charged at the same 1.0 as
+        // a serve ON PURPOSE: a freshly-syncing node charges its own bucket for
+        // every offer it RECEIVES in response to its own getnftoffer requests, so
+        // a higher per-offer cost here would throttle legitimate cold-start sync.
+        // The verify-flood concern is instead bounded by the structural-forgery
+        // ban below (a peer shipping junk offers is banned after ~10).
+        {
+            LOCK(pfrom->cs_inventory);
+            if (!NftRateLimitAllow(pfrom, 1.0)) {
+                LogPrint("net", "nft: nftoffer rate-limited peer=%d\n", pfrom->id);
+                return true; // throttle, not ban
+            }
+        }
+
+        // (d) Content-address id.
+        uint256 id = blob.OfferHash();
+
+        // (e) Dedupe BEFORE verifying (cheap; the chain hasn't changed our copy).
+        if (g_offerPool.Has(id)) {
+            // Already known; remember the peer has it and do no further work.
+            LOCK(pfrom->cs_inventory);
+            pfrom->nftOfferKnown.insert(id);
+            return true;
+        }
+
+        // (f) Verify-on-receipt under cs_main (NftVerify reads pcoinsTip + the
+        //     ZSLP store). The store is non-null here (NftMarketActive checked).
+        //     Capture the tip height under the same lock for the insert below.
+        NftVerifyResult vr;
+        int nTipHeight = 0;
+        {
+            LOCK(cs_main);
+            CZSLPStore* store = NftGetStoreOrNull();
+            if (store == NULL)
+                return true; // store vanished (shutdown race): no-op
+            NftVerify(store, blob, vr);
+            nTipHeight = chainActive.Height();
+        }
+        if (!vr.ok) {
+            // An invalid offer must never be inserted or re-announced. But DON'T
+            // ban a peer for an offer that merely went stale between its pool and
+            // ours (vin[0] spent/filled, expired, or reorged) — that is a normal,
+            // frequent gossip race in a busy market and the relayer is honest.
+            // Only ban-score a STRUCTURAL/cryptographic forgery (bad shape, wrong
+            // token/price/address, or a signature that doesn't bind) — bad faith.
+            if (vr.structurallyInvalid)
+                Misbehaving(pfrom->GetId(), 10);
+            return error("nftoffer failed verify-on-receipt (%u reason(s)%s) peer=%d",
+                         (unsigned)vr.reasons.size(),
+                         vr.structurallyInvalid ? ", structural" : ", transient",
+                         pfrom->id);
+        }
+
+        // (g) Insert (re-checks advertised id == OfferHash + all caps internally).
+        std::string reason;
+        bool inserted = g_offerPool.Insert(blob, id, nBodySize,
+                                           nTipHeight, reason);
+        // Remember the sender knows it regardless of pool-full outcome.
+        {
+            LOCK(pfrom->cs_inventory);
+            pfrom->nftOfferKnown.insert(id);
+        }
+        if (!inserted) {
+            // Pool full / per-token cap: a benign, expected condition (not the
+            // peer's fault). Do not ban; just don't re-flood.
+            LogPrint("net", "nft: offer %s not inserted (%s) peer=%d\n",
+                     id.ToString(), reason, pfrom->id);
+            return true;
+        }
+        LogPrint("net", "nft: accepted offer %s (%u bytes) peer=%d; pool %u/%u\n",
+                 id.ToString(), (unsigned)nBodySize, pfrom->id,
+                 (unsigned)g_offerPool.Count(), (unsigned)g_offerPool.Bytes());
+        // Re-announce to OTHER peers whose known-filter lacks it (the flood).
+        RelayNftOfferInv(id);
+    }
+
+
+    else if (strCommand == NetMsgType::NFTABORT)
+    {
+        if (!NftMarketActive())
+            return true;
+        // ADVISORY only: a hint that an offer is spent/canceled. The chain is the
+        // authority — we re-check vin[0] liveness ourselves and only evict if the
+        // offer is actually dead. Never evict on the peer's say-so alone.
+        uint256 hash;
+        try {
+            vRecv >> hash;
+        } catch (const std::ios_base::failure&) {
+            Misbehaving(pfrom->GetId(), 20);
+            return error("nftabort has malformed payload from peer=%d", pfrom->id);
+        }
+        if (!vRecv.empty()) {
+            Misbehaving(pfrom->GetId(), 20);
+            return error("nftabort has trailing bytes from peer=%d", pfrom->id);
+        }
+
+        CNftOfferBlob blob;
+        if (!g_offerPool.Get(hash, blob))
+            return true; // we don't hold it: nothing to do
+        // Re-derive liveness from the chain (authoritative). Only evict if dead.
+        bool dead;
+        {
+            LOCK(cs_main);
+            dead = !NftOfferVinLive(blob);
+        }
+        if (dead) {
+            g_offerPool.EvictByHash(hash);
+            LogPrint("net", "nft: nftabort confirmed-dead, evicted %s peer=%d\n",
+                     hash.ToString(), pfrom->id);
+        }
+        // If still live, ignore the abort (advisory, low/zero trust). No ban.
+    }
+
+#endif // ENABLE_WALLET
 
 
     else if (strCommand == "addr")
@@ -7217,6 +7650,12 @@ bool SendMessages(CNode* pto, bool fSendTrickle)
         }
 
         SendQueuedBootstrapSnapshotChunk(pto);
+
+        // NOTE: NFT marketplace offerpool GC is NOT run here. SendMessages is
+        // entered while holding the peer's cs_vSend (net.cpp ThreadMessageHandler),
+        // and the GC must take cs_main — acquiring cs_main inside a cs_vSend scope
+        // inverts the tree's cs_main->cs_vSend order. GC is driven from the
+        // scheduler thread instead (NftOfferPoolEvictForTip via scheduleEvery).
 
         TRY_LOCK(cs_main, lockMain); // Acquire cs_main for IsInitialBlockDownload() and CNodeState()
         if (!lockMain)

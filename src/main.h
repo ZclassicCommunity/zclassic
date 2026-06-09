@@ -147,6 +147,11 @@ extern bool fReindex;
 extern bool fReindexChainState;
 extern int nScriptCheckThreads;
 extern bool fTxIndex;
+/** NFT marketplace gossip overlay enabled (-nftmarket, default true).
+ *  Gates ALL marketplace P2P handlers, relay, and per-block eviction. When
+ *  false (or the ZSLP store is absent) the daemon ignores marketplace commands
+ *  and never originates them — NON-consensus, old/new-node-safe. */
+extern bool fNftMarket;
 extern bool fIsBareMultisigStd;
 extern bool fCheckBlockIndex;
 extern bool fCheckpointsEnabled;
@@ -268,6 +273,15 @@ CBlockIndex * InsertBlockIndex(uint256 hash);
 bool GetNodeStateStats(NodeId nodeid, CNodeStateStats &stats);
 /** Increase a node's misbehavior score. */
 void Misbehaving(NodeId nodeid, int howmuch);
+
+/** NFT marketplace gossip overlay (NON-consensus, MARKETPLACE_DESIGN.md §3).
+ *  Announce one offer hash (nftinv) to every connected peer whose per-peer
+ *  known-filter lacks it, marking it known on each. No-op when !fNftMarket. */
+void RelayNftOfferInv(const uint256& offerHash);
+/** Block-driven offerpool GC (§3.3): under cs_main, evict offers whose vin[0]
+ *  is spent/missing per pcoinsTip, or whose expiry has passed. Self-throttled
+ *  to run at most once per new tip height; no-op when !fNftMarket. */
+void NftOfferPoolEvictForTip();
 /** Flush all state, indexes and buffers to disk. */
 void FlushStateToDisk();
 /** Prune block files and flush state to disk. */

@@ -34,7 +34,7 @@ $(package)_config_opts+=no-ec2m
 $(package)_config_opts+=no-ec_nistp_64_gcc_128
 $(package)_config_opts+=no-egd
 $(package)_config_opts+=no-engine
-$(package)_config_opts+=no-err
+# no-err removed: Tor references ERR_* unconditionally (tortls_openssl.c / crypto_openssl_mgt.c).
 $(package)_config_opts+=no-gost
 $(package)_config_opts+=no-heartbeats
 $(package)_config_opts+=no-idea
