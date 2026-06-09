@@ -50,7 +50,7 @@ Worker 2 reported on the ZMARKET integration:
 Local static checks on `origin/beta7/zmarket-spider-router-index`:
 
 ```bash
-qa/beta7/check-source-gates.sh origin/master
+qa/beta7/check-source-gates.sh origin/master origin/beta7/zmarket-spider-router-index
 git diff --check origin/master..origin/beta7/zmarket-spider-router-index
 git diff --name-status origin/master..origin/beta7/zmarket-spider-router-index -- \
   src/consensus src/primitives src/script src/chainparams.cpp src/chainparams.h \
@@ -75,7 +75,7 @@ Agent 3 should perform a read-only final audit on:
 ```bash
 git fetch origin
 git rev-parse origin/beta7/zmarket-spider-router-index
-qa/beta7/check-source-gates.sh origin/master
+qa/beta7/check-source-gates.sh origin/master origin/beta7/zmarket-spider-router-index
 ```
 
 Then run or confirm:
