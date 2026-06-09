@@ -158,7 +158,18 @@ static const CRPCConvertParam vRPCConvertParams[] =
     // nft_listoffers takes NO args (A-1: the dead 'mine' filter was removed), so
     // there is nothing to convert.
     { "nft_canceloffer", 0},    // params object
-    { "nft_requestbuy", 0}      // params object
+    { "nft_requestbuy", 0},     // params object
+    // ZNAM (ZCL Names): numeric args must be JSON-converted or get_int() throws
+    // on a raw CLI string.
+    { "name_register", 1},      // target_type (numeric)
+    { "name_update", 1},        // target_type (numeric)
+    { "name_setrecord", 1},     // target_type (numeric)
+    { "name_list", 0},          // count
+    { "name_list", 1},          // from
+    { "name_history", 1},       // count
+    { "name_history", 2},       // from
+    { "name_listmine", 1},      // count
+    { "name_listmine", 2}       // from
 };
 
 class CRPCConvertTable

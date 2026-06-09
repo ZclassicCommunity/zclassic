@@ -32,6 +32,17 @@
 
 #include <univalue.h>
 
+#ifdef ENABLE_WALLET
+#include "init.h"            // pwalletMain
+#include "key_io.h"          // DecodeDestination / IsValidDestination
+#include "script/standard.h" // CKeyID (P2PKH check for transfer target)
+#include "wallet/wallet.h"   // CWallet, CWalletTx, ZNAMBuildReq, BuildAndCommitZNAM
+#include "wallet/znamwallet.h" // ZNAMFindOwnerInput
+// EnsureWalletIsAvailable is file-extern in wallet/rpcwallet.cpp (no header);
+// EnsureWalletIsUnlocked is declared in rpc/server.h.
+extern bool EnsureWalletIsAvailable(bool avoidException);
+#endif
+
 // Fail CLOSED: if the index is disabled, every ZNAM read RPC throws rather than
 // silently returning empty results (which a caller could misread as "no names").
 static CZNAMStore* GetZNAMStoreOrThrow()
@@ -306,6 +317,237 @@ UniValue name_listmine(const UniValue& params, bool fHelp)
     return arr;
 }
 
+#ifdef ENABLE_WALLET
+// ── Write path (wallet) ─────────────────────────────────────────────
+//
+// Each command BUILDS + SIGNS + self-validates + BROADCASTS one ZNAM OP_RETURN
+// transaction with the OWNER's UTXO pinned at vin[0] (the FIFS signer). These are
+// safe=false (explicit user action). NON-consensus: an invalid record the network
+// admits is a deterministic overlay no-op, never a block/tx rejection.
+
+// Validate a target_type (1..7) + value, returning the encoded OP_RETURN or
+// throwing. Builders below all funnel through ZNAMBuildAndReturn (locks held).
+static UniValue ZNAMBuildAndReturn(const std::string& name, ZNAMMsgCommand cmd,
+                                   const std::vector<unsigned char>& opret,
+                                   std::string owner /*in: ""=>pick default*/)
+{
+    if (opret.empty())
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "ZNAM metadata too large or invalid for one OP_RETURN");
+    COutPoint ownerInput;
+    CScript ownerScript;
+    std::string ferr;
+    if (!ZNAMFindOwnerInput(pwalletMain, owner, ownerInput, ownerScript, ferr))
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, ferr);
+
+    ZNAMBuildReq req;
+    req.opret = CScript(opret.begin(), opret.end());
+    req.ownerInput = ownerInput;
+    req.ownerScript = ownerScript;
+    req.expectedName = name;
+    req.expectedCommand = (int)cmd;
+    req.expectedOwner = owner;
+
+    CWalletTx wtx;
+    std::string err;
+    if (!BuildAndCommitZNAM(pwalletMain, req, wtx, err))
+        throw JSONRPCError(RPC_WALLET_ERROR, err);
+
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("txid", wtx.GetHash().GetHex());
+    o.pushKV("name", name);
+    o.pushKV("owner", owner);
+    o.pushKV("command", CommandName((uint8_t)cmd));
+    return o;
+}
+
+// Resolve the current owner of an existing name, requiring it be active (or in
+// grace for RENEW). Throws if unregistered/expired. Caller holds cs_main.
+static std::string ZNAMCurrentOwnerOrThrow(const std::string& name, bool allowGrace)
+{
+    CZNAMStore* store = GetZNAMStoreOrThrow();
+    CZNAMName rec;
+    if (!store->GetName(name, rec))
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
+                           "name '" + name + "' is not registered");
+    int64_t h = CurrentHeight();
+    bool ok = CZNAMStore::IsActive(rec, h) ||
+              (allowGrace && CZNAMStore::IsInGrace(rec, h));
+    if (!ok)
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
+                           "name '" + name + "' is expired (re-register it instead)");
+    return rec.ownerAddr;
+}
+
+static void ZNAMCheckName(const std::string& name)
+{
+    if (!ZNAMValidateName(name))
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "invalid name: lowercase [a-z0-9-], no leading/trailing "
+                           "hyphen, 1..63 bytes");
+}
+
+static uint8_t ZNAMCheckType(const UniValue& v)
+{
+    int t = v.get_int();
+    if (t < ZNAM_TARGET_ONION || t > ZNAM_TARGET_CONTENT)
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "target_type must be 1..7 (onion/zaddr/taddr/btc/ltc/doge/content)");
+    return (uint8_t)t;
+}
+
+UniValue name_register(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() < 3 || params.size() > 4)
+        throw std::runtime_error(
+            "name_register \"name\" target_type \"target_value\" ( \"owner_address\" )\n"
+            "\nRegister a ZCL name (First-In-First-Served). Builds + broadcasts an\n"
+            "OP_RETURN tx whose vin[0] is the owner's coin (the owner becomes the\n"
+            "vin[0] P2PKH signer). NON-consensus / opt-in (-znamindex to observe).\n"
+            "\nArguments:\n"
+            "1. name          (string, required) lowercase [a-z0-9-], 1..63 bytes\n"
+            "2. target_type   (numeric, required) 1=onion 2=zaddr 3=taddr 4=btc 5=ltc 6=doge 7=content\n"
+            "3. target_value  (string, required) the resolver value (<=128 bytes; opaque)\n"
+            "4. owner_address (string, optional) a wallet t-address that holds a plain\n"
+            "                 spendable coin to own the name; default: the wallet's\n"
+            "                 largest plain coin's address\n"
+            "\nResult: { txid, name, owner, command }\n"
+            "\nExamples:\n"
+            + HelpExampleCli("name_register", "\"alice\" 1 \"abcd...xyz.onion\"")
+            + HelpExampleRpc("name_register", "\"alice\", 1, \"abcd...xyz.onion\""));
+    if (!EnsureWalletIsAvailable(fHelp)) return NullUniValue;
+
+    std::string name = params[0].get_str();
+    ZNAMCheckName(name);
+    uint8_t type = ZNAMCheckType(params[1]);
+    std::string value = params[2].get_str();
+    std::string owner = params.size() > 3 ? params[3].get_str() : std::string();
+
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    EnsureWalletIsUnlocked();
+    return ZNAMBuildAndReturn(name, ZNAMMSG_REGISTER,
+                              ZNAMBuildRegister(name, type, value), owner);
+}
+
+UniValue name_update(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 3)
+        throw std::runtime_error(
+            "name_update \"name\" target_type \"target_value\"\n"
+            "\nUpdate the primary target of a name you own (must be active).\n"
+            "\nArguments:\n1. name (string) \n2. target_type (numeric 1..7)\n3. target_value (string <=128)\n"
+            "\nResult: { txid, name, owner, command }\n"
+            + HelpExampleCli("name_update", "\"alice\" 2 \"zs1...\""));
+    if (!EnsureWalletIsAvailable(fHelp)) return NullUniValue;
+
+    std::string name = params[0].get_str();
+    ZNAMCheckName(name);
+    uint8_t type = ZNAMCheckType(params[1]);
+    std::string value = params[2].get_str();
+
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    EnsureWalletIsUnlocked();
+    std::string owner = ZNAMCurrentOwnerOrThrow(name, /*allowGrace=*/false);
+    return ZNAMBuildAndReturn(name, ZNAMMSG_UPDATE,
+                              ZNAMBuildUpdate(name, type, value), owner);
+}
+
+UniValue name_transfer(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 2)
+        throw std::runtime_error(
+            "name_transfer \"name\" \"new_owner\"\n"
+            "\nTransfer a name you own to a new transparent (P2PKH) owner address.\n"
+            "\nArguments:\n1. name (string)\n2. new_owner (string) a valid ZCL t-address (P2PKH)\n"
+            "\nResult: { txid, name, owner, command }\n"
+            + HelpExampleCli("name_transfer", "\"alice\" \"t1...\""));
+    if (!EnsureWalletIsAvailable(fHelp)) return NullUniValue;
+
+    std::string name = params[0].get_str();
+    ZNAMCheckName(name);
+    std::string newOwner = params[1].get_str();
+    {
+        CTxDestination dest = DecodeDestination(newOwner);
+        if (!IsValidDestination(dest) || boost::get<CKeyID>(&dest) == NULL)
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
+                               "new_owner must be a valid transparent P2PKH address");
+    }
+
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    EnsureWalletIsUnlocked();
+    std::string owner = ZNAMCurrentOwnerOrThrow(name, /*allowGrace=*/false);
+    return ZNAMBuildAndReturn(name, ZNAMMSG_TRANSFER,
+                              ZNAMBuildTransfer(name, newOwner), owner);
+}
+
+UniValue name_renew(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 1)
+        throw std::runtime_error(
+            "name_renew \"name\"\n"
+            "\nRenew a name you own (active or in its grace period).\n"
+            "\nArguments:\n1. name (string)\n"
+            "\nResult: { txid, name, owner, command }\n"
+            + HelpExampleCli("name_renew", "\"alice\""));
+    if (!EnsureWalletIsAvailable(fHelp)) return NullUniValue;
+
+    std::string name = params[0].get_str();
+    ZNAMCheckName(name);
+
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    EnsureWalletIsUnlocked();
+    std::string owner = ZNAMCurrentOwnerOrThrow(name, /*allowGrace=*/true);
+    return ZNAMBuildAndReturn(name, ZNAMMSG_RENEW, ZNAMBuildRenew(name), owner);
+}
+
+UniValue name_setrecord(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 3)
+        throw std::runtime_error(
+            "name_setrecord \"name\" target_type \"target_value\"\n"
+            "\nSet an additional address/content record on a name you own (active).\n"
+            "\nArguments:\n1. name (string)\n2. target_type (numeric 1..7)\n3. target_value (string <=128)\n"
+            "\nResult: { txid, name, owner, command }\n"
+            + HelpExampleCli("name_setrecord", "\"alice\" 4 \"bc1q...\""));
+    if (!EnsureWalletIsAvailable(fHelp)) return NullUniValue;
+
+    std::string name = params[0].get_str();
+    ZNAMCheckName(name);
+    uint8_t type = ZNAMCheckType(params[1]);
+    std::string value = params[2].get_str();
+
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    EnsureWalletIsUnlocked();
+    std::string owner = ZNAMCurrentOwnerOrThrow(name, /*allowGrace=*/false);
+    return ZNAMBuildAndReturn(name, ZNAMMSG_SET_RECORD,
+                              ZNAMBuildSetRecord(name, type, value), owner);
+}
+
+UniValue name_settext(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 3)
+        throw std::runtime_error(
+            "name_settext \"name\" \"key\" \"value\"\n"
+            "\nSet (or delete, with empty value) a printable text record on a name\n"
+            "you own (active). Keys/values are printable ASCII only.\n"
+            "\nArguments:\n1. name (string)\n2. key (string, printable, 1..32)\n3. value (string, printable, 0..128; empty deletes)\n"
+            "\nResult: { txid, name, owner, command }\n"
+            + HelpExampleCli("name_settext", "\"alice\" \"url\" \"https://alice.example\""));
+    if (!EnsureWalletIsAvailable(fHelp)) return NullUniValue;
+
+    std::string name = params[0].get_str();
+    ZNAMCheckName(name);
+    std::string key = params[1].get_str();
+    std::string value = params[2].get_str();
+
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    EnsureWalletIsUnlocked();
+    std::string owner = ZNAMCurrentOwnerOrThrow(name, /*allowGrace=*/false);
+    return ZNAMBuildAndReturn(name, ZNAMMSG_SET_TEXT,
+                              ZNAMBuildSetText(name, key, value), owner);
+}
+#endif // ENABLE_WALLET
+
 static const CRPCCommand commands[] =
 { //  category   name              actor (function)   okSafeMode
   //  ---------  ----------------  -----------------  ----------
@@ -314,6 +556,14 @@ static const CRPCCommand commands[] =
     { "znam",    "name_list",      &name_list,        true },
     { "znam",    "name_history",   &name_history,     true },
     { "znam",    "name_listmine",  &name_listmine,    true },
+#ifdef ENABLE_WALLET
+    { "znam",    "name_register",  &name_register,    false },
+    { "znam",    "name_update",    &name_update,      false },
+    { "znam",    "name_transfer",  &name_transfer,    false },
+    { "znam",    "name_renew",     &name_renew,       false },
+    { "znam",    "name_setrecord", &name_setrecord,   false },
+    { "znam",    "name_settext",   &name_settext,     false },
+#endif
 };
 
 void RegisterZNAMRPCCommands(CRPCTable& tableRPC)

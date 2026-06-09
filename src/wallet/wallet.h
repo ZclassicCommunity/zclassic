@@ -800,6 +800,30 @@ bool BuildAndCommitZSLP(CWallet* w, const ZSLPBuildReq& req,
                         CWalletTx& wtxOut, std::string& err);
 
 /**
+ * ZNAM (ZCL Names) write request. The whole point is to pin the OWNER's UTXO at
+ * vin[0] so the NON-consensus indexer derives the intended FIFS owner from the
+ * vin[0] P2PKH signer. vout[0] is the OP_RETURN (value 0); ZEC change goes to the
+ * tail. Fee coins exclude token UTXOs (anti-burn, via AvailableCoins).
+ */
+struct ZNAMBuildReq {
+    CScript opret;             //!< OP_RETURN script (from ZNAMBuild*)
+    COutPoint ownerInput;      //!< plain spendable UTXO to FORCE at vin[0] (owner signer)
+    CScript ownerScript;       //!< ownerInput's scriptPubKey (owner self-check + change dest)
+    std::string expectedName;  //!< name the built tx must carry (self-validate)
+    int expectedCommand;       //!< ZNAMMsgCommand the built tx must carry (self-validate)
+    std::string expectedOwner; //!< address ExtractP2PKHOwnerFromScript(ownerScript) must equal
+    ZNAMBuildReq() : expectedCommand(0) {}
+};
+/**
+ * Build, fund (owner pinned at vin[0], anti-burn fee coins), sign, SELF-VALIDATE
+ * (the REAL CZNAMIndexer::ParseTx + vin[0] owner derivation), and only then
+ * CommitTransaction. Returns false (err set) and broadcasts nothing on any
+ * failure. Friend of CWallet to reach the private SelectCoins() seam.
+ */
+bool BuildAndCommitZNAM(CWallet* w, const ZNAMBuildReq& req,
+                        CWalletTx& wtxOut, std::string& err);
+
+/**
  * A CWallet is an extension of a keystore, which also maintains a set of transactions and balances,
  * and provides the ability to create new transactions.
  */
@@ -809,6 +833,8 @@ private:
     // The ZSLP OP_RETURN builder needs the private SelectCoins() seam to fund
     // the fee deterministically while pinning token inputs (anti-burn).
     friend bool ::BuildAndCommitZSLP(CWallet* w, const ZSLPBuildReq& req,
+                                     CWalletTx& wtxOut, std::string& err);
+    friend bool ::BuildAndCommitZNAM(CWallet* w, const ZNAMBuildReq& req,
                                      CWalletTx& wtxOut, std::string& err);
 
     bool SelectCoins(const CAmount& nTargetValue, std::set<std::pair<const CWalletTx*,unsigned int> >& setCoinsRet, CAmount& nValueRet, bool& fOnlyCoinbaseCoinsRet, bool& fNeedCoinbaseCoinsRet, const CCoinControl *coinControl = NULL) const;
