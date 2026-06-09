@@ -334,14 +334,18 @@ CBlockTemplate* CreateNewBlock(const CScript& scriptPubKeyIn)
                 CAmount sproutValueDummy = sproutValue;
                 CAmount saplingValueDummy = saplingValue;
 
-                saplingValueDummy += -tx.valueBalance;
-
-                for (auto js : tx.vjoinsplit) {
-                    sproutValueDummy += js.vpub_old;
-                    sproutValueDummy -= js.vpub_new;
+                bool dummyOk = CheckedAddTo(saplingValueDummy, -tx.valueBalance);
+                if (dummyOk) {
+                    for (auto js : tx.vjoinsplit) {
+                        if (!CheckedAddTo(sproutValueDummy, js.vpub_old) ||
+                            !CheckedAddTo(sproutValueDummy, -js.vpub_new)) {
+                            dummyOk = false;
+                            break;
+                        }
+                    }
                 }
 
-                if (sproutValueDummy < 0) {
+                if (!dummyOk || sproutValueDummy < 0) {
                     LogPrintf("CreateNewBlock(): tx %s appears to violate Sprout turnstile\n", tx.GetHash().ToString());
                     continue;
                 }

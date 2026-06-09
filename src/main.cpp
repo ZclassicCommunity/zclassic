@@ -2630,6 +2630,14 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
     CBlockUndo blockundo;
 
+    // txdata must be declared before `control`: queued CScriptChecks hold raw
+    // PrecomputedTransactionData* into this vector, and ~CCheckQueueControl()
+    // calls Wait() for in-flight worker checks on every (including early) return.
+    // Declaring txdata first guarantees reverse-order destruction runs that Wait()
+    // before txdata is destroyed, closing the use-after-free (CVE-2024-52911 parity).
+    std::vector<PrecomputedTransactionData> txdata;
+    txdata.reserve(block.vtx.size()); // Required so that pointers to individual PrecomputedTransactionData don't get invalidated
+
     CCheckQueueControl<CScriptCheck> control(fExpensiveChecks && nScriptCheckThreads ? &scriptcheckqueue : NULL);
 
     int64_t nTimeStart = GetTimeMicros();
@@ -2666,8 +2674,6 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     // Grab the consensus branch ID for the block's height
     auto consensusBranchId = CurrentEpochBranchId(pindex->nHeight, Params().GetConsensus());
 
-    std::vector<PrecomputedTransactionData> txdata;
-    txdata.reserve(block.vtx.size()); // Required so that pointers to individual PrecomputedTransactionData don't get invalidated
     for (unsigned int i = 0; i < block.vtx.size(); i++)
     {
         const CTransaction &tx = block.vtx[i];
@@ -4080,8 +4086,12 @@ void FallbackSproutValuePoolBalance(
                 // this point onwards (assuming the checkpoint is late enough)
                 pindex->nChainSproutValue = chainparams.SproutValuePoolCheckpointBalance();
             } else {
-                // Apparently we have been. So, we should expect the current
-                // value to match the hardcoded one.
+                // Chain-value recomputation cross-check against the ZIP-209 Sprout checkpoint.
+                // The nChainSproutValue was computed by summing per-block nSproutValue deltas
+                // (via checked arithmetic in ReceivedBlockTransactions + propagation).
+                // It must match the independently known balance at this height.
+                // This is the live recomputation test for the pool accounting (see also
+                // scripts/audit-mainnet-history.py for the full-history version).
                 assert(*pindex->nChainSproutValue == chainparams.SproutValuePoolCheckpointBalance());
                 // And we should expect non-none for the delta stored in the block index here,
                 // or the checkpoint is too early.
@@ -4104,21 +4114,38 @@ bool ReceivedBlockTransactions(const CBlock &block, CValidationState& state, CBl
     pindexNew->nChainTx = 0;
     CAmount sproutValue = 0;
     CAmount saplingValue = 0;
+    bool blockDeltaOk = true;
     for (auto tx : block.vtx) {
         // Negative valueBalance "takes" money from the transparent value pool
         // and adds it to the Sapling value pool. Positive valueBalance "gives"
         // money to the transparent value pool, removing from the Sapling value
         // pool. So we invert the sign here.
-        saplingValue += -tx.valueBalance;
+        if (!CheckedAddTo(saplingValue, -tx.valueBalance)) {
+            blockDeltaOk = false;
+            break;
+        }
 
         for (auto js : tx.vjoinsplit) {
-            sproutValue += js.vpub_old;
-            sproutValue -= js.vpub_new;
+            if (!CheckedAddTo(sproutValue, js.vpub_old) ||
+                !CheckedAddTo(sproutValue, -js.vpub_new)) {
+                blockDeltaOk = false;
+                break;
+            }
         }
+        if (!blockDeltaOk) break;
     }
-    pindexNew->nSproutValue = sproutValue;
+    if (blockDeltaOk) {
+        pindexNew->nSproutValue = sproutValue;
+        pindexNew->nSaplingValue = saplingValue;
+    } else {
+        // Overflow in per-block shielded pool delta (see April-2026 per-pool
+        // signed overflow class). Do not trust this block's delta for chain
+        // value propagation; descendants will get nChain*Value = none until
+        // a later checkpoint or reindex can re-establish a known-good total.
+        pindexNew->nSproutValue = boost::none;
+        pindexNew->nSaplingValue = 0;
+    }
     pindexNew->nChainSproutValue = boost::none;
-    pindexNew->nSaplingValue = saplingValue;
     pindexNew->nChainSaplingValue = boost::none;
     pindexNew->nFile = pos.nFile;
     pindexNew->nDataPos = pos.nPos;
@@ -4139,12 +4166,22 @@ bool ReceivedBlockTransactions(const CBlock &block, CValidationState& state, CBl
             pindex->nChainTx = (pindex->pprev ? pindex->pprev->nChainTx : 0) + pindex->nTx;
             if (pindex->pprev) {
                 if (pindex->pprev->nChainSproutValue && pindex->nSproutValue) {
-                    pindex->nChainSproutValue = *pindex->pprev->nChainSproutValue + *pindex->nSproutValue;
+                    CAmount chainSprout;
+                    if (CheckedAdd(*pindex->pprev->nChainSproutValue, *pindex->nSproutValue, chainSprout)) {
+                        pindex->nChainSproutValue = chainSprout;
+                    } else {
+                        pindex->nChainSproutValue = boost::none;
+                    }
                 } else {
                     pindex->nChainSproutValue = boost::none;
                 }
                 if (pindex->pprev->nChainSaplingValue) {
-                    pindex->nChainSaplingValue = *pindex->pprev->nChainSaplingValue + pindex->nSaplingValue;
+                    CAmount chainSapling;
+                    if (CheckedAdd(*pindex->pprev->nChainSaplingValue, pindex->nSaplingValue, chainSapling)) {
+                        pindex->nChainSaplingValue = chainSapling;
+                    } else {
+                        pindex->nChainSaplingValue = boost::none;
+                    }
                 } else {
                     pindex->nChainSaplingValue = boost::none;
                 }
@@ -4565,7 +4602,14 @@ bool AcceptBlock(CBlock& block, CValidationState& state, CBlockIndex** ppindex, 
     // mark the chain as parked. If it has enough work, it'll unpark
     // automatically. We mark the block as parked at the very last minute so we
     // can make sure everything is ready to be reorged if needed.
-    if (GetBoolArg("-parkdeepreorg", true)) {
+    //
+    // Skip during initial block download / reindex: there, blocks are loaded
+    // from disk out of height order, so the "would cause a deep reorg" test
+    // (fork depth > 1) fires spuriously and parks large swaths of the chain,
+    // stalling the sync (the bug that forces -parkdeepreorg=0 on a from-genesis
+    // reindex). Deep-reorg protection is an at-tip defense; during IBD the node
+    // only follows the best chain forward, so there is nothing to protect.
+    if (GetBoolArg("-parkdeepreorg", true) && !IsInitialBlockDownload()) {
         const CBlockIndex *pindexFork = chainActive.FindFork(pindex);
         if (pindexFork && pindexFork->nHeight + 1 < pindex->nHeight) {
             LogPrintf("Park block %s as it would cause a deep reorg.\n",
