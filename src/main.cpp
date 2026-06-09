@@ -6488,6 +6488,12 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
         if ((fDebug && vInv.size() > 0) || (vInv.size() == 1))
             LogPrint("net", "received getdata for: %s peer=%d\n", vInv[0].ToString(), pfrom->id);
 
+        if (pfrom->vRecvGetData.size() + vInv.size() > 100000) {
+            Misbehaving(pfrom->GetId(), 20);
+            pfrom->fDisconnect = true;
+            return true;
+        }
+
         pfrom->vRecvGetData.insert(pfrom->vRecvGetData.end(), vInv.begin(), vInv.end());
         ProcessGetData(pfrom);
     }
@@ -6498,6 +6504,11 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
         CBlockLocator locator;
         uint256 hashStop;
         vRecv >> locator >> hashStop;
+
+        if (locator.vHave.size() > 64) {
+            Misbehaving(pfrom->GetId(), 20);
+            return true;
+        }
 
         LOCK(cs_main);
 
@@ -6542,6 +6553,11 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
         CBlockLocator locator;
         uint256 hashStop;
         vRecv >> locator >> hashStop;
+
+        if (locator.vHave.size() > 64) {
+            Misbehaving(pfrom->GetId(), 20);
+            return true;
+        }
 
         LOCK(cs_main);
 
@@ -6823,6 +6839,11 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
 
     else if (strCommand == "mempool")
     {
+        if (pfrom->fSentMempool) {
+            LogPrint("net", "Ignoring repeated \"mempool\" from peer=%d\n", pfrom->id);
+            return true;
+        }
+
         int currentHeight = GetHeight();
 
         LOCK2(cs_main, pfrom->cs_filter);
@@ -6850,6 +6871,7 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
         }
         if (vInv.size() > 0)
             pfrom->PushMessage("inv", vInv);
+        pfrom->fSentMempool = true;
     }
 
 
