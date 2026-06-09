@@ -119,18 +119,40 @@ change for in-range values.
 
 ---
 
-## Audit items still OPEN (not in this merge)
+## 4. Checkpoint hash enforcement at header acceptance — FIXED (audit #2, `6b53a6916`)
 
-From the June-2026 upstream-parity audit. Priority order:
+Added in a follow-up merge after the items above.
 
-1. **#2 — checkpoint hash not enforced at header acceptance (High).**
-   `GetLastCheckpoint` only finds checkpoints already in `mapBlockIndex`;
-   `ContextualCheckBlockHeader` (`main.cpp:4434`) rejects only forks **below**
-   the last checkpoint height, never a header **at** checkpoint height with the
-   wrong hash. Upstream's `CheckIndexAgainstCheckpoint` is absent. Fix first —
-   #3's "checkpoint validates correctness" rationale depends on it.
+### Gap
+`ContextualCheckBlockHeader` rejected only forks strictly **below** the last
+checkpoint *present in `mapBlockIndex`* (`GetLastCheckpoint` +
+`nHeight < pcheckpoint->nHeight`). It never rejected a header presented **at** a
+checkpoint height with the wrong hash, and it depended on chain state — so a
+fresh or eclipsed node could accept a forged chain that does not pass through the
+compiled checkpoint hashes. Upstream's `CheckIndexAgainstCheckpoint` was absent.
 
-2. **#3 — reindex size band-aids loosen live consensus (High).**
+### Fix
+New `Checkpoints::CheckBlock(data, nHeight, hash)` (mirrors upstream) returns
+false only when there is a checkpoint at `nHeight` and the hash differs. Called
+in `ContextualCheckBlockHeader` under `fCheckpointsEnabled`: a mismatch is
+rejected with `DoS(100)` / `REJECT_CHECKPOINT` / `"bad-fork-checkpoint"`. It
+reads the **hardcoded** checkpoint map directly, so it is independent of
+`mapBlockIndex` state and protects a fresh/eclipsed node during bootstrap.
+
+### Safety
+Pure tightening: canonical headers at checkpoint heights match by definition, so
+honest peers are never rejected; an empty checkpoint map (regtest) is a no-op. No
+activation height, no coordination. Unit test
+`Checkpoints_tests/checkpoint_hash_lockin` covers no-checkpoint / match /
+mismatch; all `Checkpoints_tests` pass and the UAF gtest still passes.
+
+---
+
+## Audit items still OPEN (not yet implemented)
+
+From the June-2026 upstream-parity audit. Priority order (#2 now done — see §4):
+
+1. **#3 — reindex size band-aids loosen live consensus (High).**
    `GENEROUS_BLOCK_SIZE_LIMIT = 2MB` (`main.cpp:4364`) vs `MAX_BLOCK_SIZE =
    200000` (`consensus.h:22`); `GENEROUS_TX_SIZE_LIMIT = 2MB` non-contextual
    (`main.cpp:1230`) with the tight `MAX_TX_SIZE_AFTER_SAPLING = 102000` enforced
@@ -142,11 +164,11 @@ From the June-2026 upstream-parity audit. Priority order:
    the tight limits in `ContextualCheckTransaction`/`ContextualCheckBlock` gated
    on a future activation height (coordinated soft fork).
 
-3. **#4 — header-DoS hardening gap (Medium, unproven).** No modern
+2. **#4 — header-DoS hardening gap (Medium, unproven).** No modern
    `nMinimumChainWork`/headers-presync staging. Has `MAX_HEADERS_RESULTS=160` +
    checkpoint fork-rejection. Hardening gap, not a demonstrated exploit.
 
-4. **#5 — timestamp adjustment (Low).** Raw `nTime - GetTime()` (`main.cpp:6208`).
+3. **#5 — timestamp adjustment (Low).** Raw `nTime - GetTime()` (`main.cpp:6208`).
    Self-limiting (200-sample freeze; protective per the in-code issue-#4521
    note). Signed-overflow hardening only.
 
