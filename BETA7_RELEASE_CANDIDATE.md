@@ -2,7 +2,10 @@
 
 Status: daemon release-candidate handoff.
 Candidate branch: `origin/beta7/zmarket-spider-router-index`
-Candidate SHA: `35f64c9e0de18b0aac35852791be0cb5d3c871df`
+Candidate head: resolve at final audit time with
+`git rev-parse origin/beta7/zmarket-spider-router-index`.
+Last source-verified code head before this handoff update:
+`d6cbdb51cc963b9a0bfca096e6ddd655f506d689`.
 Base: `origin/master` at `14a83d510ffd109d3fa09bf74ebf8c28854a263f`
 
 ## What This Candidate Contains
@@ -44,7 +47,7 @@ Worker 2 reported on the ZMARKET integration:
 - expanded onion endpoint invariants;
 - no file-hosting side effects from spider/router/index modes.
 
-Local static checks on `35f64c9e0`:
+Local static checks on `origin/beta7/zmarket-spider-router-index`:
 
 ```bash
 qa/beta7/check-source-gates.sh origin/master
@@ -61,7 +64,9 @@ Results:
 - whitespace diff check passed;
 - no direct consensus-path diff in the listed paths;
 - Tor tarball hash matched;
-- dry-run master fast-forward with `--force-with-lease` passed.
+- previous dry-run master fast-forward with `--force-with-lease` passed on
+  the earlier source candidate. Rerun the exact dry-run command below after
+  the final audit, using the current candidate branch head.
 
 ## Required Final Audit Before Master
 
@@ -89,13 +94,17 @@ Do not run this until the final audit passes.
 
 ```bash
 git fetch origin
+MASTER_EXPECTED=14a83d510ffd109d3fa09bf74ebf8c28854a263f
+CANDIDATE=$(git rev-parse origin/beta7/zmarket-spider-router-index)
+
+git merge-base --is-ancestor origin/master origin/beta7/zmarket-spider-router-index
 git push --dry-run \
-  --force-with-lease=refs/heads/master:14a83d510ffd109d3fa09bf74ebf8c28854a263f \
-  origin 35f64c9e0de18b0aac35852791be0cb5d3c871df:refs/heads/master
+  --force-with-lease=refs/heads/master:$MASTER_EXPECTED \
+  origin $CANDIDATE:refs/heads/master
 
 git push \
-  --force-with-lease=refs/heads/master:14a83d510ffd109d3fa09bf74ebf8c28854a263f \
-  origin 35f64c9e0de18b0aac35852791be0cb5d3c871df:refs/heads/master
+  --force-with-lease=refs/heads/master:$MASTER_EXPECTED \
+  origin $CANDIDATE:refs/heads/master
 ```
 
 This is a fast-forward of `master`; the lease rejects if remote master moved.
