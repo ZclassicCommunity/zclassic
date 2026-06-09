@@ -53,6 +53,8 @@ zcash_gtest_SOURCES += \
 	gtest/test_zslp_fingerprint.cpp \
 	gtest/test_nftoffer.cpp \
 	gtest/test_offerpool.cpp \
+	gtest/test_zmarket_c.cpp \
+	gtest/test_zmarket_spider_router.cpp \
 	gtest/test_blockindexcache.cpp \
 	gtest/test_torembed.cpp \
 	gtest/test_torv3_identity.cpp \

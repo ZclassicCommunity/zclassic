@@ -230,7 +230,7 @@ root_alg           u8      1=bare_sha256, 2=merkle_sha256_v1
 whole_sha256       32B     SHA256 over the complete file bytes
 file_size          u64le   exact byte length
 chunk_size         u32le   1048576 for merkle_sha256_v1; file_size for bare_sha256
-chunk_count        u32le   ceil(file_size / chunk_size), or 1 for an empty file
+chunk_count        u32le   0 for an empty file; otherwise ceil(file_size / chunk_size)
 flags              u32le   bit0=encrypted, bit1=has_poster, bit2=publisher_approved_mirrors_required
 media_type         bytes   UTF-8, max 127 bytes, advisory only
 display_filename   bytes   UTF-8 basename, max 255 bytes, advisory only

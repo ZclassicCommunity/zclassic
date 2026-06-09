@@ -97,6 +97,7 @@ Concrete C modules to add:
 | `src/zmarket/zmarket_spider.{h,c}` | Peer inventory cache, request scheduler, dedupe, per-peer token buckets, reject accounting, and batch selection. |
 | `src/zmarket/zmarket_router.{h,c}` | Encrypted route-packet cache, TTL/hop decrement, fanout selection, duplicate suppression, and Tor-only/clearnet policy checks. |
 | `src/zmarket/zmarket_peer.{h,c}` | Peer score, byte/object quotas, backoff, and relay eligibility decisions. |
+| `src/zmarket/zmarket_onion.{h,c}` | Canonical v3 onion endpoint validation, role-scoped endpoint indexes, reusable/one-time scope policy, deterministic failover choice, and endpoint health counters. |
 | `src/zmarket/zmarket_content.{h,c}` | Explicit content allowlist index: exact hash rows, byte caps, served counters, and mirror descriptor generation. Actual HTTP serving is bridged. |
 | `src/zmarket/zmarket_engine.{h,c}` | One C facade that wires policy, store, memindex, spider, router, validation cache, and content allowlist together. |
 
@@ -375,6 +376,22 @@ Tor behavior:
 - Before ADDRv2, onion routing is safe only through direct route hints,
   `-addnode`/manual peers, or a local Tor proxy path. The marketplace docs and UI
   must say this plainly.
+- Onion addresses are role identities. Reusing one onion for node P2P, market
+  selling, content mirroring, ZNAM publication, and future social activity links
+  those roles. Beta7 should use separate persisted onion keys per long-lived role
+  where the operator enables that role.
+- One-time onion endpoints are for short-lived direct reply routes, buyer
+  negotiation, or diagnostics. Public listings, mirror records, and ZNAM records
+  should use reusable role-scoped onions because they need offline reachability,
+  reputation, and signed endpoint stability.
+- Load balancing is application-level failover across multiple signed endpoint
+  or mirror records. Do not require Tor OnionBalance or shared onion private keys
+  in beta7. A verified mirror set may contain several onion endpoints signed by
+  the same or different operators; the client chooses one, tracks health, and
+  fails over only after timeout, missing range, expiry, or hash mismatch.
+- Default media fetch should be serial through one verified mirror to minimize
+  interest leakage. Parallel mirror fetch is a separate user setting because it
+  exposes the viewed content root to more operators.
 
 ## 7. Local Index Shape
 
@@ -900,7 +917,7 @@ selects only endpoints matching the required role.
 `ZMARKET_ONION_SCOPE_ONE_TIME` endpoints are **exclusively for short-lived
 direct/private routes** between a specific buyer and seller. After a single
 successful use, the endpoint transitions to `ZMARKET_ONION_USED` state and is
-permanently retired — it can never be chosen again by `zmarket_onion_choose`.
+permanently retired - it can never be chosen again by `zmarket_onion_choose`.
 One-time onions must never be used for market listings, content mirroring, or
 social relay roles. They require a non-zero `scope_id` binding them to the
 specific trade session.
@@ -920,7 +937,7 @@ records**. The `zmarket_onion_set` stores multiple `MIRROR` or `MIRROR_SET`
 record-backed endpoints, each carrying a `weight` and `scope_id` for weighted
 selection. When one endpoint fails (tracked via `fail_count`), the engine
 selects the next-best candidate from the signed set. No media is downloaded
-by the indexer — only signed endpoint metadata (host, port, weight, expiry,
+by the indexer - only signed endpoint metadata (host, port, weight, expiry,
 role, scope) is tracked in-RAM. Failover scoring uses a deterministic
 FNV-1a-based weighted random with failure penalty, seeded per-query to ensure
 reproducible selection without requiring persistent state.
@@ -932,4 +949,4 @@ reproducible selection without requiring persistent state.
 | `REUSABLE` | Persistent, operator-managed | MARKET, CONTENT, SOCIAL | Optional | Long-lived market/mirror/relay |
 | `ASSET` | Per-asset listing | MARKET, CONTENT | Required | Tied to a specific NFT/collection |
 | `SESSION` | Session-bound | Any | Required | Temporary session, survives disconnect |
-| `ONE_TIME` | Single-use, then retired | DIRECT only | Required | Private buyer↔seller route |
+| `ONE_TIME` | Single-use, then retired | DIRECT only | Required | Private buyer-seller route |

@@ -47,6 +47,10 @@ Beta7 should feel like a native decentralized collectibles wallet:
   and market identities to keys and onion endpoints.
 - Privacy and Network tab: embedded Tor status, marketplace relay/index mode,
   local onion address, and explicit hosted-file controls.
+- AI Assistant tab or panel: optional provider-backed or local assistant that
+  can explain wallet/NFT/market/name state and draft actions, but cannot sign,
+  broadcast, publish, host, unhost, or change settings without explicit user
+  approval.
 
 The wallet may say "decentralized marketplace" only when the path uses signed
 offers and local verification. It must not imply that NFT ownership is enforced
@@ -243,6 +247,7 @@ Suggested C module layout:
 | `src/zmarket/zmarket_record.{h,c}` | canonical signed record framing, length checks, ids |
 | `src/zmarket/zmarket_spider.{h,c}` | bounded peer/onion spider queue, TTL, backoff |
 | `src/zmarket/zmarket_router.{h,c}` | inventory dedupe, route scoring, relay policy |
+| `src/zmarket/zmarket_onion.{h,c}` | role-scoped onion endpoint validation, failover, reusable/one-time scope policy |
 | `src/zmarket/zmarket_index.{h,c}` | local in-memory/index-batch structures for fast browse |
 | `src/zmarket/zmarket_policy.{h,c}` | caps, operator modes, host/relay/index permissions |
 | `src/zmarket/zmarket_bridge.{h,cpp}` | thin C++ bridge to CNftOfferBlob, RPC, P2P, wallet |
@@ -251,6 +256,37 @@ The C engine never calls consensus validation directly. The bridge supplies
 callbacks for chain facts such as "is this NFT UTXO live?", "does this ZNAM
 name resolve?", and "does this signature verify under the wallet/daemon key
 rules?"
+
+## Onion identity, failover, and privacy
+
+Onion addresses are product-visible identities and must be scoped like keys, not
+treated as one generic node URL.
+
+Required beta7 model:
+
+- A reusable P2P node onion may exist for ordinary daemon reachability.
+- A reusable ZMARKET seller/route onion may exist for the operator's market
+  yard.
+- A reusable content mirror onion may exist only when content hosting is enabled
+  and exact content objects are allowlisted.
+- A reusable ZNAM/name endpoint onion may be published only by explicit operator
+  action, because it publicly links a name to a long-lived service.
+- One-time onion endpoints are reserved for short-lived direct routes such as
+  buyer reply paths, diagnostics, or private negotiation. They are not the
+  default for public listings, mirrors, or names because they break offline
+  discovery and reputation.
+
+Load balancing is application-level failover across multiple signed endpoint or
+mirror records. Beta7 must not depend on Tor OnionBalance, shared onion private
+keys, or a central mirror directory. A wallet builds a verified mirror set from
+signed records, fetches from one mirror at a time by default, and fails over by
+chunk or object only after timeout, expiry, missing range, or hash mismatch.
+Parallel mirror fetch is a separate privacy-impacting user setting.
+
+The GUI must show onion role separation plainly. Reusing one onion for node,
+market, content, name, and social activity links those activities. Separate role
+keys reduce linkability but do not eliminate timing, listing, or gallery
+correlation.
 
 ## Content hosting
 
@@ -299,6 +335,55 @@ The GUI should be fast and clear:
 7. Add content host allowlist and onion serving behind explicit operator opt-in.
 8. Add multi-node regtest and GUI E2E coverage.
 
+## Private social network direction
+
+Beta7 should leave room for a wallet-native decentralized social layer, but it
+must use the same non-consensus signed-gossip rules:
+
+- social profile, post, feed-head, moderation, and encrypted DM route records
+  are off-chain signed records;
+- follows are local encrypted wallet data by default, not public graph records;
+- optional ZNAM name badges are signed by the current ZNAM owner and expire;
+- media attachments are content roots and manifest hashes only, never file
+  bytes in social records;
+- social routing/indexing reuses the ZMARKET C engine and Tor route policy
+  instead of creating a second spider/router/indexer in Qt or C++;
+- public social relay is opt-in and rate-limited like market relay;
+- DMs use encrypted route packets, higher PoW/rate limits for unknown senders,
+  no read receipts by default, and no automatic media fetch.
+
+The first social deliverable is documentation and C parser/index scaffolding.
+User-facing social relay should ship only after market routing, Tor role
+identity, spam limits, and local moderation have test coverage.
+
+## Wallet AI assistant direction
+
+The AI assistant is a GUI feature, not consensus and not a daemon hot path.
+Reference plan: `doc/ai/WALLET_AI_ASSISTANT_PLAN.md`.
+
+Requirements:
+
+- AI is disabled by default.
+- The GUI may use user-supplied credentials for OpenAI/GPT, Claude, Gemini,
+  z.ai, local OpenAI-compatible servers, or future providers through a provider
+  adapter interface.
+- Provider credentials are stored by the GUI in secure local storage or an
+  encrypted local fallback. They are never written to daemon config or sent to
+  daemon RPC.
+- AI receives redacted bounded wallet context only.
+- AI cannot access wallet seed, spending keys, viewing keys, RPC password, Tor
+  private keys, onion private keys, or raw local config.
+- AI tools are REST-shaped wallet commands with stable schemas and explicit
+  permission levels.
+- ActiveRecord-style models are allowed for local GUI rows such as credentials,
+  conversations, tool calls, command drafts, and audit logs. They are not used
+  in consensus paths or C hot paths.
+- Side effects use command objects and GUI approval. Spending, listing, buying,
+  hosting, unhosting, mirror publishing, social posting, and settings changes
+  require explicit confirmation every time.
+- NFT metadata, market descriptions, mirror records, social posts, and ZNAM text
+  are untrusted data and cannot grant tool permissions or override wallet policy.
+
 ## Release gates
 
 Beta7 cannot ship this platform unless:
@@ -308,5 +393,6 @@ Beta7 cannot ship this platform unless:
 - tests prove content hosting is allowlist-only;
 - tests prove invalid signed offers and forged mirror records do not index;
 - tests prove the GUI never auto-hosts or auto-fetches arbitrary media;
+- tests prove AI cannot access secrets or perform side effects without approval;
 - multi-node market browse works without a central server;
 - Linux/Windows/macOS release artifacts pass the existing beta release gates.

@@ -104,6 +104,13 @@ Beta7 daemon architecture has four cooperating but separate surfaces:
 
 The four surfaces must not collapse into one another. ZNAM can point at an onion or content fingerprint; ZMARKET can carry a signed offer; Tor can carry connections; file availability can serve selected off-chain bytes. None of those facts authorizes automatic file hosting.
 
+The wallet AI assistant is a fifth GUI-side surface, but it does not become a
+daemon subsystem. `zclassicd` exposes ordinary authenticated RPC facts and
+side-effecting commands with the same validation as non-AI callers. The GUI owns
+AI provider credentials, provider calls, redaction, approval dialogs, and audit
+logs. The daemon never calls OpenAI, Claude, Gemini, z.ai, or any other model
+provider.
+
 ---
 
 ## 3. Milestones
@@ -268,6 +275,11 @@ Concrete layout:
 - `src/zmarket/zmarket_route.h` / `src/zmarket/zmarket_route.c`
   - Pure C route/spider state transitions over bounded peer/offer counters: inventory admission, request scheduling, retry/backoff, route scoring, and token-bucket math.
   - No `CNode`, no sockets, no `cs_main`; the C++ net bridge maps daemon peers to small C route structs.
+- `src/zmarket/zmarket_onion.h` / `src/zmarket/zmarket_onion.c`
+  - Pure C v3 onion endpoint validation and local endpoint indexes.
+  - Tracks role bits, reusable/asset/session/one-time scope, expiry, health
+    counters, and deterministic failover choice.
+  - Does not start Tor, connect sockets, fetch media, or serve files.
 - `src/zmarket/zmarketmsg.h` / `src/zmarket/zmarketmsg.cpp`
   - Thin C++ bridge like `znam/znammsg.cpp`.
   - The only translation unit that includes the C headers inside `extern "C"` if needed.
@@ -348,6 +360,15 @@ Deliverables:
   - canary tests for v3 onion round-trip and addrman retention.
 - Expose Tor state in `getnetworkinfo`: compiled/available, enabled, state, bootstrap percent, onion, control/SOCKS ports, inbound onion peers, and gate reasons.
 - Keep dynhost HTTP beacon off for beta7. No unauthenticated Tor HTTP server in the wallet-key process.
+- Add role-scoped onion service state before exposing marketplace/content/social
+  UI: node P2P, market route/seller, content mirror, optional ZNAM endpoint, and
+  future social feed/DM endpoints should not silently share one onion identity.
+- Persist long-lived role keys only after explicit operator enablement for that
+  role. One-time onions are short TTL direct routes only and are retired after
+  successful use.
+- Defer Tor OnionBalance and shared private-key replicas. Beta7 load balancing
+  is multiple signed onion endpoints/mirror records plus client-side health and
+  failover.
 
 Guardrails:
 
@@ -355,6 +376,8 @@ Guardrails:
 - Tor does not imply file hosting.
 - Tor does not imply market relay. Market relay still requires `-nftmarket=1`.
 - Tor does not imply media serving. Future media serving requires an explicit file-host gate and explicit per-object add.
+- Tor does not imply social publication. Future social profile/feed/DM endpoints
+  require separate identity and relay settings.
 - Default-on market relay is blocked until BIP155 is complete, onion-only relay has soaked, and the operator consent gate exists.
 
 Tests:
@@ -363,6 +386,8 @@ Tests:
 - New BIP155 serialization tests prove v3 onions survive wire and peers.dat round-trips.
 - Old peers continue to receive legacy address format.
 - DEANON guard tests prove the node does not advertise clearnet and onion self-addresses together.
+- Role isolation tests prove enabling one onion role does not publish another
+  role, and one-time endpoints are not reused after successful delivery.
 
 ### M4 - Voluntary NFT File Availability Scaffolding
 
@@ -415,7 +440,118 @@ Tests:
 - Enabling `-nftmarket` hosts zero objects.
 - Only explicit `nft_hostfile_add` increases hosted count.
 
-### M5 - Integrated Verification And Release Gate
+### M5 - ZSOCIAL Privacy Scaffolding
+
+Goal: leave a coherent path for a wallet-native decentralized social layer
+without creating chain data, random hosting, or a second market network stack.
+
+Recommended beta7 cut:
+
+- Ship protocol/privacy docs and inert C parser/index scaffolding first.
+- Reuse the ZMARKET signed-gossip/Tor route engine for public social records
+  and encrypted DM route packets.
+- Keep public relay default off and behind explicit social/market relay flags.
+- Keep follows local, encrypted-at-rest wallet data by default. Do not publish a
+  follow graph in beta7.
+
+Record model:
+
+- `ZSOC_PROFILE1`: social public key, sequence, expiry, avatar/banner content
+  roots, optional ZNAM badge proof, optional feed/onion hints, signature.
+- `ZSOC_POST1`: author key, sequence, created/expiry, reply/root/quote refs,
+  bounded text or encrypted body, tags, content roots, NFT/listing refs,
+  signature.
+- `ZSOC_FEEDHEAD1`: signed compact list of recent post hashes for direct author
+  feed fetch.
+- `ZSOC_DELETE1`: advisory signed tombstone for local indexes.
+- `ZSOC_MODLIST1`: signed block/label list for keys, names, content roots,
+  tags, listings, or post hashes.
+- `ZSOC_DM_ROUTE1`: encrypted route packet over Tor/ZMARKET routing; relays see
+  only packet metadata, not sender identity or message contents.
+
+Guardrails:
+
+- No social records on-chain.
+- No media bytes in social records.
+- No automatic media fetch while indexing social records.
+- No automatic content hosting from a profile, post, gallery, or DM.
+- Optional ZNAM binding is a badge signed by the current ZNAM owner and expires;
+  it is not a uniqueness or truth oracle.
+- Social identity keys, DM prekeys, onion route keys, and wallet spend keys must
+  be separate.
+- Local moderation is local policy. Subscribed curator lists are optional signed
+  inputs, not global authority.
+
+Suggested C hot-path modules:
+
+- `src/zmarket/zmarket_social_record.{h,c}` for bounded social record framing.
+- `src/zmarket/zmarket_social_policy.{h,c}` for caps, PoW, expiry, and
+  per-author/per-peer limits.
+- `src/zmarket/zmarket_social_index.{h,c}` for local derived indexes by author,
+  ZNAM badge, post time, reply root, tag, content root, NFT token id, and market
+  listing id.
+- `src/zmarket/zmarket_social_route.{h,c}` for encrypted DM route metadata and
+  direct onion reply hints.
+- `src/zmarket/zmarket_social_moderation.{h,c}` for local block/list decisions.
+
+Tests:
+
+- Opening a social feed performs no media fetch.
+- Public post indexing stores only bounded signed records and content roots.
+- Private follow lists never enter gossip records.
+- Unknown-sender DMs require stricter PoW/rate limits.
+- ZNAM-bound profiles show valid, expired, transferred, and mismatch states.
+- NFT/listing cards revalidate through ZSLP/ZMARKET before showing verified or
+  buyable badges.
+
+### M6 - AI Assistant RPC Boundary
+
+Goal: make the daemon safe for an AI-assisted GUI without giving the AI a raw
+wallet RPC tunnel.
+
+Reference plan: `doc/ai/WALLET_AI_ASSISTANT_PLAN.md`.
+
+Daemon responsibilities:
+
+- Expose bounded read RPCs for wallet status, balances, owned NFTs, market rows,
+  offer verification, ZNAM state, mirror health, and social record summaries.
+- Keep money-moving, publishing, hosting, unhosting, and settings-changing RPCs
+  behind the same validation they already require for normal GUI calls.
+- Return stable REST-shaped schemas where possible: `status`, `list`, `get`,
+  `create draft`, `revalidate`, `publish`, `remove`, and `audit` concepts.
+- Never return private keys, seeds, viewing keys, RPC credentials, Tor private
+  keys, onion private keys, or unredacted config.
+- Keep daemon logs free of AI prompts, provider credentials, and authorization
+  headers.
+
+GUI responsibilities:
+
+- Own provider adapters and credentials.
+- Build redacted context.
+- Convert AI proposals into command drafts.
+- Require explicit user approval for every side effect.
+- Preserve existing wallet confirmation dialogs for final signing/broadcasting.
+- Write redacted local audit logs.
+
+Guardrails:
+
+- No raw RPC passthrough tool.
+- No provider credentials in daemon config.
+- No provider network calls from daemon code.
+- No AI-triggered automatic content fetch or hosting.
+- No AI-triggered automatic market/social relay.
+- AI text embedded in remote metadata is untrusted data, not instructions.
+
+Tests:
+
+- A mocked AI cannot retrieve secrets because daemon read RPCs do not expose
+  them.
+- A mocked AI proposal creates a draft, not a signed/broadcast transaction.
+- Rejected GUI approval leaves daemon state unchanged.
+- Approved commands still pass existing offer, ownership, hash, expiry, and
+  wallet-lock validation.
+
+### M7 - Integrated Verification And Release Gate
 
 Goal: prove the beta7 daemon surfaces compose without violating the rules in section 0.
 

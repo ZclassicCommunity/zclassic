@@ -248,7 +248,14 @@ BITCOIN_CORE_H = \
   zslp/zslpindexer.h \
   zslp/contentfingerprint.h \
   znam/znam.h \
-  znam/znammsg.h
+  znam/znammsg.h \
+  zmarket/zmarket_content.h \
+  zmarket/zmarket_index.h \
+  zmarket/zmarket_onion.h \
+  zmarket/zmarket_policy.h \
+  zmarket/zmarket_record.h \
+  zmarket/zmarket_router.h \
+  zmarket/zmarket_spider.h
 
 
 obj/build.h: FORCE
@@ -418,6 +425,13 @@ libbitcoin_common_a_SOURCES = \
   script/standard.cpp \
   transaction_builder.cpp \
   utiltest.cpp \
+  zmarket/zmarket_content.c \
+  zmarket/zmarket_index.c \
+  zmarket/zmarket_onion.c \
+  zmarket/zmarket_policy.c \
+  zmarket/zmarket_record.c \
+  zmarket/zmarket_router.c \
+  zmarket/zmarket_spider.c \
   zslp/slp.c \
   znam/znam.c \
   $(BITCOIN_CORE_H) \

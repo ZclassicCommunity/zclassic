@@ -1,7 +1,9 @@
 SDKs/
 work/
 built/
-sources/
+sources/*
+!sources/.gitignore
+!sources/tor-73bd405.tar.gz
 config.site
 x86_64*
 i686*
