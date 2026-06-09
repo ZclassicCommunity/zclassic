@@ -19,12 +19,12 @@
  * for both bitcoind and bitcoin-core, to make it harder for attackers to
  * target servers or GUI users specifically.
  */
-const std::string CLIENT_NAME("ZipherX");
+const std::string CLIENT_NAME("ZClassic");
 
 /**
  * Client version number
  */
-#define CLIENT_VERSION_SUFFIX "-ZipherX"
+#define CLIENT_VERSION_SUFFIX "-ZClassic"
 
 
 /**
