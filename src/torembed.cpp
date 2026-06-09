@@ -30,7 +30,7 @@
 #include <string>
 #include <vector>
 
-#ifdef ENABLE_TOR
+#if ENABLE_TOR
 #include <boost/bind.hpp>
 #include <boost/chrono/chrono.hpp>
 #include <boost/filesystem.hpp>
@@ -49,7 +49,7 @@ std::string g_onion;        // guarded by cs_torembed (set by torcontrol via a f
 uint16_t    g_ctrlPort = 0; // guarded by cs_torembed
 uint16_t    g_socksPort = 0;// guarded by cs_torembed
 
-#ifdef ENABLE_TOR
+#if ENABLE_TOR
 tor_main_configuration_t* g_cfg = NULL;
 tor_control_socket_t      g_ctrlSock = INVALID_SOCKET;
 boost::thread             g_torThread;
@@ -140,7 +140,7 @@ void BootstrapMonitor()
 
 bool TorEmbedAvailable()
 {
-#ifdef ENABLE_TOR
+#if ENABLE_TOR
     return true;
 #else
     return false;
@@ -149,7 +149,7 @@ bool TorEmbedAvailable()
 
 std::string TorEmbedProviderVersion()
 {
-#ifdef ENABLE_TOR
+#if ENABLE_TOR
     const char* v = tor_api_get_provider_version();
     return v ? std::string(v) : std::string("tor (version unknown)");
 #else
@@ -159,7 +159,7 @@ std::string TorEmbedProviderVersion()
 
 bool StartEmbeddedTor(const std::string& datadir, uint16_t p2pPort)
 {
-#ifdef ENABLE_TOR
+#if ENABLE_TOR
     if (g_state.load() != EMBEDTOR_DISABLED) return true; // idempotent
 
     uint16_t ctrlPort = 0, socksPort = 0;
@@ -237,14 +237,14 @@ bool StartEmbeddedTor(const std::string& datadir, uint16_t p2pPort)
 
 void InterruptEmbeddedTor()
 {
-#ifdef ENABLE_TOR
+#if ENABLE_TOR
     g_interrupt.store(true);
 #endif
 }
 
 void StopEmbeddedTor()
 {
-#ifdef ENABLE_TOR
+#if ENABLE_TOR
     g_interrupt.store(true);
     // Ask tor to halt via the owning-controller socket, then bounded-join so a tor hang
     // can never block or interleave with the leveldb close that follows in Shutdown().

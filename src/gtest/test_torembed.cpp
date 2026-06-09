@@ -12,7 +12,7 @@
 
 // T1 build-integration smoke test: proves libtor is compiled in and linked, and
 // that no Zcash coin name leaks into a surfaced string (coin is ZCL, never ZEC).
-#ifdef ENABLE_TOR
+#if ENABLE_TOR
 
 TEST(TorEmbed, AvailableWhenCompiledIn)
 {

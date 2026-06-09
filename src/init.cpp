@@ -193,7 +193,7 @@ void Interrupt(boost::thread_group& threadGroup)
     InterruptRPC();
     InterruptREST();
     InterruptTorControl();
-#ifdef ENABLE_TOR
+#if ENABLE_TOR
     InterruptEmbeddedTor();
 #endif
     InterruptMapPort();
@@ -242,7 +242,7 @@ void Shutdown()
 #endif
     StopNode();
     StopTorControl();
-#ifdef ENABLE_TOR
+#if ENABLE_TOR
     // Halt + bounded-join embedded Tor BEFORE the chainstate flush below, so a Tor hang
     // can never block or interleave with the leveldb close (dirty-DB hazard).
     StopEmbeddedTor();
@@ -3304,7 +3304,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // recently added to the mempool.
     threadGroup.create_thread(boost::bind(&TraceThread<void (*)()>, "txnotify", &ThreadNotifyRecentlyAdded));
 
-#ifdef ENABLE_TOR
+#if ENABLE_TOR
     // Embedded Tor (T2): bring up the in-process engine BEFORE StartTorControl so the
     // control/socks ports exist and -torcontrol is authoritative when torcontrol connects
     // and runs ADD_ONION (which publishes our .onion and AddLocal()s it). Opt-in (default OFF).
