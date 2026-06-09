@@ -4473,7 +4473,11 @@ bool AcceptBlockHeader(const CBlockHeader& block, CValidationState& state, CBloc
         return false;
 
 
-    if (!pindexPrev->IsValid(BLOCK_VALID_SCRIPTS)) {
+    // pindexPrev is NULL for the genesis block (set only for non-genesis above).
+    // The genesis block has no ancestors, so the invalid-ancestor walk below is
+    // meaningless for it; guard the dereference to avoid a NULL segfault during
+    // -reindex / import, where LoadExternalBlockFile re-accepts the genesis header.
+    if (pindexPrev != NULL && !pindexPrev->IsValid(BLOCK_VALID_SCRIPTS)) {
         for (const CBlockIndex *failedit : g_failed_blocks) {
             if (pindexPrev->GetAncestor(failedit->nHeight) == failedit) {
                 assert(failedit->nStatus & BLOCK_FAILED_MASK);
