@@ -157,6 +157,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "nft_takeoffer", 0},      // params object
     // nft_listoffers takes NO args (A-1: the dead 'mine' filter was removed), so
     // there is nothing to convert.
+    { "nft_browseoffers", 0},   // params object (optional; its numeric fields ride inside)
     { "nft_canceloffer", 0},    // params object
     { "nft_requestbuy", 0},     // params object
     // ZNAM (ZCL Names): numeric args must be JSON-converted or get_int() throws

@@ -27,6 +27,7 @@
 #include "znam/znamstore.h"
 
 #include <stdint.h>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,7 @@
 #include "script/standard.h" // CKeyID (P2PKH check for transfer target)
 #include "wallet/wallet.h"   // CWallet, CWalletTx, ZNAMBuildReq, BuildAndCommitZNAM
 #include "wallet/znamwallet.h" // ZNAMFindOwnerInput
+#include "wallet/zslpwallet.h" // ZSLPAddrFromScript (script -> t-address, D2 enum)
 // EnsureWalletIsAvailable is file-extern in wallet/rpcwallet.cpp (no header);
 // EnsureWalletIsUnlocked is declared in rpc/server.h.
 extern bool EnsureWalletIsAvailable(bool avoidException);
@@ -272,24 +274,53 @@ UniValue name_history(const UniValue& params, bool fHelp)
     return arr;
 }
 
+// Append { name, owner, expiryHeight, status } for `n` to `arr`. Shared by both
+// the explicit-owner path and the wallet self-enumeration path so the row shape
+// is identical in either mode.
+static void ZNAMPushNameRow(UniValue& arr, const CZNAMName& n, int64_t height)
+{
+    std::string status = CZNAMStore::IsActive(n, height) ? "active"
+                       : (CZNAMStore::IsInGrace(n, height) ? "grace" : "free");
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("name", n.name);
+    o.pushKV("owner", n.ownerAddr);
+    o.pushKV("expiryHeight", n.expiryHeight);
+    o.pushKV("status", status);
+    arr.push_back(o);
+}
+
 UniValue name_listmine(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() < 1 || params.size() > 3)
+    if (fHelp || params.size() > 3)
         throw std::runtime_error(
-            "name_listmine \"owner_address\" ( count from )\n"
+            "name_listmine ( \"owner_address\" count from )\n"
             "\nLists ZNAM names currently owned by a transparent address.\n"
+#ifdef ENABLE_WALLET
+            "\nWith NO arguments, enumerates EVERY name owned by ANY of this\n"
+            "wallet's own spendable t-addresses (the addresses that can sign a\n"
+            "name operation) and de-duplicates by name. Passing an explicit owner\n"
+            "address keeps the original single-address behavior.\n"
+#else
             "(The GUI/wallet passes one of its own t-addresses.)\n"
+            "owner_address is REQUIRED on a daemon built without wallet support.\n"
+#endif
             "\nArguments:\n"
-            "1. owner_address (string, required) the owner t-address\n"
-            "2. count         (numeric, optional, default=100) max names (<=" + std::to_string(ZNAM_LIST_MAX) + ")\n"
-            "3. from          (numeric, optional, default=0) names to skip\n"
+            "1. owner_address (string, "
+#ifdef ENABLE_WALLET
+            "optional"
+#else
+            "required"
+#endif
+            ") the owner t-address; omit to scan this wallet\n"
+            "2. count         (numeric, optional, default=100) max names per address (<=" + std::to_string(ZNAM_LIST_MAX) + ")\n"
+            "3. from          (numeric, optional, default=0) names to skip per address\n"
             "\nResult: [ { name, owner, expiryHeight, status }, ... ]\n"
             "\nExamples:\n"
+            + HelpExampleCli("name_listmine", "")
             + HelpExampleCli("name_listmine", "\"t1exampleaddress\"")
             + HelpExampleRpc("name_listmine", "\"t1exampleaddress\""));
 
     CZNAMStore* store = GetZNAMStoreOrThrow();
-    std::string owner = params[0].get_str();
 
     int count = 100, from = 0;
     if (params.size() > 1) count = params[1].get_int();
@@ -299,21 +330,72 @@ UniValue name_listmine(const UniValue& params, bool fHelp)
     if (from < 0) from = 0;
 
     int64_t height = CurrentHeight();
+
+    // ── zero-arg mode: self-enumerate the wallet's signer addresses ──────
+    // Backward-compatible: this ONLY adds a no-owner mode. An explicit owner
+    // (params[0]) keeps the exact original single-address behavior below.
+    if (params.empty()) {
+#ifdef ENABLE_WALLET
+        if (!EnsureWalletIsAvailable(false))
+            throw JSONRPCError(RPC_WALLET_ERROR, "wallet not available");
+
+        // The SAME address set ZNAMFindOwnerInput uses to pick a signer: the
+        // wallet's confirmed, non-token, (regtest:non-coinbase) plain UTXOs whose
+        // scriptPubKey extracts to a standard t-address. These are exactly the
+        // addresses that can SIGN a name op, so they are the right "mine" set.
+        std::set<std::string> ownerAddrs;
+        {
+            LOCK2(cs_main, pwalletMain->cs_wallet);
+            const bool includeCoinbase =
+                !Params().GetConsensus().fCoinbaseMustBeProtected;
+            std::vector<COutput> coins;
+            pwalletMain->AvailableCoins(coins, /*fOnlyConfirmed=*/true,
+                                        /*coinControl=*/NULL,
+                                        /*fIncludeZeroValue=*/false,
+                                        /*fIncludeCoinBase=*/includeCoinbase,
+                                        /*fExcludeZSLPTokens=*/true);
+            for (size_t i = 0; i < coins.size(); ++i) {
+                const COutput& c = coins[i];
+                if (!c.fSpendable)
+                    continue;
+                std::string addr =
+                    ZSLPAddrFromScript(c.tx->vout[c.i].scriptPubKey);
+                if (!addr.empty())
+                    ownerAddrs.insert(addr);
+            }
+        }
+
+        // De-dup names across addresses (a name maps to ONE owner address, but
+        // two of our addresses cannot own the same name; the set still guards
+        // against any double-count if ListOwnerNames ever overlapped).
+        std::set<std::string> seenNames;
+        UniValue arr(UniValue::VARR);
+        for (std::set<std::string>::const_iterator it = ownerAddrs.begin();
+             it != ownerAddrs.end(); ++it) {
+            std::vector<CZNAMName> names;
+            store->ListOwnerNames(*it, from, count, names);
+            for (size_t i = 0; i < names.size(); ++i) {
+                if (!seenNames.insert(names[i].name).second)
+                    continue;
+                ZNAMPushNameRow(arr, names[i], height);
+            }
+        }
+        return arr;
+#else
+        throw std::runtime_error(
+            "name_listmine requires an owner_address on a daemon built without "
+            "wallet support");
+#endif
+    }
+
+    // ── explicit-owner mode (unchanged) ─────────────────────────────────
+    std::string owner = params[0].get_str();
     std::vector<CZNAMName> names;
     store->ListOwnerNames(owner, from, count, names);
 
     UniValue arr(UniValue::VARR);
-    for (size_t i = 0; i < names.size(); ++i) {
-        const CZNAMName& n = names[i];
-        std::string status = CZNAMStore::IsActive(n, height) ? "active"
-                           : (CZNAMStore::IsInGrace(n, height) ? "grace" : "free");
-        UniValue o(UniValue::VOBJ);
-        o.pushKV("name", n.name);
-        o.pushKV("owner", n.ownerAddr);
-        o.pushKV("expiryHeight", n.expiryHeight);
-        o.pushKV("status", status);
-        arr.push_back(o);
-    }
+    for (size_t i = 0; i < names.size(); ++i)
+        ZNAMPushNameRow(arr, names[i], height);
     return arr;
 }
 

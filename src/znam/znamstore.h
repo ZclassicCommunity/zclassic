@@ -301,6 +301,16 @@ public:
     static bool IsInGrace(const CZNAMName& rec, int64_t height);
     static bool IsFreeOrExpired(const CZNAMName& rec, int64_t height);
 
+    // D3 — the ONE owner-authorization predicate shared by every mutating
+    // command (UPDATE/TRANSFER/RENEW/SET_RECORD/SET_TEXT): the name exists with
+    // a non-empty signer that equals the current owner of record, and is active
+    // (or in grace IFF allowGrace, which only RENEW passes). Pure function of
+    // its inputs; behavior is identical to the prior inline checks. The RPC
+    // layer mirrors `allowGrace` via ZNAMCurrentOwnerOrThrow so model + caller
+    // agree on "may this owner act now".
+    static bool CheckOwnerAuth(const CZNAMName& cur, const std::string& ownerAddr,
+                               int64_t height, bool allowGrace);
+
 private:
     bool readName(const std::string& name, CZNAMName& out) const;
     void appendUndo(CDBBatch& batch, const CZNAMUndoOp& op);

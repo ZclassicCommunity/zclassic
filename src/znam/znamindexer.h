@@ -65,6 +65,20 @@ public:
     static bool ExtractP2PKHOwnerFromScript(const CScript& scriptPubKey,
                                             std::string& ownerAddr);
 
+    /**
+     * Resolve vin[0].prevout's spent scriptPubKey from the block undo data and
+     * encode the owner P2PKH address, or return false so the ZNAM record is
+     * ignored (ownerless): coinbase (txIndex < 1), missing/short block-undo, an
+     * empty prevout vector, or a non-P2PKH signer all yield false.
+     *
+     * Pure function of its inputs (no member/chain state) — STATIC so the gtest
+     * can drive this FIFS trust-boundary seam directly. blockUndo's vtxundo
+     * excludes the coinbase, so block-tx index i maps to vtxundo[i-1].
+     */
+    static bool GetOwnerForTransaction(const CTransaction& tx, int32_t txIndex,
+                                       const CBlockUndo& blockUndo,
+                                       std::string& ownerAddr);
+
     // Store open / migration and background catch-up lifecycle. Future .cpp
     // should mirror CZSLPIndexer without default-enabling runtime behavior.
     bool OpenStore();
@@ -94,13 +108,6 @@ private:
     // this tx's spent prevouts); empty undo => the record is treated as ownerless.
     void IndexTransaction(const CTransaction& tx, const CBlockIndex* pindex,
                           int32_t txIndex, const CBlockUndo& blockUndo);
-
-    // Resolve vin[0].prevout's spent scriptPubKey from the block undo data and
-    // encode the owner P2PKH address, or return false so the ZNAM record is
-    // ignored (ownerless / non-P2PKH signer / missing undo).
-    bool GetOwnerForTransaction(const CTransaction& tx, int32_t txIndex,
-                                const CBlockUndo& blockUndo,
-                                std::string& ownerAddr) const;
 
     void SyncWorker();
     void RunCatchUp();

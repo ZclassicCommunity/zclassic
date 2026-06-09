@@ -49,6 +49,7 @@
 
 #ifdef ENABLE_WALLET
 #include "init.h"          // pwalletMain
+#include "nft/offerpool.h" // g_offerPool, COfferPoolFilter, COfferPoolEntry (D1)
 #include "wallet/wallet.h"
 #include "wallet/zslpwallet.h"
 extern bool EnsureWalletIsAvailable(bool avoidException);
@@ -1037,6 +1038,118 @@ UniValue nft_listoffers(const UniValue& params, bool fHelp)
     return out;
 }
 
+// ── nft_browseoffers ────────────────────────────────────────────────
+//
+// DISCOVERY layer (the GUI Browse tab + search): read the LOCAL RAM-only
+// offerpool (g_offerPool), price-ascending, with the optional tokenId /
+// maxPriceZat / from / count filters. UNLIKE nft_listoffers (which lists only
+// THIS node's own canonical offers from datadir/nftoffers.json), this reads the
+// gossip-fed cache of ALREADY-VERIFIED offers. Browse the local pool regardless
+// of -nftmarket (the toggle only gates outbound/inbound gossip, not local read).
+//
+// Read-only, okSafeMode. The pool self-locks on cs_pool, so we do NOT take
+// cs_main — none of the Browse path touches the chain. Each entry re-emits the
+// blob as "znftoffer:"+ToBase64 so the GUI can hand it straight to nft_takeoffer
+// (closes the search->buy seam).
+UniValue nft_browseoffers(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() > 1)
+        throw std::runtime_error(
+            "nft_browseoffers ( '{\"tokenId\":\"hex\",\"maxPriceZat\":n,\"from\":n,\"count\":n}' )\n"
+            "\nBrowse the LOCAL discovery offerpool (already-verified offers this\n"
+            "node has seen), price-ascending (element 0 = the floor). This is the\n"
+            "search feed for the buy flow; it is READ-ONLY and never broadcasts.\n"
+            "It reads the local pool regardless of the -nftmarket gossip toggle.\n"
+            "Requires -nftindex/-zslpindex (the NFT index) to be on.\n"
+            "\nArguments:\n"
+            "1. \"filter\" (object, optional) {\n"
+            "     \"tokenId\":\"hex\",     (only offers for this NFT/token)\n"
+            "     \"maxPriceZat\":n,     (only priceZat <= this, in zatoshi)\n"
+            "     \"from\":n,            (pagination offset after sort; default 0)\n"
+            "     \"count\":n            (max rows; default + cap 50)\n"
+            "   }\n"
+            "\nResult:\n"
+            "[ {\n"
+            "    \"offerId\": \"hex\",        (short display fingerprint)\n"
+            "    \"offerHash\": \"hex\",      (full 32-byte content hash / pool key)\n"
+            "    \"tokenId\": \"hex\",        (the NFT/token being offered)\n"
+            "    \"priceZat\": n,           (asking price, in zatoshi)\n"
+            "    \"expiryHeight\": n,       (0 = no expiry)\n"
+            "    \"firstSeenHeight\": n,    (chain height when first seen)\n"
+            "    \"live\": true|false,      (last-known liveness)\n"
+            "    \"offerBlob\": \"znftoffer:..\" (hand straight to nft_takeoffer)\n"
+            "  }, ... ]\n"
+            "\nExamples:\n"
+            + HelpExampleCli("nft_browseoffers", "")
+            + HelpExampleCli("nft_browseoffers", "'{\"maxPriceZat\":100000000,\"count\":20}'")
+            + HelpExampleRpc("nft_browseoffers", "{\"maxPriceZat\":100000000,\"count\":20}"));
+
+    NftGetStoreOrThrow(); // fail CLOSED if the NFT index is off
+
+    // Default count cap = 50, with pagination. An absent/empty arg means "first
+    // page, default cap".
+    static const size_t kDefaultCount = 50;
+    COfferPoolFilter filter;
+    filter.count = kDefaultCount;
+
+    if (params.size() == 1 && !params[0].isNull()) {
+        const UniValue& o = params[0].get_obj();
+
+        const UniValue& vt = find_value(o, "tokenId");
+        if (vt.isStr() && !vt.get_str().empty()) {
+            filter.tokenId = ParseHashV(vt, "tokenId");
+            filter.hasTokenId = true;
+        }
+
+        const UniValue& vmp = find_value(o, "maxPriceZat");
+        if (!vmp.isNull()) {
+            int64_t mp = vmp.get_int64();
+            if (mp < 0)
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "maxPriceZat must be >= 0");
+            filter.maxPriceZat = mp;
+            filter.hasMaxPriceZat = true;
+        }
+
+        const UniValue& vfrom = find_value(o, "from");
+        if (!vfrom.isNull()) {
+            int64_t from = vfrom.get_int64();
+            if (from < 0)
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "from must be >= 0");
+            filter.from = (size_t)from;
+        }
+
+        const UniValue& vcount = find_value(o, "count");
+        if (!vcount.isNull()) {
+            int64_t count = vcount.get_int64();
+            if (count < 0)
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "count must be >= 0");
+            // 0 means "no explicit limit"; still clamp to the default cap so an
+            // unbounded RPC reply is impossible.
+            size_t req = (count == 0) ? kDefaultCount : (size_t)count;
+            filter.count = std::min(req, kDefaultCount);
+        }
+    }
+
+    // Browse the LOCAL pool. The pool self-locks on cs_pool; we hold NO cs_main.
+    std::vector<COfferPoolEntry> entries = g_offerPool.Browse(filter);
+
+    UniValue out(UniValue::VARR);
+    for (size_t i = 0; i < entries.size(); ++i) {
+        const COfferPoolEntry& e = entries[i];
+        UniValue o(UniValue::VOBJ);
+        o.push_back(Pair("offerId", e.blob.OfferId()));
+        o.push_back(Pair("offerHash", e.offerHash.GetHex()));
+        o.push_back(Pair("tokenId", e.tokenId.GetHex()));
+        o.push_back(Pair("priceZat", e.priceZat));
+        o.push_back(Pair("expiryHeight", (int64_t)e.expiryHeight));
+        o.push_back(Pair("firstSeenHeight", (int64_t)e.firstSeenHeight));
+        o.push_back(Pair("live", e.live));
+        o.push_back(Pair("offerBlob", "znftoffer:" + e.blob.ToBase64()));
+        out.push_back(o);
+    }
+    return out;
+}
+
 // ── nft_canceloffer ─────────────────────────────────────────────────
 
 UniValue nft_canceloffer(const UniValue& params, bool fHelp)
@@ -1185,6 +1298,7 @@ static const CRPCCommand commands[] =
     { "nft",     "nft_verifyoffer", &nft_verifyoffer, true  },
     { "nft",     "nft_listoffers",  &nft_listoffers,  true  },
 #ifdef ENABLE_WALLET
+    { "nft",     "nft_browseoffers",&nft_browseoffers,true  },
     { "nft",     "nft_makeoffer",   &nft_makeoffer,   false },
     { "nft",     "nft_takeoffer",   &nft_takeoffer,   false },
     { "nft",     "nft_canceloffer", &nft_canceloffer, false },

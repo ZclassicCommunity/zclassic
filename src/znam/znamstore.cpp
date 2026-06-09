@@ -356,6 +356,29 @@ bool CZNAMStore::ConnectBlockEnd(int64_t height, const uint256& blockHash)
 // no-op — writes a history row and logs the matching undo ops, so a reorg's
 // reverse replay restores byte-identical prior state. One batch per call gives
 // a later tx in the SAME block visibility of an earlier tx's writes.
+// D3 — ActiveRecord-style owner-auth predicate, extracted from the 5 commands
+// (UPDATE/TRANSFER/RENEW/SET_RECORD/SET_TEXT) that mutate an EXISTING name. The
+// authorization model, in ONE place: the name must exist, be active (or in
+// grace IFF the command allows grace — only RENEW does), the message must carry
+// a non-empty signer (a P2PKH vin[0] owner), and that signer must be the
+// current owner of record. Behavior is byte-for-byte the previous inline checks
+// (RENEW used IsActive||IsInGrace; the other four used IsActive only). The RPC
+// layer mirrors this via ZNAMCurrentOwnerOrThrow's allowGrace flag so both the
+// model and the caller share one notion of "may this owner act now".
+bool CZNAMStore::CheckOwnerAuth(const CZNAMName& cur, const std::string& ownerAddr,
+                                int64_t height, bool allowGrace)
+{
+    if (ownerAddr.empty())
+        return false;
+    if (cur.ownerAddr != ownerAddr)
+        return false;
+    if (IsActive(cur, height))
+        return true;
+    if (allowGrace && IsInGrace(cur, height))
+        return true;
+    return false;
+}
+
 bool CZNAMStore::ApplyRecord(const ZNAMMessage& msg, const std::string& ownerAddr,
                              const uint256& txid, int64_t height, int32_t txIndex,
                              const uint256& blockHash)
@@ -367,10 +390,22 @@ bool CZNAMStore::ApplyRecord(const ZNAMMessage& msg, const std::string& ownerAdd
 
     bool applied = false;
 
+    // D4 — defense-in-depth re-validation at the model boundary. The C parser
+    // already enforces name validity + target_type range, but ApplyRecord must
+    // be correct INDEPENDENT of its caller (so a future caller, or a parser bug,
+    // cannot push an invalid name into the store). An invalid name is a
+    // deterministic NO-OP: the switch is skipped (applied stays false), so we
+    // record the history row WITHOUT mutating any name/record/owner-index state.
+    // The per-command target_type guards below (REGISTER/UPDATE/SET_RECORD)
+    // provide the same belt-and-suspenders check for the 1..7 target range.
+    if (ZNAMValidateName(msg.name))
     switch (msg.command) {
     case ZNAMMSG_REGISTER: {
         // Ownerless registration is dropped; only a P2PKH signer can own a name.
-        if (!ownerAddr.empty() && (!exists || IsFreeOrExpired(cur, height))) {
+        // D4: also re-assert the 1..7 primary target_type at the model boundary
+        // (the parser already enforces this; belt-and-suspenders for a bad caller).
+        if (!ownerAddr.empty() && (!exists || IsFreeOrExpired(cur, height)) &&
+            msg.targetType >= ZNAM_TARGET_ONION && msg.targetType <= ZNAM_TARGET_CONTENT) {
             // A fresh registration RESETS the name: wipe any stale overlay rows
             // and the prior owner index left by an expired prior registration.
             if (exists) {
@@ -451,8 +486,8 @@ bool CZNAMStore::ApplyRecord(const ZNAMMessage& msg, const std::string& ownerAdd
         break;
     }
     case ZNAMMSG_UPDATE: {
-        if (exists && IsActive(cur, height) && cur.ownerAddr == ownerAddr &&
-            !ownerAddr.empty()) {
+        if (exists && CheckOwnerAuth(cur, ownerAddr, height, /*allowGrace=*/false) &&
+            msg.targetType >= ZNAM_TARGET_ONION && msg.targetType <= ZNAM_TARGET_CONTENT) {
             CZNAMName next = cur;
             next.primaryType = msg.targetType;
             next.primaryValue = msg.targetValue;
@@ -468,8 +503,8 @@ bool CZNAMStore::ApplyRecord(const ZNAMMessage& msg, const std::string& ownerAdd
         break;
     }
     case ZNAMMSG_TRANSFER: {
-        if (exists && IsActive(cur, height) && cur.ownerAddr == ownerAddr &&
-            !ownerAddr.empty() && IsValidP2PKHAddress(msg.newOwner)) {
+        if (exists && CheckOwnerAuth(cur, ownerAddr, height, /*allowGrace=*/false) &&
+            IsValidP2PKHAddress(msg.newOwner)) {
             // Move the owner reverse-index row from old -> new owner.
             batch.Erase(OwnerKey(cur.ownerAddr, msg.name));
             CZNAMUndoOp ue;
@@ -500,8 +535,7 @@ bool CZNAMStore::ApplyRecord(const ZNAMMessage& msg, const std::string& ownerAdd
         break;
     }
     case ZNAMMSG_RENEW: {
-        if (exists && (IsActive(cur, height) || IsInGrace(cur, height)) &&
-            cur.ownerAddr == ownerAddr && !ownerAddr.empty()) {
+        if (exists && CheckOwnerAuth(cur, ownerAddr, height, /*allowGrace=*/true)) {
             CZNAMName next = cur;
             int64_t base = std::max(cur.expiryHeight, height);
             int64_t extended = base + ZNAM_REGISTRATION_DURATION_BLOCKS;
@@ -519,8 +553,7 @@ bool CZNAMStore::ApplyRecord(const ZNAMMessage& msg, const std::string& ownerAdd
         break;
     }
     case ZNAMMSG_SET_RECORD: {
-        if (exists && IsActive(cur, height) && cur.ownerAddr == ownerAddr &&
-            !ownerAddr.empty() &&
+        if (exists && CheckOwnerAuth(cur, ownerAddr, height, /*allowGrace=*/false) &&
             msg.targetType >= ZNAM_TARGET_ONION && msg.targetType <= ZNAM_TARGET_CONTENT) {
             std::string prevValue;
             bool hadPrev = GetRecord(msg.name, msg.targetType, prevValue);
@@ -541,8 +574,7 @@ bool CZNAMStore::ApplyRecord(const ZNAMMessage& msg, const std::string& ownerAdd
         break;
     }
     case ZNAMMSG_SET_TEXT: {
-        if (exists && IsActive(cur, height) && cur.ownerAddr == ownerAddr &&
-            !ownerAddr.empty() &&
+        if (exists && CheckOwnerAuth(cur, ownerAddr, height, /*allowGrace=*/false) &&
             IsPrintableKey(msg.textKey) && !msg.textKey.empty() &&
             IsPrintableValue(msg.textValue)) {
             std::string prevValue;

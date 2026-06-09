@@ -59,7 +59,8 @@ zcash_gtest_SOURCES += \
 	gtest/test_torembed.cpp \
 	gtest/test_torv3_identity.cpp \
 	gtest/test_znam.cpp \
-	gtest/test_znam_indexer.cpp
+	gtest/test_znam_indexer.cpp \
+	gtest/test_znam_indexer_owner.cpp
 if ENABLE_WALLET
 zcash_gtest_SOURCES += \
 	wallet/gtest/test_paymentdisclosure.cpp \

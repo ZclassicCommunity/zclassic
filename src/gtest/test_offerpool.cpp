@@ -494,6 +494,57 @@ TEST(OfferPool, FloorByToken)
     EXPECT_TRUE(sawT2);
 }
 
+// D1: the search->buy seam. nft_browseoffers emits each offer as
+// "znftoffer:"+blob.ToBase64(); nft_takeoffer must be able to decode that exact
+// string back into the SAME blob via CNftOfferBlob::FromBase64. This round-trips
+// the wire form Browse hands the GUI (strip the "znftoffer:" URI prefix, base64
+// is the bare blob) and asserts byte-for-byte field equality — closing the gap
+// between what Browse returns and what takeoffer consumes.
+TEST(OfferPool, BrowseOfferBlobRoundTripsThroughFromBase64)
+{
+    COfferPool pool;
+    std::string reason;
+
+    CNftOfferBlob orig = MakeBlob(42, 123456789, 654321, 7);
+    ASSERT_TRUE(InsertGood(pool, orig, 100, reason)) << reason;
+
+    COfferPoolFilter f;
+    std::vector<COfferPoolEntry> res = pool.Browse(f);
+    ASSERT_EQ(1u, res.size());
+    const COfferPoolEntry& e = res[0];
+
+    // Exactly the field nft_browseoffers emits for "offerBlob".
+    const std::string offerBlob = "znftoffer:" + e.blob.ToBase64();
+
+    // The GUI / nft_takeoffer strips the "znftoffer:" prefix, then FromBase64.
+    const std::string prefix = "znftoffer:";
+    ASSERT_EQ(0u, offerBlob.find(prefix));
+    const std::string bare = offerBlob.substr(prefix.size());
+
+    CNftOfferBlob decoded;
+    std::string err;
+    ASSERT_TRUE(decoded.FromBase64(bare, err)) << err;
+    EXPECT_TRUE(err.empty());
+
+    // Byte-for-byte field equality (the seam must not mutate the offer).
+    EXPECT_EQ(orig.tokenId, decoded.tokenId);
+    EXPECT_EQ(orig.priceZat, decoded.priceZat);
+    EXPECT_EQ(orig.payoutAddr, decoded.payoutAddr);
+    EXPECT_EQ(orig.buyerNftAddr, decoded.buyerNftAddr);
+    EXPECT_EQ(orig.expiryHeight, decoded.expiryHeight);
+    EXPECT_EQ(orig.offerHex, decoded.offerHex);
+
+    // And the content hash (the pool key / anti-grind id) is preserved.
+    EXPECT_EQ(orig.OfferHash(), decoded.OfferHash());
+    EXPECT_EQ(e.offerHash, decoded.OfferHash());
+
+    // A garbage base64 must FAIL to decode (fail-closed), not silently accept.
+    CNftOfferBlob bad;
+    std::string baderr;
+    EXPECT_FALSE(bad.FromBase64("not!valid!base64!!!", baderr));
+    EXPECT_FALSE(baderr.empty());
+}
+
 TEST(OfferPool, ClearResetsAccounting)
 {
     COfferPool pool;

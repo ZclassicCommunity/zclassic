@@ -245,7 +245,7 @@ bool CZNAMIndexer::ExtractP2PKHOwnerFromScript(const CScript& scriptPubKey,
 // so block-tx index i maps to vtxundo[i-1]). Empty/short undo => no owner.
 bool CZNAMIndexer::GetOwnerForTransaction(const CTransaction& tx, int32_t txIndex,
                                           const CBlockUndo& blockUndo,
-                                          std::string& ownerAddr) const
+                                          std::string& ownerAddr)
 {
     if (txIndex < 1) // coinbase has only a null prevout; never an owner
         return false;
