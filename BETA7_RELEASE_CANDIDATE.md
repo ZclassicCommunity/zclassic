@@ -4,8 +4,8 @@ Status: daemon release-candidate handoff.
 Candidate branch: `origin/beta7/zmarket-spider-router-index`
 Candidate head: resolve at final audit time with
 `git rev-parse origin/beta7/zmarket-spider-router-index`.
-Last source-verified code head before this handoff update:
-`d6cbdb51cc963b9a0bfca096e6ddd655f506d689`.
+Latest local ZMARKET/source-gate verified head:
+`b45cf6225cd760fdf82b80c0468fa7f6583ea1e2`.
 Base: `origin/master` at `14a83d510ffd109d3fa09bf74ebf8c28854a263f`
 
 ## What This Candidate Contains
@@ -61,6 +61,7 @@ git show origin/beta7/zmarket-spider-router-index:depends/sources/tor-73bd405.ta
 Results:
 
 - source gate passed;
+- `./src/zcash-gtest --gtest_filter='ZMarket*'` passed: 35/35 tests;
 - whitespace diff check passed;
 - no direct consensus-path diff in the listed paths;
 - Tor tarball hash matched;
@@ -76,6 +77,7 @@ Agent 3 should perform a read-only final audit on:
 git fetch origin
 git rev-parse origin/beta7/zmarket-spider-router-index
 qa/beta7/check-source-gates.sh origin/master origin/beta7/zmarket-spider-router-index
+./src/zcash-gtest --gtest_filter='ZMarket*'
 ```
 
 Then run or confirm:
