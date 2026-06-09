@@ -202,6 +202,21 @@ public:
             1138            // * recent transactions/day (measured: ~1.0 tx/block, ~1138 blocks/day)
         };
 
+        // ZIP-209: reject any block that drives a shielded value pool balance
+        // negative (turnstile enforcement). Previously configured on testnet
+        // only; this mirrors that for mainnet. The hardcoded Sprout checkpoint
+        // re-seeds nChainSproutValue for nodes whose block index predates pool
+        // monitoring, so they can enforce from this height forward WITHOUT a full
+        // reindex; nodes that tracked the pool from genesis instead assert their
+        // computed balance equals this value, so it MUST be the exact genesis-
+        // derived Sprout balance at this block. Verified on a synced mainnet node:
+        //   getblock 0000038aee939c8017f4ad353e3fd1313c6a0da565bbc1d3269bbe855fe33505
+        //   -> valuePools[id=sprout].chainValueZat == 1316412375709  (height 3000000)
+        nSproutValuePoolCheckpointHeight = 3000000;
+        nSproutValuePoolCheckpointBalance = 1316412375709;
+        fZIP209Enabled = true;
+        hashSproutValuePoolCheckpointBlock = uint256S("0000038aee939c8017f4ad353e3fd1313c6a0da565bbc1d3269bbe855fe33505");
+
         fastSyncAnchorData.nHeight = 3126937;
         fastSyncAnchorData.hashBlock = uint256S("0x00000663e40f1fe0bc32a7e7282fac25de5fe8ecefd9c627e2fd948d388f7053");
         fastSyncAnchorData.hashAnchorSha256 = uint256S("0x376d6d5e6f7d02459b89ae0988f5c51bb1deaf2a3e4b3a1de745e4f2e3bb279d");
