@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
 
+#include "checkqueue.h"
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
 #include "main.h"
 #include "pow.h"
+#include "script/interpreter.h"
 #include "txdb.h"
 #include "utiltest.h"
 
@@ -370,4 +372,80 @@ TEST(Validation, ChainstateCommitmentBindsCoinMetadata)
     ASSERT_TRUE(db.GetStats(bumpHeight));
     EXPECT_EQ(base.hashSerialized, bumpHeight.hashSerialized);
     EXPECT_NE(base.hashSerializedFull, bumpHeight.hashSerializedFull);
+}
+
+// Regression guard for the CVE-2024-52911-parity use-after-free in ConnectBlock.
+//
+// In ConnectBlock, queued CScriptChecks hold a raw PrecomputedTransactionData*
+// into a local `txdata` vector, and ~CCheckQueueControl() calls Wait() on every
+// (including early) return. Crucially, Wait() drains any still-queued checks ON
+// THE CALLING THREAD (the "master" in CCheckQueue::Loop). So if `txdata` is
+// declared AFTER `control`, reverse-order destruction frees txdata BEFORE
+// ~control's Wait() runs the queued check that dereferences it -> heap UAF.
+//
+// The check below mirrors CScriptCheck: it holds a PrecomputedTransactionData*
+// and dereferences it when run. Because no background worker threads are started,
+// the queued check is guaranteed to execute inside ~control's Wait() on this
+// thread -> the reproduction is DETERMINISTIC, not racy.
+//
+//  * EXPECT_TRUE(ran) deterministically guards the property the fix depends on:
+//    ~CCheckQueueControl drains queued checks. If that contract regresses, the
+//    fix becomes a silent no-op and this fails WITHOUT needing a sanitizer.
+//  * Under AddressSanitizer, swapping the declaration order of `txdata` and
+//    `control` below makes the drained check read freed memory -> ASan reports
+//    heap-use-after-free. Build with: ./configure --with-sanitizers=address
+//
+// NOTE: this guards the lifetime *mechanism*; the exact declaration order inside
+// ConnectBlock itself is guarded by the inline comment there + code review.
+struct LifetimeCheck {
+    const PrecomputedTransactionData* pdata;
+    uint256* sink;
+    bool* ran;
+    LifetimeCheck() : pdata(nullptr), sink(nullptr), ran(nullptr) {}
+    LifetimeCheck(const PrecomputedTransactionData* pdataIn, uint256* sinkIn, bool* ranIn)
+        : pdata(pdataIn), sink(sinkIn), ran(ranIn) {}
+    bool operator()() {
+        // Dereference pdata exactly as CScriptCheck dereferences its txdata.
+        if (pdata != nullptr && sink != nullptr) {
+            *sink = pdata->hashPrevouts;
+        }
+        if (ran != nullptr) {
+            *ran = true;
+        }
+        return true;
+    }
+    void swap(LifetimeCheck& other) {
+        std::swap(pdata, other.pdata);
+        std::swap(sink, other.sink);
+        std::swap(ran, other.ran);
+    }
+};
+
+TEST(Validation, CheckQueueControlDrainsQueuedCheckBeforeTxdataDestroyed) {
+    CCheckQueue<LifetimeCheck> queue(128);
+    uint256 sink;
+    bool ran = false;
+    {
+        // ConnectBlock's FIXED ordering: txdata declared BEFORE control, so
+        // ~control's Wait() (which drains the queued check on this thread) runs
+        // BEFORE txdata is destroyed. Swapping these two lines reproduces the
+        // use-after-free under AddressSanitizer.
+        std::vector<PrecomputedTransactionData> txdata;
+        txdata.reserve(1);
+        CMutableTransaction mtx;
+        mtx.vin.resize(1);
+        txdata.emplace_back(CTransaction(mtx));
+
+        CCheckQueueControl<LifetimeCheck> control(&queue);
+
+        std::vector<LifetimeCheck> vChecks;
+        vChecks.emplace_back(&txdata[0], &sink, &ran);
+        control.Add(vChecks);
+
+        // Simulate an early consensus-failure return (coinbase overpay / bad
+        // Sapling root): leave scope WITHOUT calling control.Wait().
+    }
+    // ~control must have drained the queued check on this thread while txdata
+    // was still alive. If it did not, the fix is void.
+    EXPECT_TRUE(ran);
 }
