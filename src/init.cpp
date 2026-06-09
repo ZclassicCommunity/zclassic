@@ -2567,8 +2567,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // the CConnman added-node list without lock-ordering hazards, which does
     // not exist yet.
     if (!mapArgs.count("-connect")) {
+        // Append the bootstrap peers AFTER any user-supplied -addnode entries
+        // (which are already present in this vector from ParseParameters), so
+        // ThreadOpenAddedConnections attempts the user's peers first and the
+        // injected bootstrap peers only as a fallback. De-duplicate: skip any
+        // bootstrap peer the user already pinned. Never starves user entries.
+        std::vector<std::string>& addnodes = mapMultiArgs["-addnode"];
         BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
-            std::vector<std::string>& addnodes = mapMultiArgs["-addnode"];
             if (std::find(addnodes.begin(), addnodes.end(), peer) == addnodes.end()) {
                 addnodes.push_back(peer);
                 LogPrintf("Adding bootstrap peer %s as a persistent sync node\n", peer);
