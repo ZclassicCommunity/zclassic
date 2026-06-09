@@ -15,6 +15,7 @@
 #include "wallet/paymentdisclosure.h"
 
 #include <array>
+#include <set>
 #include <unordered_map>
 #include <tuple>
 
@@ -60,7 +61,14 @@ public:
         std::vector<SendManyRecipient> zOutputs,
         int minDepth,
         CAmount fee = ASYNC_RPC_OPERATION_DEFAULT_MINERS_FEE,
-        UniValue contextInfo = NullUniValue);
+        UniValue contextInfo = NullUniValue,
+        // Optional coin-control: when useInputSelection is true, the spend is
+        // restricted to exactly the pinned UTXOs/notes below. NON-CONSENSUS:
+        // this only narrows which already-valid inputs the wallet may select.
+        bool useInputSelection = false,
+        std::set<COutPoint> pinnedTransparent = std::set<COutPoint>(),
+        std::set<SaplingOutPoint> pinnedSapling = std::set<SaplingOutPoint>(),
+        std::set<JSOutPoint> pinnedSprout = std::set<JSOutPoint>());
     virtual ~AsyncRPCOperation_sendmany();
     
     // We don't want to be copied or moved around
@@ -104,6 +112,14 @@ private:
     std::vector<SendManyInputUTXO> t_inputs_;
     std::vector<SendManyInputJSOP> z_sprout_inputs_;
     std::vector<SaplingNoteEntry> z_sapling_inputs_;
+
+    // Coin-control (optional). When useInputSelection_ is true, find_utxos()
+    // and find_unspent_notes() restrict the spend to exactly these inputs.
+    // NON-CONSENSUS: this only narrows selection of already-valid inputs.
+    bool useInputSelection_ = false;
+    std::set<COutPoint> pinnedTransparent_;
+    std::set<SaplingOutPoint> pinnedSapling_;
+    std::set<JSOutPoint> pinnedSprout_;
 
     TransactionBuilder builder_;
     CTransaction tx_;
@@ -197,6 +213,23 @@ public:
     
     void set_state(OperationStatus state) {
         delegate->state_.store(state);
+    }
+
+    // Coin-control accessors (for unit testing input selection wiring).
+    bool useInputSelection() {
+        return delegate->useInputSelection_;
+    }
+
+    const std::set<COutPoint>& pinnedTransparent() {
+        return delegate->pinnedTransparent_;
+    }
+
+    const std::set<SaplingOutPoint>& pinnedSapling() {
+        return delegate->pinnedSapling_;
+    }
+
+    const std::set<JSOutPoint>& pinnedSprout() {
+        return delegate->pinnedSprout_;
     }
 };
 
