@@ -97,4 +97,26 @@ BOOST_AUTO_TEST_CASE(fast_sync_anchor_negative_branches)
     }
 }
 
+BOOST_AUTO_TEST_CASE(checkpoint_hash_lockin)
+{
+    const uint256 hashA = uint256S("0x00000000000000000000000000000000000000000000000000000000000000aa");
+    const uint256 hashB = uint256S("0x00000000000000000000000000000000000000000000000000000000000000bb");
+
+    CCheckpointData data{};
+    data.mapCheckpoints[30000]  = hashA;
+    data.mapCheckpoints[160000] = hashB;
+
+    // No checkpoint at this height -> always accepted, regardless of hash.
+    BOOST_CHECK(Checkpoints::CheckBlock(data, 12345, hashA));
+    BOOST_CHECK(Checkpoints::CheckBlock(data, 12345, hashB));
+
+    // Correct hash at a checkpoint height -> accepted.
+    BOOST_CHECK(Checkpoints::CheckBlock(data, 30000, hashA));
+    BOOST_CHECK(Checkpoints::CheckBlock(data, 160000, hashB));
+
+    // Wrong hash at a checkpoint height -> rejected (the forgery case #2 closes).
+    BOOST_CHECK(!Checkpoints::CheckBlock(data, 30000, hashB));
+    BOOST_CHECK(!Checkpoints::CheckBlock(data, 160000, hashA));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
