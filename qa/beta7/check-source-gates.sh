@@ -5,6 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 base_ref="${1:-origin/master}"
 candidate_ref="${2:-HEAD}"
 tor_sha="178fb8242d5a1066c3535f1328d8b5ef1e4578e318a8e622d6a6732144fa2517"
+zlib_sha="9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23"
 failures=0
 
 cd "$repo_root"
@@ -140,6 +141,7 @@ required_files=(
   doc/social/ZSOCIAL_PROTOCOL.md
   depends/packages/tor.mk
   depends/sources/tor-73bd405.tar.gz
+  depends/sources/zlib-1.3.1.tar.gz
   src/torembed.cpp
   src/torembed.h
   src/rpc/zslp.cpp
@@ -195,6 +197,14 @@ if git cat-file -e "$candidate_commit:depends/sources/tor-73bd405.tar.gz" 2>/dev
     && pass "tor tarball sha256" \
     || fail "tor tarball sha256 mismatch: $actual_sha"
   require_tracked depends/sources/tor-73bd405.tar.gz
+fi
+
+if git cat-file -e "$candidate_commit:depends/sources/zlib-1.3.1.tar.gz" 2>/dev/null; then
+  actual_sha="$(git show "$candidate_commit:depends/sources/zlib-1.3.1.tar.gz" | sha256sum | awk '{print $1}')"
+  [[ "$actual_sha" == "$zlib_sha" ]] \
+    && pass "zlib tarball sha256" \
+    || fail "zlib tarball sha256 mismatch: $actual_sha"
+  require_tracked depends/sources/zlib-1.3.1.tar.gz
 fi
 
 for path in \

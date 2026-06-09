@@ -4,6 +4,7 @@ built/
 sources/*
 !sources/.gitignore
 !sources/tor-73bd405.tar.gz
+!sources/zlib-1.3.1.tar.gz
 config.site
 x86_64*
 i686*
