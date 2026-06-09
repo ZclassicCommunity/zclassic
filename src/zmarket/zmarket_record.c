@@ -27,17 +27,23 @@ static uint64_t rd64le(const uint8_t *p)
 uint32_t zmarket_record_type_max_payload(enum zmarket_record_type type)
 {
     switch (type) {
-    case ZMARKET_RECORD_OFFER:      return 8u * 1024u;
-    case ZMARKET_RECORD_MANIFEST:   return 64u * 1024u;
-    case ZMARKET_RECORD_MIRROR:     return 8u * 1024u;
-    case ZMARKET_RECORD_MIRROR_SET: return 16u * 1024u;
-    default:                        return 0u;
+    case ZMARKET_RECORD_LISTING:            return 8u * 1024u;
+    case ZMARKET_RECORD_BUYREQ_ROUTE:       return 4u * 1024u;
+    case ZMARKET_RECORD_SEALED_OFFER_ROUTE: return 8u * 1024u;
+    case ZMARKET_RECORD_CANCEL:             return 2u * 1024u;
+    case ZMARKET_RECORD_MANIFEST:           return 64u * 1024u;
+    case ZMARKET_RECORD_MIRROR:             return 8u * 1024u;
+    case ZMARKET_RECORD_MIRROR_SET:         return 16u * 1024u;
+    default:                                return 0u;
     }
 }
 
 bool zmarket_record_type_is_routable(enum zmarket_record_type type)
 {
-    return type == ZMARKET_RECORD_OFFER ||
+    return type == ZMARKET_RECORD_LISTING ||
+           type == ZMARKET_RECORD_BUYREQ_ROUTE ||
+           type == ZMARKET_RECORD_SEALED_OFFER_ROUTE ||
+           type == ZMARKET_RECORD_CANCEL ||
            type == ZMARKET_RECORD_MANIFEST ||
            type == ZMARKET_RECORD_MIRROR ||
            type == ZMARKET_RECORD_MIRROR_SET;
@@ -69,7 +75,7 @@ zmarket_record_parse(const uint8_t *bytes, size_t len,
         return ZMARKET_RECORD_ERR_VERSION;
 
     type = rd16le(bytes + off); off += 2;
-    if (type < ZMARKET_RECORD_OFFER || type > ZMARKET_RECORD_MIRROR_SET)
+    if (type < ZMARKET_RECORD_LISTING || type > ZMARKET_RECORD_MIRROR_SET)
         return ZMARKET_RECORD_ERR_TYPE;
 
     out->type = (enum zmarket_record_type)type;

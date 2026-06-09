@@ -883,3 +883,53 @@ Wallet/RPC tests:
   onion-only market route mode.
 - Spidering, routing, indexing, validation cache, peer scoring, and content
   allowlist decisions are C-owned hot paths. C++ and Qt remain bridges.
+
+## 14. Beta7 Onion Identity Rules
+
+### Separate Reusable Identities Per Role
+
+Each marketplace role uses its **own dedicated reusable onion identity**. A node
+running multiple roles (market listing, content mirror, social/relay, direct
+buyer-seller) maintains separate `.onion` v3 service identities for each, with
+independent key material. The `zmarket_onion_set` tracks endpoints tagged with
+`zmarket_onion_role` bits (`MARKET`, `CONTENT`, `SOCIAL`, `DIRECT`); routing
+selects only endpoints matching the required role.
+
+### One-Time Onions: Short-Lived Direct/Private Only
+
+`ZMARKET_ONION_SCOPE_ONE_TIME` endpoints are **exclusively for short-lived
+direct/private routes** between a specific buyer and seller. After a single
+successful use, the endpoint transitions to `ZMARKET_ONION_USED` state and is
+permanently retired — it can never be chosen again by `zmarket_onion_choose`.
+One-time onions must never be used for market listings, content mirroring, or
+social relay roles. They require a non-zero `scope_id` binding them to the
+specific trade session.
+
+### Deferred: OnionBalance and Shared-Key Replicas
+
+Beta7 **defers** OnionBalance and shared-key `.onion` replica configurations.
+Multi-server high availability for onion services is a deployment-time concern
+that requires external orchestration (OnionBalance, Tor `HiddenServicePort`
+distribution) and is out of scope for the C hot-path engine. The onion module
+does not manage replica keys, load balancers, or shared secret material.
+
+### Load Balancing: App-Level Failover Across Signed Endpoints
+
+Load balancing is **app-level failover across multiple signed mirror/endpoint
+records**. The `zmarket_onion_set` stores multiple `MIRROR` or `MIRROR_SET`
+record-backed endpoints, each carrying a `weight` and `scope_id` for weighted
+selection. When one endpoint fails (tracked via `fail_count`), the engine
+selects the next-best candidate from the signed set. No media is downloaded
+by the indexer — only signed endpoint metadata (host, port, weight, expiry,
+role, scope) is tracked in-RAM. Failover scoring uses a deterministic
+FNV-1a-based weighted random with failure penalty, seeded per-query to ensure
+reproducible selection without requiring persistent state.
+
+### Onion Identity Summary Table
+
+| Scope | Lifecycle | Roles | `scope_id` | Use Case |
+|---|---|---|---|---|
+| `REUSABLE` | Persistent, operator-managed | MARKET, CONTENT, SOCIAL | Optional | Long-lived market/mirror/relay |
+| `ASSET` | Per-asset listing | MARKET, CONTENT | Required | Tied to a specific NFT/collection |
+| `SESSION` | Session-bound | Any | Required | Temporary session, survives disconnect |
+| `ONE_TIME` | Single-use, then retired | DIRECT only | Required | Private buyer↔seller route |

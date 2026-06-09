@@ -7,6 +7,7 @@
 extern "C" {
 #include "zmarket/zmarket_content.h"
 #include "zmarket/zmarket_index.h"
+#include "zmarket/zmarket_onion.h"
 #include "zmarket/zmarket_policy.h"
 #include "zmarket/zmarket_record.h"
 }
@@ -109,6 +110,42 @@ TEST(ZMarketCRecord, RejectsOversizeAndTrailingBytes)
     bytes.push_back(0x00);
     EXPECT_EQ(zmarket_record_parse(bytes.data(), bytes.size(), 8192, &view),
               ZMARKET_RECORD_ERR_TRAILING);
+}
+
+TEST(ZMarketCRecord, SupportsRouteAndCancelRecordTypes)
+{
+    std::vector<unsigned char> route_payload(16, 'r');
+    std::vector<unsigned char> cancel_payload(8, 'c');
+    zmarket_record_view view;
+
+    std::vector<unsigned char> bytes =
+        record(ZMARKET_RECORD_BUYREQ_ROUTE, route_payload);
+    ASSERT_EQ(zmarket_record_parse(bytes.data(), bytes.size(), 8192, &view),
+              ZMARKET_RECORD_OK);
+    EXPECT_EQ(view.type, ZMARKET_RECORD_BUYREQ_ROUTE);
+    EXPECT_TRUE(zmarket_record_type_is_routable(view.type));
+
+    bytes = record(ZMARKET_RECORD_SEALED_OFFER_ROUTE, route_payload);
+    ASSERT_EQ(zmarket_record_parse(bytes.data(), bytes.size(), 8192, &view),
+              ZMARKET_RECORD_OK);
+    EXPECT_EQ(view.type, ZMARKET_RECORD_SEALED_OFFER_ROUTE);
+    EXPECT_TRUE(zmarket_record_type_is_routable(view.type));
+
+    bytes = record(ZMARKET_RECORD_CANCEL, cancel_payload);
+    ASSERT_EQ(zmarket_record_parse(bytes.data(), bytes.size(), 8192, &view),
+              ZMARKET_RECORD_OK);
+    EXPECT_EQ(view.type, ZMARKET_RECORD_CANCEL);
+}
+
+TEST(ZMarketCRecord, EnforcesPerTypePayloadCaps)
+{
+    std::vector<unsigned char> too_large_cancel(3 * 1024, 'x');
+    std::vector<unsigned char> bytes =
+        record(ZMARKET_RECORD_CANCEL, too_large_cancel);
+    zmarket_record_view view;
+
+    EXPECT_EQ(zmarket_record_parse(bytes.data(), bytes.size(), 8192, &view),
+              ZMARKET_RECORD_ERR_SIZE);
 }
 
 TEST(ZMarketCIndex, FixedMemoryDedupe)
@@ -239,4 +276,112 @@ TEST(ZMarketCContent, BoundedAllowlistUpdatesAndRemoves)
                                             std::strlen(path_b), 30),
               ZMARKET_CONTENT_OK);
     EXPECT_TRUE(zmarket_content_operator_allowed(&allowlist, root_b));
+}
+
+TEST(ZMarketCOnion, ValidatesCanonicalV3OnionHosts)
+{
+    const char host[] =
+        "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+
+    ASSERT_EQ(std::strlen(host), (size_t)ZMARKET_ONION_HOST_LEN);
+    EXPECT_TRUE(zmarket_onion_host_is_v3(host, std::strlen(host)));
+    EXPECT_FALSE(zmarket_onion_host_is_v3(host, std::strlen(host) - 1));
+
+    char uppercase[ZMARKET_ONION_HOST_BUF_LEN];
+    std::memcpy(uppercase, host, sizeof(host));
+    uppercase[0] = 'A';
+    EXPECT_FALSE(zmarket_onion_host_is_v3(uppercase, std::strlen(uppercase)));
+
+    const char bad_suffix[] =
+        "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.tor";
+    EXPECT_FALSE(zmarket_onion_host_is_v3(bad_suffix,
+                                          std::strlen(bad_suffix)));
+}
+
+TEST(ZMarketCOnion, TracksReusableAndOneTimeEndpoints)
+{
+    zmarket_onion_endpoint entries[3];
+    zmarket_onion_set set;
+    zmarket_onion_set_init(&set, entries, 3);
+
+    const char market_host[] =
+        "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+    const char direct_host[] =
+        "bcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxy.onion";
+
+    unsigned char scope_id[ZMARKET_ONION_SCOPE_ID_LEN] = {0};
+    scope_id[0] = 0x55;
+    scope_id[31] = 0xaa;
+
+    EXPECT_EQ(zmarket_onion_set_put(&set, market_host,
+                                    std::strlen(market_host), 9735,
+                                    ZMARKET_ONION_ROLE_MARKET |
+                                        ZMARKET_ONION_ROLE_SOCIAL,
+                                    ZMARKET_ONION_SCOPE_REUSABLE, nullptr,
+                                    100, 1700001000ULL, 1700000000ULL),
+              ZMARKET_ONION_OK);
+
+    EXPECT_EQ(zmarket_onion_set_put(&set, direct_host,
+                                    std::strlen(direct_host), 9736,
+                                    ZMARKET_ONION_ROLE_DIRECT,
+                                    ZMARKET_ONION_SCOPE_ONE_TIME, scope_id,
+                                    100, 1700001000ULL, 1700000000ULL),
+              ZMARKET_ONION_OK);
+    EXPECT_EQ(zmarket_onion_set_count(&set), (size_t)2);
+
+    const zmarket_onion_endpoint* chosen =
+        zmarket_onion_choose(&set, ZMARKET_ONION_ROLE_MARKET,
+                             1700000100ULL, 1234);
+    ASSERT_NE(chosen, nullptr);
+    EXPECT_STREQ(chosen->host, market_host);
+
+    chosen = zmarket_onion_choose(&set, ZMARKET_ONION_ROLE_DIRECT,
+                                  1700000100ULL, 1234);
+    ASSERT_NE(chosen, nullptr);
+    EXPECT_STREQ(chosen->host, direct_host);
+
+    EXPECT_TRUE(zmarket_onion_mark_success(&set, direct_host,
+                                           std::strlen(direct_host), 9736,
+                                           1700000200ULL));
+    EXPECT_EQ(zmarket_onion_choose(&set, ZMARKET_ONION_ROLE_DIRECT,
+                                   1700000201ULL, 1234),
+              nullptr);
+}
+
+TEST(ZMarketCOnion, RejectsAmbiguousOrExpiredEndpoints)
+{
+    zmarket_onion_endpoint entries[1];
+    zmarket_onion_set set;
+    zmarket_onion_set_init(&set, entries, 1);
+
+    const char host[] =
+        "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+    unsigned char zero_scope[ZMARKET_ONION_SCOPE_ID_LEN] = {0};
+    unsigned char scope_id[ZMARKET_ONION_SCOPE_ID_LEN] = {0};
+    scope_id[1] = 0x42;
+
+    EXPECT_EQ(zmarket_onion_set_put(&set, host, std::strlen(host), 0,
+                                    ZMARKET_ONION_ROLE_MARKET,
+                                    ZMARKET_ONION_SCOPE_REUSABLE, nullptr,
+                                    100, 0, 0),
+              ZMARKET_ONION_ERR_PORT);
+    EXPECT_EQ(zmarket_onion_set_put(&set, host, std::strlen(host), 9735,
+                                    0,
+                                    ZMARKET_ONION_SCOPE_REUSABLE, nullptr,
+                                    100, 0, 0),
+              ZMARKET_ONION_ERR_ROLE);
+    EXPECT_EQ(zmarket_onion_set_put(&set, host, std::strlen(host), 9735,
+                                    ZMARKET_ONION_ROLE_MARKET,
+                                    ZMARKET_ONION_SCOPE_ONE_TIME, zero_scope,
+                                    100, 0, 0),
+              ZMARKET_ONION_ERR_SCOPE);
+
+    EXPECT_EQ(zmarket_onion_set_put(&set, host, std::strlen(host), 9735,
+                                    ZMARKET_ONION_ROLE_MARKET,
+                                    ZMARKET_ONION_SCOPE_ASSET, scope_id,
+                                    100, 1700000100ULL, 1700000000ULL),
+              ZMARKET_ONION_OK);
+    EXPECT_EQ(zmarket_onion_choose(&set, ZMARKET_ONION_ROLE_MARKET,
+                                   1700000200ULL, 1),
+              nullptr);
 }

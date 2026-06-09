@@ -20,11 +20,19 @@ extern "C" {
 #define ZMARKET_ID_LEN 32u
 
 enum zmarket_record_type {
-    ZMARKET_RECORD_INVALID    = 0,
-    ZMARKET_RECORD_OFFER      = 1,
-    ZMARKET_RECORD_MANIFEST   = 2,
-    ZMARKET_RECORD_MIRROR     = 3,
-    ZMARKET_RECORD_MIRROR_SET = 4
+    ZMARKET_RECORD_INVALID            = 0,
+    ZMARKET_RECORD_LISTING            = 1,
+    ZMARKET_RECORD_BUYREQ_ROUTE       = 2,
+    ZMARKET_RECORD_SEALED_OFFER_ROUTE = 3,
+    ZMARKET_RECORD_CANCEL             = 4,
+    ZMARKET_RECORD_MANIFEST           = 5,
+    ZMARKET_RECORD_MIRROR             = 6,
+    ZMARKET_RECORD_MIRROR_SET         = 7,
+
+    /* Compatibility name for early beta7 scaffolding. Public listings are not
+     * buyer-specific settlement offers; final buys still revalidate the sealed
+     * ZNFTOFFER1 flow before spending. */
+    ZMARKET_RECORD_OFFER = ZMARKET_RECORD_LISTING
 };
 
 enum zmarket_record_error {

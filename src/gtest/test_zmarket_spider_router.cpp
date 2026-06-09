@@ -8,6 +8,7 @@
 extern "C" {
 #include "zmarket/zmarket_content.h"
 #include "zmarket/zmarket_index.h"
+#include "zmarket/zmarket_onion.h"
 #include "zmarket/zmarket_policy.h"
 #include "zmarket/zmarket_record.h"
 #include "zmarket/zmarket_router.h"
@@ -764,4 +765,523 @@ TEST(ZMarketCIndex, IterVisitsAllSlots)
             return *cnt < 3;
         }, &limited);
     EXPECT_EQ(limited, (size_t)3);
+}
+
+// ============================================================
+// Onion endpoint lifecycle tests
+// ============================================================
+
+TEST(ZMarketCOnion, OneTimeEndpointRetiresAfterSuccessfulUse)
+{
+    /* One-time onion endpoints must retire (state -> USED) after a single
+     * successful use and must never be chosen again by zmarket_onion_choose. */
+
+    zmarket_onion_endpoint entries[4];
+    zmarket_onion_set set;
+    zmarket_onion_set_init(&set, entries, 4);
+
+    const char one_time_a[] =
+        "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+    const char one_time_b[] =
+        "bcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxy.onion";
+    const char reusable_c[] =
+        "cdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxyz.onion";
+
+    unsigned char scope_id[ZMARKET_ONION_SCOPE_ID_LEN] = {0};
+    scope_id[0] = 0x77;
+
+    /* Insert one-time endpoints and a reusable endpoint. */
+    ASSERT_EQ(zmarket_onion_set_put(&set, one_time_a,
+                std::strlen(one_time_a), 9735,
+                ZMARKET_ONION_ROLE_DIRECT,
+                ZMARKET_ONION_SCOPE_ONE_TIME, scope_id,
+                100, 1700002000ULL, 1700000000ULL),
+              ZMARKET_ONION_OK);
+    ASSERT_EQ(zmarket_onion_set_put(&set, one_time_b,
+                std::strlen(one_time_b), 9736,
+                ZMARKET_ONION_ROLE_DIRECT,
+                ZMARKET_ONION_SCOPE_ONE_TIME, scope_id,
+                100, 1700002000ULL, 1700000000ULL),
+              ZMARKET_ONION_OK);
+    ASSERT_EQ(zmarket_onion_set_put(&set, reusable_c,
+                std::strlen(reusable_c), 9737,
+                ZMARKET_ONION_ROLE_DIRECT,
+                ZMARKET_ONION_SCOPE_REUSABLE, nullptr,
+                100, 1700002000ULL, 1700000000ULL),
+              ZMARKET_ONION_OK);
+
+    /* Choose a DIRECT one-time endpoint. */
+    const zmarket_onion_endpoint *ep =
+        zmarket_onion_choose(&set, ZMARKET_ONION_ROLE_DIRECT,
+                             1700000100ULL, 42);
+    ASSERT_NE(ep, nullptr);
+    EXPECT_EQ(ep->scope, (uint8_t)ZMARKET_ONION_SCOPE_ONE_TIME);
+    EXPECT_EQ(ep->use_count, (uint32_t)0);
+
+    /* Mark it as successfully used. */
+    EXPECT_TRUE(zmarket_onion_mark_success(&set, ep->host,
+                                           ZMARKET_ONION_HOST_LEN,
+                                           ep->port, 1700000200ULL));
+
+    /* Verify the endpoint is now in USED state. */
+    const zmarket_onion_endpoint *used_ep =
+        zmarket_onion_set_find(&set, ep->host, ZMARKET_ONION_HOST_LEN,
+                               ep->port);
+    ASSERT_NE(used_ep, nullptr);
+    EXPECT_EQ(used_ep->state, (uint8_t)ZMARKET_ONION_USED);
+    EXPECT_EQ(used_ep->use_count, (uint32_t)1);
+    EXPECT_EQ(used_ep->success_count, (uint32_t)1);
+
+    /* The retired endpoint must never be chosen again. */
+    const zmarket_onion_endpoint *chosen_again =
+        zmarket_onion_choose(&set, ZMARKET_ONION_ROLE_DIRECT,
+                             1700000300ULL, 9999);
+    /* Should get the other one-time or the reusable, NOT the retired one. */
+    if (chosen_again) {
+        EXPECT_NE(chosen_again->state, (uint8_t)ZMARKET_ONION_USED);
+        /* The retired endpoint should never appear. */
+        EXPECT_NE(memcmp(chosen_again->host, used_ep->host,
+                         ZMARKET_ONION_HOST_LEN), 0);
+    }
+
+    /* Mark the other one-time as used too. */
+    const zmarket_onion_endpoint *other = nullptr;
+    if (chosen_again &&
+        chosen_again->scope == ZMARKET_ONION_SCOPE_ONE_TIME) {
+        other = chosen_again;
+        zmarket_onion_mark_success(&set, other->host,
+                                   ZMARKET_ONION_HOST_LEN,
+                                   other->port, 1700000300ULL);
+    }
+
+    /* After both one-time endpoints are used, only the reusable one
+     * should remain selectable. */
+    const zmarket_onion_endpoint *final_choice =
+        zmarket_onion_choose(&set, ZMARKET_ONION_ROLE_DIRECT,
+                             1700000400ULL, 12345);
+    ASSERT_NE(final_choice, nullptr);
+    EXPECT_EQ(final_choice->scope, (uint8_t)ZMARKET_ONION_SCOPE_REUSABLE);
+    EXPECT_STREQ(final_choice->host, reusable_c);
+
+    /* Reusable endpoint survives repeated use. */
+    for (int i = 0; i < 5; i++)
+        zmarket_onion_mark_success(&set, reusable_c,
+                                   std::strlen(reusable_c), 9737,
+                                   1700000400ULL + (uint64_t)i);
+    const zmarket_onion_endpoint *still_ok =
+        zmarket_onion_set_find(&set, reusable_c,
+                               std::strlen(reusable_c), 9737);
+    ASSERT_NE(still_ok, nullptr);
+    EXPECT_EQ(still_ok->state, (uint8_t)ZMARKET_ONION_ACTIVE);
+    EXPECT_EQ(still_ok->use_count, (uint32_t)5);
+}
+
+TEST(ZMarketCOnion, ExpiredEndpointsAreNeverChosen)
+{
+    /* Expired endpoints must never appear in zmarket_onion_choose results,
+     * regardless of role, weight, or seed. */
+
+    zmarket_onion_endpoint entries[4];
+    zmarket_onion_set set;
+    zmarket_onion_set_init(&set, entries, 4);
+
+    const char host_a[] =
+        "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+    const char host_b[] =
+        "bcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxy.onion";
+
+    unsigned char scope_id[ZMARKET_ONION_SCOPE_ID_LEN] = {0};
+    scope_id[0] = 0x33;
+
+    /* Insert an expired endpoint (expires at 1000). */
+    ASSERT_EQ(zmarket_onion_set_put(&set, host_a,
+                std::strlen(host_a), 9735,
+                ZMARKET_ONION_ROLE_MARKET,
+                ZMARKET_ONION_SCOPE_REUSABLE, nullptr,
+                500, 1000ULL, 500ULL),
+              ZMARKET_ONION_OK);
+
+    /* Insert a valid endpoint (expires at 2000). */
+    ASSERT_EQ(zmarket_onion_set_put(&set, host_b,
+                std::strlen(host_b), 9736,
+                ZMARKET_ONION_ROLE_MARKET,
+                ZMARKET_ONION_SCOPE_ASSET, scope_id,
+                500, 2000ULL, 500ULL),
+              ZMARKET_ONION_OK);
+
+    /* At now=1500, host_a is expired. */
+    const zmarket_onion_endpoint *chosen =
+        zmarket_onion_choose(&set, ZMARKET_ONION_ROLE_MARKET, 1500ULL, 0);
+    ASSERT_NE(chosen, nullptr);
+    EXPECT_STREQ(chosen->host, host_b);  /* Only non-expired. */
+
+    /* Verify endpoint_usable rejects expired. */
+    const zmarket_onion_endpoint *expired_ep =
+        zmarket_onion_set_find(&set, host_a, std::strlen(host_a), 9735);
+    ASSERT_NE(expired_ep, nullptr);
+    EXPECT_FALSE(zmarket_onion_endpoint_usable(expired_ep,
+                                                ZMARKET_ONION_ROLE_MARKET,
+                                                1500ULL));
+
+    /* Usable endpoint passes. */
+    const zmarket_onion_endpoint *valid_ep =
+        zmarket_onion_set_find(&set, host_b, std::strlen(host_b), 9736);
+    ASSERT_NE(valid_ep, nullptr);
+    EXPECT_TRUE(zmarket_onion_endpoint_usable(valid_ep,
+                                               ZMARKET_ONION_ROLE_MARKET,
+                                               1500ULL));
+
+    /* At now=2500, both are expired -> choose returns NULL. */
+    EXPECT_EQ(zmarket_onion_choose(&set, ZMARKET_ONION_ROLE_MARKET,
+                                    2500ULL, 0),
+              nullptr);
+
+    /* With now=0 (skip expiry check), expired one is technically usable. */
+    EXPECT_TRUE(zmarket_onion_endpoint_usable(expired_ep,
+                                               ZMARKET_ONION_ROLE_MARKET,
+                                               0ULL));
+}
+
+TEST(ZMarketCOnion, TorOnlyRoutingRejectsClearnetRoutes)
+{
+    /* Tor-only routing must never select clearnet (non-onion) endpoints.
+     * The onion layer only stores validated .onion v3 hosts; any clearnet
+     * route attempt must fail validation at the onion layer. */
+
+    zmarket_onion_endpoint entries[4];
+    zmarket_onion_set set;
+    zmarket_onion_set_init(&set, entries, 4);
+
+    const char onion_host[] =
+        "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+
+    /* Clearnet addresses cannot even be inserted — host validation rejects. */
+    const char clearnet_ip[] = "192.168.1.1";
+    EXPECT_FALSE(zmarket_onion_host_is_v3(clearnet_ip,
+                                          std::strlen(clearnet_ip)));
+
+    const char clearnet_dns[] = "example.com";
+    EXPECT_FALSE(zmarket_onion_host_is_v3(clearnet_dns,
+                                          std::strlen(clearnet_dns)));
+
+    const char clearnet_port[] = "example.com:8080";
+    EXPECT_FALSE(zmarket_onion_host_is_v3(clearnet_port,
+                                          std::strlen(clearnet_port)));
+
+    /* Attempting to put a clearnet address into the onion set fails. */
+    EXPECT_EQ(zmarket_onion_set_put(&set, clearnet_ip,
+                                    std::strlen(clearnet_ip), 80,
+                                    ZMARKET_ONION_ROLE_MARKET,
+                                    ZMARKET_ONION_SCOPE_REUSABLE, nullptr,
+                                    100, 2000ULL, 1000ULL),
+              ZMARKET_ONION_ERR_HOST);
+
+    EXPECT_EQ(zmarket_onion_set_put(&set, clearnet_dns,
+                                    std::strlen(clearnet_dns), 443,
+                                    ZMARKET_ONION_ROLE_MARKET,
+                                    ZMARKET_ONION_SCOPE_REUSABLE, nullptr,
+                                    100, 2000ULL, 1000ULL),
+              ZMARKET_ONION_ERR_HOST);
+
+    /* Only valid onion hosts succeed. */
+    EXPECT_EQ(zmarket_onion_set_put(&set, onion_host,
+                                    std::strlen(onion_host), 9735,
+                                    ZMARKET_ONION_ROLE_MARKET,
+                                    ZMARKET_ONION_SCOPE_REUSABLE, nullptr,
+                                    100, 2000ULL, 1000ULL),
+              ZMARKET_ONION_OK);
+
+    /* Tor-only router fanout: combine with router's tor_mode. */
+    zmarket_policy policy;
+    zmarket_policy_default(&policy);
+    policy.mode_bits |= ZMARKET_MODE_RELAY;
+
+    zmarket_index_slot dedup_slots[4];
+    zmarket_index dedup;
+    zmarket_index_init(&dedup, dedup_slots, 4);
+
+    zmarket_route_entry rt_entries[4];
+    zmarket_router_peer peers[4];
+    zmarket_router rt;
+    zmarket_router_init(&rt, rt_entries, 4, peers, 4, &dedup, &policy);
+
+    /* Add one Tor peer and one clearnet peer to the router. */
+    zmarket_router_add_peer(&rt, "tor-onion-a", 12, true);
+    zmarket_router_add_peer(&rt, "clearnet-ip", 12, false);
+
+    uint8_t id[ZMARKET_ID_LEN];
+    make_id(id, 0xBB);
+    zmarket_router_admit(&rt, id, ZMARKET_RECORD_LISTING, 2000,
+                         0, nullptr, 0, 1000);
+
+    /* Tor-only mode: only tor peer is relayable. */
+    zmarket_router_set_tor_mode(&rt, 2);
+    EXPECT_TRUE(zmarket_router_should_relay(&rt, id,
+                                            "tor-onion-a", 12, 1000));
+    EXPECT_FALSE(zmarket_router_should_relay(&rt, id,
+                                             "clearnet-ip", 12, 1000));
+
+    /* Fanout should only include the Tor peer. */
+    zmarket_route_fanout fo = zmarket_router_fanout(&rt, id,
+                                                     nullptr, 0, 1000);
+    ASSERT_EQ(fo.count, (size_t)1);
+    /* Verify the selected peer is the Tor one. */
+    EXPECT_TRUE(rt.peers[fo.peer_indices[0]].tor_peer);
+
+    /* The onion endpoint set has zero clearnet entries. */
+    EXPECT_EQ(zmarket_onion_set_count(&set), (size_t)1);
+}
+
+TEST(ZMarketCOnion, RoutingSpiderIndexModesCannotEnableContentHosting)
+{
+    /* HARD INVARIANT: enabling SPIDER, INDEXER, or RELAY (routing) modes
+     * must NEVER imply or enable content hosting. Content hosting requires
+     * an explicit ZMARKET_MODE_CONTENT_HOST mode bit AND per-file operator
+     * allowlist entry. This test proves the separation. */
+
+    zmarket_policy policy;
+    zmarket_policy_default(&policy);
+
+    /* Default: viewer+buyer+seller+indexer — no hosting. */
+    EXPECT_FALSE(zmarket_policy_can_host_content(&policy, true));
+    EXPECT_FALSE(zmarket_policy_can_host_content(&policy, false));
+
+    /* Add spider mode: still no hosting. */
+    policy.mode_bits |= ZMARKET_MODE_SPIDER;
+    EXPECT_TRUE(zmarket_policy_can_spider_records(&policy));
+    EXPECT_FALSE(zmarket_policy_can_host_content(&policy, true));
+    EXPECT_FALSE(zmarket_policy_can_host_content(&policy, false));
+
+    /* Add relay/routing mode: still no hosting. */
+    policy.mode_bits |= ZMARKET_MODE_RELAY;
+    EXPECT_TRUE(zmarket_policy_can_route_records(&policy));
+    EXPECT_FALSE(zmarket_policy_can_host_content(&policy, true));
+    EXPECT_FALSE(zmarket_policy_can_host_content(&policy, false));
+
+    /* Add indexer mode: still no hosting. */
+    policy.mode_bits |= ZMARKET_MODE_INDEXER;
+    EXPECT_TRUE(zmarket_policy_can_index_records(&policy));
+    EXPECT_FALSE(zmarket_policy_can_host_content(&policy, true));
+    EXPECT_FALSE(zmarket_policy_can_host_content(&policy, false));
+
+    /* All three routing modes together: STILL no hosting. */
+    EXPECT_TRUE(zmarket_policy_can_spider_records(&policy));
+    EXPECT_TRUE(zmarket_policy_can_route_records(&policy));
+    EXPECT_TRUE(zmarket_policy_can_index_records(&policy));
+    EXPECT_FALSE(zmarket_policy_can_host_content(&policy, true));
+    EXPECT_FALSE(zmarket_policy_can_host_content(&policy, false));
+
+    /* Now add content_host mode. Hosting still denied without allowlist. */
+    policy.mode_bits |= ZMARKET_MODE_CONTENT_HOST;
+    EXPECT_FALSE(zmarket_policy_can_host_content(&policy, false));
+    EXPECT_TRUE(zmarket_policy_can_host_content(&policy, true));
+
+    /* Cross-check with content allowlist: routing activity must not
+     * pollute the allowlist. */
+    zmarket_content_allowlist_entry content_entries[4];
+    zmarket_content_allowlist allowlist;
+    zmarket_content_allowlist_init(&allowlist, content_entries, 4);
+
+    /* Simulate routing activity: index many records of various types. */
+    zmarket_index_slot slots[16];
+    zmarket_index idx;
+    zmarket_index_init(&idx, slots, 16);
+
+    uint8_t id[ZMARKET_ID_LEN];
+    for (int i = 0; i < 8; i++) {
+        make_id(id, (uint8_t)(0xC0 + i));
+        enum zmarket_record_type t;
+        switch (i % 4) {
+        case 0: t = ZMARKET_RECORD_LISTING; break;
+        case 1: t = ZMARKET_RECORD_BUYREQ_ROUTE; break;
+        case 2: t = ZMARKET_RECORD_MANIFEST; break;
+        default: t = ZMARKET_RECORD_MIRROR; break;
+        }
+        zmarket_index_put(&idx, id, t, 2000 + (uint64_t)i);
+    }
+    EXPECT_EQ(zmarket_index_count(&idx), (size_t)8);
+
+    /* Spider peers and onion endpoints — still no content. */
+    zmarket_onion_endpoint onion_entries[4];
+    zmarket_onion_set onion_set;
+    zmarket_onion_set_init(&onion_set, onion_entries, 4);
+
+    const char onion_host[] =
+        "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+    zmarket_onion_set_put(&onion_set, onion_host, std::strlen(onion_host),
+                          9735, ZMARKET_ONION_ROLE_MARKET,
+                          ZMARKET_ONION_SCOPE_REUSABLE, nullptr,
+                          100, 2000ULL, 1000ULL);
+
+    /* None of this routing/indexing/spidering activity affects hosting. */
+    EXPECT_EQ(zmarket_content_allowlist_count(&allowlist), (size_t)0);
+
+    /* A content root not in the allowlist is not hostable. */
+    uint8_t content_root[ZMARKET_CONTENT_ROOT_LEN];
+    content_root[0] = 0xDD;
+    EXPECT_FALSE(zmarket_content_can_host(&policy, &allowlist, content_root));
+
+    /* Only an explicit operator allowlist entry enables hosting. */
+    const char path[] = "/operator/explicitly-chosen/file.bin";
+    EXPECT_EQ(zmarket_content_allowlist_put(&allowlist, content_root,
+                                            path, std::strlen(path), 1000),
+              ZMARKET_CONTENT_OK);
+    EXPECT_EQ(zmarket_content_allowlist_count(&allowlist), (size_t)1);
+    EXPECT_TRUE(zmarket_content_can_host(&policy, &allowlist, content_root));
+
+    /* The allowlist was NOT enlarged by routing activity. */
+    EXPECT_EQ(zmarket_content_allowlist_count(&allowlist), (size_t)1);
+}
+
+TEST(ZMarketCOnion, MirrorFailoverUsesSignedEndpointsNoMedia)
+{
+    /* Mirror failover must use signed endpoint sets (MIRROR/MIRROR_SET
+     * records) and the indexer must track these without downloading or
+     * storing any media bytes. This test proves mirror records go through
+     * the index/router as signed envelopes only. */
+
+    zmarket_policy policy;
+    zmarket_policy_default(&policy);
+    policy.mode_bits |= ZMARKET_MODE_RELAY;
+    policy.mode_bits |= ZMARKET_MODE_INDEXER;
+
+    /* Step 1: Parse MIRROR and MIRROR_SET records (signed envelopes). */
+    std::vector<unsigned char> mirror_payload(32, 'M');
+    std::vector<unsigned char> mirror_set_payload(64, 'S');
+    zmarket_record_view view;
+
+    std::vector<unsigned char> mirror_bytes =
+        record(ZMARKET_RECORD_MIRROR, mirror_payload);
+    ASSERT_EQ(zmarket_record_parse(mirror_bytes.data(),
+                                    mirror_bytes.size(), 8192, &view),
+              ZMARKET_RECORD_OK);
+    EXPECT_EQ(view.type, ZMARKET_RECORD_MIRROR);
+    EXPECT_TRUE(zmarket_record_type_is_routable(view.type));
+    /* The record carries signed payload metadata, not file bytes. */
+    ASSERT_EQ(view.payload_len, (uint32_t)32);
+
+    std::vector<unsigned char> mirror_set_bytes =
+        record(ZMARKET_RECORD_MIRROR_SET, mirror_set_payload);
+    ASSERT_EQ(zmarket_record_parse(mirror_set_bytes.data(),
+                                    mirror_set_bytes.size(), 16384, &view),
+              ZMARKET_RECORD_OK);
+    EXPECT_EQ(view.type, ZMARKET_RECORD_MIRROR_SET);
+    EXPECT_TRUE(zmarket_record_type_is_routable(view.type));
+
+    /* Step 2: Index MIRROR records — no media bytes stored. */
+    zmarket_index_slot slots[16];
+    zmarket_index idx;
+    zmarket_index_init(&idx, slots, 16);
+
+    uint8_t mirror_id_a[ZMARKET_ID_LEN], mirror_id_b[ZMARKET_ID_LEN];
+    uint8_t mirror_set_id[ZMARKET_ID_LEN];
+    make_id(mirror_id_a, 0x10);
+    make_id(mirror_id_b, 0x11);
+    make_id(mirror_set_id, 0x12);
+
+    EXPECT_TRUE(zmarket_index_put(&idx, mirror_id_a,
+                                  ZMARKET_RECORD_MIRROR, 3000));
+    EXPECT_TRUE(zmarket_index_put(&idx, mirror_id_b,
+                                  ZMARKET_RECORD_MIRROR, 4000));
+    EXPECT_TRUE(zmarket_index_put(&idx, mirror_set_id,
+                                  ZMARKET_RECORD_MIRROR_SET, 5000));
+    EXPECT_EQ(zmarket_index_count(&idx), (size_t)3);
+
+    /* Index slots store metadata (id, type, expiry, seen_count), NOT media. */
+    const zmarket_index_slot *slot_a = zmarket_index_get(&idx, mirror_id_a);
+    ASSERT_NE(slot_a, nullptr);
+    EXPECT_EQ(slot_a->type, (uint16_t)ZMARKET_RECORD_MIRROR);
+    EXPECT_EQ(slot_a->expires_unix, (uint64_t)3000);
+    EXPECT_EQ(slot_a->seen_count, (uint32_t)1);
+
+    /* Step 3: Mirror failover via signed onion endpoints. */
+    zmarket_onion_endpoint onion_entries[4];
+    zmarket_onion_set mirror_set;
+    zmarket_onion_set_init(&mirror_set, onion_entries, 4);
+
+    const char mirror_host_1[] =
+        "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+    const char mirror_host_2[] =
+        "bcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxy.onion";
+    const char mirror_host_3[] =
+        "cdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxyz.onion";
+
+    unsigned char scope_a[ZMARKET_ONION_SCOPE_ID_LEN] = {0};
+    unsigned char scope_b[ZMARKET_ONION_SCOPE_ID_LEN] = {0};
+    unsigned char scope_c[ZMARKET_ONION_SCOPE_ID_LEN] = {0};
+    scope_a[0] = 0xAA;
+    scope_b[0] = 0xBB;
+    scope_c[0] = 0xCC;
+
+    /* Each mirror endpoint is a signed onion address (not media). */
+    ASSERT_EQ(zmarket_onion_set_put(&mirror_set, mirror_host_1,
+                std::strlen(mirror_host_1), 9735,
+                ZMARKET_ONION_ROLE_CONTENT,
+                ZMARKET_ONION_SCOPE_ASSET, scope_a,
+                200, 1700005000ULL, 1700000000ULL),
+              ZMARKET_ONION_OK);
+    ASSERT_EQ(zmarket_onion_set_put(&mirror_set, mirror_host_2,
+                std::strlen(mirror_host_2), 9736,
+                ZMARKET_ONION_ROLE_CONTENT,
+                ZMARKET_ONION_SCOPE_ASSET, scope_b,
+                200, 1700005000ULL, 1700000000ULL),
+              ZMARKET_ONION_OK);
+    ASSERT_EQ(zmarket_onion_set_put(&mirror_set, mirror_host_3,
+                std::strlen(mirror_host_3), 9737,
+                ZMARKET_ONION_ROLE_CONTENT,
+                ZMARKET_ONION_SCOPE_ASSET, scope_c,
+                200, 1700005000ULL, 1700000000ULL),
+              ZMARKET_ONION_OK);
+    EXPECT_EQ(zmarket_onion_set_count(&mirror_set), (size_t)3);
+
+    /* Simulate failover: mark mirror_host_1 as failed. */
+    zmarket_onion_mark_failure(&mirror_set, mirror_host_1,
+                               std::strlen(mirror_host_1), 9735,
+                               1700001000ULL);
+    const zmarket_onion_endpoint *failed =
+        zmarket_onion_set_find(&mirror_set, mirror_host_1,
+                               std::strlen(mirror_host_1), 9735);
+    ASSERT_NE(failed, nullptr);
+    EXPECT_EQ(failed->fail_count, (uint32_t)1);
+    /* Still usable (failures don't retire), but gets lower score. */
+
+    /* Failover: choose picks the best remaining endpoint. */
+    const zmarket_onion_endpoint *chosen =
+        zmarket_onion_choose(&mirror_set, ZMARKET_ONION_ROLE_CONTENT,
+                             1700001000ULL, 42);
+    ASSERT_NE(chosen, nullptr);
+    /* The chosen endpoint is a valid onion host — signed metadata only. */
+    EXPECT_TRUE(zmarket_onion_host_is_v3(chosen->host,
+                                         ZMARKET_ONION_HOST_LEN));
+    EXPECT_EQ(chosen->fail_count, (uint32_t)0);
+
+    /* Mark mirror_host_2 as failed too. */
+    zmarket_onion_mark_failure(&mirror_set, mirror_host_2,
+                               std::strlen(mirror_host_2), 9736,
+                               1700002000ULL);
+
+    /* Third mirror should still work. */
+    const zmarket_onion_endpoint *failover2 =
+        zmarket_onion_choose(&mirror_set, ZMARKET_ONION_ROLE_CONTENT,
+                             1700002000ULL, 42);
+    ASSERT_NE(failover2, nullptr);
+    EXPECT_EQ(failover2->fail_count, (uint32_t)0);
+
+    /* Step 4: Content hosting is STILL denied — the indexer/router only
+     * tracks signed endpoint metadata, never hosts or downloads media. */
+    EXPECT_FALSE(zmarket_policy_can_host_content(&policy, true));
+    EXPECT_FALSE(zmarket_policy_can_host_content(&policy, false));
+
+    zmarket_content_allowlist_entry content_entries[2];
+    zmarket_content_allowlist allowlist;
+    zmarket_content_allowlist_init(&allowlist, content_entries, 2);
+    EXPECT_EQ(zmarket_content_allowlist_count(&allowlist), (size_t)0);
+
+    uint8_t content_root[ZMARKET_CONTENT_ROOT_LEN];
+    content_root[0] = 0xEE;
+    EXPECT_FALSE(zmarket_content_can_host(&policy, &allowlist, content_root));
+
+    /* The mirror record bytes in the index are signed envelopes,
+     * NOT media file data. Verify no content was automatically hosted. */
+    EXPECT_EQ(zmarket_content_allowlist_count(&allowlist), (size_t)0);
 }

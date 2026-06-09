@@ -204,7 +204,7 @@ enum zmarket_spider_error zmarket_spider_on_inv(
     for (i = 0; i < id_count; i++) {
         const uint8_t *id = ids + i * ZMARKET_ID_LEN;
         enum zmarket_record_type typ = types ? types[i] :
-                                       ZMARKET_RECORD_OFFER;
+                                       ZMARKET_RECORD_LISTING;
         uint64_t exp = expires ? expires[i] : UINT64_MAX;
 
         /* Skip if already expired. */
