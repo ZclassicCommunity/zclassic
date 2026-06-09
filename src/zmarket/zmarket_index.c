@@ -7,6 +7,7 @@
 
 #define ZMARKET_INDEX_EMPTY 0u
 #define ZMARKET_INDEX_USED  1u
+#define ZMARKET_INDEX_DELETED 2u
 
 static uint64_t zmarket_id_hash(const uint8_t id[ZMARKET_ID_LEN])
 {
@@ -44,6 +45,8 @@ static bool zmarket_index_find_slot(const struct zmarket_index *idx,
                                     bool *found_out)
 {
     size_t start, n;
+    size_t first_deleted = 0;
+    bool have_deleted = false;
     if (!idx || !idx->slots || idx->capacity == 0 || !id)
         return false;
 
@@ -52,15 +55,27 @@ static bool zmarket_index_find_slot(const struct zmarket_index *idx,
         size_t pos = (start + n) % idx->capacity;
         struct zmarket_index_slot *s = &idx->slots[pos];
         if (s->state == ZMARKET_INDEX_EMPTY) {
-            if (slot_out) *slot_out = pos;
+            if (slot_out) *slot_out = have_deleted ? first_deleted : pos;
             if (found_out) *found_out = false;
             return true;
+        }
+        if (s->state == ZMARKET_INDEX_DELETED) {
+            if (!have_deleted) {
+                first_deleted = pos;
+                have_deleted = true;
+            }
+            continue;
         }
         if (memcmp(s->id, id, ZMARKET_ID_LEN) == 0) {
             if (slot_out) *slot_out = pos;
             if (found_out) *found_out = true;
             return true;
         }
+    }
+    if (have_deleted) {
+        if (slot_out) *slot_out = first_deleted;
+        if (found_out) *found_out = false;
+        return true;
     }
     return false;
 }
@@ -138,6 +153,7 @@ bool zmarket_index_remove(struct zmarket_index *idx,
     if (!zmarket_index_find_slot(idx, id, &slot, &found) || !found)
         return false;
     memset(&idx->slots[slot], 0, sizeof(idx->slots[slot]));
+    idx->slots[slot].state = ZMARKET_INDEX_DELETED;
     if (idx->count > 0) idx->count--;
     return true;
 }
@@ -152,6 +168,7 @@ size_t zmarket_index_prune(struct zmarket_index *idx, uint64_t now_unix)
         if (s->state != ZMARKET_INDEX_USED) continue;
         if (s->expires_unix <= now_unix) {
             memset(s, 0, sizeof(*s));
+            s->state = ZMARKET_INDEX_DELETED;
             pruned++;
             if (idx->count > 0) idx->count--;
         }

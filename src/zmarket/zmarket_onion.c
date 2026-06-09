@@ -283,25 +283,36 @@ const struct zmarket_onion_endpoint *zmarket_onion_choose(
     uint64_t now_unix,
     uint64_t seed)
 {
-    const struct zmarket_onion_endpoint *best = NULL;
-    uint64_t best_score = 0;
+    const struct zmarket_onion_endpoint *best;
+    uint64_t best_score;
     size_t i;
+    int pass;
 
     if (!set || !set->entries || set->capacity == 0)
         return NULL;
 
-    for (i = 0; i < set->capacity; i++) {
-        const struct zmarket_onion_endpoint *e = &set->entries[i];
-        uint64_t score;
-        if (!zmarket_onion_endpoint_usable(e, required_role_bits, now_unix))
-            continue;
-        score = zmarket_onion_score(e, required_role_bits, seed);
-        if (!best || score > best_score) {
-            best = e;
-            best_score = score;
+    for (pass = 0; pass < 2; pass++) {
+        best = NULL;
+        best_score = 0;
+        for (i = 0; i < set->capacity; i++) {
+            const struct zmarket_onion_endpoint *e = &set->entries[i];
+            uint64_t score;
+            if (pass == 0 && e->scope != ZMARKET_ONION_SCOPE_ONE_TIME)
+                continue;
+            if (pass == 1 && e->scope == ZMARKET_ONION_SCOPE_ONE_TIME)
+                continue;
+            if (!zmarket_onion_endpoint_usable(e, required_role_bits, now_unix))
+                continue;
+            score = zmarket_onion_score(e, required_role_bits, seed);
+            if (!best || score > best_score) {
+                best = e;
+                best_score = score;
+            }
         }
+        if (best)
+            return best;
     }
-    return best;
+    return NULL;
 }
 
 bool zmarket_onion_mark_success(struct zmarket_onion_set *set,

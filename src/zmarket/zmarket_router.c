@@ -375,7 +375,6 @@ bool zmarket_router_decrement_hops(struct zmarket_router *rt,
     if (!rt || !id) return false;
     entry = zmarket_router_find_entry(rt, id);
     if (!entry || entry->state != ROUTE_ENTRY_ACTIVE) return false;
-    if (entry->hop_count == 0) return false;
     entry->hop_count++;
     /* hop_count tracks hops taken; when it exceeds max, it's no longer
      * routable. */

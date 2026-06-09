@@ -52,8 +52,9 @@ struct zmarket_spider_fetch {
     uint8_t id[ZMARKET_ID_LEN];
     enum zmarket_record_type type;
     uint64_t expires_unix;
+    size_t peer_index;
     uint8_t priority; /* 0=normal, higher=sooner */
-    uint8_t state;    /* 0=pending, 1=in-flight, 2=done, 3=failed */
+    uint8_t state;    /* 0=empty, 1=pending, 2=in-flight, 3=done, 4=failed */
 };
 
 /* Spider result codes. */

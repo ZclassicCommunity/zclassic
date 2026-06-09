@@ -10,10 +10,11 @@
 #define SPIDER_PEER_BACKOFF 2u
 
 /* Internal fetch states. */
-#define SPIDER_FETCH_PENDING  0u
-#define SPIDER_FETCH_INFLIGHT 1u
-#define SPIDER_FETCH_DONE     2u
-#define SPIDER_FETCH_FAILED   3u
+#define SPIDER_FETCH_EMPTY    0u
+#define SPIDER_FETCH_PENDING  1u
+#define SPIDER_FETCH_INFLIGHT 2u
+#define SPIDER_FETCH_DONE     3u
+#define SPIDER_FETCH_FAILED   4u
 
 /* Backoff parameters: first failure = 2s, doubles each time, max 300s. */
 #define SPIDER_BACKOFF_BASE_SEC  2u
@@ -169,6 +170,7 @@ enum zmarket_spider_error zmarket_spider_on_inv(
     uint64_t now_unix)
 {
     struct zmarket_spider_peer *peer;
+    size_t peer_index;
     size_t i;
     size_t max_queue;
 
@@ -182,6 +184,7 @@ enum zmarket_spider_error zmarket_spider_on_inv(
     peer = zmarket_spider_find_peer(sp, peer_id, peer_id_len);
     if (!peer)
         return ZMARKET_SPIDER_ERR_NOT_FOUND;
+    peer_index = (size_t)(peer - sp->peers);
 
     /* Check if peer is in backoff. */
     if (peer->state == SPIDER_PEER_BACKOFF &&
@@ -241,7 +244,7 @@ enum zmarket_spider_error zmarket_spider_on_inv(
             for (slot_idx = 0; slot_idx < sp->queue_capacity; slot_idx++) {
                 if (sp->queue[slot_idx].state == SPIDER_FETCH_DONE ||
                     sp->queue[slot_idx].state == SPIDER_FETCH_FAILED ||
-                    sp->queue[slot_idx].state == 0) {
+                    sp->queue[slot_idx].state == SPIDER_FETCH_EMPTY) {
                     found = true;
                     break;
                 }
@@ -256,6 +259,7 @@ enum zmarket_spider_error zmarket_spider_on_inv(
             memcpy(sp->queue[slot_idx].id, id, ZMARKET_ID_LEN);
             sp->queue[slot_idx].type = typ;
             sp->queue[slot_idx].expires_unix = exp;
+            sp->queue[slot_idx].peer_index = peer_index;
             sp->queue[slot_idx].priority = 0;
             sp->queue[slot_idx].state = SPIDER_FETCH_PENDING;
             sp->queue_count++;
@@ -339,7 +343,9 @@ void zmarket_spider_fetch_done(struct zmarket_spider *sp,
 
     for (i = 0; i < sp->queue_capacity; i++) {
         struct zmarket_spider_fetch *f = &sp->queue[i];
-        if (f->state != SPIDER_FETCH_INFLIGHT) continue;
+        if (f->state != SPIDER_FETCH_PENDING &&
+            f->state != SPIDER_FETCH_INFLIGHT)
+            continue;
         if (memcmp(f->id, id, ZMARKET_ID_LEN) != 0) continue;
 
         if (success) {
@@ -347,7 +353,22 @@ void zmarket_spider_fetch_done(struct zmarket_spider *sp,
             /* Add to seen index so we don't re-fetch. */
             if (sp->seen)
                 zmarket_index_put(sp->seen, id, f->type, f->expires_unix);
+            if (f->peer_index < sp->peer_capacity)
+                sp->peers[f->peer_index].consecutive_failures = 0;
         } else {
+            if (f->peer_index < sp->peer_capacity) {
+                struct zmarket_spider_peer *peer = &sp->peers[f->peer_index];
+                if (peer->state != SPIDER_PEER_EMPTY &&
+                    peer->consecutive_failures != UINT32_MAX) {
+                    peer->consecutive_failures++;
+                    if (peer->consecutive_failures >= 10) {
+                        peer->state = SPIDER_PEER_BACKOFF;
+                        peer->backoff_until_unix = now_unix +
+                            zmarket_spider_compute_backoff(
+                                peer->consecutive_failures);
+                    }
+                }
+            }
             f->state = SPIDER_FETCH_FAILED;
         }
         if (sp->queue_count > 0) sp->queue_count--;
@@ -380,7 +401,7 @@ size_t zmarket_spider_prune(struct zmarket_spider *sp, uint64_t now_unix)
     if (sp->queue) {
         for (i = 0; i < sp->queue_capacity; i++) {
             struct zmarket_spider_fetch *f = &sp->queue[i];
-            if (f->state == 0) continue;
+            if (f->state == SPIDER_FETCH_EMPTY) continue;
             if (f->state == SPIDER_FETCH_DONE ||
                 f->state == SPIDER_FETCH_FAILED)
                 continue;
