@@ -4389,6 +4389,17 @@ bool ContextualCheckBlockHeader(const CBlockHeader& block, CValidationState& sta
         CBlockIndex* pcheckpoint = Checkpoints::GetLastCheckpoint(chainParams.Checkpoints());
         if (pcheckpoint && nHeight < pcheckpoint->nHeight)
             return state.DoS(100, error("%s: forked chain older than last checkpoint (height %d)", __func__, nHeight));
+
+        // Enforce the exact hash at checkpoint heights. A header presented at a
+        // checkpoint height with a different hash is a forgery. The forked-chain
+        // check above only covers heights strictly below the last checkpoint
+        // *present in mapBlockIndex*; this closes the gap at the checkpoint
+        // height itself and is independent of mapBlockIndex state, so it also
+        // protects a fresh/eclipsed node during bootstrap.
+        if (!Checkpoints::CheckBlock(chainParams.Checkpoints(), nHeight, hash))
+            return state.DoS(100, error("%s: rejected by checkpoint lock-in at height %d (hash %s)",
+                                        __func__, nHeight, hash.ToString()),
+                             REJECT_CHECKPOINT, "bad-fork-checkpoint");
     }
 
     // Reject block.nVersion < 4 blocks
