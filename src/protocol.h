@@ -357,6 +357,16 @@ extern const char* GETBSPMAN;
 extern const char* BSPMAN;
 extern const char* GETBSPCHK;
 extern const char* BSPCHK;
+// NFT marketplace gossip overlay (NON-consensus, MARKETPLACE_DESIGN.md §3.1).
+// Dedicated commands so old/disabled nodes safely ignore them via the
+// unknown-command fallthrough in ProcessMessage; NEVER routed through CInv
+// (CInv::GetCommand() throws on unknown inv types, which would abort co-batched
+// tx/block invs on unmodified peers).
+extern const char* NFTINV;       //!< announce up to 1000 known offer hashes
+extern const char* GETNFTOFFER;  //!< pull one offer blob by 32-byte hash
+extern const char* NFTOFFER;     //!< one CNftOfferBlob (hard body-capped)
+extern const char* GETNFTINV;    //!< cold-start digest request (no payload)
+extern const char* NFTABORT;     //!< advisory spent/cancel hint (never authoritative)
 }
 
 #endif // BITCOIN_PROTOCOL_H

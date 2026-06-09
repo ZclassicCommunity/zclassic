@@ -6,7 +6,7 @@ define(_CLIENT_VERSION_REVISION, 2)
 dnl Build number drives the beta/rc suffix: for build N < 25 the version renders
 dnl as "<rev>-beta(N+1)". So beta5 == build 4. Bump this by one per beta and
 dnl re-tag so the compiled version, the P2P subversion, and the git tag agree.
-define(_CLIENT_VERSION_BUILD, 5)
+define(_CLIENT_VERSION_BUILD, 6)
 define(_ZC_BUILD_VAL, m4_if(m4_eval(_CLIENT_VERSION_BUILD < 25), 1, m4_incr(_CLIENT_VERSION_BUILD), m4_eval(_CLIENT_VERSION_BUILD < 50), 1, m4_eval(_CLIENT_VERSION_BUILD - 24), m4_eval(_CLIENT_VERSION_BUILD == 50), 1, , m4_eval(_CLIENT_VERSION_BUILD - 50)))
 define(_CLIENT_VERSION_SUFFIX, m4_if(m4_eval(_CLIENT_VERSION_BUILD < 25), 1, _CLIENT_VERSION_REVISION-beta$1, m4_eval(_CLIENT_VERSION_BUILD < 50), 1, _CLIENT_VERSION_REVISION-rc$1, m4_eval(_CLIENT_VERSION_BUILD == 50), 1, _CLIENT_VERSION_REVISION, _CLIENT_VERSION_REVISION-$1)))
 define(_CLIENT_VERSION_IS_RELEASE, true)
@@ -104,6 +104,12 @@ AC_ARG_ENABLE([proton],
   [disable Proton (AMQP messaging)])],
   [use_proton=$enableval],
   [use_proton=yes])
+
+AC_ARG_ENABLE([tor],
+  [AS_HELP_STRING([--disable-tor],
+  [disable the in-process embedded Tor onion service (default is to enable)])],
+  [use_tor=$enableval],
+  [use_tor=yes])
 
 AC_ARG_ENABLE(tests,
     AS_HELP_STRING([--enable-tests],[compile tests (default is yes)]),
@@ -902,6 +908,26 @@ AC_SUBST(HARDENED_LDFLAGS)
 AC_SUBST(PIC_FLAGS)
 AC_SUBST(PIE_FLAGS)
 AC_SUBST(LIBTOOL_APP_LDFLAGS)
+dnl Embedded Tor (in-process v3 onion P2P reachability). Header-only detection:
+dnl depends/ stages tor_api.h + libtor.a into the host prefix; libtor needs -lz.
+if test "x$use_tor" = "xyes"; then
+  AC_CHECK_HEADER([tor_api.h],
+    [AC_DEFINE([ENABLE_TOR],[1],[Define to 1 to build the in-process embedded Tor onion service])
+     TOR_LIBS=-ltor
+     ZLIB_LIBS=-lz],
+    [AC_MSG_WARN([tor_api.h not found, disabling embedded Tor])
+     use_tor=no
+     AC_DEFINE([ENABLE_TOR],[0],[Define to 1 to build the in-process embedded Tor onion service])])
+  if test "x$TARGET_OS" = "xwindows"; then
+    TOR_SYSTEM_LIBS=-luserenv
+  fi
+else
+  AC_DEFINE([ENABLE_TOR],[0],[Define to 1 to build the in-process embedded Tor onion service])
+fi
+
+AC_SUBST(TOR_LIBS)
+AC_SUBST(ZLIB_LIBS)
+AC_SUBST(TOR_SYSTEM_LIBS)
 AC_SUBST(BOOST_LIBS)
 AC_SUBST(TESTDEFS)
 AC_SUBST(LEVELDB_TARGET_FLAGS)

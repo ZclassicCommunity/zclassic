@@ -172,10 +172,17 @@ private:
                 /* FIXME: Because malloc/realloc here won't call new_handler if allocation fails, assert
                     success. These should instead use an allocator or new/delete so that handlers
                     are called as necessary, but performance would be slightly degraded by doing so. */
+                // Guard against sizeof(T)*new_capacity overflowing size_t (would wrap to a
+                // small allocation followed by an out-of-bounds write). Compared in size_t
+                // to match the multiplication below; only rejects sizes that can never
+                // represent a valid object.
+                if ((size_t)new_capacity > SIZE_MAX / sizeof(T)) { new_handler_terminate(); }
                 _union.indirect = static_cast<char*>(realloc(_union.indirect, ((size_t)sizeof(T)) * new_capacity));
                 if (!_union.indirect) { new_handler_terminate(); }
                 _union.capacity = new_capacity;
             } else {
+                // Guard against sizeof(T)*new_capacity overflowing size_t (see above).
+                if ((size_t)new_capacity > SIZE_MAX / sizeof(T)) { new_handler_terminate(); }
                 char* new_indirect = static_cast<char*>(malloc(((size_t)sizeof(T)) * new_capacity));
                 if (!new_indirect) { new_handler_terminate(); }
                 T* src = direct_ptr(0);

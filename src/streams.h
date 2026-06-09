@@ -281,6 +281,15 @@ public:
             throw std::ios_base::failure("CBaseDataStream::read(): cannot read from null pointer");
         }
 
+        // Bounds-check in full-width size_t before the (unsigned int) math below, which
+        // would otherwise truncate nReadPos + nSize on 64-bit and could wrap past the
+        // buffer. (vch.size() - nReadPos) is safe: nReadPos <= vch.size() is an invariant.
+        // This only rejects reads that already run past the end of data; valid reads are
+        // unaffected and still take the existing path below.
+        if (nSize > vch.size() - nReadPos) {
+            throw std::ios_base::failure("CBaseDataStream::read(): end of data");
+        }
+
         // Read from the beginning of the buffer
         unsigned int nReadPosNext = nReadPos + nSize;
         if (nReadPosNext >= vch.size())

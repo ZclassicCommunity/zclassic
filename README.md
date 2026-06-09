@@ -1,4 +1,4 @@
-# ZClassic 2.1.2-beta6
+# ZClassic 2.1.2-beta7
 
 ZClassic is an Equihash-based proof-of-work implementation of the Zerocash protocol. It offers privacy through shielded transactions using zero-knowledge proofs that preserve transaction confidentiality. Based on Bitcoin's code and derived from Zcash, ZClassic builds three main binaries: **zclassicd** (daemon), **zclassic-cli** (RPC client), and **zclassic-tx** (transaction utility).
 
@@ -155,6 +155,65 @@ Interact with the running daemon via JSON-RPC:
 ```
 
 `getblockchaininfo` reports overall sync progress in `verificationprogress`. When the node is running with the experimental trustless bootstrap mode, its `bootstrap_validation` object reports the background re-validation state; in the default anchor-pinned fast-sync mode that object reports `state: disabled`.
+
+---
+
+## NFTs / Collectibles (ZSLP) — dev/testnet stage
+
+ZClassic can carry **NFTs and tokens** as a **non-consensus overlay** called ZSLP (an SLP Token Type 1 message in a single `OP_RETURN`). An NFT is a 1-of-1 token: a baton-less GENESIS with `decimals=0`, `quantity=1`. The token id is the genesis transaction id. The file itself never goes on-chain — only a 32-byte fingerprint (`document_hash`, a SHA-256 of the file) is recorded, so anyone can verify that a given file matches what was minted.
+
+**Security model, in one paragraph.** ZClassic consensus does not know NFTs exist — it never changes for this feature. Instead, every node that runs the indexer re-derives the same token ledger as a deterministic function of the confirmed chain: it reads each `OP_RETURN`, debits the spent token inputs, credits the outputs, and enforces conservation (a transfer is valid only if tokens-in ≥ tokens-out). The consequence, stated honestly: a forged token message **can be mined, but it credits nobody** and every honest node agrees it is invalid. Security here is *agreement*, not chain rejection — so treat ZSLP as **dev/testnet-stage**, not mainnet-ready.
+
+**The index is ON by default.** The `zslp_*` RPCs need the read-only ZSLP index, which defaults **on** (`-zslpindex`, default `1`). It does a one-time catch-up scan in the background. Opt out with `-zslpindex=0`.
+
+### CLI walkthrough (mint → inspect → transfer → list)
+
+All arguments are **positional**. (`zslp_genesis` takes one JSON object; the rest take plain positional args.)
+
+```bash
+# 1. Compute the file fingerprint (32-byte SHA-256, lowercase hex)
+HASH=$(sha256sum my-art.png | cut -d' ' -f1)
+
+# 2. Mint a 1-of-1 NFT (nft:true forces decimals 0, quantity 1, no re-issue baton)
+./src/zclassic-cli zslp_genesis "{\"nft\":true,\"name\":\"My Photo #1\",\"document_url\":\"\",\"document_hash\":\"$HASH\"}"
+#   -> { "txid": "<hex>", "tokenid": "<hex>" }     (tokenid == txid == the NFT's identity)
+
+# 3. Inspect the token you just minted
+./src/zclassic-cli zslp_gettoken "<tokenid>"
+#   -> name, document_hash, decimals 0, totalMinted 1, hasMintBaton false  (a real 1-of-1)
+
+# 4. Transfer / gift it to someone (positional: tokenid, recipient, amount[, change_addr])
+./src/zclassic-cli zslp_send "<tokenid>" "t1RecipientAddress..." 1
+#   -> { "txid": "<hex>" }
+
+# 5. List the NFTs/tokens this wallet holds
+./src/zclassic-cli zslp_listmytokens
+```
+
+> **Honest limits.** A transfer is public and irreversible (a send to the wrong address cannot be undone). The name and image are **not** unique — anyone can mint another token reusing them; only the token id (genesis txid) is one of a kind. The fingerprint proves *which bytes* were minted, never that a creator is "genuine" or "official." ZSLP is a non-consensus overlay (dev/testnet-stage).
+
+> **No arbitrary files on-chain.** ZClassic deliberately provides **no wallet path to store files on the blockchain.** An NFT keeps only a 32-byte content hash on-chain; the image lives off-chain. (An earlier experimental shielded "data channel" for sending files was **removed** — by design the wallet does not put file bytes on the chain.)
+
+### Sell an NFT for ZCL (atomic swap) — dev/testnet
+
+You can sell a transparent NFT for transparent ZCL in a single `ALL|ANYONECANPAY` atomic swap.
+
+```bash
+# SELLER: build a signed offer for the NFT
+OFFER=$(./src/zclassic-cli nft_makeoffer '{"tokenId":"<txid>","priceZat":"100000000","buyerNftAddr":"t1Buyer...","payoutAddr":"t1Seller..."}')
+#   -> { "offerBlob": "znftoffer:..." }   (hand this blob to the buyer)
+
+# BUYER (mandatory): verify the offer BEFORE taking it
+./src/zclassic-cli nft_verifyoffer '{"offerBlob":"znftoffer:..."}'
+#   -> { "ok": true, "priceZat": ..., ... }
+
+# BUYER: take the offer (appends funding, broadcasts the single atomic tx)
+./src/zclassic-cli nft_takeoffer '{"offerBlob":"znftoffer:..."}'
+```
+
+> **Honest limit.** The single-tx swap makes the **coin** legs consensus-atomic, but token attribution is an indexer convention — so this is **trust-minimized, not trustless**. Always run `nft_verifyoffer` before `nft_takeoffer`. No shielded leg can be atomic. (Other SELL RPCs: `nft_listoffers`, `nft_canceloffer`, `nft_requestbuy`.)
+
+For the full design — mint/transfer write path, anti-burn protection, content addressing, and the NFT→ZCL sell design — see [doc/nft/README.md](doc/nft/README.md) (start with `NATIVE_NFT_GUIDE.md`). Runnable end-to-end proofs live in `qa/zslp/` (`zslp-nft-regtest.sh`, `nft-sell-regtest.sh`; see `qa/zslp/README.md`).
 
 ---
 
