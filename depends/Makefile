@@ -126,9 +126,16 @@ endef
 
 define check_or_remove_sources
   mkdir -p $($(package)_source_dir); cd $($(package)_source_dir); \
-  $(build_SHA256SUM) -c $($(package)_fetched) >/dev/null 2>/dev/null || \
-    ( if test -f $($(package)_all_sources); then echo "Checksum missing or mismatched for $(package) source. Forcing re-download."; fi; \
-      rm -f $($(package)_all_sources) $($(1)_fetched))
+  if test -f $($(package)_file_name) && ! printf '%s  %s\n' "$($(package)_sha256_hash)" "$($(package)_file_name)" | $(build_SHA256SUM) -c >/dev/null 2>/dev/null; then \
+    echo "Checksum mismatched for $(package) source. Forcing re-download."; \
+    rm -f $($(package)_all_sources) $($(1)_fetched); \
+  elif test -f $($(package)_fetched) && ! $(build_SHA256SUM) -c $($(package)_fetched) >/dev/null 2>/dev/null; then \
+    if test -n "$($(package)_extra_sources)"; then \
+      echo "Checksum mismatched for $(package) source. Forcing re-download."; \
+      rm -f $($(package)_all_sources); \
+    fi; \
+    rm -f $($(1)_fetched); \
+  fi
 endef
 
 check-packages:
