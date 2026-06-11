@@ -50,8 +50,8 @@ const std::string ADDR_TYPE_SAPLING = "sapling";
 
 extern UniValue TxJoinSplitToJSON(const CTransaction& tx);
 
-int64_t nWalletUnlockTime;
-static CCriticalSection cs_nWalletUnlockTime;
+std::atomic<int64_t> nWalletUnlockTime;       // WAL-06: atomic (see rpc/server.h)
+static CCriticalSection cs_nWalletUnlockTime; // still serializes check-then-set writes
 
 // Private method:
 UniValue z_getoperationstatus_IMPL(const UniValue&, bool);
@@ -2299,7 +2299,7 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
     obj.push_back(Pair("keypoololdest", pwalletMain->GetOldestKeyPoolTime()));
     obj.push_back(Pair("keypoolsize",   (int)pwalletMain->GetKeyPoolSize()));
     if (pwalletMain->IsCrypted())
-        obj.push_back(Pair("unlocked_until", nWalletUnlockTime));
+        obj.push_back(Pair("unlocked_until", nWalletUnlockTime.load())); // WAL-06
     obj.push_back(Pair("paytxfee",      ValueFromAmount(payTxFee.GetFeePerK())));
     uint256 seedFp = pwalletMain->GetHDChain().seedFp;
     if (!seedFp.IsNull())
@@ -3743,6 +3743,11 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
             + strprintf("%s", FormatMoney(ASYNC_RPC_OPERATION_DEFAULT_MINERS_FEE)) + ") The fee amount to attach to this transaction.\n"
             "\nResult:\n"
             "\"operationid\"          (string) An operationid to pass to z_getoperationstatus to get the result of the operation.\n"
+            "\nWARNING: running with -debug=zrpcunsafe (or -debug=all) writes the\n"
+            "sender address, every recipient address, amounts and memo fields of this\n"
+            "call to debug.log in plaintext, defeating shielded-pool privacy. Do not\n"
+            "enable that category on a node whose debug.log is shipped to log\n"
+            "aggregators or shared.\n"
             "\nExamples:\n"
             + HelpExampleCli("z_sendmany", "\"t1M72Sfpbz1BPpXFHz9m3CdqATR44Jvaydd\" '[{\"address\": \"ztfaW34Gj9FrnGUEf833ywDVL62NWXBM81u6EQnM6VR45eYnXhwztecW1SjxA7JrmAXKJhxhj3vDNEpVCQoSvVoSpmbhtjf\" ,\"amount\": 5.0}]'")
             + HelpExampleRpc("z_sendmany", "\"t1M72Sfpbz1BPpXFHz9m3CdqATR44Jvaydd\", [{\"address\": \"ztfaW34Gj9FrnGUEf833ywDVL62NWXBM81u6EQnM6VR45eYnXhwztecW1SjxA7JrmAXKJhxhj3vDNEpVCQoSvVoSpmbhtjf\" ,\"amount\": 5.0}]")

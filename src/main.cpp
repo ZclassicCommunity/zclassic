@@ -1227,6 +1227,14 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
     // limit is meant to be a live consensus rule for new blocks, enforce it in
     // ContextualCheckTransaction (which has nHeight), gated on its activation
     // height — not in this non-contextual check.
+    //
+    // CON-04 (DECISION REQUIRED — intentionally NOT changed here): restoring the
+    // 102000-byte post-Sapling tx limit for new transactions is a TIGHTENING of the
+    // rules, i.e. a soft fork. It MUST be staged at a fixed future activation height
+    // (so the 1,272 historical >200 KB blocks and any historical >102 KB txs stay
+    // valid) and added in ContextualCheckTransaction. That height is a policy choice
+    // for the maintainers; this review does not pick one, so runtime behavior is
+    // left unchanged (current rule = generous 2 MB).
     const unsigned int GENEROUS_TX_SIZE_LIMIT = 2000000; // 2MB, matches GENEROUS_BLOCK_SIZE_LIMIT
     if (::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION) > GENEROUS_TX_SIZE_LIMIT)
         return state.DoS(100, error("CheckTransaction(): size limits failed"),
@@ -4143,6 +4151,21 @@ bool ReceivedBlockTransactions(const CBlock &block, CValidationState& state, CBl
         // value propagation; descendants will get nChain*Value = none until
         // a later checkpoint or reindex can re-establish a known-good total.
         pindexNew->nSproutValue = boost::none;
+        // CON-02/03: nSaplingValue is a plain CAmount (not boost::optional, see
+        // chain.h), so unlike Sprout it cannot carry an "unknown" sentinel; we
+        // store 0 here. nChainSaplingValue is forced to none just below and the
+        // accumulation loops propagate none to every descendant (they guard on
+        // pprev->nChainSaplingValue). The ZIP-209 turnstile in ConnectBlock only
+        // runs when nChainSaplingValue is present, so for an overflowed block (and
+        // its descendants) the turnstile is SKIPPED, not enforced — i.e. the
+        // substituted 0 can never cause a wrong turnstile PASS on corrupted data,
+        // but the turnstile is also not enforced across the unknown window. That
+        // trade-off (check-skipped, not fail-closed rejection) is acceptable for
+        // this corruption-recovery path; a checkpoint/reindex re-establishes a
+        // known-good total. Carrying a true per-block "unknown" would require
+        // making nSaplingValue optional, which changes the on-disk
+        // CDiskBlockIndex format; deferred. The actual UB (raw signed '+') is
+        // fixed at the CON-01 sites.
         pindexNew->nSaplingValue = 0;
     }
     pindexNew->nChainSproutValue = boost::none;
@@ -4366,9 +4389,16 @@ bool CheckBlock(const CBlock& block, CValidationState& state,
     // Skip all structural validation (size, coinbase, transactions, sigops) for pre-checkpoint blocks.
     if (fCheckSizeLimits) {
         // Size limits
-        // Allow larger blocks for historical chain variations - checkpoint validates correctness
-        const unsigned int GENEROUS_BLOCK_SIZE_LIMIT = 2000000; // 2MB to accommodate any historical forks
-        if (block.vtx.empty() || block.vtx.size() > GENEROUS_BLOCK_SIZE_LIMIT || ::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION) > GENEROUS_BLOCK_SIZE_LIMIT)
+        // Allow larger blocks for historical chain variations - checkpoint validates correctness.
+        // The real mainnet history contains 1,272 blocks in (200000, 2000000] bytes (see
+        // audit-full.json + scripts/audit-mainnet-history.py). This generous limit (defined
+        // once in consensus/consensus.h) is also used by the -reindex/-loadblock path so that
+        // LoadExternalBlockFile can successfully import the canonical chain. See BLK-01.
+        // CON-05: the serialized-size check below is the real block-size guard.
+        // The former `block.vtx.size() > GENEROUS_BLOCK_SIZE_LIMIT` conjunct compared a
+        // transaction *count* against a *byte* constant (a no-op in practice, since vtx
+        // is already bounded by the serialized size) and was dropped for clarity.
+        if (block.vtx.empty() || ::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION) > GENEROUS_BLOCK_SIZE_LIMIT)
             return state.DoS(100, error("CheckBlock(): size limits failed"),
                              REJECT_INVALID, "bad-blk-length");
 
@@ -4925,13 +4955,28 @@ bool static LoadBlockIndexDB()
             if (pindex->pprev) {
                 if (pindex->pprev->nChainTx) {
                     pindex->nChainTx = pindex->pprev->nChainTx + pindex->nTx;
+                    // CON-01: use overflow-safe CheckedAdd here, exactly as the live
+                    // ReceivedBlockTransactions path does. Raw signed '+' on CAmount
+                    // (int64_t) is undefined behaviour on overflow; on a corrupted
+                    // on-disk delta it could wrap the chain totals that the ZIP-209
+                    // turnstile reads. Fall back to boost::none (unknown) on overflow.
                     if (pindex->pprev->nChainSproutValue && pindex->nSproutValue) {
-                        pindex->nChainSproutValue = *pindex->pprev->nChainSproutValue + *pindex->nSproutValue;
+                        CAmount chainSprout;
+                        if (CheckedAdd(*pindex->pprev->nChainSproutValue, *pindex->nSproutValue, chainSprout)) {
+                            pindex->nChainSproutValue = chainSprout;
+                        } else {
+                            pindex->nChainSproutValue = boost::none;
+                        }
                     } else {
                         pindex->nChainSproutValue = boost::none;
                     }
                     if (pindex->pprev->nChainSaplingValue) {
-                        pindex->nChainSaplingValue = *pindex->pprev->nChainSaplingValue + pindex->nSaplingValue;
+                        CAmount chainSapling;
+                        if (CheckedAdd(*pindex->pprev->nChainSaplingValue, pindex->nSaplingValue, chainSapling)) {
+                            pindex->nChainSaplingValue = chainSapling;
+                        } else {
+                            pindex->nChainSaplingValue = boost::none;
+                        }
                     } else {
                         pindex->nChainSaplingValue = boost::none;
                     }
@@ -5447,8 +5492,16 @@ bool LoadExternalBlockFile(FILE* fileIn, CDiskBlockPos *dbp)
 
     int nLoaded = 0;
     try {
-        // This takes over fileIn and calls fclose() on it in the CBufferedFile destructor
-        CBufferedFile blkdat(fileIn, 2*MAX_BLOCK_SIZE, MAX_BLOCK_SIZE+8, SER_DISK, CLIENT_VERSION);
+        // This takes over fileIn and calls fclose() on it in the CBufferedFile destructor.
+        //
+        // Use GENEROUS_BLOCK_SIZE_LIMIT (not MAX_BLOCK_SIZE) for both the buffer and the
+        // nSize filter. The canonical chain contains 1,272 blocks larger than the original
+        // 200000-byte MAX_BLOCK_SIZE (all < 2 MB). Without this, -reindex and -loadblock
+        // (see call sites in init.cpp) silently skip them via the size check or fail to
+        // buffer them, producing a divergent chainstate even though CheckBlock + checkpoints
+        // would have accepted them. ProcessNewBlock below will still validate each block
+        // through the normal (generous) CheckBlock path. See BLK-01 (Critical).
+        CBufferedFile blkdat(fileIn, 2*GENEROUS_BLOCK_SIZE_LIMIT, GENEROUS_BLOCK_SIZE_LIMIT+8, SER_DISK, CLIENT_VERSION);
         uint64_t nRewind = blkdat.GetPos();
         while (!blkdat.eof()) {
             boost::this_thread::interruption_point();
@@ -5467,7 +5520,7 @@ bool LoadExternalBlockFile(FILE* fileIn, CDiskBlockPos *dbp)
                     continue;
                 // read size
                 blkdat >> nSize;
-                if (nSize < 80 || nSize > MAX_BLOCK_SIZE)
+                if (nSize < 80 || nSize > GENEROUS_BLOCK_SIZE_LIMIT)
                     continue;
             } catch (const std::exception&) {
                 // no valid block header found; don't complain
@@ -6458,9 +6511,14 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
                     {
                         if (pnode->nVersion < CADDR_TIME_VERSION)
                             continue;
-                        unsigned int nPointer;
+                        // NET-01: use uintptr_t (not unsigned int) so the full pointer
+                        // value mixes into the relay-selection hash. On 64-bit a 4-byte
+                        // copy kept only the low 32 bits (ASLR randomizes the high bits),
+                        // letting distinct CNode* collide and biasing which peers receive
+                        // freshly-relayed addresses.
+                        uintptr_t nPointer;
                         memcpy(&nPointer, &pnode, sizeof(nPointer));
-                        uint256 hashKey = ArithToUint256(UintToArith256(hashRand) ^ nPointer);
+                        uint256 hashKey = ArithToUint256(UintToArith256(hashRand) ^ (uint64_t)nPointer);
                         hashKey = Hash(BEGIN(hashKey), END(hashKey));
                         mapMix.insert(make_pair(hashKey, pnode));
                     }

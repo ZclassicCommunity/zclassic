@@ -127,6 +127,15 @@ curve_G1 CompressedG1::to_libsnark_g1() const
 
     assert(r.is_well_formed());
 
+    // CRY-03: explicitly verify the point is in the prime-order subgroup,
+    // mirroring the G2 check in to_libsnark_g2(). For alt_bn128 G1 the cofactor
+    // is 1 (every well-formed point is already in the subgroup), so this rejects
+    // nothing new today, but it removes the implicit, undocumented dependence on
+    // that cofactor-1 property and makes the G1/G2 defense posture symmetric.
+    if (alt_bn128_modulus_r * r != curve_G1::zero()) {
+        throw std::runtime_error("point is not in G1");
+    }
+
     return r;
 }
 

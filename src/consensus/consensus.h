@@ -20,6 +20,21 @@ static const int32_t SAPLING_MIN_TX_VERSION = 4;
 static const int32_t SAPLING_MAX_TX_VERSION = 4;
 /** The maximum allowed size for a serialized block, in bytes (network rule) */
 static const unsigned int MAX_BLOCK_SIZE = 200000;
+
+/** The maximum block size we tolerate when loading blocks from disk during -reindex,
+ *  -loadblock, or bootstrap.dat import. The canonical mainnet chain contains 1,272 blocks
+ *  whose serialized size is strictly between 200000 and 2000000 bytes (max observed
+ *  1,999,599 B as of height ~3.1M). These blocks are accepted on the normal P2P/ConnectBlock
+ *  path via the local GENEROUS_BLOCK_SIZE_LIMIT in CheckBlock ("checkpoint validates
+ *  correctness" + hash chain). LoadExternalBlockFile was not widened when the generous
+ *  tolerance was added, causing silent drops (nSize check + undersized CBufferedFile).
+ *  This constant makes the import path match CheckBlock so that -reindex can rebuild
+ *  real mainnet history. Safety remains: subsequent ProcessNewBlock still runs CheckBlock
+ *  (which applies the same generous limit) and the checkpoint hash proof for historical
+ *  blocks. See BLK-01 (Critical in 2026-06 full source review, rev 3).
+ */
+static const unsigned int GENEROUS_BLOCK_SIZE_LIMIT = 2000000;
+
 /** The maximum allowed number of signature check operations in a block (network rule) */
 static const unsigned int MAX_BLOCK_SIGOPS = 20000;
 /** The maximum size of a transaction (network rule) */

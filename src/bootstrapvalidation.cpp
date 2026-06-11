@@ -103,7 +103,10 @@ static void RefreshFinalizationHoldLocked()
     g_finalizationHold.store(provisional || tipHold, std::memory_order_relaxed);
 }
 
-static const int64_t BOOTSTRAPVAL_BATCH_MS = 80;          // cs_main per-batch budget
+// PERF-04: cs_main per-batch budget. Lowered 80 -> 20 ms so the background UTXO
+// validator holds cs_main for far shorter spans, reducing stalls to live message
+// processing / block relay (and peer timeouts on slower hardware) while it runs.
+static const int64_t BOOTSTRAPVAL_BATCH_MS = 20;          // cs_main per-batch budget
 static const size_t BOOTSTRAPVAL_FLUSH_CAP = 300 * (1 << 20); // in-mem coin cache cap
 
 static boost::filesystem::path ScratchDir()
