@@ -10,6 +10,7 @@
 #include "rpc/protocol.h"
 #include "uint256.h"
 
+#include <atomic>
 #include <list>
 #include <map>
 #include <stdint.h>
@@ -169,7 +170,9 @@ extern uint256 ParseHashO(const UniValue& o, std::string strKey);
 extern std::vector<unsigned char> ParseHexV(const UniValue& v, std::string strName);
 extern std::vector<unsigned char> ParseHexO(const UniValue& o, std::string strKey);
 
-extern int64_t nWalletUnlockTime;
+// WAL-06: atomic so unlocked reads in getwalletinfo/getinfo cannot tear against
+// the relock timer's write (writes still occur under cs_nWalletUnlockTime).
+extern std::atomic<int64_t> nWalletUnlockTime;
 extern CAmount AmountFromValue(const UniValue& value);
 extern UniValue ValueFromAmount(const CAmount& amount);
 extern double GetDifficulty(const CBlockIndex* blockindex = NULL);

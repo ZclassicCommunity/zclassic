@@ -281,20 +281,21 @@ public:
             throw std::ios_base::failure("CBaseDataStream::read(): cannot read from null pointer");
         }
 
-        // Read from the beginning of the buffer
-        unsigned int nReadPosNext = nReadPos + nSize;
-        if (nReadPosNext >= vch.size())
+        // MEM-01: do the bounds arithmetic in size_t and check for overflow
+        // BEFORE adding. Previously `unsigned int nReadPosNext = nReadPos + nSize`
+        // narrowed the size_t nSize on LP64, so a large nSize could wrap to a small
+        // value that slipped past the guard before the full-size memcpy ran.
+        if (nReadPos > vch.size() || nSize > vch.size() - nReadPos) {
+            throw std::ios_base::failure("CBaseDataStream::read(): end of data");
+        }
+        size_t nReadPosNext = (size_t)nReadPos + nSize;
+        memcpy(pch, &vch[nReadPos], nSize);
+        if (nReadPosNext == vch.size())
         {
-            if (nReadPosNext > vch.size())
-            {
-                throw std::ios_base::failure("CBaseDataStream::read(): end of data");
-            }
-            memcpy(pch, &vch[nReadPos], nSize);
             nReadPos = 0;
             vch.clear();
             return;
         }
-        memcpy(pch, &vch[nReadPos], nSize);
         nReadPos = nReadPosNext;
     }
 
@@ -304,11 +305,15 @@ public:
         if (nSize < 0) {
             throw std::ios_base::failure("CDataStream::ignore(): nSize negative");
         }
-        unsigned int nReadPosNext = nReadPos + nSize;
-        if (nReadPosNext >= vch.size())
+        // MEM-01: size_t arithmetic with an explicit pre-addition overflow guard
+        // (see read() above).
+        size_t snSize = (size_t)nSize;
+        if (nReadPos > vch.size() || snSize > vch.size() - nReadPos) {
+            throw std::ios_base::failure("CBaseDataStream::ignore(): end of data");
+        }
+        size_t nReadPosNext = (size_t)nReadPos + snSize;
+        if (nReadPosNext == vch.size())
         {
-            if (nReadPosNext > vch.size())
-                throw std::ios_base::failure("CBaseDataStream::ignore(): end of data");
             nReadPos = 0;
             vch.clear();
             return;

@@ -766,6 +766,14 @@ static bool check_file_hash(const std::string& path, const std::string& hash)
     SHA256 buff;
     while (!feof(file)){
         size = fread(buffer.data(), 1, kHashReadBufSize, file);
+        // RUST-02: on a real I/O error fread sets ferror() (not feof()) and returns
+        // 0, so the original `while(!feof)` loop would spin forever at 100% CPU.
+        // Bail out instead of hanging node startup.
+        if (size == 0 && ferror(file)) {
+            LogPrintf("%s: I/O error while reading for hash check\n", path);
+            fclose(file);
+            return false;
+        }
         buff.update(buffer.data(), size);
     }
     std::string buff_hash = buff.hash();

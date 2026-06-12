@@ -487,6 +487,17 @@ UniValue dumpwallet_impl(const UniValue& params, bool fHelp, bool fDumpZKeys)
     if (!file.is_open())
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Cannot open wallet dump file");
 
+    // WAL-05: this file contains every private key AND the HD seed (root entropy
+    // for all derived keys) in plaintext. Restrict it to owner read/write (0600)
+    // immediately so it is not left world/group-readable in the export directory.
+    try {
+        boost::filesystem::permissions(exportfilepath,
+            boost::filesystem::owner_read | boost::filesystem::owner_write);
+    } catch (const boost::filesystem::filesystem_error& e) {
+        LogPrintf("dumpwallet: warning: could not set 0600 permissions on %s: %s\n",
+                  exportfilepath.string(), e.what());
+    }
+
     std::map<CKeyID, int64_t> mapKeyBirth;
     std::set<CKeyID> setKeyPool;
     pwalletMain->GetKeyBirthTimes(mapKeyBirth);

@@ -336,6 +336,14 @@ static bool HTTPBindAddresses(struct evhttp* http)
             endpoints.push_back(std::make_pair(host, port));
         }
     } else { // No specific bind address specified, bind to any
+        // WAL-02: -rpcallowip was set without -rpcbind, so the RPC port binds on
+        // ALL interfaces and is reachable from the network, protected only by the
+        // IP ACL plus the RPC password. Warn loudly — a broad ACL (e.g.
+        // -rpcallowip=0.0.0.0/0) then exposes dumpprivkey/dumpwallet/z_exportkey to
+        // the internet behind the password alone.
+        LogPrintf("WARNING: -rpcallowip was specified without -rpcbind; binding RPC to all interfaces "
+                  "(0.0.0.0 and ::). The RPC port is now network-reachable, guarded only by the IP ACL "
+                  "and password. Set -rpcbind=127.0.0.1 (or a specific address) unless this is intended.\n");
         endpoints.push_back(std::make_pair("::", defaultPort));
         endpoints.push_back(std::make_pair("0.0.0.0", defaultPort));
     }
