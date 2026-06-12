@@ -496,6 +496,17 @@ void CNode::Ban(const CSubNet& subNet, int64_t bantimeoffset, bool sinceUnixEpoc
         banTime = (sinceUnixEpoch ? 0 : GetTime() )+bantimeoffset;
 
     LOCK(cs_setBanned);
+    // NET-02: prune expired entries on each new ban so setBanned cannot grow
+    // unbounded. Without this, an attacker cycling distinct source IPs accumulates
+    // dead entries that IsBanned() linearly scans under cs_setBanned on every
+    // inbound connection, degrading into a lock-contention bottleneck over time.
+    int64_t nowPrune = GetTime();
+    for (std::map<CSubNet, int64_t>::iterator it = setBanned.begin(); it != setBanned.end(); ) {
+        if (it->second < nowPrune)
+            setBanned.erase(it++);
+        else
+            ++it;
+    }
     if (setBanned[subNet] < banTime)
         setBanned[subNet] = banTime;
 }
@@ -1878,6 +1889,17 @@ void RelayTransaction(const CTransaction& tx, const CDataStream& ss)
         LOCK(cs_mapRelay);
         // Expire old relay messages
         while (!vRelayExpiration.empty() && vRelayExpiration.front().first < GetTime())
+        {
+            mapRelay.erase(vRelayExpiration.front().second);
+            vRelayExpiration.pop_front();
+        }
+
+        // PERF-03: hard cap on relay entries. Time-based expiry alone lets a flood
+        // of unique-txid transactions grow mapRelay (full CDataStream per entry) to
+        // hundreds of MB before the 15-minute timer reclaims the oldest. Evict the
+        // oldest entries once the cap is reached.
+        static const size_t MAX_RELAY_ENTRIES = 100000;
+        while (mapRelay.size() >= MAX_RELAY_ENTRIES && !vRelayExpiration.empty())
         {
             mapRelay.erase(vRelayExpiration.front().second);
             vRelayExpiration.pop_front();

@@ -537,8 +537,13 @@ bool CWallet::ChangeWalletPassphrase(const SecureString& strOldWalletPassphrase,
                 crypter.SetKeyFromPassphrase(strNewWalletPassphrase, pMasterKey.second.vchSalt, pMasterKey.second.nDeriveIterations, pMasterKey.second.nDerivationMethod);
                 pMasterKey.second.nDeriveIterations = (pMasterKey.second.nDeriveIterations + pMasterKey.second.nDeriveIterations * 100 / ((double)(GetTimeMillis() - nStartTime))) / 2;
 
-                if (pMasterKey.second.nDeriveIterations < 25000)
-                    pMasterKey.second.nDeriveIterations = 25000;
+                // WAL-03: raise the KDF iteration floor 25000 -> 100000. The
+                // dynamic calibration targets ~0.1s and normally lands far higher;
+                // the floor only binds on very fast machines, where 25000 rounds of
+                // (non-memory-hard) PBKDF2-SHA512 is too cheap against an offline
+                // wallet.dat dictionary attack.
+                if (pMasterKey.second.nDeriveIterations < 100000)
+                    pMasterKey.second.nDeriveIterations = 100000;
 
                 LogPrintf("Wallet passphrase changed to an nDeriveIterations of %i\n", pMasterKey.second.nDeriveIterations);
 
@@ -1195,8 +1200,9 @@ bool CWallet::EncryptWallet(const SecureString& strWalletPassphrase)
     crypter.SetKeyFromPassphrase(strWalletPassphrase, kMasterKey.vchSalt, kMasterKey.nDeriveIterations, kMasterKey.nDerivationMethod);
     kMasterKey.nDeriveIterations = (kMasterKey.nDeriveIterations + kMasterKey.nDeriveIterations * 100 / ((double)(GetTimeMillis() - nStartTime))) / 2;
 
-    if (kMasterKey.nDeriveIterations < 25000)
-        kMasterKey.nDeriveIterations = 25000;
+    // WAL-03: raise the KDF iteration floor 25000 -> 100000 (see ChangeWalletPassphrase).
+    if (kMasterKey.nDeriveIterations < 100000)
+        kMasterKey.nDeriveIterations = 100000;
 
     LogPrintf("Encrypting Wallet with an nDeriveIterations of %i\n", kMasterKey.nDeriveIterations);
 
@@ -2779,7 +2785,11 @@ void CWallet::ReacceptWalletTransactions()
     {
         CWalletTx& wtx = *(item.second);
 
-        LOCK(mempool.cs);
+        // PERF-01: do not take an explicit LOCK(mempool.cs) here. AcceptToMemoryPool
+        // already acquires mempool.cs internally (under cs_main); taking it here too
+        // only added a redundant cs_wallet -> mempool.cs lock-order edge that a
+        // lock-order checker flags as an inversion against the pool.cs -> cs_wallet
+        // path (NotifyRecentlyAdded -> SyncWithWallets).
         wtx.AcceptToMemoryPool(false);
     }
 }

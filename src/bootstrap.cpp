@@ -268,15 +268,23 @@ static size_t DiscoverBootstrapPeersFromSocket(SOCKET socket, const CService& pe
 
     std::vector<CAddress> vAddr;
     try {
-        addrPayload >> vAddr;
+        // MEM-03: read and bound the element COUNT before allocating/deserializing
+        // the vector, mirroring the normal addr handler's 1000-entry bound. The
+        // previous `addrPayload >> vAddr` deserialized the whole list (up to the
+        // 2 MiB message cap) before the size guard below could fire.
+        uint64_t nAddr = ReadCompactSize(addrPayload);
+        if (nAddr > 1000) {
+            LogPrint("net", "bootstrap discovery: oversized addr (%llu) from %s\n", (unsigned long long)nAddr, peerAddress.ToStringIPPort());
+            return 0;
+        }
+        vAddr.reserve(nAddr);
+        for (uint64_t i = 0; i < nAddr; ++i) {
+            CAddress a;
+            addrPayload >> a;
+            vAddr.push_back(a);
+        }
     } catch (const std::exception& e) {
         LogPrint("net", "bootstrap discovery: malformed addr from %s: %s\n", peerAddress.ToStringIPPort(), e.what());
-        return 0;
-    }
-    // Mirror the addr-message bound enforced by the normal net handler so a
-    // misbehaving peer cannot make us iterate an enormous list.
-    if (vAddr.size() > 1000) {
-        LogPrint("net", "bootstrap discovery: oversized addr (%u) from %s\n", (unsigned int)vAddr.size(), peerAddress.ToStringIPPort());
         return 0;
     }
 

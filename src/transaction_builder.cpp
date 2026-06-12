@@ -285,18 +285,29 @@ TransactionBuilderResult TransactionBuilder::Build()
     }
 
     // Create Sapling spendAuth and binding signatures
+    // RUST-01: these FFI calls return bool and fail on an invalid ask/ar (e.g. a
+    // corrupted spending key). Previously the returns were discarded, so on
+    // failure the tx was built with an all-zero signature that every node rejects
+    // while the wallet treated the note as spent (funds stranded, hard to
+    // diagnose). Check both and surface an error instead.
     for (size_t i = 0; i < spends.size(); i++) {
-        librustzcash_sapling_spend_sig(
-            spends[i].expsk.ask.begin(),
-            spends[i].alpha.begin(),
-            dataToBeSigned.begin(),
-            mtx.vShieldedSpend[i].spendAuthSig.data());
+        if (!librustzcash_sapling_spend_sig(
+                spends[i].expsk.ask.begin(),
+                spends[i].alpha.begin(),
+                dataToBeSigned.begin(),
+                mtx.vShieldedSpend[i].spendAuthSig.data())) {
+            librustzcash_sapling_proving_ctx_free(ctx);
+            return TransactionBuilderResult("Failed to create Sapling spend signature");
+        }
     }
-    librustzcash_sapling_binding_sig(
-        ctx,
-        mtx.valueBalance,
-        dataToBeSigned.begin(),
-        mtx.bindingSig.data());
+    if (!librustzcash_sapling_binding_sig(
+            ctx,
+            mtx.valueBalance,
+            dataToBeSigned.begin(),
+            mtx.bindingSig.data())) {
+        librustzcash_sapling_proving_ctx_free(ctx);
+        return TransactionBuilderResult("Failed to create Sapling binding signature");
+    }
 
     librustzcash_sapling_proving_ctx_free(ctx);
 

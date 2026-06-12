@@ -366,13 +366,25 @@ template<typename Stream, typename I>
 I ReadVarInt(Stream& is)
 {
     I n = 0;
+    // MEM-02: guard against overflow of I BEFORE shifting and BEFORE the
+    // increment, so a malformed max-length encoding cannot wrap the value or hit
+    // signed UB (VARINT is also used for signed fields, e.g. CDiskBlockIndex
+    // nFile/nPos). This is the upstream Bitcoin Core form; it also bounds the
+    // iteration count, since n grows past the limit within ceil(bits/7) bytes.
     while(true) {
         unsigned char chData = ser_readdata8(is);
+        if (n > (std::numeric_limits<I>::max() >> 7)) {
+            throw std::ios_base::failure("ReadVarInt(): size too large");
+        }
         n = (n << 7) | (chData & 0x7F);
-        if (chData & 0x80)
+        if (chData & 0x80) {
+            if (n == std::numeric_limits<I>::max()) {
+                throw std::ios_base::failure("ReadVarInt(): size too large");
+            }
             n++;
-        else
+        } else {
             return n;
+        }
     }
 }
 

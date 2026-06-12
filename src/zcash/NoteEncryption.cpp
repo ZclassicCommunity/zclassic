@@ -4,8 +4,25 @@
 #include <boost/static_assert.hpp>
 #include "prf.h"
 #include "librustzcash.h"
+#include "support/cleanse.h" // CRY-01: zeroize symmetric keys / DH secrets after use
 
 #define NOTEENCRYPTION_CIPHER_KEYSIZE 32
+
+namespace {
+// CRY-01: zeroes a fixed buffer when it leaves scope, so a derived symmetric key
+// or DH secret is cleared on EVERY exit path — normal return, early return, and
+// any throw (e.g. a should-never-happen KDF hash-failure between key derivation
+// and the end of the function). Declaring one of these right after the secret
+// buffer guarantees cleanup without relying on manual calls before each return.
+struct MemoryCleanser {
+    void* p;
+    size_t n;
+    MemoryCleanser(void* p_, size_t n_) : p(p_), n(n_) {}
+    ~MemoryCleanser() { memory_cleanse(p, n); }
+    MemoryCleanser(const MemoryCleanser&) = delete;
+    MemoryCleanser& operator=(const MemoryCleanser&) = delete;
+};
+} // namespace
 
 void clamp_curve25519(unsigned char key[crypto_scalarmult_SCALARBYTES])
 {
@@ -38,8 +55,10 @@ void PRF_ock(
                                                  personalization
                                                 ) != 0)
     {
+        memory_cleanse(block, sizeof(block)); // CRY-01
         throw std::logic_error("hash function failure");
     }
+    memory_cleanse(block, sizeof(block)); // CRY-01: block held ovk/cv/cm/epk
 }
 
 void KDF_Sapling(
@@ -62,8 +81,10 @@ void KDF_Sapling(
                                                  personalization
                                                 ) != 0)
     {
+        memory_cleanse(block, sizeof(block)); // CRY-01
         throw std::logic_error("hash function failure");
     }
+    memory_cleanse(block, sizeof(block)); // CRY-01: block held the DH secret
 }
 
 void KDF(unsigned char K[NOTEENCRYPTION_CIPHER_KEYSIZE],
@@ -95,8 +116,10 @@ void KDF(unsigned char K[NOTEENCRYPTION_CIPHER_KEYSIZE],
                                                  personalization
                                                 ) != 0)
     {
+        memory_cleanse(block, sizeof(block)); // CRY-01
         throw std::logic_error("hash function failure");
     }
+    memory_cleanse(block, sizeof(block)); // CRY-01: block held hSig/dhsecret/epk/pk_enc
 }
 
 namespace libzcash {
@@ -126,6 +149,7 @@ boost::optional<SaplingEncCiphertext> SaplingNoteEncryption::encrypt_to_recipien
     }
 
     uint256 dhsecret;
+    MemoryCleanser _cleanseDhsecret(dhsecret.begin(), 32); // CRY-01: zeroed on every exit
 
     if (!librustzcash_sapling_ka_agree(pk_d.begin(), esk.begin(), dhsecret.begin())) {
         return boost::none;
@@ -133,6 +157,7 @@ boost::optional<SaplingEncCiphertext> SaplingNoteEncryption::encrypt_to_recipien
 
     // Construct the symmetric key
     unsigned char K[NOTEENCRYPTION_CIPHER_KEYSIZE];
+    MemoryCleanser _cleanseK(K, sizeof(K)); // CRY-01: zeroed on every exit
     KDF_Sapling(K, dhsecret, epk);
 
     // The nonce is zero because we never reuse keys
@@ -147,6 +172,7 @@ boost::optional<SaplingEncCiphertext> SaplingNoteEncryption::encrypt_to_recipien
         NULL, cipher_nonce, K
     );
 
+
     already_encrypted_enc = true;
 
     return ciphertext;
@@ -159,6 +185,7 @@ boost::optional<SaplingEncPlaintext> AttemptSaplingEncDecryption(
 )
 {
     uint256 dhsecret;
+    MemoryCleanser _cleanseDhsecret(dhsecret.begin(), 32); // CRY-01: zeroed on every exit
 
     if (!librustzcash_sapling_ka_agree(epk.begin(), ivk.begin(), dhsecret.begin())) {
         return boost::none;
@@ -166,6 +193,7 @@ boost::optional<SaplingEncPlaintext> AttemptSaplingEncDecryption(
 
     // Construct the symmetric key
     unsigned char K[NOTEENCRYPTION_CIPHER_KEYSIZE];
+    MemoryCleanser _cleanseK(K, sizeof(K)); // CRY-01: zeroed on every exit
     KDF_Sapling(K, dhsecret, epk);
 
     // The nonce is zero because we never reuse keys
@@ -195,6 +223,7 @@ boost::optional<SaplingEncPlaintext> AttemptSaplingEncDecryption (
 )
 {
     uint256 dhsecret;
+    MemoryCleanser _cleanseDhsecret(dhsecret.begin(), 32); // CRY-01: zeroed on every exit
 
     if (!librustzcash_sapling_ka_agree(pk_d.begin(), esk.begin(), dhsecret.begin())) {
         return boost::none;
@@ -202,6 +231,7 @@ boost::optional<SaplingEncPlaintext> AttemptSaplingEncDecryption (
 
     // Construct the symmetric key
     unsigned char K[NOTEENCRYPTION_CIPHER_KEYSIZE];
+    MemoryCleanser _cleanseK(K, sizeof(K)); // CRY-01: zeroed on every exit
     KDF_Sapling(K, dhsecret, epk);
 
     // The nonce is zero because we never reuse keys
@@ -237,6 +267,7 @@ SaplingOutCiphertext SaplingNoteEncryption::encrypt_to_ourselves(
 
     // Construct the symmetric key
     unsigned char K[NOTEENCRYPTION_CIPHER_KEYSIZE];
+    MemoryCleanser _cleanseK(K, sizeof(K)); // CRY-01: zeroed on every exit
     PRF_ock(K, ovk, cv, cm, epk);
 
     // The nonce is zero because we never reuse keys
@@ -250,6 +281,7 @@ SaplingOutCiphertext SaplingNoteEncryption::encrypt_to_ourselves(
         NULL, 0, // no "additional data"
         NULL, cipher_nonce, K
     );
+
 
     already_encrypted_out = true;
 
@@ -266,6 +298,7 @@ boost::optional<SaplingOutPlaintext> AttemptSaplingOutDecryption(
 {
     // Construct the symmetric key
     unsigned char K[NOTEENCRYPTION_CIPHER_KEYSIZE];
+    MemoryCleanser _cleanseK(K, sizeof(K)); // CRY-01: zeroed on every exit
     PRF_ock(K, ovk, cv, cm, epk);
 
     // The nonce is zero because we never reuse keys
@@ -313,6 +346,7 @@ typename NoteEncryption<MLEN>::Ciphertext NoteEncryption<MLEN>::encrypt
                                           )
 {
     uint256 dhsecret;
+    MemoryCleanser _cleanseDhsecret(dhsecret.begin(), 32); // CRY-01: zeroed on every exit
 
     if (crypto_scalarmult(dhsecret.begin(), esk.begin(), pk_enc.begin()) != 0) {
         throw std::logic_error("Could not create DH secret");
@@ -320,6 +354,7 @@ typename NoteEncryption<MLEN>::Ciphertext NoteEncryption<MLEN>::encrypt
 
     // Construct the symmetric key
     unsigned char K[NOTEENCRYPTION_CIPHER_KEYSIZE];
+    MemoryCleanser _cleanseK(K, sizeof(K)); // CRY-01: zeroed on every exit
     KDF(K, dhsecret, epk, pk_enc, hSig, nonce);
 
     // Increment the number of encryptions we've performed
@@ -335,6 +370,7 @@ typename NoteEncryption<MLEN>::Ciphertext NoteEncryption<MLEN>::encrypt
                                          NULL, 0, // no "additional data"
                                          NULL, cipher_nonce, K);
 
+
     return ciphertext;
 }
 
@@ -347,12 +383,14 @@ typename NoteDecryption<MLEN>::Plaintext NoteDecryption<MLEN>::decrypt
                                          ) const
 {
     uint256 dhsecret;
+    MemoryCleanser _cleanseDhsecret(dhsecret.begin(), 32); // CRY-01: zeroed on every exit
 
     if (crypto_scalarmult(dhsecret.begin(), sk_enc.begin(), epk.begin()) != 0) {
         throw std::logic_error("Could not create DH secret");
     }
 
     unsigned char K[NOTEENCRYPTION_CIPHER_KEYSIZE];
+    MemoryCleanser _cleanseK(K, sizeof(K)); // CRY-01: zeroed on every exit
     KDF(K, dhsecret, epk, pk_enc, hSig, nonce);
 
     // The nonce is zero because we never reuse keys
@@ -387,6 +425,7 @@ typename PaymentDisclosureNoteDecryption<MLEN>::Plaintext PaymentDisclosureNoteD
                                          ) const
 {
     uint256 dhsecret;
+    MemoryCleanser _cleanseDhsecret(dhsecret.begin(), 32); // CRY-01: zeroed on every exit
 
     if (crypto_scalarmult(dhsecret.begin(), esk.begin(), pk_enc.begin()) != 0) {
         throw std::logic_error("Could not create DH secret");
@@ -396,6 +435,7 @@ typename PaymentDisclosureNoteDecryption<MLEN>::Plaintext PaymentDisclosureNoteD
     uint256 epk = NoteEncryption<MLEN>::generate_pubkey(esk);
 
     unsigned char K[NOTEENCRYPTION_CIPHER_KEYSIZE];
+    MemoryCleanser _cleanseK(K, sizeof(K)); // CRY-01: zeroed on every exit
     KDF(K, dhsecret, epk, pk_enc, hSig, nonce);
 
     // The nonce is zero because we never reuse keys
