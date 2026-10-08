@@ -733,10 +733,11 @@ int RaiseFileDescriptorLimit(int nMinFD) {
 }
 
 /**
- * this function tries to make a particular range of a file allocated (corresponding to disk space)
- * it is advisory, and the range specified in the arguments will never contain live data
+ * This function tries to make a particular range of a file allocated
+ * (corresponding to disk space). The range specified in the arguments will
+ * never contain live data. Returns false when the reservation cannot complete.
  */
-void AllocateFileRange(FILE *file, unsigned int offset, unsigned int length) {
+bool AllocateFileRange(FILE *file, unsigned int offset, unsigned int length) {
 #if defined(WIN32)
     // Windows-specific version
     HANDLE hFile = (HANDLE)_get_osfhandle(_fileno(file));
@@ -744,8 +745,8 @@ void AllocateFileRange(FILE *file, unsigned int offset, unsigned int length) {
     int64_t nEndPos = (int64_t)offset + length;
     nFileSize.u.LowPart = nEndPos & 0xFFFFFFFF;
     nFileSize.u.HighPart = nEndPos >> 32;
-    SetFilePointerEx(hFile, nFileSize, 0, FILE_BEGIN);
-    SetEndOfFile(hFile);
+    return SetFilePointerEx(hFile, nFileSize, 0, FILE_BEGIN) != 0 &&
+           SetEndOfFile(hFile) != 0;
 #elif defined(MAC_OSX)
     // OSX specific version
     fstore_t fst;
@@ -754,27 +755,31 @@ void AllocateFileRange(FILE *file, unsigned int offset, unsigned int length) {
     fst.fst_offset = 0;
     fst.fst_length = (off_t)offset + length;
     fst.fst_bytesalloc = 0;
-    if (fcntl(fileno(file), F_PREALLOCATE, &fst) == -1) {
+    bool allocated = fcntl(fileno(file), F_PREALLOCATE, &fst) != -1;
+    if (!allocated) {
         fst.fst_flags = F_ALLOCATEALL;
-        fcntl(fileno(file), F_PREALLOCATE, &fst);
+        allocated = fcntl(fileno(file), F_PREALLOCATE, &fst) != -1;
     }
-    ftruncate(fileno(file), fst.fst_length);
+    return allocated && ftruncate(fileno(file), fst.fst_length) == 0;
 #elif defined(__linux__)
     // Version using posix_fallocate
     off_t nEndPos = (off_t)offset + length;
-    posix_fallocate(fileno(file), 0, nEndPos);
+    return posix_fallocate(fileno(file), 0, nEndPos) == 0;
 #else
     // Fallback version
     // TODO: just write one byte per block
     static const char buf[65536] = {};
-    fseek(file, offset, SEEK_SET);
+    if (fseek(file, offset, SEEK_SET) != 0)
+        return false;
     while (length > 0) {
         unsigned int now = 65536;
         if (length < now)
             now = length;
-        fwrite(buf, 1, now, file); // allowed to fail; this function is advisory anyway
+        if (fwrite(buf, 1, now, file) != now)
+            return false;
         length -= now;
     }
+    return true;
 #endif
 }
 

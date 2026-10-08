@@ -124,7 +124,7 @@ void ParseParameters(int argc, const char*const argv[]);
 void FileCommit(FILE *fileout);
 bool TruncateFile(FILE *file, unsigned int length);
 int RaiseFileDescriptorLimit(int nMinFD);
-void AllocateFileRange(FILE *file, unsigned int offset, unsigned int length);
+bool AllocateFileRange(FILE *file, unsigned int offset, unsigned int length);
 bool RenameOver(boost::filesystem::path src, boost::filesystem::path dest);
 bool TryCreateDirectory(const boost::filesystem::path& p);
 boost::filesystem::path GetDefaultDataDir();

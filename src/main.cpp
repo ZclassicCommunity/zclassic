@@ -4163,6 +4163,22 @@ bool ReceivedBlockTransactions(const CBlock &block, CValidationState& state, CBl
     return true;
 }
 
+static bool PreAllocateFileRange(CValidationState& state, FILE* file,
+                                 unsigned int offset, unsigned int length,
+                                 const char* prefix, unsigned int fileNumber,
+                                 unsigned int endPosition)
+{
+    if (!file)
+        return state.Error("failed to open file for pre-allocation");
+    LogPrintf("Pre-allocating up to position 0x%x in %s%05u.dat\n",
+              endPosition, prefix, fileNumber);
+    const bool allocated = AllocateFileRange(file, offset, length);
+    const bool closed = fclose(file) == 0;
+    if (!allocated || !closed)
+        return state.Error("failed to pre-allocate file");
+    return true;
+}
+
 bool FindBlockPos(CValidationState &state, CDiskBlockPos &pos, unsigned int nAddSize, unsigned int nHeight, uint64_t nTime, bool fKnown = false)
 {
     LOCK(cs_LastBlockFile);
@@ -4204,12 +4220,11 @@ bool FindBlockPos(CValidationState &state, CDiskBlockPos &pos, unsigned int nAdd
             if (fPruneMode)
                 fCheckForPruning = true;
             if (CheckDiskSpace(nNewChunks * BLOCKFILE_CHUNK_SIZE - pos.nPos)) {
-                FILE *file = OpenBlockFile(pos);
-                if (file) {
-                    LogPrintf("Pre-allocating up to position 0x%x in blk%05u.dat\n", nNewChunks * BLOCKFILE_CHUNK_SIZE, pos.nFile);
-                    AllocateFileRange(file, pos.nPos, nNewChunks * BLOCKFILE_CHUNK_SIZE - pos.nPos);
-                    fclose(file);
-                }
+                if (!PreAllocateFileRange(state, OpenBlockFile(pos), pos.nPos,
+                                          nNewChunks * BLOCKFILE_CHUNK_SIZE - pos.nPos,
+                                          "blk", pos.nFile,
+                                          nNewChunks * BLOCKFILE_CHUNK_SIZE))
+                    return false;
             }
             else
                 return state.Error("out of disk space");
@@ -4237,12 +4252,11 @@ bool FindUndoPos(CValidationState &state, int nFile, CDiskBlockPos &pos, unsigne
         if (fPruneMode)
             fCheckForPruning = true;
         if (CheckDiskSpace(nNewChunks * UNDOFILE_CHUNK_SIZE - pos.nPos)) {
-            FILE *file = OpenUndoFile(pos);
-            if (file) {
-                LogPrintf("Pre-allocating up to position 0x%x in rev%05u.dat\n", nNewChunks * UNDOFILE_CHUNK_SIZE, pos.nFile);
-                AllocateFileRange(file, pos.nPos, nNewChunks * UNDOFILE_CHUNK_SIZE - pos.nPos);
-                fclose(file);
-            }
+            if (!PreAllocateFileRange(state, OpenUndoFile(pos), pos.nPos,
+                                      nNewChunks * UNDOFILE_CHUNK_SIZE - pos.nPos,
+                                      "rev", pos.nFile,
+                                      nNewChunks * UNDOFILE_CHUNK_SIZE))
+                return false;
         }
         else
             return state.Error("out of disk space");

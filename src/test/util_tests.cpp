@@ -21,6 +21,15 @@ using namespace std;
 
 BOOST_FIXTURE_TEST_SUITE(util_tests, BasicTestingSetup)
 
+#ifdef __linux__
+BOOST_AUTO_TEST_CASE(util_allocate_file_range_failure)
+{
+    FILE* file = fopen("/dev/full", "wb");
+    BOOST_REQUIRE(file != NULL);
+    BOOST_CHECK(!AllocateFileRange(file, 0, 4096));
+    fclose(file);
+}
+#endif
 BOOST_AUTO_TEST_CASE(util_criticalsection)
 {
     CCriticalSection cs;
