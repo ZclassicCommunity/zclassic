@@ -169,6 +169,7 @@ See [doc/bootstrap-snapshots.md](doc/bootstrap-snapshots.md) for:
 
 ## Getting Help
 
+- **Chat:** [Z23 Chat on Telegram](https://t.me/z23_chat): questions about ZClassic and [Z23](https://github.com/z23c/z23), node reports and ideas.
 - **Build Issues:** see [BUILD.md](BUILD.md) for troubleshooting.
 - **Bug Reports:** [github.com/ZclassicCommunity/zclassic/issues](https://github.com/ZclassicCommunity/zclassic/issues).
 
