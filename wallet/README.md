@@ -10,7 +10,7 @@ A private, single-file ZClassic wallet — with a full ZClassic node built right
 ## Download & run
 
 **Latest release: v2.1.2-beta6** — always grab whatever GitHub marks as **Latest**:
-**https://github.com/ZclassicCommunity/zcl-qt-wallet/releases/latest**
+**https://github.com/ZclassicCommunity/zclassic/releases/latest**
 
 Download the **one** file for your computer and open it:
 

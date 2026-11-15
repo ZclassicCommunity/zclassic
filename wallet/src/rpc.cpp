@@ -1,4 +1,5 @@
 #include "rpc.h"
+#include "releaseversion.h"
 
 #include "addressbook.h"
 #include "settings.h"
@@ -1946,7 +1947,7 @@ void RPC::checkForUpdate(bool silent) {
         suppressFirstModal   = true;
     }
 
-    QUrl cmcURL("https://api.github.com/repos/ZclassicCommunity/zcl-qt-wallet/releases");
+    QUrl cmcURL("https://api.github.com/repos/ZclassicCommunity/zclassic/releases");
 
     QNetworkRequest req;
     req.setUrl(cmcURL);
@@ -1961,6 +1962,7 @@ void RPC::checkForUpdate(bool silent) {
 
                 auto releases = QJsonDocument::fromJson(reply->readAll()).array();
                 QVersionNumber maxVersion(0, 0, 0);
+                QString maxTag;
 
                 for (QJsonValue rel : releases) {
                     if (!rel.toObject().contains("tag_name"))
@@ -1971,37 +1973,39 @@ void RPC::checkForUpdate(bool silent) {
                         tag = tag.right(tag.length() - 1);
 
                     if (!tag.isEmpty()) {
-                        auto v = QVersionNumber::fromString(tag);
-                        if (v > maxVersion)
+                        auto v = walletReleaseOrder(tag);
+                        if (!v.isNull() && v > maxVersion) {
                             maxVersion = v;
+                            maxTag = tag;
+                        }
                     }
                 }
 
-                auto currentVersion = QVersionNumber::fromString(APP_VERSION);
+                auto currentVersion = walletReleaseOrder(APP_VERSION);
                 
                 // Get the max version that the user has hidden updates for
                 QSettings s;
-                auto maxHiddenVersion = QVersionNumber::fromString(s.value("update/lastversion", "0.0.0").toString());
+                auto maxHiddenVersion = walletReleaseOrder(s.value("update/lastReleaseTag", "0.0.0").toString());
 
                 qDebug() << "Version check: Current " << currentVersion << ", Available " << maxVersion;
 
                 if (maxVersion > currentVersion && !suppressFirstModal && (!silent || maxVersion > maxHiddenVersion)) {
                     auto ans = QMessageBox::information(main, QObject::tr("Update Available"), 
                         QObject::tr("A new release v%1 is available! You have v%2.\n\nWould you like to visit the releases page?")
-                            .arg(maxVersion.toString())
-                            .arg(currentVersion.toString()),
+                            .arg(maxTag)
+                            .arg(APP_VERSION),
                         QMessageBox::Yes, QMessageBox::Cancel);
                     if (ans == QMessageBox::Yes) {
-                        QDesktopServices::openUrl(QUrl("https://github.com/ZclassicCommunity/zcl-qt-wallet/releases"));
+                        QDesktopServices::openUrl(QUrl("https://github.com/ZclassicCommunity/zclassic/releases"));
                     } else {
                         // If the user selects cancel, don't bother them again for this version
-                        s.setValue("update/lastversion", maxVersion.toString());
+                        s.setValue("update/lastReleaseTag", maxTag);
                     }
                 } else {
                     if (!silent) {
                         QMessageBox::information(main, QObject::tr("No updates available"), 
                             QObject::tr("You already have the latest release v%1")
-                                .arg(currentVersion.toString()));
+                                .arg(APP_VERSION));
                     }
                 } 
             } else {
@@ -2013,7 +2017,7 @@ void RPC::checkForUpdate(bool silent) {
                                     "Open the releases page in your browser?"),
                         QMessageBox::Yes, QMessageBox::Cancel);
                     if (ans == QMessageBox::Yes) {
-                        QDesktopServices::openUrl(QUrl("https://github.com/ZclassicCommunity/zcl-qt-wallet/releases"));
+                        QDesktopServices::openUrl(QUrl("https://github.com/ZclassicCommunity/zclassic/releases"));
                     }
                 }
             }

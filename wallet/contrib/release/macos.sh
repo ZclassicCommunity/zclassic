@@ -13,10 +13,16 @@ printf '%s  daemon.tar.gz\n' 4f2344da82a57b404a1eb5e5497c00ffc635ec4792f8f9e4ab9
 tar -xf daemon.tar.gz
 cp zclassic-2.1.2-beta6-osx-arm64/zclassicd zclwallet.app/Contents/MacOS/
 "$qt/bin/macdeployqt" zclwallet.app -verbose=2
+# Qt 5's deployment tool misses Brotli's @rpath-only transitive dependency.
+# Newer Homebrew FreeType pulls in libbrotlidec, which needs this sibling.
+if [ -f zclwallet.app/Contents/Frameworks/libbrotlidec.1.dylib ]; then
+    cp "$(brew --prefix brotli)/lib/libbrotlicommon.1.dylib" zclwallet.app/Contents/Frameworks/
+fi
 otool -l "$root/res/libsodium.a" > minimum-os.txt
 # Check every Mach-O, including the daemon, Qt frameworks and platform plugins.
 # --version alone could silently resolve a library installed on the build host.
 find zclwallet.app -type f -exec sh -c '
+    set -eu
     for binary do
         if file "$binary" | grep -q "Mach-O"; then
             own_id=$(otool -D "$binary" | sed -n "2p")
@@ -26,6 +32,16 @@ find zclwallet.app -type f -exec sh -c '
                 echo "Unbundled developer-machine dependency: $binary" >&2
                 exit 1
             fi
+            printf "%s\n" "$dependencies" | awk '\''{print $1}'\'' | while IFS= read -r dependency; do
+                case "$dependency" in
+                    @rpath/*) resolved="zclwallet.app/Contents/Frameworks/${dependency#@rpath/}" ;;
+                    @executable_path/*) resolved="zclwallet.app/Contents/MacOS/${dependency#@executable_path/}" ;;
+                    @loader_path/*) resolved="$(dirname "$binary")/${dependency#@loader_path/}" ;;
+                    /System/Library/*|/usr/lib/*|"") continue ;;
+                    *) echo "Unexpected dependency: $dependency" >&2; exit 1 ;;
+                esac
+                [ -e "$resolved" ] || { echo "Missing bundled dependency: $dependency ($binary)" >&2; exit 1; }
+            done || exit 1
             otool -l "$binary" >> minimum-os.txt
         fi
     done

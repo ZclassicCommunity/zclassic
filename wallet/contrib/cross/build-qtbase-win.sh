@@ -3,7 +3,7 @@
 # using the system apt mingw (gcc-13) -- the SAME toolchain that built zclassicd.exe, so
 # the GUI .exe and daemon are ABI-consistent. No sudo, no MXE gcc rebuild. Qt's bundled
 # zlib/pcre/libpng/freetype/harfbuzz are used; no OpenSSL/GL/DBus/ICU (the wallet talks
-# plain HTTP to the local RPC; HTTPS price/update are best-effort and already silenced).
+# plain HTTP to local RPC; Windows Schannel provides HTTPS without OpenSSL DLLs).
 set -euo pipefail
 SRC="${SRC:?Set SRC to the Qt 5.15 qtbase source archive}"
 WORK="${WORK:?Set WORK to a dedicated Qt build directory}"
@@ -22,7 +22,7 @@ if [ ! -f Makefile ]; then
     -device-option CROSS_COMPILE=x86_64-w64-mingw32- \
     -prefix "$PREFIX" \
     -qt-zlib -qt-libpng -qt-libjpeg -qt-freetype -qt-pcre -qt-harfbuzz \
-    -no-opengl -no-openssl -no-dbus -no-icu \
+    -no-opengl -no-openssl -schannel -no-dbus -no-icu \
     -nomake examples -nomake tests
 fi
 

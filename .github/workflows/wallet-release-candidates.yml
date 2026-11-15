@@ -28,6 +28,24 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - name: Restore Linux toolchain
+        id: qt-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: wallet-focal-qt5.15.19-openssl3.5.9-static-v1
+          path: |
+            wallet/artifacts/linux-build/qt-static
+            wallet/artifacts/linux-build/openssl
+      - name: Build Linux toolchain
+        run: BUILD_TOOLCHAIN_ONLY=1 sh wallet/contrib/release/linux.sh
+      - name: Save Linux toolchain
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: wallet-focal-qt5.15.19-openssl3.5.9-static-v1
+          path: |
+            wallet/artifacts/linux-build/qt-static
+            wallet/artifacts/linux-build/openssl
       - name: Build and check portable Linux candidate
         run: sh wallet/contrib/release/linux.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

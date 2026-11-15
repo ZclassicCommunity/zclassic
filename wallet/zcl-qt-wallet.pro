@@ -75,6 +75,7 @@ SOURCES += \
     src/notifyserver.cpp
 
 HEADERS += \
+    src/releaseversion.h \
     src/embeddeddaemon.h \
     src/notifyserver.h \
     src/securerandom.h \

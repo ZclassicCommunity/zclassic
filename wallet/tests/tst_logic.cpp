@@ -24,6 +24,7 @@
 #include <QtGlobal>
 #include "filepermissions.h"
 #include "embeddeddaemon.h"
+#include "releaseversion.h"
 #include <QCryptographicHash>
 #include <QStandardItemModel>
 
@@ -172,6 +173,18 @@ class TestLogic : public QObject {
     Q_OBJECT
 
 private slots:
+    void releaseVersion_ordering() {
+        QVERIFY(walletReleaseOrder("2.1.2-beta7") > walletReleaseOrder("2.1.2-beta6"));
+        QVERIFY(walletReleaseOrder("2.1.2-beta10") > walletReleaseOrder("2.1.2-beta9"));
+        QVERIFY(walletReleaseOrder("2.1.2-rc1") > walletReleaseOrder("2.1.2-beta99"));
+        QVERIFY(walletReleaseOrder("2.1.2") > walletReleaseOrder("2.1.2-rc99"));
+        QVERIFY(walletReleaseOrder("2.1.3-beta1") > walletReleaseOrder("2.1.2"));
+        QCOMPARE(walletReleaseOrder("v2.1.2-beta7"), walletReleaseOrder("2.1.2-beta7"));
+        QVERIFY(walletReleaseOrder("2.1.2-beta7garbage").isNull());
+        QVERIFY(walletReleaseOrder("999999999999.1.2").isNull());
+        QVERIFY(walletReleaseOrder("2.1.2-beta999999999999").isNull());
+        QVERIFY(walletReleaseOrder("").isNull());
+    }
     void embeddedDaemon_integrity();
     void initTestCase();
     void cleanupTestCase();

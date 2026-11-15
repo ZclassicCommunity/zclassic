@@ -6,6 +6,9 @@ under `wallet/`, imported from `ZclassicCommunity/zcl-qt-wallet` commit
 `0589e5badacb3e12740ab6e84fe2eebb4832c61e`. Its license is retained in
 `wallet/LICENSE`. The bundled node remains the reviewed beta6 daemon; its
 reported node version is intentionally beta6. There are no consensus changes.
+The old Hugo documentation-site theme and a stale prebuilt GUI executable are
+excluded; the public website remains in `zclassicorg.github.io`. The theme's
+Tachyons CSS references were unrelated to blockchain protocol code.
 
 ## Improvements
 
@@ -13,6 +16,9 @@ reported node version is intentionally beta6. There are no consensus changes.
   runtime and pthreads. Beta6 requested `libgcc_s_seh-1.dll`; inspection also
   found missing `libstdc++-6.dll` and `libwinpthread-1.dll` dependencies.
   Packaging now rejects non-system DLL dependencies in both GUI and daemon.
+  Windows HTTPS uses native Schannel, restoring certificate-verified update
+  requests without adding OpenSSL DLL requirements. Linux GUI candidates use
+  Qt 5.15.19 and statically linked OpenSSL 3.5.9; the node's libraries are unchanged.
 - **Sync configuration:** stop forcing a 450 MiB database cache. The existing
   64-bit daemon defaults (1024 MiB, or 2048 MiB during a rebuild) and explicit
   user settings now take effect. No verification checks are removed. This can
@@ -32,6 +38,13 @@ reported node version is intentionally beta6. There are no consensus changes.
   verify actual notification round trips in native tests.
 - **Fresh profiles:** create the logging directory when missing and handle
   log-open failures without repeated invalid writes.
+- **Canonical releases:** the wallet's update checker and download links now use
+  `ZclassicCommunity/zclassic`, alongside the node and unified release notes.
+  Version comparisons distinguish beta6, beta7, release candidates and final
+  releases instead of treating every 2.1.2 prerelease as the same version.
+- **macOS packaging:** include a transitive Brotli library missed by Qt's deploy
+  tool, check all bundled library references, and set the minimum macOS version
+  from the actual deployed libraries and static objects before signing.
 - **Release reliability:** test shadow builds and platform permissions, isolate
   tests from real user profiles, reject oversized embedded payloads and existing
   packaging outputs, and snapshot the daemon before hashing/packaging so a
