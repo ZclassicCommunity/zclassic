@@ -25,7 +25,10 @@ tar -xf qtbase.tar.xz
 tar -xf qtsvg.tar.xz
 mkdir qt-build
 cd qt-build
-OPENSSL_INCDIR="$work/openssl/include" OPENSSL_LIBDIR="$work/openssl/lib" OPENSSL_LIBS="-L$work/openssl/lib -lssl -lcrypto -ldl -pthread" ../qtbase-everywhere-src-5.15.19/configure -opensource -confirm-license -release -static -prefix "$prefix" -nomake examples -nomake tests -no-opengl -openssl-linked -no-dbus -no-icu -qt-zlib -qt-libpng -qt-libjpeg -qt-freetype -qt-pcre -qt-harfbuzz -xcb
+if ! OPENSSL_LIBS="-L$work/openssl/lib -lssl -lcrypto -ldl -pthread" ../qtbase-everywhere-src-5.15.19/configure -opensource -confirm-license -release -static -prefix "$prefix" -nomake examples -nomake tests -no-opengl -openssl-linked -I "$work/openssl/include" -L "$work/openssl/lib" -no-dbus -no-icu -qt-zlib -qt-libpng -qt-libjpeg -qt-freetype -qt-pcre -qt-harfbuzz -xcb; then
+    cat config.log
+    exit 1
+fi
 make -j4
 make install
 cd "$work"
