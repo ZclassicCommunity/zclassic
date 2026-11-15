@@ -18,6 +18,9 @@ cp zclassic-2.1.2-beta6-osx-arm64/zclassicd zclwallet.app/Contents/MacOS/
 if [ -f zclwallet.app/Contents/Frameworks/libbrotlidec.1.dylib ]; then
     cp "$(brew --prefix brotli)/lib/libbrotlicommon.1.dylib" zclwallet.app/Contents/Frameworks/
 fi
+if [ -f zclwallet.app/Contents/Frameworks/libwebp.7.dylib ]; then
+    cp "$(brew --prefix webp)/lib/libsharpyuv.0.dylib" zclwallet.app/Contents/Frameworks/
+fi
 otool -l "$root/res/libsodium.a" > minimum-os.txt
 # Check every Mach-O, including the daemon, Qt frameworks and platform plugins.
 # --version alone could silently resolve a library installed on the build host.

@@ -42,7 +42,7 @@ Tachyons CSS references were unrelated to blockchain protocol code.
   `ZclassicCommunity/zclassic`, alongside the node and unified release notes.
   Version comparisons distinguish beta6, beta7, release candidates and final
   releases instead of treating every 2.1.2 prerelease as the same version.
-- **macOS packaging:** include a transitive Brotli library missed by Qt's deploy
+- **macOS packaging:** include transitive Brotli and WebP libraries missed by Qt's deploy
   tool, check all bundled library references, and set the minimum macOS version
   from the actual deployed libraries and static objects before signing.
 - **Release reliability:** test shadow builds and platform permissions, isolate
