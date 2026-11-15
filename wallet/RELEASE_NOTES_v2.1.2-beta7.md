@@ -13,7 +13,7 @@ until reviewed beta7 artifacts are published.
 - Damaged sent history is preserved, and fresh-profile logging works reliably.
 - Cached embedded nodes are hash-checked before reuse; extraction uses private,
   atomic writes and rejects malformed payloads without replacing a prior file.
-- Retained node stderr is bounded to 64 KiB, and unused stdout is discarded to
+- Retained node stderr is bounded to 64K characters, and unused stdout is discarded to
   avoid accumulating console output throughout long-running node sessions.
 - Native platform tests cover the GUI, private file access, notification
   round trips and packaging failures.

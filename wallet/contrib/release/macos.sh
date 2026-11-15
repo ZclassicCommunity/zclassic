@@ -16,13 +16,23 @@ cp zclassic-2.1.2-beta6-osx-arm64/zclassicd zclwallet.app/Contents/MacOS/
 codesign --force --timestamp=none --sign - zclwallet.app/Contents/MacOS/zclassicd
 codesign --force --deep --timestamp=none --sign - zclwallet.app
 codesign --verify --deep --strict --verbose=2 zclwallet.app
-QT_QPA_PLATFORM=offscreen zclwallet.app/Contents/MacOS/zclwallet --help > "$root/artifacts/release/macos-help.txt"
+QT_QPA_PLATFORM=cocoa zclwallet.app/Contents/MacOS/zclwallet --help > "$root/artifacts/release/macos-help.txt"
 zclwallet.app/Contents/MacOS/zclassicd --version > "$root/artifacts/release/macos-validation.txt"
 otool -L zclwallet.app/Contents/MacOS/zclwallet >> "$root/artifacts/release/macos-validation.txt"
-if otool -L zclwallet.app/Contents/MacOS/zclwallet | grep -E '/opt/homebrew|/usr/local'; then
-    echo 'Unbundled developer-machine library dependency' >&2
-    exit 1
-fi
+# Check every Mach-O, including the daemon, Qt frameworks and platform plugins.
+# --version alone could silently resolve a library installed on the build host.
+find zclwallet.app -type f -exec sh -c '
+    for binary do
+        if file "$binary" | grep -q "Mach-O"; then
+            dependencies=$(otool -L "$binary") || exit 1
+            printf "%s\n" "$dependencies"
+            if printf "%s\n" "$dependencies" | grep -E "/opt/homebrew|/usr/local"; then
+                echo "Unbundled developer-machine dependency: $binary" >&2
+                exit 1
+            fi
+        fi
+    done
+' sh {} + >> "$root/artifacts/release/macos-validation.txt"
 mkdir dmg-root
 mv zclwallet.app dmg-root/ZclWallet.app
 ln -s /Applications dmg-root/Applications

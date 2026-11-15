@@ -21,7 +21,7 @@ reported node version is intentionally beta6. There are no consensus changes.
   lengths, reject symbolic-link output files, and publish extracted binaries
   atomically with private access permissions. Same-size corruption is repaired
   from a verified payload; a bad payload cannot replace the previous cache.
-- **Long-running stability:** bound retained node stderr to 64 KiB. Unused
+- **Long-running stability:** bound retained node stderr to 64K characters. Unused
   stdout is discarded instead of accumulating in memory. The default daemon
   logging destination remains `debug.log`; explicit `printtoconsole` output is
   discarded by the GUI launcher.

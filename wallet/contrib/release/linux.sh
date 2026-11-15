@@ -68,5 +68,10 @@ mv "$output.part" "$output"
 # --help does not start the node or access a canonical datadir.
 QT_QPA_PLATFORM=offscreen "$output" --help > "$root/artifacts/release/linux-help.txt"
 "$daemon" --version >> "$root/artifacts/release/linux-validation.txt"
+mkdir "$work/extraction-check"
+cd "$work/extraction-check"
+"$prefix/bin/qmake" "$root/tests/check-embedded.pro"
+make -j4
+./check-embedded "$output" "$daemon" >> "$root/artifacts/release/linux-validation.txt"
 cd "$root/artifacts/release"
 sha256sum zclwallet-v2.1.2-beta7-linux-x86_64 > linux-SHA256SUMS.txt
