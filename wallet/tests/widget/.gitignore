@@ -1,0 +1,7 @@
+/bin/
+/Makefile
+/tst_widget
+/tst_widget_plugin_import.cpp
+/.qmake.stash
+*.o
+*.moc

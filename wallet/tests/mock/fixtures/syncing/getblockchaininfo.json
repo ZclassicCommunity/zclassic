@@ -1,0 +1,10 @@
+{
+  "chain": "main",
+  "blocks": 850000,
+  "headers": 1700000,
+  "bestblockhash": "00000000abcdef0000000000000000000000000000000000000000000000beef",
+  "difficulty": 9999.0,
+  "verificationprogress": 0.9635123,
+  "chainwork": "0000000000000000000000000000000000000000000000000000000000abc123",
+  "pruned": false
+}

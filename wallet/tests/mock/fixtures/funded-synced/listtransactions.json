@@ -1,0 +1,29 @@
+[
+  {
+    "account": "",
+    "address": "t1RealFormatTransparentAddr1aBcDeFgHjK",
+    "category": "receive",
+    "amount": 12.34500000,
+    "vout": 0,
+    "confirmations": 250,
+    "blockhash": "00000000abc0000000000000000000000000000000000000000000000000d00d",
+    "blockindex": 1,
+    "txid": "aa11bb22cc33dd44ee55ff66001122334455667788990011223344556677aabb",
+    "time": 1690000000,
+    "timereceived": 1690000000
+  },
+  {
+    "account": "",
+    "address": "t1RealFormatTransparentAddr1aBcDeFgHjK",
+    "category": "send",
+    "amount": -1.50000000,
+    "vout": 0,
+    "fee": -0.00010000,
+    "confirmations": 30,
+    "blockhash": "00000000fed0000000000000000000000000000000000000000000000000beef",
+    "blockindex": 2,
+    "txid": "ee55ff66001122334455667788990011223344556677aabbaa11bb22cc33dd44",
+    "time": 1695000000,
+    "timereceived": 1695000000
+  }
+]

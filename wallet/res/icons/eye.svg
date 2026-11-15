@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- eye silhouette: PUBLIC / transparent (t-address). Single solid #000000 fill
+     used as an alpha mask and tinted to the amber badge color at paint time.
+     The pupil is a transparent cut-out (fill-rule evenodd) so the open eye
+     reads clearly even when flat-tinted. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <path fill="#000000" fill-rule="evenodd" d="M12 5.2C6.9 5.2 2.6 8.3 1 12c1.6 3.7 5.9 6.8 11 6.8S21.4 15.7 23 12c-1.6-3.7-5.9-6.8-11-6.8zm0 2.1c2.6 0 4.7 2.1 4.7 4.7S14.6 16.7 12 16.7 7.3 14.6 7.3 12 9.4 7.3 12 7.3zm0 2.2c-1.4 0-2.5 1.1-2.5 2.5s1.1 2.5 2.5 2.5 2.5-1.1 2.5-2.5-1.1-2.5-2.5-2.5z"/>
+</svg>
