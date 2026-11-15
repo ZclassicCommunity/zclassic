@@ -1,6 +1,8 @@
 bin/
 debug/
 release/
+!contrib/release/
+zclwallet
 x64/
 artifacts/
 .vscode/

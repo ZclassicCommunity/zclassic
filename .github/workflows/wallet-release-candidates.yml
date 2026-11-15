@@ -1,15 +1,20 @@
 name: Wallet release candidates
 on:
-  push:
-    branches: ['release/beta7-wallet']
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Candidate platform
+        type: choice
+        options: [all, linux, macos]
+        default: all
 concurrency:
-  group: wallet-release-${{ github.ref }}
+  group: wallet-release-${{ github.ref }}-${{ inputs.platform }}
   cancel-in-progress: true
 permissions:
   contents: read
 jobs:
   linux:
+    if: inputs.platform == 'all' || inputs.platform == 'linux'
     runs-on: ubuntu-24.04
     container: ubuntu:20.04
     timeout-minutes: 120
@@ -31,6 +36,7 @@ jobs:
           path: wallet/artifacts/release/*
           if-no-files-found: error
   macos:
+    if: inputs.platform == 'all' || inputs.platform == 'macos'
     runs-on: macos-15
     timeout-minutes: 40
     steps:
