@@ -1,7 +1,6 @@
 # ZClassic Wallet 2.1.2-beta7
 
-Release preparation: binaries are candidates until validation and publication
-finish. This release brings the Qt desktop wallet source into this repository
+This release brings the Qt desktop wallet source into this repository
 under `wallet/`, imported from `ZclassicCommunity/zcl-qt-wallet` commit
 `0589e5badacb3e12740ab6e84fe2eebb4832c61e`. Its license is retained in
 `wallet/LICENSE`. The bundled node remains the reviewed beta6 daemon; its
@@ -53,7 +52,7 @@ Tachyons CSS references were unrelated to blockchain protocol code.
 ## Validation and release status
 
 The imported source passed native builds and tests on Windows, Linux and macOS.
-Windows: 105 logic and 48 widget passes; Linux/macOS: 106 logic and 47 widget
+Windows: 106 logic and 48 widget passes; Linux/macOS: 107 logic and 47 widget
 passes each. There were no failures. Windows skips one POSIX-only test; all
 platforms retain one previously deferred widget latency test.
 
@@ -62,11 +61,44 @@ actual packaged executable was extracted with production code into a temporary
 cache, its daemon hash was checked against beta6, and `--version` completed.
 Independent source review found two test integration issues, both corrected.
 
-Portable Linux/macOS artifacts, signing checks and isolated full-chain sync
-measurement are still release gates. No funds were spent, keys exported,
+Windows HTTPS was tested with certificate verification and Windows-only PATH.
+The macOS DMG passed library closure checks, ad-hoc signature verification and
+mounted-image GUI/node startup on a separate Mac. It requires macOS 15 or newer
+on Apple Silicon. Windows candidates are unsigned; macOS is not notarized.
+
+The Linux candidate passed the glibc/C++ runtime floors, dependency checks,
+production payload extraction, cache reuse and verified HTTPS. Its downloaded
+binary also started on a separate Linux host. Full-chain sync speed has not been
+benchmarked, so this release makes no measured speedup claim. No funds were spent, keys exported,
 canonical datadirs changed, or transaction-construction code modified. Z23's
-storage read-ahead design is being evaluated separately; no unvalidated Z23
-consensus or storage implementation has been substituted into this release.
+storage read-ahead and MMB designs are being evaluated separately; no unvalidated
+Z23 consensus or storage implementation has been substituted into this release.
+MMB snapshot sync is not enabled: ZClassic headers do not commit an MMB or UTXO
+root, so an auxiliary peer proof cannot replace full historical validation.
 
 Published binaries must include SHA256SUMS.txt and platform requirements.
 Windows candidates are unsigned; macOS ad-hoc signing is not notarization.
+
+## Downloads and requirements
+
+- Windows x86_64: `zclwallet-v2.1.2-beta7-win64.exe`. No GCC, Qt, pthread or
+  OpenSSL DLL installation is needed.
+- macOS 15+ Apple Silicon: `zclwallet-v2.1.2-beta7-macos-arm64.dmg`. Drag the app
+  to Applications. It is ad-hoc signed, not Apple-notarized; use the system's
+  Privacy & Security approval flow if Gatekeeper blocks it.
+- Linux x86_64: `zclwallet-v2.1.2-beta7-linux-x86_64`. Built on Ubuntu 20.04;
+  requires glibc 2.31+, the system C++ runtime and X11/XCB desktop libraries.
+  Qt and OpenSSL are statically included. Run `chmod +x` on the downloaded file.
+
+On minimal Ubuntu/Debian installations, the X11/XCB runtime packages are:
+
+```sh
+sudo apt-get install libx11-xcb1 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+  libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-sync1 libxcb-xfixes0 \
+  libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0 libstdc++6 ca-certificates
+```
+
+Verify downloads against `SHA256SUMS.txt`. Back up your wallet before upgrading.
+Replace the application; do not delete or reindex your existing data directory
+as part of this upgrade. Standalone daemon downloads remain beta6 because its
+implementation is unchanged. No transaction or consensus migration is required.
