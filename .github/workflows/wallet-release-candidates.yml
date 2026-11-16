@@ -33,6 +33,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - name: Trust this container checkout for source identification
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Restore Linux toolchain
         id: qt-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
