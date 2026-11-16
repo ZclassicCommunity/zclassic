@@ -1,7 +1,8 @@
 # src/c23: the C23 core that replaces librustzcash
 
-Status: units U1 (vendor) and U2 (glue) only. Nothing here is wired into the build yet
-(`glue/WIRING.md` lists what the build-switch unit must add).
+Status: wired. `src/Makefile.am` builds everything below into `libzcl_c23.a`, which
+`zclassicd`, `zclassic-tx`, `zcash-gtest` and `test_bitcoin` link instead of
+`librustzcash.a`. How it is built, checked and tuned: `doc/c23-build.md`.
 
 ```
 vendor/                  VERBATIM Z23 files at the pin in Z23_SOURCE.tsv. Never edit.

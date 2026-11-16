@@ -1,0 +1,125 @@
+# Building zclassicd on the C23 crypto core
+
+zclassicd no longer links `librustzcash.a`. The Sapling and Sprout-Groth16
+functions it calls (`librustzcash_*`, 31 of them) come from `src/c23`, built
+into `src/libzcl_c23.a` by `src/Makefile.am`. No Rust toolchain or Rust
+library takes part in the link.
+
+## What is built
+
+| archive | contents | language |
+|---|---|---|
+| `libzcl_c23.a` | `c23/vendor` (Z23, verbatim), `c23/glue`, `c23/compat` (the ABI shim), `c23/sprout_prover` | C |
+| `libzcl_c23_seam.a` | `c23/glue/zcl_c23_log.cpp`: `LogPrintStr`, `-debug=zc23`, network id | C++ |
+
+Both are listed as `$(LIBZCL_C23)`, after every library that calls
+`librustzcash_*` and before `-lsodium -lcrypto`. `zclassic-cli` does not link them.
+
+## Rules the Makefile enforces
+
+- **Header.** `-I$(srcdir)/c23/compat` is first in `AM_CPPFLAGS`, so
+  `#include "librustzcash.h"` is the shim header.
+- **Include isolation.** The Z23 include directories are given to the C objects
+  only, and Automake's `-I.` is removed for them. Z23 has `chainparams.h`,
+  `crypto/sha256.h`, `crypto/sha512.h`, `uint256.h`; so does zclassicd.
+- **Symbol prefix.** Every object of `libzcl_c23.a` is compiled with
+  `-include c23/glue/zcl_c23_symbol_prefix.h`, which renames each internal
+  global to `zc23_<name>`. Z23 and libsodium both export `blake2b_init`,
+  `blake2b_update`, `blake2b_final`, `blake2b` (different state layouts); a
+  static link either fails with "multiple definition" or binds one library's
+  callers to the other's function. `c23-symbols.stamp` runs
+  `c23/tools/symbol-prefix.sh check` on the archive and every program that
+  links it depends on that stamp. After re-vendoring, if the check names a new
+  symbol: `sh src/c23/tools/symbol-prefix.sh gen nm src/libzcl_c23.a
+  src/c23/glue/zcl_c23_symbol_prefix.h`, rebuild, commit the header.
+- **Language level.** configure compiles a C23 probe with `-std=c23
+  -D_GNU_SOURCE`. If it works that is used; otherwise `-std=gnu17` (the
+  force-included `c23/glue/zcl_c23_compat.h` supplies the C23 spellings).
+  `-D_GNU_SOURCE` is passed in both modes (glibc needs it for the Sprout
+  prover's `sched_getaffinity`). Override: `./configure ZCL_C23_STD=-std=gnu17`.
+  GCC 14.2 takes the C23 path. mingw-w64 GCC 13 has no `-std=c23` and takes
+  gnu17 (the core compiles there with no diagnostics; that was a standalone
+  cross compile, a full mingw configure run needs a mingw `depends` prefix).
+- **Optimisation.** The C23 objects always end with `-O3`, whatever `CFLAGS`
+  says. Release `CFLAGS`/`CXXFLAGS` from `depends` are `-O3` on Linux, Windows
+  and macOS, and libsnark is built with `OPTFLAGS=-O3`. A prefix built before
+  this change has `-O2` in `share/config.site`; rebuild `depends` or the
+  daemon's C++ stays at `-O2`.
+- **No `-march`.** Nothing in the release flags selects an instruction set.
+  The core picks ADX/BMI2, AVX2, AVX-512 and SHA-NI code at run time
+  (`simd_dispatch.c`); those functions carry `target` attributes.
+  `-fomit-frame-pointer` is required by the ADX inline assembly.
+- **Hardening** is unchanged and now covers the C objects too:
+  `-fstack-protector-all`, `-D_FORTIFY_SOURCE=2`, `-fPIE`/`-pie`, RELRO, BIND_NOW.
+
+## Checks
+
+```sh
+make -C src check-c23-no-rust     # 31 librustzcash_* from the shim, 0 Rust symbols, per binary
+make -C src check-c23-vendor      # vendored files match Z23_SOURCE.tsv
+sh src/c23/test/run.sh --out <dir> --linked src/libzcl_c23.a --deps <depends prefix> \
+    --golden <c23_golden>         # KAT replay + mutations + threads against the linked archive
+sh src/c23/test/regtest-smoke.sh --bin src --work <empty dir> [--peer-bin <other build>/src]
+sh src/c23/test/params-smoke.sh --bin src --work <empty dir>
+ZCL_MAINNET_BLK_FILES=<copy of blkNNNNN.dat>[:...] ZCL_MAINNET_BLK_THREADS=8 \
+    src/zcash-gtest --gtest_filter='MainnetBlocks.*'
+```
+
+## Parameters at startup
+
+`init.cpp` is unchanged: its SHA-256 gate runs first, then
+`librustzcash_init_zksnark_params` (now the shim) reads the three Groth16
+parameter files through BLAKE2b-512 against the same digests as before and
+aborts with librustzcash's wording, prefixed `librustzcash (C23):` instead of
+Rust's `thread '<unnamed>' panicked at`.
+
+## LTO: measured, not enabled
+
+`libzcl_c23_a_CFLAGS` ends with `$(ZCL_C23_LTO_CFLAGS)`, empty by default.
+Measured on x86_64 Linux, GCC 14.2, `-O3` against `-O3 -flto` for the whole
+core and its test driver (`kat_bench`, same golden inputs, median per call):
+
+| op | -O3 | -O3 -flto |
+|---|---|---|
+| check_spend | 2.86 ms | 3.06 ms |
+| check_output | 2.66 ms | 2.82 ms |
+| sprout_verify | 2.67 ms | 2.83 ms |
+| merkle_hash | 43.2 us | 45.4 us |
+| final_check | 252 us | 269 us |
+
+That is the quietest of three interleaved rounds: LTO was 5-7% slower on every
+verification op. The other two rounds ran under heavy host load and went
+either way (one LTO-slower, one LTO-faster), so no gain was demonstrated. On
+Linux both variants were bit-for-bit reproducible when rebuilt in the same
+directory. With the mingw-w64 GCC 13 cross compiler the core compiles and
+links with `-flto`, but reproducibility there is unproven: the test link
+differed between two builds with and without LTO alike (the PE timestamp was
+not pinned). With no measured gain, LTO stays off.
+To try it again (untested through Automake):
+`make ZCL_C23_LTO_CFLAGS="-flto -ffat-lto-objects" AR=gcc-ar RANLIB=gcc-ranlib`.
+
+## Performance against the Rust build
+
+Same host, same golden inputs, interleaved runs of `c23/test/kat_bench` linked
+against `libzcl_c23.a` and against `librustzcash.a` (median per call, the
+quietest of three rounds; the host was shared and loaded):
+
+| op | Rust | C23 |
+|---|---|---|
+| check_spend | 3.75 ms | 3.03 ms |
+| check_output | 3.42 ms | 2.82 ms |
+| sprout_verify (Groth16) | 3.77 ms | 2.82 ms |
+| final_check | 200 us | 267 us |
+| merkle_hash | 21.5 us | 45.5 us |
+| compute_cm | 191 us | 257 us |
+| ivk_to_pkd | 90 us | 102 us |
+| ka_agree | 88 us | 104 us |
+| spend_proof | 0.47 s | 8.97 s |
+| output_proof | 0.11 s | 1.32 s |
+
+Groth16 verification is about 20% faster than librustzcash. The
+Jubjub/Pedersen operations are 13% to 2.1x slower; `merkle_hash` is what the
+note commitment tree calls for every append and root. Proof creation is 8x
+to 19x slower across the rounds (`zcbenchmark createsaplingspend`: 8.65 s
+against 0.45-0.83 s): `groth16_prover.c` loads the proving key again for every
+proof and prints `Proving key loaded: ...` to stdout each time.

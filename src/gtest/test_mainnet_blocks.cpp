@@ -70,11 +70,14 @@ int CoinbaseHeight(const CBlock& block)
         return CScript::DecodeOP_N(op);
     if (data.empty() || data.size() > 4)
         return -1;
+    int h;
     try {
-        return CScriptNum(data, false).getint();
+        h = CScriptNum(data, false).getint();
     } catch (const scriptnum_error&) {
         return -1;
     }
+    // A first push that is not a height (a legacy "04ffff001d"-style coinbase).
+    return (h >= 0 && h < 100000000) ? h : -1;
 }
 
 bool HasShielded(const CTransaction& tx)
@@ -128,14 +131,14 @@ bool ReadBlkFile(const std::string& path, std::vector<ShieldedBlock>& out,
             // Genesis has no height push; it has no shielded data either.
             continue;
         }
-        if (h < minHeight) minHeight = h;
-        if (h > maxHeight) maxHeight = h;
         ShieldedBlock sb;
         sb.height = h;
         for (const CTransaction& tx : block.vtx)
             if (HasShielded(tx))
                 sb.txs.push_back(tx);
         if (!sb.txs.empty()) {
+            if (h < minHeight) minHeight = h;
+            if (h > maxHeight) maxHeight = h;
             sb.hash = block.GetHash();
             out.push_back(std::move(sb));
         }
@@ -237,11 +240,11 @@ TEST(MainnetBlocks, ShieldedConsensusChecksAcceptRealBlocks)
         threads.create_thread(worker);
     threads.join_all();
 
-    printf("[ MAINNET  ] files=%d blocks=%llu heights=%d..%d blocks_with_shielded=%llu "
+    printf("[ MAINNET  ] files=%d blocks=%llu blocks_with_shielded=%llu shielded_heights=%d..%d "
            "shielded_txs=%llu sapling_spends=%llu sapling_outputs=%llu "
            "joinsplits_groth16=%llu joinsplits_phgr13=%llu joinsplits_phgr13_skipped=%llu failures=%llu threads=%d\n",
-           nFiles, (unsigned long long)nBlocks, minHeight, maxHeight,
-           (unsigned long long)blocks.size(), (unsigned long long)nTx.load(),
+           nFiles, (unsigned long long)nBlocks, (unsigned long long)blocks.size(), minHeight, maxHeight,
+           (unsigned long long)nTx.load(),
            (unsigned long long)nSpend.load(), (unsigned long long)nOutput.load(),
            (unsigned long long)nGroth.load(), (unsigned long long)nPHGR.load(),
            (unsigned long long)nPHGRSkipped.load(), (unsigned long long)nFail.load(), nThreads);

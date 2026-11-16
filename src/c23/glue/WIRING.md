@@ -1,5 +1,15 @@
 # Build wiring for libzcl_c23.a (for the later build-switch unit)
 
+APPLIED by the build switch. This file is the original plan; `doc/c23-build.md`
+describes the build as it is. Where they differ, the build is right:
+
+- the C objects are compiled with Automake's `-I.` removed (it shadowed Z23's
+  `crypto/sha512.h`), and with `c23/glue/zcl_c23_symbol_prefix.h` force-included
+  (every internal global is `zc23_<name>`; libsodium.a exports `blake2b_init` etc.);
+- the language level is chosen by configure (`-std=c23 -D_GNU_SOURCE` or `-std=gnu17`);
+- `zcl_c23_log.cpp` lives in its own `libzcl_c23_seam.a`, listed right after
+  `libzcl_c23.a`, not in `libbitcoin_util.a` (it needs `Params()` from common).
+
 Nothing here is applied by unit U1/U2. `configure.ac` and `Makefile*.am` are untouched.
 All paths are relative to `src/`. Everything below was proven with the standalone
 `tools/build-check.sh` (see README.md); the Automake text itself is UNTESTED until
