@@ -27,6 +27,7 @@
 #include "repairlock.h"
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QTcpServer>
 #include "repairlocation.h"
 #include "embeddeddaemon.h"
 #include "releaseversion.h"
@@ -265,6 +266,97 @@ private slots:
         QVERIFY(!QFileInfo::exists(network.filePath("blocks")));
         QVERIFY(!QFileInfo::exists(network.filePath("chainstate")));
         QVERIFY(QFileInfo::exists(ChainBackup::journalPath(network)));
+    }
+    void chainBackup_realWalletSurvivesSnapshotReplacement() {
+        const QString daemon = qEnvironmentVariable("ZCL_TEST_REPAIR_DAEMON");
+        if (daemon.isEmpty()) QSKIP("Set ZCL_TEST_REPAIR_DAEMON for isolated regtest wallet migration");
+        const QString cli = QFileInfo(daemon).dir().filePath(
+#ifdef Q_OS_WIN
+            "zclassic-cli.exe"
+#else
+            "zclassic-cli"
+#endif
+        );
+        QVERIFY(QFileInfo::exists(cli));
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        const QDir root(temporary.path());
+        const QDir network(root.filePath("regtest"));
+        QTcpServer reservation;
+        QVERIFY(reservation.listen(QHostAddress::LocalHost, 0));
+        const QString port = QString::number(reservation.serverPort());
+        reservation.close();
+        const QStringList common{"-regtest", "-datadir=" + root.path(), "-rpcport=" + port};
+        QProcess node;
+        auto rpc = [&](const QStringList& arguments, QByteArray& output) {
+            QProcess process;
+            process.start(cli, common + arguments);
+            if (!process.waitForFinished(30000)) return false;
+            output = process.readAllStandardOutput();
+            return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
+        };
+        auto start = [&](const QStringList& extra) {
+            node.start(daemon, common + QStringList{"-listen=0", "-connect=0", "-dnsseed=0", "-bootstrap=0"} + extra);
+            if (!node.waitForStarted(5000)) return false;
+            QElapsedTimer elapsed; elapsed.start();
+            while (elapsed.elapsed() < 30000 && node.state() != QProcess::NotRunning) {
+                QByteArray output;
+                if (rpc({"getwalletinfo"}, output)) return true;
+                QTest::qWait(100);
+            }
+            return false;
+        };
+        auto stop = [&]() {
+            QByteArray output;
+            return rpc({"stop"}, output) && node.waitForFinished(30000) &&
+                node.exitStatus() == QProcess::NormalExit && node.exitCode() == 0;
+        };
+        auto walletHash = [&]() {
+            QFile file(network.filePath("wallet.dat"));
+            if (!file.open(QIODevice::ReadOnly)) return QByteArray();
+            QCryptographicHash hash(QCryptographicHash::Sha256);
+            if (!hash.addData(&file)) return QByteArray();
+            return hash.result();
+        };
+        QVERIFY(start({}));
+        QVERIFY(!repairProcessIsStopped(&node));
+        QByteArray address, output;
+        QVERIFY(rpc({"getnewaddress"}, address));
+        QVERIFY(!address.trimmed().isEmpty());
+        QVERIFY(rpc({"generate", "12"}, output));
+        QVERIFY(rpc({"getwalletinfo"}, output));
+        const auto before = QJsonDocument::fromJson(output).object();
+        QVERIFY(before.value("immature_balance").toDouble() > 0);
+        QVERIFY(before.value("txcount").toInt() >= 12);
+        QVERIFY(stop());
+        QVERIFY(repairProcessIsStopped(&node));
+        const QByteArray originalHash = walletHash();
+        QVERIFY(!originalHash.isEmpty());
+        QString backupPath;
+        {
+            RepairLock lock(network.path());
+            QVERIFY(lock.acquired());
+            const auto backup = ChainBackup::setAside(network);
+            QVERIFY2(backup.success, qPrintable(backup.error));
+            backupPath = backup.path;
+            QCOMPARE(walletHash(), originalHash);
+            QVERIFY(!QFileInfo::exists(network.filePath("blocks")));
+            QVERIFY(!QFileInfo::exists(network.filePath("chainstate")));
+        }
+        // Real daemon imports the retained snapshot into fresh chain directories;
+        // the original wallet remains in place throughout, with no key export.
+        QVERIFY(start({"-bootstrapdatadir=" + backupPath}));
+        QVERIFY(rpc({"getblockcount"}, output));
+        QCOMPARE(output.trimmed().toInt(), 12);
+        QVERIFY(rpc({"getwalletinfo"}, output));
+        const auto after = QJsonDocument::fromJson(output).object();
+        QCOMPARE(after.value("immature_balance"), before.value("immature_balance"));
+        QCOMPARE(after.value("txcount"), before.value("txcount"));
+        QVERIFY(rpc({"validateaddress", QString::fromUtf8(address.trimmed())}, output));
+        QVERIFY(QJsonDocument::fromJson(output).object().value("ismine").toBool());
+        QVERIFY(stop());
+        QVERIFY(QFileInfo::exists(QDir(backupPath).filePath("blocks")));
+        QVERIFY(QFileInfo::exists(QDir(backupPath).filePath("chainstate")));
     }
     void repairConfig_matchesDaemonSelection() {
         const auto parsed = parseRepairConfig("# comment\nnotestnet=0 # enable\ntestnet=0\n"

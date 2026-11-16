@@ -5,7 +5,11 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QMutex>
+#include <QProcess>
 #ifdef Q_OS_WIN
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #else
 #include <fcntl.h>
@@ -16,6 +20,12 @@
 // Same OS lock and byte range as boost::interprocess::file_lock in zclassicd.
 // QLockFile/flock are not compatible with that protocol. Never unlink .lock.
 // Stack-owned on the repair thread, held across wallet backup and chain moves.
+inline bool repairProcessIsStopped(const QProcess* process) {
+    // Starting also counts as live. Never terminate a node to make repair
+    // eligible: it may still be flushing wallet or database state.
+    return !process || process->state() == QProcess::NotRunning;
+}
+
 class RepairLock {
 public:
     explicit RepairLock(const QString& directory) {

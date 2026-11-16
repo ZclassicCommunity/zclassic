@@ -70,6 +70,13 @@ These are checked persistence requests and tested process-interruption recovery,
 not a guarantee against power loss or faulty storage. End-to-end wallet migration
 still needs qualification before announcing an existing-wallet fast-sync release.
 
+Repair no longer force-kills a node that is still stopping; it waits for a later
+attempt after shutdown finishes. An isolated Windows regtest migration retained
+wallet bytes during chain set-aside, then restored the same chain height, wallet
+transaction count, test balance and address ownership through the real backend's
+snapshot-import path. The original chain backup remained available. This is not
+yet proof of the complete GUI/mainnet checkpoint flow.
+
 Isolated Windows and Linux tests have imported and verified the full state at
 that checkpoint and continued ordinary block validation above it. This does
 not yet provide automatic migration of an existing partially synced wallet.

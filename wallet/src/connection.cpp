@@ -1571,23 +1571,15 @@ void ConnectionLoader::setHealInProgress(bool on) {
 // SAFETY GATE: positively confirm NO embedded daemon is alive before a destructive
 // heal mutates the datadir. There are two owners across the heal lifetime:
 //   - startup-failure path: THIS loader owns ezclassicd (already exited, but we
-//     terminate()/kill() + poll to be certain there is no zombie holding LevelDB);
+//     check its process state without interrupting outstanding database writes);
 //   - manual Help->Repair path: this loader is fresh (ezclassicd==nullptr) and the
 //     live node is owned by RPC, which mainwindow stopped first — re-confirm via
-//     rpc->confirmEmbeddedStopped() (which itself escalates terminate->kill).
+//     rpc->confirmEmbeddedStopped() (which never escalates to a forced stop).
 // Returns false if a live daemon can't be confirmed dead; the caller then ABORTS
 // the repair, leaving the datadir untouched, and tells the user to fully quit.
 bool ConnectionLoader::confirmDaemonDeadForRepair() {
     if (ezclassicd != nullptr) {
-        if (ezclassicd->state() != QProcess::NotRunning && ezclassicd->processId() != 0) {
-            ezclassicd->terminate();
-            ezclassicd->waitForFinished(5000);
-            if (ezclassicd->state() != QProcess::NotRunning) {
-                ezclassicd->kill();
-                ezclassicd->waitForFinished(5000);
-            }
-        }
-        return ezclassicd->state() == QProcess::NotRunning || ezclassicd->processId() == 0;
+        return repairProcessIsStopped(ezclassicd);
     }
 
     // No process owned by THIS loader. Defer to RPC for the EMBEDDED node it owns.
