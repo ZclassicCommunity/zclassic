@@ -1,0 +1,615 @@
+/* ============================================================================
+ * ZClassic wallet — "Quiet+" redesign, dark theme (default) + VISUAL POLISH pass.
+ * Central source of truth for the modern look + type scale. Loaded in main.cpp
+ * after QApplication::setStyle("Fusion") + a dark QPalette. Pure restyle — no
+ * widget structure changes, so the L0/L1/L2 test harness stays green.
+ *
+ * ----------------------------------------------------------------------------
+ * SURFACE-ELEVATION TOKEN SYSTEM (Polish P1). Three steps + one hairline + one
+ * radius, applied consistently so cards read as raised, not flat zones:
+ *   app bg     #0f1115      (window / page background — the deepest level)
+ *   card       #15171c      (the surface a card/group sits on)
+ *   inset      #1d2027      (elevated content WITHIN a card: rows, inputs, table)
+ *   hairline   #2a2d35      (1px border on every card/inset)
+ *   radius     12px         (standardized card corner)
+ *
+ * SEMANTIC COLOR TOKENS:
+ *   text           #e6e6e6     dim text       #9aa0a6  (AA: never dimmer for live text)
+ *   private/green  #1f7a1f     hero-green     #34c759  (brightened, WCAG-AA on dark)
+ *   public/amber   #d9822b  = PUBLIC / transparent EVERYWHERE (badge, Shield card,
+ *                              Receive transparent warning, t-Addr radio dot)
+ *   danger/red     #c0392b  = RESERVED for DE-SHIELD only (z->t leak)
+ *   danger-body    #e06b5e     (lighter danger text, ~6.5:1, for callout bodies)
+ *   info/blue      #2c5d8f     accent hover   #2a9d2a
+ *
+ * PRIVACY BADGE COMPONENT (Polish P1) — see the .badge rules near the bottom:
+ *   pill 20px h, radius 10, 8px h-pad, 11pt/600, ~15% tint fill + full-strength
+ *   text/border. One component, three color variants (private/public/deshield).
+ * ============================================================================ */
+
+/* ---- base ---- */
+QWidget {
+    background-color: #15171c;
+    color: #e6e6e6;
+    font-size: 14pt;                      /* bigger base for legibility (user pref) */
+}
+/* App/page background sits at the DEEPEST elevation level so cards read as raised. */
+QMainWindow, QDialog { background-color: #0f1115; }
+QToolTip {
+    background-color: #1d2027; color: #e6e6e6;
+    border: 1px solid #2a2d35; border-radius: 6px; padding: 6px 8px;
+}
+
+/* ---- cards (group boxes become rounded surfaces) ---------------------------
+ * Elevation level: card #15171c on the #0f1115 page, 1px #2a2d35 hairline,
+ * standardized 12px radius. The inset content within (rows/inputs/tables) steps
+ * up to #1d2027. */
+QGroupBox {
+    background-color: #15171c;
+    border: 1px solid #2a2d35;
+    border-radius: 12px;
+    margin-top: 14px;
+    padding: 16px 14px 14px 14px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 14px; top: 2px;
+    color: #e6e6e6;                       /* section titles never sub-body dim */
+    font-size: 14pt;                      /* P2-2: section title >= 13pt body, not under it */
+    font-weight: 700;
+}
+
+/* ---- typography accents (existing objectNames; conservative sizes to avoid clipping) ---- */
+QLabel#balTotal      { font-size: 19pt; font-weight: 700; color: #ffffff; }
+/* Privacy = color, everywhere: private balance GREEN, transparent AMBER (= visible
+ * to everyone), matching the hero + badge tokens. */
+QLabel#balSheilded   { font-size: 14pt; font-weight: 700; color: #34c759; }
+QLabel#balTransparent{ font-size: 14pt; font-weight: 700; color: #d9822b; }
+
+/* ---- tabs (kept for Phase 1; the IA rail arrives in Phase 3) ---- */
+QTabWidget::pane { border: 1px solid #2a2d35; border-radius: 12px; top: -1px; background: #0f1115; }
+QTabBar::tab {
+    background: transparent; color: #9aa0a6;
+    padding: 9px 18px; margin-right: 4px;
+    border: none; border-bottom: 2px solid transparent;
+    font-size: 12pt; font-weight: 600;
+}
+QTabBar::tab:hover    { color: #e6e6e6; }
+QTabBar::tab:selected { color: #ffffff; border-bottom: 2px solid #1f7a1f; }
+
+/* ---- buttons ---- */
+QPushButton {
+    background-color: #2a2e37; color: #e6e6e6;
+    border: 1px solid #343a44; border-radius: 8px;
+    padding: 8px 16px; font-size: 12pt; font-weight: 600;
+    min-height: 24px;                     /* STANDARD control-height floor, sized to the 14pt line box.
+                                             Text controls size from font metrics (min-height + symmetric
+                                             padding) and grow with the font — never clamp with max-height. */
+}
+QPushButton:hover    { background-color: #333945; }
+QPushButton:pressed  { background-color: #2a2e37; }
+QPushButton:disabled { color: #6b7177; background-color: #1d2027; border-color: #23272f; }
+QPushButton:default {
+    background-color: #1f7a1f; border-color: #1f7a1f; color: #ffffff;
+}
+QPushButton:default:hover { background-color: #2a9d2a; border-color: #2a9d2a; }
+
+/* ---- inputs (inset elevation: #1d2027 on a card) ---- */
+QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox {
+    background-color: #1d2027; color: #e6e6e6;
+    border: 1px solid #343a44; border-radius: 8px;
+    padding: 7px 10px; min-height: 24px; selection-background-color: #1f7a1f;
+}
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus { border: 1px solid #1f7a1f; }
+QLineEdit:read-only { color: #9aa0a6; background-color: #15171c; }
+
+QComboBox {
+    background-color: #1d2027; color: #e6e6e6;
+    border: 1px solid #343a44; border-radius: 8px;
+    padding: 7px 10px; min-height: 24px;
+}
+QComboBox:hover { border-color: #3d4450; }
+QComboBox::drop-down { border: none; width: 22px; }
+QComboBox QAbstractItemView {
+    background-color: #1d2027; color: #e6e6e6;
+    border: 1px solid #2a2d35; border-radius: 8px;
+    selection-background-color: #1f7a1f; selection-color: #ffffff;
+    outline: 0; padding: 4px;
+}
+
+/* ---- tables (inset elevation on the card) ---- */
+QTableView, QTreeView, QListView {
+    background-color: #1d2027; alternate-background-color: #191c22;
+    color: #e6e6e6; gridline-color: #23272f;
+    border: 1px solid #2a2d35; border-radius: 10px;
+    selection-background-color: #243047; selection-color: #ffffff;
+    outline: 0;
+}
+QTableView::item, QTreeView::item, QListView::item { padding: 8px 10px; }
+QHeaderView::section {
+    background-color: #15171c; color: #9aa0a6;
+    padding: 10px 12px; border: none; border-bottom: 1px solid #2a2d35;
+    font-size: 12pt; font-weight: 600;
+}
+QTableView QTableCornerButton::section { background-color: #15171c; border: none; }
+
+/* ---- menus / status / progress ---- */
+QMenuBar { background-color: #0f1115; color: #e6e6e6; }
+QMenuBar::item:selected { background-color: #2a2e37; border-radius: 6px; }
+QMenu { background-color: #1d2027; color: #e6e6e6; border: 1px solid #2a2d35; border-radius: 8px; padding: 4px; }
+QMenu::item { padding: 7px 22px; border-radius: 6px; }
+QMenu::item:selected { background-color: #2a2e37; }
+QMenu::separator { height: 1px; background: #2a2d35; margin: 4px 8px; }
+QStatusBar { background-color: #0f1115; color: #9aa0a6; border-top: 1px solid #2a2d35; }
+QStatusBar::item { border: none; }
+QProgressBar {
+    background-color: #1d2027; border: 1px solid #2a2d35; border-radius: 8px;
+    text-align: center; color: #e6e6e6; min-height: 24px;
+}
+QProgressBar::chunk { background-color: #1f7a1f; border-radius: 7px; }
+
+/* ---- checks / radios ---- */
+QRadioButton, QCheckBox { spacing: 8px; }
+QRadioButton::indicator, QCheckBox::indicator { width: 18px; height: 18px; }
+QCheckBox::indicator { border: 1px solid #3d4450; border-radius: 5px; background: #15171c; }
+QCheckBox::indicator:checked { background: #1f7a1f; border-color: #1f7a1f; }
+QRadioButton::indicator { border: 1px solid #3d4450; border-radius: 9px; background: #15171c; }
+/* Default checked dot is private/green. Polish P1: the TRANSPARENT (t-Addr) radio
+ * carries a property "public"=true so its dot is AMBER, never green — color must
+ * always equal privacy state (green=private, amber=public). */
+QRadioButton::indicator:checked { background: #1f7a1f; border-color: #1f7a1f; }
+QRadioButton[public="true"]::indicator:checked { background: #d9822b; border-color: #d9822b; }
+QRadioButton[public="true"] { color: #e6b06a; }
+
+/* ============================================================================
+ * Phase 3a: modern left NAV RAIL (Quiet+).
+ * A slightly darker rail surface on the left, with large flat checkable buttons
+ * built programmatically (mainwindow.cpp setupNavRail). The selected button is
+ * highlighted with the green #1f7a1f accent via a left border + tinted surface.
+ * Tab bar itself is hidden in code; pages stay index-selectable.
+ * ============================================================================ */
+QFrame#navRail {
+    background-color: #0c0e12;            /* a touch darker than the page bg */
+    border-right: 1px solid #2a2d35;
+}
+/* The QTabWidget content sits flush to the rail (documentMode is on in code). */
+QFrame#navRail QPushButton[navrail="true"] {
+    background: transparent;
+    color: #9aa0a6;
+    border: none;
+    border-left: 3px solid transparent;   /* reserve the accent gutter */
+    border-radius: 8px;
+    padding: 12px 12px 12px 13px;          /* 8px grid; left a touch tighter for the gutter */
+    margin: 0px;
+    text-align: left;
+    font-size: 13pt;
+    font-weight: 600;
+}
+QFrame#navRail QPushButton[navrail="true"]:hover {
+    background-color: #1a1d23;
+    color: #e6e6e6;
+    border-left: 3px solid rgba(31, 122, 31, 0.40);   /* faint green hint = clickable */
+}
+QFrame#navRail QPushButton[navrail="true"]:checked {
+    background-color: rgba(31, 122, 31, 0.18);   /* tinted green surface */
+    color: #ffffff;
+    border-left: 3px solid #1f7a1f;              /* green accent gutter */
+}
+/* The demoted "Advanced" gear: smaller, bottom of the rail. Polish P1/UX-18: its
+ * label must never drop below #9aa0a6 (AA) — #6b7177 (~3.1:1) failed for a live
+ * clickable control. Visually demoted via size/weight, not sub-AA contrast. */
+QFrame#navRail QPushButton[navrailadv="true"] {
+    font-size: 11pt;
+    font-weight: 500;
+    color: #9aa0a6;
+    padding: 9px 12px 9px 13px;
+}
+QFrame#navRail QPushButton[navrailadv="true"]:hover  { color: #e6e6e6; }
+QFrame#navRail QPushButton[navrailadv="true"]:checked { color: #ffffff; }
+
+/* ---- scrollbars ---- */
+QScrollBar:vertical   { background: transparent; width: 12px; margin: 2px; }
+QScrollBar:horizontal { background: transparent; height: 12px; margin: 2px; }
+QScrollBar::handle:vertical   { background: #343a44; border-radius: 5px; min-height: 28px; }
+QScrollBar::handle:horizontal { background: #343a44; border-radius: 5px; min-width: 28px; }
+QScrollBar::handle:hover { background: #3d4450; }
+QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+
+/* ============================================================================
+ * Phase 3b: modern Home DASHBOARD (Quiet+).
+ * Built programmatically on the Balance page (mainwindow.cpp setupHomeDashboard).
+ * Privacy-forward: the SHIELDED/private balance is the visual hero (green accent),
+ * Total is secondary/dim. Two large quick-action buttons (Send primary green,
+ * Receive secondary). An amber "shield public funds" fix-it card, hidden unless
+ * the transparent balance > 0. Tokens: green #1f7a1f, text #e6e6e6, dim #9aa0a6,
+ * amber #d9822b. 8px grid; no Fixed-vsizetype row is forced to grow.
+ * ============================================================================ */
+
+/* ---- hero: the privacy-forward lead balance --------------------------------- */
+QFrame#homeHero {
+    background-color: #15171c;             /* card elevation, raised off #0f1115 */
+    border: 1px solid #2a2d35;
+    border-left: 3px solid #34c759;        /* brightened green private accent */
+    border-radius: 12px;
+}
+QLabel#homeHeroCaption {
+    color: #9aa0a6;                        /* dim caption (AA, non-essential) */
+    font-size: 12pt;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+/* Polish P0-1 + P1 + item 1 (trust-aware): the PRIVATE balance is the hero at
+ * 40pt/700 (~3x body). Its COLOUR is state-driven via the heroconfident property set
+ * by updateHomeFixIt(): confident GREEN (#34c759 — WCAG-AA on the dark card, unlike
+ * #1f7a1f which fails as text) ONLY on the synced edge; neutral GREY (#9aa0a6) while
+ * the number is cached / warming / mid-sync, so a not-yet-final balance is never
+ * celebrated and never misread as final spendable money. */
+QLabel#homeHeroPrivate {
+    color: #9aa0a6;                        /* default: not-yet-confident (warming/fresh) */
+    font-size: 40pt;
+    font-weight: 700;
+}
+QLabel#homeHeroPrivate[heroconfident="true"]  { color: #34c759; }   /* synced edge only */
+QLabel#homeHeroPrivate[heroconfident="false"] { color: #9aa0a6; }   /* cached/warming/mid-sync */
+QLabel#homeHeroTotal {
+    color: #9aa0a6;                        /* secondary/dim Total subline */
+    font-size: 13pt;
+    font-weight: 500;
+}
+/* Item 1: inline "not final yet" / "Last updated … · refreshing" qualifier shown
+ * under the number only while warming. Quiet, smaller than the Total subline. */
+QLabel#homeHeroQualifier {
+    color: #9aa0a6;
+    font-size: 11pt;
+    font-weight: 500;
+    font-style: italic;
+}
+/* Polish P1/UX-22: a one-line friendly helper under the hero when balance == 0. */
+QLabel#homeHeroHelper {
+    color: #9aa0a6;
+    font-size: 13pt;
+    font-weight: 500;
+}
+
+/* ---- quick actions: primary (green) + secondary ----------------------------
+ * Polish P1/UX-22: keyed on the "homeaction" PROPERTY (primary|secondary), not the
+ * object name, so updateHomeFixIt() can swap which action is primary — Receive
+ * leads (green) when balance == 0, Send leads once funded. */
+QFrame#homeQuickActions { background: transparent; border: none; }
+QPushButton#homeSendBtn, QPushButton#homeReceiveBtn {
+    border-radius: 8px;
+    padding: 12px 16px; font-size: 12pt; font-weight: 700;
+    min-height: 24px;
+}
+QPushButton[homeaction="primary"] {
+    background-color: #1f7a1f; color: #ffffff;
+    border: 1px solid #1f7a1f;
+}
+QPushButton[homeaction="primary"]:hover   { background-color: #2a9d2a; border-color: #2a9d2a; }
+QPushButton[homeaction="primary"]:pressed { background-color: #1a6b1a; }
+QPushButton[homeaction="secondary"] {
+    background-color: #2a2e37; color: #e6e6e6;
+    border: 1px solid #343a44; font-weight: 600;
+}
+QPushButton[homeaction="secondary"]:hover   { background-color: #333945; }
+QPushButton[homeaction="secondary"]:pressed { background-color: #2a2e37; }
+
+/* ---- fix-it card: amber "shield public funds" (hidden unless transparent>0) --
+ * Polish P1: soften from a saturated amber flood into an amber-TINTED card with a
+ * left-accent bar + normal body text (guidance, not alarm). Body 13pt; the action
+ * button has a >=44px touch target. Amber = PUBLIC/transparent, consistent with
+ * the badge + Receive transparent warning. */
+QFrame#homeFixItCard {
+    background-color: rgba(217, 130, 43, 0.07);   /* gentle amber tint = guidance, not alarm */
+    border: 1px solid #2a2d35;                    /* quiet hairline like other cards */
+    border-left: 3px solid #d9822b;               /* amber left-accent bar */
+    border-radius: 12px;
+}
+QLabel#homeFixItText {
+    color: #e6b06a;                        /* readable amber-tinted body on dark */
+    font-size: 13pt;
+    font-weight: 600;
+}
+QPushButton#homeFixItBtn {
+    background-color: #d9822b; color: #15171c;
+    border: 1px solid #d9822b; border-radius: 8px;
+    padding: 10px 16px; font-size: 12pt; font-weight: 700;
+    min-height: 24px;                      /* >=44px effective target with padding */
+}
+QPushButton#homeFixItBtn:hover   { background-color: #e09444; border-color: #e09444; }
+QPushButton#homeFixItBtn:pressed { background-color: #c2731f; }
+
+/* ============================================================================
+ * QUIET "SYNCED" INLINE PILL (Polish P0-2). At rest, green lives on the balance,
+ * not the chrome: the full-width colored banner is reserved for syncing/error;
+ * when synced we show this quiet 24px pill (green dot + "Synced" in dim text).
+ * Built by setupSyncBanner / driven by setSyncStatus in mainwindow.cpp.
+ * ============================================================================ */
+QLabel#syncQuietPill {
+    background-color: transparent;
+    color: #9aa0a6;
+    font-size: 13pt;
+    font-weight: 600;
+    padding: 2px 0px;
+}
+
+/* ============================================================================
+ * Phase 3c: private-by-default RECEIVE (Quiet+).
+ * The Receive page rests on ONE shielded Sapling z-address with a green "Private"
+ * badge; the transparent + legacy-Sprout radios live behind a collapsed
+ * "▸ Other address types (advanced)" QToolButton (built in
+ * mainwindow.cpp setupReceivePrivacyDisclosure). Tokens: green #1f7a1f,
+ * dim #9aa0a6. Additive only — no existing rule is changed.
+ * ============================================================================ */
+
+/* ---- green "Private" resting affordance ----------------------------------- */
+QLabel#lblReceivePrivate {
+    color: #34c759;                 /* brightened private/green, matches the hero */
+    font-size: 12pt;
+    font-weight: 700;
+    padding: 2px 0px;
+}
+
+/* ---- Receive QR card (Polish P0-5) -----------------------------------------
+ * Frame the white QR in a rounded container on the dark surface — radius 12,
+ * ~16px quiet-zone padding, 1px #2a2d35 border, fixed-ish ~200x200, centered in a
+ * right column — instead of an edge-bleeding white slab. The QRCodeLabel keeps a
+ * white background (the code must be white for scanners); the wrapper supplies the
+ * frame + quiet zone. */
+QFrame#receiveQrCard {
+    background-color: #ffffff;
+    border: 1px solid #2a2d35;
+    border-radius: 12px;
+    padding: 16px;
+}
+
+/* ---- Receive address + primary Copy (Polish P1/UX-24) ----------------------
+ * Copy is the most common Receive action: a primary (green) button >=40px,
+ * adjacent to the address; New Address is demoted to a secondary button. */
+QPushButton#btnReceiveCopy {
+    background-color: #1f7a1f; color: #ffffff;
+    border: 1px solid #1f7a1f; border-radius: 8px;
+    padding: 10px 18px; font-size: 12pt; font-weight: 700;
+    min-height: 24px;
+}
+QPushButton#btnReceiveCopy:hover   { background-color: #2a9d2a; border-color: #2a9d2a; }
+QPushButton#btnReceiveCopy:pressed { background-color: #1a6b1a; }
+
+/* "Copy payment request" — same primary-green as Copy (shown only when an amount is set). */
+QPushButton#btnReceiveCopyRequest {
+    background-color: #1f7a1f; color: #ffffff;
+    border: 1px solid #1f7a1f; border-radius: 8px;
+    padding: 10px 18px; font-size: 12pt; font-weight: 700;
+    min-height: 24px;
+}
+QPushButton#btnReceiveCopyRequest:hover   { background-color: #2a9d2a; border-color: #2a9d2a; }
+QPushButton#btnReceiveCopyRequest:pressed { background-color: #1a6b1a; }
+
+/* "Get paid" headline + subhead (plain-language framing, parity with the Send tab). */
+QLabel#lblReceiveHeadline { font-size: 16pt; font-weight: 700; color: #e6e6e6; }
+QLabel#lblReceiveSubhead  { color: #9aa0a6; }
+
+/* Request-amount inputs — right-aligned amount, same border/radius as the Send fields. */
+QLineEdit#txtReceiveAmount, QLineEdit#txtReceiveMemo {
+    border: 1px solid #3a3f4b; border-radius: 6px; padding: 6px 8px;
+}
+
+QLabel#lblReceiveAddressCaption {
+    color: #9aa0a6;
+    font-size: 11pt;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+/* ---- the "Other address types (advanced)" disclosure toggle --------------- */
+QToolButton#btnReceiveAdvanced {
+    background: transparent;
+    color: #9aa0a6;                 /* demoted/dim, like the nav "Advanced" gear */
+    border: none;
+    border-radius: 6px;
+    padding: 6px 6px;
+    font-size: 11pt;
+    font-weight: 600;
+    text-align: left;
+}
+QToolButton#btnReceiveAdvanced:hover   { color: #e6e6e6; }
+QToolButton#btnReceiveAdvanced:checked { color: #e6e6e6; }
+QToolButton#btnReceiveAdvanced::menu-indicator { image: none; }
+
+/* ---- the collapsible advanced panel + its caption ------------------------- */
+QWidget#receiveAdvancedPanel { background: transparent; }
+QLabel#lblReceiveAdvancedCaption {
+    color: #9aa0a6;
+    font-size: 10pt;
+    font-weight: 500;
+    padding-bottom: 2px;
+}
+
+/* ============================================================================
+ * Danger / DE-SHIELD styling (PRIV-11/UX-12, NIT-4). The red token #c0392b is
+ * the strongest privacy warning -- a private->transparent de-shield leak. This
+ * is a REAL rule (not a comment), so the PRIV-14 token guard protects an actual
+ * shipped style and the red de-shield surface can never silently drift away.
+ *   * QLabel#publicWarning[deshield="true"] -- the confirm dialog's reused
+ *     warning label when the send is a z->t de-shield (the code also sets an
+ *     inline color, but this default keeps it red even before that runs).
+ *   * a generic ".deshield" danger pill for any future Deshield badge widget.
+ * ============================================================================ */
+QLabel#publicWarning[deshield="true"] {
+    color: #c0392b;                 /* red: strongest de-shield warning */
+    font-weight: 600;
+}
+.deshield, QLabel[badgeKind="deshield"] {
+    background-color: rgba(192, 57, 43, 0.14);   /* faint red surface */
+    border: 1px solid #c0392b;
+    border-radius: 8px;
+    color: #c0392b;
+    padding: 2px 8px;
+    font-weight: 700;
+}
+
+/* ============================================================================
+ * STANDARDIZED PRIVACY BADGE COMPONENT (Polish P1). One pill, three color
+ * variants. pill 20px h, radius 10, 8px h-pad, 11pt/600, ~15% tint fill +
+ * full-strength text/border. Keyed on a "badge" property + a "tone" variant so
+ * any QLabel can adopt it (the table cells use the painted PrivacyBadgeDelegate;
+ * this is for inline labels that need the same visual language).
+ *   tone=private -> green  #1f7a1f
+ *   tone=public  -> amber  #d9822b   (PUBLIC / transparent EVERYWHERE)
+ *   tone=deshield-> red    #c0392b   (RESERVED for de-shield)
+ * ============================================================================ */
+QLabel[badge="true"] {
+    border-radius: 10px;
+    padding: 2px 8px;
+    min-height: 24px;                     /* >= 12pt line box + 2*2 padding + 1px border; grows with the
+                                             font. max-height REMOVED — clamping a text control clips it. */
+    font-size: 12pt;
+    font-weight: 600;
+}
+QLabel[badge="true"][tone="private"] {
+    background-color: rgba(31, 122, 31, 0.15);
+    border: 1px solid #1f7a1f;
+    color: #34c759;
+}
+QLabel[badge="true"][tone="public"] {
+    background-color: rgba(217, 130, 43, 0.15);
+    border: 1px solid #d9822b;
+    color: #e6b06a;
+}
+QLabel[badge="true"][tone="deshield"] {
+    background-color: rgba(192, 57, 43, 0.15);
+    border: 1px solid #c0392b;
+    color: #e06b5e;
+}
+
+/* ============================================================================
+ * SEND FORM "don't make me think" affordances.
+ *  - sendPrivacyBadge: live private/public verdict above the form. When a verdict
+ *    is set it carries badge/tone (styled above); at rest (no tone) it is a quiet
+ *    neutral hint, not an alarm.
+ *  - sendAddressBalance: a read-only QLineEdit that should read as a STATUS value,
+ *    not a clickable input (no border / focus ring, bold).
+ *  - sendTotalsLine: the running "You'll send X + fee = Z" summary, quiet + secondary.
+ * ============================================================================ */
+QLabel#sendPrivacyBadge {
+    padding: 6px 10px;
+    color: #9aa0a6;                  /* neutral resting hint */
+    font-style: italic;
+}
+QLineEdit#sendAddressBalance {
+    border: none;
+    background: transparent;
+    font-weight: 700;
+    color: #e6e6e6;
+}
+QLabel#sendTotalsLine {
+    color: #c7ccd1;
+    font-weight: 600;
+}
+
+/* ============================================================================
+ * SOFTENED PUBLIC WARNING CALLOUT (Polish P1). The Receive transparent (t-Addr)
+ * warning reuses lblSproutWarning. Instead of a full-bold red crash-message, it
+ * is an AMBER callout card (amber = PUBLIC/transparent everywhere): tinted bg +
+ * left-accent border + a lighter, readable body. Keyed on a "callout" property
+ * set in code (mainwindow.cpp setupRecieveTab) so the inline `color:red` in the
+ * .ui no longer governs it. Red (#c0392b) stays RESERVED for de-shield.
+ * ============================================================================ */
+QLabel[callout="public"] {
+    background-color: rgba(217, 130, 43, 0.12);
+    border: 1px solid rgba(217, 130, 43, 0.40);
+    border-left: 3px solid #d9822b;
+    border-radius: 8px;
+    color: #e6b06a;                 /* lighter danger/public body, readable */
+    padding: 10px 12px;
+}
+
+/* ============================================================================
+ * DIALOG TYPOGRAPHY. Settings/Confirm/About dialogs otherwise fall back to ~10pt
+ * OS defaults, jarring next to the polished main window. Scope to child controls
+ * (not QDialog itself, which can size title bars oddly on some styles).
+ * ============================================================================ */
+QDialog QLabel, QDialog QCheckBox, QDialog QRadioButton,
+QDialog QLineEdit, QDialog QComboBox { font-size: 13pt; }
+QDialog QGroupBox::title { font-size: 14pt; font-weight: 700; }
+
+/* ============================================================================
+ * LIVE ADDRESS VALIDATION affordance on Send recipients: a green border the
+ * instant a typed address parses, red when it clearly will not (driven by the
+ * "validation" property set in sendtab.cpp addressChanged). Empty = neutral.
+ * ============================================================================ */
+QLineEdit[validation="valid"]   { border: 1px solid #34c759; }
+QLineEdit[validation="invalid"] { border: 1px solid #c0392b; }
+
+/* ============================================================================
+ * PRIVATE-KEY / EXPORT dialog — calm, premium, readable (objectNames set in
+ * mainwindow.cpp exportKeys()). The keys are monospace green on the inset
+ * surface; the security note is calm dim guidance, not an alarm; Copy is a clear
+ * primary action. No blocking scare popup precedes this anymore.
+ * ============================================================================ */
+QDialog#PrivKey { background-color: #0f1115; }
+QLabel#privKeySecurity {
+    color: #b0b5bc;
+    font-size: 13pt;
+    font-weight: 500;
+    padding: 4px 2px 10px 2px;
+}
+QPlainTextEdit#privKeyTextEdit {
+    background-color: #1d2027;
+    color: #34c759;                       /* keys in private/green monospace */
+    border: 1px solid #2a2d35;
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-family: "DejaVu Sans Mono", "Liberation Mono", "Courier New", monospace;
+    font-size: 12pt;
+    selection-background-color: #1f7a1f;
+}
+/* Copy All is the SECONDARY action; only Save (privKeySaveBtn) stays green primary,
+ * so the advanced screen has one obvious press instead of an all-green blur. */
+QPushButton#privKeyCopyBtn {
+    background-color: transparent; color: #c6cbd2;
+    border: 1px solid #3a3f47; border-radius: 8px;
+    padding: 8px 18px; font-size: 12pt; font-weight: 600;
+}
+QPushButton#privKeyCopyBtn:hover   { background-color: #2a2d35; border-color: #4a4f57; }
+QPushButton#privKeyCopyBtn:pressed { background-color: #20232a; }
+
+/* Advanced-export orientation header: amber caution card (matches the homeFixItCard
+ * amber language) so the user reads "this is the advanced tool, not your backup"
+ * before the keys. */
+QLabel#privKeyIntro {
+    background-color: rgba(217, 130, 43, 0.10);
+    color: #e6b06a;
+    border: 1px solid #2a2d35;
+    border-left: 3px solid #d9822b;
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 12pt;
+    font-weight: 600;
+}
+/* Inline 'Saved to <path>' confirmation after a successful key-file write: calm green
+ * (same private/green language as the key text), hidden until a save succeeds. */
+QLabel#privKeyDoneLbl {
+    color: #34c759;
+    font-size: 12pt;
+    font-weight: 600;
+    padding: 6px 2px 4px 2px;
+}
+/* Quiet helper text under the keys: "closing is safe". Calm, not alarming. */
+QLabel#privKeyCloseHint {
+    color: #8b9098;
+    font-size: 11pt;
+    padding: 2px 2px 6px 2px;
+}
+/* Save promoted to the filled primary action in the advanced export dialog. */
+QPushButton#privKeySaveBtn {
+    background-color: #1f7a1f; color: #ffffff;
+    border: 1px solid #1f7a1f; border-radius: 8px;
+    padding: 8px 18px; font-size: 12pt; font-weight: 700;
+}
+QPushButton#privKeySaveBtn:hover   { background-color: #2a9d2a; border-color: #2a9d2a; }
+QPushButton#privKeySaveBtn:pressed { background-color: #1a6b1a; }

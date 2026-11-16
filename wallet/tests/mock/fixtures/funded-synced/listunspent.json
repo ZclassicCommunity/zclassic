@@ -1,0 +1,12 @@
+[
+  {
+    "txid": "aa11bb22cc33dd44ee55ff66001122334455667788990011223344556677aabb",
+    "vout": 0,
+    "generated": false,
+    "address": "t1RealFormatTransparentAddr1aBcDeFgHjK",
+    "scriptPubKey": "76a914000000000000000000000000000000000000000088ac",
+    "amount": 12.34500000,
+    "confirmations": 250,
+    "spendable": true
+  }
+]

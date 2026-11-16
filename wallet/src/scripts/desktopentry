@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=ZclWallet
+Comment=Full node and wallet for ZClassic
+GenericName=Wallet
+Exec=/usr/local/bin/zclwallet %u
+Icon=zclwallet.xpm
+Type=Application
+StartupNotify=true
+StartupWMClass=zclwallet
+Categories=Utility;
+MimeType=x-scheme-handler/zclassic;
+Keywords=zclwallet;
+

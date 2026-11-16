@@ -1,0 +1,57 @@
+name: Wallet platform validation
+on:
+  push:
+    branches: [master, 'release/**', 'fix/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: wallet-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential qtbase5-dev libqt5svg5-dev qttools5-dev-tools libsodium-dev fonts-dejavu-core
+          cp "/usr/lib/$(cc -print-multiarch)/libsodium.a" res/libsodium.a
+      - name: macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install qt@5 libsodium
+          echo "$(brew --prefix qt@5)/bin" >> "$GITHUB_PATH"
+          cp "$(brew --prefix libsodium)/lib/libsodium.a" res/libsodium.a
+      - name: Build GUI and isolated tests
+        run: |
+          mkdir -p artifacts/gui artifacts/logic artifacts/widget
+          (cd artifacts/gui && qmake ../../zcl-qt-wallet.pro CONFIG+=release && make -j4)
+          (cd artifacts/logic && qmake ../../tests/tests.pro CONFIG+=release && make -j4)
+          (cd artifacts/widget && qmake ../../tests/widget/tst_widget.pro CONFIG+=release && make -j4)
+      - name: Run isolated tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          export ZCL_SHOTS_DIR="$PWD/artifacts/shots"
+          artifacts/logic/tst_logic -o artifacts/logic-results.txt,txt
+          artifacts/widget/tst_widget -o artifacts/widget-results.txt,txt
+      - name: Retain validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wallet-validation-${{ matrix.os }}
+          path: |
+            artifacts/*-results.txt
+            artifacts/shots/*.png
+          if-no-files-found: warn
