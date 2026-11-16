@@ -1,7 +1,43 @@
 # Building ZclWallet (Qt GUI + single-file all-in-one)
 
-This is the canonical build guide for the **ZClassic Qt GUI wallet** in this repo
-(`zcl-qt-wallet`), covering **Linux**, **Windows**, and **macOS**.
+The **ZClassic Qt GUI wallet** is maintained under `wallet/` in
+`ZclassicCommunity/zclassic`, covering **Linux**, **Windows**, and **macOS**.
+
+## Current beta7 release builds
+
+The released application is **2.1.2-beta7**. The embedded/sibling daemon remains
+the pinned beta6 implementation. Do not relabel that daemon or change consensus
+to match the GUI version.
+
+- Linux: [`contrib/release/linux.sh`](../contrib/release/linux.sh), run in Ubuntu
+  20.04, builds pinned static Qt 5.15.19 and OpenSSL 3.5.9. The release requires
+  glibc 2.31+ and system X11/XCB libraries.
+- macOS: [`contrib/release/macos.sh`](../contrib/release/macos.sh), run natively on
+  Apple Silicon with Homebrew `qt@5` and `libsodium`, bundles transitive libraries,
+  measures the minimum OS and verifies the ad-hoc signature and DMG. The published
+  beta7 DMG requires macOS 15+ and is not notarized.
+- Windows: use static Qt 5.15.2 with native Schannel enabled, MinGW POSIX threads,
+  static libsodium and `CONFIG+=zqw_portable`. Package with
+  [`contrib/cross/package-win.sh`](../contrib/cross/package-win.sh); both GUI and daemon
+  must pass [`contrib/cross/check-win-deps.sh`](../contrib/cross/check-win-deps.sh).
+  The published executable is unsigned and needs no GCC/Qt/pthread/OpenSSL DLLs.
+
+The tracked [release workflow](../../.github/workflows/wallet-release-candidates.yml)
+provides the Linux/macOS environments and final-payload checks. For maintainers:
+
+```sh
+gh workflow run wallet-release-candidates.yml --repo ZclassicCommunity/zclassic --ref master -f platform=all
+```
+
+Check downloaded artifacts, not just build logs: runtime dependencies, extracted
+daemon hash/version/cache reuse, certificate-verified HTTPS and native startup.
+See [beta7 release notes](../../doc/release-notes-beta7.md) and the release's
+`BUILDINFO.txt` and `SHA256SUMS.txt` for the tested artifacts.
+
+The detailed sections below describe older development and packaging paths,
+including historical beta5 examples and host-local proot scripts. Use the
+tracked beta7 release scripts above for current releases; adjust legacy checkout
+paths to `zclassic/wallet`.
 
 It covers, in order:
 
