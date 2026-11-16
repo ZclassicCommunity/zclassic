@@ -67,6 +67,7 @@ BITCOIN_TESTS =\
   test/crypto_tests.cpp \
   test/DoS_tests.cpp \
   test/equihash_tests.cpp \
+  test/equihashmemo_tests.cpp \
   test/getarg_tests.cpp \
   test/hash_tests.cpp \
   test/key_tests.cpp \
@@ -124,6 +125,8 @@ test_test_bitcoin_LDADD += $(LIBBITCOIN_SERVER) $(LIBBITCOIN_CLI) $(LIBBITCOIN_C
 test_test_bitcoin_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 
 test_test_bitcoin_LDADD += $(LIBZCASH_CONSENSUS) $(BDB_LIBS) $(SSL_LIBS) $(CRYPTO_LIBS) $(LIBZCASH) $(LIBSNARK) $(LIBZCASH_LIBS)
+# C23 Equihash verifier, referenced by pow.cpp in libbitcoin_server.
+test_test_bitcoin_LDADD += $(LIBZC23_EQUIHASH)
 test_test_bitcoin_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -static
 
 if ENABLE_ZMQ

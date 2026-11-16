@@ -6,15 +6,20 @@
 #include "pow.h"
 
 #include "arith_uint256.h"
+#include "c23/equihash/zc23_equihash.h"
 #include "chain.h"
 #include "chainparams.h"
 #include "crypto/equihash.h"
+#include "equihashmemo.h"
 #include "primitives/block.h"
 #include "streams.h"
 #include "uint256.h"
 #include "util.h"
 
 #include "sodium.h"
+
+#include <atomic>
+#include <mutex>
 
 /**
  * Manually increase difficulty by a multiplier. Note that because of the use of compact bits, this will 
@@ -142,13 +147,46 @@ unsigned int CalculateNextWorkRequired(arith_uint256 bnAvg,
     return bnNew.GetCompact();
 }
 
-bool CheckEquihashSolution(const CBlockHeader *pblock, const CChainParams& params)
+namespace {
+
+std::once_flag g_equihashOptionsOnce;
+std::atomic<int> g_equihashImpl{(int)DEFAULT_EQUIHASH_IMPL};
+std::atomic<bool> g_equihashDifferential{false};
+std::atomic<bool> g_equihashMemoEnabled{DEFAULT_EQUIHASH_MEMO};
+std::atomic<uint64_t> g_equihashVerifications{0};
+std::atomic<uint64_t> g_equihashMemoHits{0};
+std::atomic<uint64_t> g_equihashDisagreements{0};
+
+void EquihashC23LogSink(const char* line)
 {
-    // Derive n, k from the solution size as the block header does not specify parameters used.
-    // In the future, we could pass in the block height and call EquihashN() and EquihashK()
-    // to perform a contextual check against the parameters in use at a given block height.
-    unsigned int n, k;
-    size_t nSolSize = pblock->nSolution.size();
+    // Same category as the C++ verifier's own reject diagnostics.
+    LogPrint("pow", "%s\n", line);
+}
+
+void LoadEquihashOptionsOnce()
+{
+    std::call_once(g_equihashOptionsOnce, []() {
+        zc23_equihash_set_log_sink(EquihashC23LogSink);
+        const std::string strDefault = (DEFAULT_EQUIHASH_IMPL == EquihashImpl::C23) ? "c23" : "cpp";
+        const std::string strImpl = GetArg("-equihashimpl", strDefault);
+        if (strImpl == "c23") {
+            g_equihashImpl = (int)EquihashImpl::C23;
+        } else if (strImpl == "cpp") {
+            g_equihashImpl = (int)EquihashImpl::CPP;
+        } else {
+            LogPrintf("Unknown -equihashimpl=%s; using %s\n", strImpl, strDefault);
+            g_equihashImpl = (int)DEFAULT_EQUIHASH_IMPL;
+        }
+        g_equihashDifferential = GetBoolArg("-equihashdifferential", false);
+        g_equihashMemoEnabled = GetBoolArg("-equihashmemo", DEFAULT_EQUIHASH_MEMO);
+    });
+}
+
+// Derive n, k from the solution size as the block header does not specify parameters used.
+// In the future, we could pass in the block height and call EquihashN() and EquihashK()
+// to perform a contextual check against the parameters in use at a given block height.
+bool EquihashParamsFromSolutionSize(size_t nSolSize, unsigned int& n, unsigned int& k)
+{
     if (nSolSize == 1344) { // mainnet and testnet genesis
         n = 200;
         k = 9;
@@ -162,12 +200,41 @@ bool CheckEquihashSolution(const CBlockHeader *pblock, const CChainParams& param
         n = 192;
         k = 7;
     } else {
-        return error("%s: Unsupported solution size of %d", __func__, nSolSize);
+        return false;
     }
+    return true;
+}
 
+// The zcashd C++ verifier, unchanged.
+bool VerifyEquihashCpp(unsigned int n, unsigned int k, const CDataStream& ss,
+                       const std::vector<unsigned char>& solution)
+{
     // Hash state
     crypto_generichash_blake2b_state state;
     EhInitialiseState(n, k, state);
+
+    // H(I||V||...
+    crypto_generichash_blake2b_update(&state, (const unsigned char*)&ss[0], ss.size());
+
+    bool isValid;
+    EhIsValidSolution(n, k, state, solution, isValid);
+    return isValid;
+}
+
+// The C23 verifier is wired only for the two mainnet/testnet parameter sets.
+// (48,5) and (96,5) (regtest) always use the C++ verifier.
+bool EquihashC23Eligible(unsigned int n, unsigned int k)
+{
+    return (n == 200 && k == 9) || (n == 192 && k == 7);
+}
+
+bool CheckEquihashSolutionImpl(const CBlockHeader* pblock, EquihashImpl impl, bool fDifferential)
+{
+    unsigned int n, k;
+    size_t nSolSize = pblock->nSolution.size();
+    if (!EquihashParamsFromSolutionSize(nSolSize, n, k)) {
+        return error("%s: Unsupported solution size of %d", "CheckEquihashSolution", nSolSize);
+    }
 
     // I = the block header minus nonce and solution.
     CEquihashInput I{*pblock};
@@ -176,15 +243,119 @@ bool CheckEquihashSolution(const CBlockHeader *pblock, const CChainParams& param
     ss << I;
     ss << pblock->nNonce;
 
-    // H(I||V||...
-    crypto_generichash_blake2b_update(&state, (unsigned char*)&ss[0], ss.size());
-
     bool isValid;
-    EhIsValidSolution(n, k, state, pblock->nSolution, isValid);
+    if (EquihashC23Eligible(n, k) && (impl == EquihashImpl::C23 || fDifferential)) {
+        const int c23 = zc23_equihash_verify(n, k,
+                                             (const unsigned char*)&ss[0], ss.size(),
+                                             pblock->nSolution.data(), pblock->nSolution.size());
+        if (fDifferential || c23 < 0) {
+            // The C++ verifier is the reference: in differential mode its
+            // verdict is the one returned, and a C23 "no verdict" (internal
+            // error, never a reject) falls back to it.
+            const bool cpp = VerifyEquihashCpp(n, k, ss, pblock->nSolution);
+            if (c23 < 0) {
+                LogPrintf("CheckEquihashSolution(): C23 verifier gave no verdict (%d) for %s; used the C++ verifier\n",
+                          c23, pblock->GetHash().ToString());
+            } else if ((c23 == ZC23_EH_VALID) != cpp) {
+                g_equihashDisagreements++;
+                LogPrintf("ERROR: CheckEquihashSolution(): C++ and C23 Equihash verifiers DISAGREE on %s (n=%u k=%u): C++ %s, C23 %s; using the C++ verdict\n",
+                          pblock->GetHash().ToString(), n, k,
+                          cpp ? "valid" : "invalid", c23 == ZC23_EH_VALID ? "valid" : "invalid");
+            }
+            isValid = cpp;
+        } else {
+            isValid = (c23 == ZC23_EH_VALID);
+        }
+    } else {
+        isValid = VerifyEquihashCpp(n, k, ss, pblock->nSolution);
+    }
+
     if (!isValid)
         return error("CheckEquihashSolution(): invalid solution");
 
     return true;
+}
+
+} // namespace
+
+void InitEquihashOptions()
+{
+    LoadEquihashOptionsOnce();
+}
+
+void SetEquihashImplementation(EquihashImpl impl)
+{
+    LoadEquihashOptionsOnce();
+    g_equihashImpl = (int)impl;
+}
+
+EquihashImpl GetEquihashImplementation()
+{
+    LoadEquihashOptionsOnce();
+    return (EquihashImpl)g_equihashImpl.load();
+}
+
+void SetEquihashDifferential(bool fEnable)
+{
+    LoadEquihashOptionsOnce();
+    g_equihashDifferential = fEnable;
+}
+
+void SetEquihashMemoEnabled(bool fEnable)
+{
+    LoadEquihashOptionsOnce();
+    g_equihashMemoEnabled = fEnable;
+}
+
+bool GetEquihashMemoEnabled()
+{
+    LoadEquihashOptionsOnce();
+    return g_equihashMemoEnabled.load();
+}
+
+EquihashVerifierStats GetEquihashVerifierStats()
+{
+    EquihashVerifierStats s;
+    s.nVerifications = g_equihashVerifications.load();
+    s.nMemoHits = g_equihashMemoHits.load();
+    s.nDisagreements = g_equihashDisagreements.load();
+    return s;
+}
+
+bool CheckEquihashSolution(const CBlockHeader *pblock, const CChainParams& params)
+{
+    LoadEquihashOptionsOnce();
+    g_equihashVerifications++;
+    return CheckEquihashSolutionImpl(pblock, (EquihashImpl)g_equihashImpl.load(),
+                                     g_equihashDifferential.load());
+}
+
+bool CheckEquihashSolutionWith(const CBlockHeader *pblock, const CChainParams& params, EquihashImpl impl)
+{
+    return CheckEquihashSolutionImpl(pblock, impl, false);
+}
+
+bool CheckEquihashSolutionMemo(const CBlockHeader *pblock, const CChainParams& params)
+{
+    LoadEquihashOptionsOnce();
+    const bool fMemo = g_equihashMemoEnabled.load();
+    const bool fLog = LogAcceptCategory("equihash");
+    if (!fMemo && !fLog)
+        return CheckEquihashSolution(pblock, params);
+
+    // The key is computed here from the header itself, never taken from the
+    // caller, so a hit can only ever stand for these exact header bytes.
+    const uint256 hash = pblock->GetHash();
+    if (fMemo && GetEquihashMemo().Contains(hash)) {
+        g_equihashMemoHits++;
+        LogPrint("equihash", "equihash-check %s memo-hit\n", hash.ToString());
+        return true;
+    }
+    const bool fValid = CheckEquihashSolution(pblock, params);
+    if (fValid && fMemo)
+        GetEquihashMemo().Insert(hash); // only TRUE results are ever memoised
+    LogPrint("equihash", "equihash-check %s verified %s\n", hash.ToString(), fValid ? "valid" : "invalid");
+    return fValid;
 }
 
 bool CheckProofOfWork(uint256 hash, unsigned int nBits, const Consensus::Params& params)

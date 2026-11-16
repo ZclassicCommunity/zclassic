@@ -1,0 +1,10 @@
+# Vendored Z23 sources for the C23 Equihash verifier. Every file is byte-identical to Z23.
+# z23_commit	aa9eed8322b686cf9ee5443adfe9bb6063d985e7	(Z23 origin/main, fetched 2026-11-16)
+# Columns: local path (relative to this directory) | Z23 path | git blob id (sha1, `git hash-object`) | SHA3-256 from Z23 core/MANIFEST.sha3 at the commit
+vendor/core/modules/crypto/include/crypto/blake2b.h	core/modules/crypto/include/crypto/blake2b.h	c83f998e5d5d9669f75eccba35a794dbf6e06e26	913e66dafbf67e94f3cbe8976a263c5fbc452ab20f60a5cfb54360b3357304fb
+vendor/core/modules/crypto/include/crypto/equihash.h	core/modules/crypto/include/crypto/equihash.h	69e3ea80961d7de4e265e5eb48b63b242b495449	4e84bf80fbe1fc0e4c6242f575f808f74a6623f1ac5814a3fa0fb13dce09489d
+vendor/core/modules/crypto/include/crypto/simd_dispatch.h	core/modules/crypto/include/crypto/simd_dispatch.h	c75574bafbfdb51cab015cb00908cf6448f4f0d8	fdd9b75bb5b8a6e4a7fcc220ba7205272f6d0dbb2143b874bc472f4cd95c37b3
+vendor/core/modules/crypto/src/blake2b.c	core/modules/crypto/src/blake2b.c	8b595b4fefd9a95e7ca0e74e4d8f68afe4525f33	da0cda3f7a6514e082a75162e277cf934751bd0eb03690d16b2dc66c3c0e06e2
+vendor/core/modules/crypto/src/blake2b_avx2.c	core/modules/crypto/src/blake2b_avx2.c	6eeea2d082c185676e48beb5c480e571caa0ebe7	0805a8158e20c6e9f5f27a4f3896df2b08c98751eb32c0aaf35316fe4e8a6381
+vendor/core/modules/crypto/src/equihash.c	core/modules/crypto/src/equihash.c	d70f2ece0a9477db641bd7061d88a9bc3ab3438e	8564cf69b77919fa5eb4c41145a410c47bf0116f10b2b6512561fbd0165e69f7
+vendor/core/modules/crypto/src/simd_dispatch.c	core/modules/crypto/src/simd_dispatch.c	83573d196185149a3254258a0f0d55e5c33ec999	8bb19631ee188a535626d2dcc193e61cefef32d2fd28d184373ee02ca0ea2549

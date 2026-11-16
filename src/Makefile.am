@@ -37,6 +37,7 @@ LIBSECP256K1=secp256k1/libsecp256k1.la
 LIBSNARK=snark/libsnark.a
 LIBUNIVALUE=univalue/libunivalue.la
 LIBZCASH=libzcash.a
+LIBZC23_EQUIHASH=libzc23_equihash.a
 
 if ENABLE_ZMQ
 LIBBITCOIN_ZMQ=libbitcoin_zmq.a
@@ -85,7 +86,8 @@ EXTRA_LIBRARIES += \
   $(LIBBITCOIN_WALLET) \
   $(LIBBITCOIN_ZMQ) \
   $(LIBBITCOIN_PROTON) \
-  $(LIBZCASH)
+  $(LIBZCASH) \
+  $(LIBZC23_EQUIHASH)
 
 lib_LTLIBRARIES = $(LIBZCASH_CONSENSUS)
 
@@ -176,6 +178,7 @@ BITCOIN_CORE_H = \
   noui.h \
   policy/fees.h \
   pow.h \
+  equihashmemo.h \
   prevector.h \
   primitives/block.h \
   primitives/transaction.h \
@@ -260,6 +263,7 @@ libbitcoin_server_a_SOURCES = \
   chain.cpp \
   checkpoints.cpp \
   deprecation.cpp \
+  equihashmemo.cpp \
   httprpc.cpp \
   httpserver.cpp \
   init.cpp \
@@ -460,6 +464,7 @@ zclassicd_LDADD = \
   $(LIBBITCOIN_PROTON) \
   $(LIBBITCOIN_CRYPTO) \
   $(LIBZCASH) \
+  $(LIBZC23_EQUIHASH) \
   $(LIBSNARK) \
   $(LIBLEVELDB) \
   $(LIBMEMENV) \
@@ -552,6 +557,29 @@ libzcash_a_CFLAGS = $(SAN_CXXFLAGS) $(HARDENED_CXXFLAGS) $(PIE_FLAGS)
 libzcash_a_LDFLAGS = $(AM_LDFLAGS)
 
 libzcash_a_CPPFLAGS += -DMONTGOMERY_OUTPUT
+
+# C23 Equihash verifier vendored from Z23 (src/c23/equihash/Z23_SOURCE.tsv) #
+# -iquote puts the vendored and glue headers ahead of src/ for "..." includes
+# only, so src/crypto/equihash.h never shadows the vendored crypto/equihash.h.
+libzc23_equihash_a_SOURCES = \
+  c23/equihash/zc23_equihash.c \
+  c23/equihash/zc23_equihash.h \
+  c23/equihash/glue/util/log_macros.h \
+  c23/equihash/glue/util/safe_alloc.h \
+  c23/equihash/glue/zc23_eh_namespace.h \
+  c23/equihash/vendor/core/modules/crypto/include/crypto/blake2b.h \
+  c23/equihash/vendor/core/modules/crypto/include/crypto/equihash.h \
+  c23/equihash/vendor/core/modules/crypto/include/crypto/simd_dispatch.h \
+  c23/equihash/vendor/core/modules/crypto/src/blake2b.c \
+  c23/equihash/vendor/core/modules/crypto/src/blake2b_avx2.c \
+  c23/equihash/vendor/core/modules/crypto/src/equihash.c \
+  c23/equihash/vendor/core/modules/crypto/src/simd_dispatch.c
+libzc23_equihash_a_CPPFLAGS = $(AM_CPPFLAGS) \
+  -include $(srcdir)/c23/equihash/glue/zc23_eh_namespace.h \
+  -iquote $(srcdir)/c23/equihash/glue \
+  -iquote $(srcdir)/c23/equihash/vendor/core/modules/crypto/include \
+  -iquote $(srcdir)/c23/equihash
+libzc23_equihash_a_CFLAGS = -std=gnu17 -fno-strict-aliasing $(SAN_CXXFLAGS) $(HARDENED_CXXFLAGS) $(PIE_FLAGS)
 
 # zcashconsensus library #
 if BUILD_BITCOIN_LIBS
