@@ -47,9 +47,11 @@ cd gui
 make -j4
 strip zclwallet
 cd "$work"
-fetch https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta6/zclassicd-v2.1.2-beta6-linux-x86_64.tar.gz daemon.tar.gz 1e67a34a79ff8dea6f5c739484f540ceb6d598ace214c1ab68c0d923c56b3dce
-tar -xf daemon.tar.gz
-daemon="$work/zclassic-2.1.2-beta6-linux-x86_64/zclassicd"
+: "${ZCL_DAEMON:?Supply the newly built daemon path}"
+: "${ZCL_DAEMON_SHA256:?Supply the verified daemon SHA256}"
+daemon="$ZCL_DAEMON"
+printf '%s  %s\n' "$ZCL_DAEMON_SHA256" "$daemon" | sha256sum -c -
+"$daemon" --version | grep -F '2.1.2-beta11'
 # Check both executable compatibility floors and document runtime libraries.
 for binary in "$work/gui/zclwallet" "$daemon"; do
     readelf -h "$binary" >/dev/null
@@ -58,7 +60,7 @@ for binary in "$work/gui/zclwallet" "$daemon"; do
     [ "$(printf '%s\nGLIBC_2.31\n' "$highest" | sort -V | tail -1)" = GLIBC_2.31 ]
     ldd "$binary" > "$work/dependencies.txt"
     if grep -E 'not found|libQt|libgomp' "$work/dependencies.txt"; then exit 1; fi
-    # The unchanged beta6 node uses the standard system C++ runtime. Bound its
+    # The node may use the standard system C++ runtime. Bound its
     # required symbol version to Ubuntu 20.04's runtime rather than rejecting it.
     cxx=$(objdump -T "$binary" | grep -oE 'GLIBCXX_[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1)
     if [ -n "$cxx" ]; then
@@ -67,7 +69,7 @@ for binary in "$work/gui/zclwallet" "$daemon"; do
     printf '\n%s: %s\n' "$binary" "$highest" >> "$root/artifacts/release/linux-validation.txt"
     cat "$work/dependencies.txt" >> "$root/artifacts/release/linux-validation.txt"
 done
-output="$root/artifacts/release/zclwallet-v2.1.2-beta10-linux-x86_64"
+output="$root/artifacts/release/zclwallet-v2.1.2-beta11-linux-x86_64"
 [ ! -e "$output" ]
 size=$(wc -c < "$daemon" | tr -d '[:space:]')
 [ "$size" -gt 0 ] && [ "$size" -le 536870912 ]
@@ -98,4 +100,4 @@ cd "$work/tls-check"
 make -j4
 ./check-tls >> "$root/artifacts/release/linux-validation.txt"
 cd "$root/artifacts/release"
-sha256sum zclwallet-v2.1.2-beta10-linux-x86_64 > linux-SHA256SUMS.txt
+sha256sum zclwallet-v2.1.2-beta11-linux-x86_64 > linux-SHA256SUMS.txt
