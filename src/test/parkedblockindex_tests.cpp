@@ -1,11 +1,11 @@
 // Distributed under the MIT software license; see COPYING.
+#include "parkedblockindex.h"
 #ifdef PARKED_BLOCK_INDEX_STANDALONE
 #define BOOST_TEST_MODULE parkedblockindex_tests
 #include <boost/test/included/unit_test.hpp>
 #else
 #include <boost/test/unit_test.hpp>
 #endif
-#include "parkedblockindex.h"
 #include <chrono>
 #include <vector>
 
@@ -33,8 +33,9 @@ void Reference(std::vector<CBlockIndex>& nodes, size_t targetId, bool children, 
     };
     update(target, BLOCK_PARKED_MASK, true);
     for (auto& node : nodes) {
-        if (node.GetAncestor(target->nHeight) == target)
-            update(&node, children ? BLOCK_PARKED_MASK : BLOCK_PARKED_PARENT_FLAG, true);
+        const unsigned int mask = children ? BLOCK_PARKED_MASK : BLOCK_PARKED_PARENT_FLAG;
+        if ((node.nStatus & ~mask) != node.nStatus && node.GetAncestor(target->nHeight) == target)
+            update(&node, mask, true);
     }
     for (CBlockIndex* node = target; node; node = node->pprev)
         update(node, BLOCK_PARKED_MASK, false);
@@ -116,6 +117,13 @@ BOOST_AUTO_TEST_CASE(long_chain_sparse_flags)
     nodes[count - 1].nStatus |= BLOCK_PARKED_FLAG;
     index.Update(&nodes[1]);
     index.Update(&nodes[count - 1]);
+    Effects referenceEffects;
+    const auto referenceStart = std::chrono::steady_clock::now();
+    Reference(nodes, count - 1, false, referenceEffects);
+    const auto referenceUs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - referenceStart).count();
+    BOOST_CHECK_EQUAL(referenceEffects.dirty.size(), 2U);
+    nodes[1].nStatus |= BLOCK_PARKED_FLAG;
+    nodes[count - 1].nStatus |= BLOCK_PARKED_FLAG;
     size_t callbacks = 0;
     const auto start = std::chrono::steady_clock::now();
     index.Unpark(&nodes[count - 1], false, [&](CBlockIndex*, bool) { ++callbacks; });
@@ -123,7 +131,7 @@ BOOST_AUTO_TEST_CASE(long_chain_sparse_flags)
     BOOST_CHECK_EQUAL(callbacks, 2U);
     BOOST_CHECK_EQUAL(index.Size(), 0U);
     BOOST_CHECK_EQUAL(nodes[1].nStatus & BLOCK_PARKED_MASK, 0U);
-    BOOST_TEST_MESSAGE("100000-block sparse unpark: " << us << " us");
+    BOOST_TEST_MESSAGE("100000-block sparse unpark: old traversal " << referenceUs << " us, indexed " << us << " us");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
