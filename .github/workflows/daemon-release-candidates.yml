@@ -1,5 +1,7 @@
 name: Daemon release candidates
 on:
+  push:
+    branches: [release/beta11-backend]
   workflow_dispatch:
 permissions:
   contents: read
