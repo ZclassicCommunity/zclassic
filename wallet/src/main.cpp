@@ -347,14 +347,15 @@ public:
         // Listen for any secondary instances: bring this window to the front
         // (un-hiding from the tray if needed) and, if a payment URI was passed,
         // pay it.
-        QObject::connect(&a, &SingleApplication::receivedMessage, [=] (quint32, QByteArray msg) {
+        QObject::connect(&a, &SingleApplication::receivedMessage, w, [=] (quint32, QByteArray msg) {
             QString uri(msg);
 
             // We need to execute this async, otherwise the app seems to crash for some reason.
-            QTimer::singleShot(1, [=]() {
-                w->showFromTray();
+            MainWindow* window = w;
+            QTimer::singleShot(1, window, [window, uri]() {
+                window->showFromTray();
                 if (uri != QStringLiteral("__SHOW__") && !uri.isEmpty())
-                    w->payZClassicURI(uri);
+                    window->payZClassicURI(uri);
             });
         });
 
@@ -393,7 +394,15 @@ public:
             w->activateWindow();
         }
 
-        return QApplication::exec();
+        const int result = QApplication::exec();
+        // Native windows and menus must die while QApplication's platform
+        // integration still exists. Application outlives the local `a`, so
+        // leaving this to ~Application dereferences Qt's destroyed Windows
+        // context during QMenu/QWidget teardown.
+        MainWindow* window = w;
+        w = nullptr;
+        delete window;
+        return result;
     }
 
     void DispatchToMainThread(std::function<void()> callback)
