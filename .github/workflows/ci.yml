@@ -133,6 +133,7 @@ jobs:
           ./zcutil/fetch-params.sh
           ./src/zcash-gtest --gtest_filter='merkletree.*:WalletTests.*'
           ./src/test/test_bitcoin --run_test=bootstrap_snapshot_protocol_tests --log_level=test_suite
+          ./src/test/test_bitcoin --run_test=parkedblockindex_tests --log_level=test_suite
       - name: Upload tree test binary
         if: always()
         uses: actions/upload-artifact@v4
