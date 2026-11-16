@@ -1,9 +1,9 @@
 name: C23 tree root checks
 on:
   push:
-    paths: ['src/zcash/tree_root.*', 'src/test/tree_root_c_tests.c', '.github/workflows/tree-root.yml']
+    paths: ['src/zcash/tree_root.*', 'src/zcash/jubjub_scalar.*', 'src/test/tree_root_c_tests.c', 'src/test/c23_scalar_tests.cpp', '.github/workflows/tree-root.yml']
   pull_request:
-    paths: ['src/zcash/tree_root.*', 'src/test/tree_root_c_tests.c', '.github/workflows/tree-root.yml']
+    paths: ['src/zcash/tree_root.*', 'src/zcash/jubjub_scalar.*', 'src/test/tree_root_c_tests.c', 'src/test/c23_scalar_tests.cpp', '.github/workflows/tree-root.yml']
 jobs:
   c23:
     runs-on: ubuntu-24.04
@@ -13,3 +13,10 @@ jobs:
         run: |
           cc -std=c2x -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Isrc src/zcash/tree_root.c src/test/tree_root_c_tests.c -o /tmp/tree-root-test
           /tmp/tree-root-test
+      - name: Independent scalar-reduction oracle
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libboost-dev
+          cc -std=c2x -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Isrc -c src/zcash/jubjub_scalar.c -o /tmp/scalar.o
+          c++ -std=c++14 -O1 -g -fsanitize=address,undefined -Isrc src/test/c23_scalar_tests.cpp /tmp/scalar.o -o /tmp/scalar-test
+          /tmp/scalar-test

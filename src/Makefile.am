@@ -524,6 +524,8 @@ zclassic_tx_LDADD += $(BOOST_LIBS) $(CRYPTO_LIBS)
 
 # zclassic protocol primitives #
 libzcash_a_SOURCES = \
+  zcash/jubjub_scalar.c \
+  zcash/jubjub_scalar.h \
   zcash/tree_root.c \
   zcash/tree_root.h \
   zcash/LICENSE.tree-root \
@@ -586,7 +588,7 @@ CLEANFILES = leveldb/libleveldb.a leveldb/libmemenv.a *.gcda *.gcno */*.gcno wal
 
 DISTCLEANFILES = obj/build.h
 
-EXTRA_DIST = leveldb snark test/tree_root_c_tests.c
+EXTRA_DIST = leveldb snark test/tree_root_c_tests.c test/c23_scalar_tests.cpp
 
 clean-local:
 	-$(MAKE) -C leveldb clean
