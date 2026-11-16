@@ -39,6 +39,11 @@ parallel transfer fails. The existing compiled checkpoint at height 3,126,937
 and full imported-chainstate commitment check remain mandatory. Initial chain
 replay honors shutdown requests between completed validation batches.
 
+Default snapshot endpoints now explicitly use port 8035, where the project's
+legacy snapshot services run. Previously they used port 8033, whose ordinary
+P2P nodes do not provide this snapshot protocol. Normal block synchronization
+still uses port 8033; checkpoint commitments and validation rules are unchanged.
+
 Catch-up now keeps an in-memory index of parked blocks, avoiding repeated scans
 of the entire block index and full ancestor walks when out-of-order blocks become
 usable. Parking rules, accumulated-work requirements and validation checks are

@@ -2269,6 +2269,15 @@ BOOST_AUTO_TEST_CASE(bootstrap_peer_list_multi_and_single)
         const std::vector<std::string> got = GetBootstrapPeerList();
         BOOST_CHECK(got == Params().BootstrapPeers());
         BOOST_CHECK(!got.empty());
+        // Snapshot services run separately from the normal P2P listeners.
+        // Parse exactly as a caller does: omitting the explicit service port
+        // would silently send first-run downloads to the wrong listener.
+        BOOST_CHECK_EQUAL(Params().GetDefaultPort(), 8033);
+        for (const std::string& peer : got) {
+            CService service;
+            BOOST_REQUIRE(LookupNumeric(peer.c_str(), service, Params().GetDefaultPort()));
+            BOOST_CHECK_EQUAL(service.GetPort(), 8035);
+        }
     }
 
     // Restore BOTH containers.
