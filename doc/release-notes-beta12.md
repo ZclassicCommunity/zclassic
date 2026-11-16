@@ -1,4 +1,4 @@
-# ZClassic Wallet 2.1.2-beta12 candidate
+# ZClassic Windows Wallet 2.1.2-beta12
 
 Existing wallets far below the compiled checkpoint previously resumed slow
 block-by-block sync after upgrading: the backend intentionally refuses to replace
@@ -33,5 +33,9 @@ The replacement test also exposed and now covers a shutdown null-pointer crash;
 shutdown waits for its original process even if a replacement clears RPC state.
 
 These tests do not establish an end-to-end funded public-mainnet migration.
-Release packaging and cross-platform qualification remain pending. Do not replace
-a published beta11 artifact with this candidate.
+Windows beta12 is [published](https://github.com/ZclassicCommunity/zclassic/releases/tag/v2.1.2-beta12).
+Production packaging, system-DLL imports and embedded extraction/hash/version/cache
+checks passed; the public binary and checksum file were downloaded and reverified.
+Linux wallet and backend CI passed. Hosted Mac jobs did not obtain a runner and
+executed no test steps. Linux/macOS wallet downloads remain beta11 for now.
+Source a7367ab1b was merged through PR158 as 448f65b18 with an identical source tree.
