@@ -4,6 +4,7 @@
 #include "mainwindow.h"
 #include "ui_connection.h"
 #include "precompiled.h"
+#include <atomic>
 
 using json = nlohmann::json;
 
@@ -70,6 +71,12 @@ public:
 private:
     friend class TestWidget; // Isolated integration tests exercise actual startup paths.
     QString confReadError; // Distinguish unreadable existing config from absent config.
+    QStringList accessCheckedRoots;
+    quint64 accessAttempt = 0;
+    bool accessCheckRunning = false;
+    bool manualConnectAttempt = false;
+    std::shared_ptr<std::atomic<bool>> accessCancelled;
+    void checkAccess(const QStringList& roots, bool repair = false);
     std::shared_ptr<ConnectionConfig> autoDetectZClassicConf();
     std::shared_ptr<ConnectionConfig> loadFromSettings();
 

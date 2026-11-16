@@ -1,6 +1,8 @@
 #include "connection.h"
 #include "embeddeddaemon.h"
 #include "configfile.h"
+#include "startupaccess.h"
+#include <QThread>
 #include "mainwindow.h"
 #include "settings.h"
 #include "securerandom.h"   // CONF-1: CSPRNG rpcpassword / notify token
@@ -29,6 +31,11 @@ using json = nlohmann::json;
 ConnectionLoader::ConnectionLoader(MainWindow* main, RPC* rpc) {
     this->main = main;
     this->rpc  = rpc;
+    if (main->cancelStartupAccess) main->cancelStartupAccess();
+    main->cancelStartupAccess = {};
+    accessAttempt = ++main->startupAttempt;
+    main->setStartupAction(QString(), {});
+    main->setStartupDetails(QString());
 
     d = new QDialog(main);
     connD = new Ui_ConnectionDialog();
@@ -79,6 +86,7 @@ ConnectionLoader::ConnectionLoader(MainWindow* main, RPC* rpc) {
 }
 
 ConnectionLoader::~ConnectionLoader() {
+    if (accessCancelled) accessCancelled->store(true);
     // W2: mark this loader as gone so any still-in-flight async probe callback
     // (e.g. the getbootstrapinfo probe, whose Connection OUTLIVES the loader) sees
     // a false 'alive' token and bails before dereferencing freed members.
@@ -152,6 +160,79 @@ void ConnectionLoader::loadConnection() {
     d->exec();
 }
 
+void ConnectionLoader::checkAccess(const QStringList& roots, bool repair) {
+    if (accessCheckRunning) return;
+    accessCheckRunning = true;
+    accessCancelled = std::make_shared<std::atomic<bool>>(false);
+    const auto cancel = accessCancelled;
+    main->cancelStartupAccess = [cancel]() { cancel->store(true); };
+    const auto count = std::make_shared<std::atomic<int>>(0);
+    const auto result = std::make_shared<StartupAccessResult>();
+    const auto alive = ezAlive;
+    main->connectionStartupError = QObject::tr("Checking access to your wallet files…");
+    main->setSyncStatusConnecting();
+    main->setStartupAction(QObject::tr("Stop"), [cancel]() { cancel->store(true); });
+    ezProgrammaticClose = true;
+    d->close();
+    ezProgrammaticClose = false;
+    auto* progress = new QTimer(main);
+    QObject::connect(progress, &QTimer::timeout, main, [=]() {
+        if (!alive || !*alive || accessAttempt != main->startupAttempt) { progress->stop(); return; }
+        main->connectionStartupError = repair
+            ? QObject::tr("Restoring access — %1 items checked. File contents are unchanged.").arg(count->load())
+            : QObject::tr("Checking access — %1 items checked…").arg(count->load());
+        main->setSyncStatusConnecting();
+    });
+    progress->start(200);
+    auto* worker = QThread::create([roots, repair, cancel, count, result]() {
+        *result = checkStartupAccess(roots, repair, [cancel, count](int checked, int) {
+            count->store(checked);
+            return !cancel->load();
+        });
+    });
+    QObject::connect(main, &QObject::destroyed, worker, [cancel]() {
+        cancel->store(true);
+    }, Qt::DirectConnection);
+    QObject::connect(worker, &QThread::finished, main, [=]() {
+        progress->stop();
+        progress->deleteLater();
+        if (!alive || !*alive) return;
+        accessCheckRunning = false;
+        if (accessAttempt != main->startupAttempt) return;
+        main->cancelStartupAccess = {};
+        main->setStartupAction(QString(), {});
+        if (result->cancelled || !result->error.isEmpty()) {
+            showError(result->cancelled
+                ? QObject::tr("File access check stopped. Your file contents were not changed.")
+                : QObject::tr("The wallet could not finish checking file access.\n%1").arg(result->error));
+            main->setStartupAction(QObject::tr("Try again"), [=]() {
+                if (alive && *alive && accessAttempt == main->startupAttempt) checkAccess(roots, false);
+            });
+            return;
+        }
+        if (!repair && result->repairable > 0) {
+            showError(QObject::tr("Windows is blocking access to your wallet files. "
+                "Restore access for your account to continue. "
+                "Your file contents stay unchanged; no blockchain download is needed."));
+            main->setStartupDetails(QObject::tr("Only recognized broken permissions belonging to your account "
+                "will be repaired. Custom access rules and links are left unchanged.\n\nLocations:\n%1")
+                .arg(roots.join("\n")));
+            main->setStartupAction(QObject::tr("Repair access and continue"), [=]() {
+                if (alive && *alive && accessAttempt == main->startupAttempt) checkAccess(roots, true);
+            });
+            return;
+        }
+        for (const auto& root : roots)
+            if (!accessCheckedRoots.contains(root)) accessCheckedRoots.append(root);
+        main->connectionStartupError.clear();
+        main->setStartupDetails(QString());
+        main->setSyncStatusConnecting();
+        doAutoConnect();
+    });
+    QObject::connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
+}
+
 void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
     // Re-entrancy guard: a queued poll singleShot must not run on a RETIRED loader
     // (user closed the startup splash -> quitting; or ~ConnectionLoader ran). Without
@@ -159,6 +240,7 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
     // touch the dialog/connection/embedded node being torn down -> UAF/SIGSEGV.
     if (!ezAlive || !*ezAlive)
         return;
+
 
     // Priority 1: zk-params. We DO NOT pre-download them from z.cash here anymore.
     // z.cash now permanently 403s the deprecated sprout-proving.key (the legacy
@@ -197,17 +279,15 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
     auto config = autoDetectZClassicConf();
     if (!config && !confReadError.isEmpty()) {
         const QString path = locateZClassicConfFile();
-        if (ownerEmptyFileAcl(path) && !Settings::getInstance()->isHeadless()) {
-            const auto choice = QMessageBox::question(main, QObject::tr("Restore configuration access?"),
-                QObject::tr("Windows is denying access to your existing ZClassic configuration. "
-                    "This file belongs to your account but its access list is empty.\n\n"
-                    "Restore access for your account only? The file contents, wallet and blockchain "
-                    "will not be changed."), QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-            if (choice == QMessageBox::Yes && ownerEmptyFileAcl(path, true)) {
-                main->logger->write("Restored owner-only access to existing configuration");
-                config = autoDetectZClassicConf();
-            }
+#ifdef Q_OS_WIN
+        // Until configuration is readable we cannot know who owns node startup.
+        // Offer only this file, never the external node's whole data tree.
+        if (!Settings::getInstance()->isHeadless() && !path.isEmpty() &&
+            !accessCheckedRoots.contains(path)) {
+            checkAccess({path});
+            return;
         }
+#endif
         if (!config) {
             showError(QObject::tr("Cannot read your existing ZClassic configuration:\n%1\n\n%2\n\n"
                 "The existing file was preserved. Restore file access, then use Edit → Settings "
@@ -234,7 +314,7 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
             // NEVER show a scary error while the node is alive or within a warmup
             // window. (Previously a transient refused during normal warmup could
             // fire a false "Couldn't start the embedded zclassicd" on first launch.)
-            if (!Settings::getInstance()->useEmbedded()) {
+            if (!Settings::getInstance()->useEmbedded() || config->zclassicDaemon) {
                 main->logger->write("Not using embedded and couldn't connect to zclassicd");
                 this->showError(QObject::tr("ZClassic couldn't connect.\n\n"
                     "It is set to use an outside connection that isn't responding. "
@@ -244,6 +324,17 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
 
             // Never started yet -> start it once.
             if (ezclassicd == nullptr) {
+#ifdef Q_OS_WIN
+                if (!Settings::getInstance()->isHeadless()) {
+                    QStringList roots;
+                    const QString data = QDir::cleanPath(config->dataDirOverride.isEmpty()
+                        ? config->zclassicDir : config->dataDirOverride);
+                    const QString params = QDir::cleanPath(zcashParamsDir());
+                    for (const auto& root : {data, params})
+                        if (!root.isEmpty() && !accessCheckedRoots.contains(root)) roots.append(root);
+                    if (!roots.isEmpty()) { checkAccess(roots); return; }
+                }
+#endif
                 this->showInformation(QObject::tr("Step 2 of 3: Starting your wallet…"));
                 if (!this->startEmbeddedZClassicd()) {
                     main->logger->write("Could not launch the embedded zclassicd binary");
@@ -261,6 +352,10 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
             // Started, RPC not answering yet. While the process is alive -- or within
             // a generous warmup window after it forked into the background -- keep
             // polling with a friendly message instead of ever showing an error.
+            if (ezclassicd->state() == QProcess::NotRunning && ezNodeQuitDuringStartup) {
+                handleStartupFailure();
+                return;
+            }
             if (ezclassicd->state() != QProcess::NotRunning ||
                 (ezWarmupTimer.isValid() && ezWarmupTimer.elapsed() < 120000)) {
                 // Static fallback FIRST (covers the brief pre-RPC-bind window and an
@@ -856,6 +951,16 @@ void ConnectionLoader::handleStartupFailure() {
     qint64 freeBytes = ezDataDir.isEmpty() ? -1 : QStorageInfo(resolveDataSubdir()).bytesAvailable();
     bool lowDiskContext = (freeBytes >= 0 && freeBytes < (qint64)2 * 1024 * 1024 * 1024);
 
+    // Windows includes the generic lock warning even when access, not another
+    // process, is the cause. Never route permissions failures into chain repair.
+    if (diag.contains("Access is denied", Qt::CaseInsensitive) ||
+        diag.contains("Permission denied", Qt::CaseInsensitive)) {
+        this->showError(QObject::tr("Windows or your operating system is blocking access to the wallet's files. "
+            "Your blockchain does not need to be downloaded again for this error. "
+            "Check folder access and any security-software notification."));
+        return;
+    }
+
     // Another copy is already using this data folder (a second wallet window, or a
     // manually started zclassicd). A repair is the wrong action — point at that.
     if (diag.contains("probably already running", Qt::CaseInsensitive) ||
@@ -1017,6 +1122,8 @@ bool ConnectionLoader::startupDiagHasMarker(const QString& text) {
     static const char* markers[] = {
         // explicit/non-destructive signals
         "Disk space is low",
+        "Access is denied",
+        "Permission denied",
         "probably already running",
         "Cannot obtain a lock",
         // EXTRACT_FAILED (single-file build)
@@ -1739,6 +1846,7 @@ void ConnectionLoader::startManualRepair() {
 }
 
 void ConnectionLoader::doManualConnect() {
+    manualConnectAttempt = true;
     main->connectionStartupError.clear();
     auto config = loadFromSettings();
 
@@ -1749,7 +1857,6 @@ void ConnectionLoader::doManualConnect() {
                 "Please set the host/port and user/password in the Edit->Settings menu.");
 
         showError(explanation);
-        doRPCSetConnection(nullptr);
 
         return;
     }
@@ -1761,7 +1868,6 @@ void ConnectionLoader::doManualConnect() {
                 "Please check the address and sign-in details under Edit → Settings.");
 
         showError(explanation);
-        doRPCSetConnection(nullptr);
 
         return;
     });
@@ -2326,7 +2432,29 @@ void ConnectionLoader::showInformation(QString info, QString detail) {
  * Show error will close the loading dialog and show an error. 
 */
 void ConnectionLoader::showError(QString explanation) {
+    main->setStartupDetails(QString());
     main->connectionStartupError = explanation;
+    const auto alive = ezAlive;
+    if (!accessCheckRunning && (!ezclassicd || ezclassicd->state() == QProcess::NotRunning)) {
+        main->setStartupAction(QObject::tr("Try again"), [=]() {
+            if (!alive || !*alive || accessAttempt != main->startupAttempt) return;
+            main->setStartupAction(QString(), {});
+            if (ezclassicd) {
+                if (ezclassicd->state() != QProcess::NotRunning) return;
+                QObject::disconnect(ezclassicd, nullptr, nullptr, nullptr);
+                ezclassicd->deleteLater();
+                ezclassicd = nullptr;
+            }
+            accessCheckedRoots.clear();
+            ezWarmupTimer.invalidate();
+            ezNodeQuitDuringStartup = false;
+            ezStdErr.clear();
+            main->connectionStartupError.clear();
+            main->setSyncStatusConnecting();
+            if (manualConnectAttempt) doManualConnect();
+            else doAutoConnect();
+        });
+    }
     rpc->setEZClassicd(nullptr);
     rpc->noConnection();
 

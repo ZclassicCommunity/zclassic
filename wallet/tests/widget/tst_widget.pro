@@ -48,6 +48,7 @@ DEPENDPATH  += $$PWD/../../res
 # qrcode 3rdparty + singleapplication + the test itself.
 SOURCES += \
     ../../src/embeddeddaemon.cpp \
+    ../../src/startupaccess.cpp \
     ../../src/mainwindow.cpp \
     ../../src/rpc.cpp \
     ../../src/balancestablemodel.cpp \
@@ -114,3 +115,6 @@ static {
     win32: QTPLUGIN.platforms = qwindows
     else: QTPLUGIN.platforms = qoffscreen
 }
+
+# Windows 7+ metadata APIs used for handle-based startup access checks.
+win32: DEFINES += _WIN32_WINNT=0x0601 WINVER=0x0601

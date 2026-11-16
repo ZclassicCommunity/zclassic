@@ -178,6 +178,14 @@ public:
     void setSyncStatus(bool isSyncing, int blockNumber, int estimatedHeight, double progress);
     void setSyncStatusConnecting();
     QString connectionStartupError; // Retained across disconnected polling; cleared on retry/success.
+    quint64 startupAttempt = 0;
+    std::function<void()> cancelStartupAccess;
+    QPushButton* startupActionButton = nullptr;
+    QPushButton* startupDetailsButton = nullptr;
+    QLabel* startupDetailsLabel = nullptr;
+    void setStartupDetails(const QString& details);
+    std::function<void()> startupAction;
+    void setStartupAction(const QString& text, std::function<void()> action);
 
     // Phase-3b redesign (Quiet+): the modern Home DASHBOARD on the Balance page.
     // updateHomeFixIt() is called from rpc.cpp's refreshBalances() (and the cached-

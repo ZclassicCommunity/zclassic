@@ -87,6 +87,7 @@
 #include "../filepermissions.h"
 #include "privatefile.h"
 #include "configfile.h"
+#include "startupaccess.h"
 
 // Kept alive for the whole process so QStandardPaths/QSettings stay isolated.
 static QTemporaryDir* g_homeDir = nullptr;
@@ -163,7 +164,155 @@ private slots:
         QVERIFY(!QApplication::activeModalWidget());
     }
 
+    void deniedLockDoesNotOfferChainRepair() {
+        std::unique_ptr<MainWindow> w(makeWindow());
+        ConnectionLoader loader(w.get(), w->getRPC());
+        loader.ezStdErr = "Cannot obtain a lock. ZClassic is probably already running. Access is denied.";
+        QVERIFY(loader.startupDiagHasMarker(loader.ezStdErr));
+        loader.handleStartupFailure();
+        QVERIFY(w->connectionStartupError.contains("blocking access"));
+        QVERIFY(!w->connectionStartupError.contains("may already be running"));
+        QVERIFY(!QApplication::activeModalWidget());
+    }
+
+    void manualConnectionRetryRemainsUsable() {
+        QSettings settings;
+        const QVariant oldUser = settings.value("connection/rpcuser");
+        settings.remove("connection/rpcuser");
+        std::unique_ptr<MainWindow> w(makeWindow());
+        ConnectionLoader loader(w.get(), w->getRPC());
+        loader.doManualConnect();
+        QApplication::processEvents();
+        QVERIFY(*loader.ezAlive);
+        QVERIFY(w->startupActionButton->isVisible());
+        w->connectionStartupError = "waiting for retry";
+        w->startupActionButton->click();
+        QVERIFY(w->connectionStartupError.contains("settings are not configured"));
+        QVERIFY(*loader.ezAlive);
+        if (oldUser.isValid()) settings.setValue("connection/rpcuser", oldUser);
+    }
+
 #ifdef Q_OS_WIN
+    void replacedAccessCheckCannotResumeStartup() {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        std::unique_ptr<MainWindow> w(makeWindow());
+        ConnectionLoader oldAttempt(w.get(), w->getRPC());
+        oldAttempt.checkAccess({temp.path()});
+        // Replace synchronously before the first worker completion is dispatched.
+        ConnectionLoader newAttempt(w.get(), w->getRPC());
+        newAttempt.showError("New attempt owns this message");
+        QTRY_VERIFY_WITH_TIMEOUT(!oldAttempt.accessCheckRunning, 5000);
+        QCOMPARE(w->connectionStartupError, QString("New attempt owns this message"));
+        QVERIFY(oldAttempt.accessCheckedRoots.isEmpty());
+        QCOMPARE(w->startupActionButton->text(), QString("Try again"));
+    }
+
+    void startupAccessRepairsWholeTreeAndFutureFiles() {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const QString root = temp.filePath("data");
+        const QString params = temp.filePath("params");
+        QVERIFY(QDir().mkpath(root + "/blocks/index"));
+        QVERIFY(QDir().mkpath(root + "/chainstate"));
+        QVERIFY(QDir().mkpath(params));
+        const QStringList files = {root + "/wallet.dat", root + "/.lock", root + "/zclassic.conf",
+            root + "/blocks/index/state.ldb", root + "/chainstate/state.ldb", params + "/test.params"};
+        for (const auto& path : files) {
+            QFile file(path);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            QCOMPARE(file.write("unchanged fixture bytes"), qint64(23));
+        }
+        HANDLE token = nullptr;
+        QVERIFY(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token));
+        union { TOKEN_USER user; BYTE bytes[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE]; } identity;
+        DWORD bytes = 0;
+        QVERIFY(GetTokenInformation(token, TokenUser, &identity, sizeof(identity), &bytes));
+        CloseHandle(token);
+        auto stamp = [&](const QString& path, DWORD rights, bool systemAlso, bool protect = true) {
+            alignas(DWORD) BYTE buffer[sizeof(ACL) + 2 * (sizeof(ACCESS_ALLOWED_ACE) + SECURITY_MAX_SID_SIZE)];
+            auto acl = reinterpret_cast<PACL>(buffer);
+            if (!InitializeAcl(acl, sizeof(buffer), ACL_REVISION)) return false;
+            if (rights && !AddAccessAllowedAce(acl, ACL_REVISION, rights, identity.user.User.Sid)) return false;
+            BYTE system[SECURITY_MAX_SID_SIZE]; DWORD length = sizeof(system);
+            if (systemAlso && (!CreateWellKnownSid(WinLocalSystemSid, nullptr, system, &length) ||
+                !AddAccessAllowedAce(acl, ACL_REVISION, FILE_ALL_ACCESS, system))) return false;
+            SECURITY_DESCRIPTOR sd;
+            return InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION) &&
+                SetSecurityDescriptorDacl(&sd, TRUE, acl, FALSE) &&
+                SetFileSecurityW(reinterpret_cast<LPCWSTR>(path.utf16()), DACL_SECURITY_INFORMATION |
+                    (protect ? PROTECTED_DACL_SECURITY_INFORMATION : UNPROTECTED_DACL_SECURITY_INFORMATION), &sd);
+        };
+        auto policy = [](const QString& path) {
+            DWORD size = 0;
+            GetFileSecurityW(reinterpret_cast<LPCWSTR>(path.utf16()), DACL_SECURITY_INFORMATION, nullptr, 0, &size);
+            QByteArray bytes(int(size), 0);
+            if (!size || !GetFileSecurityW(reinterpret_cast<LPCWSTR>(path.utf16()), DACL_SECURITY_INFORMATION,
+                reinterpret_cast<PSECURITY_DESCRIPTOR>(bytes.data()), size, &size)) return QByteArray();
+            return bytes;
+        };
+        // Reproduce the user's folder: owner+SYSTEM full access, no inheritance.
+        QVERIFY(stamp(root, FILE_ALL_ACCESS, true));
+        const QString custom = root + "/custom-policy.txt";
+        { QFile file(custom); QVERIFY(file.open(QIODevice::WriteOnly)); QCOMPARE(file.write("custom"), qint64(6)); }
+        QVERIFY(stamp(custom, FILE_GENERIC_READ, false, false));
+        const QByteArray customPolicy = policy(custom);
+        QVERIFY(!customPolicy.isEmpty());
+        for (const auto& path : files) QVERIFY(stamp(path, 0, false));
+        QVERIFY(stamp(root + "/blocks/index", 0, false));
+        QVERIFY(stamp(root + "/blocks", 0, false));
+        QVERIFY(stamp(root + "/chainstate", 0, false));
+        QVERIFY(stamp(params, 0, false));
+        // The real UI discovers the whole affected tree before asking once.
+        // Its action remains reachable after normal disconnected refreshes.
+        {
+            std::unique_ptr<MainWindow> w(makeWindow());
+            ConnectionLoader loader(w.get(), w->getRPC());
+            loader.checkAccess({root, params});
+            QTRY_VERIFY_WITH_TIMEOUT(!loader.accessCheckRunning, 5000);
+            QCOMPARE(w->startupActionButton->text(), QString("Repair access and continue"));
+            QVERIFY(w->startupActionButton->isVisible());
+            QVERIFY(w->startupDetailsLabel->text().contains(root));
+            QVERIFY(w->startupDetailsLabel->text().contains(params));
+            w->getRPC()->refresh();
+            QVERIFY(w->syncStatusLabel->text().contains("Restore access"));
+            QVERIFY(!QApplication::activeModalWidget());
+            const QString shots = qEnvironmentVariable("ZCL_SHOTS_DIR");
+            if (!shots.isEmpty()) {
+                QVERIFY(QDir().mkpath(shots));
+                QVERIFY(w->grab().save(shots + "/startup-access-repair.png"));
+            }
+            // No permission changes happen until the repair action is chosen.
+            QFile blocked(files.first());
+            QVERIFY(!blocked.open(QIODevice::ReadOnly));
+        }
+        auto scan = checkStartupAccess({root, params}, false);
+        QVERIFY2(scan.error.isEmpty(), qPrintable(scan.error));
+        QVERIFY(scan.repairable >= 3);
+        QCOMPARE(scan.repaired, 0);
+        { QFile file(files.first()); QVERIFY(!file.open(QIODevice::ReadOnly)); }
+        const auto cancelled = checkStartupAccess({root, params}, true, [](int, int) { return false; });
+        QVERIFY(cancelled.cancelled);
+        QCOMPARE(cancelled.repaired, 0);
+        const auto repaired = checkStartupAccess({root, params}, true);
+        QVERIFY2(repaired.error.isEmpty(), qPrintable(repaired.error));
+        QVERIFY(repaired.repaired >= 7);
+        for (const auto& path : files) {
+            QFile file(path);
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            QCOMPARE(file.readAll(), QByteArray("unchanged fixture bytes"));
+            file.close();
+            QVERIFY(testFileIsOwnerOnly(path));
+        }
+        QCOMPARE(policy(custom), customPolicy); // Never rewrite/propagate over a custom policy.
+        const QString newFile = root + "/chainstate/new.ldb";
+        { QFile file(newFile); QVERIFY(file.open(QIODevice::WriteOnly)); QCOMPARE(file.write("new"), qint64(3)); }
+        QVERIFY(testFileIsOwnerOnly(newFile)); // Prevent the defect from recurring.
+        scan = checkStartupAccess({root, params}, false);
+        QVERIFY2(scan.error.isEmpty(), qPrintable(scan.error));
+        QCOMPARE(scan.repairable, 0);
+    }
+
     void unreadableConfigurationIsNotRecreated() {
         std::unique_ptr<MainWindow> w(makeWindow());
         ConnectionLoader loader(w.get(), w->getRPC());

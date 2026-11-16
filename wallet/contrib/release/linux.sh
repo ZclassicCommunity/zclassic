@@ -67,7 +67,7 @@ for binary in "$work/gui/zclwallet" "$daemon"; do
     printf '\n%s: %s\n' "$binary" "$highest" >> "$root/artifacts/release/linux-validation.txt"
     cat "$work/dependencies.txt" >> "$root/artifacts/release/linux-validation.txt"
 done
-output="$root/artifacts/release/zclwallet-v2.1.2-beta8-linux-x86_64"
+output="$root/artifacts/release/zclwallet-v2.1.2-beta9-linux-x86_64"
 [ ! -e "$output" ]
 size=$(wc -c < "$daemon" | tr -d '[:space:]')
 [ "$size" -gt 0 ] && [ "$size" -le 536870912 ]
@@ -98,4 +98,4 @@ cd "$work/tls-check"
 make -j4
 ./check-tls >> "$root/artifacts/release/linux-validation.txt"
 cd "$root/artifacts/release"
-sha256sum zclwallet-v2.1.2-beta8-linux-x86_64 > linux-SHA256SUMS.txt
+sha256sum zclwallet-v2.1.2-beta9-linux-x86_64 > linux-SHA256SUMS.txt

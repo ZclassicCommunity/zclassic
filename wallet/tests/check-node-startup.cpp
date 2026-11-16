@@ -12,6 +12,7 @@
 #include <QEventLoop>
 #include <QTimer>
 #include <cstdio>
+#include "../src/startupaccess.h"
 #ifdef Q_OS_WIN
 #include <windows.h>
 #endif
@@ -19,7 +20,7 @@
 // Real node/RPC startup, isolated from wallets, mainnet peers and canonical data.
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
-    if (app.arguments().size() != 2) return 2;
+    if (app.arguments().size() < 2 || app.arguments().size() > 3) return 2;
     QTemporaryDir data;
     QTcpServer reservation;
     if (!data.isValid() || !reservation.listen(QHostAddress::LocalHost, 0)) return 3;
@@ -31,6 +32,35 @@ int main(int argc, char** argv) {
     QFile config(data.filePath("zclassic.conf"));
     if (!config.open(QIODevice::WriteOnly) || config.write("server=1\n") != 9) return 3;
     config.close();
+#ifdef Q_OS_WIN
+    if (app.arguments().contains("--repair-fixture")) {
+        // Reproduce the upgrade failure using only this disposable regtest tree.
+        HANDLE token = nullptr;
+        union { TOKEN_USER user; BYTE bytes[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE]; } identity;
+        DWORD size = 0;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return 6;
+        const bool identified = GetTokenInformation(token, TokenUser, &identity, sizeof(identity), &size);
+        CloseHandle(token);
+        if (!identified) return 6;
+        alignas(DWORD) BYTE buffer[sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) + SECURITY_MAX_SID_SIZE];
+        auto acl = reinterpret_cast<PACL>(buffer);
+        SECURITY_DESCRIPTOR descriptor;
+        if (!InitializeAcl(acl, sizeof(buffer), ACL_REVISION) ||
+            !AddAccessAllowedAce(acl, ACL_REVISION, FILE_ALL_ACCESS, identity.user.User.Sid) ||
+            !InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION) ||
+            !SetSecurityDescriptorDacl(&descriptor, TRUE, acl, FALSE) ||
+            !SetFileSecurityW(reinterpret_cast<LPCWSTR>(data.path().utf16()),
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, &descriptor)) return 6;
+        if (!InitializeAcl(acl, sizeof(buffer), ACL_REVISION) ||
+            !SetFileSecurityW(reinterpret_cast<LPCWSTR>(config.fileName().utf16()),
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, &descriptor)) return 6;
+        const auto repaired = checkStartupAccess({data.path()}, true);
+        if (!repaired.error.isEmpty() || repaired.repaired != 2) {
+            fputs("FAIL: isolated access repair\n", stderr);
+            return 6;
+        }
+    }
+#endif
     QProcess node;
 #ifdef Q_OS_WIN
     node.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) {
