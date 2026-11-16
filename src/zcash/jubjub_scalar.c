@@ -5,13 +5,13 @@
  * Jubjub scalar field arithmetic for Sapling.
  * Implements 512-bit reduction modulo the Jubjub scalar field order.
  *
- * (constant-time): `zcl_jubjub_to_scalar` is on the Sapling
+ * The candidate `zcl_jubjub_to_scalar` is intended for the Sapling
  * nullifier-derivation path (via `prf_nsk`) where `nsk` is a
  * long-lived secret reused across all spends from the same key.
  * Any per-bit timing or cache leak here correlates across many
  * spends, so the reduction loop and its helpers must be
- * branchless. See tests/harness/src/test_sapling_crypto.c for the
- * diff and Hamming-weight timing regressions.
+ * branchless. Production callers retain Rust until platform performance
+ * and side-channel review pass. The timing history below is from Z23.
  *
  * Branch-free is necessary but NOT sufficient: on arm64 (Apple
  * Silicon, Apple Clang 17) the previous 9x32-bit mask-selected
@@ -37,8 +37,7 @@
  *      A  = D + r + borrow*r
  *
  * which is algebraically the old `acc = 2acc|b; if (acc >= r) acc -= r`
- * plus the constant r.  D hits zero only on a ~2^-256 limb alignment,
- * never persistently for any input class.  Measured on the same host:
+ * plus the constant r. Measured in the original Z23 investigation:
  * ratio 0.94-1.03 across runs, and the real-world (nonzero-input) path
  * got faster than the old code (about 5.4us vs 7.0us per call in the
  * same session; 4.6us on a quieter one) because the 4x64-bit carry
@@ -109,6 +108,7 @@ static void bi_to_bytes(const struct bigint *a, unsigned char *b, size_t n)
 static void bi_shl1(struct bigint *a)
 {
     uint64_t carry = 0;
+#pragma GCC unroll 4
     for (int i = 0; i < NL; i++) {
         uint64_t new_carry = a->d[i] >> 63;
         a->d[i] = (a->d[i] << 1) | carry;
@@ -122,6 +122,7 @@ static void bi_shl1(struct bigint *a)
 static uint64_t bi_sub(struct bigint *a, const struct bigint *c)
 {
     uint64_t borrow = 0;
+#pragma GCC unroll 4
     for (int i = 0; i < NL; i++) {
         jubjub_uint128 diff =
             (jubjub_uint128)a->d[i] - c->d[i] - borrow;
@@ -138,6 +139,7 @@ static void bi_add_r_weighted(struct bigint *a, const struct bigint *r,
 {
     jubjub_uint128 carry = 0;
     uint64_t mask = (uint64_t)0 - w;
+#pragma GCC unroll 4
     for (int i = 0; i < NL; i++) {
         jubjub_uint128 sum = (jubjub_uint128)a->d[i] +
                              (jubjub_uint128)r->d[i] +
@@ -151,16 +153,16 @@ static void bi_add_r_weighted(struct bigint *a, const struct bigint *r,
  *
  * Schoolbook shift-and-subtract, one bit per iteration from MSB down,
  * carried in the shifted representation A = value + r (see the file
- * comment for why the offset is load-bearing for timing).  All 512
- * iterations always execute; every operation inside an iteration runs
+ * comment for why the offset is load-bearing for timing). The top 248
+ * bits seed the accumulator directly; all remaining 264 iterations
+ * always execute; every operation inside an iteration runs
  * unconditionally; there are no data-dependent branches and no
- * data-dependent memory accesses.  Total work AND the value-pattern of
- * the intermediates are independent of the secret input.
+ * data-dependent memory accesses. The operation count is independent of
+ * the secret input; this alone does not prove constant-time execution.
  *
  * Threat: callers include `prf_nsk` (Sapling nullifier key) where the
  * input is derived from a long-lived spending secret; any timing leak
- * here correlates across every spend.  See AGENT-3.md ("prf.c
- * nullifier-path constant-time audit"). */
+ * here correlates across every spend. */
 void zcl_jubjub_to_scalar(const unsigned char *input, unsigned char *result)
 {
     struct bigint r, r3, acc;
@@ -181,12 +183,15 @@ void zcl_jubjub_to_scalar(const unsigned char *input, unsigned char *result)
         }
     }
 
-    /* Shifted representation: A = value + r.  value starts at 0, so
-     * A starts at r. */
-    bi_from_bytes(&acc, JUBJUB_R, 32);
+    /* The top 248 bits are strictly below r (r > 2^251). Seed the
+     * shifted accumulator with that prefix + r instead of spending 248
+     * rounds shifting it in. The prefix length is public and fixed for
+     * every input, including zero; r <= A < 2r still holds. */
+    bi_from_bytes(&acc, input + 33, 31);
+    bi_add_r_weighted(&acc, &r, 0);
 
-    /* Process 512 bits from MSB (bit 511) to LSB (bit 0). */
-    for (int bit = 511; bit >= 0; bit--) {
+    /* Process the remaining 264 bits, with no input-dependent shortcut. */
+    for (int bit = 263; bit >= 0; bit--) {
         /* acc = 2A | b.  A >= r, so 2A|b >= 2r: never zero, and the
          * next subtract's borrow is exactly the old
          * "value >= r after shift" test. */

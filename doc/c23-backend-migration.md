@@ -45,8 +45,11 @@ replace a tested release backend with an unfinished cryptographic port.
 
 `src/zcash/jubjub_scalar.c` imports Z23's shifted-accumulator reducer, source
 blob `67c21700e4b8904fe58690cd2d24bff27dcc85c4`. Only its include path and public
-symbol prefix are adapted. The algorithm runs a fixed 512 rounds and avoids
-secret-dependent indexing. C23 `_BitInt(128)` is used where supported, with the
+symbol prefix were adapted initially. The optimized candidate seeds the top
+248 input bits directly (strictly less than the modulus), adds the modulus
+to preserve the shifted representation, and processes the remaining 264 bits.
+Four-limb carry loops request compiler unrolling. Work remains independent of
+the input; there is no secret-dependent indexing. C23 `_BitInt(128)` is used where supported, with the
 upstream `unsigned __int128` fallback for legacy compilers.
 
 It is compiled and tested but **not yet selected by production key derivation**.
@@ -56,3 +59,13 @@ deterministic pseudorandom inputs, including overlapping input/output buffers.
 The suite reports Rust/C23 timing without weakening a correctness assertion to
 meet a performance target. Cross-platform timing/side-channel review and the
 differential gate are required before switching the two production callers.
+
+The initial implementation passed all 64 native backend tests, but took
+21,103 microseconds for 4,096 reductions versus Rust's 4,881 in CI. It was
+therefore not enabled. Prefix seeding and limb-loop unrolling measured
+4.39–4.64 times faster than that initial C implementation in alternating
+100,000-call Linux GCC `-O2` trials (zero, all-one and mixed inputs).
+These measurements do not establish parity with Rust on the same host or
+constant-time behavior. Updated Rust comparisons and platform timing are
+required. A measured performance regression blocks production selection;
+language choice alone is never evidence of a speedup.
