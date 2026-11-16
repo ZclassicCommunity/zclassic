@@ -39,6 +39,12 @@ parallel transfer fails. The existing compiled checkpoint at height 3,126,937
 and full imported-chainstate commitment check remain mandatory. Initial chain
 replay honors shutdown requests between completed validation batches.
 
+Cancelling a startup download now stops before database initialization or rewind,
+including cancellation while genesis activation is in progress. This fixes an
+empty-candidate assertion observed when closing an isolated Windows test during
+download. Transfer byte counts and rates refresh between whole-percent changes,
+so a slow download no longer needs to receive over 100 MB before reporting motion.
+
 Default snapshot endpoints now explicitly use port 8035, where the project's
 legacy snapshot services run. Previously they used port 8033, whose ordinary
 P2P nodes do not provide this snapshot protocol. Normal block synchronization

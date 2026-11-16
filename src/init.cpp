@@ -2428,6 +2428,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     // DBs but never synced — e.g. a prior interrupted bootstrap that
                     // then fell back to peerless P2P sync and hung at 0 blocks) is
                     // backed up by BootstrapDatadirEligible and counts as eligible.
+                    if (ShutdownRequested())
+                        return false;
                     if (explicit_peer)
                         return InitError(bootstrap_error);
                 }
@@ -2526,6 +2528,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                                       restore_err, genesisBackupDir.string());
                         genesisBackupDir.clear();
                     }
+                    if (ShutdownRequested())
+                        return false;
                     if (explicit_peer)
                         return InitError(bootstrap_error);
                     LogPrintf("Bootstrap snapshot unavailable; continuing with normal peer-to-peer sync: %s\n", bootstrap_error);
@@ -2550,6 +2554,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                                                              : "no bootstrap peers configured"));
         }
     }
+
+    // A cancelled download must not continue into database initialization.
+    // In particular, ActivateBestChain honors shutdown before activating
+    // genesis; rewind assumes that initialization produced an active chain.
+    if (ShutdownRequested())
+        return false;
 
     // Keep a persistent connection to the bootstrap peer(s) for ongoing peer
     // discovery. ZClassic's DNS seeds are unreliable and the compiled fixed-seed
@@ -2697,6 +2707,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     strLoadError = _("Error initializing block database");
                     break;
                 }
+                // Shutdown may also arrive while genesis is being initialized.
+                // Do not rewind or verify a chain whose activation was cancelled.
+                if (ShutdownRequested())
+                    return false;
 
                 // Check for changed -txindex state. Only treat it as a change
                 // when the user explicitly passed -txindex: the default flipped

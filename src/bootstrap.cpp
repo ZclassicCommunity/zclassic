@@ -1514,6 +1514,8 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
     boost::filesystem::path open_part;
     uint64_t stream_received = 0;
     int last_logged_percent = -1;
+    uint64_t last_reported_bytes = 0;
+    int64_t last_report_ms = 0;
     int64_t last_emit_ms = 0;
     int last_emit_decile = -1;
     const int64_t download_started = GetTimeMillis();
@@ -1608,17 +1610,22 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
             boost::filesystem::rename(open_part, open_path);
         }
 
-        // Log on each whole-percent advance so an operator watching the console
-        // (-printtoconsole) or debug.log sees steady progress during what can be
-        // a multi-gigabyte transfer. Only the single-stream caller logs here;
+        // Report whole-percent changes immediately and sub-percent transfers
+        // at most once per second. One percent can exceed 100 MiB: waiting for
+        // that boundary makes a working slow transfer look idle. Only the
+        // single-stream caller reports here;
         // the parallel manager logs aggregate progress from its own thread.
         if (logProgress) {
             const int percent = manifest.nSnapshotBytes > 0
                 ? (int)((total_received * 100) / manifest.nSnapshotBytes)
                 : 100;
-            if (percent != last_logged_percent) {
+            const int64_t report_ms = GetTimeMillis();
+            if (percent != last_logged_percent ||
+                (total_received != last_reported_bytes && report_ms - last_report_ms >= 1000)) {
                 last_logged_percent = percent;
-                const int64_t elapsed_ms = std::max<int64_t>(1, GetTimeMillis() - download_started);
+                last_reported_bytes = total_received;
+                last_report_ms = report_ms;
+                const int64_t elapsed_ms = std::max<int64_t>(1, report_ms - download_started);
                 const double mbps = (stream_received / 1048576.0) / (elapsed_ms / 1000.0);
                 LogPrintf("Bootstrap: downloaded %d%% (%llu/%llu bytes, %.1f MB/s)\n",
                     percent,
@@ -1831,6 +1838,8 @@ static bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const
 
     // This thread reports aggregate progress until every stream has finished.
     int last_logged_percent = -1;
+    uint64_t last_reported_bytes = 0;
+    int64_t last_report_ms = 0;
     int64_t last_emit_ms = 0;
     int last_emit_decile = -1;
     const int64_t download_started = GetTimeMillis();
@@ -1843,9 +1852,13 @@ static bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const
         const int percent = manifest.nSnapshotBytes > 0
             ? (int)((total_received * 100) / manifest.nSnapshotBytes)
             : 100;
-        if (percent != last_logged_percent) {
+        const int64_t report_ms = GetTimeMillis();
+        if (percent != last_logged_percent ||
+            (total_received != last_reported_bytes && report_ms - last_report_ms >= 1000)) {
             last_logged_percent = percent;
-            const int64_t elapsed_ms = std::max<int64_t>(1, GetTimeMillis() - download_started);
+            last_reported_bytes = total_received;
+            last_report_ms = report_ms;
+            const int64_t elapsed_ms = std::max<int64_t>(1, report_ms - download_started);
             const double mbps = ((total_received - completed) / 1048576.0) / (elapsed_ms / 1000.0);
             LogPrintf("Bootstrap: downloaded %d%% (%llu/%llu bytes, %.1f MB/s, %d streams)\n",
                 percent,
