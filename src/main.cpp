@@ -4488,7 +4488,11 @@ bool AcceptBlockHeader(const CBlockHeader& block, CValidationState& state, CBloc
         return false;
 
 
-    if (!pindexPrev->IsValid(BLOCK_VALID_SCRIPTS)) {
+    // The genesis block has no previous block (pindexPrev == NULL); it is
+    // accepted by the special case above, so there is no parent whose
+    // validity could be inherited. This is reached by -reindex, which
+    // re-adds genesis through ProcessNewBlock/AcceptBlockHeader.
+    if (pindexPrev && !pindexPrev->IsValid(BLOCK_VALID_SCRIPTS)) {
         for (const CBlockIndex *failedit : g_failed_blocks) {
             if (pindexPrev->GetAncestor(failedit->nHeight) == failedit) {
                 assert(failedit->nStatus & BLOCK_FAILED_MASK);

@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "chainparams.h"
+#include "consensus/validation.h"
 #include "main.h"
 
 #include "test/test_bitcoin.h"
@@ -157,6 +158,46 @@ BOOST_AUTO_TEST_CASE(test_combiner_all)
     BOOST_CHECK(Test());
     Test.disconnect(&ReturnTrue);
     BOOST_CHECK(Test());
+}
+
+// Regression: -reindex re-adds the genesis block through
+// ProcessNewBlock -> AcceptBlock -> AcceptBlockHeader with an empty block
+// index. Genesis has no parent, so pindexPrev is NULL there; the "prev block
+// invalid" propagation added by Deep Reorg Protection dereferenced it
+// unconditionally and crashed the node.
+BOOST_AUTO_TEST_CASE(accept_block_header_genesis_empty_index)
+{
+    const CChainParams& chainparams = Params();
+    CBlock genesis = chainparams.GenesisBlock();
+    const uint256 genesisHash = genesis.GetHash();
+    BOOST_REQUIRE(genesisHash == chainparams.GetConsensus().hashGenesisBlock);
+
+    // Present AcceptBlockHeader with an empty block index, as during -reindex.
+    // Swapping keeps every node (and every phashBlock) of the real index alive.
+    BlockMap saved;
+    {
+        LOCK(cs_main);
+        saved.swap(mapBlockIndex);
+    }
+
+    CValidationState state;
+    CBlockIndex* pindex = NULL;
+    bool ok = false;
+    {
+        LOCK(cs_main);
+        ok = AcceptBlockHeader(genesis, state, &pindex);
+        // Restore the real index first so teardown sees what it expects.
+        mapBlockIndex.swap(saved);
+    }
+
+    BOOST_CHECK(ok);
+    BOOST_CHECK(state.IsValid());
+    BOOST_REQUIRE(pindex != NULL);
+    BOOST_CHECK(pindex->pprev == NULL);
+    BOOST_CHECK_EQUAL(pindex->nHeight, 0);
+    BOOST_CHECK(pindex->GetBlockHash() == genesisHash);
+    // pindex is intentionally not freed: it is still referenced by the
+    // dirty-block-index set and is reclaimed at process exit.
 }
 
 BOOST_AUTO_TEST_SUITE_END()

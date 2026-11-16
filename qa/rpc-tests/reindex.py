@@ -27,10 +27,19 @@ class ReindexTest(BitcoinTestFramework):
 
     def run_test(self):
         self.nodes[0].generate(3)
+        besthash = self.nodes[0].getbestblockhash()
         stop_node(self.nodes[0], 0)
         wait_bitcoinds()
         self.nodes[0]=start_node(0, self.options.tmpdir, ["-debug", "-reindex", "-checkblockindex=1"])
         assert_equal(self.nodes[0].getblockcount(), 3)
+        assert_equal(self.nodes[0].getbestblockhash(), besthash)
+        # -reindex re-adds the genesis block with an empty block index
+        # (AcceptBlockHeader with a NULL pindexPrev); the node must come back.
+        stop_node(self.nodes[0], 0)
+        wait_bitcoinds()
+        self.nodes[0]=start_node(0, self.options.tmpdir, ["-debug", "-reindex-chainstate", "-checkblockindex=1"])
+        assert_equal(self.nodes[0].getblockcount(), 3)
+        assert_equal(self.nodes[0].getbestblockhash(), besthash)
         print "Success"
 
 if __name__ == '__main__':
