@@ -1408,7 +1408,10 @@ int64_t CWallet::IncOrderPosNext(CWalletDB *pwalletdb)
 CWallet::TxItems CWallet::OrderedTxItems(std::list<CAccountingEntry>& acentries, std::string strAccount)
 {
     AssertLockHeld(cs_wallet); // mapWallet
-    CWalletDB walletdb(strWalletFile);
+    // Read-only: this only lists accounting entries. A handle opened for
+    // writing forces a database checkpoint and fsync when it closes, which
+    // AddToWallet would then pay for every transaction found in a block.
+    CWalletDB walletdb(strWalletFile, "r");
 
     // First: get all CWalletTx and CAccountingEntry into a sorted-by-order multimap.
     TxItems txOrdered;
