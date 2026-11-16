@@ -20,6 +20,10 @@
 #include <algorithm>
 #include <iterator>
 #include <map>
+#ifndef WIN32
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
@@ -48,6 +52,8 @@ extern std::string BootstrapServeQuotaKey(const CNetAddr& addr);
 extern bool BootstrapDownloadTooSlow(int64_t&, uint64_t&, uint64_t, int64_t);
 extern bool BootstrapPendingFiles(const CBootstrapSnapshotManifest&, const boost::filesystem::path&,
                                   std::vector<uint32_t>&, uint64_t&, std::string&);
+extern bool DownloadBootstrapSnapshot(SOCKET, const CBootstrapSnapshotManifest&, const boost::filesystem::path&,
+                                      int, const std::string&, std::string&);
 
 // Test-only seam (defined in bootstrapvalidation.cpp, not the public header) to
 // drive a terminal latch so we can verify the finalization-hold flag releases on
@@ -201,6 +207,57 @@ BOOST_AUTO_TEST_CASE(bootstrap_reconnect_reuses_only_verified_complete_files)
     manifest.vFiles[0].strPath = "../wallet.dat";
     BOOST_CHECK(!BootstrapPendingFiles(manifest, staging, pending, completed, error));
 }
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(bootstrap_download_disconnect_then_resume)
+{
+    namespace fs = boost::filesystem;
+    const fs::path staging = fs::temp_directory_path() / fs::unique_path("bootstrap-wire-resume-%%%%-%%%%");
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { boost::system::error_code ec; fs::remove_all(path, ec); }
+    } cleanup{staging};
+    CBootstrapSnapshotManifest manifest;
+    manifest.nChunkSize = BOOTSTRAP_SNAPSHOT_CHUNK_SIZE;
+    manifest.nSnapshotBytes = 6;
+    CBootstrapSnapshotFile file;
+    file.strPath = "blocks/blk00000.dat";
+    file.nSize = 3;
+    file.hashSha256 = Sha256OfBytes(std::vector<unsigned char>{'a', 'b', 'c'});
+    manifest.vFiles.push_back(file);
+    file.strPath = "chainstate/000001.ldb";
+    manifest.vFiles.push_back(file);
+    std::string error;
+    // Preload one valid response, then EOF. The first connection loses the
+    // second requested file; the second connection supplies only that file.
+    for (uint32_t index = 0; index < 2; ++index) {
+        int sockets[2];
+        BOOST_REQUIRE_EQUAL(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets), 0);
+        struct ClosePair {
+            int a, b;
+            ~ClosePair() { close(a); close(b); }
+        } closePair{sockets[0], sockets[1]};
+        CBootstrapSnapshotChunk chunk;
+        chunk.nFileIndex = index;
+        chunk.nOffset = 0;
+        chunk.vData = std::vector<unsigned char>{'a', 'b', 'c'};
+        CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
+        payload << chunk;
+        CSerializeData frame;
+        BOOST_REQUIRE(BuildBootstrapNetworkMessage("bschk", payload, frame, error));
+        BOOST_REQUIRE_EQUAL(send(sockets[1], frame.data(), frame.size(), 0), (ssize_t)frame.size());
+        BOOST_REQUIRE_EQUAL(shutdown(sockets[1], SHUT_WR), 0);
+        const bool ok = DownloadBootstrapSnapshot(sockets[0], manifest, staging, 1000, "local fixture", error);
+        BOOST_CHECK_EQUAL(ok, index == 1);
+        BOOST_CHECK(fs::exists(staging / manifest.vFiles[index].strPath));
+    }
+    std::vector<uint32_t> pending;
+    uint64_t completed = 0;
+    BOOST_REQUIRE(BootstrapPendingFiles(manifest, staging, pending, completed, error));
+    BOOST_CHECK(pending.empty());
+    BOOST_CHECK_EQUAL(completed, 6);
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(bootstrap_snapshot_file_serialization)
 {

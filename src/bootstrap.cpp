@@ -1672,7 +1672,7 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
 
 // Single-stream download of the whole snapshot over an already-handshaked
 // socket (the legacy path; used when -bootstrapstreams=1).
-static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, int timeout_ms, const std::string& peer, std::string& error)
+bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, int timeout_ms, const std::string& peer, std::string& error)
 {
     LogPrintf("Bootstrap: downloading snapshot from peer %s: %u files, %llu bytes (height %d)\n",
         peer,
