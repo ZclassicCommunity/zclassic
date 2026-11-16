@@ -177,6 +177,7 @@ public:
 
     void setSyncStatus(bool isSyncing, int blockNumber, int estimatedHeight, double progress);
     void setSyncStatusConnecting();
+    QString connectionStartupError; // Retained across disconnected polling; cleared on retry/success.
 
     // Phase-3b redesign (Quiet+): the modern Home DASHBOARD on the Balance page.
     // updateHomeFixIt() is called from rpc.cpp's refreshBalances() (and the cached-

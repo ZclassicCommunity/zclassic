@@ -86,6 +86,7 @@
 #include "logger.h"
 #include "../filepermissions.h"
 #include "privatefile.h"
+#include "configfile.h"
 
 // Kept alive for the whole process so QStandardPaths/QSettings stay isolated.
 static QTemporaryDir* g_homeDir = nullptr;
@@ -139,7 +140,68 @@ private:
 
 private slots:
 
+    void configurationCreationPreservesExisting() {
+        QTemporaryDir temp;
+        const QString path = temp.filePath("zclassic.conf");
+        QString error;
+        const QByteArray original("server=1\n# keep this setting\n");
+        QVERIFY2(createPrivateConfig(path, original, error), qPrintable(error));
+        QVERIFY(testFileIsOwnerOnly(path));
+        QVERIFY(!createPrivateConfig(path, "replacement", error));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.readAll(), original);
+    }
+
+    void connectionErrorRemainsVisible() {
+        std::unique_ptr<MainWindow> w(makeWindow());
+        ConnectionLoader loader(w.get(), w->getRPC());
+        loader.showError("Configuration access denied; existing file preserved.");
+        w->getRPC()->refresh(); // A normal disconnected timer tick must retain the error.
+        QCOMPARE(w->statusLabel->text(), QString("Connection needs attention"));
+        QCOMPARE(w->syncStatusLabel->text(), QString("Configuration access denied; existing file preserved."));
+        QVERIFY(!QApplication::activeModalWidget());
+    }
+
 #ifdef Q_OS_WIN
+    void unreadableConfigurationIsNotRecreated() {
+        std::unique_ptr<MainWindow> w(makeWindow());
+        ConnectionLoader loader(w.get(), w->getRPC());
+        const QString path = loader.zclassicConfWritableLocation();
+        QVERIFY(path.contains("qttest")); // Never touch the live user's config.
+        QString error;
+        const QByteArray original("server=1\nrpcport=18992\n# preserved\n");
+        QVERIFY2(createPrivateConfig(path, original, error), qPrintable(error));
+        QVERIFY(!ownerEmptyFileAcl(path));
+        QVERIFY(!ownerEmptyFileAcl(path, true)); // Do not change ordinary ACLs.
+        alignas(DWORD) BYTE bytes[sizeof(ACL)];
+        PACL empty = reinterpret_cast<PACL>(bytes);
+        QVERIFY(InitializeAcl(empty, sizeof(bytes), ACL_REVISION));
+        SECURITY_DESCRIPTOR sd;
+        QVERIFY(InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION));
+        QVERIFY(SetSecurityDescriptorDacl(&sd, TRUE, empty, FALSE));
+        QVERIFY(SetFileSecurityW(reinterpret_cast<LPCWSTR>(path.utf16()),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, &sd));
+        QVERIFY(ownerEmptyFileAcl(path));
+        QVERIFY(!loader.autoDetectZClassicConf());
+        QVERIFY(!loader.confReadError.isEmpty());
+        // Headless disables the consent dialog; the real startup path must stop
+        // with an actionable banner, without creating a config or starting a node.
+        loader.doAutoConnect();
+        QVERIFY(w->syncStatusLabel->text().contains("existing file was preserved"));
+        QVERIFY(!createPrivateConfig(path, "replacement", error));
+        QVERIFY(ownerEmptyFileAcl(path, true));
+        QVERIFY(testFileIsOwnerOnly(path));
+        QVERIFY(!ownerEmptyFileAcl(path));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.readAll(), original);
+        file.close();
+        QVERIFY(loader.autoDetectZClassicConf());
+        QVERIFY(loader.confReadError.isEmpty());
+        QVERIFY(QFile::remove(path));
+    }
+
     void privateFileCheckRejectsPublicRead() {
         QTemporaryDir temp;
         QVERIFY(temp.isValid());

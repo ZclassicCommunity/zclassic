@@ -68,6 +68,8 @@ public:
     static qint64 blocksDirSizeBytes(const QString& datadirRoot);
 
 private:
+    friend class TestWidget; // Isolated integration tests exercise actual startup paths.
+    QString confReadError; // Distinguish unreadable existing config from absent config.
     std::shared_ptr<ConnectionConfig> autoDetectZClassicConf();
     std::shared_ptr<ConnectionConfig> loadFromSettings();
 

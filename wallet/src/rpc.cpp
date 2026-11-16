@@ -267,6 +267,7 @@ void RPC::handleEZClassicdCrash(int exitCode, QProcess::ExitStatus status) {
 
 // Called when a connection to zclassicd is available. 
 void RPC::setConnection(Connection* c) {
+    if (c) main->connectionStartupError.clear();
     if (c == nullptr) return;
 
     delete conn;
@@ -651,8 +652,9 @@ void RPC::noConnection(bool preserveBalances) {
     QIcon i = QApplication::style()->standardIcon(QStyle::SP_MessageBoxCritical);
     main->statusIcon->setPixmap(i.pixmap(16, 16));
     main->statusIcon->setToolTip("");
-    main->statusLabel->setText(QObject::tr("No Connection"));
-    main->statusLabel->setToolTip("");
+    main->statusLabel->setText(main->connectionStartupError.isEmpty()
+        ? QObject::tr("No Connection") : QObject::tr("Connection needs attention"));
+    main->statusLabel->setToolTip(main->connectionStartupError);
     main->ui->statusBar->showMessage(QObject::tr("No Connection"), 1000);
 
     // P0-6: reflect the lost connection in the main-tab sync banner.

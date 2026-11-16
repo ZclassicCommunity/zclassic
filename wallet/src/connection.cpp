@@ -1,5 +1,6 @@
 #include "connection.h"
 #include "embeddeddaemon.h"
+#include "configfile.h"
 #include "mainwindow.h"
 #include "settings.h"
 #include "securerandom.h"   // CONF-1: CSPRNG rpcpassword / notify token
@@ -15,6 +16,7 @@
 #include "precompiled.h"
 
 #include <QStorageInfo>
+#include <QSaveFile>
 #include <QProgressBar>
 #include <QElapsedTimer>
 #include <QtNetwork/QTcpSocket>
@@ -87,6 +89,7 @@ ConnectionLoader::~ConnectionLoader() {
 }
 
 void ConnectionLoader::loadConnection() {
+    main->connectionStartupError.clear();
     QTimer::singleShot(1, [=]() { this->doAutoConnect(); });
 
     if (Settings::getInstance()->isHeadless())
@@ -192,6 +195,27 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
 
     // Priority 2: Try to connect to detect zclassic.conf and connect to it.
     auto config = autoDetectZClassicConf();
+    if (!config && !confReadError.isEmpty()) {
+        const QString path = locateZClassicConfFile();
+        if (ownerEmptyFileAcl(path) && !Settings::getInstance()->isHeadless()) {
+            const auto choice = QMessageBox::question(main, QObject::tr("Restore configuration access?"),
+                QObject::tr("Windows is denying access to your existing ZClassic configuration. "
+                    "This file belongs to your account but its access list is empty.\n\n"
+                    "Restore access for your account only? The file contents, wallet and blockchain "
+                    "will not be changed."), QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (choice == QMessageBox::Yes && ownerEmptyFileAcl(path, true)) {
+                main->logger->write("Restored owner-only access to existing configuration");
+                config = autoDetectZClassicConf();
+            }
+        }
+        if (!config) {
+            showError(QObject::tr("Cannot read your existing ZClassic configuration:\n%1\n\n%2\n\n"
+                "The existing file was preserved. Restore file access, then use Edit → Settings "
+                "to reconnect or reopen the wallet. Do not re-download the blockchain for this error.")
+                .arg(QDir::toNativeSeparators(path), confReadError));
+            return;
+        }
+    }
     main->logger->write(QObject::tr("Attempting autoconnect"));
 
     if (config.get() != nullptr) {
@@ -351,91 +375,31 @@ void ConnectionLoader::createZClassicConf() {
     // Show the dialog
     QString datadir = "";
     bool useTor = false;
-    if (d.exec() == QDialog::Accepted) {
+    if (d.exec() != QDialog::Accepted) {
+        showError(QObject::tr("Wallet setup was cancelled. No configuration was created. Reopen the wallet to try again."));
+        return;
+    }
+    {
         datadir = ui.lblDirName->text();
         useTor = ui.chkUseTor->isChecked();
     }
 
-    main->logger->write("Creating file " + confLocation);
-    QDir().mkpath(fi.dir().absolutePath());
-
-    // CONF-2: the conf holds the rpcpassword (and, in Phase 1, the notify token),
-    // so it must be owner-only (0600) and NEVER group/world-readable for any
-    // instant — the hostile co-resident local user is in the threat model. Tighten
-    // the umask to 0077 ACROSS the create so a fresh conf is BORN 0600 (no TOCTOU
-    // window at the umask default of ~0644 before we could chmod it); the umask is
-    // restored immediately after open(). chmod-after still runs below to also narrow
-    // a pre-existing conf written 0644 by an older wallet. Linux/macOS only (POSIX
-    // umask); Windows file ACLs are handled by setPermissions alone.
-#ifndef Q_OS_WIN
-    mode_t oldMask = ::umask(0077);
-#endif
-    QFile file(confLocation);
-    bool opened = file.open(QIODevice::ReadWrite | QIODevice::Truncate);
-#ifndef Q_OS_WIN
-    ::umask(oldMask);
-#endif
-    if (!opened) {
-        main->logger->write("Could not create zclassic.conf, returning");
-        // Don't silently strand the user on the connecting screen forever — tell
-        // them what went wrong so they can fix permissions / free disk space.
-        this->showError(QObject::tr("ZClassic couldn't save its configuration file.\n\n"
-            "Please make sure you have permission to write to your home folder and "
-            "enough free disk space, then open ZClassic again."));
+    QByteArray contents("server=1\n");
+    if (!datadir.isEmpty()) {
+        if (datadir.contains('\n') || datadir.contains('\r')) {
+            showError(QObject::tr("The data-directory path cannot contain a line break."));
+            return;
+        }
+        contents += "datadir=" + datadir.toUtf8() + "\n";
+    }
+    if (useTor) contents += "proxy=127.0.0.1:9050\n";
+    QString error;
+    if (!createPrivateConfig(confLocation, contents, error)) {
+        main->logger->write("Configuration creation failed: " + error);
+        showError(QObject::tr("ZClassic could not create its configuration:\n%1\n\n%2")
+            .arg(QDir::toNativeSeparators(confLocation), error));
         return;
     }
-
-    // Belt-and-suspenders + pre-existing-conf narrowing (Truncate keeps an existing
-    // file's old mode, which umask does not touch). Best-effort: on a filesystem
-    // that can't honor perms we still write the conf (logged without any secret).
-    if (!file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner))
-        main->logger->write("warning: could not restrict zclassic.conf to 0600");
-
-    QTextStream out(&file);
-    
-    out << "server=1\n";
-    // No addnode here: mainnet.z.cash is a Zcash (ZEC) node, not a valid ZClassic
-    // peer, and the zclassicd we drive already pins its own compiled bootstrap
-    // peers / seeds as -addnode on every start. Baking a wrong peer into the
-    // user's permanent conf only causes repeated failed connections.
-    // COOKIE-AUTH: do NOT write a shared rpcuser/rpcpassword. With no rpcpassword in
-    // the conf the daemon auto-generates <datadir>/.cookie on every start
-    // (httprpc.cpp InitRPCAuthentication, gated on mapArgs["-rpcpassword"]=="") and the
-    // GUI authenticates by reading that cookie on each connect attempt. With no
-    // persisted shared secret, the rpcpassword desync that produced the HTTP-401
-    // dead-end cannot occur for an embedded node — the 401 class is eliminated by
-    // construction, not patched. The embedded launch additionally forces an absolute
-    // -rpccookiefile (startEmbeddedZClassicd) so the GUI reads the exact file the
-    // daemon wrote, with no testnet3/ or custom-datadir= guessing. randomPassword() is
-    // retained for compatibility but is no longer on the conf-write path.
-    // (Was: rpcuser=zcl-qt-wallet + rpcpassword=<randomPassword()>.)
-    if (!datadir.isEmpty()) {
-        out << "datadir=" % datadir % "\n";
-    }
-    if (useTor) {
-        out << "proxy=127.0.0.1:9050\n";
-    }
-
-    file.close();
-
-    // CONF-2 verify: read the perms BACK from disk and confirm the conf is actually
-    // owner-only. setPermissions() above is best-effort (a pre-existing 0644 conf from
-    // an older wallet, or an exotic filesystem, may not have narrowed). If any
-    // group/other read or write bit is still set, the rpcpassword is exposed to a
-    // co-resident local user — log a CLEAR diagnostic (never the password) so it's
-    // visible. We do NOT abort: stranding the user on the connecting screen is worse
-    // than a logged warning, and a fresh conf is born 0600 via the umask above anyway.
-    {
-        QFile::Permissions p = QFile::permissions(confLocation);
-        const QFile::Permissions leaky =
-            QFileDevice::ReadGroup  | QFileDevice::WriteGroup |
-            QFileDevice::ReadOther  | QFileDevice::WriteOther;
-        if (p & leaky)
-            main->logger->write("WARNING: zclassic.conf could not be secured to 0600 — it "
-                                "remains group/other-accessible, exposing the RPC credentials "
-                                "to other local users on this machine. Please chmod 600 it.");
-    }
-
     // Now that zclassic.conf exists, try to autoconnect again
     this->doAutoConnect();
 }
@@ -1775,6 +1739,7 @@ void ConnectionLoader::startManualRepair() {
 }
 
 void ConnectionLoader::doManualConnect() {
+    main->connectionStartupError.clear();
     auto config = loadFromSettings();
 
     if (!config) {
@@ -2361,12 +2326,19 @@ void ConnectionLoader::showInformation(QString info, QString detail) {
  * Show error will close the loading dialog and show an error. 
 */
 void ConnectionLoader::showError(QString explanation) {
+    main->connectionStartupError = explanation;
     rpc->setEZClassicd(nullptr);
     rpc->noConnection();
 
-    QMessageBox::critical(main, QObject::tr("Connection Error"), explanation, QMessageBox::Ok);
+    main->statusLabel->setText(QObject::tr("Connection needs attention"));
+    main->statusLabel->setToolTip(explanation);
+    if (main->syncStatusLabel) {
+        main->syncStatusLabel->setTextFormat(Qt::PlainText);
+        main->syncStatusLabel->setText(explanation);
+        main->syncStatusLabel->setWordWrap(true);
+    }
 
-    // NEVER-STRAND: after the error is acknowledged we close the modal connect
+    // Keep the explanation visible in the main window and close the startup
     // dialog. With quit-on-last-window-closed off for the whole lifetime this can
     // no longer quit the app, and we explicitly leave the user looking at the main
     // window (in its noConnection state, set above) with the error already seen --
@@ -2394,6 +2366,7 @@ QString ConnectionLoader::locateZClassicConfFile() {
     auto confLocation = QStandardPaths::locate(QStandardPaths::AppDataLocation, "../../ZClassic/zclassic.conf");
 #endif
 
+    if (confLocation.isEmpty()) return QString();
     main->logger->write("Found zclassicconf at " + QDir::cleanPath(confLocation));
     return QDir::cleanPath(confLocation);
 }
@@ -2407,6 +2380,7 @@ QString ConnectionLoader::zclassicConfWritableLocation() {
     auto confLocation = QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath("../../ZClassic/zclassic.conf");
 #endif
 
+    if (confLocation.isEmpty()) return QString();
     main->logger->write("Found zclassicconf at " + QDir::cleanPath(confLocation));
     return QDir::cleanPath(confLocation);
 }
@@ -2598,8 +2572,8 @@ QString ConnectionLoader::discoverCredsFromRunningDaemon(const std::shared_ptr<C
 }
 
 // PROACTIVE one-time migration of a legacy GUI-owned conf to cookie auth. Strips ONLY
-// the rpcuser=/rpcpassword= lines IN PLACE (preserving server=/datadir=/proxy=/testnet=
-// verbatim — we do NOT reuse createZClassicConf, which is modal + truncates and would
+// the rpcuser=/rpcpassword= lines using an atomic replacement (preserving server=/datadir=/proxy=/testnet=
+// verbatim — we do NOT reuse createZClassicConf, which is a first-run writer and must not
 // clobber a custom datadir=). Gated to a GUI-owned (rpcuser=="zcl-qt-wallet"), embedded,
 // non-external (daemon=1 ABSENT) conf so a user's external-node creds are never touched.
 // Runs at most once (QSettings conf/cookieMigrated). Re-asserts 0600 + the read-back
@@ -2671,28 +2645,18 @@ void ConnectionLoader::migrateConfToCookie() {
         }
     }
 
-    // Rewrite 0600 (born owner-only via umask, exactly like createZClassicConf).
-#ifndef Q_OS_WIN
-    mode_t oldMask = ::umask(0077);
-#endif
-    QFile out(confLocation);
-    bool opened = out.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text);
-#ifndef Q_OS_WIN
-    ::umask(oldMask);
-#endif
-    if (!opened) {
-        main->logger->write("migrateConfToCookie: could not rewrite conf; leaving it as-is");
-        return;   // do NOT set the flag -> retry on a future launch
+    // Stage privately and atomically replace only after the complete write succeeds.
+    // Never truncate a working configuration before its replacement is durable.
+    QSaveFile out(confLocation);
+    if (!out.open(QIODevice::WriteOnly) || !makeFileOwnerOnly(out)) {
+        main->logger->write("migrateConfToCookie: cannot stage private configuration; original preserved");
+        return;
     }
-    if (!out.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner))
-        main->logger->write("warning: could not restrict zclassic.conf to 0600 (migration)");
-    {
-        QTextStream os(&out);
-        for (const QString& l : kept)
-            os << l << "\n";
+    const QByteArray replacement = (kept.join("\n") + "\n").toUtf8();
+    if (out.write(replacement) != replacement.size() || !out.commit()) {
+        main->logger->write("migrateConfToCookie: atomic save failed; original preserved");
+        return;
     }
-    out.close();
-
     // Read-back leak check (same posture as createZClassicConf).
     {
         QFile::Permissions p = QFile::permissions(confLocation);
@@ -2782,16 +2746,18 @@ bool ConnectionLoader::handleEmbeddedAuthFailure() {
  * Try to automatically detect a zclassic.conf file in the correct location and load parameters
  */
 std::shared_ptr<ConnectionConfig> ConnectionLoader::autoDetectZClassicConf() {
+    confReadError.clear();
     auto confLocation = locateZClassicConfFile();
 
-    if (confLocation.isNull()) {
+    if (confLocation.isEmpty()) {
         // No ZClassic file, just return with nothing
         return nullptr;
     }
 
     QFile file(confLocation);
     if (!file.open(QIODevice::ReadOnly)) {
-        qDebug() << file.errorString();
+        confReadError = file.errorString();
+        main->logger->write("Cannot read existing configuration: " + confReadError);
         return nullptr;
     }
 
