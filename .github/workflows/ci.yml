@@ -71,7 +71,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Dependency cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
+        id: depends-cache
         env:
           cache-name: depends
         with:
@@ -85,8 +86,17 @@ jobs:
           # to compile under modern gcc (-Werror on generated protocol.h), so
           # building it here is both pointless and a hard CI failure.
           make $MAKEJOBS -C depends HOST=${{ matrix.host }} NO_PROTON=1 ${{ matrix.dep-opts }}
+      - name: Save completed dependencies
+        if: steps.depends-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        env:
+          cache-name: depends
+        with:
+          path: ./depends/built
+          key: ${{ matrix.name }}-${{ env.cache-name }}-v2-${{ hashFiles('depends/packages/**', 'depends/hosts/**', 'depends/builders/**', 'depends/patches/**', 'depends/Makefile', 'depends/funcs.mk') }}
       - name: CCache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
+        id: compiler-cache
         env:
           cache-name: ccache
         with:
@@ -101,6 +111,14 @@ jobs:
           # The legacy packaging wrapper ignored MAKEJOBS, disabled tests,
           # and rebuilt depends in release mode before a second test build.
           DEBUG=1 CONFIGURE_FLAGS="--enable-tests --disable-man" ./zcutil/build.sh $MAKEJOBS
+      - name: Save completed compiler cache
+        if: steps.compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        env:
+          cache-name: ccache
+        with:
+          path: ~/.ccache
+          key: ${{ matrix.name }}-${{ env.cache-name }}-v2-${{ hashFiles('**/configure.ac') }}-${{ github.sha }}
       - name: Upload artifacts
         if: success()
         uses: actions/upload-artifact@v4
@@ -116,6 +134,7 @@ jobs:
           ./src/zcash-gtest --gtest_filter='merkletree.*:WalletTests.*'
           ./src/test/test_bitcoin --run_test=bootstrap_snapshot_protocol_tests --log_level=test_suite
       - name: Upload tree test binary
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tree-parity-${{ github.sha }}
