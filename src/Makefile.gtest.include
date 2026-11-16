@@ -49,6 +49,7 @@ if ENABLE_WALLET
 zcash_gtest_SOURCES += \
 	wallet/gtest/test_paymentdisclosure.cpp \
 	wallet/gtest/test_wallet.cpp \
+	wallet/gtest/test_wallet_perf.cpp \
 	wallet/gtest/test_wallet_witness_index.cpp
 endif
 
