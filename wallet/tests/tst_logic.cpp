@@ -24,6 +24,9 @@
 #include <QtGlobal>
 #include "filepermissions.h"
 #include "chainbackup.h"
+#include "repairlock.h"
+#include <QProcess>
+#include <QProcessEnvironment>
 #include "repairlocation.h"
 #include "embeddeddaemon.h"
 #include "releaseversion.h"
@@ -186,6 +189,61 @@ private slots:
             QVERIFY2(!invalid.error.isEmpty(), qPrintable(name));
             QVERIFY(invalid.directory.isEmpty());
         }
+    }
+    void repairLock_childProbe() {
+        const QString directory = qEnvironmentVariable("ZCL_TEST_REPAIR_LOCK_DIR");
+        if (directory.isEmpty()) QSKIP("Child-process lock probe only");
+        RepairLock lock(directory);
+        QCOMPARE(lock.acquired(), qEnvironmentVariable("ZCL_TEST_REPAIR_LOCK_EXPECT") == "1");
+    }
+    void repairLock_excludesOtherProcesses() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        const QString path = QDir(temporary.path()).filePath(".lock");
+        { QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); }
+        auto probe = [&](bool expected) {
+            QProcess child;
+            auto environment = QProcessEnvironment::systemEnvironment();
+            environment.insert("ZCL_TEST_REPAIR_LOCK_DIR", temporary.path());
+            environment.insert("ZCL_TEST_REPAIR_LOCK_EXPECT", expected ? "1" : "0");
+            child.setProcessEnvironment(environment);
+            child.start(QCoreApplication::applicationFilePath(), {"repairLock_childProbe"});
+            if (!child.waitForFinished(15000)) return false;
+            return child.exitStatus() == QProcess::NormalExit && child.exitCode() == 0;
+        };
+        {
+            RepairLock lock(temporary.path());
+            QVERIFY2(lock.acquired(), qPrintable(lock.error()));
+            QVERIFY(probe(false));
+            { RepairLock duplicate(temporary.path()); QVERIFY(!duplicate.acquired()); }
+            QVERIFY(probe(false)); // Rejecting a second local lock must not release the first.
+            lock.release();
+            QVERIFY(probe(true));
+        }
+        QVERIFY(QFileInfo::exists(path)); // Never unlink the shared authority.
+        QVERIFY(probe(true));
+        QVERIFY(QFile::remove(path));
+        RepairLock missing(temporary.path());
+        QVERIFY(!missing.acquired());
+    }
+    void repairLock_rejectsDaemonStartup() {
+        const QString daemon = qEnvironmentVariable("ZCL_TEST_REPAIR_DAEMON");
+        if (daemon.isEmpty()) QSKIP("Set ZCL_TEST_REPAIR_DAEMON for real backend interoperability");
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        QDir root(temporary.path());
+        QVERIFY(root.mkdir("regtest"));
+        const QString network = root.filePath("regtest");
+        { QFile file(QDir(network).filePath(".lock")); QVERIFY(file.open(QIODevice::WriteOnly)); }
+        RepairLock lock(network);
+        QVERIFY2(lock.acquired(), qPrintable(lock.error()));
+        QProcess node;
+        node.start(daemon, {"-datadir=" + temporary.path(), "-regtest", "-disablewallet",
+            "-listen=0", "-connect=0", "-dnsseed=0", "-bootstrap=0"});
+        QVERIFY(node.waitForFinished(15000));
+        QVERIFY(node.exitCode() != 0);
+        const QByteArray output = node.readAllStandardError() + node.readAllStandardOutput();
+        QVERIFY2(output.contains("Cannot obtain a lock on data directory"), output.constData());
     }
     void repairConfig_matchesDaemonSelection() {
         const auto parsed = parseRepairConfig("# comment\nnotestnet=0 # enable\ntestnet=0\n"

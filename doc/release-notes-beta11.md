@@ -49,8 +49,11 @@ Repair now selects the configured data directory, network and wallet filename,
 including configuration comments, duplicate-setting precedence and negative
 boolean options. It no longer guesses testnet from folders present on disk.
 Relative paths are refused when the daemon's working directory is unknown.
+Wallet backup and blockchain moves now hold the daemon-compatible native data
+directory lock. A node using custom ports still blocks repair, and another node
+cannot open the databases during those moves. The lock file is never deleted.
 This is preparation for safe existing-wallet checkpoint migration; it does not
-yet provide the locking and interruption recovery needed for that transition.
+yet provide the interruption recovery needed for that transition.
 
 Isolated Windows and Linux tests have imported and verified the full state at
 that checkpoint and continued ordinary block validation above it. This does

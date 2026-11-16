@@ -2,6 +2,7 @@
 #include "embeddeddaemon.h"
 #include "configfile.h"
 #include "chainbackup.h"
+#include "repairlock.h"
 #include "repairlocation.h"
 #include "startupaccess.h"
 #include <QThread>
@@ -1323,6 +1324,13 @@ void ConnectionLoader::relaunchForRepair(const QStringList& extraArgs) {
         return;
     }
 
+    RepairLock repairLock(ezRepairPathError.isEmpty() ? ezDataDir : QString());
+    if (!repairLock.acquired()) {
+        this->setHealInProgress(false);
+        this->showError(repairLock.error());
+        return;
+    }
+
     // GUARD RAIL: never proceed to a repair without a fresh wallet.dat backup.
     if (!backupWalletForRepair()) {
         // Roll back the serialize guard so the user (or a later run) can retry.
@@ -1358,6 +1366,7 @@ void ConnectionLoader::relaunchForRepair(const QStringList& extraArgs) {
     this->showInformation(QObject::tr("Repairing your blockchain data…"),
         QObject::tr("This can take several minutes. Your wallet is safe."));
 
+    repairLock.release(); // The daemon must acquire the same lock before opening databases.
     if (!this->startEmbeddedZClassicd(extraArgs)) {
         this->setHealInProgress(false);   // relaunch never armed -> release the guard
         this->showError(QObject::tr("ZClassic couldn't start the repair.\n\n"
@@ -1389,6 +1398,12 @@ void ConnectionLoader::redownloadChain() {
         this->showError(QObject::tr("Please fully quit ZClassic first.\n\n"
             "The blockchain couldn't be re-downloaded because the ZClassic node is still "
             "running. Your wallet, coins, and blockchain data have not been changed."));
+        return;
+    }
+
+    RepairLock repairLock(ezRepairPathError.isEmpty() ? ezDataDir : QString());
+    if (!repairLock.acquired()) {
+        this->showError(repairLock.error());
         return;
     }
 
@@ -1432,6 +1447,7 @@ void ConnectionLoader::redownloadChain() {
         return;
     }
     const QString aside = QFileInfo(backup.path).fileName();
+    repairLock.release(); // All local file mutations are finished before relaunch.
     // Count this repair attempt (persisted per install), matching relaunchForRepair.
     QSettings().setValue("repair/attempts", QSettings().value("repair/attempts", 0).toInt() + 1);
 

@@ -83,6 +83,7 @@ HEADERS += \
     src/privatefile.h \
     src/configfile.h \
     src/chainbackup.h \
+    src/repairlock.h \
     src/repairlocation.h \
     src/startupaccess.h \
     src/mainwindow.h \
