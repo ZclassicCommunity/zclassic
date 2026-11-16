@@ -180,6 +180,8 @@ public:
     QString connectionStartupError; // Retained across disconnected polling; cleared on retry/success.
     QString connectionStartupProgress; // Visible even when the startup overlay is closed.
     quint64 startupAttempt = 0;
+    bool isQuitting() const { return quitting; }
+    void noteQuitting() { quitting = true; }
     std::function<void()> cancelStartupAccess;
     QPushButton* startupActionButton = nullptr;
     QPushButton* startupDetailsButton = nullptr;
@@ -236,6 +238,7 @@ public:
     // existing safety guard (daemon-dead confirm, wallet.dat backup, disk floor,
     // reversible set-aside) applies. Non-interactive but surfaces a clear status.
     void autoHealStubChain();
+    void autoFastSync();
 
     // P0-2 FUND-SAFETY: prompt the user (once per run) to back up wallet.dat. There
     // is no seed phrase for this wallet, so an un-backed-up wallet.dat is permanent,

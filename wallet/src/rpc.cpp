@@ -1,4 +1,5 @@
 #include "rpc.h"
+#include "fastsync.h"
 #include "releaseversion.h"
 #include "repairlocation.h"
 #include "repairlock.h"
@@ -12,6 +13,7 @@
 
 #include <QEventLoop>
 #include <QElapsedTimer>
+#include <QPointer>
 
 using json = nlohmann::json;
 
@@ -1066,6 +1068,15 @@ void RPC::getInfoThenRefresh(bool force) {
         conn->doRPCIgnoreError(payload, [=](const json& reply) {
             auto progress    = reply["verificationprogress"].get<double>();
             int  blockNumber = reply["blocks"].get<json::number_unsigned_t>();
+            ezFastSyncHeight = blockNumber;
+            ezFastSyncMainnet = reply.find("chain") != reply.end() &&
+                reply["chain"].is_string() && reply["chain"].get<std::string>() == "main";
+            // Existing wallets may have peers and still be hundreds of thousands
+            // of blocks below the checkpoint. Do not restrict this probe to the
+            // peerless path: that was why upgrades silently resumed slow replay.
+            if (!ezFastSyncScheduled && ezclassicd != nullptr && ezFastSyncMainnet &&
+                blockNumber > 0 && blockNumber < 3026937)
+                pollBootstrapSnapshotStatus();
 
             // The node's best *header* height is the reliable sync target: headers
             // download ahead of blocks during sync, and at the chain tip blocks ==
@@ -2101,6 +2112,7 @@ void RPC::refreshZCLPrice() {
 // here is safe -- no alive-token needed (unlike ConnectionLoader's pre-connect probe).
 void RPC::pollBootstrapSnapshotStatus() {
     if (conn == nullptr) return;
+    const auto requestedConnection = conn;
     json payload = {
         {"jsonrpc", "1.0"},
         {"id", "someid"},
@@ -2108,6 +2120,27 @@ void RPC::pollBootstrapSnapshotStatus() {
     };
     conn->doRPC(payload,
         [=] (json bi) {
+            if (conn != requestedConnection || ezExpectedShutdown) return;
+            if (!ezFastSyncScheduled && bi.is_object() &&
+                bi.find("mode") != bi.end() && bi["mode"].is_string() &&
+                bi["mode"].get<std::string>() == "anchor" &&
+                bi.find("verify_pending") != bi.end() && bi["verify_pending"].is_boolean() &&
+                !bi["verify_pending"].get<bool>() &&
+                bi.find("tip_hold") != bi.end() && bi["tip_hold"].is_boolean() &&
+                !bi["tip_hold"].get<bool>() &&
+                bi.find("validation_state") != bi.end() && bi["validation_state"].is_string() &&
+                bi["validation_state"].get<std::string>() == "disabled" &&
+                bi.find("phase") != bi.end() && bi["phase"].is_string() &&
+                bi.find("reason") != bi.end() && bi["reason"].is_string() &&
+                shouldMigrateToCheckpoint(ezclassicd != nullptr, ezFastSyncMainnet,
+                    ezFastSyncHeight, QString::fromStdString(bi["phase"].get<std::string>()),
+                    QString::fromStdString(bi["reason"].get<std::string>()))) {
+                ezFastSyncScheduled = true;
+                // Leave the RPC callback before shutting down its connection.
+                QTimer::singleShot(0, main, [this, requestedConnection]() {
+                    if (!ezExpectedShutdown && conn == requestedConnection) main->autoFastSync();
+                });
+            }
             bool   active = false;
             int    pct    = 0;
             qint64 recv   = 0, total = 0;
@@ -2140,6 +2173,7 @@ void RPC::pollBootstrapSnapshotStatus() {
 }
 
 void RPC::onAboutToQuit() {
+    main->noteQuitting();
     // Runs on every quit route (see header). The macOS app-menu Quit / Cmd-Q skips
     // MainWindow::closeEvent()->shutdownZClassicd(), so ezExpectedShutdown was never
     // set on that path and the periodic refresh poller (RPC::refresh) could fire its
@@ -2172,6 +2206,12 @@ void RPC::shutdownZClassicd() {
         return;
     }
 
+    // A replacement loader may clear/adopt RPC state while the nested wait
+    // processes events. Wait for the process this call actually stopped.
+    const QPointer<QProcess> stoppingProcess(ezclassicd);
+    const auto stoppingConnection = conn;
+    const bool stoppingExternal = conn->config && conn->config->zclassicDaemon;
+
     json payload = {
         {"jsonrpc", "1.0"},
         {"id", "someid"},
@@ -2202,9 +2242,9 @@ void RPC::shutdownZClassicd() {
     // True once the node is gone (or there's nothing for us to wait on, or we've
     // hit the hard cap so quitting can never hang).
     auto fnEnded = [&]() -> bool {
-        return ezclassicd->state() == QProcess::NotRunning
-            || ezclassicd->processId() == 0
-            || conn->config->zclassicDaemon       // external daemon: we don't own its lifetime
+        return !stoppingProcess || stoppingProcess->state() == QProcess::NotRunning
+            || stoppingProcess->processId() == 0
+            || stoppingExternal       // external daemon: we don't own its lifetime
             || elapsed.hasExpired(30000);          // hard cap (ms) so Quit never wedges
     };
 
@@ -2248,7 +2288,7 @@ void RPC::shutdownZClassicd() {
     // NOTIFY-SRV: the daemon we launched is gone, so tear down the push socket and
     // remove the 0600 token file. (A fresh restart re-starts it in
     // startEmbeddedZClassicd before the daemon launches.)
-    if (notifyServer)
+    if (notifyServer && conn == stoppingConnection && ezclassicd == stoppingProcess.data())
         notifyServer->stop();
 
     // Release the re-entrancy latch now this shutdown has unwound. It serializes

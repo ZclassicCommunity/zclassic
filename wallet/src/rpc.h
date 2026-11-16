@@ -315,6 +315,9 @@ private:
     // async; the peerless path reads it so an active download shows real progress and
     // is never healed.
     bool                        ezBootstrapActive           = false;
+    bool                        ezFastSyncScheduled         = false;
+    int                         ezFastSyncHeight            = 0;
+    bool                        ezFastSyncMainnet           = false;
     int                         ezBootstrapPct              = 0;
     qint64                      ezBootstrapRecv             = 0;
     qint64                      ezBootstrapTotal            = 0;

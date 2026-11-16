@@ -77,6 +77,7 @@ SOURCES += \
 
 HEADERS += \
     src/releaseversion.h \
+    src/fastsync.h \
     src/embeddeddaemon.h \
     src/notifyserver.h \
     src/securerandom.h \

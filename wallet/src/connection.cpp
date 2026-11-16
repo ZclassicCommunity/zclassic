@@ -22,6 +22,8 @@
 #include "precompiled.h"
 
 #include <QStorageInfo>
+#include <QPointer>
+#include <QUuid>
 #include <QSaveFile>
 #include <QProgressBar>
 #include <QElapsedTimer>
@@ -1545,7 +1547,10 @@ bool ConnectionLoader::healInProgress() {
 }
 
 void ConnectionLoader::setHealInProgress(bool on) {
-    QSettings().setValue("heal/inProgress", on);
+    QSettings settings;
+    settings.setValue("heal/inProgress", on);
+    if (on) settings.setValue("heal/owner", QUuid::createUuid().toString());
+    else settings.remove("heal/owner");
 }
 
 // SAFETY GATE: positively confirm NO embedded daemon is alive before a destructive
@@ -1772,7 +1777,7 @@ void ConnectionLoader::handleWarmupWedged() {
 // option here is an explicit user choice, so it clears manualOnly and starts fresh.
 void ConnectionLoader::startManualRepair() {
     QSettings().setValue("heal/manualOnly", false);
-    QSettings().setValue("heal/inProgress", false);
+    setHealInProgress(false);
     // Mark this as the user-initiated repair entry so "Not now" relaunches the (healthy,
     // just-stopped) node instead of showing the false startup-failure dead-end.
     ezManualRepair = true;
@@ -1786,6 +1791,62 @@ void ConnectionLoader::startManualRepair() {
 
     d->show();
     this->offerCorruptionRepair();
+}
+
+bool ConnectionLoader::startFastSync() {
+    if (main->isQuitting() || healInProgress() || !rpc->isEmbedded() || !rpc->getConnection()) return false;
+    const auto originalConnection = rpc->getConnection();
+    const auto originalProcess = rpc->getEZClassicD();
+    const auto config = rpc->getConnection()->config;
+    if (!config || config->zclassicDaemon || config->testnet || config->regtest ||
+        rpc->getEZClassicD()->state() != QProcess::Running) return false;
+    rememberRepairLocation(config);
+    if (!ezRepairPathError.isEmpty() || ezDataDir.isEmpty()) return false;
+    const QDir directory = resolveDataSubdir();
+    const QString canonical = QFileInfo(directory.absolutePath()).canonicalFilePath();
+    if (canonical.isEmpty()) return false;
+    QStorageInfo storage(canonical);
+    if (!storage.isValid() || !storage.isReady() ||
+        storage.bytesAvailable() < qint64(15) * 1024 * 1024 * 1024) return false;
+
+    // Persist before stopping: a failed download must never cause repeated chain
+    // replacement on subsequent launches. Scope the attempt to this actual datadir.
+    const QString key = QStringLiteral("fastSync/3126937/") + QString::fromLatin1(
+        QCryptographicHash::hash(canonical.toUtf8(), QCryptographicHash::Sha256).toHex());
+    QSettings settings;
+    if (settings.value(key, false).toBool()) return false;
+    settings.setValue(key, true);
+    settings.sync();
+    if (settings.status() != QSettings::NoError) return false;
+
+    main->connectionStartupProgress = QObject::tr("Preparing faster checkpoint sync…");
+    main->setSyncStatusConnecting();
+    const QPointer<MainWindow> window(main);
+    const QPointer<QDialog> dialog(d);
+    const auto generation = accessAttempt;
+    setHealInProgress(true);
+    const QString operationOwner = QSettings().value("heal/owner").toString();
+    rpc->shutdownZClassicd();
+    // Shutdown processes UI events. Quit, settings changes or another startup
+    // attempt revoke this migration before any wallet backup or chain movement.
+    if (!window || !dialog || window->isQuitting() ||
+        window->startupAttempt != generation || rpc->getConnection() != originalConnection ||
+        rpc->getEZClassicD() != originalProcess || originalConnection->config != config) {
+        if (QSettings().value("heal/owner").toString() == operationOwner) setHealInProgress(false);
+        // No files were moved. A later normal launch may still use fast sync.
+        settings.remove(key);
+        settings.sync();
+        if (!dialog) d = nullptr;
+        return false;
+    }
+    d->show();
+    showInformation(QObject::tr("Preparing faster checkpoint sync…"),
+        QObject::tr("Backing up your wallet and keeping your previous blockchain copy."));
+    // This path owns all stop, lock, private backup, disk and journal checks.
+    // No repair-choice dialog, reindex, deleted backup or validation bypass.
+    redownloadChain();
+    if (QSettings().value("heal/owner").toString() == operationOwner) setHealInProgress(false);
+    return true;
 }
 
 void ConnectionLoader::doManualConnect() {
