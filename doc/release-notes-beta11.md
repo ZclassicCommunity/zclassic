@@ -61,8 +61,14 @@ scratch data move with the old chain and are restored together after interruptio
 The imported-tip hold and validation records already reside in the moved block
 index. Recovery rejects legacy journals that would strand newer verification
 metadata. Abrupt-exit tests cover all seven move boundaries.
-Power-loss durability and end-to-end wallet migration still need qualification
-before this can be presented as an existing-wallet fast-sync transition.
+Repair now checks the journal's native file flush before moving components.
+POSIX directory changes are flushed destination-first; Windows moves request
+write-through completion. A completed journal is archived with the backup.
+Flush failures stop the transition without starting the node. Fault-injection
+tests cover publication, move barriers, recovery retries and completion conflicts.
+These are checked persistence requests and tested process-interruption recovery,
+not a guarantee against power loss or faulty storage. End-to-end wallet migration
+still needs qualification before announcing an existing-wallet fast-sync release.
 
 Isolated Windows and Linux tests have imported and verified the full state at
 that checkpoint and continued ordinary block validation above it. This does

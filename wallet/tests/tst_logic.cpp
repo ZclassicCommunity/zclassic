@@ -365,6 +365,128 @@ private slots:
         QVERIFY(f.open(QIODevice::ReadOnly));
         QCOMPARE(f.readAll(), QByteArray("keep"));
     }
+    void chainBackup_stopsOnPersistenceFailure_data() {
+        QTest::addColumn<int>("failure");
+        QTest::newRow("journal-file-flush") << 0;
+        for (int step = 1; step <= 8; ++step)
+            QTest::newRow(qPrintable(QString("directory-barrier-%1").arg(step))) << step;
+    }
+    void chainBackup_stopsOnPersistenceFailure() {
+        QFETCH(int, failure);
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        QDir data(temporary.path());
+        QVERIFY(data.mkdir("blocks"));
+        QVERIFY(data.mkdir("chainstate"));
+        int barriers = 0, moves = 0;
+        ChainBackup::Persistence persistence;
+        persistence.flushFile = [&](QFile& file) { return failure != 0 && RepairPersistence::flushFile(file); };
+        persistence.syncDirectory = [&](const QString& path) {
+            return ++barriers != failure && RepairPersistence::syncDirectory(path);
+        };
+        const auto result = ChainBackup::setAside(data, [&](const QString& from, const QString& to) {
+            ++moves;
+            return RepairPersistence::move(from, to);
+        }, persistence);
+        QVERIFY(!result.success);
+        QVERIFY(!result.error.isEmpty());
+        if (failure <= 2) QCOMPARE(moves, 0); // No component moves without persisted intent.
+        if (failure == 0) {
+            QVERIFY(!QFileInfo::exists(ChainBackup::journalPath(data)));
+            QVERIFY(QFileInfo::exists(data.filePath("blocks")));
+            QVERIFY(QFileInfo::exists(data.filePath("chainstate")));
+            return;
+        }
+        if (QFileInfo::exists(ChainBackup::journalPath(data))) {
+            const auto recovery = ChainBackup::recover(data);
+            QVERIFY2(recovery.success, qPrintable(recovery.error));
+            QVERIFY(QFileInfo::exists(data.filePath("blocks")));
+            QVERIFY(QFileInfo::exists(data.filePath("chainstate")));
+        } else {
+            // Completion rename happened before its flush failed. Both components
+            // had already passed their own persistence barriers; no mixed pair.
+            QVERIFY(QFileInfo::exists(QDir(result.path).filePath("blocks")));
+            QVERIFY(QFileInfo::exists(QDir(result.path).filePath("chainstate")));
+            QVERIFY(!QFileInfo::exists(data.filePath("blocks")));
+            QVERIFY(!QFileInfo::exists(data.filePath("chainstate")));
+        }
+    }
+    void chainBackup_recoveryRetriesFlushFailure_data() {
+        QTest::addColumn<int>("failure");
+        for (int step = 1; step <= 8; ++step)
+            QTest::newRow(qPrintable(QString("recovery-barrier-%1").arg(step))) << step;
+    }
+    void chainBackup_recoveryRetriesFlushFailure() {
+        QFETCH(int, failure);
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        QDir data(temporary.path());
+        QVERIFY(data.mkpath("chain-set-aside-fixture/blocks"));
+        QVERIFY(data.mkpath("chain-set-aside-fixture/chainstate"));
+        { QFile file(ChainBackup::journalPath(data)); QVERIFY(file.open(QIODevice::WriteOnly));
+          const QByteArray bytes = "{\"version\":2,\"backup\":\"chain-set-aside-fixture\",\"entries\":[\"blocks\",\"chainstate\"]}";
+          QCOMPARE(file.write(bytes), qint64(bytes.size())); }
+        int barriers = 0;
+        QStringList flushed;
+        ChainBackup::Persistence persistence;
+        persistence.syncDirectory = [&](const QString& path) {
+            flushed.append(path);
+            return ++barriers != failure && RepairPersistence::syncDirectory(path);
+        };
+        QVERIFY(!ChainBackup::recover(data, RepairPersistence::move, persistence).success);
+        QCOMPARE(flushed.first(), data.absolutePath()); // Restore destination first.
+        if (flushed.size() >= 2)
+            QCOMPARE(flushed[1], data.filePath("chain-set-aside-fixture"));
+        const auto retry = ChainBackup::recover(data);
+        QVERIFY2(retry.success, qPrintable(retry.error));
+        QVERIFY(QFileInfo::exists(data.filePath("blocks")));
+        QVERIFY(QFileInfo::exists(data.filePath("chainstate")));
+    }
+    void chainBackup_journalCollisionsNeverOverwrite() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        QDir data(temporary.path());
+        QVERIFY(data.mkdir("blocks"));
+        QVERIFY(data.mkdir("chainstate"));
+        ChainBackup::Persistence persistence;
+        persistence.flushFile = [&](QFile& file) {
+            QFile collision(ChainBackup::journalPath(data));
+            if (!collision.open(QIODevice::WriteOnly) || collision.write("preserve-journal") != 16) return false;
+            collision.close();
+            return RepairPersistence::flushFile(file);
+        };
+        int moves = 0;
+        const auto blocked = ChainBackup::setAside(data, [&](const QString& from, const QString& to) {
+            ++moves; return RepairPersistence::move(from, to);
+        }, persistence);
+        QVERIFY(!blocked.success);
+        QCOMPARE(moves, 0);
+        QFile journal(ChainBackup::journalPath(data));
+        QVERIFY(journal.open(QIODevice::ReadOnly));
+        QCOMPARE(journal.readAll(), QByteArray("preserve-journal"));
+        journal.close();
+        QVERIFY(journal.remove()); // Only this test's injected collision.
+        QString receipt;
+        const auto completion = ChainBackup::setAside(data, [&](const QString& from, const QString& to) {
+            if (!RepairPersistence::move(from, to)) return false;
+            if (QFileInfo(to).fileName() == "chainstate") {
+                receipt = QFileInfo(to).dir().filePath("repair-completed.json");
+                QFile collision(receipt);
+                return collision.open(QIODevice::WriteOnly) && collision.write("preserve-receipt") == 16;
+            }
+            return true;
+        });
+        QVERIFY(!completion.success);
+        QVERIFY(QFileInfo::exists(ChainBackup::journalPath(data)));
+        const auto recovery = ChainBackup::recover(data);
+        QVERIFY(!recovery.success); // Collision still prevents clearing the guard.
+        QVERIFY(QFileInfo::exists(data.filePath("blocks")));
+        QVERIFY(QFileInfo::exists(data.filePath("chainstate")));
+        QFile saved(receipt);
+        QVERIFY(saved.open(QIODevice::ReadOnly));
+        QCOMPARE(saved.readAll(), QByteArray("preserve-receipt"));
+        QVERIFY(QFileInfo::exists(ChainBackup::journalPath(data)));
+    }
     void chainBackup_crashChild() {
         const QString directory = qEnvironmentVariable("ZCL_TEST_CHAIN_CRASH_DIR");
         if (directory.isEmpty()) QSKIP("Abrupt-exit fixture only");

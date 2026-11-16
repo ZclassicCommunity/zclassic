@@ -5,7 +5,8 @@
 #include <QFileInfo>
 #include <QStringList>
 #include <QTemporaryDir>
-#include <QSaveFile>
+#include <QTemporaryFile>
+#include "repairpersistence.h"
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -18,6 +19,24 @@ struct Result {
     QString path;
     QString error;
 };
+
+struct Persistence {
+    std::function<bool(QFile&)> flushFile = RepairPersistence::flushFile;
+    std::function<bool(const QString&)> syncDirectory = RepairPersistence::syncDirectory;
+};
+
+inline bool syncParents(const QDir& source, const QDir& destination, const Persistence& persistence) {
+    // Persist the new name before the disappearance of the old name.
+    return persistence.syncDirectory(destination.absolutePath()) &&
+           persistence.syncDirectory(source.absolutePath());
+}
+
+// Archive the pending journal with a checked same-volume rename. On Windows
+// this requests write-through completion rather than an unchecked unlink.
+inline bool finishJournal(const QDir& data, const QDir& saved, const Persistence& persistence) {
+    return RepairPersistence::move(data.filePath("chain-repair-pending.json"),
+               saved.filePath("repair-completed.json")) && syncParents(data, saved, persistence);
+}
 
 inline QString journalPath(const QDir& data) {
     return data.filePath(QStringLiteral("chain-repair-pending.json"));
@@ -44,7 +63,7 @@ inline bool componentTypeMatches(const QFileInfo& info, const QString& name) {
 // holds the native datadir lock. A journal remains until recovery is complete.
 inline Result recover(const QDir& data,
         const std::function<bool(const QString&, const QString&)>& rename =
-            [](const QString& from, const QString& to) { return QDir().rename(from, to); }) {
+            RepairPersistence::move, const Persistence& persistence = Persistence()) {
     Result result;
     const QFileInfo marker(journalPath(data));
     if (!marker.exists() && !marker.isSymLink()) { result.success = true; return result; }
@@ -117,12 +136,17 @@ inline Result recover(const QDir& data,
                 .arg(saved.filePath(*it), data.filePath(*it));
             return result;
         }
+        if (!syncParents(saved, data, persistence)) {
+            result.error = QStringLiteral("Restored %1 but could not confirm the directory flush. The repair journal was retained.").arg(*it);
+            return result;
+        }
     }
-    if (!QFile::remove(marker.filePath())) {
-        result.error = QStringLiteral("Recovered blockchain files but could not clear %1.").arg(marker.filePath());
+    // Also flush when an earlier attempt restored everything but failed its
+    // barrier; no pending guard may be cleared before that retry succeeds.
+    if (!syncParents(saved, data, persistence) || !finishJournal(data, saved, persistence)) {
+        result.error = QStringLiteral("Recovered blockchain files but could not confirm completion of %1. The node was not restarted.").arg(marker.filePath());
         return result;
     }
-    QDir().rmdir(result.path); // Empty only; never delete a retained copy.
     result.success = true;
     return result;
 }
@@ -132,9 +156,7 @@ inline Result recover(const QDir& data,
 // leaves every moved directory available for manual recovery.
 inline Result setAside(const QDir& data,
                        const std::function<bool(const QString&, const QString&)>& rename =
-                           [](const QString& from, const QString& to) {
-                               return QDir().rename(from, to);
-                           }) {
+                           RepairPersistence::move, const Persistence& persistence = Persistence()) {
     Result result;
     if (QFileInfo::exists(journalPath(data)) || QFileInfo(journalPath(data)).isSymLink()) {
         result.error = QStringLiteral("An interrupted blockchain repair must be recovered first.");
@@ -161,25 +183,39 @@ inline Result setAside(const QDir& data,
         if (QFileInfo::exists(data.filePath(name))) entries.append(name);
     const QByteArray journal = QJsonDocument(QJsonObject{{"version", 2},
         {"backup", QFileInfo(result.path).fileName()}, {"entries", entries}}).toJson(QJsonDocument::Compact);
-    QSaveFile marker(journalPath(data));
-    marker.setDirectWriteFallback(false);
-    if (!marker.open(QIODevice::WriteOnly) || marker.write(journal) != journal.size() || !marker.commit()) {
-        result.error = QStringLiteral("Could not record blockchain repair intent; no directories were moved.");
-        QDir().rmdir(result.path);
+    QString temporaryPath;
+    {
+        QTemporaryFile marker(data.filePath("chain-repair-intent-XXXXXX"));
+        if (!marker.open() || marker.write(journal) != journal.size() || !persistence.flushFile(marker)) {
+            result.error = QStringLiteral("Could not record blockchain repair intent; no directories were moved.");
+            QDir().rmdir(result.path);
+            return result;
+        }
+        temporaryPath = marker.fileName();
+        marker.setAutoRemove(false);
+        // Destroy the QTemporaryFile before native rename: close() alone may
+        // retain Qt's underlying handle, preventing a Windows move.
+    }
+    if (!RepairPersistence::move(temporaryPath, journalPath(data)) || !syncParents(data, saved, persistence)) {
+        result.error = QStringLiteral("Could not confirm publication of the repair journal; no blockchain components were moved. Recovery files were preserved.");
         return result;
     }
     for (const QString& name : names) {
         if (!QFileInfo::exists(data.filePath(name))) continue;
         if (!QFileInfo::exists(saved.filePath(name)) && rename(data.filePath(name), saved.filePath(name))) {
+            if (!syncParents(data, saved, persistence)) {
+                result.error = QStringLiteral("Moved %1 but could not confirm the directory flush. The repair journal and backups were retained.").arg(name);
+                return result;
+            }
             continue;
         }
         result.error = QStringLiteral("Could not move %1 into %2.").arg(data.filePath(name), result.path);
-        const auto recovery = recover(data, rename);
+        const auto recovery = recover(data, rename, persistence);
         if (!recovery.success) result.error += "\n" + recovery.error;
         return result;
     }
-    if (!QFile::remove(journalPath(data))) {
-        result.error = QStringLiteral("Blockchain files were backed up but the repair journal could not be cleared. Restart will recover the previous chain.");
+    if (!finishJournal(data, saved, persistence)) {
+        result.error = QStringLiteral("Blockchain files were backed up but completion could not be confirmed. The node was not restarted; recovery files were preserved.");
         return result;
     }
     result.success = true;
