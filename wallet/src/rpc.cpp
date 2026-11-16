@@ -267,7 +267,11 @@ void RPC::handleEZClassicdCrash(int exitCode, QProcess::ExitStatus status) {
 
 // Called when a connection to zclassicd is available. 
 void RPC::setConnection(Connection* c) {
-    if (c) main->connectionStartupError.clear();
+    if (c) {
+        main->connectionStartupError.clear();
+        main->setStartupAction(QString(), {});
+        main->setStartupDetails(QString());
+    }
     if (c == nullptr) return;
 
     delete conn;

@@ -52,6 +52,7 @@ contains(CONFIG, zqw_portable) {
 
 SOURCES += \
     src/embeddeddaemon.cpp \
+    src/startupaccess.cpp \
     src/main.cpp \
     src/mainwindow.cpp \
     src/rpc.cpp \
@@ -81,6 +82,7 @@ HEADERS += \
     src/securerandom.h \
     src/privatefile.h \
     src/configfile.h \
+    src/startupaccess.h \
     src/mainwindow.h \
     src/precompiled.h \
     src/rpc.h \
@@ -166,3 +168,6 @@ else:win32-g++:CONFIG(debug, debug|release): PRE_TARGETDEPS += $$PWD/res/liblibs
 else:win32:!win32-g++:CONFIG(release, debug|release): PRE_TARGETDEPS += $$PWD/res/libsodium.lib
 else:win32:!win32-g++:CONFIG(debug, debug|release): PRE_TARGETDEPS += $$PWD/res/libsodiumd.lib
 else:unix: PRE_TARGETDEPS += $$PWD/res/libsodium.a
+
+# Windows 7+ metadata APIs used for handle-based startup access checks.
+win32: DEFINES += _WIN32_WINNT=0x0601 WINVER=0x0601

@@ -600,9 +600,27 @@ void MainWindow::setupStatusBar() {
 // Built in C++ (rather than hand-editing the .ui XML) so the insertion is
 // mechanically safe: gridLayout_2 holds exactly one item (horizontalLayout_5),
 // which we move to row 1 while the banner takes row 0.
+void MainWindow::setStartupAction(const QString& text, std::function<void()> action) {
+    startupAction = std::move(action);
+    if (startupActionButton) {
+        startupActionButton->setText(text);
+        startupActionButton->setVisible(bool(startupAction));
+    }
+}
+
+void MainWindow::setStartupDetails(const QString& details) {
+    if (!startupDetailsLabel) return;
+    startupDetailsLabel->setText(details);
+    startupDetailsLabel->hide();
+    startupDetailsButton->setVisible(!details.isEmpty());
+}
+
 void MainWindow::setupSyncBanner() {
     syncBanner = new QWidget(ui->tab);
-    auto* bannerLayout = new QHBoxLayout(syncBanner);
+    auto* bannerColumn = new QVBoxLayout(syncBanner);
+    bannerColumn->setContentsMargins(8, 6, 8, 6);
+    auto* bannerLayout = new QHBoxLayout();
+    bannerColumn->addLayout(bannerLayout);
     bannerLayout->setContentsMargins(8, 6, 8, 6);
     bannerLayout->setSpacing(10);
 
@@ -637,10 +655,33 @@ void MainWindow::setupSyncBanner() {
     syncQuietPill->setText(tr("<span style=\"color:#34c759;\">●</span>&nbsp;&nbsp;Synced"));
     syncQuietPill->setVisible(false);
 
+    startupActionButton = new QPushButton(syncBanner);
+    startupActionButton->setObjectName("startupActionButton");
+    startupActionButton->hide();
+    connect(startupActionButton, &QPushButton::clicked, this, [this]() {
+        const auto action = startupAction;
+        if (action) action();
+    });
     bannerLayout->addWidget(syncStatusLabel, 1);
     bannerLayout->addWidget(syncProgressBar, 0);
     bannerLayout->addWidget(syncQuietPill, 0);
     bannerLayout->addStretch(0);
+    auto* actions = new QHBoxLayout();
+    actions->addWidget(startupActionButton);
+    startupDetailsButton = new QPushButton(tr("Details"), syncBanner);
+    startupDetailsButton->hide();
+    actions->addWidget(startupDetailsButton);
+    actions->addStretch(1);
+    bannerColumn->addLayout(actions);
+    startupDetailsLabel = new QLabel(syncBanner);
+    startupDetailsLabel->setTextFormat(Qt::PlainText);
+    startupDetailsLabel->setWordWrap(true);
+    startupDetailsLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    startupDetailsLabel->hide();
+    bannerColumn->addWidget(startupDetailsLabel);
+    connect(startupDetailsButton, &QPushButton::clicked, this, [this]() {
+        startupDetailsLabel->setVisible(!startupDetailsLabel->isVisible());
+    });
 
     // Move the existing balances content (horizontalLayout_5) down to row 1 and
     // place the banner on row 0. takeAt(0) is safe: gridLayout_2 has one item.

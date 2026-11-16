@@ -1,5 +1,8 @@
 # ZClassic Wallet 2.1.2-beta8
 
+**Beta9 is being validated:** [startup recovery changes](doc/release-notes-beta9.md).
+The downloads below remain beta8 until the new release is published.
+
 **Desktop wallet beta8 is available for Windows, Linux and macOS.** The bundled
 daemon and standalone node remain **2.1.2-beta6**; their consensus rules and
 implementation are unchanged. The wallet source now lives in [`wallet/`](wallet/).
