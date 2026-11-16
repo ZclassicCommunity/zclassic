@@ -3752,6 +3752,12 @@ bool ActivateBestChain(CValidationState &state, CBlock *pblock) {
     const CChainParams& chainParams = Params();
     do {
         boost::this_thread::interruption_point();
+        // Init-time snapshot replay runs on the main thread, which is not
+        // interrupted by the shutdown thread group. Honor RPC/signal shutdown
+        // between complete activation steps; Shutdown() flushes the valid tip.
+        // No unvalidated block is connected or marked valid by stopping here.
+        if (ShutdownRequested())
+            return true;
 
         bool fInitialDownload;
         {

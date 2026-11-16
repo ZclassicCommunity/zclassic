@@ -17,6 +17,22 @@ No consensus parameters, wallet file formats or chain-state formats change.
 Rust cryptography remains linked; the root cache avoids redundant Rust calls
 but does not replace cryptographic implementations.
 
+Release builds now use portable `-O2` optimization. The Windows GUI destroys
+its windows before Qt shuts down, fixing an exit-time platform crash.
+
+Interrupted snapshot transfers retry with completed files retained within the
+current attempt. Completed files are rehashed against the same manifest before
+reuse; incomplete files are downloaded again. Reconnects use one stream if a
+parallel transfer fails. The existing compiled checkpoint at height 3,126,937
+and full imported-chainstate commitment check remain mandatory. Initial chain
+replay honors shutdown requests between completed validation batches.
+
+Isolated Windows and Linux tests have imported and verified the full state at
+that checkpoint and continued ordinary block validation above it. This does
+not yet provide automatic migration of an existing partially synced wallet.
+The new retry code still requires its full regression and final build checks.
+No wallet data should be removed to enable fast sync.
+
 ## Release gates
 
 - Full daemon build, Sprout/Sapling root vectors and differential root tests.

@@ -29,7 +29,7 @@ jobs:
     env:
       MAKEJOBS: "-j3"
       CHECK_DOC: "0"
-      CCACHE_SIZE: "100M"
+      CCACHE_SIZE: "2G"
       CCACHE_TEMPDIR: /tmp/.ccache-temp
       CCACHE_COMPRESS: "1"
       PYTHON_DEBUG: "1"
@@ -76,7 +76,7 @@ jobs:
           cache-name: depends
         with:
           path: ./depends/built
-          key: ${{ matrix.name }}-${{ env.cache-name }}-${{ hashFiles('depends/packages/*') }}
+          key: ${{ matrix.name }}-${{ env.cache-name }}-v2-${{ hashFiles('depends/packages/**', 'depends/hosts/**', 'depends/builders/**', 'depends/patches/**', 'depends/Makefile', 'depends/funcs.mk') }}
 
       - name: Build depends
         run: |
@@ -91,7 +91,9 @@ jobs:
           cache-name: ccache
         with:
           path: ~/.ccache
-          key: ${{ matrix.name }}-${{ env.cache-name }}-${{ hashFiles('**/configure.ac') }}
+          key: ${{ matrix.name }}-${{ env.cache-name }}-v2-${{ hashFiles('**/configure.ac') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ matrix.name }}-${{ env.cache-name }}-v2-${{ hashFiles('**/configure.ac') }}-
 
       - name: Build Zclassic
         run: |
