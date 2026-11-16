@@ -88,6 +88,8 @@
 #include "privatefile.h"
 #include "configfile.h"
 #include "startupaccess.h"
+#include "chainbackup.h"
+#include <QStorageInfo>
 
 // Kept alive for the whole process so QStandardPaths/QSettings stay isolated.
 static QTemporaryDir* g_homeDir = nullptr;
@@ -140,6 +142,90 @@ private:
     }
 
 private slots:
+
+    void repairUsesConfiguredWalletAndPreservesOtherNetworks() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        if (QStorageInfo(temporary.path()).bytesAvailable() < qint64(15) * 1024 * 1024 * 1024)
+            QSKIP("Actual repair preflight requires 15 GiB free on the isolated fixture volume");
+        QDir base(temporary.path());
+        QVERIFY(base.mkpath("testnet3/blocks"));
+        QVERIFY(base.mkpath("testnet3/chainstate"));
+        QVERIFY(base.mkpath("blocks"));
+        auto write = [](const QString& path, const QByteArray& bytes) {
+            QFile file(path);
+            return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
+        };
+        const QDir selected(base.filePath("testnet3"));
+        QVERIFY(write(selected.filePath(".lock"), ""));
+        QVERIFY(write(selected.filePath("savings.dat"), "test-wallet"));
+        QVERIFY(write(selected.filePath("blocks/payload"), "test-blocks"));
+        QVERIFY(write(selected.filePath("chainstate/payload"), "test-state"));
+        QVERIFY(write(base.filePath("wallet.dat"), "main-wallet"));
+        QVERIFY(write(base.filePath("blocks/payload"), "main-blocks"));
+        std::unique_ptr<MainWindow> w(makeWindow());
+        ConnectionLoader loader(w.get(), w->getRPC());
+        auto config = std::make_shared<ConnectionConfig>();
+        config->zclassicDir = base.path();
+        config->testnet = true;
+        config->walletFile = "savings.dat";
+        loader.rememberRepairLocation(config);
+        // A stopped owned process avoids probing any unrelated host's ports.
+        loader.ezclassicd = new QProcess(w.get());
+        loader.redownloadChain();
+        // Embedded launch remains disabled in this fixture. Exercise all actual
+        // backup/move/error wiring, then require a clear failed-start outcome.
+        QVERIFY(w->connectionStartupError.contains("couldn't start the re-download"));
+        QVERIFY(!QFileInfo::exists(selected.filePath("blocks")));
+        QVERIFY(!QFileInfo::exists(selected.filePath("chainstate")));
+        const auto backups = selected.entryList({"chain-set-aside-*"}, QDir::Dirs | QDir::NoDotAndDotDot);
+        QCOMPARE(backups.size(), 1);
+        QVERIFY(QFileInfo::exists(selected.filePath(backups.first() + "/blocks/payload")));
+        QVERIFY(QFileInfo::exists(selected.filePath(backups.first() + "/chainstate/payload")));
+        const auto wallets = selected.entryList({"savings.dat.backup-*"}, QDir::Files);
+        QCOMPARE(wallets.size(), 1);
+        QVERIFY(testFileIsOwnerOnly(selected.filePath(wallets.first())));
+        for (const auto& entry : {qMakePair(selected.filePath("savings.dat"), QByteArray("test-wallet")),
+                                 qMakePair(selected.filePath(wallets.first()), QByteArray("test-wallet")),
+                                 qMakePair(selected.filePath(backups.first() + "/blocks/payload"), QByteArray("test-blocks")),
+                                 qMakePair(selected.filePath(backups.first() + "/chainstate/payload"), QByteArray("test-state")),
+                                 qMakePair(base.filePath("wallet.dat"), QByteArray("main-wallet")),
+                                 qMakePair(base.filePath("blocks/payload"), QByteArray("main-blocks"))}) {
+            QFile file(entry.first);
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            QCOMPARE(file.readAll(), entry.second);
+        }
+        QVERIFY(!QFileInfo::exists(ChainBackup::journalPath(selected)));
+    }
+
+    void repairMissingConfiguredWalletLeavesChainUntouched() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        if (QStorageInfo(temporary.path()).bytesAvailable() < qint64(3) * 1024 * 1024 * 1024)
+            QSKIP("Actual backup preflight requires 3 GiB free on the isolated fixture volume");
+        QDir data(temporary.path());
+        QVERIFY(data.mkdir("blocks"));
+        QVERIFY(data.mkdir("chainstate"));
+        { QFile lock(data.filePath(".lock")); QVERIFY(lock.open(QIODevice::WriteOnly)); }
+        { QFile wallet(data.filePath("wallet.dat")); QVERIFY(wallet.open(QIODevice::WriteOnly));
+          QCOMPARE(wallet.write("default-wallet-must-not-be-used"), qint64(31)); }
+        std::unique_ptr<MainWindow> w(makeWindow());
+        ConnectionLoader loader(w.get(), w->getRPC());
+        auto config = std::make_shared<ConnectionConfig>();
+        config->zclassicDir = data.path();
+        config->walletFile = "missing.dat";
+        loader.rememberRepairLocation(config);
+        loader.ezclassicd = new QProcess(w.get());
+        loader.redownloadChain();
+        QVERIFY(w->connectionStartupError.contains("Cannot read the configured wallet"));
+        QVERIFY(QFileInfo::exists(data.filePath("blocks")));
+        QVERIFY(QFileInfo::exists(data.filePath("chainstate")));
+        QVERIFY(!QFileInfo::exists(ChainBackup::journalPath(data)));
+        QVERIFY(data.entryList({"chain-set-aside-*"}, QDir::Dirs | QDir::NoDotAndDotDot).isEmpty());
+        QFile wallet(data.filePath("wallet.dat"));
+        QVERIFY(wallet.open(QIODevice::ReadOnly));
+        QCOMPARE(wallet.readAll(), QByteArray("default-wallet-must-not-be-used"));
+    }
 
     void configurationCreationPreservesExisting() {
         QTemporaryDir temp;
