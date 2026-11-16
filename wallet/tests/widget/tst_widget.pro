@@ -112,7 +112,7 @@ PRE_TARGETDEPS += $$PWD/../../res/libsodium.a
 # Static-Qt offscreen platform plugin import (no X server in the chroot). qmake
 # emits the Q_IMPORT_PLUGIN glue from QTPLUGIN into a generated _plugin_import.cpp.
 static {
-    win32: QTPLUGIN.platforms = qwindows
+    win32: QTPLUGIN.platforms = qwindows qoffscreen
     else: QTPLUGIN.platforms = qoffscreen
 }
 

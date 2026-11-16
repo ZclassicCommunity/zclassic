@@ -63,6 +63,9 @@ public:
     // offerCorruptionRepair() ladder used by the startup classifier — there is no
     // second ladder.
     void startManualRepair();
+    // Automatic existing-wallet migration, using the same backup/journal guards.
+    // Returns false before stopping the node if prerequisites are not satisfied.
+    bool startFastSync();
 
     // RUNTIME STUB AUTO-HEAL discriminator (primary, robust stub-vs-real test): total
     // bytes of the blocks/ store under an explicitly resolved network directory.

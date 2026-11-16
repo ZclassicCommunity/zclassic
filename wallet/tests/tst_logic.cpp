@@ -32,6 +32,7 @@
 #include "walletbackup.h"
 #include "embeddeddaemon.h"
 #include "releaseversion.h"
+#include "fastsync.h"
 #include <QCryptographicHash>
 #include <QStandardItemModel>
 
@@ -160,6 +161,20 @@ class TestLogic : public QObject {
     Q_OBJECT
 
 private slots:
+    void fastSync_existingWalletSkipsHistoricalReplay() {
+        const QString existing = "bootstrap peer download requires a fresh chain datadir; /data/blocks already exists";
+        QVERIFY(shouldMigrateToCheckpoint(true, true, 2719719, "skipped", existing));
+        QVERIFY(shouldMigrateToCheckpoint(true, true, 1, "skipped", existing));
+        QVERIFY(!shouldMigrateToCheckpoint(false, true, 2719719, "skipped", existing));
+        QVERIFY(!shouldMigrateToCheckpoint(true, false, 2719719, "skipped", existing));
+        QVERIFY(!shouldMigrateToCheckpoint(true, true, 0, "skipped", existing));
+        QVERIFY(!shouldMigrateToCheckpoint(true, true, 3126936, "skipped", existing));
+        QVERIFY(!shouldMigrateToCheckpoint(true, true, 3321378, "skipped", existing));
+        QVERIFY(!shouldMigrateToCheckpoint(true, true, 2719719, "active", existing));
+        QVERIFY(!shouldMigrateToCheckpoint(true, true, 2719719, "skipped", "-bootstrap=0"));
+        QVERIFY(!shouldMigrateToCheckpoint(true, true, 2719719, "skipped", "incompatible import options"));
+        QVERIFY(!shouldMigrateToCheckpoint(true, true, 2719719, "", ""));
+    }
     void repairLocation_usesConfiguredNetworkAndWallet() {
         QTemporaryDir temporary;
         QVERIFY(temporary.isValid());

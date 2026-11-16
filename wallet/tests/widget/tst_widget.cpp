@@ -143,6 +143,77 @@ private:
     }
 
 private slots:
+    void automaticFastSyncLifecycle_data() {
+        QTest::addColumn<int>("interruption");
+        QTest::newRow("complete") << 0;
+        QTest::newRow("quit-during-stop") << 1;
+        QTest::newRow("replacement-during-stop") << 2;
+        QTest::newRow("competing-request") << 3;
+    }
+    void automaticFastSyncLifecycle() {
+        QFETCH(int, interruption);
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const QDir dir(temp.path());
+        QVERIFY(dir.mkpath("blocks"));
+        QVERIFY(dir.mkpath("chainstate"));
+        auto write = [](const QString& path, const QByteArray& bytes) {
+            QFile file(path);
+            return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
+        };
+        QVERIFY(write(dir.filePath(".lock"), ""));
+        QVERIFY(write(dir.filePath("wallet.dat"), "isolated-test-wallet"));
+        QVERIFY(write(dir.filePath("blocks/payload"), "isolated-test-chain"));
+        std::unique_ptr<MainWindow> w(makeWindow());
+        auto config = std::make_shared<ConnectionConfig>();
+        config->zclassicDir = dir.path();
+        config->host = "127.0.0.1";
+        config->port = "1";
+        config->zclassicDaemon = false;
+        auto connection = new Connection(w.get(), new QNetworkAccessManager,
+            new QNetworkRequest(QUrl("http://127.0.0.1:1")), config);
+        w->getRPC()->testSetConnection(connection);
+        QProcess child;
+        child.start(QCoreApplication::applicationFilePath(), {"--fast-sync-child"});
+        QVERIFY(child.waitForStarted(5000));
+        w->getRPC()->setEZClassicd(&child);
+        ConnectionLoader loader(w.get(), w->getRPC());
+        bool competingRefused = false;
+        QTimer::singleShot(50, w.get(), [&]() {
+            if (interruption == 1) w->noteQuitting();
+            if (interruption == 2) {
+                ConnectionLoader replacement(w.get(), w->getRPC());
+                replacement.showError("Isolated replacement failure");
+            }
+            if (interruption == 3) {
+                // The window-level entry must refuse before allocating a loader
+                // and changing the active startup generation.
+                const auto generation = w->startupAttempt;
+                w->autoFastSync();
+                competingRefused = w->startupAttempt == generation;
+            }
+        });
+        const bool entered = loader.startFastSync();
+        w->getRPC()->setEZClassicd(nullptr);
+        QVERIFY(child.waitForFinished(5000) || child.state() == QProcess::NotRunning);
+        QVERIFY(!QSettings().value("heal/inProgress", false).toBool());
+        QFile wallet(dir.filePath("wallet.dat"));
+        QVERIFY(wallet.open(QIODevice::ReadOnly));
+        QCOMPARE(wallet.readAll(), QByteArray("isolated-test-wallet"));
+        const auto backups = dir.entryList({"chain-set-aside-*"}, QDir::Dirs | QDir::NoDotAndDotDot);
+        if (interruption == 1 || interruption == 2) {
+            QVERIFY(!entered);
+            QVERIFY(backups.isEmpty());
+            QVERIFY(QFileInfo::exists(dir.filePath("blocks/payload")));
+        } else {
+            QVERIFY(entered);
+            QVERIFY2(backups.size() == 1, qPrintable(w->connectionStartupError));
+            QVERIFY(QFileInfo::exists(dir.filePath(backups.first() + "/blocks/payload")));
+            QVERIFY(w->connectionStartupError.contains("couldn't start the re-download"));
+            if (interruption == 3) QVERIFY(competingRefused);
+        }
+        QVERIFY(!QApplication::activeModalWidget());
+    }
 
     void repairUsesConfiguredWalletAndPreservesOtherNetworks() {
         QTemporaryDir temporary;
@@ -2900,6 +2971,11 @@ private:
 };
 
 int main(int argc, char* argv[]) {
+    if (argc == 2 && QByteArray(argv[1]) == "--fast-sync-child") {
+        QCoreApplication child(argc, argv);
+        QTimer::singleShot(750, &child, &QCoreApplication::quit);
+        return child.exec();
+    }
     // SAFETY: isolate HOME *before* QApplication so QStandardPaths::HomeLocation
     // and QSettings never touch the real ~/.zclassic or the user's config.
     g_homeDir = new QTemporaryDir();

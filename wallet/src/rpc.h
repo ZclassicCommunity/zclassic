@@ -133,7 +133,7 @@ public:
     void importZPrivKey(QString addr, bool rescan, const std::function<void(json)>& cb);
     void importTPrivKey(QString addr, bool rescan, const std::function<void(json)>& cb);
 
-    void shutdownZClassicd();
+    void shutdownZClassicd(bool waitForCheckpoint = false);
 
     // Called from QCoreApplication::aboutToQuit, i.e. on EVERY quit route -- window
     // close, File->Exit, SIGINT, AND the macOS app-menu "Quit" / Cmd-Q, which calls
@@ -315,6 +315,9 @@ private:
     // async; the peerless path reads it so an active download shows real progress and
     // is never healed.
     bool                        ezBootstrapActive           = false;
+    bool                        ezFastSyncScheduled         = false;
+    int                         ezFastSyncHeight            = 0;
+    bool                        ezFastSyncMainnet           = false;
     int                         ezBootstrapPct              = 0;
     qint64                      ezBootstrapRecv             = 0;
     qint64                      ezBootstrapTotal            = 0;

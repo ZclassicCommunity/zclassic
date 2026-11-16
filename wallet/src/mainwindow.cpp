@@ -290,6 +290,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     }
 
     // Real shutdown. Let the RPC know to shut down any running service.
+    quitting = true;
     rpc->shutdownZClassicd();
 
     // Bubble up
@@ -1604,6 +1605,12 @@ void MainWindow::launchBlockchainRepair() {
     // exactly like the settings-change path does, then drive the ladder.
     auto* cl = new ConnectionLoader(this, rpc);
     cl->startManualRepair();
+}
+
+void MainWindow::autoFastSync() {
+    if (isQuitting() || !rpc->isEmbedded() || QSettings().value("heal/inProgress", false).toBool()) return;
+    auto* loader = new ConnectionLoader(this, rpc);
+    if (!loader->startFastSync()) delete loader;
 }
 
 // RUNTIME STUB AUTO-HEAL entry. Called from the post-connection sync poller (rpc.cpp)
