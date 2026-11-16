@@ -13,6 +13,7 @@
 //   WPERF_BLOCKS (120) foreign blocks connected after the wallet is filled
 //   WPERF_OUTS (20)    foreign Sapling outputs per foreign block
 //   WPERF_PREFILL (30000) commitments in the Sapling tree before the first note
+//   WPERF_READ_REPS (3) repetitions of the read paths
 //
 // It also prints a digest of the observable wallet state (per-note witness
 // bytes, heights, nullifiers, values, balances) keyed by note commitment, so
@@ -309,7 +310,8 @@ TEST(WalletPerf, DISABLED_Bench)
         std::vector<CSproutNotePlaintextEntry> sproutEntries;
         std::vector<SaplingNoteEntry> saplingEntries;
         CAmount nSaplingCached = 0, nSproutCached = 0, nBalance = 0;
-        for (int rep = 0; rep < 3; rep++) {
+        const int nReadReps = EnvInt("WPERF_READ_REPS", 3);
+        for (int rep = 0; rep < nReadReps; rep++) {
             sproutEntries.clear();
             saplingEntries.clear();
             WPERF_TIME(timer, "GetFilteredNotes (all)", wallet.GetFilteredNotes(sproutEntries, saplingEntries, "", 1));

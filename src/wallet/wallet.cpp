@@ -4897,7 +4897,8 @@ void CWallet::GetFilteredNotes(
     LOCK2(cs_main, cs_wallet);
 
     for (auto & p : mapWallet) {
-        CWalletTx wtx = p.second;
+        // By reference: a copy would duplicate every cached witness of every note.
+        const CWalletTx& wtx = p.second;
 
         // Filter the transactions before checking for notes
         if (!CheckFinalTx(wtx) ||
@@ -4909,7 +4910,7 @@ void CWallet::GetFilteredNotes(
 
         for (auto & pair : wtx.mapSproutNoteData) {
             JSOutPoint jsop = pair.first;
-            SproutNoteData nd = pair.second;
+            const SproutNoteData& nd = pair.second;
             SproutPaymentAddress pa = nd.address;
 
             // skip notes which belong to a different payment address in the wallet
@@ -4965,7 +4966,7 @@ void CWallet::GetFilteredNotes(
 
         for (auto & pair : wtx.mapSaplingNoteData) {
             SaplingOutPoint op = pair.first;
-            SaplingNoteData nd = pair.second;
+            const SaplingNoteData& nd = pair.second;
 
             auto maybe_pt = SaplingNotePlaintext::decrypt(
                 wtx.vShieldedOutput[op.n].encCiphertext,
