@@ -231,7 +231,11 @@ private slots:
         std::unique_ptr<MainWindow> w(makeWindow());
         ConnectionLoader loader(w.get(), w->getRPC());
         const QString path = loader.zclassicConfWritableLocation();
+#ifdef Q_OS_LINUX
+        QCOMPARE(path, g_homeDir->filePath(".zclassic/zclassic.conf"));
+#else
         QVERIFY(path.contains("qttest"));
+#endif
         QVERIFY(!QFileInfo::exists(path));
         QString error;
         const QByteArray contents(
