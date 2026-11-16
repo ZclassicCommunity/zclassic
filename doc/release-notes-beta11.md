@@ -84,15 +84,22 @@ write-through completion. A completed journal is archived with the backup.
 Flush failures stop the transition without starting the node. Fault-injection
 tests cover publication, move barriers, recovery retries and completion conflicts.
 These are checked persistence requests and tested process-interruption recovery,
-not a guarantee against power loss or faulty storage. End-to-end wallet migration
+not a guarantee against power loss or faulty storage. Public-endpoint migration
 still needs qualification before announcing an existing-wallet fast-sync release.
 
 Repair no longer force-kills a node that is still stopping; it waits for a later
 attempt after shutdown finishes. An isolated Windows regtest migration retained
 wallet bytes during chain set-aside, then restored the same chain height, wallet
 transaction count, test balance and address ownership through the real backend's
-snapshot-import path. The original chain backup remained available. This is not
-yet proof of the complete GUI/mainnet checkpoint flow.
+snapshot-import path. The original chain backup remained available.
+
+An isolated Linux production-GUI mainnet test also preserved a disposable
+wallet through chain set-aside and checkpoint import, verified the checkpoint
+commitment, validated bundled post-anchor blocks through height 3,172,671 and
+retained ownership of the existing address. The GUI became usable in about
+3.5 minutes using a local snapshot server. This is not an internet-download
+benchmark, a funded-mainnet wallet rescan benchmark, or proof of default public
+endpoint availability. The imported-tip corroboration hold remained enabled.
 
 The repair safety copy is now owner-only before any wallet bytes are written,
 streamed and hash-checked, explicitly flushed, and published without replacing
@@ -101,7 +108,7 @@ instead of silently proceeding. Backup failures show their actual cause.
 
 Isolated Windows and Linux tests have imported and verified the full state at
 that checkpoint and continued ordinary block validation above it. This does
-not yet provide automatic migration of an existing partially synced wallet.
+not by itself prove the complete public-endpoint GUI migration path.
 The consolidated backend passed full debug CI and isolated Windows packaging,
 extraction, startup and shutdown checks. Final release qualification is ongoing.
 No wallet data should be removed to enable fast sync.
