@@ -9,20 +9,20 @@ A private, single-file ZClassic wallet — with a full ZClassic node built right
 
 ## Download & run
 
-**Current desktop prerelease: v2.1.2-beta7**:
-**https://github.com/ZclassicCommunity/zclassic/releases/tag/v2.1.2-beta7**
+**Current desktop prerelease: v2.1.2-beta8**:
+**https://github.com/ZclassicCommunity/zclassic/releases/tag/v2.1.2-beta8**
 
 Download the **one** file for your computer and open it:
 
 | Your computer | Download | First-time open |
 |---|---|---|
-| **Windows** | `zclwallet-v2.1.2-beta7-win64.exe` | Double-click. If you see **"Windows protected your PC"**, click **More info → Run anyway**. |
-| **macOS 15+** (Apple Silicon) | `zclwallet-v2.1.2-beta7-macos-arm64.dmg` | Open the `.dmg` and drag **ZclWallet** to Applications. On first launch macOS says **"Apple could not verify … is free from malware"** — that's expected (the app is signed but not yet notarized). See **[Opening on macOS](#opening-on-macos)** just below. |
-| **Linux** | `zclwallet-v2.1.2-beta7-linux-x86_64` | `chmod +x zclwallet-v2.1.2-beta7-linux-x86_64 && ./zclwallet-v2.1.2-beta7-linux-x86_64` — or right-click → Properties → *Allow executing as program*, then double-click. _(glibc ≥ 2.31; system X11/XCB libraries required; no Qt or OpenSSL install needed.)_ |
+| **Windows** | `zclwallet-v2.1.2-beta8-win64.exe` | Double-click. If you see **"Windows protected your PC"**, click **More info → Run anyway**. |
+| **macOS 15+** (Apple Silicon) | `zclwallet-v2.1.2-beta8-macos-arm64.dmg` | Open the `.dmg` and drag **ZclWallet** to Applications. On first launch macOS says **"Apple could not verify … is free from malware"** — that's expected (the app is signed but not yet notarized). See **[Opening on macOS](#opening-on-macos)** just below. |
+| **Linux** | `zclwallet-v2.1.2-beta8-linux-x86_64` | `chmod +x zclwallet-v2.1.2-beta8-linux-x86_64 && ./zclwallet-v2.1.2-beta8-linux-x86_64` — or right-click → Properties → *Allow executing as program*, then double-click. _(glibc ≥ 2.31; system X11/XCB libraries required; no Qt or OpenSSL install needed.)_ |
 
 ### Opening on macOS
 
-The beta7 app requires **macOS 15 or newer on Apple Silicon**. It is ad-hoc signed, not Apple-notarized. Verify its checksum first. If Gatekeeper blocks it, use **System Settings → Privacy & Security → Open Anyway** for the verified app.
+The beta8 app requires **macOS 15 or newer on Apple Silicon**. It is ad-hoc signed, not Apple-notarized. Verify its checksum first. If Gatekeeper blocks it, use **System Settings → Privacy & Security → Open Anyway** for the verified app.
 
 ## What happens on first launch
 
@@ -39,9 +39,9 @@ ZClassic supports **shielded z-addresses**, which keep your balances and transfe
 
 The tabs are: **Balance · Send · Receive · Transactions · zclassicd**.
 
-## Beta7 improvements
+## Beta8 improvements
 
-Windows requires no separate GCC, Qt, pthread or OpenSSL DLLs. The release adds verified daemon extraction and cache reuse, owner-only metadata permissions, atomic file writes and verified HTTPS. It retains the beta6 daemon and unchanged consensus rules. See [release notes and platform requirements](../doc/release-notes-beta7.md). Full-chain sync speed has not been benchmarked.
+Windows requires no separate GCC, Qt, pthread or OpenSSL DLLs. The release adds verified daemon extraction and cache reuse, owner-only metadata permissions, atomic file writes and verified HTTPS. It retains the beta6 daemon and unchanged consensus rules. See [release notes and platform requirements](../doc/release-notes-beta8.md). Full-chain sync speed has not been benchmarked.
 
 ## Verify your download
 

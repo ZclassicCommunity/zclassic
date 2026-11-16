@@ -80,6 +80,7 @@ HEADERS += \
     src/notifyserver.h \
     src/securerandom.h \
     src/privatefile.h \
+    src/configfile.h \
     src/mainwindow.h \
     src/precompiled.h \
     src/rpc.h \

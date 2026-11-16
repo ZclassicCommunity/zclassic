@@ -608,7 +608,9 @@ void MainWindow::setupSyncBanner() {
 
     syncStatusLabel = new QLabel(syncBanner);
     syncStatusLabel->setWordWrap(true);
-    syncStatusLabel->setText(tr("Connecting to your ZClassic node…"));
+    syncStatusLabel->setTextFormat(Qt::PlainText);
+    syncStatusLabel->setText(connectionStartupError.isEmpty()
+        ? tr("Connecting to your ZClassic node…") : connectionStartupError);
     QFont f = syncStatusLabel->font();
     f.setBold(true);
     syncStatusLabel->setFont(f);
@@ -1506,7 +1508,9 @@ void MainWindow::setSyncStatusConnecting() {
     syncProgressBar->setVisible(false);
     if (syncQuietPill) syncQuietPill->setVisible(false);
     syncStatusLabel->setVisible(true);
-    syncStatusLabel->setText(tr("Connecting to your ZClassic node…"));
+    syncStatusLabel->setTextFormat(Qt::PlainText);
+    syncStatusLabel->setText(connectionStartupError.isEmpty()
+        ? tr("Connecting to your ZClassic node…") : connectionStartupError);
     applyBannerStyle("QWidget { background-color: #555555; } QLabel { color: white; }");
 }
 

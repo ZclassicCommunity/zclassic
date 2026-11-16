@@ -3,9 +3,9 @@
 The **ZClassic Qt GUI wallet** is maintained under `wallet/` in
 `ZclassicCommunity/zclassic`, covering **Linux**, **Windows**, and **macOS**.
 
-## Current beta7 release builds
+## Current beta8 release builds
 
-The released application is **2.1.2-beta7**. The embedded/sibling daemon remains
+The released application is **2.1.2-beta8**. The embedded/sibling daemon remains
 the pinned beta6 implementation. Do not relabel that daemon or change consensus
 to match the GUI version.
 
@@ -15,7 +15,7 @@ to match the GUI version.
 - macOS: [`contrib/release/macos.sh`](../contrib/release/macos.sh), run natively on
   Apple Silicon with Homebrew `qt@5` and `libsodium`, bundles transitive libraries,
   measures the minimum OS and verifies the ad-hoc signature and DMG. The published
-  beta7 DMG requires macOS 15+ and is not notarized.
+  beta8 DMG requires macOS 15+ and is not notarized.
 - Windows: use static Qt 5.15.2 with native Schannel enabled, MinGW POSIX threads,
   static libsodium and `CONFIG+=zqw_portable`. Package with
   [`contrib/cross/package-win.sh`](../contrib/cross/package-win.sh); both GUI and daemon
@@ -31,12 +31,12 @@ gh workflow run wallet-release-candidates.yml --repo ZclassicCommunity/zclassic 
 
 Check downloaded artifacts, not just build logs: runtime dependencies, extracted
 daemon hash/version/cache reuse, certificate-verified HTTPS and native startup.
-See [beta7 release notes](../../doc/release-notes-beta7.md) and the release's
+See [beta8 release notes](../../doc/release-notes-beta8.md) and the release's
 `BUILDINFO.txt` and `SHA256SUMS.txt` for the tested artifacts.
 
 The detailed sections below describe older development and packaging paths,
 including historical beta5 examples and host-local proot scripts. Use the
-tracked beta7 release scripts above for current releases; adjust legacy checkout
+tracked beta8 release scripts above for current releases; adjust legacy checkout
 paths to `zclassic/wallet`.
 
 It covers, in order:
