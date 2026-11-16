@@ -4,7 +4,10 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 qt=$(brew --prefix qt@5)
 cd "$root"
 mkdir -p artifacts/mac-build artifacts/release
-cp "$(brew --prefix libsodium)/lib/libsodium.a" res/libsodium.a
+# A newer host's Homebrew archive can require a newer macOS than Qt/the node.
+# Allow the pinned daemon-depends archive built for the intended deployment OS.
+install -m 644 "${ZCL_SODIUM_STATIC:-$(brew --prefix libsodium)/lib/libsodium.a}" res/libsodium.a
+shasum -a 256 res/libsodium.a > artifacts/release/macos-libsodium-SHA256SUMS.txt
 cd artifacts/mac-build
 "$qt/bin/qmake" "$root/zcl-qt-wallet.pro" CONFIG+=release
 make -j2

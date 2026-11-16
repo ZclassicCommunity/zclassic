@@ -44,6 +44,9 @@ including cancellation while genesis activation is in progress. This fixes an
 empty-candidate assertion observed when closing an isolated Windows test during
 download. Transfer byte counts and rates refresh between whole-percent changes,
 so a slow download no longer needs to receive over 100 MB before reporting motion.
+Failed initialization also interrupts and joins worker threads before destroying
+the scheduler and shared state. Isolated Windows and Linux startup-failure tests
+exercise this teardown, including failure after workers have started.
 
 Default snapshot endpoints now explicitly use port 8035, where the project's
 legacy snapshot services run. Previously they used port 8033, whose ordinary
@@ -118,6 +121,24 @@ not by itself prove the complete public-endpoint GUI migration path.
 The consolidated backend passed full debug CI and isolated Windows packaging,
 extraction, startup and shutdown checks. Final release qualification is ongoing.
 No wallet data should be removed to enable fast sync.
+
+A wallet-disabled Windows public-network run downloaded and verified the compiled
+checkpoint, validated the bundled post-anchor blocks, and caught up to live height
+3,321,378 with the imported-tip hold released. The final backend candidate then
+restarted that isolated chain, connected to both Z23 peers and shut down cleanly.
+Download/bootstrap took about 27 minutes under the shared snapshot-server bandwidth
+cap; startup including bundled replay took about 61 minutes before live-peer
+catch-up. These are observed timings, not a guarantee or a wallet-rescan benchmark.
+Both default public snapshot endpoints have now served data to the Windows
+candidate. The second mirror also completed checkpoint verification and live
+catch-up, and is configured to start automatically after reboot.
+
+Native macOS testing exposed a notification-burst fixture that could spread its
+messages beyond the debounce window under load. It now connects clients first,
+queues the burst without intervening waits, verifies all four notifications and
+retains the exact one-refresh assertion. Twenty focused repetitions passed on
+both Windows and macOS; the full native Mac widget suite passed with its existing
+deferred warm-latency case. Production debounce timing is unchanged.
 
 ## Release gates
 

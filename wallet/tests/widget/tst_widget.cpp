@@ -2210,13 +2210,23 @@ private slots:
 
         const QByteArray tok = srv.token().toLatin1();
         const QByteArray id(64, 'a');
-        // Fire a burst of validated notifies tightly together (block + its wallet txns).
+        QSignalSpy delivered(&srv, &NotifyServer::notified);
+        QList<QLocalSocket*> clients;
+        // Establish every connection before sending the burst. Interleaving qWait
+        // with each send can let a loaded event loop cross the debounce deadline,
+        // turning the fixture into separate bursts (observed on native macOS).
         for (int i = 0; i < 4; ++i) {
-            QLocalSocket* c = notifySendLine(p, tok + " " + id + "\n");
-            QVERIFY(c);
-            QTest::qWait(15);                          // inside the debounce window
-            c->disconnectFromServer(); c->deleteLater();
+            auto* c = new QLocalSocket(&srv);
+            c->connectToServer(p);
+            QVERIFY(c->waitForConnected(1000));
+            clients.append(c);
         }
+        const QByteArray payload = tok + " " + id + "\n";
+        for (auto* c : clients) {
+            QCOMPARE(c->write(payload), qint64(payload.size()));
+            c->flush();
+        }
+        QTRY_COMPARE(delivered.count(), 4);            // every notify was validated
         QTest::qWait(RPC::kNotifyDebounceMs + 300);    // quiet window elapses
         QCOMPARE(refreshes, 1);                        // 4 notifies -> 1 refresh
     }

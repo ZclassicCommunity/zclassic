@@ -3,19 +3,23 @@
 The **ZClassic Qt GUI wallet** is maintained under `wallet/` in
 `ZclassicCommunity/zclassic`, covering **Linux**, **Windows**, and **macOS**.
 
-## Current beta8 release builds
+## Beta11 candidate builds
 
-The released application is **2.1.2-beta8**. The embedded/sibling daemon remains
-the pinned beta6 implementation. Do not relabel that daemon or change consensus
-to match the GUI version.
+Beta11 rebuilds both the GUI and daemon from the same source revision. Verify
+the daemon's source identity, version and hash before packaging; do not fall back
+to the old beta6 daemon. Published beta10 downloads remain current until beta11
+qualification and publication finish. Consensus rules are unchanged.
 
 - Linux: [`contrib/release/linux.sh`](../contrib/release/linux.sh), run in Ubuntu
   20.04, builds pinned static Qt 5.15.19 and OpenSSL 3.5.9. The release requires
   glibc 2.31+ and system X11/XCB libraries.
 - macOS: [`contrib/release/macos.sh`](../contrib/release/macos.sh), run natively on
   Apple Silicon with Homebrew `qt@5` and `libsodium`, bundles transitive libraries,
-  measures the minimum OS and verifies the ad-hoc signature and DMG. The published
-  beta8 DMG requires macOS 15+ and is not notarized.
+  measures the minimum OS and verifies the ad-hoc signature and DMG. It is not
+  notarized. To avoid inheriting a newer host's Homebrew deployment requirement,
+  set `ZCL_SODIUM_STATIC` to the absolute path of `lib/libsodium.a` from the same-source native daemon
+  depends prefix, built for the intended minimum OS. The archive hash is recorded
+  and its object deployment versions still participate in the minimum-OS check.
 - Windows: use static Qt 5.15.2 with native Schannel enabled, MinGW POSIX threads,
   static libsodium and `CONFIG+=zqw_portable`. Package with
   [`contrib/cross/package-win.sh`](../contrib/cross/package-win.sh); both GUI and daemon
