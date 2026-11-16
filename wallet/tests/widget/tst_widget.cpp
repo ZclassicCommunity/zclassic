@@ -162,6 +162,109 @@ private slots:
         QCOMPARE(w->statusLabel->text(), QString("Connection needs attention"));
         QCOMPARE(w->syncStatusLabel->text(), QString("Configuration access denied; existing file preserved."));
         QVERIFY(!QApplication::activeModalWidget());
+        ConnectionLoader nextAttempt(w.get(), w->getRPC());
+        nextAttempt.showInformation("Starting again", "Loading block index...");
+        QVERIFY(w->connectionStartupError.isEmpty());
+        QVERIFY(w->syncStatusLabel->text().contains("Starting again"));
+    }
+
+    void startupProgressSurvivesClosedOverlayAndPolling() {
+        std::unique_ptr<MainWindow> w(makeWindow());
+        ConnectionLoader loader(w.get(), w->getRPC());
+        loader.d->hide(); // Permission preflight leaves the overlay closed.
+        loader.showInformation("Starting your wallet", "Loading block index 2300000...");
+        w->getRPC()->refresh();
+        QVERIFY(w->syncStatusLabel->text().contains("Loading block index 2300000"));
+        QCOMPARE(w->statusLabel->text(), QString("Starting node"));
+        QVERIFY(w->ui->statusBar->currentMessage().isEmpty());
+        loader.showInformation("Starting your wallet", "Loading block index 2400000...");
+        w->getRPC()->refresh();
+        QVERIFY(w->syncStatusLabel->text().contains("Loading block index 2400000"));
+        loader.showError("Node stopped; retry available");
+        loader.showInformation("Late progress", "Must not hide the failure");
+        w->getRPC()->refresh();
+        QCOMPARE(w->syncStatusLabel->text(), QString("Node stopped; retry available"));
+        QCOMPARE(w->statusLabel->text(), QString("Connection needs attention"));
+    }
+
+    void stillSyncingDoesNotRoundUpToComplete() {
+        std::unique_ptr<MainWindow> w(makeWindow());
+        w->setSyncStatus(true, 2397476, 2400281, 0.9988);
+        QCOMPARE(w->syncProgressBar->maximum(), 0);
+        QVERIFY(!w->syncStatusLabel->text().contains("100%"));
+        const QString first = w->syncStatusLabel->text();
+        w->setSyncStatus(true, 2397476, 3400281, 0.705);
+        QCOMPARE(w->syncStatusLabel->text(), first); // Discovering headers is not a moving finish line.
+        QVERIFY(!first.contains("ETA"));
+        QVERIFY(!first.contains("2400281"));
+    }
+
+    void fundedHomeFitsTextWithAllCards() {
+        const QString previousSheet = qApp->styleSheet();
+        const QPalette previousPalette = qApp->palette();
+        applyProductionTheme();
+        std::unique_ptr<MainWindow> w(makeWindow());
+        w->ui->balSheilded->setText("123456.12345678 ZCL");
+        w->ui->balTransparent->setText("7 ZCL");
+        w->ui->balTotal->setText("123463.12345678 ZCL");
+        w->updateHomeFixIt(7.0, true);
+        w->showBackupNag();
+        w->setSyncStatus(true, 2300000, 2400000, 0.95);
+        for (const QSize size : {QSize(968, 616), QSize(648, 480), QSize(1100, 720)}) {
+            w->resize(size);
+            QApplication::processEvents();
+            auto* balance = w->findChild<QLabel*>("homeHeroPrivate");
+            QVERIFY(balance);
+            QCOMPARE(balance->text(), QString("123456.12345678 ZCL"));
+            QVERIFY2(balance->contentsRect().height() >= QFontMetrics(balance->font()).height(),
+                qPrintable(QString("Balance clipped: height %1, font height %2 at %3x%4")
+                    .arg(balance->contentsRect().height()).arg(QFontMetrics(balance->font()).height())
+                    .arg(size.width()).arg(size.height())));
+            const QString shots = qEnvironmentVariable("ZCL_SHOTS_DIR");
+            if (!shots.isEmpty()) {
+                QVERIFY(QDir().mkpath(shots));
+                QVERIFY(w->grab().save(shots + QString("/funded-%1x%2.png").arg(size.width()).arg(size.height())));
+            }
+        }
+        w.reset();
+        qApp->setStyleSheet(previousSheet);
+        qApp->setPalette(previousPalette);
+    }
+
+    void mainPagesKeepTextControlsReadable() {
+        const QString previousSheet = qApp->styleSheet();
+        const QPalette previousPalette = qApp->palette();
+        applyProductionTheme();
+        std::unique_ptr<MainWindow> w(makeWindow());
+        for (int page = 0; page < 4; ++page) {
+            w->ui->tabWidget->setCurrentIndex(page);
+            for (const QSize size : {QSize(648, 480), QSize(968, 616)}) {
+                w->resize(size);
+                QApplication::processEvents();
+                const auto widgets = w->findChildren<QWidget*>();
+                for (auto* widget : widgets) {
+                    if (!widget->isVisibleTo(w.get())) continue;
+                    auto* label = qobject_cast<QLabel*>(widget);
+                    auto* button = qobject_cast<QPushButton*>(widget);
+                    auto* edit = qobject_cast<QLineEdit*>(widget);
+                    if ((!label || label->text().isEmpty() || label->wordWrap()) &&
+                        (!button || button->text().isEmpty()) && !edit) continue;
+                    QVERIFY2(widget->contentsRect().height() >= QFontMetrics(widget->font()).height(),
+                        qPrintable(QString("Clipped %1 on page %2: height %3 font %4")
+                            .arg(widget->objectName()).arg(page).arg(widget->contentsRect().height())
+                            .arg(QFontMetrics(widget->font()).height())));
+                }
+                const QString shots = qEnvironmentVariable("ZCL_SHOTS_DIR");
+                if (!shots.isEmpty()) {
+                    QVERIFY(QDir().mkpath(shots));
+                    QVERIFY(w->grab().save(shots + QString("/page-%1-%2x%3.png")
+                        .arg(page).arg(size.width()).arg(size.height())));
+                }
+            }
+        }
+        w.reset();
+        qApp->setStyleSheet(previousSheet);
+        qApp->setPalette(previousPalette);
     }
 
     void deniedLockDoesNotOfferChainRepair() {
@@ -2675,6 +2778,8 @@ int main(int argc, char* argv[]) {
         qputenv("XDG_CACHE_HOME",  (g_homeDir->path() + "/.cache").toLocal8Bit());
     }
 
+    QCoreApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
+    QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
     QApplication app(argc, argv);
     QCoreApplication::setOrganizationName("ZClassicTest");
     QCoreApplication::setOrganizationDomain("test.zclassic.invalid");

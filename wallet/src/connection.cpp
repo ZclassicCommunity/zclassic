@@ -31,6 +31,8 @@ using json = nlohmann::json;
 ConnectionLoader::ConnectionLoader(MainWindow* main, RPC* rpc) {
     this->main = main;
     this->rpc  = rpc;
+    main->connectionStartupProgress.clear();
+    main->connectionStartupError.clear();
     if (main->cancelStartupAccess) main->cancelStartupAccess();
     main->cancelStartupAccess = {};
     accessAttempt = ++main->startupAttempt;
@@ -2395,6 +2397,8 @@ bool ConnectionLoader::portsFree(std::shared_ptr<ConnectionConfig> config) {
 
 // Update the UI with the status
 void ConnectionLoader::showInformation(QString info, QString detail) {
+    if (!ezAlive || !*ezAlive || accessAttempt != main->startupAttempt ||
+        !main->connectionStartupError.isEmpty()) return;
     // Once we reach the syncing phase, drop the now-stale onboarding card so it
     // doesn't contradict the live status; the progress bar carries on.
     if (info.contains(QObject::tr("Step 3")) && ezCard && ezCard->isVisible())
@@ -2419,6 +2423,14 @@ void ConnectionLoader::showInformation(QString info, QString detail) {
 
     connD->status->setText(info);
     connD->statusDetail->setText(detail);
+    // File-access preflight closes the overlay. Keep actual daemon warmup
+    // progress in the main window, including across normal disconnected polls.
+    main->connectionStartupProgress = info + (detail.isEmpty() ? QString() : "\n" + detail);
+    main->setSyncStatusConnecting();
+    main->statusLabel->setText(QObject::tr("Starting node"));
+    main->statusLabel->setToolTip(main->connectionStartupProgress);
+    main->statusIcon->clear();
+    main->ui->statusBar->clearMessage();
 
     // Log the first few status transitions, then go quiet (avoids one log line per
     // ~1s rescan poll, matching the old rescanCount<10 intent).
@@ -2432,6 +2444,7 @@ void ConnectionLoader::showInformation(QString info, QString detail) {
  * Show error will close the loading dialog and show an error. 
 */
 void ConnectionLoader::showError(QString explanation) {
+    main->connectionStartupProgress.clear();
     main->setStartupDetails(QString());
     main->connectionStartupError = explanation;
     const auto alive = ezAlive;

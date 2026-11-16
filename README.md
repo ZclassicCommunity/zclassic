@@ -1,9 +1,8 @@
-# ZClassic Wallet 2.1.2-beta8
+# ZClassic Wallet 2.1.2-beta9
 
-**Beta9 is being validated:** [startup recovery changes](doc/release-notes-beta9.md).
-The downloads below remain beta8 until the new release is published.
+**Beta10 candidate:** [startup feedback, readable layouts and honest sync progress](doc/release-notes-beta10.md). Published downloads remain beta9 until release validation completes.
 
-**Desktop wallet beta8 is available for Windows, Linux and macOS.** The bundled
+**Desktop wallet beta9 is available for Windows, Linux and macOS.** The bundled
 daemon and standalone node remain **2.1.2-beta6**; their consensus rules and
 implementation are unchanged. The wallet source now lives in [`wallet/`](wallet/).
 
@@ -29,20 +28,22 @@ This software is the ZClassic client. It synchronizes the entire blockchain hist
 
 Pre-built release binaries are published on **[GitHub Releases](https://github.com/ZclassicCommunity/zclassic/releases)**. Download the bundle for your platform and verify it against the checksums published alongside it before running. If you prefer to build it yourself, see [Build from Source](#build-from-source) below.
 
-| Desktop wallet beta8 | Download |
+| Desktop wallet beta9 | Download |
 |---|---|
-| Windows x86_64, portable executable | [Windows wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta8/zclwallet-v2.1.2-beta8-win64.exe) |
-| Linux x86_64, glibc 2.31+ and X11/XCB libraries | [Linux wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta8/zclwallet-v2.1.2-beta8-linux-x86_64) |
-| macOS 15+, Apple Silicon | [macOS wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta8/zclwallet-v2.1.2-beta8-macos-arm64.dmg) |
+| Windows x86_64, portable executable | [Windows wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta9/zclwallet-v2.1.2-beta9-win64.exe) |
+| Linux x86_64, glibc 2.31+ and X11/XCB libraries | [Linux wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta9/zclwallet-v2.1.2-beta9-linux-x86_64) |
+| macOS 15+, Apple Silicon | [macOS wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta9/zclwallet-v2.1.2-beta9-macos-arm64.dmg) |
 
-Beta8 removes the Windows GCC/Qt/pthread/OpenSSL DLL installation requirement,
+Beta9 adds a **Repair access and continue** action for recognized Windows folder
+permission failures, restores access for newly created files, and reports stopped
+nodes immediately with a retry action. It retains removal of the Windows GCC/Qt/pthread/OpenSSL DLL installation requirement,
 verifies cached node executables, protects local metadata with private atomic
 writes, and respects the node's existing sync-cache settings. Windows uses native
 Schannel HTTPS; Linux includes static Qt and OpenSSL. Windows is unsigned and
 macOS is ad-hoc signed, not notarized.
 
-See the [release notes](doc/release-notes-beta8.md),
-[checksums](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta8/SHA256SUMS.txt),
+See the [release notes](doc/release-notes-beta9.md),
+[checksums](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta9/SHA256SUMS.txt),
 and [wallet instructions](wallet/README.md). Standalone command-line binaries
 remain in the [beta6 node release](https://github.com/ZclassicCommunity/zclassic/releases/tag/v2.1.2-beta6).
 Back up your wallet before upgrading; do not delete or reindex your data directory.
@@ -96,7 +97,7 @@ Before running `zclassicd`, obtain the ZCash proving parameters (~1.6 GB):
 
 ### Default: Auto Fast-Sync (Recommended for Fresh Nodes)
 
-On a fresh data directory, the node automatically fast-syncs from a compiled-in default bootstrap peer over parallel streams (4 by default). The downloaded snapshot's tip is verified against a compiled fast-sync anchor commitment, and every block after the anchor is forward-validated. This existing snapshot mode relies on that anchor; it is not full historical validation. Sync time depends on peers, hardware and network conditions. Beta8 introduces no MMB snapshot mode or measured full-chain speedup.
+On a fresh data directory, the node automatically fast-syncs from a compiled-in default bootstrap peer over parallel streams (4 by default). The downloaded snapshot's tip is verified against a compiled fast-sync anchor commitment, and every block after the anchor is forward-validated. This existing snapshot mode relies on that anchor; it is not full historical validation. Sync time depends on peers, hardware and network conditions. Beta9 introduces no MMB snapshot mode or measured full-chain speedup.
 
 ```bash
 ./src/zclassicd

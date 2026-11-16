@@ -178,6 +178,7 @@ public:
     void setSyncStatus(bool isSyncing, int blockNumber, int estimatedHeight, double progress);
     void setSyncStatusConnecting();
     QString connectionStartupError; // Retained across disconnected polling; cleared on retry/success.
+    QString connectionStartupProgress; // Visible even when the startup overlay is closed.
     quint64 startupAttempt = 0;
     std::function<void()> cancelStartupAccess;
     QPushButton* startupActionButton = nullptr;
@@ -309,9 +310,7 @@ public:
 
 private:
     void closeEvent(QCloseEvent* event);
-    // Narrow-window fix: re-elide the Home hero number to the window's current width on
-    // every resize, so the 40pt balance shrinks (with an ellipsis) instead of pinning a
-    // large minimum width. See relayoutHero() / heroPrivateFull.
+    // Fit the full balance to the page width without hiding digits.
     void resizeEvent(QResizeEvent* event) override;
 
     void setupTrayIcon();
@@ -346,15 +345,11 @@ private:
     QLabel*      homeHeroPrivate   = nullptr;   // big private (shielded) number
     QLabel*      homeHeroTotal     = nullptr;   // secondary "Total NN ZCL"
     QLabel*      homeHeroHelper    = nullptr;   // UX-22 zero-balance helper line
-    // Narrow-window fix: the hero labels are given QSizePolicy::Minimum + minimumWidth(0)
-    // so their (40pt) sizeHint stops pinning the whole window's min width. To avoid a
-    // mid-glyph hard-clip at narrow widths we ELIDE the displayed text but keep the FULL
-    // string here so (a) text-selection copies the real value and (b) the number re-expands
-    // when the window widens. relayoutHero() recomputes the elided text from these; it is
-    // invoked BOTH where the text is set (updateHomeFixIt) AND from resizeEvent().
-    QString      heroPrivateFull;               // un-elided private-balance string
-    QString      heroTotalFull;                 // un-elided "Total: …" string
-    void         relayoutHero();                // re-elide the hero labels to their current width
+    // Retain complete values while adapting font size and scrolling to fit.
+    QString      heroPrivateFull;
+    bool         heroLayoutPending = false;
+    QString      heroTotalFull;
+    void         relayoutHero();
     // Trust-aware hero (item 1): inline qualifier shown under the number while the
     // balance is cached/warming/mid-sync ("Updating… not final yet" / "Last updated
     // <when> · refreshing"); hidden on the synced edge. Confidence colour is driven by
@@ -402,11 +397,6 @@ private:
     // runtime stub auto-heal: stop the embedded node, then drive a fresh
     // ConnectionLoader through startManualRepair() (the staged re-download ladder).
     void launchBlockchainRepair();
-
-    // P0-6: state used to estimate a sync ETA from observed block rate.
-    QElapsedTimer       syncEtaTimer;
-    bool                syncEtaStarted = false;
-    int                 syncEtaStartBlock = 0;
 
     void removeExtraAddresses();
 

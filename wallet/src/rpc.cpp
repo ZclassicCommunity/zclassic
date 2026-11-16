@@ -269,6 +269,7 @@ void RPC::handleEZClassicdCrash(int exitCode, QProcess::ExitStatus status) {
 void RPC::setConnection(Connection* c) {
     if (c) {
         main->connectionStartupError.clear();
+        main->connectionStartupProgress.clear();
         main->setStartupAction(QString(), {});
         main->setStartupDetails(QString());
     }
@@ -653,13 +654,18 @@ void RPC::fillTxJsonParams(json& params, Tx tx) {
 
 
 void RPC::noConnection(bool preserveBalances) {
+    const bool starting = main->connectionStartupError.isEmpty() &&
+        !main->connectionStartupProgress.isEmpty();
     QIcon i = QApplication::style()->standardIcon(QStyle::SP_MessageBoxCritical);
-    main->statusIcon->setPixmap(i.pixmap(16, 16));
+    if (starting) main->statusIcon->clear();
+    else main->statusIcon->setPixmap(i.pixmap(16, 16));
     main->statusIcon->setToolTip("");
     main->statusLabel->setText(main->connectionStartupError.isEmpty()
-        ? QObject::tr("No Connection") : QObject::tr("Connection needs attention"));
-    main->statusLabel->setToolTip(main->connectionStartupError);
-    main->ui->statusBar->showMessage(QObject::tr("No Connection"), 1000);
+        ? (starting ? QObject::tr("Starting node") : QObject::tr("No Connection"))
+        : QObject::tr("Connection needs attention"));
+    main->statusLabel->setToolTip(starting ? main->connectionStartupProgress : main->connectionStartupError);
+    if (starting) main->ui->statusBar->clearMessage();
+    else main->ui->statusBar->showMessage(QObject::tr("No Connection"), 1000);
 
     // P0-6: reflect the lost connection in the main-tab sync banner.
     main->setSyncStatusConnecting();
@@ -1280,11 +1286,8 @@ void RPC::getInfoThenRefresh(bool force) {
                 if (isSyncing) {
                     QString txt = QString::number(blockNumber);
                     if (targetKnown) {
-                        txt = txt % " / ~" % QString::number(target);
-                        // Use downloaded-blocks vs the header target for progress.
-                        progress = (double)blockNumber / (double)target;
-                        txt = txt %  " ( " % QString::number(progress * 100, 'f', 2) % "% )";
-                        ui->heightLabel->setText(QObject::tr("Downloading blocks"));
+                        ui->heightLabel->setText(QObject::tr("Validated block"));
+                        ui->blockheight->setToolTip(QObject::tr("Known headers: %1. More may still arrive.").arg(target));
                     } else {
                         // No target yet: show the height without a bogus percent.
                         ui->heightLabel->setText(QObject::tr("Starting…"));
@@ -1307,7 +1310,6 @@ void RPC::getInfoThenRefresh(bool force) {
                 " (" %
                 (Settings::getInstance()->isTestnet() ? QObject::tr("testnet:") : "") %
                 heightStr %
-                (isSyncing && targetKnown ? ("/" % QString::number(progress*100, 'f', 2) % "%") : QString()) %
                 ")";
             if (isSyncing && !targetKnown)
                 statusText = QObject::tr("Starting (block %1)").arg(blockNumber);

@@ -20,8 +20,8 @@
 
 #include <QSystemTrayIcon>
 #include <QCloseEvent>
-#include <QResizeEvent>   // narrow-window fix: re-elide the Home hero on resize
-#include <QFontMetrics>   // narrow-window fix: elidedText for the 40pt hero number
+#include <QResizeEvent>
+#include <QFontMetrics>
 #include <QtNetwork/QTcpSocket>
 #include <QFrame>
 #include <QLabel>
@@ -36,6 +36,7 @@
 #include <QTabBar>
 #include <QSignalBlocker>
 #include <QFileInfo>     // showExternalNodeAuthFailed: open the conf's folder
+#include <QScrollArea>
 
 using json = nlohmann::json;
 
@@ -169,13 +170,28 @@ MainWindow::MainWindow(QWidget *parent) :
     // live tab indices (Home/Balance 0, Send 1, Receive 2, Activity 3).
     setupNavRail();
 
-    // Narrow-window fix: declare an HONEST, tested minimum width so dragging the edge has
-    // predictable behaviour (a deliberate floor) instead of an emergent "mystery wall" from
-    // additive child mins. Derivation: navRail setFixedWidth(168) + ~480 content budget =
-    // 648. The content side reaches ~480 because the 40pt hero now elides (QSizePolicy::Minimum
-    // + relayoutHero), the Summary groupBox .ui minimumSize was relaxed 250 -> 0, and the
-    // Receive QR floor dropped 200 -> 140. If the rail width or those mins change, revisit 648.
-    setMinimumWidth(648);
+    // A funded wallet can show both backup and shielding cards. At large fonts
+    // these must scroll instead of squeezing the balance text below its line box.
+    QList<QWidget*> pages;
+    for (int i = 0; i < ui->tabWidget->count(); ++i) pages.append(ui->tabWidget->widget(i));
+    pages.append(zclassicdtab);
+    for (QWidget* page : pages) {
+        if (!page || !page->layout()) continue;
+        auto* contents = new QWidget;
+        contents->setLayout(page->layout());
+        contents->layout()->setSizeConstraint(QLayout::SetMinimumSize);
+        auto* scroll = new QScrollArea(page);
+        scroll->setObjectName("pageScrollArea");
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setWidget(contents);
+        auto* layout = new QVBoxLayout(page);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->addWidget(scroll);
+    }
+
+    // Scrollable pages retain readable controls even on small, scaled displays.
+    setMinimumSize(360, 320);
 
     rpc = new RPC(this);
 
@@ -628,7 +644,8 @@ void MainWindow::setupSyncBanner() {
     syncStatusLabel->setWordWrap(true);
     syncStatusLabel->setTextFormat(Qt::PlainText);
     syncStatusLabel->setText(connectionStartupError.isEmpty()
-        ? tr("Connecting to your ZClassic node…") : connectionStartupError);
+        ? (connectionStartupProgress.isEmpty() ? tr("Connecting to your ZClassic node…")
+            : connectionStartupProgress) : connectionStartupError);
     QFont f = syncStatusLabel->font();
     f.setBold(true);
     syncStatusLabel->setFont(f);
@@ -745,19 +762,14 @@ void MainWindow::setupHomeDashboard() {
     homeHeroPrivate = new QLabel(QString(), hero);
     homeHeroPrivate->setObjectName("homeHeroPrivate");
     homeHeroPrivate->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    // Narrow-window fix: a 40pt non-wrapping QLabel's minimumSizeHint tracks its full
-    // rendered text (~430-520px for a balance string), which propagated up through the
-    // Summary groupBox -> Balance tab -> tabWidget and PINNED the whole window's minimum
-    // width. QSizePolicy::Minimum lets the label shrink BELOW its sizeHint (it still won't
-    // stretch wider, so the hero stays left-aligned at normal/large widths); minimumWidth(0)
-    // removes the residual floor. The displayed text is elided in relayoutHero() so it shows
-    // an ellipsis rather than a mid-glyph clip; heroPrivateFull keeps the real value.
-    homeHeroPrivate->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
+    // Fit the full amount to the available width without compressing its height.
+    homeHeroPrivate->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Minimum);
     homeHeroPrivate->setMinimumWidth(0);
+    homeHeroPrivate->installEventFilter(this);
 
     homeHeroTotal = new QLabel(QString(), hero);
     homeHeroTotal->setObjectName("homeHeroTotal");
-    homeHeroTotal->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
+    homeHeroTotal->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
     homeHeroTotal->setMinimumWidth(0);
 
     // Polish P1/UX-22: a one-line friendly helper, shown ONLY when the balance is
@@ -1022,9 +1034,7 @@ void MainWindow::updateHomeFixIt(double transparent, bool fromCache) {
 
     // Mirror the canonical labels into the hero. On a true FRESH install the labels are
     // still empty (""), so substitute a deterministic zero rather than paint a blank card.
-    // Narrow-window fix: stash the FULL strings in members and let relayoutHero() set the
-    // (possibly elided) display text, so the 40pt number never pins the window width yet
-    // still copies/re-expands to its true value. relayoutHero() runs here AND on resize.
+    // Keep every digit; relayoutHero() fits the font to the available width.
     heroPrivateFull = haveNumber ? balZText
                                  : Settings::getZCLDisplayFormat(0.0);
     heroTotalFull   = tr("Total: %1").arg(haveNumber ? ui->balTotal->text()
@@ -1247,38 +1257,35 @@ void MainWindow::ensureSaplingProvisioned() {
 //   * syncBanner is a child of ui->tab (the Balance page) and sits ABOVE that
 //     page's content via gridLayout_2; it is unaffected and stays above the
 //     content, spanning the content column (not the rail), exactly as required.
-// Narrow-window fix: re-elide the Home hero number/total to the labels' CURRENT width so
-// the 40pt balance shows an ellipsis instead of either pinning a large minimum width or
-// hard-clipping mid-glyph. The full (un-elided) value lives in heroPrivateFull/heroTotalFull
-// so text-selection copies the real number and it re-expands when the window widens. Called
-// from updateHomeFixIt() (text-set) and resizeEvent() (geometry change). Cheap + idempotent.
+// Preserve every balance digit and adapt the headline font to the available width.
 void MainWindow::relayoutHero() {
+    // Stack the two Home columns before the balance is forced into a sliver.
+    ui->horizontalLayout_5->setDirection(ui->tabWidget->width() < 820
+        ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
     if (homeHeroPrivate) {
-        int w = homeHeroPrivate->width();
-        // Width is 0 before the first layout pass; show the full string then (resizeEvent
-        // re-elides once a real width exists). elidedText with w<=0 would blank the label.
-        QString shown = (w > 0)
-            ? QFontMetrics(homeHeroPrivate->font()).elidedText(heroPrivateFull, Qt::ElideRight, w)
-            : heroPrivateFull;
-        if (homeHeroPrivate->text() != shown)
-            homeHeroPrivate->setText(shown);
-        // Keep the real value reachable on hover even when elided.
-        homeHeroPrivate->setToolTip(shown == heroPrivateFull ? QString() : heroPrivateFull);
+        QFont candidate = homeHeroPrivate->font();
+        candidate.setPointSizeF(14.0);
+        const int minimum = QFontMetrics(candidate).horizontalAdvance(heroPrivateFull) + 2;
+        homeHeroPrivate->setMinimumWidth(minimum);
+        const int available = qMax(minimum, homeHeroPrivate->contentsRect().width());
+        // Keep every digit selectable. Scale the headline down to body size if
+        // needed; at smaller widths the page scrolls instead of truncating money.
+        qreal points = 40.0;
+        for (; points > 14.0; points -= 0.5) {
+            candidate.setPointSizeF(points);
+            if (QFontMetrics(candidate).horizontalAdvance(heroPrivateFull) + 2 <= available) break;
+        }
+        const QString style = QString("font-size: %1pt;").arg(points);
+        if (homeHeroPrivate->styleSheet() != style) homeHeroPrivate->setStyleSheet(style);
+        homeHeroPrivate->setText(heroPrivateFull);
+        homeHeroPrivate->setToolTip(QString());
     }
     if (homeHeroTotal) {
-        int w = homeHeroTotal->width();
-        QString shown = (w > 0)
-            ? QFontMetrics(homeHeroTotal->font()).elidedText(heroTotalFull, Qt::ElideRight, w)
-            : heroTotalFull;
-        if (homeHeroTotal->text() != shown)
-            homeHeroTotal->setText(shown);
-        homeHeroTotal->setToolTip(shown == heroTotalFull ? QString() : heroTotalFull);
+        homeHeroTotal->setText(heroTotalFull);
+        homeHeroTotal->setToolTip(QString());
     }
 }
-
-// Narrow-window fix: re-elide the hero on every resize so the number tracks the available
-// width (shrinks with an ellipsis as the window narrows, re-expands as it widens). Base
-// behaviour first, then our pass.
+// Fit the complete balance and stack the cards when the page narrows.
 void MainWindow::resizeEvent(QResizeEvent* event) {
     QMainWindow::resizeEvent(event);
     relayoutHero();
@@ -1296,7 +1303,8 @@ void MainWindow::setupNavRail() {
     auto* navRail = new QFrame(ui->centralWidget);
     navRail->setObjectName("navRail");
     navRail->setFrameShape(QFrame::NoFrame);
-    navRail->setFixedWidth(168);   // ~150-190px, on the 8px grid (21*8)
+    navRail->setMinimumWidth(168);
+    navRail->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
 
     auto* railLayout = new QVBoxLayout(navRail);
     railLayout->setContentsMargins(8, 16, 8, 16);
@@ -1450,7 +1458,7 @@ void MainWindow::setSyncStatus(bool isSyncing, int blockNumber, int estimatedHei
         // Fully caught up. Polish P0-2: DON'T shout a full-width green bar at rest.
         // Hide the loud banner content + drop the colored fill (transparent), and
         // show the quiet inline "● Synced" pill. Green lives on the balance hero.
-        syncEtaStarted = false;
+
         syncProgressBar->setVisible(false);
         syncProgressBar->setRange(0, 100);   // reset in case it was indeterminate
         syncStatusLabel->setVisible(false);
@@ -1474,70 +1482,18 @@ void MainWindow::setSyncStatus(bool isSyncing, int blockNumber, int estimatedHei
     if (syncQuietPill) syncQuietPill->setVisible(false);
     syncStatusLabel->setVisible(true);
 
-    // Indeterminate: we are syncing but have no usable target yet (e.g. the node's
-    // header height isn't known on the first poll). Show a busy bar and a friendly
-    // "starting" message rather than a misleading 0%/height/ETA.
-    bool indeterminate = isSyncing && (estimatedHeight <= 0 || progress < 0.0);
-    if (indeterminate) {
-        syncEtaStarted = false;
-        syncProgressBar->setVisible(true);
-        syncProgressBar->setRange(0, 0);     // busy/indeterminate animation
-        // Include the live block height so the text VISIBLY changes as blocks arrive,
-        // rather than a frozen "Starting your node…" that reads as stuck on a slow link.
-        // When the node already has a tip (blockNumber > 0) it is finding peers / confirming
-        // the chain; before that it is genuinely still starting.
-        if (blockNumber > 0)
-            syncStatusLabel->setText(tr("Starting your node… (block %1, connecting to peers)")
-                .arg(blockNumber));
-        else
-            syncStatusLabel->setText(tr("Starting your node…"));
-        applyBannerStyle("QWidget { background-color: #d9822b; } QLabel { color: white; }");
-        return;
-    }
-
-    // Syncing: show a progress bar and an estimated time remaining. qRound (not a
-    // truncating cast) so e.g. 99.6% reads 100, not 99.
-    int pct = qRound(progress * 100.0);
-    if (pct < 0)   pct = 0;
-    if (pct > 100) pct = 100;
+    // Known headers arrive in batches; they are not the network's final height.
+    // A block/header ratio and extrapolated ETA repeatedly promise completion
+    // just before the next batch arrives. Report completed work instead.
+    Q_UNUSED(estimatedHeight);
+    Q_UNUSED(progress);
     syncProgressBar->setVisible(true);
-    syncProgressBar->setRange(0, 100);       // reset in case it was indeterminate
-    syncProgressBar->setValue(pct);
-
-    QString etaText;
-    if (estimatedHeight > 0 && blockNumber > 0) {
-        if (!syncEtaStarted) {
-            syncEtaStarted = true;
-            syncEtaStartBlock = blockNumber;
-            syncEtaTimer.restart();
-        } else {
-            qint64 elapsedMs = syncEtaTimer.elapsed();
-            int    blocksDone = blockNumber - syncEtaStartBlock;
-            if (elapsedMs > 2000 && blocksDone > 0) {
-                double blocksPerSec = (double) blocksDone / (elapsedMs / 1000.0);
-                int    remaining    = estimatedHeight - blockNumber;
-                if (blocksPerSec > 0.0 && remaining > 0) {
-                    qint64 secsLeft = (qint64) (remaining / blocksPerSec);
-                    QString human;
-                    if (secsLeft >= 3600)
-                        human = tr("about %1h %2m").arg(secsLeft / 3600).arg((secsLeft % 3600) / 60);
-                    else if (secsLeft >= 60)
-                        human = tr("about %1m").arg(secsLeft / 60);
-                    else
-                        human = tr("less than a minute");
-                    etaText = QString(" • ") % tr("ETA %1").arg(human);
-                }
-            }
-        }
-    }
-
-    QString heightText;
-    if (estimatedHeight > 0) {
-        heightText = QString(" • ") % tr("block %1 / ~%2")
-            .arg(QString::number(blockNumber), QString::number(estimatedHeight));
-    }
-
-    syncStatusLabel->setText(tr("Syncing blockchain… %1%").arg(pct) % heightText % etaText);
+    syncProgressBar->setRange(0, 0);
+    syncStatusLabel->setText(blockNumber > 0
+        ? tr("Syncing blockchain\nValidated block %1")
+            .arg(Settings::getHeightString(blockNumber))
+        : tr("Syncing blockchain — finding the latest blocks…"));
+    syncStatusLabel->setToolTip(tr("Downloading and validating blocks. The latest network height is still being discovered; a reliable completion time is not available."));
     applyBannerStyle("QWidget { background-color: #d9822b; } QLabel { color: white; }");
 }
 
@@ -1545,13 +1501,14 @@ void MainWindow::setSyncStatus(bool isSyncing, int blockNumber, int estimatedHei
 // non-alarming "connecting" state instead of a blank/stuck UI.
 void MainWindow::setSyncStatusConnecting() {
     if (syncBanner == nullptr) return;
-    syncEtaStarted = false;
+
     syncProgressBar->setVisible(false);
     if (syncQuietPill) syncQuietPill->setVisible(false);
     syncStatusLabel->setVisible(true);
     syncStatusLabel->setTextFormat(Qt::PlainText);
     syncStatusLabel->setText(connectionStartupError.isEmpty()
-        ? tr("Connecting to your ZClassic node…") : connectionStartupError);
+        ? (connectionStartupProgress.isEmpty() ? tr("Connecting to your ZClassic node…")
+            : connectionStartupProgress) : connectionStartupError);
     applyBannerStyle("QWidget { background-color: #555555; } QLabel { color: white; }");
 }
 
@@ -1560,7 +1517,7 @@ void MainWindow::setSyncStatusConnecting() {
 // the user the real problem (no network) instead.
 void MainWindow::setSyncStatusWaitingForPeers(bool longStretch) {
     if (syncBanner == nullptr) return;
-    syncEtaStarted = false;
+
     if (syncQuietPill) syncQuietPill->setVisible(false);
     syncStatusLabel->setVisible(true);
     syncProgressBar->setVisible(false);
@@ -1578,7 +1535,7 @@ void MainWindow::setSyncStatusWaitingForPeers(bool longStretch) {
 // downloads the snapshot, but it is actively working -- not stuck.
 void MainWindow::setSyncStatusBootstrapSnapshot(int pct, qint64 received, qint64 total, double mbps) {
     if (syncBanner == nullptr) return;
-    syncEtaStarted = false;
+
     if (syncQuietPill) syncQuietPill->setVisible(false);
     syncStatusLabel->setVisible(true);
     if (pct < 0)   pct = 0;
@@ -2281,6 +2238,15 @@ void MainWindow::promptWalletBackup() {
 
 // Event filter for MacOS specific handling of payment URIs
 bool MainWindow::eventFilter(QObject *object, QEvent *event) {
+    if (object == homeHeroPrivate && (event->type() == QEvent::Resize ||
+        event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange) &&
+        !heroLayoutPending) {
+        heroLayoutPending = true;
+        QTimer::singleShot(0, this, [this]() {
+            heroLayoutPending = false;
+            relayoutHero();
+        });
+    }
     if (event->type() == QEvent::FileOpen) {
         QFileOpenEvent *fileEvent = static_cast<QFileOpenEvent*>(event);
         if (!fileEvent->url().isEmpty())
