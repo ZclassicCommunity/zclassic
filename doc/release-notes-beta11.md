@@ -27,6 +27,18 @@ parallel transfer fails. The existing compiled checkpoint at height 3,126,937
 and full imported-chainstate commitment check remain mandatory. Initial chain
 replay honors shutdown requests between completed validation batches.
 
+Catch-up now keeps an in-memory index of parked blocks, avoiding repeated scans
+of the entire block index and full ancestor walks when out-of-order blocks become
+usable. Parking rules, accumulated-work requirements and validation checks are
+unchanged. The index is rebuilt on load and maintained through reorgs and cleanup.
+Differential tests compare its flag changes and side effects with the old traversal;
+Windows regtest exercises fork handling and parked-state recovery after restart.
+
+A short Windows comparison from the same saved height and using the same three
+Z23 peers measured about 141 blocks/second before and 183 after this optimization.
+This is one network-dependent catch-up sample, not a guaranteed sync rate or a
+measurement of the full download and wallet-rescan time.
+
 Blockchain re-download repair now preserves earlier backups and uses a unique
 backup directory for each attempt. Failed moves restore what they can and retain
 any data that cannot be restored, with the recovery paths shown in the error.
