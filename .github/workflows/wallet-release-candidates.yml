@@ -2,6 +2,10 @@ name: Wallet release candidates
 on:
   workflow_dispatch:
     inputs:
+      daemon_run:
+        description: Successful daemon candidate run for this exact source commit
+        required: true
+        type: string
       platform:
         description: Candidate platform
         type: choice
@@ -12,6 +16,7 @@ concurrency:
   cancel-in-progress: true
 permissions:
   contents: read
+  actions: read
 jobs:
   linux:
     if: inputs.platform == 'all' || inputs.platform == 'linux'
@@ -46,11 +51,23 @@ jobs:
           path: |
             wallet/artifacts/linux-build/qt-static
             wallet/artifacts/linux-build/openssl
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: daemon-linux-x86_64
+          path: daemon
+          run-id: ${{ inputs.daemon_run }}
+          github-token: ${{ github.token }}
       - name: Build and check portable Linux candidate
-        run: sh wallet/contrib/release/linux.sh
+        run: |
+          test "$(cat daemon/SOURCE_COMMIT.txt)" = "$(git rev-parse HEAD)"
+          cd daemon && sha256sum -c SHA256SUMS.txt && cd ..
+          export ZCL_DAEMON="$PWD/daemon/zclassicd"
+          export ZCL_DAEMON_SHA256=$(sha256sum "$ZCL_DAEMON" | cut -d' ' -f1)
+          chmod +x "$ZCL_DAEMON"
+          sh wallet/contrib/release/linux.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: beta10-linux-candidate
+          name: beta11-linux-candidate
           path: wallet/artifacts/release/*
           if-no-files-found: error
   macos:
@@ -62,10 +79,22 @@ jobs:
         with:
           persist-credentials: false
       - run: brew install qt@5 libsodium
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: daemon-macos-arm64
+          path: daemon
+          run-id: ${{ inputs.daemon_run }}
+          github-token: ${{ github.token }}
       - name: Build and check macOS candidate
-        run: sh wallet/contrib/release/macos.sh
+        run: |
+          test "$(cat daemon/SOURCE_COMMIT.txt)" = "$(git rev-parse HEAD)"
+          cd daemon && shasum -a 256 -c SHA256SUMS.txt && cd ..
+          export ZCL_DAEMON="$PWD/daemon/zclassicd"
+          export ZCL_DAEMON_SHA256=$(shasum -a 256 "$ZCL_DAEMON" | cut -d' ' -f1)
+          chmod +x "$ZCL_DAEMON"
+          sh wallet/contrib/release/macos.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: beta10-macos-candidate
+          name: beta11-macos-candidate
           path: wallet/artifacts/release/*
           if-no-files-found: error

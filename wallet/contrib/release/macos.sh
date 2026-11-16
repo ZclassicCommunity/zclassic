@@ -8,10 +8,11 @@ cp "$(brew --prefix libsodium)/lib/libsodium.a" res/libsodium.a
 cd artifacts/mac-build
 "$qt/bin/qmake" "$root/zcl-qt-wallet.pro" CONFIG+=release
 make -j2
-curl --fail --location --retry 3 https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta6/zclassicd-v2.1.2-beta6-macos-arm64.tar.gz -o daemon.tar.gz
-printf '%s  daemon.tar.gz\n' 4f2344da82a57b404a1eb5e5497c00ffc635ec4792f8f9e4ab9457e970d5a12a | shasum -a 256 -c -
-tar -xf daemon.tar.gz
-cp zclassic-2.1.2-beta6-osx-arm64/zclassicd zclwallet.app/Contents/MacOS/
+: "${ZCL_DAEMON:?Supply the newly built daemon path}"
+: "${ZCL_DAEMON_SHA256:?Supply the verified daemon SHA256}"
+printf '%s  %s\n' "$ZCL_DAEMON_SHA256" "$ZCL_DAEMON" | shasum -a 256 -c -
+"$ZCL_DAEMON" --version | grep -F '2.1.2-beta11'
+cp "$ZCL_DAEMON" zclwallet.app/Contents/MacOS/zclassicd
 "$qt/bin/macdeployqt" zclwallet.app -verbose=2
 # Qt 5's deployment tool misses Brotli's @rpath-only transitive dependency.
 # Newer Homebrew FreeType pulls in libbrotlidec, which needs this sibling.
@@ -74,9 +75,9 @@ zclwallet.app/Contents/MacOS/zclassicd --version >> "$root/artifacts/release/mac
 mkdir dmg-root
 mv zclwallet.app dmg-root/ZclWallet.app
 ln -s /Applications dmg-root/Applications
-output="$root/artifacts/release/zclwallet-v2.1.2-beta10-macos-arm64.dmg"
+output="$root/artifacts/release/zclwallet-v2.1.2-beta11-macos-arm64.dmg"
 [ ! -e "$output" ]
-hdiutil create -volname ZClassic-beta10 -srcfolder dmg-root -format UDZO "$output"
+hdiutil create -volname ZClassic-beta11 -srcfolder dmg-root -format UDZO "$output"
 hdiutil verify "$output"
 cd "$root/artifacts/release"
-shasum -a 256 zclwallet-v2.1.2-beta10-macos-arm64.dmg > macos-SHA256SUMS.txt
+shasum -a 256 zclwallet-v2.1.2-beta11-macos-arm64.dmg > macos-SHA256SUMS.txt
