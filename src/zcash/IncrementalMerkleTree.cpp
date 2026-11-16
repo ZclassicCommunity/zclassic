@@ -10,12 +10,26 @@
 
 namespace libzcash {
 
+// The memo of the innermost live PedersenHashMemo on this thread, if any.
+static thread_local PedersenHashMemo::Results* pedersenMemo = nullptr;
+
+PedersenHashMemo::PedersenHashMemo() : previous(pedersenMemo) { pedersenMemo = &results; }
+PedersenHashMemo::~PedersenHashMemo() { pedersenMemo = previous; }
+
 PedersenHash PedersenHash::combine(
     const PedersenHash& a,
     const PedersenHash& b,
     size_t depth
 )
 {
+    PedersenHashMemo::Results* memo = pedersenMemo;
+    if (memo) {
+        auto it = memo->find(std::make_tuple(depth, uint256(a), uint256(b)));
+        if (it != memo->end()) {
+            return PedersenHash(it->second);
+        }
+    }
+
     PedersenHash res = PedersenHash();
 
     librustzcash_merkle_hash(
@@ -24,6 +38,10 @@ PedersenHash PedersenHash::combine(
         b.begin(),
         res.begin()
     );
+
+    if (memo) {
+        memo->emplace(std::make_tuple(depth, uint256(a), uint256(b)), res);
+    }
 
     return res;
 }

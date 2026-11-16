@@ -1148,6 +1148,9 @@ void CWallet::IncrementNoteWitnesses(const CBlockIndex* pindex,
                                      SaplingMerkleTree& saplingTree)
 {
     LOCK(cs_wallet);
+    // Witnesses that are filling the same subtree hash the same inputs, so
+    // compute each Sapling tree hash once per block instead of once per note.
+    libzcash::PedersenHashMemo pedersenMemo;
     // Only wallet transactions with note data take part; for every other
     // entry the per-note loops below are empty, so skipping them changes
     // nothing. noteTxs is in txid order, like a mapWallet walk.
