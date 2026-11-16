@@ -8,6 +8,9 @@
 #include "crypto/sha256.h" /* the VENDORED Z23 header (see Makefile.am include order) */
 
 #include <stddef.h>
+#if defined(__x86_64__) || defined(__i386__)
+#include <cpuid.h>
+#endif
 
 _Static_assert(sizeof(struct zcl_c23_sha256_state) == sizeof(struct sha256_ctx),
                "zcl_c23_sha256_state must match Z23 sha256_ctx");
@@ -53,8 +56,23 @@ void zcl_c23_sha256_midstate(struct zcl_c23_sha256_state *st, unsigned char hash
 
 int zcl_c23_sha256_autodetect(void)
 {
-    (void)sha256_select_impl(SHA256_IMPL_AUTO);
-    return sha256_selftest() ? 1 : 0;
+    const int installed = sha256_select_impl(SHA256_IMPL_AUTO);
+    if (!sha256_selftest())
+        return 0;
+#if defined(__x86_64__) || defined(__i386__)
+    /* The vendored probe (detect_sha_ni) runs the known-answer test itself
+     * and, on a mismatch, quietly installs the portable transform, so
+     * sha256_selftest() above then finds nothing to test and passes. Report
+     * that case here: the CPU advertises SHA (CPUID.(EAX=7,ECX=0):EBX[29])
+     * but the portable backend was installed. */
+    unsigned int eax, ebx, ecx, edx;
+    if (installed == SHA256_IMPL_PORTABLE &&
+        __get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx) && ((ebx >> 29) & 1u))
+        return 0;
+#else
+    (void)installed;
+#endif
+    return 1;
 }
 
 const char *zcl_c23_sha256_backend_name(void)
