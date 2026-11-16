@@ -859,3 +859,52 @@ TEST(WalletTxOrder, LatestSmartTimeMatchesFullSort)
 
     mapBlockIndex.erase(hashBlock);
 }
+
+// Ties on nOrderPos, checked directly: OrderedTxItems() lists accounting
+// entries after the transactions that share their position, and those
+// transactions in txid order, so a walk from the end meets the entry first
+// and then the transactions in descending txid order. The randomized test
+// above rarely reaches a tie before it finds a tolerated entry.
+TEST(WalletTxOrder, TiesOnOrderPosMatchFullSort)
+{
+    DbEnvGuard env;
+    std::mt19937_64 rng(77);
+    OrderWallet w("txorder_tie_" + std::to_string(GetTimeMicros()) + ".dat");
+    { CWalletDB create(w.strWalletFile, "cr+"); }
+    LOCK2(cs_main, w.cs_wallet);
+
+    // AddToWallet always skips the transaction being added, never nullptr
+    // (the reference would then skip accounting entries too), so give it
+    // one at another position.
+    CWalletTx skipped(nullptr, RandomTx(rng, 0, 0));
+    skipped.nOrderPos = 9;
+    skipped.nTimeSmart = 1000;
+    skipped.nTimeReceived = 1000;
+    ASSERT_TRUE(w.AddToWallet(skipped, true, nullptr));
+    const CWalletTx* skip = &w.mapWallet.at(skipped.GetHash());
+
+    for (int64_t nTime : {1100, 1300}) {
+        CWalletTx wtx(nullptr, RandomTx(rng, 0, 0));
+        wtx.nOrderPos = 5;
+        wtx.nTimeSmart = nTime;
+        wtx.nTimeReceived = nTime;
+        ASSERT_TRUE(w.AddToWallet(wtx, true, nullptr));
+    }
+    CAccountingEntry entry;
+    entry.strAccount = "";
+    entry.nTime = 1200;
+    entry.nOrderPos = 5;
+    ASSERT_TRUE(CWalletDB(w.strWalletFile).WriteAccountingEntry(entry));
+
+    for (int64_t tolerated : {1050, 1150, 1250, 1350}) {
+        int64_t expected = -1, actual = -1;
+        bool fExpected = LatestByFullSort(w, skip, tolerated, expected);
+        bool fActual = w.Latest(skip, tolerated, actual);
+        ASSERT_EQ(fExpected, fActual) << "tolerated " << tolerated;
+        ASSERT_EQ(expected, actual) << "tolerated " << tolerated;
+    }
+    // The accounting entry is met first whenever it is tolerated.
+    int64_t latest = -1;
+    ASSERT_TRUE(w.Latest(skip, 1350, latest));
+    ASSERT_EQ(1200, latest);
+}
