@@ -39,6 +39,9 @@ qualification and publication finish. Consensus rules are unchanged.
   executable can miss a library that requires a newer OS.
   The Mac packaging gate also builds the HTTPS probe with that same Qt toolkit
   and requires a certificate-verified response from the canonical release endpoint.
+  Public app directories and executables receive mode 755, and resources receive
+  mode 644 before signing. The gate checks these access bits after signing so a
+  private build-account umask cannot silently restrict the distributed app.
 - Windows: use static Qt 5.15.2 with native Schannel enabled, MinGW POSIX threads,
   static libsodium and `CONFIG+=zqw_portable`. Package with
   [`contrib/cross/package-win.sh`](../contrib/cross/package-win.sh); both GUI and daemon

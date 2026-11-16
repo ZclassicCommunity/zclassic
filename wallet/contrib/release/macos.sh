@@ -64,10 +64,14 @@ if [ "$static_qt" = 1 ]; then
 fi
 # Check every Mach-O, including the daemon, Qt frameworks and platform plugins.
 # --version alone could silently resolve a library installed on the build host.
+# Public application files must not inherit a maintainer's private build umask.
+find zclwallet.app -type d -exec chmod 755 {} +
+find zclwallet.app -type f -exec chmod 644 {} +
 find zclwallet.app -type f -exec sh -c '
     set -eu
     for binary do
         if file "$binary" | grep -q "Mach-O"; then
+            chmod 755 "$binary"
             lipo "$binary" -verify_arch arm64
             own_id=$(otool -D "$binary" | sed -n "2p")
             dependencies=$(otool -L "$binary" | awk -v own="$own_id" '\''NR > 1 && $1 != own { print }'\'') || exit 1
@@ -113,9 +117,25 @@ if ! awk -v version="$minimum" 'BEGIN { split(version, p, "."); exit (p[1]*10000
 fi
 /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion $minimum" zclwallet.app/Contents/Info.plist
 printf 'Minimum macOS version: %s\n' "$minimum" >> "$root/artifacts/release/macos-validation.txt"
-codesign --force --timestamp=none --sign - zclwallet.app/Contents/MacOS/zclassicd
-codesign --force --deep --timestamp=none --sign - zclwallet.app
+(
+    umask 022
+    codesign --force --timestamp=none --sign - zclwallet.app/Contents/MacOS/zclassicd
+    codesign --force --deep --timestamp=none --sign - zclwallet.app
+)
 codesign --verify --deep --strict --verbose=2 zclwallet.app
+private_dirs=$(find zclwallet.app -type d ! -perm -0555 -print)
+private_files=$(find zclwallet.app -type f ! -perm -0444 -print)
+[ -z "$private_dirs$private_files" ] || {
+    echo 'Application bundle contains files or directories inaccessible to other users.' >&2
+    exit 1
+}
+for binary in zclwallet.app/Contents/MacOS/zclwallet zclwallet.app/Contents/MacOS/zclassicd; do
+    [ "$(stat -f '%Lp' "$binary")" = 755 ] || {
+        echo "Application executable must have mode 755: $binary" >&2
+        exit 1
+    }
+done
+printf 'PASS: public application file modes, including executable mode 755\n' >> "$root/artifacts/release/macos-validation.txt"
 QT_DEBUG_PLUGINS=1 QT_QPA_PLATFORM=cocoa zclwallet.app/Contents/MacOS/zclwallet --help > "$root/artifacts/release/macos-help.txt"
 zclwallet.app/Contents/MacOS/zclassicd --version >> "$root/artifacts/release/macos-validation.txt"
 # Use the same Qt TLS implementation as the wallet, retaining certificate and
@@ -128,11 +148,13 @@ mkdir -p tls-check
     ./check-tls
 ) >> "$root/artifacts/release/macos-validation.txt" 2>&1
 mkdir dmg-root
+chmod 755 dmg-root
 mv zclwallet.app dmg-root/ZclWallet.app
 ln -s /Applications dmg-root/Applications
 output="$root/artifacts/release/zclwallet-v2.1.2-beta11-macos-arm64.dmg"
 [ ! -e "$output" ]
 hdiutil create -volname ZClassic-beta11 -srcfolder dmg-root -format UDZO "$output"
 hdiutil verify "$output"
+chmod 644 "$output"
 cd "$root/artifacts/release"
 shasum -a 256 zclwallet-v2.1.2-beta11-macos-arm64.dmg > macos-SHA256SUMS.txt

@@ -40,6 +40,9 @@ rejects a minimum OS above 15, verifies the daemon against its audited build,
 and tests certificate-verified HTTPS access before creating the DMG. Complete
 package qualification is still required; successful library builds alone do not
 prove that the finished application works.
+The Mac package also normalizes public application file permissions and verifies
+them after signing, avoiding owner-only bundles inherited from a private build
+account's umask.
 
 Interrupted snapshot transfers retry with completed files retained within the
 current attempt. Completed files are rehashed against the same manifest before
