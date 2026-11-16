@@ -58,10 +58,16 @@
 
 static double sp_now(void)
 {
+#ifdef _WIN32
+    /* mingw-w64 on msvcrt (the Debian/Ubuntu cross toolchain the release build
+     * uses) has neither timespec_get nor TIME_UTC. Only differences are used. */
+    return (double)GetTickCount64() * 1e-3;
+#else
     struct timespec ts;
     if (timespec_get(&ts, TIME_UTC) != TIME_UTC)
         return 0.0;
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#endif
 }
 
 static pthread_mutex_t g_path_mu = PTHREAD_MUTEX_INITIALIZER;

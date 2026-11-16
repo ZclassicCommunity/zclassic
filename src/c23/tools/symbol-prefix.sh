@@ -27,8 +27,10 @@ mode=${1:-}; nm=${2:-}; lib=${3:-}
     echo "usage: $0 check <nm> <archive> | gen <nm> <archive> <header>" >&2; exit 2; }
 
 # Defined external symbols, one per line. Mach-O prefixes every C name with "_".
+# Names starting with "." are not C identifiers (PE/COFF .refptr.<sym> COMDAT
+# pointers, section symbols) and cannot be defined by anyone else's C code.
 globals() {
-    $nm -g "$lib" 2>/dev/null | awk 'NF==3 && $2 ~ /^[A-TV-Z]$/ {print $3}' | sort -u >"$1"
+    $nm -g "$lib" 2>/dev/null | awk 'NF==3 && $2 ~ /^[A-TV-Z]$/ && substr($3, 1, 1) != "." {print $3}' | sort -u >"$1"
     if [ -s "$1" ] && ! grep -q -v '^_' "$1"; then
         sed 's/^_//' "$1" >"$1.s" && mv "$1.s" "$1"
     fi

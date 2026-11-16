@@ -57,7 +57,10 @@ while IFS="$tab" read -r lpath zpath blob commit sha extra; do
 done <"$tsv"
 
 # Unlisted files anywhere under vendor/ (.gitattributes guard is the one allowed extra).
-find "$c23/vendor" -type f >"$listed.found"
+# An in-tree build leaves objects, depfiles and stamps beside the sources; they
+# are build products (git-ignored), not vendored files.
+find "$c23/vendor" -type f ! -name "*.o" ! -name "*.obj" ! -name "*.lo" ! -name "*.Po" \
+    ! -name "*.Tpo" ! -name ".dirstamp" ! -name "*.gcno" ! -name "*.gcda" >"$listed.found"
 while IFS= read -r f; do
     rel=${f#"$root"/}
     [ "$rel" = src/c23/vendor/.gitattributes ] && continue

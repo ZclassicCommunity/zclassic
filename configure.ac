@@ -766,10 +766,15 @@ _Static_assert(sizeof(void*)==8 && sizeof(unsigned __int128)==16, "need 64-bit")
 dnl Language level for libzcl_c23.a: -std=c23 when the compiler really speaks it,
 dnl else -std=gnu17 (GCC < 14, mingw-w64 GCC 13, older Apple clang); the
 dnl force-included src/c23/glue/zcl_c23_compat.h supplies the C23 spellings there.
-dnl Strict -std=c23 hides the POSIX declarations on glibc, so that mode also
-dnl defines _GNU_SOURCE. Override with ZCL_C23_STD=<flag> (ZCL_C23_STD_DEFS too).
+dnl Both modes define _GNU_SOURCE: strict -std=c23 hides the POSIX declarations
+dnl on glibc, and the Sprout prover uses sched_getaffinity/CPU_COUNT there. It
+dnl is harmless on mingw-w64 and Darwin. Override with ZCL_C23_STD=<flag> and,
+dnl if needed, ZCL_C23_STD_DEFS=<defines> (an empty value is honoured).
 AC_ARG_VAR([ZCL_C23_STD], [C language flag for the C23 crypto core (default: -std=c23 if it works, else -std=gnu17)])
-AC_ARG_VAR([ZCL_C23_STD_DEFS], [feature-test macros that go with ZCL_C23_STD])
+AC_ARG_VAR([ZCL_C23_STD_DEFS], [feature-test macros that go with ZCL_C23_STD (default: -D_GNU_SOURCE)])
+if test "x${ZCL_C23_STD_DEFS+set}" != xset; then
+  ZCL_C23_STD_DEFS="-D_GNU_SOURCE"
+fi
 if test "x$ZCL_C23_STD" = x; then
   AC_CACHE_CHECK([whether $CC compiles C23 with -std=c23], [zcl_cv_cc_std_c23], [
     zcl_save_CFLAGS="$CFLAGS"
@@ -800,7 +805,6 @@ int zcl_probe_main(void)
     CFLAGS="$zcl_save_CFLAGS"])
   if test "x$zcl_cv_cc_std_c23" = xyes; then
     ZCL_C23_STD="-std=c23"
-    ZCL_C23_STD_DEFS="-D_GNU_SOURCE"
   else
     ZCL_C23_STD="-std=gnu17"
   fi
