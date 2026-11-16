@@ -1,8 +1,9 @@
-# ZClassic Wallet 2.1.2-beta10
+# ZClassic Wallet and Node 2.1.2-beta11
 
-**Desktop wallet beta10 is available for Windows, Linux and macOS.** The bundled
-daemon and standalone node remain **2.1.2-beta6**; their consensus rules and
-implementation are unchanged. The wallet source now lives in [`wallet/`](wallet/).
+**Beta11 updates both the desktop wallet and zclassicd for Windows, Linux and macOS.**
+It improves verified checkpoint downloads, block catch-up and recoverable wallet
+repair without changing consensus rules, proof checks or wallet formats.
+The wallet source lives in [wallet/](wallet/).
 
 ZClassic is an Equihash-based proof-of-work implementation of the Zerocash protocol. It offers privacy through shielded transactions using zero-knowledge proofs that preserve transaction confidentiality. Based on Bitcoin's code and derived from Zcash, ZClassic builds three main binaries: **zclassicd** (daemon), **zclassic-cli** (RPC client), and **zclassic-tx** (transaction utility).
 
@@ -12,7 +13,7 @@ ZClassic is an Equihash-based proof-of-work implementation of the Zerocash proto
 
 [ZClassic](https://zclassic.org/) implements the "Zerocash" protocol, offering far higher privacy than Bitcoin through a zero-knowledge proving scheme that preserves the confidentiality of transaction metadata. For technical details, see the [Protocol Specification](https://github.com/zcash/zips/raw/master/protocol/protocol.pdf).
 
-This software is the ZClassic client. It synchronizes the entire blockchain history to your computer.
+This software is the ZClassic client. It downloads and validates the chain, with an optional compiled-checkpoint bootstrap for fresh nodes.
 
 **Security Warning:** ZClassic is experimental and a work-in-progress. Use at your own risk. For a security issue, please [open an issue](https://github.com/ZclassicCommunity/zclassic/issues); see also the [upstream Zcash security background](https://z.cash/support/security/).
 
@@ -26,26 +27,39 @@ This software is the ZClassic client. It synchronizes the entire blockchain hist
 
 Pre-built release binaries are published on **[GitHub Releases](https://github.com/ZclassicCommunity/zclassic/releases)**. Download the bundle for your platform and verify it against the checksums published alongside it before running. If you prefer to build it yourself, see [Build from Source](#build-from-source) below.
 
-| Desktop wallet beta10 | Download |
+| Desktop wallet beta11 | Download |
 |---|---|
-| Windows x86_64, portable executable | [Windows wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta10/zclwallet-v2.1.2-beta10-win64.exe) |
-| Linux x86_64, glibc 2.31+ and X11/XCB libraries | [Linux wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta10/zclwallet-v2.1.2-beta10-linux-x86_64) |
-| macOS 15+, Apple Silicon | [macOS wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta10/zclwallet-v2.1.2-beta10-macos-arm64.dmg) |
+| Windows x86_64, portable executable | [Windows wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta11/zclwallet-v2.1.2-beta11-win64.exe) |
+| Linux x86_64, glibc 2.31+ and X11/XCB libraries | [Linux wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta11/zclwallet-v2.1.2-beta11-linux-x86_64) |
+| macOS 15+, Apple Silicon | [macOS wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta11/zclwallet-v2.1.2-beta11-macos-arm64.dmg) |
 
-Beta10 keeps node startup progress visible, preserves full balance text at large
-display scales, and shows validated blocks without a misleading sync ETA.
-It retains beta9's **Repair access and continue** action for recognized Windows folder
-permission failures, restores access for newly created files, and reports stopped
-nodes immediately with a retry action. It retains removal of the Windows GCC/Qt/pthread/OpenSSL DLL installation requirement,
-verifies cached node executables, protects local metadata with private atomic
-writes, and respects the node's existing sync-cache settings. Windows uses native
-Schannel HTTPS; Linux includes static Qt and OpenSSL. Windows is unsigned and
-macOS is ad-hoc signed, not notarized.
+Beta11 fixes snapshot service connections, retries interrupted downloads, and
+reports transfer progress between whole percentages. The existing compiled
+checkpoint at block 3,126,937 avoids replaying earlier blocks; imported state must
+match its commitment and later blocks remain validated. Z23-derived exact-state
+root caching and indexed block catch-up reduce redundant work. Wallet scanning
+avoids unnecessary copies. Rust cryptography remains linked.
 
-See the [release notes](doc/release-notes-beta10.md),
-[checksums](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta10/SHA256SUMS.txt),
-and [wallet instructions](wallet/README.md). Standalone command-line binaries
-remain in the [beta6 node release](https://github.com/ZclassicCommunity/zclassic/releases/tag/v2.1.2-beta6).
+Repair preserves private verified wallet backups and journals blockchain moves
+for interrupted-process recovery. The GUI retains readable balances at large
+display scales and validated block counts instead of a misleading sync ETA.
+Initial downloads and wallet scanning still take time; performance depends on
+your hardware, peers and network.
+
+Windows requires no separately installed GCC, GMP, MPC, ISL or Qt runtime DLLs.
+Windows binaries are unsigned and may trigger SmartScreen. Mac builds are ad-hoc
+signed, not notarized; they target macOS 15+ and were tested natively on macOS 26.
+
+| Command-line node beta11 | Download |
+|---|---|
+| Windows x86_64 | [Windows node ZIP](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta11/zclassicd-v2.1.2-beta11-win64.zip) |
+| Linux x86_64, glibc 2.31+ | [Linux node archive](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta11/zclassicd-v2.1.2-beta11-linux-x86_64.tar.gz) |
+| macOS 15+, Apple Silicon | [Mac node archive](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta11/zclassicd-v2.1.2-beta11-macos-arm64.tar.gz) |
+
+See the [release notes](doc/release-notes-beta11.md),
+[checksums](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta11/SHA256SUMS.txt),
+and [wallet instructions](wallet/README.md). Each node archive contains
+`zclassicd`, `zclassic-cli` and `zclassic-tx`.
 Back up your wallet before upgrading; do not delete or reindex your data directory.
 
 ---
@@ -97,7 +111,7 @@ Before running `zclassicd`, obtain the ZCash proving parameters (~1.6 GB):
 
 ### Default: Auto Fast-Sync (Recommended for Fresh Nodes)
 
-On a fresh data directory, the node automatically fast-syncs from a compiled-in default bootstrap peer over parallel streams (4 by default). The downloaded snapshot's tip is verified against a compiled fast-sync anchor commitment, and every block after the anchor is forward-validated. This existing snapshot mode relies on that anchor; it is not full historical validation. Sync time depends on peers, hardware and network conditions. Beta10 introduces no MMB snapshot mode or measured full-chain speedup.
+On a fresh data directory, the node automatically fast-syncs from a compiled-in default bootstrap peer over parallel streams (4 by default). The downloaded snapshot's tip is verified against a compiled fast-sync anchor commitment, and every block after the anchor is forward-validated. This existing snapshot mode relies on that anchor; it is not full historical validation. Sync time depends on peers, hardware and network conditions. Beta11 improves this existing checkpoint path; it does not remove the checkpoint trust assumption or guarantee a sync time.
 
 ```bash
 ./src/zclassicd
