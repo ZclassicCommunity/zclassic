@@ -4,7 +4,7 @@ name: Continuous Integration
 # runs for the same commit. Group them so only the latest commit's run survives;
 # superseded runs are cancelled instead of piling up in the queue.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 on:
@@ -95,19 +95,21 @@ jobs:
 
       - name: Build Zclassic
         run: |
-           bash zcutil/build-linux-ci.sh ${{ matrix.goal }} || ( echo "Build failure. Verbose build follows." && make ${{ matrix.goal }} V=1 ; false )
+          # Reuse the debug depends configuration above and build tests once.
+          # The legacy packaging wrapper ignored MAKEJOBS, disabled tests,
+          # and rebuilt depends in release mode before a second test build.
+          DEBUG=1 CONFIGURE_FLAGS="--enable-tests --disable-man" ./zcutil/build.sh $MAKEJOBS
       - name: Upload artifacts
-        # Root parity must pass against the original C++ witness calculation.
-        # The release build script above deliberately disables tests.
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: Zclassic-Wallet-${{ github.sha }}-${{ matrix.name }}
           path: |
-            depends/bin/*
+            src/zclassicd
+            src/zclassic-cli
+            src/zclassic-tx
       - name: Build and run shielded tree parity tests
         run: |
-          CONFIGURE_FLAGS="--enable-tests --disable-man" ./zcutil/build.sh -j3
           ./zcutil/fetch-params.sh
           ./src/zcash-gtest --gtest_filter='merkletree.*:WalletTests.*'
       - name: Upload tree test binary
