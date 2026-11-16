@@ -1,7 +1,6 @@
-# ZClassic Wallet 2.1.2-beta10 candidate
+# ZClassic Wallet 2.1.2-beta10
 
-Beta10 fixes startup feedback and text clipping observed in beta9. It is a
-candidate until all platform builds and release verification finish.
+Beta10 fixes startup feedback and text clipping observed in beta9. Windows, Linux and macOS builds have passed release verification.
 
 - Show the node's actual startup progress in the main window, including block
   index loading. Routine RPC polling no longer replaces that progress with
@@ -35,3 +34,5 @@ optimization.
 
 Windows signing and macOS notarization remain separate release requirements;
 this update does not bypass operating-system security prompts.
+
+Platform requirements: Windows x86_64 (unsigned); Linux x86_64 with glibc 2.31+ and system X11/XCB libraries; macOS 15+ Apple Silicon (ad-hoc signed, not notarized). Linux/macOS native CI and release gates passed. See SHA256SUMS.txt for download checksums.
