@@ -14,7 +14,7 @@ if [ "${SAN:-0}" = 1 ]; then
 fi
 # shellcheck disable=SC2086
 $CC $FLAGS -o "$OUT" \
-    "$here/zcl_tor_selftest.c" "$here/zcl_tor_embed.c" "$here/zcl_tor_dispatch.c" \
+    "$here/zcl_tor_selftest.c" "$here/zcl_tor_embed.c" "$here/zcl_tor_dispatch.c" "$here/zcl_tor_inproc.c" \
     "$here/zcl_tor_proc_posix.c" "$here/keyfile.c" \
     -L"$DEPS/lib" -ltor -led25519_donna -led25519_ref10 -lkeccak-tiny \
     -levent_pthreads -levent -lssl -lcrypto -lz -lm -lpthread -ldl

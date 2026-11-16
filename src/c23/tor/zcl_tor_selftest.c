@@ -6,7 +6,8 @@
  *   zcl_tor_selftest offline    DisableNetwork runs, no network is touched
  *   zcl_tor_selftest orphan     kill -9 the parent, the Tor child must exit
  *   zcl_tor_selftest online     bootstrap, publish an onion service, reach it
- *   zcl_tor_selftest all        offline + orphan (not online)
+ *   zcl_tor_selftest inproc     Tor on a thread of this process (DisableNetwork)
+ *   zcl_tor_selftest all        offline + orphan + inproc (not online)
  *
  * All state lives in a fresh temporary directory that is removed at the end.
  * The binary is its own Tor child (zcl_tor_embed_dispatch runs first). */
@@ -855,6 +856,153 @@ static int run_online(const char *tmp)
     return 0;
 }
 
+/* ------------------------------------------------------------- in-process */
+
+/* Open descriptors of this process. Eventfds are counted apart: Tor leaves
+ * one open per tor_run_main (its own leak, see README.md, In-process mode). */
+static int count_fds(int *eventfds)
+{
+    DIR *d = opendir("/proc/self/fd");
+    struct dirent *e;
+    int n = 0, ev = 0;
+    if (!d)
+        return -1;
+    while ((e = readdir(d)) != NULL) {
+        char p[300], t[128];
+        ssize_t k;
+        if (e->d_name[0] == '.')
+            continue;
+        (void)snprintf(p, sizeof(p), "/proc/self/fd/%s", e->d_name);
+        k = readlink(p, t, sizeof(t) - 1);
+        t[k > 0 ? k : 0] = '\0';
+        if (strcmp(t, "anon_inode:[eventfd]") == 0)
+            ev++;
+        else
+            n++;
+    }
+    (void)closedir(d);
+    if (eventfds)
+        *eventfds = ev;
+    return n - 1; /* minus the directory stream itself */
+}
+
+static void list_fds(void)
+{
+    DIR *d = opendir("/proc/self/fd");
+    struct dirent *e;
+    if (!d)
+        return;
+    while ((e = readdir(d)) != NULL) {
+        char p[300], t[512];
+        ssize_t n;
+        if (e->d_name[0] == '.')
+            continue;
+        (void)snprintf(p, sizeof(p), "/proc/self/fd/%s", e->d_name);
+        n = readlink(p, t, sizeof(t) - 1);
+        if (n > 0) {
+            t[n] = 0;
+            (void)printf("  fd %s -> %s\n", e->d_name, t);
+        }
+    }
+    (void)closedir(d);
+}
+
+static int count_threads(void)
+{
+    DIR *d = opendir("/proc/self/task");
+    struct dirent *e;
+    int n = 0;
+    if (!d)
+        return -1;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] != '.')
+            n++;
+    }
+    (void)closedir(d);
+    return n;
+}
+
+/* Tor on a thread of this process: start, control, onion service, stop; no
+ * leaked descriptors or threads; a second start after stop works. */
+static int run_inproc(const char *tmp)
+{
+    char dd[1100], err[256] = "", reply[8192], id[128], t[1300];
+    int round, ev0 = 0, fd0 = count_fds(&ev0), th0 = count_threads();
+
+    (void)printf("== inproc ==\n");
+    (void)snprintf(dd, sizeof(dd), "%s/inproc node", tmp); /* space in the path */
+    (void)mkdir(dd, 0755);
+    for (round = 0; round < 2; round++) {
+        zcl_tor_embed *h = NULL, *h2 = NULL;
+        zcl_tor_embed_opts o;
+        const zcl_tor_embed_info *info;
+        zcl_tor_sock c;
+        struct sigaction sa;
+        uint64_t t0 = zcl_tor_now_ms();
+        int rc;
+
+        memset(&o, 0, sizeof(o));
+        o.datadir = dd;
+        o.disable_network = true;
+        o.in_process = true;
+        rc = zcl_tor_embed_start(&o, &h, err, sizeof(err));
+        check(rc == 0 && h, "round %d: in-process start (rc=%d %s) in %llu ms", round, rc, err,
+              (unsigned long long)(zcl_tor_now_ms() - t0));
+        if (rc != 0 || !h)
+            return 1;
+        info = zcl_tor_embed_info_get(h);
+        check(info->pid == 0 && info->control_port > 0 && zcl_tor_embed_alive(h),
+              "round %d: no child pid, control_port=%u, alive", round,
+              (unsigned)info->control_port);
+        check(count_threads() > th0, "round %d: Tor runs on threads of this process (%d -> %d)",
+              round, th0, count_threads());
+        check(file_mode_is(info->cookie_path, 0600) && file_mode_is(info->tor_dir, 0700),
+              "round %d: cookie 0600, tor dir 0700", round);
+        (void)snprintf(t, sizeof(t), "%s/tor.log", info->tor_dir);
+        check(access(t, R_OK) == 0, "round %d: notice log is a file in the tor dir (path with a space)", round);
+        /* Tor must not have taken the process's signal handlers. */
+        check(sigaction(SIGTERM, NULL, &sa) == 0 && sa.sa_handler == SIG_DFL &&
+                  sigaction(SIGINT, NULL, &sa) == 0 && sa.sa_handler == SIG_DFL &&
+                  sigaction(SIGHUP, NULL, &sa) == 0 && sa.sa_handler == SIG_DFL,
+              "round %d: SIGTERM/SIGINT/SIGHUP handlers untouched", round);
+        rc = zcl_tor_embed_start(&o, &h2, err, sizeof(err));
+        check(rc != 0 && !h2, "round %d: a second in-process Tor is refused (%s)", round, err);
+        rc = zcl_tor_control_open(h, &c, err, sizeof(err));
+        check(rc == 0, "round %d: control cookie authentication (%s)", round, err);
+        if (rc == 0) {
+            rc = zcl_tor_control_cmd(c, "GETINFO version", reply, sizeof(reply), 5000);
+            check(rc == 0 && strstr(reply, "version=0.4"), "round %d: GETINFO version -> %.40s", round, reply);
+            rc = zcl_tor_control_cmd(c, "ADD_ONION NEW:ED25519-V3 Port=8333,127.0.0.1:8333", reply,
+                                     sizeof(reply), 20000);
+            id[0] = '\0';
+            if (rc == 0)
+                (void)extract_value(reply, "ServiceID=", id, sizeof(id));
+            check(rc == 0 && strlen(id) == 56, "round %d: ADD_ONION returned a %zu-character service id",
+                  round, strlen(id));
+            zcl_tor_control_close(c);
+        }
+        t0 = zcl_tor_now_ms();
+        rc = zcl_tor_embed_stop(h, 15000);
+        check(rc == 0 && !zcl_tor_embed_alive(h), "round %d: stop joined the Tor thread in %llu ms (rc=%d)",
+              round, (unsigned long long)(zcl_tor_now_ms() - t0), rc);
+        zcl_tor_embed_free(h);
+        zcl_tor_sleep_ms(200);
+        {
+            int ev = 0, fds = count_fds(&ev);
+            check(fds == fd0,
+                  "round %d: no leaked sockets, files or pipes (%d before, %d after)", round, fd0, fds);
+            check(ev - ev0 <= round + 1,
+                  "round %d: at most one eventfd left open per Tor run (%d left by %d run(s))", round,
+                  ev - ev0, round + 1);
+            if (fds != fd0)
+                list_fds();
+        }
+        check(count_threads() == th0, "round %d: no leaked threads (%d before, %d after)", round, th0,
+              count_threads());
+    }
+    return 0;
+}
+
 /* ------------------------------------------------------------------- main */
 
 int main(int argc, char **argv)
@@ -885,10 +1033,13 @@ int main(int argc, char **argv)
         rc |= run_offline(tmp);
     if (strcmp(mode, "orphan") == 0 || strcmp(mode, "all") == 0)
         rc |= run_orphan(tmp, self);
+    if (strcmp(mode, "inproc") == 0 || strcmp(mode, "all") == 0)
+        rc |= run_inproc(tmp);
     if (strcmp(mode, "online") == 0)
         rc |= run_online(tmp);
-    if (strcmp(mode, "offline") && strcmp(mode, "all") && strcmp(mode, "orphan") && strcmp(mode, "online")) {
-        (void)fprintf(stderr, "usage: %s [offline|orphan|online|all]\n", argv[0]);
+    if (strcmp(mode, "offline") && strcmp(mode, "all") && strcmp(mode, "orphan") && strcmp(mode, "online") &&
+        strcmp(mode, "inproc")) {
+        (void)fprintf(stderr, "usage: %s [offline|orphan|inproc|online|all]\n", argv[0]);
         rm_rf(tmp, "zcltor-selftest.");
         return 2;
     }

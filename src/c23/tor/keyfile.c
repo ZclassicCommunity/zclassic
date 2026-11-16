@@ -175,7 +175,7 @@ int zcl_keyfile_read(const char *path, void *buf, size_t cap, size_t *len,
 {
     unsigned char *b = (unsigned char *)buf;
     size_t off = 0;
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); /* a secret file is never a symlink */
     if (fd < 0) {
         kf_err(err, errsz, "keyfile read: open %s: %s", path, strerror(errno));
         return -1;

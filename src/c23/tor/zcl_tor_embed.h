@@ -40,10 +40,15 @@ typedef struct {
     /* How long start() waits for the control port (and, with the network
      * enabled, the Socks listener). 0 means 30000. */
     unsigned start_timeout_ms;
+    /* Run Tor on a thread of this process (tor_run_main) instead of as a
+     * child process. No process boundary: Tor shares the heap, OpenSSL and
+     * libevent of the caller, and a Tor assertion aborts the caller. At most
+     * one in-process Tor per process. `exe_path` is ignored. */
+    bool in_process;
 } zcl_tor_embed_opts;
 
 typedef struct {
-    long pid;                 /* child process id */
+    long pid;                 /* child process id; 0 in in-process mode */
     uint16_t socks_port;      /* 127.0.0.1 Socks port; 0 when disable_network */
     uint16_t control_port;    /* 127.0.0.1 control port */
     char cookie_path[1024];   /* control_auth_cookie, mode 0600 */

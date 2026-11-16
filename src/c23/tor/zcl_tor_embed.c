@@ -10,6 +10,7 @@
 
 #include "zcl_tor_embed.h"
 #include "keyfile.h"
+#include "zcl_tor_inproc.h"
 #include "zcl_tor_proc.h"
 
 #include <errno.h>
@@ -40,6 +41,7 @@
 
 struct zcl_tor_embed {
     struct zcl_tor_proc proc;
+    struct zcl_tor_inproc *inproc; /* non-NULL in in-process mode */
     zcl_tor_embed_info info;
     bool disable_network;
     bool stopped;
@@ -116,11 +118,11 @@ static bool torrc_line(char *out, size_t cap, size_t *len, const char *key,
  * tor_config_log.c): loopback SocksPort, DataDirectory, notice log to a
  * file, Schedulers KISTLite,Vanilla, optional DisableNetwork. Differences:
  * both listeners use auto ports (the control port is read back from
- * ControlPortWriteToFile), cookie authentication is on, and the signal
- * handlers stay on because Tor is its own process here. */
+ * ControlPortWriteToFile), cookie authentication is on, and in child mode the
+ * signal handlers stay on because Tor is its own process there. */
 static int build_torrc(char *out, size_t cap, const char *tor_dir,
                        const char *cookie, const char *ctlfile,
-                       bool disable_network)
+                       bool disable_network, const char *inproc_log)
 {
     size_t n = 0;
     int w;
@@ -135,12 +137,33 @@ static int build_torrc(char *out, size_t cap, const char *tor_dir,
                  "ClientOnly 1\n"
                  "ExitRelay 0\n"
                  "Schedulers KISTLite,Vanilla\n"
-                 /* Tor splits "Log ... file <path>" on spaces and does not
-                  * unquote it, so a datadir with a space cannot be a log
-                  * path. Tor's stdout is the tor-child.log the process layer
-                  * opened, so the notice log lands there. */
-                 "Log notice stdout\n"
                  "SafeLogging 1\n");
+    if (w < 0 || (size_t)w >= cap - n)
+        return -1;
+    n += (size_t)w;
+    /* Log level: notice, except the APP domain at warn. The pinned Tor fork
+     * logs one notice line per DATA cell a stream receives (src/core/or/
+     * relay.c, "DATA cell received for stream ..."), in the APP domain: at
+     * notice a block download would write about a quarter of its size to the
+     * log. */
+#define ZCL_TOR_LOG_LEVELS "[app]warn [~app]notice"
+    if (inproc_log) {
+        /* In-process: stdout belongs to the daemon, so the log goes to a
+         * file. The whole value is one quoted string ("... file <path>"),
+         * which keeps spaces and '#' in the path intact. Signal handlers stay
+         * with the daemon. */
+        char val[PATHCAP + 64];
+        w = snprintf(val, sizeof(val), ZCL_TOR_LOG_LEVELS " file %s", inproc_log);
+        if (w < 0 || (size_t)w >= sizeof(val) ||
+            !torrc_line(out, cap, &n, "Log", val))
+            return -1;
+        w = snprintf(out + n, cap - n, "__DisableSignalHandlers 1\n");
+    } else {
+        /* Child: Tor's stdout is the tor-child.log the process layer opened,
+         * so the log lands there. */
+        w = snprintf(out + n, cap - n, "Log " ZCL_TOR_LOG_LEVELS " stdout\n");
+    }
+#undef ZCL_TOR_LOG_LEVELS
     if (w < 0 || (size_t)w >= cap - n)
         return -1;
     n += (size_t)w;
@@ -387,8 +410,44 @@ static int join(char *out, size_t cap, const char *a, const char *b)
     return (n > 0 && (size_t)n < cap) ? 0 : -1;
 }
 
+static bool tor_alive(zcl_tor_embed *h)
+{
+    return h->inproc ? zcl_tor_inproc_alive(h->inproc)
+                     : zcl_tor_proc_alive(&h->proc);
+}
+
+/* Ask a running Tor to stop through its control port. */
+static void control_halt(zcl_tor_embed *h)
+{
+    zcl_tor_sock c;
+    if (h->info.control_port != 0 && zcl_tor_control_open(h, &c, NULL, 0) == 0) {
+        char reply[256];
+        (void)zcl_tor_control_cmd(c, "SIGNAL HALT", reply, sizeof(reply), 1000);
+        zcl_tor_control_close(c);
+    }
+}
+
+/* Stop an in-process Tor. A thread cannot be killed, so on timeout the
+ * (small) state stays allocated and false is returned. */
+static bool inproc_stop(zcl_tor_embed *h, unsigned timeout_ms)
+{
+    if (zcl_tor_inproc_alive(h->inproc))
+        control_halt(h);
+    zcl_tor_inproc_release_owner(h->inproc);
+    if (!zcl_tor_inproc_wait(h->inproc, timeout_ms))
+        return false;
+    zcl_tor_inproc_close(h->inproc);
+    h->inproc = NULL;
+    return true;
+}
+
 static void fail_cleanup(zcl_tor_embed *h)
 {
+    if (h->inproc) {
+        if (inproc_stop(h, 10000))
+            free(h);
+        return;
+    }
     if (h->proc.pid != 0
 #ifdef _WIN32
         || h->proc.process
@@ -424,6 +483,13 @@ int zcl_tor_embed_start(const zcl_tor_embed_opts *opts, zcl_tor_embed **out,
         seterr(err, errsz, "tor embed: datadir path too long");
         return -1;
     }
+    /* Before any file is touched: a second in-process start must not remove
+     * the cookie and control-port file of the instance that is running. */
+    if (opts->in_process && zcl_tor_inproc_busy()) {
+        seterr(err, errsz, "tor embed: an in-process Tor is already running in this "
+                           "process");
+        return -1;
+    }
     h = (zcl_tor_embed *)calloc(1, sizeof(*h));
     if (!h) {
         seterr(err, errsz, "tor embed: out of memory");
@@ -456,8 +522,15 @@ int zcl_tor_embed_start(const zcl_tor_embed_opts *opts, zcl_tor_embed **out,
         free(h);
         return -1;
     }
+    if (opts->in_process &&
+        join(stdlog, sizeof(stdlog), h->info.tor_dir, "tor.log") != 0) {
+        seterr(err, errsz, "tor embed: path too long");
+        free(h);
+        return -1;
+    }
     if (build_torrc(body, sizeof(body), h->info.tor_dir, h->info.cookie_path,
-                    h->control_file, h->disable_network) != 0) {
+                    h->control_file, h->disable_network,
+                    opts->in_process ? stdlog : NULL) != 0) {
         seterr(err, errsz, "tor embed: torrc does not fit or the path has a control "
                            "character");
         free(h);
@@ -469,33 +542,37 @@ int zcl_tor_embed_start(const zcl_tor_embed_opts *opts, zcl_tor_embed **out,
         free(h);
         return -1;
     }
-    if (opts->exe_path && opts->exe_path[0]) {
-        if (strlen(opts->exe_path) >= sizeof(exe)) {
-            seterr(err, errsz, "tor embed: exe_path too long");
-            free(h);
-            return -1;
-        }
-        memcpy(exe, opts->exe_path, strlen(opts->exe_path) + 1);
-    } else if (zcl_tor_proc_self_exe(exe, sizeof(exe)) != 0) {
-        seterr(err, errsz, "tor embed: cannot locate this binary; set exe_path");
-        free(h);
-        return -1;
-    }
-
     args[0] = "-f";
     args[1] = torrc;
     args[2] = "--defaults-torrc";
     args[3] = defaults;
-    if (zcl_tor_proc_spawn(&h->proc, exe, args, 4, stdlog, e2, sizeof(e2)) != 0) {
-        seterr(err, errsz, "tor embed: %s", e2);
-        free(h);
-        return -1;
+    if (opts->in_process) {
+        if (zcl_tor_inproc_start(&h->inproc, args, 4, e2, sizeof(e2)) != 0) {
+            seterr(err, errsz, "tor embed: %s", e2);
+            free(h);
+            return -1;
+        }
+        h->info.pid = 0;
+    } else {
+        if (opts->exe_path && opts->exe_path[0]) {
+            if (strlen(opts->exe_path) >= sizeof(exe)) {
+                seterr(err, errsz, "tor embed: exe_path too long");
+                free(h);
+                return -1;
+            }
+            memcpy(exe, opts->exe_path, strlen(opts->exe_path) + 1);
+        } else if (zcl_tor_proc_self_exe(exe, sizeof(exe)) != 0) {
+            seterr(err, errsz, "tor embed: cannot locate this binary; set exe_path");
+            free(h);
+            return -1;
+        }
+        if (zcl_tor_proc_spawn(&h->proc, exe, args, 4, stdlog, e2, sizeof(e2)) != 0) {
+            seterr(err, errsz, "tor embed: %s", e2);
+            free(h);
+            return -1;
+        }
+        h->info.pid = (long)h->proc.pid;
     }
-#ifdef _WIN32
-    h->info.pid = (long)h->proc.pid;
-#else
-    h->info.pid = (long)h->proc.pid;
-#endif
 
     t0 = zcl_tor_now_ms();
     end = t0 + tmo;
@@ -504,8 +581,8 @@ int zcl_tor_embed_start(const zcl_tor_embed_opts *opts, zcl_tor_embed **out,
         char buf[128];
         size_t got = 0;
         uint16_t port = 0;
-        if (!zcl_tor_proc_alive(&h->proc)) {
-            seterr(err, errsz, "tor embed: Tor child exited during startup (see %s)",
+        if (!tor_alive(h)) {
+            seterr(err, errsz, "tor embed: Tor exited during startup (see %s)",
                    stdlog);
             fail_cleanup(h);
             return -1;
@@ -550,8 +627,8 @@ int zcl_tor_embed_start(const zcl_tor_embed_opts *opts, zcl_tor_embed **out,
             }
             zcl_tor_control_close(c);
         }
-        if (!zcl_tor_proc_alive(&h->proc)) {
-            seterr(err, errsz, "tor embed: Tor child exited during startup");
+        if (!tor_alive(h)) {
+            seterr(err, errsz, "tor embed: Tor exited during startup");
             fail_cleanup(h);
             return -1;
         }
@@ -574,7 +651,7 @@ const zcl_tor_embed_info *zcl_tor_embed_info_get(const zcl_tor_embed *h)
 
 bool zcl_tor_embed_alive(zcl_tor_embed *h)
 {
-    return h && !h->stopped && zcl_tor_proc_alive(&h->proc);
+    return h && !h->stopped && tor_alive(h);
 }
 
 int zcl_tor_embed_wait_bootstrap(zcl_tor_embed *h, unsigned timeout_ms,
@@ -595,8 +672,8 @@ int zcl_tor_embed_wait_bootstrap(zcl_tor_embed *h, unsigned timeout_ms,
     }
     for (;;) {
         zcl_tor_sock c;
-        if (!zcl_tor_proc_alive(&h->proc)) {
-            seterr(err, errsz, "tor embed: Tor child exited (last progress %d)", last);
+        if (!tor_alive(h)) {
+            seterr(err, errsz, "tor embed: Tor exited (last progress %d)", last);
             return -1;
         }
         if (zcl_tor_control_open(h, &c, e2, sizeof(e2)) == 0) {
@@ -636,6 +713,12 @@ int zcl_tor_embed_stop(zcl_tor_embed *h, unsigned timeout_ms)
         timeout_ms = 10000;
     t1 = timeout_ms * 4 / 10;
     t2 = timeout_ms * 3 / 10;
+    if (h->inproc) {
+        if (!inproc_stop(h, timeout_ms))
+            return -1;
+        h->stopped = true;
+        return 0;
+    }
     if (zcl_tor_proc_alive(&h->proc)) {
         zcl_tor_sock c;
         /* Graceful: SIGNAL HALT over the control port, then drop the owner

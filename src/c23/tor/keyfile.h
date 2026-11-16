@@ -30,7 +30,8 @@ int zcl_keyfile_write(const char *path, const void *data, size_t len,
  * owned by the caller, chmod/ACL failure). Never follows a symlink on POSIX. */
 int zcl_keyfile_tighten(const char *path, char *err, size_t errsz);
 
-/* Read a whole file of at most `cap` bytes into `buf`. Fails if larger. */
+/* Read a whole file of at most `cap` bytes into `buf`. Fails if larger.
+ * Never follows a symlink on POSIX. */
 int zcl_keyfile_read(const char *path, void *buf, size_t cap, size_t *len,
                      char *err, size_t errsz);
 
