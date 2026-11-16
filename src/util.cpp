@@ -10,6 +10,7 @@
 #include "util.h"
 
 #include "chainparamsbase.h"
+#include "crypto/sha256.h"
 #include "random.h"
 #include "serialize.h"
 #include "sync.h"
@@ -18,6 +19,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <memory>
 
 #if (defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__DragonFly__))
 #include <pthread.h>
@@ -682,6 +684,37 @@ bool TryCreateDirectory(const boost::filesystem::path& p)
 
     // create_directory didn't create the directory, it had to have existed already
     return false;
+}
+
+bool HashFileSHA256(const boost::filesystem::path& path, std::string& digest, std::string& error)
+{
+    digest.clear();
+    error.clear();
+    // Bounded memory and large reads also avoid excessive proot syscall overhead.
+    std::vector<unsigned char> buffer(256 * 1024);
+    std::unique_ptr<FILE, decltype(&fclose)> file(fopen(path.string().c_str(), "rb"), &fclose);
+    if (!file) {
+        error = strprintf("Cannot open file for hashing: %s", path.string());
+        return false;
+    }
+    CSHA256 hasher;
+    for (;;) {
+        const size_t count = fread(buffer.data(), 1, buffer.size(), file.get());
+        if (count != 0) hasher.Write(buffer.data(), count);
+        if (count == buffer.size()) continue;
+        // feof alone does not detect read errors: retrying a failed stream can spin.
+        if (ferror(file.get())) {
+            error = strprintf("Error reading file for hashing: %s", path.string());
+            return false;
+        }
+        if (feof(file.get())) break;
+        error = strprintf("Incomplete read while hashing file: %s", path.string());
+        return false;
+    }
+    unsigned char hash[CSHA256::OUTPUT_SIZE];
+    hasher.Finalize(hash);
+    digest = HexStr(hash, hash + sizeof(hash));
+    return true;
 }
 
 void FileCommit(FILE *fileout)

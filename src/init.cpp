@@ -737,14 +737,10 @@ void ThreadNotifyRecentlyAdded()
 
 static bool check_file_hash(const std::string& path, const std::string& hash)
 {
-    FILE* file = fopen(path.c_str(), "rb");
-    if (!file){
-        LogPrintf("Cannot open file: %s\n", path);
-        uiInterface.ThreadSafeMessageBox(strprintf(
-            _("Cannot open file:\n"
-              "%s\n"),
-                path),
-            "", CClientUIInterface::MSG_ERROR);
+    std::string buff_hash, error;
+    if (!HashFileSHA256(path, buff_hash, error)) {
+        LogPrintf("%s\n", error);
+        uiInterface.ThreadSafeMessageBox(error, "", CClientUIInterface::MSG_ERROR);
         // NB: do NOT StartShutdown() here. check_file_hash() runs inside the
         // self-heal loop in InitSanityCheck(); returning false lets that loop
         // re-fetch the param from a bootstrap peer and re-verify. The caller
@@ -753,22 +749,6 @@ static bool check_file_hash(const std::string& path, const std::string& hash)
         // node would exit even after a successful self-heal (heals-then-exits).
         return false;
     }
-    // Hash in large blocks rather than 1 KiB at a time. The param files total
-    // ~1.69 GB; a 1024-byte buffer issues ~1.65M read() syscalls, each of which
-    // is ptrace-intercepted under proot, dominating cold start. A 256 KiB block
-    // feeds the SAME bytes in the SAME order to the SAME incremental SHA-256, so
-    // the resulting hash and the verification semantics are byte-for-byte
-    // identical; only the disk buffering changes. Heap-allocated to keep the
-    // stack small.
-    static const size_t kHashReadBufSize = 256 * 1024;
-    std::vector<char> buffer(kHashReadBufSize);
-    size_t size;
-    SHA256 buff;
-    while (!feof(file)){
-        size = fread(buffer.data(), 1, kHashReadBufSize, file);
-        buff.update(buffer.data(), size);
-    }
-    std::string buff_hash = buff.hash();
     LogPrintf("%s: %s\n", path, buff_hash);
     if(buff_hash != hash){
         uiInterface.ThreadSafeMessageBox(strprintf(
@@ -776,13 +756,11 @@ static bool check_file_hash(const std::string& path, const std::string& hash)
               "%s\n\n expecting:\n%s\n"),
                 path, buff_hash, hash),
             "", CClientUIInterface::MSG_ERROR);
-        // See the note in the fopen branch above: the caller (InitSanityCheck's
+        // See the failure path above: the caller (InitSanityCheck's
         // self-heal loop) owns the abort decision, so a corrupted-but-healable
         // param re-fetches and re-verifies instead of latching shutdown here.
-        fclose(file);
         return false;
     }
-    fclose(file);
     return true;
 }
 

@@ -48,6 +48,12 @@ Failed initialization also interrupts and joins worker threads before destroying
 the scheduler and shared state. Isolated Windows and Linux startup-failure tests
 exercise this teardown, including failure after workers have started.
 
+Parameter-file integrity checks now reuse the backend's existing SHA-256
+implementation, retaining the same mandatory digests and bounded read buffers.
+Read errors fail verification instead of repeatedly reading a failed stream.
+Boundary-vector and read-error tests cover this file-hashing path; block, proof
+and transaction hashing are unchanged.
+
 Default snapshot endpoints now explicitly use port 8035, where the project's
 legacy snapshot services run. Previously they used port 8033, whose ordinary
 P2P nodes do not provide this snapshot protocol. Normal block synchronization
