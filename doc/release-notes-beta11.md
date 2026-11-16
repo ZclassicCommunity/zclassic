@@ -27,6 +27,12 @@ parallel transfer fails. The existing compiled checkpoint at height 3,126,937
 and full imported-chainstate commitment check remain mandatory. Initial chain
 replay honors shutdown requests between completed validation batches.
 
+Blockchain re-download repair now preserves earlier backups and uses a unique
+backup directory for each attempt. Failed moves restore what they can and retain
+any data that cannot be restored, with the recovery paths shown in the error.
+Repair stops instead of restarting the node when a move fails. Older backups
+are no longer deleted automatically; they continue to occupy disk space.
+
 Isolated Windows and Linux tests have imported and verified the full state at
 that checkpoint and continued ordinary block validation above it. This does
 not yet provide automatic migration of an existing partially synced wallet.

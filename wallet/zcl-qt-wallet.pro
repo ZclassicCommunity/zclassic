@@ -82,6 +82,7 @@ HEADERS += \
     src/securerandom.h \
     src/privatefile.h \
     src/configfile.h \
+    src/chainbackup.h \
     src/startupaccess.h \
     src/mainwindow.h \
     src/precompiled.h \

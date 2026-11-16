@@ -1,6 +1,7 @@
 #include "connection.h"
 #include "embeddeddaemon.h"
 #include "configfile.h"
+#include "chainbackup.h"
 #include "startupaccess.h"
 #include <QThread>
 #include "mainwindow.h"
@@ -1397,24 +1398,10 @@ void ConnectionLoader::relaunchForRepair(const QStringList& extraArgs) {
     QTimer::singleShot(1000, [=]() { doAutoConnect(); });
 }
 
-// A GENUINE re-download (unlike -reindex, which rebuilds from the same possibly
-// corrupt local blk files): set the local blocks/ and chainstate/ aside into ONE
-// timestamped parent dir, then start the node normally so that — seeing an empty
-// datadir — it re-runs its automatic bootstrap-snapshot flow and fetches a fresh
-// chain. (Verified: the shipped daemon auto-bootstraps on an empty/eligible datadir
-// with NO flag — -bootstrap defaults to true and -bootstrapmode defaults to
-// "anchor" — so a plain start is correct here.) The move is rollback-safe: if any
-// directory fails to move, every prior move is undone and the datadir is left
-// exactly as found. Disk growth from the set-aside copy is bounded to ONE
-// generation: a prior set-aside dir is swept before this one is created, so a
-// repeated re-download never accumulates. The single "chain-set-aside-*" parent
-// stays in the datadir (renaming within it is instant and recoverable); the user
-// can delete it later to reclaim disk space, and the next re-download sweeps it.
-//
-// This only ever runs from offerCorruptionRepair <- handleStartupFailure, i.e. the
-// node process is ALREADY DEAD, so there are no open file handles on these dirs.
+// Preserve the previous blockchain in a unique backup before downloading again.
+// A failed move or rollback must never delete the only recoverable copy.
 void ConnectionLoader::redownloadChain() {
-    main->logger->write("redownloadChain: wiping local chain data for fresh re-download");
+    main->logger->write("redownloadChain: preserving local chain data for fresh re-download");
 
     // SAFETY GATE: never move blocks/chainstate while a daemon could still hold them
     // open. Positively confirm the node is dead first; if we can't, ABORT untouched.
@@ -1436,16 +1423,6 @@ void ConnectionLoader::redownloadChain() {
     }
 
     QDir dd = resolveDataSubdir();
-    QString stamp = QDateTime::currentDateTime().toString("yyyyMMdd-hhmmss");
-
-    // Bound disk growth to one generation: sweep any set-aside dirs left over from a
-    // previous re-download before creating this one. (The node is dead, so nothing
-    // holds these.) Doing this first also reclaims that space ahead of the disk check.
-    for (const QString& entry : dd.entryList(QStringList() << "chain-set-aside-*",
-                                             QDir::Dirs | QDir::NoDotAndDotDot)) {
-        QDir(dd.filePath(entry)).removeRecursively();
-    }
-
     // A re-download fetches a FRESH full chain that must briefly coexist on disk with
     // the set-aside old copy (the set-aside is just a rename, so it keeps occupying
     // its original space). On the near-full disk that often CAUSED the corruption,
@@ -1467,35 +1444,15 @@ void ConnectionLoader::redownloadChain() {
         }
     }
 
-    // Set aside blocks/ and chainstate/ into ONE parent rather than deleting them, so
-    // the move is instant and fully recoverable. If any rename fails, roll back every
-    // move already done and remove the parent, leaving the datadir exactly as found.
-    QString aside = "chain-set-aside-" + stamp;
-    dd.mkpath(aside);
-
-    QStringList moved;   // names successfully moved INTO 'aside', for rollback
-    bool moveFailed = false;
-    for (const QString& name : { QStringLiteral("blocks"), QStringLiteral("chainstate") }) {
-        if (dd.exists(name)) {
-            if (!dd.rename(name, aside + "/" + name)) {
-                moveFailed = true;
-                break;
-            }
-            moved << name;
-        }
-    }
-    if (moveFailed) {
-        main->logger->write("redownloadChain: a set-aside move failed; rolling back");
-        // Undo every move already done, then drop the (now-partial) parent.
-        for (const QString& done : moved)
-            dd.rename(aside + "/" + done, done);
-        QDir(dd.filePath(aside)).removeRecursively();
-        this->showError(QObject::tr("ZClassic couldn't move the old blockchain data aside.\n\n"
-            "Please make sure you have free disk space and that no other copy of "
-            "ZClassic is running, then try again. Your wallet and coins are safe."));
+    const auto backup = ChainBackup::setAside(dd);
+    if (!backup.success) {
+        main->logger->write("redownloadChain: " + backup.error);
+        this->showError(QObject::tr("ZClassic couldn't safely set aside the blockchain. "
+            "The node has not been restarted. No blockchain backups were deleted.\n\n%1")
+            .arg(backup.error));
         return;
     }
-
+    const QString aside = QFileInfo(backup.path).fileName();
     // Count this repair attempt (persisted per install), matching relaunchForRepair.
     QSettings().setValue("repair/attempts", QSettings().value("repair/attempts", 0).toInt() + 1);
 

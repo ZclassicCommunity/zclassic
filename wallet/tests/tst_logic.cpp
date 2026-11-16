@@ -23,6 +23,7 @@
 #include <QtTest/QtTest>
 #include <QtGlobal>
 #include "filepermissions.h"
+#include "chainbackup.h"
 #include "embeddeddaemon.h"
 #include "releaseversion.h"
 #include <QCryptographicHash>
@@ -173,6 +174,88 @@ class TestLogic : public QObject {
     Q_OBJECT
 
 private slots:
+    void chainBackup_preservesEveryCopy_data() {
+        QTest::addColumn<int>("failure");
+        QTest::newRow("success") << 0;
+        QTest::newRow("first-move-fails") << 1;
+        QTest::newRow("second-move-fails") << 2;
+        QTest::newRow("rollback-fails") << 3;
+        QTest::newRow("rollback-destination-collision") << 4;
+    }
+    void chainBackup_preservesEveryCopy() {
+        QFETCH(int, failure);
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        QDir data(temporary.path());
+        auto write = [](const QString& path, const QByteArray& bytes) {
+            QFile f(path);
+            return f.open(QIODevice::WriteOnly) && f.write(bytes) == bytes.size();
+        };
+        auto read = [](const QString& path) {
+            QFile f(path);
+            return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+        };
+        QVERIFY(data.mkdir("blocks"));
+        QVERIFY(data.mkdir("chainstate"));
+        QVERIFY(data.mkdir("chain-set-aside-previous"));
+        QVERIFY(write(data.filePath("blocks/payload"), "blocks-original"));
+        QVERIFY(write(data.filePath("chainstate/payload"), "state-original"));
+        QVERIFY(write(data.filePath("chain-set-aside-previous/payload"), "previous-backup"));
+        QVERIFY(write(data.filePath("wallet.dat"), "wallet-untouched"));
+        int call = 0;
+        bool collisionCreated = false;
+        const auto result = ChainBackup::setAside(data, [&](const QString& from, const QString& to) {
+            ++call;
+            if (failure == 1 && call == 1) return false;
+            if (failure >= 2 && call == 2) {
+                if (failure == 4) {
+                    collisionCreated = data.mkdir("blocks") &&
+                        write(data.filePath("blocks/payload"), "concurrent-copy");
+                }
+                return false;
+            }
+            if (failure == 3 && call == 3) return false;
+            return QDir().rename(from, to);
+        });
+        QCOMPARE(result.success, failure == 0);
+        QCOMPARE(read(data.filePath("wallet.dat")), QByteArray("wallet-untouched"));
+        QCOMPARE(read(data.filePath("chain-set-aside-previous/payload")), QByteArray("previous-backup"));
+        const QDir saved(result.path);
+        const bool blocksSaved = failure == 0 || failure >= 3;
+        QCOMPARE(read((blocksSaved ? saved : data).filePath("blocks/payload")), QByteArray("blocks-original"));
+        QCOMPARE(read((failure == 0 ? saved : data).filePath("chainstate/payload")), QByteArray("state-original"));
+        if (failure) QVERIFY(!result.error.isEmpty());
+        if (failure >= 3) {
+            QVERIFY(result.error.contains(saved.filePath("blocks")));
+            QVERIFY(QFileInfo::exists(result.path));
+        }
+        if (failure == 4) {
+            QVERIFY(collisionCreated);
+            QCOMPARE(read(data.filePath("blocks/payload")), QByteArray("concurrent-copy"));
+        }
+        if (failure == 0) {
+            QVERIFY(data.mkdir("blocks"));
+            QVERIFY(write(data.filePath("blocks/payload"), "next-copy"));
+            const auto second = ChainBackup::setAside(data);
+            QVERIFY(second.success);
+            QVERIFY(second.path != result.path);
+            QCOMPARE(read(saved.filePath("blocks/payload")), QByteArray("blocks-original"));
+            QCOMPARE(read(QDir(second.path).filePath("blocks/payload")), QByteArray("next-copy"));
+        }
+    }
+    void chainBackup_rejectsNonDirectory() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        QFile f(temporary.filePath("blocks"));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        QCOMPARE(f.write("keep"), qint64(4));
+        f.close();
+        const auto result = ChainBackup::setAside(QDir(temporary.path()));
+        QVERIFY(!result.success);
+        QVERIFY(result.path.isEmpty());
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        QCOMPARE(f.readAll(), QByteArray("keep"));
+    }
     void releaseVersion_ordering() {
         QVERIFY(walletReleaseOrder("2.1.2-beta7") > walletReleaseOrder("2.1.2-beta6"));
         QVERIFY(walletReleaseOrder("2.1.2-beta10") > walletReleaseOrder("2.1.2-beta9"));
