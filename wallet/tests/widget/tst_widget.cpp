@@ -87,6 +87,7 @@
 #include "../filepermissions.h"
 #include "privatefile.h"
 #include "configfile.h"
+#include <QFontDatabase>
 #include "startupaccess.h"
 #include "chainbackup.h"
 #include <QStorageInfo>
@@ -2918,6 +2919,17 @@ int main(int argc, char* argv[]) {
     QCoreApplication::setOrganizationName("ZClassicTest");
     QCoreApplication::setOrganizationDomain("test.zclassic.invalid");
     QCoreApplication::setApplicationName("tst_widget");
+
+    // Match main.cpp's shipped typography. Offscreen's platform default can be
+    // a much narrower fallback face and hide real balance/control clipping.
+    const int fontId = QFontDatabase::addApplicationFont(":/fonts/res/Ubuntu-R.ttf");
+    if (fontId < 0 || !QFontDatabase::applicationFontFamilies(fontId).contains("Ubuntu")) {
+        qCritical("The shipped Ubuntu font could not be loaded for GUI tests");
+        return 1;
+    }
+    QFont baseFont("Ubuntu", 13);
+    baseFont.setStyleStrategy(QFont::PreferAntialias);
+    app.setFont(baseFont);
 
     // Never let a stray window-close quit mid-test.
     app.setQuitOnLastWindowClosed(false);
