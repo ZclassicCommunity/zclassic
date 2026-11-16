@@ -26,6 +26,9 @@ struct zcl_tree_root_cache {
 typedef void (*zcl_tree_combine)(const uint8_t *, const uint8_t *, size_t, uint8_t *);
 typedef void (*zcl_tree_empty)(size_t, uint8_t *);
 
+/* Sapling's uncommitted leaf: canonical little-endian field element one. */
+void zcl_sapling_uncommitted(uint8_t out[32]);
+
 /* Zero-initialize cache before use. It belongs to one thread and one hash
  * algorithm. Returns 0 for invalid
  * arguments without updating the cache. Hash callbacks must not throw. */

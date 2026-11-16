@@ -27,6 +27,7 @@
 #include "streams.h"
 
 #include "zcash/IncrementalMerkleTree.hpp"
+#include "librustzcash.h"
 #include "zcash/util.h"
 
 #include <libsnark/common/default_types/r1cs_ppzksnark_pp.hpp>
@@ -40,6 +41,14 @@
 
 using namespace std;
 using namespace libsnark;
+
+TEST(merkletree, C23UncommittedMatchesRust) {
+    uint256 expected;
+    librustzcash_tree_uncommitted(expected.begin());
+    const auto actual = libzcash::PedersenHash::uncommitted();
+    EXPECT_EQ(uint256(actual), expected);
+    EXPECT_EQ(expected, uint256S("01"));
+}
 
 template<typename Tree>
 void CheckCachedRoots() {

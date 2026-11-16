@@ -6,6 +6,13 @@
 #include "tree_root.h"
 #include <string.h>
 
+/* Z23 pedersen_hash.c: sapling_uncommitted(), Apache-2.0. */
+void zcl_sapling_uncommitted(uint8_t out[32])
+{
+    memset(out, 0, 32);
+    out[0] = 1;
+}
+
 static int same_frontier(const struct zcl_tree_frontier *a,
                          const struct zcl_tree_frontier *b)
 {

@@ -31,7 +31,7 @@ PedersenHash PedersenHash::combine(
 PedersenHash PedersenHash::uncommitted() {
     PedersenHash res = PedersenHash();
 
-    librustzcash_tree_uncommitted(res.begin());
+    zcl_sapling_uncommitted(res.begin());
 
     return res;
 }
