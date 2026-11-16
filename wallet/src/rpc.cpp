@@ -1,5 +1,6 @@
 #include "rpc.h"
 #include "releaseversion.h"
+#include "repairlocation.h"
 
 #include "addressbook.h"
 #include "settings.h"
@@ -2303,7 +2304,11 @@ bool RPC::maybeAutoHealStubChain(int connections) {
     // the banner applies. blocksDirSizeBytes() returns -1 when it can't measure, which
     // we treat as "unknown" and DO NOT heal on (fail safe -> keep the chain).
     const qint64 kStubFloor = (qint64)1024 * 1024 * 1024;   // 1 GiB hard floor
-    qint64 blocksBytes = ConnectionLoader::blocksDirSizeBytes(conn->config->zclassicDir);
+    const auto location = resolveRepairLocation(conn->config->zclassicDir,
+        conn->config->dataDirOverride, conn->config->testnet,
+        conn->config->regtest, conn->config->walletFile);
+    qint64 blocksBytes = (location.error.isEmpty() && conn->config->repairConfigError.isEmpty())
+        ? ConnectionLoader::blocksDirSizeBytes(location.directory) : -1;
     if (blocksBytes < 0) {
         main->logger->write("stub-auto-heal: blocks/ size unknown; not healing (fail-safe)");
         return false;

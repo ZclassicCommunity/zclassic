@@ -36,10 +36,14 @@ struct ConnectionConfig {
     // from a persisted shared secret. dataDirOverride holds a conf `datadir=` line so
     // the cookie path is computed under the daemon's real datadir, not the conf dir.
     // NOTE: declared LAST (after connType) on purpose — loadFromSettings() uses a
-    // positional aggregate-init of the first 9 fields, so these two MUST stay trailing
+    // positional aggregate-init of the first 9 fields, so these fields MUST stay trailing
     // (they take their defaults there). Do not reorder.
     bool    cookieAuth = false;
     QString dataDirOverride;
+    bool testnet = false;
+    bool regtest = false;
+    QString walletFile = QStringLiteral("wallet.dat");
+    QString repairConfigError;
 };
 
 class Connection;
@@ -61,12 +65,11 @@ public:
     void startManualRepair();
 
     // RUNTIME STUB AUTO-HEAL discriminator (primary, robust stub-vs-real test): total
-    // bytes of the on-disk blocks/ store under `datadirRoot` (root, or testnet3/ when
-    // that holds the chain — same resolution as resolveDataSubdir()). Static so the
-    // runtime sync poller in RPC can call it with just the active connection's datadir.
+    // bytes of the blocks/ store under an explicitly resolved network directory.
+    // Never guesses the network from the folders present on disk.
     // Returns -1 when blocks/ can't be located/measured; callers MUST treat -1 as
     // "unknown" and NEVER heal on it. A fully-synced chain is ~10 GiB; a stub is tens of MB.
-    static qint64 blocksDirSizeBytes(const QString& datadirRoot);
+    static qint64 blocksDirSizeBytes(const QString& networkDirectory);
 
 private:
     friend class TestWidget; // Isolated integration tests exercise actual startup paths.
@@ -197,6 +200,9 @@ private:
     bool        ezRepairOffered         = false;  // repair dialog already shown this run
     QString     ezStdErr;                          // accumulated node stderr this run
     QString     ezDataDir;                         // datadir holding blocks/chainstate/debug.log/wallet.dat
+    QString     ezWalletFile = QStringLiteral("wallet.dat");
+    QString     ezRepairPathError;
+    void rememberRepairLocation(const std::shared_ptr<ConnectionConfig>& config);
 
     // Item 3 (legible first-run param wait). The daemon peer-fetches ~1.7GB of zk-params
     // in ZC_LoadParams BEFORE it binds its RPC port, so for 10-20 min on a fresh install
@@ -224,7 +230,7 @@ private:
     // first). Returns false if a live daemon can't be confirmed dead — the caller
     // must then ABORT and leave the datadir untouched.
     bool    confirmDaemonDeadForRepair();
-    QDir    resolveDataSubdir();                            // datadir root, or testnet3/ when it holds the chain
+    QDir    resolveDataSubdir();                            // configured network directory
 
     // SELF-HEAL classifier additions (all hang off the EXISTING two lifecycle
     // owners — no new controller object). These run only A-side, while this

@@ -2,6 +2,7 @@
 #include "embeddeddaemon.h"
 #include "configfile.h"
 #include "chainbackup.h"
+#include "repairlocation.h"
 #include "startupaccess.h"
 #include <QThread>
 #include "mainwindow.h"
@@ -307,8 +308,7 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
         // P2-1: remember the datadir (holds blocks/, chainstate/, debug.log and
         // wallet.dat) so the corruption failsafe can read debug.log and back up
         // wallet.dat if the node dies before the RPC connection comes up.
-        if (ezDataDir.isEmpty() && !config->zclassicDir.isEmpty())
-            ezDataDir = config->zclassicDir;
+        rememberRepairLocation(config);
 
         refreshZClassicdState(connection, [=] () {
             // Connection refused: the embedded node either has not started yet, or
@@ -1173,58 +1173,37 @@ bool ConnectionLoader::looksLikeDbCorruption(const QString& text) {
     return false;
 }
 
-// The network data subdirectory: the datadir root for mainnet, or testnet3/ when
-// that subdir actually holds the chain/wallet. We probe the filesystem rather than
-// Settings::isTestnet() because isTestnet() is only set from the getinfo RPC reply,
-// which never arrives when the node dies during startup.
-QDir ConnectionLoader::resolveDataSubdir() {
-    QDir root(ezDataDir);
-    QDir testnet(QDir(ezDataDir).filePath("testnet3"));
-    if (testnet.exists() &&
-        (QFile::exists(testnet.filePath("wallet.dat")) ||
-         QFile::exists(testnet.filePath("debug.log")) ||
-         QDir(testnet.filePath("blocks")).exists()))
-        return testnet;
-    return root;
-}
-
-// RUNTIME STUB AUTO-HEAL discriminator: total bytes of the on-disk blocks/ store.
-// Static + standalone (no live loader needed) so the runtime sync poller in RPC can
-// call it cheaply with just the datadir root from the active connection's config. It
-// reuses the SAME root-or-testnet3/ resolution as resolveDataSubdir() so it measures
-// the chain the daemon is actually running. Returns -1 when the datadir/blocks dir is
-// unknown or missing (caller MUST treat -1 as "don't know" and NEVER heal on it — a
-// missing blocks/ here only means we couldn't measure, not that the chain is a stub).
-// This is the primary, robust stub-vs-real-chain test: a fully-synced chain is ~10
-// GiB; an aborted-P2P stub is tens of MB.
-qint64 ConnectionLoader::blocksDirSizeBytes(const QString& datadirRoot) {
-    if (datadirRoot.isEmpty())
-        return -1;
-
-    // Mirror resolveDataSubdir(): prefer testnet3/ when it actually holds the chain.
-    QDir base(datadirRoot);
-    QDir testnet(QDir(datadirRoot).filePath("testnet3"));
-    if (testnet.exists() &&
-        (QFile::exists(testnet.filePath("wallet.dat")) ||
-         QFile::exists(testnet.filePath("debug.log")) ||
-         QDir(testnet.filePath("blocks")).exists()))
-        base = testnet;
-
-    QDir blocks(base.filePath("blocks"));
-    if (!blocks.exists())
-        return -1;   // can't measure -> "unknown", never a heal trigger
-
-    // Sum every regular file under blocks/ (blk*.dat, rev*.dat, index/, etc.).
-    qint64 total = 0;
-    QDirIterator it(blocks.absolutePath(), QDir::Files | QDir::NoSymLinks,
-                    QDirIterator::Subdirectories);
-    while (it.hasNext()) {
-        it.next();
-        total += it.fileInfo().size();
+void ConnectionLoader::rememberRepairLocation(const std::shared_ptr<ConnectionConfig>& config) {
+    if (!config) {
+        ezDataDir.clear();
+        ezRepairPathError = QObject::tr("The node configuration is unavailable.");
+        return;
     }
-    return total;
+    // External nodes may have a different working directory. Relative paths are
+    // deliberately unavailable for repair until their location is known.
+    QString daemonWorkingDirectory;
+    if (ezclassicd) {
+#ifdef Q_OS_WIN
+        daemonWorkingDirectory = QCoreApplication::applicationDirPath();
+#else
+        daemonWorkingDirectory = QDir::currentPath();
+#endif
+    }
+    const auto location = resolveRepairLocation(config->zclassicDir, config->dataDirOverride,
+        config->testnet, config->regtest, config->walletFile, daemonWorkingDirectory);
+    ezDataDir = location.directory;
+    ezWalletFile = location.walletFile;
+    ezRepairPathError = config->repairConfigError.isEmpty() ? location.error : config->repairConfigError;
 }
 
+QDir ConnectionLoader::resolveDataSubdir() {
+    return QDir(ezDataDir);
+}
+// Measure only an explicitly resolved network directory; never infer the network
+// from whichever folders happen to exist.
+qint64 ConnectionLoader::blocksDirSizeBytes(const QString& networkDirectory) {
+    return repairBlocksSize(networkDirectory);
+}
 // Read the last maxBytes of <datadir>/debug.log, READ-ONLY. Returns "" if the
 // datadir/log is unknown or unreadable. Never opens any file for writing.
 QString ConnectionLoader::readDebugLogTail(int maxBytes) {
@@ -1493,14 +1472,14 @@ void ConnectionLoader::redownloadChain() {
 // to a timestamped backup beside it. It never deletes, renames, or opens
 // wallet.dat for writing. Returns true on a verified successful copy.
 bool ConnectionLoader::backupWalletForRepair() {
-    if (ezDataDir.isEmpty()) {
-        main->logger->write("Repair backup: datadir unknown, cannot locate wallet.dat");
+    if (ezDataDir.isEmpty() || !ezRepairPathError.isEmpty()) {
+        main->logger->write("Repair backup: cannot resolve wallet location: " + ezRepairPathError);
         return false;
     }
 
     QDir dir = resolveDataSubdir();
 
-    QFile wallet(dir.filePath("wallet.dat"));
+    QFile wallet(dir.filePath(ezWalletFile));
     if (!wallet.exists()) {
         // No wallet.dat means there is nothing to protect (e.g. a brand-new datadir
         // that never finished its first run). Safe to proceed with the repair.
@@ -1513,7 +1492,7 @@ bool ConnectionLoader::backupWalletForRepair() {
         return false;
 
     QString stamp = QDateTime::currentDateTime().toString("yyyyMMdd-hhmmss");
-    QString backupPath = dir.filePath("wallet.dat.backup-" + stamp);
+    QString backupPath = dir.filePath(ezWalletFile + ".backup-" + stamp);
 
     // Don't clobber an existing backup of the same second (extremely unlikely).
     if (QFile::exists(backupPath)) {
@@ -1796,8 +1775,7 @@ void ConnectionLoader::startManualRepair() {
     // the same way doAutoConnect does, since this loader is created cold.
     if (ezDataDir.isEmpty()) {
         auto config = autoDetectZClassicConf();
-        if (config && !config->zclassicDir.isEmpty())
-            ezDataDir = config->zclassicDir;
+        rememberRepairLocation(config);
     }
 
     d->show();
@@ -2859,7 +2837,8 @@ std::shared_ptr<ConnectionConfig> ConnectionLoader::autoDetectZClassicConf() {
         return nullptr;
     }
 
-    QTextStream in(&file);
+    QString configurationText = QString::fromUtf8(file.readAll());
+    QTextStream in(&configurationText);
 
     auto zclassicconf = new ConnectionConfig();
     zclassicconf->host     = "127.0.0.1";
@@ -2903,6 +2882,13 @@ std::shared_ptr<ConnectionConfig> ConnectionLoader::autoDetectZClassicConf() {
                 zclassicconf->port = "18023";
         }
     }
+
+    const auto repairConfig = parseRepairConfig(configurationText);
+    zclassicconf->repairConfigError = repairConfig.error;
+    zclassicconf->dataDirOverride = repairConfig.values.value("datadir");
+    zclassicconf->testnet = repairConfigBool(repairConfig.values.value("testnet", "0"));
+    zclassicconf->regtest = repairConfigBool(repairConfig.values.value("regtest", "0"));
+    zclassicconf->walletFile = repairConfig.values.value("wallet", "wallet.dat");
 
     // If rpcport is not in the file, and it was not set by the testnet=1 flag, then go to default
     if (zclassicconf->port.isEmpty()) zclassicconf->port = "8023";

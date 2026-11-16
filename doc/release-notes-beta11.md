@@ -45,10 +45,18 @@ any data that cannot be restored, with the recovery paths shown in the error.
 Repair stops instead of restarting the node when a move fails. Older backups
 are no longer deleted automatically; they continue to occupy disk space.
 
+Repair now selects the configured data directory, network and wallet filename,
+including configuration comments, duplicate-setting precedence and negative
+boolean options. It no longer guesses testnet from folders present on disk.
+Relative paths are refused when the daemon's working directory is unknown.
+This is preparation for safe existing-wallet checkpoint migration; it does not
+yet provide the locking and interruption recovery needed for that transition.
+
 Isolated Windows and Linux tests have imported and verified the full state at
 that checkpoint and continued ordinary block validation above it. This does
 not yet provide automatic migration of an existing partially synced wallet.
-The new retry code still requires its full regression and final build checks.
+The consolidated backend passed full debug CI and isolated Windows packaging,
+extraction, startup and shutdown checks. Final release qualification is ongoing.
 No wallet data should be removed to enable fast sync.
 
 ## Release gates

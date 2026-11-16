@@ -24,6 +24,7 @@
 #include <QtGlobal>
 #include "filepermissions.h"
 #include "chainbackup.h"
+#include "repairlocation.h"
 #include "embeddeddaemon.h"
 #include "releaseversion.h"
 #include <QCryptographicHash>
@@ -138,26 +139,6 @@ static bool isLongWarmupPhase(const QString& status) {
     return false;
 }
 
-// src/connection.cpp:1041-1067  ConnectionLoader::blocksDirSizeBytes
-// (root-or-testnet3 resolution + recursive Files sum; -1 == "can't measure")
-static qint64 blocksDirSizeBytes(const QString& datadirRoot) {
-    if (datadirRoot.isEmpty()) return -1;
-    QDir base(datadirRoot);
-    QDir testnet(QDir(datadirRoot).filePath("testnet3"));
-    if (testnet.exists() &&
-        (QFile::exists(testnet.filePath("wallet.dat")) ||
-         QFile::exists(testnet.filePath("debug.log")) ||
-         QDir(testnet.filePath("blocks")).exists()))
-        base = testnet;
-    QDir blocks(base.filePath("blocks"));
-    if (!blocks.exists()) return -1;
-    qint64 total = 0;
-    QDirIterator it(blocks.absolutePath(), QDir::Files | QDir::NoSymLinks,
-                    QDirIterator::Subdirectories);
-    while (it.hasNext()) { it.next(); total += it.fileInfo().size(); }
-    return total;
-}
-
 } // namespace cxmirror
 
 // =====================================================================
@@ -174,6 +155,55 @@ class TestLogic : public QObject {
     Q_OBJECT
 
 private slots:
+    void repairLocation_usesConfiguredNetworkAndWallet() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        QDir base(temporary.path());
+        QVERIFY(base.mkdir("testnet3"));
+        QVERIFY(base.mkdir("regtest"));
+        QVERIFY(base.mkdir("custom data"));
+        const auto mainnet = resolveRepairLocation(base.path(), "", false, false);
+        QVERIFY(mainnet.error.isEmpty());
+        QCOMPARE(mainnet.directory, base.absolutePath());
+        QCOMPARE(mainnet.walletFile, QString("wallet.dat"));
+        const auto testnet = resolveRepairLocation(base.path(), "", true, false);
+        QCOMPARE(testnet.directory, base.filePath("testnet3"));
+        const auto regtest = resolveRepairLocation(base.path(), "", false, true);
+        QCOMPARE(regtest.directory, base.filePath("regtest"));
+        const auto custom = resolveRepairLocation(base.path(), base.filePath("custom data"), true, false, "savings.dat");
+        QVERIFY(custom.error.isEmpty());
+        QCOMPARE(custom.directory, base.filePath("custom data/testnet3"));
+        QCOMPARE(custom.walletFile, QString("savings.dat"));
+        const auto relative = resolveRepairLocation(base.path(), "relative-node", false, false);
+        QVERIFY(!relative.error.isEmpty());
+        const auto relativeKnown = resolveRepairLocation(base.path(), "relative-node", false, false,
+            "wallet.dat", base.path());
+        QCOMPARE(relativeKnown.directory, base.filePath("relative-node"));
+        QVERIFY(!resolveRepairLocation(base.path(), "", true, true).error.isEmpty());
+        QVERIFY(!resolveRepairLocation("", "", false, false).error.isEmpty());
+        for (const QString& name : {QString(), QString("."), QString(".."), QString("../wallet.dat"), QString("sub/wallet.dat"), QString("sub\\wallet.dat"), base.filePath("wallet.dat")}) {
+            const auto invalid = resolveRepairLocation(base.path(), "", false, false, name);
+            QVERIFY2(!invalid.error.isEmpty(), qPrintable(name));
+            QVERIFY(invalid.directory.isEmpty());
+        }
+    }
+    void repairConfig_matchesDaemonSelection() {
+        const auto parsed = parseRepairConfig("# comment\nnotestnet=0 # enable\ntestnet=0\n"
+            "wallet=first.dat # keep this\nwallet=second.dat\nWallet=wrong.dat\n"
+            "datadir=relative path # comment\n[other]\nwallet=section.dat\n");
+        QVERIFY(parsed.error.isEmpty());
+        QVERIFY(repairConfigBool(parsed.values.value("testnet")));
+        QCOMPARE(parsed.values.value("wallet"), QString("first.dat"));
+        QCOMPARE(parsed.values.value("datadir"), QString("relative path"));
+        QCOMPARE(parsed.values.value("other.wallet"), QString("section.dat"));
+        const auto positive = parseRepairConfig("testnet=0\nnotestnet=0\nnoregtest=\n");
+        QVERIFY(!repairConfigBool(positive.values.value("testnet")));
+        QVERIFY(!repairConfigBool(positive.values.value("regtest")));
+        QVERIFY(repairConfigBool("1suffix")); // daemon uses atoi, not QString::toInt
+        QVERIFY(repairConfigBool(""));
+        QVERIFY(!parseRepairConfig("testnet\n").error.isEmpty());
+        QVERIFY(!parseRepairConfig("[]\n").error.isEmpty());
+    }
     void chainBackup_preservesEveryCopy_data() {
         QTest::addColumn<int>("failure");
         QTest::newRow("success") << 0;
@@ -825,14 +855,14 @@ void TestLogic::longWarmupPhase() {
 // =====================================================================
 void TestLogic::blocksDirSizeBytes() {
     // empty/unknown root -> -1
-    QCOMPARE(cxmirror::blocksDirSizeBytes(QString()), (qint64)-1);
+    QCOMPARE(repairBlocksSize(QString()), (qint64)-1);
 
     QTemporaryDir tmp;
     QVERIFY(tmp.isValid());
     QString root = tmp.path();
 
     // No blocks/ dir yet -> -1 ("can't measure", never a heal trigger).
-    QCOMPARE(cxmirror::blocksDirSizeBytes(root), (qint64)-1);
+    QCOMPARE(repairBlocksSize(root), (qint64)-1);
 
     // Build root/blocks/{blk00000.dat, index/foo.ldb} with known byte sizes.
     QDir(root).mkpath("blocks/index");
@@ -847,9 +877,9 @@ void TestLogic::blocksDirSizeBytes() {
     writeBytes(QDir(root).filePath("blocks/index/000001.ldb"), 250);
 
     // Recursive sum = 1000 + 500 + 250 = 1750.
-    QCOMPARE(cxmirror::blocksDirSizeBytes(root), (qint64)1750);
+    QCOMPARE(repairBlocksSize(root), (qint64)1750);
 
-    // testnet3/ resolution: when testnet3/ holds the chain, it's measured instead.
+    // Coexisting testnet data must never override the selected mainnet directory.
     QString root2;
     {
         QTemporaryDir tmp2;
@@ -860,7 +890,8 @@ void TestLogic::blocksDirSizeBytes() {
         // mark testnet3 as the live chain
         writeBytes(QDir(root2).filePath("testnet3/debug.log"), 1);
         writeBytes(QDir(root2).filePath("testnet3/blocks/blk00000.dat"), 4096);
-        QCOMPARE(cxmirror::blocksDirSizeBytes(root2), (qint64)4096);
+        QCOMPARE(repairBlocksSize(root2), (qint64)0);
+        QCOMPARE(repairBlocksSize(QDir(root2).filePath("testnet3")), (qint64)4096);
     }
 }
 
