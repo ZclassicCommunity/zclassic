@@ -1,0 +1,17 @@
+zclassicd C23 cryptographic core (src/c23/vendor)
+
+The files under src/c23/vendor/ are copied byte for byte from the Z23 repository
+(zclassic23), commit recorded in Z23_SOURCE.tsv, and are licensed under the Apache
+License, Version 2.0 (full text in LICENSE.z23):
+
+    Copyright 2026 Rhett Creighton
+
+The rest of zclassicd remains under the MIT license (see COPYING). The copyright holder
+of the vendored files and of zclassicd's C23 glue is the same. Individual vendored files
+keep whatever notices they carry; those are part of the byte-identical copy.
+
+Vendored files must never be edited in this tree. Provenance and identity checks:
+tools/check-vendor.sh against Z23_SOURCE.tsv.
+
+OWNER CONFIRMATION NEEDED (hard stop H7 of the plan): that shipping an Apache-2.0
+subtree inside this MIT project, with this NOTICE and LICENSE.z23, is the intended text.
