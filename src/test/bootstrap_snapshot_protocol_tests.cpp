@@ -46,6 +46,8 @@ extern std::string BootstrapServeQuotaKey(const CNetAddr& addr);
 // global-namespace definition. Caller keeps windowStartMs/bytesAtWindowStart
 // as locals; returns true to abort when a full window stayed below the floor.
 extern bool BootstrapDownloadTooSlow(int64_t&, uint64_t&, uint64_t, int64_t);
+extern bool BootstrapPendingFiles(const CBootstrapSnapshotManifest&, const boost::filesystem::path&,
+                                  std::vector<uint32_t>&, uint64_t&, std::string&);
 
 // Test-only seam (defined in bootstrapvalidation.cpp, not the public header) to
 // drive a terminal latch so we can verify the finalization-hold flag releases on
@@ -157,6 +159,48 @@ static std::string DeterministicBytes(size_t n, unsigned int seed)
 }
 
 BOOST_FIXTURE_TEST_SUITE(bootstrap_snapshot_protocol_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(bootstrap_reconnect_reuses_only_verified_complete_files)
+{
+    namespace fs = boost::filesystem;
+    const fs::path staging = fs::temp_directory_path() / fs::unique_path("bootstrap-resume-%%%%-%%%%");
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { boost::system::error_code ec; fs::remove_all(path, ec); }
+    } cleanup{staging};
+    CBootstrapSnapshotManifest manifest;
+    CBootstrapSnapshotFile file;
+    file.strPath = "blocks/blk00000.dat";
+    file.nSize = 3;
+    file.hashSha256 = Sha256OfBytes(std::vector<unsigned char>{'a', 'b', 'c'});
+    manifest.vFiles.push_back(file);
+    file.strPath = "chainstate/000001.ldb";
+    manifest.vFiles.push_back(file);
+    manifest.nSnapshotBytes = 6;
+    WriteFixtureFile(staging / manifest.vFiles[0].strPath, "abc");
+    WriteFixtureFile(staging / (manifest.vFiles[1].strPath + ".part"), "abc");
+    std::vector<uint32_t> pending;
+    uint64_t completed = 0;
+    std::string error;
+    BOOST_REQUIRE(BootstrapPendingFiles(manifest, staging, pending, completed, error));
+    BOOST_CHECK_EQUAL(completed, 3);
+    BOOST_REQUIRE_EQUAL(pending.size(), 1);
+    BOOST_CHECK_EQUAL(pending[0], 1);
+    // Even a full-size .part must be downloaded and checked normally.
+    WriteFixtureFile(staging / manifest.vFiles[1].strPath, "abc");
+    BOOST_REQUIRE(BootstrapPendingFiles(manifest, staging, pending, completed, error));
+    BOOST_CHECK(pending.empty());
+    BOOST_CHECK_EQUAL(completed, 6);
+    // Same-length corruption and mismatched manifests cannot become trusted progress.
+    WriteFixtureFile(staging / manifest.vFiles[0].strPath, "xyz");
+    BOOST_CHECK(!BootstrapPendingFiles(manifest, staging, pending, completed, error));
+    WriteFixtureFile(staging / manifest.vFiles[0].strPath, "abc");
+    manifest.nSnapshotBytes = 2;
+    BOOST_CHECK(!BootstrapPendingFiles(manifest, staging, pending, completed, error));
+    manifest.nSnapshotBytes = 6;
+    manifest.vFiles[0].strPath = "../wallet.dat";
+    BOOST_CHECK(!BootstrapPendingFiles(manifest, staging, pending, completed, error));
+}
 
 BOOST_AUTO_TEST_CASE(bootstrap_snapshot_file_serialization)
 {

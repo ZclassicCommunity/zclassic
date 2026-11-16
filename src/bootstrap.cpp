@@ -1378,7 +1378,46 @@ static bool CreateEmptyBootstrapFiles(const CBootstrapSnapshotManifest& manifest
 // Prepare the staging directory for a snapshot download: ensure free space,
 // materialize zero-length files, and pre-create every parent directory so
 // concurrent download streams never race on directory creation.
-static bool DownloadBootstrapPrepareStaging(const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, std::string& error)
+// Only reuse completed files from this attempt's private staging directory.
+// Rehash against the validated manifest on every reconnect; .part files never
+// count as verified progress. The final chainstate commitment still gates import.
+bool BootstrapPendingFiles(const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging,
+                           std::vector<uint32_t>& pending, uint64_t& completed, std::string& error)
+{
+    pending.clear();
+    completed = 0;
+    for (size_t i = 0; i < manifest.vFiles.size(); ++i) {
+        if (ShutdownRequested()) {
+            error = "bootstrap resume canceled: shutdown requested";
+            return false;
+        }
+        const CBootstrapSnapshotFile& file = manifest.vFiles[i];
+        const boost::filesystem::path relative(file.strPath);
+        if (!IsBootstrapSnapshotDataPath(relative)) {
+            error = "unsafe bootstrap resume path";
+            return false;
+        }
+        const boost::filesystem::path path = staging / relative;
+        if (boost::filesystem::exists(path)) {
+            if (boost::filesystem::is_symlink(path) || !boost::filesystem::is_regular_file(path)) {
+                error = "bootstrap resume file is not a regular file";
+                return false;
+            }
+            if (!VerifyBootstrapDownloadedFile(path, file, error))
+                return false;
+            if (completed > manifest.nSnapshotBytes || file.nSize > manifest.nSnapshotBytes - completed) {
+                error = "bootstrap resume bytes exceed manifest size";
+                return false;
+            }
+            completed += file.nSize;
+        } else if (file.nSize > 0) {
+            pending.push_back((uint32_t)i);
+        }
+    }
+    return true;
+}
+
+static bool DownloadBootstrapPrepareStaging(const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, uint64_t completed, std::string& error)
 {
     // Refuse to start if the staging filesystem cannot fit the manifest plus
     // a safety margin. Cheaper to fail fast than to fill the disk and then
@@ -1386,7 +1425,7 @@ static bool DownloadBootstrapPrepareStaging(const CBootstrapSnapshotManifest& ma
     try {
         boost::filesystem::create_directories(staging);
         boost::filesystem::space_info si = boost::filesystem::space(staging);
-        const uint64_t need = manifest.nSnapshotBytes + (uint64_t)BOOTSTRAP_SNAPSHOT_DISK_SAFETY_MARGIN_BYTES;
+        const uint64_t need = manifest.nSnapshotBytes - completed + (uint64_t)BOOTSTRAP_SNAPSHOT_DISK_SAFETY_MARGIN_BYTES;
         if (si.available < need) {
             error = strprintf(
                 "insufficient free space in %s for bootstrap snapshot: need %llu bytes (including %lld safety margin), have %llu",
@@ -1580,7 +1619,7 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
             if (percent != last_logged_percent) {
                 last_logged_percent = percent;
                 const int64_t elapsed_ms = std::max<int64_t>(1, GetTimeMillis() - download_started);
-                const double mbps = (total_received / 1048576.0) / (elapsed_ms / 1000.0);
+                const double mbps = (stream_received / 1048576.0) / (elapsed_ms / 1000.0);
                 LogPrintf("Bootstrap: downloaded %d%% (%llu/%llu bytes, %.1f MB/s)\n",
                     percent,
                     (unsigned long long)total_received,
@@ -1641,18 +1680,13 @@ static bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotMan
         (unsigned long long)manifest.nSnapshotBytes,
         manifest.nHeight);
 
-    if (!DownloadBootstrapPrepareStaging(manifest, staging, error)) {
+    std::vector<uint32_t> order;
+    uint64_t completed = 0;
+    if (!BootstrapPendingFiles(manifest, staging, order, completed, error) ||
+        !DownloadBootstrapPrepareStaging(manifest, staging, completed, error)) {
         return false;
     }
-
-    std::vector<uint32_t> order;
-    for (size_t i = 0; i < manifest.vFiles.size(); ++i) {
-        if (manifest.vFiles[i].nSize > 0) {
-            order.push_back((uint32_t)i);
-        }
-    }
-
-    std::atomic<uint64_t> progressBytes(0);
+    std::atomic<uint64_t> progressBytes(completed);
     std::atomic<bool> abortFlag(false);
     return DownloadBootstrapFileSubset(socket, manifest, staging, order, timeout_ms,
                                        progressBytes, abortFlag, /*logProgress=*/true, error);
@@ -1718,16 +1752,11 @@ static bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const
         (unsigned long long)manifest.nSnapshotBytes,
         manifest.nHeight);
 
-    if (!DownloadBootstrapPrepareStaging(manifest, staging, error)) {
-        return false;
-    }
-
-    // Files to download (zero-length files were materialized by the preamble).
     std::vector<uint32_t> files;
-    for (size_t i = 0; i < manifest.vFiles.size(); ++i) {
-        if (manifest.vFiles[i].nSize > 0) {
-            files.push_back((uint32_t)i);
-        }
+    uint64_t completed = 0;
+    if (!BootstrapPendingFiles(manifest, staging, files, completed, error) ||
+        !DownloadBootstrapPrepareStaging(manifest, staging, completed, error)) {
+        return false;
     }
     if (files.empty()) {
         return true; // nothing to fetch over the wire
@@ -1755,7 +1784,7 @@ static bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const
         binBytes[best] += manifest.vFiles[files[i]].nSize;
     }
 
-    std::atomic<uint64_t> progressBytes(0);
+    std::atomic<uint64_t> progressBytes(completed);
     std::atomic<bool> abortFlag(false);
     std::atomic<int> doneCount(0);
     CCriticalSection csErr;
@@ -1817,7 +1846,7 @@ static bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const
         if (percent != last_logged_percent) {
             last_logged_percent = percent;
             const int64_t elapsed_ms = std::max<int64_t>(1, GetTimeMillis() - download_started);
-            const double mbps = (total_received / 1048576.0) / (elapsed_ms / 1000.0);
+            const double mbps = ((total_received - completed) / 1048576.0) / (elapsed_ms / 1000.0);
             LogPrintf("Bootstrap: downloaded %d%% (%llu/%llu bytes, %.1f MB/s, %d streams)\n",
                 percent,
                 (unsigned long long)total_received,
@@ -3259,6 +3288,20 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
             CloseSocket(socket);
             socket = INVALID_SOCKET;
             downloadOk = DownloadBootstrapSnapshotParallel(peerAddress, peer, manifest, staging, BOOTSTRAP_NET_TIMEOUT_MS, nStreams, error);
+        }
+        // Keep verified files across bounded reconnects. Parallel streams can
+        // exceed a server's per-IP connection allowance; one replacement stream
+        // makes progress without relaxing the server policy. Always re-fetch and
+        // compare the manifest before reusing any downloaded bytes.
+        for (int retry = 0; !downloadOk && retry < 2 && !ShutdownRequested(); ++retry) {
+            LogPrintf("Bootstrap: reconnecting with verified files retained (%d/2): %s\n", retry + 1, error);
+            MilliSleep(1000);
+            error.clear();
+            if (!OpenBootstrapStreamAndVerifyManifest(peerAddress, BOOTSTRAP_NET_TIMEOUT_MS, manifest, socket, error))
+                continue;
+            downloadOk = DownloadBootstrapSnapshot(socket, manifest, staging, BOOTSTRAP_NET_TIMEOUT_MS, peer, error);
+            CloseSocket(socket);
+            socket = INVALID_SOCKET;
         }
         if (!downloadOk) {
             boost::filesystem::remove_all(staging);

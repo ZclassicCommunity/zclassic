@@ -110,6 +110,7 @@ jobs:
           CONFIGURE_FLAGS="--enable-tests --disable-man" ./zcutil/build.sh -j3
           ./zcutil/fetch-params.sh
           ./src/zcash-gtest --gtest_filter='merkletree.*:WalletTests.*'
+          ./src/test/test_bitcoin --run_test=bootstrap_snapshot_protocol_tests --log_level=test_suite
       - name: Upload tree test binary
         uses: actions/upload-artifact@v4
         with:
