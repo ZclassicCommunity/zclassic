@@ -840,12 +840,12 @@ protected:
      * Sprout or Sapling note data, a connected block only advances
      * nWitnessCacheSize: there is nothing to copy, append, witness or
      * re-height, so the commitment tree appends (which only feed witnesses)
-     * are skipped. The trees are the caller's copies.
+     * are skipped. The trees are borrowed; a copy is made only when they are appended to.
      */
     void WitnessChainTip(const CBlockIndex* pindex,
                          const CBlock* pblock,
-                         SproutMerkleTree& sproutTree,
-                         SaplingMerkleTree& saplingTree,
+                         const SproutMerkleTree& sproutTree,
+                         const SaplingMerkleTree& saplingTree,
                          bool added);
 
     /**
@@ -1337,7 +1337,7 @@ public:
     CAmount GetDebit(const CTransaction& tx, const isminefilter& filter) const;
     CAmount GetCredit(const CTransaction& tx, const isminefilter& filter) const;
     CAmount GetChange(const CTransaction& tx) const;
-    void ChainTip(const CBlockIndex *pindex, const CBlock *pblock, SproutMerkleTree sproutTree, SaplingMerkleTree saplingTree, bool added);
+    void ChainTip(const CBlockIndex *pindex, const CBlock *pblock, const SproutMerkleTree& sproutTree, const SaplingMerkleTree& saplingTree, bool added);
     /** Saves witness caches and best block locator to disk. */
     void SetBestChain(const CBlockLocator& loc);
     std::set<std::pair<libzcash::PaymentAddress, uint256>> GetNullifiersForAddresses(const std::set<libzcash::PaymentAddress> & addresses);

@@ -180,7 +180,7 @@ void DecrementNoteWitnesses(CWallet& w, const CBlockIndex* pindex)
     assert(w.nWitnessCacheSize > 0);
 }
 
-// The witness half of the original CWallet::ChainTip (trees by value).
+// The witness half of the original CWallet::ChainTip (trees by const reference).
 void ChainTip(CWallet& w, const CBlockIndex* pindex, const CBlock* pblock,
               SproutMerkleTree sproutTree, SaplingMerkleTree saplingTree, bool added)
 {
@@ -199,9 +199,9 @@ class IndexedWallet : public CWallet {
 public:
     explicit IndexedWallet(const std::string& file) : CWallet(file) { }
 
-    // The witness half of the production CWallet::ChainTip (trees by value).
+    // The witness half of the production CWallet::ChainTip (trees by const reference).
     void ChainTipWitness(const CBlockIndex* pindex, const CBlock* pblock,
-                         SproutMerkleTree sproutTree, SaplingMerkleTree saplingTree, bool added) {
+                         const SproutMerkleTree& sproutTree, const SaplingMerkleTree& saplingTree, bool added) {
         WitnessChainTip(pindex, pblock, sproutTree, saplingTree, added);
     }
     size_t IndexSize() const { return setNoteTxIndex.size(); }

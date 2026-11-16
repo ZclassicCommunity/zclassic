@@ -559,8 +559,8 @@ bool CWallet::ChangeWalletPassphrase(const SecureString& strOldWalletPassphrase,
 
 void CWallet::ChainTip(const CBlockIndex *pindex, 
                        const CBlock *pblock,
-                       SproutMerkleTree sproutTree,
-                       SaplingMerkleTree saplingTree, 
+                       const SproutMerkleTree& sproutTree,
+                       const SaplingMerkleTree& saplingTree,
                        bool added)
 {
     WitnessChainTip(pindex, pblock, sproutTree, saplingTree, added);
@@ -569,8 +569,8 @@ void CWallet::ChainTip(const CBlockIndex *pindex,
 
 void CWallet::WitnessChainTip(const CBlockIndex* pindex,
                               const CBlock* pblock,
-                              SproutMerkleTree& sproutTree,
-                              SaplingMerkleTree& saplingTree,
+                              const SproutMerkleTree& sproutTree,
+                              const SaplingMerkleTree& saplingTree,
                               bool added)
 {
     LOCK(cs_wallet);
@@ -579,8 +579,8 @@ void CWallet::WitnessChainTip(const CBlockIndex* pindex,
         CollectNoteTxs(noteTxs);
         if (noteTxs.empty()) {
             // No wallet transaction carries note data, so the full
-            // IncrementNoteWitnesses would only append to the caller's tree
-            // copies and advance the cache size. Every witness loop is empty
+            // IncrementNoteWitnesses would only append to tree copies and advance the
+            // cache size. Every witness loop is empty
             // and no output of this block is ours with note data (the
             // block's own wallet txs were added by SyncTransaction before
             // ChainTip, so they would be in the index).
@@ -589,7 +589,10 @@ void CWallet::WitnessChainTip(const CBlockIndex* pindex,
             }
             return;
         }
-        IncrementNoteWitnesses(pindex, pblock, sproutTree, saplingTree);
+        // The append path mutates the trees, so copy them here, only when needed.
+        SproutMerkleTree sproutWork = sproutTree;
+        SaplingMerkleTree saplingWork = saplingTree;
+        IncrementNoteWitnesses(pindex, pblock, sproutWork, saplingWork);
     } else {
         DecrementNoteWitnesses(pindex);
     }
