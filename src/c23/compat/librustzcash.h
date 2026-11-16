@@ -386,9 +386,10 @@ extern "C" {
     bool zcl_c23_batch_verify(const zcl_c23_batch *batch,
                               bool *bad_is_output, size_t *bad_index);
 
-    /// Diagnostics: the Z23 proving readiness name ("none", "pair_present",
-    /// "pair_armed", "full_set") and the last proving refusal reason (a
-    /// static code string, or NULL). Neither carries a path or key byte.
+    /// Diagnostics: "none" before init, "resident" once init holds the
+    /// verified Sapling proving keys (as librustzcash does). The last
+    /// refusal is always NULL: proving no longer loads anything, so nothing
+    /// is refused at proof time. Kept for ABI stability.
     const char *zcl_c23_proving_status(void);
     const char *zcl_c23_proving_last_refusal(void);
 

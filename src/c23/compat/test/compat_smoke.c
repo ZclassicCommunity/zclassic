@@ -39,9 +39,6 @@
 
 #include "sprout_tx476970.h"
 
-#ifdef ZCL_C23_COMPAT_TESTING
-void zcl_c23_test_force_full_set_fallback(bool on);
-#endif
 extern char zcl_c23_test_sprout_path[4096];
 
 static int g_fail;
@@ -207,13 +204,8 @@ static double do_init(const char *dir, const char *const names[3],
     return t1 - t0;
 }
 
-static void test_init(const char *dir, bool force_full)
+static void test_init(const char *dir)
 {
-#ifdef ZCL_C23_COMPAT_TESTING
-    zcl_c23_test_force_full_set_fallback(force_full);
-#else
-    (void)force_full;
-#endif
     double dt = do_init(dir, NAMES, HASHES);
     check(zcl_c23_params_initialized(), "init_zksnark_params completed");
     char want[4200];
@@ -225,6 +217,8 @@ static void test_init(const char *dir, bool force_full)
     printf("TIME init_zksnark_params %.3f ms; proving status after init: %s\n",
            dt * 1e3, zcl_c23_proving_status());
 }
+
+static void check_valid_output_preinit(void);
 
 /* Each case must end in abort() (Rust panic). Returns only if it did not. */
 static void run_abort_case(const char *dir, int which)
@@ -246,13 +240,11 @@ static void run_abort_case(const char *dir, int which)
     case 3: /* pedersen_hash.rs:16 assert!(num < 63) */
         librustzcash_merkle_hash(63, z32, z32, out);
         break;
-    case 4: /* rustzcash.rs uses SAPLING_SPEND_VK.unwrap() without init */
-    {
-        void *v = librustzcash_sapling_verification_ctx_init();
-        uint8_t sig[64] = {0};
-        librustzcash_sapling_check_spend(v, z32, z32, z32, z32, proof, sig, z32);
+    case 4: /* rustzcash.rs:859 SAPLING_OUTPUT_VK.expect(..) without init: a
+             * well-formed output passes every earlier check, then panics.
+             * (Malformed inputs return false before init, as in Rust.) */
+        check_valid_output_preinit();
         break;
-    }
     case 5: { /* rustzcash.rs:1471 assert_eq!(witness[0], 32) */
         do_init(dir, NAMES, HASHES);
         uint8_t ask[32], ak[32], nsk[32], rcm[32], ar[32], d[11], cv[32], rk[32];
@@ -356,6 +348,18 @@ static bool do_output(const struct output *o)
     bool ok = librustzcash_sapling_check_output(ctx, o->cv, o->cm, o->epk, o->proof);
     librustzcash_sapling_verification_ctx_free(ctx);
     return ok;
+}
+
+static void check_valid_output_preinit(void)
+{
+    uint8_t oraw[948];
+    hex(oraw, sizeof(oraw), OUTPUT_HEX);
+    struct output o;
+    memcpy(o.cv, oraw, 32);
+    memcpy(o.cm, oraw + 32, 32);
+    memcpy(o.epk, oraw + 64, 32);
+    memcpy(o.proof, oraw + 64 + 32 + 580 + 80, 192);
+    (void)do_output(&o);
 }
 
 static void test_testnet_vectors(void)
@@ -772,9 +776,8 @@ static void test_end_to_end(void)
     rand_bytes(sighash, 32);
     void *z = librustzcash_sapling_proving_ctx_init();
     check(z != NULL, "proving_ctx_init never returns NULL");
-    check(strcmp(zcl_c23_proving_status(), "pair_armed") != 0 &&
-              strcmp(zcl_c23_proving_status(), "full_set") != 0,
-          "lazy proving: no proving keys loaded by ctx_init alone");
+    check(strcmp(zcl_c23_proving_status(), "resident") == 0,
+          "proving keys resident from init (as Rust)");
     check(!librustzcash_sapling_binding_sig(z, 1, sighash, sig0),
           "binding_sig, zero descriptions, valueBalance 1 -> false");
     check(librustzcash_sapling_binding_sig(z, 0, sighash, sig0),
@@ -792,8 +795,7 @@ static void test_end_to_end(void)
                                                anchor, w, cv, rk, proof);
     double t1 = now_s();
     check(sp, "e2e: spend_proof from a 1065-byte witness at position 5");
-    printf("TIME spend_proof (first, includes proving session: SHA-512 pin + "
-           "self-test) %.1f ms; proving status now: %s\n",
+    printf("TIME spend_proof (first) %.1f ms; proving status now: %s\n",
            (t1 - t0) * 1e3, zcl_c23_proving_status());
 
     uint8_t esk[32], rcm2[32], cv_o[32], proof_o[192], epk[32], cm_o[32];
@@ -1117,16 +1119,15 @@ int main(int argc, char **argv)
         LocalFree(wargv);
 #endif
     if (!dir) {
-        fprintf(stderr, "usage: %s <params-dir> [--force-full-set]\n", argv[0]);
+        fprintf(stderr, "usage: %s <params-dir>\n", argv[0]);
         return 2;
     }
     if (argc > 3 && strcmp(argv[2], "--abort-case") == 0) {
         run_abort_case(dir, atoi(argv[3]));
         return 0; /* the driver treats a normal exit as a failure */
     }
-    bool force_full = argc > 2 && strcmp(argv[2], "--force-full-set") == 0;
     test_misc();
-    test_init(dir, force_full);
+    test_init(dir);
     test_testnet_vectors();
     test_sprout_verify();
     test_key_components();

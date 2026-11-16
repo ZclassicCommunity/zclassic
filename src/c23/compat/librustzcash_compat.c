@@ -19,7 +19,9 @@
  *   D14  output_proof: esk/rcm/pk_d checks, bvk accumulation
  *   D15  binding_sig: valueBalance consistency check, INT64_MIN reject,
  *        zero-description signing
- *   D6   init: Rust path ABI, failure policy (abort)
+ *   D6   init: Rust path ABI, full-file BLAKE2b-512 check of all three files,
+ *        failure policy (abort), proving keys resident from init
+ *   --   calls made before init: false or abort exactly where Rust unwraps
  *   D7   merkle_hash depth >= 63 aborts
  *   D12/D17 contexts are never NULL
  *   D20  lazily initialised constants and CPU dispatch warmed before use
@@ -52,6 +54,7 @@
 #include <string.h>
 
 #if !defined(_WIN32)
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -72,6 +75,7 @@
 #include "zip32_codec.h"
 
 #include "base/log_level.h"
+#include "crypto/blake2b.h"
 #include "crypto/simd_dispatch.h"
 #include "sapling/bls12_381.h"
 #include "sapling/bn254_accel.h"
@@ -148,15 +152,6 @@ __attribute__((noreturn, cold)) static void zcl_panic(const char *msg)
     fprintf(stderr, "librustzcash (C23): %s\n", msg);
     fflush(stderr);
     abort();
-}
-
-/* Operator-relevant, rare events (proving refused). Goes through the glue's
- * sink unconditionally: zcl_log_emit_at does not consult the level. Never
- * carries a key or path byte. */
-static void zcl_note(const char *what, const char *why)
-{
-    zcl_log_emit_at(ZCL_LOG_WARN, "librustzcash (C23): %s: %s\n", what,
-                    why ? why : "unknown");
 }
 
 /* ------------------------------------------------------------------------ */
@@ -257,6 +252,21 @@ static inline void require_init(void)
                   "(librustzcash_init_zksnark_params was not called)");
 }
 
+/* Before init, Rust's check_spend / check_output run every input check and
+ * Proof::read, returning false on any failure, and panic only at the
+ * verifying-key unwrap (rustzcash.rs:780, :859). Z23's prepare functions stop
+ * at a NULL verifying key just before their Proof::read, so on this cold path
+ * the compiled-in verifying keys are published first (idempotent, under
+ * Z23's params mutex; init publishes the same keys) and prepare then runs
+ * Rust's whole check sequence. The verdict stays gated by require_init(),
+ * placed where Rust unwraps. Never reached by zclassicd, which inits first. */
+__attribute__((cold, noinline)) static void preinit_vks(void)
+{
+    if (!sapling_install_embedded_vks())
+        zcl_panic("compiled-in Sapling/Sprout verifying keys failed their "
+                  "integrity check");
+}
+
 bool zcl_c23_params_initialized(void)
 {
     return atomic_load_explicit(&g_init, memory_order_acquire);
@@ -322,7 +332,9 @@ static bool value_balance_point(int64_t v, struct jub_point *out)
     return true;
 }
 
-/* strdup is not declared under strict -std=c23 on every libc. NULL on OOM. */
+#if !defined(_WIN32)
+/* strdup is not declared under strict -std=c23 on every libc. NULL on OOM.
+ * (POSIX only: Windows paths go through wide_to_utf8.) */
 static char *dup_cstr(const char *s)
 {
     size_t n = strlen(s) + 1;
@@ -331,6 +343,7 @@ static char *dup_cstr(const char *s)
         memcpy(d, s, n);
     return d;
 }
+#endif
 
 static void generate_r_or_abort(uint8_t out[32])
 {
@@ -583,70 +596,134 @@ static zcl_pchar *path_copy(const codeunit *p, size_t len, const char *open_msg)
     return out;
 }
 
-/* rustzcash.rs:218-220 File::open(..).expect(..). Also returns the size. */
-static uint64_t open_and_size(const zcl_pchar *path, const char *open_msg)
+/* An open parameter file. */
+#if defined(_WIN32)
+typedef HANDLE zcl_fh;
+#else
+typedef int zcl_fh;
+#endif
+
+/* rustzcash.rs:218-220 File::open(..).expect(..). Rust's std::fs::File::open
+ * opens with read access only; on Windows it shares read, write and delete
+ * and passes FILE_FLAG_BACKUP_SEMANTICS, so a directory opens there and the
+ * read that follows fails (as it does on POSIX). */
+static zcl_fh open_or_panic(const zcl_pchar *path, const char *open_msg)
 {
 #if defined(_WIN32)
     HANDLE h = CreateFileW(path, GENERIC_READ,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                           NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
     if (h == INVALID_HANDLE_VALUE)
         zcl_panic(open_msg);
-    LARGE_INTEGER sz;
-    BOOL ok = GetFileSizeEx(h, &sz);
-    if (!CloseHandle(h) || !ok || sz.QuadPart < 0)
-        zcl_panic(open_msg);
-    return (uint64_t)sz.QuadPart;
+    return h;
 #else
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         zcl_panic(open_msg);
-    struct stat st;
-    int rc = fstat(fd, &st);
-    if (close(fd) != 0 || rc != 0 || st.st_size < 0)
-        zcl_panic(open_msg);
-    return (uint64_t)st.st_size;
+    return fd;
 #endif
 }
 
-/* Length of the directory part, or 0 when the path has none. The trailing
- * separator is dropped, except for a file in the root directory, whose
- * directory is the separator itself. *base receives the basename. */
-static size_t split_dir(const zcl_pchar *path, const zcl_pchar **base)
+/* The file is only read; a failing close cannot change bytes already hashed,
+ * and Rust's drop of a File ignores the close result as well. */
+static void fh_close(zcl_fh h)
 {
-    size_t n = 0, cut = 0;
-    bool have = false;
-    for (; path[n]; n++) {
-        if (ZCL_PSEP_IS(path[n])) {
-            cut = n;
-            have = true;
-        }
-    }
-    *base = have ? path + cut + 1 : path;
-    if (!have)
-        return 0;
-    return cut == 0 ? 1 : cut;
-}
-
-static bool base_is(const zcl_pchar *base, const char *ascii)
-{
-    size_t i = 0;
-    for (; ascii[i]; i++)
-        if (base[i] != (zcl_pchar)(unsigned char)ascii[i])
-            return false;
-    return base[i] == 0;
-}
-
 #if defined(_WIN32)
-static bool wide_is_ascii(const wchar_t *w)
+    (void)CloseHandle(h);
+#else
+    (void)close(h);
+#endif
+}
+
+/* One read: > 0 bytes read, 0 at end of file, -1 on an error. EINTR is
+ * retried, as Rust's BufReader and io::copy do. */
+static long long fh_read(zcl_fh h, uint8_t *buf, size_t cap)
 {
-    for (; *w; w++)
-        if (*w >= 0x80)
-            return false;
-    return true;
+#if defined(_WIN32)
+    DWORD want = cap > (size_t)(1u << 30) ? (DWORD)(1u << 30) : (DWORD)cap;
+    DWORD got = 0;
+    if (!ReadFile(h, buf, want, &got, NULL))
+        return -1;
+    return (long long)got;
+#else
+    for (;;) {
+        ssize_t n = read(h, buf, cap);
+        if (n >= 0)
+            return (long long)n;
+        if (errno != EINTR)
+            return -1;
+    }
+#endif
+}
+
+#define ZCL_READ_CHUNK ((size_t)1 << 20) /* Rust: BufReader::with_capacity(1 MiB) */
+
+/* rustzcash.rs:222-250 plus hashreader.rs: every byte of the file goes
+ * through BLAKE2b-512 (Blake2b::new(64), unkeyed), and into_hash renders the
+ * digest as lowercase hex ("{:02x}"). keep_cap > 0 also keeps the first
+ * keep_cap bytes in memory: for a file whose digest is the canonical one,
+ * that is the whole file, and it becomes the proving key. */
+struct hash_job {
+    zcl_fh fh;
+    size_t keep_cap;
+    uint8_t *kept; /* out: malloc'd, keep_cap bytes, NULL when keep_cap == 0 */
+    uint64_t len;  /* out: bytes read */
+    char hex[129]; /* out: lowercase hex digest */
+    bool io_ok;    /* out: read to end of file without an I/O error */
+};
+
+static void *hash_job_run(void *arg)
+{
+    static const char HEX[] = "0123456789abcdef";
+    struct hash_job *j = arg;
+    struct blake2b_ctx b;
+    uint8_t d[64];
+    j->io_ok = false;
+    j->len = 0;
+    j->hex[0] = 0;
+    if (blake2b_init(&b, sizeof(d)) != 0)
+        zcl_panic("internal: BLAKE2b-512 initialisation failed");
+    if (j->keep_cap) {
+        j->kept = malloc(j->keep_cap);
+        if (!j->kept)
+            zcl_panic("out of memory reading a Sapling parameter file");
+    }
+    uint8_t *scratch = malloc(ZCL_READ_CHUNK);
+    if (!scratch)
+        zcl_panic("out of memory reading a parameter file");
+    for (;;) {
+        uint8_t *dst = scratch;
+        size_t cap = ZCL_READ_CHUNK;
+        if (j->len < j->keep_cap) {
+            dst = j->kept + j->len;
+            cap = j->keep_cap - (size_t)j->len;
+            if (cap > ZCL_READ_CHUNK)
+                cap = ZCL_READ_CHUNK;
+        }
+        long long n = fh_read(j->fh, dst, cap);
+        if (n < 0)
+            goto out;
+        if (n == 0)
+            break;
+        if (blake2b_update(&b, dst, (size_t)n) != 0)
+            zcl_panic("internal: BLAKE2b-512 update failed");
+        j->len += (uint64_t)n;
+    }
+    if (blake2b_final(&b, d, sizeof(d)) != 0)
+        zcl_panic("internal: BLAKE2b-512 finalisation failed");
+    for (size_t i = 0; i < sizeof(d); i++) {
+        j->hex[2 * i] = HEX[d[i] >> 4];
+        j->hex[2 * i + 1] = HEX[d[i] & 15];
+    }
+    j->hex[128] = 0;
+    j->io_ok = true;
+out:
+    free(scratch);
+    return NULL;
 }
 
 /* UTF-16 -> UTF-8; NULL when the input is not valid UTF-16 (lone surrogate). */
+#if defined(_WIN32)
 static char *wide_to_utf8(const wchar_t *w)
 {
     int n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w, -1, NULL, 0,
@@ -663,41 +740,6 @@ static char *wide_to_utf8(const wchar_t *w)
     }
     return out;
 }
-
-/* The Z23 pair loader (params_init.c) stats files with the CRT's narrow
- * stat(), which interprets the string in the ANSI code page, and reads them
- * through file_stream.c, which converts from UTF-8 to UTF-16. Both agree only
- * on a string that is ASCII, or on any UTF-8 string when the process ANSI code
- * page is UTF-8. Return such a spelling of `wdir`, or NULL when none exists:
- * the directory itself if ASCII, its 8.3 short name if that is ASCII, its
- * UTF-8 form when GetACP() == CP_UTF8. */
-static char *windows_engine_dir(const wchar_t *wdir)
-{
-#ifdef ZCL_C23_COMPAT_TESTING
-    if (g_test_force_full_set)
-        return NULL;
-#endif
-    if (wide_is_ascii(wdir))
-        return wide_to_utf8(wdir);
-    DWORD need = GetShortPathNameW(wdir, NULL, 0);
-    if (need > 0) {
-        wchar_t *s = malloc((size_t)need * sizeof(wchar_t));
-        if (!s)
-            zcl_panic("out of memory converting a parameter path");
-        DWORD got = GetShortPathNameW(wdir, s, need);
-        if (got > 0 && got < need && wide_is_ascii(s)) {
-            char *u = wide_to_utf8(s);
-            free(s);
-            if (u)
-                return u;
-        } else {
-            free(s);
-        }
-    }
-    if (GetACP() == CP_UTF8)
-        return wide_to_utf8(wdir);
-    return NULL;
-}
 #endif
 
 void librustzcash_init_zksnark_params(
@@ -708,6 +750,11 @@ void librustzcash_init_zksnark_params(
     static const char SPEND_OPEN[] = "couldn't load Sapling spend parameters file";
     static const char OUTPUT_OPEN[] = "couldn't load Sapling output parameters file";
     static const char SPROUT_OPEN[] = "couldn't load Sprout groth16 parameters file";
+    /* rustzcash.rs:229-232: both Parameters::read calls carry the "spend"
+     * message in Rust (sic). */
+    static const char SPEND_READ[] = "couldn't deserialize Sapling spend parameters file";
+    static const char OUTPUT_READ[] = "couldn't deserialize Sapling spend parameters file";
+    static const char SPROUT_READ[] = "couldn't deserialize Sprout Groth16 verifying key";
     static const char SPEND_BAD[] =
         "Sapling spend parameter file is not correct, please clean your "
         "`~/.zcash-params/` and re-run `fetch-params`.";
@@ -729,112 +776,135 @@ void librustzcash_init_zksnark_params(
     check_hash_arg(sprout_hash);
 
     /* rustzcash.rs:141-149 (Unix bytes) / :174-179 (Windows UTF-16) paths;
-     * rustzcash.rs:218-220 File::open(..).expect(..) in this order. */
+     * rustzcash.rs:218-220 File::open(..).expect(..), all three, in this
+     * order, before anything is read. Any file name and any directories. */
     zcl_pchar *sp = path_copy(spend_path, spend_path_len, SPEND_OPEN);
     zcl_pchar *op = path_copy(output_path, output_path_len, OUTPUT_OPEN);
     zcl_pchar *gp = path_copy(sprout_path, sprout_path_len, SPROUT_OPEN);
-    uint64_t sp_size = open_and_size(sp, SPEND_OPEN);
-    uint64_t op_size = open_and_size(op, OUTPUT_OPEN);
-    uint64_t gp_size = open_and_size(gp, SPROUT_OPEN);
+    struct hash_job jobs[3];
+    memset(jobs, 0, sizeof(jobs));
+    jobs[0].fh = open_or_panic(sp, SPEND_OPEN);
+    jobs[1].fh = open_or_panic(op, OUTPUT_OPEN);
+    jobs[2].fh = open_or_panic(gp, SPROUT_OPEN);
+    jobs[0].keep_cap = (size_t)SAPLING_SPEND_SIZE;
+    jobs[1].keep_cap = (size_t)SAPLING_OUTPUT_SIZE;
+    jobs[2].keep_cap = 0; /* :234-238 only the Sprout VK is kept; proving reopens the path */
 
-    /* rustzcash.rs:252-262: the BLAKE2b of each whole file must equal the
-     * caller's string, else panic. The C23 engine accepts only the pinned
-     * ceremony files (Z23 SHA-512 pins on every byte it later parses), so a
-     * caller string other than the pinned digest, or a file whose size rules
-     * the pinned digest out, gets Rust's panic now. The full-file digest of
-     * the Sapling pair is checked by Z23 (SHA-512) before its first proof;
-     * verification uses the compiled-in verifying keys, which Z23 checks
-     * against their SHA-256 pins (params_init.c embedded_vk_sha256_ok). */
-    if (strcmp(spend_hash, SAPLING_SPEND_B2) != 0 || sp_size != SAPLING_SPEND_SIZE)
+    /* rustzcash.rs:222-250 read every byte of the three files through
+     * BLAKE2b-512. Rust reads them one after another; the digests do not
+     * depend on the order, so the 692 MiB Sprout file is hashed on a second
+     * thread while this one reads the Sapling pair. */
+    pthread_t sprout_thread;
+    bool threaded = pthread_create(&sprout_thread, NULL, hash_job_run, &jobs[2]) == 0;
+    hash_job_run(&jobs[0]);
+    hash_job_run(&jobs[1]);
+    if (threaded) {
+        if (pthread_join(sprout_thread, NULL) != 0)
+            zcl_panic("pthread_join failed while hashing the Sprout parameters");
+    } else {
+        hash_job_run(&jobs[2]);
+    }
+    for (int i = 0; i < 3; i++)
+        fh_close(jobs[i].fh);
+
+    /* rustzcash.rs:229-250: a read error panics, spend first. (A truncated
+     * or otherwise malformed file makes Rust's Parameters::read panic with
+     * the same message; here it reaches the digest check below and panics
+     * with the "not correct" message. Both are aborts.) */
+    if (!jobs[0].io_ok)
+        zcl_panic(SPEND_READ);
+    if (!jobs[1].io_ok)
+        zcl_panic(OUTPUT_READ);
+    if (!jobs[2].io_ok)
+        zcl_panic(SPROUT_READ);
+
+    /* rustzcash.rs:252-262: into_hash() != caller string -> panic, in this
+     * order. Plain string equality, as Rust's String != String. */
+    if (strcmp(jobs[0].hex, spend_hash) != 0)
         zcl_panic(SPEND_BAD);
-    if (strcmp(output_hash, SAPLING_OUTPUT_B2) != 0 || op_size != SAPLING_OUTPUT_SIZE)
+    if (strcmp(jobs[1].hex, output_hash) != 0)
         zcl_panic(OUTPUT_BAD);
-    if (strcmp(sprout_hash, SPROUT_GROTH16_B2) != 0 || gp_size != SPROUT_GROTH16_SIZE)
+    if (strcmp(jobs[2].hex, sprout_hash) != 0)
         zcl_panic(SPROUT_BAD);
 
-    /* The Z23 loaders need the canonical names in one directory. */
-    const zcl_pchar *sp_base, *op_base, *gp_base;
-    size_t sp_dlen = split_dir(sp, &sp_base);
-    size_t op_dlen = split_dir(op, &op_base);
-    (void)split_dir(gp, &gp_base);
-    if (!base_is(sp_base, "sapling-spend.params") ||
-        !base_is(op_base, "sapling-output.params") || sp_dlen != op_dlen ||
-        memcmp(sp, op, sp_dlen * sizeof(zcl_pchar)) != 0)
-        zcl_panic("the C23 build needs sapling-spend.params and "
-                  "sapling-output.params in one directory");
+    /* Each file now has the caller's digest. Rust would go on to use the
+     * verifying keys parsed from these files (:264-279) whatever the digest;
+     * the C23 engine has the canonical ceremony keys compiled in, so it
+     * accepts only the canonical digests, which are the only ones zclassicd
+     * passes (init.cpp ZC_LoadParams, gtest/main.cpp, test_bitcoin.cpp). A
+     * caller that passes other digests together with matching files is the
+     * one case where Rust accepts and this build aborts. */
+    if (strcmp(spend_hash, SAPLING_SPEND_B2) != 0 ||
+        strcmp(output_hash, SAPLING_OUTPUT_B2) != 0 ||
+        strcmp(sprout_hash, SPROUT_GROTH16_B2) != 0)
+        zcl_panic("the C23 build accepts only the canonical Zcash parameter "
+                  "files (a non-canonical BLAKE2b digest was passed)");
+    /* A canonical digest fixes the length; anything else is a broken read. */
+    if (jobs[0].len != SAPLING_SPEND_SIZE || jobs[1].len != SAPLING_OUTPUT_SIZE ||
+        jobs[2].len != SPROUT_GROTH16_SIZE)
+        zcl_panic("internal: canonical parameter file read with the wrong length");
 
     /* rustzcash.rs:264-279 publish the verifying keys. Here: the compiled-in
-     * keys, which are the leading bytes of the pinned files. */
+     * keys, which are the leading bytes of the canonical files just verified
+     * (Z23 also checks them against SHA-256 pins). */
     if (!sapling_install_embedded_vks())
         zcl_panic("compiled-in Sapling/Sprout verifying keys failed their "
                   "integrity check");
 
-    /* A bare file name means the current directory, as File::open sees it. */
-    zcl_pchar *dir = malloc(((sp_dlen ? sp_dlen : 1) + 1) * sizeof(zcl_pchar));
-    if (!dir)
-        zcl_panic("out of memory copying the parameter directory");
-    if (sp_dlen == 0) {
-        dir[0] = (zcl_pchar)'.';
-        dir[1] = 0;
-    } else {
-        memcpy(dir, sp, sp_dlen * sizeof(zcl_pchar));
-        dir[sp_dlen] = 0;
-    }
-
     char *sprout_utf8 = NULL;
-    char *engine_dir = NULL;
-    char *full_set_dir = NULL;
 #if defined(_WIN32)
     sprout_utf8 = wide_to_utf8(gp);
     if (!sprout_utf8)
         zcl_panic(SPROUT_OPEN);
-    engine_dir = windows_engine_dir(dir);
-    if (!engine_dir) {
-        full_set_dir = wide_to_utf8(dir);
-        if (!full_set_dir)
-            zcl_panic(SPEND_OPEN);
-    }
 #else
     sprout_utf8 = dup_cstr(gp);
-    engine_dir = dup_cstr(dir);
-    if (!sprout_utf8 || !engine_dir)
+    if (!sprout_utf8)
         zcl_panic("out of memory copying a parameter path");
 #endif
-
     /* rustzcash.rs:274 SPROUT_GROTH16_PARAMS_PATH = Some(sprout_path). */
     if (!zc23_sprout_prover_set_params_path(sprout_utf8))
         zcl_panic(SPROUT_OPEN);
 
-    if (pthread_mutex_lock(&g_init_mu) != 0)
-        zcl_panic("pthread_mutex_lock failed");
-    /* Proving keys are loaded on demand by the first proof of a send (lazy
-     * session, see pctx_session). An engine dir means the Z23 pair loader is
-     * used; otherwise (Windows directory with no ANSI-safe spelling) the
-     * full-set loader is used with the UTF-8 directory. */
-    sapling_note_proving_pair_dir(engine_dir); /* NULL clears it */
-    free(g_full_set_dir);
-    g_full_set_dir = full_set_dir;
-    if (pthread_mutex_unlock(&g_init_mu) != 0)
-        zcl_panic("pthread_mutex_unlock failed");
+    /* rustzcash.rs:272-273 SAPLING_SPEND_PARAMS / SAPLING_OUTPUT_PARAMS. */
+    struct zcl_pk_set *set = malloc(sizeof(*set));
+    if (!set)
+        zcl_panic("out of memory publishing the Sapling proving keys");
+    set->spend = jobs[0].kept;
+    set->spend_len = (size_t)jobs[0].len;
+    set->output = jobs[1].kept;
+    set->output_len = (size_t)jobs[1].len;
+    /* A previous set (second init) is leaked on purpose, see g_pks. */
+    atomic_store_explicit(&g_pks, set, memory_order_release);
 
-    free(engine_dir);
     free(sprout_utf8);
-    free(dir);
     free(sp);
     free(op);
     free(gp);
     atomic_store_explicit(&g_init, true, memory_order_release);
 }
 
+/* Diagnostics kept for ABI stability: "none" before init, "resident" after
+ * (the proving keys are held from init, as in Rust). Nothing is refused at
+ * proof time any more, so the last refusal is always NULL. */
 const char *zcl_c23_proving_status(void)
 {
-    return sapling_proving_status_name();
+    return atomic_load_explicit(&g_pks, memory_order_acquire) ? "resident" : "none";
 }
 
 const char *zcl_c23_proving_last_refusal(void)
 {
-    return sapling_proving_last_refusal();
+    return NULL;
 }
+
+static const struct zcl_pk_set *pks_get(void)
+{
+    const struct zcl_pk_set *s = atomic_load_explicit(&g_pks, memory_order_acquire);
+    if (!s || !s->spend || !s->output)
+        zcl_panic("parameters should have been initialized "
+                  "(Sapling proving keys absent)");
+    return s;
+}
+
 
 /* ------------------------------------------------------------------------ */
 /* Verification                                                              */
@@ -872,7 +942,9 @@ bool librustzcash_sapling_check_spend(void *ctx, const unsigned char *cv,
                                       const unsigned char *spendAuthSig,
                                       const unsigned char *sighashValue)
 {
-    require_init();
+    /* Before init: see preinit_vks. */
+    if (__builtin_expect(!atomic_load_explicit(&g_init, memory_order_acquire), 0))
+        preinit_vks();
     warm();
     struct sapling_verification_ctx *v = vctx_get(ctx);
     struct groth16_proof proof;
@@ -897,6 +969,7 @@ bool librustzcash_sapling_check_spend(void *ctx, const unsigned char *cv,
     if (proof_has_infinity_flag(zkproof))
         return false;
     /* rustzcash.rs:779-789 verify_proof(SAPLING_SPEND_VK) == Ok(true) */
+    require_init(); /* rustzcash.rs:780 SAPLING_SPEND_VK.expect(..) */
     return sapling_spend_groth16_one(&proof, (const uint64_t (*)[4])pub);
 }
 
@@ -905,7 +978,9 @@ bool librustzcash_sapling_check_output(void *ctx, const unsigned char *cv,
                                        const unsigned char *ephemeralKey,
                                        const unsigned char *zkproof)
 {
-    require_init();
+    /* Before init: see preinit_vks. */
+    if (__builtin_expect(!atomic_load_explicit(&g_init, memory_order_acquire), 0))
+        preinit_vks();
     warm();
     struct sapling_verification_ctx *v = vctx_get(ctx);
     struct groth16_proof proof;
@@ -924,6 +999,7 @@ bool librustzcash_sapling_check_output(void *ctx, const unsigned char *cv,
     if (proof_has_infinity_flag(zkproof))
         return false;
     /* rustzcash.rs:858-868 verify_proof(SAPLING_OUTPUT_VK) == Ok(true) */
+    require_init(); /* rustzcash.rs:859 SAPLING_OUTPUT_VK.expect(..) */
     return sapling_output_groth16_one(&proof, (const uint64_t (*)[4])pub);
 }
 
@@ -953,8 +1029,16 @@ bool librustzcash_sprout_verify(const unsigned char *proof,
                                 const unsigned char *cm2,
                                 uint64_t vpub_old, uint64_t vpub_new)
 {
-    require_init();
     warm();
+    /* rustzcash.rs:1121-1124 Proof::read (infinity flag, then on-curve and
+     * subgroup) returns false before :1127-1128 unwraps SPROUT_GROTH16_VK;
+     * before init only that panics (cold path). */
+    if (__builtin_expect(!atomic_load_explicit(&g_init, memory_order_acquire), 0)) {
+        struct groth16_proof gp;
+        if (proof_has_infinity_flag(proof) || !groth16_proof_read(&gp, proof))
+            return false;
+        require_init();
+    }
     /* rustzcash.rs:1121-1124 Proof::read rejects infinity in A, B, C. */
     if (proof_has_infinity_flag(proof))
         return false;
@@ -1116,17 +1200,13 @@ bool zcl_c23_batch_verify(const zcl_c23_batch *b, bool *bad_is_output,
 
 #define PCTX_MAGIC UINT64_C(0x7a63323370637478) /* "zc23pctx" */
 
-/* rustzcash.rs:1140-1143 SaplingProvingContext { bsk: Fs, bvk: Point }.
- * `session` records whether the Z23 proving session (proving keys resident,
- * prover self-tested) was acquired by this context. It is acquired at the
- * first spend/output proof only, so transparent-only and Sprout-only builds
- * (transaction_builder.cpp creates a context for every transaction) never
- * touch the Sapling proving files. */
+/* rustzcash.rs:1140-1143 SaplingProvingContext { bsk: Fs, bvk: Point }. The
+ * proving keys are not per context: init holds them for the process, as Rust
+ * does (see g_pks). */
 struct zcl_pctx {
     uint64_t magic;
     struct fs bsk;
     struct jub_point bvk;
-    bool session;
 };
 
 static struct zcl_pctx *pctx_get(const void *ctx)
@@ -1147,7 +1227,6 @@ void *librustzcash_sapling_proving_ctx_init(void)
     c->magic = PCTX_MAGIC;
     fs_zero(&c->bsk);
     jub_identity(&c->bvk);
-    c->session = false;
     return c;
 }
 
@@ -1157,46 +1236,8 @@ void librustzcash_sapling_proving_ctx_free(void *ctx)
     if (!ctx)
         return;
     struct zcl_pctx *c = pctx_get(ctx);
-    bool session = c->session;
     memory_cleanse(c, sizeof(*c));
     free(c);
-    if (session)
-        sapling_proving_session_release();
-}
-
-/* Make the Sapling proving keys resident for this context. Rust has them from
- * init (rustzcash.rs:272-273) and aborts at init when they are bad; here the
- * pinned files are read and checked on first use, and a refusal makes the
- * proof call return false (the send fails with "Spend proof failed" /
- * "Output proof failed") instead of killing a running node. */
-static bool pctx_session(struct zcl_pctx *c)
-{
-    if (c->session)
-        return true;
-    if (pthread_mutex_lock(&g_init_mu) != 0)
-        zcl_panic("pthread_mutex_lock failed");
-    char *full_dir = g_full_set_dir ? dup_cstr(g_full_set_dir) : NULL;
-    bool oom = g_full_set_dir && !full_dir;
-    if (pthread_mutex_unlock(&g_init_mu) != 0)
-        zcl_panic("pthread_mutex_unlock failed");
-    if (oom)
-        zcl_panic("out of memory");
-    if (full_dir) {
-        /* Windows directory without an ANSI-safe spelling: the full-set
-         * loader reads through UTF-8 -> UTF-16 only. It pins all four files
-         * and keeps the proving keys for the life of the process. */
-        if (!zclassic_sapling_prover_is_ready() && !sapling_init_params(full_dir))
-            zcl_note("Sapling proving parameters refused", "full_set_load_failed");
-        free(full_dir);
-    }
-    if (!sapling_proving_session_acquire()) {
-        zcl_note("Sapling proving unavailable", sapling_proving_last_refusal());
-        return false;
-    }
-    c->session = true;
-    if (!zclassic_sapling_prover_is_ready())
-        zcl_panic("Sapling proving session acquired but prover not ready");
-    return true;
 }
 
 /* Rust's self-verification of a fresh spend proof, rustzcash.rs:1549-1588,
@@ -1236,7 +1277,6 @@ bool librustzcash_sapling_spend_proof(void *ctx, const unsigned char *ak,
                                       unsigned char *cv, unsigned char *rk,
                                       unsigned char *zkproof)
 {
-    require_init();
     warm();
     struct zcl_pctx *c = pctx_get(ctx);
     bool ok = false;
@@ -1295,6 +1335,12 @@ bool librustzcash_sapling_spend_proof(void *ctx, const unsigned char *ak,
         goto out;
     }
 
+    /* rustzcash.rs:1545 SAPLING_SPEND_PARAMS.as_ref().unwrap(), evaluated as
+     * an argument of create_random_proof, so before synthesis: every check
+     * above returns false before init, everything below panics. */
+    require_init();
+    const struct zcl_pk_set *pks = pks_get();
+
     /* rustzcash.rs:1531-1547 create_random_proof(..).expect("proving should
      * not fail"). Rust's Spend circuit calls ak.assert_not_small_order
      * (sapling-crypto circuit/sapling/mod.rs, ecc.rs:95-122), whose
@@ -1305,9 +1351,6 @@ bool librustzcash_sapling_spend_proof(void *ctx, const unsigned char *ak,
         zcl_panic("internal: canonical ak failed to decode");
     if (jub_is_identity(&ak_pt))
         zcl_panic("proving should not fail (ak is the identity)");
-
-    if (!pctx_session(c))
-        goto out;
 
     memcpy(wit.ak, ak_c, 32);
     memcpy(wit.nsk, nsk, 32);
@@ -1331,11 +1374,7 @@ bool librustzcash_sapling_spend_proof(void *ctx, const unsigned char *ak,
         goto out;
     memcpy(pub.anchor, anchor, 32);
 
-    size_t pk_len = 0;
-    const uint8_t *pk = sapling_get_spend_pk(&pk_len);
-    if (!pk || pk_len == 0)
-        zcl_panic("internal: Sapling spend proving key absent inside a session");
-    if (!sapling_create_spend_proof(pk, pk_len, &wit, &pub, proof))
+    if (!sapling_create_spend_proof(pks->spend, pks->spend_len, &wit, &pub, proof))
         zcl_panic("proving should not fail");
 
     /* rustzcash.rs:1505-1515 nf from the FULL u64 position (the circuit uses
@@ -1378,7 +1417,6 @@ bool librustzcash_sapling_output_proof(void *ctx, const unsigned char *esk,
                                        const uint64_t value, unsigned char *cv,
                                        unsigned char *zkproof)
 {
-    require_init();
     warm();
     struct zcl_pctx *c = pctx_get(ctx);
     bool ok = false;
@@ -1410,15 +1448,18 @@ bool librustzcash_sapling_output_proof(void *ctx, const unsigned char *esk,
     fs_neg(&neg, &rcv_fs);
     fs_add(&c->bsk, &c->bsk, &neg);
 
+    /* rustzcash.rs:1224 SAPLING_OUTPUT_PARAMS.as_ref().unwrap(), evaluated as
+     * an argument of create_random_proof, after the bsk update and before
+     * synthesis (which is where an invalid diversifier panics). */
+    require_init();
+    const struct zcl_pk_set *pks = pks_get();
+
     /* rustzcash.rs:1223-1227 create_random_proof(..).expect: the Output
      * circuit witnesses g_d through payment_address.g_d(), None for an
      * invalid diversifier -> SynthesisError::AssignmentMissing -> panic.
      * (Rust never checks the diversifier before this point.) */
     if (!sapling_diversifier_to_gd(&g_d, diversifier))
         zcl_panic("proving should not fail (invalid diversifier)");
-
-    if (!pctx_session(c))
-        goto out;
 
     wit.value = value;
     memcpy(wit.diversifier, diversifier, 11);
@@ -1433,11 +1474,7 @@ bool librustzcash_sapling_output_proof(void *ctx, const unsigned char *esk,
         !sapling_compute_cm(diversifier, pk_d_c, value, rcm, pub.cm))
         zcl_panic("internal: output public inputs failed on validated inputs");
 
-    size_t pk_len = 0;
-    const uint8_t *pk = sapling_get_output_pk(&pk_len);
-    if (!pk || pk_len == 0)
-        zcl_panic("internal: Sapling output proving key absent inside a session");
-    if (!sapling_create_output_proof(pk, pk_len, &wit, &pub, proof))
+    if (!sapling_create_output_proof(pks->output, pks->output_len, &wit, &pub, proof))
         zcl_panic("proving should not fail");
 
     /* rustzcash.rs:1235-1245 ctx.bvk -= cv (no self-verification in Rust) */
