@@ -9,7 +9,7 @@ darwin_CFLAGS=-pipe -isysroot$(shell xcrun --show-sdk-path)
 darwin_CXXFLAGS=$(darwin_CFLAGS) -Wno-enum-constexpr-conversion
 darwin_LDFLAGS=-Wl,-syslibroot,$(shell xcrun --show-sdk-path)
 
-darwin_release_CFLAGS=-O2
+darwin_release_CFLAGS=-O3
 darwin_release_CXXFLAGS=$(darwin_release_CFLAGS)
 
 darwin_debug_CFLAGS=-O1

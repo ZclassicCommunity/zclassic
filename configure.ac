@@ -54,6 +54,8 @@ else
 fi
 
 AC_PROG_CXX
+dnl The C23 crypto core (src/c23) is plain C.
+AC_PROG_CC
 m4_ifdef([AC_PROG_OBJCXX],[AC_PROG_OBJCXX])
 
 dnl By default, libtool for mingw refuses to link static libs into a dll for
@@ -748,14 +750,65 @@ AC_CHECK_LIB([gmp],[__gmpn_sub_n],GMP_LIBS=-lgmp, [AC_MSG_ERROR(libgmp missing)]
 AC_CHECK_HEADER([gmpxx.h],,AC_MSG_ERROR(libgmpxx headers missing))
 AC_CHECK_LIB([gmpxx],[main],GMPXX_LIBS=-lgmpxx, [AC_MSG_ERROR(libgmpxx missing)])
 
-RUST_LIBS="-lrustzcash"
-case $host in
-  *mingw*)
-    ;;
-  *)
-    RUST_LIBS="$RUST_LIBS -ldl"
-    ;;
-esac
+dnl The C23 crypto core (src/c23, built into libzcl_c23.a) replaces librustzcash.
+dnl No Rust library is linked. The core needs a 64-bit target with __int128 and
+dnl does its own run-time CPU dispatch (ADX/BMI2/AVX2/AVX-512): never add -march
+dnl or -m<isa> flags for it.
+AC_LANG_PUSH([C])
+AC_MSG_CHECKING([whether the target is 64-bit with __int128 (C23 crypto core)])
+AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+_Static_assert(sizeof(void*)==8 && sizeof(unsigned __int128)==16, "need 64-bit");
+]])],
+  [AC_MSG_RESULT([yes])],
+  [AC_MSG_RESULT([no])
+   AC_MSG_ERROR([the C23 crypto core needs a 64-bit target with __int128 (no i686)])])
+
+dnl Language level for libzcl_c23.a: -std=c23 when the compiler really speaks it,
+dnl else -std=gnu17 (GCC < 14, mingw-w64 GCC 13, older Apple clang); the
+dnl force-included src/c23/glue/zcl_c23_compat.h supplies the C23 spellings there.
+dnl Strict -std=c23 hides the POSIX declarations on glibc, so that mode also
+dnl defines _GNU_SOURCE. Override with ZCL_C23_STD=<flag> (ZCL_C23_STD_DEFS too).
+AC_ARG_VAR([ZCL_C23_STD], [C language flag for the C23 crypto core (default: -std=c23 if it works, else -std=gnu17)])
+AC_ARG_VAR([ZCL_C23_STD_DEFS], [feature-test macros that go with ZCL_C23_STD])
+if test "x$ZCL_C23_STD" = x; then
+  AC_CACHE_CHECK([whether $CC compiles C23 with -std=c23], [zcl_cv_cc_std_c23], [
+    zcl_save_CFLAGS="$CFLAGS"
+    CFLAGS="$CFLAGS -std=c23 -D_GNU_SOURCE"
+    AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 202000L
+#error "not C23"
+#endif
+static_assert(sizeof(uint64_t) == 8, "u64");
+static bool zcl_probe(const void *p) { return p != nullptr; }
+constexpr size_t zcl_probe_n = 4;
+int zcl_probe_main(void)
+{
+    struct timespec ts = {};
+    typeof(ts.tv_sec) s = 0;
+    char buf = (char)zcl_probe_n;
+    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
+    (void)fileno(stdin);
+    (void)strnlen(&buf, 0);
+    return zcl_probe(&s) ? (int)s : 1;
+}
+]])], [zcl_cv_cc_std_c23=yes], [zcl_cv_cc_std_c23=no])
+    CFLAGS="$zcl_save_CFLAGS"])
+  if test "x$zcl_cv_cc_std_c23" = xyes; then
+    ZCL_C23_STD="-std=c23"
+    ZCL_C23_STD_DEFS="-D_GNU_SOURCE"
+  else
+    ZCL_C23_STD="-std=gnu17"
+  fi
+fi
+AC_LANG_POP([C])
+AC_SUBST(ZCL_C23_STD)
+AC_SUBST(ZCL_C23_STD_DEFS)
+
 
 dnl Check for OpenMP support
 AX_OPENMP(
@@ -780,7 +833,7 @@ AX_CHECK_COMPILE_FLAG([-fwrapv],[CXXFLAGS="$CXXFLAGS -fwrapv"])
 AX_CHECK_COMPILE_FLAG([-fno-strict-aliasing],[CXXFLAGS="$CXXFLAGS -fno-strict-aliasing"])
 AX_CHECK_COMPILE_FLAG([-Wno-builtin-declaration-mismatch],[CXXFLAGS="$CXXFLAGS -Wno-builtin-declaration-mismatch"],,[[$CXXFLAG_WERROR]])
 
-LIBZCASH_LIBS="-lgmp -lgmpxx $BOOST_SYSTEM_LIB -lcrypto -lsodium $RUST_LIBS"
+LIBZCASH_LIBS="-lgmp -lgmpxx $BOOST_SYSTEM_LIB -lcrypto -lsodium"
 
 AC_MSG_CHECKING([whether to build bitcoind])
 AM_CONDITIONAL([BUILD_BITCOIND], [test x$build_bitcoind = xyes])
@@ -972,6 +1025,7 @@ echo "  build os      = $BUILD_OS"
 echo
 echo "  CC            = $CC"
 echo "  CFLAGS        = $CFLAGS"
+echo "  C23 core std  = $ZCL_C23_STD $ZCL_C23_STD_DEFS"
 echo "  CPPFLAGS      = $CPPFLAGS"
 echo "  CXX           = $CXX"
 echo "  CXXFLAGS      = $CXXFLAGS"

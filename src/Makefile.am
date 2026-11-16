@@ -2,7 +2,9 @@ DIST_SUBDIRS = secp256k1 univalue
 
 AM_LDFLAGS = $(PTHREAD_CFLAGS) $(LIBTOOL_LDFLAGS) $(SAN_LDFLAGS) $(HARDENED_LDFLAGS)
 AM_CXXFLAGS = $(SAN_CXXFLAGS) $(HARDENED_CXXFLAGS) $(ERROR_CXXFLAGS)
-AM_CPPFLAGS = $(HARDENED_CPPFLAGS) -DBOOST_BIND_GLOBAL_PLACEHOLDERS
+# c23/compat comes FIRST: #include "librustzcash.h" must resolve to the C23 shim
+# header (src/c23/compat/librustzcash.h), never to a Rust header in a depends prefix.
+AM_CPPFLAGS = -I$(srcdir)/c23/compat $(HARDENED_CPPFLAGS) -DBOOST_BIND_GLOBAL_PLACEHOLDERS
 EXTRA_LIBRARIES =
 
 if EMBEDDED_LEVELDB
@@ -37,6 +39,11 @@ LIBSECP256K1=secp256k1/libsecp256k1.la
 LIBSNARK=snark/libsnark.a
 LIBUNIVALUE=univalue/libunivalue.la
 LIBZCASH=libzcash.a
+# The C23 crypto core that replaces librustzcash (see src/c23/README.md), then the
+# C++ seam it calls back into (logging, network id). Always list them together and
+# in this order, after every library that calls librustzcash_* and before
+# -lsodium -lcrypto.
+LIBZCL_C23=libzcl_c23.a libzcl_c23_seam.a
 
 if ENABLE_ZMQ
 LIBBITCOIN_ZMQ=libbitcoin_zmq.a
@@ -66,10 +73,10 @@ LIBSNARK_CONFIG_FLAGS += PLATFORM=darwin
 endif
 
 $(LIBSNARK): $(wildcard snark/src/*)
-	$(AM_V_at) CC="$(CC)" CXX="$(CXX)" AR="$(AR)" CXXFLAGS="$(LIBSNARK_CXXFLAGS)" $(MAKE) $(AM_MAKEFLAGS) -C snark/ DEPINST="$(LIBSNARK_DEPINST)" $(LIBSNARK_CONFIG_FLAGS) OPTFLAGS="-O2" NO_GTEST=1 CURVE=ALT_BN128 FEATUREFLAGS="-DUSE_ASM -DMONTGOMERY_OUTPUT -DNO_PROCPS" lib
+	$(AM_V_at) CC="$(CC)" CXX="$(CXX)" AR="$(AR)" CXXFLAGS="$(LIBSNARK_CXXFLAGS)" $(MAKE) $(AM_MAKEFLAGS) -C snark/ DEPINST="$(LIBSNARK_DEPINST)" $(LIBSNARK_CONFIG_FLAGS) OPTFLAGS="-O3" NO_GTEST=1 CURVE=ALT_BN128 FEATUREFLAGS="-DUSE_ASM -DMONTGOMERY_OUTPUT -DNO_PROCPS" lib
 
 libsnark-tests: $(wildcard snark/src/*)
-	$(AM_V_at) CC="$(CC)" CXX="$(CXX)" AR="$(AR)" CXXFLAGS="$(LIBSNARK_CXXFLAGS)" $(MAKE) $(AM_MAKEFLAGS) -C snark/ check DEPINST="$(LIBSNARK_DEPINST)" $(LIBSNARK_CONFIG_FLAGS) OPTFLAGS="-O2"
+	$(AM_V_at) CC="$(CC)" CXX="$(CXX)" AR="$(AR)" CXXFLAGS="$(LIBSNARK_CXXFLAGS)" $(MAKE) $(AM_MAKEFLAGS) -C snark/ check DEPINST="$(LIBSNARK_DEPINST)" $(LIBSNARK_CONFIG_FLAGS) OPTFLAGS="-O3"
 
 $(LIBUNIVALUE): $(wildcard univalue/lib/*) $(wildcard univalue/include/*)
 	$(AM_V_at)$(MAKE) $(AM_MAKEFLAGS) -C $(@D) $(@F)
@@ -85,7 +92,8 @@ EXTRA_LIBRARIES += \
   $(LIBBITCOIN_WALLET) \
   $(LIBBITCOIN_ZMQ) \
   $(LIBBITCOIN_PROTON) \
-  $(LIBZCASH)
+  $(LIBZCASH) \
+  $(LIBZCL_C23)
 
 lib_LTLIBRARIES = $(LIBZCASH_CONSENSUS)
 
@@ -113,7 +121,7 @@ LIBZCASH_H = \
   zcash/Zcash.h \
   zcash/zip32.h
 
-.PHONY: FORCE collate-libsnark check-symbols check-security
+.PHONY: FORCE collate-libsnark check-symbols check-security check-c23-vendor check-c23-no-rust
 # bitcoin core #
 BITCOIN_CORE_H = \
   addrman.h \
@@ -460,6 +468,7 @@ zclassicd_LDADD = \
   $(LIBBITCOIN_PROTON) \
   $(LIBBITCOIN_CRYPTO) \
   $(LIBZCASH) \
+  $(LIBZCL_C23) \
   $(LIBSNARK) \
   $(LIBLEVELDB) \
   $(LIBMEMENV) \
@@ -518,6 +527,7 @@ zclassic_tx_LDADD = \
   $(LIBBITCOIN_UTIL) \
   $(LIBSECP256K1) \
   $(LIBZCASH) \
+  $(LIBZCL_C23) \
   $(LIBSNARK) \
   $(LIBBITCOIN_CRYPTO) \
   $(LIBZCASH_LIBS)
@@ -553,6 +563,115 @@ libzcash_a_LDFLAGS = $(AM_LDFLAGS)
 
 libzcash_a_CPPFLAGS += -DMONTGOMERY_OUTPUT
 
+# C23 crypto core: vendored Z23 (verbatim), zclassicd glue, the librustzcash ABI
+# shim and the Sprout Groth16 prover. Replaces librustzcash.a; nothing Rust is linked.
+libzcl_c23_a_SOURCES = \
+  c23/glue/zcl_c23_glue.c \
+  c23/glue/zcl_c23_stubs.c \
+  c23/glue/zcl_c23_tree_selftest.c \
+  c23/compat/librustzcash_compat.c \
+  c23/compat/witness_codec.c \
+  c23/compat/zip32_codec.c \
+  c23/sprout_prover/sprout_circuit.c \
+  c23/sprout_prover/sprout_par.c \
+  c23/sprout_prover/sprout_prove.c \
+  c23/vendor/core/modules/crypto/src/aes256.c \
+  c23/vendor/core/modules/crypto/src/blake2b.c \
+  c23/vendor/core/modules/crypto/src/blake2s.c \
+  c23/vendor/core/modules/crypto/src/random_secret.c \
+  c23/vendor/core/modules/crypto/src/sha256.c \
+  c23/vendor/core/modules/crypto/src/sha512.c \
+  c23/vendor/core/modules/crypto/src/simd_dispatch.c \
+  c23/vendor/core/modules/sapling/src/bls12_381.c \
+  c23/vendor/core/modules/sapling/src/bn254.c \
+  c23/vendor/core/modules/sapling/src/bn254_accel.c \
+  c23/vendor/core/modules/sapling/src/circuit_bits.c \
+  c23/vendor/core/modules/sapling/src/circuit_gadgets.c \
+  c23/vendor/core/modules/sapling/src/circuit_merkle.c \
+  c23/vendor/core/modules/sapling/src/circuit_pedersen.c \
+  c23/vendor/core/modules/sapling/src/circuit_spend.c \
+  c23/vendor/core/modules/sapling/src/ff1.c \
+  c23/vendor/core/modules/sapling/src/fr.c \
+  c23/vendor/core/modules/sapling/src/fr_avx512.c \
+  c23/vendor/core/modules/sapling/src/groth16_prover.c \
+  c23/vendor/core/modules/sapling/src/jubjub.c \
+  c23/vendor/core/modules/sapling/src/msm_parallel.c \
+  c23/vendor/core/modules/sapling/src/params_init.c \
+  c23/vendor/core/modules/sapling/src/params_vk_embedded.c \
+  c23/vendor/core/modules/sapling/src/pedersen_hash.c \
+  c23/vendor/core/modules/sapling/src/sapling.c \
+  c23/vendor/core/modules/sapling/src/sapling_circuit.c \
+  c23/vendor/core/modules/sapling/src/sapling_prover_c23.c \
+  c23/vendor/core/modules/sapling/src/sapling_prover_native.c \
+  c23/vendor/core/modules/sapling/src/sprout.c \
+  c23/vendor/core/modules/sapling/src/zip32.c \
+  c23/vendor/platform/modules/base/src/safe_alloc.c \
+  c23/vendor/platform/modules/encoding/src/utilstrencodings.c \
+  c23/vendor/platform/modules/platform/src/file_stream.c \
+  c23/vendor/platform/modules/util/src/file_io.c
+
+# This -I set is for the C library ONLY. Z23 header names (chainparams.h,
+# crypto/sha256.h, core/uint256.h, ...) collide with zclassicd's, so none of
+# these directories may ever reach a C++ target; C++ sees only c23/compat.
+# c23/glue comes first (its chain/chainparams.h and zcl_c23_compat.h must win).
+libzcl_c23_a_CPPFLAGS = $(HARDENED_CPPFLAGS) $(ZCL_C23_STD_DEFS) \
+  -I$(srcdir)/c23/glue -I$(srcdir)/c23/glue/chain \
+  -I$(srcdir)/c23/compat -I$(srcdir)/c23/sprout_prover \
+  -I$(srcdir)/c23/vendor/core/modules/sapling/include \
+  -I$(srcdir)/c23/vendor/core/modules/sapling/src \
+  -I$(srcdir)/c23/vendor/core/modules/crypto/include \
+  -I$(srcdir)/c23/vendor/core/modules/core/include \
+  -I$(srcdir)/c23/vendor/core/math/include \
+  -I$(srcdir)/c23/vendor/platform/modules/base/include \
+  -I$(srcdir)/c23/vendor/platform/modules/util/include \
+  -I$(srcdir)/c23/vendor/platform/modules/support/include \
+  -I$(srcdir)/c23/vendor/platform/modules/platform/include \
+  -I$(srcdir)/c23/vendor/platform/modules/encoding/include
+
+# No -march / -m<isa> flag: one portable binary, ADX/BMI2/AVX2/AVX-512 paths are
+# function-target-attribute code selected at run time (simd_dispatch.c).
+# -fomit-frame-pointer is required by the ADX inline asm (it needs a spare GPR).
+# Never define ZCL_TESTING, ZCL_C23_COMPAT_TESTING or ZCL_FUZZ_QUIET_LOG_MACROS here.
+# $(ZCL_C23_LTO_CFLAGS) is empty by default: see doc/c23-build.md.
+libzcl_c23_a_CFLAGS = -include $(srcdir)/c23/glue/zcl_c23_symbol_prefix.h \
+  -include $(srcdir)/c23/glue/zcl_c23_compat.h \
+  -fomit-frame-pointer -fno-strict-aliasing -fvisibility=hidden \
+  $(PTHREAD_CFLAGS) $(PIC_FLAGS) $(PIE_FLAGS) $(SAN_CXXFLAGS) $(HARDENED_CXXFLAGS) \
+  $(ZCL_C23_LTO_CFLAGS)
+
+# Automake puts $(CFLAGS) after the per-target flags, so a depends/user
+# "-std=gnu17 -O2" would win. For these objects only, drop any -std= and -O from
+# CFLAGS and end with the configure-selected language level and -O3.
+$(libzcl_c23_a_OBJECTS): CFLAGS := $(filter-out -std=% -O%,$(CFLAGS)) $(ZCL_C23_STD) -O3
+# Automake's DEFAULT_INCLUDES (-I. first) would let Z23's "crypto/sha512.h", "chainparams.h"
+# ... resolve to zclassicd's C++ headers of the same name. Not for these objects.
+$(libzcl_c23_a_OBJECTS): DEFAULT_INCLUDES :=
+
+# C++ side of the glue seams (LogPrintStr, -debug=zc23, network id).
+libzcl_c23_seam_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES)
+libzcl_c23_seam_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
+libzcl_c23_seam_a_SOURCES = \
+  c23/glue/zcl_c23_glue.h \
+  c23/glue/zcl_c23_log.cpp
+
+# Z23 exports generic C names (blake2b_init, sha256_init, fr_add, ...) and
+# libsodium.a exports some of the same ones (its reference BLAKE2b). The
+# force-included c23/glue/zcl_c23_symbol_prefix.h renames every internal global
+# of the core to zc23_<name>; this stamp proves the archive exports nothing
+# else, and every program that links the core waits for it.
+c23-symbols.stamp: libzcl_c23.a $(srcdir)/c23/tools/symbol-prefix.sh
+	$(AM_V_GEN) sh $(srcdir)/c23/tools/symbol-prefix.sh check "$(NM)" libzcl_c23.a && touch $@
+EXTRA_zclassicd_DEPENDENCIES = c23-symbols.stamp
+EXTRA_zclassic_tx_DEPENDENCIES = c23-symbols.stamp
+
+# Source-identity gate for the vendored subtree (not part of "make all").
+check-c23-vendor:
+	sh $(srcdir)/c23/tools/check-vendor.sh
+
+# The linker must never see a Rust archive. Run after a build.
+check-c23-no-rust: $(bin_PROGRAMS)
+	sh $(srcdir)/c23/tools/check-no-rust.sh "$(NM)" $(bin_PROGRAMS)
+
 # zcashconsensus library #
 if BUILD_BITCOIN_LIBS
 include_HEADERS = script/zcashconsensus.h
@@ -585,7 +704,7 @@ libzcashconsensus_la_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 endif
 #
 
-CLEANFILES = leveldb/libleveldb.a leveldb/libmemenv.a *.gcda *.gcno */*.gcno wallet/*/*.gcno
+CLEANFILES = c23-symbols.stamp leveldb/libleveldb.a leveldb/libmemenv.a *.gcda *.gcno */*.gcno wallet/*/*.gcno
 
 DISTCLEANFILES = obj/build.h
 

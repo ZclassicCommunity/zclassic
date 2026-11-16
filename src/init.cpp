@@ -79,6 +79,7 @@
 #include <thread>
 #include <chrono>
 #include "librustzcash.h"
+#include "c23/glue/zcl_c23_glue.h"
 #include "sha256.h"
 #include "startuptimer.h"
 
@@ -1668,6 +1669,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     const vector<string>& categories = mapMultiArgs["-debug"];
     if (GetBoolArg("-nodebug", false) || find(categories.begin(), categories.end(), string("0")) != categories.end())
         fDebug = false;
+    // The C23 crypto core logs its reject reasons only under -debug=zc23 (or -debug=1).
+    zcl_c23_log_refresh();
 
     // Special case: if debug=zrpcunsafe, implies debug=zrpc, so add it to debug categories
     if (find(categories.begin(), categories.end(), string("zrpcunsafe")) != categories.end()) {
