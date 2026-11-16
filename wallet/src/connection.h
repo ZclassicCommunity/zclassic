@@ -202,6 +202,7 @@ private:
     QString     ezDataDir;                         // datadir holding blocks/chainstate/debug.log/wallet.dat
     QString     ezWalletFile = QStringLiteral("wallet.dat");
     QString     ezRepairPathError;
+    QString     ezWalletBackupError;
     void rememberRepairLocation(const std::shared_ptr<ConnectionConfig>& config);
 
     // Item 3 (legible first-run param wait). The daemon peer-fetches ~1.7GB of zk-params

@@ -77,6 +77,11 @@ transaction count, test balance and address ownership through the real backend's
 snapshot-import path. The original chain backup remained available. This is not
 yet proof of the complete GUI/mainnet checkpoint flow.
 
+The repair safety copy is now owner-only before any wallet bytes are written,
+streamed and hash-checked, explicitly flushed, and published without replacing
+an earlier backup. A missing, unreadable or invalid configured wallet stops repair
+instead of silently proceeding. Backup failures show their actual cause.
+
 Isolated Windows and Linux tests have imported and verified the full state at
 that checkpoint and continued ordinary block validation above it. This does
 not yet provide automatic migration of an existing partially synced wallet.

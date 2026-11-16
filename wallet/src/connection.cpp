@@ -4,6 +4,7 @@
 #include "chainbackup.h"
 #include "repairlock.h"
 #include "repairlocation.h"
+#include "walletbackup.h"
 #include "startupaccess.h"
 #include <QThread>
 #include "mainwindow.h"
@@ -1355,8 +1356,7 @@ void ConnectionLoader::relaunchForRepair(const QStringList& extraArgs) {
         this->setHealInProgress(false);
         this->showError(QObject::tr("ZClassic couldn't make a safety backup of your wallet, "
             "so the repair was stopped.\n\n"
-            "Your wallet and coins have not been changed. Please make sure you have free "
-            "disk space and try again."));
+            "Your original wallet has not been changed.\n\n%1").arg(ezWalletBackupError));
         return;
     }
 
@@ -1429,8 +1429,7 @@ void ConnectionLoader::redownloadChain() {
     if (!this->backupWalletForRepair()) {
         this->showError(QObject::tr("ZClassic couldn't make a safety backup of your wallet, "
             "so the re-download was stopped.\n\n"
-            "Your wallet and coins have not been changed. Please make sure you have free "
-            "disk space and try again."));
+            "Your original wallet has not been changed.\n\n%1").arg(ezWalletBackupError));
         return;
     }
 
@@ -1501,48 +1500,29 @@ void ConnectionLoader::redownloadChain() {
     QTimer::singleShot(1000, [=]() { doAutoConnect(); });
 }
 
-// HARD INVARIANT enforcement: this is the ONLY code in the failsafe that touches
-// wallet.dat, and it only ever READS it (QFile::copy opens the source read-only)
-// to a timestamped backup beside it. It never deletes, renames, or opens
-// wallet.dat for writing. Returns true on a verified successful copy.
+// The native datadir lock is held by both repair callers. Never continue without
+// a private, verified and flushed backup of the configured existing wallet.
 bool ConnectionLoader::backupWalletForRepair() {
+    ezWalletBackupError.clear();
     if (ezDataDir.isEmpty() || !ezRepairPathError.isEmpty()) {
+        ezWalletBackupError = QObject::tr("The configured wallet location could not be resolved.");
         main->logger->write("Repair backup: cannot resolve wallet location: " + ezRepairPathError);
         return false;
     }
-
-    QDir dir = resolveDataSubdir();
-
-    QFile wallet(dir.filePath(ezWalletFile));
-    if (!wallet.exists()) {
-        // No wallet.dat means there is nothing to protect (e.g. a brand-new datadir
-        // that never finished its first run). Safe to proceed with the repair.
-        main->logger->write("Repair backup: no wallet.dat present; nothing to back up");
-        return true;
-    }
-
-    // Make sure we have room for the copy before attempting it.
-    if (!ensureEnoughDiskSpace(dir.absolutePath()))
-        return false;
-
-    QString stamp = QDateTime::currentDateTime().toString("yyyyMMdd-hhmmss");
-    QString backupPath = dir.filePath(ezWalletFile + ".backup-" + stamp);
-
-    // Don't clobber an existing backup of the same second (extremely unlikely).
-    if (QFile::exists(backupPath)) {
-        main->logger->write("Repair backup: target already exists, aborting to avoid overwrite");
+    const QDir data = resolveDataSubdir();
+    if (!ensureEnoughDiskSpace(data.absolutePath())) {
+        ezWalletBackupError = QObject::tr("There is not enough free space for a safety backup.");
         return false;
     }
-
-    if (!wallet.copy(backupPath)) {
-        main->logger->write("Repair backup: copy failed: " + wallet.errorString());
+    const auto backup = WalletBackup::create(data, ezWalletFile);
+    if (!backup.success) {
+        ezWalletBackupError = backup.error;
+        main->logger->write("Repair backup: " + backup.error);
         return false;
     }
-
-    main->logger->write("Repair backup: wallet.dat copied to " + backupPath);
+    main->logger->write("Repair backup: verified private copy at " + backup.path);
     return true;
 }
-
 // ==================== SELF-HEAL ledger + edges (A-side) ====================
 
 // Per-edge bounded retry counters, persisted so they survive relaunches/crashes.

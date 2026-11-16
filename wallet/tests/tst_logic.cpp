@@ -29,6 +29,7 @@
 #include <QProcessEnvironment>
 #include <QTcpServer>
 #include "repairlocation.h"
+#include "walletbackup.h"
 #include "embeddeddaemon.h"
 #include "releaseversion.h"
 #include <QCryptographicHash>
@@ -333,9 +334,14 @@ private slots:
         const QByteArray originalHash = walletHash();
         QVERIFY(!originalHash.isEmpty());
         QString backupPath;
+        QString walletBackupPath;
         {
             RepairLock lock(network.path());
             QVERIFY(lock.acquired());
+            const auto walletCopy = WalletBackup::create(network, "wallet.dat");
+            QVERIFY2(walletCopy.success, qPrintable(walletCopy.error));
+            walletBackupPath = walletCopy.path;
+            QVERIFY(testFileIsOwnerOnly(walletBackupPath));
             const auto backup = ChainBackup::setAside(network);
             QVERIFY2(backup.success, qPrintable(backup.error));
             backupPath = backup.path;
@@ -357,6 +363,48 @@ private slots:
         QVERIFY(stop());
         QVERIFY(QFileInfo::exists(QDir(backupPath).filePath("blocks")));
         QVERIFY(QFileInfo::exists(QDir(backupPath).filePath("chainstate")));
+        QFile walletCopy(walletBackupPath);
+        QVERIFY(walletCopy.open(QIODevice::ReadOnly));
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        QVERIFY(hash.addData(&walletCopy));
+        QCOMPARE(hash.result(), originalHash);
+    }
+    void walletBackup_privateVerifiedAndFailClosed() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        QDir data(temporary.path());
+        QVERIFY(!WalletBackup::create(data, "wallet.dat").success);
+        QVERIFY(!WalletBackup::create(data, "missing-custom.dat").success);
+        QVERIFY(!WalletBackup::create(data, "../wallet.dat").success);
+        const QByteArray contents(1024 * 1024 + 17, 'x');
+        { QFile source(data.filePath("savings.dat")); QVERIFY(source.open(QIODevice::WriteOnly));
+          QCOMPARE(source.write(contents), qint64(contents.size())); }
+        const auto first = WalletBackup::create(data, "savings.dat");
+        QVERIFY2(first.success, qPrintable(first.error));
+        QVERIFY(testFileIsOwnerOnly(first.path));
+        QFile copy(first.path);
+        QVERIFY(copy.open(QIODevice::ReadOnly));
+        QCOMPARE(copy.readAll(), contents);
+        copy.close();
+        const auto second = WalletBackup::create(data, "savings.dat");
+        QVERIFY(second.success);
+        QVERIFY(second.path != first.path);
+        QVERIFY(QFileInfo::exists(first.path));
+        bool privateBeforeWriteCompletion = false;
+        const auto failed = WalletBackup::create(data, "savings.dat", [&](QFile& file) {
+            privateBeforeWriteCompletion = testFileIsOwnerOnly(file.fileName());
+            return false;
+        });
+        QVERIFY(privateBeforeWriteCompletion);
+        QVERIFY(!failed.success);
+        const auto corrupt = WalletBackup::create(data, "savings.dat", [](QFile& file) {
+            return file.seek(0) && file.write("bad") == 3 && RepairPersistence::flushFile(file);
+        });
+        QVERIFY(!corrupt.success);
+        QFile source(data.filePath("savings.dat"));
+        QVERIFY(source.open(QIODevice::ReadOnly));
+        QCOMPARE(source.readAll(), contents);
+        QCOMPARE(data.entryList({".wallet-backup-*"}, QDir::Files | QDir::Hidden).size(), 0);
     }
     void repairConfig_matchesDaemonSelection() {
         const auto parsed = parseRepairConfig("# comment\nnotestnet=0 # enable\ntestnet=0\n"
