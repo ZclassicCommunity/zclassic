@@ -1,4 +1,4 @@
-# ZClassic Wallet 2.1.2-beta9 candidate
+# ZClassic Wallet 2.1.2-beta9
 
 Beta9 addresses the Windows upgrade failure that beta8 repaired only partially.
 An older data folder can grant its owner access without passing that access to
@@ -34,11 +34,11 @@ and replacement of an in-flight check. The real-node release helper supports
 with wallets and peers disabled, authenticates with its RPC cookie, then checks
 clean shutdown. It never modifies the user's wallet or blockchain directory.
 
-Local Windows candidate validation: 106 logic tests and 55 widget tests passed,
+Windows validation: 106 logic tests and 55 widget tests passed,
 with one pre-existing platform/latency skip in each suite. System-only DLL import
 checks, final-bundle extraction/hash/cache checks, verified HTTPS, and real-node
 startup from the repaired fixture passed. The recovery screen was also captured
-and inspected. Linux/macOS validation is tracked by the candidate's CI runs.
+and inspected. Linux/macOS native tests, release builds, and independent host startup checks passed.
 
 The native directory-relative Windows access pattern is adapted from Z23's C23
 platform code with Apache-2.0 attribution. The legacy GUI remains C++; no Z23
@@ -50,6 +50,14 @@ Linux retains its glibc 2.31+ and X11/XCB requirements; macOS requires Apple Sil
 and macOS 15+, with ad-hoc signing rather than Apple notarization. No measured
 full-chain sync speedup or MMB snapshot support is claimed.
 
-This is a candidate until platform validation and release publication complete.
+Released from merge 62e0cd07c4f6b9294ec5e3e10609fde3cf138711 (PR #146). Its source tree is identical to the independently reviewed and tested build source ac0bc3bb8d9393534e762363bb3fcbe8bc8e257d.
 See [beta8](release-notes-beta8.md) and [beta7](release-notes-beta7.md) for retained
 packaging and configuration improvements.
+
+## Downloads
+
+- Windows x86_64: zclwallet-v2.1.2-beta9-win64.exe
+- Linux x86_64: zclwallet-v2.1.2-beta9-linux-x86_64
+- macOS 15+ Apple Silicon: zclwallet-v2.1.2-beta9-macos-arm64.dmg
+
+Verify SHA256SUMS.txt before running. BUILDINFO.txt records source identity and validation. Retain your existing data directory; do not delete or reindex it for an access error. The standalone command-line node release remains beta6.
