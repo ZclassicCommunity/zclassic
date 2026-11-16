@@ -373,6 +373,11 @@ static void libevent_log_cb(int severity, const char *msg)
         LogPrint("libevent", "libevent: %s\n", msg);
 }
 
+void RestoreLibeventLogging()
+{
+    event_set_log_callback(&libevent_log_cb);
+}
+
 bool InitHTTPServer()
 {
     struct evhttp* http = 0;

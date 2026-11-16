@@ -17,6 +17,7 @@
 #include "compat/sanity.h"
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
+#include "embeddedtor.h"
 #include "httpserver.h"
 #include "httprpc.h"
 #include "key.h"
@@ -237,6 +238,10 @@ void Shutdown()
 #endif
     StopNode();
     StopTorControl();
+    // After the P2P threads and the control client are gone, and before the
+    // datadir lock is released at exit. No-op unless -embeddedtor started it,
+    // including when AppInit2() failed part of the way.
+    StopEmbeddedTor();
     StopMapPort();
     UnregisterNodeSignals(GetNodeSignals());
 
@@ -436,6 +441,10 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-externalip=<ip>", _("Specify your own public address"));
     strUsage += HelpMessageOpt("-forcednsseed", strprintf(_("Always query for peer addresses via DNS lookup (default: %u)"), 0));
     strUsage += HelpMessageOpt("-listen", _("Accept connections from outside (default: 1 if no -proxy or -connect)"));
+    if (EmbeddedTorAvailable()) {
+        strUsage += HelpMessageOpt("-embeddedtor", strprintf(_("Run the Tor built into this binary: state in <datadir>/tor, SOCKS and control on loopback ports chosen at runtime, used for .onion peers and for the node's own onion service (default: %u)"), DEFAULT_EMBEDDED_TOR));
+        strUsage += HelpMessageOpt("-embeddedtormode=<mode>", strprintf(_("How the embedded Tor runs: inprocess (a thread of this process) or child (a separate process) (default: %s)"), DEFAULT_EMBEDDED_TOR_MODE));
+    }
     strUsage += HelpMessageOpt("-listenonion", strprintf(_("Automatically create Tor hidden service (default: %d)"), DEFAULT_LISTEN_ONION));
     strUsage += HelpMessageOpt("-natpmp", strprintf(_("Open the listen port on the router automatically via NAT-PMP/PCP, so peers can reach you (no UPnP). Maps only your own listen port (default: %d)"), DEFAULT_NATPMP));
     strUsage += HelpMessageOpt("-maxconnections=<n>", strprintf(_("Maintain at most <n> connections to peers (default: %u)"), DEFAULT_MAX_PEER_CONNECTIONS));
@@ -1688,6 +1697,19 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     if (GetBoolArg("-tor", false))
         return InitError(_("Error: Unsupported argument -tor found, use -onion."));
 
+    // Embedded Tor is opt-in. Refuse to start rather than fall back to an
+    // unproxied node when it was asked for and cannot be provided.
+    const bool fEmbeddedTor = GetBoolArg("-embeddedtor", DEFAULT_EMBEDDED_TOR);
+    EmbeddedTorMode embeddedTorMode = EMBEDDED_TOR_INPROCESS;
+    if (fEmbeddedTor) {
+        if (!EmbeddedTorAvailable())
+            return InitError(_("Error: -embeddedtor needs a build with embedded Tor (configure --with-embedded-tor)."));
+        if (!ParseEmbeddedTorMode(GetArg("-embeddedtormode", DEFAULT_EMBEDDED_TOR_MODE), embeddedTorMode))
+            return InitError(strprintf(_("Invalid -embeddedtormode: '%s' (use inprocess or child)"), GetArg("-embeddedtormode", "")));
+        if (GetArg("-onion", "") == "0")
+            return InitError(_("Error: -embeddedtor cannot be combined with -onion=0."));
+    }
+
     if (GetBoolArg("-benchmark", false))
         InitWarning(_("Warning: Unsupported argument -benchmark ignored, use -debug=bench."));
 
@@ -2116,6 +2138,31 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 return InitError(strprintf(_("Invalid -onion address: '%s'"), onionArg));
             SetProxy(NET_ONION, addrOnion);
             SetLimited(NET_ONION, false);
+        }
+    }
+
+    // -embeddedtor: launch the Tor linked into this binary. Its state lives in
+    // <datadir>/tor (the datadir lock is held since Step 4); its SOCKS and
+    // control ports are loopback ports chosen at runtime.
+    if (fEmbeddedTor) {
+        std::string strTorError;
+        if (!StartEmbeddedTor(GetDataDir().string(), embeddedTorMode, strTorError))
+            return InitError(strprintf(_("Could not start the embedded Tor: %s"), strTorError));
+        proxyType addrEmbedded = proxyType(CService("127.0.0.1", EmbeddedTorSocksPort()), proxyRandomize);
+        if (!addrEmbedded.IsValid())
+            return InitError(_("The embedded Tor did not report a SOCKS port."));
+        if (onionArg == "") {
+            // An explicit -onion keeps its meaning; otherwise .onion peers
+            // are reached through the embedded Tor.
+            SetProxy(NET_ONION, addrEmbedded);
+            SetLimited(NET_ONION, false);
+        }
+        if (IsLimited(NET_IPV4) && IsLimited(NET_IPV6) && !HaveNameProxy()) {
+            // Onion-only node (-onlynet=onion) without -proxy: host names
+            // (DNS seeds, -addnode, -seednode, -connect) must never reach the
+            // system resolver. Hand them to Tor instead.
+            SetNameProxy(addrEmbedded);
+            LogPrintf("tor: onion-only node, host names are resolved by the embedded Tor\n");
         }
     }
 

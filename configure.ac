@@ -116,6 +116,12 @@ AC_ARG_ENABLE([asan],
   [use_asan=$enableval],
   [use_asan=no])
 
+AC_ARG_WITH([embedded-tor],
+  [AS_HELP_STRING([--with-embedded-tor],
+  [link the Tor library built by depends (WITH_EMBEDDED_TOR=1) into zclassicd and enable -embeddedtor (default is no)])],
+  [use_embedded_tor=$withval],
+  [use_embedded_tor=no])
+
 AC_ARG_ENABLE([tsan],
   [AS_HELP_STRING([--enable-tsan],
   [instrument the executables with tsan (default is no)])],
@@ -842,6 +848,29 @@ fi
 
 AM_CONDITIONAL([ENABLE_ZMQ], [test "x$use_zmq" = "xyes"])
 
+dnl Embedded Tor: libtor.a and its bundled helper archives from depends. Tor
+dnl uses the same libssl, libcrypto and libevent archives as the daemon, plus
+dnl zlib. Off by default; without it nothing Tor-related is compiled or linked.
+TOR_LIBS=
+TOR_SYSTEM_LIBS=
+if test x$use_embedded_tor = xyes; then
+  if test x$build_bitcoind = xno; then
+    AC_MSG_ERROR([--with-embedded-tor needs the daemon (do not combine with --without-daemon)])
+  fi
+  AC_CHECK_HEADER([tor_api.h],, [AC_MSG_ERROR([tor_api.h not found; build depends with WITH_EMBEDDED_TOR=1])])
+  AC_CHECK_HEADER([zlib.h],, [AC_MSG_ERROR([zlib.h not found; build depends with WITH_EMBEDDED_TOR=1])])
+  if test x$TARGET_OS = xwindows; then
+    TOR_SYSTEM_LIBS="-lws2_32 -liphlpapi -lcrypt32 -ladvapi32 -lshell32 -luser32 -lgdi32 -lbcrypt -lshlwapi"
+  else
+    TOR_SYSTEM_LIBS="-lm -ldl"
+  fi
+  TOR_LIBS="-ltor -led25519_donna -led25519_ref10 -lkeccak-tiny -lz"
+  AC_CHECK_LIB([tor], [tor_run_main], [:], [AC_MSG_ERROR([libtor.a not usable; build depends with WITH_EMBEDDED_TOR=1])],
+    [-led25519_donna -led25519_ref10 -lkeccak-tiny -lz $SSL_LIBS $CRYPTO_LIBS $EVENT_PTHREADS_LIBS $EVENT_LIBS $TOR_SYSTEM_LIBS $PTHREAD_LIBS])
+  AC_DEFINE([ENABLE_EMBEDDED_TOR],[1],[Define to 1 to link the embedded Tor])
+fi
+AM_CONDITIONAL([ENABLE_EMBEDDED_TOR], [test "x$use_embedded_tor" = "xyes"])
+
 AM_CONDITIONAL([ENABLE_PROTON], [test "x$use_proton" = "xyes"])
 
 AC_MSG_CHECKING([whether to build test_bitcoin])
@@ -910,6 +939,8 @@ AC_SUBST(SSL_LIBS)
 AC_SUBST(EVENT_LIBS)
 AC_SUBST(EVENT_PTHREADS_LIBS)
 AC_SUBST(ZMQ_LIBS)
+AC_SUBST(TOR_LIBS)
+AC_SUBST(TOR_SYSTEM_LIBS)
 AC_SUBST(GMP_LIBS)
 AC_SUBST(GMPXX_LIBS)
 AC_SUBST(LIBSNARK_DEPINST)
@@ -964,6 +995,7 @@ echo "  with wallet   = $enable_wallet"
 echo "  with proton   = $use_proton"
 echo "  with zmq      = $use_zmq"
 echo "  with test     = $use_tests"
+echo "  embedded tor  = $use_embedded_tor"
 echo "  debug enabled = $enable_debug"
 echo "  werror        = $enable_werror"
 echo

@@ -37,6 +37,15 @@ LIBSECP256K1=secp256k1/libsecp256k1.la
 LIBSNARK=snark/libsnark.a
 LIBUNIVALUE=univalue/libunivalue.la
 LIBZCASH=libzcash.a
+LIBZCL_C23=libzcl_c23.a
+
+# What a program that links $(LIBBITCOIN_SERVER) needs after it: the C23
+# support library (owner-only key files; with --with-embedded-tor also the Tor
+# launcher) and, for embedded Tor, libtor and the archives it uses.
+ZCL_C23_LIBS = $(LIBZCL_C23)
+if ENABLE_EMBEDDED_TOR
+ZCL_C23_LIBS += $(TOR_LIBS) $(SSL_LIBS) $(CRYPTO_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(TOR_SYSTEM_LIBS)
+endif
 
 if ENABLE_ZMQ
 LIBBITCOIN_ZMQ=libbitcoin_zmq.a
@@ -85,7 +94,8 @@ EXTRA_LIBRARIES += \
   $(LIBBITCOIN_WALLET) \
   $(LIBBITCOIN_ZMQ) \
   $(LIBBITCOIN_PROTON) \
-  $(LIBZCASH)
+  $(LIBZCASH) \
+  $(LIBZCL_C23)
 
 lib_LTLIBRARIES = $(LIBZCASH_CONSENSUS)
 
@@ -154,6 +164,7 @@ BITCOIN_CORE_H = \
   crypto/sha3.h \
   core_memusage.h \
   deprecation.h \
+  embeddedtor.h \
   hash.h \
   httprpc.h \
   httpserver.h \
@@ -247,6 +258,27 @@ obj/build.h: FORCE
 	  $(abs_top_srcdir)
 libbitcoin_util_a-clientversion.$(OBJEXT): obj/build.h
 
+# C23 support code: owner-only key files, and the embedded Tor launcher
+libzcl_c23_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES) $(EVENT_CFLAGS)
+libzcl_c23_a_CFLAGS = $(SAN_CXXFLAGS) $(HARDENED_CXXFLAGS) $(PIE_FLAGS)
+libzcl_c23_a_SOURCES = \
+  c23/tor/keyfile.c \
+  c23/tor/keyfile.h
+if ENABLE_EMBEDDED_TOR
+libzcl_c23_a_SOURCES += \
+  c23/tor/zcl_tor_dispatch.c \
+  c23/tor/zcl_tor_embed.c \
+  c23/tor/zcl_tor_embed.h \
+  c23/tor/zcl_tor_inproc.c \
+  c23/tor/zcl_tor_inproc.h \
+  c23/tor/zcl_tor_proc.h
+if TARGET_WINDOWS
+libzcl_c23_a_SOURCES += c23/tor/zcl_tor_proc_win.c
+else
+libzcl_c23_a_SOURCES += c23/tor/zcl_tor_proc_posix.c
+endif
+endif
+
 # server: zclassicd
 libbitcoin_server_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES) $(EVENT_CFLAGS) $(EVENT_PTHREADS_CFLAGS)
 libbitcoin_server_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
@@ -260,6 +292,7 @@ libbitcoin_server_a_SOURCES = \
   chain.cpp \
   checkpoints.cpp \
   deprecation.cpp \
+  embeddedtor.cpp \
   httprpc.cpp \
   httpserver.cpp \
   init.cpp \
@@ -452,6 +485,7 @@ endif
 
 zclassicd_LDADD = \
   $(LIBBITCOIN_SERVER) \
+  $(ZCL_C23_LIBS) \
   $(LIBBITCOIN_WALLET) \
   $(LIBBITCOIN_COMMON) \
   $(LIBUNIVALUE) \

@@ -99,6 +99,7 @@ BITCOIN_TESTS =\
   test/test_bitcoin.cpp \
   test/test_bitcoin.h \
   test/timedata_tests.cpp \
+  test/embeddedtor_tests.cpp \
   test/torcontrol_tests.cpp \
   test/transaction_tests.cpp \
   test/uint256_tests.cpp \
@@ -119,7 +120,7 @@ test_test_bitcoin_LDADD =
 if ENABLE_WALLET
 test_test_bitcoin_LDADD += $(LIBBITCOIN_WALLET)
 endif
-test_test_bitcoin_LDADD += $(LIBBITCOIN_SERVER) $(LIBBITCOIN_CLI) $(LIBBITCOIN_COMMON) $(LIBBITCOIN_UTIL) $(LIBBITCOIN_CRYPTO) $(LIBUNIVALUE) \
+test_test_bitcoin_LDADD += $(LIBBITCOIN_SERVER) $(ZCL_C23_LIBS) $(LIBBITCOIN_CLI) $(LIBBITCOIN_COMMON) $(LIBBITCOIN_UTIL) $(LIBBITCOIN_CRYPTO) $(LIBUNIVALUE) \
   $(LIBLEVELDB) $(LIBMEMENV) $(BOOST_LIBS) $(BOOST_UNIT_TEST_FRAMEWORK_LIB) $(LIBSECP256K1) $(EVENT_LIBS) $(EVENT_PTHREADS_LIBS)
 test_test_bitcoin_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 

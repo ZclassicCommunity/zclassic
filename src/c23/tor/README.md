@@ -1,18 +1,24 @@
 # src/c23/tor: embedded Tor for zclassicd
 
-A small C library that runs the Tor built into the daemon binary as a child
-process and reports its loopback Socks port, control port and cookie path.
-Behind a flag, default off; nothing in this directory changes consensus or
+A small C library that runs the Tor built into the daemon binary, on a thread
+of the daemon (`in_process`) or as a child process, and reports its loopback
+Socks port, control port and cookie path. Behind a configure switch and a
+runtime flag, both default off; nothing in this directory changes consensus or
 clearnet behaviour.
 
 | File | Role |
 |---|---|
 | `zcl_tor_embed.h/.c` | public API: start, wait for bootstrap, stop, control client, torrc |
-| `zcl_tor_dispatch.c` | the Tor child entry point (`tor_run_main`); only file that needs `tor_api.h` |
+| `zcl_tor_inproc.h/.c` | in-process mode: `tor_run_main` on a thread, owner channel, join |
+| `zcl_tor_dispatch.c` | the Tor child entry point (`tor_run_main`) for child mode |
 | `zcl_tor_proc.h`, `zcl_tor_proc_posix.c`, `zcl_tor_proc_win.c` | child process layer: `posix_spawn` and socketpair; `CreateProcessW` and a kill-on-close job object |
-| `keyfile.h/.c` | owner-only secret files: atomic write, tighten, read, private directory |
+| `keyfile.h/.c` | owner-only secret files: atomic write, tighten, read, private directory. Always built into `zclassicd` (onion key file) |
 | `zcl_tor_selftest.c`, `build_selftest.sh` | proof program (Linux) |
-| `WIRING.md` | the exact edits later units make to `main()`, `init.cpp`, `torcontrol.cpp` |
+| `zcl_tor_selftest_win.c`, `build_selftest_win.sh`, `zcl_tor_win.rc`, `zcl_tor_win.manifest` | proof program (Windows, mingw-w64 cross-build; child mode) |
+| `twonode.sh`, `privacy_check.sh` | two `zclassicd` regtest nodes over an onion service; strace check that only Tor reaches the network |
+| `WIRING.md` | how `zclassicd` uses the library: options, startup, shutdown, in-process or child |
+
+Only `zcl_tor_dispatch.c` and `zcl_tor_inproc.c` include `tor_api.h`.
 
 ## Attribution
 
@@ -35,7 +41,21 @@ code, no GPL option so Equi-X is not built).
 
 ## Process model
 
-The daemon re-executes its own binary with `--zcl-embedded-tor`. Tor therefore
+Two modes, chosen per start with `zcl_tor_embed_opts.in_process`
+(`-embeddedtormode=inprocess|child` in the daemon; `inprocess` is the
+daemon's default).
+
+**In-process.** `tor_run_main` runs on a thread of the daemon, as in Z23. Tor
+is told `__DisableSignalHandlers 1` and `--quiet`, and logs to
+`<datadir>/tor/tor.log`. It is stopped with control `SIGNAL HALT` and, on
+POSIX, by closing an owner socketpair (`__OwningControllerFD`); the thread is
+then joined. One in-process Tor per process: a second start is refused before
+any file is touched. What Tor does to process-wide state (libevent allocator
+and log hooks, OpenSSL init) is listed at the top of `zcl_tor_inproc.c` and in
+`WIRING.md`. Tor itself leaves one eventfd open and 0.5 to 1.4 kB allocated
+per run (LeakSanitizer; nothing is reported without Tor or in child mode).
+
+**Child.** The daemon re-executes its own binary with `--zcl-embedded-tor`. Tor therefore
 shares no heap, OpenSSL or libevent state with the daemon, and a Tor crash
 cannot take the node down. The parent keeps a socketpair end; Tor is given the
 other end as `__OwningControllerFD`, so when the parent dies for any reason
@@ -63,8 +83,15 @@ job object with kill-on-close does the same, plus `__OwningControllerProcess`.
     make -C depends HOST=x86_64-pc-linux-gnu WITH_EMBEDDED_TOR=1 -j8 tor
     devbuild --wait sh src/c23/tor/build_selftest.sh          # -Wall -Wextra -Werror -O2
     SAN=1 OUT=zcl_tor_selftest_asan devbuild --wait sh src/c23/tor/build_selftest.sh
-    devbuild --wait src/c23/tor/zcl_tor_selftest all          # offline + kill -9 parent
+    devbuild --wait src/c23/tor/zcl_tor_selftest all          # offline + kill -9 parent + in-process
     devbuild --wait src/c23/tor/zcl_tor_selftest online       # real Tor network, isolated datadir
+
+The daemon (see `WIRING.md`):
+
+    ./configure --with-embedded-tor ...                       # after the depends line above
+    src/test/test_bitcoin --run_test=embeddedtor_tests,torcontrol_tests
+    sh src/c23/tor/twonode.sh src inprocess strace            # two regtest nodes, real Tor network
+    sh src/c23/tor/twonode.sh src child strace
 
 The self-test uses a fresh temporary directory (`$TMPDIR`) and removes it on
 success; on failure it keeps it and prints the path.

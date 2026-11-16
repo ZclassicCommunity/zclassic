@@ -196,4 +196,69 @@ BOOST_AUTO_TEST_CASE(util_ParseTorReplyMapping)
     CheckParseTorReplyMapping("EVEN+more ARGS", {});
 }
 
+BOOST_AUTO_TEST_CASE(util_ParseTorSocksListeners)
+{
+    CService addr;
+
+    // The usual single listener
+    BOOST_CHECK(ParseTorSocksListeners("net/listeners/socks=\"127.0.0.1:9050\"", addr));
+    BOOST_CHECK_EQUAL(addr.ToString(), "127.0.0.1:9050");
+
+    // A listener on another port (embedded or non-default Tor)
+    BOOST_CHECK(ParseTorSocksListeners("net/listeners/socks=\"127.0.0.1:39211\"", addr));
+    BOOST_CHECK_EQUAL(addr.ToString(), "127.0.0.1:39211");
+
+    // Unix sockets are skipped, the first TCP listener wins
+    BOOST_CHECK(ParseTorSocksListeners(
+        "net/listeners/socks=\"unix:/run/tor/socks\" \"127.0.0.1:9150\" \"127.0.0.1:9050\"", addr));
+    BOOST_CHECK_EQUAL(addr.ToString(), "127.0.0.1:9150");
+
+    // IPv6 loopback
+    BOOST_CHECK(ParseTorSocksListeners("net/listeners/socks=\"[::1]:9050\"", addr));
+    BOOST_CHECK_EQUAL(addr.ToString(), "[::1]:9050");
+
+    // Nothing usable: no listener, only a unix socket, a wildcard bind, a
+    // missing port, a host name (never resolved), another key, bad quoting.
+    CService unchanged("10.1.2.3", 1234);
+    addr = unchanged;
+    BOOST_CHECK(!ParseTorSocksListeners("net/listeners/socks=", addr));
+    BOOST_CHECK(!ParseTorSocksListeners("net/listeners/socks=\"unix:/run/tor/socks\"", addr));
+    BOOST_CHECK(!ParseTorSocksListeners("net/listeners/socks=\"0.0.0.0:9050\"", addr));
+    BOOST_CHECK(!ParseTorSocksListeners("net/listeners/socks=\"127.0.0.1\"", addr));
+    BOOST_CHECK(!ParseTorSocksListeners("net/listeners/socks=\"localhost:9050\"", addr));
+    BOOST_CHECK(!ParseTorSocksListeners("net/listeners/control=\"127.0.0.1:9051\"", addr));
+    BOOST_CHECK(!ParseTorSocksListeners("net/listeners/socks=\"127.0.0.1:9050", addr));
+    BOOST_CHECK(!ParseTorSocksListeners("net/listeners/socks=127.0.0.1:9050", addr));
+    BOOST_CHECK(!ParseTorSocksListeners("OK", addr));
+    BOOST_CHECK(!ParseTorSocksListeners("", addr));
+    BOOST_CHECK(addr == unchanged);
+}
+
+BOOST_AUTO_TEST_CASE(util_DefaultTorSocksProxy)
+{
+    // With the default control port this is the address that used to be
+    // hard-coded.
+    BOOST_CHECK_EQUAL(DefaultTorSocksProxy(DEFAULT_TOR_CONTROL).ToString(), "127.0.0.1:9050");
+    // The control port's host is kept, the port is Tor's default SOCKS port.
+    BOOST_CHECK_EQUAL(DefaultTorSocksProxy("10.0.0.5:9151").ToString(), "10.0.0.5:9050");
+    BOOST_CHECK_EQUAL(DefaultTorSocksProxy("10.0.0.5").ToString(), "10.0.0.5:9050");
+    // A control target that is not a literal address is not resolved.
+    BOOST_CHECK_EQUAL(DefaultTorSocksProxy("tor.invalid:9051").ToString(), "127.0.0.1:9050");
+}
+
+BOOST_AUTO_TEST_CASE(util_GetTorControlTarget)
+{
+    // No embedded Tor runs in a unit test: the option or its default is used.
+    std::string saved = mapArgs.count("-torcontrol") ? mapArgs["-torcontrol"] : "";
+    bool had = mapArgs.count("-torcontrol") != 0;
+    mapArgs.erase("-torcontrol");
+    BOOST_CHECK_EQUAL(GetTorControlTarget(), DEFAULT_TOR_CONTROL);
+    mapArgs["-torcontrol"] = "127.0.0.1:19051";
+    BOOST_CHECK_EQUAL(GetTorControlTarget(), "127.0.0.1:19051");
+    if (had)
+        mapArgs["-torcontrol"] = saved;
+    else
+        mapArgs.erase("-torcontrol");
+}
+
 BOOST_AUTO_TEST_SUITE_END()
