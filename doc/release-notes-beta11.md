@@ -31,6 +31,15 @@ Native macOS build preparation fixes invalid Make variable assignments, uses
 the selected Xcode SDK for native dependency tools, and identifies Apple Silicon
 as 64-bit ARM. These build fixes do not yet qualify a macOS daemon release;
 native dependency, linking and cryptographic validation remain release gates.
+Boost now selects the configured compiler and retains its SDK and deployment
+flags; the daemon's rebuilt Boost archives report macOS 15 rather than inheriting
+macOS 26 from the build host. A checksum-pinned static Qt 5.15.19 toolchain uses
+Apple's Secure Transport and avoids optional Homebrew runtime libraries.
+Mac packaging checks static archive requirements as well as final executables,
+rejects a minimum OS above 15, verifies the daemon against its audited build,
+and tests certificate-verified HTTPS access before creating the DMG. Complete
+package qualification is still required; successful library builds alone do not
+prove that the finished application works.
 
 Interrupted snapshot transfers retry with completed files retained within the
 current attempt. Completed files are rehashed against the same manifest before
@@ -54,6 +63,10 @@ same mandatory digests and bounded read buffers. The Mac path adds no third-part
 runtime dependency. Native standard-vector, legacy boundary-parity and read-error
 tests passed, as did all six real-backend wallet protection checks on Windows and
 macOS. The Mac checks retain their existing startup time limits.
+On the native Apple Silicon test host, fresh isolated regtest initialization
+with all five parameter files present fell from about 31 seconds to 5.9 seconds.
+Parameter digests were checked in both runs; this measures startup, not chain
+synchronization or a guarantee for other machines.
 Read errors fail verification instead of repeatedly reading a failed stream.
 Boundary-vector and read-error tests cover this file-hashing path; block, proof
 and transaction hashing are unchanged.
@@ -164,3 +177,7 @@ deferred warm-latency case. Production debounce timing is unchanged.
 
 Timing benchmarks are included in the backend tests. Full-chain speedup has not
 yet been measured. This candidate must not be announced as a completed release.
+
+Windows candidates are not Authenticode-signed, so Windows SmartScreen may still
+show a reputation warning. Eliminating missing runtime DLLs does not remove that
+warning. Mac candidates use ad-hoc signatures and are not Apple-notarized.

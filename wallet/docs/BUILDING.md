@@ -20,6 +20,25 @@ qualification and publication finish. Consensus rules are unchanged.
   set `ZCL_SODIUM_STATIC` to the absolute path of `lib/libsodium.a` from the same-source native daemon
   depends prefix, built for the intended minimum OS. The archive hash is recorded
   and its object deployment versions still participate in the minimum-OS check.
+  A host's other Homebrew libraries can also raise that minimum. The pinned
+  [`macos-toolchain.sh`](../contrib/release/macos-toolchain.sh) builds static Qt
+  with native Secure Transport and a macOS 14 toolkit target (Qt 5's build setting;
+  the bundled node and complete application still target macOS 15). Pass its absolute
+  `qt-static` prefix as `ZCL_QT_PREFIX` when packaging; static builds omit framework
+  deployment and check the toolchain archives' OS requirements as well. Use a fresh
+  absolute `ZCL_MAC_BUILD_DIR` when switching Qt toolchains. Final dependency,
+  minimum-OS, signature and DMG gates still apply. Packaging rejects a measured
+  requirement above macOS 15; a deployment target alone does not prove compatibility.
+  Packaging also requires absolute `ZCL_DAEMON_BUILD_DIR` and
+  `ZCL_DAEMON_DEPENDS_PREFIX` paths for the same-source native daemon build.
+  It hashes and audits all static archives under that build's `src` directory
+  and the depends prefix's `lib` directory, including Boost and proof libraries.
+  Symlinked archives are followed. `ZCL_DAEMON` must match that build's
+  `src/zclassicd` byte-for-byte; do not pair a separately stripped copy with it.
+  Retain these build inputs until packaging finishes: inspecting only the final
+  executable can miss a library that requires a newer OS.
+  The Mac packaging gate also builds the HTTPS probe with that same Qt toolkit
+  and requires a certificate-verified response from the canonical release endpoint.
 - Windows: use static Qt 5.15.2 with native Schannel enabled, MinGW POSIX threads,
   static libsodium and `CONFIG+=zqw_portable`. Package with
   [`contrib/cross/package-win.sh`](../contrib/cross/package-win.sh); both GUI and daemon

@@ -1,22 +1,43 @@
 #!/bin/sh
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-qt=$(brew --prefix qt@5)
+: "${ZCL_DAEMON_BUILD_DIR:?Supply the same-source native daemon build directory for static-library auditing}"
+: "${ZCL_DAEMON_DEPENDS_PREFIX:?Supply the native depends prefix for that build}"
+case "$ZCL_DAEMON_BUILD_DIR:$ZCL_DAEMON_DEPENDS_PREFIX" in
+    /*:/*) ;;
+    *) echo 'Daemon build and depends paths must be absolute.' >&2; exit 1 ;;
+esac
+test -f "$ZCL_DAEMON_BUILD_DIR/src/libbitcoin_server.a"
+test -f "$ZCL_DAEMON_DEPENDS_PREFIX/lib/librustzcash.a"
+qt=${ZCL_QT_PREFIX:-$(brew --prefix qt@5)}
 cd "$root"
-mkdir -p artifacts/mac-build artifacts/release
+work=${ZCL_MAC_BUILD_DIR:-"$root/artifacts/mac-build"}
+mkdir -p "$work" artifacts/release
 # A newer host's Homebrew archive can require a newer macOS than Qt/the node.
 # Allow the pinned daemon-depends archive built for the intended deployment OS.
 install -m 644 "${ZCL_SODIUM_STATIC:-$(brew --prefix libsodium)/lib/libsodium.a}" res/libsodium.a
 shasum -a 256 res/libsodium.a > artifacts/release/macos-libsodium-SHA256SUMS.txt
-cd artifacts/mac-build
-"$qt/bin/qmake" "$root/zcl-qt-wallet.pro" CONFIG+=release
+cd "$work"
+static_qt=0
+if grep -Eq '^QT_CONFIG[[:space:]]*[+]?=.*[[:space:]]static([[:space:]]|$)' "$qt/mkspecs/qconfig.pri"; then
+    static_qt=1
+    "$qt/bin/qmake" "$root/zcl-qt-wallet.pro" CONFIG+=release 'QTPLUGIN.platforms=qcocoa qoffscreen'
+else
+    "$qt/bin/qmake" "$root/zcl-qt-wallet.pro" CONFIG+=release
+fi
 make -j2
 : "${ZCL_DAEMON:?Supply the newly built daemon path}"
 : "${ZCL_DAEMON_SHA256:?Supply the verified daemon SHA256}"
 printf '%s  %s\n' "$ZCL_DAEMON_SHA256" "$ZCL_DAEMON" | shasum -a 256 -c -
+cmp "$ZCL_DAEMON" "$ZCL_DAEMON_BUILD_DIR/src/zclassicd" || {
+    echo 'The packaged daemon must match the audited native build exactly.' >&2
+    exit 1
+}
 "$ZCL_DAEMON" --version | grep -F '2.1.2-beta11'
 cp "$ZCL_DAEMON" zclwallet.app/Contents/MacOS/zclassicd
-"$qt/bin/macdeployqt" zclwallet.app -verbose=2
+if [ "$static_qt" = 0 ]; then
+    "$qt/bin/macdeployqt" zclwallet.app -verbose=2
+fi
 # Qt 5's deployment tool misses Brotli's @rpath-only transitive dependency.
 # Newer Homebrew FreeType pulls in libbrotlidec, which needs this sibling.
 if [ -f zclwallet.app/Contents/Frameworks/libbrotlidec.1.dylib ]; then
@@ -26,12 +47,28 @@ if [ -f zclwallet.app/Contents/Frameworks/libwebp.7.dylib ]; then
     cp "$(brew --prefix webp)/lib/libsharpyuv.0.dylib" zclwallet.app/Contents/Frameworks/
 fi
 otool -l "$root/res/libsodium.a" > minimum-os.txt
+# A final executable can report an older floor than its static inputs. Audit the
+# complete native dependency prefix and local archives, including proof code.
+find -L "$ZCL_DAEMON_BUILD_DIR/src" "$ZCL_DAEMON_DEPENDS_PREFIX/lib" \
+    -type f -name '*.a' -print > daemon-archives.txt
+test -s daemon-archives.txt
+: > "$root/artifacts/release/macos-daemon-archives-SHA256SUMS.txt"
+while IFS= read -r archive; do
+    shasum -a 256 "$archive" >> "$root/artifacts/release/macos-daemon-archives-SHA256SUMS.txt"
+    otool -l "$archive" >> minimum-os.txt
+done < daemon-archives.txt
+if [ "$static_qt" = 1 ]; then
+    # A static archive can require a newer OS without raising the executable's
+    # load-command minimum. Include toolchain objects in the compatibility gate.
+    find -L "$qt/lib" "$qt/plugins" -type f -name '*.a' -exec otool -l {} + >> minimum-os.txt
+fi
 # Check every Mach-O, including the daemon, Qt frameworks and platform plugins.
 # --version alone could silently resolve a library installed on the build host.
 find zclwallet.app -type f -exec sh -c '
     set -eu
     for binary do
         if file "$binary" | grep -q "Mach-O"; then
+            lipo "$binary" -verify_arch arm64
             own_id=$(otool -D "$binary" | sed -n "2p")
             dependencies=$(otool -L "$binary" | awk -v own="$own_id" '\''NR > 1 && $1 != own { print }'\'') || exit 1
             printf "%s\n" "$dependencies"
@@ -68,6 +105,12 @@ minimum=$(awk '
     END { print highest }
 ' minimum-os.txt)
 [ -n "$minimum" ]
+# Preserve the published macOS 15 support floor instead of silently raising it
+# when Homebrew or an SDK changes on the build machine.
+if ! awk -v version="$minimum" 'BEGIN { split(version, p, "."); exit (p[1]*1000000+p[2]*1000+p[3] > 15000000) }'; then
+    echo "Dependencies require macOS $minimum; this release must support macOS 15. Use the pinned static toolchain." >&2
+    exit 1
+fi
 /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion $minimum" zclwallet.app/Contents/Info.plist
 printf 'Minimum macOS version: %s\n' "$minimum" >> "$root/artifacts/release/macos-validation.txt"
 codesign --force --timestamp=none --sign - zclwallet.app/Contents/MacOS/zclassicd
@@ -75,6 +118,15 @@ codesign --force --deep --timestamp=none --sign - zclwallet.app
 codesign --verify --deep --strict --verbose=2 zclwallet.app
 QT_DEBUG_PLUGINS=1 QT_QPA_PLATFORM=cocoa zclwallet.app/Contents/MacOS/zclwallet --help > "$root/artifacts/release/macos-help.txt"
 zclwallet.app/Contents/MacOS/zclassicd --version >> "$root/artifacts/release/macos-validation.txt"
+# Use the same Qt TLS implementation as the wallet, retaining certificate and
+# hostname validation for the canonical update endpoint.
+mkdir -p tls-check
+(
+    cd tls-check
+    "$qt/bin/qmake" "$root/tests/check-tls.pro" CONFIG+=release
+    make -j2
+    ./check-tls
+) >> "$root/artifacts/release/macos-validation.txt" 2>&1
 mkdir dmg-root
 mv zclwallet.app dmg-root/ZclWallet.app
 ln -s /Applications dmg-root/Applications
