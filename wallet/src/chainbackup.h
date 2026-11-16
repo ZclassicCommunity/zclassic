@@ -23,6 +23,22 @@ inline QString journalPath(const QDir& data) {
     return data.filePath(QStringLiteral("chain-repair-pending.json"));
 }
 
+inline QStringList componentNames(int version = 2) {
+    QStringList names{QStringLiteral("blocks"), QStringLiteral("chainstate")};
+    if (version >= 2) names << QStringLiteral("bootstrap-anchor-pending")
+        << QStringLiteral("bootstrap-trustless-pending")
+        << QStringLiteral("bootstrap-stub-recovery.json")
+        << QStringLiteral("chainstate-verify");
+    return names;
+}
+
+inline bool componentTypeMatches(const QFileInfo& info, const QString& name) {
+    if (info.isSymLink()) return false;
+    if (!info.exists()) return true;
+    return (name == "blocks" || name == "chainstate" || name == "chainstate-verify")
+        ? info.isDir() : info.isFile();
+}
+
 // Recover only the exact directories named by our journal, never overwrite a
 // destination, and validate the entire plan before moving anything. The caller
 // holds the native datadir lock. A journal remains until recovery is complete.
@@ -42,9 +58,11 @@ inline Result recover(const QDir& data,
     const auto object = document.object();
     const QString basename = object.value("backup").toString();
     const QJsonArray entries = object.value("entries").toArray();
-    if (!document.isObject() || object.value("version").toInt() != 1 ||
+    const int version = object.value("version").toInt();
+    const QStringList components = componentNames(version);
+    if (!document.isObject() || (version != 1 && version != 2) ||
         !QRegularExpression("\\Achain-set-aside-[A-Za-z0-9]+\\z").match(basename).hasMatch() ||
-        !object.value("entries").isArray() || entries.size() > 2) {
+        !object.value("entries").isArray() || entries.size() > components.size()) {
         result.error = QStringLiteral("Invalid blockchain repair journal; all files were preserved.");
         return result;
     }
@@ -55,18 +73,28 @@ inline Result recover(const QDir& data,
         return result;
     }
     QDir saved(result.path);
+    if (version == 1) {
+        // Legacy journals never moved sidecars. Do not accept a damaged v2
+        // journal relabeled v1 and silently strand verification requirements.
+        for (const QString& name : componentNames().mid(2)) {
+            const QFileInfo info(saved.filePath(name));
+            if (info.exists() || info.isSymLink()) {
+                result.error = QStringLiteral("Legacy repair journal has unexpected saved metadata; all files were preserved.");
+                return result;
+            }
+        }
+    }
     QStringList names;
     for (const auto entry : entries) {
         const QString name = entry.toString();
-        if ((name != "blocks" && name != "chainstate") || names.contains(name)) {
+        if (!components.contains(name) || names.contains(name)) {
             result.error = QStringLiteral("Invalid blockchain repair entry; all files were preserved.");
             return result;
         }
         names.append(name);
         const QFileInfo original(data.filePath(name)), backup(saved.filePath(name));
-        if (original.isSymLink() || backup.isSymLink() ||
-            original.exists() == backup.exists() ||
-            (original.exists() && !original.isDir()) || (backup.exists() && !backup.isDir())) {
+        if (!componentTypeMatches(original, name) || !componentTypeMatches(backup, name) ||
+            original.exists() == backup.exists()) {
             result.error = QStringLiteral("Cannot safely restore %1 to %2; both locations were preserved.")
                 .arg(backup.filePath(), original.filePath());
             return result;
@@ -74,7 +102,7 @@ inline Result recover(const QDir& data,
     }
     // An omitted entry is valid only when that component never existed. A
     // damaged journal must not clear the guard while leaving a mixed pair.
-    for (const QString& name : {QStringLiteral("blocks"), QStringLiteral("chainstate")}) {
+    for (const QString& name : components) {
         if (names.contains(name)) continue;
         const QFileInfo original(data.filePath(name)), backup(saved.filePath(name));
         if (original.exists() || original.isSymLink() || backup.exists() || backup.isSymLink()) {
@@ -112,11 +140,11 @@ inline Result setAside(const QDir& data,
         result.error = QStringLiteral("An interrupted blockchain repair must be recovered first.");
         return result;
     }
-    const QStringList names{QStringLiteral("blocks"), QStringLiteral("chainstate")};
+    const QStringList names = componentNames();
     for (const QString& name : names) {
         const QFileInfo info(data.filePath(name));
-        if (info.isSymLink() || (info.exists() && !info.isDir())) {
-            result.error = QStringLiteral("Expected an ordinary directory: %1").arg(info.absoluteFilePath());
+        if (!componentTypeMatches(info, name)) {
+            result.error = QStringLiteral("Unexpected blockchain component type: %1").arg(info.absoluteFilePath());
             return result;
         }
     }
@@ -131,7 +159,7 @@ inline Result setAside(const QDir& data,
     QJsonArray entries;
     for (const QString& name : names)
         if (QFileInfo::exists(data.filePath(name))) entries.append(name);
-    const QByteArray journal = QJsonDocument(QJsonObject{{"version", 1},
+    const QByteArray journal = QJsonDocument(QJsonObject{{"version", 2},
         {"backup", QFileInfo(result.path).fileName()}, {"entries", entries}}).toJson(QJsonDocument::Compact);
     QSaveFile marker(journalPath(data));
     marker.setDirectWriteFallback(false);

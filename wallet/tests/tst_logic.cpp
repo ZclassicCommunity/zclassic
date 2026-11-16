@@ -385,6 +385,10 @@ private slots:
         QTest::newRow("before-first-move") << 0;
         QTest::newRow("between-moves") << 1;
         QTest::newRow("after-both-moves") << 2;
+        QTest::newRow("after-anchor-metadata") << 3;
+        QTest::newRow("after-trustless-metadata") << 4;
+        QTest::newRow("after-all-metadata") << 5;
+        QTest::newRow("after-verification-scratch") << 6;
     }
     void chainBackup_recoversAbruptExit() {
         QFETCH(int, moves);
@@ -394,6 +398,12 @@ private slots:
         for (const QString& name : {QString("blocks"), QString("chainstate")}) {
             QVERIFY(data.mkdir(name));
             QFile file(data.filePath(name + "/payload"));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            QCOMPARE(file.write(name.toUtf8()), qint64(name.size()));
+        }
+        for (const QString& name : ChainBackup::componentNames().mid(2)) {
+            if (name == "chainstate-verify") QVERIFY(data.mkdir(name));
+            QFile file(data.filePath(name == "chainstate-verify" ? name + "/payload" : name));
             QVERIFY(file.open(QIODevice::WriteOnly));
             QCOMPARE(file.write(name.toUtf8()), qint64(name.size()));
         }
@@ -421,7 +431,33 @@ private slots:
         QFile wallet(data.filePath("wallet.dat"));
         QVERIFY(wallet.open(QIODevice::ReadOnly));
         QCOMPARE(wallet.readAll(), QByteArray("keep-wallet"));
+        for (const QString& name : ChainBackup::componentNames().mid(2)) {
+            QFile file(data.filePath(name == "chainstate-verify" ? name + "/payload" : name));
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            QCOMPARE(file.readAll(), name.toUtf8());
+        }
         QVERIFY(ChainBackup::recover(data).success); // Retry is harmless.
+    }
+    void chainBackup_preservesMetadataOnSuccess() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        QDir data(temporary.path());
+        QVERIFY(data.mkdir("blocks"));
+        QVERIFY(data.mkdir("chainstate"));
+        for (const QString& name : ChainBackup::componentNames().mid(2)) {
+            if (name == "chainstate-verify") QVERIFY(data.mkdir(name));
+            QFile file(data.filePath(name == "chainstate-verify" ? name + "/payload" : name));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            QCOMPARE(file.write("verification-state"), qint64(18));
+        }
+        const auto backup = ChainBackup::setAside(data);
+        QVERIFY2(backup.success, qPrintable(backup.error));
+        for (const QString& name : ChainBackup::componentNames().mid(2)) {
+            QVERIFY(!QFileInfo::exists(data.filePath(name)));
+            QFile file(QDir(backup.path).filePath(name == "chainstate-verify" ? name + "/payload" : name));
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            QCOMPARE(file.readAll(), QByteArray("verification-state"));
+        }
     }
     void chainBackup_rejectsInvalidJournal() {
         QTemporaryDir temporary;
@@ -457,6 +493,28 @@ private slots:
             QVERIFY(marker.open(QIODevice::ReadOnly));
             QCOMPARE(marker.readAll(), contents);
         }
+    }
+    void chainBackup_legacyJournalCannotStrandMetadata() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        QDir data(temporary.path());
+        QVERIFY(data.mkdir("chain-set-aside-fixture"));
+        QVERIFY(data.mkdir("blocks"));
+        QVERIFY(data.mkdir("chainstate"));
+        const QString saved = data.filePath("chain-set-aside-fixture/bootstrap-anchor-pending");
+        { QFile file(saved); QVERIFY(file.open(QIODevice::WriteOnly)); QCOMPARE(file.write("must-verify"), qint64(11)); }
+        { QFile file(ChainBackup::journalPath(data)); QVERIFY(file.open(QIODevice::WriteOnly));
+          const QByteArray json = "{\"version\":1,\"backup\":\"chain-set-aside-fixture\",\"entries\":[\"blocks\",\"chainstate\"]}";
+          QCOMPARE(file.write(json), qint64(json.size())); }
+        QVERIFY(!ChainBackup::recover(data).success);
+        QVERIFY(QFileInfo::exists(ChainBackup::journalPath(data)));
+        QVERIFY(QFileInfo::exists(saved));
+        // A genuine v1 transition leaves metadata at the original location.
+        QVERIFY(QFile::rename(saved, data.filePath("bootstrap-anchor-pending")));
+        QVERIFY(ChainBackup::recover(data).success);
+        QFile file(data.filePath("bootstrap-anchor-pending"));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.readAll(), QByteArray("must-verify"));
     }
     void releaseVersion_ordering() {
         QVERIFY(walletReleaseOrder("2.1.2-beta7") > walletReleaseOrder("2.1.2-beta6"));

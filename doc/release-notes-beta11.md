@@ -56,8 +56,12 @@ Blockchain moves now record a recovery journal first. After an interrupted
 process, the GUI restores the previous chain under the data-directory lock;
 the daemon refuses to open databases while recovery is pending. Conflicting
 files and malformed journals stop recovery without deleting either copy.
-Abrupt-exit tests cover before, between and after both directory moves.
-Power-loss durability and checkpoint metadata migration still need qualification
+Pending snapshot-verification markers, recovery-attempt state and verification
+scratch data move with the old chain and are restored together after interruption.
+The imported-tip hold and validation records already reside in the moved block
+index. Recovery rejects legacy journals that would strand newer verification
+metadata. Abrupt-exit tests cover all seven move boundaries.
+Power-loss durability and end-to-end wallet migration still need qualification
 before this can be presented as an existing-wallet fast-sync transition.
 
 Isolated Windows and Linux tests have imported and verified the full state at
