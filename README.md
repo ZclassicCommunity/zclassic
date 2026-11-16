@@ -1,6 +1,7 @@
-# ZClassic Wallet and Node 2.1.2-beta11
+# ZClassic Wallet and Node
 
-**Beta11 updates both the desktop wallet and zclassicd for Windows, Linux and macOS.**
+**Windows wallet beta12 adds automatic checkpoint sync for eligible existing wallets.**
+Linux/macOS wallets and the command-line node remain on beta11.
 It improves verified checkpoint downloads, block catch-up and recoverable wallet
 repair without changing consensus rules, proof checks or wallet formats.
 The wallet source lives in [wallet/](wallet/).
@@ -27,11 +28,18 @@ This software is the ZClassic client. It downloads and validates the chain, with
 
 Pre-built release binaries are published on **[GitHub Releases](https://github.com/ZclassicCommunity/zclassic/releases)**. Download the bundle for your platform and verify it against the checksums published alongside it before running. If you prefer to build it yourself, see [Build from Source](#build-from-source) below.
 
-| Desktop wallet beta11 | Download |
+| Desktop wallets | Download |
 |---|---|
-| Windows x86_64, portable executable | [Windows wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta11/zclwallet-v2.1.2-beta11-win64.exe) |
+| Windows x86_64, beta12 portable executable | [Windows wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta12/zclwallet-v2.1.2-beta12-win64.exe) |
 | Linux x86_64, glibc 2.31+ and X11/XCB libraries | [Linux wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta11/zclwallet-v2.1.2-beta11-linux-x86_64) |
 | macOS 15+, Apple Silicon | [macOS wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta11/zclwallet-v2.1.2-beta11-macos-arm64.dmg) |
+
+Windows beta12 automatically switches its owned mainnet node to verified
+checkpoint download when existing chain files prevented bootstrap and it is more
+than 100,000 blocks below checkpoint 3,126,937. It preserves a verified wallet
+backup and the previous chain; no repair-menu steps are required. See the
+[beta12 notes](doc/release-notes-beta12.md) and
+[Windows checksum](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta12/SHA256SUMS.txt).
 
 Beta11 fixes snapshot service connections, retries interrupted downloads, and
 reports transfer progress between whole percentages. The existing compiled
