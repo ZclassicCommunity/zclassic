@@ -524,6 +524,9 @@ zclassic_tx_LDADD += $(BOOST_LIBS) $(CRYPTO_LIBS)
 
 # zclassic protocol primitives #
 libzcash_a_SOURCES = \
+  zcash/tree_root.c \
+  zcash/tree_root.h \
+  zcash/LICENSE.tree-root \
   zcash/IncrementalMerkleTree.cpp \
   zcash/NoteEncryption.cpp \
   zcash/Address.cpp \
@@ -542,6 +545,7 @@ libzcash_a_SOURCES = \
 
 libzcash_a_CPPFLAGS = $(AM_CPPFLAGS) $(PIC_FLAGS) -DBINARY_OUTPUT -DCURVE_ALT_BN128 -DBOOST_SPIRIT_THREADSAFE -fvisibility=hidden -DSTATIC $(BITCOIN_INCLUDES)
 libzcash_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
+libzcash_a_CFLAGS = $(SAN_CXXFLAGS) $(HARDENED_CXXFLAGS) $(PIE_FLAGS)
 libzcash_a_LDFLAGS = $(AM_LDFLAGS)
 
 libzcash_a_CPPFLAGS += -DMONTGOMERY_OUTPUT
@@ -582,7 +586,7 @@ CLEANFILES = leveldb/libleveldb.a leveldb/libmemenv.a *.gcda *.gcno */*.gcno wal
 
 DISTCLEANFILES = obj/build.h
 
-EXTRA_DIST = leveldb snark
+EXTRA_DIST = leveldb snark test/tree_root_c_tests.c
 
 clean-local:
 	-$(MAKE) -C leveldb clean

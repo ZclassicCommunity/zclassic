@@ -101,9 +101,7 @@ public:
     size_t size() const;
 
     void append(Hash obj);
-    Hash root() const {
-        return root(Depth, std::deque<Hash>());
-    }
+    Hash root() const;
     Hash last() const;
 
     IncrementalWitness<Depth, Hash> witness() const {

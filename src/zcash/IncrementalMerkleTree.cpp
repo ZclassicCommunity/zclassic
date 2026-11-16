@@ -6,6 +6,7 @@
 #include "crypto/sha256.h"
 #include "zcash/util.h"
 #include "librustzcash.h"
+#include "zcash/tree_root.h"
 
 namespace libzcash {
 
@@ -224,7 +225,44 @@ size_t IncrementalMerkleTree<Depth, Hash>::next_depth(size_t skip) const {
     return d + skip;
 }
 
-// This calculates the root of the tree.
+// Z23's root memoization, isolated per thread and hash/depth specialization.
+// Match the entire frontier instead of relying on mutable validity flags: copies,
+// deserialization and reorgs cannot accidentally retain a stale root. Neither the
+// tree nor its serialization changes, and concurrent const readers do not race.
+template<size_t Depth, typename Hash>
+Hash IncrementalMerkleTree<Depth, Hash>::root() const {
+    static thread_local zcl_tree_root_cache cache = {};
+    if (Depth > ZCL_TREE_MAX_DEPTH || parents.size() >= Depth)
+        return root(Depth, std::deque<Hash>());
+    zcl_tree_frontier frontier = {};
+    frontier.depth = Depth;
+    frontier.parents_len = parents.size();
+    frontier.has_left = bool(left);
+    frontier.has_right = bool(right);
+    if (left) std::copy(left->begin(), left->end(), frontier.left);
+    if (right) std::copy(right->begin(), right->end(), frontier.right);
+    for (size_t i = 0; i < parents.size(); ++i) {
+        frontier.has_parent[i] = bool(parents[i]);
+        if (parents[i]) std::copy(parents[i]->begin(), parents[i]->end(), frontier.parents[i]);
+    }
+    Hash result;
+    const auto combine = [](const uint8_t* a, const uint8_t* b, size_t depth, uint8_t* out) {
+        Hash leftHash, rightHash;
+        std::copy(a, a + 32, leftHash.begin());
+        std::copy(b, b + 32, rightHash.begin());
+        const Hash hash = Hash::combine(leftHash, rightHash, depth);
+        std::copy(hash.begin(), hash.end(), out);
+    };
+    const auto empty = [](size_t depth, uint8_t* out) {
+        const Hash hash = emptyroots.empty_root(depth);
+        std::copy(hash.begin(), hash.end(), out);
+    };
+    if (!zcl_tree_root(&frontier, &cache, combine, empty, result.begin()))
+        return root(Depth, std::deque<Hash>());
+    return result;
+}
+
+// Original calculation retained for witness paths and differential tests.
 template<size_t Depth, typename Hash>
 Hash IncrementalMerkleTree<Depth, Hash>::root(size_t depth,
                                               std::deque<Hash> filler_hashes) const {

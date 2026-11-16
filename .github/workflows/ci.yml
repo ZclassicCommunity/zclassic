@@ -97,8 +97,22 @@ jobs:
         run: |
            bash zcutil/build-linux-ci.sh ${{ matrix.goal }} || ( echo "Build failure. Verbose build follows." && make ${{ matrix.goal }} V=1 ; false )
       - name: Upload artifacts
+        # Root parity must pass against the original C++ witness calculation.
+        # The release build script above deliberately disables tests.
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: Zclassic-Wallet-${{ github.sha }}-${{ matrix.name }}
           path: |
             depends/bin/*
+      - name: Build and run shielded tree parity tests
+        run: |
+          CONFIGURE_FLAGS="--enable-tests --disable-man" ./zcutil/build.sh -j3
+          ./zcutil/fetch-params.sh
+          ./src/zcash-gtest --gtest_filter='merkletree.*:WalletTests.*'
+      - name: Upload tree test binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: tree-parity-${{ github.sha }}
+          path: |
+            src/zcash-gtest
