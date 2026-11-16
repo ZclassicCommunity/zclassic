@@ -1,7 +1,7 @@
-# ZClassic 2.1.2-beta11 candidate
+# ZClassic 2.1.2-beta11
 
-This release is being built and tested. Published beta10 downloads remain the
-current wallet release until backend validation and platform packaging finish.
+Beta11 updates both the desktop wallet and command-line node. Download the
+[release binaries and checksums](https://github.com/ZclassicCommunity/zclassic/releases/tag/v2.1.2-beta11).
 
 Unlike beta7–beta10, beta11 rebuilds **zclassicd itself**, as well as the wallet.
 The new C23-compatible root-calculation module is adapted from Z23. It reuses
@@ -145,7 +145,7 @@ Isolated Windows and Linux tests have imported and verified the full state at
 that checkpoint and continued ordinary block validation above it. This does
 not by itself prove the complete public-endpoint GUI migration path.
 The consolidated backend passed full debug CI and isolated Windows packaging,
-extraction, startup and shutdown checks. Final release qualification is ongoing.
+extraction, startup and shutdown checks. Final artifact results are recorded below.
 No wallet data should be removed to enable fast sync.
 
 A wallet-disabled Windows public-network run downloaded and verified the compiled
@@ -187,8 +187,10 @@ candidates; final artifact startup tests do not repeat that entire download.
 The final Linux GUI package passed GLIBC compatibility, production extraction,
 backend hash/version/cache and certificate-verified HTTPS checks. All six final
 artifacts were hashed locally and are covered by one checksum manifest.
-Publication remains pending collaborator approval and merge; the website must
-only be updated after the corresponding release links are available.
+PR #156 was merged as `6230189cf6a31a98bdbbc1462265ae42d61743c1`.
+Its source tree matches the qualified binary source exactly. The release includes
+all six platform files, one checksum manifest and build provenance.
+
 ## Release gates
 
 - Full daemon build, Sprout/Sapling root vectors and differential root tests.
@@ -202,8 +204,8 @@ only be updated after the corresponding release links are available.
   macOS bundle. The new Linux/Windows daemon workflow does not produce that build.
 
 Timing benchmarks are included in the backend tests. Full-chain speedup has not
-yet been measured. This candidate must not be announced as a completed release.
+yet been measured; no universal speedup is claimed.
 
-Windows candidates are not Authenticode-signed, so Windows SmartScreen may still
+Windows binaries are not Authenticode-signed, so Windows SmartScreen may still
 show a reputation warning. Eliminating missing runtime DLLs does not remove that
-warning. Mac candidates use ad-hoc signatures and are not Apple-notarized.
+warning. Mac binaries use ad-hoc signatures and are not Apple-notarized.
