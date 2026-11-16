@@ -25,7 +25,11 @@ jobs:
       - name: Install build tools
         run: |
           apt-get update
-          apt-get install -y build-essential libtool autotools-dev automake pkg-config bsdmainutils curl ca-certificates git ccache bison python3 g++-mingw-w64-x86-64-posix
+          apt-get install -y build-essential libtool autotools-dev automake pkg-config bsdmainutils curl ca-certificates git ccache bison python3
+      - name: Install Windows cross compiler
+        if: matrix.target == 'win64'
+        run: |
+          apt-get install -y g++-mingw-w64-x86-64
           update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
           update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
