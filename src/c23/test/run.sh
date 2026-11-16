@@ -16,11 +16,15 @@
 #   --prove              replay re-runs every prover (Sapling and Sprout) and emits C23-made
 #                        proofs to <out>/c23made.cases (+ .expect) for the Rust verifier
 #   --threads-only       build only kat_threads (used for -fsanitize=thread)
+#   --linked <archive>   do not compile the core: link the tests against this
+#                        libzcl_c23.a (the one the daemon links, production glue,
+#                        prefixed symbols) plus kat_linked_seam.c; needs --deps
+#   --deps <prefix>      depends prefix with lib/libsodium.a and lib/libcrypto.a
 # Exit status: 0 all steps passed, 1 a step failed, 2 usage/build error.
 set -u
 
 cc=gcc; std=-std=gnu17; opt=-O3; san=""; out=""; params="${HOME:-}/.zcash-params"; golden=""
-steps="build,replay,mutations,threads"; prove=0; threads_only=0
+steps="build,replay,mutations,threads"; prove=0; threads_only=0; linked=""; deps=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --cc) cc=$2; shift 2 ;;
@@ -33,6 +37,8 @@ while [ $# -gt 0 ]; do
         --steps) steps=$2; shift 2 ;;
         --prove) prove=1; shift ;;
         --threads-only) threads_only=1; shift ;;
+        --linked) linked=$2; shift 2 ;;
+        --deps) deps=$2; shift 2 ;;
         *) echo "run.sh: unknown argument $1" >&2; exit 2 ;;
     esac
 done
@@ -62,7 +68,14 @@ case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) libs="-lbcrypt -lshell32 -lpsapi"; exe=".exe" ;;
     *) libs="-lm"; exe=""; posix="-D_POSIX_C_SOURCE=200809L"; spflags="-U_POSIX_C_SOURCE -D_GNU_SOURCE" ;;
 esac
-base="$std $opt $san -pthread -include $g/zcl_c23_compat.h -fno-strict-aliasing $posix $inc"
+pfx=""
+if [ -n "$linked" ]; then
+    [ -f "$linked" ] && [ -f "$deps/lib/libsodium.a" ] || { echo "run.sh: --linked needs an existing archive and --deps <prefix>" >&2; exit 2; }
+    # The archive's internal names are zc23_-prefixed; kat_jub.c calls them directly.
+    pfx="-include $g/zcl_c23_symbol_prefix.h"
+    libs="-L$deps/lib -lsodium -lcrypto -ldl $libs"
+fi
+base="$std $opt $san -pthread $pfx -include $g/zcl_c23_compat.h -fno-strict-aliasing $posix $inc"
 log=$out/build.log
 : >"$log"
 fail=0
@@ -81,7 +94,8 @@ compile() { # <src> <obj> <extra flags...>
 }
 
 lib=$out/libkat_c23.a
-if has_step build || [ ! -f "$lib" ]; then
+[ -z "$linked" ] || lib=$linked
+if [ -z "$linked" ] && { has_step build || [ ! -f "$lib" ]; }; then
     t0=$(date +%s)
     objs=""
     for rel in $(awk -F"	" 'index($1,"src/c23/vendor/")==1 && substr($1,length($1)-1)==".c" {print $1}' "$c23/Z23_SOURCE.tsv"); do
@@ -114,6 +128,7 @@ fi
 
 tflags="-Wall -Wextra -Werror -DKAT_C23_HEADER"
 tcommon="$here/kat_common.c $here/kat_jub.c"
+[ -z "$linked" ] || tcommon="$tcommon $here/kat_linked_seam.c"
 link_test() { # <name> <sources...>
     n=$1; shift
     # shellcheck disable=SC2086
