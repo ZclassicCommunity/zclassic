@@ -14,6 +14,9 @@
 //   WPERF_OUTS (20)    foreign Sapling outputs per foreign block
 //   WPERF_PREFILL (30000) commitments in the Sapling tree before the first note
 //   WPERF_READ_REPS (3) repetitions of the read paths
+//   WPERF_DIR          where the temporary datadir is made (default: the
+//                      system temporary directory). A tmpfs path takes disk
+//                      latency out of the database paths.
 //
 // It also prints a digest of the observable wallet state (per-note witness
 // bytes, heights, nullifiers, values, balances) keyed by note commitment, so
@@ -219,7 +222,8 @@ TEST(WalletPerf, DISABLED_Bench)
     const int nFillBlocks = 20;
 
     RegtestActivateSapling();
-    boost::filesystem::path dir = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("wperf-%%%%-%%%%-%%%%");
+    const char* base = getenv("WPERF_DIR");
+    boost::filesystem::path dir = (base ? boost::filesystem::path(base) : boost::filesystem::temp_directory_path()) / boost::filesystem::unique_path("wperf-%%%%-%%%%-%%%%");
     boost::filesystem::create_directories(dir);
     mapArgs["-datadir"] = dir.string();
     ClearDatadirCache();

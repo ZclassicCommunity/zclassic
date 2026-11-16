@@ -873,6 +873,28 @@ protected:
      */
     void CollectNoteTxs(std::vector<CWalletTx*>& out);
 
+    /**
+     * Wallet transactions as (nOrderPos, txid), which is the order
+     * OrderedTxItems() lists them in. It lets AddToWallet find the latest
+     * entries without sorting the whole wallet for every new transaction.
+     *
+     * Requires cs_wallet. Built by a full walk when first needed.
+     * AddToWallet then adds each new transaction; loading or erasing a
+     * transaction marks the index stale, and a stale index is rebuilt on
+     * the next use, as is one whose size differs from mapWallet. Nothing
+     * else changes the nOrderPos of a wallet entry except the reorder pass
+     * of LoadWallet, which runs straight after loading.
+     */
+    std::set<std::pair<int64_t, uint256>> setTxOrder;
+    bool fTxOrderValid = false;
+    /**
+     * Walks wallet transactions and accounting entries from the end of the
+     * OrderedTxItems() order, skipping pwtxSkip, and gives the smart time
+     * of the first one that is not later than nLatestTolerated. Returns
+     * false if there is none.
+     */
+    bool LatestOrderedSmartTime(const CWalletTx* pwtxSkip, int64_t nLatestTolerated, int64_t& nSmartTimeRet);
+
     template <typename WalletDB>
     void SetBestChainINTERNAL(WalletDB& walletdb, const CBlockLocator& loc) {
         if (!walletdb.TxnBegin()) {

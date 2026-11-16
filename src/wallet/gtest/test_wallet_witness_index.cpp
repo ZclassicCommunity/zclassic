@@ -20,6 +20,7 @@
 #include "primitives/transaction.h"
 #include "script/script.h"
 #include "streams.h"
+#include "timedata.h"
 #include "wallet/db.h"
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
@@ -706,4 +707,155 @@ TEST(WalletWitnessIndex, PerBlockCost)
                     c.nTransparent, c.nNoteTxs, c.shielded ? "yes" : "no",
                     total[1] / nBlocks, total[0] / nBlocks, nBlocks);
     }
+}
+
+// ---- Order index used by AddToWallet to pick nTimeSmart ----
+//
+// AddToWallet used to sort the whole wallet (OrderedTxItems) for every new
+// transaction in a block and walk back to the latest tolerated entry. It
+// now asks LatestOrderedSmartTime, which keeps an index. The original scan
+// is kept here as the reference.
+
+namespace {
+
+class OrderWallet : public CWallet {
+public:
+    explicit OrderWallet(const std::string& file) : CWallet(file) { }
+    bool Latest(const CWalletTx* pwtxSkip, int64_t nLatestTolerated, int64_t& nSmartTimeRet) {
+        return LatestOrderedSmartTime(pwtxSkip, nLatestTolerated, nSmartTimeRet);
+    }
+};
+
+bool LatestByFullSort(CWallet& w, const CWalletTx* pwtxSkip, int64_t latestTolerated, int64_t& nSmartTimeRet)
+{
+    std::list<CAccountingEntry> acentries;
+    CWallet::TxItems txOrdered = w.OrderedTxItems(acentries);
+    for (CWallet::TxItems::reverse_iterator it = txOrdered.rbegin(); it != txOrdered.rend(); ++it)
+    {
+        CWalletTx *const pwtx = (*it).second.first;
+        if (pwtx == pwtxSkip)
+            continue;
+        CAccountingEntry *const pacentry = (*it).second.second;
+        int64_t nSmartTime;
+        if (pwtx)
+        {
+            nSmartTime = pwtx->nTimeSmart;
+            if (!nSmartTime)
+                nSmartTime = pwtx->nTimeReceived;
+        }
+        else
+            nSmartTime = pacentry->nTime;
+        if (nSmartTime <= latestTolerated)
+        {
+            nSmartTimeRet = nSmartTime;
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+TEST(WalletTxOrder, LatestSmartTimeMatchesFullSort)
+{
+    DbEnvGuard env;
+    std::mt19937_64 rng(4242);
+    OrderWallet w("txorder_" + std::to_string(GetTimeMicros()) + ".dat");
+    { CWalletDB create(w.strWalletFile, "cr+"); }
+    LOCK2(cs_main, w.cs_wallet);
+
+    std::vector<uint256> hashes;
+    // Small ranges, so order positions and times collide often.
+    auto randomTime = [&]() { return (int64_t)(1000 + rng() % 500); };
+    auto randomPos = [&]() { return (int64_t)(rng() % 40) - 1; };
+    auto addLoaded = [&]() {
+        CWalletTx wtx(nullptr, RandomTx(rng, 0, 0));
+        wtx.nOrderPos = randomPos();
+        wtx.nTimeSmart = (rng() % 4 == 0) ? 0 : randomTime();
+        wtx.nTimeReceived = randomTime();
+        ASSERT_TRUE(w.AddToWallet(wtx, true, nullptr));
+        hashes.push_back(wtx.GetHash());
+    };
+    auto addAccounting = [&](const std::string& account) {
+        CAccountingEntry entry;
+        entry.strAccount = account;
+        entry.nTime = randomTime();
+        entry.nOrderPos = randomPos();
+        ASSERT_TRUE(CWalletDB(w.strWalletFile).WriteAccountingEntry(entry));
+    };
+    auto check = [&](const std::string& where) {
+        for (int i = 0; i < 80; i++) {
+            const CWalletTx* skip = &w.mapWallet.at(hashes[rng() % hashes.size()]);
+            int64_t tolerated = (i % 8 == 0) ? GetAdjustedTime() + 300 : (int64_t)(990 + rng() % 530);
+            int64_t expected = -1, actual = -1;
+            bool fExpected = LatestByFullSort(w, skip, tolerated, expected);
+            bool fActual = w.Latest(skip, tolerated, actual);
+            ASSERT_EQ(fExpected, fActual) << where << " i=" << i;
+            ASSERT_EQ(expected, actual) << where << " i=" << i;
+        }
+    };
+
+    for (int i = 0; i < 150; i++) addLoaded();
+    check("loaded");
+    for (int i = 0; i < 6; i++) addAccounting("");
+    for (int i = 0; i < 3; i++) addAccounting("other");
+    check("accounting entries");
+
+    CBlockIndex blockIndex;
+    uint256 hashBlock = RandHash(rng);
+    mapBlockIndex.insert(std::make_pair(hashBlock, &blockIndex));
+
+    for (int round = 0; round < 12; round++) {
+        // New transactions through the live path, some of them in a block,
+        // which is the path that uses the index.
+        for (int i = 0; i < 5; i++) {
+            CWalletTx wtx(nullptr, RandomTx(rng, 0, 0));
+            bool fInBlock = (i % 2 == 0);
+            blockIndex.nTime = (uint32_t)(GetAdjustedTime() - 1000 + (int64_t)(rng() % 2000));
+            if (fInBlock) wtx.hashBlock = hashBlock;
+            CWalletDB db(w.strWalletFile, "r+", false);
+            ASSERT_TRUE(w.AddToWallet(wtx, false, &db));
+            hashes.push_back(wtx.GetHash());
+            const CWalletTx& added = w.mapWallet.at(wtx.GetHash());
+            if (fInBlock) {
+                // nTimeSmart as the original scan would have set it.
+                int64_t latestNow = added.nTimeReceived;
+                int64_t latestEntry = 0;
+                int64_t nSmartTime = 0;
+                if (LatestByFullSort(w, &added, latestNow + 300, nSmartTime)) {
+                    latestEntry = nSmartTime;
+                    if (nSmartTime > latestNow) latestNow = nSmartTime;
+                }
+                ASSERT_EQ(std::max(latestEntry, std::min((int64_t)blockIndex.nTime, latestNow)), (int64_t)added.nTimeSmart);
+            } else {
+                ASSERT_EQ(added.nTimeReceived, (int64_t)added.nTimeSmart);
+            }
+        }
+        check("live adds");
+
+        size_t k = rng() % hashes.size();
+        w.EraseFromWallet(hashes[k]);
+        hashes.erase(hashes.begin() + k);
+        check("erase");
+
+        if (round % 3 == 0) addAccounting("");
+        if (round % 4 == 1) {
+            // Loading, then changing an order position, as LoadWallet and
+            // its reorder pass do. Loading is what marks the index stale.
+            addLoaded();
+            w.mapWallet.at(hashes[rng() % hashes.size()]).nOrderPos = 1000000 + round;
+        }
+        if (round % 4 == 2) {
+            // An insert behind the wallet's back changes the size, which
+            // the index notices.
+            CWalletTx wtx(nullptr, RandomTx(rng, 0, 0));
+            wtx.nOrderPos = randomPos();
+            wtx.nTimeReceived = randomTime();
+            w.mapWallet[wtx.GetHash()] = wtx;
+            hashes.push_back(wtx.GetHash());
+        }
+        check("round end");
+    }
+
+    mapBlockIndex.erase(hashBlock);
 }

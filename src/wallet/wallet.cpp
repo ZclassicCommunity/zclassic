@@ -1436,6 +1436,59 @@ CWallet::TxItems CWallet::OrderedTxItems(std::list<CAccountingEntry>& acentries,
     return txOrdered;
 }
 
+bool CWallet::LatestOrderedSmartTime(const CWalletTx* pwtxSkip, int64_t nLatestTolerated, int64_t& nSmartTimeRet)
+{
+    AssertLockHeld(cs_wallet); // mapWallet
+
+    // Accounting entries are few and live only in the database. On equal
+    // nOrderPos OrderedTxItems() lists them after the transactions, in the
+    // order they were read.
+    std::list<CAccountingEntry> acentries;
+    CWalletDB(strWalletFile, "r").ListAccountCreditDebit("", acentries);
+    std::multimap<int64_t, int64_t> acOrdered; // nOrderPos -> nTime
+    for (const CAccountingEntry& entry : acentries) {
+        acOrdered.insert(std::make_pair(entry.nOrderPos, entry.nTime));
+    }
+
+    // A second pass is only needed if the first finds the index stale.
+    for (int pass = 0; pass < 2; pass++) {
+        if (!fTxOrderValid || setTxOrder.size() != mapWallet.size()) {
+            setTxOrder.clear();
+            for (const std::pair<const uint256, CWalletTx>& item : mapWallet) {
+                setTxOrder.insert(std::make_pair(item.second.nOrderPos, item.first));
+            }
+            fTxOrderValid = true;
+        }
+        auto ac = acOrdered.rbegin();
+        auto tx = setTxOrder.rbegin();
+        while (fTxOrderValid && (ac != acOrdered.rend() || tx != setTxOrder.rend())) {
+            int64_t nSmartTime;
+            if (tx == setTxOrder.rend() || (ac != acOrdered.rend() && ac->first >= tx->first)) {
+                nSmartTime = ac->second;
+                ++ac;
+            } else {
+                auto mi = mapWallet.find(tx->second);
+                if (mi == mapWallet.end() || mi->second.nOrderPos != tx->first) {
+                    fTxOrderValid = false;
+                    break;
+                }
+                ++tx;
+                const CWalletTx& wtx = mi->second;
+                if (&wtx == pwtxSkip)
+                    continue;
+                nSmartTime = wtx.nTimeSmart ? wtx.nTimeSmart : wtx.nTimeReceived;
+            }
+            if (nSmartTime <= nLatestTolerated) {
+                nSmartTimeRet = nSmartTime;
+                return true;
+            }
+        }
+        if (fTxOrderValid)
+            return false;
+    }
+    return false;
+}
+
 void CWallet::MarkDirty()
 {
     {
@@ -1590,6 +1643,7 @@ bool CWallet::AddToWallet(const CWalletTx& wtxIn, bool fFromLoadWallet, CWalletD
             nNoteTxIndexWalletSize++;
         }
         mapWallet[hash] = wtxIn;
+        fTxOrderValid = false;
         NoteTxIndexAdd(hash, mapWallet[hash]);
         mapWallet[hash].BindWallet(this);
         UpdateNullifierNoteMapWithTx(mapWallet[hash]);
@@ -1611,6 +1665,9 @@ bool CWallet::AddToWallet(const CWalletTx& wtxIn, bool fFromLoadWallet, CWalletD
         {
             wtx.nTimeReceived = GetAdjustedTime();
             wtx.nOrderPos = IncOrderPosNext(pwalletdb);
+            if (fTxOrderValid) {
+                setTxOrder.insert(std::make_pair(wtx.nOrderPos, hash));
+            }
 
             wtx.nTimeSmart = wtx.nTimeReceived;
             if (!wtxIn.hashBlock.IsNull())
@@ -1622,30 +1679,12 @@ bool CWallet::AddToWallet(const CWalletTx& wtxIn, bool fFromLoadWallet, CWalletD
                     {
                         // Tolerate times up to the last timestamp in the wallet not more than 5 minutes into the future
                         int64_t latestTolerated = latestNow + 300;
-                        std::list<CAccountingEntry> acentries;
-                        TxItems txOrdered = OrderedTxItems(acentries);
-                        for (TxItems::reverse_iterator it = txOrdered.rbegin(); it != txOrdered.rend(); ++it)
+                        int64_t nSmartTime;
+                        if (LatestOrderedSmartTime(&wtx, latestTolerated, nSmartTime))
                         {
-                            CWalletTx *const pwtx = (*it).second.first;
-                            if (pwtx == &wtx)
-                                continue;
-                            CAccountingEntry *const pacentry = (*it).second.second;
-                            int64_t nSmartTime;
-                            if (pwtx)
-                            {
-                                nSmartTime = pwtx->nTimeSmart;
-                                if (!nSmartTime)
-                                    nSmartTime = pwtx->nTimeReceived;
-                            }
-                            else
-                                nSmartTime = pacentry->nTime;
-                            if (nSmartTime <= latestTolerated)
-                            {
-                                latestEntry = nSmartTime;
-                                if (nSmartTime > latestNow)
-                                    latestNow = nSmartTime;
-                                break;
-                            }
+                            latestEntry = nSmartTime;
+                            if (nSmartTime > latestNow)
+                                latestNow = nSmartTime;
                         }
                     }
 
@@ -1848,6 +1887,7 @@ void CWallet::EraseFromWallet(const uint256 &hash)
     {
         LOCK(cs_wallet);
         if (mapWallet.erase(hash)) {
+            fTxOrderValid = false;
             nNoteTxIndexWalletSize--;
             setNoteTxIndex.erase(hash);
             CWalletDB(strWalletFile).EraseTx(hash);
