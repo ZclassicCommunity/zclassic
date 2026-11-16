@@ -9,19 +9,19 @@ A private, single-file ZClassic wallet — with a full ZClassic node built right
 
 ## Download & run
 
-**Windows: [v2.1.2-beta12](https://github.com/ZclassicCommunity/zclassic/releases/tag/v2.1.2-beta12). Linux/macOS: [v2.1.2-beta11](https://github.com/ZclassicCommunity/zclassic/releases/tag/v2.1.2-beta11).**
+**Windows, Linux and macOS: [v2.1.2-beta12](https://github.com/ZclassicCommunity/zclassic/releases/tag/v2.1.2-beta12).**
 
 Download the **one** file for your computer and open it:
 
 | Your computer | Download | First-time open |
 |---|---|---|
 | **Windows** | `zclwallet-v2.1.2-beta12-win64.exe` | Double-click. If you see **"Windows protected your PC"**, click **More info → Run anyway**. |
-| **macOS 15+** (Apple Silicon) | `zclwallet-v2.1.2-beta11-macos-arm64.dmg` | Open the `.dmg` and drag **ZclWallet** to Applications. On first launch macOS says **"Apple could not verify … is free from malware"** — that's expected (the app is signed but not yet notarized). See **[Opening on macOS](#opening-on-macos)** just below. |
-| **Linux** | `zclwallet-v2.1.2-beta11-linux-x86_64` | `chmod +x zclwallet-v2.1.2-beta11-linux-x86_64 && ./zclwallet-v2.1.2-beta11-linux-x86_64` — or right-click → Properties → *Allow executing as program*, then double-click. _(glibc ≥ 2.31; system X11/XCB libraries required; no Qt or OpenSSL install needed.)_ |
+| **macOS 15+** (Apple Silicon) | `zclwallet-v2.1.2-beta12-macos-arm64.dmg` | Open the `.dmg` and drag **ZclWallet** to Applications. On first launch macOS says **"Apple could not verify … is free from malware"** — that's expected (the app is signed but not yet notarized). See **[Opening on macOS](#opening-on-macos)** just below. |
+| **Linux** | `zclwallet-v2.1.2-beta12-linux-x86_64` | `chmod +x zclwallet-v2.1.2-beta12-linux-x86_64 && ./zclwallet-v2.1.2-beta12-linux-x86_64` — or right-click → Properties → *Allow executing as program*, then double-click. _(glibc ≥ 2.31; system X11/XCB libraries required; no Qt or OpenSSL install needed.)_ |
 
 ### Opening on macOS
 
-The beta11 app targets **macOS 15 or newer on Apple Silicon** and was tested natively on macOS 26. It is ad-hoc signed, not Apple-notarized. Verify its checksum first. If Gatekeeper blocks it, use **System Settings → Privacy & Security → Open Anyway** for the verified app.
+The beta12 app targets **macOS 15 or newer on Apple Silicon** and was tested natively on macOS 26. It is ad-hoc signed, not Apple-notarized. Verify its checksum first. If Gatekeeper blocks it, use **System Settings → Privacy & Security → Open Anyway** for the verified app.
 
 ## What happens on first launch
 
@@ -38,7 +38,7 @@ ZClassic supports **shielded z-addresses**, which keep your balances and transfe
 
 The tabs are: **Balance · Send · Receive · Transactions · zclassicd**.
 
-## Windows beta12: automatic checkpoint sync
+## Beta12: automatic checkpoint sync
 
 Close your older wallet normally and open beta12 with the existing data directory.
 Eligible wallets far behind the compiled checkpoint switch automatically: the app
@@ -79,7 +79,7 @@ Compare the result against the matching line in `SHA256SUMS.txt`.
 
 The wallet runs its own embedded `zclassicd` automatically — most people never think about it. If you already run a ZClassic node, the wallet connects to that instead.
 
-To run a **node only** (no GUI, e.g. on a server), download `zclassicd` from the [beta11 node release](https://github.com/ZclassicCommunity/zclassic/releases/tag/v2.1.2-beta11) and run it — **no flags or config needed**. It fetches the params and a snapshot and syncs by itself.
+To run a **node only** (no GUI, e.g. on a server), download `zclassicd` from the [beta12 release (unchanged beta11 node)](https://github.com/ZclassicCommunity/zclassic/releases/tag/v2.1.2-beta12) and run it — **no flags or config needed**. It fetches the params and a snapshot and syncs by itself.
 
 _(To run the wallet itself without the GUI, pass `--headless`.)_
 

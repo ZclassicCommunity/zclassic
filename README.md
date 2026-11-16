@@ -1,7 +1,7 @@
 # ZClassic Wallet and Node
 
-**Windows wallet beta12 adds automatic checkpoint sync for eligible existing wallets.**
-Linux/macOS wallets and the command-line node remain on beta11.
+**Wallet beta12 adds automatic checkpoint sync for eligible existing wallets on Windows, Linux and macOS.**
+The unchanged beta11 command-line node is also included in the beta12 release.
 It improves verified checkpoint downloads, block catch-up and recoverable wallet
 repair without changing consensus rules, proof checks or wallet formats.
 The wallet source lives in [wallet/](wallet/).
@@ -31,15 +31,15 @@ Pre-built release binaries are published on **[GitHub Releases](https://github.c
 | Desktop wallets | Download |
 |---|---|
 | Windows x86_64, beta12 portable executable | [Windows wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta12/zclwallet-v2.1.2-beta12-win64.exe) |
-| Linux x86_64, glibc 2.31+ and X11/XCB libraries | [Linux wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta11/zclwallet-v2.1.2-beta11-linux-x86_64) |
-| macOS 15+, Apple Silicon | [macOS wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta11/zclwallet-v2.1.2-beta11-macos-arm64.dmg) |
+| Linux x86_64, glibc 2.31+ and X11/XCB libraries | [Linux wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta12/zclwallet-v2.1.2-beta12-linux-x86_64) |
+| macOS 15+, Apple Silicon | [macOS wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta12/zclwallet-v2.1.2-beta12-macos-arm64.dmg) |
 
-Windows beta12 automatically switches its owned mainnet node to verified
+Beta12 automatically switches its owned mainnet node to verified
 checkpoint download when existing chain files prevented bootstrap and it is more
 than 100,000 blocks below checkpoint 3,126,937. It preserves a verified wallet
 backup and the previous chain; no repair-menu steps are required. See the
 [beta12 notes](doc/release-notes-beta12.md) and
-[Windows checksum](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta12/SHA256SUMS.txt).
+[Release checksums](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta12/SHA256SUMS.txt).
 
 Beta11 fixes snapshot service connections, retries interrupted downloads, and
 reports transfer progress between whole percentages. The existing compiled
@@ -60,12 +60,12 @@ signed, not notarized; they target macOS 15+ and were tested natively on macOS 2
 
 | Command-line node beta11 | Download |
 |---|---|
-| Windows x86_64 | [Windows node ZIP](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta11/zclassicd-v2.1.2-beta11-win64.zip) |
-| Linux x86_64, glibc 2.31+ | [Linux node archive](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta11/zclassicd-v2.1.2-beta11-linux-x86_64.tar.gz) |
-| macOS 15+, Apple Silicon | [Mac node archive](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta11/zclassicd-v2.1.2-beta11-macos-arm64.tar.gz) |
+| Windows x86_64 | [Windows node ZIP](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta12/zclassicd-v2.1.2-beta11-win64.zip) |
+| Linux x86_64, glibc 2.31+ | [Linux node archive](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta12/zclassicd-v2.1.2-beta11-linux-x86_64.tar.gz) |
+| macOS 15+, Apple Silicon | [Mac node archive](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta12/zclassicd-v2.1.2-beta11-macos-arm64.tar.gz) |
 
 See the [release notes](doc/release-notes-beta11.md),
-[checksums](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta11/SHA256SUMS.txt),
+[checksums](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta12/SHA256SUMS.txt),
 and [wallet instructions](wallet/README.md). Each node archive contains
 `zclassicd`, `zclassic-cli` and `zclassic-tx`.
 Back up your wallet before upgrading; do not delete or reindex your data directory.
