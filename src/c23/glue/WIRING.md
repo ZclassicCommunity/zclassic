@@ -158,3 +158,62 @@ static link run `nm -g build/src/zclassicd | sort | uniq -d` and fail on duplica
 The vendored sha256/sha512 (`sha256_init`...) vs zclassicd's `crypto/sha256.cpp` are
 C++-mangled on the zclassicd side, so no clash is expected; this is not machine-checked
 here (needs a full daemon link).
+
+## Hash acceleration (unit p4-hash): APPLIED, unlike the rest of this file
+
+`CSHA256` (`crypto/sha256.{h,cpp}`) now runs on the vendored Z23
+`vendor/core/modules/crypto/src/sha256.c`. The C++ class interface is unchanged; every
+SHA-256 consumer (CHash256, CHash160, CHMAC_SHA256, SHA256Compress, HashFileSHA256,
+txid/header/merkle hashing) gets the backend without a call-site change.
+
+```
+crypto/sha256.cpp ──> c23/glue/zcl_c23_sha256.h (extern "C" seam; the only header C++ sees)
+                      c23/glue/zcl_c23_sha256.c (forwarders, layout static asserts; #includes the
+                        vendored sha256.c below so no object is written under vendor/)
+                      c23/vendor/core/modules/crypto/src/sha256.c (portable C, SHA-NI, ARMv8 SHA)
+                      c23/glue/zcl_c23_hash_log.c (zcl_log_level_get / zcl_log_emit_at -> stderr)
+```
+
+Built as `libzcl_c23_hash.a` (and as the libtool convenience library
+`libzcl_c23_hash_pic.la` for `libzcashconsensus`, which compiles `crypto/sha256.cpp`
+itself). `LIBBITCOIN_CRYPTO` expands to `crypto/libbitcoin_crypto.a libzcl_c23_hash.a`, so
+every existing link line carries it in the right order.
+
+- **Include path is `-iquote`, not `-I`.** Automake emits `-I.` (zclassicd `src/`) before
+  per-target flags, so with `-I` the vendored `sha256.c` picked up zclassicd's C++
+  `crypto/sha256.h` (first build failed on `#include <string>`). `-iquote` directories are
+  searched before every `-I`. The `libzcl_c23_a_CPPFLAGS` stanza above has the same
+  problem for `crypto/sha256.h`, `crypto/common.h`, `crypto/sha512.h`: use `-iquote` there too.
+- **No `-march`, `-msha`, `-msse4` anywhere.** The SHA-NI and ARMv8 transforms carry
+  `__attribute__((target(...)))`; the object is x86-64 baseline and the transform is
+  chosen from CPUID at run time, after a known-answer comparison with the portable code.
+- **Dispatch.** The backend flag is an `_Atomic int` probed on first use (benign race: every
+  thread computes the same value). `crypto/sha256.cpp` also probes in a static initialiser
+  and `AppInit2` calls `SHA256AutoDetect()` before any thread starts and logs
+  `Using the '<name>' SHA256 implementation`.
+- **Linux aarch64 stays portable.** The pinned Z23 `sha256.c` only enables the ARMv8
+  transform on Apple (`sysctl hw.optional.arm.FEAT_SHA256`); on other arm64 systems
+  `detect_sha_arm()` returns "unavailable". That is upstream behaviour at this pin, not a
+  glue choice; a `getauxval(AT_HWCAP)` probe belongs in Z23 and arrives by re-vendoring.
+- **Private symbol names.** `glue/zcl_c23_hash_names.h` (included first in both glue C
+  files) renames the vendored externals to `zcl_c23h_sha256_*` and the two log entry points
+  to `zcl_c23h_log_*`. This was forced by a real clash: zclassicd's `src/sha256.cpp` (the
+  helper behind `SHA256::hashString`) defines `sha256_init` and `sha256_finalize` as
+  `extern "C"` with other signatures, and the first zclassicd link failed with "multiple
+  definition". The "Symbol-collision audit" section above assumed the zclassicd names are
+  C++-mangled; for these two they are not, so `libzcl_c23.a` needs the same treatment.
+- **When `libzcl_c23.a` is added:** thanks to the renaming both libraries can be linked
+  into one program without duplicate symbols (two private copies of SHA-256, about 16 KB).
+  To share one copy instead, point `libzcl_c23.a` at the `zcl_c23h_` names and drop
+  `sha256.c` from its source list.
+- **Test hooks.** `SHA256SelectBackendForTesting("portable"|"hardware"|"auto")`;
+  `ZCL_SHA256_BACKEND=portable|hardware` forces a backend for a whole `zcash-gtest` or
+  `test_bitcoin` run; `ZCL_SHA256_REQUIRE_HARDWARE=1` makes the differential test fail
+  instead of silently running portable twice on a host that should have SHA-NI.
+- **Proofs.** `gtest/test_sha256_differential.cpp` (reference: the former C++ code in
+  `gtest/sha256_reference.h`), `c23/test/sha256-diff-sanitize.sh` (ASan+UBSan),
+  `c23/bench/hash/build.sh` (before/after numbers), `make check-c23-vendor`.
+
+Not replaced, on measurement: RIPEMD160 (Z23 portable equals the C++ one), single-stream
+BLAKE2b (libsodium's AVX2 compress is 12 to 17 percent faster than Z23's scalar code).
+Equihash 4-way/8-way BLAKE2b is a separate unit (`vendor-equihash-pending/`).

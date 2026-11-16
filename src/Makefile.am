@@ -32,7 +32,10 @@ LIBBITCOIN_SERVER=libbitcoin_server.a
 LIBBITCOIN_COMMON=libbitcoin_common.a
 LIBBITCOIN_CLI=libbitcoin_cli.a
 LIBBITCOIN_UTIL=libbitcoin_util.a
-LIBBITCOIN_CRYPTO=crypto/libbitcoin_crypto.a
+# SHA-256 backend of CSHA256: vendored Z23 C23 with run-time CPU dispatch.
+# crypto/sha256.cpp calls it, so it always travels right behind libbitcoin_crypto.
+LIBZCL_C23_HASH=libzcl_c23_hash.a
+LIBBITCOIN_CRYPTO=crypto/libbitcoin_crypto.a $(LIBZCL_C23_HASH)
 LIBSECP256K1=secp256k1/libsecp256k1.la
 LIBSNARK=snark/libsnark.a
 LIBUNIVALUE=univalue/libunivalue.la
@@ -366,6 +369,38 @@ crypto_libbitcoin_crypto_a_SOURCES += \
   ${EQUIHASH_TROMP_SOURCES}
 endif
 
+# Vendored Z23 SHA-256 (portable C, SHA-NI, ARMv8 SHA; selected at run time) plus
+# the zclassicd glue that CSHA256 calls. See c23/glue/WIRING.md, "Hash acceleration".
+# No -march/-msha flag here or anywhere: the hardware transforms carry a per-function
+# target attribute, so the objects stay x86-64 baseline. The include set below holds
+# Z23 headers whose names collide with zclassicd (crypto/sha256.h, crypto/common.h);
+# it is for these C sources ONLY and must never reach a C++ target. It is -iquote,
+# not -I: Automake puts -I. (zclassicd src/) ahead of per-target flags, and -iquote
+# directories are searched before every -I, so the vendored headers win here.
+# zcl_c23_sha256.c #includes the vendored sha256.c, so no build output lands in
+# c23/vendor/ (check-vendor.sh rejects unlisted files there).
+ZCL_C23_HASH_SOURCES = \
+  c23/glue/zcl_c23_sha256.c \
+  c23/glue/zcl_c23_sha256.h \
+  c23/glue/zcl_c23_hash_log.c \
+  c23/glue/zcl_c23_hash_names.h \
+  c23/glue/zcl_c23_compat.h
+ZCL_C23_HASH_CPPFLAGS = \
+  -iquote $(srcdir)/c23/glue \
+  -iquote $(srcdir)/c23/vendor/core/modules/crypto/include \
+  -iquote $(srcdir)/c23/vendor/platform/modules/util/include \
+  -iquote $(srcdir)/c23/vendor/platform/modules/base/include
+# -O2 first so a user CFLAGS (which Automake appends) can still override it.
+ZCL_C23_HASH_CFLAGS = -O2 -std=gnu17 -include $(srcdir)/c23/glue/zcl_c23_compat.h \
+  -fno-strict-aliasing -fvisibility=hidden $(SAN_CXXFLAGS) $(HARDENED_CXXFLAGS)
+
+libzcl_c23_hash_a_SOURCES = $(ZCL_C23_HASH_SOURCES)
+libzcl_c23_hash_a_CPPFLAGS = $(ZCL_C23_HASH_CPPFLAGS)
+libzcl_c23_hash_a_CFLAGS = $(ZCL_C23_HASH_CFLAGS) $(PIE_FLAGS)
+
+check-c23-vendor:
+	sh $(srcdir)/c23/tools/check-vendor.sh
+
 # common: shared between zclassicd and non-server tools
 libbitcoin_common_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES)
 libbitcoin_common_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
@@ -578,7 +613,12 @@ if GLIBC_BACK_COMPAT
 endif
 
 libzcashconsensus_la_LDFLAGS = $(AM_LDFLAGS) -no-undefined $(RELDFLAGS)
-libzcashconsensus_la_LIBADD = $(LIBSECP256K1)
+# libzcashconsensus compiles crypto/sha256.cpp itself, so it needs the C backend too.
+noinst_LTLIBRARIES = libzcl_c23_hash_pic.la
+libzcl_c23_hash_pic_la_SOURCES = $(ZCL_C23_HASH_SOURCES)
+libzcl_c23_hash_pic_la_CPPFLAGS = $(ZCL_C23_HASH_CPPFLAGS)
+libzcl_c23_hash_pic_la_CFLAGS = $(ZCL_C23_HASH_CFLAGS)
+libzcashconsensus_la_LIBADD = $(LIBSECP256K1) libzcl_c23_hash_pic.la
 libzcashconsensus_la_CPPFLAGS = $(AM_CPPFLAGS) -I$(builddir)/obj -I$(srcdir)/secp256k1/include -DBUILD_BITCOIN_INTERNAL
 libzcashconsensus_la_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 

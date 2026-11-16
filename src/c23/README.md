@@ -1,6 +1,7 @@
 # src/c23: the C23 core that replaces librustzcash
 
-Status: units U1 (vendor) and U2 (glue) only. Nothing here is wired into the build yet
+Status: units U1 (vendor) and U2 (glue), plus the SHA-256 backend of `CSHA256` (unit p4-hash,
+wired: `libzcl_c23_hash.a`, see `glue/WIRING.md` "Hash acceleration"). Nothing else here is wired into the build yet
 (`glue/WIRING.md` lists what the build-switch unit must add).
 
 ```

@@ -1,5 +1,6 @@
 #include "gmock/gmock.h"
 #include "crypto/common.h"
+#include "crypto/sha256.h"
 #include "key.h"
 #include "pubkey.h"
 #include "zcash/JoinSplit.hpp"
@@ -20,6 +21,12 @@ ECCryptoClosure instance_of_eccryptoclosure;
 ZCJoinSplit* params;
 
 int main(int argc, char **argv) {
+  // ZCL_SHA256_BACKEND=portable|hardware runs the whole suite on a forced
+  // SHA-256 backend (speed only; the output is identical by construction and
+  // by test_sha256_differential.cpp).
+  const char* sha256_backend = getenv("ZCL_SHA256_BACKEND");
+  const std::string sha256_name = SHA256SelectBackendForTesting(sha256_backend ? sha256_backend : "auto");
+  fprintf(stderr, "SHA256 implementation: %s\n", sha256_name.c_str());
   assert(init_and_check_sodium() != -1);
   ECC_Start();
 

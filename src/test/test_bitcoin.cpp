@@ -7,6 +7,7 @@
 #include "test_bitcoin.h"
 
 #include "crypto/common.h"
+#include "crypto/sha256.h"
 
 #include "key.h"
 #include "main.h"
@@ -72,6 +73,11 @@ JoinSplitTestingSetup::~JoinSplitTestingSetup()
 
 BasicTestingSetup::BasicTestingSetup()
 {
+    // ZCL_SHA256_BACKEND=portable|hardware runs the suite on a forced SHA-256
+    // backend; unset selects automatically, as the daemon does.
+    if (const char* backend = getenv("ZCL_SHA256_BACKEND")) {
+        SHA256SelectBackendForTesting(backend);
+    }
     assert(init_and_check_sodium() != -1);
     ECC_Start();
     SetupEnvironment();

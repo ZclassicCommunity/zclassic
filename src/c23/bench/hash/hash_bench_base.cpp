@@ -5,6 +5,7 @@
 #include "crypto/ripemd160.h"
 #include "hash.h"
 #include <sodium.h>
+#include <stdlib.h>
 #include <string.h>
 #include <vector>
 
@@ -17,6 +18,16 @@ int main()
     printf("libsodium %s  avx2=%d sse41=%d ssse3=%d avx512f=%d\n", sodium_version_string(),
            sodium_runtime_has_avx2(), sodium_runtime_has_sse41(), sodium_runtime_has_ssse3(),
            sodium_runtime_has_avx512f());
+    // Trees with the Z23 SHA-256 backend expose the dispatcher; ZCL_SHA256_BACKEND
+    // (portable|hardware) forces a backend so each one can be timed.
+#if defined(__has_include) && __has_include("c23/glue/zcl_c23_sha256.h")
+    {
+        const char* b = getenv("ZCL_SHA256_BACKEND");
+        printf("sha256 backend: %s\n", SHA256SelectBackendForTesting(b ? b : "auto").c_str());
+    }
+#else
+    printf("sha256 backend: zclassicd portable C++ (no dispatch)\n");
+#endif
     const size_t BIG = 1 << 20;
     std::vector<unsigned char> raw(BIG + 64);
     for (size_t i = 0; i < raw.size(); i++) raw[i] = (unsigned char)(i * 131 + 7);
