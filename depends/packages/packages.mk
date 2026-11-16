@@ -39,3 +39,8 @@ packages := boost openssl libevent zeromq $(zcash_packages) googletest
 native_packages := native_ccache
 
 wallet_packages=bdb
+
+# Embedded Tor (opt in): make -C depends WITH_EMBEDDED_TOR=1 ...
+ifneq ($(WITH_EMBEDDED_TOR),)
+packages += zlib tor
+endif
