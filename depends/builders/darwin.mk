@@ -5,6 +5,12 @@ build_darwin_RANLIB := $(shell xcrun -f ranlib)
 build_darwin_STRIP := $(shell xcrun -f strip)
 build_darwin_OTOOL := $(shell xcrun -f otool)
 build_darwin_NM := $(shell xcrun -f nm)
+build_darwin_SDK := $(shell xcrun --show-sdk-path)
+# Native build tools need the selected SDK too. Invoking clang by its resolved
+# path can otherwise fail to find libSystem with newer Command Line Tools.
+build_darwin_CFLAGS += -isysroot"$(build_darwin_SDK)"
+build_darwin_CXXFLAGS += -isysroot"$(build_darwin_SDK)"
+build_darwin_LDFLAGS += -Wl,-syslibroot,"$(build_darwin_SDK)"
 build_darwin_INSTALL_NAME_TOOL:=$(shell xcrun -f install_name_tool)
 build_darwin_SHA256SUM = shasum -a 256
 build_darwin_DOWNLOAD = curl --location --fail --connect-timeout $(DOWNLOAD_CONNECT_TIMEOUT) --retry $(DOWNLOAD_RETRIES) -o
