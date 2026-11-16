@@ -1970,6 +1970,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 #ifndef WIN32
     CreatePidFile(GetPidFile(), getpid());
 #endif
+    // Never open a mixed database pair after an interrupted GUI repair.
+    const auto repairJournal = GetDataDir() / "chain-repair-pending.json";
+    if (boost::filesystem::exists(repairJournal) || boost::filesystem::is_symlink(repairJournal))
+        return InitError(_("An interrupted blockchain repair needs recovery. Open the ZClassic wallet to restore the previous chain before starting the node. Do not delete the repair journal or blockchain backups."));
     // if (GetBoolArg("-shrinkdebugfile", !fDebug))
     //     ShrinkDebugFile();
 

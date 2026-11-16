@@ -52,8 +52,13 @@ Relative paths are refused when the daemon's working directory is unknown.
 Wallet backup and blockchain moves now hold the daemon-compatible native data
 directory lock. A node using custom ports still blocks repair, and another node
 cannot open the databases during those moves. The lock file is never deleted.
-This is preparation for safe existing-wallet checkpoint migration; it does not
-yet provide the interruption recovery needed for that transition.
+Blockchain moves now record a recovery journal first. After an interrupted
+process, the GUI restores the previous chain under the data-directory lock;
+the daemon refuses to open databases while recovery is pending. Conflicting
+files and malformed journals stop recovery without deleting either copy.
+Abrupt-exit tests cover before, between and after both directory moves.
+Power-loss durability and checkpoint metadata migration still need qualification
+before this can be presented as an existing-wallet fast-sync transition.
 
 Isolated Windows and Linux tests have imported and verified the full state at
 that checkpoint and continued ordinary block validation above it. This does

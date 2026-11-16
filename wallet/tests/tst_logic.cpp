@@ -245,6 +245,27 @@ private slots:
         const QByteArray output = node.readAllStandardError() + node.readAllStandardOutput();
         QVERIFY2(output.contains("Cannot obtain a lock on data directory"), output.constData());
     }
+    void chainBackup_backendRejectsPendingJournal() {
+        const QString daemon = qEnvironmentVariable("ZCL_TEST_REPAIR_DAEMON");
+        if (daemon.isEmpty()) QSKIP("Set ZCL_TEST_REPAIR_DAEMON to the updated backend");
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        QDir root(temporary.path());
+        QVERIFY(root.mkdir("regtest"));
+        QDir network(root.filePath("regtest"));
+        { QFile marker(ChainBackup::journalPath(network));
+          QVERIFY(marker.open(QIODevice::WriteOnly)); QCOMPARE(marker.write("incomplete"), qint64(10)); }
+        QProcess node;
+        node.start(daemon, {"-datadir=" + temporary.path(), "-regtest", "-disablewallet",
+            "-listen=0", "-connect=0", "-dnsseed=0", "-bootstrap=0"});
+        QVERIFY(node.waitForFinished(15000));
+        QVERIFY(node.exitCode() != 0);
+        const QByteArray output = node.readAllStandardError() + node.readAllStandardOutput();
+        QVERIFY2(output.contains("interrupted blockchain repair needs recovery"), output.constData());
+        QVERIFY(!QFileInfo::exists(network.filePath("blocks")));
+        QVERIFY(!QFileInfo::exists(network.filePath("chainstate")));
+        QVERIFY(QFileInfo::exists(ChainBackup::journalPath(network)));
+    }
     void repairConfig_matchesDaemonSelection() {
         const auto parsed = parseRepairConfig("# comment\nnotestnet=0 # enable\ntestnet=0\n"
             "wallet=first.dat # keep this\nwallet=second.dat\nWallet=wrong.dat\n"
@@ -343,6 +364,99 @@ private slots:
         QVERIFY(result.path.isEmpty());
         QVERIFY(f.open(QIODevice::ReadOnly));
         QCOMPARE(f.readAll(), QByteArray("keep"));
+    }
+    void chainBackup_crashChild() {
+        const QString directory = qEnvironmentVariable("ZCL_TEST_CHAIN_CRASH_DIR");
+        if (directory.isEmpty()) QSKIP("Abrupt-exit fixture only");
+        const int stop = qEnvironmentVariableIntValue("ZCL_TEST_CHAIN_CRASH_AFTER");
+        RepairLock lock(directory);
+        QVERIFY(lock.acquired());
+        int moves = 0;
+        ChainBackup::setAside(QDir(directory), [&](const QString& from, const QString& to) {
+            if (moves == stop) std::_Exit(73);
+            if (!QDir().rename(from, to)) return false;
+            if (++moves == stop) std::_Exit(73);
+            return true;
+        });
+        QFAIL("Crash fixture did not reach requested move boundary");
+    }
+    void chainBackup_recoversAbruptExit_data() {
+        QTest::addColumn<int>("moves");
+        QTest::newRow("before-first-move") << 0;
+        QTest::newRow("between-moves") << 1;
+        QTest::newRow("after-both-moves") << 2;
+    }
+    void chainBackup_recoversAbruptExit() {
+        QFETCH(int, moves);
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        QDir data(temporary.path());
+        for (const QString& name : {QString("blocks"), QString("chainstate")}) {
+            QVERIFY(data.mkdir(name));
+            QFile file(data.filePath(name + "/payload"));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            QCOMPARE(file.write(name.toUtf8()), qint64(name.size()));
+        }
+        { QFile file(data.filePath(".lock")); QVERIFY(file.open(QIODevice::WriteOnly)); }
+        { QFile file(data.filePath("wallet.dat")); QVERIFY(file.open(QIODevice::WriteOnly)); QCOMPARE(file.write("keep-wallet"), qint64(11)); }
+        QProcess child;
+        auto environment = QProcessEnvironment::systemEnvironment();
+        environment.insert("ZCL_TEST_CHAIN_CRASH_DIR", data.path());
+        environment.insert("ZCL_TEST_CHAIN_CRASH_AFTER", QString::number(moves));
+        child.setProcessEnvironment(environment);
+        child.start(QCoreApplication::applicationFilePath(), {"chainBackup_crashChild"});
+        QVERIFY(child.waitForFinished(15000));
+        QCOMPARE(child.exitCode(), 73);
+        QVERIFY(QFileInfo::exists(ChainBackup::journalPath(data)));
+        RepairLock lock(data.path());
+        QVERIFY(lock.acquired());
+        const auto recovery = ChainBackup::recover(data);
+        QVERIFY2(recovery.success, qPrintable(recovery.error));
+        QVERIFY(!QFileInfo::exists(ChainBackup::journalPath(data)));
+        for (const QString& name : {QString("blocks"), QString("chainstate")}) {
+            QFile file(data.filePath(name + "/payload"));
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            QCOMPARE(file.readAll(), name.toUtf8());
+        }
+        QFile wallet(data.filePath("wallet.dat"));
+        QVERIFY(wallet.open(QIODevice::ReadOnly));
+        QCOMPARE(wallet.readAll(), QByteArray("keep-wallet"));
+        QVERIFY(ChainBackup::recover(data).success); // Retry is harmless.
+    }
+    void chainBackup_rejectsInvalidJournal() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        const QDir data(temporary.path());
+        for (const QByteArray& contents : {QByteArray("{"), QByteArray("{\"version\":1,\"backup\":\"../outside\",\"entries\":[\"wallet.dat\"]}")}) {
+            QFile marker(ChainBackup::journalPath(data));
+            QVERIFY(marker.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            QCOMPARE(marker.write(contents), qint64(contents.size()));
+            marker.close();
+            QVERIFY(!ChainBackup::recover(data).success);
+            QVERIFY(marker.open(QIODevice::ReadOnly));
+            QCOMPARE(marker.readAll(), contents);
+        }
+    }
+    void chainBackup_rejectsOmittedJournalEntry() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        QDir data(temporary.path());
+        QVERIFY(data.mkdir("chain-set-aside-fixture"));
+        QVERIFY(data.mkpath("chain-set-aside-fixture/blocks"));
+        QVERIFY(data.mkdir("chainstate"));
+        for (const QByteArray& entries : {QByteArray("[]"), QByteArray("[\"chainstate\"]")}) {
+            QFile marker(ChainBackup::journalPath(data));
+            QVERIFY(marker.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            const QByteArray contents = "{\"version\":1,\"backup\":\"chain-set-aside-fixture\",\"entries\":" + entries + "}";
+            QCOMPARE(marker.write(contents), qint64(contents.size()));
+            marker.close();
+            QVERIFY(!ChainBackup::recover(data).success);
+            QVERIFY(!QFileInfo::exists(data.filePath("blocks")));
+            QVERIFY(QFileInfo::exists(data.filePath("chainstate")));
+            QVERIFY(QFileInfo::exists(data.filePath("chain-set-aside-fixture/blocks")));
+            QVERIFY(marker.open(QIODevice::ReadOnly));
+            QCOMPARE(marker.readAll(), contents);
+        }
     }
     void releaseVersion_ordering() {
         QVERIFY(walletReleaseOrder("2.1.2-beta7") > walletReleaseOrder("2.1.2-beta6"));

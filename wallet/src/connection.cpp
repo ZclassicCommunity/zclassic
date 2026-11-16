@@ -835,6 +835,24 @@ bool ConnectionLoader::startEmbeddedZClassicd(const QStringList& extraArgs) {
     {
         auto detected = autoDetectZClassicConf();
         if (detected) {
+            rememberRepairLocation(detected);
+            if (ezRepairPathError.isEmpty() && !ezDataDir.isEmpty()) {
+                const QDir data(ezDataDir);
+                const QFileInfo marker(ChainBackup::journalPath(data));
+                if (marker.exists() || marker.isSymLink()) {
+                    RepairLock repairLock(ezDataDir);
+                    if (!repairLock.acquired()) {
+                        this->showError(repairLock.error());
+                        return false;
+                    }
+                    const auto recovery = ChainBackup::recover(data);
+                    if (!recovery.success) {
+                        this->showError(QObject::tr("The interrupted blockchain repair could not be recovered safely. No backups were deleted.\n\n%1").arg(recovery.error));
+                        return false;
+                    }
+                    main->logger->write("Recovered interrupted blockchain repair before node startup");
+                }
+            }
             QString cookiePath = cookieFilePathForConf(detected);
             if (!cookiePath.isEmpty()) {
                 // Logs only the PATH, never cookie contents (matches daemon log).
