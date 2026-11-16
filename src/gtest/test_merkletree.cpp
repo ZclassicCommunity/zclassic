@@ -17,9 +17,12 @@
 #include <iostream>
 
 #include <stdexcept>
+#include <thread>
+#include <chrono>
 
 #include "utilstrencodings.h"
 #include "version.h"
+#include "tinyformat.h"
 #include "serialize.h"
 #include "streams.h"
 
@@ -37,6 +40,58 @@
 
 using namespace std;
 using namespace libsnark;
+
+template<typename Tree>
+void CheckCachedRoots() {
+    Tree tree;
+    EXPECT_EQ(tree.root(), Tree::empty_root());
+    for (unsigned i = 1; i <= 64; ++i) {
+        // The witness root uses the original, uncached C++ calculation.
+        tree.append(uint256S(strprintf("%064x", i)));
+        const auto expected = tree.witness().root();
+        EXPECT_EQ(tree.root(), expected);
+        EXPECT_EQ(tree.root(), expected);
+        Tree copy = tree;
+        EXPECT_EQ(copy.root(), expected);
+        CDataStream bytes(SER_NETWORK, PROTOCOL_VERSION);
+        bytes << tree;
+        Tree restored;
+        // Warm a different frontier before restoring into this object.
+        restored.root();
+        bytes >> restored;
+        EXPECT_EQ(restored.root(), expected);
+        // Exercise another tree at the same size with different contents.
+        Tree other;
+        other.append(uint256S("ff"));
+        EXPECT_EQ(other.root(), other.witness().root());
+        EXPECT_EQ(tree.root(), expected);
+        // Concurrent const readers must have independent memo state.
+        std::thread reader([&]() { EXPECT_EQ(tree.root(), expected); });
+        EXPECT_EQ(tree.root(), expected);
+        reader.join();
+    }
+}
+
+TEST(merkletree, CachedRootParitySprout) { CheckCachedRoots<SproutMerkleTree>(); }
+TEST(merkletree, CachedRootParitySapling) { CheckCachedRoots<SaplingMerkleTree>(); }
+
+TEST(merkletree, CachedRootTimingSapling) {
+    SaplingMerkleTree tree;
+    tree.append(uint256S("01"));
+    const auto witness = tree.witness();
+    const auto expected = witness.root();
+    const auto start = std::chrono::steady_clock::now();
+    for (unsigned i = 0; i < 128; ++i) ASSERT_EQ(witness.root(), expected);
+    const auto middle = std::chrono::steady_clock::now();
+    for (unsigned i = 0; i < 128; ++i) ASSERT_EQ(tree.root(), expected);
+    const auto end = std::chrono::steady_clock::now();
+    // Report measurements, not a timing assertion dependent on host load.
+    std::cout << "Sapling root 128 calls: original_us="
+              << std::chrono::duration_cast<std::chrono::microseconds>(middle - start).count()
+              << " cached_us="
+              << std::chrono::duration_cast<std::chrono::microseconds>(end - middle).count()
+              << std::endl;
+}
 
 template<>
 void expect_deser_same(const SproutTestingWitness& expected)
