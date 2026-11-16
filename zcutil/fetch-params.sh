@@ -13,7 +13,7 @@ SPROUT_VKEY_NAME='sprout-verifying.key'
 SAPLING_SPEND_NAME='sapling-spend.params'
 SAPLING_OUTPUT_NAME='sapling-output.params'
 SAPLING_SPROUT_GROTH16_NAME='sprout-groth16.params'
-SPROUT_URL="https://z.cash/downloads"
+SPROUT_URL="https://download.z.cash/downloads"
 SPROUT_IPFS="/ipfs/QmZKKx7Xup7LiAtFRhYsE1M7waXcv9ir9eCECyXAFGxhEo"
 
 SHA256CMD="$(command -v sha256sum || echo shasum)"
@@ -79,6 +79,7 @@ Retrieving (curl): $SPROUT_URL/$filename
 EOF
 
     curl \
+        --fail --retry 3 \
         --output "$dlname" \
         -# -L -C - \
         "$SPROUT_URL/$filename"
