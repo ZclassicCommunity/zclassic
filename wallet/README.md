@@ -9,6 +9,8 @@ A private, single-file ZClassic wallet — with a full ZClassic node built right
 
 ## Download & run
 
+**Beta10 candidate:** [startup feedback, readable layouts and honest sync progress](../doc/release-notes-beta10.md). Published downloads remain beta9 until release validation completes.
+
 **Current desktop prerelease: v2.1.2-beta9**:
 **https://github.com/ZclassicCommunity/zclassic/releases/tag/v2.1.2-beta9**
 

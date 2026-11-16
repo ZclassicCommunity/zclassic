@@ -74,9 +74,9 @@ zclwallet.app/Contents/MacOS/zclassicd --version >> "$root/artifacts/release/mac
 mkdir dmg-root
 mv zclwallet.app dmg-root/ZclWallet.app
 ln -s /Applications dmg-root/Applications
-output="$root/artifacts/release/zclwallet-v2.1.2-beta9-macos-arm64.dmg"
+output="$root/artifacts/release/zclwallet-v2.1.2-beta10-macos-arm64.dmg"
 [ ! -e "$output" ]
-hdiutil create -volname ZClassic-beta9 -srcfolder dmg-root -format UDZO "$output"
+hdiutil create -volname ZClassic-beta10 -srcfolder dmg-root -format UDZO "$output"
 hdiutil verify "$output"
 cd "$root/artifacts/release"
-shasum -a 256 zclwallet-v2.1.2-beta9-macos-arm64.dmg > macos-SHA256SUMS.txt
+shasum -a 256 zclwallet-v2.1.2-beta10-macos-arm64.dmg > macos-SHA256SUMS.txt
