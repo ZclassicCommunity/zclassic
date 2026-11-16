@@ -1,7 +1,7 @@
-# ZClassic 2.1.2-beta11 candidate
+# ZClassic 2.1.2-beta11
 
-This release is being built and tested. Published beta10 downloads remain the
-current wallet release until backend validation and platform packaging finish.
+Beta11 updates both the desktop wallet and command-line node. Download the
+[release binaries and checksums](https://github.com/ZclassicCommunity/zclassic/releases/tag/v2.1.2-beta11).
 
 Unlike beta7–beta10, beta11 rebuilds **zclassicd itself**, as well as the wallet.
 The new C23-compatible root-calculation module is adapted from Z23. It reuses
@@ -29,17 +29,17 @@ reported rather than interpreted using guessed settings.
 
 Native macOS build preparation fixes invalid Make variable assignments, uses
 the selected Xcode SDK for native dependency tools, and identifies Apple Silicon
-as 64-bit ARM. These build fixes do not yet qualify a macOS daemon release;
-native dependency, linking and cryptographic validation remain release gates.
+as 64-bit ARM. Native dependency, linking, cryptographic and package validation passed on
+Apple Silicon macOS 26. The audited deployment minimum is macOS 15; this is
+not a claim of native runtime testing on macOS 15.
 Boost now selects the configured compiler and retains its SDK and deployment
 flags; the daemon's rebuilt Boost archives report macOS 15 rather than inheriting
 macOS 26 from the build host. A checksum-pinned static Qt 5.15.19 toolchain uses
 Apple's Secure Transport and avoids optional Homebrew runtime libraries.
 Mac packaging checks static archive requirements as well as final executables,
 rejects a minimum OS above 15, verifies the daemon against its audited build,
-and tests certificate-verified HTTPS access before creating the DMG. Complete
-package qualification is still required; successful library builds alone do not
-prove that the finished application works.
+and tests certificate-verified HTTPS access before creating the DMG. Final native package qualification passed, including a mounted-DMG permission
+and signature check and extracted node-archive checksums.
 The Mac package also normalizes public application file permissions and verifies
 them after signing, avoiding owner-only bundles inherited from a private build
 account's umask.
@@ -145,12 +145,12 @@ Isolated Windows and Linux tests have imported and verified the full state at
 that checkpoint and continued ordinary block validation above it. This does
 not by itself prove the complete public-endpoint GUI migration path.
 The consolidated backend passed full debug CI and isolated Windows packaging,
-extraction, startup and shutdown checks. Final release qualification is ongoing.
+extraction, startup and shutdown checks. Final artifact results are recorded below.
 No wallet data should be removed to enable fast sync.
 
 A wallet-disabled Windows public-network run downloaded and verified the compiled
 checkpoint, validated the bundled post-anchor blocks, and caught up to live height
-3,321,378 with the imported-tip hold released. The final backend candidate then
+3,321,378 with the imported-tip hold released. The earlier RC11 backend candidate then
 restarted that isolated chain, connected to both Z23 peers and shut down cleanly.
 Download/bootstrap took about 27 minutes under the shared snapshot-server bandwidth
 cap; startup including bundled replay took about 61 minutes before live-peer
@@ -166,6 +166,31 @@ retains the exact one-refresh assertion. Twenty focused repetitions passed on
 both Windows and macOS; the full native Mac widget suite passed with its existing
 deferred warm-latency case. Production debounce timing is unchanged.
 
+## Final-source qualification
+
+Source `b00a3442f6a429a9cc3c913e53ef69f76e2fa100` passed full backend CI,
+Linux/macOS wallet platform tests, and Linux/Windows daemon release builds.
+Native Mac final-source tests passed 149 logic cases, 58 widget cases and both
+parameter-hash cases. Two child-only logic cases and one existing deferred
+widget-latency case were skipped. Native backend cryptographic validation passed
+63 Boost cases with 1,467,179 assertions and 63 gtests.
+
+The final Windows wallet and standalone node ZIP passed system-DLL import checks,
+production embedded extraction/hash/version/cache checks, all six real-backend
+wallet protection checks, and default-endpoint download/cancellation/restart and
+post-worker initialization-failure checks. The ZIP was extracted and each file
+matched its manifest. The Linux node archive passed architecture, runtime-library
+compatibility and extracted-file checks. Downloaded Mac and Linux archives were
+rehashed after transfer. The full public snapshot run above used earlier
+candidates; final artifact startup tests do not repeat that entire download.
+
+The final Linux GUI package passed GLIBC compatibility, production extraction,
+backend hash/version/cache and certificate-verified HTTPS checks. All six final
+artifacts were hashed locally and are covered by one checksum manifest.
+PR #156 was merged as `6230189cf6a31a98bdbbc1462265ae42d61743c1`.
+Its source tree matches the qualified binary source exactly. The release includes
+all six platform files, one checksum manifest and build provenance.
+
 ## Release gates
 
 - Full daemon build, Sprout/Sapling root vectors and differential root tests.
@@ -179,8 +204,8 @@ deferred warm-latency case. Production debounce timing is unchanged.
   macOS bundle. The new Linux/Windows daemon workflow does not produce that build.
 
 Timing benchmarks are included in the backend tests. Full-chain speedup has not
-yet been measured. This candidate must not be announced as a completed release.
+yet been measured; no universal speedup is claimed.
 
-Windows candidates are not Authenticode-signed, so Windows SmartScreen may still
+Windows binaries are not Authenticode-signed, so Windows SmartScreen may still
 show a reputation warning. Eliminating missing runtime DLLs does not remove that
-warning. Mac candidates use ad-hoc signatures and are not Apple-notarized.
+warning. Mac binaries use ad-hoc signatures and are not Apple-notarized.
