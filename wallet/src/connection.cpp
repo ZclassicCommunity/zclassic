@@ -2844,7 +2844,11 @@ std::shared_ptr<ConnectionConfig> ConnectionLoader::autoDetectZClassicConf() {
     }
 
     QString configurationText = QString::fromUtf8(file.readAll());
-    QTextStream in(&configurationText);
+    const auto repairConfig = parseRepairConfig(configurationText);
+    if (!repairConfig.error.isEmpty()) {
+        confReadError = repairConfig.error;
+        return nullptr;
+    }
 
     auto zclassicconf = new ConnectionConfig();
     zclassicconf->host     = "127.0.0.1";
@@ -2855,49 +2859,22 @@ std::shared_ptr<ConnectionConfig> ConnectionLoader::autoDetectZClassicConf() {
 
     Settings::getInstance()->setUsingZClassicConf(confLocation);
 
-    while (!in.atEnd()) {
-        QString line = in.readLine();
-        auto s = line.indexOf("=");
-        QString name  = line.left(s).trimmed().toLower();
-        QString value = line.right(line.length() - s - 1).trimmed();
-
-        if (name == "rpcuser") {
-            zclassicconf->rpcuser = value;
-        }
-        if (name == "rpcpassword") {
-            zclassicconf->rpcpassword = value;
-        }
-        if (name == "rpcport") {
-            zclassicconf->port = value;
-        }
-        if (name == "daemon" && value == "1") {
-            zclassicconf->zclassicDaemon = true;
-        }
-        if (name == "proxy") {
-            zclassicconf->proxy = value;
-        }
-        if (name == "datadir") {
-            // COOKIE-AUTH: a custom datadir= means the daemon's .cookie lives under
-            // THAT dir, not the conf's directory. Capture it so cookieFilePathForConf
-            // resolves the cookie (and the forced -rpccookiefile) correctly.
-            zclassicconf->dataDirOverride = value;
-        }
-        if (name == "testnet" &&
-            value == "1"  &&
-            zclassicconf->port.isEmpty()) {
-                zclassicconf->port = "18023";
-        }
-    }
-
-    const auto repairConfig = parseRepairConfig(configurationText);
+    // Match the daemon's first-value-wins, case-sensitive config semantics.
+    // The repair path and RPC connection must select the same node settings.
+    zclassicconf->rpcuser = repairConfig.values.value("rpcuser");
+    zclassicconf->rpcpassword = repairConfig.values.value("rpcpassword");
+    zclassicconf->port = repairConfig.values.value("rpcport");
+    zclassicconf->proxy = repairConfig.values.value("proxy");
+    zclassicconf->zclassicDaemon = repairConfigBool(repairConfig.values.value("daemon", "0"));
     zclassicconf->repairConfigError = repairConfig.error;
     zclassicconf->dataDirOverride = repairConfig.values.value("datadir");
     zclassicconf->testnet = repairConfigBool(repairConfig.values.value("testnet", "0"));
     zclassicconf->regtest = repairConfigBool(repairConfig.values.value("regtest", "0"));
     zclassicconf->walletFile = repairConfig.values.value("wallet", "wallet.dat");
 
-    // If rpcport is not in the file, and it was not set by the testnet=1 flag, then go to default
-    if (zclassicconf->port.isEmpty()) zclassicconf->port = "8023";
+    // Both non-mainnet networks use the daemon's 18023 default RPC port.
+    if (zclassicconf->port.isEmpty())
+        zclassicconf->port = (zclassicconf->testnet || zclassicconf->regtest) ? "18023" : "8023";
     file.close();
 
     // COOKIE-AUTH read (touch-point b). When the conf carries NO rpcpassword, the

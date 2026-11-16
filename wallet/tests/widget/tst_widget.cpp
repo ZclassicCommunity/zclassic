@@ -227,6 +227,50 @@ private slots:
         QCOMPARE(wallet.readAll(), QByteArray("default-wallet-must-not-be-used"));
     }
 
+    void detectedConfigurationMatchesDaemon() {
+        std::unique_ptr<MainWindow> w(makeWindow());
+        ConnectionLoader loader(w.get(), w->getRPC());
+        const QString path = loader.zclassicConfWritableLocation();
+        QVERIFY(path.contains("qttest"));
+        QVERIFY(!QFileInfo::exists(path));
+        QString error;
+        const QByteArray contents(
+            "rpcuser=first-user # ignored comment\n"
+            "rpcuser=second-user\nrpcpassword=fixture-password # comment\n"
+            "rpcpassword=wrong-password\nRPCPORT=9999\n"
+            "rpcport=18992 # local fixture\nrpcport=18993\n"
+            "testnet=1 # enabled\nnotestnet=1\n"
+            "daemon=1 # enabled\nproxy=127.0.0.1:19050 # proxy\n"
+            "[ignored]\nrpcport=19999\nrpcpassword=wrong-section\n");
+        QVERIFY2(createPrivateConfig(path, contents, error), qPrintable(error));
+        auto config = loader.autoDetectZClassicConf();
+        QVERIFY(config);
+        QCOMPARE(config->rpcuser, QString("first-user"));
+        QCOMPARE(config->rpcpassword, QString("fixture-password"));
+        QCOMPARE(config->port, QString("18992"));
+        QCOMPARE(config->proxy, QString("127.0.0.1:19050"));
+        QVERIFY(config->testnet);
+        QVERIFY(config->zclassicDaemon);
+        QVERIFY(QFile::remove(path));
+
+        for (const QByteArray network : {QByteArray("testnet=1 # comment\n"),
+                                        QByteArray("regtest=1\n")}) {
+            QVERIFY2(createPrivateConfig(path, network + "rpcpassword=fixture-password\n", error), qPrintable(error));
+            config = loader.autoDetectZClassicConf();
+            QVERIFY(config);
+            QCOMPARE(config->port, QString("18023"));
+            QVERIFY(QFile::remove(path));
+        }
+        QVERIFY2(createPrivateConfig(path, "invalid line\n", error), qPrintable(error));
+        QVERIFY(!loader.autoDetectZClassicConf());
+        QVERIFY(!loader.confReadError.isEmpty());
+        QFile preserved(path);
+        QVERIFY(preserved.open(QIODevice::ReadOnly));
+        QCOMPARE(preserved.readAll(), QByteArray("invalid line\n"));
+        preserved.close();
+        QVERIFY(QFile::remove(path));
+    }
+
     void configurationCreationPreservesExisting() {
         QTemporaryDir temp;
         const QString path = temp.filePath("zclassic.conf");
