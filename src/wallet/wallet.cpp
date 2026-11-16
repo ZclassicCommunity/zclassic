@@ -1625,8 +1625,8 @@ bool CWallet::AddToWalletIfInvolvingMe(const CTransaction& tx, const CBlock* pbl
         if (fExisted && !fUpdate) return false;
         auto sproutNoteData = FindMySproutNotes(tx);
         auto saplingNoteDataAndAddressesToAdd = FindMySaplingNotes(tx);
-        auto saplingNoteData = saplingNoteDataAndAddressesToAdd.first;
-        auto addressesToAdd = saplingNoteDataAndAddressesToAdd.second;
+        auto& saplingNoteData = saplingNoteDataAndAddressesToAdd.first;
+        const auto& addressesToAdd = saplingNoteDataAndAddressesToAdd.second;
         for (const auto &addressToAdd : addressesToAdd) {
             if (!AddSaplingIncomingViewingKey(addressToAdd.second, addressToAdd.first)) {
                 return false;
@@ -1760,6 +1760,9 @@ boost::optional<uint256> CWallet::GetSproutNoteNullifier(const JSDescription &js
  */
 mapSproutNoteData_t CWallet::FindMySproutNotes(const CTransaction &tx) const
 {
+    // Transparent-only transactions cannot contain Sprout notes. Avoid taking
+    // the key-store lock and preparing scan state for the common empty case.
+    if (tx.vjoinsplit.empty()) return {};
     LOCK(cs_SpendingKeyStore);
     uint256 hash = tx.GetHash();
 
@@ -1844,6 +1847,10 @@ boost::optional<SaplingOutputMatch> CWallet::TrialDecryptSaplingOutput(
 
 std::pair<mapSaplingNoteData_t, SaplingIncomingViewingKeyMap> CWallet::FindMySaplingNotes(const CTransaction &tx) const
 {
+    // In particular, do not copy every viewing key for each transparent-only
+    // transaction during initial sync. Spend-only transactions have no new
+    // notes either; their nullifier/ownership processing remains in the caller.
+    if (tx.vShieldedOutput.empty()) return {};
     LOCK(cs_SpendingKeyStore);
     uint256 hash = tx.GetHash();
 
@@ -2738,7 +2745,9 @@ int CWallet::ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate)
         // After rescanning, persist Sapling note data that might have changed, e.g. nullifiers.
         // Do not flush the wallet here for performance reasons.
         CWalletDB walletdb(strWalletFile, "r+", false);
-        for (auto hash : myTxHashes) {
+        for (const auto& hash : myTxHashes) {
+            // Serialization currently mutates mapValue through a const-cast.
+            // Retain the defensive copy until that serializer is made pure.
             CWalletTx wtx = mapWallet[hash];
             if (!wtx.mapSaplingNoteData.empty()) {
                 if (!wtx.WriteToDisk(&walletdb)) {

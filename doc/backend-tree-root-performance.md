@@ -38,3 +38,22 @@ This is not yet a released backend. Full-node builds and root parity tests must
 pass before landing. A full-chain sync speedup has not yet been measured; the
 amount saved depends on how often unchanged trees are revisited. MMB snapshot
 activation is unrelated and remains unchanged.
+
+## Wallet scanning
+
+Transactions without Sapling outputs now return an empty discovery result before
+locking the key store or copying its incoming viewing keys. Transactions without
+Sprout JoinSplits similarly avoid unnecessary scan setup. Spend/nullifier and
+transparent ownership checks still run through their original caller paths.
+
+The apply path uses references to discovery results instead of copying their
+maps. Write ordering, serialization and the crash-recovery cursor are unchanged.
+The defensive transaction copy during rescan persistence is retained: the legacy
+serializer mutates its metadata map, so removing that copy requires a separate
+serializer correction with byte-parity and exception-safety tests.
+
+The existing parallel Sapling rescan implementation is retained; it is not a new
+feature of this change. Wallet tests, including scan parity, viewing-key discovery,
+reorg and witness coverage, are included in the native validation gate. The Rust
+cryptographic dependency is retained; avoiding unnecessary calls is separate from
+replacing a cryptographic implementation.

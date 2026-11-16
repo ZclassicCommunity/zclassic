@@ -564,6 +564,21 @@ TEST(WalletTests, GetSproutNoteNullifier) {
     EXPECT_EQ(nullifier, ret);
 }
 
+TEST(WalletTests, EmptyShieldedOutputsHaveNoNewNotes) {
+    TestWallet wallet;
+    auto sk = GetTestMasterSaplingSpendingKey();
+    ASSERT_TRUE(wallet.AddSaplingZKey(sk, sk.DefaultAddress()));
+    CMutableTransaction tx;
+    // A Sapling spend does not make this a note-receiving transaction.
+    tx.vShieldedSpend.resize(1);
+    const CTransaction spendOnly(tx);
+    const auto found = wallet.FindMySaplingNotes(spendOnly);
+    EXPECT_TRUE(found.first.empty());
+    EXPECT_TRUE(found.second.empty());
+    EXPECT_TRUE(wallet.FindMySproutNotes(spendOnly).empty());
+    EXPECT_TRUE(wallet.HaveSaplingSpendingKey(sk.expsk.full_viewing_key()));
+}
+
 TEST(WalletTests, FindMySaplingNotes) {
     auto consensusParams = RegtestActivateSapling();
 
