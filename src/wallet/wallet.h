@@ -835,6 +835,43 @@ protected:
      * pindex is the old tip being disconnected.
      */
     void DecrementNoteWitnesses(const CBlockIndex* pindex);
+    /**
+     * The witness half of ChainTip. When no wallet transaction carries
+     * Sprout or Sapling note data, a connected block only advances
+     * nWitnessCacheSize: there is nothing to copy, append, witness or
+     * re-height, so the commitment tree appends (which only feed witnesses)
+     * are skipped. The trees are the caller's copies.
+     */
+    void WitnessChainTip(const CBlockIndex* pindex,
+                         const CBlock* pblock,
+                         SproutMerkleTree& sproutTree,
+                         SaplingMerkleTree& saplingTree,
+                         bool added);
+
+    /**
+     * Index of wallet transactions that may carry note data.
+     *
+     * Invariant (requires cs_wallet): every mapWallet entry whose
+     * mapSproutNoteData or mapSaplingNoteData is non-empty has its txid in
+     * setNoteTxIndex. The set may be a superset; a txid with empty maps is
+     * harmless because the witness loops do nothing for empty maps.
+     *
+     * Maintained by AddToWallet (load and live paths, insert and merge)
+     * and EraseFromWallet. nNoteTxIndexWalletSize tracks mapWallet.size()
+     * through those same paths; if anything else inserts into or erases from
+     * mapWallet the sizes diverge and the index is rebuilt by a full walk
+     * before the next witness update (CollectNoteTxs).
+     */
+    std::set<uint256> setNoteTxIndex;
+    size_t nNoteTxIndexWalletSize = 0;
+    void NoteTxIndexAdd(const uint256& hash, const CWalletTx& wtx);
+    /**
+     * Fill out with the mapWallet entries that currently carry note data,
+     * in txid order (the same relative order as a full mapWallet walk).
+     * Requires cs_wallet. The pointers stay valid until mapWallet is next
+     * inserted into or erased from.
+     */
+    void CollectNoteTxs(std::vector<CWalletTx*>& out);
 
     template <typename WalletDB>
     void SetBestChainINTERNAL(WalletDB& walletdb, const CBlockLocator& loc) {
@@ -1004,6 +1041,8 @@ public:
         nTimeFirstKey = 0;
         fBroadcastTransactions = false;
         nWitnessCacheSize = 0;
+        setNoteTxIndex.clear();
+        nNoteTxIndexWalletSize = 0;
     }
 
     /**

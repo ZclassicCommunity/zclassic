@@ -563,12 +563,79 @@ void CWallet::ChainTip(const CBlockIndex *pindex,
                        SaplingMerkleTree saplingTree, 
                        bool added)
 {
+    WitnessChainTip(pindex, pblock, sproutTree, saplingTree, added);
+    UpdateSaplingNullifierNoteMapForBlock(pblock);
+}
+
+void CWallet::WitnessChainTip(const CBlockIndex* pindex,
+                              const CBlock* pblock,
+                              SproutMerkleTree& sproutTree,
+                              SaplingMerkleTree& saplingTree,
+                              bool added)
+{
+    LOCK(cs_wallet);
     if (added) {
+        std::vector<CWalletTx*> noteTxs;
+        CollectNoteTxs(noteTxs);
+        if (noteTxs.empty()) {
+            // No wallet transaction carries note data, so the full
+            // IncrementNoteWitnesses would only append to the caller's tree
+            // copies and advance the cache size. Every witness loop is empty
+            // and no output of this block is ours with note data (the
+            // block's own wallet txs were added by SyncTransaction before
+            // ChainTip, so they would be in the index).
+            if (nWitnessCacheSize < WITNESS_CACHE_SIZE) {
+                nWitnessCacheSize += 1;
+            }
+            return;
+        }
         IncrementNoteWitnesses(pindex, pblock, sproutTree, saplingTree);
     } else {
         DecrementNoteWitnesses(pindex);
     }
-    UpdateSaplingNullifierNoteMapForBlock(pblock);
+}
+
+void CWallet::NoteTxIndexAdd(const uint256& hash, const CWalletTx& wtx)
+{
+    if (!wtx.mapSproutNoteData.empty() || !wtx.mapSaplingNoteData.empty()) {
+        setNoteTxIndex.insert(hash);
+    }
+}
+
+void CWallet::CollectNoteTxs(std::vector<CWalletTx*>& out)
+{
+    AssertLockHeld(cs_wallet);
+    // Two passes at most: if the first finds the index out of step with
+    // mapWallet (an insert or erase that bypassed AddToWallet /
+    // EraseFromWallet), rebuild it from a full walk and collect again.
+    for (int pass = 0; pass < 2; pass++) {
+        out.clear();
+        bool fStale = (mapWallet.size() != nNoteTxIndexWalletSize);
+        if (!fStale) {
+            out.reserve(setNoteTxIndex.size());
+            for (const uint256& hash : setNoteTxIndex) {
+                auto mi = mapWallet.find(hash);
+                if (mi == mapWallet.end()) {
+                    fStale = true;
+                    break;
+                }
+                CWalletTx& wtx = mi->second;
+                if (!wtx.mapSproutNoteData.empty() || !wtx.mapSaplingNoteData.empty()) {
+                    out.push_back(&wtx);
+                }
+            }
+        }
+        if (!fStale) {
+            return;
+        }
+        LogPrint("wallet", "%s: rebuilding note index (%u entries, expected %u)\n",
+                 __func__, (unsigned)mapWallet.size(), (unsigned)nNoteTxIndexWalletSize);
+        setNoteTxIndex.clear();
+        for (std::pair<const uint256, CWalletTx>& wtxItem : mapWallet) {
+            NoteTxIndexAdd(wtxItem.first, wtxItem.second);
+        }
+        nNoteTxIndexWalletSize = mapWallet.size();
+    }
 }
 
 void CWallet::SetBestChain(const CBlockLocator& loc)
@@ -983,25 +1050,53 @@ void CopyPreviousWitnesses(NoteDataMap& noteDataMap, int indexHeight, int64_t nW
     }
 }
 
-template<typename NoteDataMap>
-void AppendNoteCommitment(NoteDataMap& noteDataMap, int indexHeight, int64_t nWitnessCacheSize, const uint256& note_commitment)
+/**
+ * Collect the notes a new commitment at this height is appended to
+ * (witnessHeight < indexHeight and a non-empty cache), in the same order a
+ * full walk visits them. This is the selection the former per-commitment
+ * AppendNoteCommitment walk made.
+ */
+template<typename NoteDataMap, typename NoteData>
+void CollectAppendTargets(NoteDataMap& noteDataMap, int indexHeight, std::vector<NoteData*>& out)
 {
     for (auto& item : noteDataMap) {
         auto* nd = &(item.second);
         if (nd->witnessHeight < indexHeight && nd->witnesses.size() > 0) {
-            // Check the validity of the cache
-            // See comment in CopyPreviousWitnesses about validity.
-            assert(nWitnessCacheSize >= nd->witnesses.size());
-            nd->witnesses.front().append(note_commitment);
+            out.push_back(nd);
         }
     }
 }
 
-template<typename OutPoint, typename NoteData, typename Witness>
-void WitnessNoteIfMine(std::map<OutPoint, NoteData>& noteDataMap, int indexHeight, int64_t nWitnessCacheSize, const OutPoint& key, const Witness& witness)
+/**
+ * AppendNoteCommitment over a pre-collected target list. Same assertion,
+ * same append, applied to exactly the notes the full walk would select.
+ */
+template<typename NoteData>
+void AppendNoteCommitmentToTargets(const std::vector<NoteData*>& targets, int64_t nWitnessCacheSize, const uint256& note_commitment)
 {
-    if (noteDataMap.count(key) && noteDataMap[key].witnessHeight < indexHeight) {
-        auto* nd = &(noteDataMap[key]);
+    for (NoteData* nd : targets) {
+        // Check the validity of the cache
+        // See comment in CopyPreviousWitnesses about validity.
+        assert(nWitnessCacheSize >= nd->witnesses.size());
+        nd->witnesses.front().append(note_commitment);
+    }
+}
+
+/**
+ * Returns the note that was witnessed (nullptr if the outpoint is not ours
+ * or is already witnessed at this height). *pfWasTarget is set to whether
+ * that note was already an append target before this call. The witness is
+ * taken from tree only when a note is witnessed (tree.witness() is a pure
+ * copy, so taking it lazily yields the same bytes).
+ */
+template<typename OutPoint, typename NoteData, typename Tree>
+NoteData* WitnessNoteIfMine(std::map<OutPoint, NoteData>& noteDataMap, int indexHeight, int64_t nWitnessCacheSize, const OutPoint& key, const Tree& tree, bool* pfWasTarget)
+{
+    auto mi = noteDataMap.find(key);
+    if (mi != noteDataMap.end() && mi->second.witnessHeight < indexHeight) {
+        auto* nd = &(mi->second);
+        const auto witness = tree.witness();
+        *pfWasTarget = (nd->witnesses.size() > 0);
         if (nd->witnesses.size() > 0) {
             // We think this can happen because we write out the
             // witness cache state after every block increment or
@@ -1024,7 +1119,9 @@ void WitnessNoteIfMine(std::map<OutPoint, NoteData>& noteDataMap, int indexHeigh
         nd->witnessHeight = indexHeight - 1;
         // Check the validity of the cache
         assert(nWitnessCacheSize >= nd->witnesses.size());
+        return nd;
     }
+    return nullptr;
 }
 
 
@@ -1048,9 +1145,15 @@ void CWallet::IncrementNoteWitnesses(const CBlockIndex* pindex,
                                      SaplingMerkleTree& saplingTree)
 {
     LOCK(cs_wallet);
-    for (std::pair<const uint256, CWalletTx>& wtxItem : mapWallet) {
-       ::CopyPreviousWitnesses(wtxItem.second.mapSproutNoteData, pindex->nHeight, nWitnessCacheSize);
-       ::CopyPreviousWitnesses(wtxItem.second.mapSaplingNoteData, pindex->nHeight, nWitnessCacheSize);
+    // Only wallet transactions with note data take part; for every other
+    // entry the per-note loops below are empty, so skipping them changes
+    // nothing. noteTxs is in txid order, like a mapWallet walk.
+    std::vector<CWalletTx*> noteTxs;
+    CollectNoteTxs(noteTxs);
+
+    for (CWalletTx* pwtx : noteTxs) {
+       ::CopyPreviousWitnesses(pwtx->mapSproutNoteData, pindex->nHeight, nWitnessCacheSize);
+       ::CopyPreviousWitnesses(pwtx->mapSaplingNoteData, pindex->nHeight, nWitnessCacheSize);
     }
 
     if (nWitnessCacheSize < WITNESS_CACHE_SIZE) {
@@ -1064,9 +1167,26 @@ void CWallet::IncrementNoteWitnesses(const CBlockIndex* pindex,
         pblock = &block;
     }
 
+    // The notes a full walk would append each new commitment to: those
+    // behind this height with a non-empty cache. The set only grows during
+    // the block, when one of our notes is first witnessed below.
+    std::vector<SproutNoteData*> sproutTargets;
+    std::vector<SaplingNoteData*> saplingTargets;
+    for (CWalletTx* pwtx : noteTxs) {
+        ::CollectAppendTargets(pwtx->mapSproutNoteData, pindex->nHeight, sproutTargets);
+        ::CollectAppendTargets(pwtx->mapSaplingNoteData, pindex->nHeight, saplingTargets);
+    }
+
     for (const CTransaction& tx : pblock->vtx) {
         auto hash = tx.GetHash();
-        bool txIsOurs = mapWallet.count(hash);
+        // Only a wallet tx with note data can have a note to witness.
+        CWalletTx* pwtxOurs = nullptr;
+        if (setNoteTxIndex.count(hash)) {
+            auto mi = mapWallet.find(hash);
+            if (mi != mapWallet.end()) {
+                pwtxOurs = &(mi->second);
+            }
+        }
         // Sprout
         for (size_t i = 0; i < tx.vjoinsplit.size(); i++) {
             const JSDescription& jsdesc = tx.vjoinsplit[i];
@@ -1075,14 +1195,16 @@ void CWallet::IncrementNoteWitnesses(const CBlockIndex* pindex,
                 sproutTree.append(note_commitment);
 
                 // Increment existing witnesses
-                for (std::pair<const uint256, CWalletTx>& wtxItem : mapWallet) {
-                    ::AppendNoteCommitment(wtxItem.second.mapSproutNoteData, pindex->nHeight, nWitnessCacheSize, note_commitment);
-                }
+                ::AppendNoteCommitmentToTargets(sproutTargets, nWitnessCacheSize, note_commitment);
 
                 // If this is our note, witness it
-                if (txIsOurs) {
+                if (pwtxOurs) {
                     JSOutPoint jsoutpt {hash, i, j};
-                    ::WitnessNoteIfMine(mapWallet[hash].mapSproutNoteData, pindex->nHeight, nWitnessCacheSize, jsoutpt, sproutTree.witness());
+                    bool fWasTarget = false;
+                    SproutNoteData* nd = ::WitnessNoteIfMine(pwtxOurs->mapSproutNoteData, pindex->nHeight, nWitnessCacheSize, jsoutpt, sproutTree, &fWasTarget);
+                    if (nd && !fWasTarget) {
+                        sproutTargets.push_back(nd);
+                    }
                 }
             }
         }
@@ -1092,22 +1214,24 @@ void CWallet::IncrementNoteWitnesses(const CBlockIndex* pindex,
             saplingTree.append(note_commitment);
 
             // Increment existing witnesses
-            for (std::pair<const uint256, CWalletTx>& wtxItem : mapWallet) {
-                ::AppendNoteCommitment(wtxItem.second.mapSaplingNoteData, pindex->nHeight, nWitnessCacheSize, note_commitment);
-            }
+            ::AppendNoteCommitmentToTargets(saplingTargets, nWitnessCacheSize, note_commitment);
 
             // If this is our note, witness it
-            if (txIsOurs) {
+            if (pwtxOurs) {
                 SaplingOutPoint outPoint {hash, i};
-                ::WitnessNoteIfMine(mapWallet[hash].mapSaplingNoteData, pindex->nHeight, nWitnessCacheSize, outPoint, saplingTree.witness());
+                bool fWasTarget = false;
+                SaplingNoteData* nd = ::WitnessNoteIfMine(pwtxOurs->mapSaplingNoteData, pindex->nHeight, nWitnessCacheSize, outPoint, saplingTree, &fWasTarget);
+                if (nd && !fWasTarget) {
+                    saplingTargets.push_back(nd);
+                }
             }
         }
     }
 
     // Update witness heights
-    for (std::pair<const uint256, CWalletTx>& wtxItem : mapWallet) {
-        ::UpdateWitnessHeights(wtxItem.second.mapSproutNoteData, pindex->nHeight, nWitnessCacheSize);
-        ::UpdateWitnessHeights(wtxItem.second.mapSaplingNoteData, pindex->nHeight, nWitnessCacheSize);
+    for (CWalletTx* pwtx : noteTxs) {
+        ::UpdateWitnessHeights(pwtx->mapSproutNoteData, pindex->nHeight, nWitnessCacheSize);
+        ::UpdateWitnessHeights(pwtx->mapSaplingNoteData, pindex->nHeight, nWitnessCacheSize);
     }
 
     // For performance reasons, we write out the witness cache in
@@ -1158,9 +1282,13 @@ void DecrementNoteWitnesses(NoteDataMap& noteDataMap, int indexHeight, int64_t n
 void CWallet::DecrementNoteWitnesses(const CBlockIndex* pindex)
 {
     LOCK(cs_wallet);
-    for (std::pair<const uint256, CWalletTx>& wtxItem : mapWallet) {
-        ::DecrementNoteWitnesses(wtxItem.second.mapSproutNoteData, pindex->nHeight, nWitnessCacheSize);
-        ::DecrementNoteWitnesses(wtxItem.second.mapSaplingNoteData, pindex->nHeight, nWitnessCacheSize);
+    // As in IncrementNoteWitnesses, entries without note data have empty
+    // loops here and are skipped.
+    std::vector<CWalletTx*> noteTxs;
+    CollectNoteTxs(noteTxs);
+    for (CWalletTx* pwtx : noteTxs) {
+        ::DecrementNoteWitnesses(pwtx->mapSproutNoteData, pindex->nHeight, nWitnessCacheSize);
+        ::DecrementNoteWitnesses(pwtx->mapSaplingNoteData, pindex->nHeight, nWitnessCacheSize);
     }
     nWitnessCacheSize -= 1;
     // TODO: If nWitnessCache is zero, we need to regenerate the caches (#1302)
@@ -1449,7 +1577,11 @@ bool CWallet::AddToWallet(const CWalletTx& wtxIn, bool fFromLoadWallet, CWalletD
 
     if (fFromLoadWallet)
     {
+        if (!mapWallet.count(hash)) {
+            nNoteTxIndexWalletSize++;
+        }
         mapWallet[hash] = wtxIn;
+        NoteTxIndexAdd(hash, mapWallet[hash]);
         mapWallet[hash].BindWallet(this);
         UpdateNullifierNoteMapWithTx(mapWallet[hash]);
         AddToSpends(hash);
@@ -1463,6 +1595,9 @@ bool CWallet::AddToWallet(const CWalletTx& wtxIn, bool fFromLoadWallet, CWalletD
         wtx.BindWallet(this);
         UpdateNullifierNoteMapWithTx(wtx);
         bool fInsertedNew = ret.second;
+        if (fInsertedNew) {
+            nNoteTxIndexWalletSize++;
+        }
         if (fInsertedNew)
         {
             wtx.nTimeReceived = GetAdjustedTime();
@@ -1540,6 +1675,8 @@ bool CWallet::AddToWallet(const CWalletTx& wtxIn, bool fFromLoadWallet, CWalletD
                 fUpdated = true;
             }
         }
+        // New or merged note data: keep the witness index a superset.
+        NoteTxIndexAdd(hash, wtx);
 
         //// debug print
         LogPrintf("AddToWallet %s  %s%s\n", wtxIn.GetHash().ToString(), (fInsertedNew ? "new" : ""), (fUpdated ? "update" : ""));
@@ -1701,8 +1838,11 @@ void CWallet::EraseFromWallet(const uint256 &hash)
         return;
     {
         LOCK(cs_wallet);
-        if (mapWallet.erase(hash))
+        if (mapWallet.erase(hash)) {
+            nNoteTxIndexWalletSize--;
+            setNoteTxIndex.erase(hash);
             CWalletDB(strWalletFile).EraseTx(hash);
+        }
     }
     return;
 }
