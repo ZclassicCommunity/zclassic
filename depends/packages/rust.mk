@@ -8,6 +8,14 @@ $(package)_sha256_hash_darwin=f0dfba507192f9b5c330b5984ba71d57d434475f3d62bd44a3
 $(package)_file_name_mingw32=rust-$($(package)_version)-x86_64-pc-windows-gnu.tar.gz
 $(package)_sha256_hash_mingw32=358e1435347c67dbf33aa9cad6fe501a833d6633ed5d5aa1863d5dffa0349be9
 
+# Rust 1.32 predates Apple Silicon and only supplies an Intel macOS toolchain.
+# Keep other targets unchanged; pin a native compiler and its upstream checksum.
+ifeq ($(host_os)-$(host_arch),darwin-aarch64)
+$(package)_version=1.63.0
+$(package)_file_name_darwin=rust-$($(package)_version)-aarch64-apple-darwin.tar.gz
+$(package)_sha256_hash_darwin=25c3f43459da9b8683292999c3522d88980b0ca3244fe830f5a87a8092aac5a6
+endif
+
 ifeq ($(host_os),mingw32)
 $(package)_build_subdir=buildos
 $(package)_extra_sources = $($(package)_file_name_$(build_os))

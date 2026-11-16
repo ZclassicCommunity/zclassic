@@ -20,6 +20,18 @@ but does not replace cryptographic implementations.
 Release builds now use portable `-O2` optimization. The Windows GUI destroys
 its windows before Qt shuts down, fixing an exit-time platform crash.
 
+The GUI now reads RPC settings with the same case-sensitive, first-value-wins
+configuration rules as the daemon, including comments and section prefixes.
+This fixes connection failures caused by conflicting duplicate settings or
+comments being treated as part of a port or password. Testnet and regtest both
+use the correct default RPC port. Malformed configuration is preserved and
+reported rather than interpreted using guessed settings.
+
+Native macOS build preparation fixes invalid Make variable assignments, uses
+the selected Xcode SDK for native dependency tools, and identifies Apple Silicon
+as 64-bit ARM. These build fixes do not yet qualify a macOS daemon release;
+native dependency, linking and cryptographic validation remain release gates.
+
 Interrupted snapshot transfers retry with completed files retained within the
 current attempt. Completed files are rehashed against the same manifest before
 reuse; incomplete files are downloaded again. Reconnects use one stream if a
