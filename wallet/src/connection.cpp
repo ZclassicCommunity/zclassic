@@ -1826,7 +1826,7 @@ bool ConnectionLoader::startFastSync() {
     const auto generation = accessAttempt;
     setHealInProgress(true);
     const QString operationOwner = QSettings().value("heal/owner").toString();
-    rpc->shutdownZClassicd();
+    rpc->shutdownZClassicd(true);
     // Shutdown processes UI events. Quit, settings changes or another startup
     // attempt revoke this migration before any wallet backup or chain movement.
     if (!window || !dialog || window->isQuitting() ||

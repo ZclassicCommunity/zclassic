@@ -2186,7 +2186,7 @@ void RPC::onAboutToQuit() {
     if (notifyDebounce) notifyDebounce->stop();
 }
 
-void RPC::shutdownZClassicd() {
+void RPC::shutdownZClassicd(bool waitForCheckpoint) {
     // Re-entrancy guard: the wait below spins a nested event loop while the main
     // window is still live, so a second Quit / window-close could otherwise re-enter
     // here and stack another loop. Once we're shutting down, ignore repeats.
@@ -2211,6 +2211,7 @@ void RPC::shutdownZClassicd() {
     const QPointer<QProcess> stoppingProcess(ezclassicd);
     const auto stoppingConnection = conn;
     const bool stoppingExternal = conn->config && conn->config->zclassicDaemon;
+    const auto stoppingGeneration = main->startupAttempt;
 
     json payload = {
         {"jsonrpc", "1.0"},
@@ -2233,8 +2234,10 @@ void RPC::shutdownZClassicd() {
     Ui_ConnectionDialog connD;
     connD.setupUi(&d);
     connD.topIcon->setBasePixmap(QIcon(":/icons/res/icon.ico").pixmap(256, 256));
-    connD.status->setText(QObject::tr("Please wait for ZclWallet to exit"));
-    connD.statusDetail->setText(QObject::tr("Waiting for zclassicd to exit"));
+    connD.status->setText(waitForCheckpoint ? QObject::tr("Preparing faster checkpoint sync…")
+                                          : QObject::tr("Please wait for ZclWallet to exit"));
+    connD.statusDetail->setText(waitForCheckpoint ? QObject::tr("Saving your wallet before switching sync methods…")
+                                                : QObject::tr("Waiting for zclassicd to exit"));
 
     QElapsedTimer elapsed;
     elapsed.start();
@@ -2245,7 +2248,10 @@ void RPC::shutdownZClassicd() {
         return !stoppingProcess || stoppingProcess->state() == QProcess::NotRunning
             || stoppingProcess->processId() == 0
             || stoppingExternal       // external daemon: we don't own its lifetime
-            || elapsed.hasExpired(30000);          // hard cap (ms) so Quit never wedges
+            || (!waitForCheckpoint && elapsed.hasExpired(30000))
+            || (waitForCheckpoint && (main->isQuitting() ||
+                main->startupAttempt != stoppingGeneration || conn != stoppingConnection ||
+                ezclassicd != stoppingProcess.data()));
     };
 
     if (fnEnded()) {

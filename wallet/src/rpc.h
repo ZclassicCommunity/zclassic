@@ -133,7 +133,7 @@ public:
     void importZPrivKey(QString addr, bool rescan, const std::function<void(json)>& cb);
     void importTPrivKey(QString addr, bool rescan, const std::function<void(json)>& cb);
 
-    void shutdownZClassicd();
+    void shutdownZClassicd(bool waitForCheckpoint = false);
 
     // Called from QCoreApplication::aboutToQuit, i.e. on EVERY quit route -- window
     // close, File->Exit, SIGINT, AND the macOS app-menu "Quit" / Cmd-Q, which calls
