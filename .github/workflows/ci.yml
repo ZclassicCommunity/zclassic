@@ -108,6 +108,7 @@ jobs:
       - name: Build and run shielded tree parity tests
         run: |
           CONFIGURE_FLAGS="--enable-tests --disable-man" ./zcutil/build.sh -j3
+          ./zcutil/fetch-params.sh
           ./src/zcash-gtest --gtest_filter='merkletree.*'
       - name: Upload tree test binary
         uses: actions/upload-artifact@v4
