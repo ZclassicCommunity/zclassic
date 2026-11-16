@@ -78,7 +78,7 @@ cd zclassic
 
 The build script will:
 1. Download and build required dependencies (Boost, etc.)
-2. Download Rust libraries for zero-knowledge proofs
+2. Build the zero-knowledge crypto from C23 sources (src/c23, no Rust toolchain)
 3. Configure the build system
 4. Compile all components
 
