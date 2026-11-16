@@ -132,6 +132,7 @@ BITCOIN_CORE_H = \
   bootstrapvalidation.h \
   bloom.h \
   chain.h \
+  parkedblockindex.h \
   chainparams.h \
   chainparamsbase.h \
   chainparamsseeds.h \

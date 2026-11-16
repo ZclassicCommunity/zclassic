@@ -22,6 +22,7 @@
 #include "metrics.h"
 #include "net.h"
 #include "pow.h"
+#include "parkedblockindex.h"
 #include "rpc/server.h"
 #include "txdb.h"
 #include "txmempool.h"
@@ -74,6 +75,7 @@ bool fHavePruned = false;
 bool fPruneMode = false;
 bool fIsBareMultisigStd = true;
 bool fCheckBlockIndex = false;
+static ParkedBlockIndex parkedBlockIndex GUARDED_BY(cs_main);
 bool fCheckpointsEnabled = true;
 bool fCoinbaseEnforcedProtectionEnabled = true;
 // Set ONLY while init's Step-10 forward-connect activates a chain that includes
@@ -3578,6 +3580,7 @@ static CBlockIndex* FindMostWorkChain() {
                     if (fFailedChain) pindexFailed->nStatus |= BLOCK_FAILED_CHILD;
                     pindexFailed->nStatus &= ~BLOCK_PARKED_PARENT_FLAG;
                     if (fParkedChain) pindexFailed->nStatus |= BLOCK_PARKED_PARENT_FLAG;
+                    parkedBlockIndex.Update(pindexFailed);
                 } else if (fMissingData) {
                     // If we're missing data, then add back to mapBlocksUnlinked,
                     // so that if the block arrives in the future we can try adding
@@ -3855,12 +3858,14 @@ static bool UnwindBlock(CValidationState& state, CBlockIndex *pindex, bool inval
     // (note this may not be all descendants).
     while (pindex_was_in_chain && invalid_walk_tip != pindex) {
         invalid_walk_tip->nStatus |= invalidate ? BLOCK_FAILED_CHILD : BLOCK_PARKED_PARENT_FLAG;
+        parkedBlockIndex.Update(invalid_walk_tip);
         setDirtyBlockIndex.insert(invalid_walk_tip);
         invalid_walk_tip = invalid_walk_tip->pprev;
     }
 
     // Mark the block as either invalid or parked.
     pindex->nStatus |= invalidate ? BLOCK_FAILED_VALID : BLOCK_PARKED_FLAG;
+    parkedBlockIndex.Update(pindex);
     setDirtyBlockIndex.insert(pindex);
     if (invalidate) {
         g_failed_blocks.insert(pindex);
@@ -3905,6 +3910,7 @@ template <typename F> void UpdateFlagsForBlock(CBlockIndex *pindexBase,
     if (pindex->nStatus != newStatus &&
         pindex->GetAncestor(pindexBase->nHeight) == pindexBase) {
         pindex->nStatus = newStatus;
+        parkedBlockIndex.Update(pindex);
         setDirtyBlockIndex.insert(pindex);
         if (pindex->IsValid()) {
             g_failed_blocks.erase(pindex);
@@ -3935,6 +3941,7 @@ template <typename F, typename C> void UpdateFlags(CBlockIndex *pindex, F f, C f
         unsigned int newStatus = f(pindex->nStatus);
         if (pindex->nStatus != newStatus) {
             pindex->nStatus = newStatus;
+            parkedBlockIndex.Update(pindex);
             setDirtyBlockIndex.insert(pindex);
             if (pindex->IsValid()) {
                 g_failed_blocks.erase(pindex);
@@ -3983,15 +3990,15 @@ bool UnparkBlockImpl(CBlockIndex *pindex, bool fClearChildren) {
         pindexBestParked = nullptr;
     }
 
-    UpdateFlags(pindex,
-                [](const unsigned int status) {
-                    return status & ~BLOCK_PARKED_MASK;
-                },
-                [fClearChildren](const unsigned int status) {
-                    return fClearChildren ? status & ~BLOCK_PARKED_MASK
-                                          : status & ~BLOCK_PARKED_PARENT_FLAG;
-                });
-
+    parkedBlockIndex.Unpark(pindex, fClearChildren,
+        [](CBlockIndex* block, bool descendant) {
+            setDirtyBlockIndex.insert(block);
+            if (block->IsValid()) g_failed_blocks.erase(block);
+            if (descendant && block->IsValid(BLOCK_VALID_TRANSACTIONS) && block->nChainTx &&
+                setBlockIndexCandidates.value_comp()(chainActive.Tip(), block)) {
+                setBlockIndexCandidates.insert(block);
+            }
+        });
     return true;
 }
 
@@ -4556,6 +4563,7 @@ bool AcceptBlock(CBlock& block, CValidationState& state, CBlockIndex** ppindex, 
             LogPrintf("Park block %s as it would cause a deep reorg.\n",
                       pindex->GetBlockHash().ToString());
             pindex->nStatus |= BLOCK_PARKED_FLAG;
+            parkedBlockIndex.Update(pindex);
             setDirtyBlockIndex.insert(pindex);
         }
     }
@@ -4836,12 +4844,14 @@ bool static LoadBlockIndexDB()
 
     boost::this_thread::interruption_point();
 
+    parkedBlockIndex.Clear();
     // Calculate nChainWork
     vector<pair<int, CBlockIndex*> > vSortedByHeight;
     vSortedByHeight.reserve(mapBlockIndex.size());
     BOOST_FOREACH(const PAIRTYPE(uint256, CBlockIndex*)& item, mapBlockIndex)
     {
         CBlockIndex* pindex = item.second;
+        parkedBlockIndex.Update(pindex);
         vSortedByHeight.push_back(make_pair(pindex->nHeight, pindex));
     }
     sort(vSortedByHeight.begin(), vSortedByHeight.end());
@@ -5265,6 +5275,7 @@ bool RewindBlockIndex(const CChainParams& params, bool& clearWitnessCaches)
         auto ret = mapBlockIndex.find(*pindex->phashBlock);
         if (ret != mapBlockIndex.end()) {
             mapBlockIndex.erase(ret);
+            parkedBlockIndex.Erase(pindex);
             delete pindex;
         }
     }
@@ -5303,6 +5314,7 @@ void UnloadBlockIndex()
     nPreferredDownload = 0;
     setDirtyBlockIndex.clear();
     g_failed_blocks.clear();
+    parkedBlockIndex.Clear();
     setDirtyFileInfo.clear();
     mapNodeState.clear();
     recentRejects.reset(NULL);
@@ -5491,6 +5503,7 @@ void static CheckBlockIndex()
     // Build forward-pointing map of the entire block tree.
     std::multimap<CBlockIndex*,CBlockIndex*> forward;
     for (BlockMap::iterator it = mapBlockIndex.begin(); it != mapBlockIndex.end(); it++) {
+        assert(parkedBlockIndex.Contains(it->second) == ((it->second->nStatus & BLOCK_PARKED_MASK) != 0));
         forward.insert(std::make_pair(it->second->pprev, it->second));
     }
 
@@ -7434,6 +7447,7 @@ public:
     CMainCleanup() {}
     ~CMainCleanup() {
         // block headers
+        parkedBlockIndex.Clear();
         BlockMap::iterator it1 = mapBlockIndex.begin();
         for (; it1 != mapBlockIndex.end(); it1++)
             delete (*it1).second;
