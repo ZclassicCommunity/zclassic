@@ -3222,10 +3222,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     }
     g_startupTimer.mark("activate best chain");
 
-    // A stop during replay is a normal shutdown, not permission to start new
-    // import/network work. Return through WaitForShutdown and the normal flush.
+    // A stop during replay is not permission to start new import/network work.
+    // A fatal activation error can also request shutdown: preserve its failure
+    // result rather than treating it as a successful user cancellation.
     if (ShutdownRequested())
-        return true;
+        return strErrors.str().empty();
 
     std::vector<boost::filesystem::path> vImportFiles;
     if (mapArgs.count("-loadblock"))
