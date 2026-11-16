@@ -42,6 +42,11 @@ jobs:
         with:
           path: depends/built
           key: daemon-focal-${{ matrix.platform }}-${{ hashFiles('depends/packages/**', 'depends/patches/**', 'depends/hosts/**') }}
+          # The depends recipe hashes and archive checksums reject stale entries.
+          # Reuse unchanged packages when one dependency recipe changes instead
+          # of fetching and rebuilding the entire toolchain from scratch.
+          restore-keys: |
+            daemon-focal-${{ matrix.platform }}-
       - name: Build Linux daemon
         if: matrix.target == 'linux'
         run: ZQW_STATIC_GOMP=1 CONFIGURE_FLAGS=--disable-man bash zcutil/build-release.sh linux -j3

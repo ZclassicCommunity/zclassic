@@ -87,7 +87,10 @@
 #include "../filepermissions.h"
 #include "privatefile.h"
 #include "configfile.h"
+#include <QFontDatabase>
 #include "startupaccess.h"
+#include "chainbackup.h"
+#include <QStorageInfo>
 
 // Kept alive for the whole process so QStandardPaths/QSettings stay isolated.
 static QTemporaryDir* g_homeDir = nullptr;
@@ -140,6 +143,138 @@ private:
     }
 
 private slots:
+
+    void repairUsesConfiguredWalletAndPreservesOtherNetworks() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        if (QStorageInfo(temporary.path()).bytesAvailable() < qint64(15) * 1024 * 1024 * 1024)
+            QSKIP("Actual repair preflight requires 15 GiB free on the isolated fixture volume");
+        QDir base(temporary.path());
+        QVERIFY(base.mkpath("testnet3/blocks"));
+        QVERIFY(base.mkpath("testnet3/chainstate"));
+        QVERIFY(base.mkpath("blocks"));
+        auto write = [](const QString& path, const QByteArray& bytes) {
+            QFile file(path);
+            return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
+        };
+        const QDir selected(base.filePath("testnet3"));
+        QVERIFY(write(selected.filePath(".lock"), ""));
+        QVERIFY(write(selected.filePath("savings.dat"), "test-wallet"));
+        QVERIFY(write(selected.filePath("blocks/payload"), "test-blocks"));
+        QVERIFY(write(selected.filePath("chainstate/payload"), "test-state"));
+        QVERIFY(write(base.filePath("wallet.dat"), "main-wallet"));
+        QVERIFY(write(base.filePath("blocks/payload"), "main-blocks"));
+        std::unique_ptr<MainWindow> w(makeWindow());
+        ConnectionLoader loader(w.get(), w->getRPC());
+        auto config = std::make_shared<ConnectionConfig>();
+        config->zclassicDir = base.path();
+        config->testnet = true;
+        config->walletFile = "savings.dat";
+        loader.rememberRepairLocation(config);
+        // A stopped owned process avoids probing any unrelated host's ports.
+        loader.ezclassicd = new QProcess(w.get());
+        loader.redownloadChain();
+        // Embedded launch remains disabled in this fixture. Exercise all actual
+        // backup/move/error wiring, then require a clear failed-start outcome.
+        QVERIFY(w->connectionStartupError.contains("couldn't start the re-download"));
+        QVERIFY(!QFileInfo::exists(selected.filePath("blocks")));
+        QVERIFY(!QFileInfo::exists(selected.filePath("chainstate")));
+        const auto backups = selected.entryList({"chain-set-aside-*"}, QDir::Dirs | QDir::NoDotAndDotDot);
+        QCOMPARE(backups.size(), 1);
+        QVERIFY(QFileInfo::exists(selected.filePath(backups.first() + "/blocks/payload")));
+        QVERIFY(QFileInfo::exists(selected.filePath(backups.first() + "/chainstate/payload")));
+        const auto wallets = selected.entryList({"savings.dat.backup-*"}, QDir::Files);
+        QCOMPARE(wallets.size(), 1);
+        QVERIFY(testFileIsOwnerOnly(selected.filePath(wallets.first())));
+        for (const auto& entry : {qMakePair(selected.filePath("savings.dat"), QByteArray("test-wallet")),
+                                 qMakePair(selected.filePath(wallets.first()), QByteArray("test-wallet")),
+                                 qMakePair(selected.filePath(backups.first() + "/blocks/payload"), QByteArray("test-blocks")),
+                                 qMakePair(selected.filePath(backups.first() + "/chainstate/payload"), QByteArray("test-state")),
+                                 qMakePair(base.filePath("wallet.dat"), QByteArray("main-wallet")),
+                                 qMakePair(base.filePath("blocks/payload"), QByteArray("main-blocks"))}) {
+            QFile file(entry.first);
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            QCOMPARE(file.readAll(), entry.second);
+        }
+        QVERIFY(!QFileInfo::exists(ChainBackup::journalPath(selected)));
+    }
+
+    void repairMissingConfiguredWalletLeavesChainUntouched() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        if (QStorageInfo(temporary.path()).bytesAvailable() < qint64(3) * 1024 * 1024 * 1024)
+            QSKIP("Actual backup preflight requires 3 GiB free on the isolated fixture volume");
+        QDir data(temporary.path());
+        QVERIFY(data.mkdir("blocks"));
+        QVERIFY(data.mkdir("chainstate"));
+        { QFile lock(data.filePath(".lock")); QVERIFY(lock.open(QIODevice::WriteOnly)); }
+        { QFile wallet(data.filePath("wallet.dat")); QVERIFY(wallet.open(QIODevice::WriteOnly));
+          QCOMPARE(wallet.write("default-wallet-must-not-be-used"), qint64(31)); }
+        std::unique_ptr<MainWindow> w(makeWindow());
+        ConnectionLoader loader(w.get(), w->getRPC());
+        auto config = std::make_shared<ConnectionConfig>();
+        config->zclassicDir = data.path();
+        config->walletFile = "missing.dat";
+        loader.rememberRepairLocation(config);
+        loader.ezclassicd = new QProcess(w.get());
+        loader.redownloadChain();
+        QVERIFY(w->connectionStartupError.contains("Cannot read the configured wallet"));
+        QVERIFY(QFileInfo::exists(data.filePath("blocks")));
+        QVERIFY(QFileInfo::exists(data.filePath("chainstate")));
+        QVERIFY(!QFileInfo::exists(ChainBackup::journalPath(data)));
+        QVERIFY(data.entryList({"chain-set-aside-*"}, QDir::Dirs | QDir::NoDotAndDotDot).isEmpty());
+        QFile wallet(data.filePath("wallet.dat"));
+        QVERIFY(wallet.open(QIODevice::ReadOnly));
+        QCOMPARE(wallet.readAll(), QByteArray("default-wallet-must-not-be-used"));
+    }
+
+    void detectedConfigurationMatchesDaemon() {
+        std::unique_ptr<MainWindow> w(makeWindow());
+        ConnectionLoader loader(w.get(), w->getRPC());
+        const QString path = loader.zclassicConfWritableLocation();
+#ifdef Q_OS_LINUX
+        QCOMPARE(path, g_homeDir->filePath(".zclassic/zclassic.conf"));
+#else
+        QVERIFY(path.contains("qttest"));
+#endif
+        QVERIFY(!QFileInfo::exists(path));
+        QString error;
+        const QByteArray contents(
+            "rpcuser=first-user # ignored comment\n"
+            "rpcuser=second-user\nrpcpassword=fixture-password # comment\n"
+            "rpcpassword=wrong-password\nRPCPORT=9999\n"
+            "rpcport=18992 # local fixture\nrpcport=18993\n"
+            "testnet=1 # enabled\nnotestnet=1\n"
+            "daemon=1 # enabled\nproxy=127.0.0.1:19050 # proxy\n"
+            "[ignored]\nrpcport=19999\nrpcpassword=wrong-section\n");
+        QVERIFY2(createPrivateConfig(path, contents, error), qPrintable(error));
+        auto config = loader.autoDetectZClassicConf();
+        QVERIFY(config);
+        QCOMPARE(config->rpcuser, QString("first-user"));
+        QCOMPARE(config->rpcpassword, QString("fixture-password"));
+        QCOMPARE(config->port, QString("18992"));
+        QCOMPARE(config->proxy, QString("127.0.0.1:19050"));
+        QVERIFY(config->testnet);
+        QVERIFY(config->zclassicDaemon);
+        QVERIFY(QFile::remove(path));
+
+        for (const QByteArray network : {QByteArray("testnet=1 # comment\n"),
+                                        QByteArray("regtest=1\n")}) {
+            QVERIFY2(createPrivateConfig(path, network + "rpcpassword=fixture-password\n", error), qPrintable(error));
+            config = loader.autoDetectZClassicConf();
+            QVERIFY(config);
+            QCOMPARE(config->port, QString("18023"));
+            QVERIFY(QFile::remove(path));
+        }
+        QVERIFY2(createPrivateConfig(path, "invalid line\n", error), qPrintable(error));
+        QVERIFY(!loader.autoDetectZClassicConf());
+        QVERIFY(!loader.confReadError.isEmpty());
+        QFile preserved(path);
+        QVERIFY(preserved.open(QIODevice::ReadOnly));
+        QCOMPARE(preserved.readAll(), QByteArray("invalid line\n"));
+        preserved.close();
+        QVERIFY(QFile::remove(path));
+    }
 
     void configurationCreationPreservesExisting() {
         QTemporaryDir temp;
@@ -2075,13 +2210,23 @@ private slots:
 
         const QByteArray tok = srv.token().toLatin1();
         const QByteArray id(64, 'a');
-        // Fire a burst of validated notifies tightly together (block + its wallet txns).
+        QSignalSpy delivered(&srv, &NotifyServer::notified);
+        QList<QLocalSocket*> clients;
+        // Establish every connection before sending the burst. Interleaving qWait
+        // with each send can let a loaded event loop cross the debounce deadline,
+        // turning the fixture into separate bursts (observed on native macOS).
         for (int i = 0; i < 4; ++i) {
-            QLocalSocket* c = notifySendLine(p, tok + " " + id + "\n");
-            QVERIFY(c);
-            QTest::qWait(15);                          // inside the debounce window
-            c->disconnectFromServer(); c->deleteLater();
+            auto* c = new QLocalSocket(&srv);
+            c->connectToServer(p);
+            QVERIFY(c->waitForConnected(1000));
+            clients.append(c);
         }
+        const QByteArray payload = tok + " " + id + "\n";
+        for (auto* c : clients) {
+            QCOMPARE(c->write(payload), qint64(payload.size()));
+            c->flush();
+        }
+        QTRY_COMPARE(delivered.count(), 4);            // every notify was validated
         QTest::qWait(RPC::kNotifyDebounceMs + 300);    // quiet window elapses
         QCOMPARE(refreshes, 1);                        // 4 notifies -> 1 refresh
     }
@@ -2784,6 +2929,17 @@ int main(int argc, char* argv[]) {
     QCoreApplication::setOrganizationName("ZClassicTest");
     QCoreApplication::setOrganizationDomain("test.zclassic.invalid");
     QCoreApplication::setApplicationName("tst_widget");
+
+    // Match main.cpp's shipped typography. Offscreen's platform default can be
+    // a much narrower fallback face and hide real balance/control clipping.
+    const int fontId = QFontDatabase::addApplicationFont(":/fonts/res/Ubuntu-R.ttf");
+    if (fontId < 0 || !QFontDatabase::applicationFontFamilies(fontId).contains("Ubuntu")) {
+        qCritical("The shipped Ubuntu font could not be loaded for GUI tests");
+        return 1;
+    }
+    QFont baseFont("Ubuntu", 13);
+    baseFont.setStyleStrategy(QFont::PreferAntialias);
+    app.setFont(baseFont);
 
     // Never let a stray window-close quit mid-test.
     app.setQuitOnLastWindowClosed(false);

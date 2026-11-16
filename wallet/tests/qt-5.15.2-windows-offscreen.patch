@@ -1,0 +1,13 @@
+--- a/src/widgets/dialogs/qmessagebox.cpp
++++ b/src/widgets/dialogs/qmessagebox.cpp
+@@ -78,7 +78,9 @@
+ HMENU qt_getWindowsSystemMenu(const QWidget *w)
+ {
++    auto *native = QGuiApplication::platformNativeInterface();
++    if (!native) return 0;
+     if (QWindow *window = QApplicationPrivate::windowForWidget(w))
+-        if (void *handle = QGuiApplication::platformNativeInterface()->nativeResourceForWindow("handle", window))
++        if (void *handle = native->nativeResourceForWindow("handle", window))
+             return GetSystemMenu(reinterpret_cast<HWND>(handle), false);
+     return 0;
+ }

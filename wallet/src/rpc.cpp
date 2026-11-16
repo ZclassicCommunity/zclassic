@@ -1,5 +1,7 @@
 #include "rpc.h"
 #include "releaseversion.h"
+#include "repairlocation.h"
+#include "repairlock.h"
 
 #include "addressbook.h"
 #include "settings.h"
@@ -2258,7 +2260,8 @@ void RPC::shutdownZClassicd() {
 // SAFETY GATE for the manual Help -> Repair path. shutdownZClassicd() above is
 // allowed to return on a 30s soft cap so Quit never wedges — that means "quit
 // promptly", NOT "confirmed exited". Before any datadir mutation we must POSITIVELY
-// confirm the embedded node is gone, so terminate()/kill() it and poll its state.
+// confirm the embedded node is gone. Defer repair while it is still flushing;
+// never terminate or kill it merely to make repair eligible.
 // RUNTIME STUB AUTO-HEAL evaluator. See the header for the full ALL-of trigger. Every
 // branch here is a guard that must pass; the destructive work itself is delegated to
 // MainWindow::autoHealStubChain() -> launchBlockchainRepair() -> redownloadChain(),
@@ -2303,7 +2306,11 @@ bool RPC::maybeAutoHealStubChain(int connections) {
     // the banner applies. blocksDirSizeBytes() returns -1 when it can't measure, which
     // we treat as "unknown" and DO NOT heal on (fail safe -> keep the chain).
     const qint64 kStubFloor = (qint64)1024 * 1024 * 1024;   // 1 GiB hard floor
-    qint64 blocksBytes = ConnectionLoader::blocksDirSizeBytes(conn->config->zclassicDir);
+    const auto location = resolveRepairLocation(conn->config->zclassicDir,
+        conn->config->dataDirOverride, conn->config->testnet,
+        conn->config->regtest, conn->config->walletFile);
+    qint64 blocksBytes = (location.error.isEmpty() && conn->config->repairConfigError.isEmpty())
+        ? ConnectionLoader::blocksDirSizeBytes(location.directory) : -1;
     if (blocksBytes < 0) {
         main->logger->write("stub-auto-heal: blocks/ size unknown; not healing (fail-safe)");
         return false;
@@ -2342,24 +2349,10 @@ bool RPC::maybeAutoHealStubChain(int connections) {
 }
 
 bool RPC::confirmEmbeddedStopped() {
-    // No embedded node we own (e.g. an external daemon, which has ezclassicd==nullptr,
-    // or already torn down): nothing of ours can be holding the datadir open.
-    if (ezclassicd == nullptr)
-        return true;
-
-    if (ezclassicd->state() == QProcess::NotRunning || ezclassicd->processId() == 0)
-        return true;
-
-    // Still alive after the polite RPC 'stop': ask it to terminate, then escalate.
-    ezExpectedShutdown = true;   // a forced stop here is deliberate, not a crash
-    ezclassicd->terminate();
-    ezclassicd->waitForFinished(5000);
-    if (ezclassicd->state() != QProcess::NotRunning) {
-        ezclassicd->kill();
-        ezclassicd->waitForFinished(5000);
-    }
-
-    return ezclassicd->state() == QProcess::NotRunning;
+    // The earlier RPC stop may still be flushing databases after the UI's soft
+    // wait limit. Defer repair; never force-kill that flush to make it eligible.
+    // A native datadir lock separately excludes external nodes.
+    return repairProcessIsStopped(ezclassicd);
 }
 
 

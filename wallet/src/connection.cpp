@@ -1,6 +1,10 @@
 #include "connection.h"
 #include "embeddeddaemon.h"
 #include "configfile.h"
+#include "chainbackup.h"
+#include "repairlock.h"
+#include "repairlocation.h"
+#include "walletbackup.h"
 #include "startupaccess.h"
 #include <QThread>
 #include "mainwindow.h"
@@ -306,8 +310,7 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
         // P2-1: remember the datadir (holds blocks/, chainstate/, debug.log and
         // wallet.dat) so the corruption failsafe can read debug.log and back up
         // wallet.dat if the node dies before the RPC connection comes up.
-        if (ezDataDir.isEmpty() && !config->zclassicDir.isEmpty())
-            ezDataDir = config->zclassicDir;
+        rememberRepairLocation(config);
 
         refreshZClassicdState(connection, [=] () {
             // Connection refused: the embedded node either has not started yet, or
@@ -833,6 +836,24 @@ bool ConnectionLoader::startEmbeddedZClassicd(const QStringList& extraArgs) {
     {
         auto detected = autoDetectZClassicConf();
         if (detected) {
+            rememberRepairLocation(detected);
+            if (ezRepairPathError.isEmpty() && !ezDataDir.isEmpty()) {
+                const QDir data(ezDataDir);
+                const QFileInfo marker(ChainBackup::journalPath(data));
+                if (marker.exists() || marker.isSymLink()) {
+                    RepairLock repairLock(ezDataDir);
+                    if (!repairLock.acquired()) {
+                        this->showError(repairLock.error());
+                        return false;
+                    }
+                    const auto recovery = ChainBackup::recover(data);
+                    if (!recovery.success) {
+                        this->showError(QObject::tr("The interrupted blockchain repair could not be recovered safely. No backups were deleted.\n\n%1").arg(recovery.error));
+                        return false;
+                    }
+                    main->logger->write("Recovered interrupted blockchain repair before node startup");
+                }
+            }
             QString cookiePath = cookieFilePathForConf(detected);
             if (!cookiePath.isEmpty()) {
                 // Logs only the PATH, never cookie contents (matches daemon log).
@@ -1172,58 +1193,37 @@ bool ConnectionLoader::looksLikeDbCorruption(const QString& text) {
     return false;
 }
 
-// The network data subdirectory: the datadir root for mainnet, or testnet3/ when
-// that subdir actually holds the chain/wallet. We probe the filesystem rather than
-// Settings::isTestnet() because isTestnet() is only set from the getinfo RPC reply,
-// which never arrives when the node dies during startup.
-QDir ConnectionLoader::resolveDataSubdir() {
-    QDir root(ezDataDir);
-    QDir testnet(QDir(ezDataDir).filePath("testnet3"));
-    if (testnet.exists() &&
-        (QFile::exists(testnet.filePath("wallet.dat")) ||
-         QFile::exists(testnet.filePath("debug.log")) ||
-         QDir(testnet.filePath("blocks")).exists()))
-        return testnet;
-    return root;
-}
-
-// RUNTIME STUB AUTO-HEAL discriminator: total bytes of the on-disk blocks/ store.
-// Static + standalone (no live loader needed) so the runtime sync poller in RPC can
-// call it cheaply with just the datadir root from the active connection's config. It
-// reuses the SAME root-or-testnet3/ resolution as resolveDataSubdir() so it measures
-// the chain the daemon is actually running. Returns -1 when the datadir/blocks dir is
-// unknown or missing (caller MUST treat -1 as "don't know" and NEVER heal on it — a
-// missing blocks/ here only means we couldn't measure, not that the chain is a stub).
-// This is the primary, robust stub-vs-real-chain test: a fully-synced chain is ~10
-// GiB; an aborted-P2P stub is tens of MB.
-qint64 ConnectionLoader::blocksDirSizeBytes(const QString& datadirRoot) {
-    if (datadirRoot.isEmpty())
-        return -1;
-
-    // Mirror resolveDataSubdir(): prefer testnet3/ when it actually holds the chain.
-    QDir base(datadirRoot);
-    QDir testnet(QDir(datadirRoot).filePath("testnet3"));
-    if (testnet.exists() &&
-        (QFile::exists(testnet.filePath("wallet.dat")) ||
-         QFile::exists(testnet.filePath("debug.log")) ||
-         QDir(testnet.filePath("blocks")).exists()))
-        base = testnet;
-
-    QDir blocks(base.filePath("blocks"));
-    if (!blocks.exists())
-        return -1;   // can't measure -> "unknown", never a heal trigger
-
-    // Sum every regular file under blocks/ (blk*.dat, rev*.dat, index/, etc.).
-    qint64 total = 0;
-    QDirIterator it(blocks.absolutePath(), QDir::Files | QDir::NoSymLinks,
-                    QDirIterator::Subdirectories);
-    while (it.hasNext()) {
-        it.next();
-        total += it.fileInfo().size();
+void ConnectionLoader::rememberRepairLocation(const std::shared_ptr<ConnectionConfig>& config) {
+    if (!config) {
+        ezDataDir.clear();
+        ezRepairPathError = QObject::tr("The node configuration is unavailable.");
+        return;
     }
-    return total;
+    // External nodes may have a different working directory. Relative paths are
+    // deliberately unavailable for repair until their location is known.
+    QString daemonWorkingDirectory;
+    if (ezclassicd) {
+#ifdef Q_OS_WIN
+        daemonWorkingDirectory = QCoreApplication::applicationDirPath();
+#else
+        daemonWorkingDirectory = QDir::currentPath();
+#endif
+    }
+    const auto location = resolveRepairLocation(config->zclassicDir, config->dataDirOverride,
+        config->testnet, config->regtest, config->walletFile, daemonWorkingDirectory);
+    ezDataDir = location.directory;
+    ezWalletFile = location.walletFile;
+    ezRepairPathError = config->repairConfigError.isEmpty() ? location.error : config->repairConfigError;
 }
 
+QDir ConnectionLoader::resolveDataSubdir() {
+    return QDir(ezDataDir);
+}
+// Measure only an explicitly resolved network directory; never infer the network
+// from whichever folders happen to exist.
+qint64 ConnectionLoader::blocksDirSizeBytes(const QString& networkDirectory) {
+    return repairBlocksSize(networkDirectory);
+}
 // Read the last maxBytes of <datadir>/debug.log, READ-ONLY. Returns "" if the
 // datadir/log is unknown or unreadable. Never opens any file for writing.
 QString ConnectionLoader::readDebugLogTail(int maxBytes) {
@@ -1343,14 +1343,20 @@ void ConnectionLoader::relaunchForRepair(const QStringList& extraArgs) {
         return;
     }
 
+    RepairLock repairLock(ezRepairPathError.isEmpty() ? ezDataDir : QString());
+    if (!repairLock.acquired()) {
+        this->setHealInProgress(false);
+        this->showError(repairLock.error());
+        return;
+    }
+
     // GUARD RAIL: never proceed to a repair without a fresh wallet.dat backup.
     if (!backupWalletForRepair()) {
         // Roll back the serialize guard so the user (or a later run) can retry.
         this->setHealInProgress(false);
         this->showError(QObject::tr("ZClassic couldn't make a safety backup of your wallet, "
             "so the repair was stopped.\n\n"
-            "Your wallet and coins have not been changed. Please make sure you have free "
-            "disk space and try again."));
+            "Your original wallet has not been changed.\n\n%1").arg(ezWalletBackupError));
         return;
     }
 
@@ -1378,6 +1384,7 @@ void ConnectionLoader::relaunchForRepair(const QStringList& extraArgs) {
     this->showInformation(QObject::tr("Repairing your blockchain data…"),
         QObject::tr("This can take several minutes. Your wallet is safe."));
 
+    repairLock.release(); // The daemon must acquire the same lock before opening databases.
     if (!this->startEmbeddedZClassicd(extraArgs)) {
         this->setHealInProgress(false);   // relaunch never armed -> release the guard
         this->showError(QObject::tr("ZClassic couldn't start the repair.\n\n"
@@ -1397,24 +1404,10 @@ void ConnectionLoader::relaunchForRepair(const QStringList& extraArgs) {
     QTimer::singleShot(1000, [=]() { doAutoConnect(); });
 }
 
-// A GENUINE re-download (unlike -reindex, which rebuilds from the same possibly
-// corrupt local blk files): set the local blocks/ and chainstate/ aside into ONE
-// timestamped parent dir, then start the node normally so that — seeing an empty
-// datadir — it re-runs its automatic bootstrap-snapshot flow and fetches a fresh
-// chain. (Verified: the shipped daemon auto-bootstraps on an empty/eligible datadir
-// with NO flag — -bootstrap defaults to true and -bootstrapmode defaults to
-// "anchor" — so a plain start is correct here.) The move is rollback-safe: if any
-// directory fails to move, every prior move is undone and the datadir is left
-// exactly as found. Disk growth from the set-aside copy is bounded to ONE
-// generation: a prior set-aside dir is swept before this one is created, so a
-// repeated re-download never accumulates. The single "chain-set-aside-*" parent
-// stays in the datadir (renaming within it is instant and recoverable); the user
-// can delete it later to reclaim disk space, and the next re-download sweeps it.
-//
-// This only ever runs from offerCorruptionRepair <- handleStartupFailure, i.e. the
-// node process is ALREADY DEAD, so there are no open file handles on these dirs.
+// Preserve the previous blockchain in a unique backup before downloading again.
+// A failed move or rollback must never delete the only recoverable copy.
 void ConnectionLoader::redownloadChain() {
-    main->logger->write("redownloadChain: wiping local chain data for fresh re-download");
+    main->logger->write("redownloadChain: preserving local chain data for fresh re-download");
 
     // SAFETY GATE: never move blocks/chainstate while a daemon could still hold them
     // open. Positively confirm the node is dead first; if we can't, ABORT untouched.
@@ -1426,26 +1419,21 @@ void ConnectionLoader::redownloadChain() {
         return;
     }
 
+    RepairLock repairLock(ezRepairPathError.isEmpty() ? ezDataDir : QString());
+    if (!repairLock.acquired()) {
+        this->showError(repairLock.error());
+        return;
+    }
+
     // Step 0: always make a fresh wallet.dat safety backup first.
     if (!this->backupWalletForRepair()) {
         this->showError(QObject::tr("ZClassic couldn't make a safety backup of your wallet, "
             "so the re-download was stopped.\n\n"
-            "Your wallet and coins have not been changed. Please make sure you have free "
-            "disk space and try again."));
+            "Your original wallet has not been changed.\n\n%1").arg(ezWalletBackupError));
         return;
     }
 
     QDir dd = resolveDataSubdir();
-    QString stamp = QDateTime::currentDateTime().toString("yyyyMMdd-hhmmss");
-
-    // Bound disk growth to one generation: sweep any set-aside dirs left over from a
-    // previous re-download before creating this one. (The node is dead, so nothing
-    // holds these.) Doing this first also reclaims that space ahead of the disk check.
-    for (const QString& entry : dd.entryList(QStringList() << "chain-set-aside-*",
-                                             QDir::Dirs | QDir::NoDotAndDotDot)) {
-        QDir(dd.filePath(entry)).removeRecursively();
-    }
-
     // A re-download fetches a FRESH full chain that must briefly coexist on disk with
     // the set-aside old copy (the set-aside is just a rename, so it keeps occupying
     // its original space). On the near-full disk that often CAUSED the corruption,
@@ -1467,35 +1455,16 @@ void ConnectionLoader::redownloadChain() {
         }
     }
 
-    // Set aside blocks/ and chainstate/ into ONE parent rather than deleting them, so
-    // the move is instant and fully recoverable. If any rename fails, roll back every
-    // move already done and remove the parent, leaving the datadir exactly as found.
-    QString aside = "chain-set-aside-" + stamp;
-    dd.mkpath(aside);
-
-    QStringList moved;   // names successfully moved INTO 'aside', for rollback
-    bool moveFailed = false;
-    for (const QString& name : { QStringLiteral("blocks"), QStringLiteral("chainstate") }) {
-        if (dd.exists(name)) {
-            if (!dd.rename(name, aside + "/" + name)) {
-                moveFailed = true;
-                break;
-            }
-            moved << name;
-        }
-    }
-    if (moveFailed) {
-        main->logger->write("redownloadChain: a set-aside move failed; rolling back");
-        // Undo every move already done, then drop the (now-partial) parent.
-        for (const QString& done : moved)
-            dd.rename(aside + "/" + done, done);
-        QDir(dd.filePath(aside)).removeRecursively();
-        this->showError(QObject::tr("ZClassic couldn't move the old blockchain data aside.\n\n"
-            "Please make sure you have free disk space and that no other copy of "
-            "ZClassic is running, then try again. Your wallet and coins are safe."));
+    const auto backup = ChainBackup::setAside(dd);
+    if (!backup.success) {
+        main->logger->write("redownloadChain: " + backup.error);
+        this->showError(QObject::tr("ZClassic couldn't safely set aside the blockchain. "
+            "The node has not been restarted. No blockchain backups were deleted.\n\n%1")
+            .arg(backup.error));
         return;
     }
-
+    const QString aside = QFileInfo(backup.path).fileName();
+    repairLock.release(); // All local file mutations are finished before relaunch.
     // Count this repair attempt (persisted per install), matching relaunchForRepair.
     QSettings().setValue("repair/attempts", QSettings().value("repair/attempts", 0).toInt() + 1);
 
@@ -1531,48 +1500,29 @@ void ConnectionLoader::redownloadChain() {
     QTimer::singleShot(1000, [=]() { doAutoConnect(); });
 }
 
-// HARD INVARIANT enforcement: this is the ONLY code in the failsafe that touches
-// wallet.dat, and it only ever READS it (QFile::copy opens the source read-only)
-// to a timestamped backup beside it. It never deletes, renames, or opens
-// wallet.dat for writing. Returns true on a verified successful copy.
+// The native datadir lock is held by both repair callers. Never continue without
+// a private, verified and flushed backup of the configured existing wallet.
 bool ConnectionLoader::backupWalletForRepair() {
-    if (ezDataDir.isEmpty()) {
-        main->logger->write("Repair backup: datadir unknown, cannot locate wallet.dat");
+    ezWalletBackupError.clear();
+    if (ezDataDir.isEmpty() || !ezRepairPathError.isEmpty()) {
+        ezWalletBackupError = QObject::tr("The configured wallet location could not be resolved.");
+        main->logger->write("Repair backup: cannot resolve wallet location: " + ezRepairPathError);
         return false;
     }
-
-    QDir dir = resolveDataSubdir();
-
-    QFile wallet(dir.filePath("wallet.dat"));
-    if (!wallet.exists()) {
-        // No wallet.dat means there is nothing to protect (e.g. a brand-new datadir
-        // that never finished its first run). Safe to proceed with the repair.
-        main->logger->write("Repair backup: no wallet.dat present; nothing to back up");
-        return true;
-    }
-
-    // Make sure we have room for the copy before attempting it.
-    if (!ensureEnoughDiskSpace(dir.absolutePath()))
-        return false;
-
-    QString stamp = QDateTime::currentDateTime().toString("yyyyMMdd-hhmmss");
-    QString backupPath = dir.filePath("wallet.dat.backup-" + stamp);
-
-    // Don't clobber an existing backup of the same second (extremely unlikely).
-    if (QFile::exists(backupPath)) {
-        main->logger->write("Repair backup: target already exists, aborting to avoid overwrite");
+    const QDir data = resolveDataSubdir();
+    if (!ensureEnoughDiskSpace(data.absolutePath())) {
+        ezWalletBackupError = QObject::tr("There is not enough free space for a safety backup.");
         return false;
     }
-
-    if (!wallet.copy(backupPath)) {
-        main->logger->write("Repair backup: copy failed: " + wallet.errorString());
+    const auto backup = WalletBackup::create(data, ezWalletFile);
+    if (!backup.success) {
+        ezWalletBackupError = backup.error;
+        main->logger->write("Repair backup: " + backup.error);
         return false;
     }
-
-    main->logger->write("Repair backup: wallet.dat copied to " + backupPath);
+    main->logger->write("Repair backup: verified private copy at " + backup.path);
     return true;
 }
-
 // ==================== SELF-HEAL ledger + edges (A-side) ====================
 
 // Per-edge bounded retry counters, persisted so they survive relaunches/crashes.
@@ -1601,23 +1551,15 @@ void ConnectionLoader::setHealInProgress(bool on) {
 // SAFETY GATE: positively confirm NO embedded daemon is alive before a destructive
 // heal mutates the datadir. There are two owners across the heal lifetime:
 //   - startup-failure path: THIS loader owns ezclassicd (already exited, but we
-//     terminate()/kill() + poll to be certain there is no zombie holding LevelDB);
+//     check its process state without interrupting outstanding database writes);
 //   - manual Help->Repair path: this loader is fresh (ezclassicd==nullptr) and the
 //     live node is owned by RPC, which mainwindow stopped first — re-confirm via
-//     rpc->confirmEmbeddedStopped() (which itself escalates terminate->kill).
+//     rpc->confirmEmbeddedStopped() (which never escalates to a forced stop).
 // Returns false if a live daemon can't be confirmed dead; the caller then ABORTS
 // the repair, leaving the datadir untouched, and tells the user to fully quit.
 bool ConnectionLoader::confirmDaemonDeadForRepair() {
     if (ezclassicd != nullptr) {
-        if (ezclassicd->state() != QProcess::NotRunning && ezclassicd->processId() != 0) {
-            ezclassicd->terminate();
-            ezclassicd->waitForFinished(5000);
-            if (ezclassicd->state() != QProcess::NotRunning) {
-                ezclassicd->kill();
-                ezclassicd->waitForFinished(5000);
-            }
-        }
-        return ezclassicd->state() == QProcess::NotRunning || ezclassicd->processId() == 0;
+        return repairProcessIsStopped(ezclassicd);
     }
 
     // No process owned by THIS loader. Defer to RPC for the EMBEDDED node it owns.
@@ -1839,8 +1781,7 @@ void ConnectionLoader::startManualRepair() {
     // the same way doAutoConnect does, since this loader is created cold.
     if (ezDataDir.isEmpty()) {
         auto config = autoDetectZClassicConf();
-        if (config && !config->zclassicDir.isEmpty())
-            ezDataDir = config->zclassicDir;
+        rememberRepairLocation(config);
     }
 
     d->show();
@@ -2902,7 +2843,12 @@ std::shared_ptr<ConnectionConfig> ConnectionLoader::autoDetectZClassicConf() {
         return nullptr;
     }
 
-    QTextStream in(&file);
+    QString configurationText = QString::fromUtf8(file.readAll());
+    const auto repairConfig = parseRepairConfig(configurationText);
+    if (!repairConfig.error.isEmpty()) {
+        confReadError = repairConfig.error;
+        return nullptr;
+    }
 
     auto zclassicconf = new ConnectionConfig();
     zclassicconf->host     = "127.0.0.1";
@@ -2913,42 +2859,22 @@ std::shared_ptr<ConnectionConfig> ConnectionLoader::autoDetectZClassicConf() {
 
     Settings::getInstance()->setUsingZClassicConf(confLocation);
 
-    while (!in.atEnd()) {
-        QString line = in.readLine();
-        auto s = line.indexOf("=");
-        QString name  = line.left(s).trimmed().toLower();
-        QString value = line.right(line.length() - s - 1).trimmed();
+    // Match the daemon's first-value-wins, case-sensitive config semantics.
+    // The repair path and RPC connection must select the same node settings.
+    zclassicconf->rpcuser = repairConfig.values.value("rpcuser");
+    zclassicconf->rpcpassword = repairConfig.values.value("rpcpassword");
+    zclassicconf->port = repairConfig.values.value("rpcport");
+    zclassicconf->proxy = repairConfig.values.value("proxy");
+    zclassicconf->zclassicDaemon = repairConfigBool(repairConfig.values.value("daemon", "0"));
+    zclassicconf->repairConfigError = repairConfig.error;
+    zclassicconf->dataDirOverride = repairConfig.values.value("datadir");
+    zclassicconf->testnet = repairConfigBool(repairConfig.values.value("testnet", "0"));
+    zclassicconf->regtest = repairConfigBool(repairConfig.values.value("regtest", "0"));
+    zclassicconf->walletFile = repairConfig.values.value("wallet", "wallet.dat");
 
-        if (name == "rpcuser") {
-            zclassicconf->rpcuser = value;
-        }
-        if (name == "rpcpassword") {
-            zclassicconf->rpcpassword = value;
-        }
-        if (name == "rpcport") {
-            zclassicconf->port = value;
-        }
-        if (name == "daemon" && value == "1") {
-            zclassicconf->zclassicDaemon = true;
-        }
-        if (name == "proxy") {
-            zclassicconf->proxy = value;
-        }
-        if (name == "datadir") {
-            // COOKIE-AUTH: a custom datadir= means the daemon's .cookie lives under
-            // THAT dir, not the conf's directory. Capture it so cookieFilePathForConf
-            // resolves the cookie (and the forced -rpccookiefile) correctly.
-            zclassicconf->dataDirOverride = value;
-        }
-        if (name == "testnet" &&
-            value == "1"  &&
-            zclassicconf->port.isEmpty()) {
-                zclassicconf->port = "18023";
-        }
-    }
-
-    // If rpcport is not in the file, and it was not set by the testnet=1 flag, then go to default
-    if (zclassicconf->port.isEmpty()) zclassicconf->port = "8023";
+    // Both non-mainnet networks use the daemon's 18023 default RPC port.
+    if (zclassicconf->port.isEmpty())
+        zclassicconf->port = (zclassicconf->testnet || zclassicconf->regtest) ? "18023" : "8023";
     file.close();
 
     // COOKIE-AUTH read (touch-point b). When the conf carries NO rpcpassword, the

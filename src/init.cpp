@@ -737,14 +737,10 @@ void ThreadNotifyRecentlyAdded()
 
 static bool check_file_hash(const std::string& path, const std::string& hash)
 {
-    FILE* file = fopen(path.c_str(), "rb");
-    if (!file){
-        LogPrintf("Cannot open file: %s\n", path);
-        uiInterface.ThreadSafeMessageBox(strprintf(
-            _("Cannot open file:\n"
-              "%s\n"),
-                path),
-            "", CClientUIInterface::MSG_ERROR);
+    std::string buff_hash, error;
+    if (!HashFileSHA256(path, buff_hash, error)) {
+        LogPrintf("%s\n", error);
+        uiInterface.ThreadSafeMessageBox(error, "", CClientUIInterface::MSG_ERROR);
         // NB: do NOT StartShutdown() here. check_file_hash() runs inside the
         // self-heal loop in InitSanityCheck(); returning false lets that loop
         // re-fetch the param from a bootstrap peer and re-verify. The caller
@@ -753,22 +749,6 @@ static bool check_file_hash(const std::string& path, const std::string& hash)
         // node would exit even after a successful self-heal (heals-then-exits).
         return false;
     }
-    // Hash in large blocks rather than 1 KiB at a time. The param files total
-    // ~1.69 GB; a 1024-byte buffer issues ~1.65M read() syscalls, each of which
-    // is ptrace-intercepted under proot, dominating cold start. A 256 KiB block
-    // feeds the SAME bytes in the SAME order to the SAME incremental SHA-256, so
-    // the resulting hash and the verification semantics are byte-for-byte
-    // identical; only the disk buffering changes. Heap-allocated to keep the
-    // stack small.
-    static const size_t kHashReadBufSize = 256 * 1024;
-    std::vector<char> buffer(kHashReadBufSize);
-    size_t size;
-    SHA256 buff;
-    while (!feof(file)){
-        size = fread(buffer.data(), 1, kHashReadBufSize, file);
-        buff.update(buffer.data(), size);
-    }
-    std::string buff_hash = buff.hash();
     LogPrintf("%s: %s\n", path, buff_hash);
     if(buff_hash != hash){
         uiInterface.ThreadSafeMessageBox(strprintf(
@@ -776,13 +756,11 @@ static bool check_file_hash(const std::string& path, const std::string& hash)
               "%s\n\n expecting:\n%s\n"),
                 path, buff_hash, hash),
             "", CClientUIInterface::MSG_ERROR);
-        // See the note in the fopen branch above: the caller (InitSanityCheck's
+        // See the failure path above: the caller (InitSanityCheck's
         // self-heal loop) owns the abort decision, so a corrupted-but-healable
         // param re-fetches and re-verifies instead of latching shutdown here.
-        fclose(file);
         return false;
     }
-    fclose(file);
     return true;
 }
 
@@ -1970,6 +1948,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 #ifndef WIN32
     CreatePidFile(GetPidFile(), getpid());
 #endif
+    // Never open a mixed database pair after an interrupted GUI repair.
+    const auto repairJournal = GetDataDir() / "chain-repair-pending.json";
+    if (boost::filesystem::exists(repairJournal) || boost::filesystem::is_symlink(repairJournal))
+        return InitError(_("An interrupted blockchain repair needs recovery. Open the ZClassic wallet to restore the previous chain before starting the node. Do not delete the repair journal or blockchain backups."));
     // if (GetBoolArg("-shrinkdebugfile", !fDebug))
     //     ShrinkDebugFile();
 
@@ -2424,6 +2406,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     // DBs but never synced — e.g. a prior interrupted bootstrap that
                     // then fell back to peerless P2P sync and hung at 0 blocks) is
                     // backed up by BootstrapDatadirEligible and counts as eligible.
+                    if (ShutdownRequested())
+                        return false;
                     if (explicit_peer)
                         return InitError(bootstrap_error);
                 }
@@ -2522,6 +2506,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                                       restore_err, genesisBackupDir.string());
                         genesisBackupDir.clear();
                     }
+                    if (ShutdownRequested())
+                        return false;
                     if (explicit_peer)
                         return InitError(bootstrap_error);
                     LogPrintf("Bootstrap snapshot unavailable; continuing with normal peer-to-peer sync: %s\n", bootstrap_error);
@@ -2546,6 +2532,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                                                              : "no bootstrap peers configured"));
         }
     }
+
+    // A cancelled download must not continue into database initialization.
+    // In particular, ActivateBestChain honors shutdown before activating
+    // genesis; rewind assumes that initialization produced an active chain.
+    if (ShutdownRequested())
+        return false;
 
     // Keep a persistent connection to the bootstrap peer(s) for ongoing peer
     // discovery. ZClassic's DNS seeds are unreliable and the compiled fixed-seed
@@ -2693,6 +2685,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     strLoadError = _("Error initializing block database");
                     break;
                 }
+                // Shutdown may also arrive while genesis is being initialized.
+                // Do not rewind or verify a chain whose activation was cancelled.
+                if (ShutdownRequested())
+                    return false;
 
                 // Check for changed -txindex state. Only treat it as a change
                 // when the user explicitly passed -txindex: the default flipped
@@ -3221,6 +3217,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             strErrors << "Failed to connect best block";
     }
     g_startupTimer.mark("activate best chain");
+
+    // A stop during replay is not permission to start new import/network work.
+    // A fatal activation error can also request shutdown: preserve its failure
+    // result rather than treating it as a successful user cancellation.
+    if (ShutdownRequested())
+        return strErrors.str().empty();
 
     std::vector<boost::filesystem::path> vImportFiles;
     if (mapArgs.count("-loadblock"))

@@ -1952,6 +1952,8 @@ TEST(WalletTests, ClearNoteWitnessCache) {
     noteData[jsoutpt] = nd;
     wtx.SetSproutNoteData(noteData);
     auto saplingNotes = SetSaplingNoteData(wtx);
+    // Query a second, unknown note as well, matching the Sprout fixture below.
+    saplingNotes.emplace_back(wtx.GetHash(), 1);
 
     // Pretend we mined the tx by adding a fake witness
     SproutMerkleTree sproutTree;
@@ -1972,6 +1974,8 @@ TEST(WalletTests, ClearNoteWitnessCache) {
 
     // Before clearing, we should have a witness for one note
     GetWitnessesAndAnchors(wallet, sproutNotes, saplingNotes, sproutWitnesses, saplingWitnesses);
+    ASSERT_EQ(2U, sproutWitnesses.size());
+    ASSERT_EQ(2U, saplingWitnesses.size());
     EXPECT_TRUE((bool) sproutWitnesses[0]);
     EXPECT_FALSE((bool) sproutWitnesses[1]);
     EXPECT_TRUE((bool) saplingWitnesses[0]);
@@ -1983,6 +1987,8 @@ TEST(WalletTests, ClearNoteWitnessCache) {
     // After clearing, we should not have a witness for either note
     wallet.ClearNoteWitnessCache();
     auto anchors2 = GetWitnessesAndAnchors(wallet, sproutNotes, saplingNotes, sproutWitnesses, saplingWitnesses);
+    ASSERT_EQ(2U, sproutWitnesses.size());
+    ASSERT_EQ(2U, saplingWitnesses.size());
     EXPECT_FALSE((bool) sproutWitnesses[0]);
     EXPECT_FALSE((bool) sproutWitnesses[1]);
     EXPECT_FALSE((bool) saplingWitnesses[0]);

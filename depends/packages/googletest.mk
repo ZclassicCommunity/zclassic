@@ -10,9 +10,11 @@ $(package)_cxxflags+=-std=c++11
 $(package)_cxxflags_linux=-fPIC
 endef
 
+# Google Mock exposes STL containers through header-defined mock objects. Keep
+# its debug iterator ABI identical to the test translation units.
 define $(package)_build_cmds
-  $(MAKE) -C googlemock/make CC="$($(package)_cc)" CXX="$($(package)_cxx)" AR="$($(package)_ar)" CXXFLAGS="$($(package)_cxxflags)" gmock.a && \
-  $(MAKE) -C googletest/make CC="$($(package)_cc)" CXX="$($(package)_cxx)" AR="$($(package)_ar)" CXXFLAGS="$($(package)_cxxflags)" gtest.a
+  $(MAKE) -C googlemock/make CC="$($(package)_cc)" CXX="$($(package)_cxx)" AR="$($(package)_ar)" CXXFLAGS="$($(package)_cxxflags) $($(package)_cppflags)" gmock.a && \
+  $(MAKE) -C googletest/make CC="$($(package)_cc)" CXX="$($(package)_cxx)" AR="$($(package)_ar)" CXXFLAGS="$($(package)_cxxflags) $($(package)_cppflags)" gtest.a
 endef
 
 define $(package)_stage_cmds

@@ -68,9 +68,19 @@ standard P2P port (mainnet 8033) with `-bootstrapserve` serves it. `-bootstrappe
 takes the serving node's `host[:port]` and defaults to the standard P2P port; pass an
 explicit `:port` only if a particular server runs its node on a non-standard port.
 
-The default fast-sync is best-effort: if no bootstrap peer is reachable the node
-silently falls back to Option A (normal sync from genesis), so a compromised or
-offline bootstrap peer can never *prevent* you from syncing trustlessly.
+The compiled mainnet snapshot endpoints are `74.50.74.102:8035` and
+`205.209.104.118:8035`. These are configured for separate snapshot-serving nodes;
+the ordinary P2P services on those hosts' port 8033 do not implement this legacy snapshot
+protocol. Keep the explicit port when selecting either snapshot service manually.
+This does not change the mainnet P2P default port or checkpoint validation.
+During beta11 qualification, the second mirror is still initializing and must
+pass snapshot verification and a public download test before release.
+
+The default fast-sync is best-effort: if the configured peers fail, the node
+reports that fast sync is unavailable and falls back to Option A (normal sync
+from genesis). An explicitly selected `-bootstrappeer` instead reports the
+failure and stops; remove that override to restore default peer selection, or
+use `-bootstrap=0` to request normal sync directly.
 
 ### Match the snapshot's `-txindex` setting
 
@@ -469,6 +479,17 @@ answers `getbspman`/`getbspchk` from its own params directory, subject to the
 same per-IP serve quota as snapshots.
 
 ## Serving Limits (Bandwidth Abuse)
+
+`-bootstrapservemaxtotalkbps=<n>` caps aggregate snapshot uploads across peers
+in **decimal Kbit/s**, not KiB/s. For example, `100000` allows approximately
+12.5 MB/s total before protocol overhead, shared by all downloading clients.
+`0` means unlimited. Size this limit to the host's available bandwidth; download
+streams share the same aggregate budget. A first chunk is allowed through each
+window to ensure progress, so very small caps have a chunk-sized minimum rate;
+the daemon warns at startup when the configured cap is below that floor.
+`-bootstrapservemaxpeers=<n>` additionally
+limits the number of actively served connections (`0` means unlimited).
+Whitelisted peers bypass these aggregate limits.
 
 A serving node caps how much one IP can download per rolling 24-hour window:
 

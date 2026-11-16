@@ -209,10 +209,12 @@ bool AppInit(int argc, char* argv[])
 
     if (!fRet)
     {
+        // Failed or cancelled initialization may already have started script
+        // checks and the scheduler. They must leave before Shutdown tears down
+        // shared state and before the stack-owned scheduler is destroyed.
+        StartShutdown();
         Interrupt(threadGroup);
-        // threadGroup.join_all(); was left out intentionally here, because we didn't re-test all of
-        // the startup-failure cases to make sure they don't result in a hang due to some
-        // thread-blocking-waiting-for-another-thread-during-startup case
+        threadGroup.join_all();
     } else {
         WaitForShutdown(&threadGroup);
     }

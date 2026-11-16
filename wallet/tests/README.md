@@ -71,3 +71,23 @@ logic, and `blocksDirSizeBytes` runs real recursive filesystem traversal over a
 throwaway org/app name, so `QSettings` and `SentTxStore` writes land in a
 sandbox (`~/.config/ZClassicTest`, `~/.local/share/ZClassicTest`) — never the
 real wallet profile or `~/.zclassic`. The suite cleans up after itself.
+
+## Windows headless widget tests with Qt 5.15.2
+
+The full `widget/tst_widget.pro` suite uses real wallet widgets. For static Qt,
+link the offscreen plugin with `QTPLUGIN+=qoffscreen`, then run with
+`QT_QPA_PLATFORM=offscreen` and `QT_QPA_FONTDIR=C:/Windows/Fonts`.
+
+Stock Qt 5.15.2 on Windows dereferences a null native platform interface in
+`qt_getWindowsSystemMenu()` when an offscreen `QMessageBox` opens. This is a
+headless Qt platform defect, not evidence that the native Windows wallet crashes.
+For this specific test environment, apply
+[`qt-5.15.2-windows-offscreen.patch`](qt-5.15.2-windows-offscreen.patch) to a
+dedicated Qt source/build tree and relink the test executable against its Widgets
+library. The patch returns no native system menu when no native interface exists;
+it leaves the message box and its confirmation buttons in place.
+
+Keep this test dependency separate from production Qt. Record the patch and Qt
+version with the results; do not describe a patched headless run as a native
+Windows desktop smoke test. The isolated patched-library run on Windows passed
+62 widget cases, with no failures and the existing warm-latency case deferred.

@@ -233,14 +233,12 @@ public:
 
         // Default NODE_BOOTSTRAP peers a fresh node fetches params and the chain
         // snapshot from. Overridable with -bootstrappeer, disable with -bootstrap=0.
-        // No explicit port -> the standard mainnet P2P port (nDefaultPort, 8033):
-        // the snapshot is served over the ordinary P2P connection (the new BS*
-        // messages in ProcessMessage), not a separate socket, so the serving node
-        // needs no dedicated port. DEPLOYMENT: the seed servers must listen on 8033
-        // for this to resolve; until they are moved off 8034, keep them reachable on
-        // 8033 (a node binding 8033 serves bootstrap to any standard-port client).
-        vBootstrapPeers.push_back("74.50.74.102");
-        vBootstrapPeers.push_back("205.209.104.118");
+        // These hosts run the legacy BS* snapshot service on a separate node
+        // listening on 8035. Their ordinary P2P nodes on 8033 do not serve this
+        // snapshot protocol. Keep the explicit service port here; nDefaultPort
+        // remains 8033 for ordinary block/header synchronization.
+        vBootstrapPeers.push_back("74.50.74.102:8035");
+        vBootstrapPeers.push_back("205.209.104.118:8035");
 
         // Founders reward script expects a vector of 2-of-3 multisig addresses
         vFoundersRewardAddress = {

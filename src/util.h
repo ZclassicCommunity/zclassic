@@ -122,6 +122,8 @@ const boost::filesystem::path &ZC_GetParamsDir();
 void PrintExceptionContinue(const std::exception *pex, const char* pszThread);
 void ParseParameters(int argc, const char*const argv[]);
 void FileCommit(FILE *fileout);
+/** Hash every byte through EOF; leave digest empty on any open/read error. */
+bool HashFileSHA256(const boost::filesystem::path& path, std::string& digest, std::string& error);
 bool TruncateFile(FILE *file, unsigned int length);
 int RaiseFileDescriptorLimit(int nMinFD);
 void AllocateFileRange(FILE *file, unsigned int offset, unsigned int length);

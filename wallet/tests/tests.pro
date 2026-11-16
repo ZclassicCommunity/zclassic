@@ -68,6 +68,6 @@ SOURCES += \
 
 # Static-Qt offscreen platform plugin import (no X server in the chroot).
 static {
-    win32: QTPLUGIN.platforms = qwindows
+    win32: QTPLUGIN.platforms = qwindows qoffscreen
     else: QTPLUGIN.platforms = qoffscreen
 }

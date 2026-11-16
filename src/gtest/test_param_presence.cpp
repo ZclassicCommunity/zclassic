@@ -6,6 +6,8 @@
 #include <string>
 #include <cstdint>
 #include "bootstrap.h"
+#include "sha256.h"
+#include "util.h"
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/stat.h>
@@ -154,4 +156,62 @@ TEST(ParamPresence, PresentDoesNotImplyHashValid) {
         ASSERT_TRUE(WriteSizedFile(dir / kParams[i].name, kParams[i].size));
     EXPECT_TRUE(ZcashParamsPresentInDir(dir)); // correct sizes, all-zero bytes
     boost::filesystem::remove_all(dir);
+}
+
+namespace {
+struct ParamHashDirectory {
+    boost::filesystem::path path = MakeTmpDir();
+    ~ParamHashDirectory() {
+        boost::system::error_code error;
+        boost::filesystem::remove_all(path, error);
+    }
+};
+}
+
+TEST(ParamHash, StandardVectorsAndLegacyBoundaryParity) {
+    ParamHashDirectory temporary;
+    const auto path = temporary.path / "payload";
+    const size_t sizes[] = {0, 1, 55, 56, 63, 64, 65, 255, 256, 257,
+                           262143, 262144, 262145, 524288};
+    for (const size_t size : sizes) {
+        SCOPED_TRACE(size);
+        std::string bytes(size, '\0');
+        for (size_t i = 0; i < size; ++i) bytes[i] = static_cast<char>((i * 17 + 31) & 255);
+        boost::filesystem::ofstream file(path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.is_open());
+        file.write(bytes.data(), bytes.size());
+        file.close();
+        ASSERT_FALSE(file.fail());
+        std::string digest, error;
+        ASSERT_TRUE(HashFileSHA256(path, digest, error)) << error;
+        EXPECT_TRUE(error.empty());
+        EXPECT_EQ(SHA256::hashString(bytes), digest);
+        if (size == 0) EXPECT_EQ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", digest);
+    }
+    boost::filesystem::ofstream file(path, std::ios::binary | std::ios::trunc);
+    file << "abc";
+    file.close();
+    ASSERT_FALSE(file.fail());
+    std::string digest, error;
+    ASSERT_TRUE(HashFileSHA256(path, digest, error)) << error;
+    EXPECT_EQ("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", digest);
+}
+
+TEST(ParamHash, OpenAndReadFailuresDoNotReturnADigest) {
+    ParamHashDirectory temporary;
+    std::string digest = "stale", error = "stale";
+    EXPECT_FALSE(HashFileSHA256(temporary.path / "missing", digest, error));
+    EXPECT_TRUE(digest.empty());
+    EXPECT_FALSE(error.empty());
+#ifdef HAVE_POSIX_STAT
+    // POSIX can open a directory as a read stream, but fread fails with EISDIR.
+    // Exercise that error separately from an fopen failure; it must not spin.
+    FILE* directory = fopen(temporary.path.string().c_str(), "rb");
+    ASSERT_NE(nullptr, directory);
+    fclose(directory);
+    digest = "stale";
+    EXPECT_FALSE(HashFileSHA256(temporary.path, digest, error));
+    EXPECT_TRUE(digest.empty());
+    EXPECT_NE(std::string::npos, error.find("Error reading"));
+#endif
 }
