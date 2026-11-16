@@ -48,8 +48,12 @@ Failed initialization also interrupts and joins worker threads before destroying
 the scheduler and shared state. Isolated Windows and Linux startup-failure tests
 exercise this teardown, including failure after workers have started.
 
-Parameter-file integrity checks now reuse the backend's existing SHA-256
-implementation, retaining the same mandatory digests and bounded read buffers.
+Parameter-file integrity checks use the backend's existing SHA-256 implementation
+on Linux/Windows and Apple's system SHA-256 acceleration on macOS, retaining the
+same mandatory digests and bounded read buffers. The Mac path adds no third-party
+runtime dependency. Native standard-vector, legacy boundary-parity and read-error
+tests passed, as did all six real-backend wallet protection checks on Windows and
+macOS. The Mac checks retain their existing startup time limits.
 Read errors fail verification instead of repeatedly reading a failed stream.
 Boundary-vector and read-error tests cover this file-hashing path; block, proof
 and transaction hashing are unchanged.
