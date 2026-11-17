@@ -158,7 +158,7 @@ bool AppInit(int argc, char* argv[])
                  _("- Source code:  %s\n"
                    "- .deb package: %s\n")).c_str(),
                 GetConfigFile().string().c_str(),
-                "contrib/debian/examples/zclassic.conf",
+                "contrib/examples/zclassic.conf",
                 "/usr/share/doc/zcash/examples/zclassic.conf");
             return false;
         } catch (const std::exception& e) {

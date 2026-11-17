@@ -26,7 +26,7 @@ THE SOFTWARE.
 The MIT software license (http://www.opensource.org/licenses/mit-license.php)
 above applies to the code directly included in this source distribution.
 Dependencies downloaded as part of the build process may be covered by other
-open-source licenses. For further details see 'contrib/debian/copyright'.
+open-source licenses. For further details see 'THIRD-PARTY-LICENSES'.
 
 
 This product includes software developed by the OpenSSL Project for use in the
