@@ -2,10 +2,13 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include "bootstrap.h"
 #include "main.h"
 #include "test/test_bitcoin.h"
 
 #include <string>
+
+#include <boost/filesystem.hpp>
 
 #include <boost/test/unit_test.hpp>
 
@@ -39,6 +42,24 @@ BOOST_AUTO_TEST_CASE(sync_phase_classification)
     // Reindex and import override.
     BOOST_CHECK_EQUAL(std::string(ClassifySyncPhase(true, true, false, 0, 100, 100)), "reindexing");
     BOOST_CHECK_EQUAL(std::string(ClassifySyncPhase(true, false, true, 0, 100, 100)), "importing");
+}
+
+// An interrupted snapshot download used to leave its staging directory (up to the full snapshot size)
+// in the datadir forever.
+BOOST_AUTO_TEST_CASE(stale_bootstrap_staging_removed)
+{
+    const boost::filesystem::path dir = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("z23-staging-%%%%-%%%%");
+    boost::filesystem::create_directories(dir / "bootstrap-peer-staging-100" / "blocks");
+    boost::filesystem::create_directories(dir / "bootstrap-peer-staging-200" / "chainstate");
+    boost::filesystem::create_directories(dir / "blocks");
+    boost::filesystem::create_directories(dir / "bootstrap-import-300");
+    BOOST_CHECK_EQUAL(RemoveStaleBootstrapStaging(dir), (size_t)2);
+    BOOST_CHECK(!boost::filesystem::exists(dir / "bootstrap-peer-staging-100"));
+    BOOST_CHECK(!boost::filesystem::exists(dir / "bootstrap-peer-staging-200"));
+    BOOST_CHECK(boost::filesystem::exists(dir / "blocks"));
+    BOOST_CHECK(boost::filesystem::exists(dir / "bootstrap-import-300"));
+    BOOST_CHECK_EQUAL(RemoveStaleBootstrapStaging(dir), (size_t)0);
+    boost::filesystem::remove_all(dir);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

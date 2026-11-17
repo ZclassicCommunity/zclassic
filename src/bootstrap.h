@@ -45,6 +45,11 @@ static const int64_t BOOTSTRAP_SERVE_DEFAULT_THROTTLE_KBPS = 1024;              
 
 bool BootstrapSnapshotPathsExist(const boost::filesystem::path& root);
 bool IsBootstrapFreshChainDatadir(const boost::filesystem::path& data_dir, std::string& error);
+
+/** Remove leftover bootstrap-peer-staging-* directories (an interrupted or killed snapshot download
+ *  leaves up to the whole snapshot size behind; the next attempt always starts a new directory).
+ *  Returns the number of directories removed. */
+size_t RemoveStaleBootstrapStaging(const boost::filesystem::path& data_dir);
 // True if the datadir holds only a genesis-height chainstate (initialized but
 // never synced past genesis); such a datadir carries no real chain.
 bool IsGenesisOnlyChainDatadir(const boost::filesystem::path& data_dir, std::string& error);

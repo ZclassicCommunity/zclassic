@@ -3222,6 +3222,26 @@ bool ProvisionalAcceptTrustlessSnapshot(const boost::filesystem::path& data_dir,
     return true;
 }
 
+size_t RemoveStaleBootstrapStaging(const boost::filesystem::path& data_dir)
+{
+    size_t removed = 0;
+    boost::system::error_code ec;
+    for (boost::filesystem::directory_iterator it(data_dir, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        if (name.compare(0, 23, "bootstrap-peer-staging-") != 0)
+            continue;
+        boost::system::error_code rmec;
+        boost::filesystem::remove_all(it->path(), rmec);
+        if (rmec) {
+            LogPrintf("Bootstrap: could not remove stale staging directory %s: %s\n", it->path().string(), rmec.message());
+            continue;
+        }
+        LogPrintf("Bootstrap: removed stale staging directory %s from an interrupted snapshot download\n", name);
+        ++removed;
+    }
+    return removed;
+}
+
 bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& data_dir, std::string& error)
 {
     if (!IsBootstrapFreshChainDatadir(data_dir, error)) {
@@ -3241,6 +3261,7 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
         return false;
     }
 
+    RemoveStaleBootstrapStaging(data_dir);
     const boost::filesystem::path staging = data_dir / strprintf("bootstrap-peer-staging-%d", GetTime());
     try {
         boost::filesystem::remove_all(staging);
