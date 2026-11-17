@@ -1,0 +1,180 @@
+# ZSLP token index
+
+zclassicd can index ZSLP tokens (SLP Token Type 1) and answer questions about them:
+which tokens exist, who holds how much, what a transaction did to the tokens. It is
+**read-only**: it never touches consensus, never signs, never writes `wallet.dat`, and
+never sends a token. It is **off by default**.
+
+The rules that decide whether a token transaction is valid come from Z23, the owner's
+C23 ZClassic node, which is also what the ZSLP tokens on mainnet were made with.
+
+## Turn it on
+
+```
+zclassicd -zslpindex=1
+```
+
+or `zslpindex=1` in `zclassic.conf`. On the first start the index is built from the
+chain in a background thread; the node syncs, mines and serves RPC meanwhile.
+`zslp_getindexinfo` shows progress. The index lives in `<datadir>/zslpindex` (LevelDB).
+Deleting that directory while the node is stopped makes it rebuild from the chain.
+Nothing else is touched.
+
+| option | meaning |
+|---|---|
+| `-zslpindex=<0\|1>` | maintain the index (default 0) |
+| `-zslpindexstart=<n>` | first block the index reads (default: the first block with a ZSLP transaction on mainnet, 0 on testnet and regtest) |
+
+Needs the full block files: it is refused together with `-prune`. If a block file has
+been pruned away or is damaged the index says so (`error` in `zslp_getindexinfo`) and
+waits; it does not guess.
+
+With the flag off, the seven RPC commands below exist and answer
+`The ZSLP token index is disabled...`; the daemon does nothing else differently, and no
+`zslpindex` directory is created. The GUI (`wallet/`) shows a **Tokens** view only when
+the daemon reports the index as enabled.
+
+## What is indexed
+
+Every connected block. For each transaction the index looks at the first output whose
+script starts with `OP_RETURN` (on mainnet that is always `vout[0]`; the wallet's token
+guard reads the same output) and parses it with Z23's own SLP parser:
+
+| message | token outputs |
+|---|---|
+| GENESIS | `vout[1]` carries the initial quantity, `vout[mint_baton_vout]` the mint baton |
+| MINT | `vout[1]` the new quantity, `vout[mint_baton_vout]` the new baton |
+| SEND | quantity `i` rides on `vout[i+1]` (up to 19) |
+
+A message is **valid** by Z23's rules (`zslp_validity.c`), reason codes included:
+
+- GENESIS: the outputs it names exist. A quantity above 2^63-1 is *unknown*
+  (`quantity_unrepresentable`), not valid, and creates no token.
+- MINT: exactly one unspent mint baton of that token among the inputs, no invalid or
+  unknown parent of the same token.
+- SEND: at least one input token of that token, none of another token, every nonzero
+  output exists, and the outputs add up to no more than the inputs. The difference is
+  burned. The sums are exact 64-bit integers; a sum above 2^64-1 is invalid
+  (`output_quantity_overflow`), above 2^63-1 unknown.
+- Any other transaction that spends a token or baton output burns it. Invalid and
+  unknown token transactions create no token outputs and burn their token inputs.
+
+Three states: `valid`, `invalid`, `unknown`. `unknown` means the rules cannot decide
+(an amount that does not fit a signed 64-bit number, or a parent that is itself
+unknown); it is never silently turned into valid or invalid.
+
+Per token: ticker, name, document URI and hash, decimals, genesis height, minted supply,
+burned supply (in SENDs, and by spending), circulating supply, the mint baton location.
+Per output: token, amount, holder. Per address: token balances. Per transaction: type,
+validity, reason, and the token outputs it spent and created.
+
+### Amounts
+
+Always **decimal strings** with the token's decimals (`"1000.00"`, `"9223372036854775807"`),
+computed from 64-bit integers. Never floating point, in the daemon or in the GUI.
+
+### Reorgs and crashes
+
+Every block is applied as one atomic LevelDB batch containing the changes, an undo
+record and the new best block hash. A crash (including `kill -9`) leaves the index at
+a block boundary. A reorg disconnects blocks one at a time by replaying the undo records
+and returns the **exact** prior state; the worker compares its own best block with the
+active chain on every step, so a missed or coalesced notification, a restart, or a
+`-reindex` cannot leave it wrong. (Z23's own overlay tables do not unwind on a reorg;
+this index does.)
+
+### Holders
+
+`P2PKH` and `P2PK` outputs are held by the public-key hash, `P2SH` by the script hash
+(both shown as ordinary addresses); any other script is shown as `script:<hash160>`.
+
+## RPC reference
+
+All amounts are strings. All commands are read-only and need `-zslpindex=1`.
+
+| command | result |
+|---|---|
+| `zslp_getindexinfo` | `enabled`, `running`, `synced`, `startheight`, `indexedheight`, `indexedblock`, `chainheight`, `progress` (0..1), `error`, `tokens`, `validtransactions`, `invalidtransactions`, `unknowntransactions`, `burntransactions`, `unspentoutputs`, `genesismessages`, `mintmessages`, `sendmessages` (every parsed SLP message, valid or not), `unrepresentablequantities` (unknown: a quantity or sum above 2^63-1), `overflowingquantities` (invalid: a sum above 2^64-1) |
+| `zslp_listtokens ( skip count )` | array of token objects ordered by token id (count 1..1000, default 100) |
+| `zslp_gettoken "tokenid" ( holders )` | one token: `tokenid`, `ticker`, `name`, `decimals`, `documenturi`, `documenthash`, `genesisheight`, `totalminted`, `totalburned`, `burnedinsends`, `burnedbyspending`, `circulating`, `supplyoverflow`, `mintbaton`, `transactions`, and up to `holders` (max 1000) `{address, amount}` |
+| `zslp_listtransactions "tokenid" ( skip count )` | the SLP transactions that name a token, valid or not, oldest first: `[{txid, height, type, validity}]` (count 1..1000, default 100) |
+| `zslp_getbalances "address"` | `{address, synced, balances:[{tokenid, ticker, decimals, amount}]}` |
+| `zslp_gettransaction "txid"` | `type` (GENESIS, MINT, SEND, or NONE for an ordinary transaction that burned tokens), `validity` (`valid`, `invalid`, `unknown`, `burn`), `reason`, `tokenid`, `height`, `inputamount`, `outputamount`, `mintedamount`, `burnedamount`, `inputs`, `outputs` |
+| `zslp_listunspent ( minconf )` | the wallet's token outputs and batons: `{synced, outputs:[{txid, vout, address, tokenid, ticker, decimals, role, amount, confirmations, protected}], balances:[...]}` |
+
+The token id is the GENESIS txid. The three existing token-guard behaviours are
+unchanged: `listunspent` marks token outputs `tokenbearing`, and the wallet never uses
+them as ordinary funds (see `src/c23/services/README.md`).
+
+## GUI
+
+When the daemon reports the index as enabled, the wallet shows a **Tokens** button in the
+left rail. It opens a read-only window with the wallet's token balances and token
+outputs, the index status, and a plain statement that those coins are protected from
+ordinary spending and that sending tokens is not available yet. With the index off the
+button is not there.
+
+## Provenance, in three layers
+
+| layer | what | where |
+|---|---|---|
+| **verbatim Z23** | the SLP wire parser and its codec, byte-identical, hashes pinned | `src/c23/services/vendor/**`, `Z23_SOURCE.tsv` |
+| **glue (C)** | `zcl_slp_parse_message` forwards to the vendored parser. `zcl_slp_evaluate` carries the *decision rules* of Z23's `contexts/market/models/src/zslp_validity.c` (`validity_inputs_total`, `validity_validate_genesis/_mint/_send`, `validate_message`) with the SQLite reads and writes taken out; the reason strings are Z23's. This is a port, not a copy: Z23's file is welded to its SQL tables and cannot be vendored as it is | `src/c23/services/glue/zcl_slp_index.{h,c}` |
+| **new C++** | the store, the per-block undo, the chain follower, the RPC | `src/zslp/`, `src/rpc/zslp.cpp`, `wallet/src/tokens*.{h,cpp}` |
+
+Differences from Z23 that are on purpose: the ancestry walk (depth 256, 1024
+transactions) is not needed because blocks are applied in order and every parent is
+settled before its child; Z23's input limit (4096 inputs per transaction) is not
+applied; and a spend by an *ordinary* transaction is recorded as a burn and counted.
+
+Licence: Z23 files are Apache-2.0 (`src/c23/services/NOTICE`, `LICENSE.z23`); the rest is
+MIT as zclassicd.
+
+## Limits
+
+- Token Type 1 only. NFT types (65, 129), ZNAM and messaging are not indexed.
+- Transparent outputs only. Shielded transactions never carry ZSLP tokens.
+- Read-only: no token creation, sending, minting or burning from the daemon or the GUI.
+  `createrawtransaction` and `signrawtransaction` remain the only way, as before.
+- Not compatible with `-prune`.
+- The index trusts the node's own chain. It is a convenience view, not a proof: verify a
+  token that matters against the chain.
+- If a message is not at the first `OP_RETURN` output the answer follows that output;
+  Z23's wallet code reads `vout[0]`. On mainnet the two are the same.
+
+## Mainnet check
+
+Measured on a copy of a full-history mainnet datadir (3,322,991 blocks, the copy had no peers
+and no wallet) with `qa/zslp/mainnet_crosscheck.sh`:
+
+| | |
+|---|---|
+| build from block 0 | 330 s (about 10,000 blocks/s, on a shared build host) |
+| build from block 650,000 (the default) | 150 s; identical counters, tokens and transactions |
+| size of `<datadir>/zslpindex` | 15 MB |
+| SLP messages | 874 GENESIS, 34 MINT, 3,394 SEND = **4,302**, the same numbers as the census of the chain made before this work |
+| valid / invalid / unknown | 4,273 / 0 / 29 |
+| unknown | all 29 are `quantity_unrepresentable`: a quantity or sum of 2^63 or more (21 GENESIS, 8 SEND). That is the 29 transactions the census found with a quantity of 2^63 or more |
+| zero-quantity messages | 2 (one GENESIS and one MINT of 0 units), both valid, as in the census |
+| tokens (valid GENESIS) | 853 (the 21 other GENESIS are unknown, so they make no token) |
+| ordinary transactions that burned token outputs | 56 |
+| unspent token and baton outputs | 3,849 |
+| first ZSLP message | block 652,947, a GENESIS |
+
+There is no invalid ZSLP transaction on mainnet under these rules. Z23's own answer for
+the same tokens could not be compared: the Z23 node reachable for this work had no ZSLP
+rows (its `zslp_listtokens` returns an empty list), so the comparison is with the counts
+of the chain, not with another implementation. `src/test/data/zslp_mainnet.json` pins real
+transactions of eight tokens and what the index answered on the whole chain.
+
+## Tests
+
+```
+make -C src test/test_bitcoin && src/test/test_bitcoin --run_test=zslp_tests    # rules, undo, atomicity, 2^63
+sh qa/rpc-tests/zslp_index.sh src                                               # regtest end to end
+BASELINE_SRC=<unmodified build dir> sh qa/rpc-tests/zslp_index.sh src           # also: flag-off RPC list
+cd wallet/tests && qmake tokens.pro && make && QT_QPA_PLATFORM=offscreen ./tst_tokens   # GUI logic
+```
+
+`-zslpindexdelayms=<n>` (hidden, test aid only) slows the worker so a test can
+interrupt it mid-build.
