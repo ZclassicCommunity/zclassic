@@ -16,14 +16,20 @@
 static int zcl_c23_cpu_advertises_sha(void)
 {
     unsigned int a = 0, b = 0, c = 0, d = 0;
+    unsigned int l1c = 0;
     __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
     if (a < 7)
         return 0;
+    a = 1;
+    c = 0;
+    __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+    l1c = c;
     a = 7;
     c = 0;
     __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
     (void)d;
-    return (int)((b >> 29) & 1u);
+    /* Same predicate as the vendored probe: SHA plus SSSE3 and SSE4.1. */
+    return (int)sha256_cpuid_allows_shani(l1c, b);
 }
 #endif
 
