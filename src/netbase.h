@@ -203,6 +203,15 @@ bool GetProxy(enum Network net, proxyType &proxyInfoOut);
 bool IsProxy(const CNetAddr &addr);
 bool SetNameProxy(const proxyType &addrProxy);
 bool HaveNameProxy();
+/**
+ * Proxy-only mode (off by default; turned on only for an onion-only
+ * -embeddedtor node): ConnectSocket() refuses to dial a non-loopback address
+ * directly when its network has no proxy, instead of falling back to a direct
+ * connection. Unroutable addresses (RFC1918, TEST-NET, ...) have no network
+ * and therefore never a proxy.
+ */
+void SetProxyOnly(bool fProxyOnly);
+bool IsProxyOnly();
 bool LookupHost(const char *pszName, std::vector<CNetAddr>& vIP, unsigned int nMaxSolutions = 0, bool fAllowLookup = true);
 bool Lookup(const char *pszName, CService& addr, int portDefault = 0, bool fAllowLookup = true);
 bool Lookup(const char *pszName, std::vector<CService>& vAddr, int portDefault = 0, bool fAllowLookup = true, unsigned int nMaxSolutions = 0);

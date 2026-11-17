@@ -8,7 +8,9 @@
 
 #include "embeddedtor.h"
 #include "c23/tor/keyfile.h"
+#include "netbase.h"
 #include "test/test_bitcoin.h"
+#include "utiltime.h"
 #include "util.h"
 
 #include <string>
@@ -85,6 +87,77 @@ BOOST_AUTO_TEST_CASE(embeddedtor_options)
     BOOST_CHECK(!err.empty());
     BOOST_CHECK(!EmbeddedTorRunning());
 #endif
+}
+
+BOOST_AUTO_TEST_CASE(embeddedtor_not_running_state)
+{
+    // Nothing started: no cookie path to trust, and not alive. The watchdog
+    // and the control client key off these.
+    BOOST_CHECK(EmbeddedTorCookiePath().empty());
+    BOOST_CHECK(!EmbeddedTorAlive());
+    StopEmbeddedTor();
+    BOOST_CHECK(EmbeddedTorCookiePath().empty());
+    BOOST_CHECK(!EmbeddedTorAlive());
+}
+
+BOOST_AUTO_TEST_CASE(proxy_only_refuses_direct_dial)
+{
+    // Off by default: nothing changes for a node without onion-only Tor.
+    BOOST_CHECK(!IsProxyOnly());
+
+    // On: an address with no proxy for its network is not dialled at all
+    // (TEST-NET-1 is unroutable, so it never has a proxy), and the call
+    // returns at once instead of after a connect timeout.
+    SetProxyOnly(true);
+    SOCKET s = INVALID_SOCKET;
+    bool fProxyFailed = true;
+    int64_t nStart = GetTimeMillis();
+    BOOST_CHECK(!ConnectSocket(CService("192.0.2.1", 8033), s, 5000, &fProxyFailed));
+    BOOST_CHECK(s == INVALID_SOCKET);
+    BOOST_CHECK(!fProxyFailed);
+    BOOST_CHECK(GetTimeMillis() - nStart < 1000);
+    BOOST_CHECK(!ConnectSocket(CService("10.1.2.3", 8033), s, 5000));
+    BOOST_CHECK(s == INVALID_SOCKET);
+    SetProxyOnly(false);
+    BOOST_CHECK(!IsProxyOnly());
+}
+
+BOOST_AUTO_TEST_CASE(embeddedtor_onion_only_requested)
+{
+    std::map<std::string, std::string> savedArgs = mapArgs;
+    std::map<std::string, std::vector<std::string> > savedMulti = mapMultiArgs;
+    mapArgs.erase("-embeddedtor");
+    mapArgs.erase("-onlynet");
+    mapMultiArgs.erase("-onlynet");
+
+    // No -embeddedtor: never, whatever -onlynet says.
+    mapArgs["-onlynet"] = "onion";
+    mapMultiArgs["-onlynet"] = std::vector<std::string>(1, "onion");
+    BOOST_CHECK(!EmbeddedTorOnionOnlyRequested());
+    mapArgs["-embeddedtor"] = "0";
+    BOOST_CHECK(!EmbeddedTorOnionOnlyRequested());
+
+    // -embeddedtor with onion only (any spelling ParseNetwork accepts).
+    mapArgs["-embeddedtor"] = "1";
+    BOOST_CHECK(EmbeddedTorOnionOnlyRequested());
+    mapMultiArgs["-onlynet"] = std::vector<std::string>(1, "tor");
+    BOOST_CHECK(EmbeddedTorOnionOnlyRequested());
+    mapMultiArgs["-onlynet"] = std::vector<std::string>(1, "ONION");
+    BOOST_CHECK(EmbeddedTorOnionOnlyRequested());
+
+    // Any clearnet network in the list: not onion-only.
+    mapMultiArgs["-onlynet"].push_back("ipv4");
+    BOOST_CHECK(!EmbeddedTorOnionOnlyRequested());
+    mapMultiArgs["-onlynet"] = std::vector<std::string>(1, "ipv6");
+    BOOST_CHECK(!EmbeddedTorOnionOnlyRequested());
+
+    // -embeddedtor without -onlynet: a clearnet node that also uses Tor.
+    mapArgs.erase("-onlynet");
+    mapMultiArgs.erase("-onlynet");
+    BOOST_CHECK(!EmbeddedTorOnionOnlyRequested());
+
+    mapArgs = savedArgs;
+    mapMultiArgs = savedMulti;
 }
 
 #ifndef WIN32

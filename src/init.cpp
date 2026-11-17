@@ -1182,6 +1182,15 @@ static void InterruptBootstrapServeFreeze()
  *  Ensure that Bitcoin is running in a usable environment with all
  *  necessary library support.
  */
+/** Scheduled every few seconds while -embeddedtor is on (see Step 6). */
+static void EmbeddedTorWatchdog()
+{
+    if (ShutdownRequested() || !EmbeddedTorRunning() || EmbeddedTorAlive())
+        return;
+    LogPrintf("tor: the embedded Tor has exited; shutting down (-embeddedtor never continues without Tor)\n");
+    StartShutdown();
+}
+
 bool InitSanityCheck(void)
 {
 
@@ -1204,7 +1213,13 @@ bool InitSanityCheck(void)
     // once before use. A corrupted-but-correct-size param slips past this gate
     // but is caught by that loop, which then re-fetches (self-heal) before
     // failing.
-    if (!ZcashParamsPresent() && GetBoolArg("-bootstrap", true)) {
+    // An onion-only -embeddedtor node never fetches here: this runs before
+    // Step 6 starts Tor and sets the proxies, so the fetch would dial the
+    // bootstrap peers over clearnet.
+    const bool fParamFetchAllowed = GetBoolArg("-bootstrap", true) && !EmbeddedTorOnionOnlyRequested();
+    if (!ZcashParamsPresent() && GetBoolArg("-bootstrap", true) && !fParamFetchAllowed)
+        LogPrintf("Zcash parameters are missing; not fetching them from a bootstrap peer before the embedded Tor is up (-onlynet without ipv4/ipv6)\n");
+    if (!ZcashParamsPresent() && fParamFetchAllowed) {
         std::string paramError = "no bootstrap peer configured";
         BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
             fprintf(stdout, "Fetching Zcash parameters from peer %s...\n", peer.c_str());
@@ -1305,7 +1320,7 @@ bool InitSanityCheck(void)
         if (!check_file_hash(path.string(), spec.sha256hex)) {
             // A present, correct-size, but wrong-hash (corrupted/forged) file.
             // Self-heal once via the bootstrap-peer fetch, then re-verify.
-            if (!fParamRefetched && GetBoolArg("-bootstrap", true)) {
+            if (!fParamRefetched && fParamFetchAllowed) {
                 fParamRefetched = true;
                 std::string paramError = "no bootstrap peer configured";
                 BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
@@ -2162,8 +2177,33 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             // (DNS seeds, -addnode, -seednode, -connect) must never reach the
             // system resolver. Hand them to Tor instead.
             SetNameProxy(addrEmbedded);
-            LogPrintf("tor: onion-only node, host names are resolved by the embedded Tor\n");
+            // Literal IPv4/IPv6 destinations do not use the name proxy:
+            // ConnectSocket() dials them directly unless their network has a
+            // proxy, and -onlynet does not stop it. Those are -addnode,
+            // -connect and -seednode given as addresses, the compiled
+            // bootstrap peers init adds as -addnode on every start, and the
+            // bootstrap snapshot download. Send them through Tor as well,
+            // the same as -proxy does.
+            SetProxy(NET_IPV4, addrEmbedded);
+            SetProxy(NET_IPV6, addrEmbedded);
+            // Addresses with no network (private ranges, TEST-NET, ...) have
+            // no proxy and would still be dialled directly: refuse those.
+            SetProxyOnly(true);
+            LogPrintf("tor: onion-only node, host names and IP destinations go through the embedded Tor\n");
+            // Without -bind the P2P port listens on every interface, and a
+            // clearnet peer that connects in is sent this node's onion
+            // address (version addrMe, addr relay), tying the two together.
+            // Tor reaches the port on loopback, so listen only there.
+            if (!mapArgs.count("-bind") && !mapArgs.count("-whitebind")) {
+                mapArgs["-bind"] = "127.0.0.1";
+                mapMultiArgs["-bind"].push_back("127.0.0.1");
+                LogPrintf("tor: onion-only node without -bind, listening on 127.0.0.1 only\n");
+            }
         }
+        // A node that asked for Tor never continues without it: if Tor exits
+        // on its own, shut down instead of leaving its loopback ports free
+        // for another local process to take over.
+        scheduler.scheduleEvery(&EmbeddedTorWatchdog, 5);
     }
 
     // see Step 2: parameter interactions for more information about these

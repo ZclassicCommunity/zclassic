@@ -60,4 +60,21 @@ uint16_t EmbeddedTorSocksPort();
 /** Loopback control port of the running instance, 0 when not running. */
 uint16_t EmbeddedTorControlPort();
 
+/** Control cookie file of the running instance, empty when not running. */
+std::string EmbeddedTorCookiePath();
+
+/**
+ * True while the started Tor is still running. False when it was never
+ * started, was stopped, or has exited (thread returned or child process
+ * gone) on its own.
+ */
+bool EmbeddedTorAlive();
+
+/**
+ * True when the arguments ask for an onion-only node with the embedded Tor:
+ * -embeddedtor=1 and an -onlynet list that names neither ipv4 nor ipv6. Such
+ * a node must not open a clearnet connection, also not before Tor is up.
+ */
+bool EmbeddedTorOnionOnlyRequested();
+
 #endif // ZCLASSIC_EMBEDDEDTOR_H

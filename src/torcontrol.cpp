@@ -756,12 +756,27 @@ void TorController::protocolinfo_cb(TorControlConnection& conn, const TorControl
         BOOST_FOREACH(const std::string &s, methods) {
             LogPrint("tor", "tor: Supported authentication method: %s\n", s);
         }
+        std::string torpassword = GetArg("-torpassword", "");
+        if (!mapArgs.count("-torcontrol") && EmbeddedTorRunning()) {
+            // The embedded Tor offers SAFECOOKIE with the cookie file init
+            // configured. Anything else answering on its control port (a
+            // local process that took the port after Tor went away) offering
+            // NULL auth or a cookie file of its choosing would pass the
+            // checks below and then be sent ADD_ONION with our onion key.
+            const std::string expected = EmbeddedTorCookiePath();
+            if (!methods.count("SAFECOOKIE") || expected.empty() || cookiefile != expected) {
+                LogPrintf("tor: Control port %s does not offer SAFECOOKIE with the embedded Tor's cookie file; not authenticating\n", target);
+                return;
+            }
+            methods.clear();
+            methods.insert("SAFECOOKIE");
+            torpassword.clear();
+        }
         // Prefer NULL, otherwise SAFECOOKIE. If a password is provided, use HASHEDPASSWORD
         /* Authentication:
          *   cookie:   hex-encoded ~/.tor/control_auth_cookie
          *   password: "password"
          */
-        std::string torpassword = GetArg("-torpassword", "");
         if (!torpassword.empty()) {
             if (methods.count("HASHEDPASSWORD")) {
                 LogPrint("tor", "tor: Using HASHEDPASSWORD authentication\n");

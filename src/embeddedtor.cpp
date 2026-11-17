@@ -9,14 +9,32 @@
 #include "embeddedtor.h"
 
 #include "httpserver.h"
+#include "netbase.h"
 #include "sync.h"
 #include "util.h"
+
+#include <boost/foreach.hpp>
 
 #ifdef ENABLE_EMBEDDED_TOR
 #include "c23/tor/zcl_tor_embed.h"
 #endif
 
 const char* const DEFAULT_EMBEDDED_TOR_MODE = "inprocess";
+
+bool EmbeddedTorOnionOnlyRequested()
+{
+    if (!GetBoolArg("-embeddedtor", DEFAULT_EMBEDDED_TOR))
+        return false;
+    std::map<std::string, std::vector<std::string> >::const_iterator it = mapMultiArgs.find("-onlynet");
+    if (it == mapMultiArgs.end() || it->second.empty())
+        return false;
+    BOOST_FOREACH(const std::string& snet, it->second) {
+        enum Network net = ParseNetwork(snet);
+        if (net == NET_IPV4 || net == NET_IPV6)
+            return false;
+    }
+    return true;
+}
 
 bool ParseEmbeddedTorMode(const std::string& str, EmbeddedTorMode& mode)
 {
@@ -37,6 +55,7 @@ static CCriticalSection cs_embeddedTor;
 static zcl_tor_embed* g_embeddedTor = NULL;
 static uint16_t g_socksPort = 0;
 static uint16_t g_controlPort = 0;
+static std::string g_cookiePath;
 static bool g_inProcess = false;
 
 bool EmbeddedTorAvailable()
@@ -76,6 +95,7 @@ bool StartEmbeddedTor(const std::string& datadir, EmbeddedTorMode mode, std::str
     g_inProcess = opts.in_process;
     g_socksPort = info->socks_port;
     g_controlPort = info->control_port;
+    g_cookiePath = info->cookie_path;
     LogPrintf("tor: embedded Tor started (%s, %s) in %dms: SOCKS 127.0.0.1:%u, control 127.0.0.1:%u, state in %s\n",
               opts.in_process ? "in-process" : "child process",
               opts.in_process ? "thread" : strprintf("pid %d", (int)info->pid),
@@ -99,8 +119,21 @@ void StopEmbeddedTor()
     g_embeddedTor = NULL;
     g_socksPort = 0;
     g_controlPort = 0;
+    g_cookiePath.clear();
     if (g_inProcess)
         RestoreLibeventLogging();
+}
+
+std::string EmbeddedTorCookiePath()
+{
+    LOCK(cs_embeddedTor);
+    return g_cookiePath;
+}
+
+bool EmbeddedTorAlive()
+{
+    LOCK(cs_embeddedTor);
+    return g_embeddedTor != NULL && zcl_tor_embed_alive(g_embeddedTor);
 }
 
 bool EmbeddedTorRunning()
@@ -156,6 +189,16 @@ uint16_t EmbeddedTorSocksPort()
 uint16_t EmbeddedTorControlPort()
 {
     return 0;
+}
+
+std::string EmbeddedTorCookiePath()
+{
+    return std::string();
+}
+
+bool EmbeddedTorAlive()
+{
+    return false;
 }
 
 #endif // ENABLE_EMBEDDED_TOR

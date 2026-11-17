@@ -591,6 +591,18 @@ bool HaveNameProxy() {
     return nameProxy.IsValid();
 }
 
+static bool fProxyOnlyMode = false; // guarded by cs_proxyInfos
+
+void SetProxyOnly(bool fProxyOnly) {
+    LOCK(cs_proxyInfos);
+    fProxyOnlyMode = fProxyOnly;
+}
+
+bool IsProxyOnly() {
+    LOCK(cs_proxyInfos);
+    return fProxyOnlyMode;
+}
+
 bool IsProxy(const CNetAddr &addr) {
     LOCK(cs_proxyInfos);
     for (int i = 0; i < NET_MAX; i++) {
@@ -633,8 +645,12 @@ bool ConnectSocket(const CService &addrDest, SOCKET& hSocketRet, int nTimeout, b
 
     if (GetProxy(addrDest.GetNetwork(), proxy))
         return ConnectThroughProxy(proxy, addrDest.ToStringIP(), addrDest.GetPort(), hSocketRet, nTimeout, outProxyConnectionFailed);
-    else // no proxy needed (none set for target network)
-        return ConnectSocketDirectly(addrDest, hSocketRet, nTimeout);
+    if (IsProxyOnly() && !addrDest.IsLocal()) {
+        LogPrintf("Not connecting to %s directly: proxy-only mode and no proxy for its network\n", addrDest.ToString());
+        return false;
+    }
+    // no proxy needed (none set for target network)
+    return ConnectSocketDirectly(addrDest, hSocketRet, nTimeout);
 }
 
 bool ConnectSocketByName(CService &addr, SOCKET& hSocketRet, const char *pszDest, int portDefault, int nTimeout, bool *outProxyConnectionFailed)
