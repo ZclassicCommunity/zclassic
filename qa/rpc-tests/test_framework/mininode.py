@@ -388,7 +388,7 @@ class SpendDescription(object):
         r += self.spendAuthSig
         return r
 
-    def __repr__(self)
+    def __repr__(self):
         return "SpendDescription(cv=%064x, anchor=%064x, nullifier=%064x, rk=%064x, zkproof=%064x, spendAuthSig=%064x)" \
             % (self.cv, self.anchor, self.nullifier, self.rk, self.zkproof, self.spendauthsig)
 
