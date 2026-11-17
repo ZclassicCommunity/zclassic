@@ -391,6 +391,47 @@ static BOOL WINAPI WinConsoleCtrlHandler(DWORD dwCtrlType)
 }
 #endif
 
+#if defined(WIN32) && defined(ENABLE_EMBEDDED_TOR)
+/**
+ * The datadir in the form the embedded Tor glue (src/c23/tor) expects on Windows.
+ * - UTF-8: the glue converts paths with CP_UTF8, while path::string() is in the
+ *   ANSI code page, which is UTF-8 only under the manifest on Windows 10 1903+.
+ * - Absolute, backslash-separated, no trailing separator: the glue hands Tor
+ *   GetFullPathNameW() of <datadir>\tor, and the control-port check in
+ *   torcontrol.cpp compares the COOKIEFILE Tor reports with the cookie path
+ *   built from this string, so both must be the same spelling.
+ * - When the ANSI code page is not UTF-8, the 8.3 short name of a non-ASCII path,
+ *   which is what the glue hands Tor in that case (same reason).
+ * Falls back to path::string() if a conversion fails; the glue then reports it.
+ */
+static std::string EmbeddedTorDataDir(const boost::filesystem::path& p)
+{
+    std::wstring w = p.wstring();
+    std::vector<wchar_t> buf(32768);
+    DWORD n = GetFullPathNameW(w.c_str(), (DWORD)buf.size(), buf.data(), NULL);
+    if (n == 0 || n >= buf.size())
+        return p.string();
+    w.assign(buf.data());
+    while (w.size() > 3 && (w[w.size() - 1] == L'\\' || w[w.size() - 1] == L'/'))
+        w.erase(w.size() - 1);
+    bool fAscii = true;
+    for (size_t i = 0; i < w.size(); i++)
+        if (w[i] > 0x7f) fAscii = false;
+    if (!fAscii && GetACP() != CP_UTF8) {
+        n = GetShortPathNameW(w.c_str(), buf.data(), (DWORD)buf.size());
+        if (n > 0 && n < buf.size())
+            w.assign(buf.data());
+    }
+    int u = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, NULL, 0, NULL, NULL);
+    if (u <= 0)
+        return p.string();
+    std::vector<char> out(u);
+    if (WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, out.data(), u, NULL, NULL) != u)
+        return p.string();
+    return std::string(out.data());
+}
+#endif
+
 bool static InitError(const std::string &str)
 {
     uiInterface.ThreadSafeMessageBox(str, "", CClientUIInterface::MSG_ERROR);
@@ -2234,7 +2275,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // control ports are loopback ports chosen at runtime.
     if (fEmbeddedTor) {
         std::string strTorError;
-        if (!StartEmbeddedTor(GetDataDir().string(), embeddedTorMode, strTorError))
+#if defined(WIN32) && defined(ENABLE_EMBEDDED_TOR)
+        const std::string strTorDataDir = EmbeddedTorDataDir(GetDataDir());
+#else
+        const std::string strTorDataDir = GetDataDir().string();
+#endif
+        if (!StartEmbeddedTor(strTorDataDir, embeddedTorMode, strTorError))
             return InitError(strprintf(_("Could not start the embedded Tor: %s"), strTorError));
         proxyType addrEmbedded = proxyType(CService("127.0.0.1", EmbeddedTorSocksPort()), proxyRandomize);
         if (!addrEmbedded.IsValid())
