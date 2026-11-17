@@ -78,6 +78,8 @@
 
 #include <fstream>
 #include <thread>
+#include <future>
+#include <exception>
 #include <chrono>
 #include "librustzcash.h"
 #include "c23/glue/zcl_c23_glue.h"
@@ -1501,6 +1503,33 @@ static void ZC_LoadParams(
     LogPrintf("Loaded Sapling parameters in %fs seconds.\n", elapsed);
 }
 
+// Loading and hash-checking the Sapling parameter files takes most of a second and
+// is independent of the block-index load that follows it, so AppInit2 runs it on a
+// helper thread and joins before anything that can create or verify a proof. The
+// files are still hash-checked in full before use; only the wait is overlapped.
+// The guard joins on every exit path so the thread never outlives AppInit2.
+class ZcParamsLoader
+{
+    std::future<void> fut;
+public:
+    void Start(const CChainParams& chainparams)
+    {
+        fut = std::async(std::launch::async, [&chainparams]() { ZC_LoadParams(chainparams); });
+    }
+    // Wait for the load to finish; rethrows what ZC_LoadParams threw, as the
+    // synchronous call did.
+    void Join()
+    {
+        if (fut.valid())
+            fut.get();
+    }
+    ~ZcParamsLoader()
+    {
+        if (fut.valid())
+            fut.wait();
+    }
+};
+
 bool AppInitServers(boost::thread_group& threadGroup)
 {
     RPCServer::OnStopped(&OnRPCStopped);
@@ -2063,10 +2092,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     g_startupTimer.mark("datadir-lock+threads");
     // Initialize Zclassic circuit parameters
-    ZC_LoadParams(chainparams);
-    g_startupTimer.mark("zk-snark params");
+    ZcParamsLoader zcParamsLoader;
+    zcParamsLoader.Start(chainparams);
+    g_startupTimer.mark("zk-snark params (started)");
 
     if (GetBoolArg("-savesproutr1cs", false)) {
+        zcParamsLoader.Join();
         boost::filesystem::path r1cs_path = ZC_GetParamsDir() / "r1cs";
 
         LogPrintf("Saving Sprout R1CS to %s\n", r1cs_path.string());
@@ -2754,6 +2785,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     bool clearWitnessCaches = false;
 
+    // An exception from the background parameter load is not a block-database
+    // error. It is kept out of the catch below (which reports "Error opening
+    // block database" and offers a -reindex) and rethrown after the load loop,
+    // where it leaves AppInit2 exactly as the synchronous ZC_LoadParams did.
+    std::exception_ptr paramsLoadError;
     bool fLoaded = false;
     while (!fLoaded) {
         bool fReset = fReindex || fReindexChainState;
@@ -2793,6 +2829,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     break;
                 }
                 g_startupTimer.mark(".loadblockindex-db");
+                try {
+                    zcParamsLoader.Join();
+                } catch (...) {
+                    paramsLoadError = std::current_exception();
+                    break;
+                }
+                g_startupTimer.mark(".zk-snark params (wait)");
 
                 // If the loaded chain has a wrong genesis, bail out immediately
                 // (we're likely using a testnet datadir, or the other way around).
@@ -2866,6 +2909,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
             fLoaded = true;
         } while(false);
+        if (paramsLoadError)
+            std::rethrow_exception(paramsLoadError);
 
         if (!fLoaded) {
             // first suggest a reindex

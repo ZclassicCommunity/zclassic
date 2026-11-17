@@ -8,7 +8,16 @@
 #include "util/crc32c.h"
 
 #include <stdint.h>
+#include <string.h>
 #include "util/coding.h"
+
+// Hardware CRC32C (Castagnoli, the SSE4.2 CRC32 instruction) on x86-64. The result
+// is bit-for-bit the portable table implementation below; it is selected at run
+// time so the same binary still runs on CPUs without SSE4.2.
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#define LEVELDB_CRC32C_X86 1
+#include <nmmintrin.h>
+#endif
 
 namespace leveldb {
 namespace crc32c {
@@ -283,7 +292,7 @@ static inline uint32_t LE_LOAD32(const uint8_t *p) {
   return DecodeFixed32(reinterpret_cast<const char*>(p));
 }
 
-uint32_t Extend(uint32_t crc, const char* buf, size_t size) {
+uint32_t ExtendPortable(uint32_t crc, const char* buf, size_t size) {
   const uint8_t *p = reinterpret_cast<const uint8_t *>(buf);
   const uint8_t *e = p + size;
   uint32_t l = crc ^ 0xffffffffu;
@@ -327,6 +336,50 @@ uint32_t Extend(uint32_t crc, const char* buf, size_t size) {
 #undef STEP1
   return l ^ 0xffffffffu;
 }
+
+#ifdef LEVELDB_CRC32C_X86
+__attribute__((target("sse4.2")))
+static uint32_t ExtendHardware(uint32_t crc, const char* buf, size_t size) {
+  const uint8_t *p = reinterpret_cast<const uint8_t *>(buf);
+  uint64_t l = crc ^ 0xffffffffu;
+  while (size >= 8) {
+    uint64_t v;
+    memcpy(&v, p, sizeof(v));  // unaligned load; x86 is little-endian
+    l = _mm_crc32_u64(l, v);
+    p += 8;
+    size -= 8;
+  }
+  uint32_t l32 = static_cast<uint32_t>(l);
+  while (size > 0) {
+    l32 = _mm_crc32_u8(l32, *p++);
+    size--;
+  }
+  return l32 ^ 0xffffffffu;
+}
+
+static bool DetectHardware() {
+  __builtin_cpu_init();
+  return __builtin_cpu_supports("sse4.2");
+}
+
+bool HaveHardwareCrc32c() {
+  static const bool have = DetectHardware();
+  return have;
+}
+
+uint32_t Extend(uint32_t crc, const char* buf, size_t size) {
+  if (HaveHardwareCrc32c()) {
+    return ExtendHardware(crc, buf, size);
+  }
+  return ExtendPortable(crc, buf, size);
+}
+#else
+bool HaveHardwareCrc32c() { return false; }
+
+uint32_t Extend(uint32_t crc, const char* buf, size_t size) {
+  return ExtendPortable(crc, buf, size);
+}
+#endif
 
 }  // namespace crc32c
 }  // namespace leveldb

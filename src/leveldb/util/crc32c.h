@@ -16,6 +16,13 @@ namespace crc32c {
 // crc32c of a stream of data.
 extern uint32_t Extend(uint32_t init_crc, const char* data, size_t n);
 
+// The table-driven reference implementation that Extend() falls back to when the
+// CPU has no CRC32C instruction. Exposed so tests can compare the two.
+extern uint32_t ExtendPortable(uint32_t init_crc, const char* data, size_t n);
+
+// True when Extend() uses the hardware CRC32C instruction.
+extern bool HaveHardwareCrc32c();
+
 // Return the crc32c of data[0,n-1]
 inline uint32_t Value(const char* data, size_t n) {
   return Extend(0, data, n);
