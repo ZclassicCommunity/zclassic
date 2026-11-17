@@ -3136,6 +3136,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                         copyTo->WriteToDisk(&walletdb);
                     }
                 }
+                // nOrderPos was just overwritten above: the wallet's cached transaction-order index is stale.
+                {
+                    LOCK(pwalletMain->cs_wallet);
+                    pwalletMain->fTxOrderValid = false;
+                }
             }
         }
         pwalletMain->SetBroadcastTransactions(GetBoolArg("-walletbroadcast", true));
