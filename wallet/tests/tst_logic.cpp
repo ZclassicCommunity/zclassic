@@ -194,6 +194,10 @@ private slots:
         QTest::newRow("first-poll-nothing")  << "main" << 0 << 0 << -1 << 0 << -1 << false << (int)Syncing << true;
         QTest::newRow("testnet-tip-fresh")   << "test" << 900000 << 900000 << 200 << 3 << 0 << false << (int)Synced << false;
         QTest::newRow("clock-skew-reported") << "main" << 3330000 << 3330000 << 3600*3 << 2 << 0 << false << (int)ClockSkew << false;
+        // The node itself still reports initial block download with a fresh tip (its chain has less work
+        // than the known minimum, e.g. a low-work chain fed by the only peers it has): never "synced".
+        QTest::newRow("ibd-fresh-tip-peers")    << "main" << 3330000 << 3330000 << 120 << 8 << 1 << false << (int)Syncing << true;
+        QTest::newRow("ibd-fresh-tip-everSynced-nopeers") << "main" << 3330000 << 3330000 << 120 << 0 << 1 << true << (int)WaitingForPeers << true;
     }
     void syncState() {
         QFETCH(QString, chain); QFETCH(int, blocks); QFETCH(int, headers); QFETCH(int, tipAgeSecs);

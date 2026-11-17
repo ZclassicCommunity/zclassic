@@ -75,12 +75,14 @@ inline Verdict classify(const Input& in) {
     }
 
     // Caught up with every header we know. Is that the network tip?
-    if (tipOld || (in.ibd == 1 && v.tipAge < 0)) {
+    // The node's own initial-block-download flag outranks a fresh-looking tip: a chain with less
+    // work than the known minimum can carry fresh timestamps, and the node then refuses to call it synced.
+    if (tipOld || in.ibd == 1) {
         // Old newest block: we are behind (or our clock is). With peers this is real
         // catching-up (snapshot just imported, headers not yet arrived); say Syncing.
         v.kind = in.connections > 0 ? Syncing : WaitingForPeers;
         v.isSyncing = true;
-        if (in.connections > 0 && in.everSynced) v.kind = StaleTip;
+        if (in.connections > 0 && in.everSynced && tipOld) v.kind = StaleTip;
         return v;
     }
     if (in.connections > 0 || in.everSynced) {
