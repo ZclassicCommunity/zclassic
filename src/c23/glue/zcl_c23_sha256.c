@@ -8,8 +8,23 @@
 #include "crypto/sha256.h" /* the VENDORED Z23 header (see Makefile.am include order) */
 
 #include <stddef.h>
-#if defined(__x86_64__) || defined(__i386__)
-#include <cpuid.h>
+#if defined(__x86_64__)
+/* Own CPUID helper, not <cpuid.h>: the vendored sha256.c included below
+ * includes <cpuid.h> itself, and GCC before 11 ships that header without an
+ * include guard, so a second include in this translation unit fails to
+ * compile (seen with the mingw-w64 GCC 9.3 release toolchain). */
+static int zcl_c23_cpu_advertises_sha(void)
+{
+    unsigned int a = 0, b = 0, c = 0, d = 0;
+    __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+    if (a < 7)
+        return 0;
+    a = 7;
+    c = 0;
+    __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+    (void)d;
+    return (int)((b >> 29) & 1u);
+}
 #endif
 
 _Static_assert(sizeof(struct zcl_c23_sha256_state) == sizeof(struct sha256_ctx),
@@ -59,15 +74,14 @@ int zcl_c23_sha256_autodetect(void)
     const int installed = sha256_select_impl(SHA256_IMPL_AUTO);
     if (!sha256_selftest())
         return 0;
-#if defined(__x86_64__) || defined(__i386__)
+#if defined(__x86_64__)
     /* The vendored probe (detect_sha_ni) runs the known-answer test itself
      * and, on a mismatch, quietly installs the portable transform, so
      * sha256_selftest() above then finds nothing to test and passes. Report
      * that case here: the CPU advertises SHA (CPUID.(EAX=7,ECX=0):EBX[29])
      * but the portable backend was installed. */
-    unsigned int eax, ebx, ecx, edx;
     if (installed == SHA256_IMPL_PORTABLE &&
-        __get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx) && ((ebx >> 29) & 1u))
+        zcl_c23_cpu_advertises_sha())
         return 0;
 #else
     (void)installed;
