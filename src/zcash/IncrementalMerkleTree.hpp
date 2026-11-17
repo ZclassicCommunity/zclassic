@@ -3,6 +3,8 @@
 
 #include <array>
 #include <deque>
+#include <map>
+#include <tuple>
 #include <boost/optional.hpp>
 #include <boost/static_assert.hpp>
 
@@ -239,6 +241,27 @@ public:
     );
 
     static PedersenHash uncommitted();
+};
+
+/**
+ * While one of these is alive, PedersenHash::combine on the same thread
+ * remembers its results and returns the remembered hash when it is called
+ * again with the same inputs. combine is a pure function of (a, b, depth),
+ * so every result is unchanged. Meant for a caller that appends the same
+ * commitments to many witnesses, which repeat the same subtree hashes.
+ */
+class PedersenHashMemo {
+public:
+    typedef std::map<std::tuple<size_t, uint256, uint256>, uint256> Results;
+
+    PedersenHashMemo();
+    ~PedersenHashMemo();
+    PedersenHashMemo(const PedersenHashMemo&) = delete;
+    PedersenHashMemo& operator=(const PedersenHashMemo&) = delete;
+
+private:
+    Results results;
+    Results* previous;
 };
 
 template<size_t Depth, typename Hash>

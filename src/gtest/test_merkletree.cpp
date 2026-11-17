@@ -397,3 +397,76 @@ TEST(merkletree, testZeroElements) {
         ASSERT_TRUE(newTree.root() == oldroot);
     }
 }
+
+namespace {
+template<typename T>
+std::string SerializedBytes(const T& obj) {
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << obj;
+    return std::string(ss.begin(), ss.end());
+}
+
+// Deterministic 32-byte values with the top byte clear.
+uint256 MemoTestLeaf(uint64_t n) {
+    uint256 h;
+    for (int k = 0; k < 31; k++) {
+        n = n * 6364136223846793005ULL + 1442695040888963407ULL;
+        *(h.begin() + k) = (unsigned char)(n >> 56);
+    }
+    return h;
+}
+} // namespace
+
+// PedersenHashMemo must not change any hash, witness or root: the same
+// appends are made with no memo, under one memo, and under nested memos.
+TEST(merkletree, PedersenHashMemoParity) {
+    using libzcash::PedersenHash;
+    using libzcash::PedersenHashMemo;
+
+    for (uint64_t i = 0; i < 40; i++) {
+        PedersenHash a(MemoTestLeaf(2 * i)), b(MemoTestLeaf(2 * i + 1));
+        size_t depth = i % 32;
+        PedersenHash plain = PedersenHash::combine(a, b, depth);
+        PedersenHashMemo memo;
+        EXPECT_EQ(plain, PedersenHash::combine(a, b, depth));
+        EXPECT_EQ(plain, PedersenHash::combine(a, b, depth));
+        // Argument order and depth are part of the key.
+        EXPECT_EQ(PedersenHash::combine(b, a, depth), PedersenHash::combine(b, a, depth));
+        EXPECT_NE(plain, PedersenHash::combine(b, a, depth));
+        EXPECT_NE(plain, PedersenHash::combine(a, b, (depth + 1) % 32));
+        {
+            PedersenHashMemo inner;
+            EXPECT_EQ(plain, PedersenHash::combine(a, b, depth));
+        }
+        EXPECT_EQ(plain, PedersenHash::combine(a, b, depth));
+    }
+
+    // Witnesses taken at different positions, then extended by the same
+    // commitments, as the wallet does for every note on each block.
+    SaplingMerkleTree treePlain, treeMemo;
+    std::vector<SaplingWitness> plain, memoized;
+    for (uint64_t i = 0; i < 300; i++) {
+        uint256 cm = MemoTestLeaf(1000 + i);
+        treePlain.append(cm);
+        for (SaplingWitness& w : plain) w.append(cm);
+        {
+            PedersenHashMemo memo;
+            treeMemo.append(cm);
+            for (SaplingWitness& w : memoized) w.append(cm);
+        }
+        if (i % 7 == 0 || i == 64 || i == 127) {
+            plain.push_back(treePlain.witness());
+            memoized.push_back(treeMemo.witness());
+        }
+        if (i % 50 == 49) {
+            ASSERT_EQ(SerializedBytes(treePlain), SerializedBytes(treeMemo));
+            ASSERT_EQ(plain.size(), memoized.size());
+            for (size_t k = 0; k < plain.size(); k++) {
+                ASSERT_EQ(SerializedBytes(plain[k]), SerializedBytes(memoized[k])) << "witness " << k << " after " << i;
+                PedersenHashMemo memo;
+                ASSERT_EQ(plain[k].root(), memoized[k].root());
+                ASSERT_EQ(treePlain.root(), memoized[k].root());
+            }
+        }
+    }
+}
