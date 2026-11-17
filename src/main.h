@@ -91,6 +91,13 @@ static const unsigned int MAX_HEADERS_RESULTS = 160;
  *  degree of disordering of blocks on disk (which make reindexing and in the future perhaps pruning
  *  harder). We'll probably want to make this a per-peer adaptive value at some point. */
 static const unsigned int BLOCK_DOWNLOAD_WINDOW = 4096;
+/** Seconds to wait for an answer to a getheaders request before giving the single header-sync
+ *  slot to another peer. A peer that is itself in initial block download silently ignores
+ *  getheaders, so without this timeout a node whose first sync peer is such a peer would wait
+ *  forever. Purely local policy: nothing is sent and nobody is disconnected. */
+static const int64_t HEADERS_RESPONSE_TIMEOUT = 120;
+/** Seconds a peer that did not answer getheaders is skipped when choosing the header-sync peer. */
+static const int64_t HEADERS_STALLED_PEER_COOLDOWN = 300;
 /** Time to wait (in seconds) between writing blocks/block index to disk. */
 static const unsigned int DATABASE_WRITE_INTERVAL = 60 * 60;
 /** Time to wait (in seconds) between flushing chainstate to disk. */
@@ -232,6 +239,15 @@ void ThreadScriptCheck();
 void PartitionCheck(bool (*initialDownloadCheck)(), CCriticalSection& cs, const CBlockIndex *const &bestHeader);
 /** Check whether we are doing an initial block download (synchronizing from disk or network) */
 bool IsInitialBlockDownload();
+
+/** True if a getheaders request sent at nRequestedAt (microseconds, 0 = none outstanding) has
+ *  gone unanswered for more than nTimeoutSeconds at nNow (microseconds). */
+bool HeadersRequestTimedOut(int64_t nNow, int64_t nRequestedAt, int64_t nTimeoutSeconds);
+
+/** Machine-readable sync phase for getblockchaininfo: synced, waiting_for_peers, downloading_headers,
+ *  downloading_blocks, reindexing or importing. Pure function of its arguments. */
+const char* ClassifySyncPhase(bool fInitialBlockDownload, bool fReindexing, bool fImporting,
+                              int nConnections, int nBlocks, int nHeaders);
 /** Format a string that describes several potential problems detected by the core */
 std::string GetWarnings(const std::string& strFor);
 /** Retrieve a transaction (from memory pool, or from disk, if possible) */
