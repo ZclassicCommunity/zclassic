@@ -177,6 +177,13 @@ while [ $i -lt 1200 ]; do
 done
 outbound_to cli_c "$OA:$PA"; check $? "C: connected to A's onion (addnode)"
 outbound_to cli_c "$OB:$PB"; check $? "C: connected to B's onion, learned by gossip (after $(now)s)"
+# C learned B from A: C tried B's onion before any inbound peer reached C, so at
+# that point every peer C had was one it dialled, and the only address it was
+# given is A's. (B dialling C first and advertising itself would not prove it.)
+first_try=$(grep -n "trying connection $OB" "$C/regtest/debug.log" | head -1 | cut -d: -f1)
+first_in=$(grep -n "connection from .* accepted" "$C/regtest/debug.log" | head -1 | cut -d: -f1)
+[ -n "$first_try" ] && { [ -z "$first_in" ] || [ "$first_try" -lt "$first_in" ]; }
+check $? "C: dialled B's onion before any inbound peer reached it (line ${first_try:-none} < ${first_in:-none}), so B came from A"
 grep -q "sendaddrv2 from peer" "$C/regtest/debug.log"; check $? "C: negotiated addrv2"
 grep -q "received: addrv2" "$C/regtest/debug.log"; check $? "C: received an addrv2 message"
 height_is cli_c 5 600; check $? "C: synced to height 5"

@@ -129,6 +129,24 @@ grep -q 'Unknown command "sendaddrv2"' "$TMP/new-old/regtest/debug.log"; check $
 # peers.dat of the new node, after it has stored addresses, loads in the old binary
 cp "$TMP/new-node/regtest/peers.dat" "$TMP/peers.dat.new" 2>/dev/null
 [ -s "$TMP/peers.dat.new" ]; check $? "the new node wrote peers.dat"
+if [ -s "$TMP/peers.dat.new" ]; then
+    # load it in the old binary (fresh datadir, no network)
+    L=$TMP/old-load
+    conf "$L" "$PO" "$RO" connect=0 listen=0
+    mkdir -p "$L/regtest"
+    cp "$TMP/peers.dat.new" "$L/regtest/peers.dat"
+    "$OLD/zclassicd" -datadir="$L" > "$TMP/old-load.out" 2>&1 &
+    PL=$!
+    PIDS="$PL"
+    wait_rpc "$OLD/zclassic-cli" "$L" 120
+    nl=$(grep -o 'Loaded [0-9]* addresses from peers.dat' "$L/regtest/debug.log" | awk '{print $2}')
+    nn=$(grep -o 'Flushed [0-9]* addresses to peers.dat' "$TMP/new-node/regtest/debug.log" | tail -1 | awk '{print $2}')
+    [ -n "$nl" ] && [ "$nl" = "$nn" ]
+    check $? "the old binary loaded the new node's peers.dat with every entry ($nn written, ${nl:-none} loaded)"
+    "$OLD/zclassic-cli" -datadir="$L" stop >/dev/null 2>&1
+    wait_gone "$PL" 60
+    PIDS=
+fi
 [ ! -e "$TMP/new-node/regtest/onion_peers.dat" ] || say "note: onion_peers.dat present ($(wc -c < "$TMP/new-node/regtest/onion_peers.dat") bytes)"
 
 say "RESULT pass=$pass fail=$fail"
