@@ -54,6 +54,8 @@ else
 fi
 
 AC_PROG_CXX
+dnl The wallet token guard (src/c23/services) is plain C.
+AC_PROG_CC
 m4_ifdef([AC_PROG_OBJCXX],[AC_PROG_OBJCXX])
 
 dnl By default, libtool for mingw refuses to link static libs into a dll for

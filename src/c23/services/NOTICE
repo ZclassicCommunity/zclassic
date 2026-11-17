@@ -1,0 +1,18 @@
+zclassicd wallet token guard: vendored Z23 service parsers (src/c23/services/vendor)
+
+The files under src/c23/services/vendor/ are copied byte for byte from the Z23
+repository (zclassic23), commit recorded in Z23_SOURCE.tsv, and are licensed under
+the Apache License, Version 2.0 (full text in LICENSE.z23):
+
+    Copyright 2026 Rhett Creighton
+
+The rest of zclassicd remains under the MIT license (see COPYING). The copyright
+holder of the vendored files and of zclassicd's glue is the same. Individual vendored
+files keep whatever notices they carry; those are part of the byte-identical copy.
+
+Vendored files must never be edited in this tree. Provenance and identity checks:
+tools/check-vendor.sh against Z23_SOURCE.tsv.
+
+OWNER CONFIRMATION NEEDED (the same open question as src/c23/NOTICE on branch
+integration/c23-rust-removal): that shipping an Apache-2.0 subtree inside this MIT
+project, with this NOTICE and LICENSE.z23, is the intended text.

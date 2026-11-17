@@ -14,6 +14,12 @@ public:
     CTxDestination destChange;
     //! If false, allows unselected inputs, but requires all selected inputs be used
     bool fAllowOtherInputs;
+    //! Wallet token guard override. If false (the default), an explicitly
+    //! selected input that carries ZSLP tokens or a mint baton makes coin
+    //! selection fail. If true, explicitly selected token-bearing inputs are
+    //! spent as asked. It never makes the wallet pick a token-bearing output
+    //! on its own: only outputs in the selected set are affected.
+    bool fAllowTokenOutputs;
 
     CCoinControl()
     {
@@ -24,6 +30,7 @@ public:
     {
         destChange = CNoDestination();
         fAllowOtherInputs = false;
+        fAllowTokenOutputs = false;
         setSelected.clear();
     }
 

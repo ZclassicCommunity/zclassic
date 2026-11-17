@@ -20,6 +20,7 @@
 #include "utilstrencodings.h"
 #include "validationinterface.h"
 #include "wallet/crypter.h"
+#include "wallet/tokenguard.h"
 #include "wallet/wallet_ismine.h"
 #include "wallet/walletdb.h"
 #include "wallet/rpcwallet.h"
@@ -482,6 +483,14 @@ public:
     mutable CAmount nAvailableWatchCreditCached;
     mutable CAmount nChangeCached;
 
+    // memory only: wallet token guard (see wallet/tokenguard.h). Never
+    // serialized; recomputed from the transaction itself after a restart, a
+    // rescan or a restore from backup. Keyed by txid so a CWalletTx whose
+    // transaction is replaced in place cannot serve a stale answer.
+    mutable bool fTokenRolesCached;
+    mutable uint256 hashTokenRolesCached;
+    mutable std::vector<unsigned char> vTokenRolesCached;
+
     CWalletTx()
     {
         Init(NULL);
@@ -533,6 +542,9 @@ public:
         nImmatureWatchCreditCached = 0;
         nChangeCached = 0;
         nOrderPos = -1;
+        fTokenRolesCached = false;
+        hashTokenRolesCached.SetNull();
+        vTokenRolesCached.clear();
     }
 
     ADD_SERIALIZE_METHODS;
@@ -627,6 +639,15 @@ public:
     }
 
     bool IsTrusted() const;
+
+    /**
+     * Wallet token guard: TOKEN_ROLE_* of output n (wallet/tokenguard.h).
+     * Parses at most once per transaction, and only when the transaction has
+     * an OP_RETURN output. Call with cs_wallet held, like the other caches.
+     */
+    unsigned char GetTokenOutputRole(unsigned int n) const;
+    //! True if spending output n as ordinary funds would burn ZSLP tokens or a mint baton.
+    bool IsTokenBearingOutput(unsigned int n) const { return GetTokenOutputRole(n) != 0; }
 
     bool WriteToDisk(CWalletDB *pwalletdb);
 
@@ -777,7 +798,7 @@ private:
 class CWallet : public CCryptoKeyStore, public CValidationInterface
 {
 private:
-    bool SelectCoins(const CAmount& nTargetValue, std::set<std::pair<const CWalletTx*,unsigned int> >& setCoinsRet, CAmount& nValueRet, bool& fOnlyCoinbaseCoinsRet, bool& fNeedCoinbaseCoinsRet, const CCoinControl *coinControl = NULL) const;
+    bool SelectCoins(const CAmount& nTargetValue, std::set<std::pair<const CWalletTx*,unsigned int> >& setCoinsRet, CAmount& nValueRet, bool& fOnlyCoinbaseCoinsRet, bool& fNeedCoinbaseCoinsRet, const CCoinControl *coinControl = NULL, CTokenGuardReport *pTokenGuardReport = NULL) const;
 
     CWalletDB *pwalletdbEncryption;
 
@@ -1238,7 +1259,12 @@ public:
     CAmount GetWatchOnlyBalance() const;
     CAmount GetUnconfirmedWatchOnlyBalance() const;
     CAmount GetImmatureWatchOnlyBalance() const;
-    bool FundTransaction(CMutableTransaction& tx, CAmount& nFeeRet, int& nChangePosRet, std::string& strFailReason);
+    /**
+     * fAllowTokenInputs is the wallet token guard override for the inputs the
+     * caller already put in tx. Inputs this function adds are never
+     * token-bearing, whatever the flag says.
+     */
+    bool FundTransaction(CMutableTransaction& tx, CAmount& nFeeRet, int& nChangePosRet, std::string& strFailReason, bool fAllowTokenInputs = false);
     bool CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletTx& wtxNew, CReserveKey& reservekey, CAmount& nFeeRet, int& nChangePosRet,
                            std::string& strFailReason, const CCoinControl *coinControl = NULL, bool sign = true);
     bool CommitTransaction(CWalletTx& wtxNew, CReserveKey& reservekey);

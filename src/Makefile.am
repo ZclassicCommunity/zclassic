@@ -48,7 +48,10 @@ if BUILD_BITCOIN_LIBS
 LIBZCASH_CONSENSUS=libzcashconsensus.la
 endif
 if ENABLE_WALLET
-LIBBITCOIN_WALLET=libbitcoin_wallet.a
+# libzcl_tokenguard.a is part of the wallet, not an option: every target that
+# links the wallet gets the token guard (see src/c23/services/README.md). It
+# must stay listed right after libbitcoin_wallet.a, which calls into it.
+LIBBITCOIN_WALLET=libbitcoin_wallet.a libzcl_tokenguard.a
 endif
 
 $(LIBSECP256K1): $(wildcard secp256k1/src/*) $(wildcard secp256k1/include/*)
@@ -232,6 +235,7 @@ BITCOIN_CORE_H = \
   wallet/paymentdisclosure.h \
   wallet/paymentdisclosuredb.h \
   wallet/rpcwallet.h \
+  wallet/tokenguard.h \
   wallet/wallet.h \
   wallet/wallet_ismine.h \
   wallet/walletdb.h \
@@ -325,11 +329,40 @@ libbitcoin_wallet_a_SOURCES = \
   wallet/rpcdisclosure.cpp \
   wallet/rpcdump.cpp \
   wallet/rpcwallet.cpp \
+  wallet/tokenguard.cpp \
   wallet/wallet.cpp \
   wallet/wallet_ismine.cpp \
   wallet/walletdb.cpp \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
+
+# Wallet token guard: Z23's SLP wire parser, vendored verbatim, plus zclassicd
+# glue. Plain C, compiled into every wallet build with no feature flag.
+#
+# The include directories are -iquote, not -I, and belong to this C library
+# ONLY. Z23 header names collide with zclassicd's (the vendored slp.c includes
+# "primitives/transaction.h"); -iquote is searched before the -I. that automake
+# adds, so the glue header wins here, and no C++ target ever sees these
+# directories. C++ includes c23/services/glue/zcl_token_guard.h by path.
+libzcl_tokenguard_a_SOURCES = \
+  c23/services/glue/zcl_token_guard.c \
+  c23/services/glue/zcl_token_guard.h \
+  c23/services/glue/core/uint256.h \
+  c23/services/glue/primitives/transaction.h \
+  c23/services/glue/util/log_macros.h \
+  c23/services/vendor/contexts/market/modules/zslp/include/zslp/slp.h \
+  c23/services/vendor/contexts/market/modules/zslp/src/slp.c \
+  c23/services/vendor/core/modules/script/include/script/op_return_push.h \
+  c23/services/vendor/engine/modules/overlay/include/overlay/overlay_codec.h \
+  c23/services/vendor/engine/modules/overlay/src/overlay_codec.c
+libzcl_tokenguard_a_CPPFLAGS = $(HARDENED_CPPFLAGS) \
+  -iquote $(srcdir)/c23/services/glue \
+  -iquote $(srcdir)/c23/services/vendor/contexts/market/modules/zslp/include \
+  -iquote $(srcdir)/c23/services/vendor/engine/modules/overlay/include \
+  -iquote $(srcdir)/c23/services/vendor/core/modules/script/include
+# -std=gnu11 is the floor the release toolchain (GCC 9) offers; the vendored
+# files need nothing newer. No -march / -m<isa> flag: one portable binary.
+libzcl_tokenguard_a_CFLAGS = -std=gnu11 $(HARDENED_CXXFLAGS) $(PIE_FLAGS)
 
 # crypto primitives library
 crypto_libbitcoin_crypto_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_CONFIG_INCLUDES)
@@ -589,7 +622,22 @@ CLEANFILES = leveldb/libleveldb.a leveldb/libmemenv.a *.gcda *.gcno */*.gcno wal
 
 DISTCLEANFILES = obj/build.h
 
-EXTRA_DIST = leveldb snark test/tree_root_c_tests.c
+EXTRA_DIST = leveldb snark test/tree_root_c_tests.c \
+  c23/services/README.md \
+  c23/services/NOTICE \
+  c23/services/LICENSE.z23 \
+  c23/services/Z23_SOURCE.tsv \
+  c23/services/vendor/.gitattributes \
+  c23/services/tools/check-vendor.sh \
+  c23/services/tools/revendor.sh \
+  c23/services/tools/vendor-files.txt \
+  c23/services/tools/z23-vector-check.sh \
+  c23/services/tools/z23_vector_shim.h \
+  c23/services/tools/slpscript.c
+
+# Proves src/c23/services/vendor is byte-identical to the Z23 pin.
+check-token-guard-vendor:
+	sh $(srcdir)/c23/services/tools/check-vendor.sh $(srcdir)/c23/services
 
 clean-local:
 	-$(MAKE) -C leveldb clean
