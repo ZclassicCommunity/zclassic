@@ -306,6 +306,10 @@ struct CNodeState {
     const CBlockIndex *pindexLastCommonBlock;
     //! Whether we've started headers synchronization with this peer.
     bool fSyncStarted;
+    //! When (microseconds) our outstanding getheaders request to this peer was sent, or 0 if none.
+    int64_t nHeadersRequestedAt;
+    //! Do not pick this peer for header sync before this time (microseconds); set when it ignored getheaders.
+    int64_t nHeadersStalledUntil;
     //! Since when we're stalling block download progress (in microseconds), or 0.
     int64_t nStallingSince;
     list<QueuedBlock> vBlocksInFlight;
@@ -325,6 +329,8 @@ struct CNodeState {
         hashLastUnknownBlock.SetNull();
         pindexLastCommonBlock = NULL;
         fSyncStarted = false;
+        nHeadersRequestedAt = 0;
+        nHeadersStalledUntil = 0;
         nStallingSince = 0;
         nBlocksInFlight = 0;
         nBlocksInFlightValidHeaders = 0;
@@ -1850,6 +1856,35 @@ CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
     }
 }
 
+int64_t BlockIndexWriteInterval(bool fInitialBlockDownload)
+{
+    return fInitialBlockDownload ? DATABASE_WRITE_INTERVAL_IBD : DATABASE_WRITE_INTERVAL;
+}
+
+bool HeadersRequestTimedOut(int64_t nNow, int64_t nRequestedAt, int64_t nTimeoutSeconds)
+{
+    return nRequestedAt != 0 && nNow - nRequestedAt > nTimeoutSeconds * 1000000;
+}
+
+int ReplayProgressPercent(int nBaseHeight, int nTipHeight, int nTargetHeight)
+{
+    const int nSpan = nTargetHeight - nBaseHeight;
+    if (nSpan <= 0)
+        return 99;
+    return std::max(1, std::min(99, (int)(((double)(nTipHeight - nBaseHeight)) / (double)nSpan * 100)));
+}
+
+const char* ClassifySyncPhase(bool fInitialBlockDownload, bool fReindexing, bool fImporting,
+                              int nConnections, int nBlocks, int nHeaders)
+{
+    if (fReindexing) return "reindexing";
+    if (fImporting) return "importing";
+    if (!fInitialBlockDownload) return "synced";
+    if (nConnections <= 0) return "waiting_for_peers";
+    if (nHeaders > nBlocks) return "downloading_blocks";
+    return "downloading_headers";
+}
+
 bool IsInitialBlockDownload()
 {
     const CChainParams& chainParams = Params();
@@ -2861,7 +2896,7 @@ bool static FlushStateToDisk(CValidationState &state, FlushStateMode mode) {
     // The cache is over the limit, we have to write now.
     bool fCacheCritical = mode == FLUSH_STATE_IF_NEEDED && cacheSize > nCoinCacheUsage;
     // It's been a while since we wrote the block index to disk. Do this frequently, so we don't need to redownload after a crash.
-    bool fPeriodicWrite = mode == FLUSH_STATE_PERIODIC && nNow > nLastWrite + (int64_t)DATABASE_WRITE_INTERVAL * 1000000;
+    bool fPeriodicWrite = mode == FLUSH_STATE_PERIODIC && nNow > nLastWrite + BlockIndexWriteInterval(IsInitialBlockDownload()) * 1000000;
     // It's been very long since we flushed the cache. Do this infrequently, to optimize cache usage.
     bool fPeriodicFlush = mode == FLUSH_STATE_PERIODIC && nNow > nLastFlush + (int64_t)DATABASE_FLUSH_INTERVAL * 1000000;
     // Combine all conditions that result in a full cache flush.
@@ -3635,8 +3670,20 @@ static bool ActivateBestChainStep(CValidationState &state, CBlockIndex *pindexMo
     // bootstrap import or a mid-sync restart). Outside warmup this is the live
     // single-block connect path and emitting status there would be noise.
     const bool fInitReplay = RPCIsInWarmup(NULL) && pindexMostWork != NULL;
-    const int nReplayBase = pindexFork ? pindexFork->nHeight : 0;
-    const int nReplaySpan = pindexMostWork ? (pindexMostWork->nHeight - nReplayBase) : 0;
+    // Every call here connects at most a few blocks and starts from the current tip, so the replay base
+    // must be remembered across calls: measured from the tip each time the percentage was always 1
+    // and the status line stayed frozen for the whole replay (tens of minutes after a snapshot import).
+    static int nReplayStartHeight = -1;
+    if (fInitReplay && nReplayStartHeight < 0)
+        nReplayStartHeight = pindexFork ? pindexFork->nHeight : 0;
+    const int nReplayBase = fInitReplay ? nReplayStartHeight : (pindexFork ? pindexFork->nHeight : 0);
+    const int nReplayTarget = pindexMostWork ? pindexMostWork->nHeight : 0;
+    // During the init-time replay nobody else needs cs_main, but returning after every block made
+    // ActivateBestChain recompute FindMostWorkChain (a walk back to the fork, ~200k blocks after a
+    // snapshot import) once per block, which dominated the replay. Connect a larger batch per call; the
+    // batch is bounded so a shutdown request is still honoured between calls.
+    static const int REPLAY_BATCH = 1000;
+    int nReplayConnected = 0;
 
     // - On ChainDB initialization, pindexOldTip will be null, so there are no removable blocks.
     // - If pindexMostWork is in a chain that doesn't have the same genesis block as our chain,
@@ -3710,16 +3757,16 @@ static bool ActivateBestChainStep(CValidationState &state, CBlockIndex *pindexMo
                 // keeps resetting and the user sees the chain advancing. Only
                 // emit when the integer percent changes, to avoid spam.
                 if (fInitReplay) {
-                    int percentageDone = nReplaySpan > 0
-                        ? std::max(1, std::min(99, (int)(((double)(chainActive.Tip()->nHeight - nReplayBase)) / (double)nReplaySpan * 100)))
-                        : 99;
+                    int percentageDone = ReplayProgressPercent(nReplayBase, chainActive.Tip()->nHeight, nReplayTarget);
                     if (percentageDone != nLastReplayInitPercent) {
-                        uiInterface.InitMessage(strprintf(_("Activating best chain... height %d (%d%%)"),
-                                                          chainActive.Tip()->nHeight, percentageDone));
+                        uiInterface.InitMessage(strprintf(_("Activating best chain... height %d of %d (%d%%)"),
+                                                          chainActive.Tip()->nHeight, nReplayTarget, percentageDone));
                         nLastReplayInitPercent = percentageDone;
                     }
                 }
                 if (!pindexOldTip || chainActive.Tip()->nChainWork > pindexOldTip->nChainWork) {
+                    if (fInitReplay && ++nReplayConnected < REPLAY_BATCH)
+                        continue;
                     // We're in a better position than we were. Return temporarily to release the lock.
                     fContinue = false;
                     break;
@@ -6803,6 +6850,11 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
             return error("headers message size = %u", nCount);
         }
         headers.resize(nCount);
+        {
+            LOCK(cs_main);
+            CNodeState *hstate = State(pfrom->GetId());
+            if (hstate) hstate->nHeadersRequestedAt = 0;
+        }
         for (unsigned int n = 0; n < nCount; n++) {
             vRecv >> headers[n];
             ReadCompactSize(vRecv); // ignore tx count; assume it is 0.
@@ -6840,6 +6892,7 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
             // TODO: optimize: if pindexLast is an ancestor of chainActive.Tip or pindexBestHeader, continue
             // from there instead.
             LogPrint("net", "more getheaders (%d) to end to peer=%d (startheight:%d)\n", pindexLast->nHeight, pfrom->id, pfrom->nStartingHeight);
+            if (CNodeState *hstate = State(pfrom->GetId())) hstate->nHeadersRequestedAt = GetTimeMicros();
             pfrom->PushMessage("getheaders", chainActive.GetLocator(pindexLast), uint256());
         }
 
@@ -7348,13 +7401,26 @@ bool SendMessages(CNode* pto, bool fSendTrickle)
         bool fFetch = state.fPreferredDownload || (nPreferredDownload == 0 && !pto->fClient && !pto->fOneShot); // Download if this is a nice peer, or we have no nice peers and this one might do.
         if (!state.fSyncStarted && !pto->fClient && !fImporting && !fReindex) {
             // Only actively request headers from a single peer, unless we're close to today.
-            if ((nSyncStarted == 0 && fFetch) || pindexBestHeader->GetBlockTime() > GetAdjustedTime() - 24 * 60 * 60) {
+            if (GetTimeMicros() >= state.nHeadersStalledUntil && ((nSyncStarted == 0 && fFetch) || pindexBestHeader->GetBlockTime() > GetAdjustedTime() - 24 * 60 * 60)) {
                 state.fSyncStarted = true;
+                state.nHeadersRequestedAt = GetTimeMicros();
                 nSyncStarted++;
                 CBlockIndex *pindexStart = pindexBestHeader->pprev ? pindexBestHeader->pprev : pindexBestHeader;
                 LogPrint("net", "initial getheaders (%d) to peer=%d (startheight:%d)\n", pindexStart->nHeight, pto->id, pto->nStartingHeight);
                 pto->PushMessage("getheaders", chainActive.GetLocator(pindexStart), uint256());
             }
+        }
+
+        // A peer that is itself in initial block download ignores getheaders, so the single
+        // header-sync slot would be held forever by a peer that will never answer. Give the slot
+        // to another peer (no message is sent and nobody is disconnected: this is local policy).
+        if (state.fSyncStarted && HeadersRequestTimedOut(GetTimeMicros(), state.nHeadersRequestedAt, HEADERS_RESPONSE_TIMEOUT)) {
+            LogPrintf("Peer=%d did not answer getheaders within %d seconds (our best header is %d); trying another peer for header sync\n",
+                      pto->id, (int)HEADERS_RESPONSE_TIMEOUT, pindexBestHeader ? pindexBestHeader->nHeight : -1);
+            state.fSyncStarted = false;
+            nSyncStarted--;
+            state.nHeadersRequestedAt = 0;
+            state.nHeadersStalledUntil = GetTimeMicros() + HEADERS_STALLED_PEER_COOLDOWN * 1000000;
         }
 
         // Resend wallet transactions that haven't gotten in a block yet
