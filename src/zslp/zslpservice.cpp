@@ -202,9 +202,12 @@ void ZslpService::Run()
 
 namespace zslp {
 
-// First block of the ZClassic mainnet chain that holds a ZSLP transaction: indexing below it
-// finds nothing, so a new index skips it. Other networks start at the genesis block.
-static const int kMainnetFirstSlpHeight = 0;
+// Where a new mainnet index starts reading. Measured on the full chain (3,322,991 blocks): the first
+// ZSLP message of any kind (a GENESIS) is in block 652,947, and an index started there reports the
+// same 874 GENESIS, 34 MINT and 3,394 SEND messages, the same tokens and the same transactions as
+// one built from block 0 (qa/zslp/mainnet_crosscheck.sh). 650,000 leaves a margin. Other networks
+// start at the genesis block.
+static const int kMainnetFirstSlpHeight = 650000;
 
 int DefaultStartHeight()
 {

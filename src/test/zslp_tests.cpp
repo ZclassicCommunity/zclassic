@@ -6,9 +6,13 @@
 // The messages come from the vendored Z23 builders, so a parser/builder disagreement shows up here.
 
 #include "zslp/zslpindex.h"
+#include "zslp/zslpservice.h"
 
+#include "data/zslp_mainnet.json.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
+#include "streams.h"
+#include "version.h"
 #include "script/script.h"
 #include "test/test_bitcoin.h"
 #include "uint256.h"
@@ -19,6 +23,7 @@
 #include "c23/services/glue/zcl_token_guard.h"
 
 #include <boost/test/unit_test.hpp>
+#include <univalue.h>
 
 using namespace zslp;
 
@@ -131,6 +136,12 @@ struct Chain {
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(zslp_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(default_start_height)
+{
+    // BasicTestingSetup selects the main chain: a new index skips the 650,000 blocks before the first ZSLP message
+    BOOST_CHECK_EQUAL(DefaultStartHeight(), 650000);
+}
 
 BOOST_AUTO_TEST_CASE(format_amount_is_exact)
 {
@@ -486,6 +497,98 @@ BOOST_AUTO_TEST_CASE(holders_and_balances_agree)
     BOOST_CHECK_EQUAL(c.idx.GetHolders(tok, 1, 1).size(), 1u);
     BOOST_CHECK_EQUAL(c.idx.ListTokens(0, 10).size(), 1u);
     BOOST_CHECK_EQUAL(c.idx.ListTokens(1, 10).size(), 0u);
+}
+
+// Real mainnet transactions (src/test/data/zslp_mainnet.json, made by qa/zslp/make_fixtures.sh from
+// a full-chain run): parsed from their raw bytes, applied in chain order, and every transaction's
+// validity and reason, every token's supply and every holder must match what the index answered on the chain.
+BOOST_AUTO_TEST_CASE(mainnet_fixtures)
+{
+    UniValue root;
+    BOOST_REQUIRE(root.read(std::string(json_tests::zslp_mainnet, json_tests::zslp_mainnet + sizeof(json_tests::zslp_mainnet))));
+    const UniValue& tokens = root["tokens"].get_array();
+    BOOST_REQUIRE(tokens.size() > 0);
+
+    struct Row { int height, pos; std::string txid, hex, validity, reason, type; };
+    std::map<std::string, Row> uniq;
+    for (size_t i = 0; i < tokens.size(); i++) {
+        const UniValue& txs = tokens[i]["txs"].get_array();
+        for (size_t k = 0; k < txs.size(); k++) {
+            Row r;
+            r.height = txs[k]["height"].get_int();
+            r.pos = txs[k]["pos"].get_int();
+            r.txid = txs[k]["txid"].get_str();
+            r.hex = txs[k]["hex"].get_str();
+            r.validity = txs[k]["validity"].get_str();
+            r.reason = txs[k]["reason"].get_str();
+            r.type = txs[k]["type"].get_str();
+            uniq[r.txid] = r;
+        }
+    }
+    std::map<int, std::map<int, Row> > byHeight;
+    for (std::map<std::string, Row>::const_iterator it = uniq.begin(); it != uniq.end(); ++it)
+        byHeight[it->second.height][it->second.pos] = it->second;
+
+    MemKV kv;
+    ZslpIndex idx(&kv);
+    std::string err;
+    BOOST_REQUIRE(idx.Load(err));
+    uint256 prev;
+    unsigned nBlocks = 0;
+    for (std::map<int, std::map<int, Row> >::const_iterator hb = byHeight.begin(); hb != byHeight.end(); ++hb) {
+        CBlock b;
+        b.hashPrevBlock = prev;
+        for (std::map<int, Row>::const_iterator rb = hb->second.begin(); rb != hb->second.end(); ++rb) {
+            CTransaction tx;
+            CDataStream ss(ParseHex(rb->second.hex), SER_NETWORK, PROTOCOL_VERSION);
+            ss >> tx;
+            BOOST_REQUIRE_EQUAL(tx.GetHash().GetHex(), rb->second.txid);
+            b.vtx.push_back(tx);
+        }
+        uint256 h = uint256S(strprintf("%x", 0x200000 + ++nBlocks));
+        BOOST_REQUIRE_MESSAGE(idx.ApplyBlock(b, h, hb->first, true, err), err);
+        prev = h;
+    }
+
+    for (std::map<std::string, Row>::const_iterator it = uniq.begin(); it != uniq.end(); ++it) {
+        TxInfo ti;
+        BOOST_REQUIRE_MESSAGE(idx.GetTx(uint256S(it->first), ti), "no record of " + it->first);
+        const std::string validity = ti.type == 0 ? "burn" : ti.status == STATUS_VALID ? "valid" : ti.status == STATUS_INVALID ? "invalid" : "unknown";
+        BOOST_CHECK_MESSAGE(validity == it->second.validity && ti.reason == it->second.reason,
+                            it->first << ": " << validity << "/" << ti.reason << " expected " << it->second.validity << "/" << it->second.reason);
+    }
+    for (size_t i = 0; i < tokens.size(); i++) {
+        const UniValue& tj = tokens[i];
+        TokenInfo t;
+        const uint256 id = uint256S(tj["tokenid"].get_str());
+        if (tj["token"].isNull()) {
+            BOOST_CHECK(!idx.GetToken(id, t));
+            continue;
+        }
+        BOOST_REQUIRE_MESSAGE(idx.GetToken(id, t), "no token " + tj["tokenid"].get_str());
+        const UniValue& e = tj["token"];
+        const unsigned dec = (unsigned)e["decimals"].get_int();
+        BOOST_CHECK_EQUAL(t.decimals, dec);
+        BOOST_CHECK_EQUAL(FormatAmount(t.minted, dec), e["totalminted"].get_str());
+        BOOST_CHECK_EQUAL(FormatAmount(t.sendBurned, dec), e["burnedinsends"].get_str());
+        BOOST_CHECK_EQUAL(FormatAmount(t.spentBurned, dec), e["burnedbyspending"].get_str());
+        BOOST_CHECK_EQUAL(FormatAmount(t.minted - t.sendBurned - t.spentBurned, dec), e["circulating"].get_str());
+        BOOST_CHECK_EQUAL(t.hasBaton, !e["mintbaton"].isNull());
+        // the holders: every address and amount
+        const UniValue& holders = tj["holders"].get_array();
+        std::vector<HolderBalance> got = idx.GetHolders(id, 0, 100000);
+        BOOST_CHECK_EQUAL(got.size(), holders.size());
+        for (size_t k = 0; k < holders.size(); k++) {
+            const std::string addr = holders[k]["address"].get_str();
+            bool found = false;
+            for (size_t m = 0; m < got.size(); m++)
+                if (AddrKeyToString(got[m].addr) == addr) {
+                    found = true;
+                    BOOST_CHECK_EQUAL(FormatAmount(got[m].amount, dec), holders[k]["amount"].get_str());
+                }
+            BOOST_CHECK_MESSAGE(found, "holder " + addr + " missing");
+        }
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

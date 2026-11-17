@@ -893,7 +893,8 @@ std::vector<TxRef> ZslpIndex::ListTokenTransactions(const uint256& token, size_t
         if (seen++ < skip)
             return true;
         TxRef t;
-        Dec hd(k.substr(33, 4));
+        const std::string hbytes = k.substr(33, 4);
+        Dec hd(hbytes);
         t.height = (int)hd.U32();
         memcpy(t.txid.begin(), k.data() + 37, 32);
         Dec d(v);
