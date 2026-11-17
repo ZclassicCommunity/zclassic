@@ -247,7 +247,10 @@ static bool WinCommandLineIsLossy()
     LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &nArgs);
     if (!wargv) return false;
     bool lossy = false;
-    for (int i = 0; i < nArgs && !lossy; i++) {
+    // Skip argv[0]: the executable path is not used to open anything (the embedded
+    // Tor child is located with GetModuleFileNameW), so a binary kept under a
+    // non-ANSI folder with an ASCII datadir must keep working.
+    for (int i = 1; i < nArgs && !lossy; i++) {
         BOOL usedDefault = FALSE;
         if (WideCharToMultiByte(CP_ACP, 0x00000400 /* WC_NO_BEST_FIT_CHARS */, wargv[i], -1, NULL, 0, "?", &usedDefault) > 0 && usedDefault)
             lossy = true;
