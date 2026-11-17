@@ -16,6 +16,15 @@
 
 #include <boost/thread.hpp>
 
+#include <algorithm>
+#include <condition_variable>
+#include <deque>
+#include <exception>
+#include <future>
+#include <mutex>
+#include <thread>
+#include <vector>
+
 using namespace std;
 
 // NOTE: Per issue #3277, do not use the prefix 'X' or 'x' as they were
@@ -377,6 +386,51 @@ bool CBlockTreeDB::ReadFlag(const std::string &name, bool &fValue) {
     return true;
 }
 
+namespace {
+
+// A run of consecutive block-index values copied out of leveldb.
+struct RawIndexBatch {
+    std::vector<char> data;
+    std::vector<size_t> end; // end[i] = offset one past record i in data
+    size_t size() const { return end.size(); }
+};
+
+// What a worker derives from a RawIndexBatch. Nothing here touches shared state.
+struct ParsedIndexBatch {
+    std::vector<CDiskBlockIndex> disk;
+    std::vector<uint256> hash;
+    std::vector<char> parsed; // record deserialized
+    std::vector<char> powOk;  // CheckProofOfWork() on the block hash passed
+};
+
+ParsedIndexBatch ParseIndexBatch(const RawIndexBatch& raw, const Consensus::Params& consensus)
+{
+    ParsedIndexBatch out;
+    const size_t n = raw.size();
+    out.disk.resize(n);
+    out.hash.resize(n);
+    out.parsed.assign(n, 0);
+    out.powOk.assign(n, 0);
+    size_t begin = 0;
+    for (size_t i = 0; i < n; i++) {
+        const char* p = raw.data.data() + begin;
+        const char* e = raw.data.data() + raw.end[i];
+        begin = raw.end[i];
+        try {
+            CDataStream ssValue(p, e, SER_DISK, CLIENT_VERSION);
+            ssValue >> out.disk[i];
+        } catch (const std::exception&) {
+            continue; // reported, in record order, by the consumer
+        }
+        out.parsed[i] = 1;
+        out.hash[i] = out.disk[i].GetBlockHash();
+        out.powOk[i] = CheckProofOfWork(out.hash[i], out.disk[i].nBits, consensus);
+    }
+    return out;
+}
+
+} // namespace
+
 bool CBlockTreeDB::LoadBlockIndexGuts()
 {
     boost::scoped_ptr<CDBIterator> pcursor(NewIterator());
@@ -385,71 +439,171 @@ bool CBlockTreeDB::LoadBlockIndexGuts()
 
     int64_t nLoaded = 0;
 
-    // Load mapBlockIndex
-    while (pcursor->Valid()) {
-        boost::this_thread::interruption_point();
-        std::pair<char, uint256> key;
-        if (pcursor->GetKey(key) && key.first == DB_BLOCK_INDEX) {
-            CDiskBlockIndex diskindex;
-            if (pcursor->GetValue(diskindex)) {
-                // Construct block index object
-                CBlockIndex* pindexNew = InsertBlockIndex(diskindex.GetBlockHash());
-                pindexNew->pprev          = InsertBlockIndex(diskindex.hashPrev);
-                pindexNew->nHeight        = diskindex.nHeight;
-                pindexNew->nFile          = diskindex.nFile;
-                pindexNew->nDataPos       = diskindex.nDataPos;
-                pindexNew->nUndoPos       = diskindex.nUndoPos;
-                pindexNew->hashSproutAnchor     = diskindex.hashSproutAnchor;
-                pindexNew->nVersion       = diskindex.nVersion;
-                pindexNew->hashMerkleRoot = diskindex.hashMerkleRoot;
-                pindexNew->hashFinalSaplingRoot   = diskindex.hashFinalSaplingRoot;
-                pindexNew->nTime          = diskindex.nTime;
-                pindexNew->nBits          = diskindex.nBits;
-                pindexNew->nNonce         = diskindex.nNonce;
-                pindexNew->nSolution      = diskindex.nSolution;
-                pindexNew->nStatus        = diskindex.nStatus;
-                pindexNew->nCachedBranchId = diskindex.nCachedBranchId;
-                pindexNew->nTx            = diskindex.nTx;
-                pindexNew->nSproutValue   = diskindex.nSproutValue;
-                pindexNew->nSaplingValue  = diskindex.nSaplingValue;
+    // The block index holds millions of records. Reading them is a pipeline:
+    // this thread walks leveldb in key order and copies the raw values into
+    // batches; worker threads deserialize each record, double-SHA256 its header
+    // and check its proof of work (all pure functions of the record); this thread
+    // then inserts the results into mapBlockIndex strictly in key order, so the
+    // result, and the first error if any, are exactly those of the one-record-
+    // at-a-time loop this replaces.
+    const Consensus::Params& consensus = Params().GetConsensus();
+    const unsigned int nHardware = std::thread::hardware_concurrency();
+    const size_t nMaxPending = nHardware > 1 ? std::min<unsigned int>(nHardware, 8) : 0;
+    static const size_t BATCH_RECORDS = 2048;
 
-                // Consistency check.
-                //
-                // pindexNew->GetBlockHash() is the hash produced by
-                // diskindex.GetBlockHash() above (used to key this entry in
-                // mapBlockIndex). That call already builds a CBlockHeader from the
-                // SAME deserialized header fields {nVersion, hashPrev,
-                // hashMerkleRoot, hashFinalSaplingRoot, nTime, nBits, nNonce,
-                // nSolution} that the lines above copied verbatim into pindexNew, and
-                // double-SHA256s it. Re-deriving the header from pindexNew and
-                // hashing it a second time (the old `header.GetHash() !=
-                // GetBlockHash()` check) compares a recompute against a recompute of
-                // identical, unmutated inputs (pprev->GetBlockHash() == the map key
-                // == diskindex.hashPrev): it can never fail and just doubles the
-                // per-record header hashing cost across millions of records. The PoW
-                // check below consumes the same already-computed hash, so removing
-                // the duplicate rehash is a no-op for consensus and for the set of
-                // detectable on-disk corruptions.
-                if (!CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, Params().GetConsensus()))
-                    return error("LoadBlockIndex(): CheckProofOfWork failed: %s", pindexNew->ToString());
 
-                pcursor->Next();
-
-                // The block index holds millions of records; scanning it is the
-                // longest phase of an otherwise-synced startup. Emit a periodic
-                // progress message so neither the console nor a GUI looks frozen.
-                // InitMessage is wired to SetRPCWarmupStatus (init.cpp), so the
-                // climbing count also reaches GUI wallets polling over RPC during
-                // warmup. Trailing "..." matches the wallet's dot-animation. Purely
-                // cosmetic -- it does not change what is loaded.
-                if ((++nLoaded % 50000) == 0)
-                    uiInterface.InitMessage(strprintf(_("Loading block index %d..."), nLoaded));
-            } else {
+    // Insert one parsed batch. Returns false after reporting an error.
+    auto consume = [&nLoaded](ParsedIndexBatch& pb) -> bool {
+        for (size_t i = 0; i < pb.disk.size(); i++) {
+            boost::this_thread::interruption_point();
+            if (!pb.parsed[i])
                 return error("LoadBlockIndex() : failed to read value");
-            }
-        } else {
-            break;
+            CDiskBlockIndex& diskindex = pb.disk[i];
+
+            // Construct block index object
+            CBlockIndex* pindexNew = InsertBlockIndex(pb.hash[i]);
+            pindexNew->pprev          = InsertBlockIndex(diskindex.hashPrev);
+            pindexNew->nHeight        = diskindex.nHeight;
+            pindexNew->nFile          = diskindex.nFile;
+            pindexNew->nDataPos       = diskindex.nDataPos;
+            pindexNew->nUndoPos       = diskindex.nUndoPos;
+            pindexNew->hashSproutAnchor     = diskindex.hashSproutAnchor;
+            pindexNew->nVersion       = diskindex.nVersion;
+            pindexNew->hashMerkleRoot = diskindex.hashMerkleRoot;
+            pindexNew->hashFinalSaplingRoot   = diskindex.hashFinalSaplingRoot;
+            pindexNew->nTime          = diskindex.nTime;
+            pindexNew->nBits          = diskindex.nBits;
+            pindexNew->nNonce         = diskindex.nNonce;
+            pindexNew->nSolution      = std::move(diskindex.nSolution);
+            pindexNew->nStatus        = diskindex.nStatus;
+            pindexNew->nCachedBranchId = diskindex.nCachedBranchId;
+            pindexNew->nTx            = diskindex.nTx;
+            pindexNew->nSproutValue   = diskindex.nSproutValue;
+            pindexNew->nSaplingValue  = diskindex.nSaplingValue;
+
+            // Consistency check.
+            //
+            // pb.hash[i] is the double-SHA256 of the header that was just
+            // deserialized, and is the key this entry was inserted under; the
+            // fields above are copied verbatim from the same record, so
+            // recomputing the header hash from pindexNew would compare a value
+            // with itself (the former `header.GetHash() != GetBlockHash()`
+            // check could never fail). The proof-of-work check consumes the same
+            // hash; a worker evaluated it, and it is reported here at the same
+            // point in record order as before.
+            if (!pb.powOk[i])
+                return error("LoadBlockIndex(): CheckProofOfWork failed: %s", pindexNew->ToString());
+
+            // The block index holds millions of records; scanning it is the
+            // longest phase of an otherwise-synced startup. Emit a periodic
+            // progress message so neither the console nor a GUI looks frozen.
+            // InitMessage is wired to SetRPCWarmupStatus (init.cpp), so the
+            // climbing count also reaches GUI wallets polling over RPC during
+            // warmup. Trailing "..." matches the wallet's dot-animation. Purely
+            // cosmetic -- it does not change what is loaded.
+            if ((++nLoaded % 50000) == 0)
+                uiInterface.InitMessage(strprintf(_("Loading block index %d..."), nLoaded));
         }
+        return true;
+    };
+
+    // Copy the next run of records out of leveldb. Returns false at the end of
+    // the block-index key range (or an unparsable key), after which no more
+    // records follow.
+    auto readBatch = [&pcursor](RawIndexBatch& raw) -> bool {
+        while (raw.size() < BATCH_RECORDS) {
+            if (!pcursor->Valid())
+                return false;
+            std::pair<char, uint256> key;
+            if (!(pcursor->GetKey(key) && key.first == DB_BLOCK_INDEX))
+                return false;
+            const std::pair<const char*, size_t> value = pcursor->GetRawValue();
+            raw.data.insert(raw.data.end(), value.first, value.first + value.second);
+            raw.end.push_back(raw.data.size());
+            pcursor->Next();
+        }
+        return true;
+    };
+
+    if (nHardware <= 1) {
+        // One CPU: nothing to overlap.
+        for (bool fMore = true; fMore;) {
+            boost::this_thread::interruption_point();
+            RawIndexBatch raw;
+            fMore = readBatch(raw);
+            ParsedIndexBatch pb = ParseIndexBatch(raw, consensus);
+            if (!consume(pb))
+                return false;
+        }
+        return true;
+    }
+
+    // A reader thread owns the leveldb iterator from here on and hands parse
+    // tasks over in key order through a bounded queue; this thread consumes them
+    // in that order. The guard stops and joins the reader on every exit path
+    // (including a boost interruption thrown from consume()).
+    struct Pipeline {
+        std::mutex mtx;
+        std::condition_variable cvSpace, cvItem;
+        std::deque<std::future<ParsedIndexBatch>> queue;
+        bool fDone = false;
+        bool fStop = false;
+        std::exception_ptr error;
+        std::thread reader;
+        ~Pipeline()
+        {
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                fStop = true;
+            }
+            cvSpace.notify_all();
+            if (reader.joinable())
+                reader.join();
+        }
+    } pipe;
+
+    pipe.reader = std::thread([&pipe, &readBatch, &consensus, nMaxPending]() {
+        try {
+            for (bool fMore = true; fMore;) {
+                RawIndexBatch raw;
+                fMore = readBatch(raw);
+                if (raw.size() == 0)
+                    continue;
+                std::future<ParsedIndexBatch> fut = std::async(std::launch::async,
+                    [raw = std::move(raw), &consensus]() { return ParseIndexBatch(raw, consensus); });
+                std::unique_lock<std::mutex> lock(pipe.mtx);
+                pipe.cvSpace.wait(lock, [&] { return pipe.fStop || pipe.queue.size() < nMaxPending; });
+                if (pipe.fStop)
+                    break;
+                pipe.queue.push_back(std::move(fut));
+                pipe.cvItem.notify_one();
+            }
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(pipe.mtx);
+            pipe.error = std::current_exception();
+        }
+        std::lock_guard<std::mutex> lock(pipe.mtx);
+        pipe.fDone = true;
+        pipe.cvItem.notify_one();
+    });
+
+    for (;;) {
+        std::future<ParsedIndexBatch> fut;
+        {
+            std::unique_lock<std::mutex> lock(pipe.mtx);
+            pipe.cvItem.wait(lock, [&] { return !pipe.queue.empty() || pipe.fDone; });
+            if (pipe.queue.empty()) {
+                if (pipe.error)
+                    std::rethrow_exception(pipe.error);
+                break;
+            }
+            fut = std::move(pipe.queue.front());
+            pipe.queue.pop_front();
+        }
+        pipe.cvSpace.notify_one();
+        ParsedIndexBatch pb = fut.get();
+        if (!consume(pb))
+            return false;
     }
 
     return true;

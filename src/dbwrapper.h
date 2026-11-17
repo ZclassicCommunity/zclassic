@@ -140,6 +140,12 @@ public:
         return piter->value().size();
     }
 
+    // The undecoded value bytes; valid until the iterator is moved.
+    std::pair<const char*, size_t> GetRawValue() {
+        leveldb::Slice slValue = piter->value();
+        return std::make_pair(slValue.data(), slValue.size());
+    }
+
 };
 
 class CDBWrapper
