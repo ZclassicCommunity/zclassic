@@ -78,8 +78,15 @@ static void ie(char *err, size_t errsz, const char *fmt, ...)
     va_end(ap);
 }
 
+/* Carried patch depends/patches/tor/0002-dynhost-set-enabled.patch: the pinned
+ * fork starts a second, random-key onion service (dynhost) on its own. The
+ * daemon makes its onion service through the control port; switch dynhost off
+ * before Tor runs. Not declared in tor_api.h. */
+extern void dynhost_set_enabled(int enabled);
+
 static void run(struct zcl_tor_inproc *p)
 {
+    dynhost_set_enabled(0);
     p->rc = tor_run_main(p->cfg);
     atomic_store(&p->done, 1);
 }

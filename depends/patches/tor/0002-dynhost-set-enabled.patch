@@ -1,0 +1,106 @@
+Dynhost off switch (zclassicd carry patch).
+
+The fork enables the dynhost service unconditionally: subsystem init registers
+virtual port 80 and the mainloop calls dynhost_check_and_activate() once a
+second, which publishes a second, random-key onion service with demo web pages
+once Tor has a circuit. This adds dynhost_set_enabled(int), default 1 so other
+embedders of the fork keep today's behaviour. With 0: no virtual port is
+registered, dynhost_activate_service() refuses and dynhost_check_and_activate()
+returns at once, so no service is created. Call it before tor_run_main().
+
+--- a/src/feature/dynhost/dynhost.c
++++ b/src/feature/dynhost/dynhost.c
+@@ -26,6 +26,25 @@
+ /** Global dynhost service state */
+ static dynhost_service_t *global_dynhost_service = NULL;
+ 
++/** Whether this process runs the dynhost service. On by default, which keeps
++ * the fork's behaviour for embedders that rely on it. An embedder that wants
++ * only stock Tor onion services turns it off with dynhost_set_enabled(0)
++ * before it calls tor_run_main(). Written before Tor's thread starts, read on
++ * it. */
++static volatile int g_dynhost_enabled = 1;
++
++void
++dynhost_set_enabled(int enabled)
++{
++  g_dynhost_enabled = enabled ? 1 : 0;
++}
++
++int
++dynhost_is_enabled(void)
++{
++  return g_dynhost_enabled;
++}
++
+ /**
+  * Create a dynamic onion service without port binding.
+  */
+@@ -90,8 +109,13 @@
+   log_notice(LD_REND, "Dynhost initialized, service creation deferred");
+   global_dynhost_service->hs_service = NULL;
+   
+-  // Add default virtual port 80
+-  dynhost_add_virtual_port(80, 0);
++  // Add default virtual port 80, unless the embedder switched dynhost off
++  if (g_dynhost_enabled) {
++    dynhost_add_virtual_port(80, 0);
++  } else {
++    log_notice(LD_REND, "Dynhost disabled by the embedder: no virtual port "
++               "and no service will be created");
++  }
+   
+   // Initialize message subsystem
+   dynhost_message_init();
+@@ -214,6 +238,11 @@
+     return -1;
+   }
+ 
++  if (!g_dynhost_enabled) {
++    log_info(LD_REND, "Dynhost disabled, not activating a service");
++    return -1;
++  }
++
+   if (global_dynhost_service->hs_service) {
+     log_info(LD_REND, "Dynhost service already activated");
+     return 0;
+@@ -340,7 +369,10 @@
+ {
+   static int activation_attempted = 0;
+   static int check_count = 0;
+-  
++
++  if (!g_dynhost_enabled)
++    return;
++
+   /* Log every 10 checks to avoid spam */
+   if (++check_count % 10 == 1) {
+     log_info(LD_REND, "Dynhost activation check #%d (attempted=%d, global=%p, service=%p)", 
+--- a/src/feature/dynhost/dynhost.h
++++ b/src/feature/dynhost/dynhost.h
+@@ -57,6 +57,13 @@
+ void dynhost_check_and_activate(void);
+ void dynhost_run_scheduled_events(time_t now);
+ 
++/* Switch the dynhost service on (default) or off. Off: no virtual port is
++ * registered, dynhost_activate_service() refuses and
++ * dynhost_check_and_activate() does nothing, so no hidden service is created.
++ * Call before tor_run_main(). */
++void dynhost_set_enabled(int enabled);
++int dynhost_is_enabled(void);
++
+ /* Service management */
+ hs_service_t *dynhost_create_service(void);
+ int dynhost_add_virtual_port(uint16_t virtual_port, uint32_t isolation_flags);
+--- a/src/feature/dynhost/dynhost_sys.c
++++ b/src/feature/dynhost/dynhost_sys.c
+@@ -51,7 +51,8 @@
+ subsys_dynhost_set_options(void *arg)
+ {
+   const struct or_options_t *options = arg;
+-  (void)options;  /* Dynhost is always enabled for now */
++  if (!dynhost_is_enabled())
++    return 0;  /* switched off by the embedder: nothing to configure */
+   return dynhost_configure(options);
+ }
+ 

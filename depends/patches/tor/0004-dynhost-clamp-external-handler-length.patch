@@ -1,0 +1,22 @@
+Clamp the length an external dynhost handler returns.
+
+dynhost_webserver_handle_request() gives g_external_handler a 65536-byte buffer
+and then sends resp_len bytes of it. A handler that returns more than it was
+given made the loop read past the buffer. Truncate to the buffer size.
+
+--- a/src/feature/dynhost/dynhost_webserver.c
++++ b/src/feature/dynhost/dynhost_webserver.c
+@@ -325,6 +325,13 @@
+     size_t resp_len = g_external_handler(method, path, body, body_len,
+                                           resp_buf, 65536,
+                                           g_external_handler_ctx);
++    /* The handler reports how much of resp_buf it filled; never trust it past
++     * the buffer it was given. */
++    if (resp_len > 65536) {
++      log_warn(LD_REND, "Dynhost external handler returned %zu bytes for a "
++               "65536-byte buffer; truncating", resp_len);
++      resp_len = 65536;
++    }
+     if (resp_len > 0) {
+       /* Send response back through Tor circuit in chunks */
+       size_t sent = 0;

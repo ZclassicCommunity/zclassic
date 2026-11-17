@@ -13,7 +13,18 @@ $(package)_dependencies=openssl libevent zlib
 # The archive carries no generated configure script, so autoconf, automake and
 # libtool are needed on the build machine (the same requirement as Z23
 # tools/scripts/build_tor_full.sh).
+# Carry patches on the pinned fork (doc/tor-provenance.md lists and explains
+# each). Applied in order, before autogen.sh; the same on every host.
+$(package)_patches=0001-dynhost-stream-shutdown.patch
+$(package)_patches+=0002-dynhost-set-enabled.patch
+$(package)_patches+=0003-dynhost-free-reassembly-buf.patch
+$(package)_patches+=0004-dynhost-clamp-external-handler-length.patch
+
 define $(package)_preprocess_cmds
+  patch -p1 < $($(package)_patch_dir)/0001-dynhost-stream-shutdown.patch && \
+  patch -p1 < $($(package)_patch_dir)/0002-dynhost-set-enabled.patch && \
+  patch -p1 < $($(package)_patch_dir)/0003-dynhost-free-reassembly-buf.patch && \
+  patch -p1 < $($(package)_patch_dir)/0004-dynhost-clamp-external-handler-length.patch && \
   ./autogen.sh
 endef
 
