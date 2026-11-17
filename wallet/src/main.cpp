@@ -495,6 +495,15 @@ int main(int argc, char* argv[])
     // Install the noise filter before anything can log.
     qInstallMessageHandler(zclMessageFilter);
 
+    // Dry check: print every resolved state location and exit, touching nothing.
+    for (int i = 1; i < argc; i++) {
+        if (qstrcmp(argv[i], "--print-profile-paths") == 0) {
+            for (const QString& l : ProfilePaths::describe())
+                fprintf(stdout, "%s\n", l.toLocal8Bit().constData());
+            return 0;
+        }
+    }
+
     // NOTIFY-SRV connector mode: `<self> --notify <id>`, invoked by zclassicd's
     // -walletnotify/-blocknotify. A tiny headless mode that connects to the GUI's
     // token-gated notify socket, sends the per-session token + the txid/blockhash,

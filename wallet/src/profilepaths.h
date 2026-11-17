@@ -118,6 +118,23 @@ inline void applySettings() {
     QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, s);
 }
 
+// One line per resolved state location ("name=path"); drives `--print-profile-paths`,
+// a dry check that touches nothing on disk.
+inline QStringList describe() {
+    return QStringList()
+        << "profile=" + (active() ? dir() : QStringLiteral("(inactive)"))
+        << "settings=" + (active() ? sub(QStringLiteral("settings")) : QStringLiteral("(native)"))
+        << "appdata=" + appDataDir()
+        << "cache=" + cacheDir()
+        << "run=" + (active() ? runtimeDir() : QStringLiteral("(default)"))
+        << "exports=" + (active() ? exportsDir() : QStringLiteral("(default)"))
+        << "fontconfig=" + (active() ? fontconfigRoot() : QStringLiteral("(default)"))
+        << "datadir=" + (active() ? zclassicDataDir() : QStringLiteral("(daemon default)"))
+        << "conf=" + (active() ? zclassicConfPath() : QStringLiteral("(default)"))
+        << "daemonargs=" + daemonArgs().join(' ')
+        << "params=" + paramsDir(QStringLiteral("(default)"));
+}
+
 // Title suffix shown whenever the override is active ("" otherwise).
 inline QString titleMarker() {
     return active() ? QStringLiteral("  [profile: %1]").arg(QDir::toNativeSeparators(dir())) : QString();
