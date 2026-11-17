@@ -38,11 +38,11 @@ if [ ! -f Makefile ]; then
         -no-dbus -no-glib -no-icu -no-cups -qt-zlib -qt-libpng -qt-libjpeg -qt-freetype \
         -qt-pcre -qt-harfbuzz -device-option QMAKE_MACOSX_DEPLOYMENT_TARGET=14.0
 fi
-make -j4
+make -j"${ZCL_MAKE_JOBS:-4}"
 make install
 cd "$work/svg-build"
 "$prefix/bin/qmake" ../qtsvg-everywhere-src-5.15.19/qtsvg.pro
-make -j4
+make -j"${ZCL_MAKE_JOBS:-4}"
 make install
 "$prefix/bin/qmake" -query
 printf 'Static Qt prefix: %s\n' "$prefix"
