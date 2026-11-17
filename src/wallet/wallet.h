@@ -49,6 +49,10 @@ extern bool bSpendZeroConfChange;
 extern bool fSendFreeTransactions;
 extern bool fPayAtLeastCustomFee;
 
+//! After startup, unconfirmed wallet transactions are announced to peers once, retrying while the chain catches up.
+static const int64_t STARTUP_REBROADCAST_WINDOW_SECONDS = 60 * 60;
+static const int64_t STARTUP_REBROADCAST_RETRY_SECONDS = 10;
+
 //! -paytxfee default
 static const CAmount DEFAULT_TRANSACTION_FEE = 0;
 //! -paytxfee will warn if called with a higher fee than this amount (in satoshis) per KB
@@ -819,6 +823,10 @@ private:
 
     int64_t nNextResend;
     int64_t nLastResend;
+    //! set by ReacceptWalletTransactions(): unconfirmed wallet transactions to announce to peers once after startup (retried while the chain catches up)
+    std::set<uint256> setStartupRebroadcast;
+    int64_t nStartupRebroadcastNextTry;
+    int64_t nStartupRebroadcastEnd;
     bool fBroadcastTransactions;
 
     template <class T>
@@ -1090,6 +1098,8 @@ public:
         nOrderPosNext = 0;
         nNextResend = 0;
         nLastResend = 0;
+        nStartupRebroadcastNextTry = 0;
+        nStartupRebroadcastEnd = 0;
         nTimeFirstKey = 0;
         fBroadcastTransactions = false;
         nWitnessCacheSize = 0;
@@ -1323,6 +1333,7 @@ public:
     void ReacceptWalletTransactions();
     void ResendWalletTransactions(int64_t nBestBlockTime);
     std::vector<uint256> ResendWalletTransactionsBefore(int64_t nTime);
+    std::vector<uint256> ResendWalletTransactionsAtStartup();
     CAmount GetBalance() const;
     CAmount GetUnconfirmedBalance() const;
     CAmount GetImmatureBalance() const;
