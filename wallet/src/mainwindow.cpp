@@ -1,3 +1,4 @@
+#include "profilepaths.h"
 #include "mainwindow.h"
 #include "addressbook.h"
 #include "ui_mainwindow.h"
@@ -45,7 +46,7 @@ MainWindow::MainWindow(QWidget *parent) :
     ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
-    logger = new Logger(this, QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath("zcl-qt-wallet.log"));
+    logger = new Logger(this, QDir(ProfilePaths::appDataDir()).filePath("zcl-qt-wallet.log"));
 
     // SELF-HEAL: a heal/inProgress flag seen at PROCESS STARTUP is necessarily stale —
     // it's a persisted QSettings flag that a prior session set just before a deferred
@@ -2432,9 +2433,15 @@ void MainWindow::importPrivKey() {
 void MainWindow::exportTransactions() {
     // First, get the export file name
     QString exportName = "zclassic-transactions-" + QDateTime::currentDateTime().toString("yyyyMMdd") + ".csv";
+    if (ProfilePaths::active()) {
+        QDir().mkpath(ProfilePaths::exportsDir());
+        exportName = QDir(ProfilePaths::exportsDir()).filePath(exportName);
+    }
 
     QUrl csvName = QFileDialog::getSaveFileUrl(this, 
-            tr("Export transactions"), exportName, "CSV file (*.csv)");
+            tr("Export transactions"),
+            ProfilePaths::active() ? QUrl::fromLocalFile(exportName) : QUrl(exportName),
+            "CSV file (*.csv)");
 
     if (csvName.isEmpty())
         return;
@@ -2450,6 +2457,11 @@ void MainWindow::exportTransactions() {
 // write a spendable secret without a Save dialog (agency/safety), but we make that
 // dialog open already pointing at a good place.
 QString MainWindow::fnDefaultBackupDir() {
+    if (ProfilePaths::active()) {
+        const QString pd = ProfilePaths::exportsDir();
+        QDir().mkpath(pd);
+        return pd;
+    }
     for (auto loc : { QStandardPaths::DesktopLocation, QStandardPaths::DocumentsLocation,
                       QStandardPaths::HomeLocation }) {
         QString dir = QStandardPaths::writableLocation(loc);

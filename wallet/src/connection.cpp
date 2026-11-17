@@ -1,3 +1,5 @@
+#include "daemonjob.h"
+#include "profilepaths.h"
 #include "connection.h"
 #include "embeddeddaemon.h"
 #include "configfile.h"
@@ -759,6 +761,13 @@ bool ConnectionLoader::startEmbeddedZClassicd(const QStringList& extraArgs) {
     // buffer unused stdout for the lifetime of a full-node session. Explicit
     // printtoconsole output is discarded; startup stderr is still captured below.
     ezclassicd->setStandardOutputFile(QProcess::nullDevice());
+    // Windows backstop: bind every (re)start of the daemon to a kill-on-close job so a
+    // wallet that dies without cleanup does not leave it orphaned (no-op elsewhere).
+    // The orderly `stop` in RPC::shutdownZClassicd() disarms it first.
+    QObject::connect(ezclassicd, &QProcess::started, [=] () {
+        if (!DaemonJob::bind(ezclassicd))
+            main->logger->write("daemon job backstop unavailable (platform or setup failure)");
+    });
     QObject::connect(ezclassicd, &QProcess::started, [=] () {
         //qDebug() << "zclassicd started";
     });
@@ -864,6 +873,8 @@ bool ConnectionLoader::startEmbeddedZClassicd(const QStringList& extraArgs) {
             }
         }
     }
+    // Profile override: the daemon must never fall back to its own platform datadir.
+    launchArgs << ProfilePaths::daemonArgs();
     launchArgs << "-par=0"                // auto-detect cores: parallel script
                                           // verification (startup verify + IBD;
                                           // daemon default is single-threaded)
@@ -923,7 +934,7 @@ QString ConnectionLoader::ensureDaemonExtracted() {
 #else
     QString error;
     const QString path = extractEmbeddedDaemon(QCoreApplication::applicationFilePath(),
-        QStandardPaths::writableLocation(QStandardPaths::CacheLocation), &error);
+        ProfilePaths::cacheDir(), &error);
     if (path.isEmpty()) main->logger->write("Embedded daemon: " + error);
     return path;
 #endif // Q_OS_DARWIN
@@ -1694,7 +1705,7 @@ void ConnectionLoader::retryExtractionOnce(const QString& diag) {
     // re-runs its verified (SHA-256-gated) extraction from scratch. This is the SAME
     // dir ensureDaemonExtracted() writes to (<CacheLocation>/zclassic-node); we remove
     // only our own extracted-daemon dir, never anything else.
-    QDir cacheRoot(QStandardPaths::writableLocation(QStandardPaths::CacheLocation));
+    QDir cacheRoot(ProfilePaths::cacheDir());
     QDir cache(cacheRoot.filePath("zclassic-node"));
     if (cache.exists())
         cache.removeRecursively();
@@ -2501,6 +2512,13 @@ void ConnectionLoader::showError(QString explanation) {
 }
 
 QString ConnectionLoader::locateZClassicConfFile() {
+    if (ProfilePaths::active()) {
+        // Profile override: only ever consider the profile conf, never the real one.
+        const QString p = ProfilePaths::zclassicConfPath();
+        if (!QFileInfo::exists(p)) return QString();
+        main->logger->write("Found zclassicconf at " + p);
+        return p;
+    }
 #ifdef Q_OS_LINUX
     auto confLocation = QStandardPaths::locate(QStandardPaths::HomeLocation, ".zclassic/zclassic.conf");
 #elif defined(Q_OS_DARWIN)
@@ -2515,6 +2533,11 @@ QString ConnectionLoader::locateZClassicConfFile() {
 }
 
 QString ConnectionLoader::zclassicConfWritableLocation() {
+    if (ProfilePaths::active()) {
+        const QString p = ProfilePaths::zclassicConfPath();
+        main->logger->write("Found zclassicconf at " + p);
+        return p;
+    }
 #ifdef Q_OS_LINUX
     auto confLocation = QDir(QStandardPaths::writableLocation(QStandardPaths::HomeLocation)).filePath(".zclassic/zclassic.conf");
 #elif defined(Q_OS_DARWIN)
@@ -2529,6 +2552,12 @@ QString ConnectionLoader::zclassicConfWritableLocation() {
 }
 
 QString ConnectionLoader::zcashParamsDir() {
+    if (!ProfilePaths::paramsDir(QString()).isEmpty()) {
+        const QString p = ProfilePaths::paramsDir(QString());
+        QDir().mkpath(p);
+        main->logger->write("Using ZCLWALLET_PARAMS_DIR params directory at " + p);
+        return p;
+    }
     #ifdef Q_OS_LINUX
     auto paramsLocation = QDir(QDir(QStandardPaths::writableLocation(QStandardPaths::HomeLocation)).filePath(".zcash-params"));
 #elif defined(Q_OS_DARWIN)

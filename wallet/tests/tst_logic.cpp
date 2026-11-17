@@ -29,6 +29,8 @@
 #include <QProcessEnvironment>
 #include <QTcpServer>
 #include "repairlocation.h"
+#include "profilepaths.h"
+#include <QTemporaryDir>
 #include "walletbackup.h"
 #include "embeddeddaemon.h"
 #include "releaseversion.h"
@@ -881,6 +883,10 @@ private slots:
 
     // --- First-run trust: send-gate staleness predicate (pure) ---
     void sendgate_staleWhenPollStops();               // Settings::syncGateIsStale boundary
+    void profile_unsetKeepsDefaults();
+    void profile_setRedirectsEveryPath();
+    void profile_settingsAreIniInsideProfile();
+    void profile_noDirectStateLocations();
 
 private:
     QString sandboxAppData() const {
@@ -1921,6 +1927,114 @@ void TestLogic::sendgate_staleWhenPollStops() {
     // Past the window: stale.
     QVERIFY(Settings::syncGateIsStale(now, now - (W + 1)));
     QVERIFY(Settings::syncGateIsStale(now, now - 10 * W));
+}
+
+// ---- Profile override (ZCLWALLET_PROFILE_DIR) -------------------------------------
+// Unset => helpers return exactly the pre-override locations; set => every helper
+// resolves inside the profile; settings become IniFormat files inside it.
+void TestLogic::profile_unsetKeepsDefaults() {
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+    qunsetenv("ZCLWALLET_PARAMS_DIR");
+    QVERIFY(!ProfilePaths::active());
+    QVERIFY(ProfilePaths::valid());
+    QCOMPARE(ProfilePaths::appDataDir(), QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
+    QCOMPARE(ProfilePaths::cacheDir(), QStandardPaths::writableLocation(QStandardPaths::CacheLocation));
+    QVERIFY(ProfilePaths::runtimeDir().isEmpty());
+    QVERIFY(ProfilePaths::exportsDir().isEmpty());
+    QVERIFY(ProfilePaths::fontconfigRoot().isEmpty());
+    QVERIFY(ProfilePaths::zclassicDataDir().isEmpty());
+    QVERIFY(ProfilePaths::zclassicConfPath().isEmpty());
+    QVERIFY(ProfilePaths::daemonArgs().isEmpty());          // no -datadir: daemon default
+    QVERIFY(ProfilePaths::titleMarker().isEmpty());
+    QCOMPARE(ProfilePaths::paramsDir("/default/params"), QString("/default/params"));
+    const auto before = QSettings::defaultFormat();
+    ProfilePaths::applySettings();                           // must be a no-op
+    QCOMPARE(QSettings::defaultFormat(), before);
+}
+
+void TestLogic::profile_setRedirectsEveryPath() {
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    const QString root = QDir::cleanPath(QFileInfo(tmp.path()).absoluteFilePath());
+    qputenv("ZCLWALLET_PROFILE_DIR", root.toLocal8Bit());
+    qunsetenv("ZCLWALLET_PARAMS_DIR");
+    auto under = [&](const QString& p) {
+        return QDir::cleanPath(p) == root || QDir::cleanPath(p).startsWith(root + "/");
+    };
+    QVERIFY(ProfilePaths::active());
+    QVERIFY(ProfilePaths::valid());
+    QCOMPARE(ProfilePaths::dir(), root);
+    const QStringList all = {
+        ProfilePaths::appDataDir(), ProfilePaths::cacheDir(), ProfilePaths::runtimeDir(),
+        ProfilePaths::exportsDir(), ProfilePaths::fontconfigRoot(),
+        ProfilePaths::zclassicDataDir(), ProfilePaths::zclassicConfPath(),
+    };
+    for (const QString& p : all) {
+        QVERIFY2(!p.isEmpty(), "profile helper returned an empty path");
+        QVERIFY2(under(p), qPrintable("outside the profile: " + p));
+    }
+    QCOMPARE(ProfilePaths::zclassicConfPath(), root + "/ZClassic/zclassic.conf");
+    // The embedded daemon must be pinned to the profile datadir, never its default.
+    const QStringList args = ProfilePaths::daemonArgs();
+    QCOMPARE(args.size(), 1);
+    QVERIFY(args[0].startsWith("-datadir="));
+    QVERIFY2(under(QDir::fromNativeSeparators(args[0].mid(9))), qPrintable(args[0]));
+    QVERIFY(ProfilePaths::titleMarker().contains("profile:"));
+    // Params keep their default unless ZCLWALLET_PARAMS_DIR says otherwise.
+    QCOMPARE(ProfilePaths::paramsDir("/default/params"), QString("/default/params"));
+    qputenv("ZCLWALLET_PARAMS_DIR", (root + "/params").toLocal8Bit());
+    QVERIFY(under(ProfilePaths::paramsDir("/default/params")));
+    // A set-but-missing profile dir is invalid (main() refuses to start).
+    qputenv("ZCLWALLET_PROFILE_DIR", (root + "/does-not-exist").toLocal8Bit());
+    QVERIFY(!ProfilePaths::valid());
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+    qunsetenv("ZCLWALLET_PARAMS_DIR");
+}
+
+void TestLogic::profile_settingsAreIniInsideProfile() {
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    const QString root = QDir::cleanPath(QFileInfo(tmp.path()).absoluteFilePath());
+    qputenv("ZCLWALLET_PROFILE_DIR", root.toLocal8Bit());
+    const QString oldOrg = QCoreApplication::organizationName(), oldApp = QCoreApplication::applicationName();
+    QCoreApplication::setOrganizationName("profile-test-org");
+    QCoreApplication::setApplicationName("profile-test-app");
+    const auto fmt = QSettings::defaultFormat();
+    ProfilePaths::applySettings();
+    QCOMPARE(QSettings::defaultFormat(), QSettings::IniFormat);
+    {
+        // The wallet only ever uses the default constructor (QSettings s;).
+        QSettings s;
+        QCOMPARE(s.format(), QSettings::IniFormat);
+        s.setValue("k", 1);
+        s.sync();
+        QVERIFY2(QDir::cleanPath(s.fileName()).startsWith(root + "/"), qPrintable(s.fileName()));
+        QVERIFY(QFileInfo::exists(s.fileName()));
+    }
+    {
+        QSettings sys(QSettings::IniFormat, QSettings::SystemScope, "o", "a");
+        QVERIFY2(QDir::cleanPath(sys.fileName()).startsWith(root + "/"), qPrintable(sys.fileName()));
+    }
+    QSettings::setDefaultFormat(fmt);
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+    QCoreApplication::setOrganizationName(oldOrg);
+    QCoreApplication::setApplicationName(oldApp);
+}
+
+// Source guard: no state location is decided outside ProfilePaths any more.
+void TestLogic::profile_noDirectStateLocations() {
+    for (const char* f : {"addressbook.cpp", "senttxstore.cpp", "turnstile.cpp", "mainwindow.cpp",
+                          "connection.cpp", "notifyserver.cpp", "main.cpp"}) {
+        const QString code = readStrippedSrc(f);
+        QVERIFY2(!code.isEmpty(), f);
+        QVERIFY2(!code.contains("QStandardPaths::AppDataLocation") ||
+                 QString(f) == "connection.cpp" /* legacy conf path in the inactive branch */,
+                 f);
+        QVERIFY2(!code.contains("QStandardPaths::CacheLocation"), f);
+    }
+    const QString conn = readStrippedSrc("connection.cpp");
+    QVERIFY2(conn.contains("ProfilePaths::daemonArgs()"), "embedded launch must pin -datadir under a profile");
+    QVERIFY2(conn.contains("ProfilePaths::zclassicConfPath()"), "conf lookup must honour the profile");
 }
 
 QTEST_MAIN(TestLogic)

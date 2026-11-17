@@ -1,3 +1,4 @@
+#include "daemonjob.h"
 #include "rpc.h"
 #include "fastsync.h"
 #include "releaseversion.h"
@@ -2223,6 +2224,8 @@ void RPC::shutdownZClassicd(bool waitForCheckpoint) {
     // snapshot-download) the daemon may refuse the connection or reply RPC_IN_WARMUP;
     // that must not pop a "Transaction Error" box -- we fall back to terminate() below.
     conn->doRPCIgnoreError(payload, [=](auto) {});
+    // The orderly stop is under way: the Windows job backstop must never cut it short.
+    DaemonJob::disarm();
     conn->shutdown();
 
     // Wait for the embedded zclassicd to finish flushing its state and exit, but
