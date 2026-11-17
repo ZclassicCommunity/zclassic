@@ -104,13 +104,6 @@ signed. **CAUTION:** Remember the `v` at the beginning here:
     $ git tag -s v1.0.9
     $ git push origin v1.0.9
 
-## Make and deploy deterministic builds
-
-- Run the [Gitian deterministic build environment](https://github.com/zcash/zcash-gitian)
-- Compare the uploaded [build manifests on gitian.sigs](https://github.com/zcash/gitian.sigs)
-- If all is well, the DevOps engineer will build the Debian packages and update the
-  [apt.z.cash package repository](https://apt.z.cash).
-
 ## Add release notes to GitHub
 
 - Go to the [GitHub tags page](https://github.com/zcash/zcash/tags).

@@ -214,7 +214,6 @@ def patch_version_in_files(release, releaseprev):
     patch_README(release, releaseprev)
     patch_clientversion_h(release)
     patch_configure_ac(release)
-    patch_gitian_linux_yml(release, releaseprev)
 
 
 @phase('Patching release height for end-of-support halt.')
@@ -344,18 +343,6 @@ def patch_configure_ac(release):
     )
 
 
-def patch_gitian_linux_yml(release, releaseprev):
-    path = 'contrib/gitian-descriptors/gitian-linux.yml'
-    with PathPatcher(path) as (inf, outf):
-        outf.write(inf.readline())
-
-        secondline = inf.readline()
-        assert secondline == 'name: "zcash-{}"\n'.format(
-            releaseprev.novtext
-        ), repr(secondline)
-
-        outf.write('name: "zcash-{}"\n'.format(release.novtext))
-        outf.write(inf.read())
 
 
 def _patch_build_defs(release, path, pattern):
