@@ -675,7 +675,7 @@
              </size>
             </property>
             <property name="text">
-             <string>Review &amp; send</string>
+             <string>Review and send</string>
             </property>
             <property name="default">
              <bool>true</bool>

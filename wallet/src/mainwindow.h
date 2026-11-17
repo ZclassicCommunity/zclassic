@@ -99,6 +99,9 @@ public:
     // Drive the REAL shield flow the Home fix-it button now uses (PRIV-18): set up
     // a t -> default-Sapling send on the Send page exactly as a click would.
     void testShieldPublicFunds()    { shieldPublicFunds(); }
+    void testBackupWallet()         { backupWallet(); }
+    void testSendButton()           { sendButton(); }
+    bool testAskKeepRunningInTray() { return askKeepRunningInTray(); }
 #endif
 
     QString doSendTxValidations(Tx tx);
@@ -321,6 +324,9 @@ private:
     QSystemTrayIcon* trayIcon       = nullptr;
     bool             quitting       = false;
     bool             trayHintShown  = false;
+    // First-time close notice: tells the user the node keeps running and offers to quit now.
+    // Returns true to keep running in the tray, false if the user chose to quit.
+    bool askKeepRunningInTray();
 
     void setupSendTab();
     void setupTransactionsTab();

@@ -40,6 +40,45 @@
 
 using json = nlohmann::json;
 
+// Activity list columns. Left to Qt's 100px defaults the Type, Address and Date columns
+// were cut to "Recei...", a bare badge and "2026-11..." while the Amount column ate the
+// rest of the width. Type, date and amount size to their content and the address column
+// takes the remaining room, so a transaction can be read at a glance. Applied after the
+// saved header state is restored so an older, squeezed layout cannot come back.
+void applyActivityColumnLayout(QTableView* table) {
+    QHeaderView* h = table->horizontalHeader();
+    if (h->count() < 4)
+        return;
+    h->setStretchLastSection(false);
+    h->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    h->setSectionResizeMode(1, QHeaderView::Stretch);
+    h->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    h->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    table->verticalHeader()->setVisible(false);
+}
+
+// Address Balances (Home): the address column was left at its 100px default, which showed
+// only the PUBLIC/Private pill and none of the address. The address takes the spare width.
+void applyBalanceColumnLayout(QTableView* table) {
+    QHeaderView* h = table->horizontalHeader();
+    if (h->count() < 2)
+        return;
+    h->setStretchLastSection(false);
+    h->setSectionResizeMode(0, QHeaderView::Stretch);
+    h->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    table->verticalHeader()->setVisible(false);
+}
+
+// A button the user pressed must never do nothing. When the node is not connected yet,
+// say so and say what to do, instead of silently returning.
+static void tellNotConnected(QWidget* parent, const QString& what) {
+    QMessageBox::information(parent, QObject::tr("Not connected yet"),
+        QObject::tr("%1 needs the ZClassic node, and the wallet is not connected to it "
+                    "yet. If the status bar says it is starting, wait until it shows "
+                    "that the wallet is connected, then try again. If it says there is "
+                    "a problem, use the \"Try again\" button on the Home page.").arg(what));
+}
+
 MainWindow::MainWindow(QWidget *parent) :
     QMainWindow(parent),
     ui(new Ui::MainWindow)
@@ -2123,6 +2162,11 @@ void MainWindow::doImport(QSharedPointer<QList<QString>> keys) {
     if (rpc->getConnection() == nullptr) {
         // No connection, just return (keys is freed when the last reference drops).
         showImportProgress(false);   // don't strand the card on a dropped connection
+        // Tell the user their keys were NOT imported rather than letting them assume so.
+        QMessageBox::warning(this, tr("Keys were not imported"),
+            tr("The connection to the ZClassic node was lost, so your keys were not "
+               "imported. Nothing was changed. Wait until the wallet is connected again "
+               "and import them again."));
         return;
     }
 
@@ -2466,8 +2510,10 @@ QString MainWindow::fnDefaultBackupDir() {
 // + prompt) and show the one warm closure. KEY-1: the secret is only ever copied to
 // the local file the user confirms — never networked or logged.
 void MainWindow::backupWallet() {
-    if (!rpc || !rpc->getConnection())
+    if (!rpc || !rpc->getConnection()) {
+        tellNotConnected(this, tr("Backing up your wallet"));
         return;
+    }
 
     QDir zclassicdir(rpc->getConnection()->config->zclassicDir);
     QString namePrefix = "zclassic-wallet-backup-";
@@ -3231,8 +3277,10 @@ void MainWindow::setupRecieveTab() {
 
     // Explicitly get new address button.
     QObject::connect(ui->btnRecieveNewAddr, &QPushButton::clicked, [=] () {
-        if (!rpc->getConnection())
+        if (!rpc->getConnection()) {
+            tellNotConnected(this, tr("Creating a new address"));
             return;
+        }
 
         // New-address creation is shielded Sapling or transparent only. Creating NEW
         // legacy Sprout addresses is removed (Sprout is deprecated); rdioZAddr remains

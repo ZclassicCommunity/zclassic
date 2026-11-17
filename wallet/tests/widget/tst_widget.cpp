@@ -1028,6 +1028,69 @@ private slots:
     // and a QTimer::singleShot(0) modal-dismisser reads the confirm dialog's
     // publicWarning visibility BEFORE closing the dialog, then injects the
     // answer (reject) so exec() returns without a deadlock.
+    // ---- UX: a button the user pressed must never silently do nothing -----------
+    // With no node connection, "Back up my wallet" used to return without a word.
+    void ux1_backupWithoutConnectionSaysWhy() {
+        MainWindow* w = makeWindow();
+        _infoSeen = 0;
+        armInfoCounter();
+        w->testBackupWallet();
+        ++_modalGen;                       // stop the poller
+        QVERIFY2(_infoSeen >= 1, "Back up my wallet did nothing and said nothing without a connection");
+        settleAndDelete(w);
+    }
+
+    // "Review and send" with no Pay-from address (node still starting) used to do nothing.
+    void ux2_reviewSendWithNoPayFromSaysWhy() {
+        MainWindow* w = makeWindow();
+        _infoSeen = 0;
+        armInfoCounter();
+        w->testSendButton();
+        ++_modalGen;
+        QVERIFY2(_infoSeen >= 1, "Review and send did nothing and said nothing with no Pay-from address");
+        settleAndDelete(w);
+    }
+
+    // The confirm dialog must show every row at full height. With a public send, an
+    // auto-shielded change row, and the syncing + no-peers warnings stacked under it, the
+    // rows used to be squeezed to half height so the amount and fee could not be read.
+    void ux3_confirmDialogRowsAreNotClipped() {
+        MainWindow* w = makeWindow();
+        w->testSeedBalances();
+        Settings::getInstance()->setSyncing(true);
+        Settings::getInstance()->setPeers(0);
+
+        const QString T  = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+        const QString ZS = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        Tx tx; tx.fromAddr = T; tx.fee = 0.0001;
+        ToFields a; a.addr = T;  a.amount = 1.25;   tx.toAddrs.append(a);
+        ToFields b; b.addr = ZS; b.amount = 6.5199; b.txtMemo = QStringLiteral("auto-shield-change"); tx.toAddrs.append(b);
+
+        QString clipped = QStringLiteral("dialog never appeared");
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            QWidget* dlg = QApplication::activeModalWidget();
+            if (!dlg) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+            clipped.clear();
+            const auto labels = dlg->findChildren<QLabel*>();
+            for (QLabel* l : labels) {
+                if (!l->isVisibleTo(dlg) || l->text().isEmpty()) continue;
+                int need = l->hasHeightForWidth() ? l->heightForWidth(l->width()) : l->sizeHint().height();
+                if (l->height() + 1 < need)
+                    clipped += QString("%1 h=%2 need=%3; ").arg(l->objectName()).arg(l->height()).arg(need);
+            }
+            if (auto* qd = qobject_cast<QDialog*>(dlg)) qd->reject();
+        };
+        QTimer::singleShot(0, [&]() { poll(300); });
+        w->testConfirmTx(tx);
+        ++_modalGen;
+        QVERIFY2(clipped.isEmpty(), qPrintable("confirm dialog rows clipped: " + clipped));
+        Settings::getInstance()->setSyncing(false);
+        Settings::getInstance()->setPeers(8);
+        settleAndDelete(w);
+    }
+
     void e2_publicWarningVisibleForTransparentRecipient() {
         MainWindow* w = makeWindow();
 
