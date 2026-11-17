@@ -77,6 +77,10 @@ $(LIBSECP256K1): $(wildcard secp256k1/src/*) $(wildcard secp256k1/include/*)
 # libsnark's standalone makefile compiles with CXXFLAGS alone. Carry the same
 # preprocessor ABI switches (notably _GLIBCXX_DEBUG) as its callers.
 LIBSNARK_CXXFLAGS = $(CPPFLAGS) $(CXXFLAGS) $(AM_CXXFLAGS) $(PIC_FLAGS) -DBINARY_OUTPUT -DNO_PT_COMPRESSION=1 -fstack-protector-all
+# Field-arithmetic ABI switches shared by libsnark and libzcash: the field templates in
+# libsnark headers are COMDAT, so both must be built with the same set or the linker
+# picks one unit's generic GMP mul_reduce over libsnark's asm one.
+ZCL_FIELD_DEFINES = -DUSE_ASM -DMONTGOMERY_OUTPUT
 LIBSNARK_CONFIG_FLAGS = CURVE=ALT_BN128 NO_PROCPS=1 NO_DOCS=1 STATIC=1 NO_SUPERCOP=1 FEATUREFLAGS=-DMONTGOMERY_OUTPUT NO_COPY_DEPINST=1 NO_COMPILE_LIBGTEST=1
 if HAVE_OPENMP
 LIBSNARK_CONFIG_FLAGS += MULTICORE=1
@@ -86,7 +90,7 @@ LIBSNARK_CONFIG_FLAGS += PLATFORM=darwin
 endif
 
 $(LIBSNARK): $(wildcard snark/src/*)
-	$(AM_V_at) CC="$(CC)" CXX="$(CXX)" AR="$(AR)" CXXFLAGS="$(LIBSNARK_CXXFLAGS)" $(MAKE) $(AM_MAKEFLAGS) -C snark/ DEPINST="$(LIBSNARK_DEPINST)" $(LIBSNARK_CONFIG_FLAGS) OPTFLAGS="-O3" NO_GTEST=1 CURVE=ALT_BN128 FEATUREFLAGS="-DUSE_ASM -DMONTGOMERY_OUTPUT -DNO_PROCPS" lib
+	$(AM_V_at) CC="$(CC)" CXX="$(CXX)" AR="$(AR)" CXXFLAGS="$(LIBSNARK_CXXFLAGS)" $(MAKE) $(AM_MAKEFLAGS) -C snark/ DEPINST="$(LIBSNARK_DEPINST)" $(LIBSNARK_CONFIG_FLAGS) OPTFLAGS="-O3" NO_GTEST=1 CURVE=ALT_BN128 FEATUREFLAGS="$(ZCL_FIELD_DEFINES) -DNO_PROCPS" lib
 
 libsnark-tests: $(wildcard snark/src/*)
 	$(AM_V_at) CC="$(CC)" CXX="$(CXX)" AR="$(AR)" CXXFLAGS="$(LIBSNARK_CXXFLAGS)" $(MAKE) $(AM_MAKEFLAGS) -C snark/ check DEPINST="$(LIBSNARK_DEPINST)" $(LIBSNARK_CONFIG_FLAGS) OPTFLAGS="-O3"
@@ -656,10 +660,7 @@ libzcash_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 libzcash_a_CFLAGS = $(SAN_CXXFLAGS) $(HARDENED_CXXFLAGS) $(PIE_FLAGS)
 libzcash_a_LDFLAGS = $(AM_LDFLAGS)
 
-libzcash_a_CPPFLAGS += -DMONTGOMERY_OUTPUT
-# Match the libsnark build (src/Makefile.am snark rule): the field templates in libsnark headers
-# are COMDAT; without USE_ASM here the linker picks this unit's generic GMP mul_reduce over libsnark's asm one.
-libzcash_a_CPPFLAGS += -DUSE_ASM
+libzcash_a_CPPFLAGS += $(ZCL_FIELD_DEFINES)
 
 # C23 crypto core: vendored Z23 (verbatim), zclassicd glue, the librustzcash ABI
 # shim and the Sprout Groth16 prover. Replaces librustzcash.a; nothing Rust is linked.
