@@ -65,6 +65,8 @@ static const QString ZC_SPROUT    = "zcEgrceTwvoiFdEvPWcsJHAMrpLsprMF6aRJiQa3fan
 // testnet
 static const QString ZTS_SAPLING  = "ztestsapling1wn6889vznyu42wzmkakl2effhllhpe4azhu696edg2x6me4kfsnmqwpglaxzs7tmqsq7kudemp5";
 static const QString ZTN_SPROUT   = "ztn6fYKBii4Fp4vbGhkPgrtLU4XjXp4ZBMZgShtopmDGbn1L2JLTYbBp2b7SSkNr9F3rQeNZ9idmoR7s4JCVUZ7iiM5byhF";
+// regtest (real address from a Z23 regtest node: getinfo.testnet is false there)
+static const QString ZRT_SAPLING  = "zregtestsapling1pm6ght3yqlsyupz82y5l9t9j8ram9l4e25nwvvqhqnwxt3uayjz39ydtw0scn0d00y436v9s4ha";
 }
 
 // Flip one character of a valid address to break its checksum (typo negative).
@@ -926,6 +928,9 @@ void TestLogic::classifiers_data() {
     QTest::newRow("mainnet sprout zc")   << addr::ZC_SPROUT   << false << false << true  << false << true;
     QTest::newRow("testnet sapling zts") << addr::ZTS_SAPLING << true  << false << true  << true  << false;
     QTest::newRow("testnet sprout ztn")  << addr::ZTN_SPROUT  << true  << false << true  << false << true;
+    // regtest Sapling is Sapling whatever the testnet flag says (the daemon reports testnet=false)
+    QTest::newRow("regtest sapling zrt")    << addr::ZRT_SAPLING << false << false << true  << true  << false;
+    QTest::newRow("regtest sapling zrt tn") << addr::ZRT_SAPLING << true  << false << true  << true  << false;
 
     // On the WRONG network, a Sapling addr is not recognized as Sapling
     // (isSaplingAddress is net-aware), so it classifies as Sprout (z && !sapling).
@@ -961,6 +966,7 @@ void TestLogic::invalidAddressesRejected_data() {
     QTest::newRow("bad checksum zc")    << corrupt(addr::ZC_SPROUT);
     QTest::newRow("bad checksum zts")   << corrupt(addr::ZTS_SAPLING);
     QTest::newRow("bad checksum ztn")   << corrupt(addr::ZTN_SPROUT);
+    QTest::newRow("bad checksum zrt")   << corrupt(addr::ZRT_SAPLING);
     QTest::newRow("only prefix z")      << QString("z");
     QTest::newRow("only prefix t")      << QString("t");
 }
