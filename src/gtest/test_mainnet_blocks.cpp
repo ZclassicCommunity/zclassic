@@ -112,7 +112,7 @@ bool ReadBlkFile(const std::string& path, std::vector<ShieldedBlock>& out,
         uint32_t nSize;
         memcpy(&nSize, &buf[pos + 4], 4);
         nSize = le32toh(nSize);
-        if (nSize < 80 || nSize > MAX_BLOCK_SIZE || pos + 8 + nSize > buf.size()) {
+        if (nSize < 80 || nSize > GENEROUS_BLOCK_SIZE_LIMIT || pos + 8 + nSize > buf.size()) {
             pos++;
             continue;
         }
