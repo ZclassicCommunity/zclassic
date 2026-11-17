@@ -217,6 +217,16 @@ private slots:
         QCOMPARE((int)v.kind, kind);
         QCOMPARE(v.isSyncing, isSyncing);
     }
+    void presentation_peerlessDebounce() {
+        using namespace SyncState;
+        Verdict s; s.kind = WaitingForPeers; s.isSyncing = true;
+        Verdict done; done.kind = Synced; done.isSyncing = false;
+        QCOMPARE((int)presentation(s, 0, 1), (int)PresentConnecting);
+        QCOMPARE((int)presentation(s, 0, kNoPeerDebouncePolls - 1), (int)PresentConnecting);
+        QCOMPARE((int)presentation(s, 0, kNoPeerDebouncePolls), (int)PresentNoPeers);
+        QCOMPARE((int)presentation(s, 3, 50), (int)PresentNormal);
+        QCOMPARE((int)presentation(done, 0, 50), (int)PresentNormal);
+    }
     void syncState_formatAge() {
         QCOMPARE(SyncState::formatAge(-1), QString());
         QCOMPARE(SyncState::formatAge(40), QString("40 s"));

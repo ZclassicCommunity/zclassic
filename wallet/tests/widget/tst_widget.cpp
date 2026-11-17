@@ -33,6 +33,7 @@
 // ============================================================================
 #include <QtTest/QtTest>
 #include "syncstate.h"
+#include "addresscombo.h"
 #include <QApplication>
 #include <QTemporaryDir>
 #include <QRadioButton>
@@ -1251,6 +1252,124 @@ private slots:
         QVERIFY2(!w->testHeroText().startsWith("0"), qPrintable("after soft disconnect hero shows " + w->testHeroText()));
         QVERIFY2(!w->testHeroHelperVisible(), "helper reappeared after soft disconnect");
         settleAndDelete(w);
+    }
+
+    // ---- combo fixes: status messages must agree with the classified sync state -------------
+
+    // Run confirmTx and report whether the red "no peers" warning was visible in the dialog.
+    bool confirmShowsNoPeersWarning(MainWindow* w) {
+        const QString T  = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+        const QString ZS = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        Tx tx; tx.fromAddr = T; tx.fee = 0.0001;
+        ToFields a; a.addr = ZS; a.amount = 1.25; tx.toAddrs.append(a);
+        int seen = -1;
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            QWidget* dlg = QApplication::activeModalWidget();
+            if (!dlg) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+            QLabel* l = dlg->findChild<QLabel*>("nopeersWarning");
+            seen = (l && l->isVisibleTo(dlg)) ? 1 : 0;
+            if (auto* qd = qobject_cast<QDialog*>(dlg)) qd->reject();
+        };
+        QTimer::singleShot(0, [&]() { poll(300); });
+        w->testConfirmTx(tx);
+        ++_modalGen;
+        return seen == 1;
+    }
+
+    void combo1_localNetworkConfirmHasNoPeerWarning() {
+        MainWindow* w = makeWindow();
+        w->testSeedBalances();
+        Settings::getInstance()->setPeers(0);
+        Settings::getInstance()->setLocalNetwork(true);
+        QVERIFY2(!confirmShowsNoPeersWarning(w), "regtest confirm shows a no-peers warning");
+        // A real network with no peers keeps the warning exactly as before.
+        Settings::getInstance()->setLocalNetwork(false);
+        QVERIFY2(confirmShowsNoPeersWarning(w), "real network with 0 peers lost its warning");
+        Settings::getInstance()->setPeers(8);
+        settleAndDelete(w);
+    }
+
+    QString sendSuccessText(MainWindow* w) {
+        w->testShowSendSuccess(QStringLiteral("00"));
+        const auto boxes = w->findChildren<QMessageBox*>();   // closed ones may await deletion: take the newest
+        QMessageBox* box = boxes.isEmpty() ? nullptr : boxes.last();
+        const QString t = box ? box->text() + "|" + box->informativeText() : QString("no box");
+        if (box) box->close();
+        return t;
+    }
+
+    void combo2_localNetworkResultTextIsTrue() {
+        MainWindow* w = makeWindow();
+        Settings::getInstance()->setPeers(0);
+        Settings::getInstance()->setLocalNetwork(true);
+        const QString local = sendSuccessText(w);
+        QVERIFY2(local.contains("local test network") && local.contains("mined") && !local.contains("not sent"),
+                 qPrintable(local));
+        Settings::getInstance()->setLocalNetwork(false);
+        const QString real = sendSuccessText(w);
+        QVERIFY2(real.contains("not sent to the network yet"), qPrintable(real));
+        Settings::getInstance()->setPeers(8);
+        settleAndDelete(w);
+    }
+
+    void combo3_disconnectHidesPendingNotice() {
+        MainWindow* w = makeWindow();
+        w->show();
+        QLabel* l = w->findChild<QLabel*>("unconfirmedWarning");
+        QVERIFY(l);
+        w->getRPC()->testSetBalances(new QMap<QString, double>());
+        w->getRPC()->testSetUTXOs(new QList<UnspentOutput>());
+        w->getRPC()->testUpdateUI(true);
+        QVERIFY(l->isVisibleTo(w));
+        w->getRPC()->noConnection(false);
+        QVERIFY2(!l->isVisibleTo(w), "pending-funds notice survived a disconnect");
+        w->getRPC()->testUpdateUI(false);
+        settleAndDelete(w);
+    }
+
+    void combo4_peerlessDebounceIsOneState() {
+        using namespace SyncState;
+        Verdict syncing; syncing.kind = WaitingForPeers; syncing.isSyncing = true;
+        Verdict synced;  synced.kind = Synced; synced.isSyncing = false;
+        Verdict local;   local.kind = LocalNetwork; local.isSyncing = false;
+        for (int polls = 1; polls <= 2; ++polls)
+            QCOMPARE((int)presentation(syncing, 0, polls), (int)PresentConnecting);
+        QCOMPARE((int)presentation(syncing, 0, 3), (int)PresentNoPeers);
+        QCOMPARE((int)presentation(syncing, 5, 9), (int)PresentNormal);
+        QCOMPARE((int)presentation(synced, 0, 9), (int)PresentNormal);
+        QCOMPARE((int)presentation(local, 0, 9), (int)PresentNormal);
+        MainWindow* w = makeWindow();
+        w->setSyncStatusNetworkConnecting(0, -1);
+        QCOMPARE(w->syncStatusLabel->text(), QString("Connecting to the ZClassic network…"));
+        QVERIFY(!w->syncStatusLabel->text().contains("Syncing"));
+        settleAndDelete(w);
+    }
+
+    void combo5_emptyRecipientMessageHasNoDoubleSpace() {
+        MainWindow* w = makeWindow();
+        Tx tx; tx.fromAddr = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+        ToFields a; a.addr = QString(); a.amount = 1; tx.toAddrs.append(a);
+        const QString m = w->testDoSendTxValidations(tx);
+        QVERIFY2(m.contains("Recipient Address") && m.contains("Invalid") && !m.contains("  "), qPrintable(m));
+        tx.toAddrs[0].addr = "bogus";
+        QCOMPARE(w->testDoSendTxValidations(tx), QString("Recipient Address bogus is Invalid"));
+        settleAndDelete(w);
+    }
+
+    void combo6_payFromComboElidesMiddleKeepsBalance() {
+        AddressCombo c;
+        const QString z = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        c.addItem(z, 1234.5);
+        c.setCurrentIndex(0);
+        const QString shown = c.displayText(260);
+        QVERIFY2(shown.contains(QChar(0x2026)), qPrintable(shown));
+        QVERIFY2(shown.endsWith("ZCL)") || shown.endsWith(")"), qPrintable(shown));
+        QVERIFY2(shown.contains("1,234.5") || shown.contains("1234.5"), qPrintable(shown));
+        QVERIFY2(shown.startsWith("zs1"), qPrintable(shown));
+        QCOMPARE(c.currentText(), z);                       // the real address is untouched
+        QVERIFY(!c.displayText(100000).contains(QChar(0x2026)));
     }
 
     // A locked (encrypted) wallet cannot send, and this app has no unlock button. The

@@ -1199,7 +1199,9 @@ bool MainWindow::confirmTx(Tx tx) {
     confirm.syncingWarning->setVisible(Settings::getInstance()->isSyncing());
 
     // No peers warning
-    confirm.nopeersWarning->setVisible(Settings::getInstance()->getPeers() == 0);
+    // A private test chain has no peers by nature; the status bar already says so.
+    confirm.nopeersWarning->setVisible(Settings::getInstance()->getPeers() == 0 &&
+                                       !Settings::getInstance()->isLocalNetwork());
 
     // PRIV-11 / UX-12 — drive the confirm dialog wording + a privacy badge from the
     // four-way category. Tokens mirror dark.qss / PrivacyBadgeDelegate:
@@ -1372,6 +1374,10 @@ void MainWindow::sendButton() {
             title = tr("Still importing your keys");
             body  = tr("Your wallet is still importing and rescanning, so your balance "
                        "may be incomplete and this transaction could fail.\n\nSend anyway?");
+        } else if (Settings::getInstance()->getPeers() == 0 && !Settings::getInstance()->isLocalNetwork()) {
+            // Not catching up, just alone: say what is true.
+            body  = tr("Your wallet is not connected to any peers yet, so it cannot tell whether "
+                       "its balance is current and this transaction could fail.\n\nSend anyway?");
         } else if (stale) {
             body  = tr("Your wallet hasn't reported sync progress recently. Your balance "
                        "may be up to date, or syncing may have paused.\n\nSend anyway?");
@@ -1444,7 +1450,9 @@ QString MainWindow::doSendTxValidations(Tx tx) {
     for (auto toAddr : tx.toAddrs) {
         if (!Settings::isValidAddress(toAddr.addr)) {
             QString addr = (toAddr.addr.length() > 100 ? toAddr.addr.left(100) + "..." : toAddr.addr);
-            return QString(tr("Recipient Address ")) % addr % tr(" is Invalid");
+            // An empty recipient used to read "Recipient Address  is Invalid" (double space).
+            return addr.isEmpty() ? tr("Recipient Address is Invalid")
+                                  : tr("Recipient Address %1 is Invalid").arg(addr);
         }
 
         // This technically shouldn't be possible, but issue #62 seems to have discovered a bug
@@ -1615,7 +1623,11 @@ void MainWindow::showSendSuccess(QString txid) {
     box->setIcon(QMessageBox::Information);
     // Say only what is true. Your own node accepting the transaction is not the same as
     // the network having it: with no peers connected it has not been broadcast yet.
-    if (Settings::getInstance()->getPeers() == 0) {
+    if (Settings::getInstance()->isLocalNetwork()) {
+        box->setWindowTitle(tr("Transaction created"));
+        box->setText(tr("Transaction created on the local test network"));
+        box->setInformativeText(tr("It will confirm when a block is mined."));
+    } else if (Settings::getInstance()->getPeers() == 0) {
         box->setWindowTitle(tr("Transaction created"));
         box->setText(tr("Transaction created, but not sent to the network yet"));
         box->setInformativeText(tr("Your node accepted the transaction, but it is not "

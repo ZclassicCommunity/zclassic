@@ -717,6 +717,10 @@ void RPC::noConnection(bool preserveBalances) {
     // P0-6: reflect the lost connection in the main-tab sync banner.
     main->setSyncStatusConnecting();
 
+    // Nothing below can be known without a node: drop the "not yet confirmed" notice that the
+    // last balance refresh left on Home (it comes back with the next live refresh).
+    ui->unconfirmedWarning->setVisible(false);
+
     // transient-disconnect-zeroes-hero: a SOFT disconnect (one debounced getinfo
     // error, connection still live) must NOT discard the last-known balances. Keep
     // the labels/tables/send-inputs exactly as painted and only de-confidence the
@@ -1222,6 +1226,7 @@ void RPC::getInfoThenRefresh(bool force) {
 
             const bool wasSyncing = Settings::getInstance()->isSyncing();
             Settings::getInstance()->setSyncing(isSyncing);
+            Settings::getInstance()->setLocalNetwork(verdict.kind == SyncState::LocalNetwork);
             // The home hero's green/grey confidence is painted from this flag at balance
             // refresh time. When the flag flips (first poll after connect, peers lost or
             // regained, snapshot import finishing) repaint, so a balance is never left
@@ -1269,7 +1274,9 @@ void RPC::getInfoThenRefresh(bool force) {
             // shouldn't flip it. Require ~3 consecutive peerless polls (~15s at the
             // 5s sync cadence); a single peer resets the counter instantly.
             if (connections == 0) ezNoPeerPolls++; else { ezNoPeerPolls = 0; ezForeignStuckSince.invalidate(); ezForeignStuckShown = false; }   // W1-4: peers back -> let the stuck dialog re-surface if it gets stuck again later
-            if (isSyncing && connections == 0 && ezNoPeerPolls >= 3) {
+            // One classification feeds both this banner and the status bar below.
+            const SyncState::Presentation pres = SyncState::presentation(verdict, connections, ezNoPeerPolls);
+            if (pres == SyncState::PresentNoPeers) {
                 // RUNTIME STUB AUTO-HEAL: a node that STARTED FINE but loaded a tiny
                 // non-genesis "stub" chain (e.g. an aborted P2P sync left ~17MB of
                 // blocks/) and then can't find peers would otherwise sit on "waiting
@@ -1341,6 +1348,8 @@ void RPC::getInfoThenRefresh(bool force) {
                     main->setSyncStatusWaitingForPeers(true, blockNumber, verdict.tipAge);
                 else
                     main->setSyncStatusWaitingForPeers(false, blockNumber, verdict.tipAge);
+            } else if (pres == SyncState::PresentConnecting) {
+                main->setSyncStatusNetworkConnecting(blockNumber, verdict.tipAge);
             } else {
                 main->setSyncStatus(isSyncing, blockNumber, target, progress, verdict.tipAge, (int)verdict.kind);
             }
@@ -1415,10 +1424,14 @@ void RPC::getInfoThenRefresh(bool force) {
             if (isSyncing && !targetKnown)
                 statusText = blockNumber > 0 ? QObject::tr("Syncing (block %1)").arg(blockNumber)
                                              : QObject::tr("Starting node");
-            if (verdict.kind == SyncState::LocalNetwork)
-                statusText = QObject::tr("Local test network (block %1)").arg(Settings::getHeightString(blockNumber));
-            else if (verdict.kind == SyncState::WaitingForPeers)
+            if (pres == SyncState::PresentConnecting)
+                statusText = QObject::tr("Connecting to the ZClassic network…");
+            else if (pres == SyncState::PresentNoPeers && ezBootstrapActive)
+                statusText = QObject::tr("Downloading blockchain snapshot (%1%)").arg(ezBootstrapPct);   // same state the banner shows
+            else if (pres == SyncState::PresentNoPeers)
                 statusText = QObject::tr("No peers (block %1)").arg(Settings::getHeightString(blockNumber));
+            else if (verdict.kind == SyncState::LocalNetwork)
+                statusText = QObject::tr("Local test network (block %1)").arg(Settings::getHeightString(blockNumber));
             else if (verdict.kind == SyncState::StaleTip)
                 statusText = QObject::tr("Waiting for new blocks (%1)").arg(Settings::getHeightString(blockNumber));
             main->statusLabel->setText(statusText);

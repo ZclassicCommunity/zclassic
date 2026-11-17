@@ -30,6 +30,10 @@ public:
             
     bool    isSyncing();
     void    setSyncing(bool syncing);
+    // True while the node reports a private test chain (SyncState::LocalNetwork): 0 peers is normal there.
+    // Written by the status poll beside setSyncing, from the same classification the banner uses.
+    bool    isLocalNetwork() { return _isLocalNetwork; }
+    void    setLocalNetwork(bool b) { _isLocalNetwork = b; }
 
     // Send-gate staleness: epoch (secs) of the last successful sync poll, plus a PURE
     // predicate deciding whether a still-true isSyncing flag is stale (no poll refreshed
@@ -156,6 +160,7 @@ private:
     QString _executable;
     bool    _isTestnet        = false;
     bool    _isSyncing        = false;
+    bool    _isLocalNetwork   = false;
     qint64  _lastSyncPollEpoch = 0;   // secs-since-epoch of last successful sync poll (send-gate staleness)
     int     _blockNumber      = 0;
     int     _zclassicdVersion    = 0;

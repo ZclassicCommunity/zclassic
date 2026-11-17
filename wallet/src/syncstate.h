@@ -97,6 +97,22 @@ inline Verdict classify(const Input& in) {
     return v;
 }
 
+// What the peerless case looks like on screen. The Home banner and the status bar both read
+// this, so they cannot disagree. A single peerless sample means nothing (a fresh start has
+// none for the first seconds), so the node is "connecting" for the first kNoPeerDebouncePolls
+// polls and only then "no peers".
+enum Presentation {
+    PresentNormal,      // show the verdict as classified
+    PresentConnecting,  // syncing with 0 peers, inside the debounce window: neutral wording
+    PresentNoPeers      // syncing with 0 peers for long enough to say so
+};
+static const int kNoPeerDebouncePolls = 3;   // ~15 s at the 5 s sync cadence
+
+inline Presentation presentation(const Verdict& v, int connections, int noPeerPolls) {
+    if (!v.isSyncing || connections > 0) return PresentNormal;
+    return noPeerPolls >= kNoPeerDebouncePolls ? PresentNoPeers : PresentConnecting;
+}
+
 // "12 min", "3 h", "5 days" for a duration in seconds.
 inline QString formatAge(qint64 s) {
     if (s < 0) return QString();

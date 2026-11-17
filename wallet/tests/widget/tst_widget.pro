@@ -69,6 +69,8 @@ SOURCES += \
     ../../src/addresscombo.cpp \
     ../../src/recurring.cpp \
     ../../src/notifyserver.cpp \
+    ../../src/tokensmodel.cpp \
+    ../../src/tokensview.cpp \
     tst_widget.cpp
 
 # Q_OBJECT headers so MOC runs (matches zcl-qt-wallet.pro HEADERS that carry
@@ -80,6 +82,8 @@ HEADERS += \
     ../../src/fillediconlabel.h \
     ../../src/addresscombo.h \
     ../../src/notifyserver.h \
+    ../../src/tokensmodel.h \
+    ../../src/tokensview.h \
     ../../src/logger.h
 
 FORMS += \

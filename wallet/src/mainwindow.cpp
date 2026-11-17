@@ -1137,6 +1137,7 @@ void MainWindow::updateHomeFixIt(double transparent, bool fromCache) {
     // helper over showHeroUnavailable().
     if (!haveNumber) {
         showHeroUnavailable();
+        ui->unconfirmedWarning->setVisible(false);   // pending funds are unknowable without a balance
         if (homeFixItCard)
             homeFixItCard->setVisible(false);
         emit heroBalancesPainted();
@@ -1712,6 +1713,20 @@ void MainWindow::setSyncStatusWaitingForPeers(bool longStretch, int blockNumber,
     else
         syncStatusLabel->setText(tr("Connecting to the ZClassic network… no peers yet") % where);
     applyBannerStyle("QWidget { background-color: #d9822b; } QLabel { color: white; }");
+}
+
+// The first few peerless polls of a start: say the neutral thing. The status bar reads the same
+// SyncState::presentation(), so the two never disagree about whether we are still connecting.
+void MainWindow::setSyncStatusNetworkConnecting(int blockNumber, qint64 tipAge) {
+    if (syncBanner == nullptr) return;
+    Q_UNUSED(blockNumber);
+    Q_UNUSED(tipAge);
+    if (syncQuietPill) syncQuietPill->setVisible(false);
+    syncStatusLabel->setVisible(true);
+    syncProgressBar->setVisible(false);
+    syncProgressBar->setRange(0, 100);
+    syncStatusLabel->setText(tr("Connecting to the ZClassic network…"));
+    applyBannerStyle("QWidget { background-color: #555555; } QLabel { color: white; }");
 }
 
 // Bootstrap snapshot download in progress: show real determinate progress instead of

@@ -93,6 +93,8 @@ public:
     bool testVerifyAutoShield(const Tx& tx) { return verifyAutoShieldUnchanged(tx); }
     void testSeedBalances();
     QString testHumaneSendError(const QString& raw) { return humaneSendError(raw); }
+    QString testDoSendTxValidations(const Tx& tx) { return doSendTxValidations(tx); }
+    void    testShowSendSuccess(const QString& txid) { showSendSuccess(txid); }
     // Build the send-page Tx through the REAL createTxFromSendPage() path so the
     // L1 fail-open tests (PRIV-10) exercise the actual production routing.
     Tx   testCreateTxFromSendPage() { return createTxFromSendPage(); }
@@ -226,6 +228,7 @@ public:
     // longStretch=true after a LONG peerless stretch (~3min): adds a stronger
     // "check your internet / try again later" hint (SELF-HEAL SYNCED-ZERO-PEERS).
     void setSyncStatusWaitingForPeers(bool longStretch = false, int blockNumber = 0, qint64 tipAge = -1);
+    void setSyncStatusNetworkConnecting(int blockNumber = 0, qint64 tipAge = -1);
     // Bootstrap snapshot download in progress (getbootstrapinfo phase==active): show a
     // determinate "Downloading blockchain snapshot — X%" (with GB + MB/s when known)
     // instead of the misleading "waiting for peers" -- the node is actively

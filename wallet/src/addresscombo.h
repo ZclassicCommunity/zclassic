@@ -15,6 +15,13 @@ public:
     void        addItem(const QString& itemText, double bal);
     void        insertItem(int index, const QString& text, double bal = 0.0);
 
+    // What the closed box shows: the address elided in the MIDDLE to fit, the "(balance)" suffix
+    // always whole. Display only; currentText()/itemText() still return the full address.
+    QString     displayText(int availableWidth) const;
+
+protected:
+    void        paintEvent(QPaintEvent* e) override;
+
 public slots:
     void setCurrentText(const QString& itemText);
 
