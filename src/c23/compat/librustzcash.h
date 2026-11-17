@@ -402,6 +402,22 @@ extern "C" {
 #define ZCL_C23_HAVE_PROVER_THREADS 1
     void zcl_c23_set_prover_threads(unsigned n);
 
+    /// Splits the thread budget among `concurrent_proofs` proofs that a caller
+    /// is about to run at the same time, for the duration of that batch, so the
+    /// total stays at the budget; returns the per-proof budget (>= 1). Every
+    /// enter must be paired with a leave. Batches may nest or overlap: the
+    /// largest split in force applies until the last one leaves.
+    unsigned zcl_c23_prover_budget_enter(unsigned concurrent_proofs);
+    void zcl_c23_prover_budget_leave(void);
+    /// The configured total budget, with the automatic default resolved.
+    unsigned zcl_c23_prover_budget(void);
+
+    /// Adds the value-commitment accumulators of proving context `src` to
+    /// `dst` (as if src's spend and output proofs had been made on dst). Used
+    /// to prove one transaction's descriptions on private contexts in parallel
+    /// and still sign with a single binding key. `src` is not freed.
+    void zcl_c23_sapling_proving_ctx_merge(void *dst, const void *src);
+
 #ifdef __cplusplus
 }
 #endif
