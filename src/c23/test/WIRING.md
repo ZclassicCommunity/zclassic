@@ -15,7 +15,7 @@ may add.
 | `kat_mutgen.c` | writes `vectors/mutations.cases` (mutations not in the golden corpus) |
 | `kat_cases.c` | runs a case file through whichever ABI it is linked with, and `--compare`s two result files |
 | `kat_threads.c` | 16-thread concurrency check (cold warm-up before init, then check_spend / check_output / merkle_hash / ka_agree after init); meant for `-fsanitize=thread` too |
-| `kat_bench.c` | per-call timing on fixed golden inputs; the same source links the C23 shim or the Rust `librustzcash.a` |
+| `kat_bench.c` | per-call timing on fixed golden inputs; the same source links the C23 shim or the Rust `librustzcash.a`; `--threads N` (C23 build only) sets the vendored prover thread budget |
 | `make-pdir.sh` | builds the parameter directory the `init:` mutation cases use (reads the real params, never writes them) |
 | `run.sh` | builds and runs everything against the C23 shim (Windows MSYS2 or Linux) |
 | `rust.sh` | builds `kat_cases_rust` / `kat_bench_rust` against a Rust-backed `depends` prefix and produces Rust's results |

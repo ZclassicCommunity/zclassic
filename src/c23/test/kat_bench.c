@@ -8,6 +8,7 @@
  * same host. Timing is reported, never asserted.
  *
  *   kat_bench --dir <c23_golden> --params <dir> [--runs 21] [--only <op>] [--label <s>]
+ *             [--threads <n>]   (C23 build only: prover thread budget, 0 = default)
  *
  * Each op runs --runs times; each run performs `inner` calls (fixed per op,
  * identical for both libraries) and yields one per-call time. Reported: the
@@ -19,6 +20,11 @@
 #include <string.h>
 
 static const char *g_dir;
+
+#ifndef KAT_RUST
+/* Vendored Z23 prover thread budget (sapling/groth16_prover.h); 0 = its default. */
+void groth16_prover_set_threads(unsigned n);
+#endif
 
 /* Finds the first C record in <file> whose column vcol equals want and (when
  * label is non-NULL) whose label equals label. */
@@ -339,6 +345,10 @@ int main(int argc, char **argv)
             runs = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--only") && i + 1 < argc)
             only = argv[++i];
+#ifndef KAT_RUST
+        else if (!strcmp(argv[i], "--threads") && i + 1 < argc)
+            groth16_prover_set_threads((unsigned)atoi(argv[++i]));
+#endif
         else if (!strcmp(argv[i], "--label") && i + 1 < argc)
             label = argv[++i];
         else {

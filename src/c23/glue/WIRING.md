@@ -147,6 +147,30 @@ zclassicd (`Makefile.am` ~478), zclassic-cli / zclassic-tx (~501, ~523),
 mingw: `file_stream.c` uses MultiByteToWideChar/_wopen (kernel32, ucrt); `pthread` is
 winpthreads (already static in the release job). No bcrypt needed in production glue.
 
+## Prover thread budget (set it at init)
+
+The vendored Groth16 prover (Sapling spend and output proofs) runs its FFT and
+multi-scalar multiplications on a thread budget
+(`sapling/groth16_prover.h`):
+
+```c
+void groth16_prover_set_threads(unsigned n);  /* 0 = default, clamped to 64 */
+unsigned groth16_prover_threads(void);
+```
+
+The threads are created and joined inside each proof; nothing stays behind
+when it returns. With no budget set the prover uses the online processors, at
+most 8, and exactly 1 where `sysconf(_SC_NPROCESSORS_ONLN)` is not available,
+which includes mingw-w64. A Windows build therefore proves on ONE thread
+(about 2.3 s per spend proof instead of about 0.55 s on 8) until the daemon
+sets a budget, and a node that proves while it validates should set its own
+on every platform. Call it once after argument parsing, from wherever the
+daemon decides its other thread counts (`-par`, `GetNumCores()`); it is
+`extern "C"` and thread-safe, and takes effect on the next proof.
+
+`g1_msm` / `g2_msm` (used by `sprout_prover`, which fans out on its own) stay
+single-threaded whatever the budget is.
+
 ## Source-identity gate
 
 Add a check target (not part of `make all`):

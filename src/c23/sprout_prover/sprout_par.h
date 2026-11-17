@@ -4,8 +4,8 @@
  * Sprout prover. sprout_fft() returns exactly what the vendored serial
  * fr_fft() returns (same domain, same root of unity, same bit-reversed
  * iterative order) — test/test_fft_parity.c checks equality element by
- * element. The vendored fr_fft_parallel is NOT used: it disagrees with
- * fr_fft at every size >= 256. */
+ * element. The vendored fr_fft_parallel is not used. Before Z23 2bae686c3 it
+ * disagreed with fr_fft at every size >= 256; it is now the same transform. */
 
 #ifndef ZC23_SPROUT_PAR_H
 #define ZC23_SPROUT_PAR_H

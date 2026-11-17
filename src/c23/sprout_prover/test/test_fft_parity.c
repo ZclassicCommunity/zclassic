@@ -5,8 +5,8 @@
  * from 2^1 to 2^21 (the Sprout domain). Exit status 0 = equal.
  *
  * Also REPORTS (does not gate on) the vendored fr_fft_parallel, which the
- * prover does not use: at this Z23 revision it disagrees with fr_fft at
- * every size >= 256. */
+ * prover does not use. Before Z23 2bae686c3 it disagreed with fr_fft at every
+ * size >= 256; from that revision on the count printed here is 0. */
 
 #include "../sprout_par.h"
 #include "sapling/fr.h"
