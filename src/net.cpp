@@ -55,8 +55,9 @@ namespace {
     struct ListenSocket {
         SOCKET socket;
         bool whitelisted;
+        bool onion; // the onion service target
 
-        ListenSocket(SOCKET socket, bool whitelisted) : socket(socket), whitelisted(whitelisted) {}
+        ListenSocket(SOCKET socket, bool whitelisted, bool onion = false) : socket(socket), whitelisted(whitelisted), onion(onion) {}
     };
 }
 
@@ -116,10 +117,12 @@ unsigned short GetListenPort()
 }
 
 // find 'best' local address for a particular peer
-bool GetLocal(CService& addr, const CNetAddr *paddrPeer)
+bool GetLocal(CService& addr, const CNetAddr *paddrPeer, bool fPeerOnion)
 {
     if (!fListen)
         return false;
+
+    const bool fOnionPeer = fPeerOnion || (paddrPeer && paddrPeer->IsTor());
 
     int nBestScore = -1;
     int nBestReachability = -1;
@@ -127,6 +130,10 @@ bool GetLocal(CService& addr, const CNetAddr *paddrPeer)
         LOCK(cs_mapLocalHost);
         for (map<CNetAddr, LocalServiceInfo>::iterator it = mapLocalHost.begin(); it != mapLocalHost.end(); it++)
         {
+            // never mix the two sides: our Tor address only for onion peers, our
+            // clearnet addresses never for them
+            if ((*it).first.IsTor() != fOnionPeer)
+                continue;
             int nScore = (*it).second.nScore;
             int nReachability = (*it).first.GetReachabilityFrom(paddrPeer);
             if (nReachability > nBestReachability || (nReachability == nBestReachability && nScore > nBestScore))
@@ -165,11 +172,11 @@ static std::vector<CAddress> convertSeed6(const std::vector<SeedSpec6> &vSeedsIn
 // Otherwise, return the unroutable 0.0.0.0 but filled in with
 // the normal parameters, since the IP may be changed to a useful
 // one by discovery.
-CAddress GetLocalAddress(const CNetAddr *paddrPeer)
+CAddress GetLocalAddress(const CNetAddr *paddrPeer, bool fPeerOnion)
 {
     CAddress ret(CService("0.0.0.0",GetListenPort()),0);
     CService addr;
-    if (GetLocal(addr, paddrPeer))
+    if (GetLocal(addr, paddrPeer, fPeerOnion))
     {
         ret = CAddress(addr);
     }
@@ -189,7 +196,8 @@ int GetnScore(const CService& addr)
 // Is our peer's addrLocal potentially useful as an external IP source?
 bool IsPeerAddrLocalGood(CNode *pnode)
 {
-    return fDiscover && pnode->addr.IsRoutable() && pnode->addrLocal.IsRoutable() &&
+    // a peer on the onion side only knows us as the Tor exit: nothing to learn
+    return fDiscover && !pnode->IsOnionPeer() && pnode->addr.IsRoutable() && pnode->addrLocal.IsRoutable() &&
            !IsLimited(pnode->addrLocal.GetNetwork());
 }
 
@@ -198,7 +206,7 @@ void AdvertizeLocal(CNode *pnode)
 {
     if (fListen && pnode->fSuccessfullyConnected)
     {
-        CAddress addrLocal = GetLocalAddress(&pnode->addr);
+        CAddress addrLocal = GetLocalAddress(&pnode->addr, pnode->IsOnionPeer());
         // If discovery is enabled, sometimes give our peer the address it
         // tells us that it sees us as in case it has a better idea of our
         // address than we do.
@@ -213,6 +221,43 @@ void AdvertizeLocal(CNode *pnode)
             pnode->PushAddress(addrLocal);
         }
     }
+}
+
+// Our Tor v3 address for a peer on the onion side that negotiated addrv2.
+// Needs the service to be up (the address is in mapLocalHost only after
+// ADD_ONION succeeded, or when given with -externalip).
+bool AdvertizeLocalOnion(CNode *pnode)
+{
+    if (!fListen || !pnode->fSuccessfullyConnected || !pnode->fSendAddrV2 || !pnode->IsOnionPeer())
+        return false;
+    CService svc;
+    if (!GetLocal(svc, &pnode->addr, true) || !svc.IsTorV3())
+        return false;
+    CAddress addr(svc, nLocalServices);
+    addr.nTime = GetAdjustedTime();
+    LogPrintf("AdvertizeLocalOnion: advertizing %s to onion peer=%d\n", addr.ToString(), pnode->id);
+    pnode->PushAddress(addr);
+    return true;
+}
+
+static CCriticalSection cs_onionTarget;
+static CService onionTarget;
+static bool fHaveOnionTarget = false;
+
+void SetOnionServiceTarget(const CService& addr)
+{
+    LOCK(cs_onionTarget);
+    onionTarget = addr;
+    fHaveOnionTarget = true;
+}
+
+bool GetOnionServiceTarget(CService& addrOut)
+{
+    LOCK(cs_onionTarget);
+    if (!fHaveOnionTarget)
+        return false;
+    addrOut = onionTarget;
+    return true;
 }
 
 // learn a new local address
@@ -434,7 +479,7 @@ void CNode::PushVersion()
     // A v3 onion peer cannot be named in the 16-byte field: send the unroutable
     // placeholder, as for any peer we reach through a proxy.
     CAddress addrYou = (addr.IsRoutable() && !addr.IsTorV3() && !IsProxy(addr) ? addr : CAddress(CService("0.0.0.0",0)));
-    CAddress addrMe = GetLocalAddress(&addr);
+    CAddress addrMe = GetLocalAddress(&addr, IsOnionPeer());
     GetRandBytes((unsigned char*)&nLocalHostNonce, sizeof(nLocalHostNonce));
     if (fLogIPs)
         LogPrint("net", "send version message: version %d, blocks=%d, us=%s, them=%s, peer=%d\n", PROTOCOL_VERSION, nBestHeight, addrMe.ToString(), addrYou.ToString(), id);
@@ -967,8 +1012,9 @@ static void AcceptConnection(const ListenSocket& hListenSocket) {
     CNode* pnode = new CNode(hSocket, addr, "", true);
     pnode->AddRef();
     pnode->fWhitelisted = whitelisted;
+    pnode->fInboundOnion = hListenSocket.onion;
 
-    LogPrint("net", "connection from %s accepted\n", addr.ToString());
+    LogPrint("net", "connection from %s accepted%s\n", addr.ToString(), hListenSocket.onion ? " (onion service)" : "");
 
     {
         LOCK(cs_vNodes);
@@ -1635,7 +1681,7 @@ void ThreadMessageHandler()
 
 
 
-bool BindListenPort(const CService &addrBind, string& strError, bool fWhitelisted)
+bool BindListenPort(const CService &addrBind, string& strError, bool fWhitelisted, bool fOnion)
 {
     strError = "";
     int nOne = 1;
@@ -1725,9 +1771,9 @@ bool BindListenPort(const CService &addrBind, string& strError, bool fWhiteliste
         return false;
     }
 
-    vhListenSocket.push_back(ListenSocket(hListenSocket, fWhitelisted));
+    vhListenSocket.push_back(ListenSocket(hListenSocket, fWhitelisted, fOnion));
 
-    if (addrBind.IsRoutable() && fDiscover && !fWhitelisted)
+    if (addrBind.IsRoutable() && fDiscover && !fWhitelisted && !fOnion)
         AddLocal(addrBind, LOCAL_BIND);
 
     return true;
@@ -2258,6 +2304,8 @@ CNode::CNode(SOCKET hSocketIn, const CAddress& addrIn, const std::string& addrNa
     fRelayTxes = false;
     fSentAddr = false;
     fSendAddrV2 = false;
+    fInboundOnion = false;
+    fOnionAdvertised = false;
     fVerackRecvd = false;
     fBootstrapManifestSent = false;
     fBootstrapParamManifestSent = false;

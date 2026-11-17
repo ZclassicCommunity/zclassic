@@ -427,13 +427,15 @@ BOOST_AUTO_TEST_CASE(peers_dat_never_sees_v3)
         main.Add(MakeV4(("94." + itostr(i + 1) + ".20.1").c_str(), 8033, 1, GetTime()), src);
         main.Add(MakeV3((unsigned char)i, 8033, 1, GetTime()), src);
     }
-    BOOST_CHECK_EQUAL(main.size(), 50u);
+    BOOST_CHECK_GE(main.size(), 40u); // a few bucket collisions are normal
+    for (const CAddrInfo& e : main.GetEntries())
+        BOOST_CHECK(!e.IsTorV3());
     // the serialised table reads back in a plain (legacy) CAddrMan with 50 entries
     CDataStream ss(SER_DISK, CLIENT_VERSION);
     ss << main;
     CAddrMan back;
     ss >> back;
-    BOOST_CHECK_EQUAL(back.size(), 50u);
+    BOOST_CHECK_EQUAL(back.size(), main.size());
 }
 
 BOOST_AUTO_TEST_CASE(onion_peers_file_roundtrip)
@@ -514,6 +516,86 @@ BOOST_AUTO_TEST_CASE(addrv2_v3_goes_to_onion_store)
     BOOST_CHECK_EQUAL(addrmanOnion.size(), onionBefore + 2);
 
     SetLimited(NET_ONION, wasLimited);
+    for (CNode* x : keep)
+        delete x;
+}
+
+
+// Privacy rules: our onion address only to the onion side, our clearnet
+// address never to it, and nothing before the onion service is up.
+BOOST_AUTO_TEST_CASE(self_advertisement_privacy)
+{
+    bool oldListen = fListen;
+    fListen = true;
+    vector<CNode*> keep;
+
+    CAddress onionSvc = MakeV3(77, 8033, 1, 1);
+    CService clearSvc("93.184.216.200", 8033);
+
+    // an onion peer we reached over Tor, an inbound onion peer, a clearnet peer
+    CNode* outOnion = new CNode(INVALID_SOCKET, MakeV3(90, 8033, 1, 1), "", false);
+    CNode* inOnion = NewNode(keep, "127.0.0.1", true);
+    inOnion->fInboundOnion = true;
+    CNode* clear = NewNode(keep, "93.184.216.1", false);
+    keep.push_back(outOnion);
+    for (CNode* n : keep) {
+        n->fSuccessfullyConnected = true;
+        n->fSendAddrV2 = true;
+    }
+    BOOST_CHECK(outOnion->IsOnionPeer());
+    BOOST_CHECK(inOnion->IsOnionPeer());
+    BOOST_CHECK(!clear->IsOnionPeer());
+
+    // the service is not up yet: nothing to advertise anywhere
+    BOOST_CHECK(!AdvertizeLocalOnion(outOnion));
+    BOOST_CHECK(!AdvertizeLocalOnion(inOnion));
+    BOOST_CHECK(outOnion->vAddrToSend.empty());
+
+    BOOST_REQUIRE(AddLocal(clearSvc, LOCAL_MANUAL));
+    BOOST_REQUIRE(AddLocal((CService)onionSvc, LOCAL_MANUAL));
+
+    // clearnet peer: our clearnet address, never the onion one
+    CService got;
+    BOOST_REQUIRE(GetLocal(got, &clear->addr, false));
+    BOOST_CHECK(got == clearSvc);
+    CAddress la = GetLocalAddress(&clear->addr, false);
+    BOOST_CHECK(!la.IsTor());
+    BOOST_CHECK(!AdvertizeLocalOnion(clear)); // not an onion peer
+
+    // onion peers: the onion address, never the clearnet one
+    BOOST_REQUIRE(GetLocal(got, &outOnion->addr, false));
+    BOOST_CHECK(got == (CService)onionSvc);
+    BOOST_REQUIRE(GetLocal(got, &inOnion->addr, true)); // inbound: flag, address is 127.0.0.1
+    BOOST_CHECK(got == (CService)onionSvc);
+    BOOST_CHECK(GetLocalAddress(&inOnion->addr, true).IsTorV3());
+
+    // advertised to both onion peers, as an addrv2 entry
+    BOOST_CHECK(AdvertizeLocalOnion(outOnion));
+    BOOST_CHECK(AdvertizeLocalOnion(inOnion));
+    BOOST_REQUIRE_EQUAL(outOnion->vAddrToSend.size(), 1u);
+    BOOST_CHECK(outOnion->vAddrToSend[0] == (CService)onionSvc);
+    BOOST_CHECK_EQUAL(inOnion->vAddrToSend.size(), 1u);
+    BOOST_CHECK(clear->vAddrToSend.empty());
+
+    // an onion peer that did not negotiate addrv2 gets nothing
+    inOnion->fSendAddrV2 = false;
+    inOnion->vAddrToSend.clear();
+    BOOST_CHECK(!AdvertizeLocalOnion(inOnion));
+    BOOST_CHECK(inOnion->vAddrToSend.empty());
+
+    // with only the onion address known, a clearnet peer is offered nothing
+    RemoveLocal(clearSvc);
+    BOOST_CHECK(!GetLocal(got, &clear->addr, false));
+    BOOST_CHECK(!GetLocalAddress(&clear->addr, false).IsRoutable());
+    // and with only the clearnet address, an onion peer is offered nothing
+    BOOST_REQUIRE(AddLocal(clearSvc, LOCAL_MANUAL));
+    RemoveLocal((CService)onionSvc);
+    BOOST_CHECK(!GetLocal(got, &outOnion->addr, false));
+    BOOST_CHECK(!GetLocalAddress(&inOnion->addr, true).IsRoutable());
+    BOOST_CHECK(!IsPeerAddrLocalGood(inOnion));
+
+    RemoveLocal(clearSvc);
+    fListen = oldListen;
     for (CNode* x : keep)
         delete x;
 }

@@ -451,7 +451,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-addnode=<ip>", _("Add a node to connect to and attempt to keep the connection open"));
     strUsage += HelpMessageOpt("-banscore=<n>", strprintf(_("Threshold for disconnecting misbehaving peers (default: %u)"), 100));
     strUsage += HelpMessageOpt("-bantime=<n>", strprintf(_("Number of seconds to keep misbehaving peers from reconnecting (default: %u)"), 86400));
-    strUsage += HelpMessageOpt("-bind=<addr>", _("Bind to given address and always listen on it. Use [host]:port notation for IPv6"));
+    strUsage += HelpMessageOpt("-bind=<addr>", _("Bind to given address and always listen on it. Use [host]:port notation for IPv6. Append =onion (-bind=<addr>=onion) to make it the listener that the onion service points at (default port: the P2P port + 1)"));
     strUsage += HelpMessageOpt("-connect=<ip>", _("Connect only to the specified node(s)"));
     strUsage += HelpMessageOpt("-discover", _("Discover own IP addresses (default: 1 when listening and no -externalip or -proxy)"));
     strUsage += HelpMessageOpt("-dns", _("Allow DNS lookups for -addnode, -seednode and -connect") + " " + _("(default: 1)"));
@@ -2240,12 +2240,32 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     fNameLookup = GetBoolArg("-dns", true);
 
     bool fBound = false;
+    bool fOnionTargetBound = false;
     if (fListen) {
         if (mapArgs.count("-bind") || mapArgs.count("-whitebind")) {
-            BOOST_FOREACH(const std::string& strBind, mapMultiArgs["-bind"]) {
+            BOOST_FOREACH(const std::string& strBindArg, mapMultiArgs["-bind"]) {
+                // <addr>=onion: the listener the onion service points at (see doc/tor.md)
+                std::string strBind = strBindArg;
+                bool fOnionBind = false;
+                if (strBind.size() > 6 && strBind.compare(strBind.size() - 6, 6, "=onion") == 0) {
+                    strBind.resize(strBind.size() - 6);
+                    fOnionBind = true;
+                }
                 CService addrBind;
-                if (!Lookup(strBind.c_str(), addrBind, GetListenPort(), false))
+                if (!Lookup(strBind.c_str(), addrBind, fOnionBind ? GetListenPort() + 1 : GetListenPort(), false))
                     return InitError(strprintf(_("Cannot resolve -bind address: '%s'"), strBind));
+                if (fOnionBind) {
+                    if (!addrBind.IsLocal() && !addrBind.IsRFC1918())
+                        LogPrintf("Warning: -bind=%s=onion is not a loopback address; the onion service target should not be reachable from outside\n", strBind);
+                    std::string strOnionError;
+                    if (!BindListenPort(addrBind, strOnionError, false, true))
+                        return InitError(strOnionError);
+                    SetOnionServiceTarget(addrBind);
+                    fOnionTargetBound = true;
+                    fBound = true;
+                    LogPrintf("Onion service target: %s\n", addrBind.ToString());
+                    continue;
+                }
                 fBound |= Bind(addrBind, (BF_EXPLICIT | BF_REPORT_ERROR));
             }
             BOOST_FOREACH(const std::string& strBind, mapMultiArgs["-whitebind"]) {
@@ -2265,6 +2285,26 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
         if (!fBound)
             return InitError(_("Failed to listen on any port. Use -listen=0 if you want this."));
+
+        // A node that was asked to run an onion service (embedded Tor, or an explicit
+        // -torcontrol) gets a second loopback listener dedicated to it, the port after
+        // the P2P port, unless -bind=<addr>=onion chose one. ADD_ONION points there, so
+        // a connection accepted on it is known to be an onion peer. Fail-soft: without
+        // it the service targets the P2P port as before and inbound onion peers are
+        // simply not recognised (our onion address is then only sent to peers we
+        // reached over Tor). Not done for the legacy auto-detected control port, which
+        // may belong to any Tor on the host.
+        if (!fOnionTargetBound && GetBoolArg("-listenonion", DEFAULT_LISTEN_ONION) &&
+            (fEmbeddedTor || mapArgs.count("-torcontrol"))) {
+            CService addrOnionBind(CNetAddr("127.0.0.1"), GetListenPort() + 1);
+            std::string strOnionError;
+            if (BindListenPort(addrOnionBind, strOnionError, false, true)) {
+                SetOnionServiceTarget(addrOnionBind);
+                LogPrintf("Onion service target: %s\n", addrOnionBind.ToString());
+            } else {
+                LogPrintf("Warning: no dedicated onion listener (%s); the onion service targets the P2P port\n", strOnionError);
+            }
+        }
 
         // Opt-in (default off): ask the router to forward our own listen port via
         // NAT-PMP/PCP so NAT/firewalled peers become reachable for inbound

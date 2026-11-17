@@ -78,7 +78,7 @@ CNode* FindNode(const CService& ip);
 CNode* ConnectNode(CAddress addrConnect, const char *pszDest = NULL);
 bool OpenNetworkConnection(const CAddress& addrConnect, CSemaphoreGrant *grantOutbound = NULL, const char *strDest = NULL, bool fOneShot = false);
 unsigned short GetListenPort();
-bool BindListenPort(const CService &bindAddr, std::string& strError, bool fWhitelisted = false);
+bool BindListenPort(const CService &bindAddr, std::string& strError, bool fWhitelisted = false, bool fOnion = false);
 void StartNode(boost::thread_group& threadGroup, CScheduler& scheduler);
 bool StopNode();
 void SocketSendData(CNode *pnode);
@@ -127,6 +127,17 @@ enum
 
 bool IsPeerAddrLocalGood(CNode *pnode);
 void AdvertizeLocal(CNode *pnode);
+/** Queue our own Tor v3 address for an addrv2 peer that is on the onion side (see doc/tor.md).
+ *  False when there is nothing to send yet (no peer addrv2, not an onion peer, service not up). */
+bool AdvertizeLocalOnion(CNode *pnode);
+/**
+ * The loopback address ADD_ONION points the onion service at. Connections
+ * accepted there came in through the onion service (inbound onion peers);
+ * every other listener is clearnet. Unset when the service targets the main
+ * listen port (then inbound onion peers cannot be told from local ones).
+ */
+void SetOnionServiceTarget(const CService& addr);
+bool GetOnionServiceTarget(CService& addrOut);
 void SetLimited(enum Network net, bool fLimited = true);
 bool IsLimited(enum Network net);
 bool IsLimited(const CNetAddr& addr);
@@ -135,10 +146,15 @@ bool AddLocal(const CNetAddr& addr, int nScore = LOCAL_NONE);
 bool RemoveLocal(const CService& addr);
 bool SeenLocal(const CService& addr);
 bool IsLocal(const CService& addr);
-bool GetLocal(CService &addr, const CNetAddr *paddrPeer = NULL);
+/**
+ * Best local address for a peer. Privacy rule: an onion peer (fPeerOnion, or a
+ * paddrPeer that is a Tor address) is only ever offered our Tor address, and a
+ * clearnet peer is never offered it.
+ */
+bool GetLocal(CService &addr, const CNetAddr *paddrPeer = NULL, bool fPeerOnion = false);
 bool IsReachable(enum Network net);
 bool IsReachable(const CNetAddr &addr);
-CAddress GetLocalAddress(const CNetAddr *paddrPeer = NULL);
+CAddress GetLocalAddress(const CNetAddr *paddrPeer = NULL, bool fPeerOnion = false);
 
 
 extern bool fDiscover;
@@ -299,6 +315,14 @@ public:
     // BIP155: the peer sent "sendaddrv2" before its verack, so we may send it
     // "addrv2" (and Tor v3 addresses). Unset for every older peer.
     bool fSendAddrV2;
+    // Accepted on the listener that ADD_ONION targets: the peer reached us
+    // through our onion service (its address is the Tor exit side, 127.0.0.1).
+    bool fInboundOnion;
+    // our Tor address has been queued for this peer
+    bool fOnionAdvertised;
+    // The peer is on the onion side of the node: we reached it over Tor (its
+    // address is a .onion) or it reached us through the onion service.
+    bool IsOnionPeer() const { return fInboundOnion || addr.IsTor(); }
     // The peer's verack arrived; a later "sendaddrv2" no longer counts.
     bool fVerackRecvd;
     CSemaphoreGrant grantOutbound;

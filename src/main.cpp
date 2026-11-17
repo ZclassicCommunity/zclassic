@@ -6202,7 +6202,7 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
             // Advertise our address
             if (fListen && !IsInitialBlockDownload())
             {
-                CAddress addr = GetLocalAddress(&pfrom->addr);
+                CAddress addr = GetLocalAddress(&pfrom->addr, pfrom->IsOnionPeer());
                 if (addr.IsRoutable())
                 {
                     LogPrintf("ProcessMessages: advertizing address %s\n", addr.ToString());
@@ -7290,8 +7290,10 @@ bool SendMessages(CNode* pto, bool fSendTrickle)
             BOOST_FOREACH(CNode* pnode, vNodes)
             {
                 // Periodically clear addrKnown to allow refresh broadcasts
-                if (nLastRebroadcast)
+                if (nLastRebroadcast) {
                     pnode->addrKnown.reset();
+                    pnode->fOnionAdvertised = false;
+                }
 
                 // Rebroadcast our address
                 AdvertizeLocal(pnode);
@@ -7303,6 +7305,12 @@ bool SendMessages(CNode* pto, bool fSendTrickle)
         //
         // Message: addr
         //
+        // Our Tor address goes to onion peers only, once they negotiated addrv2
+        // (known after their verack) and once the onion service is up. Retried
+        // on every pass until it has been queued; the 24h rebroadcast resets it.
+        if (pto->fVerackRecvd && !pto->fOnionAdvertised && AdvertizeLocalOnion(pto))
+            pto->fOnionAdvertised = true;
+
         if (fSendTrickle)
         {
             // A peer that sent sendaddrv2 gets "addrv2"; everyone else gets
