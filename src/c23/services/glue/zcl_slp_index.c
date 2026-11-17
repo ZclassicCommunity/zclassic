@@ -191,6 +191,12 @@ void zcl_slp_evaluate(const struct zcl_slp_parsed *msg,
         set_result(out, ZCL_SLP_STATUS_UNKNOWN, "bad_arguments");
         return;
     }
+    /* validate_message: Z23 stores at most ZSLP_VALIDITY_MAX_INPUTS inputs and
+     * leaves a transaction with more UNKNOWN, whatever its type. */
+    if (num_inputs > ZCL_SLP_MAX_INPUTS) {
+        set_result(out, ZCL_SLP_STATUS_UNKNOWN, "input_limit_exceeded");
+        return;
+    }
     if (!inputs_total(inputs, num_inputs, token_id, &totals)) {
         set_result(out, ZCL_SLP_STATUS_INVALID, "input_quantity_overflow");
         return;

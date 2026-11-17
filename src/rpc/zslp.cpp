@@ -456,8 +456,10 @@ UniValue zslp_listunspent(const UniValue& params, bool fHelp)
         e.push_back(Pair("confirmations", c.nDepth));
         e.push_back(Pair("protected", TokenGuardOutputRole(*c.tx, c.i) != TOKEN_ROLE_NONE));
         outputs.push_back(e);
-        if (oi.role == ROLE_TOKEN)
-            totals[oi.token] += oi.amount;
+        if (oi.role == ROLE_TOKEN) {
+            uint64_t& sum = totals[oi.token];
+            sum = oi.amount > UINT64_MAX - sum ? UINT64_MAX : sum + oi.amount; // saturate, never wrap
+        }
     }
     UniValue balances(UniValue::VARR);
     for (map<uint256, uint64_t>::const_iterator it = totals.begin(); it != totals.end(); ++it) {

@@ -31,6 +31,7 @@ extern "C" {
 #define ZCL_SLP_TX_SEND    3
 
 #define ZCL_SLP_MAX_OUTPUTS 19 /* a SEND names vout 1..19 */
+#define ZCL_SLP_MAX_INPUTS 4096 /* Z23's ZSLP_VALIDITY_MAX_INPUTS: more is UNKNOWN */
 
 /* A parsed SLP Token Type 1 message. Strings are NUL terminated, already
  * clipped by the vendored parser (ticker 63, name 127, url 255 bytes). */

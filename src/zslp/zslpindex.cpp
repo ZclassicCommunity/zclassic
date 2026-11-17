@@ -370,17 +370,29 @@ bool AddU64(uint64_t& acc, uint64_t add)
     return true;
 }
 
-bool GetU64(const Journal& j, const std::string& key, uint64_t& out)
+/** A holder balance is kept exact. Every token output holds at most 2^63-1 units, but a token whose supply
+ *  passed 2^64-1 (supplyOverflow) can give one holder more than 64 bits hold: a saturated 64-bit balance would
+ *  then underflow when those outputs are spent and stop the index for good. So the value is 8 bytes (the low
+ *  word) while the high word is zero, which is every balance on mainnet, and 16 bytes (high word first) above. */
+bool DecodeBalance(const std::string& v, uint64_t& hi, uint64_t& lo)
 {
-    std::string v;
-    if (!j.Get(key, v))
-        return false;
     Dec d(v);
-    out = d.U64();
-    return d.ok;
+    hi = v.size() == 16 ? d.U64() : 0;
+    lo = d.U64();
+    return d.ok && (v.size() == 8 || v.size() == 16);
 }
 
-std::string U64Str(uint64_t v) { Enc e; e.U64(v); return e.s; }
+std::string EncodeBalance(uint64_t hi, uint64_t lo)
+{
+    Enc e;
+    if (hi)
+        e.U64(hi);
+    e.U64(lo);
+    return e.s;
+}
+
+/** A balance as the readers report it: saturated at 2^64-1 (the token record carries supplyOverflow). */
+uint64_t ReportedBalance(uint64_t hi, uint64_t lo) { return hi ? UINT64_MAX : lo; }
 
 /** Adjust a holder balance in both indexes. false only on an underflow, which means a corrupt store. */
 bool AdjustBalance(Journal& j, const std::string& addr, const uint256& token, uint64_t amount, bool add)
@@ -388,21 +400,27 @@ bool AdjustBalance(Journal& j, const std::string& addr, const uint256& token, ui
     if (amount == 0)
         return true;
     const std::string ka = KeyAddrBal(addr, token), kh = KeyTokBal(token, addr);
-    uint64_t cur = 0;
-    GetU64(j, ka, cur);
+    uint64_t hi = 0, lo = 0;
+    std::string v;
+    if (j.Get(ka, v) && !DecodeBalance(v, hi, lo))
+        return false;
     if (add) {
-        AddU64(cur, amount); // saturates; a token whose supply overflowed is flagged on the token record
+        lo += amount;
+        if (lo < amount)
+            hi++; // cannot wrap: that would take 2^64 outputs
     } else {
-        if (amount > cur)
+        if (hi == 0 && amount > lo)
             return false;
-        cur -= amount;
+        if (amount > lo)
+            hi--;
+        lo -= amount;
     }
-    if (cur == 0) {
+    if (hi == 0 && lo == 0) {
         j.Erase(ka);
         j.Erase(kh);
     } else {
-        j.Put(ka, U64Str(cur));
-        j.Put(kh, U64Str(cur));
+        j.Put(ka, EncodeBalance(hi, lo));
+        j.Put(kh, EncodeBalance(hi, lo));
     }
     return true;
 }
@@ -605,25 +623,36 @@ bool ProcessTx(Journal& j, IndexStats& st, const CTransaction& tx, int height, s
             ReverseTokenId(msg.token_id_wire, target);
         info.token = target;
 
+        // Each spent record and each parent record is looked up once per transaction: many inputs from one
+        // parent must not decode that parent's record (which lists all its own inputs) once per input.
+        std::map<COutPoint, const OutInfo*> spentAt;
+        for (size_t k = 0; k < spent.size(); k++)
+            spentAt[spent[k].op] = &spent[k].rec;
+        std::map<uint256, int> parentStatus; // prev txid -> its status for this token, -1 when not an SLP tx of it
         std::vector<zcl_slp_input> in(tx.vin.size());
         for (size_t i = 0; i < tx.vin.size(); i++) {
             memset(&in[i], 0, sizeof(in[i]));
             if (coinbase)
                 continue;
-            for (size_t k = 0; k < spent.size(); k++) {
-                if (spent[k].op == tx.vin[i].prevout) {
-                    in[i].has_ledger = 1;
-                    in[i].role = spent[k].rec.role;
-                    memcpy(in[i].token_id, spent[k].rec.token.begin(), 32);
-                    in[i].amount = spent[k].rec.amount;
-                }
+            std::map<COutPoint, const OutInfo*>::const_iterator sp = spentAt.find(tx.vin[i].prevout);
+            if (sp != spentAt.end()) {
+                in[i].has_ledger = 1;
+                in[i].role = sp->second->role;
+                memcpy(in[i].token_id, sp->second->token.begin(), 32);
+                in[i].amount = sp->second->amount;
             }
-            std::string pv;
-            TxInfo parent;
-            if (j.Get(KeyTx(tx.vin[i].prevout.hash), pv) && DecodeTx(pv, parent) && parent.type != 0 &&
-                parent.token == target) {
+            const uint256& prevHash = tx.vin[i].prevout.hash;
+            std::map<uint256, int>::iterator ps = parentStatus.find(prevHash);
+            if (ps == parentStatus.end()) {
+                std::string pv;
+                TxInfo parent;
+                const bool same = j.Get(KeyTx(prevHash), pv) && DecodeTx(pv, parent) && parent.type != 0 &&
+                                  parent.token == target;
+                ps = parentStatus.insert(std::make_pair(prevHash, same ? parent.status : -1)).first;
+            }
+            if (ps->second >= 0) {
                 in[i].parent_same_token = 1;
-                in[i].parent_status = parent.status;
+                in[i].parent_status = ps->second;
             }
         }
         zcl_slp_evaluate(&msg, target.begin(), tx.vout.size(), in.empty() ? NULL : &in[0], in.size(), &ev);
@@ -924,10 +953,11 @@ std::vector<HolderBalance> ZslpIndex::GetBalances(const std::string& addrKey) co
         HolderBalance hb;
         hb.addr = addrKey;
         memcpy(hb.token.begin(), k.data() + 22, 32);
-        Dec d(v);
-        hb.amount = d.U64();
-        if (d.ok)
+        uint64_t hi, lo;
+        if (DecodeBalance(v, hi, lo)) {
+            hb.amount = ReportedBalance(hi, lo);
             r.push_back(hb);
+        }
         return true;
     });
     return r;
@@ -946,10 +976,11 @@ std::vector<HolderBalance> ZslpIndex::GetHolders(const uint256& token, size_t sk
         HolderBalance hb;
         hb.addr = k.substr(33, 21);
         hb.token = token;
-        Dec d(v);
-        hb.amount = d.U64();
-        if (d.ok)
+        uint64_t hi, lo;
+        if (DecodeBalance(v, hi, lo)) {
+            hb.amount = ReportedBalance(hi, lo);
             r.push_back(hb);
+        }
         return r.size() < count;
     });
     return r;
@@ -961,9 +992,8 @@ bool ZslpIndex::SumUnspent(const uint256& token, uint64_t& out) const
     bool overflow = false;
     out = 0;
     kv->Scan("h" + HStr(token), [&](const std::string&, const std::string& v) {
-        Dec d(v);
-        uint64_t a = d.U64();
-        if (!AddU64(out, a))
+        uint64_t hi = 0, lo = 0;
+        if (!DecodeBalance(v, hi, lo) || hi || !AddU64(out, lo))
             overflow = true;
         return true;
     });

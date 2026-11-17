@@ -23,6 +23,7 @@
 #include "c23/services/glue/zcl_token_guard.h"
 
 #include <boost/test/unit_test.hpp>
+#include <set>
 #include <univalue.h>
 
 using namespace zslp;
@@ -452,7 +453,7 @@ BOOST_AUTO_TEST_CASE(disconnect_restores_the_exact_state)
 
     // and the same blocks apply again to the same result
     c.Add(std::vector<CTransaction>(1, g));
-    BOOST_CHECK(c.kv.m == afterGenesis || c.kv.m.size() == afterGenesis.size());
+    BOOST_CHECK(c.kv.m == afterGenesis);
     BOOST_CHECK_EQUAL(c.Bal(0xa1, tok), 1000u);
 }
 
@@ -589,6 +590,322 @@ BOOST_AUTO_TEST_CASE(mainnet_fixtures)
             BOOST_CHECK_MESSAGE(found, "holder " + addr + " missing");
         }
     }
+}
+
+
+// ---- independent review: adversarial cases and a randomised reorg check --------------------------
+
+namespace {
+const std::vector<COutPoint> kNoInputs;
+std::vector<CTransaction> One(const CTransaction& tx) { return std::vector<CTransaction>(1, tx); }
+}
+
+// A holder can own more than 2^64-1 units of a token whose supply overflowed (three MINTs of 2^63-1 to one
+// address). Spending those outputs must neither stop the index (a saturated 64-bit balance used to underflow
+// here) nor leave a wrong balance behind, and every block must still disconnect.
+BOOST_AUTO_TEST_CASE(review_holder_balance_above_2_64)
+{
+    Chain c;
+    const uint64_t max = 9223372036854775807ULL;
+    CTransaction g = Tx(kNoInputs, {GenesisMsg(max, 2, "BIG", 0), P2PKH(0xa1), P2PKH(0xa2)});
+    const uint256 tok = g.GetHash();
+    c.Add(One(g));
+    const std::map<std::string, std::string> afterGenesis = c.kv.m;
+    CTransaction m1 = Tx({COutPoint(tok, 2)}, {MintMsg(tok, max, 2), P2PKH(0xa1), P2PKH(0xa2)}, 20);
+    c.Add(One(m1));
+    CTransaction m2 = Tx({COutPoint(m1.GetHash(), 2)}, {MintMsg(tok, max, 2), P2PKH(0xa1), P2PKH(0xa2)}, 40);
+    c.Add(One(m2));
+    TokenInfo t;
+    BOOST_REQUIRE(c.idx.GetToken(tok, t));
+    BOOST_CHECK(t.supplyOverflow);
+    BOOST_CHECK_EQUAL(c.Bal(0xa1, tok), UINT64_MAX); // shown saturated: 3 * (2^63-1) does not fit
+    uint64_t sum = 0;
+    BOOST_CHECK(!c.idx.SumUnspent(tok, sum));          // and the sum says it does not fit
+    c.Add(One(Tx({COutPoint(tok, 1)}, {P2PKH(0xee)}, 60)));
+    BOOST_CHECK_EQUAL(c.Bal(0xa1, tok), UINT64_MAX - 1); // 2 * (2^63-1), exact
+    c.Add(One(Tx({COutPoint(m1.GetHash(), 1)}, {P2PKH(0xee)}, 61)));
+    BOOST_CHECK_EQUAL(c.Bal(0xa1, tok), max);
+    c.Add(One(Tx({COutPoint(m2.GetHash(), 1)}, {P2PKH(0xee)}, 62)));
+    BOOST_CHECK_EQUAL(c.Bal(0xa1, tok), 0u);
+    BOOST_CHECK(c.idx.GetHolders(tok, 0, 10).empty());
+    for (int i = 0; i < 5; i++)
+        c.Pop();
+    BOOST_CHECK(c.kv.m == afterGenesis);
+}
+
+// Z23 (zslp_validity.c, ZSLP_VALIDITY_MAX_INPUTS) does not judge an SLP transaction with more than 4096
+// inputs: it is UNKNOWN "input_limit_exceeded". 4096 inputs are still judged.
+BOOST_AUTO_TEST_CASE(review_input_limit_matches_z23)
+{
+    Chain c;
+    CTransaction g = Tx(kNoInputs, {GenesisMsg(100, 0), P2PKH(0xa1), P2PKH(0xa2)});
+    const uint256 tok = g.GetHash();
+    CTransaction split = Tx({COutPoint(tok, 1)}, {SendMsg(tok, {50, 50}), P2PKH(0xa1), P2PKH(0xa2)}, 3);
+    std::vector<CTransaction> v;
+    v.push_back(g); v.push_back(split);
+    c.Add(v);
+    std::vector<COutPoint> at(1, COutPoint(split.GetHash(), 1)), over(1, COutPoint(split.GetHash(), 2));
+    for (int i = 0; i < 4095; i++)
+        at.push_back(COutPoint(uint256S(strprintf("%x", 0x700000 + i)), 0));
+    for (int i = 0; i < 4096; i++)
+        over.push_back(COutPoint(uint256S(strprintf("%x", 0x800000 + i)), 0));
+    CTransaction sAt = Tx(at, {SendMsg(tok, {50}), P2PKH(0xb1)}, 100000);
+    CTransaction sOver = Tx(over, {SendMsg(tok, {50}), P2PKH(0xb2)}, 200000);
+    BOOST_REQUIRE_EQUAL(sAt.vin.size(), 4096u);
+    BOOST_REQUIRE_EQUAL(sOver.vin.size(), 4097u);
+    v.clear();
+    v.push_back(sAt); v.push_back(sOver);
+    c.Add(v);
+    TxInfo ti;
+    BOOST_REQUIRE(c.idx.GetTx(sAt.GetHash(), ti));
+    BOOST_CHECK_EQUAL(ti.status, STATUS_VALID);
+    BOOST_REQUIRE(c.idx.GetTx(sOver.GetHash(), ti));
+    BOOST_CHECK_EQUAL(ti.status, STATUS_UNKNOWN);
+    BOOST_CHECK_EQUAL(ti.reason, "input_limit_exceeded");
+    BOOST_CHECK_EQUAL(c.Bal(0xb1, tok), 50u);
+    BOOST_CHECK_EQUAL(c.Bal(0xb2, tok), 0u);
+    TokenInfo t;
+    BOOST_REQUIRE(c.idx.GetToken(tok, t));
+    BOOST_CHECK_EQUAL(t.spentBurned, 50u); // the UNKNOWN transaction carries nothing: its token input is burned
+}
+
+// Z23's rules on adversarial SENDs, MINTs and batons, case by case.
+BOOST_AUTO_TEST_CASE(review_adversarial_rules)
+{
+    Chain c;
+    CTransaction g = Tx(kNoInputs, {GenesisMsg(100, 2), P2PKH(0xa1), P2PKH(0xa2)});
+    const uint256 tok = g.GetHash();
+    CTransaction g2 = Tx(kNoInputs, {GenesisMsg(9, 0, "OTH"), P2PKH(0xa3)}, 5);
+    const uint256 oth = g2.GetHash();
+    CTransaction split = Tx({COutPoint(tok, 1)}, {SendMsg(tok, {60, 40}), P2PKH(0xa1), P2PKH(0xa1)}, 7);
+    std::vector<CTransaction> v;
+    v.push_back(g); v.push_back(g2); v.push_back(split);
+    c.Add(v);
+    TxInfo ti;
+
+    // over-spend across two inputs: 60 + 40 = 100 < 101
+    CTransaction over = Tx({COutPoint(split.GetHash(), 1), COutPoint(split.GetHash(), 2)},
+                           {SendMsg(tok, {51, 50}), P2PKH(0xb1), P2PKH(0xb2)}, 9);
+    c.Add(One(over));
+    BOOST_REQUIRE(c.idx.GetTx(over.GetHash(), ti));
+    BOOST_CHECK_EQUAL(ti.status, STATUS_INVALID);
+    BOOST_CHECK_EQUAL(ti.reason, "send_output_exceeds_input");
+    BOOST_CHECK_EQUAL(ti.inputUnits, 100u);
+    c.Pop();
+    // the exact amount across two inputs is valid
+    CTransaction exact = Tx({COutPoint(split.GetHash(), 1), COutPoint(split.GetHash(), 2)},
+                            {SendMsg(tok, {50, 50}), P2PKH(0xb1), P2PKH(0xb2)}, 11);
+    c.Add(One(exact));
+    BOOST_REQUIRE(c.idx.GetTx(exact.GetHash(), ti));
+    BOOST_CHECK_EQUAL(ti.status, STATUS_VALID);
+    c.Pop();
+    // mixed token inputs: invalid, and BOTH tokens' inputs burn
+    CTransaction mixed = Tx({COutPoint(split.GetHash(), 1), COutPoint(oth, 1)},
+                            {SendMsg(tok, {60}), P2PKH(0xb1)}, 13);
+    c.Add(One(mixed));
+    BOOST_REQUIRE(c.idx.GetTx(mixed.GetHash(), ti));
+    BOOST_CHECK_EQUAL(ti.status, STATUS_INVALID);
+    BOOST_CHECK_EQUAL(ti.reason, "mixed_token_inputs");
+    TokenInfo t;
+    BOOST_REQUIRE(c.idx.GetToken(oth, t));
+    BOOST_CHECK_EQUAL(t.spentBurned, 9u);
+    BOOST_REQUIRE(c.idx.GetToken(tok, t));
+    BOOST_CHECK_EQUAL(t.spentBurned, 60u);
+    c.Pop();
+    // a valid SEND that also spends the baton: the baton is destroyed, the tokens move
+    CTransaction withBaton = Tx({COutPoint(split.GetHash(), 1), COutPoint(tok, 2)},
+                                {SendMsg(tok, {60}), P2PKH(0xb1)}, 15);
+    c.Add(One(withBaton));
+    BOOST_REQUIRE(c.idx.GetTx(withBaton.GetHash(), ti));
+    BOOST_CHECK_EQUAL(ti.status, STATUS_VALID);
+    BOOST_REQUIRE(c.idx.GetToken(tok, t));
+    BOOST_CHECK(!t.hasBaton);
+    BOOST_CHECK_EQUAL(c.Bal(0xb1, tok), 60u);
+    c.Pop();
+    // a SEND with only the baton as input has no token input
+    CTransaction batonOnly = Tx({COutPoint(tok, 2)}, {SendMsg(tok, {1}), P2PKH(0xb1)}, 17);
+    c.Add(One(batonOnly));
+    BOOST_REQUIRE(c.idx.GetTx(batonOnly.GetHash(), ti));
+    BOOST_CHECK_EQUAL(ti.status, STATUS_INVALID);
+    BOOST_CHECK_EQUAL(ti.reason, "send_ancestry_invalid");
+    c.Pop();
+    // a MINT of the other token's id with this token's baton: no baton of the target token
+    CTransaction wrongMint = Tx({COutPoint(tok, 2)}, {MintMsg(oth, 5, 2), P2PKH(0xb1), P2PKH(0xb2)}, 19);
+    c.Add(One(wrongMint));
+    BOOST_REQUIRE(c.idx.GetTx(wrongMint.GetHash(), ti));
+    BOOST_CHECK_EQUAL(ti.status, STATUS_INVALID);
+    BOOST_CHECK_EQUAL(ti.reason, "mint_baton_lineage_invalid");
+    BOOST_REQUIRE(c.idx.GetToken(tok, t));
+    BOOST_CHECK(!t.hasBaton); // spending it in a non-MINT of its token ends it
+    c.Pop();
+    // Z23 rule: one input whose parent is an INVALID transaction of the same token makes the SEND invalid,
+    // even next to a good token input (stricter than "invalid inputs count zero")
+    CTransaction bad = Tx({COutPoint(split.GetHash(), 2)}, {SendMsg(tok, {41}), P2PKH(0xc1), P2PKH(0xc2)}, 21);
+    c.Add(One(bad));
+    BOOST_REQUIRE(c.idx.GetTx(bad.GetHash(), ti));
+    BOOST_CHECK_EQUAL(ti.status, STATUS_INVALID);
+    CTransaction child = Tx({COutPoint(split.GetHash(), 1), COutPoint(bad.GetHash(), 2)},
+                            {SendMsg(tok, {60}), P2PKH(0xc3)}, 23);
+    c.Add(One(child));
+    BOOST_REQUIRE(c.idx.GetTx(child.GetHash(), ti));
+    BOOST_CHECK_EQUAL(ti.status, STATUS_INVALID);
+    BOOST_CHECK_EQUAL(ti.reason, "send_ancestry_invalid");
+    c.Pop();
+    c.Pop();
+    // a SEND naming a vout the transaction does not have
+    CTransaction missing = Tx({COutPoint(split.GetHash(), 1)}, {SendMsg(tok, {30, 30}), P2PKH(0xb1)}, 25);
+    c.Add(One(missing));
+    BOOST_REQUIRE(c.idx.GetTx(missing.GetHash(), ti));
+    BOOST_CHECK_EQUAL(ti.status, STATUS_INVALID);
+    BOOST_CHECK_EQUAL(ti.reason, "send_output_missing");
+    c.Pop();
+    // a zero slot may name a vout that does not exist
+    CTransaction zeroSlot = Tx({COutPoint(split.GetHash(), 1)}, {SendMsg(tok, {60, 0}), P2PKH(0xb1)}, 27);
+    c.Add(One(zeroSlot));
+    BOOST_REQUIRE(c.idx.GetTx(zeroSlot.GetHash(), ti));
+    BOOST_CHECK_EQUAL(ti.status, STATUS_VALID);
+    c.Pop();
+}
+
+// Which output carries the message: the FIRST OP_RETURN output, wherever it is, as Z23.s ledger reads it
+// (explorer_index.c index_op_return) and as the wallet token guard reads it (tokenguard.cpp, reading B).
+// The SLP Token Type 1 spec puts the message at vout[0] only. This pins the current choice.
+BOOST_AUTO_TEST_CASE(review_message_position)
+{
+    Chain c;
+    CTransaction g = Tx(kNoInputs, {GenesisMsg(10, 0), P2PKH(0xa1)});
+    c.Add(One(g));
+    // message at vout[1] after a P2PKH vout[0]: indexed (tokens go to vout 1 = the OP_RETURN itself)
+    CTransaction late = Tx(kNoInputs, {P2PKH(0xa2), GenesisMsg(5, 0, "LATE"), P2PKH(0xa3)}, 31);
+    // a non-SLP OP_RETURN first, then an SLP one: not indexed
+    CTransaction second = Tx(kNoInputs, {CScript() << OP_RETURN << std::vector<unsigned char>(4, 0x41),
+                                         GenesisMsg(5, 0, "SEC"), P2PKH(0xa4)}, 33);
+    std::vector<CTransaction> v;
+    v.push_back(late); v.push_back(second);
+    c.Add(v);
+    TxInfo ti;
+    BOOST_CHECK(c.idx.GetTx(late.GetHash(), ti));
+    BOOST_CHECK(!c.idx.GetTx(second.GetHash(), ti));
+}
+
+// Random connect/disconnect sequences: after every disconnect the store equals the snapshot taken when
+// that height was the tip, and at the end it equals a from-scratch build of the surviving chain.
+BOOST_AUTO_TEST_CASE(review_random_reorgs_equal_rebuild)
+{
+    uint64_t rng = 0x9e3779b97f4a7c15ULL;
+    auto rnd = [&rng](uint64_t n) {
+        rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+        return n ? rng % n : 0;
+    };
+    int tagSeq = 1000;
+    uint64_t nValid = 0, nInvalid = 0, nUnknown = 0, nBurn = 0;
+    std::map<uint256, uint256> tokOf; // txid -> the token its message names (generator hint only)
+    for (int round = 0; round < 20; round++) {
+        Chain c;
+        std::vector<std::vector<CTransaction> > blocks;     // the current branch
+        std::vector<std::map<std::string, std::string> > snaps; // store after each block
+        for (int step = 0; step < 150; step++) {
+            if (!blocks.empty() && rnd(10) < 3) {
+                const size_t k = 1 + rnd(std::min<size_t>(4, blocks.size()));
+                for (size_t i = 0; i < k; i++) {
+                    c.Pop();
+                    blocks.pop_back();
+                    snaps.pop_back();
+                    if (!snaps.empty())
+                        BOOST_REQUIRE(c.kv.m == snaps.back());
+                }
+                continue;
+            }
+            // outputs and tokens of the current branch
+            std::vector<COutPoint> pool;
+            std::vector<uint256> toks;
+            std::set<COutPoint> spent;
+            for (size_t b = 0; b < blocks.size(); b++)
+                for (size_t t = 0; t < blocks[b].size(); t++) {
+                    const CTransaction& tx = blocks[b][t];
+                    for (size_t i = 0; i < tx.vin.size(); i++)
+                        spent.insert(tx.vin[i].prevout);
+                    for (size_t i = 1; i < tx.vout.size(); i++)
+                        pool.push_back(COutPoint(tx.GetHash(), i));
+                    if (tokOf.count(tx.GetHash()) && tokOf[tx.GetHash()] == tx.GetHash())
+                        toks.push_back(tx.GetHash());
+                }
+            std::vector<COutPoint> unspent;
+            for (size_t i = 0; i < pool.size(); i++)
+                if (!spent.count(pool[i]))
+                    unspent.push_back(pool[i]);
+            std::vector<CTransaction> blk;
+            const int ntx = (int)rnd(5);
+            for (int n = 0; n < ntx; n++) {
+                const unsigned char a = (unsigned char)(0xa0 + rnd(4));
+                const uint256 tok = toks.empty() ? uint256() : toks[rnd(toks.size())];
+                const uint64_t qs[] = {0, 1, 7, 50, 100, 300, 9223372036854775807ULL, 9223372036854775808ULL};
+                std::vector<CScript> outs;
+                const uint64_t kind = toks.empty() ? 0 : rnd(5);
+                // inputs: mostly outputs of transactions that named the chosen token, sometimes any output
+                std::vector<COutPoint> ins;
+                const int nin = unspent.empty() ? 0 : 1 + (int)rnd(3);
+                for (int i = 0; i < nin && !unspent.empty(); i++) {
+                    size_t p = rnd(unspent.size());
+                    if ((kind == 1 || kind == 2 || kind == 3) && rnd(5) != 0) {
+                        for (size_t tries = 0; tries < unspent.size(); tries++) {
+                            const size_t qp = (p + tries) % unspent.size();
+                            if (tokOf.count(unspent[qp].hash) && tokOf[unspent[qp].hash] == tok) {
+                                p = qp;
+                                break;
+                            }
+                        }
+                    }
+                    ins.push_back(unspent[p]);
+                    unspent.erase(unspent.begin() + p);
+                }
+                if (kind == 0) {
+                    outs.push_back(GenesisMsg(qs[rnd(8)], rnd(2) ? 2 : 0, "R", (unsigned)rnd(3)));
+                    outs.push_back(P2PKH(a)); outs.push_back(P2PKH(a + 1));
+                } else if (kind == 1) {
+                    outs.push_back(MintMsg(tok, qs[rnd(6)], rnd(2) ? 2 : 0));
+                    outs.push_back(P2PKH(a)); outs.push_back(P2PKH(a + 1));
+                } else if (kind == 2 || kind == 3) {
+                    std::vector<uint64_t> q;
+                    const int nout = 1 + (int)rnd(3);
+                    for (int i = 0; i < nout; i++)
+                        q.push_back(qs[rnd(rnd(8) == 0 ? 8 : 5)]);
+                    outs.push_back(SendMsg(tok, q));
+                    for (int i = 0; i < nout - (rnd(6) == 0 ? 1 : 0); i++)
+                        outs.push_back(P2PKH((unsigned char)(a + i)));
+                } else {
+                    outs.push_back(P2PKH(a));
+                }
+                CTransaction tx = Tx(ins, outs, tagSeq);
+                tagSeq += 10;
+                blk.push_back(tx);
+                for (size_t i = 1; i < tx.vout.size(); i++)
+                    unspent.push_back(COutPoint(tx.GetHash(), i));
+                if (kind == 0) {
+                    tokOf[tx.GetHash()] = tx.GetHash();
+                    toks.push_back(tx.GetHash());
+                } else if (kind != 4) {
+                    tokOf[tx.GetHash()] = tok;
+                }
+            }
+            c.Add(blk);
+            blocks.push_back(blk);
+            snaps.push_back(c.kv.m);
+        }
+        Chain fresh;
+        for (size_t b = 0; b < blocks.size(); b++)
+            fresh.Add(blocks[b]);
+        std::map<std::string, std::string> got = c.kv.m;
+        if (blocks.empty())
+            got.erase("mbest"); // a store popped back to nothing keeps a best pointer to the null block
+        BOOST_CHECK_MESSAGE(fresh.kv.m == got, strprintf("round %d: reorged store differs from a rebuild", round));
+        BOOST_CHECK(fresh.idx.GetStats().unspentOutputs == c.idx.GetStats().unspentOutputs);
+        const IndexStats fs = fresh.idx.GetStats();
+        nValid += fs.txValid; nInvalid += fs.txInvalid; nUnknown += fs.txUnknown; nBurn += fs.txBurn;
+    }
+    BOOST_TEST_MESSAGE(strprintf("random reorgs: %u valid, %u invalid, %u unknown, %u burn transactions survive", nValid, nInvalid, nUnknown, nBurn));
+    // the sequences must exercise every outcome, or the comparison proves little
+    BOOST_CHECK(nValid > 100 && nInvalid > 100 && nUnknown > 10 && nBurn > 10);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -124,8 +124,12 @@ button is not there.
 
 Differences from Z23 that are on purpose: the ancestry walk (depth 256, 1024
 transactions) is not needed because blocks are applied in order and every parent is
-settled before its child; Z23's input limit (4096 inputs per transaction) is not
-applied; and a spend by an *ordinary* transaction is recorded as a burn and counted.
+settled before its child; and a spend by an *ordinary* transaction is recorded as a burn
+and counted. Z23's input limit does apply: an SLP transaction with more than 4096 inputs
+is `unknown` (`input_limit_exceeded`), as in Z23, so the two give the same answer.
+
+A holder balance is exact even above 2^64-1 (possible only for a token whose supply
+overflowed, `supplyoverflow`); the RPC shows it saturated at 2^64-1 base units.
 
 Licence: Z23 files are Apache-2.0 (`src/c23/services/NOTICE`, `LICENSE.z23`); the rest is
 MIT as zclassicd.
