@@ -743,4 +743,211 @@ BOOST_AUTO_TEST_CASE(addr_bytes_unchanged_for_old_peer)
         delete x;
 }
 
+
+// Service bits above MAX_SIZE (2^25) are a bit field, not a length: Z23 nodes
+// advertise NODE_NOISE_HYBRID (1 << 26). An entry carrying them must parse, or
+// one such address would fail every addrv2 message and onion_peers.dat that
+// holds it. Bitcoin Core reads this field without a range check too.
+BOOST_AUTO_TEST_CASE(services_above_max_size)
+{
+    const uint64_t vServices[] = {(uint64_t)1 << 26 | 1, (uint64_t)1 << 40, ~(uint64_t)0};
+    for (uint64_t svc : vServices) {
+        CAddress a = MakeV4("93.184.216.34", 8033, svc, 1700000000);
+        CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+        ss << CAddressV2(a);
+        CAddressV2 back;
+        ss >> back;
+        BOOST_REQUIRE(back.fKnown);
+        BOOST_CHECK_EQUAL(back.addr.nServices, svc);
+        BOOST_CHECK(ss.empty());
+    }
+    // the field must still be canonical: 0x05 written as fd 05 00 is refused
+    CDataStream nc(SER_NETWORK, PROTOCOL_VERSION);
+    uint32_t t = 1700000000;
+    nc << t;
+    unsigned char svc[3] = {0xfd, 0x05, 0x00};
+    nc.write((const char*)svc, 3);
+    CAddressV2 e;
+    BOOST_CHECK_THROW(nc >> e, std::ios_base::failure);
+}
+
+// Adversarial addrv2 input, deterministic. Only std::ios_base::failure may
+// escape (ProcessMessages turns it into a reject, no score), nothing is
+// allocated beyond the bounds, and only a count above 1000 scores (20, as
+// Bitcoin Core does for an oversized addr/addrv2).
+BOOST_AUTO_TEST_CASE(addrv2_adversarial_inputs)
+{
+    vector<CNode*> keep;
+    CNode* n = NewNode(keep, "8.8.8.8", false);
+    n->fSendAddrV2 = true;
+    auto score = [&]() {
+        CNodeStateStats st;
+        BOOST_REQUIRE(GetNodeStateStats(n->GetId(), st));
+        return st.nMisbehavior;
+    };
+    auto msgOf = [](const CDataStream& body, uint64_t count) {
+        CDataStream m(SER_NETWORK, PROTOCOL_VERSION);
+        WriteCompactSize(m, count);
+        if (body.size())
+            m.write(&*body.begin(), body.size());
+        return m;
+    };
+    const int s0 = score();
+
+    // count: 9-byte compact size near 2^64, refused before anything is allocated
+    {
+        CDataStream m(SER_NETWORK, PROTOCOL_VERSION);
+        m << uint8_t(0xff) << uint64_t(0xffffffffffffffffULL);
+        BOOST_CHECK_THROW(ProcessMessage(n, "addrv2", m, GetTime()), std::ios_base::failure);
+    }
+    // count: non-canonical (5 as fd 05 00)
+    {
+        CDataStream m(SER_NETWORK, PROTOCOL_VERSION);
+        m << uint8_t(0xfd) << uint16_t(5);
+        BOOST_CHECK_THROW(ProcessMessage(n, "addrv2", m, GetTime()), std::ios_base::failure);
+    }
+    BOOST_CHECK_EQUAL(score(), s0);
+    // count: exactly MAX_SIZE is read, then refused (> 1000) with a score of 20
+    {
+        CDataStream m(SER_NETWORK, PROTOCOL_VERSION);
+        WriteCompactSize(m, MAX_SIZE);
+        BOOST_CHECK(!ProcessMessage(n, "addrv2", m, GetTime()));
+        BOOST_CHECK_EQUAL(score(), s0 + 20);
+    }
+    // count larger than the entries present: end of data
+    {
+        CDataStream e(SER_NETWORK, PROTOCOL_VERSION);
+        e << CAddressV2(MakeV4("93.184.216.34", 8033, 1, GetTime()));
+        CDataStream m = msgOf(e, 2);
+        BOOST_CHECK_THROW(ProcessMessage(n, "addrv2", m, GetTime()), std::ios_base::failure);
+    }
+    // address length: compact size beyond MAX_SIZE, just at MAX_SIZE, and 513
+    {
+        const uint64_t vLen[] = {0xffffffffULL, MAX_SIZE, 513};
+        for (uint64_t len : vLen) {
+            CDataStream e(SER_NETWORK, PROTOCOL_VERSION);
+            uint32_t t = 1700000000;
+            e << t;
+            WriteCompactSize(e, 1);
+            e << uint8_t(0x7f);
+            if (len > MAX_SIZE) {
+                e << uint8_t(0xfe) << uint32_t(len);
+            } else {
+                WriteCompactSize(e, len);
+            }
+            CDataStream m = msgOf(e, 1);
+            BOOST_CHECK_THROW(ProcessMessage(n, "addrv2", m, GetTime()), std::ios_base::failure);
+        }
+    }
+    // zero-length address: an error for every known network, skipped otherwise
+    {
+        const uint8_t vKnown[] = {1, 2, 3, 4};
+        for (uint8_t net : vKnown) {
+            CAddressV2 e;
+            CDataStream ss = RawEntryFill(net, 0);
+            BOOST_CHECK_THROW(ss >> e, std::ios_base::failure);
+        }
+        const uint8_t vOther[] = {0, 5, 6, 7, 0xff};
+        for (uint8_t net : vOther) {
+            CAddressV2 e;
+            CDataStream ss = RawEntryFill(net, 0);
+            ss >> e;
+            BOOST_CHECK(!e.fKnown);
+            BOOST_CHECK(ss.empty());
+        }
+    }
+    // truncated port
+    {
+        CDataStream e(SER_NETWORK, PROTOCOL_VERSION);
+        e << CAddressV2(MakeV4("93.184.216.34", 8033, 1, GetTime()));
+        vector<char> vcut(e.begin(), e.end() - 1);
+        CDataStream cut(vcut, SER_NETWORK, PROTOCOL_VERSION);
+        CDataStream m = msgOf(cut, 1);
+        BOOST_CHECK_THROW(ProcessMessage(n, "addrv2", m, GetTime()), std::ios_base::failure);
+    }
+    BOOST_CHECK_EQUAL(score(), s0 + 20);
+
+    // 1000 copies of one address, and 1000 skipped entries of 512 bytes (the
+    // largest message this allows, ~0.5 MB): accepted, no score, one addrman
+    // entry at most.
+    {
+        size_t before = addrman.size();
+        CDataStream e(SER_NETWORK, PROTOCOL_VERSION);
+        CAddressV2 one(MakeV4("93.184.216.199", 8033, 1, GetTime() + 365 * 24 * 3600)); // far future
+        for (int i = 0; i < 1000; i++)
+            e << one;
+        CDataStream m = msgOf(e, 1000);
+        BOOST_CHECK(ProcessMessage(n, "addrv2", m, GetTime()));
+        BOOST_CHECK(addrman.size() <= before + 1);
+
+        CDataStream big(SER_NETWORK, PROTOCOL_VERSION);
+        for (int i = 0; i < 1000; i++) {
+            CDataStream x = RawEntryFill(0x7f, 512);
+            big.write(&*x.begin(), x.size());
+        }
+        CDataStream m2 = msgOf(big, 1000);
+        BOOST_CHECK(ProcessMessage(n, "addrv2", m2, GetTime()));
+        BOOST_CHECK_EQUAL(score(), s0 + 20);
+    }
+    // the far-future time was clamped to five days ago, as for addr
+    {
+        bool fFound = false;
+        for (const CAddrInfo& info : addrman.GetEntries()) {
+            if (info.ToStringIP() == "93.184.216.199") {
+                fFound = true;
+                BOOST_CHECK_MESSAGE((int64_t)info.nTime <= GetAdjustedTime() - 4 * 24 * 3600, "nTime " << info.nTime << " now " << GetAdjustedTime() << " time " << GetTime());
+            }
+        }
+        BOOST_CHECK(fFound);
+    }
+
+    // deterministic mutation fuzzing of a valid mixed message: flips, cuts,
+    // inserts. Only ios_base::failure may escape the parser; a parsed message
+    // never yields more than 1000 entries.
+    {
+        vector<CAddress> v;
+        v.push_back(MakeV4("93.184.216.34", 8033, 1, 1700000000));
+        v.push_back(MakeV3(9, 8033, (uint64_t)1 << 26, 1700000000));
+        CAddress v6(CService("2001:4860:4860::8888", 8033), 0x409);
+        v6.nTime = 1700000000;
+        v.push_back(v6);
+        CDataStream base = V2Payload(v);
+        CDataStream unk = RawEntryFill(0x7f, 40);
+        const vector<char> seed0(base.begin(), base.end());
+        uint32_t x = 0x2545F491;
+        auto rnd = [&]() { x ^= x << 13; x ^= x >> 17; x ^= x << 5; return x; };
+        int nParsed = 0, nFailed = 0, nOther = 0;
+        for (int it = 0; it < 50000; it++) {
+            vector<char> b = seed0;
+            if (it % 7 == 0)
+                b.insert(b.end(), unk.begin(), unk.end());
+            int nMut = 1 + rnd() % 4;
+            for (int k = 0; k < nMut && !b.empty(); k++) {
+                switch (rnd() % 4) {
+                case 0: b[rnd() % b.size()] = (char)rnd(); break;
+                case 1: b.resize(rnd() % b.size()); break;
+                case 2: b.insert(b.begin() + rnd() % (b.size() + 1), (char)rnd()); break;
+                case 3: b[rnd() % b.size()] ^= (char)(1 << (rnd() % 8)); break;
+                }
+            }
+            CDataStream ss(b, SER_NETWORK, PROTOCOL_VERSION);
+            vector<CAddress> out;
+            try {
+                if (ReadAddrV2List(ss, out))
+                    nParsed++;
+                BOOST_CHECK(out.size() <= MAX_ADDRV2_ENTRIES);
+            } catch (const std::ios_base::failure&) {
+                nFailed++;
+            } catch (...) {
+                nOther++;
+            }
+        }
+        BOOST_CHECK_EQUAL(nOther, 0);
+        BOOST_CHECK(nParsed > 0 && nFailed > 0);
+        BOOST_TEST_MESSAGE("addrv2 fuzz: parsed " << nParsed << " failed " << nFailed);
+    }
+    for (CNode* y : keep)
+        delete y;
+}
+
 BOOST_AUTO_TEST_SUITE_END()

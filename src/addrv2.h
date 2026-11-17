@@ -47,6 +47,36 @@ static const unsigned int MAX_ADDRV2_SIZE = 512;
 /** Most entries in one addrv2 message (BIP155, same as "addr"). */
 static const unsigned int MAX_ADDRV2_ENTRIES = 1000;
 
+/**
+ * The services field of an addrv2 entry: a compact size that is a bit field,
+ * not a length, so it is read without ReadCompactSize's MAX_SIZE (2^25) limit,
+ * as Bitcoin Core does. Service bits above 2^25 exist on this network (Z23's
+ * NODE_NOISE_HYBRID is 1 << 26), and one such entry must not fail a whole
+ * message. The encoding must still be canonical.
+ */
+template <typename Stream>
+uint64_t ReadAddrV2Services(Stream& is)
+{
+    uint8_t chSize = ser_readdata8(is);
+    uint64_t n;
+    if (chSize < 253)
+        return chSize;
+    if (chSize == 253) {
+        n = ser_readdata16(is);
+        if (n < 253)
+            throw std::ios_base::failure("non-canonical ReadCompactSize()");
+    } else if (chSize == 254) {
+        n = ser_readdata32(is);
+        if (n < 0x10000u)
+            throw std::ios_base::failure("non-canonical ReadCompactSize()");
+    } else {
+        n = ser_readdata64(is);
+        if (n < 0x100000000ULL)
+            throw std::ios_base::failure("non-canonical ReadCompactSize()");
+    }
+    return n;
+}
+
 class CAddressV2
 {
 public:
@@ -107,7 +137,7 @@ public:
 
         uint32_t nTime;
         s >> nTime;
-        uint64_t nServices = ReadCompactSize(s);
+        uint64_t nServices = ReadAddrV2Services(s);
         uint8_t net;
         s >> net;
         uint64_t len = ReadCompactSize(s);
