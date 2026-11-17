@@ -385,6 +385,14 @@ std::vector<std::string> DiscoverBootstrapPeers()
     return discovered;
 }
 
+static std::atomic<bool> g_onionBootstrapFallback(false);
+
+static bool OnionProxyConfigured()
+{
+    proxyType p;
+    return GetProxy(NET_ONION, p) && p.IsValid();
+}
+
 std::vector<std::string> GetBootstrapPeerList()
 {
     // Explicit -bootstrappeer entries (repeatable) take precedence: the operator
@@ -401,7 +409,76 @@ std::vector<std::string> GetBootstrapPeerList()
     // additional NODE_BOOTSTRAP peers (DiscoverBootstrapPeers) is invoked
     // lazily by the init bootstrap loop only if these fail, so we neither pay
     // its latency nor dial seed peers when a compiled peer already works.
-    return Params().BootstrapPeers();
+    return SelectBootstrapPeers(Params().BootstrapPeers(), Params().OnionBootstrapPeers(),
+                                OnionProxyConfigured(), IsLimited(NET_IPV4) && IsLimited(NET_IPV6),
+                                g_onionBootstrapFallback.load());
+}
+
+std::vector<std::string> SelectBootstrapPeers(const std::vector<std::string>& clearnet,
+                                              const std::vector<std::string>& onion,
+                                              bool fOnionReachable, bool fOnionOnly, bool fFallback)
+{
+    if (!fOnionOnly || !fOnionReachable || onion.empty() || fFallback)
+        return clearnet;
+    return onion;
+}
+
+bool BootstrapOnionOnlyActive()
+{
+    return !Params().OnionBootstrapPeers().empty() && OnionProxyConfigured() &&
+           IsLimited(NET_IPV4) && IsLimited(NET_IPV6);
+}
+
+bool BootstrapFallbackDue(bool fOnionOnly, int nOnionBootstrapConnected, int nOutbound,
+                          int64_t nElapsedSeconds, int64_t nGraceSeconds)
+{
+    return fOnionOnly && nElapsedSeconds >= nGraceSeconds &&
+           nOnionBootstrapConnected == 0 && nOutbound == 0;
+}
+
+void BootstrapOnionFallbackCheck()
+{
+    if (g_onionBootstrapFallback.load() || !BootstrapOnionOnlyActive())
+        return;
+    const std::vector<std::string> onion = Params().OnionBootstrapPeers();
+    int nOnion = 0, nOutbound = 0;
+    {
+        LOCK(cs_vNodes);
+        BOOST_FOREACH(CNode* pnode, vNodes) {
+            if (pnode->fInbound || !pnode->fSuccessfullyConnected)
+                continue;
+            ++nOutbound;
+            if (std::find(onion.begin(), onion.end(), pnode->addrName) != onion.end())
+                ++nOnion;
+        }
+    }
+    if (!BootstrapFallbackDue(true, nOnion, nOutbound, BOOTSTRAP_ONION_GRACE_SECONDS, BOOTSTRAP_ONION_GRACE_SECONDS))
+        return;
+    g_onionBootstrapFallback = true;
+    LogPrintf("Bootstrap: no onion bootstrap peer reachable after %d seconds and no other outbound peer; "
+              "falling back to the clearnet bootstrap peers through the proxy\n",
+              (int)BOOTSTRAP_ONION_GRACE_SECONDS);
+    LOCK(cs_vAddedNodes);
+    BOOST_FOREACH(const std::string& peer, Params().BootstrapPeers()) {
+        if (std::find(vAddedNodes.begin(), vAddedNodes.end(), peer) == vAddedNodes.end()) {
+            vAddedNodes.push_back(peer);
+            LogPrintf("Adding bootstrap peer %s as a persistent sync node\n", peer);
+        }
+    }
+}
+
+std::vector<std::string> GetBootstrapSnapshotPeerList()
+{
+    std::vector<std::string> peers = GetBootstrapPeerList();
+    if (mapArgs.count("-bootstrappeer") || !BootstrapOnionOnlyActive())
+        return peers;
+    // Onion-only: the onion peers first; if they fail, the clearnet ones
+    // through the proxy, as before this list existed.
+    BOOST_FOREACH(const std::string& peer, Params().BootstrapPeers()) {
+        if (std::find(peers.begin(), peers.end(), peer) == peers.end())
+            peers.push_back(peer);
+    }
+    return peers;
 }
 
 static bool IsSafeBootstrapSnapshotPath(const boost::filesystem::path& relative);

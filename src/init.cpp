@@ -2539,7 +2539,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 // Each BootstrapFromPeer attempt is self-contained (it stages into a
                 // fresh dir and cleans up on failure), so retrying is safe and cheap.
                 const int nBootstrapAttempts = 3;
-                const std::vector<std::string> bootstrapPeers = GetBootstrapPeerList();
+                const std::vector<std::string> bootstrapPeers = GetBootstrapSnapshotPeerList();
                 const int nBootstrapPeers = (int)bootstrapPeers.size();
                 int peerIndex = 0;
                 BOOST_FOREACH(const std::string& peer, bootstrapPeers) {
@@ -2677,6 +2677,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 LogPrintf("Adding bootstrap peer %s as a persistent sync node\n", peer);
             }
         }
+        // Onion-only node on the onion bootstrap peers; the clearnet fallback
+        // check is scheduled after StartNode() (Step 11).
+        if (!mapArgs.count("-bootstrappeer") && BootstrapOnionOnlyActive())
+            LogPrintf("Bootstrap: onion-only node, using the onion bootstrap peers instead of the clearnet addresses\n");
     }
 
     // This now measures ONLY the bootstrap-snapshot decision + (when the datadir
@@ -3383,6 +3387,15 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     StartNode(threadGroup, scheduler);
     g_startupTimer.mark("start node");
+
+    // Onion-only node on the onion bootstrap peers: if neither connects (and
+    // nothing else does) within the grace period, add the clearnet ones
+    // through the proxy, once. Counted from here, not from Step 6: block
+    // loading and import can outlast the grace period before any connection
+    // is attempted, and ThreadOpenAddedConnections (started by StartNode)
+    // replaces vAddedNodes with -addnode when it starts.
+    if (!mapArgs.count("-connect") && !mapArgs.count("-bootstrappeer") && BootstrapOnionOnlyActive())
+        scheduler.scheduleFromNow(&BootstrapOnionFallbackCheck, BOOTSTRAP_ONION_GRACE_SECONDS);
 
     // Monitor the chain every minute, and alert if we get blocks much quicker or slower than expected.
     CScheduler::Function f = boost::bind(&PartitionCheck, &IsInitialBlockDownload,
