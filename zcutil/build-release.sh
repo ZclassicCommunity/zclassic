@@ -17,6 +17,10 @@
 #   MAKE=...             make program (default: make)
 #   CONFIGURE_FLAGS=...  extra ./configure flags (appended)
 #   STRIP=...            strip program (default: per-target)
+#   ZCL_NO_EMBEDDED_TOR=1  leave embedded Tor out (depends NO_EMBEDDED_TOR=1 and
+#                        --without-embedded-tor). By default a release is built
+#                        WITH embedded Tor (off at run time, -embeddedtor=0) and
+#                        configure fails if depends did not provide it.
 
 set -euo pipefail
 
@@ -55,6 +59,12 @@ esac
 
 MAKE="${MAKE:-make}"
 CONFIGURE_FLAGS="${CONFIGURE_FLAGS:-}"
+if [ -n "${ZCL_NO_EMBEDDED_TOR:-}" ]; then
+    export NO_EMBEDDED_TOR=1
+    TOR_FLAG="--without-embedded-tor"
+else
+    TOR_FLAG="--with-embedded-tor=yes"
+fi
 
 # Default to a parallel build if the caller passed no make args.
 MAKEARGS=( "$@" )
@@ -83,7 +93,7 @@ PREV_HOST=""
 echo "==> [2/4] autogen + configure"
 ./autogen.sh
 # shellcheck disable=SC2086
-CONFIG_SITE="$CONFIG_SITE_FILE" ./configure --prefix=/ --disable-tests $CONFIGURE_FLAGS
+CONFIG_SITE="$CONFIG_SITE_FILE" ./configure --prefix=/ --disable-tests $TOR_FLAG $CONFIGURE_FLAGS
 
 if [ -n "$PREV_HOST" ] && [ "$PREV_HOST" != "$HOST" ]; then
     echo "==> host changed ($PREV_HOST -> $HOST): cleaning stale build outputs to avoid mixing object architectures"

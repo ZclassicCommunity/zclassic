@@ -42,8 +42,7 @@ code, no GPL option so Equi-X is not built).
 ## Process model
 
 Two modes, chosen per start with `zcl_tor_embed_opts.in_process`
-(`-embeddedtormode=inprocess|child` in the daemon; `inprocess` is the
-daemon's default).
+(`-embeddedtormode=inprocess|child` in the daemon; `child` is the Linux default and `inprocess` the default elsewhere).
 
 **In-process.** `tor_run_main` runs on a thread of the daemon, as in Z23. Tor
 is told `__DisableSignalHandlers 1` and `--quiet`, and logs to

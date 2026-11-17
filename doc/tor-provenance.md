@@ -2,7 +2,7 @@
 
 Unit T1 of the embedded-Tor work. This file records exactly what the
 `tor` and `zlib` depends packages build and from what. It adds no daemon
-behaviour: the packages are built only when `WITH_EMBEDDED_TOR=1` is passed to
+behaviour: the packages are built by default for linux, mingw32 and darwin hosts (`NO_EMBEDDED_TOR=1` leaves them out; other hosts need `WITH_EMBEDDED_TOR=1`) when this is passed to
 `make -C depends`, so default builds are unchanged.
 
     make -C depends HOST=<triple> WITH_EMBEDDED_TOR=1 tor

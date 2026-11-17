@@ -1,8 +1,9 @@
 # How zcl_tor_embed is wired into zclassicd
 
-Build: `./configure --with-embedded-tor` (default off) after
-`make -C depends WITH_EMBEDDED_TOR=1`. Run: `-embeddedtor=1` (default off),
-`-embeddedtormode=inprocess|child` (default `inprocess`). Without the configure
+Build: depends builds Tor by default (`make -C depends NO_EMBEDDED_TOR=1` skips it);
+`./configure` links it by default when present (`--with-embedded-tor=yes` fails when
+missing, `--without-embedded-tor` skips it). Run: `-embeddedtor=1` (default off),
+`-embeddedtormode=inprocess|child` (default `child` on Linux, `inprocess` elsewhere). Without the configure
 switch nothing Tor-related is compiled or linked except `keyfile.c`, and
 `-embeddedtor=1` is refused at startup.
 
@@ -11,7 +12,7 @@ switch nothing Tor-related is compiled or linked except `keyfile.c`, and
 | Where | What |
 |---|---|
 | `configure.ac` | `--with-embedded-tor`, `TOR_LIBS`, `ENABLE_EMBEDDED_TOR` |
-| `src/Makefile.am` | `libzcl_c23.a`: always `keyfile.c`; with embedded Tor also `zcl_tor_embed.c`, `zcl_tor_dispatch.c`, `zcl_tor_inproc.c`, `zcl_tor_proc_{posix,win}.c`. `ZCL_C23_LIBS` follows `libbitcoin_server.a` in `zclassicd`, `test_bitcoin` and `zcash-gtest` |
+| `src/Makefile.am` | `libzcl_tor.a` (not the vendored core `libzcl_c23.a`): always `keyfile.c`; with embedded Tor also `zcl_tor_embed.c`, `zcl_tor_dispatch.c`, `zcl_tor_inproc.c`, `zcl_tor_proc_{posix,win}.c`. `ZCL_TOR_LIBS` follows `libbitcoin_server.a` in `zclassicd`, `test_bitcoin` and `zcash-gtest` |
 | `src/embeddedtor.{h,cpp}` | C++ wrapper: `StartEmbeddedTor`, `StopEmbeddedTor`, ports, mode parsing; stubs when not built in |
 | `src/bitcoind.cpp` | `EmbeddedTorDispatch` first thing in `main()` (the child-mode Tor process) |
 | `src/init.cpp` | option checks (Step 3), start and proxy setup (Step 6), stop in `Shutdown()` |
@@ -66,7 +67,7 @@ in-process Tor dies with the process.
 
 ## In-process or child
 
-Both modes are built in and chosen at runtime. `inprocess` is the default.
+Both modes are built in and chosen at runtime. `child` is the default on Linux, `inprocess` elsewhere.
 
 Checked for the in-process mode:
 

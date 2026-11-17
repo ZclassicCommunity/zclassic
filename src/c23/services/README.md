@@ -104,15 +104,21 @@ Z23_SOURCE.tsv   one row per vendored file: zclassicd path, Z23 path, git blob,
 LICENSE.z23, NOTICE
 ```
 
-The layout and the manifest follow `src/c23` on branch `integration/c23-rust-removal`
-(the C23 crypto core). This directory is self-contained so the two can merge without
-touching each other's manifest.
+The layout and the manifest follow `src/c23`. It keeps its own manifest and pin
+(`Z23_SOURCE.tsv`) because the wallet guard and the crypto core are re-vendored
+independently; `make check-c23-vendor` runs both checks.
 
 ## Build
 
-`libzcl_tokenguard.a` (see `src/Makefile.am`) is plain C, compiled with `-std=gnu11`
-and no `-march` flag, and is part of `$(LIBBITCOIN_WALLET)`: every target that links
-the wallet links it.
+`libzcl_tokenguard.a` (see `src/Makefile.am`) is plain C, part of `$(LIBBITCOIN_WALLET)`
+(every target that links the wallet links it), with no `-march` flag. It is built at
+the same language level as the C23 crypto core (`$(ZCL_C23_STD)`: `-std=c23` when the
+compiler speaks it, else `-std=gnu17`). Every global name of the vendored files is
+renamed to `zc23_<name>` by the force-included `glue/zcl_tokenguard_symbol_prefix.h`
+(generated: `sh src/c23/tools/symbol-prefix.sh gen <nm> libzcl_tokenguard.a <header>`),
+and `c23-symbols.stamp` fails the build if the archive exports anything else than
+`zcl_token_guard_*` and `zc23_*`. `make check-c23-vendor` verifies this manifest and the
+core's.
 
 The vendored `slp.c` includes `primitives/transaction.h`, a name zclassicd already
 uses for a C++ header. The glue directory is therefore passed with `-iquote`, which
