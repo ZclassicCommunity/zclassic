@@ -124,13 +124,20 @@ echo "connect=$ONION:$PA" >> "$B/zclassic.conf"
 # A host name B must never resolve itself: with -onlynet=onion it has to go to
 # Tor as a name (and fail there; .invalid does not exist).
 echo "addnode=zcl-embedded-tor-test.invalid:8033" >> "$B/zclassic.conf"
+# A literal IPv4 address (TEST-NET-1, never routed). The name proxy does not
+# cover it; it must still go to Tor, never be dialled directly. The compiled
+# mainnet bootstrap peers that init adds as -addnode take the same path.
+echo "addnode=192.0.2.1:8033" >> "$B/zclassic.conf"
+# B runs without -bind: an onion-only node must then listen on loopback only.
 if [ "$TRACE" = strace ]; then
-    strace -f -qq -e trace=network,clone,clone3,fork,vfork,execve -o "$TMP/b.strace" "$ZD" -datadir="$B" -bind=127.0.0.1 -rpcbind=127.0.0.1 > "$TMP/b.out" 2>&1 &
+    strace -f -qq -e trace=network,clone,clone3,fork,vfork,execve -o "$TMP/b.strace" "$ZD" -datadir="$B" -rpcbind=127.0.0.1 > "$TMP/b.out" 2>&1 &
 else
-    "$ZD" -datadir="$B" -bind=127.0.0.1 -rpcbind=127.0.0.1 > "$TMP/b.out" 2>&1 &
+    "$ZD" -datadir="$B" -rpcbind=127.0.0.1 > "$TMP/b.out" 2>&1 &
 fi
 PID_B=$!
 wait_rpc cli_b 120; check $? "B: RPC up after $(now)s"
+LISTEN_B=$(ss -Htln "sport = :$PB" 2>/dev/null | awk '{ print $4 }' | sort -u | tr '\n' ' ')
+[ "$LISTEN_B" = "127.0.0.1:$PB " ]; check $? "B: P2P port listens on loopback only without -bind ($LISTEN_B)"
 i=0
 while [ $i -lt 600 ]; do
     [ "$(cli_b getblockcount 2>/dev/null)" = 5 ] && break
@@ -216,6 +223,28 @@ fi
 
 grep -q 'zcl-embedded-tor-test.invalid' "$B/regtest/debug.log"
 check $? "B: tried the .invalid addnode $(grep -c 'zcl-embedded-tor-test.invalid' "$B/regtest/debug.log") time(s); it went to the proxy as a name"
+grep -q 'trying connection 192.0.2.1:8033' "$B/regtest/debug.log"
+check $? "B: tried the literal IPv4 addnode $(grep -c 'trying connection 192.0.2.1:8033' "$B/regtest/debug.log") time(s) (through Tor; the strace check covers direct dials)"
+
+# ------------------------------------------------ Tor exits: node shuts down
+if [ "$MODE" = child ]; then
+    E=$TMP/e
+    mkdir -p "$E"
+    conf "$E" "$((PA + 5))" "$((PA + 6))"
+    "$ZD" -datadir="$E" -rpcbind=127.0.0.1 > "$TMP/e.out" 2>&1 &
+    PID_E=$!
+    i=0
+    while [ $i -lt 120 ]; do
+        "$CLI" -datadir="$E" getblockcount >/dev/null 2>&1 && break
+        sleep 1; i=$((i + 1))
+    done
+    TORPID_E=$(grep -o 'embedded Tor started (child process, pid [0-9]*' "$E/regtest/debug.log" | grep -o '[0-9]*$' | head -1)
+    [ -n "$TORPID_E" ] && kill -9 "$TORPID_E"
+    wait_gone "$PID_E" 60; RC_E=$?
+    grep -q 'embedded Tor has exited; shutting down' "$E/regtest/debug.log" && [ "$RC_E" = 0 ]
+    check $? "E: killing its Tor child (pid ${TORPID_E:-none}) shuts the node down"
+    kill "$PID_E" 2>/dev/null
+fi
 
 # Sanitizer reports (only an instrumented build prints any).
 ! grep -q 'ERROR: AddressSanitizer\|runtime error:' "$TMP"/*.out
