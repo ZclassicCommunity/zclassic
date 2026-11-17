@@ -172,6 +172,16 @@ BOOST_AUTO_TEST_CASE(v3_subnet_and_ban)
     // the form Ban() builds
     CSubNet sa128(a.ToString() + "/128");
     BOOST_CHECK(sa128.IsValid() && sa128.Match(a) && !sa128.Match(b));
+    // the form ToString() prints (listbanned) parses back to the same entry,
+    // so "setban <that> remove" works; any wider mask is refused
+    BOOST_CHECK_EQUAL(sa128.ToString(), a.ToString() + "/ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff");
+    CSubNet back(sa128.ToString());
+    BOOST_CHECK(back.IsValid() && back == sa128 && back == sa);
+    BOOST_CHECK(back.Match(a) && !back.Match(b));
+    BOOST_CHECK(!CSubNet(a.ToString() + "/64").IsValid());
+    BOOST_CHECK(!CSubNet(a.ToString() + "/0").IsValid());
+    BOOST_CHECK(!CSubNet(a.ToString() + "/ffff:ffff::").IsValid());
+    BOOST_CHECK(!CSubNet(a.ToString() + "/" + b.ToString()).IsValid());
     // no ordinary subnet, "::/0" included, swallows a v3 address
     BOOST_CHECK(!CSubNet("::/0").Match(a));
     BOOST_CHECK(!CSubNet("::").Match(a));

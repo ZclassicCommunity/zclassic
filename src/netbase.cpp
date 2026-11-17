@@ -1419,11 +1419,25 @@ CSubNet::CSubNet(const std::string &strSubnet, bool fAllowLookup)
         if (network.IsTorV3())
         {
             // A v3 address is one 32-byte key, not a prefix: only the single
-            // address is a subnet, and "/128" (what CNode::Ban appends) means
-            // exactly that. Any other mask is a parse error.
-            int32_t n;
-            if (slash != strSubnet.npos && !(ParseInt32(strSubnet.substr(slash + 1), &n) && n == 128))
-                valid = false;
+            // address is a subnet. "/128" (what CNode::Ban appends) and the
+            // all-ones netmask (what ToString() prints, so listbanned output
+            // can be given back to setban) mean exactly that. Any other mask
+            // is a parse error.
+            if (slash != strSubnet.npos)
+            {
+                static const unsigned char pchAllOnes[16] = {
+                    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+                std::string strNetmask = strSubnet.substr(slash + 1);
+                std::vector<CNetAddr> vMask;
+                int32_t n;
+                bool fSingle = ParseInt32(strNetmask, &n)
+                    ? n == 128
+                    : (LookupHost(strNetmask.c_str(), vMask, 1, false) && // never a lookup for a netmask
+                       memcmp(vMask[0].ip, pchAllOnes, sizeof(pchAllOnes)) == 0);
+                if (!fSingle)
+                    valid = false;
+            }
         }
         else if (slash != strSubnet.npos)
         {
