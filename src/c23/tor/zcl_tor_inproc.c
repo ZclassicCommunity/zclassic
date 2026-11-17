@@ -43,6 +43,7 @@
 #include <unistd.h>
 #endif
 
+#include <fcntl.h>
 #include <event2/event.h>
 #include <event2/thread.h>
 #include <tor_api.h>
@@ -64,6 +65,12 @@ struct zcl_tor_inproc {
     ino_t tor_ino;
 #endif
 };
+
+#ifdef SOCK_CLOEXEC
+#define SOCK_CLOEXEC_FLAG SOCK_CLOEXEC
+#else
+#define SOCK_CLOEXEC_FLAG 0
+#endif
 
 /* One Tor per process (tor_api.h: concurrent tor_run_main is undefined). */
 static atomic_bool g_running;
@@ -169,10 +176,15 @@ int zcl_tor_inproc_start(struct zcl_tor_inproc **out,
         int sp[2];
         struct stat st;
         char num[16];
-        if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sp) != 0) {
+        if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC_FLAG, 0, sp) != 0) {
             ie(err, errsz, "socketpair for the owner channel failed");
             goto fail;
         }
+#ifndef SOCK_CLOEXEC
+        /* macOS: no SOCK_CLOEXEC; set the flag right after creation. */
+        (void)fcntl(sp[0], F_SETFD, FD_CLOEXEC);
+        (void)fcntl(sp[1], F_SETFD, FD_CLOEXEC);
+#endif
         p->owner_fd = sp[0];
         p->tor_fd = sp[1];
         if (fstat(sp[1], &st) == 0) {

@@ -13,6 +13,13 @@
 #define _DARWIN_C_SOURCE 1 /* strict _POSIX_C_SOURCE hides O_NOFOLLOW etc. on Darwin */
 #endif
 
+#ifdef __APPLE__
+/* macOS has no SOCK_CLOEXEC; the descriptors are moved with F_DUPFD_CLOEXEC below. */
+#include <sys/socket.h>
+#ifndef SOCK_CLOEXEC
+#define SOCK_CLOEXEC 0
+#endif
+#endif
 #include "zcl_tor_proc.h"
 #include "zcl_tor_embed.h"
 
