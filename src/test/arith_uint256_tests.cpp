@@ -374,6 +374,66 @@ bool almostEqual(double d1, double d2)
     return fabs(d1-d2) <= 4*fabs(d1)*std::numeric_limits<double>::epsilon();
 }
 
+// The original shift-and-subtract division, kept as the reference the limb-wise
+// operator/= must agree with.
+static arith_uint256 ReferenceDivide(const arith_uint256& a, const arith_uint256& b)
+{
+    arith_uint256 div = b;
+    arith_uint256 num = a;
+    arith_uint256 quot;
+    int num_bits = num.bits();
+    int div_bits = div.bits();
+    if (div_bits > num_bits)
+        return quot;
+    int shift = num_bits - div_bits;
+    div <<= shift;
+    while (shift >= 0) {
+        if (num >= div) {
+            num -= div;
+            quot |= (arith_uint256(1) << shift);
+        }
+        div >>= 1;
+        shift--;
+    }
+    return quot;
+}
+
+BOOST_AUTO_TEST_CASE( divide_matches_reference )
+{
+    uint64_t state = 0x9e3779b97f4a7c15ULL;
+    auto next = [&state]() {
+        state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+        return state;
+    };
+    static const uint32_t special[] = {0u, 1u, 2u, 0x7fffffffu, 0x80000000u, 0x80000001u, 0xfffffffeu, 0xffffffffu};
+    auto limbValue = [&](int kind) -> uint32_t {
+        switch (kind % 4) {
+        case 0: return special[next() % 8];
+        case 1: return (uint32_t)next();
+        case 2: return (uint32_t)next() & 0xffu;
+        default: return (uint32_t)(next() >> 32) | 0x80000000u;
+        }
+    };
+    for (int iter = 0; iter < 400000; iter++) {
+        arith_uint256 a, b;
+        const int na = 1 + (int)(next() % 8);
+        const int nb = 1 + (int)(next() % 8);
+        const int ka = (int)(next() % 4), kb = (int)(next() % 4);
+        for (int i = 0; i < na; i++) a |= arith_uint256(limbValue(ka + (int)(next() % 2))) << (32 * i);
+        for (int i = 0; i < nb; i++) b |= arith_uint256(limbValue(kb + (int)(next() % 2))) << (32 * i);
+        if (b == 0) continue;
+        BOOST_REQUIRE(a / b == ReferenceDivide(a, b));
+    }
+    // The shape GetBlockProof uses: ~target / (target + 1) for compact targets.
+    for (uint32_t nBits = 0x1d00ffffu; nBits > 0x1c000001u; nBits -= 0x1001) {
+        arith_uint256 t;
+        bool neg, over;
+        t.SetCompact(nBits, &neg, &over);
+        if (neg || over || t == 0) continue;
+        BOOST_REQUIRE((~t / (t + 1)) == ReferenceDivide(~t, t + 1));
+    }
+}
+
 BOOST_AUTO_TEST_CASE( methods ) // GetHex SetHex size() GetLow64 GetSerializeSize, Serialize, Unserialize
 {
     BOOST_CHECK(R1L.GetHex() == R1L.ToString());
