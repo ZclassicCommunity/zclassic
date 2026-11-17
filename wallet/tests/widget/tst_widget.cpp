@@ -1215,6 +1215,11 @@ private slots:
                  qPrintable("hero shows " + w->testHeroText()));
         QVERIFY2(!w->testHeroHelperVisible(), "the 'receive ZCL to get started' helper must not show without a connection");
         QVERIFY2(w->testHeroQualifier().contains("not affected"), qPrintable(w->testHeroQualifier()));
+        // The debounced soft-disconnect path fires after the full teardown when a node dies;
+        // it repainted the blank labels as "0 ZCL" over the message above.
+        w->getRPC()->noConnection(true);
+        QVERIFY2(!w->testHeroText().startsWith("0"), qPrintable("after soft disconnect hero shows " + w->testHeroText()));
+        QVERIFY2(!w->testHeroHelperVisible(), "helper reappeared after soft disconnect");
         settleAndDelete(w);
     }
 
@@ -1249,6 +1254,42 @@ private slots:
         act->trigger();
         ++_modalGen;
         QVERIFY2(seen.contains("2.1.2-beta13"), qPrintable(seen));
+        settleAndDelete(w);
+    }
+
+    // After the node is restarted it writes a new auth cookie. The wallet must pick it up,
+    // otherwise every poll is rejected (401) and it stays on "No Connection" with the node up.
+    void ux11_restartedNodeCookieIsFollowed() {
+        MainWindow* w = makeWindow();
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        auto cfg = std::make_shared<ConnectionConfig>();
+        cfg->zclassicDir = dir.path();
+        cfg->rpcuser = "__cookie__";
+        cfg->rpcpassword = "OLD";
+        cfg->cookieAuth = true;
+        auto* req = new QNetworkRequest();
+        req->setRawHeader("Authorization", "Basic old");
+        auto* c = new Connection(w, new QNetworkAccessManager(w), req, cfg);
+        w->getRPC()->testSetConnection(c);
+
+        QFile f(dir.filePath(".cookie"));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("__cookie__:NEWSECRET");
+        f.close();
+        QVERIFY(w->getRPC()->testRefreshAuthFromCookie());
+        QCOMPARE(cfg->rpcpassword, QStringLiteral("NEWSECRET"));
+        QCOMPARE(req->rawHeader("Authorization"), QByteArray("Basic ") + QByteArray("__cookie__:NEWSECRET").toBase64());
+        QVERIFY2(!w->getRPC()->testRefreshAuthFromCookie(), "an unchanged cookie must not report a change");
+        settleAndDelete(w);
+    }
+
+    // After the node is lost the tables are emptied; the next successful poll must repopulate
+    // them even if the chain tip has not moved (refresh only reloads when the height changes).
+    void ux12_teardownForcesNextRefresh() {
+        MainWindow* w = makeWindow();
+        w->getRPC()->noConnection(false);
+        QCOMPARE(w->getRPC()->testLastRefreshedBlock(), -1);
         settleAndDelete(w);
     }
 

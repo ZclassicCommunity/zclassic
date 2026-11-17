@@ -1093,6 +1093,19 @@ void MainWindow::updateHomeFixIt(double transparent, bool fromCache) {
     const QString balTotTxt = ui->balTotal->text().trimmed();
     const bool    haveNumber = !balZText.trimmed().isEmpty();
 
+    // No number at all: the balance is unknown, not zero. After a node dies the connection
+    // object still exists, so "no connection" cannot be tested here; blank labels are the
+    // signal (rpc.cpp clears them on teardown and fills them on every live refresh, even with
+    // "0 ZCL"). Without this the soft-disconnect path repainted "0 ZCL" and the empty-wallet
+    // helper over showHeroUnavailable().
+    if (!haveNumber) {
+        showHeroUnavailable();
+        if (homeFixItCard)
+            homeFixItCard->setVisible(false);
+        emit heroBalancesPainted();
+        return;
+    }
+
     // haveNumber is REQUIRED for the synced edge: noConnection() (rpc.cpp:663) calls
     // this with the default fromCache=false and does NOT raise the syncing flag (its
     // single writer is the live status poll), but it FIRST blanks balSheilded to "".

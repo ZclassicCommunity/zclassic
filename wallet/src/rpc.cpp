@@ -190,7 +190,46 @@ void RPC::restartEmbeddedZClassicd() {
     ezExpectedShutdown = false;   // (F1) a fresh start is not a deliberate shutdown
     main->logger->write(QString("Restarting embedded zclassicd (attempt %1)").arg(ezRestartCount));
     ezclassicd->start(ezclassicd->program(), clean);
+    // A restarted node writes a NEW auth cookie. The connection still holds the old one, so
+    // without this every poll is rejected with 401 and the wallet stays on "No Connection"
+    // although the node is up. Follow the cookie until it changes (it is rewritten very early
+    // in startup); give up quietly after about a minute.
+    followRestartedNodeCookie(120);
 }
+
+// Re-read the node's auth cookie and, if it changed, switch the live connection to it.
+// Returns true when the credentials were replaced. The cookie is a secret: never logged.
+bool RPC::refreshAuthFromCookie() {
+    if (!conn || !conn->config || !conn->config->cookieAuth || !conn->request)
+        return false;
+    const auto& cfg = conn->config;
+    const QString base = !cfg->dataDirOverride.isEmpty() ? cfg->dataDirOverride : cfg->zclassicDir;
+    if (base.isEmpty())
+        return false;
+    QFile f(QDir(base).filePath(QStringLiteral(".cookie")));
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+        return false;
+    const QString line = QTextStream(&f).readLine().trimmed();
+    f.close();
+    const int colon = line.indexOf(QLatin1Char(':'));
+    if (colon <= 0)
+        return false;
+    const QString user = line.left(colon), pass = line.mid(colon + 1);
+    if (user == cfg->rpcuser && pass == cfg->rpcpassword)
+        return false;
+    cfg->rpcuser     = user;
+    cfg->rpcpassword = pass;
+    conn->request->setRawHeader("Authorization",
+        ("Basic " + (user + ":" + pass).toLocal8Bit().toBase64()));
+    return true;
+}
+
+void RPC::followRestartedNodeCookie(int triesLeft) {
+    if (triesLeft <= 0 || refreshAuthFromCookie())
+        return;
+    QTimer::singleShot(500, main, [this, triesLeft]() { followRestartedNodeCookie(triesLeft - 1); });
+}
+
 
 // Runtime recovery for the embedded node dying unexpectedly (crash/OOM). On a
 // normal shutdown (ezExpectedShutdown) this is a no-op. Otherwise we drop into the
@@ -688,6 +727,11 @@ void RPC::noConnection(bool preserveBalances) {
         return;
     }
 
+    // The tables are about to be emptied, so the next successful poll MUST repopulate them
+    // even if the chain tip has not moved (refresh() only reloads when the height changes;
+    // with blocks minutes apart a restarted node would otherwise leave Home empty).
+    lastRefreshedBlock = -1;
+
     // Clear balances table.
     QMap<QString, double> emptyBalances;
     QList<UnspentOutput>  emptyOutputs;
@@ -982,7 +1026,9 @@ void RPC::getInfoThenRefresh(bool force) {
         bool showWarningIcon = false;
 
 
-        static int    lastBlock = 0;
+        // (member, not a function static: noConnection() must be able to reset it so the first
+        // poll after a reconnect refreshes even when the chain tip has not moved)
+        int& lastBlock = lastRefreshedBlock;
         int curBlock  = reply["blocks"].get<json::number_integer_t>();
         int version = reply["version"].get<json::number_integer_t>();
         Settings::getInstance()->setZClassicdVersion(version);
