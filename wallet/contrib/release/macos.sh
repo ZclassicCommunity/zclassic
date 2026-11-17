@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+release_version=2.1.2-beta13
 # The native daemon build tree (static-library and exact-build audit) is optional:
 # a CI job that only downloads the daemon artifact has no build tree. Without it
 # the daemon is still pinned by ZCL_DAEMON_SHA256 and the artifact's SOURCE_COMMIT,
@@ -173,10 +174,10 @@ mkdir dmg-root
 chmod 755 dmg-root
 mv zclwallet.app dmg-root/ZclWallet.app
 ln -s /Applications dmg-root/Applications
-output="$root/artifacts/release/zclwallet-v2.1.2-beta11-macos-arm64.dmg"
+output="$root/artifacts/release/zclwallet-v${release_version}-macos-arm64.dmg"
 [ ! -e "$output" ]
-hdiutil create -volname ZClassic-beta11 -srcfolder dmg-root -format UDZO "$output"
+hdiutil create -volname ZClassic-beta13 -srcfolder dmg-root -format UDZO "$output"
 hdiutil verify "$output"
 chmod 644 "$output"
 cd "$root/artifacts/release"
-shasum -a 256 zclwallet-v2.1.2-beta11-macos-arm64.dmg > macos-SHA256SUMS.txt
+shasum -a 256 zclwallet-v${release_version}-macos-arm64.dmg > macos-SHA256SUMS.txt

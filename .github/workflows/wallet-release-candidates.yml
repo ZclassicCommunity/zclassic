@@ -69,7 +69,7 @@ jobs:
           sh wallet/contrib/release/linux.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: beta11-linux-candidate
+          name: beta13-linux-candidate
           path: wallet/artifacts/release/*
           if-no-files-found: error
   macos:
@@ -113,6 +113,6 @@ jobs:
           sh wallet/contrib/release/macos.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: beta11-macos-candidate
+          name: beta13-macos-candidate
           path: wallet/artifacts/release/*
           if-no-files-found: error

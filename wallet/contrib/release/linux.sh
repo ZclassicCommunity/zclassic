@@ -2,6 +2,7 @@
 # Run in Ubuntu 20.04: do not raise the released glibc floor accidentally.
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+release_version=2.1.2-beta13
 cd "$root"
 mkdir -p artifacts/linux-build artifacts/release
 work="$root/artifacts/linux-build"
@@ -69,7 +70,7 @@ for binary in "$work/gui/zclwallet" "$daemon"; do
     printf '\n%s: %s\n' "$binary" "$highest" >> "$root/artifacts/release/linux-validation.txt"
     cat "$work/dependencies.txt" >> "$root/artifacts/release/linux-validation.txt"
 done
-output="$root/artifacts/release/zclwallet-v2.1.2-beta11-linux-x86_64"
+output="$root/artifacts/release/zclwallet-v${release_version}-linux-x86_64"
 [ ! -e "$output" ]
 size=$(wc -c < "$daemon" | tr -d '[:space:]')
 [ "$size" -gt 0 ] && [ "$size" -le 536870912 ]
@@ -100,4 +101,4 @@ cd "$work/tls-check"
 make -j4
 ./check-tls >> "$root/artifacts/release/linux-validation.txt"
 cd "$root/artifacts/release"
-sha256sum zclwallet-v2.1.2-beta11-linux-x86_64 > linux-SHA256SUMS.txt
+sha256sum zclwallet-v${release_version}-linux-x86_64 > linux-SHA256SUMS.txt
