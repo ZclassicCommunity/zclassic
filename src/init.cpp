@@ -80,6 +80,7 @@
 #include <chrono>
 #include "librustzcash.h"
 #include "c23/glue/zcl_c23_glue.h"
+#include "crypto/sha256.h"
 #include "sha256.h"
 #include "startuptimer.h"
 
@@ -1909,6 +1910,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     g_startupTimer.mark("setup+flags(1-3)");
     // ********************************************************* Step 4: application initialization: dir lock, daemonize, pidfile, debug log
+
+    // Select the SHA-256 backend (portable C, SHA-NI or ARMv8 SHA) after its
+    // known-answer self-test, before any thread is started, and record it.
+    LogPrintf("Using the '%s' SHA256 implementation\n", SHA256AutoDetect());
 
     // Initialize libsodium
     if (init_and_check_sodium() == -1) {

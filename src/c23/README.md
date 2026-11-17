@@ -3,6 +3,7 @@
 Status: wired. `src/Makefile.am` builds everything below into `libzcl_c23.a`, which
 `zclassicd`, `zclassic-tx`, `zcash-gtest` and `test_bitcoin` link instead of
 `librustzcash.a`. How it is built, checked and tuned: `doc/c23-build.md`.
+`CSHA256` runs on the vendored SHA-256 through `libzcl_c23_hash.a` (`glue/WIRING.md`, "Hashacceleration"); Equihash verification is part of `libzcl_c23.a` (`equihash/WIRING.md`). Botharchives are held to the symbol-prefix check by `c23-symbols.stamp`.
 
 ```
 vendor/                  VERBATIM Z23 files at the pin in Z23_SOURCE.tsv. Never edit.
