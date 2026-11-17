@@ -435,7 +435,7 @@ protected:
         // looks affordable; the error says why it is not.
         EXPECT_FALSE(Create(w, nOrdinaryValue + 1000, true, NULL, inputs, strFail));
         EXPECT_EQ(0u, strFail.find("Insufficient funds")) << strFail;
-        EXPECT_NE(std::string::npos, strFail.find("7 token-bearing outputs holding 0.00003822")) << strFail;
+        EXPECT_NE(std::string::npos, strFail.find("8 token-bearing outputs holding 0.00004368")) << strFail;
         EXPECT_NE(std::string::npos, strFail.find("would burn the ZSLP tokens or mint baton")) << strFail;
     }
 };
@@ -800,7 +800,7 @@ TEST_F(TokenGuardTest, ListUnspentAndBalanceUnchangedApartFromNewField)
         nFlagged += fExpected ? 1 : 0;
         nListed += AmountFromValue(find_value(o, "amount"));
     }
-    EXPECT_EQ(7u, nFlagged);
+    EXPECT_EQ(8u, nFlagged);
     EXPECT_EQ(wallet->GetBalance(), nListed);
 }
 
@@ -1041,7 +1041,7 @@ TEST_F(TokenGuardTest, MergeToAddressSkipsTokenOutputs)
         params.push_back(addrOther);
 
         UniValue result = z_mergetoaddress(params, false);
-        EXPECT_EQ(9, find_value(result, "mergingUTXOs").get_int());
+        EXPECT_EQ(8, find_value(result, "mergingUTXOs").get_int());
         EXPECT_EQ(nOrdinaryValue, AmountFromValue(find_value(result, "mergingTransparentValue")));
         EXPECT_EQ(0, find_value(result, "remainingUTXOs").get_int());
 
@@ -1165,7 +1165,7 @@ TEST_F(TokenGuardTest, NothingIsPersistedAndABackupIsStillProtected)
         EXPECT_EQ(protectedOutpoints.count(outpoint) != 0, vCoins[i].tx->IsTokenBearingOutput(vCoins[i].i)) << outpoint.ToString();
         nFlagged += protectedOutpoints.count(outpoint);
     }
-    EXPECT_EQ(7u, nFlagged);
+    EXPECT_EQ(8u, nFlagged);
 
     ExpectAutomaticSelectionProtected(restored);
     delete restored;

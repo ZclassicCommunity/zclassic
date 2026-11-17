@@ -910,6 +910,7 @@ dnl uses the same libssl, libcrypto and libevent archives as the daemon, plus
 dnl zlib. The default "auto" links it when depends provides it. Embedded Tor is
 dnl compiled in but off at run time (-embeddedtor=0); without it nothing Tor-related
 dnl is compiled or linked except keyfile.c.
+dnl tor_api.h uses SOCKET on Windows and relies on <winsock2.h> being included first.
 TOR_LIBS=
 TOR_SYSTEM_LIBS=
 if test x$use_embedded_tor = xauto; then
@@ -918,14 +919,22 @@ if test x$use_embedded_tor = xauto; then
   else
     AC_CHECK_HEADER([tor_api.h], [use_embedded_tor=yes],
       [use_embedded_tor=no
-       AC_MSG_WARN([embedded Tor is not built: tor_api.h not found (depends was built with NO_EMBEDDED_TOR=1 or for a host without Tor); pass --with-embedded-tor=yes to make this an error])])
+       AC_MSG_WARN([embedded Tor is not built: tor_api.h not found (depends was built with NO_EMBEDDED_TOR=1 or for a host without Tor); pass --with-embedded-tor=yes to make this an error])],
+      [[#ifdef _WIN32
+#include <winsock2.h>
+#endif
+]])
   fi
 fi
 if test x$use_embedded_tor = xyes; then
   if test x$build_bitcoind = xno; then
     AC_MSG_ERROR([--with-embedded-tor needs the daemon (do not combine with --without-daemon)])
   fi
-  AC_CHECK_HEADER([tor_api.h],, [AC_MSG_ERROR([tor_api.h not found; build depends without NO_EMBEDDED_TOR=1])])
+  AC_CHECK_HEADER([tor_api.h],, [AC_MSG_ERROR([tor_api.h not found; build depends without NO_EMBEDDED_TOR=1])],
+    [[#ifdef _WIN32
+#include <winsock2.h>
+#endif
+]])
   AC_CHECK_HEADER([zlib.h],, [AC_MSG_ERROR([zlib.h not found; build depends without NO_EMBEDDED_TOR=1])])
   if test x$TARGET_OS = xwindows; then
     TOR_SYSTEM_LIBS="-lws2_32 -liphlpapi -lcrypt32 -ladvapi32 -lshell32 -luser32 -lgdi32 -lbcrypt -lshlwapi"

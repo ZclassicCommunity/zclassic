@@ -11,9 +11,16 @@ library takes part in the link.
 |---|---|---|
 | `libzcl_c23.a` | `c23/vendor` (Z23, verbatim), `c23/glue`, `c23/compat` (the ABI shim), `c23/sprout_prover` | C |
 | `libzcl_c23_seam.a` | `c23/glue/zcl_c23_log.cpp`: `LogPrintStr`, `-debug=zc23`, network id | C++ |
+| `libzcl_tokenguard.a` | `c23/services`: Z23's SLP wire parser (verbatim) and the wallet token-guard glue; part of `$(LIBBITCOIN_WALLET)`. Own pin and manifest `c23/services/Z23_SOURCE.tsv`; same language level and symbol-prefix scheme as the core (`glue/zcl_tokenguard_symbol_prefix.h`) | C |
+| `libzcl_tor.a` | `c23/tor`: the daemon's own C code (owner-only key files; with embedded Tor the launcher and the in-process/child runner). Not vendored Z23. Globals are `zcl_tor_*`/`zcl_keyfile_*`. Listed as `$(ZCL_TOR_LIBS)` right after `libbitcoin_server.a`, with libtor and its helper archives when embedded Tor is built | C |
 
 Both are listed as `$(LIBZCL_C23)`, after every library that calls
 `librustzcash_*` and before `-lsodium -lcrypto`. `zclassic-cli` does not link them.
+
+Embedded Tor itself (`libtor.a` and three helper archives) comes from depends and keeps Tor's own
+global names; `make check-c23-tor-symbols TOR_LIBDIR=<depends prefix>/lib` proves no other
+archive of the daemon defines one. `make check-c23-vendor` verifies both vendored manifests
+(`c23/Z23_SOURCE.tsv` and `c23/services/Z23_SOURCE.tsv`).
 
 ## Rules the Makefile enforces
 
