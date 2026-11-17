@@ -53,6 +53,11 @@ inline Verdict classify(const Input& in) {
 
     if (in.chain == QLatin1String("regtest")) {
         // The owner's "block 101" case: a private chain never has peers or a moving tip.
+        // ...unless it is fetching blocks it already has headers for (a second local node syncing).
+        if (in.headers > 0 && in.blocks < in.headers - 2) {
+            v.kind = Syncing; v.isSyncing = true; v.headersAhead = true;
+            return v;
+        }
         v.kind = LocalNetwork; v.isSyncing = false;
         return v;
     }

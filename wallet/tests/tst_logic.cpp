@@ -179,6 +179,8 @@ private slots:
         // The owner's case: regtest, 101 blocks, no peers -> a local network, never "starting".
         QTest::newRow("regtest-101-nopeers") << "regtest" << 101 << 101 << 3600*24*30 << 0 << 0 << false << (int)LocalNetwork << false;
         QTest::newRow("regtest-genesis")     << "regtest" << 0 << 0 << -1 << 0 << -1 << false << (int)LocalNetwork << false;
+        // A regtest node that is still fetching blocks it has headers for (a second local node) is syncing.
+        QTest::newRow("regtest-headers-ahead") << "regtest" << 50 << 500 << 3600 << 1 << 1 << false << (int)Syncing << true;
         // Fresh snapshot import: blocks==headers at the anchor, peers up, tip 20 days old.
         QTest::newRow("post-snapshot-old-tip") << "main" << 3126937 << 3126937 << 3600*24*20 << 8 << 1 << false << (int)Syncing << true;
         QTest::newRow("headers-ahead")       << "main" << 3200000 << 3330000 << 3600*24*3 << 8 << 1 << false << (int)Syncing << true;
