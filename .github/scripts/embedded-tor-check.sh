@@ -54,7 +54,7 @@ finish() { # <rc>
         [ "$1" -eq 0 ] && set -- 1
     fi
     wait "$pid" 2>/dev/null
-    left=$(ps -axo pid=,command= | grep -F "$work" | grep -v grep || true)
+    left=$(ps -axo pid=,command= | grep -F "$work" | grep -v grep | grep -vF "embedded-tor-check.sh" || true)
     if [ -n "$left" ]; then echo "embedded-tor-check: processes left over:"; echo "$left"; set -- 1; fi
     exit "$1"
 }

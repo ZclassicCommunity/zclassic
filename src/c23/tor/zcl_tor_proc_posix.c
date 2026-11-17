@@ -14,6 +14,12 @@
 #endif
 
 #ifdef __APPLE__
+#include <limits.h>
+#include <mach-o/dyld.h>
+#include <stdint.h>
+#endif
+
+#ifdef __APPLE__
 /* macOS has no SOCK_CLOEXEC; the descriptors are moved with F_DUPFD_CLOEXEC below. */
 #include <sys/socket.h>
 #ifndef SOCK_CLOEXEC
@@ -83,6 +89,18 @@ int zcl_tor_proc_self_exe(char *out, size_t cap)
      * upgrade, so use it directly rather than resolving it. */
     int n = snprintf(out, cap, "/proc/self/exe");
     return (n > 0 && (size_t)n < cap) ? 0 : -1;
+#elif defined(__APPLE__)
+    /* No /proc: ask dyld, then resolve symlinks and ./.. so the child is
+     * started from an absolute path. */
+    char raw[PATH_MAX];
+    char res[PATH_MAX];
+    uint32_t sz = (uint32_t)sizeof(raw);
+    if (_NSGetExecutablePath(raw, &sz) != 0 || !realpath(raw, res))
+        return -1;
+    if (strlen(res) >= cap)
+        return -1;
+    memcpy(out, res, strlen(res) + 1);
+    return 0;
 #else
     (void)out;
     (void)cap;
