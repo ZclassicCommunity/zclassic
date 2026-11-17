@@ -100,6 +100,9 @@ static const int64_t HEADERS_RESPONSE_TIMEOUT = 120;
 static const int64_t HEADERS_STALLED_PEER_COOLDOWN = 300;
 /** Time to wait (in seconds) between writing blocks/block index to disk. */
 static const unsigned int DATABASE_WRITE_INTERVAL = 60 * 60;
+/** The same, while in initial block download: after a crash (kill -9, power loss) everything downloaded
+ *  since the last block index write has to be fetched again, which at a full-speed sync is a lot of work. */
+static const unsigned int DATABASE_WRITE_INTERVAL_IBD = 5 * 60;
 /** Time to wait (in seconds) between flushing chainstate to disk. */
 static const unsigned int DATABASE_FLUSH_INTERVAL = 24 * 60 * 60;
 /** Maximum length of reject messages. */
@@ -242,6 +245,9 @@ bool IsInitialBlockDownload();
 
 /** True if a getheaders request sent at nRequestedAt (microseconds, 0 = none outstanding) has
  *  gone unanswered for more than nTimeoutSeconds at nNow (microseconds). */
+/** Seconds between periodic block index writes. */
+int64_t BlockIndexWriteInterval(bool fInitialBlockDownload);
+
 bool HeadersRequestTimedOut(int64_t nNow, int64_t nRequestedAt, int64_t nTimeoutSeconds);
 
 /** Percent (1..99) of the init-time best-chain replay done, from the height the replay started at, the

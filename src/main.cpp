@@ -1856,6 +1856,11 @@ CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
     }
 }
 
+int64_t BlockIndexWriteInterval(bool fInitialBlockDownload)
+{
+    return fInitialBlockDownload ? DATABASE_WRITE_INTERVAL_IBD : DATABASE_WRITE_INTERVAL;
+}
+
 bool HeadersRequestTimedOut(int64_t nNow, int64_t nRequestedAt, int64_t nTimeoutSeconds)
 {
     return nRequestedAt != 0 && nNow - nRequestedAt > nTimeoutSeconds * 1000000;
@@ -2891,7 +2896,7 @@ bool static FlushStateToDisk(CValidationState &state, FlushStateMode mode) {
     // The cache is over the limit, we have to write now.
     bool fCacheCritical = mode == FLUSH_STATE_IF_NEEDED && cacheSize > nCoinCacheUsage;
     // It's been a while since we wrote the block index to disk. Do this frequently, so we don't need to redownload after a crash.
-    bool fPeriodicWrite = mode == FLUSH_STATE_PERIODIC && nNow > nLastWrite + (int64_t)DATABASE_WRITE_INTERVAL * 1000000;
+    bool fPeriodicWrite = mode == FLUSH_STATE_PERIODIC && nNow > nLastWrite + BlockIndexWriteInterval(IsInitialBlockDownload()) * 1000000;
     // It's been very long since we flushed the cache. Do this infrequently, to optimize cache usage.
     bool fPeriodicFlush = mode == FLUSH_STATE_PERIODIC && nNow > nLastFlush + (int64_t)DATABASE_FLUSH_INTERVAL * 1000000;
     // Combine all conditions that result in a full cache flush.

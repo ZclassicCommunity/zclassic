@@ -39,6 +39,15 @@ BOOST_AUTO_TEST_CASE(replay_progress_percent)
     BOOST_CHECK_EQUAL(ReplayProgressPercent(100, 90, 200), 1);
 }
 
+BOOST_AUTO_TEST_CASE(block_index_write_interval)
+{
+    // During initial block download the block index is written often enough that a crash costs minutes, not an hour.
+    BOOST_CHECK_EQUAL(BlockIndexWriteInterval(true), (int64_t)DATABASE_WRITE_INTERVAL_IBD);
+    BOOST_CHECK_EQUAL(BlockIndexWriteInterval(false), (int64_t)DATABASE_WRITE_INTERVAL);
+    BOOST_CHECK(BlockIndexWriteInterval(true) <= 10 * 60);
+    BOOST_CHECK(BlockIndexWriteInterval(true) < BlockIndexWriteInterval(false));
+}
+
 BOOST_AUTO_TEST_CASE(sync_phase_classification)
 {
     // Not in IBD: synced regardless of anything else.
