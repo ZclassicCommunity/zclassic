@@ -359,8 +359,8 @@ void HandleSIGHUP(int)
 
 #ifdef WIN32
 /**
- * Console control events (Ctrl+C, Ctrl+Break, closing the console window, log off,
- * system shutdown). Without a handler Windows ends the process immediately, without
+ * Console control events (Ctrl+C, Ctrl+Break, closing the console window, system
+ * shutdown). Without a handler Windows ends the process immediately, without
  * flushing the chain state, wallet and block index, as if it had been killed.
  * Request the normal clean shutdown instead. For the events after which Windows
  * terminates the process as soon as this handler returns, wait (bounded) for the
@@ -373,8 +373,13 @@ static BOOL WINAPI WinConsoleCtrlHandler(DWORD dwCtrlType)
     case CTRL_BREAK_EVENT:
         StartShutdown();
         return TRUE;
-    case CTRL_CLOSE_EVENT:
     case CTRL_LOGOFF_EVENT:
+        // Delivered only to processes outside the interactive session that is
+        // ending (a service, or a node started under a service wrapper) when
+        // some user logs off: not a reason to stop the node. Pass it on to the
+        // next (default) handler, exactly as before this handler existed.
+        return FALSE;
+    case CTRL_CLOSE_EVENT:
     case CTRL_SHUTDOWN_EVENT:
         StartShutdown();
         for (int i = 0; i < 200 && !fWinShutdownDone; i++) // up to 20 s (the OS may cut this short)
