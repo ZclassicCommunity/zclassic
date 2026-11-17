@@ -14,6 +14,7 @@
 #include "chainparams.h"
 #include "checkpoints.h"
 #include "checkqueue.h"
+#include "consensus/oversize_grandfather.h"
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
 #include "deprecation.h"
@@ -1132,14 +1133,14 @@ bool ContextualCheckTransaction(
 
 
 bool CheckTransaction(const CTransaction& tx, CValidationState &state,
-                      libzcash::ProofVerifier& verifier)
+                      libzcash::ProofVerifier& verifier, bool fInBlock)
 {
     // Don't count coinbase transactions because mining skews the count
     if (!tx.IsCoinBase()) {
         transactionsValidated.increment();
     }
 
-    if (!CheckTransactionWithoutProofVerification(tx, state)) {
+    if (!CheckTransactionWithoutProofVerification(tx, state, fInBlock)) {
         return false;
     } else {
         // Ensure that zk-SNARKs verify
@@ -1153,7 +1154,7 @@ bool CheckTransaction(const CTransaction& tx, CValidationState &state,
     }
 }
 
-bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidationState &state)
+bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidationState &state, bool fInBlock)
 {
     // Basic checks that don't depend on any context
 
@@ -1213,7 +1214,12 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
     // Size limits
     BOOST_STATIC_ASSERT(MAX_BLOCK_SIZE >= MAX_TX_SIZE_AFTER_SAPLING); // sanity
     BOOST_STATIC_ASSERT(MAX_TX_SIZE_AFTER_SAPLING > MAX_TX_SIZE_BEFORE_SAPLING); // sanity
-    if (::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION) > MAX_TX_SIZE_AFTER_SAPLING)
+    // A transaction validated as part of a block may also be one of the 413 historical
+    // oversize mainnet transactions, identified by (txid, exact size); see
+    // consensus/oversize_grandfather.h. Every other caller keeps the strict limit.
+    const unsigned int nTxSize = ::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION);
+    if (nTxSize > MAX_TX_SIZE_AFTER_SAPLING &&
+        !(fInBlock && IsOversizeGrandfathered(tx.GetHash(), nTxSize)))
         return state.DoS(100, error("CheckTransaction(): size limits failed"),
                          REJECT_INVALID, "bad-txns-oversize");
 
@@ -4344,7 +4350,7 @@ bool CheckBlock(const CBlock& block, CValidationState& state,
 
         // Check transactions
         BOOST_FOREACH(const CTransaction& tx, block.vtx)
-            if (!CheckTransaction(tx, state, verifier))
+            if (!CheckTransaction(tx, state, verifier, true))
                 return error("CheckBlock(): CheckTransaction failed");
 
         unsigned int nSigOps = 0;
