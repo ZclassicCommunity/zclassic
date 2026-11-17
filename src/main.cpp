@@ -6894,7 +6894,18 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
             // TODO: optimize: if pindexLast is an ancestor of chainActive.Tip or pindexBestHeader, continue
             // from there instead.
             LogPrint("net", "more getheaders (%d) to end to peer=%d (startheight:%d)\n", pindexLast->nHeight, pfrom->id, pfrom->nStartingHeight);
-            if (CNodeState *hstate = State(pfrom->GetId())) hstate->nHeadersRequestedAt = GetTimeMicros();
+            if (CNodeState *hstate = State(pfrom->GetId())) {
+                hstate->nHeadersRequestedAt = GetTimeMicros();
+                // A peer we gave up on as too slow (see HEADERS_RESPONSE_TIMEOUT) answered after all and its
+                // header stream goes on. Take it back as a header-sync peer: the timeout then covers it again,
+                // and it is not sent a second initial getheaders when its cooldown ends, which would start a
+                // duplicate header stream from the same peer on a link that is already slow.
+                if (!hstate->fSyncStarted && hstate->nHeadersStalledUntil != 0) {
+                    hstate->fSyncStarted = true;
+                    nSyncStarted++;
+                    hstate->nHeadersStalledUntil = 0;
+                }
+            }
             pfrom->PushMessage("getheaders", chainActive.GetLocator(pindexLast), uint256());
         }
 
