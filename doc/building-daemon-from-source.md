@@ -82,8 +82,6 @@ toolchain and no cargo: the zk-proof code is C23 under `src/c23`
 
 - **Network access required on a clean depends build:**
   the `z.cash` depends-sources mirror and the upstream source hosts.
-- Proton/AMQP is **OFF by default** for all targets (`build.sh:93`,
-  `NO_PROTON`).
 
 The three supported host triples (`depends/Makefile:148-153`):
 
@@ -104,7 +102,7 @@ The three supported host triples (`depends/Makefile:148-153`):
   tarballs, so the linux + win depends do **not** need re-downloading.
 
 Useful `depends` knobs: `HOST=`, `NO_WALLET=1` (→ `--disable-wallet`, no bdb),
-`NO_PROTON`, `DEBUG`, `SOURCES_PATH=`, `BASE_CACHE=`.
+`DEBUG`, `SOURCES_PATH=`, `BASE_CACHE=`.
 
 ### 1.4 Windows cross toolchain (only needed for §3)
 
@@ -171,7 +169,7 @@ debug `-g`).
 
 > **build.sh flags are ORDER-SENSITIVE** (`build.sh:73-98`). If you pass any, they
 > must appear in this exact order, before MAKEARGS:
-> `[ --enable-lcov | --disable-tests ]  [ --disable-mining ]  [ --enable-proton ]  [ -jN ... ]`
+> `[ --enable-lcov | --disable-tests ]  [ --disable-mining ]  [ -jN ... ]`
 > Out-of-order flags are silently treated as make args. Default build is
 > `--enable-hardening` with tests **enabled**.
 
@@ -223,7 +221,7 @@ make -C depends -j$(nproc) NO_WALLET=1 \
   && make -j$(nproc)
 
 # Build only the depends prefix:
-make -C depends -j$(nproc) NO_PROTON=1
+make -C depends -j$(nproc)
 ```
 
 ---
@@ -406,7 +404,7 @@ The native build (§2) targets the host's glibc and will not run on older distro
 The distributable Linux daemon is built inside an **Ubuntu 20.04 / glibc 2.31
 proot sandbox** that lives **outside the git repo** at `/home/rhett/zclbuild`
 (uncommitted tribal knowledge — see §8). Inside that sandbox the recipe sets
-`NO_PROTON=1`, `CONFIGURE_FLAGS='--enable-glibc-back-compat --enable-reduce-exports'`,
+`CONFIGURE_FLAGS='--enable-glibc-back-compat --enable-reduce-exports'`,
 `ZQW_STATIC_GOMP=1`, then calls `zcutil/build-release.sh linux`, yielding a daemon
 with a **GLIBC_2.29** floor and no libgomp dependency.
 
@@ -501,9 +499,8 @@ host switch. Fix: `build-release.sh:76-93` auto-detects the host change and runs
 those two cleans yourself when switching `HOST`.
 
 **build.sh flag order.**
-Out-of-order `--disable-tests`/`--disable-mining`/`--enable-proton` are silently
-treated as make args. Order: `[--enable-lcov|--disable-tests] [--disable-mining]
-[--enable-proton] [MAKEARGS...]` (`build.sh:73-98`).
+Out-of-order `--disable-tests`/`--disable-mining` are silently
+treated as make args. Order: `[--enable-lcov|--disable-tests] [--disable-mining] [MAKEARGS...]` (`build.sh:73-98`).
 
 **Unstripped `.exe` is ~278 MB.**
 Not an error. Strip with `x86_64-w64-mingw32-strip -s` → ~13.5 MB. Use the

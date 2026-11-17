@@ -156,7 +156,7 @@ If bootstrap snapshot installation fails:
 
 ```bash
 # Build only the dependencies
-make -C depends -j$(nproc) NO_PROTON=1
+make -C depends -j$(nproc)
 
 # Then configure with the dependencies
 ./autogen.sh

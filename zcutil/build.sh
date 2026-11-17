@@ -46,7 +46,7 @@ Usage:
 $0 --help
   Show this help message and exit.
 
-$0 [ --enable-lcov || --disable-tests ] [ --disable-mining ] [ --enable-proton ] [ MAKEARGS... ]
+$0 [ --enable-lcov || --disable-tests ] [ --disable-mining ] [ MAKEARGS... ]
   Build Zcash and most of its transitive dependencies from
   source. MAKEARGS are applied to both dependencies and Zcash itself.
 
@@ -57,9 +57,6 @@ $0 [ --enable-lcov || --disable-tests ] [ --disable-mining ] [ --enable-proton ]
   If --disable-mining is passed, Zcash is configured to not build any mining
   code. It must be passed after the test arguments, if present.
 
-  If --enable-proton is passed, Zcash is configured to build the Apache Qpid Proton
-  library required for AMQP support. This library is not built by default.
-  It must be passed after the test/mining arguments, if present.
 EOF
     exit 0
 fi
@@ -89,24 +86,17 @@ then
     shift
 fi
 
-# If --enable-proton is the next argument, enable building Proton code:
-PROTON_ARG='--enable-proton=no'
-if [ "x${1:-}" = 'x--enable-proton' ]
-then
-    PROTON_ARG=''
-    shift
-fi
 
 eval "$MAKE" --version
 as --version
 ld -v
 
-HOST="$HOST" BUILD="$BUILD" NO_PROTON="$PROTON_ARG" "$MAKE" "$@" -C ./depends/ V=1
+HOST="$HOST" BUILD="$BUILD" "$MAKE" "$@" -C ./depends/ V=1
 ./autogen.sh
 
 DEPS_DIR="$PWD/depends/$HOST"
 CONFIG_SITE="$DEPS_DIR/share/config.site" ./configure \
-  "$HARDENING_ARG" "$LCOV_ARG" "$TEST_ARG" "$MINING_ARG" "$PROTON_ARG" \
+  "$HARDENING_ARG" "$LCOV_ARG" "$TEST_ARG" "$MINING_ARG" \
   --with-boost="$DEPS_DIR" \
   $CONFIGURE_FLAGS \
   CXXFLAGS='-g' \

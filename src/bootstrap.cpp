@@ -64,7 +64,7 @@ static bool BootstrapMetricsScreenActive()
     // rather than shared with init.cpp: factoring it into an init.cpp helper
     // that this file calls would force the test binary (which links bootstrap.o
     // but stubs init.o's StartShutdown/etc.) to pull the real init.o, breaking
-    // the test link with multiple-definition + ZMQ/AMQP undefined-reference
+    // the test link with multiple-definition + ZMQ undefined-reference
     // errors. A 4-line mirrored predicate is cheaper than that coupling.
     return (Params().NetworkIDString() != "regtest") &&
            GetBoolArg("-showmetrics", is_tty) &&
