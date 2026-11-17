@@ -168,7 +168,8 @@ scn_sapling() {
     # unconfirmed visibility
     b=$(zbal 0 "$zs2" 0)
     t=$(zsend 0 "$zs" "[{\"address\":\"$zs2\",\"amount\":0.25}]" | sed 's/success //'); wait_mempool 1 "$t"
-    obs "z_getbalance_minconf0_unconfirmed_delta" "$(add "$(zbal 0 "$zs2" 0)" "-$b")"
+    w=0; while [ "$(zbal 0 "$zs2" 0)" = "$b" ] && [ $w -lt 300 ]; do sleep 0.1; w=$((w + 1)); done; obs_t "z_unconfirmed_incoming_visible_after_seconds" "$(awk -v w=$w 'BEGIN{printf "%.1f", w/10}')"
+    ck "minconf 0 shows the unconfirmed incoming note" "$(zbal 0 "$zs2" 0)" "$(add "$b" 0.25)"
     mine 1
     # operation lifecycle
     op=$(cli 0 z_sendmany "$zs" "[{\"address\":\"$zs2\",\"amount\":0.01}]" 1 $FEE); r=$(wait_op 0 "$op"); wait_mempool 1 "${r#success }"; mine 1
@@ -206,7 +207,7 @@ scn_sapling() {
     nt=$(cli 0 listunspent | jq "[.[]|select(.generated|not)]|length"); cb=$(cli 0 listunspent | jq "[.[]|select(.generated)|.amount]|add // 0" | f8); obs "merge_t_utxos_before" "$nt"
     pv=$(cli 0 z_gettotalbalance | jq -r .private | f8)
     mg=$(cli 0 z_mergetoaddress "[\"ANY_TADDR\",\"$zs\"]" "$zs3" 0.0001 0 0 2>&1)
-    case $mg in *opid*) r=$(wait_op 0 "$(printf %s "$mg" | jq -r .opid)"); mine 1
+    case $mg in *opid*) r=$(wait_op 0 "$(printf %s "$mg" | jq -r .opid)"); wait_mempool 1 "${r#success }"; mine 1
         ck "mixed t and z sources are merged (notes)" "$([ "$(printf %s "$mg" | jq -r .mergingNotes)" -ge 1 ] && echo yes)" yes
         ck "mixed merge: shielded total gains the t value minus fee" "$(cli 0 z_gettotalbalance | jq -r .private | f8)" "$(add "$pv" "$(printf %s "$mg" | jq -r .mergingTransparentValue)" -0.0001)" ;;
         *) obs "mixed_t_and_z_sources" "$(printf %s "$mg" | tr '\n' ' ' | cut -c1-100)" ;; esac
@@ -215,17 +216,17 @@ scn_sapling() {
     mg=$(cli 0 z_mergetoaddress '["ANY_TADDR"]' "$zs3" 0.0001 2)
     ck "z_mergetoaddress transparent_limit 2" "$(printf %s "$mg" | jq -r .mergingUTXOs)" 2
     ck "z_mergetoaddress remaining" "$(printf %s "$mg" | jq -r .remainingUTXOs)" "$((nt - 2))"
-    r=$(wait_op 0 "$(printf %s "$mg" | jq -r .opid)"); case $r in success*) mine 1 ;; *) bad "merge limit: $r" ;; esac
+    r=$(wait_op 0 "$(printf %s "$mg" | jq -r .opid)"); case $r in success*) wait_mempool 1 "${r#success }"; mine 1 ;; *) bad "merge limit: $r" ;; esac
     z0=$(zbal 0 "$zs3"); tb=$(bal 0); cb0=$(cli 0 listunspent | jq "[.[]|select(.generated)|.amount]|add // 0" | f8)
     mg=$(cli 0 z_mergetoaddress '["ANY_TADDR"]' "$zs3" 0.0001 0)
     r=$(wait_op 0 "$(printf %s "$mg" | jq -r .opid)")
-    case $r in success*) mine 1
+    case $r in success*) wait_mempool 1 "${r#success }"; mine 1
         cb=$(cli 0 listunspent | jq "[.[]|select(.generated)|.amount]|add // 0" | f8); ck "merge all t: only coinbase coins remain" "$(bal 0)" "$cb"
         ck "merge all t: z gained the t balance minus fee" "$(zbal 0 "$zs3")" "$(add "$z0" "$tb" "-$cb0" -0.0001)" ;; *) bad "merge all t: $r" ;; esac
     tot=$(cli 0 z_gettotalbalance | jq -r .private | f8)
     mg=$(cli 0 z_mergetoaddress "[\"$zs\",\"$zs2\",\"$zs3\"]" "$zs3" 0.0001 0 0)
     r=$(wait_op 0 "$(printf %s "$mg" | jq -r .opid)")
-    case $r in success*) mine 1
+    case $r in success*) wait_mempool 1 "${r#success }"; mine 1
         ck "merge all z notes: private total drops by the fee only" "$(cli 0 z_gettotalbalance | jq -r .private | f8)" "$(add "$tot" -0.0001)"
         ck "merge all z notes: one note at the target" "$(cli 0 z_listunspent 1 9999999 false "[\"$zs3\"]" | jq length)" 1 ;; *) bad "merge z: $r" ;; esac
     alive sapling-end

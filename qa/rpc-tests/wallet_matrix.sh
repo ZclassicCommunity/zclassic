@@ -59,6 +59,7 @@ run_scn 9 "two-node interop" scn_interop
 run_scn 10 "coin selection stability" scn_coinsel
 run_scn 11 "load" scn_load
 run_scn 12 "input robustness" scn_robust
+run_scn 13 "relay after kill -9" scn_relay
 
 say; say "id|scenario|result|checks|time"; cat "$RESULTS"
 ! grep -q '|FAIL|' "$RESULTS"

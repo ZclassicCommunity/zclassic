@@ -181,9 +181,10 @@ scn_load() {
     sync_to 0; obs_t "build_${NU}_utxos" "$(elapsed "$t0")"
     ck "utxo count" "$(cli 0 listunspent | jq length)" "$NU"
     # notes: miner funds a t address then z_sendmany 50 recipients per transaction
-    t0=$(now); fa=$(cli 1 getnewaddress); cli 1 sendtoaddress "$fa" "$(awk -v n="$NN" 'BEGIN{print n*0.01+5}')" >/dev/null; cli 1 generate 1 >/dev/null
+    t0=$(now); fa=$(cli 1 getnewaddress); mzl=$(cli 1 z_getnewaddress); cli 1 sendtoaddress "$fa" "$(awk -v n="$NN" 'BEGIN{print n*0.01+5}')" >/dev/null; cli 1 generate 1 >/dev/null
+    r=$(zsend 1 "$fa" "[{\"address\":\"$mzl\",\"amount\":$(awk -v n="$NN" 'BEGIN{print n*0.01+3}')}]" 1 0.001); case $r in success*) cli 1 generate 1 >/dev/null ;; *) bad "load: miner shielding: $r" ;; esac
     i=0; while [ $((i * 50)) -lt "$NN" ]; do
-        r=$(zsend 1 "$fa" "$rec" 1 0.001); case $r in success*) cli 1 generate 1 >/dev/null ;; *) bad "load note batch $i: $r"; break ;; esac
+        r=$(zsend 1 "$mzl" "$rec" 1 0.001); case $r in success*) cli 1 generate 1 >/dev/null ;; *) bad "load note batch $i: $r"; break ;; esac
         i=$((i + 1))
     done
     sync_to 0; obs_t "build_${NN}_notes" "$(elapsed "$t0")"
@@ -202,7 +203,9 @@ scn_load() {
     t0=$(now); r=$(zsend 0 "$zs" "[{\"address\":\"$d\",\"amount\":0.35}]" 1 0.001); obs_t "z_sendmany_spends_35_notes" "$(elapsed "$t0")"
     case $r in success*) mine 1; ck "z_sendmany many notes: balance" "$(zbal 0 "$zs")" "$(add "$zb" -0.35 -0.001)" ;; *) bad "z_sendmany many notes: $r" ;; esac
     t0=$(now); mg=$(cli 0 z_mergetoaddress '["ANY_TADDR"]' "$zs" 0.0001 500); r=$(wait_op 0 "$(printf %s "$mg" | jq -r .opid)"); obs_t "z_mergetoaddress_500_utxos" "$(elapsed "$t0")"; mine 1
-t0=$(now); mg=$(cli 0 z_mergetoaddress "$(printf %s "$rec" | jq -c '[.[].address]')" "$zs" 0.0001 0 200); r=$(wait_op 0 "$(printf %s "$mg" | jq -r .opid)"); obs_t "z_mergetoaddress_200_notes" "$(elapsed "$t0")"; mine 1
+    zt0=$(cli 0 z_gettotalbalance 0 | jq -r .private | f8); t0=$(now); mg=$(cli 0 z_mergetoaddress "$(printf %s "$rec" | jq -c '[.[].address]')" "$zs" 0.0001 0 200); r=$(wait_op 0 "$(printf %s "$mg" | jq -r .opid)"); obs_t "z_mergetoaddress_200_notes" "$(elapsed "$t0")"
+    w=0; while [ "$(cli 0 z_gettotalbalance 0 | jq -r .private | f8)" != "$(add "$zt0" -0.0001)" ] && [ $w -lt 300 ]; do sleep 0.1; w=$((w + 1)); done; obs_t "merge_effect_visible_in_wallet_after_op_success" "$(awk -v w=$w 'BEGIN{printf "%.1f", w/10}')"
+    wait_mempool 1 "${r#success }"; mine 1
     s=$(snap 0)
     stop 0; t0=$(now); start 0 "$BIN" $R; obs_t "restart_to_rpc" "$(elapsed "$t0")"; ck "restart identical" "$(snap 0)" "$s"
     stop 0; t0=$(now); start 0 "$BIN" $R -rescan; sync_to 0; obs_t "rescan_start_to_rpc" "$(elapsed "$t0")"; ck "-rescan identical" "$(snap 0 | sed 's/txs=.*//')" "$(printf %s "$s" | sed 's/txs=.*//')"
@@ -300,4 +303,22 @@ scn_robust() {
     alive "wallet RPC inputs"
     ck "wallet unchanged by the invalid calls' failures (t balance not negative)" "$([ "$(bal 0 '*' 0 | cut -c1-1)" != "-" ] && echo ok)" ok
     ck "chain tips agree" "$(cli 0 getbestblockhash)" "$(cli 1 getbestblockhash)"
+}
+
+# ---------------------------------------------------------------- 13
+# What does a kill -9 right after sendtoaddress do to NETWORK relay of that tx?
+scn_relay() {
+    setup2 || return
+    ta=$(give_t 0 10); other=$(cli 1 getnewaddress); R="-connect=127.0.0.1:$((BASE + 1))"; i=0
+    while [ $i -lt 4 ]; do
+        i=$((i + 1)); tx=$(cli 0 sendtoaddress "$other" 0.1); kill9 0; start 0 "$BIN" $R
+        known=$(cli 0 gettransaction "$tx" >/dev/null 2>&1 && echo yes || echo no)
+        w=0; until cli 1 getrawmempool | grep -q "$tx" || [ $w -ge 90 ]; do sleep 1; w=$((w + 1)); done
+        if cli 1 getrawmempool | grep -q "$tx"; then at="${w}s"; else at="never(90s)"; fi
+        obs "round${i}_wallet_knows=$known,reached_peer_after" "$at"
+        [ "$at" = "never(90s)" ] && cli 1 sendrawtransaction "$(cli 0 gettransaction "$tx" | jq -r .hex)" >/dev/null 2>&1
+        cli 1 generate 1 >/dev/null; sync_to 0
+    done
+    pass "relay probe finished"
+    ck "final balance = funds minus 4 sends, exact" "$(bal 0)" "$(add 10 -0.4 "$(cli 0 listtransactions '*' 100 | jq '[.[]|select(.category=="send")|.fee]|add' | f8)")"
 }
