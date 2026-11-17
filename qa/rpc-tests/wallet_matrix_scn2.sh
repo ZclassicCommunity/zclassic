@@ -128,7 +128,7 @@ scn_keys() {
 # ---------------------------------------------------------------- 5
 scn_encrypt() {
     setup2 || return
-    ta=$(give_t 0 5); zs=$(cli 0 z_getnewaddress); give_z 0 "$zs" 4
+    ta=$(give_t 0 5); zs=$(cli 0 z_getnewaddress); give_z 0 "$zs" 4; sp=$(cli 0 z_getnewaddress sprout)
     other=$(cli 1 getnewaddress)
     cli 0 encryptwallet "pw1" >/dev/null 2>&1
     pid=$(cat "$SD/node0/pid"); t=0; while kill -0 "$pid" 2>/dev/null && [ $t -lt 120 ]; do t=$((t + 1)); sleep 1; done
@@ -140,6 +140,8 @@ scn_encrypt() {
     ck "wallet reports locked (unlocked_until 0)" "$(cli 0 getwalletinfo | jq -r .unlocked_until)" 0
     ckerr "sendtoaddress while locked" "unlock|locked|passphrase" 0 sendtoaddress "$other" 1
     r=$(zsend 0 "$zs" "[{\"address\":\"$other\",\"amount\":1}]"); case $r in *assphrase*|*nlock*|*ocked*) pass "z_sendmany while locked fails cleanly: $(printf %s "$r" | cut -c1-90)" ;; *) bad "z_sendmany while locked: $r" ;; esac; alive "z_sendmany while locked"; cli 0 getblockcount >/dev/null 2>&1 || { say "  (daemon died; restarting it, still locked)"; start 0 "$BIN" -connect=127.0.0.1:$((BASE + 1)); }
+    # the same constructor path for a Sprout from-address (no notes needed: the key lookup comes first)
+    r=$(zsend 0 "$sp" "[{\"address\":\"$other\",\"amount\":1}]"); case $r in *assphrase*|*nlock*|*ocked*) pass "z_sendmany from Sprout while locked fails cleanly" ;; *) bad "z_sendmany from Sprout while locked: $r" ;; esac; alive "z_sendmany from Sprout while locked"; cli 0 getblockcount >/dev/null 2>&1 || { say "  (daemon died; restarting it, still locked)"; start 0 "$BIN" -connect=127.0.0.1:$((BASE + 1)); }
     obs "z_getnewaddress_while_locked" "$(errtxt 0 z_getnewaddress | sed 's/OK:.*/OK/')"
     ckerr "dumpprivkey while locked" "unlock|locked|passphrase" 0 dumpprivkey "$ta"
     ckerr "walletpassphrase wrong" "incorrect|passphrase" 0 walletpassphrase "nope" 600

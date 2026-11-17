@@ -2,7 +2,10 @@
 # Wallet RPC functional matrix on regtest, with exact balance assertions.
 #
 # usage: wallet_matrix.sh --bin <dir> --work <dir> [--peer-bin <dir>] [--alt-bin <dir>]
-#                         [--only 1,2,...] [--label name]
+#                         [--only 1,2,...] [--base port]
+#   --base      first port (P2P base..base+n, RPC base+100+n; each scenario adds 7).
+#               Default derives from the PID; give distinct values to concurrent runs,
+#               which can otherwise collide (seen: bind failure at node startup)
 #   --bin       directory with zclassicd and zclassic-cli: the wallet under test
 #   --peer-bin  binary for the miner/peer node (default: --bin); a different
 #               build here exercises transaction/block interop (scenario 9)
@@ -12,11 +15,11 @@
 # Output: <work>/results.txt (one line per scenario) and <work>/obs.txt
 # (recorded observations; diff them between two binaries).
 # Needs jq and the Zcash parameters in ~/.zcash-params. Shell only, no Python.
-BIN=""; WORK=""; PEER_BIN=""; ALT_BIN=""; ONLY=""
+BIN=""; WORK=""; PEER_BIN=""; ALT_BIN=""; ONLY=""; PORT_BASE=""
 while [ $# -gt 0 ]; do
     case $1 in
         --bin) BIN=$2; shift 2 ;; --work) WORK=$2; shift 2 ;; --peer-bin) PEER_BIN=$2; shift 2 ;;
-        --alt-bin) ALT_BIN=$2; shift 2 ;; --only) ONLY=$2; shift 2 ;; *) echo "bad arg $1" >&2; exit 2 ;;
+        --alt-bin) ALT_BIN=$2; shift 2 ;; --only) ONLY=$2; shift 2 ;; --base) PORT_BASE=$2; shift 2 ;; *) echo "bad arg $1" >&2; exit 2 ;;
     esac
 done
 [ -x "$BIN/zclassicd" ] && [ -n "$WORK" ] || { echo "usage: $0 --bin DIR --work DIR [--peer-bin DIR] [--alt-bin DIR] [--only N,N]" >&2; exit 2; }
@@ -27,7 +30,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 for f in "$HERE"/wallet_matrix_scn?.sh; do . "$f"; done
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 RESULTS=$WORK/results.txt; OBS_LOG=$WORK/obs.txt; : >"$RESULTS"; : >"$OBS_LOG"
-BASE=$((20000 + ($$ % 20000)))
+BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
 trap 'stop_all' EXIT
 
 run_scn() {
