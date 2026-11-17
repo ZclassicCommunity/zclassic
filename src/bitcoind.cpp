@@ -14,6 +14,14 @@
 #include "httpserver.h"
 #include "httprpc.h"
 
+#ifdef WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN 1
+#endif
+#include <windows.h>
+#include <shellapi.h>
+#endif
+
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/thread.hpp>
@@ -224,6 +232,31 @@ bool AppInit(int argc, char* argv[])
     return fRet;
 }
 
+#ifdef WIN32
+/**
+ * The C runtime hands main() the command line converted to the ANSI code page.
+ * Characters the code page cannot represent become '?', which then fails with
+ * "Invalid argument" or points at a different directory. With the UTF-8 active
+ * code page manifest (Windows 10 1903+) the conversion is lossless; on older
+ * Windows, refuse a lossy command line with a clear message instead.
+ */
+static bool WinCommandLineIsLossy()
+{
+    if (GetACP() == CP_UTF8) return false;
+    int nArgs = 0;
+    LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &nArgs);
+    if (!wargv) return false;
+    bool lossy = false;
+    for (int i = 0; i < nArgs && !lossy; i++) {
+        BOOL usedDefault = FALSE;
+        if (WideCharToMultiByte(CP_ACP, 0x00000400 /* WC_NO_BEST_FIT_CHARS */, wargv[i], -1, NULL, 0, "?", &usedDefault) > 0 && usedDefault)
+            lossy = true;
+    }
+    LocalFree(wargv);
+    return lossy;
+}
+#endif
+
 int main(int argc, char* argv[])
 {
     // -embeddedtormode=child re-executes this binary as its Tor process. That
@@ -232,6 +265,17 @@ int main(int argc, char* argv[])
     int nTorChild = EmbeddedTorDispatch(argc, argv);
     if (nTorChild >= 0)
         return nTorChild;
+
+#ifdef WIN32
+    if (WinCommandLineIsLossy()) {
+        fprintf(stderr,
+                "Error: the command line contains characters that the system ANSI code page (%u) cannot represent,\n"
+                "for example a non-ASCII -datadir, -conf or -exportdir path. Use Windows 10 version 1903 or later\n"
+                "(this program asks for the UTF-8 code page), or use a path made of ANSI-representable characters.\n",
+                GetACP());
+        return EXIT_FAILURE;
+    }
+#endif
 
     SetupEnvironment();
 

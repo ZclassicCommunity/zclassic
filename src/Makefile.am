@@ -882,7 +882,7 @@ EXTRA_DIST = leveldb snark test/tree_root_c_tests.c \
   c23/services/tools/z23-vector-check.sh \
   c23/services/tools/z23_vector_shim.h \
   c23/services/tools/slpscript.c
-EXTRA_DIST += c23/tor/check-symbols.sh
+EXTRA_DIST += c23/tor/check-symbols.sh windows-utf8.manifest
 
 clean-local:
 	-$(MAKE) -C leveldb clean
@@ -894,7 +894,7 @@ clean-local:
 
 .rc.o:
 	@test -f $(WINDRES)
-	$(AM_V_GEN) $(WINDRES) -DWINDRES_PREPROC -i $< -o $@
+	$(AM_V_GEN) $(WINDRES) -DWINDRES_PREPROC -I$(srcdir) -i $< -o $@
 
 .mm.o:
 	$(AM_V_CXX) $(OBJCXX) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) \
