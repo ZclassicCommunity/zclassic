@@ -61,7 +61,7 @@ See [beta8 release notes](../../doc/release-notes-beta8.md) and the release's
 `BUILDINFO.txt` and `SHA256SUMS.txt` for the tested artifacts.
 
 The detailed sections below describe older development and packaging paths,
-including historical beta5 examples and host-local proot scripts. Use the
+including older version-specific examples and host-local proot scripts. Use the
 tracked beta8 release scripts above for current releases; adjust legacy checkout
 paths to `zclassic/wallet`.
 
@@ -325,7 +325,7 @@ and an LGPL relink-objects tarball.
 | Var | Meaning |
 |---|---|
 | `QT_STATIC` | base dir of a statically built Qt 5.15 (e.g. `/opt/qt-static`) |
-| `APP_VERSION` | version string, must match `src/version.h` (currently `2.1.2-beta5`) |
+| `APP_VERSION` | version string, must match `src/version.h` (read it from there) |
 | `PREV_VERSION` | prior version string (used for an in-place `sed` version bump in `.pro`/README) |
 | `ZCASH_DIR` | a zclassic checkout that has the daemon staged at `$ZCASH_DIR/artifacts/zclassicd` |
 
@@ -337,8 +337,8 @@ and an LGPL relink-objects tarball.
 ```bash
 cd /home/rhett/github/zcl-qt-wallet
 QT_STATIC=/opt/qt-static \
-APP_VERSION=2.1.2-beta5 \
-PREV_VERSION=2.1.2-beta5 \
+APP_VERSION=<VERSION> \
+PREV_VERSION=<PREV_VERSION> \
 ZCASH_DIR=/home/rhett/github/zclassic \
 bash src/scripts/mkrelease.sh
 ```
@@ -405,7 +405,7 @@ cd /path/to/zclassic && ./zcutil/build.sh -j$(sysctl -n hw.ncpu)
 
 ```bash
 cd /path/to/zcl-qt-wallet
-src/scripts/mkmacdmg.sh -q /path/to/static/Qt -z /path/to/zclassic -v 2.1.2-beta5
+src/scripts/mkmacdmg.sh -q /path/to/static/Qt -z /path/to/zclassic -v <VERSION>
 ```
 
 `mkmacdmg.sh` flow:
@@ -454,7 +454,7 @@ Privacy & Security → Automation).
 
 > If you intend to **notarize** (vs ad-hoc) you need a Developer ID identity and
 > `xcrun notarytool` / stapling — that is beyond this doc and is done by the mac
-> maintainer. The published `2.1.2-beta5` `.dmg`'s exact sign/notarize status is not
+> maintainer. A published `.dmg`'s exact sign/notarize status is not
 > verifiable from the Linux build box; confirm with the mac maintainer and commit
 > the precise invocation.
 
@@ -574,9 +574,9 @@ In-repo and already tracked (reference, do **not** re-commit): `src/scripts/mkre
 `src/scripts/mkmacdmg.sh`.
 
 ### Known open items
-- **Version is hard-coded** (`src/version.h` → `APP_VERSION "2.1.2-beta5"`); the
+- **Version is hard-coded** (`src/version.h` → `APP_VERSION`); the
   proot release scripts also hard-code it and must be bumped together with a tag.
 - **Repo links verified** — the README and docs reference `github.com/ZclassicCommunity/zcl-qt-wallet`
   throughout (the old `ZClassicFoundation/zclwallet` upstream references were removed).
-- The published `2.1.2-beta5` macOS `.dmg` sign/notarize details are owned by the mac
+- The sign/notarize details of a published macOS `.dmg` are owned by the mac
   maintainer and are not verifiable from the Linux box.
