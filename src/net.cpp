@@ -13,6 +13,7 @@
 #include "addrman.h"
 #include "chainparams.h"
 #include "clientversion.h"
+#include "embeddedtor.h"
 #include "primitives/transaction.h"
 #include "scheduler.h"
 #include "ui_interface.h"
@@ -1250,6 +1251,17 @@ void ThreadSocketHandler()
 // a tiny addrman (only the seeded bootstrap addresses) still seeds once.
 static const unsigned int kMinAddrmanToSkipDnsSeeding = 4;
 
+// A DNS seed is a name that only resolves to addresses; it is not a peer. With a
+// name proxy every seed host is queued as a one-shot connection (to the seed host
+// itself), and ProcessOneShot() re-queues a failed one-shot forever. Behind the
+// embedded Tor in onion-only mode the seed hosts never answer as peers (they
+// return nothing and Tor reports host unreachable / general failure), so they
+// were redialled every few seconds for the life of the process. Skip them there.
+bool DnsSeedOneShotsAllowed()
+{
+    return !EmbeddedTorOnionOnlyRequested();
+}
+
 void ThreadDNSAddressSeed()
 {
     // goal: only query DNS seeds if address need is acute. Pure availability:
@@ -1272,6 +1284,10 @@ void ThreadDNSAddressSeed()
 
     BOOST_FOREACH(const CDNSSeedData &seed, vSeeds) {
         if (HaveNameProxy()) {
+            if (!DnsSeedOneShotsAllowed()) {
+                LogPrintf("DNS seed %s not queued: onion-only node behind the embedded Tor\n", seed.host);
+                continue;
+            }
             AddOneShot(seed.host);
         } else {
             vector<CNetAddr> vIPs;

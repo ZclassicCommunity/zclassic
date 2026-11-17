@@ -4328,7 +4328,6 @@ bool CheckBlock(const CBlock& block, CValidationState& state,
     if (fCheckSizeLimits) {
         // Size limits
         // Allow larger blocks for historical chain variations - checkpoint validates correctness
-        const unsigned int GENEROUS_BLOCK_SIZE_LIMIT = 2000000; // 2MB to accommodate any historical forks
         if (block.vtx.empty() || block.vtx.size() > GENEROUS_BLOCK_SIZE_LIMIT || ::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION) > GENEROUS_BLOCK_SIZE_LIMIT)
             return state.DoS(100, error("CheckBlock(): size limits failed"),
                              REJECT_INVALID, "bad-blk-length");
@@ -5396,7 +5395,7 @@ bool LoadExternalBlockFile(FILE* fileIn, CDiskBlockPos *dbp)
     int nLoaded = 0;
     try {
         // This takes over fileIn and calls fclose() on it in the CBufferedFile destructor
-        CBufferedFile blkdat(fileIn, 2*MAX_BLOCK_SIZE, MAX_BLOCK_SIZE+8, SER_DISK, CLIENT_VERSION);
+        CBufferedFile blkdat(fileIn, 2*GENEROUS_BLOCK_SIZE_LIMIT, GENEROUS_BLOCK_SIZE_LIMIT+8, SER_DISK, CLIENT_VERSION);
         uint64_t nRewind = blkdat.GetPos();
         while (!blkdat.eof()) {
             boost::this_thread::interruption_point();
@@ -5415,7 +5414,7 @@ bool LoadExternalBlockFile(FILE* fileIn, CDiskBlockPos *dbp)
                     continue;
                 // read size
                 blkdat >> nSize;
-                if (nSize < 80 || nSize > MAX_BLOCK_SIZE)
+                if (nSize < 80 || nSize > GENEROUS_BLOCK_SIZE_LIMIT)
                     continue;
             } catch (const std::exception&) {
                 // no valid block header found; don't complain

@@ -20,6 +20,10 @@ static const int32_t SAPLING_MIN_TX_VERSION = 4;
 static const int32_t SAPLING_MAX_TX_VERSION = 4;
 /** The maximum allowed size for a serialized block, in bytes (network rule) */
 static const unsigned int MAX_BLOCK_SIZE = 200000;
+/** Largest serialized block CheckBlock() accepts (2MB, generous to cover historical
+ *  mainnet blocks up to 1,999,599 bytes). Also the sanity bound for on-disk block
+ *  records scanned by LoadExternalBlockFile; defined once so the two cannot drift. */
+static const unsigned int GENEROUS_BLOCK_SIZE_LIMIT = 2000000;
 /** The maximum allowed number of signature check operations in a block (network rule) */
 static const unsigned int MAX_BLOCK_SIGOPS = 20000;
 /** The maximum size of a transaction (network rule) */
