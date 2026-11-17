@@ -139,8 +139,18 @@ PrivacyBadgeDelegate::Kind PrivacyBadgeDelegate::classifyForIndex(const QModelIn
     // RPC "category" is "send"/"receive"; addZSentData uses sent-type rows too.
     // A send/sent row to a transparent address is the de-shield case.
     if (type.contains("send", Qt::CaseInsensitive) ||
-        type.contains("sent", Qt::CaseInsensitive))
+        type.contains("sent", Qt::CaseInsensitive)) {
+        // A de-shield leaves a SHIELDED address. If the model says where this send came
+        // from and it was not a shielded address, the user made an ordinary transparent
+        // payment: calling that a red "De-shield" wrongly suggests private funds leaked.
+        const QVariant from = typeIdx.data(FromAddrRole);
+        if (from.isValid()) {
+            const QString f = from.toString().trimmed();
+            if (!f.startsWith('z', Qt::CaseInsensitive))
+                return Kind::Public;
+        }
         return Kind::Deshield;
+    }
 
     return k;
 }
@@ -370,6 +380,14 @@ QSize PrivacyBadgeDelegate::sizeHint(const QStyleOptionViewItem& option,
         s.setHeight(qMax(s.height(), pillH + 6));
         // Reserve room for the widest pill so column auto-size doesn't clip it.
         s.setWidth(s.width() + 120);
+    } else {
+        // The amount is painted in the monospace face with 8px of padding each side, which
+        // is wider than the default-font estimate; a column sized to the estimate clipped
+        // the leading "-" of a sent amount. Measure what paint() will really draw.
+        QFont f = monoFont();
+        f.setPointSizeF(option.font.pointSizeF() > 0 ? option.font.pointSizeF() : f.pointSizeF());
+        const QString t = index.data(Qt::DisplayRole).toString().trimmed();
+        s.setWidth(qMax(s.width(), QFontMetrics(f).horizontalAdvance(t) + 20));
     }
     return s;
 }

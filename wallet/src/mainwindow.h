@@ -549,4 +549,8 @@ private:
     QMovie*      loadingMovie;
 };
 
+// Activity (transactions) table column sizing; see mainwindow.cpp.
+void applyActivityColumnLayout(QTableView* table);
+void applyBalanceColumnLayout(QTableView* table);
+
 #endif // MAINWINDOW_H

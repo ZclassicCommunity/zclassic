@@ -1,6 +1,7 @@
 #include "txtablemodel.h"
 #include "settings.h"
 #include "rpc.h"
+#include "privacybadgedelegate.h"
 
 TxTableModel::TxTableModel(QObject *parent)
      : QAbstractTableModel(parent) {
@@ -155,7 +156,13 @@ void TxTableModel::updateAllData() {
 
  QVariant TxTableModel::data(const QModelIndex &index, int role) const
  {
-     // Align column 4 (amount) right
+     // Where a sent row's money came from (empty for rows read from the wallet's transparent
+    // history): lets the badge tell a real de-shield from an ordinary public payment.
+    if (role == PrivacyBadgeDelegate::FromAddrRole)
+        return (modeldata && index.isValid() && index.row() < modeldata->size())
+                   ? QVariant(modeldata->at(index.row()).fromAddr) : QVariant();
+
+    // Align column 4 (amount) right
     if (role == Qt::TextAlignmentRole && index.column() == 3) return QVariant(Qt::AlignRight | Qt::AlignVCenter);
     
     if (role == Qt::ForegroundRole) {
@@ -181,6 +188,10 @@ void TxTableModel::updateAllData() {
                     const QString t = dat.type.toLower();
                     if (t.contains("send") || t.contains("sent"))  return tr("Sent");
                     if (t.contains("receive"))                     return tr("Received");
+                    // Mining rewards arrive as "generate" (mature) and "immature" (not yet spendable).
+                    // Show them as words, not the daemon's raw category.
+                    if (t.contains("immature"))                    return tr("Mined (maturing)");
+                    if (t.contains("generate"))                    return tr("Mined");
                     return dat.type;
                 }
         case 1: { 

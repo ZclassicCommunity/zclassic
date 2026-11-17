@@ -246,7 +246,9 @@ void MainWindow::restoreSavedStates() {
     restoreGeometry(s.value("geometry").toByteArray());
 
     ui->balancesTable->horizontalHeader()->restoreState(s.value("baltablegeometry").toByteArray());
+    applyBalanceColumnLayout(ui->balancesTable);
     ui->transactionsTable->horizontalHeader()->restoreState(s.value("tratablegeometry").toByteArray());
+    applyActivityColumnLayout(ui->transactionsTable);
 
     // Paint the last-known balances immediately so the first ~1-minute node
     // warmup shows a usable view instead of a blank "0.00". The live RPC
@@ -3065,6 +3067,31 @@ void MainWindow::setupTransactionsTab() {
             QMessageBox mb(QMessageBox::Information, tr("Memo"), memo, QMessageBox::Ok, this);
             mb.setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
             mb.exec();
+            return;
+        }
+
+        // No memo: double-clicking a row used to do nothing at all. Show the transaction's
+        // details instead (the same facts the right-click menu copies), so the gesture
+        // always answers.
+        const qint64 conf = txModel->getConfirmations(index.row());
+        const QString txid = txModel->getTxId(index.row());
+        QMessageBox mb(QMessageBox::Information, tr("Transaction details"),
+            tr("%1 of %2").arg(txModel->data(txModel->index(index.row(), 0), Qt::DisplayRole).toString(),
+                                                    txModel->getAmt(index.row())), QMessageBox::NoButton, this);
+        mb.setObjectName("txDetailsBox");
+        mb.setInformativeText(
+            (conf <= 0 ? tr("Waiting for its first confirmation.")
+                       : tr("%n confirmation(s).", "", int(conf))) + "\n\n" +
+            tr("Date: %1").arg(QDateTime::fromSecsSinceEpoch(txModel->getDate(index.row())).toString()) + "\n" +
+            tr("Address: %1").arg(txModel->getAddr(index.row()).isEmpty() ? tr("(shielded)") : txModel->getAddr(index.row())) + "\n" +
+            tr("Transaction id: %1").arg(txid));
+        mb.setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+        QPushButton* copy = mb.addButton(tr("Copy txid"), QMessageBox::ActionRole);
+        mb.addButton(tr("Close"), QMessageBox::AcceptRole);
+        mb.exec();
+        if (mb.clickedButton() == copy) {
+            QGuiApplication::clipboard()->setText(txid);
+            ui->statusBar->showMessage(tr("Copied to clipboard"), 3 * 1000);
         }
     });
 

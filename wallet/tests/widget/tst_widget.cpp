@@ -1091,6 +1091,54 @@ private slots:
         settleAndDelete(w);
     }
 
+    // The Activity list must give the address column the spare width and keep the type,
+    // date and amount columns readable (they were cut to "Recei...", "2026-11...").
+    void ux4_activityColumnsAreReadable() {
+        MainWindow* w = makeWindow();
+        w->resize(1100, 700);
+        QTableView* t = w->findChild<QTableView*>("transactionsTable");
+        QVERIFY(t);
+        QCOMPARE(int(t->horizontalHeader()->sectionResizeMode(1)), int(QHeaderView::Stretch));
+        QCOMPARE(int(t->horizontalHeader()->sectionResizeMode(0)), int(QHeaderView::ResizeToContents));
+        QCOMPARE(int(t->horizontalHeader()->sectionResizeMode(2)), int(QHeaderView::ResizeToContents));
+        QVERIFY2(!t->verticalHeader()->isVisible(), "row-number gutter should be hidden");
+        QTableView* b = w->findChild<QTableView*>("balancesTable");
+        QVERIFY(b);
+        QCOMPARE(int(b->horizontalHeader()->sectionResizeMode(0)), int(QHeaderView::Stretch));   // address gets the room
+        QCOMPARE(int(b->horizontalHeader()->sectionResizeMode(1)), int(QHeaderView::ResizeToContents));
+        settleAndDelete(w);
+    }
+
+    // Double-clicking an Activity row with no memo used to do nothing. It must answer.
+    void ux7_doubleClickActivityRowShowsDetails() {
+        MainWindow* w = makeWindow();
+        auto* model = const_cast<TxTableModel*>(w->getRPC()->getTransactionsModel());
+        QList<TransactionItem> rows;
+        rows.append(TransactionItem{"send", 1700000000, "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi",
+                                    "deadbeef0123", -1.0, 0, "", ""});
+        model->addTData(rows);
+        QTableView* t = w->findChild<QTableView*>("transactionsTable");
+        QVERIFY(t);
+        QString seen = QStringLiteral("no details box appeared");
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            auto* mb = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            if (!mb || mb->objectName() != "txDetailsBox") {
+                if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); });
+                return;
+            }
+            seen = mb->text() + " | " + mb->informativeText();
+            mb->done(0);
+        };
+        QTimer::singleShot(0, [&]() { poll(300); });
+        emit t->doubleClicked(model->index(0, 0));
+        ++_modalGen;
+        QVERIFY2(seen.contains("deadbeef0123") && seen.contains("Sent"), qPrintable(seen));
+        QVERIFY2(seen.contains("Waiting for its first confirmation"), qPrintable(seen));
+        settleAndDelete(w);
+    }
+
     void e2_publicWarningVisibleForTransparentRecipient() {
         MainWindow* w = makeWindow();
 
