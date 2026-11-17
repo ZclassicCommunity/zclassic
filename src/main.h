@@ -705,4 +705,38 @@ uint64_t CalculateCurrentUsage();
  */
 CMutableTransaction CreateNewContextualCMutableTransaction(const Consensus::Params& consensusParams, int nHeight);
 
+/**
+ * Snapshot of everything FindMostWorkChain() and its reference implementation
+ * read or change: the status flags of the given block index entries, the
+ * candidate set, the unlinked-block map, the parked-block index, the dirty and
+ * failed-block sets, the best-invalid/best-parked/finalized markers, the memo of
+ * the memoised path walk and its change counter. Used by the -checkblockindex
+ * cross-check in FindMostWorkChain() and by src/test/findmostwork_tests.cpp;
+ * other production code must not use it.
+ */
+struct BestChainState {
+    std::vector<unsigned int> status;                                       // nStatus of each entry of `all`
+    std::vector<CBlockIndex*> candidates;                                   // setBlockIndexCandidates, in set order
+    std::vector<std::pair<CBlockIndex*, CBlockIndex*> > blocksUnlinked;     // mapBlocksUnlinked
+    std::vector<CBlockIndex*> parked;                                       // blocks in the parked-block index
+    std::set<const CBlockIndex*> dirty;                                     // setDirtyBlockIndex
+    std::set<CBlockIndex*> failedBlocks;                                    // g_failed_blocks
+    CBlockIndex* pindexBestInvalid = NULL;
+    CBlockIndex* pindexBestParked = NULL;
+    const CBlockIndex* pindexFinalized = NULL;
+    CBlockIndex* memoIndex = NULL;                                          // the memo of the memoised walk
+    const CBlockIndex* memoFloor = NULL;
+    int memoFloorHeight = -1;
+    uint64_t memoEpoch = 0;
+    uint64_t epoch = 0;                                                     // BlockPathWalkEpoch()
+};
+/** Capture the state; `all` lists the block index entries. */
+BestChainState BestChainStateSave(const std::vector<CBlockIndex*>& all);
+/** Install `state` for the same list `all` (the parked-block index is rebuilt from the flags). */
+void BestChainStateRestore(const BestChainState& state, const std::vector<CBlockIndex*>& all);
+/** Same flags, candidates, unlinked blocks, parked index, dirty/failed sets and markers (memo and epoch are ignored). */
+bool BestChainStateSame(const BestChainState& a, const BestChainState& b);
+/** Test only. mode 0: the reference walk; 1: the memoised walk; 2: FindMostWorkChain() with its -checkblockindex cross-check. */
+CBlockIndex* FindMostWorkChainForTest(int mode);
+
 #endif // BITCOIN_MAIN_H
