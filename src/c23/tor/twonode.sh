@@ -3,14 +3,22 @@
 # node A only through A's v3 onion service and syncs blocks mined on A.
 # Needs real Tor network access. All state is in a fresh temporary directory.
 #
-#   sh twonode.sh <bindir> <inprocess|child> [strace]
+#   sh twonode.sh <bindir> <inprocess|child|default> [strace]
+#
+# "default" writes no embeddedtormode line, so the daemon's compiled-in default runs
+# (child on Linux, inprocess elsewhere); the checks for that mode then apply.
 #
 # <bindir> holds zclassicd and zclassic-cli. With "strace", node B runs under
 # strace -f -e trace=network and privacy_check.sh inspects every network
 # system call it made.
 set -u
 BINDIR=${1:?bindir}
-MODE=${2:?inprocess or child}
+MODE=${2:?inprocess, child or default}
+MODE_LINE="embeddedtormode=$MODE"
+if [ "$MODE" = default ]; then
+    MODE_LINE=""
+    case "$(uname -s)" in Linux) MODE=child ;; *) MODE=inprocess ;; esac
+fi
 TRACE=${3:-}
 ZD=$BINDIR/zclassicd
 CLI=$BINDIR/zclassic-cli
@@ -47,7 +55,7 @@ port=$2
 listen=1
 onlynet=onion
 embeddedtor=1
-embeddedtormode=$MODE
+$MODE_LINE
 debug=tor
 debug=net
 debuglogfile=1

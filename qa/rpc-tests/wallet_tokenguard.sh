@@ -242,14 +242,14 @@ stage() {
     G=$(slp_tx "outscript=0:0x$("$SLP" genesis TG "Token Guard" 2 1000)" "outaddr=$DUST:$A" "outaddr=$DUST:$A")
     # MINT: vout[1] 500 tokens, vout[2] mint baton
     M=$(slp_tx "outscript=0:0x$("$SLP" mint "$G" 2 500)" "outaddr=$DUST:$A" "outaddr=$DUST:$A")
-    # SEND: vout[1] 400 tokens, vout[2] 0 tokens (carries nothing), vout[3] 600 tokens
+    # SEND: vout[1] 400 tokens, vout[2] 0 tokens (zero quantity: still protected, as in Z23), vout[3] 600 tokens
     S=$(slp_tx "outscript=0:0x$("$SLP" send "$G" 400 0 600)" "outaddr=$DUST:$A" "outaddr=$DUST:$A" "outaddr=$DUST:$A")
     # the message is the first OP_RETURN but sits at vout[1]: quantity 2 rides on vout[2]
     L=$(slp_tx "outaddr=$DUST:$A" "outscript=0:0x$("$SLP" send "$G" 7 8)" "outaddr=$DUST:$A")
     # an OP_RETURN that is not SLP
     X=$(slp_tx "outscript=0:0x6a0b68656c6c6f20776f726c64" "outaddr=$DUST:$A")
-    for o in "$G:1" "$G:2" "$M:1" "$M:2" "$S:1" "$S:3" "$L:2"; do echo "$o" >>"$TMP/protected"; done
-    for o in "$S:2" "$L:0" "$X:1"; do echo "$o" >>"$TMP/ordinary"; done
+    for o in "$G:1" "$G:2" "$M:1" "$M:2" "$S:1" "$S:2" "$S:3" "$L:2"; do echo "$o" >>"$TMP/protected"; done
+    for o in "$L:0" "$X:1"; do echo "$o" >>"$TMP/ordinary"; done
     sort -o "$TMP/protected" "$TMP/protected"
     cli "$MN" generate 1 >/dev/null
     sync "$1"
@@ -277,14 +277,14 @@ if [ -n "${BASELINE_SRC:-}" ]; then
     case $r in success*) ;; *) fail "control: z_sendmany did not complete: $r" ;; esac
     burned=$(inputs 5 "${r#success }" | grep -Fx -f "$TMP/protected" | wc -l | tr -d ' ')
     [ "$burned" -gt 0 ] || fail "control: the unguarded baseline did NOT spend a token output; this test cannot see the bug"
-    say "  CONTROL unguarded baseline: z_sendmany of 0.4 spent $burned of the 7 token-bearing outputs as ordinary coin"
+    say "  CONTROL unguarded baseline: z_sendmany of 0.4 spent $burned of the 8 token-bearing outputs as ordinary coin"
     confirm 5 "${r#success }"
     m=$(cli 5 z_mergetoaddress '["ANY_TADDR"]' "$MINER")
     r=$(wait_op 5 "$(printf '%s' "$m" | jq -r .opid)")
     case $r in success*) ;; *) fail "control: z_mergetoaddress did not complete: $r" ;; esac
     burned2=$(inputs 5 "${r#success }" | grep -Fx -f "$TMP/protected" | wc -l | tr -d ' ')
     say "  CONTROL unguarded baseline: z_mergetoaddress then spent $burned2 more; $(cli 5 listunspent 0 | jq length) outputs left of 13"
-    [ $((burned + burned2)) = 7 ] || fail "control: expected the baseline to burn all 7 token outputs, it burned $((burned + burned2))"
+    [ $((burned + burned2)) = 8 ] || fail "control: expected the baseline to burn all 8 token outputs, it burned $((burned + burned2))"
     stop 5
     stop 6
 fi
@@ -315,13 +315,13 @@ ok "the mined GENESIS OP_RETURN classifies as: vout 1 token, vout 2 baton"
 say "== 1. listunspent, getbalance"
 LU=$(cli 1 listunspent 0)
 [ "$(printf '%s' "$LU" | jq length)" = 13 ] || fail "listunspent has $(printf '%s' "$LU" | jq length) entries, expected 13"
-ok "listunspent lists all 13 outputs (7 token-bearing, 6 ordinary)"
+ok "listunspent lists all 13 outputs (8 token-bearing, 5 ordinary)"
 [ "$(printf '%s' "$LU" | jq 'all(.[]; (.tokenbearing | type) == "boolean")')" = true ] || fail "an entry lacks a boolean tokenbearing"
 [ "$(printf '%s' "$LU" | jq -c '[.[] | keys_unsorted | map(select(. != "account"))] | unique')" = '[["txid","vout","generated","address","scriptPubKey","amount","confirmations","spendable","tokenbearing"]]' ] ||
     fail "listunspent fields changed: $(printf '%s' "$LU" | jq -c '[.[] | keys_unsorted] | unique')"
 ok "every entry has the old fields in the old order, plus a boolean tokenbearing at the end"
 [ "$(flagged 1)" = "$(cat "$TMP/protected")" ] || fail "tokenbearing flags are wrong: $(flagged 1 | tr '\n' ' ')"
-ok "tokenbearing is true for exactly the 7 outputs built to carry tokens or a baton"
+ok "tokenbearing is true for exactly the 8 outputs built to carry tokens or a baton"
 BAL=$(zat "$(cli 1 getbalance)")
 SUM=$(printf '%s' "$LU" | jq '[.[].amount * 100000000 | round] | add')
 [ "$BAL" = "$SUM" ] && [ "$BAL" = $((350000000 + 10 * 546)) ] || fail "getbalance $BAL, listunspent sum $SUM, expected $((350000000 + 10 * 546))"
@@ -377,12 +377,12 @@ confirm 1 "$t"
 
 say "== 3. the wallet has spent every ordinary coin; only token outputs remain"
 [ "$(flagged 1)" = "$(cat "$TMP/protected")" ] || fail "token outputs changed: $(flagged 1 | tr '\n' ' ')"
-[ "$(cli 1 listunspent 0 | jq length)" = 7 ] || fail "expected exactly the 7 token outputs to remain, have $(cli 1 listunspent 0 | jq -c '[.[] | {txid, vout, amount, tokenbearing}]')"
-ok "all 7 token-bearing outputs are still unspent, and nothing else is left"
-[ "$(zat "$(cli 1 getbalance)")" = $((7 * 546)) ] || fail "balance is $(cli 1 getbalance), expected 0.00003822"
-ok "getbalance = 0.00003822 (7 x 546 zatoshi of token dust)"
+[ "$(cli 1 listunspent 0 | jq length)" = 8 ] || fail "expected exactly the 8 token outputs to remain, have $(cli 1 listunspent 0 | jq -c '[.[] | {txid, vout, amount, tokenbearing}]')"
+ok "all 8 token-bearing outputs are still unspent, and nothing else is left"
+[ "$(zat "$(cli 1 getbalance)")" = $((8 * 546)) ] || fail "balance is $(cli 1 getbalance), expected 0.00004368"
+ok "getbalance = 0.00004368 (8 x 546 zatoshi of token dust)"
 
-NOTE="7 token-bearing outputs holding 0.00003822 are protected and were not used"
+NOTE="8 token-bearing outputs holding 0.00004368 are protected and were not used"
 expect_error "sendtoaddress" "Insufficient funds ($NOTE" cli 1 sendtoaddress "$MINER" 0.00001
 raw=$(cli 1 createrawtransaction '[]' "{\"$MINER\":0.00001}")
 expect_error "fundrawtransaction" "Insufficient funds ($NOTE" cli 1 fundrawtransaction "$raw"
@@ -403,7 +403,7 @@ start 1 "$ZD" -connect=127.0.0.1:$((BASE + MN))
 sync 1
 [ "$(flagged 1)" = "$(cat "$TMP/protected")" ] || fail "after restart: $(flagged 1 | tr '\n' ' ')"
 [ "$(cli 1 listlockunspent | jq length)" = 0 ] || fail "protection must not use the lock list"
-ok "after a restart the same 7 outputs are flagged, and listlockunspent is empty"
+ok "after a restart the same 8 outputs are flagged, and listlockunspent is empty"
 expect_error "sendtoaddress after restart" "Insufficient funds ($NOTE" cli 1 sendtoaddress "$MINER" 0.00001
 
 # ---- 5. restore from a backup of wallet.dat --------------------------------
@@ -417,7 +417,7 @@ cp "$TMP/export/tokenguardbackup" "$TMP/node2/regtest/wallet.dat"
 start 2 "$ZD" -connect=127.0.0.1:$((BASE + MN)) -rescan
 sync 2
 [ "$(flagged 2)" = "$(cat "$TMP/protected")" ] || fail "restored wallet: $(flagged 2 | tr '\n' ' ')"
-ok "the restored wallet flags the same 7 outputs"
+ok "the restored wallet flags the same 8 outputs"
 # give it one ordinary coin and make it pay: only that coin may move
 t=$(cli "$MN" sendtoaddress "$A" 0.7); cli "$MN" generate 1 >/dev/null; sync 2
 t=$(cli 2 sendtoaddress "$MINER" 0.5)
@@ -427,7 +427,7 @@ confirm 2 "$t"
 want=$(btc $(( $(zat "$(cli 2 getbalance)") - 2000 )))
 expect_error "restored wallet, sendtoaddress beyond its ordinary coins" "Insufficient funds ($NOTE" cli 2 sendtoaddress "$MINER" "$want"
 [ "$(flagged 2)" = "$(cat "$TMP/protected")" ] || fail "restored wallet lost token outputs"
-ok "the restored wallet still holds all 7 token outputs"
+ok "the restored wallet still holds all 8 token outputs"
 stop 2
 
 # ---- 6. a wallet rebuilt from the key by rescanning the chain --------------
@@ -438,7 +438,7 @@ sync 3
 [ "$(cli 3 listunspent 0 | jq length)" = 0 ] || fail "new wallet is not empty"
 cli 3 importprivkey "$WIF" "" true >/dev/null
 [ "$(flagged 3)" = "$(cat "$TMP/protected")" ] || fail "rescanned wallet: $(flagged 3 | tr '\n' ' ')"
-ok "the rescanned wallet flags the same 7 outputs"
+ok "the rescanned wallet flags the same 8 outputs"
 expect_error "rescanned wallet, sendtoaddress" "Insufficient funds ($NOTE" cli 3 sendtoaddress "$MINER" 0.00001
 op=$(cli 3 z_sendmany "$A" "[{\"address\":\"$MINER\",\"amount\":0.00001}]" 1 0)
 r=$(wait_op 3 "$op"); case $r in failed*token-bearing*) ok "rescanned wallet, z_sendmany: refused" ;; *) fail "rescanned wallet z_sendmany: $r" ;; esac
@@ -462,7 +462,7 @@ grep -vFx "$S:1" "$TMP/protected" >"$TMP/protected.new"; mv "$TMP/protected.new"
 [ "$(flagged 3)" = "$(cat "$TMP/protected")" ] || fail "after the token SEND: $(flagged 3 | tr '\n' ' ')"
 [ "$(cli 3 listunspent 0 | jq --arg t "$stx" '[.[] | select(.txid == $t)] | length')" = 1 ] || fail "the change of the token SEND is missing"
 [ "$(cli 3 listunspent 0 | jq --arg t "$stx" '[.[] | select(.txid == $t and .tokenbearing)] | length')" = 0 ] || fail "ordinary change of a token SEND is flagged"
-ok "6 token outputs remain flagged; the ordinary change of the SEND (vout 2) is not flagged"
+ok "7 token outputs remain flagged; the ordinary change of the SEND (vout 2) is not flagged"
 t=$(cli 3 sendtoaddress "$MINER" 0.05)
 no_token_inputs "sendtoaddress after the token SEND" "$(inputs 3 "$t")"
 
