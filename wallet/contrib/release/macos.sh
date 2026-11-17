@@ -39,8 +39,12 @@ make -j2
 printf '%s  %s\n' "$ZCL_DAEMON_SHA256" "$ZCL_DAEMON" | shasum -a 256 -c -
 if [ "$audit" = 1 ]; then
     # build-release.sh ships a stripped copy of src/zclassicd; accept either form.
-    stripped="$work/zclassicd.stripped"
-    strip -o "$stripped" "$ZCL_DAEMON_BUILD_DIR/src/zclassicd"
+    # strip re-signs ad hoc using the file name as the identifier, so strip a
+    # copy that keeps the name zclassicd to reproduce build-release.sh exactly.
+    mkdir -p "$work/stripped"
+    stripped="$work/stripped/zclassicd"
+    cp "$ZCL_DAEMON_BUILD_DIR/src/zclassicd" "$stripped"
+    strip "$stripped"
     cmp -s "$ZCL_DAEMON" "$ZCL_DAEMON_BUILD_DIR/src/zclassicd" || cmp -s "$ZCL_DAEMON" "$stripped" || {
         echo 'The packaged daemon must match the audited native build exactly (stripped or not).' >&2
         exit 1
