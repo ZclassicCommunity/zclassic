@@ -682,6 +682,7 @@ bool ConnectSocketByName(CService &addr, SOCKET& hSocketRet, const char *pszDest
 void CNetAddr::Init()
 {
     memset(ip, 0, sizeof(ip));
+    torv3_addr.clear();
 }
 
 void CNetAddr::SetIP(const CNetAddr& ipIn)
@@ -692,6 +693,7 @@ void CNetAddr::SetIP(const CNetAddr& ipIn)
 
 void CNetAddr::SetRaw(Network network, const uint8_t *ip_in)
 {
+    torv3_addr.clear(); // a raw IPv4/IPv6 address replaces any v3 key
     switch(network)
     {
         case NET_IPV4:
@@ -889,6 +891,22 @@ bool CNetAddr::IsTor() const
     return false;
 }
 
+bool CNetAddr::IsTorV3() const
+{
+    return torv3_addr.size() == ADDR_TORV3_SIZE;
+}
+
+void CNetAddr::GetLegacyWireBytes(unsigned char (&out)[16]) const
+{
+    if (IsTorV3()) {
+        // IPv4-mapped 0.0.0.0: unroutable and invalid for every peer
+        memcpy(out, pchIPv4, sizeof(pchIPv4));
+        memset(out + sizeof(pchIPv4), 0, sizeof(out) - sizeof(pchIPv4));
+        return;
+    }
+    memcpy(out, ip, sizeof(out));
+}
+
 bool CNetAddr::IsLocal() const
 {
     // IPv4 loopback
@@ -1020,19 +1038,26 @@ std::string CNetAddr::ToString() const
     return ToStringIP();
 }
 
+// A v3 onion address keeps its 32-byte key in torv3_addr and zero in ip[], so
+// ip[] alone cannot tell two of them (or one of them and "::") apart. Every
+// comparison looks at the key as well; for the other address kinds the key is
+// empty and the result is the old memcmp of ip[].
 bool operator==(const CNetAddr& a, const CNetAddr& b)
 {
-    return (memcmp(a.ip, b.ip, 16) == 0);
+    return memcmp(a.ip, b.ip, 16) == 0 && a.torv3_addr == b.torv3_addr;
 }
 
 bool operator!=(const CNetAddr& a, const CNetAddr& b)
 {
-    return (memcmp(a.ip, b.ip, 16) != 0);
+    return !(a == b);
 }
 
 bool operator<(const CNetAddr& a, const CNetAddr& b)
 {
-    return (memcmp(a.ip, b.ip, 16) < 0);
+    int c = memcmp(a.ip, b.ip, 16);
+    if (c != 0)
+        return c < 0;
+    return a.torv3_addr < b.torv3_addr;
 }
 
 bool CNetAddr::GetInAddr(struct in_addr* pipv4Addr) const
@@ -1092,6 +1117,15 @@ std::vector<unsigned char> CNetAddr::GetGroup() const
         vchRet.push_back(GetByte(2) ^ 0xFF);
         return vchRet;
     }
+    else if (IsTorV3())
+    {
+        // NET_ONION plus the leading 4 bits of the key, as for v2 below
+        // (Bitcoin Core's rule), so v3 addresses spread over 16 groups
+        // instead of all sharing the group of "::".
+        vchRet.push_back(NET_ONION);
+        vchRet.push_back(torv3_addr[0] | 0x0F);
+        return vchRet;
+    }
     else if (IsTor())
     {
         nClass = NET_ONION;
@@ -1120,7 +1154,7 @@ std::vector<unsigned char> CNetAddr::GetGroup() const
 
 uint64_t CNetAddr::GetHash() const
 {
-    uint256 hash = Hash(&ip[0], &ip[16]);
+    uint256 hash = IsTorV3() ? Hash(torv3_addr.begin(), torv3_addr.end()) : Hash(&ip[0], &ip[16]);
     uint64_t nRet;
     memcpy(&nRet, &hash, sizeof(nRet));
     return nRet;
@@ -1328,10 +1362,14 @@ bool CService::GetSockAddr(struct sockaddr* paddr, socklen_t *addrlen) const
 std::vector<unsigned char> CService::GetKey() const
 {
      std::vector<unsigned char> vKey;
-     vKey.resize(18);
-     memcpy(&vKey[0], ip, 16);
-     vKey[16] = port / 0x100;
-     vKey[17] = port & 0x0FF;
+     // A v3 key is the 32-byte key itself (ip[] is zero for every v3 address);
+     // the others keep the 16 ip bytes.
+     if (IsTorV3())
+         vKey = torv3_addr;
+     else
+         vKey.assign(ip, ip + 16);
+     vKey.push_back(port / 0x100);
+     vKey.push_back(port & 0x0FF);
      return vKey;
 }
 
@@ -1378,7 +1416,16 @@ CSubNet::CSubNet(const std::string &strSubnet, bool fAllowLookup)
     if (LookupHost(strAddress.c_str(), vIP, 1, fAllowLookup))
     {
         network = vIP[0];
-        if (slash != strSubnet.npos)
+        if (network.IsTorV3())
+        {
+            // A v3 address is one 32-byte key, not a prefix: only the single
+            // address is a subnet, and "/128" (what CNode::Ban appends) means
+            // exactly that. Any other mask is a parse error.
+            int32_t n;
+            if (slash != strSubnet.npos && !(ParseInt32(strSubnet.substr(slash + 1), &n) && n == 128))
+                valid = false;
+        }
+        else if (slash != strSubnet.npos)
         {
             std::string strNetmask = strSubnet.substr(slash + 1);
             int32_t n;
@@ -1428,6 +1475,11 @@ bool CSubNet::Match(const CNetAddr &addr) const
 {
     if (!valid || !addr.IsValid())
         return false;
+    // A v3 onion address has no ip[] to mask (it is all zero): it matches only
+    // the entry for that very address, and no ordinary subnet (not even ::/0)
+    // matches it.
+    if (network.IsTorV3() || addr.IsTorV3())
+        return network == addr;
     for(int x=0; x<16; ++x)
         if ((addr.ip[x] & netmask[x]) != network.ip[x])
             return false;

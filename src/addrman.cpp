@@ -242,10 +242,18 @@ void CAddrMan::Good_(const CService& addr, int64_t nTime)
     MakeTried(info, nId);
 }
 
-bool CAddrMan::Add_(const CAddress& addr, const CNetAddr& source, int64_t nTimePenalty)
+bool CAddrMan::Add_(const CAddress& addr, const CNetAddr& sourceIn, int64_t nTimePenalty)
 {
     if (!addr.IsRoutable())
         return false;
+    // peers.dat holds 16-byte addresses; a v3 onion address does not fit and
+    // would be read back as "::" or as one address for all of them. Neither
+    // the address nor a v3 source (an onion peer that told us about an IPv4/IPv6
+    // address) is stored; such a source counts as the unspecified "::", which
+    // is what the file held for it before.
+    if (addr.IsTorV3())
+        return false;
+    const CNetAddr source = sourceIn.IsTorV3() ? CNetAddr() : sourceIn;
 
     bool fNew = false;
     int nId;
