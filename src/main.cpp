@@ -6044,7 +6044,7 @@ static bool RecvBootstrapChunk(
 static void ProcessAddrList(CNode* pfrom, vector<CAddress>& vAddr)
 {
     // Store the new addresses
-    vector<CAddress> vAddrOk;
+    vector<CAddress> vAddrOk, vAddrOnionOk;
     int64_t nNow = GetAdjustedTime();
     int64_t nSince = nNow - 10 * 60;
     BOOST_FOREACH(CAddress& addr, vAddr)
@@ -6089,9 +6089,15 @@ static void ProcessAddrList(CNode* pfrom, vector<CAddress>& vAddr)
         }
         // Do not store addresses outside our network
         if (fReachable)
-            vAddrOk.push_back(addr);
+            (addr.IsTorV3() ? vAddrOnionOk : vAddrOk).push_back(addr);
     }
     addrman.Add(vAddrOk, pfrom->addr, 2 * 60 * 60);
+    // Tor v3 addresses (only ever sent by addrv2 peers) go to the onion store.
+    // The source is the peer: its v3 address when we reached it over Tor, its
+    // clearnet address, or 127.0.0.1 for a peer that came in through our onion
+    // service (one shared source group for all of those).
+    if (!vAddrOnionOk.empty())
+        addrmanOnion.Add(vAddrOnionOk, pfrom->addr, 2 * 60 * 60);
     if (vAddr.size() < 1000)
         pfrom->fGetAddr = false;
 }
@@ -6214,7 +6220,7 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
                 pfrom->PushMessage("getaddr");
                 pfrom->fGetAddr = true;
             }
-            addrman.Good(pfrom->addr);
+            AddrManFor(pfrom->addr).Good(pfrom->addr);
         } else {
             if (((CNetAddr)pfrom->addr) == (CNetAddr)addrFrom)
             {

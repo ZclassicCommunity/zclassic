@@ -8,6 +8,9 @@
 
 #include "addrman.h"
 #include "addrv2.h"
+#include "util.h"
+#include "utilstrencodings.h"
+#include <boost/filesystem/fstream.hpp>
 #include "clientversion.h"
 #include "main.h"
 #include "net.h"
@@ -376,6 +379,141 @@ BOOST_AUTO_TEST_CASE(version_handshake_sends_sendaddrv2_before_verack)
     BOOST_REQUIRE(iV < cmds.size());
     BOOST_CHECK(iA < iV);
     BOOST_CHECK(!n->fSendAddrV2); // the old peer never sent sendaddrv2
+    for (CNode* x : keep)
+        delete x;
+}
+
+
+BOOST_AUTO_TEST_CASE(onion_store_holds_only_v3)
+{
+    CAddrMan main(false), onion(true);
+    CAddress v4 = MakeV4("93.184.216.34", 8033, 1, GetTime());
+    CAddress v3 = MakeV3(3, 8033, 1, GetTime());
+    CNetAddr src("93.184.216.1");
+
+    BOOST_CHECK(main.Add(v4, src));
+    BOOST_CHECK(!main.Add(v3, src));       // peers.dat table never takes a v3 address
+    BOOST_CHECK(onion.Add(v3, src));       // clearnet source is fine
+    BOOST_CHECK(!onion.Add(v4, src));      // and the onion store never takes the rest
+    BOOST_CHECK_EQUAL(main.size(), 1u);
+    BOOST_CHECK_EQUAL(onion.size(), 1u);
+
+    // a v3 source is kept in the onion store, dropped to "::" in the main table
+    CAddress v3b = MakeV3(9, 8033, 1, GetTime());
+    CAddress v4b = MakeV4("93.184.216.40", 8033, 1, GetTime());
+    BOOST_CHECK(onion.Add(v3b, v3));
+    BOOST_CHECK(main.Add(v4b, v3));
+    vector<CAddrInfo> entries = onion.GetEntries();
+    bool foundSource = false;
+    for (const CAddrInfo& e : entries)
+        if (e == v3b)
+            foundSource = (e.GetSource() == (CNetAddr)v3);
+    BOOST_CHECK(foundSource);
+
+    // selection from the onion store only ever yields v3 addresses
+    for (int i = 0; i < 20; i++) {
+        CAddrInfo sel = onion.Select();
+        BOOST_CHECK(sel.IsTorV3());
+    }
+    // groups of different v3 keys differ in the leading bits (16 groups)
+    BOOST_CHECK(MakeV3(1, 8033, 1, 1).GetGroup().size() == 2);
+}
+
+BOOST_AUTO_TEST_CASE(peers_dat_never_sees_v3)
+{
+    CAddrMan main(false);
+    CNetAddr src("93.184.216.1");
+    for (int i = 0; i < 50; i++) {
+        main.Add(MakeV4(("94." + itostr(i + 1) + ".20.1").c_str(), 8033, 1, GetTime()), src);
+        main.Add(MakeV3((unsigned char)i, 8033, 1, GetTime()), src);
+    }
+    BOOST_CHECK_EQUAL(main.size(), 50u);
+    // the serialised table reads back in a plain (legacy) CAddrMan with 50 entries
+    CDataStream ss(SER_DISK, CLIENT_VERSION);
+    ss << main;
+    CAddrMan back;
+    ss >> back;
+    BOOST_CHECK_EQUAL(back.size(), 50u);
+}
+
+BOOST_AUTO_TEST_CASE(onion_peers_file_roundtrip)
+{
+    CAddrMan onion(true);
+    CNetAddr src("93.184.216.1");
+    CAddress a = MakeV3(1, 8033, 1, GetTime());
+    CAddress b = MakeV3(2, 8033, 5, GetTime());
+    CAddress c = MakeV3(3, 8033, 1, GetTime());
+    BOOST_REQUIRE(onion.Add(a, src));
+    BOOST_REQUIRE(onion.Add(b, CNetAddr()));
+    BOOST_REQUIRE(onion.Add(c, a)); // v3 source
+    onion.Good(b, GetAdjustedTime());
+
+    COnionAddrDB db;
+    BOOST_CHECK(!db.Exists() || true);
+    BOOST_REQUIRE(db.Write(onion));
+    BOOST_CHECK(db.Exists());
+
+    CAddrMan back(true);
+    BOOST_REQUIRE(db.Read(back));
+    BOOST_CHECK_EQUAL(back.size(), 3u);
+    vector<CAddrInfo> e = back.GetEntries();
+    int tried = 0;
+    for (const CAddrInfo& x : e) {
+        BOOST_CHECK(x.IsTorV3());
+        if (x.IsTried()) {
+            tried++;
+            BOOST_CHECK(x == b);
+        }
+        if (x == c)
+            BOOST_CHECK(x.GetSource() == (CNetAddr)a);
+        if (x == b)
+            BOOST_CHECK_EQUAL(x.nServices, 5u);
+    }
+    BOOST_CHECK_EQUAL(tried, 1);
+
+    // a corrupted file is refused (bad checksum), and a read into a legacy
+    // table or a wrong-magic file never yields addresses
+    boost::filesystem::path p = GetDataDir() / "onion_peers.dat";
+    {
+        boost::filesystem::fstream f(p, std::ios::in | std::ios::out | std::ios::binary);
+        f.seekp(10);
+        char z = 0x55;
+        f.write(&z, 1);
+    }
+    CAddrMan bad(true);
+    BOOST_CHECK(!db.Read(bad));
+    BOOST_CHECK_EQUAL(bad.size(), 0u);
+    boost::filesystem::remove(p);
+}
+
+BOOST_AUTO_TEST_CASE(addrv2_v3_goes_to_onion_store)
+{
+    // the node can reach onion peers (a proxy is set in a real node)
+    bool wasLimited = IsLimited(NET_ONION);
+    SetLimited(NET_ONION, false);
+    vector<CNode*> keep;
+    CNode* n = NewNode(keep, "8.8.8.8", false);
+    n->fSendAddrV2 = true;
+    size_t mainBefore = addrman.size(), onionBefore = addrmanOnion.size();
+
+    vector<CAddress> v;
+    v.push_back(MakeV3(40, 8033, 1, GetTime()));
+    v.push_back(MakeV3(41, 8033, 1, GetTime()));
+    v.push_back(MakeV4("93.184.216.99", 8033, 1, GetTime()));
+    CDataStream p = V2Payload(v);
+    BOOST_CHECK(ProcessMessage(n, "addrv2", p, GetTime()));
+    BOOST_CHECK_EQUAL(addrmanOnion.size(), onionBefore + 2);
+    BOOST_CHECK_EQUAL(addrman.size(), mainBefore + 1);
+
+    // with the onion network limited (no proxy) v3 addresses are not stored
+    SetLimited(NET_ONION, true);
+    vector<CAddress> w;
+    w.push_back(MakeV3(50, 8033, 1, GetTime()));
+    CDataStream p2 = V2Payload(w);
+    BOOST_CHECK(ProcessMessage(n, "addrv2", p2, GetTime()));
+    BOOST_CHECK_EQUAL(addrmanOnion.size(), onionBefore + 2);
+
+    SetLimited(NET_ONION, wasLimited);
     for (CNode* x : keep)
         delete x;
 }

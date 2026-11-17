@@ -247,13 +247,15 @@ bool CAddrMan::Add_(const CAddress& addr, const CNetAddr& sourceIn, int64_t nTim
     if (!addr.IsRoutable())
         return false;
     // peers.dat holds 16-byte addresses; a v3 onion address does not fit and
-    // would be read back as "::" or as one address for all of them. Neither
-    // the address nor a v3 source (an onion peer that told us about an IPv4/IPv6
-    // address) is stored; such a source counts as the unspecified "::", which
-    // is what the file held for it before.
-    if (addr.IsTorV3())
+    // would be read back as "::" or as one address for all of them. The
+    // peers.dat table therefore stores neither the address nor a v3 source (an
+    // onion peer that told us about an IPv4/IPv6 address); such a source counts
+    // as the unspecified "::", which is what the file held for it before.
+    // The onion store is the mirror image: only v3 addresses, and any source
+    // (a v3 peer, or a clearnet peer that sent us addrv2).
+    if (addr.IsTorV3() != fOnionStore)
         return false;
-    const CNetAddr source = sourceIn.IsTorV3() ? CNetAddr() : sourceIn;
+    const CNetAddr source = (!fOnionStore && sourceIn.IsTorV3()) ? CNetAddr() : sourceIn;
 
     bool fNew = false;
     int nId;

@@ -11,6 +11,7 @@
 #include "net.h"
 
 #include "addrman.h"
+#include "addrv2.h"
 #include "chainparams.h"
 #include "clientversion.h"
 #include "embeddedtor.h"
@@ -72,6 +73,7 @@ static CNode* pnodeLocalHost = NULL;
 uint64_t nLocalHostNonce = 0;
 static std::vector<ListenSocket> vhListenSocket;
 CAddrMan addrman;
+CAddrMan addrmanOnion(true);
 int nMaxConnections = DEFAULT_MAX_PEER_CONNECTIONS;
 bool fAddressesInitialized = false;
 std::string strSubVersion;
@@ -309,7 +311,7 @@ bool IsReachable(const CNetAddr& addr)
 
 void AddressCurrentlyConnected(const CService& addr)
 {
-    addrman.Connected(addr);
+    AddrManFor(addr).Connected(addr);
 }
 
 
@@ -386,7 +388,7 @@ CNode* ConnectNode(CAddress addrConnect, const char *pszDest)
             return NULL;
         }
 
-        addrman.Attempt(addrConnect);
+        AddrManFor(addrConnect).Attempt(addrConnect);
 
         // Add node
         CNode* pnode = new CNode(hSocket, addrConnect, pszDest ? pszDest : "", false);
@@ -403,7 +405,7 @@ CNode* ConnectNode(CAddress addrConnect, const char *pszDest)
     } else if (!proxyConnectionFailed) {
         // If connecting to the node failed, and failure is not caused by a problem connecting to
         // the proxy, mark this as an attempt.
-        addrman.Attempt(addrConnect);
+        AddrManFor(addrConnect).Attempt(addrConnect);
     }
 
     return NULL;
@@ -1330,6 +1332,16 @@ void DumpAddresses()
 
     LogPrint("net", "Flushed %d addresses to peers.dat  %dms\n",
            addrman.size(), GetTimeMillis() - nStart);
+
+    // The Tor v3 store has its own file; written only once it holds something
+    // (or did), so a node that never meets an onion peer never creates it.
+    static bool fOnionFileWanted = false;
+    if (addrmanOnion.size() > 0 || fOnionFileWanted) {
+        fOnionFileWanted = true;
+        COnionAddrDB odb;
+        odb.Write(addrmanOnion);
+        LogPrint("net", "Flushed %d addresses to onion_peers.dat\n", addrmanOnion.size());
+    }
 }
 
 void static ProcessOneShot()
@@ -1784,6 +1796,14 @@ void StartNode(boost::thread_group& threadGroup, CScheduler& scheduler)
     }
     LogPrintf("Loaded %i addresses from peers.dat  %dms\n",
            addrman.size(), GetTimeMillis() - nStart);
+    {
+        // Tor v3 addresses (addrv2 gossip). A missing file is the normal case.
+        COnionAddrDB odb;
+        if (odb.Exists() && !odb.Read(addrmanOnion))
+            LogPrintf("Invalid onion_peers.dat; recreating\n");
+        if (addrmanOnion.size() > 0)
+            LogPrintf("Loaded %i Tor v3 addresses from onion_peers.dat\n", addrmanOnion.size());
+    }
     fAddressesInitialized = true;
 
     if (semOutbound == NULL) {
@@ -2077,6 +2097,123 @@ bool CAddrDB::Read(CAddrMan& addr)
         return error("%s: Deserialize or I/O error - %s", __func__, e.what());
     }
 
+    return true;
+}
+
+COnionAddrDB::COnionAddrDB()
+{
+    pathOnion = GetDataDir() / "onion_peers.dat";
+}
+
+bool COnionAddrDB::Exists() const
+{
+    return boost::filesystem::exists(pathOnion);
+}
+
+static const unsigned char ONION_PEERS_VERSION = 1;
+
+bool COnionAddrDB::Write(const CAddrMan& addr)
+{
+    unsigned short randv = 0;
+    GetRandBytes((unsigned char*)&randv, sizeof(randv));
+    std::string tmpfn = strprintf("onion_peers.dat.%04x", randv);
+
+    std::vector<CAddrInfo> vInfo = addr.GetEntries();
+    CDataStream ss(SER_DISK, CLIENT_VERSION);
+    ss << FLATDATA(Params().MessageStart());
+    ss << ONION_PEERS_VERSION;
+    WriteCompactSize(ss, vInfo.size());
+    BOOST_FOREACH(const CAddrInfo& info, vInfo) {
+        ss << CAddressV2(info);
+        // the source group is part of the bucket choice, so it is kept; an
+        // OnionCat source (no addrv2 form) comes back as "::"
+        CAddress src(CService(info.GetSource(), 0));
+        ss << CAddressV2(src);
+        int64_t nLastSuccess = info.GetLastSuccess();
+        int32_t nAttempts = info.GetAttempts();
+        uint8_t fTried = info.IsTried() ? 1 : 0;
+        ss << nLastSuccess << nAttempts << fTried;
+    }
+    uint256 hash = Hash(ss.begin(), ss.end());
+    ss << hash;
+
+    boost::filesystem::path pathTmp = GetDataDir() / tmpfn;
+    FILE *file = fopen(pathTmp.string().c_str(), "wb");
+    CAutoFile fileout(file, SER_DISK, CLIENT_VERSION);
+    if (fileout.IsNull())
+        return error("%s: Failed to open file %s", __func__, pathTmp.string());
+    try {
+        fileout << ss;
+    }
+    catch (const std::exception& e) {
+        return error("%s: Serialize or I/O error - %s", __func__, e.what());
+    }
+    FileCommit(fileout.Get());
+    fileout.fclose();
+
+    if (!RenameOver(pathTmp, pathOnion))
+        return error("%s: Rename-into-place failed", __func__);
+    return true;
+}
+
+bool COnionAddrDB::Read(CAddrMan& addr)
+{
+    FILE *file = fopen(pathOnion.string().c_str(), "rb");
+    CAutoFile filein(file, SER_DISK, CLIENT_VERSION);
+    if (filein.IsNull())
+        return error("%s: Failed to open file %s", __func__, pathOnion.string());
+
+    int fileSize = boost::filesystem::file_size(pathOnion);
+    int dataSize = fileSize - sizeof(uint256);
+    if (dataSize < 0)
+        dataSize = 0;
+    vector<unsigned char> vchData;
+    vchData.resize(dataSize);
+    uint256 hashIn;
+    try {
+        if (dataSize > 0)
+            filein.read((char *)&vchData[0], dataSize);
+        filein >> hashIn;
+    }
+    catch (const std::exception& e) {
+        return error("%s: Deserialize or I/O error - %s", __func__, e.what());
+    }
+    filein.fclose();
+
+    CDataStream ss(vchData, SER_DISK, CLIENT_VERSION);
+    uint256 hashTmp = Hash(ss.begin(), ss.end());
+    if (hashIn != hashTmp)
+        return error("%s: Checksum mismatch, data corrupted", __func__);
+
+    try {
+        unsigned char pchMsgTmp[4];
+        ss >> FLATDATA(pchMsgTmp);
+        if (memcmp(pchMsgTmp, Params().MessageStart(), sizeof(pchMsgTmp)))
+            return error("%s: Invalid network magic number", __func__);
+        unsigned char nVersion;
+        ss >> nVersion;
+        if (nVersion != ONION_PEERS_VERSION)
+            return error("%s: Unknown version %u", __func__, (unsigned)nVersion);
+        uint64_t n = ReadCompactSize(ss);
+        if (n > (uint64_t)ADDRMAN_NEW_BUCKET_COUNT * ADDRMAN_BUCKET_SIZE + (uint64_t)ADDRMAN_TRIED_BUCKET_COUNT * ADDRMAN_BUCKET_SIZE)
+            return error("%s: Too many entries (%u)", __func__, (unsigned)n);
+        for (uint64_t i = 0; i < n; i++) {
+            CAddressV2 a, s;
+            int64_t nLastSuccess;
+            int32_t nAttempts;
+            uint8_t fTried;
+            ss >> a >> s >> nLastSuccess >> nAttempts >> fTried;
+            if (!a.fKnown || !a.addr.IsTorV3())
+                continue;
+            CNetAddr source = s.fKnown ? (CNetAddr)s.addr : CNetAddr();
+            addr.Add(a.addr, source, 0);
+            if (fTried && nLastSuccess > 0)
+                addr.Good(a.addr, nLastSuccess);
+        }
+    }
+    catch (const std::exception& e) {
+        return error("%s: Deserialize or I/O error - %s", __func__, e.what());
+    }
     return true;
 }
 

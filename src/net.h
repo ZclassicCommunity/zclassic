@@ -150,6 +150,12 @@ extern bool fListen;
 extern std::atomic<uint64_t> nLocalServices;
 extern uint64_t nLocalHostNonce;
 extern CAddrMan addrman;
+/** Tor v3 addresses learned by addrv2 gossip. Separate from addrman so peers.dat
+ *  keeps its legacy 16-byte format (a downgrade never sees these); persisted in
+ *  onion_peers.dat. */
+extern CAddrMan addrmanOnion;
+/** The table an address belongs to: Tor v3 in the onion store, the rest in addrman. */
+inline CAddrMan& AddrManFor(const CNetAddr& addr) { return addr.IsTorV3() ? addrmanOnion : addrman; }
 /** Maximum number of connections to simultaneously allow (aka connection slots) */
 extern int nMaxConnections;
 
@@ -687,6 +693,25 @@ private:
     boost::filesystem::path pathAddr;
 public:
     CAddrDB();
+    bool Write(const CAddrMan& addr);
+    bool Read(CAddrMan& addr);
+};
+
+/**
+ * Persistence of the onion store (onion_peers.dat in the datadir). Its own file
+ * and format, because peers.dat entries hold 16 address bytes:
+ *   magic(4) | version(1) = 1 | count (compact size) |
+ *   count x { addr (addrv2 entry) | source (addrv2 entry) | nLastSuccess (int64) | nAttempts (int32) | tried (uint8) } |
+ *   hash256 of everything before
+ * A node older than this file never opens it.
+ */
+class COnionAddrDB
+{
+private:
+    boost::filesystem::path pathOnion;
+public:
+    COnionAddrDB();
+    bool Exists() const;
     bool Write(const CAddrMan& addr);
     bool Read(CAddrMan& addr);
 };
