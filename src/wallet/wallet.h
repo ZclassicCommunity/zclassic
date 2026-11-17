@@ -1444,6 +1444,8 @@ public:
     bool GetBroadcastTransactions() const { return fBroadcastTransactions; }
     /** Set whether this wallet broadcasts transactions. */
     void SetBroadcastTransactions(bool broadcast) { fBroadcastTransactions = broadcast; }
+    //! Drop the cached transaction-order index (rebuilt on next use); call after changing any nOrderPos. Requires cs_wallet.
+    void InvalidateTxOrderIndex() { fTxOrderValid = false; }
 
     /* Returns true if HD is enabled for all address types, false if only for Sapling */
     bool IsHDFullyEnabled() const;
