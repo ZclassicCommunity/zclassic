@@ -18,6 +18,13 @@ SPROUT_IPFS="/ipfs/QmZKKx7Xup7LiAtFRhYsE1M7waXcv9ir9eCECyXAFGxhEo"
 
 SHA256CMD="$(command -v sha256sum || echo shasum)"
 SHA256ARGS="$(command -v sha256sum >/dev/null || echo '-a 256')"
+# macOS 15 ships a BSD sha256sum whose -c takes a digest argument instead of
+# reading a checksum list from stdin, so the GNU-style check below fails with
+# a usage error. shasum understands the list form on every macOS.
+if [ "$(uname -s)" = "Darwin" ] && command -v shasum >/dev/null; then
+    SHA256CMD="shasum"
+    SHA256ARGS="-a 256"
+fi
 
 WGETCMD="$(command -v wget || echo '')"
 IPFSCMD="$(command -v ipfs || echo '')"
