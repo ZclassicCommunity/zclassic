@@ -1206,6 +1206,18 @@ private slots:
         settleAndDelete(w);
     }
 
+    // With the node gone the wallet cannot know the balance. The Home hero painted
+    // "0 ZCL" and "receive ZCL to get started", which reads as "my funds are gone".
+    void ux8_noConnectionDoesNotShowZeroBalance() {
+        MainWindow* w = makeWindow();
+        w->getRPC()->noConnection(false);
+        QVERIFY2(w->testHeroText() != QStringLiteral("0 ZCL") && !w->testHeroText().startsWith("0"),
+                 qPrintable("hero shows " + w->testHeroText()));
+        QVERIFY2(!w->testHeroHelperVisible(), "the 'receive ZCL to get started' helper must not show without a connection");
+        QVERIFY2(w->testHeroQualifier().contains("not affected"), qPrintable(w->testHeroQualifier()));
+        settleAndDelete(w);
+    }
+
     void e2_publicWarningVisibleForTransparentRecipient() {
         MainWindow* w = makeWindow();
 

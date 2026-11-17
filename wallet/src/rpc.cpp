@@ -711,6 +711,7 @@ void RPC::noConnection(bool preserveBalances) {
     // Phase-3b: with no connection there is no public balance to surface — clear the
     // hero and hide the amber fix-it card (transparent == 0 hides it).
     main->updateHomeFixIt(0.0);
+    main->showHeroUnavailable();
 
     // Clear send tab from address
     ui->inputsCombo->clear();

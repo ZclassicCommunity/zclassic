@@ -1168,6 +1168,27 @@ void MainWindow::updateHomeFixIt(double transparent, bool fromCache) {
     emit heroBalancesPainted();
 }
 
+void MainWindow::showHeroUnavailable() {
+    // With no node connection the wallet cannot know the balance. The full-teardown path
+    // used to paint "0 ZCL", "Total: 0 ZCL" and "Your private balance - receive ZCL to get
+    // started", which to someone who had just seen 600 ZCL reads as funds lost. Say what
+    // is true: unknown, and nothing has happened to the funds.
+    heroPrivateFull = QStringLiteral("—");
+    heroTotalFull   = tr("Balance unavailable until the node is connected");
+    relayoutHero();
+    if (homeHeroQualifier) {
+        homeHeroQualifier->setText(tr("Your funds are not affected. The balance reappears when the node reconnects."));
+        homeHeroQualifier->setVisible(true);
+    }
+    if (homeHeroHelper)
+        homeHeroHelper->setVisible(false);
+    if (homeHeroPrivate) {
+        homeHeroPrivate->setProperty("heroconfident", false);
+        homeHeroPrivate->style()->unpolish(homeHeroPrivate);
+        homeHeroPrivate->style()->polish(homeHeroPrivate);
+    }
+}
+
 // PRIV-18 — the REAL "Shield public funds" action behind the Home fix-it button.
 // Reuses the SAME semantics as the balances context-menu "Shield balance to
 // Sapling" path: select the largest transparent source as From, fill the default
