@@ -18,6 +18,7 @@
 #define sha256_implementation      zcl_c23h_sha256_implementation
 #define sha256_shani_available     zcl_c23h_sha256_shani_available
 #define sha256_select_impl         zcl_c23h_sha256_select_impl
+#define sha256_cpuid_allows_shani  zcl_c23h_sha256_cpuid_allows_shani
 
 #define zcl_log_level_get          zcl_c23h_log_level_get
 #define zcl_log_level_set          zcl_c23h_log_level_set
