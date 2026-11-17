@@ -1541,7 +1541,7 @@ void MainWindow::updateSendTotals() {
     double fee = ui->minerFeeAmt->text().trimmed().toDouble();
     double total = sum + fee;
     QString usd = Settings::getUSDFormat(total);
-    QString msg = tr("You'll send %1 + %2 fee = %3 ZCL")
+    QString msg = tr("You'll send %1 + %2 fee = %3")
                     .arg(Settings::getZCLDisplayFormat(sum))
                     .arg(Settings::getZCLDisplayFormat(fee))
                     .arg(Settings::getZCLDisplayFormat(total));
