@@ -110,12 +110,18 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: depends/built
           key: daemon-macos15-arm64-${{ hashFiles('depends/packages/**', 'depends/patches/**', 'depends/hosts/**', 'depends/builders/**') }}
       - name: Build static macOS daemon with embedded Tor
-        run: bash zcutil/build-release.sh linux -j"$(sysctl -n hw.ncpu)"
+        run: bash zcutil/build-release.sh linux -j"$(sysctl -n hw.ncpu)" -k
+      - name: Save dependency builds
+        if: always()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: depends/built
+          key: daemon-macos15-arm64-${{ hashFiles('depends/packages/**', 'depends/patches/**', 'depends/hosts/**', 'depends/builders/**') }}
       - name: Stage and check binaries
         run: |
           set -euo pipefail

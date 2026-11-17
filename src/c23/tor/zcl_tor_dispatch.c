@@ -15,6 +15,9 @@
 #else
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE 1
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1 /* strict _POSIX_C_SOURCE hides O_NOFOLLOW etc. on Darwin */
+#endif
 #include <unistd.h>
 #endif
 
