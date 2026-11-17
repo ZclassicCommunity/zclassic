@@ -27,12 +27,31 @@ The archive hash was taken from a download on 2026-11-16. GitHub generates
 the hash check in `depends` fails closed; the file must then be re-fetched from
 a mirror of the same commit (a `git archive` of it) and the hash re-recorded.
 
-Not applied: Z23 `vendor/patches/tor-dynhost-stream-shutdown.patch` (sha256
-`c4c135447e85c5934b2c8af8ea4e52566c50ab15cc4219d2dbefa3daa75599d8`). It only
-changes dynhost stream shutdown, and the daemon design uses stock Tor onion
-service forwarding plus the existing control client, not dynhost. The dynhost
-code is still compiled into `libtor.a` (it is part of the pin) but nothing
-calls it.
+## Carried patches (`depends/patches/tor/`)
+
+The pin is unchanged. `tor.mk` applies these four patches, in order with
+`patch -p1`, in its preprocess step (before `./autogen.sh`); the step is plain
+`patch` and `sh`, so it is the same on linux, mingw and darwin hosts.
+
+Why: the fork turns its dynhost subsystem on unconditionally. Observed on the
+pre-patch build (child and in-process mode, regtest): once Tor has a circuit,
+`hs_service_callback` calls `dynhost_check_and_activate()` every second; the
+log shows `Activating dynhost ephemeral service` and `Dynamic onion host
+ephemeral service created with address: <random>`, and that second onion
+service answers on port 80 with the demo pages `/`, `/time` and `/calculator`
+(fetched through the node's own SocksPort). The daemon uses stock Tor onion
+service forwarding (`ADD_ONION` from `src/torcontrol.cpp`) and has no use for
+it, so every node would otherwise publish an unrelated second service.
+
+| Patch | What it does |
+|---|---|
+| `0001-dynhost-stream-shutdown.patch` | Z23 `vendor/patches/tor-dynhost-stream-shutdown.patch`, verbatim (sha256 `c4c135447e85c5934b2c8af8ea4e52566c50ab15cc4219d2dbefa3daa75599d8`, Z23 `origin/main`). Applies cleanly to the pin. Dynhost stream shutdown: refuses opens after the subsystem stops, no read of freed connections at cleanup, terminal callback/close ordering. Keeps the two projects on the same fork behaviour. |
+| `0002-dynhost-set-enabled.patch` | Adds `void dynhost_set_enabled(int)` and `int dynhost_is_enabled(void)` (default 1: unchanged for other embedders). Off: subsystem init registers no port-80 virtual port, the subsystem option hook is a no-op, `dynhost_activate_service()` refuses and `dynhost_check_and_activate()` returns at once, so no service is created. zclassicd calls `dynhost_set_enabled(0)` before `tor_run_main()` in both child and in-process mode; `tor_api.h` does not declare it, so `src/c23/tor/zcl_tor_dispatch.c` and `zcl_tor_inproc.c` carry a local prototype. |
+| `0003-dynhost-free-reassembly-buf.patch` | `connection_free_minimal()` frees `edge_conn->dynhost_reassembly_buf`, which `dynhost_handlers.c` allocates per dynhost connection and nothing freed. |
+| `0004-dynhost-clamp-external-handler-length.patch` | Clamps the length an external dynhost handler returns to the 65536-byte buffer it was given. |
+
+The dynhost code is still compiled into `libtor.a` (it is part of the pin) but
+with the off switch nothing in it runs in the daemon.
 
 The archive carries no generated `configure`; `./autogen.sh` runs in the
 package preprocess step, so autoconf, automake and libtool are build-host

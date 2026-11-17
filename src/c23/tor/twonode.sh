@@ -254,6 +254,22 @@ if [ "$MODE" = child ]; then
     kill "$PID_E" 2>/dev/null
 fi
 
+# The pinned fork's dynhost service must stay off (depends/patches/tor 0002):
+# neither Tor created a second (ephemeral, port 80) onion service, though both
+# reached 100% bootstrap and ran the hs_service callback that, without the
+# patch, activates it every second (that callback logs the line checked below
+# once; the subsystem's own init notice is only in the in-process log, since a
+# child's log is not open yet when subsystems start).
+for n in A B; do
+    d=$A; [ "$n" = B ] && d=$B
+    lf=$d/regtest/tor/tor.log
+    [ -f "$lf" ] || lf=$d/regtest/tor/tor-child.log
+    grep -q 'Bootstrapped 100%' "$lf" && grep -q 'calling dynhost_check_and_activate' "$lf"
+    check $? "$n: Tor bootstrapped and reached the dynhost activation point"
+    ! grep -qi 'ephemeral service created\|Activating dynhost\|Dynhost service successfully activated\|created dynhost service' "$lf"
+    check $? "$n: Tor log has no dynhost service creation ($(grep -ci 'dynhost' "$lf") dynhost lines)"
+done
+
 # Sanitizer reports (only an instrumented build prints any).
 ! grep -q 'ERROR: AddressSanitizer\|runtime error:' "$TMP"/*.out
 check $? "no AddressSanitizer error and no UBSan runtime error in the nodes' output"

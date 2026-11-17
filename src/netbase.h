@@ -86,6 +86,7 @@ class CNetAddr
         bool IsRFC6052() const; // IPv6 well-known prefix (64:FF9B::/96)
         bool IsRFC6145() const; // IPv6 IPv4-translated address (::FFFF:0:0:0/96)
         bool IsTor() const;
+        bool IsTorV3() const; // v3 onion: the 32-byte key lives in torv3_addr, ip[] is zero
         bool IsLocal() const;
         bool IsRoutable() const;
         bool IsValid() const;
@@ -110,10 +111,33 @@ class CNetAddr
 
         template <typename Stream, typename Operation>
         inline void SerializationOp(Stream& s, Operation ser_action) {
-            READWRITE(FLATDATA(ip));
+            SerializeIP(s, ser_action);
         }
 
         friend class CSubNet;
+
+    protected:
+        /**
+         * The 16 address bytes of the legacy wire/disk form (addr, version,
+         * peers.dat). It has no room for a 32-byte v3 onion key; writing one
+         * emits the unroutable IPv4-mapped 0.0.0.0 that the code already uses
+         * where a field is mandatory but there is no usable address, never the
+         * all-zero "::" that a bare ip[] would give. Reading replaces the
+         * whole value, so no v3 key survives a read into a reused object.
+         */
+        void GetLegacyWireBytes(unsigned char (&out)[16]) const;
+
+        template <typename Stream, typename Operation>
+        inline void SerializeIP(Stream& s, Operation ser_action) {
+            if (ser_action.ForRead()) {
+                torv3_addr.clear();
+                READWRITE(FLATDATA(ip));
+            } else {
+                unsigned char wire[16];
+                GetLegacyWireBytes(wire);
+                READWRITE(FLATDATA(wire));
+            }
+        }
 };
 
 class CSubNet
@@ -175,7 +199,7 @@ class CService : public CNetAddr
 
         template <typename Stream, typename Operation>
         inline void SerializationOp(Stream& s, Operation ser_action) {
-            READWRITE(FLATDATA(ip));
+            SerializeIP(s, ser_action);
             unsigned short portN = htons(port);
             READWRITE(FLATDATA(portN));
             if (ser_action.ForRead())

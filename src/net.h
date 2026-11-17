@@ -425,7 +425,9 @@ public:
         // Known checking here is only to save space from duplicates.
         // SendMessages will filter it again for knowns that were added
         // after addresses were pushed.
-        if (addr.IsValid() && !addrKnown.contains(addr.GetKey())) {
+        // A v3 onion address cannot be sent in the 16-byte addr field (it
+        // would arrive as a placeholder or as "::"), so it is never relayed.
+        if (addr.IsValid() && !addr.IsTorV3() && !addrKnown.contains(addr.GetKey())) {
             if (vAddrToSend.size() >= MAX_ADDR_TO_SEND) {
                 vAddrToSend[insecure_rand() % vAddrToSend.size()] = addr;
             } else {

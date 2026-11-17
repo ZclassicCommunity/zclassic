@@ -47,10 +47,17 @@ static void close_inherited(int keep)
 }
 #endif
 
+/* Carried patch depends/patches/tor/0002-dynhost-set-enabled.patch: the pinned
+ * fork starts a second, random-key onion service (dynhost) on its own. The
+ * daemon makes its onion service through the control port; switch dynhost off
+ * before Tor runs. Not declared in tor_api.h. */
+extern void dynhost_set_enabled(int enabled);
+
 static int run_tor(int ac, char **av)
 {
     tor_main_configuration_t *cfg = tor_main_configuration_new();
     int rc;
+    dynhost_set_enabled(0);
     if (!cfg) {
         (void)fprintf(stderr, "zcl_tor_embed: tor_main_configuration_new failed\n");
         return 70;

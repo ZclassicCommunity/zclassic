@@ -273,6 +273,26 @@ static bool file_mode_is(const char *path, mode_t want)
     return (st.st_mode & 07777) == want;
 }
 
+/* True when the text file at `path` contains `needle`. A missing or unreadable
+ * file is false. Only the first 4 MiB are searched. */
+static bool file_has_text(const char *path, const char *needle)
+{
+    enum { CAP = 4 << 20 };
+    char *buf = (char *)malloc(CAP + 1);
+    FILE *f = fopen(path, "r");
+    size_t n = 0;
+    bool found = false;
+    if (buf && f) {
+        n = fread(buf, 1, CAP, f);
+        buf[n] = '\0';
+        found = strstr(buf, needle) != NULL;
+    }
+    if (f)
+        (void)fclose(f);
+    free(buf);
+    return found;
+}
+
 static bool extract_value(const char *reply, const char *key, char *out, size_t cap)
 {
     const char *p = strstr(reply, key);
@@ -985,6 +1005,14 @@ static int run_inproc(const char *tmp)
         rc = zcl_tor_embed_stop(h, 15000);
         check(rc == 0 && !zcl_tor_embed_alive(h), "round %d: stop joined the Tor thread in %llu ms (rc=%d)",
               round, (unsigned long long)(zcl_tor_now_ms() - t0), rc);
+        /* The pinned fork's dynhost service must stay off (carried patch
+         * 0002): init says so, and no second onion service is created. */
+        check(file_has_text(t, "Dynhost disabled by the embedder"),
+              "round %d: Tor log says dynhost is disabled", round);
+        check(!file_has_text(t, "ephemeral service created") &&
+                  !file_has_text(t, "Activating dynhost") &&
+                  !file_has_text(t, "virtual port 80"),
+              "round %d: Tor log shows no dynhost service creation", round);
         zcl_tor_embed_free(h);
         zcl_tor_sleep_ms(200);
         {
