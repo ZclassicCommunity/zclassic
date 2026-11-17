@@ -48,6 +48,16 @@ LIBZCASH=libzcash.a
 # -lsodium -lcrypto.
 LIBZCL_C23=libzcl_c23.a libzcl_c23_seam.a
 
+# The daemon's own C support code, a separate archive from the vendored C23 core:
+# owner-only key files, and (with --with-embedded-tor) the embedded Tor launcher.
+# Programs that link $(LIBBITCOIN_SERVER) need $(ZCL_TOR_LIBS) after it: with
+# embedded Tor, also libtor and the archives it uses.
+LIBZCL_TOR=libzcl_tor.a
+ZCL_TOR_LIBS = $(LIBZCL_TOR)
+if ENABLE_EMBEDDED_TOR
+ZCL_TOR_LIBS += $(TOR_LIBS) $(SSL_LIBS) $(CRYPTO_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(TOR_SYSTEM_LIBS)
+endif
+
 if ENABLE_ZMQ
 LIBBITCOIN_ZMQ=libbitcoin_zmq.a
 endif
@@ -99,7 +109,8 @@ EXTRA_LIBRARIES += \
   $(LIBBITCOIN_ZMQ) \
   $(LIBBITCOIN_PROTON) \
   $(LIBZCASH) \
-  $(LIBZCL_C23)
+  $(LIBZCL_C23) \
+  $(LIBZCL_TOR)
 
 lib_LTLIBRARIES = $(LIBZCASH_CONSENSUS)
 
@@ -168,6 +179,7 @@ BITCOIN_CORE_H = \
   crypto/sha3.h \
   core_memusage.h \
   deprecation.h \
+  embeddedtor.h \
   hash.h \
   httprpc.h \
   httpserver.h \
@@ -263,6 +275,28 @@ obj/build.h: FORCE
 	  $(abs_top_srcdir)
 libbitcoin_util_a-clientversion.$(OBJEXT): obj/build.h
 
+# Daemon C support code (not vendored Z23): owner-only key files, and the embedded
+# Tor launcher. Every global of the archive is zcl_tor_*; see c23-symbols.stamp.
+libzcl_tor_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES) $(EVENT_CFLAGS)
+libzcl_tor_a_CFLAGS = $(SAN_CXXFLAGS) $(HARDENED_CXXFLAGS) $(PIE_FLAGS)
+libzcl_tor_a_SOURCES = \
+  c23/tor/keyfile.c \
+  c23/tor/keyfile.h
+if ENABLE_EMBEDDED_TOR
+libzcl_tor_a_SOURCES += \
+  c23/tor/zcl_tor_dispatch.c \
+  c23/tor/zcl_tor_embed.c \
+  c23/tor/zcl_tor_embed.h \
+  c23/tor/zcl_tor_inproc.c \
+  c23/tor/zcl_tor_inproc.h \
+  c23/tor/zcl_tor_proc.h
+if TARGET_WINDOWS
+libzcl_tor_a_SOURCES += c23/tor/zcl_tor_proc_win.c
+else
+libzcl_tor_a_SOURCES += c23/tor/zcl_tor_proc_posix.c
+endif
+endif
+
 # server: zclassicd
 libbitcoin_server_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES) $(EVENT_CFLAGS) $(EVENT_PTHREADS_CFLAGS)
 libbitcoin_server_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
@@ -276,6 +310,7 @@ libbitcoin_server_a_SOURCES = \
   chain.cpp \
   checkpoints.cpp \
   deprecation.cpp \
+  embeddedtor.cpp \
   equihashmemo.cpp \
   httprpc.cpp \
   httpserver.cpp \
@@ -534,6 +569,7 @@ endif
 
 zclassicd_LDADD = \
   $(LIBBITCOIN_SERVER) \
+  $(ZCL_TOR_LIBS) \
   $(LIBBITCOIN_WALLET) \
   $(LIBBITCOIN_COMMON) \
   $(LIBUNIVALUE) \
@@ -747,10 +783,11 @@ libzcl_c23_seam_a_SOURCES = \
 # force-included c23/glue/zcl_c23_symbol_prefix.h renames every internal global
 # of the core to zc23_<name>; this stamp proves the archive exports nothing
 # else, and every program that links the core waits for it.
-c23-symbols.stamp: libzcl_c23.a libzcl_c23_hash.a libzcl_tokenguard.a $(srcdir)/c23/tools/symbol-prefix.sh
+c23-symbols.stamp: libzcl_c23.a libzcl_c23_hash.a libzcl_tokenguard.a libzcl_tor.a $(srcdir)/c23/tools/symbol-prefix.sh
 	$(AM_V_GEN) sh $(srcdir)/c23/tools/symbol-prefix.sh check "$(NM)" libzcl_c23.a && \
 	  sh $(srcdir)/c23/tools/symbol-prefix.sh check "$(NM)" libzcl_c23_hash.a && \
-	  sh $(srcdir)/c23/tools/symbol-prefix.sh check "$(NM)" libzcl_tokenguard.a && touch $@
+	  sh $(srcdir)/c23/tools/symbol-prefix.sh check "$(NM)" libzcl_tokenguard.a && \
+	  sh $(srcdir)/c23/tools/symbol-prefix.sh check "$(NM)" libzcl_tor.a && touch $@
 EXTRA_zclassicd_DEPENDENCIES = c23-symbols.stamp
 EXTRA_zclassic_tx_DEPENDENCIES = c23-symbols.stamp
 EXTRA_zclassic_cli_DEPENDENCIES = c23-symbols.stamp

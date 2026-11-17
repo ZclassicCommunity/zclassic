@@ -5,6 +5,9 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "torcontrol.h"
+#include "embeddedtor.h"
+#include "c23/tor/keyfile.h"
+#include "support/cleanse.h"
 #include "utilstrencodings.h"
 #include "netbase.h"
 #include "net.h"
@@ -390,20 +393,68 @@ static std::pair<bool,std::string> ReadBinaryFile(const std::string &filename, s
     return std::make_pair(true,retval);
 }
 
-/** Write contents of std::string to a file.
- * @return true on success.
+/** Pick the SOCKS listener to use for .onion connections from the reply to
+ * "GETINFO net/listeners/socks", for example
+ *   net/listeners/socks="127.0.0.1:9050" "unix:/run/tor/socks" "[::1]:9050"
+ * The first TCP listener with a usable address and port wins; unix sockets
+ * and wildcard binds are skipped. No name is ever resolved.
+ * @return true and the listener in addrOut, or false if there is none.
  */
-static bool WriteBinaryFile(const std::string &filename, const std::string &data)
+static bool ParseTorSocksListeners(const std::string &line, CService &addrOut)
 {
-    FILE *f = fopen(filename.c_str(), "wb");
-    if (f == NULL)
+    static const std::string prefix = "net/listeners/socks=";
+    if (line.compare(0, prefix.size(), prefix) != 0)
         return false;
-    if (fwrite(data.data(), 1, data.size(), f) != data.size()) {
-        fclose(f);
-        return false;
+    size_t ptr = prefix.size();
+    while (ptr < line.size()) {
+        if (line[ptr] == ' ') {
+            ++ptr;
+            continue;
+        }
+        if (line[ptr] != '"')
+            return false;
+        ++ptr; // skip opening '"'
+        std::string value;
+        while (ptr < line.size() && line[ptr] != '"') {
+            if (line[ptr] == '\\' && ptr + 1 < line.size())
+                ++ptr;
+            value.push_back(line[ptr]);
+            ++ptr;
+        }
+        if (ptr == line.size()) // unterminated string
+            return false;
+        ++ptr; // skip closing '"'
+        if (value.compare(0, 5, "unix:") == 0)
+            continue;
+        CService addr(value, 0, false);
+        if (addr.IsValid() && addr.GetPort() != 0) {
+            addrOut = addr;
+            return true;
+        }
     }
-    fclose(f);
-    return true;
+    return false;
+}
+
+/** The SOCKS proxy to assume for .onion connections when Tor does not report
+ * its listeners: the control port's host with Tor's default SOCKS port. With
+ * the default -torcontrol this is 127.0.0.1:9050.
+ */
+static CService DefaultTorSocksProxy(const std::string &target)
+{
+    CService control(target, 9051, false);
+    if (control.IsValid())
+        return CService(control, 9050);
+    return CService("127.0.0.1", 9050);
+}
+
+/** Control port to connect to: -torcontrol when given, else the embedded
+ * Tor's control port when one is running, else the default.
+ */
+static std::string GetTorControlTarget()
+{
+    if (!mapArgs.count("-torcontrol") && EmbeddedTorRunning())
+        return strprintf("127.0.0.1:%u", EmbeddedTorControlPort());
+    return GetArg("-torcontrol", DEFAULT_TOR_CONTROL);
 }
 
 /****** Bitcoin specific TorController implementation ********/
@@ -439,6 +490,10 @@ private:
 
     /** Callback for ADD_ONION result */
     void add_onion_cb(TorControlConnection& conn, const TorControlReply& reply);
+    /** Callback for GETINFO net/listeners/socks result */
+    void socks_cb(TorControlConnection& conn, const TorControlReply& reply);
+    /** Send ADD_ONION for the P2P port */
+    void add_onion(TorControlConnection& conn);
     /** Callback for AUTHENTICATE result */
     void auth_cb(TorControlConnection& conn, const TorControlReply& reply);
     /** Callback for AUTHCHALLENGE result */
@@ -467,11 +522,24 @@ TorController::TorController(struct event_base* baseIn, const std::string& targe
          boost::bind(&TorController::disconnected_cb, this, _1) )) {
         LogPrintf("tor: Initiating connection to Tor control port %s failed\n", target);
     }
-    // Read service private key if cached
-    std::pair<bool,std::string> pkf = ReadBinaryFile(GetPrivateKeyFile());
-    if (pkf.first) {
-        LogPrint("tor", "tor: Reading cached private key from %s\n", GetPrivateKeyFile());
-        private_key = pkf.second;
+    // Read service private key if cached. A key file written by an older
+    // version (process umask, typically 0644) is made owner-only first; a key
+    // file that is a symlink, not a regular file or not ours is not used.
+    const std::string keyfile = GetPrivateKeyFile();
+    char kerr[256] = "";
+    int tight = zcl_keyfile_tighten(keyfile.c_str(), kerr, sizeof(kerr));
+    if (tight < 0) {
+        LogPrintf("tor: Not using cached onion service key: %s\n", kerr);
+    } else if (tight == 0) {
+        char buf[1024];
+        size_t len = 0;
+        if (zcl_keyfile_read(keyfile.c_str(), buf, sizeof(buf), &len, kerr, sizeof(kerr)) == 0) {
+            LogPrint("tor", "tor: Reading cached private key from %s\n", keyfile);
+            private_key.assign(buf, len);
+        } else {
+            LogPrintf("tor: Not using cached onion service key: %s\n", kerr);
+        }
+        memory_cleanse(buf, sizeof(buf));
     }
 }
 
@@ -518,10 +586,13 @@ void TorController::add_onion_cb(TorControlConnection& conn, const TorControlRep
         service = CService(onion_addr, GetListenPort());
         LogPrintf("tor: Got service ID %s, advertising service %s\n", service_id, service.ToString());
 
-        if (WriteBinaryFile(GetPrivateKeyFile(), private_key)) {
+        // Owner-only (0600), written to a temporary file and renamed into
+        // place, so the key is never readable by others and never partial.
+        char kerr[256] = "";
+        if (zcl_keyfile_write(GetPrivateKeyFile().c_str(), private_key.data(), private_key.size(), kerr, sizeof(kerr)) == 0) {
             LogPrint("tor", "tor: Cached service private key to %s\n", GetPrivateKeyFile());
         } else {
-            LogPrintf("tor: Error writing service private key to %s\n", GetPrivateKeyFile());
+            LogPrintf("tor: Error writing service private key to %s: %s\n", GetPrivateKeyFile(), kerr);
         }
         AddLocal(service, LOCAL_MANUAL);
         // ... onion requested - keep connection open
@@ -539,24 +610,58 @@ void TorController::auth_cb(TorControlConnection& conn, const TorControlReply& r
 
         // Now that we know Tor is running setup the proxy for onion addresses
         // if -onion isn't set to something else.
-        if (GetArg("-onion", "") == "") {
-            proxyType addrOnion = proxyType(CService("127.0.0.1", 9050), true);
-            SetProxy(NET_ONION, addrOnion);
-            SetLimited(NET_ONION, false);
+        if (GetArg("-onion", "") != "" || EmbeddedTorRunning()) {
+            // -onion names the proxy, or init already pointed the onion proxy
+            // at the embedded Tor's SOCKS port.
+            add_onion(conn);
+        } else {
+            // Ask Tor where its SOCKS listener is instead of assuming 9050.
+            conn.Command("GETINFO net/listeners/socks", boost::bind(&TorController::socks_cb, this, _1, _2));
         }
-
-        // Finally - now create the service
-        if (private_key.empty()) { // No private key, generate one
-            private_key = "NEW:ED25519-V3"; // Request ED25519-V3 for onion v3
-        }
-        // Request hidden service, redirect port.
-        // Note that the 'virtual' port doesn't have to be the same as our internal port, but this is just a convenient
-        // choice.  TODO; refactor the shutdown sequence some day.
-        conn.Command(strprintf("ADD_ONION %s Port=%i,127.0.0.1:%i", private_key, GetListenPort(), GetListenPort()),
-            boost::bind(&TorController::add_onion_cb, this, _1, _2));
     } else {
         LogPrintf("tor: Authentication failed\n");
     }
+}
+
+void TorController::socks_cb(TorControlConnection& conn, const TorControlReply& reply)
+{
+    CService addrSocks;
+    bool fFound = false;
+    if (reply.code == 250) {
+        BOOST_FOREACH(const std::string &s, reply.lines) {
+            if (ParseTorSocksListeners(s, addrSocks)) {
+                fFound = true;
+                break;
+            }
+        }
+    }
+    if (!fFound) {
+        addrSocks = DefaultTorSocksProxy(target);
+        LogPrintf("tor: Tor did not report a usable SOCKS listener, assuming %s\n", addrSocks.ToString());
+    } else {
+        LogPrint("tor", "tor: Using Tor SOCKS listener %s for onion connections\n", addrSocks.ToString());
+    }
+    // Checked again: -onion cannot change at runtime, but an embedded Tor's
+    // proxy must never be replaced by another Tor's.
+    if (GetArg("-onion", "") == "" && !EmbeddedTorRunning()) {
+        proxyType addrOnion = proxyType(addrSocks, true);
+        SetProxy(NET_ONION, addrOnion);
+        SetLimited(NET_ONION, false);
+    }
+    add_onion(conn);
+}
+
+void TorController::add_onion(TorControlConnection& conn)
+{
+    // Finally - now create the service
+    if (private_key.empty()) { // No private key, generate one
+        private_key = "NEW:ED25519-V3"; // Request ED25519-V3 for onion v3
+    }
+    // Request hidden service, redirect port.
+    // Note that the 'virtual' port doesn't have to be the same as our internal port, but this is just a convenient
+    // choice.  TODO; refactor the shutdown sequence some day.
+    conn.Command(strprintf("ADD_ONION %s Port=%i,127.0.0.1:%i", private_key, GetListenPort(), GetListenPort()),
+        boost::bind(&TorController::add_onion_cb, this, _1, _2));
 }
 
 /** Compute Tor SAFECOOKIE response.
@@ -651,12 +756,27 @@ void TorController::protocolinfo_cb(TorControlConnection& conn, const TorControl
         BOOST_FOREACH(const std::string &s, methods) {
             LogPrint("tor", "tor: Supported authentication method: %s\n", s);
         }
+        std::string torpassword = GetArg("-torpassword", "");
+        if (!mapArgs.count("-torcontrol") && EmbeddedTorRunning()) {
+            // The embedded Tor offers SAFECOOKIE with the cookie file init
+            // configured. Anything else answering on its control port (a
+            // local process that took the port after Tor went away) offering
+            // NULL auth or a cookie file of its choosing would pass the
+            // checks below and then be sent ADD_ONION with our onion key.
+            const std::string expected = EmbeddedTorCookiePath();
+            if (!methods.count("SAFECOOKIE") || expected.empty() || cookiefile != expected) {
+                LogPrintf("tor: Control port %s does not offer SAFECOOKIE with the embedded Tor's cookie file; not authenticating\n", target);
+                return;
+            }
+            methods.clear();
+            methods.insert("SAFECOOKIE");
+            torpassword.clear();
+        }
         // Prefer NULL, otherwise SAFECOOKIE. If a password is provided, use HASHEDPASSWORD
         /* Authentication:
          *   cookie:   hex-encoded ~/.tor/control_auth_cookie
          *   password: "password"
          */
-        std::string torpassword = GetArg("-torpassword", "");
         if (!torpassword.empty()) {
             if (methods.count("HASHEDPASSWORD")) {
                 LogPrint("tor", "tor: Using HASHEDPASSWORD authentication\n");
@@ -749,7 +869,7 @@ static boost::thread torControlThread;
 
 static void TorControlThread()
 {
-    TorController ctrl(gBase, GetArg("-torcontrol", DEFAULT_TOR_CONTROL));
+    TorController ctrl(gBase, GetTorControlTarget());
 
     event_base_dispatch(gBase);
 }

@@ -20,6 +20,11 @@ struct event_base;
 class CService;
 class HTTPRequest;
 
+/** (Re)install the daemon's libevent log callback. libevent has one
+ * process-wide callback; an in-process embedded Tor replaces it while it runs.
+ */
+void RestoreLibeventLogging();
+
 /** Initialize HTTP server.
  * Call this before RegisterHTTPHandler or EventBase().
  */

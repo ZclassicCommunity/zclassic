@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "clientversion.h"
+#include "embeddedtor.h"
 #include "rpc/server.h"
 #include "init.h"
 #include "main.h"
@@ -225,6 +226,13 @@ bool AppInit(int argc, char* argv[])
 
 int main(int argc, char* argv[])
 {
+    // -embeddedtormode=child re-executes this binary as its Tor process. That
+    // role must be taken before anything else runs; in every other case this
+    // returns -1 at once (and always does in a build without embedded Tor).
+    int nTorChild = EmbeddedTorDispatch(argc, argv);
+    if (nTorChild >= 0)
+        return nTorChild;
+
     SetupEnvironment();
 
     // Connect bitcoind signal handlers

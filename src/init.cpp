@@ -17,6 +17,7 @@
 #include "compat/sanity.h"
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
+#include "embeddedtor.h"
 #include "httpserver.h"
 #include "httprpc.h"
 #include "key.h"
@@ -239,6 +240,10 @@ void Shutdown()
 #endif
     StopNode();
     StopTorControl();
+    // After the P2P threads and the control client are gone, and before the
+    // datadir lock is released at exit. No-op unless -embeddedtor started it,
+    // including when AppInit2() failed part of the way.
+    StopEmbeddedTor();
     StopMapPort();
     UnregisterNodeSignals(GetNodeSignals());
 
@@ -438,6 +443,10 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-externalip=<ip>", _("Specify your own public address"));
     strUsage += HelpMessageOpt("-forcednsseed", strprintf(_("Always query for peer addresses via DNS lookup (default: %u)"), 0));
     strUsage += HelpMessageOpt("-listen", _("Accept connections from outside (default: 1 if no -proxy or -connect)"));
+    if (EmbeddedTorAvailable()) {
+        strUsage += HelpMessageOpt("-embeddedtor", strprintf(_("Run the Tor built into this binary: state in <datadir>/tor, SOCKS and control on loopback ports chosen at runtime, used for .onion peers and for the node's own onion service (default: %u)"), DEFAULT_EMBEDDED_TOR));
+        strUsage += HelpMessageOpt("-embeddedtormode=<mode>", strprintf(_("How the embedded Tor runs: inprocess (a thread of this process) or child (a separate process) (default: %s)"), DEFAULT_EMBEDDED_TOR_MODE));
+    }
     strUsage += HelpMessageOpt("-listenonion", strprintf(_("Automatically create Tor hidden service (default: %d)"), DEFAULT_LISTEN_ONION));
     strUsage += HelpMessageOpt("-natpmp", strprintf(_("Open the listen port on the router automatically via NAT-PMP/PCP, so peers can reach you (no UPnP). Maps only your own listen port (default: %d)"), DEFAULT_NATPMP));
     strUsage += HelpMessageOpt("-maxconnections=<n>", strprintf(_("Maintain at most <n> connections to peers (default: %u)"), DEFAULT_MAX_PEER_CONNECTIONS));
@@ -1175,6 +1184,15 @@ static void InterruptBootstrapServeFreeze()
  *  Ensure that Bitcoin is running in a usable environment with all
  *  necessary library support.
  */
+/** Scheduled every few seconds while -embeddedtor is on (see Step 6). */
+static void EmbeddedTorWatchdog()
+{
+    if (ShutdownRequested() || !EmbeddedTorRunning() || EmbeddedTorAlive())
+        return;
+    LogPrintf("tor: the embedded Tor has exited; shutting down (-embeddedtor never continues without Tor)\n");
+    StartShutdown();
+}
+
 bool InitSanityCheck(void)
 {
 
@@ -1197,7 +1215,13 @@ bool InitSanityCheck(void)
     // once before use. A corrupted-but-correct-size param slips past this gate
     // but is caught by that loop, which then re-fetches (self-heal) before
     // failing.
-    if (!ZcashParamsPresent() && GetBoolArg("-bootstrap", true)) {
+    // An onion-only -embeddedtor node never fetches here: this runs before
+    // Step 6 starts Tor and sets the proxies, so the fetch would dial the
+    // bootstrap peers over clearnet.
+    const bool fParamFetchAllowed = GetBoolArg("-bootstrap", true) && !EmbeddedTorOnionOnlyRequested();
+    if (!ZcashParamsPresent() && GetBoolArg("-bootstrap", true) && !fParamFetchAllowed)
+        LogPrintf("Zcash parameters are missing; not fetching them from a bootstrap peer before the embedded Tor is up (-onlynet without ipv4/ipv6)\n");
+    if (!ZcashParamsPresent() && fParamFetchAllowed) {
         std::string paramError = "no bootstrap peer configured";
         BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
             fprintf(stdout, "Fetching Zcash parameters from peer %s...\n", peer.c_str());
@@ -1298,7 +1322,7 @@ bool InitSanityCheck(void)
         if (!check_file_hash(path.string(), spec.sha256hex)) {
             // A present, correct-size, but wrong-hash (corrupted/forged) file.
             // Self-heal once via the bootstrap-peer fetch, then re-verify.
-            if (!fParamRefetched && GetBoolArg("-bootstrap", true)) {
+            if (!fParamRefetched && fParamFetchAllowed) {
                 fParamRefetched = true;
                 std::string paramError = "no bootstrap peer configured";
                 BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
@@ -1691,6 +1715,19 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // Check for -tor - as this is a privacy risk to continue, exit here
     if (GetBoolArg("-tor", false))
         return InitError(_("Error: Unsupported argument -tor found, use -onion."));
+
+    // Embedded Tor is opt-in. Refuse to start rather than fall back to an
+    // unproxied node when it was asked for and cannot be provided.
+    const bool fEmbeddedTor = GetBoolArg("-embeddedtor", DEFAULT_EMBEDDED_TOR);
+    EmbeddedTorMode embeddedTorMode = EMBEDDED_TOR_INPROCESS;
+    if (fEmbeddedTor) {
+        if (!EmbeddedTorAvailable())
+            return InitError(_("Error: -embeddedtor needs a build with embedded Tor (configure --with-embedded-tor)."));
+        if (!ParseEmbeddedTorMode(GetArg("-embeddedtormode", DEFAULT_EMBEDDED_TOR_MODE), embeddedTorMode))
+            return InitError(strprintf(_("Invalid -embeddedtormode: '%s' (use inprocess or child)"), GetArg("-embeddedtormode", "")));
+        if (GetArg("-onion", "") == "0")
+            return InitError(_("Error: -embeddedtor cannot be combined with -onion=0."));
+    }
 
     if (GetBoolArg("-benchmark", false))
         InitWarning(_("Warning: Unsupported argument -benchmark ignored, use -debug=bench."));
@@ -2125,6 +2162,56 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             SetProxy(NET_ONION, addrOnion);
             SetLimited(NET_ONION, false);
         }
+    }
+
+    // -embeddedtor: launch the Tor linked into this binary. Its state lives in
+    // <datadir>/tor (the datadir lock is held since Step 4); its SOCKS and
+    // control ports are loopback ports chosen at runtime.
+    if (fEmbeddedTor) {
+        std::string strTorError;
+        if (!StartEmbeddedTor(GetDataDir().string(), embeddedTorMode, strTorError))
+            return InitError(strprintf(_("Could not start the embedded Tor: %s"), strTorError));
+        proxyType addrEmbedded = proxyType(CService("127.0.0.1", EmbeddedTorSocksPort()), proxyRandomize);
+        if (!addrEmbedded.IsValid())
+            return InitError(_("The embedded Tor did not report a SOCKS port."));
+        if (onionArg == "") {
+            // An explicit -onion keeps its meaning; otherwise .onion peers
+            // are reached through the embedded Tor.
+            SetProxy(NET_ONION, addrEmbedded);
+            SetLimited(NET_ONION, false);
+        }
+        if (IsLimited(NET_IPV4) && IsLimited(NET_IPV6) && !HaveNameProxy()) {
+            // Onion-only node (-onlynet=onion) without -proxy: host names
+            // (DNS seeds, -addnode, -seednode, -connect) must never reach the
+            // system resolver. Hand them to Tor instead.
+            SetNameProxy(addrEmbedded);
+            // Literal IPv4/IPv6 destinations do not use the name proxy:
+            // ConnectSocket() dials them directly unless their network has a
+            // proxy, and -onlynet does not stop it. Those are -addnode,
+            // -connect and -seednode given as addresses, the compiled
+            // bootstrap peers init adds as -addnode on every start, and the
+            // bootstrap snapshot download. Send them through Tor as well,
+            // the same as -proxy does.
+            SetProxy(NET_IPV4, addrEmbedded);
+            SetProxy(NET_IPV6, addrEmbedded);
+            // Addresses with no network (private ranges, TEST-NET, ...) have
+            // no proxy and would still be dialled directly: refuse those.
+            SetProxyOnly(true);
+            LogPrintf("tor: onion-only node, host names and IP destinations go through the embedded Tor\n");
+            // Without -bind the P2P port listens on every interface, and a
+            // clearnet peer that connects in is sent this node's onion
+            // address (version addrMe, addr relay), tying the two together.
+            // Tor reaches the port on loopback, so listen only there.
+            if (!mapArgs.count("-bind") && !mapArgs.count("-whitebind")) {
+                mapArgs["-bind"] = "127.0.0.1";
+                mapMultiArgs["-bind"].push_back("127.0.0.1");
+                LogPrintf("tor: onion-only node without -bind, listening on 127.0.0.1 only\n");
+            }
+        }
+        // A node that asked for Tor never continues without it: if Tor exits
+        // on its own, shut down instead of leaving its loopback ports free
+        // for another local process to take over.
+        scheduler.scheduleEvery(&EmbeddedTorWatchdog, 5);
     }
 
     // see Step 2: parameter interactions for more information about these
