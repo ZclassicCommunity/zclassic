@@ -1592,6 +1592,15 @@ QString MainWindow::humaneSendError(const QString& raw) {
     const QString e = raw.toLower();
 
     // Order matters: check the most specific causes before the generic ones.
+    // Token guard: the daemon refuses to spend ZSLP token or mint-baton outputs as ordinary
+    // coins and says so in the error (it can accompany "no UTXOs"/"insufficient funds").
+    // Name that cause first; "wait for confirmations" or "not enough ZCL" would mislead.
+    if (e.contains("token-bearing") || e.contains("zslp") || e.contains("mint baton"))
+        return tr("Some of the coins in this wallet carry ZSLP tokens (or a token mint baton). "
+                  "They are protected and were not spent, because paying with them would "
+                  "destroy the tokens. Use other coins, or send the tokens with a "
+                  "token-aware wallet.");
+
     if (e.contains("coinbase") || e.contains("must be sent to a single z") ||
         e.contains("to a zaddr") || e.contains("shielding coinbase"))
         return tr("Mined (coinbase) ZCL must be sent to exactly one shielded (z) "

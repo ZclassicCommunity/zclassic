@@ -92,6 +92,7 @@ public:
     // diverging fresh snapshot (injected via RPC::testSetRepollUTXOs) and proceeds otherwise.
     bool testVerifyAutoShield(const Tx& tx) { return verifyAutoShieldUnchanged(tx); }
     void testSeedBalances();
+    QString testHumaneSendError(const QString& raw) { return humaneSendError(raw); }
     // Build the send-page Tx through the REAL createTxFromSendPage() path so the
     // L1 fail-open tests (PRIV-10) exercise the actual production routing.
     Tx   testCreateTxFromSendPage() { return createTxFromSendPage(); }
