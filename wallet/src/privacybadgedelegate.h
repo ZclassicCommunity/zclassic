@@ -36,6 +36,13 @@ public:
     // on its amount column (setItemDelegateForColumn).
     enum class Mode { Address, Amount };
 
+    // Optional model role (valid on any column of a row) carrying the ADDRESS THE MONEY CAME
+    // FROM for a sent row. When a model supplies it, only a send whose source is a shielded
+    // address is a "De-shield"; a send from a transparent address to a transparent address
+    // is an ordinary public payment. A model that does not supply it keeps the older rule
+    // (any send to a transparent recipient).
+    static constexpr int FromAddrRole = Qt::UserRole + 1;
+
     explicit PrivacyBadgeDelegate(Mode mode, QObject* parent = nullptr);
 
     void paint(QPainter* painter, const QStyleOptionViewItem& option,
@@ -59,6 +66,7 @@ public:
                                         const QString& displayText)     { return classifyForIndex(i, displayText); }
     static QString testLabelFor(Kind k)                                 { return labelFor(k); }
     static QString testColorHexFor(Kind k)                              { return colorFor(k).name(); }
+    static QFont   testMonoFont()                                       { return monoFont(); }
 #endif
 
 private:

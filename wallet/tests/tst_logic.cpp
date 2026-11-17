@@ -866,6 +866,8 @@ private slots:
     void priv13_badgeClassify_data();
     void priv13_badgeClassify();
     void priv13_deshieldOnlyForPublicSendRow();
+    void priv13_transparentSendIsNotDeshield();
+    void priv13_amountColumnFitsSignedAmount();
     // --- PRIV-14: badge colour hex tokens match dark.qss ---
     void priv14_badgeColorTokens();
 
@@ -1582,6 +1584,49 @@ void TestLogic::priv13_deshieldOnlyForPublicSendRow() {
 
     // No model / no Type column -> the bare classify() result (Public), never Deshield.
     QCOMPARE(int(PrivacyBadgeDelegate::testClassifyForIndex(QModelIndex(), T)), int(K::Public));
+}
+
+// UX: an ordinary transparent payment (t -> t) was badged as a red "De-shield", which says
+// private funds leaked when none did. When the model says where the money came from
+// (PrivacyBadgeDelegate::FromAddrRole), only a send FROM a shielded address is a de-shield.
+void TestLogic::priv13_transparentSendIsNotDeshield() {
+    using K = PrivacyBadgeDelegate::Kind;
+    Settings::getInstance()->setTestnet(false);
+    const QString T  = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+    const QString ZS = addr::ZS_SAPLING;
+
+    QStandardItemModel model(3, 2);
+    const int R = PrivacyBadgeDelegate::FromAddrRole;
+    // row 0: sent to a t-address, from a t-address (the wallet's own history rows: empty from)
+    model.setData(model.index(0, 0), "send"); model.setData(model.index(0, 1), T);
+    model.setData(model.index(0, 0), QString(), R);
+    // row 1: sent to a t-address FROM a shielded address -> the real de-shield
+    model.setData(model.index(1, 0), "send"); model.setData(model.index(1, 1), T);
+    model.setData(model.index(1, 0), ZS, R);
+    // row 2: sent to a t-address from another t-address
+    model.setData(model.index(2, 0), "send"); model.setData(model.index(2, 1), T);
+    model.setData(model.index(2, 0), T, R);
+
+    QCOMPARE(int(PrivacyBadgeDelegate::testClassifyForIndex(model.index(0, 1), T)), int(K::Public));
+    QCOMPARE(int(PrivacyBadgeDelegate::testClassifyForIndex(model.index(1, 1), T)), int(K::Deshield));
+    QCOMPARE(int(PrivacyBadgeDelegate::testClassifyForIndex(model.index(2, 1), T)), int(K::Public));
+}
+
+// UX: the Activity list sizes its Amount column from the delegate's sizeHint. That hint
+// was measured in the default font but the amount is painted in the wider monospace
+// face, so the column came out too narrow and a sent amount lost its leading "-".
+void TestLogic::priv13_amountColumnFitsSignedAmount() {
+    QStandardItemModel model(1, 1);
+    const QString text = "-1.52000245 ZCL";
+    model.setData(model.index(0, 0), text);
+    PrivacyBadgeDelegate d(PrivacyBadgeDelegate::Mode::Amount);
+    QStyleOptionViewItem opt;
+    opt.font = QApplication::font();
+    QFont mono = PrivacyBadgeDelegate::testMonoFont();
+    mono.setPointSizeF(opt.font.pointSizeF() > 0 ? opt.font.pointSizeF() : mono.pointSizeF());
+    const int need = QFontMetrics(mono).horizontalAdvance(text) + 16;   // 8px padding each side
+    QVERIFY2(d.sizeHint(opt, model.index(0, 0)).width() >= need,
+             qPrintable(QString("hint %1 < painted %2").arg(d.sizeHint(opt, model.index(0, 0)).width()).arg(need)));
 }
 
 // =====================================================================

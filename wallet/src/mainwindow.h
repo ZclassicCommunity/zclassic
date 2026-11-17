@@ -99,6 +99,12 @@ public:
     // Drive the REAL shield flow the Home fix-it button now uses (PRIV-18): set up
     // a t -> default-Sapling send on the Send page exactly as a click would.
     void testShieldPublicFunds()    { shieldPublicFunds(); }
+    void testBackupWallet()         { backupWallet(); }
+    void testSendButton()           { sendButton(); }
+    bool testAskKeepRunningInTray() { return askKeepRunningInTray(); }
+    QString testHeroText()   { return homeHeroPrivate ? homeHeroPrivate->text() : QString(); }
+    bool    testHeroHelperVisible() { return homeHeroHelper && !homeHeroHelper->isHidden(); }
+    QString testHeroQualifier()     { return homeHeroQualifier ? homeHeroQualifier->text() : QString(); }
 #endif
 
     QString doSendTxValidations(Tx tx);
@@ -205,6 +211,10 @@ public:
     // the WARMING (de-confidenced) hero state regardless of the isSyncing flag, which
     // is not yet set on the very first paint. All live callers use the default (false).
     void updateHomeFixIt(double transparent, bool fromCache = false);
+    // No node connection: the balance is UNKNOWN, not zero. Replaces the hero's "0 ZCL" and
+    // its "receive ZCL to get started" helper (which read as "your funds are gone") with a
+    // dash and an explicit note that funds are unaffected.
+    void showHeroUnavailable();
 
     // PRIV-28 eager Sapling provisioning: ensure at least one Sapling z-address
     // exists so the send/shield path never has to block on key generation (the
@@ -321,6 +331,9 @@ private:
     QSystemTrayIcon* trayIcon       = nullptr;
     bool             quitting       = false;
     bool             trayHintShown  = false;
+    // First-time close notice: tells the user the node keeps running and offers to quit now.
+    // Returns true to keep running in the tray, false if the user chose to quit.
+    bool askKeepRunningInTray();
 
     void setupSendTab();
     void setupTransactionsTab();
@@ -542,5 +555,9 @@ private:
 
     QMovie*      loadingMovie;
 };
+
+// Activity (transactions) table column sizing; see mainwindow.cpp.
+void applyActivityColumnLayout(QTableView* table);
+void applyBalanceColumnLayout(QTableView* table);
 
 #endif // MAINWINDOW_H

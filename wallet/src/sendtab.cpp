@@ -7,6 +7,7 @@
 #include "settings.h"
 #include "rpc.h"
 #include "recurring.h"
+#include <QScreen>
 
 using json = nlohmann::json;
 
@@ -237,6 +238,11 @@ void MainWindow::inputComboTextChanged(int index) {
         balFmt = balFmt % " (+" % Settings::getZCLDisplayFormat(pending) % tr(" confirming") % ")";
 
     ui->sendAddressBalance->setText(balFmt);
+    // The field is a read-only line edit sized for a short number; once "(+X confirming)"
+    // is appended the text overflowed and the figure was clipped from the left (the user
+    // saw ".25 ZCL confirming)"). Grow it to fit what it holds.
+    ui->sendAddressBalance->setMinimumWidth(
+        ui->sendAddressBalance->fontMetrics().horizontalAdvance(balFmt) + 28);
     ui->sendAddressBalanceUSD->setText(Settings::getUSDFormat(spendable));
     recomputeMaxIfChecked();   // from-address changed -> its balance drives the "Send max" amount
     updateSendPrivacyBadge();  // from-address private/public-ness feeds the verdict
@@ -733,7 +739,7 @@ Tx MainWindow::createTxFromSendPage() {
             QMessageBox::warning(this, tr("Shield your mined funds first"),
                 tr("Part of this address's balance is newly mined (coinbase) coins, which "
                    "can only be moved by shielding the whole balance to a private address "
-                   "first.\n\nUse \"Shield my public funds\" to move them privately, then "
+                   "first.\n\nUse \"Shield my funds\" on the Home page to move them privately, then "
                    "send again."),
                 QMessageBox::Ok);
             return Tx();   // invalid: empty fromAddr -> sendButton aborts the send
@@ -938,7 +944,7 @@ bool MainWindow::verifyAutoShieldUnchanged(const Tx& tx) {
         QMessageBox::warning(this, tr("Shield your mined funds first"),
             tr("Part of this address's balance is newly mined (coinbase) coins, which can "
                "only be moved by shielding the whole balance to a private address first. For "
-               "your privacy the transaction was NOT sent.\n\nUse \"Shield my public funds\" "
+               "your privacy the transaction was NOT sent.\n\nUse \"Shield my funds\" on the Home page "
                "to move them privately, then send again."),
             QMessageBox::Ok);
         return false;
@@ -1023,6 +1029,23 @@ QString MainWindow::createSaplingAddressSync() {
             return QString();
     }
     return created;
+}
+
+// Size a dialog to the real height of its (word-wrapped) content so no row is clipped.
+// Shared by the confirm dialog; the height is capped to 90% of the screen so a send with
+// many recipients stays on screen rather than growing off it.
+static void fitConfirmDialogToContent(QDialog* d) {
+    QLayout* lay = d->layout();
+    if (!lay)
+        return;
+    lay->activate();
+    const int w = qMax(d->sizeHint().width(), 520);
+    int h = lay->hasHeightForWidth() ? lay->totalHeightForWidth(w) : d->sizeHint().height();
+    h = qMax(h, lay->totalMinimumSize().height());
+    if (QScreen* sc = QGuiApplication::primaryScreen())
+        h = qMin(h, int(sc->availableGeometry().height() * 0.9));
+    d->setMinimumSize(w, h);
+    d->resize(w, h);
 }
 
 bool MainWindow::confirmTx(Tx tx) {
@@ -1256,6 +1279,13 @@ bool MainWindow::confirmTx(Tx tx) {
         Settings::getZCLUSDDisplayFormat(rpc->getAllBalances()->value(tx.fromAddr) - totalSpending);
     confirm.sendFrom->setToolTip(tooltip);
 
+    // UX: the rows (recipient, change, fee) and the stacked warning labels are added
+    // after setupUi(), and word-wrapped labels report a height that depends on the
+    // width. Without this the dialog opened at the .ui's 429x371 design size and the
+    // layout squeezed the amount/fee rows to half height, so the user could not read
+    // what they were about to confirm. Size the dialog to its real content first.
+    fitConfirmDialogToContent(&d);
+
     // Show the dialog and submit it if the user confirms
     if (d.exec() == QDialog::Accepted) {
         // PRIV-12 — a z->t DE-SHIELD send requires an explicit, non-default-accept
@@ -1296,8 +1326,33 @@ void MainWindow::sendButton() {
     // change could not be shielded (privacy fail-closed), or there are not enough
     // confirmed funds. Bail silently here so we don't stack a second, vaguer
     // "From Address is Invalid" error on top of the precise one already shown.
-    if (tx.fromAddr.isEmpty())
+    if (tx.fromAddr.isEmpty()) {
+        // ...except when NO message was shown because there is simply no "Pay from"
+        // address to send from (the node is still starting, or the wallet has no
+        // addresses loaded yet). That used to leave "Review and send" doing nothing at
+        // all. createTxFromSendPage() only aborts with a message of its own when the
+        // combo had an address, so an empty combo is the one silent case.
+        if (ui->inputsCombo->currentText().trimmed().isEmpty()) {
+            QMessageBox::information(this, tr("Nothing to send from yet"),
+                tr("There is no \"Pay from\" address available yet. ZClassic is still "
+                   "starting or loading your wallet. Wait until the status bar shows "
+                   "that the wallet is connected and your balance has appeared, then "
+                   "try again."));
+        }
         return;
+    }
+
+    // Report a bad address / amount BEFORE asking about sync state, so the user is
+    // never asked "Send anyway?" for a send that could not have gone out regardless.
+    {
+        const QString firstError = doSendTxValidations(tx);
+        if (!firstError.isEmpty()) {
+            QMessageBox msg(QMessageBox::Critical, tr("Transaction Error"), firstError,
+                            QMessageBox::Ok, this);
+            msg.exec();
+            return;
+        }
+    }
 
     // Still-syncing acknowledgement gate: during sync the balance/UTXO set is
     // incomplete, so a send can silently fail. Make the user explicitly accept
@@ -1356,7 +1411,7 @@ void MainWindow::sendButton() {
         // And send the Tx
         rpc->executeTransaction(tx,
             [=] (QString opid) {
-                ui->statusBar->showMessage(tr("Computing Tx: ") % opid);
+                ui->statusBar->showMessage(tr("Sending... your wallet is building the transaction (private sends can take up to a minute)."));
             },
             [=] (QString, QString txid) {
                 // Keep the long-standing status-bar line so the right-click
@@ -1558,10 +1613,22 @@ void MainWindow::showSendSuccess(QString txid) {
     box->setAttribute(Qt::WA_DeleteOnClose);
     box->setWindowModality(Qt::NonModal);
     box->setIcon(QMessageBox::Information);
-    box->setWindowTitle(tr("Sent! Your ZCL is on its way"));
-    box->setText(tr("Sent! Your ZCL is on its way"));
-    box->setInformativeText(tr("Your transaction was accepted by the network. "
-                               "It will appear in your transactions in a few minutes."));
+    // Say only what is true. Your own node accepting the transaction is not the same as
+    // the network having it: with no peers connected it has not been broadcast yet.
+    if (Settings::getInstance()->getPeers() == 0) {
+        box->setWindowTitle(tr("Transaction created"));
+        box->setText(tr("Transaction created, but not sent to the network yet"));
+        box->setInformativeText(tr("Your node accepted the transaction, but it is not "
+                                   "connected to any peers right now, so nobody else has "
+                                   "seen it. It will be broadcast when the node reconnects "
+                                   "(keep ZClassic open). Your funds are not lost."));
+    } else {
+        box->setWindowTitle(tr("Sent! Your ZCL is on its way"));
+        box->setText(tr("Sent! Your ZCL is on its way"));
+        box->setInformativeText(tr("Your node accepted the transaction and is sharing it "
+                                   "with the network. It will show as confirmed in your "
+                                   "Activity list in a few minutes."));
+    }
     box->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
 
     // One-click Copy txid (clipboard idiom matches addressbook.cpp / mainwindow.cpp),
@@ -1623,7 +1690,10 @@ QString MainWindow::humaneSendError(const QString& raw) {
                   "syncing, then try sending again.");
 
     if (e.contains("wallet is locked") || e.contains("walletpassphrase"))
-        return tr("Your wallet is locked. Unlock it, then try sending again.");
+        return tr("Your wallet is locked (it is encrypted with a passphrase), and this wallet "
+                  "app has no unlock button. Nothing was sent and no funds moved. To send, "
+                  "unlock the node with its walletpassphrase command (for example "
+                  "zclassic-cli walletpassphrase <passphrase> 120), then try sending again.");
 
     if (e.contains("amount out of range") || e.contains("invalid amount") ||
         e.contains("too small") || e.contains("dust"))

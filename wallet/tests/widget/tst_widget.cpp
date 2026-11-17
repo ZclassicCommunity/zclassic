@@ -1028,6 +1028,315 @@ private slots:
     // and a QTimer::singleShot(0) modal-dismisser reads the confirm dialog's
     // publicWarning visibility BEFORE closing the dialog, then injects the
     // answer (reject) so exec() returns without a deadlock.
+    // ---- UX: a button the user pressed must never silently do nothing -----------
+    // With no node connection, "Back up my wallet" used to return without a word.
+    void ux1_backupWithoutConnectionSaysWhy() {
+        MainWindow* w = makeWindow();
+        _infoSeen = 0;
+        armInfoCounter();
+        w->testBackupWallet();
+        ++_modalGen;                       // stop the poller
+        QVERIFY2(_infoSeen >= 1, "Back up my wallet did nothing and said nothing without a connection");
+        settleAndDelete(w);
+    }
+
+    // "Review and send" with no Pay-from address (node still starting) used to do nothing.
+    void ux2_reviewSendWithNoPayFromSaysWhy() {
+        MainWindow* w = makeWindow();
+        _infoSeen = 0;
+        armInfoCounter();
+        w->testSendButton();
+        ++_modalGen;
+        QVERIFY2(_infoSeen >= 1, "Review and send did nothing and said nothing with no Pay-from address");
+        settleAndDelete(w);
+    }
+
+    // The confirm dialog must show every row at full height. With a public send, an
+    // auto-shielded change row, and the syncing + no-peers warnings stacked under it, the
+    // rows used to be squeezed to half height so the amount and fee could not be read.
+    void ux3_confirmDialogRowsAreNotClipped() {
+        MainWindow* w = makeWindow();
+        w->testSeedBalances();
+        Settings::getInstance()->setSyncing(true);
+        Settings::getInstance()->setPeers(0);
+
+        const QString T  = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+        const QString ZS = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        Tx tx; tx.fromAddr = T; tx.fee = 0.0001;
+        ToFields a; a.addr = T;  a.amount = 1.25;   tx.toAddrs.append(a);
+        ToFields b; b.addr = ZS; b.amount = 6.5199; b.txtMemo = QStringLiteral("auto-shield-change"); tx.toAddrs.append(b);
+
+        QString clipped = QStringLiteral("dialog never appeared");
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            QWidget* dlg = QApplication::activeModalWidget();
+            if (!dlg) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+            clipped.clear();
+            const auto labels = dlg->findChildren<QLabel*>();
+            for (QLabel* l : labels) {
+                if (!l->isVisibleTo(dlg) || l->text().isEmpty()) continue;
+                int need = l->hasHeightForWidth() ? l->heightForWidth(l->width()) : l->sizeHint().height();
+                if (l->height() + 1 < need)
+                    clipped += QString("%1 h=%2 need=%3; ").arg(l->objectName()).arg(l->height()).arg(need);
+            }
+            if (auto* qd = qobject_cast<QDialog*>(dlg)) qd->reject();
+        };
+        QTimer::singleShot(0, [&]() { poll(300); });
+        w->testConfirmTx(tx);
+        ++_modalGen;
+        QVERIFY2(clipped.isEmpty(), qPrintable("confirm dialog rows clipped: " + clipped));
+        Settings::getInstance()->setSyncing(false);
+        Settings::getInstance()->setPeers(8);
+        settleAndDelete(w);
+    }
+
+    // The Activity list must give the address column the spare width and keep the type,
+    // date and amount columns readable (they were cut to "Recei...", "2026-11...").
+    void ux4_activityColumnsAreReadable() {
+        MainWindow* w = makeWindow();
+        w->resize(1100, 700);
+        QTableView* t = w->findChild<QTableView*>("transactionsTable");
+        QVERIFY(t);
+        QCOMPARE(int(t->horizontalHeader()->sectionResizeMode(1)), int(QHeaderView::Stretch));
+        QCOMPARE(int(t->horizontalHeader()->sectionResizeMode(0)), int(QHeaderView::ResizeToContents));
+        QCOMPARE(int(t->horizontalHeader()->sectionResizeMode(2)), int(QHeaderView::ResizeToContents));
+        QVERIFY2(!t->verticalHeader()->isVisible(), "row-number gutter should be hidden");
+        QTableView* b = w->findChild<QTableView*>("balancesTable");
+        QVERIFY(b);
+        QCOMPARE(int(b->horizontalHeader()->sectionResizeMode(0)), int(QHeaderView::Stretch));   // address gets the room
+        QCOMPARE(int(b->horizontalHeader()->sectionResizeMode(1)), int(QHeaderView::ResizeToContents));
+        settleAndDelete(w);
+    }
+
+    // The first time the window is closed to the tray, the user is told in a dialog that
+    // the node keeps running and can quit instead. (A tray balloon was easy to miss.)
+    void ux5_firstCloseToTrayExplainsAndOffersQuit() {
+        MainWindow* w = makeWindow();
+        for (int pass = 0; pass < 2; ++pass) {
+            const QString want = pass == 0 ? QStringLiteral("Keep running in the tray")
+                                           : QStringLiteral("Quit ZClassic now");
+            QString seenText;
+            const int gen = ++_modalGen;
+            std::function<void(int)> poll = [&](int tries) {
+                if (gen != _modalGen) return;
+                auto* mb = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+                if (!mb) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+                seenText = mb->text() + " " + mb->informativeText();
+                for (QAbstractButton* b : mb->buttons())
+                    if (b->text() == want) { b->click(); return; }
+                mb->reject();
+            };
+            QTimer::singleShot(0, [&]() { poll(300); });
+            const bool keep = w->testAskKeepRunningInTray();
+            ++_modalGen;
+            QVERIFY2(seenText.contains("does not stop"), qPrintable("notice text: " + seenText));
+            QVERIFY2(seenText.contains("File > Exit"), "notice must say how to quit");
+            QCOMPARE(keep, pass == 0);
+        }
+        settleAndDelete(w);
+    }
+
+    // The Options tab explains each setting in a wrapped sentence or two. Inside a fixed
+    // tab page those were squeezed to a line and a half and cut off mid-sentence. Every
+    // explanation must have its full wrapped height (the page scrolls instead).
+    void ux6_settingsOptionsAreNotCutOff() {
+        MainWindow* w = makeWindow();
+        QAction* act = w->findChild<QAction*>("actionSettings");
+        QVERIFY(act);
+        QString cut = QStringLiteral("settings dialog never appeared");
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            QWidget* dlg = QApplication::activeModalWidget();
+            if (!dlg || dlg->objectName() != "Settings") {
+                if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); });
+                return;
+            }
+            cut.clear();
+            for (int page = 1; page <= 2; ++page) {
+                auto* tabs = dlg->findChild<QTabWidget*>("tabWidget");
+                tabs->setCurrentIndex(page);
+                QApplication::processEvents();
+                QWidget* pw = tabs->currentWidget();
+                if (auto* sa = qobject_cast<QScrollArea*>(pw)) pw = sa->widget();
+                for (QLabel* l : pw->findChildren<QLabel*>()) {
+                    if (!l->wordWrap() || l->text().isEmpty()) continue;
+                    const int need = l->heightForWidth(l->width());
+                    if (l->height() + 1 < need)
+                        cut += QString("page%1 %2 h=%3 need=%4; ").arg(page).arg(l->objectName()).arg(l->height()).arg(need);
+                }
+            }
+            static_cast<QDialog*>(dlg)->reject();
+        };
+        QTimer::singleShot(0, [&]() { poll(300); });
+        act->trigger();
+        ++_modalGen;
+        QVERIFY2(cut.isEmpty(), qPrintable("settings text cut off: " + cut));
+        settleAndDelete(w);
+    }
+
+    // Double-clicking an Activity row with no memo used to do nothing. It must answer.
+    void ux7_doubleClickActivityRowShowsDetails() {
+        MainWindow* w = makeWindow();
+        auto* model = const_cast<TxTableModel*>(w->getRPC()->getTransactionsModel());
+        QList<TransactionItem> rows;
+        rows.append(TransactionItem{"send", 1700000000, "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi",
+                                    "deadbeef0123", -1.0, 0, "", ""});
+        model->addTData(rows);
+        QTableView* t = w->findChild<QTableView*>("transactionsTable");
+        QVERIFY(t);
+        QString seen = QStringLiteral("no details box appeared");
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            auto* mb = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            if (!mb || mb->objectName() != "txDetailsBox") {
+                if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); });
+                return;
+            }
+            seen = mb->text() + " | " + mb->informativeText();
+            mb->done(0);
+        };
+        QTimer::singleShot(0, [&]() { poll(300); });
+        emit t->doubleClicked(model->index(0, 0));
+        ++_modalGen;
+        QVERIFY2(seen.contains("deadbeef0123") && seen.contains("Sent"), qPrintable(seen));
+        QVERIFY2(seen.contains("Waiting for its first confirmation"), qPrintable(seen));
+        settleAndDelete(w);
+    }
+
+    // With the node gone the wallet cannot know the balance. The Home hero painted
+    // "0 ZCL" and "receive ZCL to get started", which reads as "my funds are gone".
+    void ux8_noConnectionDoesNotShowZeroBalance() {
+        MainWindow* w = makeWindow();
+        w->getRPC()->noConnection(false);
+        QVERIFY2(w->testHeroText() != QStringLiteral("0 ZCL") && !w->testHeroText().startsWith("0"),
+                 qPrintable("hero shows " + w->testHeroText()));
+        QVERIFY2(!w->testHeroHelperVisible(), "the 'receive ZCL to get started' helper must not show without a connection");
+        QVERIFY2(w->testHeroQualifier().contains("not affected"), qPrintable(w->testHeroQualifier()));
+        // The debounced soft-disconnect path fires after the full teardown when a node dies;
+        // it repainted the blank labels as "0 ZCL" over the message above.
+        w->getRPC()->noConnection(true);
+        QVERIFY2(!w->testHeroText().startsWith("0"), qPrintable("after soft disconnect hero shows " + w->testHeroText()));
+        QVERIFY2(!w->testHeroHelperVisible(), "helper reappeared after soft disconnect");
+        settleAndDelete(w);
+    }
+
+    // A locked (encrypted) wallet cannot send, and this app has no unlock button. The
+    // message must say nothing moved and how to proceed, not just "Unlock it".
+    void ux9_lockedWalletErrorSaysNothingMovedAndHow() {
+        MainWindow* w = makeWindow();
+        const QString m = w->testHumaneSendError(
+            "Error: Please enter the wallet passphrase with walletpassphrase first.");
+        QVERIFY2(m.contains("Nothing was sent"), qPrintable(m));
+        QVERIFY2(m.contains("walletpassphrase"), qPrintable(m));
+        settleAndDelete(w);
+    }
+
+    // About must show the node's version as well as the wallet's.
+    // The node line is decoded like the daemon's FormatVersion(): beta, rc, release and
+    // post-release builds. (The wallet's own APP_VERSION also reads "2.1.2-beta13", so the
+    // check looks at the "Node (zclassicd):" line only.)
+    void ux10_aboutShowsNodeVersion() {
+        MainWindow* w = makeWindow();
+        QAction* act = w->findChild<QAction*>("actionAbout");
+        QVERIFY(act);
+        const QList<QPair<int, QString>> cases = {
+            {2010212, "Node (zclassicd): v2.1.2-beta13"},
+            {2010226, "Node (zclassicd): v2.1.2-rc2"},
+            {2010250, "Node (zclassicd): v2.1.2"},
+            {2010251, "Node (zclassicd): v2.1.2-1"},
+        };
+        for (const auto& c : cases) {
+            Settings::getInstance()->setZClassicdVersion(c.first);
+            QString seen = QStringLiteral("about dialog never appeared");
+            QString body;
+            const int gen = ++_modalGen;
+            std::function<void(int)> poll = [&](int tries) {
+                if (gen != _modalGen) return;
+                QWidget* dlg = QApplication::activeModalWidget();
+                QLabel* l = dlg ? dlg->findChild<QLabel*>("versionLabel") : nullptr;
+                if (!l) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+                seen = l->text();
+                if (QLabel* b = dlg->findChild<QLabel*>("label")) body = b->text();
+                static_cast<QDialog*>(dlg)->reject();
+            };
+            QTimer::singleShot(0, [&]() { poll(300); });
+            act->trigger();
+            ++_modalGen;
+            const QString nodeLine = seen.section(QChar('\n'), 1, 1);
+            QVERIFY2(nodeLine == c.second, qPrintable(QString("%1 -> '%2'").arg(c.first).arg(nodeLine)));
+            // Links must not keep the dark-blue colour that is unreadable on the dark theme.
+            QVERIFY2(body.contains("href") && !body.contains("#0000ff"), "About links are still dark blue");
+        }
+        settleAndDelete(w);
+    }
+
+    // Quitting stops only a node the wallet started. Connected to an external node (no
+    // embedded process), neither the Exit item nor the first-close notice may say quitting
+    // stops "the node".
+    void ux13_externalNodeQuitWordingIsHonest() {
+        MainWindow* w = makeWindow();
+        QVERIFY(!w->getRPC()->isEmbedded());
+        QMenu* file = w->findChild<QMenu*>("menuFile");
+        QAction* exitAct = w->findChild<QAction*>("actionExit");
+        QVERIFY(file && exitAct);
+        emit file->aboutToShow();
+        QVERIFY2(!exitAct->text().contains("stops the node"), qPrintable(exitAct->text()));
+        QString seenText;
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            auto* mb = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            if (!mb) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+            seenText = mb->informativeText();
+            mb->reject();
+        };
+        QTimer::singleShot(0, [&]() { poll(300); });
+        w->testAskKeepRunningInTray();
+        ++_modalGen;
+        QVERIFY2(!seenText.contains("stop the node"), qPrintable(seenText));
+        QVERIFY2(seenText.contains("leaves that node running"), qPrintable(seenText));
+        settleAndDelete(w);
+    }
+
+    // After the node is restarted it writes a new auth cookie. The wallet must pick it up,
+    // otherwise every poll is rejected (401) and it stays on "No Connection" with the node up.
+    void ux11_restartedNodeCookieIsFollowed() {
+        MainWindow* w = makeWindow();
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        auto cfg = std::make_shared<ConnectionConfig>();
+        cfg->zclassicDir = dir.path();
+        cfg->rpcuser = "__cookie__";
+        cfg->rpcpassword = "OLD";
+        cfg->cookieAuth = true;
+        auto* req = new QNetworkRequest();
+        req->setRawHeader("Authorization", "Basic old");
+        auto* c = new Connection(w, new QNetworkAccessManager(w), req, cfg);
+        w->getRPC()->testSetConnection(c);
+
+        QFile f(dir.filePath(".cookie"));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("__cookie__:NEWSECRET");
+        f.close();
+        QVERIFY(w->getRPC()->testRefreshAuthFromCookie());
+        QCOMPARE(cfg->rpcpassword, QStringLiteral("NEWSECRET"));
+        QCOMPARE(req->rawHeader("Authorization"), QByteArray("Basic ") + QByteArray("__cookie__:NEWSECRET").toBase64());
+        QVERIFY2(!w->getRPC()->testRefreshAuthFromCookie(), "an unchanged cookie must not report a change");
+        settleAndDelete(w);
+    }
+
+    // After the node is lost the tables are emptied; the next successful poll must repopulate
+    // them even if the chain tip has not moved (refresh only reloads when the height changes).
+    void ux12_teardownForcesNextRefresh() {
+        MainWindow* w = makeWindow();
+        w->getRPC()->noConnection(false);
+        QCOMPARE(w->getRPC()->testLastRefreshedBlock(), -1);
+        settleAndDelete(w);
+    }
+
     void e2_publicWarningVisibleForTransparentRecipient() {
         MainWindow* w = makeWindow();
 

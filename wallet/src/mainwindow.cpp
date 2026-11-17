@@ -41,6 +41,45 @@
 
 using json = nlohmann::json;
 
+// Activity list columns. Left to Qt's 100px defaults the Type, Address and Date columns
+// were cut to "Recei...", a bare badge and "2026-11..." while the Amount column ate the
+// rest of the width. Type, date and amount size to their content and the address column
+// takes the remaining room, so a transaction can be read at a glance. Applied after the
+// saved header state is restored so an older, squeezed layout cannot come back.
+void applyActivityColumnLayout(QTableView* table) {
+    QHeaderView* h = table->horizontalHeader();
+    if (h->count() < 4)
+        return;
+    h->setStretchLastSection(false);
+    h->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    h->setSectionResizeMode(1, QHeaderView::Stretch);
+    h->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    h->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    table->verticalHeader()->setVisible(false);
+}
+
+// Address Balances (Home): the address column was left at its 100px default, which showed
+// only the PUBLIC/Private pill and none of the address. The address takes the spare width.
+void applyBalanceColumnLayout(QTableView* table) {
+    QHeaderView* h = table->horizontalHeader();
+    if (h->count() < 2)
+        return;
+    h->setStretchLastSection(false);
+    h->setSectionResizeMode(0, QHeaderView::Stretch);
+    h->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    table->verticalHeader()->setVisible(false);
+}
+
+// A button the user pressed must never do nothing. When the node is not connected yet,
+// say so and say what to do, instead of silently returning.
+static void tellNotConnected(QWidget* parent, const QString& what) {
+    QMessageBox::information(parent, QObject::tr("Not connected yet"),
+        QObject::tr("%1 needs the ZClassic node, and the wallet is not connected to it "
+                    "yet. If the status bar says it is starting, wait until it shows "
+                    "that the wallet is connected, then try again. If it says there is "
+                    "a problem, use the \"Try again\" button on the Home page.").arg(what));
+}
+
 MainWindow::MainWindow(QWidget *parent) :
     QMainWindow(parent),
     ui(new Ui::MainWindow)
@@ -67,6 +106,12 @@ MainWindow::MainWindow(QWidget *parent) :
     // mode File -> Exit really quits and cleanly stops the node, rather than
     // just hiding the window to the tray.
     QObject::connect(ui->actionExit, &QAction::triggered, this, &MainWindow::quitApp);
+    // Exit stops only a node this wallet started (shutdownZClassicd() leaves an external
+    // node running), so say "(stops the node)" only when that is true.
+    QObject::connect(ui->menuFile, &QMenu::aboutToShow, this, [=]() {
+        ui->actionExit->setText(rpc && rpc->isEmbedded() ? tr("E&xit ZClassic (stops the node)")
+                                                         : tr("E&xit ZClassic"));
+    });
 
     // Set up check for updates action
     QObject::connect(ui->actionCheck_for_Updates, &QAction::triggered, [=] () {
@@ -106,7 +151,28 @@ MainWindow::MainWindow(QWidget *parent) :
         Settings::saveRestore(&aboutDialog);
 
         QString version    = QString("Version ") % QString(APP_VERSION) % " (" % QString(__DATE__) % ")";
-        about.versionLabel->setText(version);
+        // Say which node this wallet is talking to as well: a user reporting a problem needs
+        // both versions, and the wallet and its node can differ (e.g. an external node).
+        const int nv = Settings::getInstance()->getZClassicdVersion();
+        // Decode exactly as the daemon's FormatVersion() (src/clientversion.cpp): build
+        // 0-24 is betaN+1, 25-49 rcN-24, 50 a release, above 50 a post-release "-N".
+        QString nodeVer;
+        if (nv > 0) {
+            const int b = nv % 100;
+            nodeVer = QString("v%1.%2.%3").arg(nv / 1000000).arg(nv / 10000 % 100).arg(nv / 100 % 100);
+            if (b < 25)       nodeVer += QString("-beta%1").arg(b + 1);
+            else if (b < 50)  nodeVer += QString("-rc%1").arg(b - 24);
+            else if (b > 50)  nodeVer += QString("-%1").arg(b - 50);
+        }
+        const QString node = nv > 0
+            ? QObject::tr("Node (zclassicd): %1").arg(nodeVer)
+            : QObject::tr("Node (zclassicd): not connected yet");
+        about.versionLabel->setText(version + QChar('\n') + node);
+        // The links are dark blue, unreadable on the dark theme. The colour is written into
+        // about.ui's rich text (color:#0000ff), so a palette change cannot reach it; recolour
+        // the text itself.
+        about.label->setText(about.label->text().replace(QStringLiteral("color:#0000ff;"),
+                                                         QStringLiteral("color:#6cb2ff;")));
 
         aboutDialog.exec();
     });
@@ -208,7 +274,9 @@ void MainWindow::restoreSavedStates() {
     restoreGeometry(s.value("geometry").toByteArray());
 
     ui->balancesTable->horizontalHeader()->restoreState(s.value("baltablegeometry").toByteArray());
+    applyBalanceColumnLayout(ui->balancesTable);
     ui->transactionsTable->horizontalHeader()->restoreState(s.value("tratablegeometry").toByteArray());
+    applyActivityColumnLayout(ui->transactionsTable);
 
     // Paint the last-known balances immediately so the first ~1-minute node
     // warmup shows a usable view instead of a blank "0.00". The live RPC
@@ -269,24 +337,25 @@ void MainWindow::closeEvent(QCloseEvent* event) {
             && Settings::getInstance()->getKeepInTray()
             && trayIcon != nullptr
             && QSystemTrayIcon::isSystemTrayAvailable()) {
-        hide();
         if (event)
             event->ignore();
 
-        // Show the "still running in the tray" hint AT MOST ONCE, EVER (persisted
-        // across launches), so the very first close quietly teaches where the window
-        // went and we NEVER nag again. trayHintShown also guards within-session
-        // repeats. A joyful wallet does not pop a notification you have to dismiss
-        // every time you close it.
+        // The FIRST time the window is closed, say plainly -- in a dialog that stays until
+        // read -- that this does not stop the node, and offer to quit now. A tray balloon
+        // (the previous hint) is easy to miss and is suppressed by Focus Assist / Do Not
+        // Disturb, so a user could close the window believing the wallet had quit while the
+        // node kept running. Shown at most once, ever (persisted); after that, closing
+        // quietly hides to the tray as before.
         if (!trayHintShown && !s.value("tray/hintShown", false).toBool()) {
             trayHintShown = true;
             s.setValue("tray/hintShown", true);
             s.sync();
-            trayIcon->showMessage(tr("Still here — opens instantly next time"),
-                tr("ZClassic stays ready in the tray, so it opens instantly. "
-                   "Use File ▸ Exit (or right-click the tray icon) to quit completely."),
-                QSystemTrayIcon::Information, 4000);
+            if (!askKeepRunningInTray()) {
+                quitApp();      // user chose to stop the node now
+                return;
+            }
         }
+        hide();
         return;
     }
 
@@ -307,6 +376,37 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     // window's X button, File->Exit, the reindex/rescan close, and every
     // quitApp()-driven path still quit cleanly with the flag permanently false.
     qApp->quit();
+}
+
+bool MainWindow::askKeepRunningInTray() {
+    QMessageBox box(QMessageBox::Information, tr("ZClassic keeps running in the tray"),
+        tr("Closing this window does not stop ZClassic."),
+        QMessageBox::NoButton, this);
+    box.setObjectName("trayFirstCloseNotice");
+    // Only a node this wallet started is stopped by quitting (shutdownZClassicd() leaves an
+    // external node alone), so only then may the notice talk about stopping "the node".
+    if (rpc && rpc->isEmbedded()) {
+        box.setInformativeText(tr(
+            "Your node stays running in the system tray (notification area) so it stays in "
+            "sync and opens instantly next time. Click the tray icon to bring the window back.\n\n"
+            "To stop the node completely, choose File > Exit, or right-click the tray icon and "
+            "choose \"Quit ZClassic\". You can turn this behaviour off in Edit > Settings > Options.\n\n"
+            "You will only see this message once."));
+    } else {
+        box.setInformativeText(tr(
+            "The wallet stays running in the system tray (notification area) so it opens "
+            "instantly next time. Click the tray icon to bring the window back.\n\n"
+            "To quit the wallet, choose File > Exit, or right-click the tray icon and choose "
+            "\"Quit ZClassic\". This wallet is connected to a node it did not start, so quitting "
+            "leaves that node running. You can turn this behaviour off in Edit > Settings > Options.\n\n"
+            "You will only see this message once."));
+    }
+    QPushButton* keep = box.addButton(tr("Keep running in the tray"), QMessageBox::AcceptRole);
+    box.addButton(tr("Quit ZClassic now"), QMessageBox::DestructiveRole);
+    box.setDefaultButton(keep);
+    box.setEscapeButton(keep);
+    box.exec();
+    return box.clickedButton() == keep;
 }
 
 void MainWindow::showFromTray() {
@@ -333,8 +433,13 @@ void MainWindow::setupTrayIcon() {
     auto showAction = trayMenu->addAction(tr("Show ZclWallet"));
     QObject::connect(showAction, &QAction::triggered, this, &MainWindow::showFromTray);
     trayMenu->addSeparator();
-    auto quitAction = trayMenu->addAction(tr("Quit"));
+    auto quitAction = trayMenu->addAction(tr("Quit ZClassic"));
     QObject::connect(quitAction, &QAction::triggered, this, &MainWindow::quitApp);
+    // "(stops the node)" is true only for a node this wallet started; decide when shown.
+    QObject::connect(trayMenu, &QMenu::aboutToShow, this, [=]() {
+        quitAction->setText(rpc && rpc->isEmbedded() ? tr("Quit ZClassic (stops the node)")
+                                                     : tr("Quit ZClassic"));
+    });
     trayIcon->setContextMenu(trayMenu);
 
     // A left-click / double-click on the tray icon brings the window back.
@@ -1022,6 +1127,19 @@ void MainWindow::updateHomeFixIt(double transparent, bool fromCache) {
     const QString balTotTxt = ui->balTotal->text().trimmed();
     const bool    haveNumber = !balZText.trimmed().isEmpty();
 
+    // No number at all: the balance is unknown, not zero. After a node dies the connection
+    // object still exists, so "no connection" cannot be tested here; blank labels are the
+    // signal (rpc.cpp clears them on teardown and fills them on every live refresh, even with
+    // "0 ZCL"). Without this the soft-disconnect path repainted "0 ZCL" and the empty-wallet
+    // helper over showHeroUnavailable().
+    if (!haveNumber) {
+        showHeroUnavailable();
+        if (homeFixItCard)
+            homeFixItCard->setVisible(false);
+        emit heroBalancesPainted();
+        return;
+    }
+
     // haveNumber is REQUIRED for the synced edge: noConnection() (rpc.cpp:663) calls
     // this with the default fromCache=false and does NOT raise the syncing flag (its
     // single writer is the live status poll), but it FIRST blanks balSheilded to "".
@@ -1106,6 +1224,29 @@ void MainWindow::updateHomeFixIt(double transparent, bool fromCache) {
     // the hero is updated) on EVERY balance update so the perf22 harness can time the
     // onNotifyPush -> painted latency. No-op in the shipped app (no listeners).
     emit heroBalancesPainted();
+}
+
+void MainWindow::showHeroUnavailable() {
+    // With no node connection the wallet cannot know the balance. The full-teardown path
+    // used to paint "0 ZCL", "Total: 0 ZCL" and "Your private balance - receive ZCL to get
+    // started", which to someone who had just seen 600 ZCL reads as funds lost. Say what
+    // is true: unknown, and nothing has happened to the funds.
+    heroPrivateFull = QStringLiteral("—");
+    heroTotalFull   = tr("Balance unavailable until the node is connected");
+    relayoutHero();
+    if (homeHeroQualifier) {
+        // Also shown on a first start before the node has answered, so say "is connected",
+        // not "reconnects".
+        homeHeroQualifier->setText(tr("Your funds are not affected. The balance is shown once the wallet is connected to its node."));
+        homeHeroQualifier->setVisible(true);
+    }
+    if (homeHeroHelper)
+        homeHeroHelper->setVisible(false);
+    if (homeHeroPrivate) {
+        homeHeroPrivate->setProperty("heroconfident", false);
+        homeHeroPrivate->style()->unpolish(homeHeroPrivate);
+        homeHeroPrivate->style()->polish(homeHeroPrivate);
+    }
 }
 
 // PRIV-18 — the REAL "Shield public funds" action behind the Home fix-it button.
@@ -1888,6 +2029,27 @@ void MainWindow::setupSettingsModal() {
         Ui_Settings settings;
         settings.setupUi(&settingsDialog);
         Settings::saveRestore(&settingsDialog);
+        // The Options tab holds a dozen wrapped explanations; below this size they are
+        // cut off mid-sentence. This floor also overrides a small size remembered from
+        // an older release by saveRestore().
+        settingsDialog.setMinimumSize(620, 600);
+        if (settingsDialog.width() < 620 || settingsDialog.height() < 600)
+            settingsDialog.resize(qMax(settingsDialog.width(), 620), qMax(settingsDialog.height(), 600));
+        // Put the Options and Troubleshooting pages in scroll areas. A tab page cannot ask
+        // its dialog for more height, so on a small screen the wrapped explanations were
+        // squeezed to a line and a half and cut off mid-sentence; in a scroll area every
+        // sentence is shown in full and the page scrolls instead.
+        for (int pageIdx = 1; pageIdx <= 2; ++pageIdx) {
+            QWidget* page = settings.tabWidget->widget(pageIdx);
+            const QString title = settings.tabWidget->tabText(pageIdx);
+            auto* area = new QScrollArea(settings.tabWidget);
+            area->setFrameShape(QFrame::NoFrame);
+            area->setWidgetResizable(true);
+            area->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            settings.tabWidget->removeTab(pageIdx);
+            area->setWidget(page);
+            settings.tabWidget->insertTab(pageIdx, area, title);
+        }
 
         // Setup save sent check box
         QObject::connect(settings.chkSaveTxs, &QCheckBox::stateChanged, [=](auto checked) {
@@ -1995,8 +2157,23 @@ void MainWindow::setupSettingsModal() {
         settings.rpcuser->setText(conf.rpcuser);
         settings.rpcpassword->setText(conf.rpcpassword);
 
-        // Connection tab by default
+        // Connection tab by default -- unless the wallet runs its own built-in node. Then
+        // the connection fields are blank (cookie auth, nothing to type) and meaningless,
+        // so lead with the Options tab, which is what people open Settings for, and say
+        // plainly why the connection tab is empty.
         settings.tabWidget->setCurrentIndex(0);
+        if (rpc->isEmbedded()) {
+            settings.confMsg->setText(tr(
+                "This wallet runs its own built-in ZClassic node and connects to it "
+                "automatically, so there is nothing to fill in on this tab.\n"
+                "Node settings file: %1").arg(QDir::toNativeSeparators(zclassicConfLocation)));
+            settings.confMsg->setWordWrap(true);
+            settings.hostname->setEnabled(false);
+            settings.port->setEnabled(false);
+            settings.rpcuser->setEnabled(false);
+            settings.rpcpassword->setEnabled(false);
+            settings.tabWidget->setCurrentIndex(1);
+        }
 
         // Enable the troubleshooting options only if using embedded zclassicd
         if (!rpc->isEmbedded()) {
@@ -2124,6 +2301,11 @@ void MainWindow::doImport(QSharedPointer<QList<QString>> keys) {
     if (rpc->getConnection() == nullptr) {
         // No connection, just return (keys is freed when the last reference drops).
         showImportProgress(false);   // don't strand the card on a dropped connection
+        // Tell the user their keys were NOT imported rather than letting them assume so.
+        QMessageBox::warning(this, tr("Keys were not imported"),
+            tr("The connection to the ZClassic node was lost, so your keys were not "
+               "imported. Nothing was changed. Wait until the wallet is connected again "
+               "and import them again."));
         return;
     }
 
@@ -2478,8 +2660,10 @@ QString MainWindow::fnDefaultBackupDir() {
 // + prompt) and show the one warm closure. KEY-1: the secret is only ever copied to
 // the local file the user confirms — never networked or logged.
 void MainWindow::backupWallet() {
-    if (!rpc || !rpc->getConnection())
+    if (!rpc || !rpc->getConnection()) {
+        tellNotConnected(this, tr("Backing up your wallet"));
         return;
+    }
 
     QDir zclassicdir(rpc->getConnection()->config->zclassicDir);
     QString namePrefix = "zclassic-wallet-backup-";
@@ -3031,6 +3215,31 @@ void MainWindow::setupTransactionsTab() {
             QMessageBox mb(QMessageBox::Information, tr("Memo"), memo, QMessageBox::Ok, this);
             mb.setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
             mb.exec();
+            return;
+        }
+
+        // No memo: double-clicking a row used to do nothing at all. Show the transaction's
+        // details instead (the same facts the right-click menu copies), so the gesture
+        // always answers.
+        const qint64 conf = txModel->getConfirmations(index.row());
+        const QString txid = txModel->getTxId(index.row());
+        QMessageBox mb(QMessageBox::Information, tr("Transaction details"),
+            tr("%1: %2 ZCL").arg(txModel->data(txModel->index(index.row(), 0), Qt::DisplayRole).toString(),
+                                                    txModel->getAmt(index.row())), QMessageBox::NoButton, this);
+        mb.setObjectName("txDetailsBox");
+        mb.setInformativeText(
+            (conf <= 0 ? tr("Waiting for its first confirmation.")
+                       : tr("%n confirmation(s).", "", int(conf))) + "\n\n" +
+            tr("Date: %1").arg(QDateTime::fromSecsSinceEpoch(txModel->getDate(index.row())).toString()) + "\n" +
+            tr("Address: %1").arg(txModel->getAddr(index.row()).isEmpty() ? tr("(shielded)") : txModel->getAddr(index.row())) + "\n" +
+            tr("Transaction id: %1").arg(txid));
+        mb.setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+        QPushButton* copy = mb.addButton(tr("Copy txid"), QMessageBox::ActionRole);
+        mb.addButton(tr("Close"), QMessageBox::AcceptRole);
+        mb.exec();
+        if (mb.clickedButton() == copy) {
+            QGuiApplication::clipboard()->setText(txid);
+            ui->statusBar->showMessage(tr("Copied to clipboard"), 3 * 1000);
         }
     });
 
@@ -3243,8 +3452,10 @@ void MainWindow::setupRecieveTab() {
 
     // Explicitly get new address button.
     QObject::connect(ui->btnRecieveNewAddr, &QPushButton::clicked, [=] () {
-        if (!rpc->getConnection())
+        if (!rpc->getConnection()) {
+            tellNotConnected(this, tr("Creating a new address"));
             return;
+        }
 
         // New-address creation is shielded Sapling or transparent only. Creating NEW
         // legacy Sprout addresses is removed (Sprout is deprecated); rdioZAddr remains
