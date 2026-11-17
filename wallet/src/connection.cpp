@@ -453,6 +453,8 @@ void ConnectionLoader::createZClassicConf() {
     QPixmap logo(":/img/res/zclassicdlogo.gif");
     ui.lblTopIcon->setBasePixmap(logo.scaled(256, 256, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     ui.btnPickDir->setEnabled(false);
+    // Profile override: the node datadir is fixed inside the profile.
+    if (ProfilePaths::active()) ui.chkCustomDatadir->setEnabled(false);
 
     ui.grpAdvanced->setVisible(false);
     QObject::connect(ui.btnAdvancedConfig, &QPushButton::toggled, [=](bool isVisible) {
@@ -2957,6 +2959,14 @@ std::shared_ptr<ConnectionConfig> ConnectionLoader::autoDetectZClassicConf() {
     zclassicconf->zclassicDaemon = repairConfigBool(repairConfig.values.value("daemon", "0"));
     zclassicconf->repairConfigError = repairConfig.error;
     zclassicconf->dataDirOverride = repairConfig.values.value("datadir");
+    if (ProfilePaths::active() && !zclassicconf->dataDirOverride.isEmpty()) {
+        // Profile override: the embedded daemon is pinned with -datadir=<profile>/ZClassic,
+        // which beats a conf datadir= line. Never let that line steer the wallet's cookie
+        // path, repair location or wallet.dat backup outside the profile.
+        main->logger->write("Profile override: ignoring zclassic.conf datadir= (node datadir is " +
+                            ProfilePaths::zclassicDataDir() + ")");
+        zclassicconf->dataDirOverride.clear();
+    }
     zclassicconf->testnet = repairConfigBool(repairConfig.values.value("testnet", "0"));
     zclassicconf->regtest = repairConfigBool(repairConfig.values.value("regtest", "0"));
     zclassicconf->walletFile = repairConfig.values.value("wallet", "wallet.dat");

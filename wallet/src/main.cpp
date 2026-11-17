@@ -491,6 +491,7 @@ int main(int argc, char* argv[])
                 ProfilePaths::dir().toLocal8Bit().constData());
         return 2;
     }
+    ProfilePaths::pin();
 
     // Install the noise filter before anything can log.
     qInstallMessageHandler(zclMessageFilter);

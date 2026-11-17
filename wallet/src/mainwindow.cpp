@@ -1779,8 +1779,8 @@ bool MainWindow::confHasUsableCreds(const QString& confLocation) {
             QString value = (s < 0 ? QString() : line.mid(s + 1)).trimmed();
             if (name == QLatin1String("rpcpassword") && !value.isEmpty())
                 hasRpcPassword = true;   // NEVER log `value`
-            else if (name == QLatin1String("datadir"))
-                dataDirOverride = value;
+            else if (name == QLatin1String("datadir") && !ProfilePaths::active())
+                dataDirOverride = value;   // profile override: the daemon is pinned to the profile
         }
     }
     file.close();

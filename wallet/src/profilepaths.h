@@ -45,10 +45,24 @@ inline QString dir() {
 
 inline bool active() { return !dir().isEmpty(); }
 
-// True when the override is unset or names an existing directory.
+// True when the override is unset or names an existing directory. A variable that is
+// SET but empty/blank (e.g. ZCLWALLET_PROFILE_DIR="$TYPO") is invalid: isolation was
+// requested, so it must never silently fall back to the real profile.
 inline bool valid() {
+    if (!qEnvironmentVariableIsSet(profileEnvName().constData())) return true;
     const QString d = dir();
-    return d.isEmpty() || QFileInfo(d).isDir();
+    return !d.isEmpty() && QFileInfo(d).isDir();
+}
+
+// Rewrite the variable to the canonical absolute path once, at startup, after valid():
+// later resolutions (including child processes started with a different working
+// directory, such as the daemon's -walletnotify connector) and the single-instance key
+// then all see one spelling of the profile, independent of cwd and symlinks.
+inline void pin() {
+    const QString d = dir();
+    if (d.isEmpty()) return;
+    const QString canon = QFileInfo(d).canonicalFilePath();
+    if (!canon.isEmpty()) qputenv(profileEnvName().constData(), canon.toLocal8Bit());
 }
 
 inline QString sub(const QString& name) { return QDir(dir()).filePath(name); }
@@ -141,19 +155,24 @@ inline QString titleMarker() {
 }
 
 // Translate `--profile-dir <dir>` / `--profile-dir=<dir>` into the environment
-// variable. Returns false on a missing value. Called first thing in main().
+// variable. Returns false on a missing or empty/blank value (`--profile-dir=` or
+// `--profile-dir "$UNSET"` must fail closed, never mean "no override"; on Windows
+// qputenv of an empty value would even delete the variable). Called first thing in main().
 inline bool consumeArgs(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         const QByteArray a(argv[i]);
+        QByteArray value;
         if (a == "--profile-dir") {
             if (i + 1 >= argc) return false;
-            qputenv(profileEnvName().constData(), QByteArray(argv[i + 1]));
-            return true;
+            value = QByteArray(argv[i + 1]);
+        } else if (a.startsWith("--profile-dir=")) {
+            value = a.mid(14);
+        } else {
+            continue;
         }
-        if (a.startsWith("--profile-dir=")) {
-            qputenv(profileEnvName().constData(), a.mid(14));
-            return true;
-        }
+        if (value.trimmed().isEmpty()) return false;
+        qputenv(profileEnvName().constData(), value);
+        return true;
     }
     return true;
 }

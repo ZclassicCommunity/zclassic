@@ -888,6 +888,7 @@ private slots:
     void profile_setRedirectsEveryPath();
     void profile_settingsAreIniInsideProfile();
     void profile_noDirectStateLocations();
+    void profile_blankValueFailsClosed();
     void daemonjob_everyLaunchPathUsesTheJob();
     void daemonjob_armedAfterEveryStart();
 
@@ -2038,6 +2039,45 @@ void TestLogic::profile_noDirectStateLocations() {
     const QString conn = readStrippedSrc("connection.cpp");
     QVERIFY2(conn.contains("ProfilePaths::daemonArgs()"), "embedded launch must pin -datadir under a profile");
     QVERIFY2(conn.contains("ProfilePaths::zclassicConfPath()"), "conf lookup must honour the profile");
+    // A conf datadir= line must not steer cookie/repair/backup paths outside the profile.
+    QVERIFY2(conn.contains("zclassicconf->dataDirOverride.clear()"),
+             "profile override must ignore a conf datadir= line");
+}
+
+// Isolation requested but empty/blank must fail closed (exit 2 in main), never mean "use
+// the real profile"; pin() canonicalizes once so cwd changes and symlink aliases agree.
+void TestLogic::profile_blankValueFailsClosed() {
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+    QVERIFY(ProfilePaths::valid());
+    qputenv("ZCLWALLET_PROFILE_DIR", QByteArray(""));
+    if (qEnvironmentVariableIsSet("ZCLWALLET_PROFILE_DIR"))   // empty values are unsettable on Windows
+        QVERIFY2(!ProfilePaths::valid(), "set-but-empty profile dir must be invalid");
+    qputenv("ZCLWALLET_PROFILE_DIR", QByteArray("   "));
+    QVERIFY2(!ProfilePaths::valid(), "blank profile dir must be invalid");
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+
+    auto consume = [](QList<QByteArray> words) {
+        QList<QByteArray> store = words;
+        std::vector<char*> argv;
+        for (auto& w : store) argv.push_back(w.data());
+        return ProfilePaths::consumeArgs(static_cast<int>(argv.size()), argv.data());
+    };
+    QVERIFY(!consume({"zclwallet", "--profile-dir="}));
+    QVERIFY(!consume({"zclwallet", "--profile-dir", ""}));
+    QVERIFY(!consume({"zclwallet", "--profile-dir", " "}));
+    QVERIFY(!consume({"zclwallet", "--profile-dir"}));
+    QVERIFY(!qEnvironmentVariableIsSet("ZCLWALLET_PROFILE_DIR"));
+    QVERIFY(consume({"zclwallet"}));
+    QVERIFY(!qEnvironmentVariableIsSet("ZCLWALLET_PROFILE_DIR"));
+
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    const QString canon = QFileInfo(tmp.path()).canonicalFilePath();
+    QVERIFY(consume({"zclwallet", QByteArray("--profile-dir=") + (tmp.path() + "/.").toLocal8Bit()}));
+    QVERIFY(ProfilePaths::valid());
+    ProfilePaths::pin();
+    QCOMPARE(QString::fromLocal8Bit(qgetenv("ZCLWALLET_PROFILE_DIR")), canon);
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
 }
 
 // Source guard: the embedded daemon is only ever launched through DaemonJob::start(). A bare
