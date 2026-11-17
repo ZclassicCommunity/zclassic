@@ -214,6 +214,7 @@ private slots:
         QCOMPARE(SyncState::formatAge(300), QString("5 min"));
         QCOMPARE(SyncState::formatAge(3 * 3600), QString("3 h"));
         QCOMPARE(SyncState::formatAge(20LL * 86400), QString("20 days"));
+        QCOMPARE(SyncState::formatAge(3641LL * 86400), QString("10.0 years"));
     }
 
     void fastSync_existingWalletSkipsHistoricalReplay() {

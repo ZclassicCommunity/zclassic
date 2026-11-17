@@ -96,6 +96,8 @@ inline QString formatAge(qint64 s) {
     if (s < 90)         return QCoreApplication::translate("SyncState", "%1 s").arg(s);
     if (s < 90 * 60)    return QCoreApplication::translate("SyncState", "%1 min").arg((s + 30) / 60);
     if (s < 36 * 3600)  return QCoreApplication::translate("SyncState", "%1 h").arg((s + 1800) / 3600);
+    if (s >= 400LL * 86400)
+        return QCoreApplication::translate("SyncState", "%1 years").arg(s / (365.25 * 86400), 0, 'f', 1);
     return QCoreApplication::translate("SyncState", "%1 days").arg((s + 43200) / 86400);
 }
 
