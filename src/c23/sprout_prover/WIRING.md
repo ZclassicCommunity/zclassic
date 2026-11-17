@@ -21,13 +21,13 @@ vendor build uses) and `src/c23/sprout_prover`.
 Measured from a link map of `test_sprout_prover` (an archive link, so only
 referenced members are pulled):
 
-    core/modules/sapling/src/{bls12_381,fr,fr_avx512,groth16_prover,
+    core/modules/sapling/src/{bls12_381,fr,fr_avx512,groth16_prover,msm_parallel,
                               circuit_bits,circuit_gadgets,params_vk_embedded}.c
     core/modules/crypto/src/{blake2b,random_secret,simd_dispatch}.c
     platform/modules/base/src/safe_alloc.c
 
-(`sprout.c` is pulled only by the test's verifier call; `msm_parallel.c` only
-by `test_fft_parity`.) All of these are already in the U1/U2 vendor set. The
+(`sprout.c` is pulled only by the test verifier call; `msm_parallel.c` provides
+`fr_fft_many` and `groth16_g1_msm`, which the prover calls.) The
 glue must provide `memory_cleanse`, `GetRandBytes` (abort on failure),
 `zcl_log_level_get` and `zcl_log_emit_at`. `src/c23/glue/zcl_c23_glue.c` does,
 and `test/test_glue.c` does for standalone tests only. Never link `test_glue.c`
@@ -50,7 +50,6 @@ into the daemon.
 | program | needs | gate |
 |---|---|---|
 | `test_sprout_circuit` | nothing | always (about 12 s): 1,989,085 constraints, satisfied, nf/cm/mac KAT, mutations |
-| `test_fft_parity` | nothing | always (about 10 s) |
 | `test_sprout_prover <sprout-groth16.params> [<other .params>]` | params | when `~/.zcash-params/sprout-groth16.params` exists (about 1 min) |
 
 For a standalone build, `sh src/c23/sprout_prover/test/build.sh <out-dir>`

@@ -79,6 +79,8 @@ static unsigned char cm_d[11], cm_pk[32], cm_r[32], cm_o[32];
 static uint64_t cm_v;
 static unsigned char ip_ivk[32], ip_d[11], ip_o[32];
 static unsigned char ka_p[32], ka_s[32], ka_o[32];
+/* sprout_prove: the golden record, as the token vector */
+static KatToks spv_k;
 static unsigned char sp_ak[32], sp_nsk[32], sp_d[11], sp_rcm[32], sp_ar[32], sp_an[32], sp_w[1065];
 static uint64_t sp_v;
 static unsigned char op_esk[32], op_d[11], op_pk[32], op_rcm[32];
@@ -144,6 +146,8 @@ static void load_inputs(void)
     kat_hexn(&k, 4, ka_s, 32);
     kat_hexn(&k, 6, ka_o, 32);
     kat_toks_free(&k);
+
+    find_rec("sprout_prove.golden", 24, "OK", "valid:input_with_path", &spv_k); /* kept for op_sprout_prove */
 
     find_rec("sapling_spend_proof.golden", 2, "valid:0", NULL, &k);
     kat_hexn(&k, 3, sp_ak, 32);
@@ -271,6 +275,34 @@ static void op_ka_agree(void)
     if (!librustzcash_sapling_ka_agree(ka_p, ka_s, o) || memcmp(o, ka_o, 32))
         die_wrong("ka_agree");
 }
+static void op_sprout_prove(void)
+{
+    const KatToks *k = &spv_k;
+    unsigned char pr[192], phi[32], rt[32], hs[32], sk1[32], rho1[32], r1[32], a1[966], sk2[32], rho2[32], r2[32], a2[966];
+    unsigned char pk1[32], or1[32], pk2[32], or2[32], f[6][32];
+    kat_hexn(k, 3, phi, 32);
+    kat_hexn(k, 4, rt, 32);
+    kat_hexn(k, 5, hs, 32);
+    kat_hexn(k, 6, sk1, 32);
+    kat_hexn(k, 8, rho1, 32);
+    kat_hexn(k, 9, r1, 32);
+    kat_hexn(k, 10, a1, 966);
+    kat_hexn(k, 11, sk2, 32);
+    kat_hexn(k, 13, rho2, 32);
+    kat_hexn(k, 14, r2, 32);
+    kat_hexn(k, 15, a2, 966);
+    kat_hexn(k, 16, pk1, 32);
+    kat_hexn(k, 18, or1, 32);
+    kat_hexn(k, 19, pk2, 32);
+    kat_hexn(k, 21, or2, 32);
+    for (int j = 0; j < 6; j++)
+        kat_hexn(k, 26 + j, f[j], 32);
+    librustzcash_sprout_prove(pr, phi, rt, hs, sk1, kat_u64(k, 7), rho1, r1, a1, sk2, kat_u64(k, 12), rho2, r2, a2, pk1,
+                              kat_u64(k, 17), or1, pk2, kat_u64(k, 20), or2, kat_u64(k, 22), kat_u64(k, 23));
+    /* derived order nf1 nf2 mac1 mac2 cm1 cm2; ABI order mac1 mac2 nf1 nf2 cm1 cm2 */
+    if (!librustzcash_sprout_verify(pr, rt, hs, f[2], f[3], f[0], f[1], f[4], f[5], kat_u64(k, 22), kat_u64(k, 23)))
+        die_wrong("sprout_prove");
+}
 static void op_spend_proof(void)
 {
     unsigned char cv[32], rk[32], pr[192];
@@ -299,6 +331,7 @@ static const struct {
     {"check_output", op_check_output, 10}, {"final_check", op_final_check, 20},
     {"sprout_verify", op_sprout_verify, 10}, {"compute_cm", op_compute_cm, 50},
     {"ivk_to_pkd", op_ivk_to_pkd, 50},     {"ka_agree", op_ka_agree, 50},
+    {"sprout_prove", op_sprout_prove, 1},
     {"spend_proof", op_spend_proof, 1},    {"output_proof", op_output_proof, 1},
 };
 

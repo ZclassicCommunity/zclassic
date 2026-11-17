@@ -8,7 +8,6 @@
 # Environment: CC (default cc), OPT (default "-O3"), ARCH (default empty,
 # i.e. the compiler's generic target; e.g. ARCH=-march=native). Produces
 #   <out-dir>/test_sprout_circuit   circuit KAT (no params needed)
-#   <out-dir>/test_fft_parity       sprout_fft == fr_fft
 #   <out-dir>/test_sprout_prover    prove + verify; needs sprout-groth16.params
 set -eu
 
@@ -61,7 +60,7 @@ for f in sprout_circuit sprout_par sprout_prove; do
 done
 $CC $CFLAGS $INC -c "$HERE/test_glue.c" -o "$OUT/obj/test_glue.o"
 
-for t in test_sprout_circuit test_fft_parity test_sprout_prover; do
+for t in test_sprout_circuit test_sprout_prover; do
     $CC $CFLAGS $INC -c "$HERE/$t.c" -o "$OUT/obj/$t.o"
     $CC $CFLAGS -o "$OUT/$t$EXE" "$OUT/obj/$t.o" $OBJ "$OUT/obj/test_glue.o" \
         "$OUT/libz23vendor.a" $SYSLIBS -lm
@@ -80,4 +79,4 @@ $CC $CFLAGS -o "$OUT/test_sprout_crosscheck$EXE" "$OUT/obj/test_sprout_crosschec
     "$OUT/obj/sprout_par.o" "$OUT/obj/test_glue.o" \
     "$OUT/obj/v_groth16_prover_testing.o" "$OUT/libz23vendor.a" $SYSLIBS -lm
 
-echo "built: $OUT/test_sprout_circuit$EXE $OUT/test_fft_parity$EXE $OUT/test_sprout_prover$EXE $OUT/test_sprout_crosscheck$EXE"
+echo "built: $OUT/test_sprout_circuit$EXE $OUT/test_sprout_prover$EXE $OUT/test_sprout_crosscheck$EXE"

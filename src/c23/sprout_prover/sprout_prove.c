@@ -140,7 +140,10 @@ static unsigned sp_thread_count(void)
 {
     if (g_test_threads)
         return g_test_threads > SP_MAX_THREADS ? SP_MAX_THREADS : g_test_threads;
-    return sprout_cpu_count();
+    /* The same budget as the Sapling prover (groth16_prover_set_threads); the
+     * CPUs this process may run on bound it. */
+    unsigned budget = groth16_prover_threads(), cpus = sprout_cpu_count();
+    return budget < cpus ? budget : cpus;
 }
 
 #define sp_parallel_for sprout_parallel_for
@@ -448,14 +451,14 @@ static enum zc23_sprout_status sp_qap_h(struct sp_qap *q, unsigned T)
     fr_inv(&ginv, &g);
     fr_one(&one);
 
+    /* The three vectors share one twiddle table (vendored fr_fft_many). */
     struct fr *v[3] = { q->a, q->b, q->c };
-    for (size_t i = 0; i < 3; i++) {
-        if (!sprout_fft(v[i], q->domain, true, T))
-            return ZC23_SPROUT_OOM;
+    if (!fr_fft_many(v, 3, q->domain, true, T))
+        return ZC23_SPROUT_OOM;
+    for (size_t i = 0; i < 3; i++)
         sprout_distribute_powers(v[i], q->domain, &g, T);
-        if (!sprout_fft(v[i], q->domain, false, T))
-            return ZC23_SPROUT_OOM;
-    }
+    if (!fr_fft_many(v, 3, q->domain, false, T))
+        return ZC23_SPROUT_OOM;
     struct sp_h_ctx hc = { q->a, q->b, q->c, { { 0 } } };
     sp_fr_pow(&hc.zinv, &g, (uint64_t)q->domain);
     fr_sub(&hc.zinv, &hc.zinv, &one);
@@ -463,13 +466,13 @@ static enum zc23_sprout_status sp_qap_h(struct sp_qap *q, unsigned T)
     sp_parallel_for(T, q->domain, sp_h_rows, &hc);
     sp_free_vec(&q->b, q->domain);
     sp_free_vec(&q->c, q->domain);
-    if (!sprout_fft(q->a, q->domain, true, T))
+    if (!fr_fft_many(&q->a, 1, q->domain, true, T))
         return ZC23_SPROUT_OOM;
     sprout_distribute_powers(q->a, q->domain, &ginv, T);
     return ZC23_SPROUT_OK;
 }
 
-/* ── G1 mixed addition and the dense H sum ───────────────────────── */
+/* ── G1 mixed addition ───────────────────────────────────────────── */
 
 /* r = a + (x2, y2), a Jacobian (X/Z^2, Y/Z^3, identity Z = 0), (x2, y2)
  * affine and on the curve (madd-2007-bl). r may alias a. The special cases
@@ -527,164 +530,44 @@ static void sp_g1_madd(struct g1_point *r, const struct g1_point *a,
     r->z = z3;
 }
 
-struct sp_aff {
-    struct fp x, y;
-};
-
-/* Window-parallel Pippenger over affine points: one thread per window, all
- * n points per window, so a window pays n mixed adds + 2^(c+1) bucket adds.
- * Variable-time in the scalars (as bellman's multiexp and the vendored
- * g1_msm); used only for the H query. */
-#define SP_DENSE_C 16u
-
+/* The dense H sum, sum_i sc[i] * P_i over n uncompressed G1 points: the
+ * points are decoded to normalised (z = 1) Jacobian form and handed to the
+ * vendored window-parallel Pippenger groth16_g1_msm (0/1 scalar split,
+ * mixed additions, cost-chosen window). Variable-time in the scalars (as
+ * bellman's multiexp); the H scalars are derived from the witness and the
+ * same property holds for Z23's Sapling prover. */
 struct sp_dense_ctx {
-    const struct sp_aff *pts;
-    const uint8_t *inf;          /* 1 = point at infinity, skip */
-    const uint64_t (*k)[4];      /* canonical scalar limbs */
-    const uint8_t *raw;          /* decode input */
-    const struct fr *sc;
-    struct sp_aff *out_pts;
-    uint8_t *out_inf;
-    uint64_t (*out_k)[4];
-    size_t n;
-    struct g1_point win[32];
+    const uint8_t *raw;
+    struct g1_point *pts;
     int err[SPROUT_MAX_THREADS];
 };
 
 static void sp_dense_decode_rows(void *p, size_t lo, size_t hi, unsigned tid)
 {
     struct sp_dense_ctx *c = p;
-    for (size_t i = lo; i < hi; i++) {
-        struct g1_point q;
-        if (!g1_from_uncompressed(&q, c->raw + i * SP_G1_RAW)) {
+    for (size_t i = lo; i < hi; i++)
+        if (!g1_from_uncompressed(&c->pts[i], c->raw + i * SP_G1_RAW)) {
             c->err[tid] = 1;
             return;
         }
-        c->out_inf[i] = g1_is_identity(&q);
-        c->out_pts[i].x = q.x; /* z = 1 after decode */
-        c->out_pts[i].y = q.y;
-        sp_fr_raw(c->out_k[i], &c->sc[i]);
-    }
 }
 
-static void sp_dense_window_rows(void *p, size_t lo, size_t hi, unsigned tid)
-{
-    struct sp_dense_ctx *c = p;
-    const size_t nb = ((size_t)1 << SP_DENSE_C) - 1;
-    struct g1_point *bk = malloc(nb * sizeof *bk);
-    if (!bk) {
-        c->err[tid] = 2;
-        return;
-    }
-    for (size_t w = lo; w < hi; w++) {
-        for (size_t b = 0; b < nb; b++)
-            g1_identity(&bk[b]);
-        unsigned off = (unsigned)w * SP_DENSE_C;
-        unsigned word = off / 64, bit = off % 64;
-        for (size_t i = 0; i < c->n; i++) {
-            if (c->inf[i])
-                continue;
-            uint64_t d = c->k[i][word] >> bit;
-            if (bit + SP_DENSE_C > 64 && word + 1 < 4)
-                d |= c->k[i][word + 1] << (64 - bit);
-            d &= ((uint64_t)1 << SP_DENSE_C) - 1;
-            if (d)
-                sp_g1_madd(&bk[d - 1], &bk[d - 1], &c->pts[i].x, &c->pts[i].y);
-        }
-        struct g1_point run, sum;
-        g1_identity(&run);
-        g1_identity(&sum);
-        for (size_t b = nb; b > 0; b--) {
-            g1_add(&run, &run, &bk[b - 1]);
-            g1_add(&sum, &sum, &run);
-        }
-        c->win[w] = sum;
-    }
-    free(bk);
-}
-
-#define SP_DENSE_WINDOWS ((255u + SP_DENSE_C - 1u) / SP_DENSE_C)
-
-struct sp_win_arg {
-    struct sp_dense_ctx *c;
-    size_t w;
-};
-
-static void *sp_window_thread(void *p)
-{
-    struct sp_win_arg *a = p;
-    sp_dense_window_rows(a->c, a->w, a->w + 1, (unsigned)a->w);
-    return NULL;
-}
-
-/* sum_i sc[i] * P_i over n uncompressed G1 points in raw[]. */
 static enum zc23_sprout_status sp_msm_g1_dense(const uint8_t *raw,
                                                const struct fr *sc, size_t n,
                                                unsigned T, struct g1_point *out)
 {
-    struct sp_dense_ctx *c = calloc(1, sizeof *c);
-    if (!c)
+    struct sp_dense_ctx c = { .raw = raw };
+    c.pts = malloc((n ? n : 1) * sizeof *c.pts);
+    if (!c.pts)
         return ZC23_SPROUT_OOM;
-    c->n = n;
-    c->raw = raw;
-    c->sc = sc;
-    c->out_pts = malloc(n * sizeof *c->out_pts);
-    c->out_inf = malloc(n ? n : 1);
-    c->out_k = malloc(n * sizeof *c->out_k);
     enum zc23_sprout_status st = ZC23_SPROUT_OK;
-    if (!c->out_pts || !c->out_inf || !c->out_k) {
-        st = ZC23_SPROUT_OOM;
-        goto done;
-    }
-    sp_parallel_for(T, n, sp_dense_decode_rows, c);
+    sp_parallel_for(T, n, sp_dense_decode_rows, &c);
     for (unsigned t = 0; t < SPROUT_MAX_THREADS; t++)
-        if (c->err[t])
+        if (c.err[t])
             st = ZC23_SPROUT_PARAMS_FORMAT;
-    if (st != ZC23_SPROUT_OK)
-        goto done;
-    c->pts = c->out_pts;
-    c->inf = c->out_inf;
-    c->k = (const uint64_t(*)[4])c->out_k;
-    /* One thread per window (16 windows of 16 bits). With T == 1 the
-     * windows run inline, one after another. */
-    size_t windows = (255 + SP_DENSE_C - 1) / SP_DENSE_C;
-    pthread_t th[SP_DENSE_WINDOWS];
-    bool started[SP_DENSE_WINDOWS];
-    struct sp_win_arg wa[SP_DENSE_WINDOWS];
-    for (size_t w = 0; w < windows; w++) {
-        wa[w].c = c;
-        wa[w].w = w;
-        started[w] = w != 0 && T > 1 &&
-                     pthread_create(&th[w], NULL, sp_window_thread, &wa[w]) == 0;
-    }
-    for (size_t w = 0; w < windows; w++)
-        if (!started[w])
-            sp_window_thread(&wa[w]);
-    for (size_t w = 0; w < windows; w++)
-        if (started[w])
-            pthread_join(th[w], NULL);
-    for (unsigned t = 0; t < SPROUT_MAX_THREADS; t++)
-        if (c->err[t])
-            st = ZC23_SPROUT_OOM;
-    if (st != ZC23_SPROUT_OK)
-        goto done;
-    struct g1_point acc;
-    g1_identity(&acc);
-    for (size_t w = windows; w > 0; w--) {
-        for (unsigned d = 0; d < SP_DENSE_C; d++)
-            g1_double(&acc, &acc);
-        g1_add(&acc, &acc, &c->win[w - 1]);
-    }
-    *out = acc;
-done:
-    if (c->out_k) {
-        memory_cleanse(c->out_k, n * sizeof *c->out_k);
-        free(c->out_k);
-    }
-    free(c->out_pts);
-    free(c->out_inf);
-    memory_cleanse(c, sizeof *c);
-    free(c);
+    if (st == ZC23_SPROUT_OK && !groth16_g1_msm(out, c.pts, sc, n, T))
+        st = ZC23_SPROUT_OOM;
+    free(c.pts); /* public proving-key points */
     return st;
 }
 

@@ -46,6 +46,25 @@ static int g_fail = 0;
         }                                                                      \
     } while (0)
 
+/* Threads of this process (Linux only; -1 elsewhere). Every proof must join
+ * its workers, so a count above 1 after a proof is a leak. */
+static int live_threads(void)
+{
+#ifdef __linux__
+    FILE *f = fopen("/proc/self/status", "r");
+    char line[128];
+    int n = -1;
+    while (f && fgets(line, sizeof line, f))
+        if (sscanf(line, "Threads: %d", &n) == 1)
+            break;
+    if (f)
+        fclose(f);
+    return n;
+#else
+    return -1;
+#endif
+}
+
 static double peak_mib(void)
 {
 #ifdef _WIN32
@@ -397,6 +416,11 @@ int main(int argc, char **argv)
         expect_no_proof("wrong params file", s, ZC23_SPROUT_PARAMS_FORMAT, proof);
     }
 
+    {
+        int th = live_threads();
+        printf("threads alive after the proofs: %d\n", th);
+        CHECK(th == -1 || th == 1, "worker threads left running: %d", th);
+    }
     free(vk.ic);
     printf("peak working set %.0f MiB\n", peak_mib());
     printf("%s (%d failures)\n", g_fail ? "FAILED" : "PASSED", g_fail);
