@@ -54,7 +54,7 @@ else
 fi
 
 AC_PROG_CXX
-dnl The C23 crypto core (src/c23) is plain C.
+dnl The C23 crypto core (src/c23) and the wallet token guard (src/c23/services) are plain C.
 AC_PROG_CC
 m4_ifdef([AC_PROG_OBJCXX],[AC_PROG_OBJCXX])
 

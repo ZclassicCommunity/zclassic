@@ -3168,6 +3168,17 @@ CAmount CWalletTx::GetChange() const
     return nChangeCached;
 }
 
+unsigned char CWalletTx::GetTokenOutputRole(unsigned int n) const
+{
+    const uint256& txid = GetHash();
+    if (!fTokenRolesCached || hashTokenRolesCached != txid) {
+        TokenGuardClassify(*this, vTokenRolesCached);
+        hashTokenRolesCached = txid;
+        fTokenRolesCached = true;
+    }
+    return n < vTokenRolesCached.size() ? vTokenRolesCached[n] : TOKEN_ROLE_NONE;
+}
+
 bool CWalletTx::IsTrusted() const
 {
     // Quick answer in most cases
@@ -3531,16 +3542,77 @@ bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, int nConfMine, int
     return true;
 }
 
-bool CWallet::SelectCoins(const CAmount& nTargetValue, set<pair<const CWalletTx*,unsigned int> >& setCoinsRet, CAmount& nValueRet,  bool& fOnlyCoinbaseCoinsRet, bool& fNeedCoinbaseCoinsRet, const CCoinControl* coinControl) const
+/**
+ * Wallet token guard for coin selection: drop every token-bearing output from
+ * vCoins, except one the caller selected explicitly AND asked to be allowed
+ * (CCoinControl::fAllowTokenOutputs). AvailableCoins itself is deliberately
+ * left alone, so listunspent and balances still show the dust.
+ */
+static void FilterTokenBearingCoins(vector<COutput>& vCoins, const CCoinControl* coinControl, CTokenGuardReport* pReport)
 {
+    for (vector<COutput>::iterator it = vCoins.begin(); it != vCoins.end();)
+    {
+        if (!it->tx->IsTokenBearingOutput(it->i)) {
+            ++it;
+            continue;
+        }
+        if (coinControl && coinControl->fAllowTokenOutputs && coinControl->IsSelected(it->tx->GetHash(), it->i)) {
+            ++it;
+            continue;
+        }
+        if (pReport && it->fSpendable)
+            pReport->Exclude(it->tx->vout[it->i].nValue);
+        it = vCoins.erase(it);
+    }
+}
+
+bool CWallet::SelectCoins(const CAmount& nTargetValue, set<pair<const CWalletTx*,unsigned int> >& setCoinsRet, CAmount& nValueRet,  bool& fOnlyCoinbaseCoinsRet, bool& fNeedCoinbaseCoinsRet, const CCoinControl* coinControl, CTokenGuardReport* pTokenGuardReport) const
+{
+    CTokenGuardReport tokenGuardReport;
+    if (pTokenGuardReport)
+        *pTokenGuardReport = tokenGuardReport;
+
+    // Wallet token guard, explicit inputs. Both coin-control paths below put
+    // every selected outpoint into the transaction (the preset path does not
+    // even go through AvailableCoins), so they are checked here, first. A
+    // selected input that carries tokens or a mint baton is refused rather
+    // than silently dropped or silently spent: the caller named it, so the
+    // caller is told, and nothing is selected in its place.
+    if (coinControl && coinControl->HasSelected() && !coinControl->fAllowTokenOutputs)
+    {
+        std::vector<COutPoint> vSelected;
+        coinControl->ListSelected(vSelected);
+        BOOST_FOREACH(const COutPoint& outpoint, vSelected)
+        {
+            map<uint256, CWalletTx>::const_iterator it = mapWallet.find(outpoint.hash);
+            if (it != mapWallet.end() && it->second.IsTokenBearingOutput(outpoint.n))
+            {
+                if (pTokenGuardReport) {
+                    pTokenGuardReport->fRefusedSelected = true;
+                    pTokenGuardReport->refusedOutpoint = outpoint;
+                }
+                return false;
+            }
+        }
+    }
+
     // Output parameter fOnlyCoinbaseCoinsRet is set to true when the only available coins are coinbase utxos.
     vector<COutput> vCoinsNoCoinbase, vCoinsWithCoinbase;
     AvailableCoins(vCoinsNoCoinbase, true, coinControl, false, false);
     AvailableCoins(vCoinsWithCoinbase, true, coinControl, false, true);
+
+    // Wallet token guard, automatic selection: token-bearing outputs are not
+    // candidates. Done before anything below looks at the candidate sets, so
+    // the coinbase hints and the totals describe what can really be spent.
+    bool fProtectCoinbase = Params().GetConsensus().fCoinbaseMustBeProtected;
+    FilterTokenBearingCoins(vCoinsNoCoinbase, coinControl, fProtectCoinbase ? &tokenGuardReport : NULL);
+    FilterTokenBearingCoins(vCoinsWithCoinbase, coinControl, fProtectCoinbase ? NULL : &tokenGuardReport);
+    if (pTokenGuardReport)
+        *pTokenGuardReport = tokenGuardReport;
+
     fOnlyCoinbaseCoinsRet = vCoinsNoCoinbase.size() == 0 && vCoinsWithCoinbase.size() > 0;
 
     // If coinbase utxos can only be sent to zaddrs, exclude any coinbase utxos from coin selection.
-    bool fProtectCoinbase = Params().GetConsensus().fCoinbaseMustBeProtected;
     vector<COutput> vCoins = (fProtectCoinbase) ? vCoinsNoCoinbase : vCoinsWithCoinbase;
 
     // Output parameter fNeedCoinbaseCoinsRet is set to true if coinbase utxos need to be spent to meet target amount
@@ -3622,7 +3694,7 @@ bool CWallet::SelectCoins(const CAmount& nTargetValue, set<pair<const CWalletTx*
     return res;
 }
 
-bool CWallet::FundTransaction(CMutableTransaction& tx, CAmount &nFeeRet, int& nChangePosRet, std::string& strFailReason)
+bool CWallet::FundTransaction(CMutableTransaction& tx, CAmount &nFeeRet, int& nChangePosRet, std::string& strFailReason, bool fAllowTokenInputs)
 {
     vector<CRecipient> vecSend;
 
@@ -3635,6 +3707,7 @@ bool CWallet::FundTransaction(CMutableTransaction& tx, CAmount &nFeeRet, int& nC
 
     CCoinControl coinControl;
     coinControl.fAllowOtherInputs = true;
+    coinControl.fAllowTokenOutputs = fAllowTokenInputs;
     BOOST_FOREACH(const CTxIn& txin, tx.vin)
         coinControl.Select(txin.prevout);
 
@@ -3783,14 +3856,17 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                 CAmount nValueIn = 0;
                 bool fOnlyCoinbaseCoins = false;
                 bool fNeedCoinbaseCoins = false;
-                if (!SelectCoins(nTotalValue, setCoins, nValueIn, fOnlyCoinbaseCoins, fNeedCoinbaseCoins, coinControl))
+                CTokenGuardReport tokenGuardReport;
+                if (!SelectCoins(nTotalValue, setCoins, nValueIn, fOnlyCoinbaseCoins, fNeedCoinbaseCoins, coinControl, &tokenGuardReport))
                 {
-                    if (fOnlyCoinbaseCoins && Params().GetConsensus().fCoinbaseMustBeProtected) {
+                    if (tokenGuardReport.fRefusedSelected) {
+                        strFailReason = TokenGuardRefusedText(tokenGuardReport.refusedOutpoint);
+                    } else if (fOnlyCoinbaseCoins && Params().GetConsensus().fCoinbaseMustBeProtected) {
                         strFailReason = _("Coinbase funds can only be sent to a zaddr");
                     } else if (fNeedCoinbaseCoins) {
                         strFailReason = _("Insufficient funds, coinbase funds can only be spent after they have been sent to a zaddr");
                     } else {
-                        strFailReason = _("Insufficient funds");
+                        strFailReason = _("Insufficient funds") + TokenGuardExcludedNote(tokenGuardReport);
                     }
                     return false;
                 }

@@ -2366,6 +2366,8 @@ UniValue listunspent(const UniValue& params, bool fHelp)
             "    \"confirmations\" : n,      (numeric) The number of confirmations\n"
             "    \"redeemScript\" : n        (string) The redeemScript if scriptPubKey is P2SH\n"
             "    \"spendable\" : xxx         (bool) Whether we have the private keys to spend this output\n"
+            "    \"tokenbearing\" : xxx      (bool) Whether this output carries ZSLP tokens or a mint baton. Such an output is never\n"
+            "                              chosen automatically as funds, because spending it as ordinary coin burns them.\n"
             "  }\n"
             "  ,...\n"
             "]\n"
@@ -2440,6 +2442,10 @@ UniValue listunspent(const UniValue& params, bool fHelp)
         entry.push_back(Pair("amount", ValueFromAmount(out.tx->vout[out.i].nValue)));
         entry.push_back(Pair("confirmations", out.nDepth));
         entry.push_back(Pair("spendable", out.fSpendable));
+        // Additive field. The output is still listed and still counted in
+        // every balance; this only tells a caller that the wallet will not
+        // pick it as ordinary funds (see wallet/tokenguard.h).
+        entry.push_back(Pair("tokenbearing", out.tx->IsTokenBearingOutput(out.i)));
         results.push_back(entry);
     }
 
@@ -2620,15 +2626,20 @@ UniValue fundrawtransaction(const UniValue& params, bool fHelp)
     if (!EnsureWalletIsAvailable(fHelp))
         return NullUniValue;
 
-    if (fHelp || params.size() != 1)
+    if (fHelp || params.size() < 1 || params.size() > 2)
         throw runtime_error(
-                            "fundrawtransaction \"hexstring\"\n"
+                            "fundrawtransaction \"hexstring\" ( allowtokeninputs )\n"
                             "\nAdd inputs to a transaction until it has enough in value to meet its out value.\n"
                             "This will not modify existing inputs, and will add one change output to the outputs.\n"
                             "Note that inputs which were signed may need to be resigned after completion since in/outputs have been added.\n"
                             "The inputs added will not be signed, use signrawtransaction for that.\n"
+                            "The inputs added never carry ZSLP tokens or a mint baton.\n"
                             "\nArguments:\n"
-                            "1. \"hexstring\"    (string, required) The hex string of the raw transaction\n"
+                            "1. \"hexstring\"        (string, required) The hex string of the raw transaction\n"
+                            "2. allowtokeninputs   (boolean, optional, default=false) The transaction may already contain inputs that carry\n"
+                            "                      ZSLP tokens or a mint baton (see \"tokenbearing\" in listunspent). By default that is an\n"
+                            "                      error, because unless the outputs form a matching token transfer the tokens are burned.\n"
+                            "                      Set to true only when the transaction is a token transfer you built on purpose.\n"
                             "\nResult:\n"
                             "{\n"
                             "  \"hex\":       \"value\", (string)  The resulting raw transaction (hex-encoded string)\n"
@@ -2647,18 +2658,22 @@ UniValue fundrawtransaction(const UniValue& params, bool fHelp)
                             + HelpExampleCli("sendrawtransaction", "\"signedtransactionhex\"")
                             );
 
-    RPCTypeCheck(params, boost::assign::list_of(UniValue::VSTR));
+    RPCTypeCheck(params, boost::assign::list_of(UniValue::VSTR)(UniValue::VBOOL));
 
     // parse hex string from parameter
     CTransaction origTx;
     if (!DecodeHexTx(origTx, params[0].get_str()))
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
 
+    bool fAllowTokenInputs = false;
+    if (params.size() > 1)
+        fAllowTokenInputs = params[1].get_bool();
+
     CMutableTransaction tx(origTx);
     CAmount nFee;
     string strFailReason;
     int nChangePos = -1;
-    if(!pwalletMain->FundTransaction(tx, nFee, nChangePos, strFailReason))
+    if(!pwalletMain->FundTransaction(tx, nFee, nChangePos, strFailReason, fAllowTokenInputs))
         throw JSONRPCError(RPC_INTERNAL_ERROR, strFailReason);
 
     UniValue result(UniValue::VOBJ);
@@ -4115,8 +4130,20 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
     pwalletMain->AvailableCoins(vecOutputs, true, NULL, false, true);
 
     // Find unspent coinbase utxos and update estimated size
+    CTokenGuardReport tokenGuardReport;
     BOOST_FOREACH(const COutput& out, vecOutputs) {
         if (!out.fSpendable) {
+            continue;
+        }
+
+        // Wallet token guard: a coinbase transaction can carry an SLP message
+        // like any other, and shielding its token-bearing output burns the tokens.
+        if (out.tx->IsCoinBase() && out.tx->IsTokenBearingOutput(out.i)) {
+            CTxDestination tokenAddress;
+            if (ExtractDestination(out.tx->vout[out.i].scriptPubKey, tokenAddress) &&
+                (destinations.size() == 0 || destinations.count(tokenAddress))) {
+                tokenGuardReport.Exclude(out.tx->vout[out.i].nValue);
+            }
             continue;
         }
 
@@ -4159,13 +4186,13 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
     size_t numUtxos = inputs.size();
 
     if (numUtxos == 0) {
-        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any coinbase funds to shield.");
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any coinbase funds to shield." + TokenGuardExcludedNote(tokenGuardReport));
     }
 
     if (shieldedValue < nFee) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
             strprintf("Insufficient coinbase funds, have %s, which is less than miners fee %s",
-            FormatMoney(shieldedValue), FormatMoney(nFee)));
+            FormatMoney(shieldedValue), FormatMoney(nFee)) + TokenGuardExcludedNote(tokenGuardReport));
     }
 
     // Check that the user specified fee is sane (if too high, it can result in error -25 absurd fee)
@@ -4431,6 +4458,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
         estimatedTxSize += OUTPUTDESCRIPTION_SIZE;
     }
 
+    CTokenGuardReport tokenGuardReport;
     if (useAnyUTXO || taddrs.size() > 0) {
         // Get available utxos
         vector<COutput> vecOutputs;
@@ -4450,6 +4478,13 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
             }
             // If taddr is not wildcard "*", filter utxos
             if (taddrs.size() > 0 && !taddrs.count(address)) {
+                continue;
+            }
+
+            // Wallet token guard: merging a token-bearing output into an
+            // ordinary payment burns the tokens or the mint baton it carries.
+            if (out.tx->IsTokenBearingOutput(out.i)) {
+                tokenGuardReport.Exclude(out.tx->vout[out.i].nValue);
                 continue;
             }
 
@@ -4557,7 +4592,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
     size_t numNotes = sproutNoteInputs.size() + saplingNoteInputs.size();
 
     if (numUtxos == 0 && numNotes == 0) {
-        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any funds to merge.");
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any funds to merge." + TokenGuardExcludedNote(tokenGuardReport));
     }
 
     // Sanity check: Don't do anything if:
@@ -4572,7 +4607,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
     if (mergedValue < nFee) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
             strprintf("Insufficient funds, have %s, which is less than miners fee %s",
-            FormatMoney(mergedValue), FormatMoney(nFee)));
+            FormatMoney(mergedValue), FormatMoney(nFee)) + TokenGuardExcludedNote(tokenGuardReport));
     }
 
     // Check that the user specified fee is sane (if too high, it can result in error -25 absurd fee)

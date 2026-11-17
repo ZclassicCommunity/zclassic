@@ -102,6 +102,8 @@ private:
     std::vector<SendManyRecipient> t_outputs_;
     std::vector<SendManyRecipient> z_outputs_;
     std::vector<SendManyInputUTXO> t_inputs_;
+    // Wallet token guard: what find_utxos left out of t_inputs_, for error text only.
+    CTokenGuardReport tokenGuardReport_;
     std::vector<SendManyInputJSOP> z_sprout_inputs_;
     std::vector<SaplingNoteEntry> z_sapling_inputs_;
 
@@ -165,6 +167,15 @@ public:
 
     bool find_utxos(bool fAcceptCoinbase) {
         return delegate->find_utxos(fAcceptCoinbase);
+    }
+
+    // The outpoints find_utxos gathered as spend candidates.
+    std::set<COutPoint> gathered_utxos() {
+        std::set<COutPoint> outpoints;
+        for (const SendManyInputUTXO& t : delegate->t_inputs_) {
+            outpoints.insert(COutPoint(std::get<0>(t), std::get<1>(t)));
+        }
+        return outpoints;
     }
     
     std::array<unsigned char, ZC_MEMO_SIZE> get_memo_from_hex_string(std::string s) {

@@ -214,15 +214,15 @@ bool AsyncRPCOperation_sendmany::main_impl() {
         if (isSingleZaddrOutput) {
             bool b = find_utxos(true);
             if (!b) {
-                throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient funds, no UTXOs found for taddr from address.");
+                throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient funds, no UTXOs found for taddr from address." + TokenGuardExcludedNote(tokenGuardReport_));
             }
         } else {
             bool b = find_utxos(false);
             if (!b) {
                 if (isMultipleZaddrOutput) {
-                    throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any non-coinbase UTXOs to spend. Coinbase UTXOs can only be sent to a single zaddr recipient.");
+                    throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any non-coinbase UTXOs to spend. Coinbase UTXOs can only be sent to a single zaddr recipient." + TokenGuardExcludedNote(tokenGuardReport_));
                 } else {
-                    throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any non-coinbase UTXOs to spend.");
+                    throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any non-coinbase UTXOs to spend." + TokenGuardExcludedNote(tokenGuardReport_));
                 }
             }
         }        
@@ -267,7 +267,7 @@ bool AsyncRPCOperation_sendmany::main_impl() {
     if (isfromtaddr_ && (t_inputs_total < targetAmount)) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
             strprintf("Insufficient transparent funds, have %s, need %s",
-            FormatMoney(t_inputs_total), FormatMoney(targetAmount)));
+            FormatMoney(t_inputs_total), FormatMoney(targetAmount)) + TokenGuardExcludedNote(tokenGuardReport_));
     }
     
     if (isfromzaddr_ && (z_inputs_total < targetAmount)) {
@@ -309,7 +309,7 @@ bool AsyncRPCOperation_sendmany::main_impl() {
         if (dustChange < dustThreshold && dustChange != 0) {
             throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
                 strprintf("Insufficient transparent funds, have %s, need %s more to avoid creating invalid change output %s (dust threshold is %s)",
-                FormatMoney(t_inputs_total), FormatMoney(dustThreshold - dustChange), FormatMoney(dustChange), FormatMoney(dustThreshold)));
+                FormatMoney(t_inputs_total), FormatMoney(dustThreshold - dustChange), FormatMoney(dustChange), FormatMoney(dustThreshold)) + TokenGuardExcludedNote(tokenGuardReport_));
         }
 
         t_inputs_ = selectedTInputs;
@@ -989,6 +989,7 @@ bool AsyncRPCOperation_sendmany::find_utxos(bool fAcceptCoinbase=false) {
     std::set<CTxDestination> destinations;
     destinations.insert(fromtaddr_);
     vector<COutput> vecOutputs;
+    tokenGuardReport_ = CTokenGuardReport();
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
@@ -1017,6 +1018,14 @@ bool AsyncRPCOperation_sendmany::find_utxos(bool fAcceptCoinbase=false) {
         // By default we ignore coinbase outputs
         bool isCoinbase = out.tx->IsCoinBase();
         if (isCoinbase && fAcceptCoinbase==false) {
+            continue;
+        }
+
+        // Wallet token guard: z_sendmany takes UTXOs smallest first, so
+        // without this the 546 zatoshi outputs that carry ZSLP tokens or a
+        // mint baton would be the FIRST ones spent, and their tokens burned.
+        if (out.tx->IsTokenBearingOutput(out.i)) {
+            tokenGuardReport_.Exclude(out.tx->vout[out.i].nValue);
             continue;
         }
 

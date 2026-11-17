@@ -15,7 +15,7 @@
 #
 # usage: symbol-prefix.sh check <nm> <libzcl_c23.a>
 #            Fails unless every defined global symbol of the archive starts with
-#            librustzcash_, zcl_c23_, zcl_c23h_ or zc23_. Run by the build before any
+#            librustzcash_, zcl_c23_, zcl_c23h_, zcl_token_guard_ or zc23_. Run by the build before any
 #            program links the archive.
 #        symbol-prefix.sh gen <nm> <libzcl_c23.a> <header>
 #            Rewrites <header> from the archive. Idempotent: works on an archive
@@ -43,14 +43,14 @@ globals "$tmp" || { echo "symbol-prefix: no symbols read from $lib" >&2; exit 2;
 
 case "$mode" in
 check)
-    bad=$(grep -v -E '^(librustzcash_|zcl_c23_|zcl_c23h_|zc23_)' "$tmp")
+    bad=$(grep -v -E '^(librustzcash_|zcl_c23_|zcl_c23h_|zcl_token_guard_|zc23_)' "$tmp")
     if [ -n "$bad" ]; then
         echo "symbol-prefix: FAIL $lib exports unprefixed names (would collide in a static link):" >&2
         echo "$bad" | sed 's/^/  /' | head -40 >&2
         echo "symbol-prefix: regenerate src/c23/glue/zcl_c23_symbol_prefix.h (symbol-prefix.sh gen) and rebuild" >&2
         exit 1
     fi
-    echo "symbol-prefix: OK $lib ($(wc -l <"$tmp" | tr -d ' ') global symbols, all librustzcash_/zcl_c23_/zcl_c23h_/zc23_)"
+    echo "symbol-prefix: OK $lib ($(wc -l <"$tmp" | tr -d ' ') global symbols, all librustzcash_/zcl_c23_/zcl_c23h_/zcl_token_guard_/zc23_)"
     ;;
 gen)
     hdr=${4:-}
@@ -60,7 +60,7 @@ gen)
     [ -f "$hdr" ] && sed -n 's/^#define \([A-Za-z_][A-Za-z0-9_]*\) zc23_\1$/\1/p' "$hdr" | sort -u >"$tmp.old"
     awk -v oldf="$tmp.old" '
         BEGIN { while ((getline l < oldf) > 0) old[l] = 1 }
-        /^(librustzcash_|zcl_c23_)/ { next }
+        /^(librustzcash_|zcl_c23_|zcl_token_guard_)/ { next }
         /^zc23_/ { b = substr($0, 6); if (b in old) print b; next }
         { print }' "$tmp" | sort -u >"$tmp.names"
     {
