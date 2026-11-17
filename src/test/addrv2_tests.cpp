@@ -684,4 +684,63 @@ BOOST_AUTO_TEST_CASE(getaddr_answers_by_negotiation)
         delete x;
 }
 
+
+// Byte level: an old peer's addr message is exactly the serialisation the base
+// code produced (vector<CAddress>, no v3), an addrv2 peer gets addrv2.
+BOOST_AUTO_TEST_CASE(addr_bytes_unchanged_for_old_peer)
+{
+    vector<CNode*> keep;
+    CAddress a1 = MakeV4("93.184.216.10", 8033, 1, 1700000000);
+    CAddress a2 = MakeV4("93.184.216.11", 8033, 5, 1700000100);
+    CAddress o1 = MakeV3(5, 8033, 1, 1700000200);
+
+    CNode* oldPeer = NewNode(keep, "8.8.8.8", false);
+    CNode* newPeer = NewNode(keep, "8.8.4.4", false);
+    newPeer->fSendAddrV2 = true;
+    for (CNode* n : keep) {
+        n->fSuccessfullyConnected = true;
+        n->ssSend.SetVersion(PROTOCOL_VERSION); // as the version handshake does
+        n->PushAddress(a1);
+        n->PushAddress(o1);
+        n->PushAddress(a2);
+    }
+    BOOST_CHECK(SendMessages(oldPeer, true));
+    BOOST_CHECK(SendMessages(newPeer, true));
+
+    // the payload of the first queued message with the given command
+    auto payloadOf = [](CNode& n, const string& want, vector<unsigned char>& out) {
+        for (const CSerializeData& m : n.vSendMsg) {
+            if (m.size() < 24)
+                continue;
+            string cmd(m.begin() + 4, m.begin() + 16);
+            cmd.resize(strlen(cmd.c_str()));
+            if (cmd == want) {
+                out.assign(m.begin() + 24, m.end());
+                return true;
+            }
+        }
+        return false;
+    };
+
+    vector<unsigned char> got;
+    BOOST_REQUIRE(payloadOf(*oldPeer, "addr", got));
+    vector<CAddress> legacy;
+    legacy.push_back(a1);
+    legacy.push_back(a2);
+    CDataStream expect(SER_NETWORK, PROTOCOL_VERSION);
+    expect << legacy;
+    BOOST_CHECK(got == vector<unsigned char>(expect.begin(), expect.end()));
+    BOOST_CHECK(!payloadOf(*oldPeer, "addrv2", got));
+
+    // the addrv2 peer: addrv2 with all three, no legacy addr
+    BOOST_REQUIRE(payloadOf(*newPeer, "addrv2", got));
+    CDataStream expect2(SER_NETWORK, PROTOCOL_VERSION);
+    WriteCompactSize(expect2, 3);
+    expect2 << CAddressV2(a1) << CAddressV2(o1) << CAddressV2(a2);
+    BOOST_CHECK(got == vector<unsigned char>(expect2.begin(), expect2.end()));
+    BOOST_CHECK(!payloadOf(*newPeer, "addr", got));
+    for (CNode* x : keep)
+        delete x;
+}
+
 BOOST_AUTO_TEST_SUITE_END()
