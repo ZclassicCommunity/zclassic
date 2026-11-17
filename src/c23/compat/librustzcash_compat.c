@@ -81,6 +81,7 @@
 #include "sapling/bn254_accel.h"
 #include "sapling/fr.h"
 #include "sapling/fr_accel.h"
+#include "sapling/groth16_prover.h"
 #include "sapling/jubjub.h"
 #include "sapling/params_init.h"
 #include "sapling/params_vk_embedded.h"
@@ -270,6 +271,11 @@ __attribute__((cold, noinline)) static void preinit_vks(void)
 bool zcl_c23_params_initialized(void)
 {
     return atomic_load_explicit(&g_init, memory_order_acquire);
+}
+
+void zcl_c23_set_prover_threads(unsigned n)
+{
+    groth16_prover_set_threads(n);
 }
 
 /* ------------------------------------------------------------------------ */

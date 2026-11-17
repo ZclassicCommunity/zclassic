@@ -396,6 +396,12 @@ extern "C" {
     /// True once librustzcash_init_zksnark_params has completed.
     bool zcl_c23_params_initialized(void);
 
+    /// Thread budget of the Groth16 prover (Sapling spend/output). 0 = the
+    /// vendored default (online processors, at most 8; 1 on mingw). Takes
+    /// effect on the next proof; threads never outlive a proof.
+#define ZCL_C23_HAVE_PROVER_THREADS 1
+    void zcl_c23_set_prover_threads(unsigned n);
+
 #ifdef __cplusplus
 }
 #endif

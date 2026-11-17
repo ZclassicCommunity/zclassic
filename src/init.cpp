@@ -85,6 +85,19 @@
 #include "sha256.h"
 #include "startuptimer.h"
 
+#ifdef ZCL_C23_HAVE_PROVER_THREADS
+// Prover thread budget: -proverthreads=<n>, 0 = auto (min(8, hardware threads)).
+static unsigned ProverThreadBudget()
+{
+    int64_t n = GetArg("-proverthreads", 0);
+    if (n > 0)
+        return n > 64 ? 64u : (unsigned)n;
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = GetNumCores() > 0 ? (unsigned)GetNumCores() : 1;
+    return hw < 8 ? hw : 8u;
+}
+#endif
+
 using namespace std;
 
 ZCJoinSplit* pzcashParams = NULL;
@@ -404,6 +417,9 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-mempooltxinputlimit=<n>", _("[DEPRECATED FROM OVERWINTER] Set the maximum number of transparent inputs in a transaction that the mempool will accept (default: 0 = no limit applied)"));
     strUsage += HelpMessageOpt("-par=<n>", strprintf(_("Set the number of script verification threads (%u to %d, 0 = auto, <0 = leave that many cores free, default: %d)"),
         -GetNumCores(), MAX_SCRIPTCHECK_THREADS, DEFAULT_SCRIPTCHECK_THREADS));
+#ifdef ZCL_C23_HAVE_PROVER_THREADS
+    strUsage += HelpMessageOpt("-proverthreads=<n>", _("Set the number of threads used to create Sapling proofs (1 to 64, 0 = auto: the lesser of 8 and the hardware threads, default: 0)"));
+#endif
 #ifndef WIN32
     strUsage += HelpMessageOpt("-pid=<file>", strprintf(_("Specify pid file (default: %s)"), "zclassicd.pid"));
 #endif
@@ -1748,6 +1764,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         nScriptCheckThreads = 0;
     else if (nScriptCheckThreads > MAX_SCRIPTCHECK_THREADS)
         nScriptCheckThreads = MAX_SCRIPTCHECK_THREADS;
+
+#ifdef ZCL_C23_HAVE_PROVER_THREADS
+    zcl_c23_set_prover_threads(ProverThreadBudget());
+#endif
 
     fServer = GetBoolArg("-server", false);
 
