@@ -56,9 +56,9 @@ void Fp_model<n,modulus>::mul_reduce(const bigint<n> &other)
     { // use asm-optimized "CIOS method"
 
         mp_limb_t tmp[n+1];
-        mp_limb_t T0=0, T1=1, cy=2, u=3; // TODO: fix this
+        mp_limb_t T0, T1, cy, u; // asm scratch registers, declared as early-clobber outputs below
 
-        __asm__ (MONT_PRECOMPUTE
+        __asm__ volatile (MONT_PRECOMPUTE
                  MONT_FIRSTITER(1)
                  MONT_FIRSTITER(2)
                  MONT_FIRSTITER(3)
@@ -91,9 +91,8 @@ void Fp_model<n,modulus>::mul_reduce(const bigint<n> &other)
                  MONT_NEXTSUB(16)
                  MONT_NEXTSUB(24)
                  "done%=:                         \n\t"
-                 :
-                 : [tmp] "r" (tmp), [A] "r" (this->mont_repr.data), [B] "r" (other.data), [inv] "r" (inv), [M] "r" (modulus.data),
-                   [T0] "r" (T0), [T1] "r" (T1), [cy] "r" (cy), [u] "r" (u)
+                 : [T0] "=&r" (T0), [T1] "=&r" (T1), [cy] "=&r" (cy), [u] "=&r" (u)
+                 : [tmp] "r" (tmp), [A] "r" (this->mont_repr.data), [B] "r" (other.data), [inv] "r" (inv), [M] "r" (modulus.data)
                  : "cc", "memory", "%rax", "%rdx"
         );
         mpn_copyi(this->mont_repr.data, tmp, n);
@@ -102,9 +101,9 @@ void Fp_model<n,modulus>::mul_reduce(const bigint<n> &other)
     { // use asm-optimized "CIOS method"
 
         mp_limb_t tmp[n+1];
-        mp_limb_t T0=0, T1=1, cy=2, u=3; // TODO: fix this
+        mp_limb_t T0, T1, cy, u; // asm scratch registers, declared as early-clobber outputs below
 
-        __asm__ (MONT_PRECOMPUTE
+        __asm__ volatile (MONT_PRECOMPUTE
                  MONT_FIRSTITER(1)
                  MONT_FIRSTITER(2)
                  MONT_FIRSTITER(3)
@@ -149,9 +148,8 @@ void Fp_model<n,modulus>::mul_reduce(const bigint<n> &other)
                  MONT_NEXTSUB(24)
                  MONT_NEXTSUB(32)
                  "done%=:                         \n\t"
-                 :
-                 : [tmp] "r" (tmp), [A] "r" (this->mont_repr.data), [B] "r" (other.data), [inv] "r" (inv), [M] "r" (modulus.data),
-                   [T0] "r" (T0), [T1] "r" (T1), [cy] "r" (cy), [u] "r" (u)
+                 : [T0] "=&r" (T0), [T1] "=&r" (T1), [cy] "=&r" (cy), [u] "=&r" (u)
+                 : [tmp] "r" (tmp), [A] "r" (this->mont_repr.data), [B] "r" (other.data), [inv] "r" (inv), [M] "r" (modulus.data)
                  : "cc", "memory", "%rax", "%rdx"
         );
         mpn_copyi(this->mont_repr.data, tmp, n);

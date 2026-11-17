@@ -37,11 +37,15 @@ public:
 
     bool operator<(const ordered_exponent<n> &other) const
     {
+    /* The asm blocks below read this->r and other.r only through pointers.
+       They are volatile and clobber memory so the compiler can neither move
+       nor drop them relative to the heap stores around them; as plain asm
+       GCC 13/14 -O2 build a verifier that returns wrong comparisons. */
 #if defined(__x86_64__) && defined(USE_ASM)
         if (n == 3)
         {
             int64_t res;
-            __asm__
+            __asm__ volatile
                 ("// check for overflow           \n\t"
                  "mov $0, %[res]                  \n\t"
                  ADD_CMP(16)
@@ -53,13 +57,13 @@ public:
                  "done%=:                         \n\t"
                  : [res] "=&r" (res)
                  : [A] "r" (other.r.data), [mod] "r" (this->r.data)
-                 : "cc", "%rax");
+                 : "cc", "memory", "%rax");
             return res;
         }
         else if (n == 4)
         {
             int64_t res;
-            __asm__
+            __asm__ volatile
                 ("// check for overflow           \n\t"
                  "mov $0, %[res]                  \n\t"
                  ADD_CMP(24)
@@ -72,13 +76,13 @@ public:
                  "done%=:                         \n\t"
                  : [res] "=&r" (res)
                  : [A] "r" (other.r.data), [mod] "r" (this->r.data)
-                 : "cc", "%rax");
+                 : "cc", "memory", "%rax");
             return res;
         }
         else if (n == 5)
         {
             int64_t res;
-            __asm__
+            __asm__ volatile
                 ("// check for overflow           \n\t"
                  "mov $0, %[res]                  \n\t"
                  ADD_CMP(32)
@@ -92,7 +96,7 @@ public:
                  "done%=:                         \n\t"
                  : [res] "=&r" (res)
                  : [A] "r" (other.r.data), [mod] "r" (this->r.data)
-                 : "cc", "%rax");
+                 : "cc", "memory", "%rax");
             return res;
         }
         else
