@@ -2127,6 +2127,16 @@ void ConnectionLoader::refreshZClassicdState(Connection* connection, std::functi
                     this->setBarPercent(pct);     // switches the bar from busy to 0-100
                     // Show the "X / Y GB  Z MB/s" tail (after the first '%') as detail.
                     QString detail = status.section(QStringLiteral("%"), 1).trimmed();
+                    // Add a time estimate from the node's own size/rate figures.
+                    static const QRegularExpression reRate(QStringLiteral(
+                        "([0-9.]+)\\s*/\\s*([0-9.]+)\\s*GB\\s+([0-9.]+)\\s*MB/s"));
+                    QRegularExpressionMatch mr = reRate.match(detail);
+                    if (mr.hasMatch() && mr.captured(3).toDouble() > 0.05) {
+                        const double left = (mr.captured(2).toDouble() - mr.captured(1).toDouble()) * 1024.0;
+                        const qint64 secs = (qint64)(left / mr.captured(3).toDouble());
+                        detail += secs < 90 ? QObject::tr(" · under a minute left")
+                                            : QObject::tr(" · about %1 min left").arg((secs + 30) / 60);
+                    }
                     this->showInformation(
                         QObject::tr("Step 3 of 3: Downloading blockchain — %1%").arg(pct),
                         detail);
