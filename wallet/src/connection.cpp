@@ -771,6 +771,24 @@ bool ConnectionLoader::startEmbeddedZClassicd(const QStringList& extraArgs) {
     QObject::connect(ezclassicd, &QProcess::started, [=] () {
         //qDebug() << "zclassicd started";
     });
+#ifndef Q_OS_WIN
+    // Quit before the RPC handoff (File->Exit, SIGINT/SIGTERM while the node is still
+    // starting): RPC::shutdownZClassicd() does not own this process yet, so without this
+    // ~QProcess would SIGKILL a node that is mid-startup. Ask for zclassicd's orderly
+    // shutdown (SIGTERM) and wait for it instead. Once RPC owns the process its own
+    // orderly stop has already run, so this is a no-op then. (Windows: terminate() is a
+    // WM_CLOSE a console daemon ignores; unchanged there.)
+    {
+        const QPointer<QProcess> owned(ezclassicd);
+        RPC* const owner = rpc;
+        QObject::connect(qApp, &QCoreApplication::aboutToQuit, ezclassicd, [owned, owner]() {
+            if (!owned || owned->state() == QProcess::NotRunning) return;
+            if (owner && owner->getEZClassicD() == owned.data()) return;
+            owned->terminate();
+            owned->waitForFinished(30000);
+        });
+    }
+#endif
 
     // NOTIFY-SRV: stand up the push socket + write the 0600 token file BEFORE launching
     // the daemon, so the socket is already listening when the node first fires a
