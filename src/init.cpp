@@ -225,6 +225,10 @@ static void InterruptBootstrapServeFreeze();
 bool ExtendServedBlocksForServe(const boost::filesystem::path& data_dir, int minAdvanceBlocks, std::string& error);
 bool BuildAnchorServeSnapshotFromGenesis(const boost::filesystem::path& data_dir, std::string& error);
 
+#ifdef WIN32
+static std::atomic<bool> fWinShutdownDone(false);
+#endif
+
 void Shutdown()
 {
     LogPrintf("%s: In progress...\n", __func__);
@@ -335,6 +339,9 @@ void Shutdown()
     globalVerifyHandle.reset();
     ECC_Stop();
     LogPrintf("%s: done\n", __func__);
+#ifdef WIN32
+    fWinShutdownDone = true;
+#endif
 }
 
 /**
@@ -349,6 +356,35 @@ void HandleSIGHUP(int)
 {
     fReopenDebugLog = true;
 }
+
+#ifdef WIN32
+/**
+ * Console control events (Ctrl+C, Ctrl+Break, closing the console window, log off,
+ * system shutdown). Without a handler Windows ends the process immediately, without
+ * flushing the chain state, wallet and block index, as if it had been killed.
+ * Request the normal clean shutdown instead. For the events after which Windows
+ * terminates the process as soon as this handler returns, wait (bounded) for the
+ * shutdown to finish.
+ */
+static BOOL WINAPI WinConsoleCtrlHandler(DWORD dwCtrlType)
+{
+    switch (dwCtrlType) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+        StartShutdown();
+        return TRUE;
+    case CTRL_CLOSE_EVENT:
+    case CTRL_LOGOFF_EVENT:
+    case CTRL_SHUTDOWN_EVENT:
+        StartShutdown();
+        for (int i = 0; i < 200 && !fWinShutdownDone; i++) // up to 20 s (the OS may cut this short)
+            Sleep(100);
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+#endif
 
 bool static InitError(const std::string &str)
 {
@@ -1582,6 +1618,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     // Ignore SIGPIPE, otherwise it will bring the daemon down if the client closes unexpectedly
     signal(SIGPIPE, SIG_IGN);
+#endif
+#ifdef WIN32
+    // Clean shutdown on Ctrl+C, Ctrl+Break and console close instead of an abrupt exit
+    SetConsoleCtrlHandler(WinConsoleCtrlHandler, TRUE);
 #endif
 
     std::set_new_handler(new_handler_terminate);
