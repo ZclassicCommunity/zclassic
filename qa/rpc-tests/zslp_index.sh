@@ -499,6 +499,14 @@ snapshot 5 >"$TMP/n5.snap"
 cmp -s "$TMP/ref.snap" "$TMP/n5.snap" || { diff "$TMP/ref.snap" "$TMP/n5.snap" | head -6; fail "the from-block-0 index differs from the reference"; }
 ok "node 5: built from block 0, equals the reference"
 
+say "== 7b. -reindex on a node with an index: the index is kept and is still exact"
+stop 5
+start 5 "$ZD" -zslpindex=1 -reindex -connect=127.0.0.1:$((BASE + 0))
+wait_index 5
+snapshot 5 >"$TMP/n5r.snap"
+cmp -s "$TMP/ref.snap" "$TMP/n5r.snap" || { diff "$TMP/ref.snap" "$TMP/n5r.snap" | head -6; fail "the index after -reindex differs from the reference"; }
+ok "node 5: the index after -reindex equals the reference"
+
 # ---- 8. the flag-off RPC list ---------------------------------------------
 
 if [ -n "${BASELINE_SRC:-}" ]; then
