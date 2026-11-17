@@ -385,9 +385,6 @@ std::vector<std::string> DiscoverBootstrapPeers()
     return discovered;
 }
 
-//! Seconds an onion-only node waits for an onion bootstrap peer before it
-//! falls back to the clearnet bootstrap peers through Tor.
-static const int64_t BOOTSTRAP_ONION_GRACE_SECONDS = 300;
 static std::atomic<bool> g_onionBootstrapFallback(false);
 
 static bool OnionProxyConfigured()

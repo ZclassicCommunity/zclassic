@@ -42,6 +42,10 @@ static const int64_t BOOTSTRAP_SNAPSHOT_DISK_SAFETY_MARGIN_BYTES = 1LL * 1024 * 
 // serving node throttles it, and the throttled rate to fall back to.
 static const int64_t BOOTSTRAP_SERVE_DEFAULT_MAX_BYTES_PER_DAY = 100LL * 1024 * 1024 * 1024; // 100 GiB
 static const int64_t BOOTSTRAP_SERVE_DEFAULT_THROTTLE_KBPS = 1024;                            // 1 MiB/s
+//! Seconds an onion-only node waits, counted from StartNode(), for an onion
+//! bootstrap peer before it falls back to the clearnet bootstrap peers
+//! through Tor.
+static const int64_t BOOTSTRAP_ONION_GRACE_SECONDS = 300;
 
 bool BootstrapSnapshotPathsExist(const boost::filesystem::path& root);
 bool IsBootstrapFreshChainDatadir(const boost::filesystem::path& data_dir, std::string& error);
