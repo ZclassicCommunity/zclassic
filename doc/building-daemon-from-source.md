@@ -47,11 +47,11 @@ The recommended wrapper `zcutil/build-release.sh` avoids this entirely — it ma
 
 - OS: Ubuntu 20.04+, Debian 11+, Arch/Manjaro, or compatible Linux. (This box is
   Ubuntu 24.04 / GCC 14, well above the GCC 9+ / Clang 10+ floor.)
-- RAM: 4 GB+ recommended. The Rust snark/`librustzcash` compile is RAM-heavy; on
+- RAM: 4 GB+ recommended. The Boost/C++ compile is RAM-heavy; on
   low-RAM machines use a smaller `-j` (e.g. `-j4`) to avoid OOM.
 - Disk: 20 GB+ free.
 - First build is slow (**30–60 min**) because `depends/` compiles Boost and builds
-  the Rust snark + `librustzcash`.
+  and the C++ tree (the shielded crypto is built from `src/c23`, no Rust).
 
 ### 1.2 Install host build dependencies
 
@@ -76,18 +76,12 @@ wget openssl libevent`.
 
 `./zcutil/build.sh` and `build-release.sh` first build a hermetic dependency
 prefix under `depends/<HOST>/`. `depends/` builds: Boost, OpenSSL, libevent,
-zeromq, libgmp, libsodium, googletest, Berkeley DB (wallet), plus a **pinned Rust
-toolchain** used solely to build `librustzcash` (the zk-proof static lib).
+zeromq, libgmp, libsodium, googletest and Berkeley DB (wallet). There is no Rust
+toolchain and no cargo: the zk-proof code is C23 under `src/c23`
+(Z23, Apache-2.0, see `src/c23/NOTICE`) and is built by the main build.
 
-- Rust is **pinned to 1.32.0** and downloaded from `static.rust-lang.org`
-  (sha256-checked). The build does **not** use your system `cargo` — `depends` is
-  self-contained. (`depends/packages/rust.mk`)
-- `librustzcash` is pinned to git commit
-  `06da3b9ac8f278e5d4ae13088cf0a4c03d2c13f5`, built with
-  `cargo build --package librustzcash --frozen --release`.
-  (`depends/packages/librustzcash.mk`)
-- **Network access required on a clean depends build:** `static.rust-lang.org`,
-  the `z.cash` depends-sources mirror, and `github.com`.
+- **Network access required on a clean depends build:**
+  the `z.cash` depends-sources mirror and the upstream source hosts.
 - Proton/AMQP is **OFF by default** for all targets (`build.sh:93`,
   `NO_PROTON`).
 
@@ -537,9 +531,9 @@ the darwin toolchain are absent (§4). Fix: provide the SDK + cctools, or build 
 a Mac.
 
 **First build is slow / OOM.**
-30–60 min is normal (Boost + Rust snark + `librustzcash`). On low RAM, lower `-j`
+30–60 min is normal (Boost and the C++ tree). On low RAM, lower `-j`
 (e.g. `-j4`). A clean depends build needs network access to
-`static.rust-lang.org`, the `z.cash` depends mirror, and `github.com`.
+the `z.cash` depends mirror and the upstream source hosts.
 
 **`build-linux-ci.sh` is legacy.**
 It hardcodes a stale `VER='v2.1.1-5'` and passes `--disable-man`. Prefer

@@ -8,7 +8,6 @@ case "$ZCL_DAEMON_BUILD_DIR:$ZCL_DAEMON_DEPENDS_PREFIX" in
     *) echo 'Daemon build and depends paths must be absolute.' >&2; exit 1 ;;
 esac
 test -f "$ZCL_DAEMON_BUILD_DIR/src/libbitcoin_server.a"
-test -f "$ZCL_DAEMON_DEPENDS_PREFIX/lib/librustzcash.a"
 qt=${ZCL_QT_PREFIX:-$(brew --prefix qt@5)}
 cd "$root"
 work=${ZCL_MAC_BUILD_DIR:-"$root/artifacts/mac-build"}

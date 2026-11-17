@@ -38,3 +38,6 @@ Although almost all of the Zcash code is licensed under "permissive" open source
 licenses, users and distributors should note that when built using the default
 build options, Zcash depends on Oracle Berkeley DB 6.2.x, which is licensed
 under the GNU Affero General Public License.
+
+Shielded-protocol cryptography (Sapling, Sprout, Jubjub, BLS12-381, Groth16, Pedersen, RedJubjub, ZIP32)
+is implemented in C23 under src/c23 and derives from Z23, licensed Apache-2.0; see src/c23/NOTICE.
