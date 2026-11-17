@@ -2539,7 +2539,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 // Each BootstrapFromPeer attempt is self-contained (it stages into a
                 // fresh dir and cleans up on failure), so retrying is safe and cheap.
                 const int nBootstrapAttempts = 3;
-                const std::vector<std::string> bootstrapPeers = GetBootstrapPeerList();
+                const std::vector<std::string> bootstrapPeers = GetBootstrapSnapshotPeerList();
                 const int nBootstrapPeers = (int)bootstrapPeers.size();
                 int peerIndex = 0;
                 BOOST_FOREACH(const std::string& peer, bootstrapPeers) {
@@ -2676,6 +2676,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 addnodes.push_back(peer);
                 LogPrintf("Adding bootstrap peer %s as a persistent sync node\n", peer);
             }
+        }
+        // Onion-only node on the onion bootstrap peers: if neither connects
+        // (and nothing else does) within the grace period, add the clearnet
+        // ones through the proxy, once.
+        if (!mapArgs.count("-bootstrappeer") && BootstrapOnionOnlyActive()) {
+            LogPrintf("Bootstrap: onion-only node, using the onion bootstrap peers instead of the clearnet addresses\n");
+            scheduler.scheduleFromNow(&BootstrapOnionFallbackCheck, 300);
         }
     }
 

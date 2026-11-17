@@ -129,6 +129,8 @@ public:
     const CFastSyncAnchorData* FindFastSyncAnchor(int nHeight, const uint256& hashBlock) const;
     /** Default peers (host:port) a fresh node fetches params and snapshot from */
     const std::vector<std::string>& BootstrapPeers() const { return vBootstrapPeers; }
+    /** Onion (Tor v3) services of the same bootstrap nodes, host:port; empty off mainnet */
+    const std::vector<std::string>& OnionBootstrapPeers() const { return vOnionBootstrapPeers; }
     /** Return the founder's reward address and script for a given block height */
     std::string GetFoundersRewardAddressAtHeight(int height) const;
     CScript GetFoundersRewardScriptAtHeight(int height) const;
@@ -161,6 +163,7 @@ protected:
     CFastSyncAnchorData fastSyncAnchorData;
     std::vector<CFastSyncAnchorData> vFastSyncAnchors;
     std::vector<std::string> vBootstrapPeers;
+    std::vector<std::string> vOnionBootstrapPeers;
     std::vector<std::string> vFoundersRewardAddress;
 
     CAmount nSproutValuePoolCheckpointHeight = 0;

@@ -240,6 +240,12 @@ public:
         vBootstrapPeers.push_back("74.50.74.102:8035");
         vBootstrapPeers.push_back("205.209.104.118:8035");
 
+        // The same two nodes as persistent Tor v3 onion services forwarding
+        // port 8035. Used only by an onion-only node (see SelectBootstrapPeers)
+        // so it never dials the clearnet addresses above through Tor exits.
+        vOnionBootstrapPeers.push_back("pbngomf4ur6vae7hye4ktx4mcd3cuhtf2n6spk2c36norcmhoamnrwad.onion:8035");   // 74.50.74.102
+        vOnionBootstrapPeers.push_back("zuhvxm6knr6geljjcsbxviap2toee2sjxmepn4eojxmomakluh25xqid.onion:8035");   // 205.209.104.118
+
         // Founders reward script expects a vector of 2-of-3 multisig addresses
         vFoundersRewardAddress = {
             "t3Vz22vK5z2LcKEdg16Yv4FFneEL1zg9ojd", /* main-index: 0*/

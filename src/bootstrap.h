@@ -120,6 +120,39 @@ std::vector<std::string> DiscoverBootstrapPeers();
 //! set, else the compiled per-network defaults (CChainParams::BootstrapPeers).
 std::vector<std::string> GetBootstrapPeerList();
 
+//! Which bootstrap peers a node uses. Pure so it can be tested for every
+//! mode. `fOnionReachable`: an onion proxy is set (embedded Tor up, or
+//! -onion/-proxy). `fOnionOnly`: IPv4 and IPv6 are both limited
+//! (-onlynet=onion). `fFallback`: the onion peers stayed unreachable.
+//!  - Tor off / no onion proxy / no onion peers: the clearnet peers (as before).
+//!  - Tor on, clearnet allowed: the clearnet peers only. The onion services
+//!    are the same two nodes, so adding them would just double-count each
+//!    node (two slots, two connections to one machine).
+//!  - onion-only: the onion peers, so the node never leaves Tor to dial the
+//!    clearnet IPs through an exit; after fallback, the clearnet peers.
+std::vector<std::string> SelectBootstrapPeers(const std::vector<std::string>& clearnet,
+                                              const std::vector<std::string>& onion,
+                                              bool fOnionReachable, bool fOnionOnly, bool fFallback);
+
+//! True when this node is onion-only with an onion proxy configured right now.
+bool BootstrapOnionOnlyActive();
+
+//! Whether the clearnet bootstrap peers should now be added to an onion-only
+//! node: it has waited `nGraceSeconds`, no onion bootstrap peer is connected
+//! and it has no other outbound peer (a node with healthy onion peers never
+//! needs to leave Tor).
+bool BootstrapFallbackDue(bool fOnionOnly, int nOnionBootstrapConnected, int nOutbound,
+                          int64_t nElapsedSeconds, int64_t nGraceSeconds);
+
+//! Scheduled once by init for an onion-only node using the onion bootstrap
+//! peers: after the grace period, applies BootstrapFallbackDue() and, if due,
+//! logs once and adds the clearnet bootstrap peers as persistent sync nodes.
+void BootstrapOnionFallbackCheck();
+
+//! Peers for the snapshot fetch: GetBootstrapPeerList(), and for an onion-only
+//! node the clearnet peers (through Tor) are tried after the onion ones.
+std::vector<std::string> GetBootstrapSnapshotPeerList();
+
 //! Auto-serve (-bootstrapserve=auto): activate serving from the immutable copy
 //! this node retained when it fast-synced (data_dir/bootstrap-serve-source).
 //! Returns true and points the serve machinery (-bootstrapsourcedir) at that
