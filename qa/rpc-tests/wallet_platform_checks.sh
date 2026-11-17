@@ -163,17 +163,17 @@ paths_flow() { # <label>: the whole flow with $SD already set to the odd path
     R="-connect=127.0.0.1:$((BASE + 1))"
     zs=$(cli 0 z_getnewaddress); ta=$(give_t 0 3); give_z 0 "$zs" 2 4d656d6f
     s0=$(snap 0); ck "$1: funded" "$(zbal 0 "$zs")" 2.00000000
-    b="bäckup é ✓ 名.dat"
+    b=backupfile   # file names must be alphanumeric (SanitizeFilename); the path under test is the -exportdir path
     cli 0 backupwallet "$b" >/dev/null; ls -l "$SD/export/" | sed 's/^/    /' >>"$SD/ls.txt"
     ck "$1: backup file exists" "$([ -s "$SD/export/$b" ] && echo yes)" yes
-    cli 0 z_exportwallet "zéxport ✓" >/dev/null; ck "$1: z_exportwallet file has the key" "$(grep -c "$(cli 0 z_exportkey "$zs")" "$SD/export/zéxport ✓")" 1
-    cli 0 dumpwallet "dümp 名" >/dev/null; ck "$1: dumpwallet file" "$([ -s "$SD/export/dümp 名" ] && echo yes)" yes
+    cli 0 z_exportwallet "zexport" >/dev/null; ck "$1: z_exportwallet file has the key" "$(grep -c "$(cli 0 z_exportkey "$zs")" "$SD/export/zexport")" 1
+    cli 0 dumpwallet "dumpfile" >/dev/null; ck "$1: dumpwallet file" "$([ -s "$SD/export/dumpfile" ] && echo yes)" yes
     stop 0; start 0 "$BIN" $R; sync_to 0
     ck "$1: restart identical" "$(snap 0)" "$s0"
     stop 0; start 0 "$BIN" $R -rescan; sync_to 0
     ck "$1: -rescan identical (no txs line)" "$(snap 0 | sed 's/txs=.*//')" "$(printf %s "$s0" | sed 's/txs=.*//')"
     fresh 2 -rescan || return
-    cli 2 importwallet "dümp 名" >/dev/null 2>&1; cli 2 z_importwallet "zéxport ✓" >/dev/null 2>&1
+    cli 2 importwallet "dumpfile" >/dev/null 2>&1; cli 2 z_importwallet "zexport" >/dev/null 2>&1
     ck "$1: import into a fresh node: t" "$(bal 2)" 3.00000000
     ck "$1: import into a fresh node: z" "$(zbal 2 "$zs")" 2.00000000
     ck "$1: spend after the round trip" "$(zsend 0 "$zs" "[{\"address\":\"$(cli 1 getnewaddress)\",\"amount\":1}]" | cut -c1-7)" success
@@ -214,9 +214,9 @@ chk_encrypt() {
     ckerr "encrypt: old passphrase rejected" 'incorrect|passphrase' 0 walletpassphrase pw1 60
     cli 0 walletpassphrase pw2 600 >/dev/null
     # lock while a proof is being built: either outcome is fine, value must be conserved
-    rec="[{\"address\":\"$d\",\"amount\":1.2}]"; b0=$(zbal 0 "$zs"); op=$(cli 0 z_sendmany "$zs" "$rec" 1 "$FEE"); sleep 0.3; cli 0 walletlock >/dev/null 2>&1
+    fund_notes 0 "$zs" 10 1; rec="[{\"address\":\"$d\",\"amount\":9.5}]"; b0=$(zbal 0 "$zs"); op=$(cli 0 z_sendmany "$zs" "$rec" 1 "$FEE"); sleep 0.3; cli 0 walletlock >/dev/null 2>&1
     r=$(wait_op 0 "$op"); obs "walletlock_during_proving" "$(printf %s "$r" | cut -c1-90)"
-    case $r in success*) wait_mempool 1 "${r#success }"; mine 1; ck "encrypt: lock mid-proving spent exactly" "$(zbal 0 "$zs")" "$(add "$b0" -1.2 -$FEE)" ;;
+    case $r in success*) wait_mempool 1 "${r#success }"; mine 1; ck "encrypt: lock mid-proving spent exactly" "$(zbal 0 "$zs")" "$(add "$b0" -9.5 -$FEE)" ;;
         *) mine 1; ck "encrypt: lock mid-proving left balance untouched" "$(zbal 0 "$zs")" "$b0" ;; esac
     cli 0 walletpassphrase pw2 600 >/dev/null; b=$(zbal 0 "$zs"); cli 0 backupwallet encbackup >/dev/null; stop 0
     cp "$SD/export/encbackup" "$SD/node0/wallet.dat.enc"
@@ -225,7 +225,7 @@ chk_encrypt() {
     r=$(zsend 2 "$zs" "[{\"address\":\"$d\",\"amount\":0.1}]"); printf %s "$r" | grep -Eqi 'passphrase|locked|unlock' && pass "encrypt: restored backup is locked" || bad "encrypt: restored backup spend without passphrase: $r"
     cli 2 walletpassphrase pw2 600 >/dev/null
     r=$(zsend 2 "$zs" "[{\"address\":\"$d\",\"amount\":0.1}]"); case $r in success*) pass "encrypt: restored backup spends with the passphrase" ;; *) bad "encrypt: restored backup spend: $r" ;; esac
-    alive encrypt
+    alive encrypt 2
 }
 
 # ----------------------------------------------------------------- interop
