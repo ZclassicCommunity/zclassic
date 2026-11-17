@@ -10,6 +10,11 @@ The rest of zclassicd remains under the MIT license (see COPYING). The copyright
 holder of the vendored files and of zclassicd's glue is the same. Individual vendored
 files keep whatever notices they carry; those are part of the byte-identical copy.
 
+glue/zcl_slp_index.c (the ZSLP token index, doc/zslp.md) is zclassicd glue, not a
+vendored copy: its function zcl_slp_evaluate re-expresses, without Z23's SQL layer, the
+validity rules of Z23's contexts/market/models/src/zslp_validity.c (Apache-2.0,
+Copyright 2026 Rhett Creighton). The rules, their order and the reason strings are Z23's.
+
 Vendored files must never be edited in this tree. Provenance and identity checks:
 tools/check-vendor.sh against Z23_SOURCE.tsv.
 

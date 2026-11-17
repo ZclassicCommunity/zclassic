@@ -40,7 +40,8 @@ JSON_TEST_FILES = \
   test/data/merkle_commitments_sapling.json \
   test/data/g1_compressed.json \
   test/data/g2_compressed.json \
-  test/data/sapling_key_components.json
+  test/data/sapling_key_components.json \
+  test/data/zslp_mainnet.json
 
 RAW_TEST_FILES =
 
@@ -108,6 +109,7 @@ BITCOIN_TESTS =\
   test/torcontrol_tests.cpp \
   test/transaction_tests.cpp \
   test/uint256_tests.cpp \
+  test/zslp_tests.cpp \
   test/univalue_tests.cpp \
   test/util_tests.cpp \
   test/sha256compress_tests.cpp
@@ -125,7 +127,7 @@ test_test_bitcoin_LDADD =
 if ENABLE_WALLET
 test_test_bitcoin_LDADD += $(LIBBITCOIN_WALLET)
 endif
-test_test_bitcoin_LDADD += $(LIBBITCOIN_SERVER) $(ZCL_TOR_LIBS) $(LIBBITCOIN_CLI) $(LIBBITCOIN_COMMON) $(LIBBITCOIN_UTIL) $(LIBBITCOIN_CRYPTO) $(LIBUNIVALUE) \
+test_test_bitcoin_LDADD += $(LIBBITCOIN_SERVER) $(LIBZCL_TOKENGUARD) $(ZCL_TOR_LIBS) $(LIBBITCOIN_CLI) $(LIBBITCOIN_COMMON) $(LIBBITCOIN_UTIL) $(LIBBITCOIN_CRYPTO) $(LIBUNIVALUE) \
   $(LIBLEVELDB) $(LIBMEMENV) $(BOOST_LIBS) $(BOOST_UNIT_TEST_FRAMEWORK_LIB) $(LIBSECP256K1) $(EVENT_LIBS) $(EVENT_PTHREADS_LIBS)
 test_test_bitcoin_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 

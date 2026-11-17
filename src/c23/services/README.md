@@ -93,6 +93,13 @@ vendor/     VERBATIM Z23 files at the pin in Z23_SOURCE.tsv. Never edit.
               core/modules/script/include/script/op_return_push.h
 glue/       zclassicd-owned.
               zcl_token_guard.{h,c}     the C seam the wallet calls
+              zcl_slp_index.{h,c}       the C seam of the ZSLP token index (doc/zslp.md):
+                                        zcl_slp_parse_message forwards to the vendored
+                                        slp_parse; zcl_slp_evaluate is a PORT (not a copy)
+                                        of the decision rules of Z23's
+                                        contexts/market/models/src/zslp_validity.c, with the
+                                        SQLite reads and writes removed. It is glue, not
+                                        vendored: Z23's file is welded to its SQL tables.
               core/uint256.h            32-byte container
               primitives/transaction.h  the thinnest struct transaction that
                                         slp_classify_tx_output compiles against
