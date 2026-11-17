@@ -505,6 +505,11 @@ int CAddrMan::Check_()
 void CAddrMan::GetAddr_(std::vector<CAddress>& vAddr)
 {
     unsigned int nNodes = ADDRMAN_GETADDR_MAX_PCT * vRandom.size() / 100;
+    // The onion store is small, and 23% of a handful of entries is none of
+    // them: a node that knows two onion peers would answer getaddr with
+    // nothing. Share up to 64 of them at least.
+    if (fOnionStore && nNodes < 64)
+        nNodes = std::min<unsigned int>(64, vRandom.size());
     if (nNodes > ADDRMAN_GETADDR_MAX)
         nNodes = ADDRMAN_GETADDR_MAX;
 
