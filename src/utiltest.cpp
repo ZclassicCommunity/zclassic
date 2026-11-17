@@ -7,6 +7,7 @@
 #include "consensus/upgrades.h"
 #include "script/sighashtype.h"
 #include "transaction_builder.h"
+#include "base58.h"
 
 #include <array>
 
@@ -229,6 +230,13 @@ libzcash::SaplingExtendedSpendingKey GetTestMasterSaplingSpendingKey() {
 
 CKey AddTestCKeyToKeyStore(CBasicKeyStore& keyStore) {
     CKey tsk = DecodeSecret(T_SECRET_REGTEST);
+    if (!tsk.IsValid()) {
+        // DecodeSecret checks the base58 prefix of the selected network; this fixed test key uses the
+        // regtest/testnet prefix (0xEF), so decode it by hand when another network is selected.
+        std::vector<unsigned char> data;
+        if (DecodeBase58Check(T_SECRET_REGTEST, data) && data.size() == 34 && data[0] == 0xEF && data[33] == 1)
+            tsk.Set(data.begin() + 1, data.begin() + 33, true);
+    }
     keyStore.AddKey(tsk);
     return tsk;
 }
@@ -245,7 +253,8 @@ TestSaplingNote GetTestSaplingNote(const libzcash::SaplingPaymentAddress& pa, CA
 CWalletTx GetValidSaplingReceive(const Consensus::Params& consensusParams,
                                  CBasicKeyStore& keyStore,
                                  const libzcash::SaplingExtendedSpendingKey &sk,
-                                 CAmount value) {
+                                 CAmount value,
+                                 int nHeight) {
     // From taddr
     CKey tsk = AddTestCKeyToKeyStore(keyStore);
     auto scriptPubKey = GetScriptForDestination(tsk.GetPubKey().GetID());
@@ -253,7 +262,7 @@ CWalletTx GetValidSaplingReceive(const Consensus::Params& consensusParams,
     auto fvk = sk.expsk.full_viewing_key();
     auto pa = sk.DefaultAddress();
 
-    auto builder = TransactionBuilder(consensusParams, 1, &keyStore);
+    auto builder = TransactionBuilder(consensusParams, nHeight, &keyStore);
     builder.SetFee(0);
     builder.AddTransparentInput(COutPoint(), scriptPubKey, value);
     builder.AddSaplingOutput(fvk.ovk, pa, value, {});

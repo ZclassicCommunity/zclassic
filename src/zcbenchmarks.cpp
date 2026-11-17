@@ -40,7 +40,7 @@ void pre_wallet_load()
 {
     LogPrintf("%s: In progress...\n", __func__);
     if (ShutdownRequested())
-        throw new std::runtime_error("The node is shutting down");
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "The node is shutting down");
 
     if (pwalletMain)
         pwalletMain->Flush(false);
@@ -305,6 +305,16 @@ double benchmark_try_decrypt_sprout_notes(size_t nKeys)
     return timer_stop(tv_start);
 }
 
+// Height at which the benchmarks build Sapling transactions: the activation height of Sapling.
+static int SaplingBenchmarkHeight(const Consensus::Params& consensusParams)
+{
+    int nHeight = consensusParams.vUpgrades[Consensus::UPGRADE_SAPLING].nActivationHeight;
+    if (nHeight == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) {
+        throw JSONRPCError(RPC_INVALID_REQUEST, "Sapling has no activation height on this network (on regtest start with -nuparams=76b809bb:1)");
+    }
+    return nHeight < 1 ? 1 : nHeight;
+}
+
 double benchmark_try_decrypt_sapling_notes(size_t nKeys)
 {
     // Set params
@@ -321,7 +331,7 @@ double benchmark_try_decrypt_sapling_notes(size_t nKeys)
 
     // Generate a key that has not been added to the wallet
     auto sk = masterKey.Derive(nKeys);
-    auto tx = GetValidSaplingReceive(consensusParams, wallet, sk, 10);
+    auto tx = GetValidSaplingReceive(consensusParams, wallet, sk, 10, SaplingBenchmarkHeight(consensusParams));
 
     struct timeval tv_start;
     timer_start(tv_start);
@@ -391,7 +401,7 @@ double benchmark_increment_sprout_note_witnesses(size_t nTxs)
 CWalletTx CreateSaplingTxWithNoteData(const Consensus::Params& consensusParams,
                                       CBasicKeyStore& keyStore,
                                       const libzcash::SaplingExtendedSpendingKey &sk) {
-    auto wtx = GetValidSaplingReceive(consensusParams, keyStore, sk, 10);
+    auto wtx = GetValidSaplingReceive(consensusParams, keyStore, sk, 10, SaplingBenchmarkHeight(consensusParams));
     auto testNote = GetTestSaplingNote(sk.DefaultAddress(), 10);
     auto fvk = sk.expsk.full_viewing_key();
     auto nullifier = testNote.note.nullifier(fvk, testNote.tree.witness().position()).get();
@@ -508,7 +518,7 @@ public:
             case SAPLING:
                 return saplingTree.root();
             default:
-                throw new std::runtime_error("Unknown shielded type");
+                throw std::runtime_error("Unknown shielded type");
         }
     }
 
@@ -531,12 +541,36 @@ public:
 double benchmark_connectblock_slow()
 {
     // Test for issue 2017-05-01.a
+    // Check the data files before touching any global state (and before FakeCoinsViewDB would
+    // create an empty database in their place): a missing file is an RPC error, not a crash.
+    const boost::filesystem::path blockFile = GetDataDir() / "benchmark/block-107134.dat";
+    const boost::filesystem::path inputsDir = GetDataDir() / "benchmark/block-107134-inputs";
+    if (!boost::filesystem::is_regular_file(blockFile) || !boost::filesystem::is_directory(inputsDir)) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, strprintf(
+            "connectblockslow needs the benchmark data files %s and the directory %s",
+            blockFile.string(), inputsDir.string()));
+    }
+    FILE* fp = fopen(blockFile.string().c_str(), "rb");
+    if (!fp) throw JSONRPCError(RPC_INTERNAL_ERROR, "Failed to open block data file " + blockFile.string());
+
+    // Restore the node's chain parameters and block index however this function exits.
+    struct StateGuard {
+        uint256 hashPrev;
+        bool fInserted = false;
+        ~StateGuard() {
+            if (fInserted) mapBlockIndex.erase(hashPrev);
+            SelectParamsFromCommandLine();
+        }
+    } guard;
+
     SelectParams(CBaseChainParams::MAIN);
     CBlock block;
-    FILE* fp = fopen((GetDataDir() / "benchmark/block-107134.dat").string().c_str(), "rb");
-    if (!fp) throw new std::runtime_error("Failed to open block data file");
     CAutoFile blkFile(fp, SER_DISK, CLIENT_VERSION);
-    blkFile >> block;
+    try {
+        blkFile >> block;
+    } catch (const std::exception& e) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, std::string("Cannot read the benchmark block: ") + e.what());
+    }
     blkFile.fclose();
 
     // Fake its inputs
@@ -552,16 +586,17 @@ double benchmark_connectblock_slow()
     indexPrev.nHeight = index.nHeight - 1;
     index.pprev = &indexPrev;
     mapBlockIndex.insert(std::make_pair(hashPrev, &indexPrev));
+    guard.hashPrev = hashPrev;
+    guard.fInserted = true;
 
     CValidationState state;
     struct timeval tv_start;
     timer_start(tv_start);
-    assert(ConnectBlock(block, state, &index, view, true));
+    bool fConnected = ConnectBlock(block, state, &index, view, true);
     auto duration = timer_stop(tv_start);
-
-    // Undo alterations to global state
-    mapBlockIndex.erase(hashPrev);
-    SelectParamsFromCommandLine();
+    if (!fConnected) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "connectblockslow: the benchmark block did not connect: " + state.GetRejectReason());
+    }
 
     return duration;
 }

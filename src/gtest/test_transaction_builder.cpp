@@ -745,3 +745,19 @@ TEST(TransactionBuilder, ConcurrentOutputProofsVerify)
 
     RegtestDeactivateSapling();
 }
+
+// The fixed transparent test key is stored with the testnet/regtest WIF prefix; the developer
+// benchmarks use it while the node runs with another network selected (mainnet), where
+// DecodeSecret() rejects the prefix and CKey::GetPubKey() used to abort on the invalid key.
+TEST(TransactionBuilder, TestKeyIsValidOnEveryNetwork)
+{
+    SelectParams(CBaseChainParams::MAIN);
+    CBasicKeyStore keystore;
+    CKey tsk = AddTestCKeyToKeyStore(keystore);
+    EXPECT_TRUE(tsk.IsValid());
+    EXPECT_TRUE(tsk.GetPubKey().IsFullyValid());
+    SelectParams(CBaseChainParams::REGTEST);
+    CKey tsk2 = AddTestCKeyToKeyStore(keystore);
+    EXPECT_TRUE(tsk2.IsValid());
+    EXPECT_EQ(tsk.GetPubKey(), tsk2.GetPubKey());
+}
