@@ -79,6 +79,7 @@
 #include <fstream>
 #include <thread>
 #include <future>
+#include <exception>
 #include <chrono>
 #include "librustzcash.h"
 #include "c23/glue/zcl_c23_glue.h"
@@ -2780,6 +2781,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     bool clearWitnessCaches = false;
 
+    // An exception from the background parameter load is not a block-database
+    // error. It is kept out of the catch below (which reports "Error opening
+    // block database" and offers a -reindex) and rethrown after the load loop,
+    // where it leaves AppInit2 exactly as the synchronous ZC_LoadParams did.
+    std::exception_ptr paramsLoadError;
     bool fLoaded = false;
     while (!fLoaded) {
         bool fReset = fReindex || fReindexChainState;
@@ -2819,7 +2825,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     break;
                 }
                 g_startupTimer.mark(".loadblockindex-db");
-                zcParamsLoader.Join();
+                try {
+                    zcParamsLoader.Join();
+                } catch (...) {
+                    paramsLoadError = std::current_exception();
+                    break;
+                }
                 g_startupTimer.mark(".zk-snark params (wait)");
 
                 // If the loaded chain has a wrong genesis, bail out immediately
@@ -2894,6 +2905,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
             fLoaded = true;
         } while(false);
+        if (paramsLoadError)
+            std::rethrow_exception(paramsLoadError);
 
         if (!fLoaded) {
             // first suggest a reindex
