@@ -184,6 +184,7 @@ BITCOIN_CORE_H = \
   noui.h \
   policy/fees.h \
   pow.h \
+  equihashmemo.h \
   prevector.h \
   primitives/block.h \
   primitives/transaction.h \
@@ -268,6 +269,7 @@ libbitcoin_server_a_SOURCES = \
   chain.cpp \
   checkpoints.cpp \
   deprecation.cpp \
+  equihashmemo.cpp \
   httprpc.cpp \
   httpserver.cpp \
   init.cpp \
@@ -569,6 +571,8 @@ libzcl_c23_a_SOURCES = \
   c23/glue/zcl_c23_glue.c \
   c23/glue/zcl_c23_stubs.c \
   c23/glue/zcl_c23_tree_selftest.c \
+  c23/equihash/zc23_equihash.c \
+  c23/equihash/zc23_equihash_vendor.c \
   c23/compat/librustzcash_compat.c \
   c23/compat/witness_codec.c \
   c23/compat/zip32_codec.c \
@@ -577,6 +581,7 @@ libzcl_c23_a_SOURCES = \
   c23/sprout_prover/sprout_prove.c \
   c23/vendor/core/modules/crypto/src/aes256.c \
   c23/vendor/core/modules/crypto/src/blake2b.c \
+  c23/vendor/core/modules/crypto/src/blake2b_avx2.c \
   c23/vendor/core/modules/crypto/src/blake2s.c \
   c23/vendor/core/modules/crypto/src/random_secret.c \
   c23/vendor/core/modules/crypto/src/sha256.c \

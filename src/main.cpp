@@ -1794,7 +1794,7 @@ bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos, bool fCheckPOW)
     // the caller may skip it for a block whose hash is already pinned (see the pindex
     // overload below), where re-running Equihash is pure redundant work.
     if (fCheckPOW &&
-        !(CheckEquihashSolution(&block, Params()) &&
+        !(CheckEquihashSolutionMemo(&block, Params()) &&
           CheckProofOfWork(block.GetHash(), block.nBits, Params().GetConsensus())))
         return error("ReadBlockFromDisk: Errors in block header at %s", pos.ToString());
 
@@ -4271,8 +4271,10 @@ bool CheckBlockHeader(const CBlockHeader& block, CValidationState& state, bool f
         return state.DoS(100, error("CheckBlockHeader(): block version too low"),
                          REJECT_INVALID, "version-too-low");
 
-    // Check Equihash solution is valid
-    if (fCheckPOW && !CheckEquihashSolution(&block, Params()))
+    // Check Equihash solution is valid. A header already verified VALID in this
+    // process (same block hash) is answered from the positive-result memo;
+    // every reject is a fresh evaluation (equihashmemo.h).
+    if (fCheckPOW && !CheckEquihashSolutionMemo(&block, Params()))
         return state.DoS(100, error("CheckBlockHeader(): Equihash solution invalid"),
                          REJECT_INVALID, "invalid-solution");
 
