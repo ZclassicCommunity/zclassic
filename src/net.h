@@ -67,6 +67,9 @@ unsigned int ReceiveFloodSize();
 unsigned int SendBufferSize();
 
 void AddOneShot(const std::string& strDest);
+//! False when DNS seed host names must not be queued as one-shot connections
+//! because the node is onion-only behind the embedded Tor (see ThreadDNSAddressSeed).
+bool DnsSeedOneShotsAllowed();
 void AddressCurrentlyConnected(const CService& addr);
 CNode* FindNode(const CNetAddr& ip);
 CNode* FindNode(const CSubNet& subNet);

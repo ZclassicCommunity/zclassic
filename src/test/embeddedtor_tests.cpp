@@ -8,6 +8,7 @@
 
 #include "embeddedtor.h"
 #include "c23/tor/keyfile.h"
+#include "net.h"
 #include "netbase.h"
 #include "test/test_bitcoin.h"
 #include "utiltime.h"
@@ -164,6 +165,33 @@ BOOST_AUTO_TEST_CASE(embeddedtor_onion_only_requested)
     mapMultiArgs = savedMulti;
 }
 
+BOOST_AUTO_TEST_CASE(dnsseed_oneshots_only_off_in_onion_only_embedded_tor)
+{
+    std::map<std::string, std::string> savedArgs = mapArgs;
+    std::map<std::string, std::vector<std::string> > savedMulti = mapMultiArgs;
+    mapArgs.erase("-embeddedtor");
+    mapArgs.erase("-onlynet");
+    mapMultiArgs.erase("-onlynet");
+
+    // Default and -embeddedtor=0 (with or without -onlynet=onion): unchanged.
+    BOOST_CHECK(DnsSeedOneShotsAllowed());
+    mapArgs["-onlynet"] = "onion";
+    mapMultiArgs["-onlynet"] = std::vector<std::string>(1, "onion");
+    BOOST_CHECK(DnsSeedOneShotsAllowed());
+    mapArgs["-embeddedtor"] = "0";
+    BOOST_CHECK(DnsSeedOneShotsAllowed());
+
+    // Embedded Tor, onion only: seeds are not queued.
+    mapArgs["-embeddedtor"] = "1";
+    BOOST_CHECK(!DnsSeedOneShotsAllowed());
+
+    // Embedded Tor that also allows clearnet: unchanged.
+    mapMultiArgs["-onlynet"].push_back("ipv4");
+    BOOST_CHECK(DnsSeedOneShotsAllowed());
+
+    mapArgs = savedArgs;
+    mapMultiArgs = savedMulti;
+}
 #ifndef WIN32
 static mode_t FileMode(const std::string& path)
 {
