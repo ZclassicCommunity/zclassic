@@ -84,6 +84,7 @@
 #include "crypto/sha256.h"
 #include "sha256.h"
 #include "startuptimer.h"
+#include "zslp/zslpservice.h"
 
 #ifdef ZCL_C23_HAVE_PROVER_THREADS
 // Prover thread budget: -proverthreads=<n>, 0 = auto (min(8, hardware threads)).
@@ -272,6 +273,9 @@ void Shutdown()
     // is in flight (and when -bootstrapserve=auto is not in use).
     InterruptBootstrapServeFreeze();
 
+    // The ZSLP index worker reads blocks and takes cs_main: stop it before the chain DBs are freed below.
+    zslp::StopService();
+
     if (fFeeEstimatesInitialized)
     {
         boost::filesystem::path est_path = GetDataDir() / FEE_ESTIMATES_FILENAME;
@@ -445,6 +449,8 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-sysperms", _("Create new files with system default permissions, instead of umask 077 (only effective with disabled wallet functionality)"));
 #endif
     strUsage += HelpMessageOpt("-txindex", strprintf(_("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)"), 1));
+    strUsage += HelpMessageOpt("-zslpindex", _("Maintain a read-only ZSLP token index in <datadir>/zslpindex, used by the zslp_* rpc calls and the GUI Tokens view. Built in the background; never touches consensus or wallet.dat (default: 0). Not compatible with -prune. See doc/zslp.md"));
+    strUsage += HelpMessageOpt("-zslpindexstart=<n>", _("First block height the ZSLP index reads (default: the first block with a ZSLP transaction on mainnet, 0 on testnet and regtest)"));
     strUsage += HelpMessageOpt("-bootstrap", strprintf(_("On a fresh datadir, fetch zk-SNARK params and the chain snapshot from a bootstrap peer before normal sync (default: %u)"), 1));
 
     strUsage += HelpMessageGroup(_("Connection options:"));
@@ -3377,6 +3383,15 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     LogPrintf("mapWallet.size() = %u\n",       pwalletMain ? pwalletMain->mapWallet.size() : 0);
     LogPrintf("mapAddressBook.size() = %u\n",  pwalletMain ? pwalletMain->mapAddressBook.size() : 0);
 #endif
+
+    // Optional read-only ZSLP token index (off by default). It only reads blocks.
+    if (GetBoolArg("-zslpindex", false)) {
+        if (fPruneMode)
+            return InitError(_("-zslpindex needs the full block files and is not compatible with -prune."));
+        std::string errZslp;
+        if (!zslp::StartService(errZslp))
+            return InitError(errZslp);
+    }
 
     // Start the thread that notifies listeners of transactions that have been
     // recently added to the mempool.

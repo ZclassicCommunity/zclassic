@@ -72,7 +72,13 @@ if ENABLE_WALLET
 # links the wallet gets the token guard (see src/c23/services/README.md). It
 # must stay listed right after libbitcoin_wallet.a, which calls into it.
 LIBBITCOIN_WALLET=libbitcoin_wallet.a libzcl_tokenguard.a
+else
+# No wallet: the ZSLP token index still needs the vendored SLP parser.
+LIBBITCOIN_WALLET=libzcl_tokenguard.a
 endif
+# The ZSLP token index (libbitcoin_server) calls the SLP seam too, so a link whose
+# $(LIBBITCOIN_WALLET) comes BEFORE libbitcoin_server.a needs it once more after the server.
+LIBZCL_TOKENGUARD=libzcl_tokenguard.a
 
 $(LIBSECP256K1): $(wildcard secp256k1/src/*) $(wildcard secp256k1/include/*)
 	$(AM_V_at)$(MAKE) $(AM_MAKEFLAGS) -C $(@D) $(@F)
@@ -260,6 +266,8 @@ BITCOIN_CORE_H = \
   wallet/paymentdisclosuredb.h \
   wallet/rpcwallet.h \
   wallet/tokenguard.h \
+  zslp/zslpindex.h \
+  zslp/zslpservice.h \
   wallet/wallet.h \
   wallet/wallet_ismine.h \
   wallet/walletdb.h \
@@ -339,6 +347,9 @@ libbitcoin_server_a_SOURCES = \
   rpc/net.cpp \
   rpc/rawtransaction.cpp \
   rpc/server.cpp \
+  rpc/zslp.cpp \
+  zslp/zslpindex.cpp \
+  zslp/zslpservice.cpp \
   script/sigcache.cpp \
   timedata.cpp \
   torcontrol.cpp \
@@ -400,6 +411,8 @@ libbitcoin_wallet_a_SOURCES = \
 libzcl_tokenguard_a_SOURCES = \
   c23/services/glue/zcl_token_guard.c \
   c23/services/glue/zcl_token_guard.h \
+  c23/services/glue/zcl_slp_index.c \
+  c23/services/glue/zcl_slp_index.h \
   c23/services/glue/zcl_tokenguard_symbol_prefix.h \
   c23/services/glue/core/uint256.h \
   c23/services/glue/primitives/transaction.h \
