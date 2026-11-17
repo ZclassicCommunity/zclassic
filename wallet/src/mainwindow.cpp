@@ -144,7 +144,18 @@ MainWindow::MainWindow(QWidget *parent) :
         Settings::saveRestore(&aboutDialog);
 
         QString version    = QString("Version ") % QString(APP_VERSION) % " (" % QString(__DATE__) % ")";
-        about.versionLabel->setText(version);
+        // Say which node this wallet is talking to as well: a user reporting a problem needs
+        // both versions, and the wallet and its node can differ (e.g. an external node).
+        const int nv = Settings::getInstance()->getZClassicdVersion();
+        const QString node = nv > 0
+            ? QObject::tr("Node (zclassicd): v%1.%2.%3-beta%4").arg(nv / 1000000).arg(nv / 10000 % 100).arg(nv / 100 % 100).arg(nv % 100 + 1)
+            : QObject::tr("Node (zclassicd): not connected yet");
+        about.versionLabel->setText(version + QChar('\n') + node);
+        // The default link colour is dark blue, unreadable on the dark theme.
+        QPalette pal = aboutDialog.palette();
+        pal.setColor(QPalette::Link, QColor("#6cb2ff"));
+        pal.setColor(QPalette::LinkVisited, QColor("#b39ddb"));
+        aboutDialog.setPalette(pal);
 
         aboutDialog.exec();
     });

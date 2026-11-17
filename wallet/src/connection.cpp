@@ -474,11 +474,17 @@ void ConnectionLoader::createZClassicConf() {
         }
     });
 
+    // The intro text wraps; size the dialog to it so it is never clipped.
+    if (d.layout()) {
+        d.layout()->activate();
+        const int w = qMax(d.sizeHint().width(), 520);
+        d.resize(w, qMax(d.sizeHint().height(), d.layout()->totalHeightForWidth(w)));
+    }
     // Show the dialog
     QString datadir = "";
     bool useTor = false;
     if (d.exec() != QDialog::Accepted) {
-        showError(QObject::tr("Wallet setup was cancelled. No configuration was created. Reopen the wallet to try again."));
+        showError(QObject::tr("Wallet setup was cancelled. Nothing was set up and nothing was downloaded. Click \"Try again\" (or reopen the wallet) when you are ready."));
         return;
     }
     {

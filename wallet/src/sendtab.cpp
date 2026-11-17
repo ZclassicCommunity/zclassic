@@ -1690,7 +1690,10 @@ QString MainWindow::humaneSendError(const QString& raw) {
                   "syncing, then try sending again.");
 
     if (e.contains("wallet is locked") || e.contains("walletpassphrase"))
-        return tr("Your wallet is locked. Unlock it, then try sending again.");
+        return tr("Your wallet is locked (it is encrypted with a passphrase), and this wallet "
+                  "app has no unlock button. Nothing was sent and no funds moved. To send, "
+                  "unlock the node with its walletpassphrase command (for example "
+                  "zclassic-cli walletpassphrase <passphrase> 120), then try sending again.");
 
     if (e.contains("amount out of range") || e.contains("invalid amount") ||
         e.contains("too small") || e.contains("dust"))

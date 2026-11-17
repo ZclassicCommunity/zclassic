@@ -1218,6 +1218,40 @@ private slots:
         settleAndDelete(w);
     }
 
+    // A locked (encrypted) wallet cannot send, and this app has no unlock button. The
+    // message must say nothing moved and how to proceed, not just "Unlock it".
+    void ux9_lockedWalletErrorSaysNothingMovedAndHow() {
+        MainWindow* w = makeWindow();
+        const QString m = w->testHumaneSendError(
+            "Error: Please enter the wallet passphrase with walletpassphrase first.");
+        QVERIFY2(m.contains("Nothing was sent"), qPrintable(m));
+        QVERIFY2(m.contains("walletpassphrase"), qPrintable(m));
+        settleAndDelete(w);
+    }
+
+    // About must show the node's version as well as the wallet's.
+    void ux10_aboutShowsNodeVersion() {
+        MainWindow* w = makeWindow();
+        Settings::getInstance()->setZClassicdVersion(2010212);
+        QAction* act = w->findChild<QAction*>("actionAbout");
+        QVERIFY(act);
+        QString seen = QStringLiteral("about dialog never appeared");
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            QWidget* dlg = QApplication::activeModalWidget();
+            QLabel* l = dlg ? dlg->findChild<QLabel*>("versionLabel") : nullptr;
+            if (!l) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+            seen = l->text();
+            static_cast<QDialog*>(dlg)->reject();
+        };
+        QTimer::singleShot(0, [&]() { poll(300); });
+        act->trigger();
+        ++_modalGen;
+        QVERIFY2(seen.contains("2.1.2-beta13"), qPrintable(seen));
+        settleAndDelete(w);
+    }
+
     void e2_publicWarningVisibleForTransparentRecipient() {
         MainWindow* w = makeWindow();
 

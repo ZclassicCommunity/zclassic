@@ -11,7 +11,7 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>Configure zclassic.conf</string>
+   <string>Set up ZClassic</string>
   </property>
   <layout class="QGridLayout" name="gridLayout">
    <item row="0" column="1">
@@ -46,7 +46,7 @@
       <enum>Qt::Horizontal</enum>
      </property>
      <property name="standardButtons">
-      <set>QDialogButtonBox::Ok</set>
+      <set>QDialogButtonBox::Cancel|QDialogButtonBox::Ok</set>
      </property>
      <property name="centerButtons">
       <bool>true</bool>
@@ -83,7 +83,10 @@
    <item row="2" column="1">
     <widget class="QLabel" name="label">
      <property name="text">
-      <string>Your zclassic node will be configured for you automatically</string>
+      <string>ZClassic will set up its own built-in node for you. On first start it downloads the blockchain from other nodes, which takes a while and needs several GB of free disk space, and it creates your wallet file. Choose Advanced if you want to store the data somewhere else.</string>
+     </property>
+     <property name="wordWrap">
+      <bool>true</bool>
      </property>
      <property name="alignment">
       <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignVCenter</set>
