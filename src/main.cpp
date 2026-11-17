@@ -4841,8 +4841,33 @@ CBlockIndex * InsertBlockIndex(uint256 hash)
     return pindexNew;
 }
 
+// Collects the candidate blocks found while linking the loaded block index and
+// inserts into setBlockIndexCandidates only those that PruneBlockIndexCandidates()
+// would keep for a given tip, i.e. every block that does not compare worse than the
+// tip under the work ordering. The final set is identical to inserting everything
+// and pruning afterwards, without building a 3M-entry red-black tree first. If the
+// function leaves before the tip is known, all collected blocks are inserted.
+namespace {
+class CandidateCollector
+{
+    std::vector<CBlockIndex*> v;
+public:
+    void Add(CBlockIndex* p) { v.push_back(p); }
+    void Flush(const CBlockIndex* tip)
+    {
+        for (CBlockIndex* p : v) {
+            if (tip == NULL || !setBlockIndexCandidates.value_comp()(p, const_cast<CBlockIndex*>(tip)))
+                setBlockIndexCandidates.insert(p);
+        }
+        v.clear();
+    }
+    ~CandidateCollector() { Flush(NULL); }
+};
+}
+
 bool static LoadBlockIndexDB()
 {
+    CandidateCollector candidates;
     const CChainParams& chainparams = Params();
     int64_t nLoadT = GetTimeMicros();
     auto benchMark = [&nLoadT](const char* what) {
@@ -4923,7 +4948,7 @@ bool static LoadBlockIndexDB()
                 setDirtyBlockIndex.insert(pindex);
         }
         if (pindex->IsValid(BLOCK_VALID_TRANSACTIONS) && (pindex->nChainTx || pindex->pprev == NULL))
-            setBlockIndexCandidates.insert(pindex);
+            candidates.Add(pindex);
         if (pindex->nStatus & BLOCK_FAILED_MASK && (!pindexBestInvalid || pindex->nChainWork > pindexBestInvalid->nChainWork))
             pindexBestInvalid = pindex;
         
@@ -5032,6 +5057,7 @@ bool static LoadBlockIndexDB()
     // Set hashFinalSproutRoot for the end of best chain
     it->second->hashFinalSproutRoot = pcoinsTip->GetBestAnchor(SPROUT);
 
+    candidates.Flush(chainActive.Tip());
     benchMark("set tip");
     PruneBlockIndexCandidates();
     benchMark("prune candidates");
@@ -5258,6 +5284,7 @@ bool RewindBlockIndex(const CChainParams& params, bool& clearWitnessCaches)
     // We do this after actual disconnecting, otherwise we'll end up writing the lack of data
     // to disk before writing the chainstate, resulting in a failure to continue if interrupted.
     std::vector<const CBlockIndex*> vBlocks;
+    CBlockIndex* const pTipForCandidates = chainActive.Tip();
     for (BlockMap::iterator it = mapBlockIndex.begin(); it != mapBlockIndex.end(); it++) {
         CBlockIndex* pindexIter = it->second;
 
@@ -5284,7 +5311,11 @@ bool RewindBlockIndex(const CChainParams& params, bool& clearWitnessCaches)
                 }
             }
         } else if (pindexIter->IsValid(BLOCK_VALID_TRANSACTIONS) && pindexIter->nChainTx) {
-            setBlockIndexCandidates.insert(pindexIter);
+            // PruneBlockIndexCandidates() below drops every candidate that compares worse
+            // than the active tip, so do not build (and then tear down) a multi-million
+            // entry tree of them: the resulting set is identical.
+            if (pTipForCandidates == NULL || !setBlockIndexCandidates.value_comp()(pindexIter, pTipForCandidates))
+                setBlockIndexCandidates.insert(pindexIter);
         }
     }
 
