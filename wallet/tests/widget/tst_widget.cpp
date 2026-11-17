@@ -988,6 +988,40 @@ private slots:
     }
 
 #ifdef ZCL_WIDGET_TEST
+    // Token guard (daemon v2.1.2-beta13): z_sendmany failures may now carry a note that
+    // ZSLP token outputs were protected. The friendly headline must say so instead of
+    // blaming confirmations or the balance, which would send the user chasing the wrong cause.
+    void sendError_tokenGuardHeadline() {
+        std::unique_ptr<MainWindow> w(makeWindow());
+        const QString notes[] = {
+            // verbatim from the daemon (wallet_tokenguard.sh, regtest z_sendmany)
+            "Could not find any non-coinbase UTXOs to spend. (8 token-bearing outputs holding "
+            "0.00004368 are protected and were not used: spending them as ordinary funds would "
+            "burn the ZSLP tokens or mint baton they carry)",
+            "Insufficient funds, no UTXOs found for taddr from address. (2 token-bearing outputs "
+            "holding 0.00001092 are protected and were not used: spending them as ordinary funds "
+            "would burn the ZSLP tokens or mint baton they carry)",
+            "Insufficient funds: have 1.00, need 2.00 (1 token-bearing output holding 0.00000546 "
+            "is protected and was not used: spending it as ordinary funds would burn the ZSLP "
+            "tokens or mint baton it carries)",
+            "Input 00:0 carries ZSLP tokens or a mint baton and is protected: spending it in a "
+            "transaction that is not a matching token transfer burns them. It was chosen "
+            "explicitly, so nothing was selected in its place; to spend it anyway, request the "
+            "token-input override explicitly",
+        };
+        for (const QString& raw : notes) {
+            const QString headline = w->testHumaneSendError(raw);
+            QVERIFY2(headline.contains("token", Qt::CaseInsensitive), qPrintable(headline));
+            QVERIFY2(!headline.contains("confirmed yet"), qPrintable(headline));
+            QVERIFY2(!headline.contains("enough confirmed"), qPrintable(headline));
+        }
+        // Unchanged mappings for the ordinary causes.
+        QVERIFY(w->testHumaneSendError("Insufficient funds, no UTXOs found for taddr from address.")
+                    .contains("confirmed yet"));
+        QVERIFY(w->testHumaneSendError("Insufficient transparent funds, have 1, need 2")
+                    .contains("enough confirmed"));
+    }
+
     // ---- E2: confirmTx with a t-recipient reveals publicWarning -----------
     // confirmTx() is private and blocks on d.exec(); the test-only public seam
     // MainWindow::testConfirmTx (guarded by ZCL_WIDGET_TEST) lets us call it,

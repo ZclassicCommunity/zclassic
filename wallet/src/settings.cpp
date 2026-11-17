@@ -190,7 +190,10 @@ bool Settings::isSaplingAddress(QString addr) {
         return false;
 
     return ( isTestnet() && addr.startsWith("ztestsapling")) ||
-           (!isTestnet() && addr.startsWith("zs"));
+           (!isTestnet() && addr.startsWith("zs")) ||
+           // regtest Sapling (zregtestsapling1..): getinfo reports testnet=false there, and
+           // no other network can produce this prefix (the bech32 HRP is checksummed above).
+           addr.startsWith("zregtestsapling");
 }
 
 bool Settings::isSproutAddress(QString addr) {
@@ -509,13 +512,14 @@ bool Settings::isValidAddress(QString addr) {
     // so the shared QRegExp match state is never touched concurrently.
     static const QRegExp zcexp("^z[a-z0-9]{94}$",  Qt::CaseInsensitive);   // Sprout  (zc.. / ztn..)
     static const QRegExp zsexp("^z[a-z0-9]{77}$",  Qt::CaseInsensitive);   // Sapling (zs1..)
-    static const QRegExp ztsexp("^ztestsapling[a-z0-9]{76}", Qt::CaseInsensitive); // testnet Sapling
+    static const QRegExp ztsexp("^z(regtest|test)sapling[a-z0-9]{76}", Qt::CaseInsensitive); // testnet / regtest Sapling
     static const QRegExp texp("^t[a-z0-9]{34}$", Qt::CaseInsensitive);     // transparent (t1.. / t3..)
 
     // Sapling addresses are bech32 -> verify the bech32 polymod checksum.
     // Note: the testnet-Sapling regex is a prefix match (matches the broader
     // Sprout shape too), so test bech32 first and fall through on failure.
-    if (addr.startsWith("zs", Qt::CaseInsensitive) || addr.startsWith("ztestsapling", Qt::CaseInsensitive)) {
+    if (addr.startsWith("zs", Qt::CaseInsensitive) || addr.startsWith("ztestsapling", Qt::CaseInsensitive) ||
+        addr.startsWith("zregtestsapling", Qt::CaseInsensitive)) {
         if (zsexp.exactMatch(addr) || ztsexp.exactMatch(addr))
             return bech32ChecksumValid(addr);
         return false;
