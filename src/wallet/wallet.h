@@ -318,6 +318,15 @@ public:
      * format change. (Sprout's cache is memory-only for the same reason.)
      */
     boost::optional<CAmount> value;
+    /**
+     * The payment address the note was received at (ivk + the decrypted
+     * diversifier). Recovering it costs a full note decryption plus two
+     * Jubjub scalar multiplications, which made every address-filtered balance
+     * or note listing O(all wallet notes) decryptions. A payment address is
+     * public data, not key material. MEMORY-ONLY exactly like 'value': never
+     * serialized, boost::none until the note is first decrypted.
+     */
+    boost::optional<libzcash::SaplingPaymentAddress> address;
 
     ADD_SERIALIZE_METHODS;
 
@@ -331,7 +340,7 @@ public:
         READWRITE(nullifier);
         READWRITE(witnesses);
         READWRITE(witnessHeight);
-        // 'value' is deliberately NOT serialized (memory-only cache) — keeps the
+        // 'value' and 'address' are deliberately NOT serialized (memory-only cache) — keeps the
         // on-disk layout identical to pre-cache wallets.
     }
 
@@ -1512,6 +1521,19 @@ public:
                           bool ignoreSpent=true,
                           bool requireSpendingKey=true,
                           bool ignoreLocked=true);
+
+    /**
+     * Sum of the Sapling note values GetFilteredNotes would return for the same
+     * arguments (maxDepth = INT_MAX, ignoreSpent = true), without constructing
+     * the plaintext entries: it reads the memory-only SaplingNoteData::value and
+     * ::address caches, decrypting a note only on a cache miss (and then filling
+     * both). Only non-invertible amounts and public payment addresses are cached;
+     * no note randomness, memo or key material.
+     */
+    CAmount GetSaplingBalanceFiltered(const std::set<libzcash::PaymentAddress>& filterAddresses,
+                                      int minDepth = 1,
+                                      bool requireSpendingKey = true,
+                                      bool ignoreLocked = true);
 
     /**
      * Sum of the wallet's spendable Sapling note values, using the MEMORY-ONLY
