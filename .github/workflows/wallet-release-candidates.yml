@@ -75,12 +75,27 @@ jobs:
   macos:
     if: inputs.platform == 'all' || inputs.platform == 'macos'
     runs-on: macos-15
-    timeout-minutes: 40
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - run: brew install qt@5 libsodium
+      - run: brew install libsodium
+      - name: Restore macOS toolchain
+        id: qt-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: wallet-macos15-qt5.15.19-static-v1-${{ hashFiles('wallet/contrib/release/macos-toolchain.sh') }}
+          path: wallet/artifacts/mac-toolchain-5.15.19/qt-static
+      - name: Build pinned static Qt (the floor check in macos.sh rejects Homebrew Qt)
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        run: ZCL_MAKE_JOBS="$(sysctl -n hw.ncpu)" sh wallet/contrib/release/macos-toolchain.sh
+      - name: Save macOS toolchain
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: wallet-macos15-qt5.15.19-static-v1-${{ hashFiles('wallet/contrib/release/macos-toolchain.sh') }}
+          path: wallet/artifacts/mac-toolchain-5.15.19/qt-static
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: daemon-macos-arm64
@@ -94,6 +109,7 @@ jobs:
           export ZCL_DAEMON="$PWD/daemon/zclassicd"
           export ZCL_DAEMON_SHA256=$(shasum -a 256 "$ZCL_DAEMON" | cut -d' ' -f1)
           chmod +x "$ZCL_DAEMON"
+          export ZCL_QT_PREFIX="$PWD/wallet/artifacts/mac-toolchain-5.15.19/qt-static"
           sh wallet/contrib/release/macos.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
