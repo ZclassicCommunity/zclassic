@@ -322,3 +322,29 @@ scn_relay() {
     pass "relay probe finished"
     ck "final balance = funds minus 4 sends, exact" "$(bal 0)" "$(add 10 -0.4 "$(cli 0 listtransactions '*' 100 | jq '[.[]|select(.category=="send")|.fee]|add' | f8)")"
 }
+
+# ---------------------------------------------------------------- 14
+# Crash window: how much does a kill -9 right after confirmed receipts lose from wallet.dat, and
+# does the next startup recover it by itself (no -rescan)?
+scn_window() {
+    setup2 || return
+    zs=$(cli 0 z_getnewaddress); ta=$(cli 0 getnewaddress); R="-connect=127.0.0.1:$((BASE + 1))"
+    mt=$(cli 1 getnewaddress); mz=$(cli 1 z_getnewaddress)
+    cli 1 sendtoaddress "$mt" 8 >/dev/null; cli 1 generate 1 >/dev/null
+    r=$(zsend 1 "$mt" "[{\"address\":\"$mz\",\"amount\":6}]"); cli 1 generate 1 >/dev/null
+    i=0; while [ $i -lt 10 ]; do
+        i=$((i + 1)); cli 1 sendtoaddress "$ta" 0.1 >/dev/null
+        r=$(zsend 1 "$mz" "[{\"address\":\"$zs\",\"amount\":0.1}]"); case $r in success*) ;; *) bad "window: miner z_sendmany $i: $r" ;; esac
+        cli 1 generate 1 >/dev/null
+    done; sync_to 0
+    ck "10 t receipts" "$(bal 0)" 1.00000000; ck "10 z receipts" "$(zbal 0 "$zs")" 1.00000000
+    kill9 0; start 0 "$BIN" $R
+    obs "kill9_after_10_blocks_t_immediate" "$(bal 0)"; obs "kill9_after_10_blocks_z_immediate" "$(zbal 0 "$zs")"
+    w=0; until [ "$(bal 0)" = 1.00000000 ] && [ "$(zbal 0 "$zs")" = 1.00000000 ] || [ $w -ge 120 ]; do sleep 1; w=$((w + 1)); done
+    obs_t "kill9_recovered_by_startup_scan_after_seconds" "$w"
+    ck "startup recovers every receipt without -rescan (t)" "$(bal 0)" 1.00000000
+    ck "startup recovers every receipt without -rescan (z)" "$(zbal 0 "$zs")" 1.00000000
+    ck "no duplicate notes" "$(cli 0 z_listunspent | jq length)" 10
+    ck "no duplicate coins" "$(cli 0 listunspent | jq length)" 10
+    ck "10 notes spendable after recovery" "$(zsend 0 "$zs" "[{\"address\":\"$mt\",\"amount\":0.9}]" | cut -c1-7)" success
+}
