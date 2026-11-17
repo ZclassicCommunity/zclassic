@@ -313,7 +313,7 @@ protected:
         v.push_back(Mine(DUST));
         CMutableTransaction mint = ForeignTx(v);
 
-        // SEND: vout[1] = 400, vout[2] = 0 (carries nothing), vout[3] = 600, vout[4] = ordinary
+        // SEND: vout[1] = 400, vout[2] = 0 (zero quantity: still protected, as in Z23), vout[3] = 600, vout[4] = ordinary
         std::vector<uint64_t> q;
         q.push_back(400);
         q.push_back(0);
@@ -369,7 +369,7 @@ protected:
         Expect(txidMint, 2, COIN / 4, false);
         Expect(txidMint, 3, DUST, true);
         Expect(txidSend, 1, DUST, true);
-        Expect(txidSend, 2, DUST, false);
+        Expect(txidSend, 2, DUST, true);
         Expect(txidSend, 3, DUST, true);
         Expect(txidSend, 4, COIN / 8, false);
         Expect(txidNotSlp, 1, DUST, false);
@@ -377,8 +377,8 @@ protected:
         Expect(txidLate, 0, DUST, false);
         Expect(txidLate, 2, DUST, true);
 
-        ASSERT_EQ(7u, protectedOutpoints.size());
-        ASSERT_EQ(9u, ordinaryOutpoints.size());
+        ASSERT_EQ(8u, protectedOutpoints.size());
+        ASSERT_EQ(8u, ordinaryOutpoints.size());
     }
 
     // Create (not commit) a payment and return its inputs.
@@ -762,8 +762,8 @@ TEST_F(TokenGuardTest, ListUnspentAndBalanceUnchangedApartFromNewField)
 
     // The balance counts the token dust exactly as before.
     EXPECT_EQ(nOrdinaryValue + nProtectedValue, wallet->GetBalance());
-    EXPECT_EQ(387500000 + 4 * DUST, nOrdinaryValue);
-    EXPECT_EQ(7 * DUST, nProtectedValue);
+    EXPECT_EQ(387500000 + 3 * DUST, nOrdinaryValue);
+    EXPECT_EQ(8 * DUST, nProtectedValue);
 
     pwalletMain = wallet;
     UniValue list = listunspent(UniValue(UniValue::VARR), false);

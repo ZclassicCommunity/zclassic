@@ -138,7 +138,7 @@ LIBZCASH_H = \
   zcash/Zcash.h \
   zcash/zip32.h
 
-.PHONY: FORCE collate-libsnark check-symbols check-security check-c23-vendor check-c23-no-rust
+.PHONY: FORCE collate-libsnark check-symbols check-security check-c23-vendor check-c23-no-rust check-c23-tor-symbols
 # bitcoin core #
 BITCOIN_CORE_H = \
   addrman.h \
@@ -797,6 +797,26 @@ check-c23-vendor:
 	sh $(srcdir)/c23/tools/check-vendor.sh
 	sh $(srcdir)/c23/services/tools/check-vendor.sh $(srcdir)/c23/services
 
+
+# Embedded Tor keeps Tor's own generic names (tor_*, crypto_*, ...). Prove no other
+# archive of the daemon defines one. Needs the depends lib directory:
+#   make check-c23-tor-symbols TOR_LIBDIR=<depends prefix>/lib
+if ENABLE_EMBEDDED_TOR
+check-c23-tor-symbols:
+	@test -n "$(TOR_LIBDIR)" || { echo "usage: make check-c23-tor-symbols TOR_LIBDIR=<depends prefix>/lib" >&2; exit 2; }
+	sh $(srcdir)/c23/tor/check-symbols.sh "$(NM)" "$(TOR_LIBDIR)" \
+	  $(TOR_LIBDIR)/libsodium.a $(TOR_LIBDIR)/libcrypto.a $(TOR_LIBDIR)/libssl.a \
+	  $(TOR_LIBDIR)/libevent.a $(TOR_LIBDIR)/libevent_pthreads.a $(TOR_LIBDIR)/libz.a \
+	  $(TOR_LIBDIR)/libgmp.a $(TOR_LIBDIR)/libzmq.a $(TOR_LIBDIR)/libdb_cxx.a \
+	  libzcl_c23.a libzcl_c23_hash.a libzcl_tokenguard.a libzcl_tor.a libzcash.a \
+	  snark/libsnark.a leveldb/libleveldb.a secp256k1/.libs/libsecp256k1.a \
+	  libbitcoin_server.a libbitcoin_common.a libbitcoin_util.a libbitcoin_wallet.a \
+	  crypto/libbitcoin_crypto.a
+else
+check-c23-tor-symbols:
+	@echo "check-c23-tor-symbols: this build has no embedded Tor"
+endif
+
 # The linker must never see a Rust archive. Run after a build.
 check-c23-no-rust: $(bin_PROGRAMS)
 	sh $(srcdir)/c23/tools/check-no-rust.sh "$(NM)" $(bin_PROGRAMS)
@@ -854,6 +874,7 @@ EXTRA_DIST = leveldb snark test/tree_root_c_tests.c \
   c23/services/tools/z23-vector-check.sh \
   c23/services/tools/z23_vector_shim.h \
   c23/services/tools/slpscript.c
+EXTRA_DIST += c23/tor/check-symbols.sh
 
 clean-local:
 	-$(MAKE) -C leveldb clean
