@@ -100,7 +100,12 @@ AsyncRPCOperation_sendmany::AsyncRPCOperation_sendmany(
 
             isfromzaddr_ = true;
             frompaymentaddress_ = address;
-            spendingkey_ = boost::apply_visitor(GetSpendingKeyForPaymentAddress(pwalletMain), address).get();
+            auto sk = boost::apply_visitor(GetSpendingKeyForPaymentAddress(pwalletMain), address);
+            if (!sk) {
+                // The wallet knows the key but cannot decrypt it: it is encrypted and locked.
+                throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED, "Error: Please enter the wallet passphrase with walletpassphrase first.");
+            }
+            spendingkey_ = sk.get();
         } else {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid from address");
         }
