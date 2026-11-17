@@ -86,7 +86,7 @@ jobs:
               test "$(printf '%s\nGLIBC_2.31\n' "$highest" | sort -V | tail -1)" = GLIBC_2.31
             done
             ! grep -E 'not found|libgomp' candidate/validation.txt
-            candidate/zclassicd --version | grep -F '2.1.2-beta11'
+            candidate/zclassicd --version | grep -F '2.1.2-beta13'
           fi
           git rev-parse HEAD > candidate/SOURCE_COMMIT.txt
           cd candidate

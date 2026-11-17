@@ -32,7 +32,7 @@ cmp "$ZCL_DAEMON" "$ZCL_DAEMON_BUILD_DIR/src/zclassicd" || {
     echo 'The packaged daemon must match the audited native build exactly.' >&2
     exit 1
 }
-"$ZCL_DAEMON" --version | grep -F '2.1.2-beta11'
+"$ZCL_DAEMON" --version | grep -F '2.1.2-beta13'
 cp "$ZCL_DAEMON" zclwallet.app/Contents/MacOS/zclassicd
 if [ "$static_qt" = 0 ]; then
     "$qt/bin/macdeployqt" zclwallet.app -verbose=2

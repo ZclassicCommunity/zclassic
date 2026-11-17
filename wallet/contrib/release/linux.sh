@@ -51,7 +51,7 @@ cd "$work"
 : "${ZCL_DAEMON_SHA256:?Supply the verified daemon SHA256}"
 daemon="$ZCL_DAEMON"
 printf '%s  %s\n' "$ZCL_DAEMON_SHA256" "$daemon" | sha256sum -c -
-"$daemon" --version | grep -F '2.1.2-beta11'
+"$daemon" --version | grep -F '2.1.2-beta13'
 # Check both executable compatibility floors and document runtime libraries.
 for binary in "$work/gui/zclwallet" "$daemon"; do
     readelf -h "$binary" >/dev/null
