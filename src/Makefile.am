@@ -677,6 +677,9 @@ libzcash_a_CFLAGS = $(SAN_CXXFLAGS) $(HARDENED_CXXFLAGS) $(PIE_FLAGS)
 libzcash_a_LDFLAGS = $(AM_LDFLAGS)
 
 libzcash_a_CPPFLAGS += -DMONTGOMERY_OUTPUT
+# Match the libsnark build (src/Makefile.am snark rule): the field templates in libsnark headers
+# are COMDAT; without USE_ASM here the linker picks this unit's generic GMP mul_reduce over libsnark's asm one.
+libzcash_a_CPPFLAGS += -DUSE_ASM
 
 # C23 crypto core: vendored Z23 (verbatim), zclassicd glue, the librustzcash ABI
 # shim and the Sprout Groth16 prover. Replaces librustzcash.a; nothing Rust is linked.
