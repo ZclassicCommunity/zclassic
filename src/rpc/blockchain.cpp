@@ -752,8 +752,12 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
             "  \"chain\": \"xxxx\",        (string) current network name as defined in BIP70 (main, test, regtest)\n"
             "  \"blocks\": xxxxxx,         (numeric) the current number of blocks processed in the server\n"
             "  \"headers\": xxxxxx,        (numeric) the current number of headers we have validated\n"
+            "  \"initialblockdownload\": true|false, (boolean) whether the node considers itself in initial block download\n"
+            "  \"syncphase\": \"xxxx\",  (string) synced|waiting_for_peers|downloading_headers|downloading_blocks|reindexing|importing\n"
+            "  \"connections\": n,        (numeric) number of peer connections\n"
             "  \"bestblockhash\": \"...\", (string) the hash of the currently best block\n"
             "  \"mediantime\" : ttt,       (numeric) The median block time of the current best block\n"
+            "  \"tiptime\" : ttt,          (numeric) Timestamp of the best block, seconds since epoch\n"
             "  \"difficulty\": xxxxxx,     (numeric) the current difficulty\n"
             "  \"verificationprogress\": xxxx, (numeric) estimate of verification progress [0..1]\n"
             "  \"chainwork\": \"xxxx\"     (string) total amount of work in active chain, in hexadecimal\n"
@@ -823,8 +827,25 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
     if (pindexBestHeader && pindexBestHeader->nHeight > nEstimatedHeight)
         nEstimatedHeight = pindexBestHeader->nHeight;
     obj.push_back(Pair("estimatedheight",       nEstimatedHeight));
+    // Explicit sync state for GUI wallets, so they need not infer it from block age.
+    // initialblockdownload is the node's own IsInitialBlockDownload(); syncphase is one of
+    // synced, waiting_for_peers, downloading_headers, downloading_blocks, reindexing, importing.
+    {
+        int nConnections = 0;
+        {
+            LOCK(cs_vNodes);
+            nConnections = (int)vNodes.size();
+        }
+        const bool fIBD = IsInitialBlockDownload();
+        obj.push_back(Pair("initialblockdownload", fIBD));
+        obj.push_back(Pair("syncphase", std::string(ClassifySyncPhase(fIBD, fReindex, fImporting, nConnections,
+                                                                       (int)chainActive.Height(), nEstimatedHeight))));
+        obj.push_back(Pair("connections", nConnections));
+    }
     obj.push_back(Pair("bestblockhash",         chainActive.Tip()->GetBlockHash().GetHex()));
     obj.push_back(Pair("mediantime",            (int64_t)chainActive.Tip()->GetMedianTimePast()));
+    // Additive status fields for GUI sync display (no behaviour change).
+    obj.push_back(Pair("tiptime",              (int64_t)chainActive.Tip()->GetBlockTime()));
     obj.push_back(Pair("difficulty",            (double)GetNetworkDifficulty()));
     obj.push_back(Pair("verificationprogress",  Checkpoints::GuessVerificationProgress(Params().Checkpoints(), chainActive.Tip())));
     obj.push_back(Pair("chainwork",             chainActive.Tip()->nChainWork.GetHex()));

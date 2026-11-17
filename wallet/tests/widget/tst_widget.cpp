@@ -32,6 +32,7 @@
 // disclosure not hiding t-Addr, or collapsing not returning to private).
 // ============================================================================
 #include <QtTest/QtTest>
+#include "syncstate.h"
 #include <QApplication>
 #include <QTemporaryDir>
 #include <QRadioButton>
@@ -403,6 +404,35 @@ private slots:
         QCOMPARE(w->syncStatusLabel->text(), first); // Discovering headers is not a moving finish line.
         QVERIFY(!first.contains("ETA"));
         QVERIFY(!first.contains("2400281"));
+    }
+
+    void syncBannerStatesAreHonest() {
+        std::unique_ptr<MainWindow> w(makeWindow());
+        // Behind by weeks after a snapshot import: say how far behind, no fake percent.
+        w->setSyncStatus(true, 3126937, 3126937, 1.0, 20LL * 86400, SyncState::Syncing);
+        QVERIFY2(w->syncStatusLabel->text().contains("20 days behind"), qPrintable(w->syncStatusLabel->text()));
+        QCOMPARE(w->syncProgressBar->maximum(), 0);
+        QVERIFY(!w->syncStatusLabel->text().contains("%"));
+        // Regtest with no peers (the owner's "block 101"): a local network, not "starting".
+        w->setSyncStatus(false, 101, 101, 1.0, 5LL * 86400, SyncState::LocalNetwork);
+        QVERIFY(w->syncQuietPill->isVisibleTo(w.get()));
+        QVERIFY2(w->syncQuietPill->text().contains("Local test network"), qPrintable(w->syncQuietPill->text()));
+        QVERIFY(!w->syncQuietPill->text().contains("days ago"));
+        QVERIFY(!w->syncStatusLabel->isVisibleTo(w.get()));
+        // Synced at the tip: say how fresh the newest block is.
+        w->setSyncStatus(false, 3330000, 3330000, 1.0, 140, SyncState::Synced);
+        QVERIFY2(w->syncQuietPill->text().contains("last block 2 min ago"), qPrintable(w->syncQuietPill->text()));
+        // No peers: tell the user where the chain stands.
+        w->setSyncStatusWaitingForPeers(false, 3330000, 300);
+        QVERIFY2(w->syncStatusLabel->text().contains("3,330,000"), qPrintable(w->syncStatusLabel->text()));
+        QVERIFY(w->syncStatusLabel->text().contains("5 min"));
+        // Stale tip with peers: wrong clock / stalled network is named.
+        w->setSyncStatus(true, 3330000, 3330000, 1.0, 5 * 3600, SyncState::StaleTip);
+        QVERIFY2(w->syncStatusLabel->text().contains("date and time"), qPrintable(w->syncStatusLabel->text()));
+        // Wrong system clock: node is caught up but says so; banner names the clock.
+        w->setSyncStatus(false, 3330000, 3330000, 1.0, 3 * 3600, SyncState::ClockSkew);
+        QVERIFY2(w->syncStatusLabel->text().contains("date or time"), qPrintable(w->syncStatusLabel->text()));
+        QVERIFY(!w->syncQuietPill->isVisibleTo(w.get()));
     }
 
     void fundedHomeFitsTextWithAllCards() {

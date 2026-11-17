@@ -36,6 +36,7 @@
 #include "embeddeddaemon.h"
 #include "releaseversion.h"
 #include "fastsync.h"
+#include "syncstate.h"
 #include <QCryptographicHash>
 #include <QStandardItemModel>
 
@@ -166,6 +167,65 @@ class TestLogic : public QObject {
     Q_OBJECT
 
 private slots:
+    // ---- sync state mapping (syncstate.h): daemon facts -> what the user is told ----
+    void syncState_data() {
+        QTest::addColumn<QString>("chain");
+        QTest::addColumn<int>("blocks");
+        QTest::addColumn<int>("headers");
+        QTest::addColumn<int>("tipAgeSecs");   // -1 = unknown
+        QTest::addColumn<int>("peers");
+        QTest::addColumn<int>("ibd");
+        QTest::addColumn<bool>("everSynced");
+        QTest::addColumn<int>("kind");
+        QTest::addColumn<bool>("isSyncing");
+        using namespace SyncState;
+        // The owner's case: regtest, 101 blocks, no peers -> a local network, never "starting".
+        QTest::newRow("regtest-101-nopeers") << "regtest" << 101 << 101 << 3600*24*30 << 0 << 0 << false << (int)LocalNetwork << false;
+        QTest::newRow("regtest-genesis")     << "regtest" << 0 << 0 << -1 << 0 << -1 << false << (int)LocalNetwork << false;
+        // A regtest node that is still fetching blocks it has headers for (a second local node) is syncing.
+        QTest::newRow("regtest-headers-ahead") << "regtest" << 50 << 500 << 3600 << 1 << 1 << false << (int)Syncing << true;
+        // Fresh snapshot import: blocks==headers at the anchor, peers up, tip 20 days old.
+        QTest::newRow("post-snapshot-old-tip") << "main" << 3126937 << 3126937 << 3600*24*20 << 8 << 1 << false << (int)Syncing << true;
+        QTest::newRow("headers-ahead")       << "main" << 3200000 << 3330000 << 3600*24*3 << 8 << 1 << false << (int)Syncing << true;
+        QTest::newRow("at-tip-fresh")        << "main" << 3330000 << 3330000 << 120 << 8 << 0 << false << (int)Synced << false;
+        QTest::newRow("within-2-headers")    << "main" << 3329998 << 3330000 << 150 << 8 << 0 << false << (int)Synced << false;
+        // Restart from a synced datadir, fresh tip, peers not yet connected: not "synced" yet.
+        QTest::newRow("restart-no-peers-yet") << "main" << 3330000 << 3330000 << 300 << 0 << 0 << false << (int)WaitingForPeers << true;
+        // Peers drop after having been confirmed at the tip: stay synced, do not flicker.
+        QTest::newRow("synced-then-peers-drop") << "main" << 3330000 << 3330000 << 300 << 0 << 0 << true << (int)Synced << false;
+        QTest::newRow("no-peers-old-tip")    << "main" << 3126937 << 3126937 << 3600*24*20 << 0 << 1 << false << (int)WaitingForPeers << true;
+        // Tip older than 2h with peers after being synced: wrong clock or stalled network.
+        QTest::newRow("stale-tip-peers")     << "main" << 3330000 << 3330000 << 3600*5 << 8 << 0 << true << (int)StaleTip << true;
+        QTest::newRow("first-poll-nothing")  << "main" << 0 << 0 << -1 << 0 << -1 << false << (int)Syncing << true;
+        QTest::newRow("testnet-tip-fresh")   << "test" << 900000 << 900000 << 200 << 3 << 0 << false << (int)Synced << false;
+        QTest::newRow("clock-skew-reported") << "main" << 3330000 << 3330000 << 3600*3 << 2 << 0 << false << (int)ClockSkew << false;
+        // The node itself still reports initial block download with a fresh tip (its chain has less work
+        // than the known minimum, e.g. a low-work chain fed by the only peers it has): never "synced".
+        QTest::newRow("ibd-fresh-tip-peers")    << "main" << 3330000 << 3330000 << 120 << 8 << 1 << false << (int)Syncing << true;
+        QTest::newRow("ibd-fresh-tip-everSynced-nopeers") << "main" << 3330000 << 3330000 << 120 << 0 << 1 << true << (int)WaitingForPeers << true;
+    }
+    void syncState() {
+        QFETCH(QString, chain); QFETCH(int, blocks); QFETCH(int, headers); QFETCH(int, tipAgeSecs);
+        QFETCH(int, peers); QFETCH(int, ibd); QFETCH(bool, everSynced);
+        QFETCH(int, kind); QFETCH(bool, isSyncing);
+        SyncState::Input in;
+        in.chain = chain; in.blocks = blocks; in.headers = headers;
+        in.now = 1800000000; in.tipTime = tipAgeSecs >= 0 ? in.now - tipAgeSecs : 0;
+        in.connections = peers; in.ibd = ibd; in.everSynced = everSynced;
+        in.clockWarning = (QByteArray(QTest::currentDataTag()) == "clock-skew-reported");
+        const SyncState::Verdict v = SyncState::classify(in);
+        QCOMPARE((int)v.kind, kind);
+        QCOMPARE(v.isSyncing, isSyncing);
+    }
+    void syncState_formatAge() {
+        QCOMPARE(SyncState::formatAge(-1), QString());
+        QCOMPARE(SyncState::formatAge(40), QString("40 s"));
+        QCOMPARE(SyncState::formatAge(300), QString("5 min"));
+        QCOMPARE(SyncState::formatAge(3 * 3600), QString("3 h"));
+        QCOMPARE(SyncState::formatAge(20LL * 86400), QString("20 days"));
+        QCOMPARE(SyncState::formatAge(3641LL * 86400), QString("10.0 years"));
+    }
+
     void fastSync_existingWalletSkipsHistoricalReplay() {
         const QString existing = "bootstrap peer download requires a fresh chain datadir; /data/blocks already exists";
         QVERIFY(shouldMigrateToCheckpoint(true, true, 2719719, "skipped", existing));
