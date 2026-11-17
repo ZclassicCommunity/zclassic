@@ -504,7 +504,7 @@ The GUI links a **static libsodium 1.0.16** built from source by
    - **Linux** links `-lsodium` → `res/libsodium.a` (the unix name).
    - **win32-g++** links `-llibsodium` → `res/liblibsodium.a` (the `lib`-prefixed name).
 
-   This repo ships `res/liblibsodium.a` (the mingw name) but **not** `res/libsodium.a`,
+   This repo ships **neither** `res/liblibsodium.a` (the mingw name, a staged build input, git-ignored) nor `res/libsodium.a`,
    so a fresh **Linux** build correctly triggers `buildlibsodium.sh`. For the Windows
    cross build, `build-gui-win.sh` stages the mingw libsodium to **both** names so the
    Linux build script never runs.
