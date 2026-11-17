@@ -13,6 +13,7 @@
 #include "bootstrapvalidation.h"
 #include "chainparams.h"
 #include "checkpoints.h"
+#include "addrv2.h"
 #include "checkqueue.h"
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
@@ -6141,6 +6142,71 @@ static bool RecvBootstrapChunk(
 
 // Not static so unit tests in src/test/bootstrap_snapshot_protocol_tests.cpp can
 // drive individual message handlers directly. Declare it `extern` from those tests.
+/**
+ * Take a batch of addresses a peer sent (legacy "addr" or BIP155 "addrv2"):
+ * relay the fresh ones to a few peers and store those on networks we use.
+ */
+static void ProcessAddrList(CNode* pfrom, vector<CAddress>& vAddr)
+{
+    // Store the new addresses
+    vector<CAddress> vAddrOk, vAddrOnionOk;
+    int64_t nNow = GetAdjustedTime();
+    int64_t nSince = nNow - 10 * 60;
+    BOOST_FOREACH(CAddress& addr, vAddr)
+    {
+        boost::this_thread::interruption_point();
+
+        if (addr.nTime <= 100000000 || addr.nTime > nNow + 10 * 60)
+            addr.nTime = nNow - 5 * 24 * 60 * 60;
+        pfrom->AddAddressKnown(addr);
+        bool fReachable = IsReachable(addr);
+        if (addr.nTime > nSince && !pfrom->fGetAddr && vAddr.size() <= 10 && addr.IsRoutable())
+        {
+            // Relay to a limited number of other nodes
+            {
+                LOCK(cs_vNodes);
+                // Use deterministic randomness to send to the same nodes for 24 hours
+                // at a time so the addrKnowns of the chosen nodes prevent repeats
+                static uint256 hashSalt;
+                if (hashSalt.IsNull())
+                    hashSalt = GetRandHash();
+                uint64_t hashAddr = addr.GetHash();
+                uint256 hashRand = ArithToUint256(UintToArith256(hashSalt) ^ (hashAddr<<32) ^ ((GetTime()+hashAddr)/(24*60*60)));
+                hashRand = Hash(BEGIN(hashRand), END(hashRand));
+                multimap<uint256, CNode*> mapMix;
+                BOOST_FOREACH(CNode* pnode, vNodes)
+                {
+                    if (pnode->nVersion < CADDR_TIME_VERSION)
+                        continue;
+                    // a Tor v3 address only goes to peers that negotiated addrv2
+                    if (addr.IsTorV3() && !pnode->fSendAddrV2)
+                        continue;
+                    unsigned int nPointer;
+                    memcpy(&nPointer, &pnode, sizeof(nPointer));
+                    uint256 hashKey = ArithToUint256(UintToArith256(hashRand) ^ nPointer);
+                    hashKey = Hash(BEGIN(hashKey), END(hashKey));
+                    mapMix.insert(make_pair(hashKey, pnode));
+                }
+                int nRelayNodes = fReachable ? 2 : 1; // limited relaying of addresses outside our network(s)
+                for (multimap<uint256, CNode*>::iterator mi = mapMix.begin(); mi != mapMix.end() && nRelayNodes-- > 0; ++mi)
+                    ((*mi).second)->PushAddress(addr);
+            }
+        }
+        // Do not store addresses outside our network
+        if (fReachable)
+            (addr.IsTorV3() ? vAddrOnionOk : vAddrOk).push_back(addr);
+    }
+    addrman.Add(vAddrOk, pfrom->addr, 2 * 60 * 60);
+    // Tor v3 addresses (only ever sent by addrv2 peers) go to the onion store.
+    // The source is the peer: its v3 address when we reached it over Tor, its
+    // clearnet address, or 127.0.0.1 for a peer that came in through our onion
+    // service (one shared source group for all of those).
+    if (!vAddrOnionOk.empty())
+        addrmanOnion.Add(vAddrOnionOk, pfrom->addr, 2 * 60 * 60);
+    if (vAddr.size() < 1000)
+        pfrom->fGetAddr = false;
+}
+
 bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t nTimeReceived)
 {
     const CChainParams& chainparams = Params();
@@ -6228,6 +6294,10 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
         // Potentially mark this peer as a preferred download peer.
         UpdatePreferredDownload(pfrom, State(pfrom->GetId()));
 
+        // BIP155: announce addrv2 support between version and verack. Older
+        // peers ignore the unknown command.
+        pfrom->PushMessage("sendaddrv2");
+
         // Change version
         pfrom->PushMessage("verack");
         pfrom->ssSend.SetVersion(min(pfrom->nVersion, PROTOCOL_VERSION));
@@ -6237,7 +6307,7 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
             // Advertise our address
             if (fListen && !IsInitialBlockDownload())
             {
-                CAddress addr = GetLocalAddress(&pfrom->addr);
+                CAddress addr = GetLocalAddress(&pfrom->addr, pfrom->IsOnionPeer());
                 if (addr.IsRoutable())
                 {
                     LogPrintf("ProcessMessages: advertizing address %s\n", addr.ToString());
@@ -6255,7 +6325,7 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
                 pfrom->PushMessage("getaddr");
                 pfrom->fGetAddr = true;
             }
-            addrman.Good(pfrom->addr);
+            AddrManFor(pfrom->addr).Good(pfrom->addr);
         } else {
             if (((CNetAddr)pfrom->addr) == (CNetAddr)addrFrom)
             {
@@ -6291,6 +6361,7 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
 
     else if (strCommand == "verack")
     {
+        pfrom->fVerackRecvd = true;
         pfrom->SetRecvVersion(min(pfrom->nVersion, PROTOCOL_VERSION));
 
         // Mark this node as currently connected, so we update its timestamp later.
@@ -6481,54 +6552,43 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
             return error("message addr size() = %u", vAddr.size());
         }
 
-        // Store the new addresses
-        vector<CAddress> vAddrOk;
-        int64_t nNow = GetAdjustedTime();
-        int64_t nSince = nNow - 10 * 60;
-        BOOST_FOREACH(CAddress& addr, vAddr)
-        {
-            boost::this_thread::interruption_point();
+        ProcessAddrList(pfrom, vAddr);
+        if (pfrom->fOneShot)
+            pfrom->fDisconnect = true;
+    }
 
-            if (addr.nTime <= 100000000 || addr.nTime > nNow + 10 * 60)
-                addr.nTime = nNow - 5 * 24 * 60 * 60;
-            pfrom->AddAddressKnown(addr);
-            bool fReachable = IsReachable(addr);
-            if (addr.nTime > nSince && !pfrom->fGetAddr && vAddr.size() <= 10 && addr.IsRoutable())
-            {
-                // Relay to a limited number of other nodes
-                {
-                    LOCK(cs_vNodes);
-                    // Use deterministic randomness to send to the same nodes for 24 hours
-                    // at a time so the addrKnowns of the chosen nodes prevent repeats
-                    static uint256 hashSalt;
-                    if (hashSalt.IsNull())
-                        hashSalt = GetRandHash();
-                    uint64_t hashAddr = addr.GetHash();
-                    uint256 hashRand = ArithToUint256(UintToArith256(hashSalt) ^ (hashAddr<<32) ^ ((GetTime()+hashAddr)/(24*60*60)));
-                    hashRand = Hash(BEGIN(hashRand), END(hashRand));
-                    multimap<uint256, CNode*> mapMix;
-                    BOOST_FOREACH(CNode* pnode, vNodes)
-                    {
-                        if (pnode->nVersion < CADDR_TIME_VERSION)
-                            continue;
-                        unsigned int nPointer;
-                        memcpy(&nPointer, &pnode, sizeof(nPointer));
-                        uint256 hashKey = ArithToUint256(UintToArith256(hashRand) ^ nPointer);
-                        hashKey = Hash(BEGIN(hashKey), END(hashKey));
-                        mapMix.insert(make_pair(hashKey, pnode));
-                    }
-                    int nRelayNodes = fReachable ? 2 : 1; // limited relaying of addresses outside our network(s)
-                    for (multimap<uint256, CNode*>::iterator mi = mapMix.begin(); mi != mapMix.end() && nRelayNodes-- > 0; ++mi)
-                        ((*mi).second)->PushAddress(addr);
-                }
-            }
-            // Do not store addresses outside our network
-            if (fReachable)
-                vAddrOk.push_back(addr);
+
+    // BIP155 (subset): the peer will send us "addrv2" instead of "addr".
+    // Only honoured between version and verack. Unknown to older peers, which
+    // ignore it like any unknown command.
+    else if (strCommand == "sendaddrv2")
+    {
+        if (!pfrom->fVerackRecvd)
+            pfrom->fSendAddrV2 = true;
+        LogPrint("net", "sendaddrv2 from peer=%d%s\n", pfrom->id, pfrom->fVerackRecvd ? " (after verack, ignored)" : "");
+    }
+
+
+    else if (strCommand == "addrv2")
+    {
+        // As in Bitcoin Core: addrv2 from a peer that did not negotiate it is
+        // ignored (no ban, no parsing).
+        if (!pfrom->fSendAddrV2) {
+            LogPrint("net", "Ignoring addrv2 from peer=%d, it did not send sendaddrv2\n", pfrom->id);
+            return true;
         }
-        addrman.Add(vAddrOk, pfrom->addr, 2 * 60 * 60);
-        if (vAddr.size() < 1000)
-            pfrom->fGetAddr = false;
+        // Don't want addr from older versions unless seeding (as for addr)
+        if (pfrom->nVersion < CADDR_TIME_VERSION && addrman.size() > 1000)
+            return true;
+        vector<CAddress> vAddr;
+        uint64_t nSeen = 0;
+        if (!ReadAddrV2List(vRecv, vAddr, &nSeen))
+        {
+            Misbehaving(pfrom->GetId(), 20);
+            return error("message addrv2 size() = %u", (unsigned)nSeen);
+        }
+
+        ProcessAddrList(pfrom, vAddr);
         if (pfrom->fOneShot)
             pfrom->fDisconnect = true;
     }
@@ -6960,6 +7020,15 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
 
         pfrom->vAddrToSend.clear();
         vector<CAddress> vAddr = addrman.GetAddr();
+        // Tor v3 addresses go to every peer that negotiated addrv2, clearnet or
+        // onion (as in Bitcoin Core a getaddr answer spans all networks the peer
+        // can parse): a clearnet peer with a Tor proxy can use them too, and they
+        // are public by nature. A peer that did not negotiate addrv2 gets exactly
+        // the legacy answer; PushAddress drops v3 for it anyway.
+        if (pfrom->fSendAddrV2) {
+            vector<CAddress> vOnion = addrmanOnion.GetAddr();
+            vAddr.insert(vAddr.end(), vOnion.begin(), vOnion.end());
+        }
         BOOST_FOREACH(const CAddress &addr, vAddr)
             pfrom->PushAddress(addr);
     }
@@ -7352,8 +7421,10 @@ bool SendMessages(CNode* pto, bool fSendTrickle)
             BOOST_FOREACH(CNode* pnode, vNodes)
             {
                 // Periodically clear addrKnown to allow refresh broadcasts
-                if (nLastRebroadcast)
+                if (nLastRebroadcast) {
                     pnode->addrKnown.reset();
+                    pnode->fOnionAdvertised = false;
+                }
 
                 // Rebroadcast our address
                 AdvertizeLocal(pnode);
@@ -7365,15 +7436,38 @@ bool SendMessages(CNode* pto, bool fSendTrickle)
         //
         // Message: addr
         //
+        // Our Tor address goes to onion peers only, once they negotiated addrv2
+        // (known after their verack) and once the onion service is up. Retried
+        // on every pass until it has been queued; the 24h rebroadcast resets it.
+        if (pto->fVerackRecvd && !pto->fOnionAdvertised && AdvertizeLocalOnion(pto))
+            pto->fOnionAdvertised = true;
+
         if (fSendTrickle)
         {
+            // A peer that sent sendaddrv2 gets "addrv2"; everyone else gets
+            // exactly the legacy "addr" stream (PushAddress never queues a
+            // Tor v3 address for them).
+            const bool fV2 = pto->fSendAddrV2;
             vector<CAddress> vAddr;
+            vector<CAddressV2> vAddrV2;
             vAddr.reserve(pto->vAddrToSend.size());
             BOOST_FOREACH(const CAddress& addr, pto->vAddrToSend)
             {
                 if (!pto->addrKnown.contains(addr.GetKey()))
                 {
                     pto->addrKnown.insert(addr.GetKey());
+                    if (fV2) {
+                        if (!CAddressV2::CanSend(addr))
+                            continue;
+                        vAddrV2.push_back(CAddressV2(addr));
+                        // receiver rejects addrv2 messages larger than 1000
+                        if (vAddrV2.size() >= MAX_ADDRV2_ENTRIES)
+                        {
+                            pto->PushMessage("addrv2", vAddrV2);
+                            vAddrV2.clear();
+                        }
+                        continue;
+                    }
                     vAddr.push_back(addr);
                     // receiver rejects addr messages larger than 1000
                     if (vAddr.size() >= 1000)
@@ -7386,6 +7480,8 @@ bool SendMessages(CNode* pto, bool fSendTrickle)
             pto->vAddrToSend.clear();
             if (!vAddr.empty())
                 pto->PushMessage("addr", vAddr);
+            if (!vAddrV2.empty())
+                pto->PushMessage("addrv2", vAddrV2);
         }
 
         CNodeState &state = *State(pto->GetId());

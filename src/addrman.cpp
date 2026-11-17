@@ -247,13 +247,15 @@ bool CAddrMan::Add_(const CAddress& addr, const CNetAddr& sourceIn, int64_t nTim
     if (!addr.IsRoutable())
         return false;
     // peers.dat holds 16-byte addresses; a v3 onion address does not fit and
-    // would be read back as "::" or as one address for all of them. Neither
-    // the address nor a v3 source (an onion peer that told us about an IPv4/IPv6
-    // address) is stored; such a source counts as the unspecified "::", which
-    // is what the file held for it before.
-    if (addr.IsTorV3())
+    // would be read back as "::" or as one address for all of them. The
+    // peers.dat table therefore stores neither the address nor a v3 source (an
+    // onion peer that told us about an IPv4/IPv6 address); such a source counts
+    // as the unspecified "::", which is what the file held for it before.
+    // The onion store is the mirror image: only v3 addresses, and any source
+    // (a v3 peer, or a clearnet peer that sent us addrv2).
+    if (addr.IsTorV3() != fOnionStore)
         return false;
-    const CNetAddr source = sourceIn.IsTorV3() ? CNetAddr() : sourceIn;
+    const CNetAddr source = (!fOnionStore && sourceIn.IsTorV3()) ? CNetAddr() : sourceIn;
 
     bool fNew = false;
     int nId;
@@ -349,6 +351,27 @@ CAddrInfo CAddrMan::Select_(bool newOnly)
 
     if (newOnly && nNew == 0)
         return CAddrInfo();
+
+    // The onion store is small and sparse (a few hundred v3 addresses spread
+    // over the 1024 x 64 slots): probing random slots until one is occupied
+    // would take tens of thousands of tries (and sleeps) per selection. Pick
+    // among the entries themselves instead, with the same 50% tried/new split
+    // and the same chance weighting. The buckets still bound what each source
+    // group can store; they just do not shape the choice here.
+    if (fOnionStore) {
+        const bool fTried = !newOnly && nTried > 0 && (nNew == 0 || RandomInt(2) == 0);
+        double fChanceFactor = 1.0;
+        while (1) {
+            int nId = vRandom[RandomInt(vRandom.size())];
+            assert(mapInfo.count(nId) == 1);
+            CAddrInfo& info = mapInfo[nId];
+            if (info.fInTried != fTried)
+                continue;
+            if (RandomInt(1 << 30) < fChanceFactor * info.GetChance() * (1 << 30))
+                return info;
+            fChanceFactor *= 1.2;
+        }
+    }
 
     // Use a 50% chance for choosing between tried and new table entries.
     if (!newOnly &&
@@ -482,6 +505,11 @@ int CAddrMan::Check_()
 void CAddrMan::GetAddr_(std::vector<CAddress>& vAddr)
 {
     unsigned int nNodes = ADDRMAN_GETADDR_MAX_PCT * vRandom.size() / 100;
+    // The onion store is small, and 23% of a handful of entries is none of
+    // them: a node that knows two onion peers would answer getaddr with
+    // nothing. Share up to 64 of them at least.
+    if (fOnionStore && nNodes < 64)
+        nNodes = std::min<unsigned int>(64, vRandom.size());
     if (nNodes > ADDRMAN_GETADDR_MAX)
         nNodes = ADDRMAN_GETADDR_MAX;
 

@@ -11,6 +11,7 @@
 #include "net.h"
 
 #include "addrman.h"
+#include "addrv2.h"
 #include "chainparams.h"
 #include "clientversion.h"
 #include "embeddedtor.h"
@@ -54,8 +55,9 @@ namespace {
     struct ListenSocket {
         SOCKET socket;
         bool whitelisted;
+        bool onion; // the onion service target
 
-        ListenSocket(SOCKET socket, bool whitelisted) : socket(socket), whitelisted(whitelisted) {}
+        ListenSocket(SOCKET socket, bool whitelisted, bool onion = false) : socket(socket), whitelisted(whitelisted), onion(onion) {}
     };
 }
 
@@ -72,6 +74,7 @@ static CNode* pnodeLocalHost = NULL;
 uint64_t nLocalHostNonce = 0;
 static std::vector<ListenSocket> vhListenSocket;
 CAddrMan addrman;
+CAddrMan addrmanOnion(true);
 int nMaxConnections = DEFAULT_MAX_PEER_CONNECTIONS;
 bool fAddressesInitialized = false;
 std::string strSubVersion;
@@ -114,10 +117,12 @@ unsigned short GetListenPort()
 }
 
 // find 'best' local address for a particular peer
-bool GetLocal(CService& addr, const CNetAddr *paddrPeer)
+bool GetLocal(CService& addr, const CNetAddr *paddrPeer, bool fPeerOnion)
 {
     if (!fListen)
         return false;
+
+    const bool fOnionPeer = fPeerOnion || (paddrPeer && paddrPeer->IsTor());
 
     int nBestScore = -1;
     int nBestReachability = -1;
@@ -125,6 +130,10 @@ bool GetLocal(CService& addr, const CNetAddr *paddrPeer)
         LOCK(cs_mapLocalHost);
         for (map<CNetAddr, LocalServiceInfo>::iterator it = mapLocalHost.begin(); it != mapLocalHost.end(); it++)
         {
+            // never mix the two sides: our Tor address only for onion peers, our
+            // clearnet addresses never for them
+            if ((*it).first.IsTor() != fOnionPeer)
+                continue;
             int nScore = (*it).second.nScore;
             int nReachability = (*it).first.GetReachabilityFrom(paddrPeer);
             if (nReachability > nBestReachability || (nReachability == nBestReachability && nScore > nBestScore))
@@ -163,11 +172,11 @@ static std::vector<CAddress> convertSeed6(const std::vector<SeedSpec6> &vSeedsIn
 // Otherwise, return the unroutable 0.0.0.0 but filled in with
 // the normal parameters, since the IP may be changed to a useful
 // one by discovery.
-CAddress GetLocalAddress(const CNetAddr *paddrPeer)
+CAddress GetLocalAddress(const CNetAddr *paddrPeer, bool fPeerOnion)
 {
     CAddress ret(CService("0.0.0.0",GetListenPort()),0);
     CService addr;
-    if (GetLocal(addr, paddrPeer))
+    if (GetLocal(addr, paddrPeer, fPeerOnion))
     {
         ret = CAddress(addr);
     }
@@ -187,7 +196,8 @@ int GetnScore(const CService& addr)
 // Is our peer's addrLocal potentially useful as an external IP source?
 bool IsPeerAddrLocalGood(CNode *pnode)
 {
-    return fDiscover && pnode->addr.IsRoutable() && pnode->addrLocal.IsRoutable() &&
+    // a peer on the onion side only knows us as the Tor exit: nothing to learn
+    return fDiscover && !pnode->IsOnionPeer() && pnode->addr.IsRoutable() && pnode->addrLocal.IsRoutable() &&
            !IsLimited(pnode->addrLocal.GetNetwork());
 }
 
@@ -196,7 +206,7 @@ void AdvertizeLocal(CNode *pnode)
 {
     if (fListen && pnode->fSuccessfullyConnected)
     {
-        CAddress addrLocal = GetLocalAddress(&pnode->addr);
+        CAddress addrLocal = GetLocalAddress(&pnode->addr, pnode->IsOnionPeer());
         // If discovery is enabled, sometimes give our peer the address it
         // tells us that it sees us as in case it has a better idea of our
         // address than we do.
@@ -211,6 +221,43 @@ void AdvertizeLocal(CNode *pnode)
             pnode->PushAddress(addrLocal);
         }
     }
+}
+
+// Our Tor v3 address for a peer on the onion side that negotiated addrv2.
+// Needs the service to be up (the address is in mapLocalHost only after
+// ADD_ONION succeeded, or when given with -externalip).
+bool AdvertizeLocalOnion(CNode *pnode)
+{
+    if (!fListen || !pnode->fSuccessfullyConnected || !pnode->fSendAddrV2 || !pnode->IsOnionPeer())
+        return false;
+    CService svc;
+    if (!GetLocal(svc, &pnode->addr, true) || !svc.IsTorV3())
+        return false;
+    CAddress addr(svc, nLocalServices);
+    addr.nTime = GetAdjustedTime();
+    LogPrintf("AdvertizeLocalOnion: advertizing %s to onion peer=%d\n", addr.ToString(), pnode->id);
+    pnode->PushAddress(addr);
+    return true;
+}
+
+static CCriticalSection cs_onionTarget;
+static CService onionTarget;
+static bool fHaveOnionTarget = false;
+
+void SetOnionServiceTarget(const CService& addr)
+{
+    LOCK(cs_onionTarget);
+    onionTarget = addr;
+    fHaveOnionTarget = true;
+}
+
+bool GetOnionServiceTarget(CService& addrOut)
+{
+    LOCK(cs_onionTarget);
+    if (!fHaveOnionTarget)
+        return false;
+    addrOut = onionTarget;
+    return true;
 }
 
 // learn a new local address
@@ -309,7 +356,7 @@ bool IsReachable(const CNetAddr& addr)
 
 void AddressCurrentlyConnected(const CService& addr)
 {
-    addrman.Connected(addr);
+    AddrManFor(addr).Connected(addr);
 }
 
 
@@ -386,7 +433,7 @@ CNode* ConnectNode(CAddress addrConnect, const char *pszDest)
             return NULL;
         }
 
-        addrman.Attempt(addrConnect);
+        AddrManFor(addrConnect).Attempt(addrConnect);
 
         // Add node
         CNode* pnode = new CNode(hSocket, addrConnect, pszDest ? pszDest : "", false);
@@ -403,7 +450,7 @@ CNode* ConnectNode(CAddress addrConnect, const char *pszDest)
     } else if (!proxyConnectionFailed) {
         // If connecting to the node failed, and failure is not caused by a problem connecting to
         // the proxy, mark this as an attempt.
-        addrman.Attempt(addrConnect);
+        AddrManFor(addrConnect).Attempt(addrConnect);
     }
 
     return NULL;
@@ -432,7 +479,7 @@ void CNode::PushVersion()
     // A v3 onion peer cannot be named in the 16-byte field: send the unroutable
     // placeholder, as for any peer we reach through a proxy.
     CAddress addrYou = (addr.IsRoutable() && !addr.IsTorV3() && !IsProxy(addr) ? addr : CAddress(CService("0.0.0.0",0)));
-    CAddress addrMe = GetLocalAddress(&addr);
+    CAddress addrMe = GetLocalAddress(&addr, IsOnionPeer());
     GetRandBytes((unsigned char*)&nLocalHostNonce, sizeof(nLocalHostNonce));
     if (fLogIPs)
         LogPrint("net", "send version message: version %d, blocks=%d, us=%s, them=%s, peer=%d\n", PROTOCOL_VERSION, nBestHeight, addrMe.ToString(), addrYou.ToString(), id);
@@ -965,8 +1012,9 @@ static void AcceptConnection(const ListenSocket& hListenSocket) {
     CNode* pnode = new CNode(hSocket, addr, "", true);
     pnode->AddRef();
     pnode->fWhitelisted = whitelisted;
+    pnode->fInboundOnion = hListenSocket.onion;
 
-    LogPrint("net", "connection from %s accepted\n", addr.ToString());
+    LogPrint("net", "connection from %s accepted%s\n", addr.ToString(), hListenSocket.onion ? " (onion service)" : "");
 
     {
         LOCK(cs_vNodes);
@@ -1330,6 +1378,16 @@ void DumpAddresses()
 
     LogPrint("net", "Flushed %d addresses to peers.dat  %dms\n",
            addrman.size(), GetTimeMillis() - nStart);
+
+    // The Tor v3 store has its own file; written only once it holds something
+    // (or did), so a node that never meets an onion peer never creates it.
+    static bool fOnionFileWanted = false;
+    if (addrmanOnion.size() > 0 || fOnionFileWanted) {
+        fOnionFileWanted = true;
+        COnionAddrDB odb;
+        odb.Write(addrmanOnion);
+        LogPrint("net", "Flushed %d addresses to onion_peers.dat\n", addrmanOnion.size());
+    }
 }
 
 void static ProcessOneShot()
@@ -1348,6 +1406,16 @@ void static ProcessOneShot()
         if (!OpenNetworkConnection(addr, &grant, strDest.c_str(), true))
             AddOneShot(strDest);
     }
+}
+
+CAddrMan& SelectDialTable(bool fOnionProxy, uint32_t nRand)
+{
+    if (addrmanOnion.size() > 0 && fOnionProxy && IsReachable(NET_ONION)) {
+        const bool fOnionOnly = IsLimited(NET_IPV4) && IsLimited(NET_IPV6);
+        if (fOnionOnly || addrman.size() == 0 || nRand == 0)
+            return addrmanOnion;
+    }
+    return addrman;
 }
 
 void ThreadOpenConnections()
@@ -1413,10 +1481,21 @@ void ThreadOpenConnections()
 
         int64_t nANow = GetAdjustedTime();
 
+        // Which table to pick from. The onion store feeds this loop only when
+        // the onion network is reachable (Tor proxy set, not limited): an
+        // onion-only node (IPv4 and IPv6 limited) takes its candidates from it
+        // whenever it has any, a mixed node one time in four (a Tor connection
+        // is slower, but keeps the onion side of the network connected) or when
+        // the clearnet table is empty. Everything selected still goes through the
+        // IsLimited/IsLocal/group checks below, so a clearnet address is never
+        // dialled by a node that limits IPv4 and IPv6.
+        proxyType proxyOnion;
+        CAddrMan* pmanSelect = &SelectDialTable(GetProxy(NET_ONION, proxyOnion), GetRand(4));
+
         int nTries = 0;
         while (true)
         {
-            CAddrInfo addr = addrman.Select();
+            CAddrInfo addr = pmanSelect->Select();
 
             // if we selected an invalid address, restart
             if (!addr.IsValid() || setConnected.count(addr.GetGroup()) || IsLocal(addr))
@@ -1623,7 +1702,7 @@ void ThreadMessageHandler()
 
 
 
-bool BindListenPort(const CService &addrBind, string& strError, bool fWhitelisted)
+bool BindListenPort(const CService &addrBind, string& strError, bool fWhitelisted, bool fOnion)
 {
     strError = "";
     int nOne = 1;
@@ -1715,9 +1794,9 @@ bool BindListenPort(const CService &addrBind, string& strError, bool fWhiteliste
         return false;
     }
 
-    vhListenSocket.push_back(ListenSocket(hListenSocket, fWhitelisted));
+    vhListenSocket.push_back(ListenSocket(hListenSocket, fWhitelisted, fOnion));
 
-    if (addrBind.IsRoutable() && fDiscover && !fWhitelisted)
+    if (addrBind.IsRoutable() && fDiscover && !fWhitelisted && !fOnion)
         AddLocal(addrBind, LOCAL_BIND);
 
     return true;
@@ -1786,6 +1865,14 @@ void StartNode(boost::thread_group& threadGroup, CScheduler& scheduler)
     }
     LogPrintf("Loaded %i addresses from peers.dat  %dms\n",
            addrman.size(), GetTimeMillis() - nStart);
+    {
+        // Tor v3 addresses (addrv2 gossip). A missing file is the normal case.
+        COnionAddrDB odb;
+        if (odb.Exists() && !odb.Read(addrmanOnion))
+            LogPrintf("Invalid onion_peers.dat; recreating\n");
+        if (addrmanOnion.size() > 0)
+            LogPrintf("Loaded %i Tor v3 addresses from onion_peers.dat\n", addrmanOnion.size());
+    }
     fAddressesInitialized = true;
 
     if (semOutbound == NULL) {
@@ -2082,6 +2169,123 @@ bool CAddrDB::Read(CAddrMan& addr)
     return true;
 }
 
+COnionAddrDB::COnionAddrDB()
+{
+    pathOnion = GetDataDir() / "onion_peers.dat";
+}
+
+bool COnionAddrDB::Exists() const
+{
+    return boost::filesystem::exists(pathOnion);
+}
+
+static const unsigned char ONION_PEERS_VERSION = 1;
+
+bool COnionAddrDB::Write(const CAddrMan& addr)
+{
+    unsigned short randv = 0;
+    GetRandBytes((unsigned char*)&randv, sizeof(randv));
+    std::string tmpfn = strprintf("onion_peers.dat.%04x", randv);
+
+    std::vector<CAddrInfo> vInfo = addr.GetEntries();
+    CDataStream ss(SER_DISK, CLIENT_VERSION);
+    ss << FLATDATA(Params().MessageStart());
+    ss << ONION_PEERS_VERSION;
+    WriteCompactSize(ss, vInfo.size());
+    BOOST_FOREACH(const CAddrInfo& info, vInfo) {
+        ss << CAddressV2(info);
+        // the source group is part of the bucket choice, so it is kept; an
+        // OnionCat source (no addrv2 form) comes back as "::"
+        CAddress src(CService(info.GetSource(), 0));
+        ss << CAddressV2(src);
+        int64_t nLastSuccess = info.GetLastSuccess();
+        int32_t nAttempts = info.GetAttempts();
+        uint8_t fTried = info.IsTried() ? 1 : 0;
+        ss << nLastSuccess << nAttempts << fTried;
+    }
+    uint256 hash = Hash(ss.begin(), ss.end());
+    ss << hash;
+
+    boost::filesystem::path pathTmp = GetDataDir() / tmpfn;
+    FILE *file = fopen(pathTmp.string().c_str(), "wb");
+    CAutoFile fileout(file, SER_DISK, CLIENT_VERSION);
+    if (fileout.IsNull())
+        return error("%s: Failed to open file %s", __func__, pathTmp.string());
+    try {
+        fileout << ss;
+    }
+    catch (const std::exception& e) {
+        return error("%s: Serialize or I/O error - %s", __func__, e.what());
+    }
+    FileCommit(fileout.Get());
+    fileout.fclose();
+
+    if (!RenameOver(pathTmp, pathOnion))
+        return error("%s: Rename-into-place failed", __func__);
+    return true;
+}
+
+bool COnionAddrDB::Read(CAddrMan& addr)
+{
+    FILE *file = fopen(pathOnion.string().c_str(), "rb");
+    CAutoFile filein(file, SER_DISK, CLIENT_VERSION);
+    if (filein.IsNull())
+        return error("%s: Failed to open file %s", __func__, pathOnion.string());
+
+    int fileSize = boost::filesystem::file_size(pathOnion);
+    int dataSize = fileSize - sizeof(uint256);
+    if (dataSize < 0)
+        dataSize = 0;
+    vector<unsigned char> vchData;
+    vchData.resize(dataSize);
+    uint256 hashIn;
+    try {
+        if (dataSize > 0)
+            filein.read((char *)&vchData[0], dataSize);
+        filein >> hashIn;
+    }
+    catch (const std::exception& e) {
+        return error("%s: Deserialize or I/O error - %s", __func__, e.what());
+    }
+    filein.fclose();
+
+    CDataStream ss(vchData, SER_DISK, CLIENT_VERSION);
+    uint256 hashTmp = Hash(ss.begin(), ss.end());
+    if (hashIn != hashTmp)
+        return error("%s: Checksum mismatch, data corrupted", __func__);
+
+    try {
+        unsigned char pchMsgTmp[4];
+        ss >> FLATDATA(pchMsgTmp);
+        if (memcmp(pchMsgTmp, Params().MessageStart(), sizeof(pchMsgTmp)))
+            return error("%s: Invalid network magic number", __func__);
+        unsigned char nVersion;
+        ss >> nVersion;
+        if (nVersion != ONION_PEERS_VERSION)
+            return error("%s: Unknown version %u", __func__, (unsigned)nVersion);
+        uint64_t n = ReadCompactSize(ss);
+        if (n > (uint64_t)ADDRMAN_NEW_BUCKET_COUNT * ADDRMAN_BUCKET_SIZE + (uint64_t)ADDRMAN_TRIED_BUCKET_COUNT * ADDRMAN_BUCKET_SIZE)
+            return error("%s: Too many entries (%u)", __func__, (unsigned)n);
+        for (uint64_t i = 0; i < n; i++) {
+            CAddressV2 a, s;
+            int64_t nLastSuccess;
+            int32_t nAttempts;
+            uint8_t fTried;
+            ss >> a >> s >> nLastSuccess >> nAttempts >> fTried;
+            if (!a.fKnown || !a.addr.IsTorV3())
+                continue;
+            CNetAddr source = s.fKnown ? (CNetAddr)s.addr : CNetAddr();
+            addr.Add(a.addr, source, 0);
+            if (fTried && nLastSuccess > 0)
+                addr.Good(a.addr, nLastSuccess);
+        }
+    }
+    catch (const std::exception& e) {
+        return error("%s: Deserialize or I/O error - %s", __func__, e.what());
+    }
+    return true;
+}
+
 unsigned int ReceiveFloodSize() { return 1000*GetArg("-maxreceivebuffer", 5*1000); }
 unsigned int SendBufferSize() { return 1000*GetArg("-maxsendbuffer", 1*1000); }
 // Bounds how many bootstrap chunk requests a peer may have queued at once.
@@ -2122,6 +2326,10 @@ CNode::CNode(SOCKET hSocketIn, const CAddress& addrIn, const std::string& addrNa
     fGetAddr = false;
     fRelayTxes = false;
     fSentAddr = false;
+    fSendAddrV2 = false;
+    fInboundOnion = false;
+    fOnionAdvertised = false;
+    fVerackRecvd = false;
     fBootstrapManifestSent = false;
     fBootstrapParamManifestSent = false;
     pfilter = new CBloomFilter();

@@ -660,7 +660,12 @@ void TorController::add_onion(TorControlConnection& conn)
     // Request hidden service, redirect port.
     // Note that the 'virtual' port doesn't have to be the same as our internal port, but this is just a convenient
     // choice.  TODO; refactor the shutdown sequence some day.
-    conn.Command(strprintf("ADD_ONION %s Port=%i,127.0.0.1:%i", private_key, GetListenPort(), GetListenPort()),
+    // The target is the loopback listener dedicated to the onion service when
+    // there is one (-bind=<addr>=onion), so inbound onion peers can be told from
+    // local ones; otherwise the main listen port, as before.
+    CService target("127.0.0.1", GetListenPort());
+    GetOnionServiceTarget(target);
+    conn.Command(strprintf("ADD_ONION %s Port=%i,%s", private_key, GetListenPort(), target.ToStringIPPort()),
         boost::bind(&TorController::add_onion_cb, this, _1, _2));
 }
 

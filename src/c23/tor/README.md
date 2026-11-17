@@ -16,6 +16,7 @@ clearnet behaviour.
 | `zcl_tor_selftest.c`, `build_selftest.sh` | proof program (Linux) |
 | `zcl_tor_selftest_win.c`, `build_selftest_win.sh`, `zcl_tor_win.rc`, `zcl_tor_win.manifest` | proof program (Windows, mingw-w64 cross-build; child mode) |
 | `twonode.sh`, `privacy_check.sh` | two `zclassicd` regtest nodes over an onion service; strace check that only Tor reaches the network |
+| `threenode.sh`, `addrv2gossip.sh`, `oldpeer.sh` | three nodes dialling each other by onion; onion address gossip (C learns B from A, clearnet peers never get our onion, beta 12 loads the peers.dat); an old peer next to the new node |
 | `WIRING.md` | how `zclassicd` uses the library: options, startup, shutdown, in-process or child |
 
 Only `zcl_tor_dispatch.c` and `zcl_tor_inproc.c` include `tor_api.h`.
