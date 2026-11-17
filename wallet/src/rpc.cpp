@@ -1,4 +1,5 @@
 #include "rpc.h"
+#include "syncstate.h"
 #include "fastsync.h"
 #include "releaseversion.h"
 #include "repairlocation.h"
@@ -1113,7 +1114,7 @@ void RPC::getInfoThenRefresh(bool force) {
                 // unreliable on ZClassic -- pins ~0.9635 even at the tip -- so it cannot
                 // be the gate.)
                 if (connections > 0 || ezEverSynced) {
-                    target = blockNumber; progress = 1.0; isSyncing = false; ezEverSynced = true;
+                    target = blockNumber; progress = 1.0; isSyncing = false;
                 } else {
                     target = 0; progress = -1.0; isSyncing = true;   // no peers: can't confirm tip
                 }
@@ -1137,6 +1138,28 @@ void RPC::getInfoThenRefresh(bool force) {
                 progress  = -1.0;
                 isSyncing = true;
             }
+            // Decide "synced" from the tip block's age and the daemon's own IBD flag, not
+            // only blocks-vs-headers (which reads "synced" right after a snapshot import,
+            // before peers send headers). A regtest chain is a private network.
+            SyncState::Input syncIn;
+            syncIn.chain       = reply.find("chain") != reply.end() && reply["chain"].is_string()
+                                     ? QString::fromStdString(reply["chain"].get<std::string>()) : QString();
+            syncIn.blocks      = blockNumber;
+            syncIn.headers     = headers;
+            if (reply.find("tiptime") != reply.end() && reply["tiptime"].is_number())
+                syncIn.tipTime = reply["tiptime"].get<json::number_integer_t>();
+            else if (reply.find("mediantime") != reply.end() && reply["mediantime"].is_number())
+                syncIn.tipTime = reply["mediantime"].get<json::number_integer_t>(); // older daemon: ~15 min stale, fine for hours-scale tests
+            syncIn.now         = QDateTime::currentSecsSinceEpoch();
+            syncIn.connections = connections;
+            if (reply.find("initialblockdownload") != reply.end() && reply["initialblockdownload"].is_boolean())
+                syncIn.ibd = reply["initialblockdownload"].get<bool>() ? 1 : 0;
+            syncIn.everSynced  = ezEverSynced;
+            const SyncState::Verdict verdict = SyncState::classify(syncIn);
+            isSyncing = verdict.isSyncing;
+            if (verdict.kind == SyncState::Synced) ezEverSynced = true;
+            if (isSyncing && target <= 0 && headers > 0) target = headers;
+            if (!isSyncing) { target = blockNumber; progress = 1.0; }
             bool targetKnown = (target > 0);
 
             Settings::getInstance()->setSyncing(isSyncing);
@@ -1243,18 +1266,18 @@ void RPC::getInfoThenRefresh(bool force) {
                     main->logger->write("Foreign node peerless/stuck past sustained window; "
                                         "surfacing actionable dialog (cannot heal a node we "
                                         "did not start)");
-                    main->setSyncStatusWaitingForPeers(true);
+                    main->setSyncStatusWaitingForPeers(true, blockNumber, verdict.tipAge);
                     main->showForeignNodeStuck();
                 } else
                 // SELF-HEAL SYNCED-ZERO-PEERS: after a LONG peerless stretch (~3min at
                 // the sync cadence) escalate the wording to point at the network. This
                 // is NOT a wipe/re-bootstrap — the daemon owns peer discovery.
                 if (ezNoPeerPolls >= 36)
-                    main->setSyncStatusWaitingForPeers(true);
+                    main->setSyncStatusWaitingForPeers(true, blockNumber, verdict.tipAge);
                 else
-                    main->setSyncStatusWaitingForPeers();
+                    main->setSyncStatusWaitingForPeers(false, blockNumber, verdict.tipAge);
             } else {
-                main->setSyncStatus(isSyncing, blockNumber, target, progress);
+                main->setSyncStatus(isSyncing, blockNumber, target, progress, verdict.tipAge, (int)verdict.kind);
             }
 
             // SELF-HEAL runtime validation surfacing (B-side). A newer daemon reports a
@@ -1303,7 +1326,7 @@ void RPC::getInfoThenRefresh(bool force) {
                         ui->blockheight->setToolTip(QObject::tr("Known headers: %1. More may still arrive.").arg(target));
                     } else {
                         // No target yet: show the height without a bogus percent.
-                        ui->heightLabel->setText(QObject::tr("Starting…"));
+                        ui->heightLabel->setText(blockNumber > 0 ? QObject::tr("Block height (syncing)") : QObject::tr("Starting…"));
                     }
                     ui->blockheight->setText(txt);
                 } else {
@@ -1325,8 +1348,21 @@ void RPC::getInfoThenRefresh(bool force) {
                 heightStr %
                 ")";
             if (isSyncing && !targetKnown)
-                statusText = QObject::tr("Starting (block %1)").arg(blockNumber);
+                statusText = blockNumber > 0 ? QObject::tr("Syncing (block %1)").arg(blockNumber)
+                                             : QObject::tr("Starting node");
+            if (verdict.kind == SyncState::LocalNetwork)
+                statusText = QObject::tr("Local test network (block %1)").arg(Settings::getHeightString(blockNumber));
+            else if (verdict.kind == SyncState::WaitingForPeers)
+                statusText = QObject::tr("No peers (block %1)").arg(Settings::getHeightString(blockNumber));
+            else if (verdict.kind == SyncState::StaleTip)
+                statusText = QObject::tr("Waiting for new blocks (%1)").arg(Settings::getHeightString(blockNumber));
             main->statusLabel->setText(statusText);
+            // The "Connected — checking blockchain…" message from connect time is stale
+            // once the poll has a verdict. A private regtest chain legitimately has no
+            // peers: do not flag that with a warning icon.
+            main->ui->statusBar->clearMessage();
+            if (verdict.kind == SyncState::LocalNetwork)
+                main->statusIcon->setPixmap(connectedPm);
 
             auto zclPrice = Settings::getUSDFormat(1);
             QString tooltip;

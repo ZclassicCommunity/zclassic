@@ -2138,12 +2138,18 @@ void ConnectionLoader::refreshZClassicdState(Connection* connection, std::functi
                     bool renderedBootstrapVerify = false;
                     if (ezBootstrapVerifyPending ||
                         ezBootstrapPhase == QStringLiteral("succeeded")) {
-                        if (ezProgress) ezProgress->setRange(0, 0);
-                        QString detail = ezBootstrapValidationState;
-                        if (detail == QStringLiteral("disabled"))
-                            detail.clear();
+                        // Show what the node is really doing (its own warm-up string,
+                        // e.g. "Activating best chain... height 3126938 (1%)") instead of
+                        // a fixed "Verifying…" line that stays even after verification.
+                        static const QRegularExpression rePct(QStringLiteral("\\((\\d+)%\\)"));
+                        QRegularExpressionMatch mp = rePct.match(status);
+                        if (mp.hasMatch()) this->setBarPercent(mp.captured(1).toInt());
+                        else if (ezProgress) ezProgress->setRange(0, 0);
+                        QString detail = status.trimmed();
                         this->showInformation(
-                            QObject::tr("Step 3 of 3: Verifying blockchain… (a few minutes)"),
+                            ezBootstrapVerifyPending
+                                ? QObject::tr("Step 3 of 3: Verifying the downloaded blockchain…")
+                                : QObject::tr("Step 3 of 3: Importing the downloaded blockchain…"),
                             detail);
                         renderedBootstrapVerify = true;
                     }
@@ -2291,17 +2297,35 @@ void ConnectionLoader::probeBootstrapProgress(Connection* connection) {
             // -> indeterminate "Verifying…" so the multi-minute verify reads as work.
             if (ezBootstrapPhase == QStringLiteral("active") && pct >= 0) {
                 this->setBarPercent(pct);
+                // Detail line: size, rate and a time estimate from the node's own counters.
+                QString dl;
+                auto num = [&](const char* k) {
+                    return (bi.is_object() && bi.find(k) != bi.end() && bi[k].is_number())
+                        ? bi[k].get<double>() : 0.0; };
+                const double got = num("bytes_received"), tot = num("bytes_total"), mbps = num("mbps");
+                if (tot > 0) {
+                    const double gb = 1e9;
+                    dl = QObject::tr("%1 of %2 GB").arg(got / gb, 0, 'f', 1).arg(tot / gb, 0, 'f', 1);
+                    if (mbps > 0.05) {
+                        dl += QObject::tr(" · %1 MB/s").arg(mbps, 0, 'f', 1);
+                        const qint64 secs = (qint64)((tot - got) / (mbps * 1e6));
+                        dl += secs < 90 ? QObject::tr(" · under a minute left")
+                                        : QObject::tr(" · about %1 min left").arg((secs + 30) / 60);
+                    } else {
+                        dl += QObject::tr(" · waiting for data…");
+                    }
+                }
                 this->showInformation(
-                    QObject::tr("Step 3 of 3: Downloading blockchain — %1%").arg(pct),
-                    QString());
-            } else if (ezBootstrapVerifyPending ||
-                       ezBootstrapPhase == QStringLiteral("succeeded")) {
+                    QObject::tr("Step 3 of 3: Downloading blockchain — %1%").arg(pct), dl);
+            } else if (ezBootstrapVerifyPending) {
+                // Only while verification is genuinely pending. After it, the daemon's
+                // own warm-up string (shown by the caller) is the accurate status.
                 if (ezProgress) ezProgress->setRange(0, 0);   // busy/indeterminate
                 QString detail = ezBootstrapValidationState;
                 if (detail == QStringLiteral("disabled"))
                     detail.clear();
                 this->showInformation(
-                    QObject::tr("Step 3 of 3: Verifying blockchain… (a few minutes)"),
+                    QObject::tr("Step 3 of 3: Verifying the downloaded blockchain…"),
                     detail);
             }
             // Any other phase (idle/skipped/failed/normal_sync) -> leave the caller's

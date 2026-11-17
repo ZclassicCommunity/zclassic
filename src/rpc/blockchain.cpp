@@ -754,6 +754,8 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
             "  \"headers\": xxxxxx,        (numeric) the current number of headers we have validated\n"
             "  \"bestblockhash\": \"...\", (string) the hash of the currently best block\n"
             "  \"mediantime\" : ttt,       (numeric) The median block time of the current best block\n"
+            "  \"tiptime\" : ttt,          (numeric) Timestamp of the best block, seconds since epoch\n"
+            "  \"initialblockdownload\": true|false, (boolean) the node still considers itself in initial block download\n"
             "  \"difficulty\": xxxxxx,     (numeric) the current difficulty\n"
             "  \"verificationprogress\": xxxx, (numeric) estimate of verification progress [0..1]\n"
             "  \"chainwork\": \"xxxx\"     (string) total amount of work in active chain, in hexadecimal\n"
@@ -825,6 +827,9 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
     obj.push_back(Pair("estimatedheight",       nEstimatedHeight));
     obj.push_back(Pair("bestblockhash",         chainActive.Tip()->GetBlockHash().GetHex()));
     obj.push_back(Pair("mediantime",            (int64_t)chainActive.Tip()->GetMedianTimePast()));
+    // Additive status fields for GUI sync display (no behaviour change).
+    obj.push_back(Pair("tiptime",              (int64_t)chainActive.Tip()->GetBlockTime()));
+    obj.push_back(Pair("initialblockdownload", IsInitialBlockDownload()));
     obj.push_back(Pair("difficulty",            (double)GetNetworkDifficulty()));
     obj.push_back(Pair("verificationprogress",  Checkpoints::GuessVerificationProgress(Params().Checkpoints(), chainActive.Tip())));
     obj.push_back(Pair("chainwork",             chainActive.Tip()->nChainWork.GetHex()));
