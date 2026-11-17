@@ -4844,9 +4844,16 @@ CBlockIndex * InsertBlockIndex(uint256 hash)
 bool static LoadBlockIndexDB()
 {
     const CChainParams& chainparams = Params();
+    int64_t nLoadT = GetTimeMicros();
+    auto benchMark = [&nLoadT](const char* what) {
+        const int64_t now = GetTimeMicros();
+        LogPrint("bench", "    - LoadBlockIndexDB %s: %.2fms\n", what, 0.001 * (now - nLoadT));
+        nLoadT = now;
+    };
 
     if (!pblocktree->LoadBlockIndexGuts())
         return false;
+    benchMark("read index records");
 
     boost::this_thread::interruption_point();
 
@@ -4861,6 +4868,7 @@ bool static LoadBlockIndexDB()
         vSortedByHeight.push_back(make_pair(pindex->nHeight, pindex));
     }
     sort(vSortedByHeight.begin(), vSortedByHeight.end());
+    benchMark("sort by height");
     BOOST_FOREACH(const PAIRTYPE(int, CBlockIndex*)& item, vSortedByHeight)
     {
         CBlockIndex* pindex = item.second;
@@ -4931,6 +4939,7 @@ bool static LoadBlockIndexDB()
             pindexBestHeader = pindex;
     }
 
+    benchMark("link chain (work, skip, candidates)");
     // Load block file info
     pblocktree->ReadLastBlockFile(nLastBlockFile);
     vinfoBlockFile.resize(nLastBlockFile + 1);
@@ -4966,6 +4975,7 @@ bool static LoadBlockIndexDB()
         }
     }
 
+    benchMark("check blk files");
     // Check whether we have ever pruned block & undo files
     pblocktree->ReadFlag("prunedblockfiles", fHavePruned);
     if (fHavePruned)
@@ -4994,6 +5004,7 @@ bool static LoadBlockIndexDB()
         }
     }
 
+    benchMark("fill in-memory data");
     // Load pointer to end of best chain
     uint256 hashBestChain = pcoinsTip->GetBestBlock();
     BlockMap::iterator it = mapBlockIndex.find(hashBestChain);
@@ -5021,7 +5032,9 @@ bool static LoadBlockIndexDB()
     // Set hashFinalSproutRoot for the end of best chain
     it->second->hashFinalSproutRoot = pcoinsTip->GetBestAnchor(SPROUT);
 
+    benchMark("set tip");
     PruneBlockIndexCandidates();
+    benchMark("prune candidates");
 
     LogPrintf("%s: hashBestChain=%s height=%d date=%s progress=%f\n", __func__,
         chainActive.Tip()->GetBlockHash().ToString(), chainActive.Height(),
@@ -5144,6 +5157,12 @@ bool CVerifyDB::VerifyDB(CCoinsView *coinsview, int nCheckLevel, int nCheckDepth
 bool RewindBlockIndex(const CChainParams& params, bool& clearWitnessCaches)
 {
     LOCK(cs_main);
+    int64_t nRewindT = GetTimeMicros();
+    auto benchMark = [&nRewindT](const char* what) {
+        const int64_t now = GetTimeMicros();
+        LogPrint("bench", "    - RewindBlockIndex %s: %.2fms\n", what, 0.001 * (now - nRewindT));
+        nRewindT = now;
+    };
 
     // RewindBlockIndex is called after LoadBlockIndex, so at this point every block
     // index will have nCachedBranchId set based on the values previously persisted
@@ -5171,6 +5190,7 @@ bool RewindBlockIndex(const CChainParams& params, bool& clearWitnessCaches)
         nHeight++;
     }
 
+    benchMark("scan active chain");
     // nHeight is now the height of the first insufficiently-validated block, or tipheight + 1
     auto rewindLength = chainActive.Height() - nHeight;
     clearWitnessCaches = false;
@@ -5233,6 +5253,7 @@ bool RewindBlockIndex(const CChainParams& params, bool& clearWitnessCaches)
             return false;
     }
 
+    benchMark("disconnect");
     // Collect blocks to be removed (blocks in mapBlockIndex must be at least BLOCK_VALID_TREE).
     // We do this after actual disconnecting, otherwise we'll end up writing the lack of data
     // to disk before writing the chainstate, resulting in a failure to continue if interrupted.
@@ -5267,6 +5288,7 @@ bool RewindBlockIndex(const CChainParams& params, bool& clearWitnessCaches)
         }
     }
 
+    benchMark("scan block index");
     // Set pindexBestHeader to the current chain tip
     // (since we are about to delete the block it is pointing to)
     pindexBestHeader = chainActive.Tip();
@@ -5286,13 +5308,16 @@ bool RewindBlockIndex(const CChainParams& params, bool& clearWitnessCaches)
         }
     }
 
+    benchMark("erase");
     PruneBlockIndexCandidates();
+    benchMark("prune candidates");
 
     CheckBlockIndex();
 
     if (!FlushStateToDisk(state, FLUSH_STATE_ALWAYS)) {
         return false;
     }
+    benchMark("flush");
 
     return true;
 }
