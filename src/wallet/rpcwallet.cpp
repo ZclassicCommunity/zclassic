@@ -3309,6 +3309,19 @@ CAmount getBalanceZaddr(std::string address, int minDepth = 1, bool ignoreUnspen
     std::vector<CSproutNotePlaintextEntry> sproutEntries;
     std::vector<SaplingNoteEntry> saplingEntries;
     LOCK2(cs_main, pwalletMain->cs_wallet);
+    // Amounts only: the Sapling total comes from the wallet's memory-only
+    // value/address caches instead of decrypting every note in the wallet.
+    if (address.length() == 0) {
+        std::set<libzcash::PaymentAddress> none;
+        return pwalletMain->GetSproutBalanceCached(minDepth, ignoreUnspendable) +
+               pwalletMain->GetSaplingBalanceFiltered(none, minDepth, ignoreUnspendable);
+    }
+    auto decoded = DecodePaymentAddress(address);
+    if (boost::get<libzcash::SaplingPaymentAddress>(&decoded) != nullptr) {
+        std::set<libzcash::PaymentAddress> only;
+        only.insert(decoded);
+        return pwalletMain->GetSaplingBalanceFiltered(only, minDepth, ignoreUnspendable);
+    }
     pwalletMain->GetFilteredNotes(sproutEntries, saplingEntries, address, minDepth, true, ignoreUnspendable);
     for (auto & entry : sproutEntries) {
         balance += CAmount(entry.plaintext.value());

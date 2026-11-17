@@ -273,9 +273,77 @@ bool zcl_c23_params_initialized(void)
     return atomic_load_explicit(&g_init, memory_order_acquire);
 }
 
+/* The prover thread budget is one process-wide value that every proof reads
+ * when it starts. A caller that proves several things at once (the transaction
+ * builder) divides it among the proofs for the duration of the batch so the
+ * total stays at the budget. g_budget_raw is what the node configured (0 = the
+ * vendored automatic default); g_budget_depth counts the batches in flight and
+ * g_budget_workers is the split in force while any is. */
+static pthread_mutex_t g_budget_mu = PTHREAD_MUTEX_INITIALIZER;
+static unsigned g_budget_raw;
+static unsigned g_budget_depth;
+static unsigned g_budget_workers = 1;
+
+/* The configured total, resolving the automatic default. Under g_budget_mu. */
+static unsigned budget_total_locked(void)
+{
+    if (g_budget_raw)
+        return g_budget_raw;
+    groth16_prover_set_threads(0);
+    return groth16_prover_threads();
+}
+
+/* Publishes the per-proof budget for the batches now in flight (the whole
+ * budget when none). Under g_budget_mu. */
+static unsigned budget_apply_locked(void)
+{
+    unsigned total = budget_total_locked();
+    unsigned per = total;
+    if (g_budget_depth > 0 && g_budget_workers > 1) {
+        per = total / g_budget_workers;
+        if (per == 0)
+            per = 1;
+    }
+    groth16_prover_set_threads(g_budget_raw == 0 && per == total ? 0 : per);
+    return per;
+}
+
 void zcl_c23_set_prover_threads(unsigned n)
 {
-    groth16_prover_set_threads(n);
+    pthread_mutex_lock(&g_budget_mu);
+    g_budget_raw = n;
+    (void)budget_apply_locked();
+    pthread_mutex_unlock(&g_budget_mu);
+}
+
+unsigned zcl_c23_prover_budget_enter(unsigned concurrent_proofs)
+{
+    pthread_mutex_lock(&g_budget_mu);
+    if (g_budget_depth++ == 0)
+        g_budget_workers = concurrent_proofs ? concurrent_proofs : 1;
+    else if (concurrent_proofs > g_budget_workers)
+        g_budget_workers = concurrent_proofs;
+    unsigned per = budget_apply_locked();
+    pthread_mutex_unlock(&g_budget_mu);
+    return per;
+}
+
+void zcl_c23_prover_budget_leave(void)
+{
+    pthread_mutex_lock(&g_budget_mu);
+    if (g_budget_depth > 0 && --g_budget_depth == 0)
+        g_budget_workers = 1;
+    (void)budget_apply_locked();
+    pthread_mutex_unlock(&g_budget_mu);
+}
+
+unsigned zcl_c23_prover_budget(void)
+{
+    pthread_mutex_lock(&g_budget_mu);
+    unsigned total = budget_total_locked();
+    (void)budget_apply_locked();
+    pthread_mutex_unlock(&g_budget_mu);
+    return total;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1244,6 +1312,19 @@ void librustzcash_sapling_proving_ctx_free(void *ctx)
     struct zcl_pctx *c = pctx_get(ctx);
     memory_cleanse(c, sizeof(*c));
     free(c);
+}
+
+/* Folds the value-commitment accumulators of `src` into `dst`: bsk adds and bvk
+ * adds, exactly what proving the src descriptions on dst would have done (both
+ * sums are commutative and associative). Lets the independent proofs of one
+ * transaction run on private contexts, in parallel, and still produce the one
+ * binding signature. src is left as it was; free it separately. */
+void zcl_c23_sapling_proving_ctx_merge(void *dst, const void *src)
+{
+    struct zcl_pctx *d = pctx_get(dst);
+    const struct zcl_pctx *s = pctx_get(src);
+    fs_add(&d->bsk, &d->bsk, &s->bsk);
+    jub_add(&d->bvk, &d->bvk, &s->bvk);
 }
 
 /* Rust's self-verification of a fresh spend proof, rustzcash.rs:1549-1588,

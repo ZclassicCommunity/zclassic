@@ -2086,6 +2086,7 @@ std::pair<mapSaplingNoteData_t, SaplingIncomingViewingKeyMap> CWallet::FindMySap
         SaplingNoteData nd;
         nd.ivk = match->ivk;
         nd.value = match->value;
+        nd.address = match->address;
         noteData.insert(std::make_pair(op, nd));
     }
 
@@ -5014,7 +5015,8 @@ void CWallet::GetFilteredNotes(
 
     for (auto & p : mapWallet) {
         // By reference: a copy would duplicate every cached witness of every note.
-        const CWalletTx& wtx = p.second;
+        // Non-const: the Sapling loop fills the memory-only SaplingNoteData caches.
+        CWalletTx& wtx = p.second;
 
         // Filter the transactions before checking for notes
         if (!CheckFinalTx(wtx) ||
@@ -5082,7 +5084,20 @@ void CWallet::GetFilteredNotes(
 
         for (auto & pair : wtx.mapSaplingNoteData) {
             SaplingOutPoint op = pair.first;
-            const SaplingNoteData& nd = pair.second;
+            SaplingNoteData& nd = pair.second;
+
+            // A note whose address is already cached is filtered BEFORE the
+            // decrypt: only the notes that are returned need their plaintext
+            // (note randomness and memo), so an address- or spend-filtered
+            // listing no longer decrypts every note in the wallet.
+            if (nd.address) {
+                if (!(filterAddresses.empty() || filterAddresses.count(*nd.address))) {
+                    continue;
+                }
+                if (!SaplingNotePassesSpendFilter(op, nd, ignoreSpent, requireSpendingKey, ignoreLocked)) {
+                    continue;
+                }
+            }
 
             auto maybe_pt = SaplingNotePlaintext::decrypt(
                 wtx.vShieldedOutput[op.n].encCiphertext,
@@ -5092,9 +5107,19 @@ void CWallet::GetFilteredNotes(
             assert(static_cast<bool>(maybe_pt));
             auto notePt = maybe_pt.get();
 
-            auto maybe_pa = nd.ivk.address(notePt.d);
-            assert(static_cast<bool>(maybe_pa));
-            auto pa = maybe_pa.get();
+            libzcash::SaplingPaymentAddress pa;
+            if (nd.address) {
+                pa = *nd.address;
+            } else {
+                auto maybe_pa = nd.ivk.address(notePt.d);
+                assert(static_cast<bool>(maybe_pa));
+                pa = maybe_pa.get();
+                // Fill the memory-only caches (public address, amount only).
+                nd.address = pa;
+                if (!nd.value) {
+                    nd.value = CAmount(notePt.value());
+                }
+            }
 
             // skip notes which belong to a different payment address in the wallet
             // (this is the only filter that requires the decrypted address, so it
@@ -5115,6 +5140,65 @@ void CWallet::GetFilteredNotes(
                 op, pa, note, notePt.memo(), wtx.GetDepthInMainChain() });
         }
     }
+}
+
+/**
+ * Sum of the Sapling note values GetFilteredNotes returns for the same filter
+ * (maxDepth = INT_MAX, ignoreSpent = true), from the memory-only value/address
+ * caches. A cache miss decrypts the note once and fills both caches.
+ */
+CAmount CWallet::GetSaplingBalanceFiltered(
+    const std::set<PaymentAddress>& filterAddresses,
+    int minDepth,
+    bool requireSpendingKey,
+    bool ignoreLocked)
+{
+    LOCK2(cs_main, cs_wallet);
+
+    CAmount balance = 0;
+
+    for (auto & p : mapWallet) {
+        CWalletTx& wtx = p.second;
+
+        if (!CheckFinalTx(wtx) ||
+            wtx.GetBlocksToMaturity() > 0 ||
+            wtx.GetDepthInMainChain() < minDepth) {
+            continue;
+        }
+
+        for (auto & pair : wtx.mapSaplingNoteData) {
+            const SaplingOutPoint& op = pair.first;
+            SaplingNoteData& nd = pair.second;
+
+            if (!(nd.address && nd.value)) {
+                auto maybe_pt = SaplingNotePlaintext::decrypt(
+                    wtx.vShieldedOutput[op.n].encCiphertext,
+                    nd.ivk,
+                    wtx.vShieldedOutput[op.n].ephemeralKey,
+                    wtx.vShieldedOutput[op.n].cm);
+                assert(static_cast<bool>(maybe_pt));
+                auto notePt = maybe_pt.get();
+                if (!nd.address) {
+                    auto maybe_pa = nd.ivk.address(notePt.d);
+                    assert(static_cast<bool>(maybe_pa));
+                    nd.address = maybe_pa.get();
+                }
+                if (!nd.value) {
+                    nd.value = CAmount(notePt.value());
+                }
+            }
+
+            if (!(filterAddresses.empty() || filterAddresses.count(*nd.address))) {
+                continue;
+            }
+            if (!SaplingNotePassesSpendFilter(op, nd, true, requireSpendingKey, ignoreLocked)) {
+                continue;
+            }
+            balance += nd.value.get();
+        }
+    }
+
+    return balance;
 }
 
 /**

@@ -607,3 +607,141 @@ TEST(TransactionBuilder, HandBuiltAndResignedCorruptionsAreRejected)
 
     RegtestDeactivateSapling();
 }
+
+// Proofs of one transaction are made by several workers at once, each on its
+// own proving context, and the contexts are merged before the binding
+// signature. This builds transactions of every shape the worker split treats
+// differently (several spends, a lone spend with many outputs, outputs only)
+// under several thread budgets, and requires each to pass full consensus
+// verification (every proof and the binding signature), keep the order of its
+// descriptions, and decrypt to the amounts that were asked for.
+namespace {
+struct ManySpends {
+    std::vector<libzcash::SaplingNote> notes;
+    std::vector<SaplingWitness> witnesses;
+    uint256 anchor;
+};
+
+ManySpends MakeManySpends(const libzcash::SaplingPaymentAddress& pa, size_t n, CAmount each)
+{
+    ManySpends m;
+    SaplingMerkleTree tree;
+    for (size_t i = 0; i < n; i++) {
+        libzcash::SaplingNote note(pa, each + CAmount(i));
+        tree.append(note.cm().get());
+        for (auto& w : m.witnesses) {
+            w.append(note.cm().get());
+        }
+        m.notes.push_back(note);
+        m.witnesses.push_back(tree.witness());
+    }
+    m.anchor = tree.root();
+    return m;
+}
+} // namespace
+
+TEST(TransactionBuilder, ConcurrentProofsVerifyForEveryShapeAndBudget)
+{
+    auto consensusParams = RegtestActivateSapling();
+
+    auto sk = libzcash::SaplingSpendingKey::random();
+    auto expsk = sk.expanded_spending_key();
+    auto fvk = sk.full_viewing_key();
+    auto ivk = fvk.in_viewing_key();
+    auto pa = sk.default_address();
+    auto other = libzcash::SaplingSpendingKey::random().default_address();
+
+    struct Shape { size_t spends, outputs; };
+    const Shape shapes[] = {{1, 6}, {3, 1}, {5, 4}};
+    for (unsigned budget : {1u, 8u}) {
+        zcl_c23_set_prover_threads(budget);
+        for (const Shape& s : shapes) {
+            SCOPED_TRACE(testing::Message() << "budget " << budget << " spends " << s.spends << " outputs " << s.outputs);
+            const CAmount each = 100000;
+            auto many = MakeManySpends(pa, s.spends, each);
+            CAmount in = 0;
+            for (auto& n : many.notes) in += n.value();
+
+            auto builder = TransactionBuilder(consensusParams, 1);
+            builder.SetFee(10000);
+            for (size_t i = 0; i < s.spends; i++) {
+                builder.AddSaplingSpend(expsk, many.notes[i], many.anchor, many.witnesses[i]);
+            }
+            CAmount sent = 0;
+            for (size_t j = 0; j < s.outputs; j++) {
+                CAmount v = 1000 * CAmount(j + 1);
+                builder.AddSaplingOutput(fvk.ovk, other, v, {});
+                sent += v;
+            }
+            auto tx = builder.Build().GetTxOrThrow();
+
+            ASSERT_EQ(tx.vShieldedSpend.size(), s.spends);
+            ASSERT_EQ(tx.vShieldedOutput.size(), s.outputs + 1); // + change to the first spend's address
+            EXPECT_EQ(tx.valueBalance, 10000);
+
+            std::string reason;
+            EXPECT_TRUE(SaplingConsensusCheck(tx, 2, reason)) << reason;
+            EXPECT_EQ(reason, "");
+
+            // Spends keep their order: nullifier i belongs to note i.
+            for (size_t i = 0; i < s.spends; i++) {
+                auto nf = many.notes[i].nullifier(fvk, many.witnesses[i].position());
+                ASSERT_TRUE(static_cast<bool>(nf));
+                EXPECT_EQ(tx.vShieldedSpend[i].nullifier, *nf);
+            }
+            // Outputs keep their order: output j opens to the j-th amount for
+            // the recipient, the last one is the change to us.
+            for (size_t j = 0; j < s.outputs; j++) {
+                auto pt = libzcash::SaplingNotePlaintext::decrypt(
+                    tx.vShieldedOutput[j].encCiphertext,
+                    libzcash::SaplingSpendingKey::random().full_viewing_key().in_viewing_key(),
+                    tx.vShieldedOutput[j].ephemeralKey, tx.vShieldedOutput[j].cm);
+                EXPECT_FALSE(static_cast<bool>(pt)); // not decryptable by a stranger
+            }
+            auto change = libzcash::SaplingNotePlaintext::decrypt(
+                tx.vShieldedOutput[s.outputs].encCiphertext, ivk,
+                tx.vShieldedOutput[s.outputs].ephemeralKey, tx.vShieldedOutput[s.outputs].cm);
+            ASSERT_TRUE(static_cast<bool>(change));
+            EXPECT_EQ(CAmount(change.get().value()), in - sent - 10000);
+        }
+    }
+    zcl_c23_set_prover_threads(0);
+
+    RegtestDeactivateSapling();
+}
+
+// Outputs only (a transparent input shielded to several recipients) takes the
+// output-only worker split.
+TEST(TransactionBuilder, ConcurrentOutputProofsVerify)
+{
+    auto consensusParams = RegtestActivateSapling();
+
+    CBasicKeyStore keyStore;
+    CKey tsk = AddTestCKeyToKeyStore(keyStore);
+    auto scriptPubKey = GetScriptForDestination(tsk.GetPubKey().GetID());
+    auto sk = libzcash::SaplingSpendingKey::random();
+    auto fvk = sk.full_viewing_key();
+    auto pa = sk.default_address();
+
+    for (unsigned budget : {1u, 8u}) {
+        zcl_c23_set_prover_threads(budget);
+        SCOPED_TRACE(testing::Message() << "budget " << budget);
+        auto builder = TransactionBuilder(consensusParams, 1, &keyStore);
+        builder.SetFee(10000);
+        builder.AddTransparentInput(COutPoint(), scriptPubKey, 100000);
+        builder.SendChangeTo(pa, fvk.ovk);
+        builder.AddSaplingOutput(fvk.ovk, pa, 20000, {});
+        builder.AddSaplingOutput(fvk.ovk, pa, 30000, {});
+        builder.AddSaplingOutput(fvk.ovk, pa, 10000, {});
+        auto tx = builder.Build().GetTxOrThrow();
+        ASSERT_EQ(tx.vShieldedSpend.size(), 0);
+        ASSERT_EQ(tx.vShieldedOutput.size(), 4); // three payments + change
+        EXPECT_EQ(tx.valueBalance, -90000);
+        std::string reason;
+        EXPECT_TRUE(SaplingConsensusCheck(tx, 2, reason)) << reason;
+        EXPECT_EQ(reason, "");
+    }
+    zcl_c23_set_prover_threads(0);
+
+    RegtestDeactivateSapling();
+}
