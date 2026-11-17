@@ -600,4 +600,88 @@ BOOST_AUTO_TEST_CASE(self_advertisement_privacy)
         delete x;
 }
 
+
+// Dialling: the table ThreadOpenConnections picks from, and the limits that
+// keep an onion-only node off clearnet addresses.
+BOOST_AUTO_TEST_CASE(dial_table_selection)
+{
+    bool l4 = IsLimited(NET_IPV4), l6 = IsLimited(NET_IPV6), lo = IsLimited(NET_ONION);
+    SetLimited(NET_IPV4, false);
+    SetLimited(NET_IPV6, false);
+    SetLimited(NET_ONION, false);
+    addrmanOnion.Clear();
+
+    BOOST_CHECK(&SelectDialTable(true, 0) == &addrman); // nothing in the onion store yet
+
+    BOOST_REQUIRE(addrmanOnion.Add(MakeV3(60, 8033, 1, GetTime()), CNetAddr("93.184.216.1")));
+    BOOST_REQUIRE(addrman.Add(MakeV4("93.184.216.77", 8033, 1, GetTime()), CNetAddr("93.184.216.1")));
+    BOOST_REQUIRE_GT(addrman.size(), 0u);
+
+    // mixed node: clearnet table, the onion store one time in four, and only with a proxy
+    BOOST_CHECK(&SelectDialTable(true, 1) == &addrman);
+    BOOST_CHECK(&SelectDialTable(true, 3) == &addrman);
+    BOOST_CHECK(&SelectDialTable(true, 0) == &addrmanOnion);
+    BOOST_CHECK(&SelectDialTable(false, 0) == &addrman);
+    // the onion network limited: never
+    SetLimited(NET_ONION, true);
+    BOOST_CHECK(&SelectDialTable(true, 0) == &addrman);
+    SetLimited(NET_ONION, false);
+
+    // onion-only node: the onion store, whatever the dice say
+    SetLimited(NET_IPV4, true);
+    SetLimited(NET_IPV6, true);
+    BOOST_CHECK(&SelectDialTable(true, 1) == &addrmanOnion);
+    BOOST_CHECK(&SelectDialTable(true, 3) == &addrmanOnion);
+    // ... and a clearnet address picked anyway is limited, a v3 address is not
+    BOOST_CHECK(IsLimited(MakeV4("93.184.216.77", 8033, 1, 1)));
+    BOOST_CHECK(IsLimited(CNetAddr("2001:4860:4860::8888")));
+    BOOST_CHECK(!IsLimited(MakeV3(60, 8033, 1, 1)));
+    BOOST_CHECK(IsReachable(MakeV3(60, 8033, 1, 1)));
+    BOOST_CHECK(!IsReachable(MakeV4("93.184.216.77", 8033, 1, 1)));
+    // selecting from the onion store only ever yields v3
+    for (int i = 0; i < 10; i++)
+        BOOST_CHECK(addrmanOnion.Select().IsTorV3());
+
+    SetLimited(NET_IPV4, l4);
+    SetLimited(NET_IPV6, l6);
+    SetLimited(NET_ONION, lo);
+    addrmanOnion.Clear();
+}
+
+BOOST_AUTO_TEST_CASE(getaddr_answers_by_negotiation)
+{
+    addrmanOnion.Clear();
+    bool lo = IsLimited(NET_ONION);
+    SetLimited(NET_ONION, false);
+    for (int i = 0; i < 5; i++)
+        BOOST_REQUIRE(addrmanOnion.Add(MakeV3((unsigned char)(100 + i), 8033, 1, GetTime()), CNetAddr("93.184.216.1")));
+
+    vector<CNode*> keep;
+    CNode* v2peer = NewNode(keep, "127.0.0.1", true); // inbound, came through the onion service
+    v2peer->fInboundOnion = true;
+    v2peer->fSendAddrV2 = true;
+    CNode* clearV2 = NewNode(keep, "93.184.216.2", true); // inbound clearnet, addrv2
+    clearV2->fSendAddrV2 = true;
+    CNode* oldPeer = NewNode(keep, "93.184.216.3", true); // inbound clearnet, no addrv2
+
+    for (CNode* n : keep) {
+        CDataStream e(SER_NETWORK, PROTOCOL_VERSION);
+        BOOST_CHECK(ProcessMessage(n, "getaddr", e, GetTime()));
+    }
+    // onion and clearnet addrv2 peers are answered with the v3 entries ...
+    int v3a = 0, v3b = 0, v3c = 0;
+    for (const CAddress& a : v2peer->vAddrToSend) v3a += a.IsTorV3();
+    for (const CAddress& a : clearV2->vAddrToSend) v3b += a.IsTorV3();
+    for (const CAddress& a : oldPeer->vAddrToSend) v3c += a.IsTorV3();
+    BOOST_CHECK_GE(v3a, 1);
+    BOOST_CHECK_GE(v3b, 1);
+    // ... a legacy peer never
+    BOOST_CHECK_EQUAL(v3c, 0);
+
+    SetLimited(NET_ONION, lo);
+    addrmanOnion.Clear();
+    for (CNode* x : keep)
+        delete x;
+}
+
 BOOST_AUTO_TEST_SUITE_END()

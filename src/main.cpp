@@ -6898,6 +6898,15 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
 
         pfrom->vAddrToSend.clear();
         vector<CAddress> vAddr = addrman.GetAddr();
+        // Tor v3 addresses go to every peer that negotiated addrv2, clearnet or
+        // onion (as in Bitcoin Core a getaddr answer spans all networks the peer
+        // can parse): a clearnet peer with a Tor proxy can use them too, and they
+        // are public by nature. A peer that did not negotiate addrv2 gets exactly
+        // the legacy answer; PushAddress drops v3 for it anyway.
+        if (pfrom->fSendAddrV2) {
+            vector<CAddress> vOnion = addrmanOnion.GetAddr();
+            vAddr.insert(vAddr.end(), vOnion.begin(), vOnion.end());
+        }
         BOOST_FOREACH(const CAddress &addr, vAddr)
             pfrom->PushAddress(addr);
     }

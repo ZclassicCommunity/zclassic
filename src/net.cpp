@@ -1408,6 +1408,16 @@ void static ProcessOneShot()
     }
 }
 
+CAddrMan& SelectDialTable(bool fOnionProxy, uint32_t nRand)
+{
+    if (addrmanOnion.size() > 0 && fOnionProxy && IsReachable(NET_ONION)) {
+        const bool fOnionOnly = IsLimited(NET_IPV4) && IsLimited(NET_IPV6);
+        if (fOnionOnly || addrman.size() == 0 || nRand == 0)
+            return addrmanOnion;
+    }
+    return addrman;
+}
+
 void ThreadOpenConnections()
 {
     // Connect to specific addresses
@@ -1471,10 +1481,21 @@ void ThreadOpenConnections()
 
         int64_t nANow = GetAdjustedTime();
 
+        // Which table to pick from. The onion store feeds this loop only when
+        // the onion network is reachable (Tor proxy set, not limited): an
+        // onion-only node (IPv4 and IPv6 limited) takes its candidates from it
+        // whenever it has any, a mixed node one time in four (a Tor connection
+        // is slower, but keeps the onion side of the network connected) or when
+        // the clearnet table is empty. Everything selected still goes through the
+        // IsLimited/IsLocal/group checks below, so a clearnet address is never
+        // dialled by a node that limits IPv4 and IPv6.
+        proxyType proxyOnion;
+        CAddrMan* pmanSelect = &SelectDialTable(GetProxy(NET_ONION, proxyOnion), GetRand(4));
+
         int nTries = 0;
         while (true)
         {
-            CAddrInfo addr = addrman.Select();
+            CAddrInfo addr = pmanSelect->Select();
 
             // if we selected an invalid address, restart
             if (!addr.IsValid() || setConnected.count(addr.GetGroup()) || IsLocal(addr))

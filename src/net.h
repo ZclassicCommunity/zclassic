@@ -170,6 +170,14 @@ extern CAddrMan addrman;
  *  keeps its legacy 16-byte format (a downgrade never sees these); persisted in
  *  onion_peers.dat. */
 extern CAddrMan addrmanOnion;
+/**
+ * The table ThreadOpenConnections picks its next candidate from. The onion
+ * store only when the onion network is reachable (fOnionProxy: a Tor proxy is
+ * set for it, and it is not limited) and it holds something: always for an
+ * onion-only node (IPv4 and IPv6 limited), otherwise when the clearnet table is
+ * empty or nRand == 0 (one time in four, nRand is GetRand(4)).
+ */
+CAddrMan& SelectDialTable(bool fOnionProxy, uint32_t nRand);
 /** The table an address belongs to: Tor v3 in the onion store, the rest in addrman. */
 inline CAddrMan& AddrManFor(const CNetAddr& addr) { return addr.IsTorV3() ? addrmanOnion : addrman; }
 /** Maximum number of connections to simultaneously allow (aka connection slots) */
