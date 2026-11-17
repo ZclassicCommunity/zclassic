@@ -761,13 +761,11 @@ bool ConnectionLoader::startEmbeddedZClassicd(const QStringList& extraArgs) {
     // buffer unused stdout for the lifetime of a full-node session. Explicit
     // printtoconsole output is discarded; startup stderr is still captured below.
     ezclassicd->setStandardOutputFile(QProcess::nullDevice());
-    // Windows backstop: bind every (re)start of the daemon to a kill-on-close job so a
-    // wallet that dies without cleanup does not leave it orphaned (no-op elsewhere).
-    // The orderly `stop` in RPC::shutdownZClassicd() disarms it first.
-    QObject::connect(ezclassicd, &QProcess::started, [=] () {
-        if (!DaemonJob::bind(ezclassicd))
-            main->logger->write("daemon job backstop unavailable (platform or setup failure)");
-    });
+    // Windows backstop: every launch goes through DaemonJob::start(), which binds the
+    // suspended child to a kill-on-close job (no-op elsewhere). It is not a signal hook:
+    // this loader disconnects all handlers on handoff to RPC, and RPC restarts the same
+    // QProcess through DaemonJob::start() as well. The orderly `stop` in
+    // RPC::shutdownZClassicd() disarms the job first.
     QObject::connect(ezclassicd, &QProcess::started, [=] () {
         //qDebug() << "zclassicd started";
     });
@@ -905,15 +903,16 @@ bool ConnectionLoader::startEmbeddedZClassicd(const QStringList& extraArgs) {
     // the startup-timing log would measure from the wrong instant.
 
 #ifdef Q_OS_LINUX
-    ezclassicd->start(zclassicdProgram, launchArgs);
+    DaemonJob::start(ezclassicd, zclassicdProgram, launchArgs);
 #elif defined(Q_OS_DARWIN)
-    ezclassicd->start(zclassicdProgram, launchArgs);
+    DaemonJob::start(ezclassicd, zclassicdProgram, launchArgs);
 #else
     // Spawn by ABSOLUTE path: in the single-file release the daemon is extracted
     // outside appPath (under %LOCALAPPDATA%), so the old bare-name "zclassicd.exe"
     // + working-directory spawn would not find it.
     ezclassicd->setWorkingDirectory(appPath.absolutePath());
-    ezclassicd->start(zclassicdProgram, launchArgs);
+    if (const auto jobErr = DaemonJob::start(ezclassicd, zclassicdProgram, launchArgs))
+        main->logger->write(QString("daemon job backstop unavailable (win32 error %1)").arg(jobErr));
 #endif // Q_OS_LINUX
 
     // [gui-startup] We own this daemon and just spawned it. First-write-wins, so a

@@ -30,6 +30,7 @@
 #include <QTcpServer>
 #include "repairlocation.h"
 #include "profilepaths.h"
+#include "daemonjob.h"
 #include <QTemporaryDir>
 #include "walletbackup.h"
 #include "embeddeddaemon.h"
@@ -887,6 +888,8 @@ private slots:
     void profile_setRedirectsEveryPath();
     void profile_settingsAreIniInsideProfile();
     void profile_noDirectStateLocations();
+    void daemonjob_everyLaunchPathUsesTheJob();
+    void daemonjob_armedAfterEveryStart();
 
 private:
     QString sandboxAppData() const {
@@ -2035,6 +2038,56 @@ void TestLogic::profile_noDirectStateLocations() {
     const QString conn = readStrippedSrc("connection.cpp");
     QVERIFY2(conn.contains("ProfilePaths::daemonArgs()"), "embedded launch must pin -datadir under a profile");
     QVERIFY2(conn.contains("ProfilePaths::zclassicConfPath()"), "conf lookup must honour the profile");
+}
+
+// Source guard: the embedded daemon is only ever launched through DaemonJob::start(). A bare
+// QProcess::start() (or a `started` signal hook, which ConnectionLoader drops on handoff to
+// RPC) would leave a daemon restarted after an unexpected exit without the kill-on-close job.
+void TestLogic::daemonjob_everyLaunchPathUsesTheJob() {
+    for (const char* f : {"connection.cpp", "rpc.cpp"}) {
+        const QString code = readStrippedSrc(f);
+        QVERIFY2(!code.isEmpty(), f);
+        QVERIFY2(!code.contains(QRegularExpression(R"(ezclassicd\s*->\s*start\s*\()")),
+                 qPrintable(QString("%1 launches the daemon without DaemonJob::start").arg(f)));
+        QVERIFY2(!code.contains("DaemonJob::bind"), f);
+    }
+    QVERIFY(readStrippedSrc("connection.cpp").contains("DaemonJob::start(ezclassicd"));
+    QVERIFY(readStrippedSrc("rpc.cpp").contains("DaemonJob::start(ezclassicd"));
+    QVERIFY(readStrippedSrc("rpc.cpp").contains("DaemonJob::disarm()"));
+}
+
+// Windows: a started child is in an armed job BEFORE it runs, the job handle is not
+// inheritable, disarm() really clears kill-on-close, and a RESTART of the same QProcess
+// (what RPC::restartEmbeddedZClassicd does) is bound and armed again. Elsewhere: no-op.
+void TestLogic::daemonjob_armedAfterEveryStart() {
+#ifndef Q_OS_WIN
+    QSKIP("Windows job-object backstop only");
+#else
+    QProcess p;
+    const QString ping = QStringLiteral("ping.exe");
+    const QStringList args{"-n", "2", "127.0.0.1"};
+    for (int round = 0; round < 3; ++round) {
+        QCOMPARE(DaemonJob::start(&p, ping, args), 0ul);
+        QVERIFY2(p.state() == QProcess::Running, "child must be resumed and running");
+        QVERIFY2(DaemonJob::isInJob(&p), qPrintable(QString("round %1 not in job").arg(round)));
+        QVERIFY2(DaemonJob::isArmed(&p), qPrintable(QString("round %1 not armed").arg(round)));
+        DWORD flags = 0;
+        QVERIFY(GetHandleInformation(DaemonJob::entries().back().job, &flags));
+        QVERIFY2(!(flags & HANDLE_FLAG_INHERIT), "job handle must not be inheritable");
+        if (round == 1) {
+            DaemonJob::disarm();
+            QVERIFY(DaemonJob::isInJob(&p));
+            QVERIFY2(!DaemonJob::isArmed(&p), "disarm must clear kill-on-close");
+        }
+        QVERIFY2(p.waitForFinished(15000), "resumed child must run to completion");
+        QCOMPARE(p.exitStatus(), QProcess::NormalExit);
+    }
+    // A launch that fails to start has nothing to bind and leaks no job.
+    QProcess bad;
+    const size_t before = DaemonJob::entries().size();
+    QCOMPARE(DaemonJob::start(&bad, "Z:/definitely/not/here.exe", {}), 0ul);
+    QVERIFY2(DaemonJob::entries().size() <= before, "failed launch must not record a job");
+#endif
 }
 
 QTEST_MAIN(TestLogic)

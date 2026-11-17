@@ -190,7 +190,9 @@ void RPC::restartEmbeddedZClassicd() {
             clean << a;
     ezExpectedShutdown = false;   // (F1) a fresh start is not a deliberate shutdown
     main->logger->write(QString("Restarting embedded zclassicd (attempt %1)").arg(ezRestartCount));
-    ezclassicd->start(ezclassicd->program(), clean);
+    // Through DaemonJob so the restarted node is bound to a kill-on-close job again.
+    if (const auto jobErr = DaemonJob::start(ezclassicd, ezclassicd->program(), clean))
+        main->logger->write(QString("daemon job backstop unavailable (win32 error %1)").arg(jobErr));
 }
 
 // Runtime recovery for the embedded node dying unexpectedly (crash/OOM). On a
