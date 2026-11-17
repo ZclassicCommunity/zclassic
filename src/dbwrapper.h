@@ -22,7 +22,12 @@ static const size_t DBWRAPPER_PREALLOC_VALUE_SIZE = 1024;
 class dbwrapper_error : public std::runtime_error
 {
 public:
-    dbwrapper_error(const std::string& msg) : std::runtime_error(msg) {}
+    dbwrapper_error(const std::string& msg, bool fEnvironmentIn = false) : std::runtime_error(msg), fEnvironment(fEnvironmentIn) {}
+    /** True when the failure comes from the environment (permissions, read-only or full disk,
+     *  path length, a held lock), so that rebuilding the database with -reindex cannot fix it. */
+    bool IsEnvironmental() const { return fEnvironment; }
+private:
+    bool fEnvironment;
 };
 
 class CDBWrapper;
@@ -34,6 +39,9 @@ namespace dbwrapper_private {
 /** Handle database error by throwing dbwrapper_error exception.
  */
 void HandleError(const leveldb::Status& status);
+
+/** True if a LevelDB IO error text describes a problem a reindex cannot repair. */
+bool IsEnvironmentalIOError(const std::string& statusText);
 
 };
 

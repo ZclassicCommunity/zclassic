@@ -48,7 +48,14 @@ CDBWrapper::CDBWrapper(const boost::filesystem::path& path, size_t nCacheSize, b
             leveldb::Status result = leveldb::DestroyDB(path.string(), options);
             dbwrapper_private::HandleError(result);
         }
-        TryCreateDirectory(path);
+        try {
+            TryCreateDirectory(path);
+        } catch (const boost::filesystem::filesystem_error& e) {
+            // Surface the OS reason (permissions, read-only filesystem, path too long, a file in the way)
+            // as a database error: none of these is repaired by -reindex.
+            LogPrintf("Cannot create the database directory %s: %s\n", path.string(), e.code().message());
+            throw dbwrapper_error("Database I/O error: cannot create " + path.string() + ": " + e.code().message(), true);
+        }
         LogPrintf("Opening LevelDB in %s\n", path.string());
     }
     leveldb::Status status = leveldb::DB::Open(options, path.string(), &pdb);
@@ -89,18 +96,35 @@ void CDBIterator::Next() { piter->Next(); }
 
 namespace dbwrapper_private {
 
+bool IsEnvironmentalIOError(const std::string& statusText)
+{
+    // strerror()/Windows texts that leveldb appends to "IO error: <path>: ". A missing or
+    // truncated table file is repairable by -reindex and is deliberately not listed.
+    static const char* const markers[] = {
+        "Permission denied", "Access is denied", "Read-only file system", "No space left",
+        "disk is full", "File name too long", "path too long", "Resource temporarily unavailable",
+        "Too many open files", "Not a directory", "Is a directory", "already held", "being used by another process",
+        "Operation not permitted", "Quota exceeded"};
+    for (const char* m : markers) {
+        if (statusText.find(m) != std::string::npos)
+            return true;
+    }
+    return false;
+}
+
 void HandleError(const leveldb::Status& status)
 {
     if (status.ok())
         return;
-    LogPrintf("%s\n", status.ToString());
+    const std::string text = status.ToString();
+    LogPrintf("%s\n", text);
     if (status.IsCorruption())
-        throw dbwrapper_error("Database corrupted");
+        throw dbwrapper_error("Database corrupted: " + text);
     if (status.IsIOError())
-        throw dbwrapper_error("Database I/O error");
+        throw dbwrapper_error("Database I/O error: " + text, IsEnvironmentalIOError(text));
     if (status.IsNotFound())
-        throw dbwrapper_error("Database entry missing");
-    throw dbwrapper_error("Unknown database error");
+        throw dbwrapper_error("Database entry missing: " + text);
+    throw dbwrapper_error("Unknown database error: " + text);
 }
 
 };
