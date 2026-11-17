@@ -176,7 +176,9 @@ public:
     QString             lastBannerSheet;
     void applyBannerStyle(const QString& sheet);
 
-    void setSyncStatus(bool isSyncing, int blockNumber, int estimatedHeight, double progress);
+    // tipAge: seconds since the newest block (-1 unknown); kind: SyncState::Kind (-1 none).
+    void setSyncStatus(bool isSyncing, int blockNumber, int estimatedHeight, double progress,
+                       qint64 tipAge = -1, int kind = -1);
     void setSyncStatusConnecting();
     QString connectionStartupError; // Retained across disconnected polling; cleared on retry/success.
     QString connectionStartupProgress; // Visible even when the startup overlay is closed.
@@ -213,7 +215,7 @@ public:
     void ensureSaplingProvisioned();
     // longStretch=true after a LONG peerless stretch (~3min): adds a stronger
     // "check your internet / try again later" hint (SELF-HEAL SYNCED-ZERO-PEERS).
-    void setSyncStatusWaitingForPeers(bool longStretch = false);
+    void setSyncStatusWaitingForPeers(bool longStretch = false, int blockNumber = 0, qint64 tipAge = -1);
     // Bootstrap snapshot download in progress (getbootstrapinfo phase==active): show a
     // determinate "Downloading blockchain snapshot — X%" (with GB + MB/s when known)
     // instead of the misleading "waiting for peers" -- the node is actively

@@ -3658,6 +3658,7 @@ static void PruneBlockIndexCandidates() {
 // warmup status during the init-time connect replay. Guarded by cs_main, which
 // ActivateBestChainStep always holds.
 static int nLastReplayInitPercent = -1;
+static int64_t nLastReplayInitTime = 0; // also refresh the warmup text every few seconds
 
 static bool ActivateBestChainStep(CValidationState &state, CBlockIndex *pindexMostWork, CBlock *pblock) {
     AssertLockHeld(cs_main);
@@ -3758,7 +3759,8 @@ static bool ActivateBestChainStep(CValidationState &state, CBlockIndex *pindexMo
                 // emit when the integer percent changes, to avoid spam.
                 if (fInitReplay) {
                     int percentageDone = ReplayProgressPercent(nReplayBase, chainActive.Tip()->nHeight, nReplayTarget);
-                    if (percentageDone != nLastReplayInitPercent) {
+                    if (percentageDone != nLastReplayInitPercent || GetTime() - nLastReplayInitTime >= 5) {
+                        nLastReplayInitTime = GetTime();
                         uiInterface.InitMessage(strprintf(_("Activating best chain... height %d of %d (%d%%)"),
                                                           chainActive.Tip()->nHeight, nReplayTarget, percentageDone));
                         nLastReplayInitPercent = percentageDone;

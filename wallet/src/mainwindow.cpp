@@ -1,5 +1,6 @@
 #include "profilepaths.h"
 #include "mainwindow.h"
+#include "syncstate.h"
 #include "addressbook.h"
 #include "ui_mainwindow.h"
 #include <QProgressBar>
@@ -1453,8 +1454,22 @@ void MainWindow::applyBannerStyle(const QString& sheet) {
 }
 
 // P0-6: called from rpc.cpp's getblockchaininfo poll on every refresh.
-void MainWindow::setSyncStatus(bool isSyncing, int blockNumber, int estimatedHeight, double progress) {
+void MainWindow::setSyncStatus(bool isSyncing, int blockNumber, int estimatedHeight, double progress,
+                               qint64 tipAge, int kind) {
     if (syncBanner == nullptr) return;
+
+    if (!isSyncing && kind == SyncState::ClockSkew) {
+        // Caught up per the node, but the computer's clock is wrong: say so prominently.
+        if (syncQuietPill) syncQuietPill->setVisible(false);
+        syncProgressBar->setVisible(false);
+        syncProgressBar->setRange(0, 100);
+        syncStatusLabel->setVisible(true);
+        syncStatusLabel->setText(tr("Your computer's date or time looks wrong\n"
+            "Wallet is up to date at block %1, but block times look off. Please correct "
+            "the clock in your system settings.").arg(Settings::getHeightString(blockNumber)));
+        applyBannerStyle("QWidget { background-color: #d9822b; } QLabel { color: white; }");
+        return;
+    }
 
     if (!isSyncing) {
         // Fully caught up. Polish P0-2: DON'T shout a full-width green bar at rest.
@@ -1472,6 +1487,15 @@ void MainWindow::setSyncStatus(bool isSyncing, int blockNumber, int estimatedHei
             if (blockNumber > 0)
                 pill = pill % "&nbsp;&nbsp;·&nbsp;&nbsp;" %
                     tr("block %1").arg(Settings::getHeightString(blockNumber));
+            if (kind == SyncState::LocalNetwork)
+                pill = tr("<span style=\"color:#34c759;\">●</span>&nbsp;&nbsp;Local test network") %
+                    "&nbsp;&nbsp;·&nbsp;&nbsp;" % tr("block %1").arg(Settings::getHeightString(blockNumber));
+            else if (tipAge >= 0)
+                pill = pill % "&nbsp;&nbsp;·&nbsp;&nbsp;" %
+                    tr("last block %1 ago").arg(SyncState::formatAge(tipAge));
+            syncQuietPill->setToolTip(kind == SyncState::LocalNetwork
+                ? tr("This is a private regtest chain on your computer. It has no peers and no network tip to catch up to.")
+                : tr("Your node has every block the network has announced."));
             syncQuietPill->setText(pill);
             syncQuietPill->setVisible(true);
         }
@@ -1491,10 +1515,18 @@ void MainWindow::setSyncStatus(bool isSyncing, int blockNumber, int estimatedHei
     Q_UNUSED(progress);
     syncProgressBar->setVisible(true);
     syncProgressBar->setRange(0, 0);
-    syncStatusLabel->setText(blockNumber > 0
+    QString syncText = blockNumber > 0
         ? tr("Syncing blockchain\nValidated block %1")
             .arg(Settings::getHeightString(blockNumber))
-        : tr("Syncing blockchain — finding the latest blocks…"));
+        : tr("Syncing blockchain — finding the latest blocks…");
+    // The age of the newest block is the one honest "how far behind" number: it does
+    // not depend on headers that are still arriving.
+    if (blockNumber > 0 && tipAge > 3600)
+        syncText += tr(" · %1 behind").arg(SyncState::formatAge(tipAge));
+    if (kind == SyncState::StaleTip)
+        syncText = tr("Waiting for new blocks\nLast block %1 ago — if this stays, check your computer's date and time")
+            .arg(SyncState::formatAge(tipAge));
+    syncStatusLabel->setText(syncText);
     syncStatusLabel->setToolTip(tr("Downloading and validating blocks. The latest network height is still being discovered; a reliable completion time is not available."));
     applyBannerStyle("QWidget { background-color: #d9822b; } QLabel { color: white; }");
 }
@@ -1517,18 +1549,25 @@ void MainWindow::setSyncStatusConnecting() {
 // C9: called from rpc.cpp when the node is "syncing" but has 0 peers. A fresh
 // install with no peers would otherwise sit on a stuck "Syncing 0%" -- this tells
 // the user the real problem (no network) instead.
-void MainWindow::setSyncStatusWaitingForPeers(bool longStretch) {
+void MainWindow::setSyncStatusWaitingForPeers(bool longStretch, int blockNumber, qint64 tipAge) {
     if (syncBanner == nullptr) return;
 
     if (syncQuietPill) syncQuietPill->setVisible(false);
     syncStatusLabel->setVisible(true);
     syncProgressBar->setVisible(false);
     syncProgressBar->setRange(0, 100);   // reset in case it was indeterminate
+    // Say what we do know: where the local chain stands and how old its newest block is.
+    QString where;
+    if (blockNumber > 0)
+        where = tipAge >= 0
+            ? tr("\nYour wallet is at block %1 (newest block %2 old).")
+                  .arg(Settings::getHeightString(blockNumber)).arg(SyncState::formatAge(tipAge))
+            : tr("\nYour wallet is at block %1.").arg(Settings::getHeightString(blockNumber));
     if (longStretch)
-        syncStatusLabel->setText(tr("Still waiting for peers… please check your internet "
-            "connection and try again later"));
+        syncStatusLabel->setText(tr("Still no connection to the ZClassic network — please check your "
+            "internet connection and firewall.") % where);
     else
-        syncStatusLabel->setText(tr("Waiting for peers… check your internet connection"));
+        syncStatusLabel->setText(tr("Connecting to the ZClassic network… no peers yet") % where);
     applyBannerStyle("QWidget { background-color: #d9822b; } QLabel { color: white; }");
 }
 
@@ -1552,8 +1591,14 @@ void MainWindow::setSyncStatusBootstrapSnapshot(int pct, qint64 received, qint64
         detail = QString(" • ") % tr("%1 / %2 GB")
             .arg(received / gb, 0, 'f', 1).arg(total / gb, 0, 'f', 1);
     }
-    if (mbps > 0.0)
+    if (mbps > 0.0) {
         detail = detail % QString(" • ") % tr("%1 MB/s").arg(mbps, 0, 'f', 1);
+        if (total > received) {
+            const qint64 secs = (qint64)((total - received) / (mbps * 1e6));
+            detail = detail % QString(" • ") % (secs < 90 ? tr("under a minute left")
+                                                         : tr("about %1 min left").arg((secs + 30) / 60));
+        }
+    }
 
     syncStatusLabel->setText(tr("Downloading blockchain snapshot… %1%").arg(pct) % detail);
     applyBannerStyle("QWidget { background-color: #d9822b; } QLabel { color: white; }");
