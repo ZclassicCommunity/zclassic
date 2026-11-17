@@ -193,6 +193,7 @@ private slots:
         QTest::newRow("stale-tip-peers")     << "main" << 3330000 << 3330000 << 3600*5 << 8 << 0 << true << (int)StaleTip << true;
         QTest::newRow("first-poll-nothing")  << "main" << 0 << 0 << -1 << 0 << -1 << false << (int)Syncing << true;
         QTest::newRow("testnet-tip-fresh")   << "test" << 900000 << 900000 << 200 << 3 << 0 << false << (int)Synced << false;
+        QTest::newRow("clock-skew-reported") << "main" << 3330000 << 3330000 << 3600*3 << 2 << 0 << false << (int)ClockSkew << false;
     }
     void syncState() {
         QFETCH(QString, chain); QFETCH(int, blocks); QFETCH(int, headers); QFETCH(int, tipAgeSecs);
@@ -202,6 +203,7 @@ private slots:
         in.chain = chain; in.blocks = blocks; in.headers = headers;
         in.now = 1800000000; in.tipTime = tipAgeSecs >= 0 ? in.now - tipAgeSecs : 0;
         in.connections = peers; in.ibd = ibd; in.everSynced = everSynced;
+        in.clockWarning = (QByteArray(QTest::currentDataTag()) == "clock-skew-reported");
         const SyncState::Verdict v = SyncState::classify(in);
         QCOMPARE((int)v.kind, kind);
         QCOMPARE(v.isSyncing, isSyncing);

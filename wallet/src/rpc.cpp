@@ -1000,6 +1000,13 @@ void RPC::getInfoThenRefresh(bool force) {
         }
 
         int connections = reply["connections"].get<json::number_integer_t>();
+        // The node itself notices a wrong system clock (peers' time offset beyond its
+        // tolerance) and says so in getinfo "errors". Without this, a wrong clock makes
+        // a perfectly synced node look hours behind.
+        bool clockWarning = false;
+        if (reply.find("errors") != reply.end() && reply["errors"].is_string())
+            clockWarning = QString::fromStdString(reply["errors"].get<std::string>())
+                               .contains(QStringLiteral("date and time"), Qt::CaseInsensitive);
         Settings::getInstance()->setPeers(connections);
 
         if (connections == 0) {
@@ -1155,6 +1162,7 @@ void RPC::getInfoThenRefresh(bool force) {
             if (reply.find("initialblockdownload") != reply.end() && reply["initialblockdownload"].is_boolean())
                 syncIn.ibd = reply["initialblockdownload"].get<bool>() ? 1 : 0;
             syncIn.everSynced  = ezEverSynced;
+            syncIn.clockWarning = clockWarning;
             const SyncState::Verdict verdict = SyncState::classify(syncIn);
             isSyncing = verdict.isSyncing;
             if (verdict.kind == SyncState::Synced) ezEverSynced = true;
@@ -1162,7 +1170,14 @@ void RPC::getInfoThenRefresh(bool force) {
             if (!isSyncing) { target = blockNumber; progress = 1.0; }
             bool targetKnown = (target > 0);
 
+            const bool wasSyncing = Settings::getInstance()->isSyncing();
             Settings::getInstance()->setSyncing(isSyncing);
+            // The home hero's green/grey confidence is painted from this flag at balance
+            // refresh time. When the flag flips (first poll after connect, peers lost or
+            // regained, snapshot import finishing) repaint, so a balance is never left
+            // confident-green while the banner says the node is not caught up.
+            if (wasSyncing != isSyncing)
+                refreshBalances();
             // Stamp the time of this live poll so the send gate can ignore a frozen
             // isSyncing flag (single writer: this poll, beside the flag it stamps).
             Settings::getInstance()->setLastSyncPollEpoch(QDateTime::currentSecsSinceEpoch());

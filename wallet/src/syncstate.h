@@ -19,7 +19,8 @@ enum Kind {
     WaitingForPeers,// caught up with every header we know, but no peers to confirm the tip
     Synced,         // at the network tip (fresh block, peers or previously confirmed)
     LocalNetwork,   // regtest: a private test chain; there is no network tip to chase
-    StaleTip        // looks caught up but the newest block is old although peers exist
+    StaleTip,       // looks caught up but the newest block is old although peers exist
+    ClockSkew       // the node reports a wrong system clock; block ages cannot be trusted
 };
 
 struct Input {
@@ -31,6 +32,7 @@ struct Input {
     int     connections = 0;
     int     ibd = -1;       // getblockchaininfo.initialblockdownload: -1 absent, 0 false, 1 true
     bool    everSynced = false; // already confirmed at tip this session
+    bool    clockWarning = false; // node says the local clock disagrees with its peers
 };
 
 struct Verdict {
@@ -53,6 +55,13 @@ inline Verdict classify(const Input& in) {
         // The owner's "block 101" case: a private chain never has peers or a moving tip.
         v.kind = LocalNetwork; v.isSyncing = false;
         return v;
+    }
+
+    // A wrong clock makes every block look old (or new). The node's own header/peer view
+    // is then the only trustworthy signal: caught up with peers and not in IBD = synced.
+    if (in.clockWarning && in.connections > 0 && in.headers > 0 &&
+        in.blocks >= in.headers - 2 && in.ibd != 1) {
+        v.kind = ClockSkew; v.isSyncing = false; return v;
     }
 
     const bool headersKnown = in.headers > 0;

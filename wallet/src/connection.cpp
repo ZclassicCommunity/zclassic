@@ -2141,11 +2141,14 @@ void ConnectionLoader::refreshZClassicdState(Connection* connection, std::functi
                         // Show what the node is really doing (its own warm-up string,
                         // e.g. "Activating best chain... height 3126938 (1%)") instead of
                         // a fixed "Verifying…" line that stays even after verification.
-                        static const QRegularExpression rePct(QStringLiteral("\\((\\d+)%\\)"));
-                        QRegularExpressionMatch mp = rePct.match(status);
-                        if (mp.hasMatch()) this->setBarPercent(mp.captured(1).toInt());
-                        else if (ezProgress) ezProgress->setRange(0, 0);
-                        QString detail = status.trimmed();
+                        // The node's own percentage here sits at 1% for most of the
+                        // import (observed: 1% from the first block to the last), so it
+                        // is shown as moving height text only, on a busy bar.
+                        static const QRegularExpression rePct(QStringLiteral("\\s*\\(\\d+%\\)"));
+                        if (ezProgress) ezProgress->setRange(0, 0);
+                        QString detail = status;
+                        detail.remove(rePct);
+                        detail = detail.trimmed();
                         this->showInformation(
                             ezBootstrapVerifyPending
                                 ? QObject::tr("Step 3 of 3: Verifying the downloaded blockchain…")
@@ -2315,6 +2318,19 @@ void ConnectionLoader::probeBootstrapProgress(Connection* connection) {
                         dl += QObject::tr(" · waiting for data…");
                     }
                 }
+                if (tot <= 0) {
+                    // Active but no manifest/bytes yet: we are still reaching a download
+                    // server (or it is not answering). Say so instead of "0%".
+                    const int pi = (int)num("peer_index"), pc = (int)num("peer_count");
+                    const int at = (int)num("attempt"), am = (int)num("attempt_max");
+                    if (ezProgress) ezProgress->setRange(0, 0);
+                    this->showInformation(
+                        QObject::tr("Step 3 of 3: Connecting to a blockchain download server…"),
+                        (pc > 0 ? QObject::tr("Server %1 of %2, attempt %3 of %4. If none answers, "
+                                              "ZClassic falls back to slower peer-to-peer sync.")
+                                      .arg(pi).arg(pc).arg(at).arg(am)
+                                : QString()));
+                } else
                 this->showInformation(
                     QObject::tr("Step 3 of 3: Downloading blockchain — %1%").arg(pct), dl);
             } else if (ezBootstrapVerifyPending) {

@@ -1457,6 +1457,19 @@ void MainWindow::setSyncStatus(bool isSyncing, int blockNumber, int estimatedHei
                                qint64 tipAge, int kind) {
     if (syncBanner == nullptr) return;
 
+    if (!isSyncing && kind == SyncState::ClockSkew) {
+        // Caught up per the node, but the computer's clock is wrong: say so prominently.
+        if (syncQuietPill) syncQuietPill->setVisible(false);
+        syncProgressBar->setVisible(false);
+        syncProgressBar->setRange(0, 100);
+        syncStatusLabel->setVisible(true);
+        syncStatusLabel->setText(tr("Your computer's date or time looks wrong\n"
+            "Wallet is up to date at block %1, but block times look off. Please correct "
+            "the clock in your system settings.").arg(Settings::getHeightString(blockNumber)));
+        applyBannerStyle("QWidget { background-color: #d9822b; } QLabel { color: white; }");
+        return;
+    }
+
     if (!isSyncing) {
         // Fully caught up. Polish P0-2: DON'T shout a full-width green bar at rest.
         // Hide the loud banner content + drop the colored fill (transparent), and

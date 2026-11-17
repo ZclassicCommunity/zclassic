@@ -429,6 +429,10 @@ private slots:
         // Stale tip with peers: wrong clock / stalled network is named.
         w->setSyncStatus(true, 3330000, 3330000, 1.0, 5 * 3600, SyncState::StaleTip);
         QVERIFY2(w->syncStatusLabel->text().contains("date and time"), qPrintable(w->syncStatusLabel->text()));
+        // Wrong system clock: node is caught up but says so; banner names the clock.
+        w->setSyncStatus(false, 3330000, 3330000, 1.0, 3 * 3600, SyncState::ClockSkew);
+        QVERIFY2(w->syncStatusLabel->text().contains("date or time"), qPrintable(w->syncStatusLabel->text()));
+        QVERIFY(!w->syncQuietPill->isVisibleTo(w.get()));
     }
 
     void fundedHomeFitsTextWithAllCards() {
