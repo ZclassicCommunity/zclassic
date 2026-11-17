@@ -1,3 +1,5 @@
+#include "daemonjob.h"
+#include "profilepaths.h"
 #include "connection.h"
 #include "embeddeddaemon.h"
 #include "configfile.h"
@@ -451,6 +453,8 @@ void ConnectionLoader::createZClassicConf() {
     QPixmap logo(":/img/res/zclassicdlogo.gif");
     ui.lblTopIcon->setBasePixmap(logo.scaled(256, 256, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     ui.btnPickDir->setEnabled(false);
+    // Profile override: the node datadir is fixed inside the profile.
+    if (ProfilePaths::active()) ui.chkCustomDatadir->setEnabled(false);
 
     ui.grpAdvanced->setVisible(false);
     QObject::connect(ui.btnAdvancedConfig, &QPushButton::toggled, [=](bool isVisible) {
@@ -759,9 +763,32 @@ bool ConnectionLoader::startEmbeddedZClassicd(const QStringList& extraArgs) {
     // buffer unused stdout for the lifetime of a full-node session. Explicit
     // printtoconsole output is discarded; startup stderr is still captured below.
     ezclassicd->setStandardOutputFile(QProcess::nullDevice());
+    // Windows backstop: every launch goes through DaemonJob::start(), which binds the
+    // suspended child to a kill-on-close job (no-op elsewhere). It is not a signal hook:
+    // this loader disconnects all handlers on handoff to RPC, and RPC restarts the same
+    // QProcess through DaemonJob::start() as well. The orderly `stop` in
+    // RPC::shutdownZClassicd() disarms the job first.
     QObject::connect(ezclassicd, &QProcess::started, [=] () {
         //qDebug() << "zclassicd started";
     });
+#ifndef Q_OS_WIN
+    // Quit before the RPC handoff (File->Exit, SIGINT/SIGTERM while the node is still
+    // starting): RPC::shutdownZClassicd() does not own this process yet, so without this
+    // ~QProcess would SIGKILL a node that is mid-startup. Ask for zclassicd's orderly
+    // shutdown (SIGTERM) and wait for it instead. Once RPC owns the process its own
+    // orderly stop has already run, so this is a no-op then. (Windows: terminate() is a
+    // WM_CLOSE a console daemon ignores; unchanged there.)
+    {
+        const QPointer<QProcess> owned(ezclassicd);
+        RPC* const owner = rpc;
+        QObject::connect(qApp, &QCoreApplication::aboutToQuit, ezclassicd, [owned, owner]() {
+            if (!owned || owned->state() == QProcess::NotRunning) return;
+            if (owner && owner->getEZClassicD() == owned.data()) return;
+            owned->terminate();
+            owned->waitForFinished(30000);
+        });
+    }
+#endif
 
     // NOTIFY-SRV: stand up the push socket + write the 0600 token file BEFORE launching
     // the daemon, so the socket is already listening when the node first fires a
@@ -864,6 +891,8 @@ bool ConnectionLoader::startEmbeddedZClassicd(const QStringList& extraArgs) {
             }
         }
     }
+    // Profile override: the daemon must never fall back to its own platform datadir.
+    launchArgs << ProfilePaths::daemonArgs();
     launchArgs << "-par=0"                // auto-detect cores: parallel script
                                           // verification (startup verify + IBD;
                                           // daemon default is single-threaded)
@@ -894,15 +923,16 @@ bool ConnectionLoader::startEmbeddedZClassicd(const QStringList& extraArgs) {
     // the startup-timing log would measure from the wrong instant.
 
 #ifdef Q_OS_LINUX
-    ezclassicd->start(zclassicdProgram, launchArgs);
+    DaemonJob::start(ezclassicd, zclassicdProgram, launchArgs);
 #elif defined(Q_OS_DARWIN)
-    ezclassicd->start(zclassicdProgram, launchArgs);
+    DaemonJob::start(ezclassicd, zclassicdProgram, launchArgs);
 #else
     // Spawn by ABSOLUTE path: in the single-file release the daemon is extracted
     // outside appPath (under %LOCALAPPDATA%), so the old bare-name "zclassicd.exe"
     // + working-directory spawn would not find it.
     ezclassicd->setWorkingDirectory(appPath.absolutePath());
-    ezclassicd->start(zclassicdProgram, launchArgs);
+    if (const auto jobErr = DaemonJob::start(ezclassicd, zclassicdProgram, launchArgs))
+        main->logger->write(QString("daemon job backstop unavailable (win32 error %1)").arg(jobErr));
 #endif // Q_OS_LINUX
 
     // [gui-startup] We own this daemon and just spawned it. First-write-wins, so a
@@ -923,7 +953,7 @@ QString ConnectionLoader::ensureDaemonExtracted() {
 #else
     QString error;
     const QString path = extractEmbeddedDaemon(QCoreApplication::applicationFilePath(),
-        QStandardPaths::writableLocation(QStandardPaths::CacheLocation), &error);
+        ProfilePaths::cacheDir(), &error);
     if (path.isEmpty()) main->logger->write("Embedded daemon: " + error);
     return path;
 #endif // Q_OS_DARWIN
@@ -1694,7 +1724,7 @@ void ConnectionLoader::retryExtractionOnce(const QString& diag) {
     // re-runs its verified (SHA-256-gated) extraction from scratch. This is the SAME
     // dir ensureDaemonExtracted() writes to (<CacheLocation>/zclassic-node); we remove
     // only our own extracted-daemon dir, never anything else.
-    QDir cacheRoot(QStandardPaths::writableLocation(QStandardPaths::CacheLocation));
+    QDir cacheRoot(ProfilePaths::cacheDir());
     QDir cache(cacheRoot.filePath("zclassic-node"));
     if (cache.exists())
         cache.removeRecursively();
@@ -2501,6 +2531,13 @@ void ConnectionLoader::showError(QString explanation) {
 }
 
 QString ConnectionLoader::locateZClassicConfFile() {
+    if (ProfilePaths::active()) {
+        // Profile override: only ever consider the profile conf, never the real one.
+        const QString p = ProfilePaths::zclassicConfPath();
+        if (!QFileInfo::exists(p)) return QString();
+        main->logger->write("Found zclassicconf at " + p);
+        return p;
+    }
 #ifdef Q_OS_LINUX
     auto confLocation = QStandardPaths::locate(QStandardPaths::HomeLocation, ".zclassic/zclassic.conf");
 #elif defined(Q_OS_DARWIN)
@@ -2515,6 +2552,11 @@ QString ConnectionLoader::locateZClassicConfFile() {
 }
 
 QString ConnectionLoader::zclassicConfWritableLocation() {
+    if (ProfilePaths::active()) {
+        const QString p = ProfilePaths::zclassicConfPath();
+        main->logger->write("Found zclassicconf at " + p);
+        return p;
+    }
 #ifdef Q_OS_LINUX
     auto confLocation = QDir(QStandardPaths::writableLocation(QStandardPaths::HomeLocation)).filePath(".zclassic/zclassic.conf");
 #elif defined(Q_OS_DARWIN)
@@ -2529,6 +2571,12 @@ QString ConnectionLoader::zclassicConfWritableLocation() {
 }
 
 QString ConnectionLoader::zcashParamsDir() {
+    if (!ProfilePaths::paramsDir(QString()).isEmpty()) {
+        const QString p = ProfilePaths::paramsDir(QString());
+        QDir().mkpath(p);
+        main->logger->write("Using ZCLWALLET_PARAMS_DIR params directory at " + p);
+        return p;
+    }
     #ifdef Q_OS_LINUX
     auto paramsLocation = QDir(QDir(QStandardPaths::writableLocation(QStandardPaths::HomeLocation)).filePath(".zcash-params"));
 #elif defined(Q_OS_DARWIN)
@@ -2929,6 +2977,14 @@ std::shared_ptr<ConnectionConfig> ConnectionLoader::autoDetectZClassicConf() {
     zclassicconf->zclassicDaemon = repairConfigBool(repairConfig.values.value("daemon", "0"));
     zclassicconf->repairConfigError = repairConfig.error;
     zclassicconf->dataDirOverride = repairConfig.values.value("datadir");
+    if (ProfilePaths::active() && !zclassicconf->dataDirOverride.isEmpty()) {
+        // Profile override: the embedded daemon is pinned with -datadir=<profile>/ZClassic,
+        // which beats a conf datadir= line. Never let that line steer the wallet's cookie
+        // path, repair location or wallet.dat backup outside the profile.
+        main->logger->write("Profile override: ignoring zclassic.conf datadir= (node datadir is " +
+                            ProfilePaths::zclassicDataDir() + ")");
+        zclassicconf->dataDirOverride.clear();
+    }
     zclassicconf->testnet = repairConfigBool(repairConfig.values.value("testnet", "0"));
     zclassicconf->regtest = repairConfigBool(repairConfig.values.value("regtest", "0"));
     zclassicconf->walletFile = repairConfig.values.value("wallet", "wallet.dat");

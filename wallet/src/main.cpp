@@ -7,6 +7,7 @@
 #include "turnstile.h"
 #include "notifyserver.h"   // NOTIFY-SRV connector mode (--notify)
 #include "guistartup.h"     // [gui-startup] client-side startup timing milestones
+#include "profilepaths.h"   // ZCLWALLET_PROFILE_DIR isolation override
 
 #include "version.h"
 
@@ -166,13 +167,19 @@ void POSIX_handleFunc(int signal)
 class Application : public SignalHandler
 {
 public:
-    Application() : SignalHandler(SignalHandler::SIG_INT), w(nullptr) {}
+    Application() : SignalHandler(SignalHandler::SIG_INT | SignalHandler::SIG_TERM), w(nullptr) {}
 
     ~Application() { delete w; }
 
     int main(int argc, char *argv[]) {
         QCoreApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
         QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+
+        // Profile override: make the single-instance key profile-specific (the key hashes
+        // the organization domain), so an isolated test wallet never forwards to, or is
+        // mistaken for, a real running wallet.
+        if (ProfilePaths::active())
+            QCoreApplication::setOrganizationDomain(QStringLiteral("profile:") + ProfilePaths::dir());
 
         SingleApplication a(argc, argv, true);
         GuiStartup::markQAppConstructed();   // [gui-startup] QApplication built
@@ -185,6 +192,11 @@ public:
         // A boolean option for running it headless
         QCommandLineOption headlessOption(QStringList() << "headless", "Run the wallet without the GUI (headless node only).");
         parser.addOption(headlessOption);
+
+        QCommandLineOption profileOption(QStringList() << "profile-dir",
+            "Run fully isolated: keep every setting, log, cache, zclassic.conf and the node datadir under <dir> (same as ZCLWALLET_PROFILE_DIR). For testing and portable use.",
+            "dir");
+        parser.addOption(profileOption);
 
         // No embedded will disable the embedded zclassicd node
         QCommandLineOption noembeddedOption(QStringList() << "no-embedded", "Disable embedded zclassicd");
@@ -246,6 +258,12 @@ public:
 
         QCoreApplication::setOrganizationName("zcl-qt-wallet-org");
         QCoreApplication::setApplicationName("zcl-qt-wallet");
+
+        // Profile override (no-op when inactive): QSettings -> IniFormat under the profile.
+        // Runs before the first QSettings object is created (Settings::init() below).
+        ProfilePaths::applySettings();
+        if (ProfilePaths::active())
+            QDir().mkpath(ProfilePaths::zclassicDataDir());
 
         QString locale = QLocale::system().name();
         locale.truncate(locale.lastIndexOf('_'));   // Get the language code
@@ -337,7 +355,7 @@ public:
         }
 
         w = new MainWindow();
-        w->setWindowTitle("ZclWallet v" + QString(APP_VERSION));
+        w->setWindowTitle("ZclWallet v" + QString(APP_VERSION) + ProfilePaths::titleMarker());
 
         // If there was a payment URI on the command line, pay it
         if (parser.positionalArguments().length() > 0) {
@@ -465,8 +483,27 @@ int main(int argc, char* argv[])
     // mirror of the daemon's [startup] log measures from true process entry.
     GuiStartup::begin();
 
+    // Profile override: --profile-dir <dir> becomes ZCLWALLET_PROFILE_DIR before anything
+    // resolves a path. A set-but-missing profile dir is fatal: never fall back to the
+    // real profile when isolation was requested.
+    if (!ProfilePaths::consumeArgs(argc, argv) || !ProfilePaths::valid()) {
+        fprintf(stderr, "zclwallet: --profile-dir / ZCLWALLET_PROFILE_DIR must name an existing directory (%s)\n",
+                ProfilePaths::dir().toLocal8Bit().constData());
+        return 2;
+    }
+    ProfilePaths::pin();
+
     // Install the noise filter before anything can log.
     qInstallMessageHandler(zclMessageFilter);
+
+    // Dry check: print every resolved state location and exit, touching nothing.
+    for (int i = 1; i < argc; i++) {
+        if (qstrcmp(argv[i], "--print-profile-paths") == 0) {
+            for (const QString& l : ProfilePaths::describe())
+                fprintf(stdout, "%s\n", l.toLocal8Bit().constData());
+            return 0;
+        }
+    }
 
     // NOTIFY-SRV connector mode: `<self> --notify <id>`, invoked by zclassicd's
     // -walletnotify/-blocknotify. A tiny headless mode that connects to the GUI's
@@ -533,7 +570,8 @@ int main(int argc, char* argv[])
     // does NOT <include> the host /etc/fonts/conf.d -- so the old static lib never touches
     // the incompatible host config/cache. Only-if-unset preserves a power-user override.
     if (!qEnvironmentVariableIsSet("FONTCONFIG_FILE")) {
-        const QString fcDir   = QDir::homePath() + "/.cache/zcl-qt-wallet";
+        const QString fcDir   = ProfilePaths::active() ? ProfilePaths::fontconfigRoot()
+                                                       : QDir::homePath() + "/.cache/zcl-qt-wallet";
         const QString fcCache = fcDir + "/fontconfig";
         const QString fcConf  = fcDir + "/fonts.conf";
         if (QDir().mkpath(fcCache)) {

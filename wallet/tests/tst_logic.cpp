@@ -29,6 +29,9 @@
 #include <QProcessEnvironment>
 #include <QTcpServer>
 #include "repairlocation.h"
+#include "profilepaths.h"
+#include "daemonjob.h"
+#include <QTemporaryDir>
 #include "walletbackup.h"
 #include "embeddeddaemon.h"
 #include "releaseversion.h"
@@ -881,6 +884,13 @@ private slots:
 
     // --- First-run trust: send-gate staleness predicate (pure) ---
     void sendgate_staleWhenPollStops();               // Settings::syncGateIsStale boundary
+    void profile_unsetKeepsDefaults();
+    void profile_setRedirectsEveryPath();
+    void profile_settingsAreIniInsideProfile();
+    void profile_noDirectStateLocations();
+    void profile_blankValueFailsClosed();
+    void daemonjob_everyLaunchPathUsesTheJob();
+    void daemonjob_armedAfterEveryStart();
 
 private:
     QString sandboxAppData() const {
@@ -1921,6 +1931,203 @@ void TestLogic::sendgate_staleWhenPollStops() {
     // Past the window: stale.
     QVERIFY(Settings::syncGateIsStale(now, now - (W + 1)));
     QVERIFY(Settings::syncGateIsStale(now, now - 10 * W));
+}
+
+// ---- Profile override (ZCLWALLET_PROFILE_DIR) -------------------------------------
+// Unset => helpers return exactly the pre-override locations; set => every helper
+// resolves inside the profile; settings become IniFormat files inside it.
+void TestLogic::profile_unsetKeepsDefaults() {
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+    qunsetenv("ZCLWALLET_PARAMS_DIR");
+    QVERIFY(!ProfilePaths::active());
+    QVERIFY(ProfilePaths::valid());
+    QCOMPARE(ProfilePaths::appDataDir(), QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
+    QCOMPARE(ProfilePaths::cacheDir(), QStandardPaths::writableLocation(QStandardPaths::CacheLocation));
+    QVERIFY(ProfilePaths::runtimeDir().isEmpty());
+    QVERIFY(ProfilePaths::exportsDir().isEmpty());
+    QVERIFY(ProfilePaths::fontconfigRoot().isEmpty());
+    QVERIFY(ProfilePaths::zclassicDataDir().isEmpty());
+    QVERIFY(ProfilePaths::zclassicConfPath().isEmpty());
+    QVERIFY(ProfilePaths::daemonArgs().isEmpty());          // no -datadir: daemon default
+    QVERIFY(ProfilePaths::titleMarker().isEmpty());
+    QCOMPARE(ProfilePaths::paramsDir("/default/params"), QString("/default/params"));
+    const auto before = QSettings::defaultFormat();
+    ProfilePaths::applySettings();                           // must be a no-op
+    QCOMPARE(QSettings::defaultFormat(), before);
+}
+
+void TestLogic::profile_setRedirectsEveryPath() {
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    const QString root = QDir::cleanPath(QFileInfo(tmp.path()).absoluteFilePath());
+    qputenv("ZCLWALLET_PROFILE_DIR", root.toLocal8Bit());
+    qunsetenv("ZCLWALLET_PARAMS_DIR");
+    auto under = [&](const QString& p) {
+        return QDir::cleanPath(p) == root || QDir::cleanPath(p).startsWith(root + "/");
+    };
+    QVERIFY(ProfilePaths::active());
+    QVERIFY(ProfilePaths::valid());
+    QCOMPARE(ProfilePaths::dir(), root);
+    const QStringList all = {
+        ProfilePaths::appDataDir(), ProfilePaths::cacheDir(), ProfilePaths::runtimeDir(),
+        ProfilePaths::exportsDir(), ProfilePaths::fontconfigRoot(),
+        ProfilePaths::zclassicDataDir(), ProfilePaths::zclassicConfPath(),
+    };
+    for (const QString& p : all) {
+        QVERIFY2(!p.isEmpty(), "profile helper returned an empty path");
+        QVERIFY2(under(p), qPrintable("outside the profile: " + p));
+    }
+    QCOMPARE(ProfilePaths::zclassicConfPath(), root + "/ZClassic/zclassic.conf");
+    // The embedded daemon must be pinned to the profile datadir, never its default.
+    const QStringList args = ProfilePaths::daemonArgs();
+    QCOMPARE(args.size(), 1);
+    QVERIFY(args[0].startsWith("-datadir="));
+    QVERIFY2(under(QDir::fromNativeSeparators(args[0].mid(9))), qPrintable(args[0]));
+    QVERIFY(ProfilePaths::titleMarker().contains("profile:"));
+    // Params keep their default unless ZCLWALLET_PARAMS_DIR says otherwise.
+    QCOMPARE(ProfilePaths::paramsDir("/default/params"), QString("/default/params"));
+    qputenv("ZCLWALLET_PARAMS_DIR", (root + "/params").toLocal8Bit());
+    QVERIFY(under(ProfilePaths::paramsDir("/default/params")));
+    // A set-but-missing profile dir is invalid (main() refuses to start).
+    qputenv("ZCLWALLET_PROFILE_DIR", (root + "/does-not-exist").toLocal8Bit());
+    QVERIFY(!ProfilePaths::valid());
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+    qunsetenv("ZCLWALLET_PARAMS_DIR");
+}
+
+void TestLogic::profile_settingsAreIniInsideProfile() {
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    const QString root = QDir::cleanPath(QFileInfo(tmp.path()).absoluteFilePath());
+    qputenv("ZCLWALLET_PROFILE_DIR", root.toLocal8Bit());
+    const QString oldOrg = QCoreApplication::organizationName(), oldApp = QCoreApplication::applicationName();
+    QCoreApplication::setOrganizationName("profile-test-org");
+    QCoreApplication::setApplicationName("profile-test-app");
+    const auto fmt = QSettings::defaultFormat();
+    ProfilePaths::applySettings();
+    QCOMPARE(QSettings::defaultFormat(), QSettings::IniFormat);
+    {
+        // The wallet only ever uses the default constructor (QSettings s;).
+        QSettings s;
+        QCOMPARE(s.format(), QSettings::IniFormat);
+        s.setValue("k", 1);
+        s.sync();
+        QVERIFY2(QDir::cleanPath(s.fileName()).startsWith(root + "/"), qPrintable(s.fileName()));
+        QVERIFY(QFileInfo::exists(s.fileName()));
+    }
+    {
+        QSettings sys(QSettings::IniFormat, QSettings::SystemScope, "o", "a");
+        QVERIFY2(QDir::cleanPath(sys.fileName()).startsWith(root + "/"), qPrintable(sys.fileName()));
+    }
+    QSettings::setDefaultFormat(fmt);
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+    QCoreApplication::setOrganizationName(oldOrg);
+    QCoreApplication::setApplicationName(oldApp);
+}
+
+// Source guard: no state location is decided outside ProfilePaths any more.
+void TestLogic::profile_noDirectStateLocations() {
+    for (const char* f : {"addressbook.cpp", "senttxstore.cpp", "turnstile.cpp", "mainwindow.cpp",
+                          "connection.cpp", "notifyserver.cpp", "main.cpp"}) {
+        const QString code = readStrippedSrc(f);
+        QVERIFY2(!code.isEmpty(), f);
+        QVERIFY2(!code.contains("QStandardPaths::AppDataLocation") ||
+                 QString(f) == "connection.cpp" /* legacy conf path in the inactive branch */,
+                 f);
+        QVERIFY2(!code.contains("QStandardPaths::CacheLocation"), f);
+    }
+    const QString conn = readStrippedSrc("connection.cpp");
+    QVERIFY2(conn.contains("ProfilePaths::daemonArgs()"), "embedded launch must pin -datadir under a profile");
+    QVERIFY2(conn.contains("ProfilePaths::zclassicConfPath()"), "conf lookup must honour the profile");
+    // A conf datadir= line must not steer cookie/repair/backup paths outside the profile.
+    QVERIFY2(conn.contains("zclassicconf->dataDirOverride.clear()"),
+             "profile override must ignore a conf datadir= line");
+}
+
+// Isolation requested but empty/blank must fail closed (exit 2 in main), never mean "use
+// the real profile"; pin() canonicalizes once so cwd changes and symlink aliases agree.
+void TestLogic::profile_blankValueFailsClosed() {
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+    QVERIFY(ProfilePaths::valid());
+    qputenv("ZCLWALLET_PROFILE_DIR", QByteArray(""));
+    if (qEnvironmentVariableIsSet("ZCLWALLET_PROFILE_DIR"))   // empty values are unsettable on Windows
+        QVERIFY2(!ProfilePaths::valid(), "set-but-empty profile dir must be invalid");
+    qputenv("ZCLWALLET_PROFILE_DIR", QByteArray("   "));
+    QVERIFY2(!ProfilePaths::valid(), "blank profile dir must be invalid");
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+
+    auto consume = [](QList<QByteArray> words) {
+        QList<QByteArray> store = words;
+        std::vector<char*> argv;
+        for (auto& w : store) argv.push_back(w.data());
+        return ProfilePaths::consumeArgs(static_cast<int>(argv.size()), argv.data());
+    };
+    QVERIFY(!consume({"zclwallet", "--profile-dir="}));
+    QVERIFY(!consume({"zclwallet", "--profile-dir", ""}));
+    QVERIFY(!consume({"zclwallet", "--profile-dir", " "}));
+    QVERIFY(!consume({"zclwallet", "--profile-dir"}));
+    QVERIFY(!qEnvironmentVariableIsSet("ZCLWALLET_PROFILE_DIR"));
+    QVERIFY(consume({"zclwallet"}));
+    QVERIFY(!qEnvironmentVariableIsSet("ZCLWALLET_PROFILE_DIR"));
+
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    const QString canon = QFileInfo(tmp.path()).canonicalFilePath();
+    QVERIFY(consume({"zclwallet", QByteArray("--profile-dir=") + (tmp.path() + "/.").toLocal8Bit()}));
+    QVERIFY(ProfilePaths::valid());
+    ProfilePaths::pin();
+    QCOMPARE(QString::fromLocal8Bit(qgetenv("ZCLWALLET_PROFILE_DIR")), canon);
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+}
+
+// Source guard: the embedded daemon is only ever launched through DaemonJob::start(). A bare
+// QProcess::start() (or a `started` signal hook, which ConnectionLoader drops on handoff to
+// RPC) would leave a daemon restarted after an unexpected exit without the kill-on-close job.
+void TestLogic::daemonjob_everyLaunchPathUsesTheJob() {
+    for (const char* f : {"connection.cpp", "rpc.cpp"}) {
+        const QString code = readStrippedSrc(f);
+        QVERIFY2(!code.isEmpty(), f);
+        QVERIFY2(!code.contains(QRegularExpression(R"(ezclassicd\s*->\s*start\s*\()")),
+                 qPrintable(QString("%1 launches the daemon without DaemonJob::start").arg(f)));
+        QVERIFY2(!code.contains("DaemonJob::bind"), f);
+    }
+    QVERIFY(readStrippedSrc("connection.cpp").contains("DaemonJob::start(ezclassicd"));
+    QVERIFY(readStrippedSrc("rpc.cpp").contains("DaemonJob::start(ezclassicd"));
+    QVERIFY(readStrippedSrc("rpc.cpp").contains("DaemonJob::disarm()"));
+}
+
+// Windows: a started child is in an armed job BEFORE it runs, the job handle is not
+// inheritable, disarm() really clears kill-on-close, and a RESTART of the same QProcess
+// (what RPC::restartEmbeddedZClassicd does) is bound and armed again. Elsewhere: no-op.
+void TestLogic::daemonjob_armedAfterEveryStart() {
+#ifndef Q_OS_WIN
+    QSKIP("Windows job-object backstop only");
+#else
+    QProcess p;
+    const QString ping = QStringLiteral("ping.exe");
+    const QStringList args{"-n", "2", "127.0.0.1"};
+    for (int round = 0; round < 3; ++round) {
+        QCOMPARE(DaemonJob::start(&p, ping, args), 0ul);
+        QVERIFY2(p.state() == QProcess::Running, "child must be resumed and running");
+        QVERIFY2(DaemonJob::isInJob(&p), qPrintable(QString("round %1 not in job").arg(round)));
+        QVERIFY2(DaemonJob::isArmed(&p), qPrintable(QString("round %1 not armed").arg(round)));
+        DWORD flags = 0;
+        QVERIFY(GetHandleInformation(DaemonJob::entries().back().job, &flags));
+        QVERIFY2(!(flags & HANDLE_FLAG_INHERIT), "job handle must not be inheritable");
+        if (round == 1) {
+            DaemonJob::disarm();
+            QVERIFY(DaemonJob::isInJob(&p));
+            QVERIFY2(!DaemonJob::isArmed(&p), "disarm must clear kill-on-close");
+        }
+        QVERIFY2(p.waitForFinished(15000), "resumed child must run to completion");
+        QCOMPARE(p.exitStatus(), QProcess::NormalExit);
+    }
+    // A launch that fails to start has nothing to bind and leaks no job.
+    QProcess bad;
+    const size_t before = DaemonJob::entries().size();
+    QCOMPARE(DaemonJob::start(&bad, "Z:/definitely/not/here.exe", {}), 0ul);
+    QVERIFY2(DaemonJob::entries().size() <= before, "failed launch must not record a job");
+#endif
 }
 
 QTEST_MAIN(TestLogic)

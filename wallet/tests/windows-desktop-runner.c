@@ -24,6 +24,16 @@ int wmain(int argc, wchar_t **argv)
         fwprintf(stderr, L"CreateDesktop failed: %lu\n", GetLastError());
         return 2;
     }
+    // Optional knobs for long-lived lifecycle tests (defaults keep the old behaviour):
+    //   ZCL_RUNNER_TIMEOUT_MS      wait limit (default 120000)
+    //   ZCL_RUNNER_KEEP_CHILDREN=1 do not kill the process tree when the runner
+    //     exits, so a test can see whether the program cleaned up its own children.
+    DWORD timeout_ms = 120000;
+    wchar_t knob[32];
+    if (GetEnvironmentVariableW(L"ZCL_RUNNER_TIMEOUT_MS", knob, 32) > 0 && _wtol(knob) > 0)
+        timeout_ms = (DWORD)_wtol(knob);
+    BOOL keep_children = GetEnvironmentVariableW(L"ZCL_RUNNER_KEEP_CHILDREN", knob, 32) > 0 &&
+                         knob[0] == L'1';
     HANDLE job = CreateJobObjectW(NULL, NULL);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -59,14 +69,18 @@ int wmain(int argc, wchar_t **argv)
             TerminateProcess(process.hProcess, 2);
         } else if (ResumeThread(process.hThread) == (DWORD)-1) {
             fwprintf(stderr, L"Test resume failed: %lu\n", GetLastError());
-        } else if (WaitForSingleObject(process.hProcess, 120000) != WAIT_OBJECT_0) {
-            fwprintf(stderr, L"Test exceeded 120 seconds or wait failed\n");
+        } else if (WaitForSingleObject(process.hProcess, timeout_ms) != WAIT_OBJECT_0) {
+            fwprintf(stderr, L"Test exceeded its time limit or wait failed\n");
         } else if (!GetExitCodeProcess(process.hProcess, &result)) {
             fwprintf(stderr, L"Cannot read test exit code: %lu\n", GetLastError());
             result = 2;
         }
         CloseHandle(process.hThread);
         CloseHandle(process.hProcess);
+    }
+    if (keep_children) {
+        limits.BasicLimitInformation.LimitFlags = 0;   // closing the job must not kill the tree
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
     }
     CloseHandle(job); // Also terminates a timed-out process and its children.
     CloseHandle(null_io);
