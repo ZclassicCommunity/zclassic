@@ -296,6 +296,11 @@ else
 libzcl_tor_a_SOURCES += c23/tor/zcl_tor_proc_posix.c
 endif
 endif
+if TARGET_WINDOWS
+# Older mingw-w64 headers (the GCC 9.3 release container) default _WIN32_WINNT to
+# 0x0502, which hides WSAPoll, struct pollfd and POLLIN. Windows 7 is the floor.
+libzcl_tor_a_CPPFLAGS += -D_WIN32_WINNT=0x0601
+endif
 
 # server: zclassicd
 libbitcoin_server_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES) $(EVENT_CFLAGS) $(EVENT_PTHREADS_CFLAGS)
