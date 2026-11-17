@@ -38,7 +38,7 @@ rss_start() { RSS_FILE=$SD/rss.$1; rm -f "$RSS_FILE.stop"
     ( pid=$(cat "$SD/node$1/pid"); while [ ! -e "$RSS_FILE.stop" ] && kill -0 "$pid" 2>/dev/null; do ps -o rss= -p "$pid"; sleep 0.2; done |
         awk 'BEGIN { m = 0 } { if ($1 + 0 > m) m = $1 + 0 } END { print m }' >"$RSS_FILE" ) &
     RSS_PID=$!; }
-rss_stop() { touch "$RSS_FILE.stop"; wait "$RSS_PID" 2>/dev/null; cat "$RSS_FILE"; }
+rss_stop() { touch "$RSS_FILE.stop"; wait "$RSS_PID" 2>/dev/null; }   # then read $RSS_FILE (not in a subshell: wait needs the parent)
 
 # fund_notes <node> <zaddr> <count> <amount>: <count> separate Sapling notes of <amount> on <zaddr>
 # (miner makes <count> t addresses, then <count> concurrent t->z z_sendmany operations)
@@ -70,7 +70,7 @@ chk_timing() {
             total=$(add "$N" -0.5); per=$(awk -v t="$total" -v r="$R" 'BEGIN { printf "%.8f", t / r }')
             rec=$(zrecips "$R" "$per")
             rss_start 0; t0=$(now)
-            r=$(zsend 0 "$zs" "$rec" 1 "$FEE"); t=$(elapsed "$t0"); rss=$(rss_stop)
+            r=$(zsend 0 "$zs" "$rec" 1 "$FEE"); t=$(elapsed "$t0"); rss_stop; rss=$(cat "$RSS_FILE")
             case $r in
                 success*) tobs "pt${pt}_notes${N}_recips${R}" "${t}s peak_rss_kb=$rss"
                     wait_mempool 1 "${r#success }"; mine 1
@@ -110,7 +110,7 @@ chk_merge() {
     t0=$(now); rss_start 0
     mg=$(cli 0 z_mergetoaddress "[\"$zs\"]" "$zd" 0.0001 0 100); op=$(printf %s "$mg" | jq -r .opid)
     ck "merge: remaining notes reported" "$(printf %s "$mg" | jq -r .remainingNotes)" 0
-    r=$(wait_op 0 "$op"); t=$(elapsed "$t0"); rss=$(rss_stop)
+    r=$(wait_op 0 "$op"); t=$(elapsed "$t0"); rss_stop; rss=$(cat "$RSS_FILE")
     tobs "z_mergetoaddress_100_notes" "${t}s peak_rss_kb=$rss"
     case $r in success*) wait_mempool 1 "${r#success }"; mine 1
         ck "merge: destination exact" "$(zbal 0 "$zd")" "$(add 100 -0.0001)"; ck "merge: source empty" "$(zbal 0 "$zs")" 0.00000000
@@ -145,7 +145,7 @@ chk_kill() {
         *) bad "kill after acceptance: $r" ;;
     esac
     # (c) kill -9 during generate on the subject node
-    s0=$(cli 0 getblockcount); ( cli 0 generate 400 >/dev/null 2>&1 ) & sleep 1; kill9 0; wait
+    s0=$(cli 0 getblockcount); ( cli 0 generate 400 >/dev/null 2>&1 ) & gp=$!; sleep 1; kill9 0; wait $gp
     start 0 "$BIN" $R; h=$(cli 0 getblockcount)
     obs "kill_during_generate_height_gain" "$((h - s0))"
     ck "kill during generate: verifychain" "$(cli 0 verifychain 4 0)" true
