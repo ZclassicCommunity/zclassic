@@ -200,6 +200,7 @@
 #define fr_add zc23_fr_add
 #define fr_eq zc23_fr_eq
 #define fr_fft zc23_fr_fft
+#define fr_fft_many zc23_fr_fft_many
 #define fr_fft_parallel zc23_fr_fft_parallel
 #define fr_from_bytes zc23_fr_from_bytes
 #define fr_inv zc23_fr_inv
@@ -208,6 +209,7 @@
 #define fr_mul zc23_fr_mul
 #define fr_neg zc23_fr_neg
 #define fr_one zc23_fr_one
+#define fr_pow_u64 zc23_fr_pow_u64
 #define fr_sq zc23_fr_sq
 #define fr_sqrt zc23_fr_sqrt
 #define fr_sub zc23_fr_sub
@@ -279,12 +281,17 @@
 #define gadget_variable_base_mul_cbits zc23_gadget_variable_base_mul_cbits
 #define GetRandBytes zc23_GetRandBytes
 #define groth16_batch_verify zc23_groth16_batch_verify
+#define groth16_g1_msm zc23_groth16_g1_msm
+#define groth16_g2_msm zc23_groth16_g2_msm
+#define groth16_parallel_for zc23_groth16_parallel_for
 #define groth16_pk_free zc23_groth16_pk_free
 #define groth16_pk_read zc23_groth16_pk_read
 #define groth16_proof_read zc23_groth16_proof_read
 #define groth16_prove zc23_groth16_prove
+#define groth16_prover_set_threads zc23_groth16_prover_set_threads
 #define groth16_prover_test_set_force_domain zc23_groth16_prover_test_set_force_domain
 #define groth16_prover_test_set_realloc_hook zc23_groth16_prover_test_set_realloc_hook
+#define groth16_prover_threads zc23_groth16_prover_threads
 #define groth16_verify zc23_groth16_verify
 #define groth16_vk_build_combs zc23_groth16_vk_build_combs
 #define groth16_vk_free_combs zc23_groth16_vk_free_combs
@@ -300,6 +307,7 @@
 #define incremental_witness_root zc23_incremental_witness_root
 #define IsHex zc23_IsHex
 #define jub_add zc23_jub_add
+#define jub_add_niels zc23_jub_add_niels
 #define jub_double zc23_jub_double
 #define jub_from_bytes zc23_jub_from_bytes
 #define jub_get_x zc23_jub_get_x
@@ -311,6 +319,7 @@
 #define jub_neg zc23_jub_neg
 #define jub_scalar_mul zc23_jub_scalar_mul
 #define jub_to_bytes zc23_jub_to_bytes
+#define jub_to_niels_batch zc23_jub_to_niels_batch
 #define lc_add_term zc23_lc_add_term
 #define lc_evaluate zc23_lc_evaluate
 #define lc_free zc23_lc_free
