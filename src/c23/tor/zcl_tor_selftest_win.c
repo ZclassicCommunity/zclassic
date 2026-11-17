@@ -846,12 +846,12 @@ static int run_offline(const char *tmp)
     if (is_dir(dd)) {
         (void)printf("  datadir (UTF-8): %s\n", dd);
         if (cycle_in(dd, "unicode datadir", true) == 0) {
-            /* restart in the same datadir: stale control_port and cookie replaced */
+            /* restart in the same datadir (control_port and cookie are removed at stop) */
             (void)cycle_in(dd, "unicode datadir restart", false);
             {
                 char t[1300];
-                (void)snprintf(t, sizeof(t), "%s\\tor\\control_port", dd);
-                check(path_exists(t), "unicode datadir: Tor created control_port inside it");
+                (void)snprintf(t, sizeof(t), "%s\\tor\\state", dd);
+                check(path_exists(t), "unicode datadir: Tor wrote its state file inside it");
             }
         }
     }

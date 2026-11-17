@@ -406,7 +406,11 @@ static int parse_port_after(const char *s, const char *needle, uint16_t *port)
 
 static int join(char *out, size_t cap, const char *a, const char *b)
 {
+#ifdef _WIN32
+    int n = snprintf(out, cap, "%s\\%s", a, b);
+#else
     int n = snprintf(out, cap, "%s/%s", a, b);
+#endif
     return (n > 0 && (size_t)n < cap) ? 0 : -1;
 }
 
@@ -467,6 +471,8 @@ int zcl_tor_embed_start(const zcl_tor_embed_opts *opts, zcl_tor_embed **out,
     zcl_tor_embed *h;
     char torrc[PATHCAP + 32], defaults[PATHCAP + 32],
         stdlog[PATHCAP + 32], exe[PATHCAP];
+    char ttor[PATHCAP + 32], tcookie[PATHCAP + 32], tctl[PATHCAP + 32], ttorrc[PATHCAP + 32],
+        tdefaults[PATHCAP + 32], tlog[PATHCAP + 32];
     char body[8192], e2[256];
     const char *args[6];
     unsigned tmo;
@@ -528,9 +534,26 @@ int zcl_tor_embed_start(const zcl_tor_embed_opts *opts, zcl_tor_embed **out,
         free(h);
         return -1;
     }
-    if (build_torrc(body, sizeof(body), h->info.tor_dir, h->info.cookie_path,
-                    h->control_file, h->disable_network,
-                    opts->in_process ? stdlog : NULL) != 0) {
+    /* The paths Tor itself opens (torrc body and command line). Tor uses the
+     * narrow ANSI file APIs on Windows: unless the process runs with a UTF-8
+     * active code page (manifest, Windows 10 1903+) a non-ASCII directory is
+     * handed over by its ASCII 8.3 short name, or refused with a clear error. */
+    if (zcl_tor_proc_tor_path(h->info.tor_dir, ttor, sizeof(ttor), e2, sizeof(e2)) != 0) {
+        seterr(err, errsz, "tor embed: %s", e2);
+        free(h);
+        return -1;
+    }
+    if (join(tcookie, sizeof(tcookie), ttor, "control_auth_cookie") != 0 ||
+        join(tctl, sizeof(tctl), ttor, "control_port") != 0 ||
+        join(ttorrc, sizeof(ttorrc), ttor, "torrc") != 0 ||
+        join(tdefaults, sizeof(tdefaults), ttor, "torrc-defaults") != 0 ||
+        join(tlog, sizeof(tlog), ttor, "tor.log") != 0) {
+        seterr(err, errsz, "tor embed: path too long");
+        free(h);
+        return -1;
+    }
+    if (build_torrc(body, sizeof(body), ttor, tcookie, tctl, h->disable_network,
+                    opts->in_process ? tlog : NULL) != 0) {
         seterr(err, errsz, "tor embed: torrc does not fit or the path has a control "
                            "character");
         free(h);
@@ -543,9 +566,9 @@ int zcl_tor_embed_start(const zcl_tor_embed_opts *opts, zcl_tor_embed **out,
         return -1;
     }
     args[0] = "-f";
-    args[1] = torrc;
+    args[1] = ttorrc;
     args[2] = "--defaults-torrc";
-    args[3] = defaults;
+    args[3] = tdefaults;
     if (opts->in_process) {
         if (zcl_tor_inproc_start(&h->inproc, args, 4, e2, sizeof(e2)) != 0) {
             seterr(err, errsz, "tor embed: %s", e2);

@@ -37,6 +37,13 @@ int zcl_tor_proc_spawn(struct zcl_tor_proc *p, const char *exe,
                        const char *const *tor_args, size_t ntor_args,
                        const char *stdio_log, char *err, size_t errsz);
 
+/* The form of an existing directory `utf8` that Tor itself can open. POSIX:
+ * a copy. Windows: Tor uses narrow ANSI file APIs, so unless the process has
+ * a UTF-8 active code page the directory is returned as an ASCII 8.3 short
+ * path; if that is impossible the call fails with a message in `err`. The
+ * result uses backslashes. */
+int zcl_tor_proc_tor_path(const char *utf8, char *out, size_t cap, char *err, size_t errsz);
+
 /* Resolve this binary's path. */
 int zcl_tor_proc_self_exe(char *out, size_t cap);
 

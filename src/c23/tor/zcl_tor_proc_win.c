@@ -56,6 +56,54 @@ static wchar_t *to_wide(const char *s)
     return w;
 }
 
+int zcl_tor_proc_tor_path(const char *utf8, char *out, size_t cap, char *err, size_t errsz)
+{
+    wchar_t *w = to_wide(utf8);
+    wchar_t full[32768], shortp[32768];
+    DWORD n;
+    int u, ascii = 1;
+    size_t i;
+    if (!w) {
+        pe(err, errsz, "path is not valid UTF-8");
+        return -1;
+    }
+    /* Absolute, backslash form: Tor treats "C:/x" as relative and warns. */
+    n = GetFullPathNameW(w, (DWORD)(sizeof(full) / sizeof(full[0])), full, NULL);
+    free(w);
+    if (n == 0 || n >= sizeof(full) / sizeof(full[0])) {
+        pe(err, errsz, "cannot resolve the full path (%lu)", GetLastError());
+        return -1;
+    }
+    for (i = 0; full[i]; i++) {
+        if (full[i] > 0x7f)
+            ascii = 0;
+    }
+    if (!ascii && GetACP() != CP_UTF8) {
+        n = GetShortPathNameW(full, shortp, (DWORD)(sizeof(shortp) / sizeof(shortp[0])));
+        if (n == 0 || n >= sizeof(shortp) / sizeof(shortp[0])) {
+            pe(err, errsz, "no 8.3 short name for a non-ASCII datadir (%lu); use an ASCII "
+                           "datadir or Windows 10 1903 or later",
+               GetLastError());
+            return -1;
+        }
+        for (i = 0; shortp[i]; i++) {
+            if (shortp[i] > 0x7f) {
+                pe(err, errsz, "datadir has a non-ASCII path and 8.3 names are disabled on "
+                               "this volume; use an ASCII datadir or Windows 10 1903 or "
+                               "later");
+                return -1;
+            }
+        }
+        wcscpy(full, shortp);
+    }
+    u = WideCharToMultiByte(CP_UTF8, 0, full, -1, out, (int)cap, NULL, NULL);
+    if (u <= 0) {
+        pe(err, errsz, "path too long");
+        return -1;
+    }
+    return 0;
+}
+
 int zcl_tor_proc_self_exe(char *out, size_t cap)
 {
     wchar_t w[32768];
@@ -120,7 +168,7 @@ int zcl_tor_proc_spawn(struct zcl_tor_proc *p, const char *exe,
     STARTUPINFOEXW si;
     PROCESS_INFORMATION pi;
     SIZE_T asz = 0;
-    HANDLE inherit[3];
+    HANDLE inherit[2];
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION jl;
     char pidbuf[32];
     int ret = -1;
@@ -206,8 +254,7 @@ int zcl_tor_proc_spawn(struct zcl_tor_proc *p, const char *exe,
     }
 
     inherit[0] = hnull;
-    inherit[1] = hlog;
-    inherit[2] = hlog;
+    inherit[1] = hlog; /* the list must hold distinct handles (duplicates give error 87) */
     (void)InitializeProcThreadAttributeList(NULL, 1, 0, &asz);
     si.lpAttributeList = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(asz);
     if (!si.lpAttributeList ||

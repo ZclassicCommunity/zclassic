@@ -56,6 +56,16 @@ void zcl_tor_sleep_ms(unsigned ms)
     }
 }
 
+int zcl_tor_proc_tor_path(const char *utf8, char *out, size_t cap, char *err, size_t errsz)
+{
+    int n = snprintf(out, cap, "%s", utf8);
+    if (n > 0 && (size_t)n < cap)
+        return 0;
+    if (err && errsz)
+        (void)snprintf(err, errsz, "path too long");
+    return -1;
+}
+
 int zcl_tor_proc_self_exe(char *out, size_t cap)
 {
 #ifdef __linux__
