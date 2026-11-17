@@ -173,7 +173,7 @@ paths_flow() { # <label>: the whole flow with $SD already set to the odd path
     stop 0; start 0 "$BIN" $R -rescan; sync_to 0
     ck "$1: -rescan identical (no txs line)" "$(snap 0 | sed 's/txs=.*//')" "$(printf %s "$s0" | sed 's/txs=.*//')"
     fresh 2 -rescan || return
-    cli 2 importwallet "dumpfile" >/dev/null 2>&1; cli 2 z_importwallet "zexport" >/dev/null 2>&1
+    cli 2 importwallet "$SD/export/dumpfile" >/dev/null; cli 2 z_importwallet "$SD/export/zexport" >/dev/null
     ck "$1: import into a fresh node: t" "$(bal 2)" 3.00000000
     ck "$1: import into a fresh node: z" "$(zbal 2 "$zs")" 2.00000000
     ck "$1: spend after the round trip" "$(zsend 0 "$zs" "[{\"address\":\"$(cli 1 getnewaddress)\",\"amount\":1}]" | cut -c1-7)" success
