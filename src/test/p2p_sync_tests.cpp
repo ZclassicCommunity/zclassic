@@ -29,6 +29,16 @@ BOOST_AUTO_TEST_CASE(headers_request_timeout)
     BOOST_CHECK(HeadersRequestTimedOut(1000 * sec + (HEADERS_RESPONSE_TIMEOUT + 1) * sec, 1000 * sec, HEADERS_RESPONSE_TIMEOUT));
 }
 
+BOOST_AUTO_TEST_CASE(replay_progress_percent)
+{
+    // Measured from the height the replay started at, not from the current tip.
+    BOOST_CHECK_EQUAL(ReplayProgressPercent(3126937, 3126938, 3326937), 1);
+    BOOST_CHECK_EQUAL(ReplayProgressPercent(3126937, 3226937, 3326937), 50);
+    BOOST_CHECK_EQUAL(ReplayProgressPercent(3126937, 3326937, 3326937), 99);
+    BOOST_CHECK_EQUAL(ReplayProgressPercent(10, 10, 10), 99);
+    BOOST_CHECK_EQUAL(ReplayProgressPercent(100, 90, 200), 1);
+}
+
 BOOST_AUTO_TEST_CASE(sync_phase_classification)
 {
     // Not in IBD: synced regardless of anything else.

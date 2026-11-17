@@ -1861,6 +1861,14 @@ bool HeadersRequestTimedOut(int64_t nNow, int64_t nRequestedAt, int64_t nTimeout
     return nRequestedAt != 0 && nNow - nRequestedAt > nTimeoutSeconds * 1000000;
 }
 
+int ReplayProgressPercent(int nBaseHeight, int nTipHeight, int nTargetHeight)
+{
+    const int nSpan = nTargetHeight - nBaseHeight;
+    if (nSpan <= 0)
+        return 99;
+    return std::max(1, std::min(99, (int)(((double)(nTipHeight - nBaseHeight)) / (double)nSpan * 100)));
+}
+
 const char* ClassifySyncPhase(bool fInitialBlockDownload, bool fReindexing, bool fImporting,
                               int nConnections, int nBlocks, int nHeaders)
 {
@@ -3657,8 +3665,20 @@ static bool ActivateBestChainStep(CValidationState &state, CBlockIndex *pindexMo
     // bootstrap import or a mid-sync restart). Outside warmup this is the live
     // single-block connect path and emitting status there would be noise.
     const bool fInitReplay = RPCIsInWarmup(NULL) && pindexMostWork != NULL;
-    const int nReplayBase = pindexFork ? pindexFork->nHeight : 0;
-    const int nReplaySpan = pindexMostWork ? (pindexMostWork->nHeight - nReplayBase) : 0;
+    // Every call here connects at most a few blocks and starts from the current tip, so the replay base
+    // must be remembered across calls: measured from the tip each time the percentage was always 1
+    // and the status line stayed frozen for the whole replay (tens of minutes after a snapshot import).
+    static int nReplayStartHeight = -1;
+    if (fInitReplay && nReplayStartHeight < 0)
+        nReplayStartHeight = pindexFork ? pindexFork->nHeight : 0;
+    const int nReplayBase = fInitReplay ? nReplayStartHeight : (pindexFork ? pindexFork->nHeight : 0);
+    const int nReplayTarget = pindexMostWork ? pindexMostWork->nHeight : 0;
+    // During the init-time replay nobody else needs cs_main, but returning after every block made
+    // ActivateBestChain recompute FindMostWorkChain (a walk back to the fork, ~200k blocks after a
+    // snapshot import) once per block, which dominated the replay. Connect a larger batch per call; the
+    // batch is bounded so a shutdown request is still honoured between calls.
+    static const int REPLAY_BATCH = 1000;
+    int nReplayConnected = 0;
 
     // - On ChainDB initialization, pindexOldTip will be null, so there are no removable blocks.
     // - If pindexMostWork is in a chain that doesn't have the same genesis block as our chain,
@@ -3732,16 +3752,16 @@ static bool ActivateBestChainStep(CValidationState &state, CBlockIndex *pindexMo
                 // keeps resetting and the user sees the chain advancing. Only
                 // emit when the integer percent changes, to avoid spam.
                 if (fInitReplay) {
-                    int percentageDone = nReplaySpan > 0
-                        ? std::max(1, std::min(99, (int)(((double)(chainActive.Tip()->nHeight - nReplayBase)) / (double)nReplaySpan * 100)))
-                        : 99;
+                    int percentageDone = ReplayProgressPercent(nReplayBase, chainActive.Tip()->nHeight, nReplayTarget);
                     if (percentageDone != nLastReplayInitPercent) {
-                        uiInterface.InitMessage(strprintf(_("Activating best chain... height %d (%d%%)"),
-                                                          chainActive.Tip()->nHeight, percentageDone));
+                        uiInterface.InitMessage(strprintf(_("Activating best chain... height %d of %d (%d%%)"),
+                                                          chainActive.Tip()->nHeight, nReplayTarget, percentageDone));
                         nLastReplayInitPercent = percentageDone;
                     }
                 }
                 if (!pindexOldTip || chainActive.Tip()->nChainWork > pindexOldTip->nChainWork) {
+                    if (fInitReplay && ++nReplayConnected < REPLAY_BATCH)
+                        continue;
                     // We're in a better position than we were. Return temporarily to release the lock.
                     fContinue = false;
                     break;

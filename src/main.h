@@ -244,6 +244,10 @@ bool IsInitialBlockDownload();
  *  gone unanswered for more than nTimeoutSeconds at nNow (microseconds). */
 bool HeadersRequestTimedOut(int64_t nNow, int64_t nRequestedAt, int64_t nTimeoutSeconds);
 
+/** Percent (1..99) of the init-time best-chain replay done, from the height the replay started at, the
+ *  current tip height and the height it is heading for. */
+int ReplayProgressPercent(int nBaseHeight, int nTipHeight, int nTargetHeight);
+
 /** Machine-readable sync phase for getblockchaininfo: synced, waiting_for_peers, downloading_headers,
  *  downloading_blocks, reindexing or importing. Pure function of its arguments. */
 const char* ClassifySyncPhase(bool fInitialBlockDownload, bool fReindexing, bool fImporting,
