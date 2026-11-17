@@ -5,6 +5,7 @@
  * not linked into any zclassic binary.
  *
  *   slpscript genesis <ticker> <name> <mint_baton_vout> <quantity>
+ *   slpscript genesisdec <ticker> <name> <decimals> <mint_baton_vout> <quantity>
  *   slpscript mint    <token_id_hex> <mint_baton_vout> <quantity>
  *   slpscript send    <token_id_hex> <quantity> [<quantity> ...]
  *   slpscript roles   <num_vout> <script_hex>
@@ -77,6 +78,12 @@ int main(int argc, char **argv)
         return print_script(buf, zcl_token_guard_build_genesis(
             buf, sizeof(buf), argv[2], argv[3], "", NULL, 0,
             (uint8_t)strtoul(argv[4], NULL, 10), strtoull(argv[5], NULL, 10)));
+    }
+    if (strcmp(argv[1], "genesisdec") == 0 && argc == 7) {
+        return print_script(buf, zcl_token_guard_build_genesis(
+            buf, sizeof(buf), argv[2], argv[3], "", NULL,
+            (uint8_t)strtoul(argv[4], NULL, 10),
+            (uint8_t)strtoul(argv[5], NULL, 10), strtoull(argv[6], NULL, 10)));
     }
     if (strcmp(argv[1], "mint") == 0 && argc == 5) {
         if (unhex(argv[2], id, sizeof(id)) != 32)
