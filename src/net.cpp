@@ -1664,7 +1664,9 @@ bool BindListenPort(const CService &addrBind, string& strError, bool fWhiteliste
     // Disable Nagle's algorithm
     setsockopt(hListenSocket, IPPROTO_TCP, TCP_NODELAY, (void*)&nOne, sizeof(int));
 #else
-    setsockopt(hListenSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&nOne, sizeof(int));
+    // Deliberately no SO_REUSEADDR on Windows: there it lets a second process bind the same
+    // address and port while the first is still listening (no error, connections are
+    // shared or stolen). Without it a taken port fails to bind, as on Linux.
     setsockopt(hListenSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&nOne, sizeof(int));
 #endif
 

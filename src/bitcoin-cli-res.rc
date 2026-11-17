@@ -33,3 +33,6 @@ BEGIN
         VALUE "Translation", 0x0, 1252 // language neutral - multilingual (decimal)
     END
 END
+
+// UTF-8 active code page + long paths (see windows-utf8.manifest)
+1 24 "windows-utf8.manifest"
