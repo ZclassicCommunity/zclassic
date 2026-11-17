@@ -41,4 +41,11 @@ void fp_accel_mont_mul_portable(uint64_t r[6], const uint64_t a[6], const uint64
 bool fr_accel_mont_mul_adx(uint64_t r[4], const uint64_t a[4], const uint64_t b[4]);
 bool fp_accel_mont_mul_adx(uint64_t r[6], const uint64_t a[6], const uint64_t b[6]);
 
+/* Test/benchmark seam: pin the DISPATCHED multiplies (Fr and Fp together) to
+ * the portable tier (true) or restore automatic selection (false). Lets a test
+ * run one whole computation, such as a Groth16 proof, on each tier and compare
+ * bytes. Not thread-safe against concurrent field arithmetic: call it while no
+ * other thread is multiplying. */
+void fr_accel_force_portable(bool portable);
+
 #endif /* ZCL_SAPLING_FR_ACCEL_H */

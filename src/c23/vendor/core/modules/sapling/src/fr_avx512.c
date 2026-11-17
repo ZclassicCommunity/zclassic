@@ -265,6 +265,16 @@ static void init_dispatch(void)
     }
 }
 
+void fr_accel_force_portable(bool portable)
+{
+    if (portable) {
+        atomic_store_explicit(&g_fr_mont_mul, fr_mont_mul_portable, memory_order_relaxed);
+        atomic_store_explicit(&g_fp_mont_mul, fp_mont_mul_portable, memory_order_relaxed);
+    } else {
+        init_dispatch();
+    }
+}
+
 /* Public dispatchers — called by fr_mul/fp_mul via extern */
 /* First-call path, kept out of line so the hot dispatchers below are a load,
  * a test and two tail calls with no frame. */

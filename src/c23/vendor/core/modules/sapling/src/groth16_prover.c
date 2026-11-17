@@ -594,9 +594,6 @@ bool groth16_pk_read(struct groth16_pk *pk, const uint8_t *data, size_t len)
         LOG_FAIL("groth16_pk", "pk_read: b_g2[] parse failed (b_g2_len=%u)", b_g2_len);
     }
 
-    printf("Proving key loaded: h=%zu l=%zu a=%zu b=%zu inputs=%zu\n",
-           pk->h_len, pk->l_len, pk->a_len, pk->b_len, pk->num_inputs);
-
     return true;
 }
 
@@ -657,18 +654,28 @@ static size_t groth16_prove_domain_for_rows(size_t n_rows)
     return domain;
 }
 
+/* Fill adapters for fr_sample_uniform: each rejected candidate is a fresh
+ * draw from the same source under the same label. */
+static bool groth16_fill_r_blind(void *user, uint8_t *out, size_t n)
+{
+    (void)user;
+    return groth16_blind_bytes(out, n, "groth16_r_blind");
+}
+
+static bool groth16_fill_s_blind(void *user, uint8_t *out, size_t n)
+{
+    (void)user;
+    return groth16_blind_bytes(out, n, "groth16_s_blind");
+}
+
+/* r and s are uniform in [0, r) by rejection sampling (bellman Fr::random),
+ * never a raw 256-bit value: that was biased and tier-dependent. */
 static bool groth16_prove_draw_blinds(struct fr *r_blind, struct fr *s_blind)
 {
-    uint8_t rb[32];
-    if (!groth16_blind_bytes(rb, 32, "groth16_r_blind"))
-        return false;
-    fr_from_bytes(r_blind, rb);
-    if (!groth16_blind_bytes(rb, 32, "groth16_s_blind")) {
-        memory_cleanse(rb, 32);
-        return false;
-    }
-    fr_from_bytes(s_blind, rb);
-    memory_cleanse(rb, 32);
+    if (!fr_sample_uniform(r_blind, groth16_fill_r_blind, NULL))
+        LOG_FAIL("groth16", "prove: could not draw an unbiased r blind");
+    if (!fr_sample_uniform(s_blind, groth16_fill_s_blind, NULL))
+        LOG_FAIL("groth16", "prove: could not draw an unbiased s blind");
     return true;
 }
 

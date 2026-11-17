@@ -36,8 +36,32 @@ void fr_inv(struct fr *r, const struct fr *a);
  * Pedersen hash is such a caller. */
 bool fr_sqrt(struct fr *r, const struct fr *a);
 
-/* Convert 32 bytes (little-endian) to Montgomery form */
+/* Convert 32 bytes (little-endian) to Montgomery form. Returns false when the
+ * encoding is not canonical (>= r). On false `*r` is still defined: it holds
+ * the input reduced mod r, so no non-canonical operand ever reaches the
+ * Montgomery multiply (whose behaviour on operands >= r differs between the
+ * ADX and portable tiers). Callers that need canonical-or-reject check the
+ * return; the canonical path is unchanged. */
 bool fr_from_bytes(struct fr *r, const uint8_t s[32]);
+
+/* Byte source for fr_sample_uniform: fill out[0..n) with fresh randomness,
+ * return false on failure (the draw is abandoned, never used). */
+typedef bool (*fr_fill_fn)(void *user, uint8_t *out, size_t n);
+
+/* Upper bound on 32-byte draws per fr_sample_uniform call. Each draw is
+ * accepted with probability r / 2^255 ~= 0.906, so a CSPRNG fails all 128
+ * with probability < 2^-400; only a stuck or adversarial source exhausts it. */
+#define FR_SAMPLE_MAX_DRAWS 128
+
+/* Uniform random scalar in [0, r) by rejection sampling, as bellman's
+ * Fr::random does: draw 32 bytes, clear bit 255 (r has 255 bits, so the value
+ * is uniform in [0, 2^255)), accept iff < r, else redraw. Expected 1.10 draws.
+ * Use for every RAW randomness draw that becomes a field element (Groth16
+ * blinds r, s); NOT for spec-defined derivations that reduce a 512-bit hash
+ * (fs_to_uniform / ToScalar). Returns false if `fill` fails or
+ * FR_SAMPLE_MAX_DRAWS draws were all rejected; `*r` is then zero. The draw
+ * buffer is cleansed before returning. */
+bool fr_sample_uniform(struct fr *r, fr_fill_fn fill, void *user);
 
 /* Convert from Montgomery form to 32 bytes (little-endian) */
 void fr_to_bytes(uint8_t s[32], const struct fr *a);

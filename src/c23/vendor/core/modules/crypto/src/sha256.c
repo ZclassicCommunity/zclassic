@@ -14,6 +14,18 @@
 
 /* --- SHA-NI accelerated transform (Intel Goldmont+, AMD Zen) --- */
 
+bool sha256_cpuid_allows_shani(unsigned int leaf1_ecx, unsigned int leaf7_ebx)
+{
+    /* sha256_transform_shani is built with target("sha,sse4.1") and also uses
+     * SSSE3 (pshufb, palignr). A hypervisor can mask SSSE3/SSE4.1 yet leave the
+     * SHA bit set; running the transform there is SIGILL, so all three bits
+     * must be present before the known-answer test executes it. */
+    bool sha   = (leaf7_ebx >> 29) & 1; /* CPUID.(7,0):EBX[29]  SHA   */
+    bool ssse3 = (leaf1_ecx >> 9) & 1;  /* CPUID.1:ECX[9]       SSSE3 */
+    bool sse41 = (leaf1_ecx >> 19) & 1; /* CPUID.1:ECX[19]      SSE4.1 */
+    return sha && ssse3 && sse41;
+}
+
 #if defined(__x86_64__) || defined(__i386__)
 #include <cpuid.h>
 #include <immintrin.h>
@@ -57,11 +69,16 @@ static void sha256_transform_shani(uint32_t *state, const unsigned char *data);
 static void detect_sha_ni(void)
 {
     unsigned int eax, ebx, ecx, edx;
+    unsigned int l1_ecx = 0;
+    if (!__get_cpuid(1, &eax, &ebx, &l1_ecx, &edx)) {
+        atomic_store_explicit(&sha_ni_available, 0, memory_order_relaxed);
+        return;
+    }
     if (!__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
         atomic_store_explicit(&sha_ni_available, 0, memory_order_relaxed);
         return;
     }
-    int hw_capable = (ebx >> 29) & 1; /* CPUID.(EAX=7,ECX=0):EBX[29] = SHA */
+    int hw_capable = sha256_cpuid_allows_shani(l1_ecx, ebx);
     if (!hw_capable) {
         atomic_store_explicit(&sha_ni_available, 0, memory_order_relaxed);
         return;

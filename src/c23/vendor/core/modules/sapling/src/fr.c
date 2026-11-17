@@ -21,6 +21,7 @@
 
 #include "sapling/fr.h"
 #include <string.h>
+#include "support/cleanse.h"
 #include "bls12_381_fp_inline.h"
 
 /* Runtime-dispatched Montgomery multiply (CPUID → BMI2+ADX or portable) */
@@ -171,9 +172,35 @@ bool fr_from_bytes(struct fr *r, const uint8_t s[32])
         if (raw[i] < FR_P[i]) { ok = true; break; }
     }
 
+    /* A non-canonical input (raw >= p, at most 2^256 - 1 < 3p) is reduced
+     * before it reaches the multiply: the Montgomery multiplies are only
+     * specified for operands < p and the ADX and portable tiers disagreed
+     * above it. Two subtractions bring any 256-bit value below p. Off the
+     * canonical path only; the hot path is unchanged. */
+    if (__builtin_expect(!ok, 0)) {
+        while (fr_gte(raw, FR_P))
+            fr_sub_noborrow(raw, raw, FR_P);
+    }
+
     /* Convert to Montgomery form: r = raw * R^2 * R^{-1} = raw * R mod p */
     fr_mont_mul(r->d, raw, FR_R2);
     return ok;
+}
+
+bool fr_sample_uniform(struct fr *r, fr_fill_fn fill, void *user)
+{
+    uint8_t buf[32];
+    bool done = false;
+    for (int draw = 0; draw < FR_SAMPLE_MAX_DRAWS && !done; draw++) {
+        if (!fill(user, buf, sizeof buf))
+            break;
+        buf[31] &= 0x7f; /* r < 2^255: keep 255 bits so draws are uniform */
+        done = fr_from_bytes(r, buf);
+    }
+    memory_cleanse(buf, sizeof buf);
+    if (!done)
+        memset(r, 0, sizeof *r);
+    return done;
 }
 
 void fr_to_bytes(uint8_t s[32], const struct fr *a)

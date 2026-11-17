@@ -22,7 +22,11 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 /* ── Thread budget ──────────────────────────────────────────────── */
 
@@ -37,17 +41,34 @@ void groth16_prover_set_threads(unsigned n)
                  n > GROTH16_MAX_THREADS ? GROTH16_MAX_THREADS : n);
 }
 
+/* Online processors, or 0 when the platform cannot say. mingw-w64 has no
+ * sysconf(_SC_NPROCESSORS_ONLN), so Windows asks the OS directly: the active
+ * processor count across all groups, falling back to GetSystemInfo. */
+static long groth16_online_cpus(void)
+{
+#if defined(_WIN32)
+    DWORD active = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    if (active > 0)
+        return (long)active;
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return (long)si.dwNumberOfProcessors;
+#elif defined(_SC_NPROCESSORS_ONLN)
+    return sysconf(_SC_NPROCESSORS_ONLN);
+#else
+    return 0;
+#endif
+}
+
 unsigned groth16_prover_threads(void)
 {
     unsigned n = atomic_load(&g_prover_threads);
     if (n)
         return n;
-#ifdef _SC_NPROCESSORS_ONLN
-    long online = sysconf(_SC_NPROCESSORS_ONLN);
+    long online = groth16_online_cpus();
     if (online > 1)
         return online < (long)GROTH16_AUTO_THREADS ? (unsigned)online
                                                    : GROTH16_AUTO_THREADS;
-#endif
     return 1;
 }
 

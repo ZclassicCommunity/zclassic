@@ -55,6 +55,13 @@ const char *sha256_implementation(void);
  * instruction, and after a failed self-test. */
 bool sha256_shani_available(void);
 
+/* Pure CPUID predicate behind the x86 SHA-NI probe: true only when
+ * CPUID.1:ECX has SSSE3 (bit 9) and SSE4.1 (bit 19) AND CPUID.(7,0):EBX has
+ * SHA (bit 29). The SHA-NI transform also executes SSSE3/SSE4.1 instructions,
+ * so a CPU model with SHA but those masked must stay on the portable path.
+ * Exposed so a test can drive it with synthetic CPUID words. */
+bool sha256_cpuid_allows_shani(unsigned int leaf1_ecx, unsigned int leaf7_ebx);
+
 /* Force the compression transform. PORTABLE always succeeds. SHANI and AUTO
  * both re-run the probe + known-answer test and fall back to PORTABLE when
  * the host cannot supply a verified hardware transform — SHANI is a request
