@@ -896,6 +896,12 @@ bool CNetAddr::IsTorV3() const
     return torv3_addr.size() == ADDR_TORV3_SIZE;
 }
 
+void CNetAddr::SetTorV3(const unsigned char* pubkey32)
+{
+    memset(ip, 0, sizeof(ip)); // ip[] is zero for every v3 address
+    torv3_addr.assign(pubkey32, pubkey32 + ADDR_TORV3_SIZE);
+}
+
 void CNetAddr::GetLegacyWireBytes(unsigned char (&out)[16]) const
 {
     if (IsTorV3()) {

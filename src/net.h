@@ -290,6 +290,11 @@ public:
     //    until it has initialized its bloom filter.
     bool fRelayTxes;
     bool fSentAddr;
+    // BIP155: the peer sent "sendaddrv2" before its verack, so we may send it
+    // "addrv2" (and Tor v3 addresses). Unset for every older peer.
+    bool fSendAddrV2;
+    // The peer's verack arrived; a later "sendaddrv2" no longer counts.
+    bool fVerackRecvd;
     CSemaphoreGrant grantOutbound;
     CCriticalSection cs_filter;
     CBloomFilter* pfilter;
@@ -429,8 +434,10 @@ public:
         // SendMessages will filter it again for knowns that were added
         // after addresses were pushed.
         // A v3 onion address cannot be sent in the 16-byte addr field (it
-        // would arrive as a placeholder or as "::"), so it is never relayed.
-        if (addr.IsValid() && !addr.IsTorV3() && !addrKnown.contains(addr.GetKey())) {
+        // would arrive as a placeholder or as "::"), so it is only queued for
+        // a peer that negotiated addrv2 (BIP155); every other peer keeps
+        // getting exactly the legacy addr stream.
+        if (addr.IsValid() && (!addr.IsTorV3() || fSendAddrV2) && !addrKnown.contains(addr.GetKey())) {
             if (vAddrToSend.size() >= MAX_ADDR_TO_SEND) {
                 vAddrToSend[insecure_rand() % vAddrToSend.size()] = addr;
             } else {

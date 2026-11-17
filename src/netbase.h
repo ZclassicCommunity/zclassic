@@ -87,6 +87,10 @@ class CNetAddr
         bool IsRFC6145() const; // IPv6 IPv4-translated address (::FFFF:0:0:0/96)
         bool IsTor() const;
         bool IsTorV3() const; // v3 onion: the 32-byte key lives in torv3_addr, ip[] is zero
+        /** Make this a v3 onion address from its 32-byte ed25519 public key (replaces any previous value). */
+        void SetTorV3(const unsigned char* pubkey32);
+        /** The 32-byte v3 key; only meaningful when IsTorV3(). */
+        const std::vector<unsigned char>& GetTorV3() const { return torv3_addr; }
         bool IsLocal() const;
         bool IsRoutable() const;
         bool IsValid() const;

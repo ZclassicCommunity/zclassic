@@ -2120,6 +2120,8 @@ CNode::CNode(SOCKET hSocketIn, const CAddress& addrIn, const std::string& addrNa
     fGetAddr = false;
     fRelayTxes = false;
     fSentAddr = false;
+    fSendAddrV2 = false;
+    fVerackRecvd = false;
     fBootstrapManifestSent = false;
     fBootstrapParamManifestSent = false;
     pfilter = new CBloomFilter();
