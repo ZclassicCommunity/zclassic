@@ -36,10 +36,20 @@ ok() { pass=$((pass + 1)); say "PASS $*"; }
 bad() { fail=$((fail + 1)); say "FAIL $*"; }
 check() { if [ "$1" = 0 ]; then ok "$2"; else bad "$2"; fi; }
 now() { echo $(( $(date +%s) - t0 )); }
+fmode() { # path -> octal mode (GNU stat -c, else BSD stat -f)
+    stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
+}
+listen_of() { # tcp-port -> sorted local listen addresses (ss on Linux, lsof elsewhere)
+    if command -v ss >/dev/null 2>&1; then
+        ss -Htln "sport = :$1" 2>/dev/null | awk '{ print $4 }' | sort -u | tr '\n' ' '
+    else
+        lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 { print $9 }' | sort -u | tr '\n' ' '
+    fi
+}
 
 # Free loopback ports: P2P and RPC for each node.
 port() {
-    awk -v seed="$$$(date +%N)" 'BEGIN { srand(seed); print 20000 + int(rand() * 20000) }'
+    awk -v seed="$$$(date +%s)" 'BEGIN { srand(seed); print 20000 + int(rand() * 20000) }'
 }
 PA=$(port); RA=$((PA + 1)); PB=$((PA + 2)); RB=$((PA + 3))
 
@@ -115,8 +125,8 @@ done
 [ ${#ONION} = 62 ]; check $? "A: announces a v3 onion local address ($ONION) after $(now)s"
 grep -q 'embedded Tor started' "$A/regtest/debug.log"; check $? "A: $(grep -o 'embedded Tor started.*' "$A/regtest/debug.log" | head -1)"
 KEY=$A/regtest/onion_v3_private_key
-[ "$(stat -c %a "$KEY" 2>/dev/null)" = 600 ]; check $? "A: onion key file mode is $(stat -c %a "$KEY" 2>/dev/null) (umask $(umask))"
-[ "$(stat -c %a "$A/regtest/tor" 2>/dev/null)" = 700 ]; check $? "A: tor state dir mode is $(stat -c %a "$A/regtest/tor" 2>/dev/null)"
+[ "$(fmode "$KEY")" = 600 ]; check $? "A: onion key file mode is $(fmode "$KEY") (umask $(umask))"
+[ "$(fmode "$A/regtest/tor")" = 700 ]; check $? "A: tor state dir mode is $(fmode "$A/regtest/tor")"
 cli_a generate 5 >/dev/null; [ "$(cli_a getblockcount)" = 5 ]; check $? "A: mined 5 blocks (height $(cli_a getblockcount))"
 
 i=0
@@ -144,7 +154,7 @@ else
 fi
 PID_B=$!
 wait_rpc cli_b 120; check $? "B: RPC up after $(now)s"
-LISTEN_B=$(ss -Htln "sport = :$PB" 2>/dev/null | awk '{ print $4 }' | sort -u | tr '\n' ' ')
+LISTEN_B=$(listen_of "$PB")
 [ "$LISTEN_B" = "127.0.0.1:$PB " ]; check $? "B: P2P port listens on loopback only without -bind ($LISTEN_B)"
 i=0
 while [ $i -lt 600 ]; do
