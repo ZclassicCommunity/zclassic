@@ -15,7 +15,7 @@
 #
 # usage: symbol-prefix.sh check <nm> <libzcl_c23.a>
 #            Fails unless every defined global symbol of the archive starts with
-#            librustzcash_, zcl_c23_, zcl_c23h_, zcl_token_guard_, zcl_tor_, zcl_keyfile_ or zc23_. Run by the build before any
+#            librustzcash_, zcl_c23_, zcl_c23h_, zcl_token_guard_, zcl_slp_, zcl_tor_, zcl_keyfile_ or zc23_. Run by the build before any
 #            program links the archive.
 #        symbol-prefix.sh gen <nm> <libzcl_c23.a> <header>
 #            Rewrites <header> from the archive. Idempotent: works on an archive
@@ -50,7 +50,7 @@ check)
         echo "symbol-prefix: regenerate src/c23/glue/zcl_c23_symbol_prefix.h (symbol-prefix.sh gen) and rebuild" >&2
         exit 1
     fi
-    echo "symbol-prefix: OK $lib ($(wc -l <"$tmp" | tr -d ' ') global symbols, all librustzcash_/zcl_c23_/zcl_c23h_/zcl_token_guard_/zcl_tor_/zcl_keyfile_/zc23_)"
+    echo "symbol-prefix: OK $lib ($(wc -l <"$tmp" | tr -d ' ') global symbols, all librustzcash_/zcl_c23_/zcl_c23h_/zcl_token_guard_/zcl_slp_/zcl_tor_/zcl_keyfile_/zc23_)"
     ;;
 gen)
     hdr=${4:-}
