@@ -32,6 +32,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdatomic.h>
+#include <pthread.h>
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
@@ -53,12 +55,13 @@ static const uint64_t BN_INV = 0x87d20782e4866389ULL;
 static bool g_cpu_bmi2 = false;
 static bool g_cpu_adx = false;
 #endif
-static bool g_cpu_detected = false;
+static pthread_once_t g_cpu_once = PTHREAD_ONCE_INIT;
 
-static void bn_detect_cpu(void)
+/* Runs exactly once (pthread_once); the flags are published to every caller by
+ * the once-barrier. A plain `static bool g_cpu_detected` here let concurrent
+ * first callers race on the flag and the feature words. */
+static void bn_detect_cpu_once(void)
 {
-    if (g_cpu_detected)
-        return;
 #if defined(__x86_64__) || defined(_M_X64)
     uint32_t eax, ebx, ecx, edx;
     __asm__ volatile("cpuid"
@@ -67,7 +70,11 @@ static void bn_detect_cpu(void)
     g_cpu_bmi2 = (ebx >> 8) & 1;    /* EBX bit 8  */
     g_cpu_adx = (ebx >> 19) & 1;    /* EBX bit 19 */
 #endif
-    g_cpu_detected = true;
+}
+
+static void bn_detect_cpu(void)
+{
+    pthread_once(&g_cpu_once, bn_detect_cpu_once);
 }
 
 /* ── Tier 2: portable __uint128 schoolbook (canonical reference) ──── */
@@ -137,25 +144,42 @@ static void bn_fq_mont_mul_adx(uint64_t r[4], const uint64_t a[4],
 typedef void (*bn_fq_mul_fn)(uint64_t r[4], const uint64_t a[4],
                              const uint64_t b[4]);
 
-static bn_fq_mul_fn g_bn_fq_mont_mul = NULL;
+/* Read on every multiplication: a relaxed atomic load is the same single mov as
+ * a plain load. The initialiser is idempotent (every racer stores the same
+ * function address, derived from the once-published CPU flags), so a relaxed
+ * store suffices and the loser of a first-call race is harmless. */
+static _Atomic(bn_fq_mul_fn) g_bn_fq_mont_mul = NULL;
 
 static void bn_init_dispatch(void)
 {
     bn_detect_cpu();
 #if defined(__x86_64__) || defined(_M_X64)
     if (g_cpu_bmi2 && g_cpu_adx)
-        g_bn_fq_mont_mul = bn_fq_mont_mul_adx;
+        atomic_store_explicit(&g_bn_fq_mont_mul, bn_fq_mont_mul_adx, memory_order_relaxed);
     else
 #endif
-        g_bn_fq_mont_mul = bn_fq_mont_mul_portable;
+        atomic_store_explicit(&g_bn_fq_mont_mul, bn_fq_mont_mul_portable, memory_order_relaxed);
+}
+
+/* First-call path, out of line so the hot dispatcher is a load, a test and two
+ * tail calls with no frame. */
+__attribute__((noinline, cold))
+static void bn_fq_mont_mul_first(uint64_t r[4], const uint64_t a[4],
+                                 const uint64_t b[4])
+{
+    bn_init_dispatch();
+    atomic_load_explicit(&g_bn_fq_mont_mul, memory_order_relaxed)(r, a, b);
 }
 
 void bn_fq_mont_mul_accel(uint64_t r[4], const uint64_t a[4],
                           const uint64_t b[4])
 {
-    if (__builtin_expect(!g_bn_fq_mont_mul, 0))
-        bn_init_dispatch();
-    g_bn_fq_mont_mul(r, a, b);
+    bn_fq_mul_fn fn = atomic_load_explicit(&g_bn_fq_mont_mul, memory_order_relaxed);
+    if (__builtin_expect(!fn, 0)) {
+        bn_fq_mont_mul_first(r, a, b);
+        return;
+    }
+    fn(r, a, b);
 }
 
 const char *bn254_accel_implementation(void)

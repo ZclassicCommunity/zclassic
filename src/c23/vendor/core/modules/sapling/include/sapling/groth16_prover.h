@@ -142,18 +142,51 @@ struct groth16_pk {
 bool groth16_pk_read(struct groth16_pk *pk, const uint8_t *data, size_t len);
 void groth16_pk_free(struct groth16_pk *pk);
 
+/* ── Thread budget and fan-out ──────────────────────────────────── */
+
+/* Upper bound on the threads one proof may run on, whatever is asked for. */
+#define GROTH16_MAX_THREADS 64u
+
+/* Sets how many threads a proof may use, the caller's included; clamped to
+ * GROTH16_MAX_THREADS. 0 restores the default: the online processors, at most
+ * 8, or 1 where the host does not report a count. A node that proves while it
+ * validates should pass its own budget. Takes effect on the next proof. */
+void groth16_prover_set_threads(unsigned n);
+unsigned groth16_prover_threads(void);
+
+/* Calls fn over [0, n) in ranges of at most `grain` items, on up to `threads`
+ * threads including the caller's. tid is unique among the threads of one call
+ * and below `threads`. The extra threads are created and joined inside the
+ * call, and one that cannot be created only costs speed. fn must make the
+ * ranges independent of each other. */
+typedef void (*groth16_range_fn)(void *ctx, size_t lo, size_t hi, unsigned tid);
+void groth16_parallel_for(unsigned threads, size_t n, size_t grain,
+                          groth16_range_fn fn, void *ctx);
+
 /* ── FFT ────────────────────────────────────────────────────────── */
 
-/* Iterative radix-2 FFT over Fr. Requires n to be a power of 2 (or
- * n <= 1 for the trivial case). Returns true on success; returns
- * false if n is not a power of 2 (data left unmodified). Callers
- * MUST check the return — silent-dropping yields un-transformed
- * evaluations and, in the Groth16 prover, mathematically invalid
- * proofs. */
+/* Radix-2 FFT over Fr, in place. Requires n to be a power of 2 (or n <= 1
+ * for the trivial case). Returns true on success; returns false if n is not
+ * a power of 2 (data left unmodified) or the twiddle table cannot be
+ * allocated. Callers MUST check the return — silent-dropping yields
+ * un-transformed evaluations and, in the Groth16 prover, mathematically
+ * invalid proofs. The inverse includes the 1/n scaling. */
 bool fr_fft(struct fr *coeffs, size_t n, bool inverse);
 
+/* The same transform over `count` arrays of n elements, on up to `threads`
+ * threads. Field arithmetic is exact, so every array ends bit-identical to
+ * what fr_fft gives it. */
+bool fr_fft_many(struct fr **v, size_t count, size_t n, bool inverse,
+                 unsigned threads);
+
+/* fr_fft on up to num_threads threads (values below 1 mean 1). */
+bool fr_fft_parallel(struct fr *coeffs, size_t n, bool inverse, int num_threads);
+
+/* base^exp. */
+void fr_pow_u64(struct fr *r, const struct fr *base, uint64_t exp);
+
 /* Smallest k such that 2^k >= n (ceil(log2(n))). Underflow-safe at
- * n=0 (returns 0). Shared by fr_fft and fr_fft_parallel. */
+ * n=0 (returns 0). */
 static inline unsigned int fr_log2_ceil(size_t n)
 {
     unsigned int k = 0;
@@ -162,8 +195,7 @@ static inline unsigned int fr_log2_ceil(size_t n)
     return k;
 }
 
-/* In-place bit-reversal permutation of arr (length n, log_n = log2(n)).
- * Shared by fr_fft and fr_fft_parallel. */
+/* In-place bit-reversal permutation of arr (length n, log_n = log2(n)). */
 static inline void bit_reverse(struct fr *arr, size_t n, unsigned int log_n)
 {
     for (size_t i = 0; i < n; i++) {
@@ -180,6 +212,17 @@ static inline void bit_reverse(struct fr *arr, size_t n, unsigned int log_n)
 
 /* ── Multi-scalar multiplication ────────────────────────────────── */
 
+/* result = sum(scalars[i] * points[i]) by Pippenger's bucket method, on up to
+ * `threads` threads. Points may be any Jacobian representative; normalised
+ * ones (z = 1) take the cheaper mixed addition. Variable time in the scalars.
+ * Returns false, with result set to the identity, when an allocation fails. */
+bool groth16_g1_msm(struct g1_point *result, const struct g1_point *points,
+                    const struct fr *scalars, size_t n, unsigned threads);
+bool groth16_g2_msm(struct g2_point *result, const struct g2_point *points,
+                    const struct fr *scalars, size_t n, unsigned threads);
+
+/* The same on the calling thread only; an allocation failure leaves the
+ * identity in result. */
 void g1_msm(struct g1_point *result,
             const struct g1_point *points, const struct fr *scalars,
             size_t n);
@@ -187,13 +230,6 @@ void g1_msm(struct g1_point *result,
 void g2_msm(struct g2_point *result,
             const struct g2_point *points, const struct fr *scalars,
             size_t n);
-
-/* ── Parallel FFT ───────────────────────────────────────────────── */
-
-/* Parallel radix-2 FFT over Fr. Dispatches to serial fr_fft when
- * n < 256 or num_threads <= 1. Returns true on success; returns
- * false if n is not a power of 2 (same contract as fr_fft). */
-bool fr_fft_parallel(struct fr *coeffs, size_t n, bool inverse, int num_threads);
 
 /* ── Groth16 Prover ─────────────────────────────────────────────── */
 

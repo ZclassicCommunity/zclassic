@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 struct fr {
     uint64_t d[4]; /* little-endian limbs, Montgomery form */
@@ -54,6 +55,25 @@ void jub_add(struct jub_point *r, const struct jub_point *a, const struct jub_po
 void jub_double(struct jub_point *r, const struct jub_point *a);
 void jub_scalar_mul(struct jub_point *r, const struct jub_point *p, const uint8_t scalar[32]);
 void jub_mul_by_cofactor(struct jub_point *r, const struct jub_point *p);
+
+/* A point in affine form prepared for mixed addition: (y+x, y-x, 2d*x*y).
+ * Adding one to an extended point takes 7 multiplications instead of 10. */
+struct jub_niels {
+    struct fr y_plus_x, y_minus_x, t2d;
+};
+
+/* Largest batch jub_to_niels_batch converts (it shares one inversion). */
+#define JUB_NIELS_BATCH_MAX 32
+
+/* out[i] = in[i] in prepared affine form, for n <= JUB_NIELS_BATCH_MAX points
+ * on the curve; a larger n (or 0) converts nothing. */
+void jub_to_niels_batch(struct jub_niels *out, const struct jub_point *in,
+                        size_t n);
+
+/* r = a + b, or a - b when negate is set (selected without a branch).
+ * r may alias a. */
+void jub_add_niels(struct jub_point *r, const struct jub_point *a,
+                   const struct jub_niels *b, bool negate);
 
 /* Compress point to 32 bytes (y-coordinate + sign bit in top bit) */
 void jub_to_bytes(uint8_t out[32], const struct jub_point *p);

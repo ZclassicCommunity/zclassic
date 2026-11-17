@@ -1,5 +1,7 @@
 core/modules/crypto/src/aes256.c
 core/modules/crypto/src/blake2b.c
+core/modules/crypto/src/blake2b_avx2.c
+core/modules/crypto/src/equihash.c
 core/modules/crypto/src/blake2s.c
 core/modules/crypto/src/random_secret.c
 core/modules/crypto/src/sha256.c

@@ -4,12 +4,14 @@
  * Precomputed chunk-multiple tables on the Jubjub Pedersen generators
  * (BLS12-381 Fr base field): each 3-bit window decodes to v = ±m with
  * m in {1,2,3,4} at radix 16^chunk, so the per-segment scalar multiply
- * becomes one table lookup + one point addition per chunk. The summed point is exactly
- * [scalar]·G — byte-identical output to the naive scalar-mul form. */
+ * becomes table lookups and point additions, one mixed addition per two
+ * chunks. The summed point is exactly [scalar]·G — byte-identical output to
+ * the naive scalar-mul form. */
 
 #include "sapling/pedersen_hash.h"
 #include "sapling/sapling.h"
 #include "sapling/fr.h"
+#include <assert.h>
 #include <pthread.h>
 #include <string.h>
 #include "util/log_macros.h"
@@ -37,6 +39,23 @@ static struct jub_point
                   [PEDERSEN_TABLE_SLOTS];
 static pthread_once_t s_tables_once = PTHREAD_ONCE_INIT;
 
+/* s_pair_tables[seg][p][i] covers chunks 2p and 2p+1 of a segment in one
+ * addition: with i = slot0 | slot1 << 2 | flip << 4 the entry is
+ *     m0 · 16^(2p) · G_seg  +  s · m1 · 16^(2p+1) · G_seg,
+ * m = slot + 1 and s = -1 when flip is set. flip is the XOR of the two
+ * chunks' sign bits; when chunk 2p itself is negative the whole entry is
+ * subtracted. Entries are prepared affine points (jub_add_niels), so a pair of
+ * chunks costs 7 field multiplications where two extended additions cost 20.
+ * The 63rd chunk of a segment, and a chunk the input ends on, have no partner
+ * and still go through s_chunk_tables. ~571 KB, read-only after init. */
+#define PEDERSEN_PAIRS_PER_GENERATOR (PEDERSEN_CHUNKS_PER_GENERATOR / 2)
+#define PEDERSEN_PAIR_SLOTS 32
+static struct jub_niels
+    s_pair_tables[PEDERSEN_NUM_GENERATORS][PEDERSEN_PAIRS_PER_GENERATOR]
+                 [PEDERSEN_PAIR_SLOTS];
+static_assert(PEDERSEN_PAIR_SLOTS <= JUB_NIELS_BATCH_MAX,
+              "a pair row is converted to affine in one batch");
+
 #ifdef ZCL_TESTING
 /* Observability for concurrent-first-caller race. Post-fix the
  * pthread_once guarantees exactly one execution of the init body. */
@@ -56,6 +75,7 @@ void zcl_pedersen_generators_reset_for_test(void)
     memset(cached_generators, 0, sizeof(cached_generators));
     s_tables_once = (pthread_once_t)PTHREAD_ONCE_INIT;
     memset(s_chunk_tables, 0, sizeof(s_chunk_tables));
+    memset(s_pair_tables, 0, sizeof(s_pair_tables));
     atomic_store(&zcl_pedersen_generators_body_runs_for_test, 0);
 }
 #endif
@@ -119,9 +139,34 @@ static void load_chunk_tables(void)
     }
 }
 
+/* Build the pair tables from the chunk tables: every sum of one multiple of
+ * chunk 2p with one signed multiple of chunk 2p+1, normalised a row at a
+ * time. ~6k additions and 186 inversions, one-time. */
+static void load_pair_tables(void)
+{
+    for (int seg = 0; seg < PEDERSEN_NUM_GENERATORS; seg++) {
+        for (int p = 0; p < PEDERSEN_PAIRS_PER_GENERATOR; p++) {
+            struct jub_point row[PEDERSEN_PAIR_SLOTS];
+            for (int i = 0; i < PEDERSEN_PAIR_SLOTS; i++) {
+                struct jub_point hi = s_chunk_tables[seg][2 * p + 1][(i >> 2) & 3];
+                if (i >> 4)
+                    jub_neg(&hi, &hi);
+                jub_add(&row[i], &s_chunk_tables[seg][2 * p][i & 3], &hi);
+            }
+            jub_to_niels_batch(s_pair_tables[seg][p], row, PEDERSEN_PAIR_SLOTS);
+        }
+    }
+}
+
+static void load_tables(void)
+{
+    load_chunk_tables();
+    load_pair_tables();
+}
+
 static void ensure_chunk_tables(void)
 {
-    pthread_once(&s_tables_once, load_chunk_tables);
+    pthread_once(&s_tables_once, load_tables);
 }
 
 bool pedersen_segment_generator(size_t index, struct jub_point *out)
@@ -135,37 +180,60 @@ bool pedersen_segment_generator(size_t index, struct jub_point *out)
     return true;
 }
 
+/* One 3-bit window: bits (a,b,c) select v = ±(1 + a + 2b), with a missing
+ * trailing bit read as 0. slot = m - 1. */
+struct pedersen_chunk {
+    unsigned slot;
+    bool negative;
+};
+
+static struct pedersen_chunk pedersen_read_chunk(const uint8_t *bits, int nbits,
+                                                 int *bit_pos)
+{
+    uint8_t v[3] = {0, 0, 0};
+    for (int k = 0; k < 3 && *bit_pos < nbits; k++)
+        v[k] = bits[(*bit_pos)++];
+    return (struct pedersen_chunk){ (unsigned)(v[0] + 2 * v[1]), v[2] != 0 };
+}
+
+/* result += the segment's contribution: v · 16^chunk · G_seg summed over its
+ * chunks — the exact summands of the scalar the naive form accumulated in Fs,
+ * so the segment total is the same group element. Chunks are taken two at a
+ * time while a partner exists. */
+static void pedersen_add_segment(struct jub_point *result, int seg,
+                                 const uint8_t *bits, int nbits, int *bit_pos)
+{
+    for (int chunk = 0; chunk < PEDERSEN_CHUNKS_PER_GENERATOR; chunk += 2) {
+        if (*bit_pos >= nbits)
+            return;
+        struct pedersen_chunk lo = pedersen_read_chunk(bits, nbits, bit_pos);
+        if (chunk + 1 >= PEDERSEN_CHUNKS_PER_GENERATOR || *bit_pos >= nbits) {
+            struct jub_point term = s_chunk_tables[seg][chunk][lo.slot];
+            if (lo.negative)
+                jub_neg(&term, &term);
+            jub_add(result, result, &term);
+            return;
+        }
+        struct pedersen_chunk hi = pedersen_read_chunk(bits, nbits, bit_pos);
+        unsigned flip = (unsigned)(lo.negative != hi.negative);
+        jub_add_niels(result, result,
+                      &s_pair_tables[seg][chunk / 2]
+                                    [lo.slot | hi.slot << 2 | flip << 4],
+                      lo.negative);
+    }
+}
+
 /* Core Pedersen hash over pre-assembled bits (personalization already included) */
 void pedersen_hash_bits(const uint8_t *bits, int nbits,
                          struct jub_point *result_pt)
 {
     ensure_chunk_tables();
+
     jub_identity(result_pt);
 
     int bit_pos = 0;
-    for (int seg = 0; seg < PEDERSEN_NUM_GENERATORS && bit_pos < nbits; seg++) {
-        /* Window decode per chunk: bits (a,b,c) select
-         * v = ±(1 + a + 2b) · 16^chunk · G_seg — the exact summands of
-         * the scalar the naive form accumulated in Fs, so the segment
-         * total is the same group element (a zero scalar is the
-         * identity point; adding it is a no-op, matching the old
-         * fs_is_zero skip). */
-        for (int chunk = 0; chunk < PEDERSEN_CHUNKS_PER_GENERATOR; chunk++) {
-            if (bit_pos >= nbits) break;
-
-            uint8_t a_bit = bits[bit_pos++];
-            uint8_t b_bit = (bit_pos < nbits) ? bits[bit_pos++] : 0;
-            uint8_t c_bit = (bit_pos < nbits) ? bits[bit_pos++] : 0;
-
-            int slot = a_bit + 2 * b_bit;   /* m - 1 in 0..3 */
-            struct jub_point term;
-            if (c_bit)
-                jub_neg(&term, &s_chunk_tables[seg][chunk][slot]);
-            else
-                term = s_chunk_tables[seg][chunk][slot];
-            jub_add(result_pt, result_pt, &term);
-        }
-    }
+    for (int seg = 0; seg < PEDERSEN_NUM_GENERATORS && bit_pos < nbits; seg++)
+        pedersen_add_segment(result_pt, seg, bits, nbits, &bit_pos);
 }
 
 void pedersen_merkle_hash(size_t depth,

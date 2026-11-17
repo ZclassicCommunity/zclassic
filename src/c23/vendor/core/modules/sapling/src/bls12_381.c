@@ -178,10 +178,12 @@ bool fp_from_bytes(struct fp *r, const uint8_t s[48])
             raw[5 - i] |= (uint64_t)s[i * 8 + j] << (8 * (7 - j));
     }
 
-    bool ok = true;
+    /* Strictly < q: an encoding equal to q is not canonical, and zclassicd's
+     * Fq::from_repr (pairing, via librustzcash 06da3b9) rejects it. */
+    bool ok = false;
     for (int i = 5; i >= 0; i--) {
-        if (raw[i] > FP_Q[i]) { ok = false; break; }
-        if (raw[i] < FP_Q[i]) break;
+        if (raw[i] > FP_Q[i]) break;
+        if (raw[i] < FP_Q[i]) { ok = true; break; }
     }
 
     fp_mont_mul(r->d, raw, FP_R2);
@@ -1084,6 +1086,13 @@ bool g1_from_compressed(struct g1_point *p, const uint8_t in[48])
     if (!compressed) return false;
 
     if (infinity) {
+        /* pairing ec.rs into_affine_unchecked: after masking the compression
+         * and infinity bits every remaining bit (sort flag included) must be
+         * zero, else UnexpectedInformation. */
+        uint8_t stray = (uint8_t)(in[0] & 0x3f);
+        for (int i = 1; i < 48; i++)
+            stray |= in[i];
+        if (stray) return false;
         g1_identity(p);
         return true;
     }
@@ -1284,6 +1293,11 @@ bool g2_from_compressed(struct g2_point *p, const uint8_t in[96])
     if (!compressed) return false;
 
     if (infinity) {
+        /* Same rule as g1_from_compressed: no bit may follow the flags. */
+        uint8_t stray = (uint8_t)(in[0] & 0x3f);
+        for (int i = 1; i < 96; i++)
+            stray |= in[i];
+        if (stray) return false;
         g2_identity(p);
         return true;
     }
@@ -2225,21 +2239,29 @@ bool g2_in_subgroup(const struct g2_point *p)
  * Each point is checked for (1) on-curve (inside g{1,2}_from_compressed) AND
  * (2) prime-order subgroup membership.  Without (2), a malicious prover could
  * submit on-curve-but-torsion points that the pairing still accepts, breaking
- * Groth16 soundness on the consensus Sapling proof path. */
+ * Groth16 soundness on the consensus Sapling proof path. (3) bellman's
+ * groth16 Proof::read, which zclassicd's librustzcash 06da3b9 uses for Sapling
+ * spends, outputs and Sprout JoinSplits, refuses A, B or C at infinity. */
 bool groth16_proof_read(struct groth16_proof *proof, const uint8_t data[192])
 {
     if (!g1_from_compressed(&proof->a, data))
         LOG_FAIL("groth16", "proof_read: g1_from_compressed(A) failed");
     if (!g1_in_subgroup(&proof->a))
         LOG_FAIL("groth16", "proof_read: A not in G1 prime-order subgroup");
+    if (g1_is_identity(&proof->a))
+        LOG_FAIL("groth16", "proof_read: A is the point at infinity");
     if (!g2_from_compressed(&proof->b, data + 48))
         LOG_FAIL("groth16", "proof_read: g2_from_compressed(B) failed");
     if (!g2_in_subgroup(&proof->b))
         LOG_FAIL("groth16", "proof_read: B not in G2 prime-order subgroup");
+    if (g2_is_identity(&proof->b))
+        LOG_FAIL("groth16", "proof_read: B is the point at infinity");
     if (!g1_from_compressed(&proof->c, data + 144))
         LOG_FAIL("groth16", "proof_read: g1_from_compressed(C) failed");
     if (!g1_in_subgroup(&proof->c))
         LOG_FAIL("groth16", "proof_read: C not in G1 prime-order subgroup");
+    if (g1_is_identity(&proof->c))
+        LOG_FAIL("groth16", "proof_read: C is the point at infinity");
     return true;
 }
 

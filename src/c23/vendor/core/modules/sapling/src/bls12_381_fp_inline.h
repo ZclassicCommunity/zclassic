@@ -39,68 +39,133 @@ static inline unsigned char fpi_sbb(unsigned char c, uint64_t x, uint64_t y, uin
 #define FPI_SBB(c, x, y, out) fpi_sbb((c), (x), (y), (out))
 #endif
 
-/* r = a + b, returns carry out.  Aliasing-safe. */
-static inline uint64_t fpi_add_raw(uint64_t r[6], const uint64_t a[6],
-                                   const uint64_t b[6])
-{
-    unsigned char c = 0;
-    c = FPI_ADC(c, a[0], b[0], &r[0]);
-    c = FPI_ADC(c, a[1], b[1], &r[1]);
-    c = FPI_ADC(c, a[2], b[2], &r[2]);
-    c = FPI_ADC(c, a[3], b[3], &r[3]);
-    c = FPI_ADC(c, a[4], b[4], &r[4]);
-    c = FPI_ADC(c, a[5], b[5], &r[5]);
-    return c;
-}
+/* r = a + b - q when a + b >= q (or the sum carries out of the top limb),
+ * else a + b:  u = a + b - q, then q is added back when that subtraction
+ * borrowed with no carry to absorb it.
+ * r = a - b, plus q when the subtraction borrowed (all mod 2^(64N)).
+ * r = -a is 0 - a under the same rule, which is 0 for a == 0.
+ *
+ * Every step is a carry chain; nothing is selected with a mask-and-or over limb
+ * arrays. That form is what cost GCC its speed here: it vectorised the select
+ * and reloaded limbs it had just stored through 16-byte SSE loads, a
+ * store-forwarding stall on every call, and it materialised the carry with
+ * SETC between ADCs whenever an AND sat inside the chain. On x86-64 the chains
+ * are therefore written out as asm (ADD/ADC, SUB/SBB), so GCC and Clang emit
+ * the same instructions; other targets use the C chains below. */
+#if defined(__x86_64__) && defined(__GNUC__)
 
-/* r = a - b mod 2^384, returns borrow out (0 or 1).  Aliasing-safe. */
-static inline uint64_t fpi_sub_raw(uint64_t r[6], const uint64_t a[6],
-                                   const uint64_t b[6])
-{
-    unsigned char c = 0;
-    c = FPI_SBB(c, a[0], b[0], &r[0]);
-    c = FPI_SBB(c, a[1], b[1], &r[1]);
-    c = FPI_SBB(c, a[2], b[2], &r[2]);
-    c = FPI_SBB(c, a[3], b[3], &r[3]);
-    c = FPI_SBB(c, a[4], b[4], &r[4]);
-    c = FPI_SBB(c, a[5], b[5], &r[5]);
-    return c;
-}
+#define FPI_LD(I, OFF) "movq " OFF "(%[ap]), %[d" I "]\n\t"
+#define FPI_OP(OP, OFF, P, I) OP " " OFF "(%[" P "]), %[d" I "]\n\t"
+#define FPI_RR(OP, I) OP " %[q" I "], %[d" I "]\n\t"
+
+#define FPI_DECL4 uint64_t d0, d1, d2, d3, m
+#define FPI_LOAD4 FPI_LD("0", "0") FPI_LD("1", "8") FPI_LD("2", "16") FPI_LD("3", "24")
+#define FPI_CHAIN4(OP1, OPN, P)                                               \
+    FPI_OP(OP1, "0", P, "0") FPI_OP(OPN, "8", P, "1")                         \
+    FPI_OP(OPN, "16", P, "2") FPI_OP(OPN, "24", P, "3")
+#define FPI_BACK4 FPI_RR("addq", "0") FPI_RR("adcq", "1") FPI_RR("adcq", "2") FPI_RR("adcq", "3")
+#define FPI_REGS4(K) [d0] K(d0), [d1] K(d1), [d2] K(d2), [d3] K(d3)
+#define FPI_QM4 [q0] "r"(q[0] & m), [q1] "r"(q[1] & m), [q2] "r"(q[2] & m), [q3] "r"(q[3] & m)
+#define FPI_STORE4 r[0] = d0; r[1] = d1; r[2] = d2; r[3] = d3
+
+#define FPI_DECL6 uint64_t d0, d1, d2, d3, d4, d5, m
+#define FPI_LOAD6 FPI_LOAD4 FPI_LD("4", "32") FPI_LD("5", "40")
+#define FPI_CHAIN6(OP1, OPN, P)                                               \
+    FPI_CHAIN4(OP1, OPN, P) FPI_OP(OPN, "32", P, "4") FPI_OP(OPN, "40", P, "5")
+#define FPI_BACK6 FPI_BACK4 FPI_RR("adcq", "4") FPI_RR("adcq", "5")
+#define FPI_REGS6(K) FPI_REGS4(K), [d4] K(d4), [d5] K(d5)
+#define FPI_QM6 FPI_QM4, [q4] "r"(q[4] & m), [q5] "r"(q[5] & m)
+#define FPI_STORE6 FPI_STORE4; r[4] = d4; r[5] = d5
+
+/* d += q & m, then store. m is all-ones or zero. */
+#define FPI_ADD_BACK(N)                                                       \
+    __asm__(FPI_BACK##N : FPI_REGS##N("+&r") : FPI_QM##N : "cc");             \
+    FPI_STORE##N;
+
+/* d = a + b with the carry in m, then d -= q; m becomes carry - borrow, and
+ * only -1 (borrowed, no carry) asks for q back. */
+#define FPI_ADD_BODY(N)                                                       \
+    FPI_DECL##N;                                                              \
+    __asm__(FPI_LOAD##N FPI_CHAIN##N("addq", "adcq", "bp")                    \
+            "movl $0, %k[m]\n\t" "adcq %[m], %[m]\n\t"                        \
+            FPI_CHAIN##N("subq", "sbbq", "qp")                                \
+            "sbbq $0, %[m]\n\t" "sarq $63, %[m]\n\t"                          \
+            : FPI_REGS##N("=&r"), [m] "=&r"(m)                                \
+            : [ap] "r"(a), [bp] "r"(b), [qp] "r"(q)                           \
+            : "cc", "memory");                                                \
+    FPI_ADD_BACK(N)
+
+/* d = a - b; SBB m,m leaves m = -borrow. */
+#define FPI_SUB_BODY(N)                                                       \
+    FPI_DECL##N;                                                              \
+    __asm__(FPI_LOAD##N FPI_CHAIN##N("subq", "sbbq", "bp")                    \
+            "sbbq %[m], %[m]\n\t"                                             \
+            : FPI_REGS##N("=&r"), [m] "=&r"(m)                                \
+            : [ap] "r"(a), [bp] "r"(b)                                        \
+            : "cc", "memory");                                                \
+    FPI_ADD_BACK(N)
+
+#else /* portable carry chains */
+
+#define FPI_ADD_BODY(N)                                                       \
+    uint64_t t[N], u[N];                                                      \
+    unsigned char carry = 0, borrow = 0, c = 0;                               \
+    for (int i = 0; i < (N); i++)                                             \
+        carry = FPI_ADC(carry, a[i], b[i], &t[i]);                            \
+    for (int i = 0; i < (N); i++)                                             \
+        borrow = FPI_SBB(borrow, t[i], q[i], &u[i]);                          \
+    uint64_t m = -(uint64_t)(borrow & (carry ^ 1));                           \
+    for (int i = 0; i < (N); i++)                                             \
+        c = FPI_ADC(c, u[i], q[i] & m, &r[i]);
+
+#define FPI_SUB_BODY(N)                                                       \
+    uint64_t d[N];                                                            \
+    unsigned char borrow = 0, c = 0;                                          \
+    for (int i = 0; i < (N); i++)                                             \
+        borrow = FPI_SBB(borrow, a[i], b[i], &d[i]);                          \
+    uint64_t m = -(uint64_t)borrow;                                           \
+    for (int i = 0; i < (N); i++)                                             \
+        c = FPI_ADC(c, d[i], q[i] & m, &r[i]);
+
+#endif
 
 static inline void fpi_add(uint64_t r[6], const uint64_t a[6],
                            const uint64_t b[6], const uint64_t q[6])
 {
-    uint64_t t[6], u[6];
-    uint64_t carry = fpi_add_raw(t, a, b);
-    uint64_t borrow = fpi_sub_raw(u, t, q);
-    uint64_t mask = -(carry | (borrow ^ 1));   /* all-ones: take t - q */
-    for (int i = 0; i < 6; i++)
-        r[i] = (t[i] & ~mask) | (u[i] & mask);
+    FPI_ADD_BODY(6)
 }
 
 static inline void fpi_sub(uint64_t r[6], const uint64_t a[6],
                            const uint64_t b[6], const uint64_t q[6])
 {
-    uint64_t d[6], e[6];
-    uint64_t borrow = fpi_sub_raw(d, a, b);
-    uint64_t mask = -borrow;                   /* all-ones: add q back */
-    uint64_t qm[6];
-    for (int i = 0; i < 6; i++)
-        qm[i] = q[i] & mask;
-    (void)fpi_add_raw(e, d, qm);
-    for (int i = 0; i < 6; i++)
-        r[i] = e[i];
+    FPI_SUB_BODY(6)
 }
 
-static inline void fpi_neg(uint64_t r[6], const uint64_t a[6],
+static inline void fpi_neg(uint64_t r[6], const uint64_t b[6],
                            const uint64_t q[6])
 {
-    uint64_t d[6];
-    uint64_t any = a[0] | a[1] | a[2] | a[3] | a[4] | a[5];
-    uint64_t mask = -(uint64_t)((any | -any) >> 63);  /* 0 iff a == 0 */
-    (void)fpi_sub_raw(d, q, a);
-    for (int i = 0; i < 6; i++)
-        r[i] = d[i] & mask;
+    static const uint64_t a[6] = {0};
+    FPI_SUB_BODY(6)
+}
+
+/* The same three operations on 4 limbs (BLS12-381 Fr and Jubjub Fs moduli). */
+static inline void fpi_add4(uint64_t r[4], const uint64_t a[4],
+                            const uint64_t b[4], const uint64_t q[4])
+{
+    FPI_ADD_BODY(4)
+}
+
+static inline void fpi_sub4(uint64_t r[4], const uint64_t a[4],
+                            const uint64_t b[4], const uint64_t q[4])
+{
+    FPI_SUB_BODY(4)
+}
+
+static inline void fpi_neg4(uint64_t r[4], const uint64_t b[4],
+                            const uint64_t q[4])
+{
+    static const uint64_t a[4] = {0};
+    FPI_SUB_BODY(4)
 }
 
 #endif /* BLS12_381_FP_INLINE_H */

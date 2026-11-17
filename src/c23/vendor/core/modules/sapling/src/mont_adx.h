@@ -52,23 +52,16 @@
 
 #if defined(__x86_64__) || defined(_M_X64)
 
-/* d = s - q, returning the borrow out. Plain uint64_t arithmetic rather than
- * __int128 so the header stays clean under -Wpedantic (simd_bench builds with
- * -Werror -pedantic). */
-#define MADX_SUB_N(N)                                                         \
-    uint64_t d[N];                                                            \
-    uint64_t borrow = 0;                                                      \
-    for (int i = 0; i < (N); i++) {                                           \
-        uint64_t si = s[i], qi = q[i];                                        \
-        uint64_t p = si - qi;                                                 \
-        uint64_t b1 = (uint64_t)(si < qi);                                    \
-        d[i] = p - borrow;                                                    \
-        borrow = b1 | (uint64_t)(p < borrow);                                 \
-    }                                                                         \
-    /* 0 when s < q (keep s), all-ones when s >= q (take s - q). */           \
-    uint64_t mask = borrow - 1u;                                              \
-    for (int i = 0; i < (N); i++)                                             \
-        r[i] = (s[i] & ~mask) | (d[i] & mask);
+/* Final conditional subtraction: r = s - q when s >= q, else s (s < 2q, so
+ * one subtraction is canonical). In asm, like the multiply itself, so every
+ * compiler emits the same SUB/SBB chain and CMOV select. The C form of this
+ * select (mask-and-or over limb arrays) is where GCC lost most of its time:
+ * it vectorised the select and reloaded the scalar limbs through 16-byte SSE
+ * loads, a store-forwarding stall on every multiply. Constant time: no branch,
+ * and both candidates are always computed. D names the difference limbs
+ * (initialised to s by the caller), S the untouched copy. */
+#define MADX_CSUB_SUB(OP, OFF, D) OP " " OFF "(%[qp]), %[" D "]\n\t"
+#define MADX_CSUB_SEL(S, D) "cmovcq %[" S "], %[" D "]\n\t"
 
 /* One partial-product row: t[TLO] += lo(rdx*src) on the CF chain, and
  * t[THI] += hi(rdx*src) on the OF chain. The two adds are independent because
@@ -171,12 +164,17 @@ static inline void mont_mul_adx4(uint64_t r[4], const uint64_t a[4],
         : "rdx", "cc", "memory");
 
     /* After the last round the window is (t3,t4,t0,t1,t2) with t3 == 0, so the
-     * product occupies t4,t0,t1,t2 low-to-high. */
-    uint64_t s[4] = { t4, t0, t1, t2 };
-
-    /* Single conditional subtraction: s < 2q, so s -= q iff s >= q. Done
-     * branchlessly on the borrow so the timing does not depend on the value. */
-    MADX_SUB_N(4)
+     * product s occupies t4,t0,t1,t2 low-to-high. */
+    uint64_t d0 = t4, d1 = t0, d2 = t1, d3 = t2;
+    __asm__(
+        MADX_CSUB_SUB("subq",  "0", "d0") MADX_CSUB_SUB("sbbq",  "8", "d1")
+        MADX_CSUB_SUB("sbbq", "16", "d2") MADX_CSUB_SUB("sbbq", "24", "d3")
+        MADX_CSUB_SEL("s0", "d0") MADX_CSUB_SEL("s1", "d1")
+        MADX_CSUB_SEL("s2", "d2") MADX_CSUB_SEL("s3", "d3")
+        : [d0] "+&r"(d0), [d1] "+&r"(d1), [d2] "+&r"(d2), [d3] "+&r"(d3)
+        : [s0] "r"(t4), [s1] "r"(t0), [s2] "r"(t1), [s3] "r"(t2), [qp] "r"(q)
+        : "cc", "memory");
+    r[0] = d0; r[1] = d1; r[2] = d2; r[3] = d3;
 }
 
 /* Same, 6 limbs (BLS12-381 Fp). Precondition: a < q. */
@@ -210,10 +208,22 @@ static inline void mont_mul_adx6(uint64_t r[6], const uint64_t a[6],
     MADX_ROUND6_ASM("32", "t4", "t5", "t6", "t0", "t1", "t2", "t3");
     MADX_ROUND6_ASM("40", "t5", "t6", "t0", "t1", "t2", "t3", "t4");
 
-    /* Window after the last round is (t5,t6,t0,t1,t2,t3,t4) with t5 == 0. */
-    uint64_t s[6] = { t6, t0, t1, t2, t3, t4 };
-
-    MADX_SUB_N(6)
+    /* Window after the last round is (t5,t6,t0,t1,t2,t3,t4) with t5 == 0, so
+     * the product s occupies t6,t0,t1,t2,t3,t4 low-to-high. */
+    uint64_t d0 = t6, d1 = t0, d2 = t1, d3 = t2, d4 = t3, d5 = t4;
+    __asm__(
+        MADX_CSUB_SUB("subq",  "0", "d0") MADX_CSUB_SUB("sbbq",  "8", "d1")
+        MADX_CSUB_SUB("sbbq", "16", "d2") MADX_CSUB_SUB("sbbq", "24", "d3")
+        MADX_CSUB_SUB("sbbq", "32", "d4") MADX_CSUB_SUB("sbbq", "40", "d5")
+        MADX_CSUB_SEL("s0", "d0") MADX_CSUB_SEL("s1", "d1")
+        MADX_CSUB_SEL("s2", "d2") MADX_CSUB_SEL("s3", "d3")
+        MADX_CSUB_SEL("s4", "d4") MADX_CSUB_SEL("s5", "d5")
+        : [d0] "+&r"(d0), [d1] "+&r"(d1), [d2] "+&r"(d2), [d3] "+&r"(d3),
+          [d4] "+&r"(d4), [d5] "+&r"(d5)
+        : [s0] "r"(t6), [s1] "r"(t0), [s2] "r"(t1), [s3] "r"(t2), [s4] "r"(t3),
+          [s5] "r"(t4), [qp] "r"(q)
+        : "cc", "memory");
+    r[0] = d0; r[1] = d1; r[2] = d2; r[3] = d3; r[4] = d4; r[5] = d5;
 }
 
 #endif /* __x86_64__ */

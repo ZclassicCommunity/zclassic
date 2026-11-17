@@ -14,7 +14,8 @@
  * VPMADD52 code in this file. fr_accel_implementation() reports it as present-
  * and-unused rather than claiming a tier that has never executed.
  *
- * Detection runs once at first use. Binary works on any x86-64 CPU.
+ * Detection runs once at first use (pthread_once; the dispatch pointers are
+ * relaxed atomics with an idempotent initialiser). Binary works on any x86-64 CPU.
  *
  * HISTORY — read before "simplifying" this back to intrinsics. Tier 1 used to
  * be _mulx_u64 + _addcarryx_u64 with a literal 0 carry-in everywhere, so GCC
@@ -31,6 +32,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdatomic.h>
+#include <pthread.h>
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include "mont_adx.h"
@@ -44,12 +47,14 @@
 static bool cpu_has_bmi2 = false;
 static bool cpu_has_adx = false;
 static bool cpu_has_avx512ifma = false;
-static bool cpu_detected = false;
+static pthread_once_t cpu_once = PTHREAD_ONCE_INIT;
 
-static void detect_cpu_features(void)
+/* Runs exactly once (pthread_once), so the three feature flags are written by
+ * one thread and published to every caller by the once-barrier. They used to
+ * be guarded by a plain `static bool cpu_detected`, which let concurrent first
+ * callers race on both the flag and the feature words. */
+static void detect_cpu_features_once(void)
 {
-    if (cpu_detected) return;
-
     /* The probe honours the maximum-supported-leaf reported by CPUID leaf 0.
      * This used to be a raw `cpuid` with EAX=7, which on a CPU whose maximum
      * basic leaf is below 7 silently returns the HIGHEST leaf's registers
@@ -67,8 +72,11 @@ static void detect_cpu_features(void)
 
     /* IFMA is a ZMM tier, so it needs the full OS-state check. */
     cpu_has_avx512ifma = simd_avx512_ifma_usable(&w);
+}
 
-    cpu_detected = true;
+static void detect_cpu_features(void)
+{
+    pthread_once(&cpu_once, detect_cpu_features_once);
 }
 
 /* Reports the multiply that init_dispatch() ACTUALLY installs — never a tier
@@ -233,37 +241,65 @@ static void fp_mont_mul_adx(uint64_t r[6], const uint64_t a[6], const uint64_t b
 typedef void (*fr_mul_fn)(uint64_t r[4], const uint64_t a[4], const uint64_t b[4]);
 typedef void (*fp_mul_fn)(uint64_t r[6], const uint64_t a[6], const uint64_t b[6]);
 
-static fr_mul_fn g_fr_mont_mul = NULL;
-static fp_mul_fn g_fp_mont_mul = NULL;
+/* The dispatch pointers are read on every multiplication, so they stay plain
+ * pointer loads: a relaxed atomic load compiles to the same single mov on every
+ * supported target. The initialiser is idempotent (every racer stores the same
+ * function addresses, derived from the pthread_once-published CPU flags), so
+ * relaxed stores suffice and the loser of a first-call race is harmless. The
+ * targets are code addresses, so there is no data to order against them. */
+static _Atomic(fr_mul_fn) g_fr_mont_mul = NULL;
+static _Atomic(fp_mul_fn) g_fp_mont_mul = NULL;
 
 static void init_dispatch(void)
 {
     detect_cpu_features();
 #if defined(__x86_64__) || defined(_M_X64)
     if (cpu_has_bmi2 && cpu_has_adx) {
-        g_fr_mont_mul = fr_mont_mul_adx;
-        g_fp_mont_mul = fp_mont_mul_adx;
+        atomic_store_explicit(&g_fr_mont_mul, fr_mont_mul_adx, memory_order_relaxed);
+        atomic_store_explicit(&g_fp_mont_mul, fp_mont_mul_adx, memory_order_relaxed);
     } else
 #endif
     {
-        g_fr_mont_mul = fr_mont_mul_portable;
-        g_fp_mont_mul = fp_mont_mul_portable;
+        atomic_store_explicit(&g_fr_mont_mul, fr_mont_mul_portable, memory_order_relaxed);
+        atomic_store_explicit(&g_fp_mont_mul, fp_mont_mul_portable, memory_order_relaxed);
     }
 }
 
 /* Public dispatchers — called by fr_mul/fp_mul via extern */
+/* First-call path, kept out of line so the hot dispatchers below are a load,
+ * a test and two tail calls with no frame. */
+__attribute__((noinline, cold))
+static void fr_mont_mul_first(uint64_t r[4], const uint64_t a[4], const uint64_t b[4])
+{
+    init_dispatch();
+    atomic_load_explicit(&g_fr_mont_mul, memory_order_relaxed)(r, a, b);
+}
+
+__attribute__((noinline, cold))
+static void fp_mont_mul_first(uint64_t r[6], const uint64_t a[6], const uint64_t b[6])
+{
+    init_dispatch();
+    atomic_load_explicit(&g_fp_mont_mul, memory_order_relaxed)(r, a, b);
+}
+
 void fr_mont_mul_accel(uint64_t r[4], const uint64_t a[4], const uint64_t b[4])
 {
-    if (__builtin_expect(!g_fr_mont_mul, 0))
-        init_dispatch();
-    g_fr_mont_mul(r, a, b);
+    fr_mul_fn fn = atomic_load_explicit(&g_fr_mont_mul, memory_order_relaxed);
+    if (__builtin_expect(!fn, 0)) {
+        fr_mont_mul_first(r, a, b);
+        return;
+    }
+    fn(r, a, b);
 }
 
 void fp_mont_mul_accel(uint64_t r[6], const uint64_t a[6], const uint64_t b[6])
 {
-    if (__builtin_expect(!g_fp_mont_mul, 0))
-        init_dispatch();
-    g_fp_mont_mul(r, a, b);
+    fp_mul_fn fn = atomic_load_explicit(&g_fp_mont_mul, memory_order_relaxed);
+    if (__builtin_expect(!fn, 0)) {
+        fp_mont_mul_first(r, a, b);
+        return;
+    }
+    fn(r, a, b);
 }
 
 bool fr_accel_mont_mul_adx(uint64_t r[4], const uint64_t a[4], const uint64_t b[4])
