@@ -194,6 +194,7 @@
 #define fp_to_bytes zc23_fp_to_bytes
 #define fp_zero zc23_fp_zero
 #define fq2_decode_fe2ip zc23_fq2_decode_fe2ip
+#define fr_accel_force_portable zc23_fr_accel_force_portable
 #define fr_accel_implementation zc23_fr_accel_implementation
 #define fr_accel_mont_mul_adx zc23_fr_accel_mont_mul_adx
 #define fr_accel_mont_mul_portable zc23_fr_accel_mont_mul_portable
@@ -210,6 +211,7 @@
 #define fr_neg zc23_fr_neg
 #define fr_one zc23_fr_one
 #define fr_pow_u64 zc23_fr_pow_u64
+#define fr_sample_uniform zc23_fr_sample_uniform
 #define fr_sq zc23_fr_sq
 #define fr_sqrt zc23_fr_sqrt
 #define fr_sub zc23_fr_sub
@@ -409,6 +411,7 @@
 #define sapling_value_commit_value_generator zc23_sapling_value_commit_value_generator
 #define sapling_verification_ctx_init zc23_sapling_verification_ctx_init
 #define sapling_vks_are_embedded zc23_sapling_vks_are_embedded
+#define sha256_cpuid_allows_shani zc23_sha256_cpuid_allows_shani
 #define sha256_finalize zc23_sha256_finalize
 #define sha256_finalize_no_padding zc23_sha256_finalize_no_padding
 #define sha256_implementation zc23_sha256_implementation
@@ -435,7 +438,6 @@
 #define sprout_compute_public zc23_sprout_compute_public
 #define sprout_cpu_count zc23_sprout_cpu_count
 #define sprout_distribute_powers zc23_sprout_distribute_powers
-#define sprout_fft zc23_sprout_fft
 #define sprout_h_sig zc23_sprout_h_sig
 #define sprout_input_note_commitment zc23_sprout_input_note_commitment
 #define sprout_pack_inputs zc23_sprout_pack_inputs
