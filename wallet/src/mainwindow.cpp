@@ -105,6 +105,12 @@ MainWindow::MainWindow(QWidget *parent) :
     // mode File -> Exit really quits and cleanly stops the node, rather than
     // just hiding the window to the tray.
     QObject::connect(ui->actionExit, &QAction::triggered, this, &MainWindow::quitApp);
+    // Exit stops only a node this wallet started (shutdownZClassicd() leaves an external
+    // node running), so say "(stops the node)" only when that is true.
+    QObject::connect(ui->menuFile, &QMenu::aboutToShow, this, [=]() {
+        ui->actionExit->setText(rpc && rpc->isEmbedded() ? tr("E&xit ZClassic (stops the node)")
+                                                         : tr("E&xit ZClassic"));
+    });
 
     // Set up check for updates action
     QObject::connect(ui->actionCheck_for_Updates, &QAction::triggered, [=] () {
@@ -147,15 +153,25 @@ MainWindow::MainWindow(QWidget *parent) :
         // Say which node this wallet is talking to as well: a user reporting a problem needs
         // both versions, and the wallet and its node can differ (e.g. an external node).
         const int nv = Settings::getInstance()->getZClassicdVersion();
+        // Decode exactly as the daemon's FormatVersion() (src/clientversion.cpp): build
+        // 0-24 is betaN+1, 25-49 rcN-24, 50 a release, above 50 a post-release "-N".
+        QString nodeVer;
+        if (nv > 0) {
+            const int b = nv % 100;
+            nodeVer = QString("v%1.%2.%3").arg(nv / 1000000).arg(nv / 10000 % 100).arg(nv / 100 % 100);
+            if (b < 25)       nodeVer += QString("-beta%1").arg(b + 1);
+            else if (b < 50)  nodeVer += QString("-rc%1").arg(b - 24);
+            else if (b > 50)  nodeVer += QString("-%1").arg(b - 50);
+        }
         const QString node = nv > 0
-            ? QObject::tr("Node (zclassicd): v%1.%2.%3-beta%4").arg(nv / 1000000).arg(nv / 10000 % 100).arg(nv / 100 % 100).arg(nv % 100 + 1)
+            ? QObject::tr("Node (zclassicd): %1").arg(nodeVer)
             : QObject::tr("Node (zclassicd): not connected yet");
         about.versionLabel->setText(version + QChar('\n') + node);
-        // The default link colour is dark blue, unreadable on the dark theme.
-        QPalette pal = aboutDialog.palette();
-        pal.setColor(QPalette::Link, QColor("#6cb2ff"));
-        pal.setColor(QPalette::LinkVisited, QColor("#b39ddb"));
-        aboutDialog.setPalette(pal);
+        // The links are dark blue, unreadable on the dark theme. The colour is written into
+        // about.ui's rich text (color:#0000ff), so a palette change cannot reach it; recolour
+        // the text itself.
+        about.label->setText(about.label->text().replace(QStringLiteral("color:#0000ff;"),
+                                                         QStringLiteral("color:#6cb2ff;")));
 
         aboutDialog.exec();
     });
@@ -366,12 +382,24 @@ bool MainWindow::askKeepRunningInTray() {
         tr("Closing this window does not stop ZClassic."),
         QMessageBox::NoButton, this);
     box.setObjectName("trayFirstCloseNotice");
-    box.setInformativeText(tr(
-        "Your node stays running in the system tray (notification area) so it stays in "
-        "sync and opens instantly next time. Click the tray icon to bring the window back.\n\n"
-        "To stop the node completely, choose File > Exit, or right-click the tray icon and "
-        "choose \"Quit ZClassic\". You can turn this behaviour off in Edit > Settings > Options.\n\n"
-        "You will only see this message once."));
+    // Only a node this wallet started is stopped by quitting (shutdownZClassicd() leaves an
+    // external node alone), so only then may the notice talk about stopping "the node".
+    if (rpc && rpc->isEmbedded()) {
+        box.setInformativeText(tr(
+            "Your node stays running in the system tray (notification area) so it stays in "
+            "sync and opens instantly next time. Click the tray icon to bring the window back.\n\n"
+            "To stop the node completely, choose File > Exit, or right-click the tray icon and "
+            "choose \"Quit ZClassic\". You can turn this behaviour off in Edit > Settings > Options.\n\n"
+            "You will only see this message once."));
+    } else {
+        box.setInformativeText(tr(
+            "The wallet stays running in the system tray (notification area) so it opens "
+            "instantly next time. Click the tray icon to bring the window back.\n\n"
+            "To quit the wallet, choose File > Exit, or right-click the tray icon and choose "
+            "\"Quit ZClassic\". This wallet is connected to a node it did not start, so quitting "
+            "leaves that node running. You can turn this behaviour off in Edit > Settings > Options.\n\n"
+            "You will only see this message once."));
+    }
     QPushButton* keep = box.addButton(tr("Keep running in the tray"), QMessageBox::AcceptRole);
     box.addButton(tr("Quit ZClassic now"), QMessageBox::DestructiveRole);
     box.setDefaultButton(keep);
@@ -404,8 +432,13 @@ void MainWindow::setupTrayIcon() {
     auto showAction = trayMenu->addAction(tr("Show ZclWallet"));
     QObject::connect(showAction, &QAction::triggered, this, &MainWindow::showFromTray);
     trayMenu->addSeparator();
-    auto quitAction = trayMenu->addAction(tr("Quit ZClassic (stops the node)"));
+    auto quitAction = trayMenu->addAction(tr("Quit ZClassic"));
     QObject::connect(quitAction, &QAction::triggered, this, &MainWindow::quitApp);
+    // "(stops the node)" is true only for a node this wallet started; decide when shown.
+    QObject::connect(trayMenu, &QMenu::aboutToShow, this, [=]() {
+        quitAction->setText(rpc && rpc->isEmbedded() ? tr("Quit ZClassic (stops the node)")
+                                                     : tr("Quit ZClassic"));
+    });
     trayIcon->setContextMenu(trayMenu);
 
     // A left-click / double-click on the tray icon brings the window back.
@@ -1201,7 +1234,9 @@ void MainWindow::showHeroUnavailable() {
     heroTotalFull   = tr("Balance unavailable until the node is connected");
     relayoutHero();
     if (homeHeroQualifier) {
-        homeHeroQualifier->setText(tr("Your funds are not affected. The balance reappears when the node reconnects."));
+        // Also shown on a first start before the node has answered, so say "is connected",
+        // not "reconnects".
+        homeHeroQualifier->setText(tr("Your funds are not affected. The balance is shown once the wallet is connected to its node."));
         homeHeroQualifier->setVisible(true);
     }
     if (homeHeroHelper)
@@ -3177,7 +3212,7 @@ void MainWindow::setupTransactionsTab() {
         const qint64 conf = txModel->getConfirmations(index.row());
         const QString txid = txModel->getTxId(index.row());
         QMessageBox mb(QMessageBox::Information, tr("Transaction details"),
-            tr("%1 of %2").arg(txModel->data(txModel->index(index.row(), 0), Qt::DisplayRole).toString(),
+            tr("%1: %2 ZCL").arg(txModel->data(txModel->index(index.row(), 0), Qt::DisplayRole).toString(),
                                                     txModel->getAmt(index.row())), QMessageBox::NoButton, this);
         mb.setObjectName("txDetailsBox");
         mb.setInformativeText(

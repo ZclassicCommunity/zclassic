@@ -1235,25 +1235,69 @@ private slots:
     }
 
     // About must show the node's version as well as the wallet's.
+    // The node line is decoded like the daemon's FormatVersion(): beta, rc, release and
+    // post-release builds. (The wallet's own APP_VERSION also reads "2.1.2-beta13", so the
+    // check looks at the "Node (zclassicd):" line only.)
     void ux10_aboutShowsNodeVersion() {
         MainWindow* w = makeWindow();
-        Settings::getInstance()->setZClassicdVersion(2010212);
         QAction* act = w->findChild<QAction*>("actionAbout");
         QVERIFY(act);
-        QString seen = QStringLiteral("about dialog never appeared");
+        const QList<QPair<int, QString>> cases = {
+            {2010212, "Node (zclassicd): v2.1.2-beta13"},
+            {2010226, "Node (zclassicd): v2.1.2-rc2"},
+            {2010250, "Node (zclassicd): v2.1.2"},
+            {2010251, "Node (zclassicd): v2.1.2-1"},
+        };
+        for (const auto& c : cases) {
+            Settings::getInstance()->setZClassicdVersion(c.first);
+            QString seen = QStringLiteral("about dialog never appeared");
+            QString body;
+            const int gen = ++_modalGen;
+            std::function<void(int)> poll = [&](int tries) {
+                if (gen != _modalGen) return;
+                QWidget* dlg = QApplication::activeModalWidget();
+                QLabel* l = dlg ? dlg->findChild<QLabel*>("versionLabel") : nullptr;
+                if (!l) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+                seen = l->text();
+                if (QLabel* b = dlg->findChild<QLabel*>("label")) body = b->text();
+                static_cast<QDialog*>(dlg)->reject();
+            };
+            QTimer::singleShot(0, [&]() { poll(300); });
+            act->trigger();
+            ++_modalGen;
+            const QString nodeLine = seen.section(QChar('\n'), 1, 1);
+            QVERIFY2(nodeLine == c.second, qPrintable(QString("%1 -> '%2'").arg(c.first).arg(nodeLine)));
+            // Links must not keep the dark-blue colour that is unreadable on the dark theme.
+            QVERIFY2(body.contains("href") && !body.contains("#0000ff"), "About links are still dark blue");
+        }
+        settleAndDelete(w);
+    }
+
+    // Quitting stops only a node the wallet started. Connected to an external node (no
+    // embedded process), neither the Exit item nor the first-close notice may say quitting
+    // stops "the node".
+    void ux13_externalNodeQuitWordingIsHonest() {
+        MainWindow* w = makeWindow();
+        QVERIFY(!w->getRPC()->isEmbedded());
+        QMenu* file = w->findChild<QMenu*>("menuFile");
+        QAction* exitAct = w->findChild<QAction*>("actionExit");
+        QVERIFY(file && exitAct);
+        emit file->aboutToShow();
+        QVERIFY2(!exitAct->text().contains("stops the node"), qPrintable(exitAct->text()));
+        QString seenText;
         const int gen = ++_modalGen;
         std::function<void(int)> poll = [&](int tries) {
             if (gen != _modalGen) return;
-            QWidget* dlg = QApplication::activeModalWidget();
-            QLabel* l = dlg ? dlg->findChild<QLabel*>("versionLabel") : nullptr;
-            if (!l) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
-            seen = l->text();
-            static_cast<QDialog*>(dlg)->reject();
+            auto* mb = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            if (!mb) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+            seenText = mb->informativeText();
+            mb->reject();
         };
         QTimer::singleShot(0, [&]() { poll(300); });
-        act->trigger();
+        w->testAskKeepRunningInTray();
         ++_modalGen;
-        QVERIFY2(seen.contains("2.1.2-beta13"), qPrintable(seen));
+        QVERIFY2(!seenText.contains("stop the node"), qPrintable(seenText));
+        QVERIFY2(seenText.contains("leaves that node running"), qPrintable(seenText));
         settleAndDelete(w);
     }
 
