@@ -73,7 +73,9 @@ SOURCES += \
     src/logger.cpp \
     src/addresscombo.cpp \
     src/recurring.cpp \
-    src/notifyserver.cpp
+    src/notifyserver.cpp \
+    src/tokensmodel.cpp \
+    src/tokensview.cpp
 
 HEADERS += \
     src/releaseversion.h \
@@ -108,7 +110,9 @@ HEADERS += \
     src/addressbook.h \
     src/logger.h \
     src/addresscombo.h \ 
-    src/recurring.h
+    src/recurring.h \
+    src/tokensmodel.h \
+    src/tokensview.h
 
 FORMS += \
     src/mainwindow.ui \
