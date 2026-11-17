@@ -665,6 +665,17 @@ libzcl_c23_a_CPPFLAGS = $(HARDENED_CPPFLAGS) $(ZCL_C23_STD_DEFS) \
   -I$(srcdir)/c23/vendor/platform/modules/platform/include \
   -I$(srcdir)/c23/vendor/platform/modules/encoding/include
 
+if TARGET_WINDOWS
+# mingw-w64 older than v8 (Ubuntu 20.04, the release container):
+# - defaults _WIN32_WINNT to 0x0502, which hides WC_ERR_INVALID_CHARS (the shim's
+#   parameter path conversion) and GetTickCount64 (Sprout prover timer); both
+#   exist from Windows Vista on, and Windows 7 is the floor for these objects;
+# - does not turn on its C99 printf for C code under _GNU_SOURCE, so "%zu" would
+#   go to msvcrt's printf, which does not know it and then misreads the
+#   arguments that follow.
+libzcl_c23_a_CPPFLAGS += -D_WIN32_WINNT=0x0601 -D__USE_MINGW_ANSI_STDIO=1
+endif
+
 # No -march / -m<isa> flag: one portable binary, ADX/BMI2/AVX2/AVX-512 paths are
 # function-target-attribute code selected at run time (simd_dispatch.c).
 # -fomit-frame-pointer is required by the ADX inline asm (it needs a spare GPR).
