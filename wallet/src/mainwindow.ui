@@ -1065,7 +1065,7 @@
   <widget class="QStatusBar" name="statusBar"/>
   <action name="actionExit">
    <property name="text">
-    <string>E&amp;xit</string>
+    <string>E&amp;xit ZClassic (stops the node)</string>
    </property>
   </action>
   <action name="actionAbout">

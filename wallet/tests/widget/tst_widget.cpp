@@ -1109,6 +1109,73 @@ private slots:
         settleAndDelete(w);
     }
 
+    // The first time the window is closed to the tray, the user is told in a dialog that
+    // the node keeps running and can quit instead. (A tray balloon was easy to miss.)
+    void ux5_firstCloseToTrayExplainsAndOffersQuit() {
+        MainWindow* w = makeWindow();
+        for (int pass = 0; pass < 2; ++pass) {
+            const QString want = pass == 0 ? QStringLiteral("Keep running in the tray")
+                                           : QStringLiteral("Quit ZClassic now");
+            QString seenText;
+            const int gen = ++_modalGen;
+            std::function<void(int)> poll = [&](int tries) {
+                if (gen != _modalGen) return;
+                auto* mb = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+                if (!mb) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+                seenText = mb->text() + " " + mb->informativeText();
+                for (QAbstractButton* b : mb->buttons())
+                    if (b->text() == want) { b->click(); return; }
+                mb->reject();
+            };
+            QTimer::singleShot(0, [&]() { poll(300); });
+            const bool keep = w->testAskKeepRunningInTray();
+            ++_modalGen;
+            QVERIFY2(seenText.contains("does not stop"), qPrintable("notice text: " + seenText));
+            QVERIFY2(seenText.contains("File > Exit"), "notice must say how to quit");
+            QCOMPARE(keep, pass == 0);
+        }
+        settleAndDelete(w);
+    }
+
+    // The Options tab explains each setting in a wrapped sentence or two. Inside a fixed
+    // tab page those were squeezed to a line and a half and cut off mid-sentence. Every
+    // explanation must have its full wrapped height (the page scrolls instead).
+    void ux6_settingsOptionsAreNotCutOff() {
+        MainWindow* w = makeWindow();
+        QAction* act = w->findChild<QAction*>("actionSettings");
+        QVERIFY(act);
+        QString cut = QStringLiteral("settings dialog never appeared");
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            QWidget* dlg = QApplication::activeModalWidget();
+            if (!dlg || dlg->objectName() != "Settings") {
+                if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); });
+                return;
+            }
+            cut.clear();
+            for (int page = 1; page <= 2; ++page) {
+                auto* tabs = dlg->findChild<QTabWidget*>("tabWidget");
+                tabs->setCurrentIndex(page);
+                QApplication::processEvents();
+                QWidget* pw = tabs->currentWidget();
+                if (auto* sa = qobject_cast<QScrollArea*>(pw)) pw = sa->widget();
+                for (QLabel* l : pw->findChildren<QLabel*>()) {
+                    if (!l->wordWrap() || l->text().isEmpty()) continue;
+                    const int need = l->heightForWidth(l->width());
+                    if (l->height() + 1 < need)
+                        cut += QString("page%1 %2 h=%3 need=%4; ").arg(page).arg(l->objectName()).arg(l->height()).arg(need);
+                }
+            }
+            static_cast<QDialog*>(dlg)->reject();
+        };
+        QTimer::singleShot(0, [&]() { poll(300); });
+        act->trigger();
+        ++_modalGen;
+        QVERIFY2(cut.isEmpty(), qPrintable("settings text cut off: " + cut));
+        settleAndDelete(w);
+    }
+
     // Double-clicking an Activity row with no memo used to do nothing. It must answer.
     void ux7_doubleClickActivityRowShowsDetails() {
         MainWindow* w = makeWindow();

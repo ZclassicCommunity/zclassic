@@ -309,24 +309,25 @@ void MainWindow::closeEvent(QCloseEvent* event) {
             && Settings::getInstance()->getKeepInTray()
             && trayIcon != nullptr
             && QSystemTrayIcon::isSystemTrayAvailable()) {
-        hide();
         if (event)
             event->ignore();
 
-        // Show the "still running in the tray" hint AT MOST ONCE, EVER (persisted
-        // across launches), so the very first close quietly teaches where the window
-        // went and we NEVER nag again. trayHintShown also guards within-session
-        // repeats. A joyful wallet does not pop a notification you have to dismiss
-        // every time you close it.
+        // The FIRST time the window is closed, say plainly -- in a dialog that stays until
+        // read -- that this does not stop the node, and offer to quit now. A tray balloon
+        // (the previous hint) is easy to miss and is suppressed by Focus Assist / Do Not
+        // Disturb, so a user could close the window believing the wallet had quit while the
+        // node kept running. Shown at most once, ever (persisted); after that, closing
+        // quietly hides to the tray as before.
         if (!trayHintShown && !s.value("tray/hintShown", false).toBool()) {
             trayHintShown = true;
             s.setValue("tray/hintShown", true);
             s.sync();
-            trayIcon->showMessage(tr("Still here — opens instantly next time"),
-                tr("ZClassic stays ready in the tray, so it opens instantly. "
-                   "Use File ▸ Exit (or right-click the tray icon) to quit completely."),
-                QSystemTrayIcon::Information, 4000);
+            if (!askKeepRunningInTray()) {
+                quitApp();      // user chose to stop the node now
+                return;
+            }
         }
+        hide();
         return;
     }
 
@@ -347,6 +348,25 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     // window's X button, File->Exit, the reindex/rescan close, and every
     // quitApp()-driven path still quit cleanly with the flag permanently false.
     qApp->quit();
+}
+
+bool MainWindow::askKeepRunningInTray() {
+    QMessageBox box(QMessageBox::Information, tr("ZClassic keeps running in the tray"),
+        tr("Closing this window does not stop ZClassic."),
+        QMessageBox::NoButton, this);
+    box.setObjectName("trayFirstCloseNotice");
+    box.setInformativeText(tr(
+        "Your node stays running in the system tray (notification area) so it stays in "
+        "sync and opens instantly next time. Click the tray icon to bring the window back.\n\n"
+        "To stop the node completely, choose File > Exit, or right-click the tray icon and "
+        "choose \"Quit ZClassic\". You can turn this behaviour off in Edit > Settings > Options.\n\n"
+        "You will only see this message once."));
+    QPushButton* keep = box.addButton(tr("Keep running in the tray"), QMessageBox::AcceptRole);
+    box.addButton(tr("Quit ZClassic now"), QMessageBox::DestructiveRole);
+    box.setDefaultButton(keep);
+    box.setEscapeButton(keep);
+    box.exec();
+    return box.clickedButton() == keep;
 }
 
 void MainWindow::showFromTray() {
@@ -373,7 +393,7 @@ void MainWindow::setupTrayIcon() {
     auto showAction = trayMenu->addAction(tr("Show ZclWallet"));
     QObject::connect(showAction, &QAction::triggered, this, &MainWindow::showFromTray);
     trayMenu->addSeparator();
-    auto quitAction = trayMenu->addAction(tr("Quit"));
+    auto quitAction = trayMenu->addAction(tr("Quit ZClassic (stops the node)"));
     QObject::connect(quitAction, &QAction::triggered, this, &MainWindow::quitApp);
     trayIcon->setContextMenu(trayMenu);
 
@@ -1928,6 +1948,27 @@ void MainWindow::setupSettingsModal() {
         Ui_Settings settings;
         settings.setupUi(&settingsDialog);
         Settings::saveRestore(&settingsDialog);
+        // The Options tab holds a dozen wrapped explanations; below this size they are
+        // cut off mid-sentence. This floor also overrides a small size remembered from
+        // an older release by saveRestore().
+        settingsDialog.setMinimumSize(620, 600);
+        if (settingsDialog.width() < 620 || settingsDialog.height() < 600)
+            settingsDialog.resize(qMax(settingsDialog.width(), 620), qMax(settingsDialog.height(), 600));
+        // Put the Options and Troubleshooting pages in scroll areas. A tab page cannot ask
+        // its dialog for more height, so on a small screen the wrapped explanations were
+        // squeezed to a line and a half and cut off mid-sentence; in a scroll area every
+        // sentence is shown in full and the page scrolls instead.
+        for (int pageIdx = 1; pageIdx <= 2; ++pageIdx) {
+            QWidget* page = settings.tabWidget->widget(pageIdx);
+            const QString title = settings.tabWidget->tabText(pageIdx);
+            auto* area = new QScrollArea(settings.tabWidget);
+            area->setFrameShape(QFrame::NoFrame);
+            area->setWidgetResizable(true);
+            area->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            settings.tabWidget->removeTab(pageIdx);
+            area->setWidget(page);
+            settings.tabWidget->insertTab(pageIdx, area, title);
+        }
 
         // Setup save sent check box
         QObject::connect(settings.chkSaveTxs, &QCheckBox::stateChanged, [=](auto checked) {
@@ -2035,8 +2076,23 @@ void MainWindow::setupSettingsModal() {
         settings.rpcuser->setText(conf.rpcuser);
         settings.rpcpassword->setText(conf.rpcpassword);
 
-        // Connection tab by default
+        // Connection tab by default -- unless the wallet runs its own built-in node. Then
+        // the connection fields are blank (cookie auth, nothing to type) and meaningless,
+        // so lead with the Options tab, which is what people open Settings for, and say
+        // plainly why the connection tab is empty.
         settings.tabWidget->setCurrentIndex(0);
+        if (rpc->isEmbedded()) {
+            settings.confMsg->setText(tr(
+                "This wallet runs its own built-in ZClassic node and connects to it "
+                "automatically, so there is nothing to fill in on this tab.\n"
+                "Node settings file: %1").arg(QDir::toNativeSeparators(zclassicConfLocation)));
+            settings.confMsg->setWordWrap(true);
+            settings.hostname->setEnabled(false);
+            settings.port->setEnabled(false);
+            settings.rpcuser->setEnabled(false);
+            settings.rpcpassword->setEnabled(false);
+            settings.tabWidget->setCurrentIndex(1);
+        }
 
         // Enable the troubleshooting options only if using embedded zclassicd
         if (!rpc->isEmbedded()) {
