@@ -413,11 +413,14 @@ ZQWDMON1 footer of §1 (no `zclassicd.exe` next to it; extracted to `%LOCALAPPDA
 
 Output: `<out>/zclwallet-v2.1.2-beta13-windows-x86_64/` (the bundle, with its own
 per-file `SHA256SUMS.txt`), the `.zip`, `<out>/SHA256SUMS.txt` (hashes of the zips) and
-`<out>/build/` (logs). The script fails if any PE file in the bundle imports a DLL
-that is neither a Windows system DLL nor in the bundle, then runs, from a copy
-with `PATH` reduced to `System32` and `Windows` and `APPDATA`/`LOCALAPPDATA`/
-`USERPROFILE` redirected: `zclwallet.exe --print-profile-paths`, `zclassicd.exe -version`
-and `tests/check-platform` (constructs `QGuiApplication` with the real `windows`
+`<out>/build/` (logs). The bundle carries the licence files (`LICENSE`, `COPYING`,
+`THIRD-PARTY-LICENSES`, `QT-LGPL-NOTICE.md`, `THIRD-PARTY-NOTICES.txt`); zip entries get
+the commit time (or `SOURCE_DATE_EPOCH`) as their timestamp. The script fails if any PE
+file in the bundle imports a DLL that is neither a Windows system DLL nor in the bundle,
+or if a bundle file is missing from or changed since its `SHA256SUMS.txt`, and runs, with
+`PATH` reduced to `System32` and `Windows` and `APPDATA`/`LOCALAPPDATA`/`USERPROFILE`
+redirected: `zclwallet.exe --print-profile-paths`, `zclassicd.exe -version` and, from a
+scratch copy, `tests/check-platform` (constructs `QGuiApplication` with the real `windows`
 platform plugin, creates no window, must print `platform=windows`).
 
 Why `windeployqt --debug`: the kit's DLLs and plugins are release builds with a

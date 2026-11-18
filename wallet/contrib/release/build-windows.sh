@@ -48,6 +48,7 @@ PATH="$QT/bin:$MINGW/bin:/usr/bin:$SYS:$SYS/WindowsPowerShell/v1.0:$(cygpath -u 
 export PATH
 OBJDUMP="$MINGW/bin/objdump.exe"
 TIMEOUT=$(command -v timeout) || die "timeout(1) not found (MSYS coreutils)"
+[ "${ALLINONE:-0}" != 1 ] || command -v openssl >/dev/null || die "ALLINONE=1 needs openssl(1) for the footer hash"
 SODIUM=$(CDPATH= cd -- "$(dirname -- "$SODIUM")" && pwd)/$(basename -- "$SODIUM")
 
 echo "== 1. build (release, Qt $(qmake -query QT_VERSION), -j$JOBS)"
@@ -86,10 +87,13 @@ is_system() {
     [ -f "$SYS/$1" ]
 }
 walk() { # $1=dir $2=copy|check
-    bad=0 grew=1
+    bad=0 grew=1 nl='
+'
     while [ "$grew" = 1 ]; do
         grew=0
+        old_ifs=$IFS; IFS=$nl   # one path per line: OUT_DIR may contain spaces
         for f in $(find "$1" -type f \( -name '*.exe' -o -name '*.dll' \)); do
+            IFS=$old_ifs
             for d in $(imports "$f"); do
                 [ -f "$1/$d" ] && continue
                 is_system "$d" && continue
@@ -98,6 +102,7 @@ walk() { # $1=dir $2=copy|check
                 else echo "UNRESOLVED: $(basename "$f") imports $d" >&2; bad=1; fi
             done
         done
+        IFS=$old_ifs
         [ "$bad" = 0 ] || return 1
     done
 }
@@ -119,6 +124,22 @@ Keep every file in this folder together; zclwallet.exe starts the sibling zclass
 try-isolated.cmd starts the wallet in its own profile (see ZCLWALLET_PROFILE_DIR in
 wallet/docs/BUILDING.md); zclwallet.exe --print-profile-paths shows where state goes.
 SHA256SUMS.txt lists every file. Needs Windows 7 or later, nothing else installed.
+Licences: LICENSE (wallet), COPYING and THIRD-PARTY-LICENSES (node),
+QT-LGPL-NOTICE.md and THIRD-PARTY-NOTICES.txt (Qt, MinGW runtime, OpenSSL).
+EOF
+cp "$wallet/LICENSE" "$wallet/docs/QT-LGPL-NOTICE.md" "$wallet/../COPYING" "$wallet/../THIRD-PARTY-LICENSES" "$b/"
+cat > "$b/THIRD-PARTY-NOTICES.txt" <<EOF
+Third-party run-time files in this folder (unmodified upstream binaries):
+- Qt $(qmake -query QT_VERSION) (Qt5*.dll, plugins): LGPLv3, (c) The Qt Company Ltd and
+  contributors. Qt is linked dynamically: replace the Qt DLLs with your own build of
+  the same Qt version to relink. Source: https://download.qt.io/archive/qt/5.15/
+- MinGW-w64 GCC runtime (libgcc_s_seh-1.dll, libstdc++-6.dll): GPLv3 with the GCC
+  Runtime Library Exception; libwinpthread-1.dll: MIT-style (MinGW-w64 project).
+- OpenSSL 1.1.1 (libssl-1_1-x64.dll, libcrypto-1_1-x64.dll): OpenSSL and SSLeay
+  licences. This product includes software developed by the OpenSSL Project for use
+  in the OpenSSL Toolkit (http://www.openssl.org/) and cryptographic software written
+  by Eric Young (eay@cryptsoft.com). Used only for the https release/price checks.
+- libsodium (linked into zclwallet.exe): ISC licence.
 EOF
 ( cd "$b" && find . -type f ! -name SHA256SUMS.txt | sed 's|^\./||' | sort | xargs sha256sum > SHA256SUMS.txt )
 
@@ -162,6 +183,13 @@ if [ "${SKIP_PROBE:-0}" != 1 ]; then
 fi
 
 zipdir() { # $1=dir-name under OUT -> $1.zip with the folder as the single top-level entry
+    # SHA256SUMS.txt must still match and cover every file that goes into the zip.
+    ( cd "$OUT/$1" && sha256sum -c --quiet SHA256SUMS.txt ) || die "$1 changed after SHA256SUMS.txt"
+    [ "$(find "$OUT/$1" -type f | wc -l)" -eq "$(($(wc -l < "$OUT/$1/SHA256SUMS.txt") + 1))" ] \
+        || die "$1 has files not listed in SHA256SUMS.txt"
+    # Reproducible entries: every mtime is the commit time (or SOURCE_DATE_EPOCH).
+    epoch=${SOURCE_DATE_EPOCH:-$(git -C "$wallet" log -1 --format=%ct 2>/dev/null || echo 315619200)}
+    find "$OUT/$1" -exec touch -h -d "@$epoch" {} + || die "cannot set timestamps in $1"
     command -v zip >/dev/null 2>&1 && { ( cd "$OUT" && zip -qr -X "$1.zip" "$1" ); return; }
     ps=$(command -v pwsh || command -v powershell) || die "no zip, pwsh or powershell"
     # Entries are written one by one with '/' separators: Windows PowerShell 5.1's
