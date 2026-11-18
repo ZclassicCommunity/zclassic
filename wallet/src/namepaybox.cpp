@@ -7,6 +7,7 @@
 #include <QCheckBox>
 #include <QFontDatabase>
 #include <QLabel>
+#include <QPointer>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -30,6 +31,7 @@ NamePayBox::NamePayBox(ResolveFn resolve, QWidget* parent)
     statusLabel_ = new QLabel(this);
     statusLabel_->setObjectName(QStringLiteral("NameStatus"));
     statusLabel_->setWordWrap(true);
+    statusLabel_->setTextFormat(Qt::PlainText); // daemon error text and names come from the chain: never markup
     lay->addWidget(statusLabel_);
 
     addressTitle_ = new QLabel(tr("The address to pay (nothing but this address goes into the transaction):"), this);
@@ -40,6 +42,7 @@ NamePayBox::NamePayBox(ResolveFn resolve, QWidget* parent)
     addressLabel_ = new QLabel(this);
     addressLabel_->setObjectName(QStringLiteral("NameAddress"));
     addressLabel_->setWordWrap(true);
+    addressLabel_->setTextFormat(Qt::PlainText);
     addressLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     mono.setBold(true);
@@ -49,6 +52,7 @@ NamePayBox::NamePayBox(ResolveFn resolve, QWidget* parent)
     infoLabel_ = new QLabel(this);
     infoLabel_->setObjectName(QStringLiteral("NameInfo"));
     infoLabel_->setWordWrap(true);
+    infoLabel_->setTextFormat(Qt::PlainText); // carries the attacker-chosen owner text: Qt would render it as HTML
     infoLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     lay->addWidget(infoLabel_);
 
@@ -139,7 +143,12 @@ void NamePayBox::resolveNow()
     const int token = ++token_;
     statusLabel_->setText(tr("Looking up @%1 ...").arg(name_));
     setState(State::Resolving);
-    resolve_(name_, [this, token](bool ok, const nlohmann::json& reply) { applyReply(token, ok, reply); });
+    // The reply can arrive after the Send tab has deleted this row, so the callback holds a guarded pointer, never `this`.
+    QPointer<NamePayBox> self(this);
+    resolve_(name_, [self, token](bool ok, const nlohmann::json& reply) {
+        if (self)
+            self->applyReply(token, ok, reply);
+    });
 }
 
 void NamePayBox::applyReply(int token, bool ok, const nlohmann::json& reply)
@@ -236,39 +245,51 @@ void NamePayBox::recheck(const std::function<void(bool)>& done)
     const int token = ++token_;
     const names::Resolution before = res_;
     const QString nm = name_;
-    resolve_(nm, [this, token, before, done](bool ok, const nlohmann::json& reply) {
-        if (token != token_) {
-            done(false);
+    QPointer<NamePayBox> self(this);
+    resolve_(nm, [self, token, before, done](bool ok, const nlohmann::json& reply) {
+        if (!self) {
+            done(false); // the row is gone; the caller still needs its answer, and nothing here may be touched
             return;
         }
-        names::Resolution now;
-        if (!ok || !names::parseResolution(reply, &now)) {
-            confirm_->setChecked(false);
-            changedNote_ = tr("@%1 could not be checked again just now, so nothing was sent. Try again.").arg(name_);
-            showResolution();
-            emit changed();
-            done(false);
-            return;
-        }
-        if (names::sameAnswer(before, now)) {
-            res_ = now;                       // fresher recency numbers; the confirmation stands
-            assessment_ = names::assess(res_);
-            showResolution();
-            emit changed();
-            done(true);
-            return;
-        }
-        res_ = now;
-        assessment_ = names::assess(res_);
-        changedNote_ = tr("The answer for @%1 CHANGED while you were checking it: nothing was sent. Review the new address.").arg(name_);
-        confirm_->blockSignals(true);
+        NamePayBox* const box = self.data();
+        box->recheckReply(token, before, ok, reply, done);
+    });
+}
+
+void NamePayBox::recheckReply(int token, const names::Resolution& before, bool ok, const nlohmann::json& reply,
+                              const std::function<void(bool)>& done)
+{
+    if (token != token_) {
+        done(false);
+        return;
+    }
+    names::Resolution now;
+    if (!ok || !names::parseResolution(reply, &now)) {
         confirm_->setChecked(false);
-        confirm_->blockSignals(false);
-        if (res_.resolved)
-            showResolution();
-        else
-            statusLabel_->setText(changedNote_ + QLatin1Char('\n') + assessment_.headline);
+        changedNote_ = tr("@%1 could not be checked again just now, so nothing was sent. Try again.").arg(name_);
+        showResolution();
         emit changed();
         done(false);
-    });
+        return;
+    }
+    if (names::sameAnswer(before, now)) {
+        res_ = now;                       // fresher recency numbers; the confirmation stands
+        assessment_ = names::assess(res_);
+        showResolution();
+        emit changed();
+        done(true);
+        return;
+    }
+    res_ = now;
+    assessment_ = names::assess(res_);
+    changedNote_ = tr("The answer for @%1 CHANGED while you were checking it: nothing was sent. Review the new address.").arg(name_);
+    confirm_->blockSignals(true);
+    confirm_->setChecked(false);
+    confirm_->blockSignals(false);
+    if (res_.resolved)
+        showResolution();
+    else
+        statusLabel_->setText(changedNote_ + QLatin1Char('\n') + assessment_.headline);
+    emit changed();
+    done(false);
 }

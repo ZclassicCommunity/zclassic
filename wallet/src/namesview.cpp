@@ -33,6 +33,12 @@ json payload(const char* method, json params = json::array())
     return {{"jsonrpc", "1.0"}, {"id", "names"}, {"method", method}, {"params", params}};
 }
 
+// Qt shows a tooltip as HTML when it looks like markup; owner and value are chain text, so escape and make it rich on purpose.
+QString plainTip(const QString& s)
+{
+    return s.isEmpty() ? s : QStringLiteral("<span>") + s.toHtmlEscaped() + QStringLiteral("</span>");
+}
+
 QString errorText(const json& err)
 {
     if (err.is_object()) {
@@ -201,8 +207,8 @@ void NamesView::refreshNames()
                     item->setToolTip(tip);
                 table_->setItem(i, col, item);
             };
-            cell(0, QStringLiteral("@") + n.name, n.owner);
-            cell(1, n.value, n.value);
+            cell(0, QStringLiteral("@") + n.name, plainTip(n.owner));
+            cell(1, n.value, plainTip(n.value));
             cell(2, n.type);
             cell(3, QString::number(n.registeredHeight));
         }
@@ -235,7 +241,10 @@ void NamesView::sendOperation(const char* method, const QString& name, const QSt
     }, [self](QNetworkReply*, const json& err) {
         if (!self)
             return;
-        QMessageBox::warning(self->dialog_, QObject::tr("The name transaction was not sent"), errorText(err));
+        QMessageBox box(QMessageBox::Warning, QObject::tr("The name transaction was not sent"), errorText(err),
+                       QMessageBox::Ok, self->dialog_);
+        box.setTextFormat(Qt::PlainText); // the daemon message can embed an owner string from the chain
+        box.exec();
     });
 }
 
