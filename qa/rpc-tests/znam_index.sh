@@ -18,7 +18,8 @@
 #   env KEEP=1              keep the temp directory
 #
 # Needs: jq, a C compiler, the Zcash parameters in ~/.zcash-params.
-# Every node runs on 127.0.0.1 with its own temp datadir and its own ports (49000-49999).
+# Every node runs on 127.0.0.1 with its own temp datadir and its own ports
+# (49000-49999, or from env E2E_PORT_BASE=<n> as in zslp_index.sh).
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -32,7 +33,7 @@ for b in "$ZD" "$ZCLI" "$ZTX"; do [ -x "$b" ] || { echo "missing $b" >&2; exit 2
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/zcl-znam-e2e.XXXXXX")
-BASE=$((49000 + ($$ % 700)))
+BASE=${E2E_PORT_BASE:-$((49000 + ($$ % 700)))}
 PIDS=""
 CHECKS=0
 
