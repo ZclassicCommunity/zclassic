@@ -234,6 +234,16 @@ TEST(ParamPresence, ManifestOffersTheLegacyProvingKeyOnlyWhenHeld)
         return boost::filesystem::is_regular_file(p, ec) && !ec &&
                boost::filesystem::file_size(p, ec) == size && !ec;
     };
+    const bool legacyHeld = held("sprout-proving.key", 910173851ULL);
+    bool anyHeld = legacyHeld;
+    for (size_t i = 0; i < kParamCount; i++) anyHeld = anyHeld || held(kParams[i].name, kParams[i].size);
+    if (!anyHeld) {
+        // The manifest refuses to build with nothing to offer ("no zcash parameters
+        // available to serve"); this host has no parameter files, so there is nothing
+        // to check. This gtest predates GTEST_SKIP(): log and pass.
+        std::cerr << "[ SKIPPED ] ParamPresence.ManifestOffersTheLegacyProvingKeyOnlyWhenHeld: no Zcash parameter files in " << dir.string() << "\n";
+        return;
+    }
     mapArgs["-bootstrapserve"] = "1";
     CBootstrapSnapshotManifest manifest;
     std::string error;
@@ -249,7 +259,7 @@ TEST(ParamPresence, ManifestOffersTheLegacyProvingKeyOnlyWhenHeld)
     for (size_t i = 0; i < kParamCount; i++) {
         EXPECT_EQ(index_of(kParams[i].name) >= 0, held(kParams[i].name, kParams[i].size)) << kParams[i].name;
     }
-    const bool legacy = held("sprout-proving.key", 910173851ULL);
+    const bool legacy = legacyHeld;
     const int li = index_of("sprout-proving.key");
     EXPECT_EQ(li >= 0, legacy);
     EXPECT_EQ(manifest.vFiles.size(), (size_t)std::count_if(std::begin(kParams), std::end(kParams),
