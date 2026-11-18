@@ -99,6 +99,9 @@ cache, or by extracting `built/<host>/tor/tor-*.tar.gz` into `<prefix>`.
 ## Verified on the build host (2026-11-16, Ubuntu 24.04, gcc 14.2.0)
 
 depends OpenSSL 1.1.1w, libevent 2.1.12, zlib 1.3.1 (all from this tree).
+depends has since moved to OpenSSL 3.5.9 (static, with assembly); the hashes and
+the version line below are the 2026-11-16 record of the 1.1.1w build and were
+not regenerated.
 
 | Archive | Linux x86_64 bytes | sha256 | mingw-w64 x86_64 bytes | sha256 |
 |---|---|---|---|---|
@@ -158,7 +161,7 @@ that includes this code must ship them with the release.
 | mulodi | MIT / UIUC | `src/ext/mulodi` |
 | ht.h, tor_queue.h | BSD-3-Clause | `src/ext` |
 | Equi-X, HashX (tevador) | LGPL-3.0 | NOT built (needs `--enable-gpl`) |
-| OpenSSL 1.1.1w | OpenSSL and SSLeay licences | depends `openssl`, linked, not in libtor.a |
+| OpenSSL 3.5.9 | Apache-2.0 | depends `openssl`, linked, not in libtor.a |
 | libevent 2.1.12 | BSD-3-Clause | depends `libevent` |
 | zlib 1.3.1 | zlib licence | depends `zlib` |
 

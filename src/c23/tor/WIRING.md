@@ -71,7 +71,7 @@ Both modes are built in and chosen at runtime. `child` is the default on Linux, 
 
 Checked for the in-process mode:
 
-- Same libraries: Tor is built by depends against the same OpenSSL 1.1.1w and
+- Same libraries: Tor is built by depends against the same OpenSSL 3.5.9 and
   libevent 2.1.12 static archives the daemon links, so there is one copy of
   each in the binary and no version or symbol clash. `zclassicd`,
   `test_bitcoin` link without duplicate symbols.
