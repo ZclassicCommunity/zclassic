@@ -120,7 +120,9 @@ void GatherCoins(CWallet* wallet, const ZslpIndex& idx, const uint256& token, in
 {
     out.clear();
     std::vector<COutput> coins;
-    wallet->AvailableCoins(coins, true, NULL, false, false);
+    // fIncludeZeroValue: a token or baton output may carry 0 zatoshi (consensus allows it, relay calls it dust).
+    // zslp_listunspent counts it, so the send paths must find it too; the checks below keep only real token outputs.
+    wallet->AvailableCoins(coins, true, NULL, true, false);
     for (size_t i = 0; i < coins.size(); i++) {
         const COutput& c = coins[i];
         if (!c.fSpendable || c.nDepth < std::max(1, minconf))
