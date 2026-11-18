@@ -90,6 +90,9 @@ do_daemon() {
     ls -l "$cand"; file "$cand"/zclassic*
     : >"$cand/validation.txt"
     for binary in "$cand"/zclassic*; do otool -L "$binary" | tee -a "$cand/validation.txt"; done
+    hard=$(sh zcutil/check-hardening.sh "$cand"/zclassic* 2>&1) && hrc=0 || hrc=1
+    echo "$hard" | tee -a "$cand/validation.txt"
+    [ "$hrc" -eq 0 ] || die "hardening check failed (zcutil/check-hardening.sh)"
     # Anything outside /usr/lib and /System would be missing on a user's Mac.
     awk '/^[ \t]+\// { print $1 }' "$cand/validation.txt" | sort -u >"$out/dylibs.txt"
     echo "== dylibs linked by the binaries"; cat "$out/dylibs.txt"

@@ -93,6 +93,15 @@ embedded manifest with `activeCodePage` UTF-8. macOS: `otool -L` allows only
 (only processes of this run are ever signalled). Unlike the workflow, a failed
 `! grep` is a real failure here.
 
+Every release binary also passes `zcutil/check-hardening.sh` (POSIX sh, binutils only;
+`make -C src check-security` runs the same script). ELF: PIE, full RELRO (`GNU_RELRO` +
+`BIND_NOW`), non-executable stack, `__stack_chk_fail` present (FORTIFY `_chk` symbols and
+the CET IBT/SHSTK note are reported as info). PE: `DYNAMIC_BASE`, `NX_COMPAT`,
+`HIGH_ENTROPY_VA` and a non-empty `.reloc` section, because without relocations ASLR does
+not apply. Mach-O: the PIE flag via `otool -hv` (skipped with a message when `otool` is
+absent). One PASS/FAIL/INFO/SKIP line per check; any FAIL makes the stage fail. Run it by
+hand on any binary: `sh zcutil/check-hardening.sh path/to/zclassicd`.
+
 `test` runs two builds of the test suites (`--flavor debug|release|both`, default both):
 
 * **debug** (as `ci.yml`): `DEBUG=1` depends and `--enable-debug`, which in this fork
