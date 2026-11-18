@@ -18,6 +18,7 @@
 #include "version.h"
 #include "zcash/JoinSplit.hpp"
 #include "zcash/Proof.hpp"
+#include "zcl_c23_phgr13.h"
 
 #include <boost/filesystem.hpp>
 
@@ -423,4 +424,250 @@ TEST(phgr13, a_verifying_key_that_does_not_load_is_refused_and_leaves_the_key)
         EXPECT_TRUE(Strict(f)) << "height " << f.height;
     }
     boost::filesystem::remove_all(dir);
+}
+
+// ---------------------------------------------------------------------------
+// Non-canonical and malformed proof encodings, through both doors: the
+// consensus path (PHGRProof deserialization, then JSDescription::Verify with
+// the strict and the disabled verifier) and the C23 verifier directly
+// (zcl_c23_phgr13_proof_decodes, zcl_c23_phgr13_verify). libsnark, as zclassicd
+// used it, rejected every vector below. PHGR13_TABLE=1 prints one line per vector.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct Verdict {
+    bool deserializes;
+    bool strict;
+    bool disabled;
+    bool decodes;
+    bool direct;
+};
+
+Verdict Judge(const Fixture& base, const std::vector<unsigned char>& wire)
+{
+    Verdict v{true, false, false, false, false};
+    try {
+        Fixture m = WithWire(base, wire);
+        v.strict = Strict(m);
+        v.disabled = Disabled(m);
+    } catch (const std::ios_base::failure&) {
+        v.deserializes = false;
+    }
+    unsigned char w[ZCL_C23_PHGR13_PROOF_SIZE];
+    EXPECT_EQ(wire.size(), (size_t)ZCL_C23_PHGR13_PROOF_SIZE);
+    memcpy(w, wire.data(), sizeof(w));
+    v.decodes = zcl_c23_phgr13_proof_decodes(w);
+    uint256 hsig = ZCJoinSplit::h_sig(base.js.randomSeed, base.js.nullifiers, base.pubKey);
+    v.direct = zcl_c23_phgr13_verify(w, base.js.anchor.begin(), hsig.begin(),
+                                     base.js.macs[0].begin(), base.js.macs[1].begin(),
+                                     base.js.nullifiers[0].begin(), base.js.nullifiers[1].begin(),
+                                     base.js.commitments[0].begin(), base.js.commitments[1].begin(),
+                                     base.js.vpub_old, base.js.vpub_new);
+    return v;
+}
+
+// mustNotDecode: the encoding itself is invalid (not just a wrong proof), so
+// the decode-only path (what ProofVerifier::Disabled runs) must refuse it too.
+void ExpectRejected(const Fixture& base, const std::vector<unsigned char>& wire, const std::string& what,
+                    bool mustNotDecode)
+{
+    const Verdict v = Judge(base, wire);
+    if (getenv("PHGR13_TABLE")) {
+        fprintf(stderr, "PHGR13_TABLE %-52s deser=%d strict=%d disabled=%d decodes=%d direct_verify=%d\n",
+                what.c_str(), v.deserializes, v.strict, v.disabled, v.decodes, v.direct);
+    }
+    EXPECT_FALSE(v.strict) << what << " (consensus path, strict)";
+    EXPECT_FALSE(v.direct) << what << " (zcl_c23_phgr13_verify)";
+    if (mustNotDecode) {
+        EXPECT_FALSE(v.disabled) << what << " (consensus path, decode only)";
+        EXPECT_FALSE(v.decodes) << what << " (zcl_c23_phgr13_proof_decodes)";
+    }
+}
+
+std::vector<unsigned char> Put(std::vector<unsigned char> w, size_t off, const std::vector<unsigned char>& b)
+{
+    std::copy(b.begin(), b.end(), w.begin() + off);
+    return w;
+}
+
+// a += k*b over 256 bits, big-endian; false on carry out of 256 bits.
+bool AddMul256(std::vector<unsigned char>& a, const std::vector<unsigned char>& b, unsigned k)
+{
+    unsigned carry = 0;
+    for (int i = 31; i >= 0; i--) {
+        unsigned v = a[i] + (unsigned)b[i] * k + carry;
+        a[i] = v & 0xff;
+        carry = v >> 8;
+    }
+    return carry == 0;
+}
+
+} // namespace
+
+TEST(phgr13_malformed, valid_proof_accepted_by_every_path)
+{
+    const Fixture f = Make(PHGR_VECTORS[0]);
+    ASSERT_EQ(f.height, 241);
+    const Verdict v = Judge(f, f.wire);
+    EXPECT_TRUE(v.deserializes);
+    EXPECT_TRUE(v.strict);
+    EXPECT_TRUE(v.disabled);
+    EXPECT_TRUE(v.decodes);
+    EXPECT_TRUE(v.direct);
+}
+
+TEST(phgr13_malformed, g2_x_not_reduced)
+{
+    const Fixture f = Make(PHGR_VECTORS[0]);
+    const std::vector<unsigned char> q = ParseHex(Q_HEX);
+    const size_t c1 = SPANS[2].off + 1; // wire bytes 67..98, the high half of x
+    // c1 + k*q for k = 1..5. FE2IP needs c1 < q, so every one that does not wrap
+    // past 2^256 is an invalid encoding; a wrapped one is some other value that
+    // must still not verify.
+    for (unsigned k = 1; k <= 5; k++) {
+        std::vector<unsigned char> hi(f.wire.begin() + c1, f.wire.begin() + c1 + 32);
+        const bool nowrap = AddMul256(hi, q, k);
+        ExpectRejected(f, Put(f.wire, c1, hi), "G2 x high + " + std::to_string(k) + "q", nowrap);
+    }
+    // c1 = q exactly (c0 unchanged).
+    ExpectRejected(f, Put(f.wire, c1, q), "G2 x c1 = q", true);
+    // (q, q): the integer is >= q^2.
+    std::vector<unsigned char> qq(q);
+    qq.insert(qq.end(), q.begin(), q.end());
+    ExpectRejected(f, Put(f.wire, c1, qq), "G2 x = (q, q)", true);
+    ExpectRejected(f, Put(f.wire, c1, std::vector<unsigned char>(64, 0xff)), "G2 x = 2^512-1", true);
+}
+
+TEST(phgr13_malformed, g1_x_not_reduced_and_x_zero)
+{
+    const Fixture f = Make(PHGR_VECTORS[0]);
+    const std::vector<unsigned char> q = ParseHex(Q_HEX);
+    std::vector<unsigned char> qp1 = q;
+    qp1[31] += 1;
+    const std::vector<unsigned char> ones(32, 0xff);
+    for (const PointSpan& s : SPANS) {
+        if (s.g2) continue;
+        const std::string at = " at " + std::to_string(s.off);
+        ExpectRejected(f, Put(f.wire, s.off + 1, q), "G1 x = q" + at, true);
+        ExpectRejected(f, Put(f.wire, s.off + 1, qp1), "G1 x = q+1" + at, true);
+        ExpectRejected(f, Put(f.wire, s.off + 1, ones), "G1 x = 2^256-1" + at, true);
+        // x = 0 with lead 0x02: (0, sqrt 3) if 3 is a square, else not a point.
+        // Never the point at infinity, and never a valid proof.
+        std::vector<unsigned char> w = Put(f.wire, s.off + 1, std::vector<unsigned char>(32, 0));
+        w[s.off] = 0x02;
+        ExpectRejected(f, w, "G1 x = 0 lead 02" + at, false);
+    }
+}
+
+TEST(phgr13_malformed, lead_bytes_and_infinity)
+{
+    const Fixture f = Make(PHGR_VECTORS[0]);
+    const unsigned char g1leads[] = {0x00, 0x01, 0x04, 0x06, 0x07, 0x12, 0x13, 0x82, 0xff};
+    const unsigned char g2leads[] = {0x08, 0x0e, 0x0f, 0x1a, 0x8a};
+    for (const PointSpan& s : SPANS) {
+        const std::string at = " at " + std::to_string(s.off);
+        if (!s.g2) {
+            for (unsigned char b : g1leads) {
+                std::vector<unsigned char> w = f.wire;
+                w[s.off] = b;
+                char name[64];
+                snprintf(name, sizeof(name), "G1 lead %02x", b);
+                // The consensus path throws at deserialization; the C23 entry
+                // points must refuse it as well.
+                ExpectRejected(f, w, name + at, true);
+            }
+            std::vector<unsigned char> inf(33, 0);
+            inf[0] = 0x06;
+            ExpectRejected(f, Put(f.wire, s.off, inf), "G1 infinity (06 + 32 zero)" + at, true);
+        } else {
+            for (unsigned char b : g2leads) {
+                std::vector<unsigned char> w = f.wire;
+                w[s.off] = b;
+                char name[64];
+                snprintf(name, sizeof(name), "G2 lead %02x", b);
+                ExpectRejected(f, w, name + at, true);
+            }
+            std::vector<unsigned char> inf(65, 0);
+            inf[0] = 0x0e;
+            ExpectRejected(f, Put(f.wire, s.off, inf), "G2 infinity (0e + 64 zero)" + at, true);
+        }
+    }
+}
+
+TEST(phgr13_malformed, flipped_parity_and_non_square_x)
+{
+    const Fixture f = Make(PHGR_VECTORS[0]);
+    for (const PointSpan& s : SPANS) {
+        const std::string at = " at " + std::to_string(s.off);
+        std::vector<unsigned char> w = f.wire;
+        w[s.off] ^= 1; // y parity (G1) / y_gt (G2): the negated point
+        ExpectRejected(f, w, std::string(s.g2 ? "G2 y_gt flipped" : "G1 y parity flipped") + at, false);
+    }
+    // G1: x values where x^3 + 3 is a non-square. The decoder is the oracle that
+    // finds them; each must be refused by the verifier and the decode-only path.
+    for (const PointSpan& s : SPANS) {
+        if (s.g2) continue;
+        int found = 0;
+        for (unsigned x = 1; x < 200 && found < 3; x++) {
+            std::vector<unsigned char> xb(32, 0);
+            xb[31] = (unsigned char)x;
+            xb[30] = (unsigned char)(x >> 8);
+            std::vector<unsigned char> w = Put(f.wire, s.off + 1, xb);
+            unsigned char raw[ZCL_C23_PHGR13_PROOF_SIZE];
+            memcpy(raw, w.data(), sizeof(raw));
+            if (zcl_c23_phgr13_proof_decodes(raw)) continue; // x is on the curve
+            found++;
+            ExpectRejected(f, w, "G1 non-square x=" + std::to_string(x) + " at " + std::to_string(s.off), true);
+        }
+        EXPECT_EQ(found, 3) << "no non-square x found for the point at " << s.off;
+    }
+}
+
+TEST(phgr13_malformed, off_subgroup_twist_points)
+{
+    // Twist-curve points outside the order-r subgroup placed in g_B
+    // (x = q+2 as FE2IP, both signs).
+    const Fixture f = Make(PHGR_VECTORS[0]);
+    const char* OFF[] = {
+        "0a000000000000000000000000000000000000000000000000000000000000000030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd49",
+        "0b000000000000000000000000000000000000000000000000000000000000000030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd49",
+    };
+    for (const char* hex : OFF) {
+        ExpectRejected(f, Put(f.wire, SPANS[2].off, ParseHex(hex)), std::string("g_B off-subgroup lead ") + hex[1], true);
+    }
+}
+
+TEST(phgr13_malformed, swapped_points_and_public_input)
+{
+    for (const Fixture& f : All()) {
+        const size_t pairs[][2] = {{0, 33}, {164, 197}};
+        for (const auto& pr : pairs) {
+            std::vector<unsigned char> w = f.wire;
+            for (size_t i = 0; i < 33; i++) std::swap(w[pr[0] + i], w[pr[1] + i]);
+            ExpectRejected(f, w, "swap " + std::to_string(pr[0]) + "," + std::to_string(pr[1]) +
+                                     " h" + std::to_string(f.height), false);
+        }
+        Fixture g = f;
+        g.js.vpub_old += 1;
+        ExpectRejected(g, f.wire, "vpub_old+1 h" + std::to_string(f.height), false);
+    }
+}
+
+TEST(phgr13_malformed, sixteen_threads_all_accept)
+{
+    const Fixture f = Make(PHGR_VECTORS[0]);
+    std::atomic<bool> go(false);
+    std::atomic<int> bad(0);
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 16; t++) {
+        threads.emplace_back([&]() {
+            while (!go.load()) {}
+            for (int i = 0; i < 20; i++) {
+                if (!Judge(f, f.wire).strict) bad++;
+            }
+        });
+    }
+    go = true;
+    for (auto& th : threads) th.join();
+    EXPECT_EQ(bad.load(), 0);
 }
