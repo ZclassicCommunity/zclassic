@@ -340,6 +340,12 @@ static bool HTTPBindAddresses(struct evhttp* http)
         endpoints.push_back(std::make_pair("0.0.0.0", defaultPort));
     }
 
+    // With the default (loopback) set IPv6 ::1 may legitimately be unavailable, but 127.0.0.1 is the
+    // address clients use: failing to bind it (port taken) must stop start-up even if ::1 bound, or the
+    // node would run with an RPC server nobody can reach.
+    const bool fLoopbackDefault = !mapArgs.count("-rpcallowip");
+    bool fRequiredFailed = false;
+
     // Bind addresses
     for (std::vector<std::pair<std::string, uint16_t> >::iterator i = endpoints.begin(); i != endpoints.end(); ++i) {
         LogPrint("http", "Binding RPC on address %s port %i\n", i->first, i->second);
@@ -348,7 +354,16 @@ static bool HTTPBindAddresses(struct evhttp* http)
             boundSockets.push_back(bind_handle);
         } else {
             LogPrintf("Binding RPC on address %s port %i failed.\n", i->first, i->second);
+            if (fLoopbackDefault && i->first == "127.0.0.1")
+                fRequiredFailed = true;
         }
+    }
+    if (fRequiredFailed) {
+        boundSockets.clear(); // the caller frees the evhttp, which closes them
+        std::string msg = strprintf("Unable to bind to RPC port %d on 127.0.0.1 (address already in use?). Stop the other program using it or choose another port with -rpcport.", defaultPort);
+        LogPrintf("%s\n", msg);
+        uiInterface.ThreadSafeMessageBox(msg, "", CClientUIInterface::MSG_ERROR);
+        return false;
     }
     return !boundSockets.empty();
 }
