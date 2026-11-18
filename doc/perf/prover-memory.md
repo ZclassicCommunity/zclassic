@@ -89,7 +89,7 @@ holding them (idle RSS near 30 MB).
 
 The vendored Z23 now stores constraint terms at exact size and offers
 `sapling_create_{spend,output}_proof_parsed`. The glue calls those two functions with the
-parsed key it keeps (the raw keys it verified at init are the glue own, not Z23 params_init, so
+parsed key it keeps (the raw keys it verified at init are the glue's own, not Z23 params_init's, so
 the parsed copy stays in `librustzcash_compat.c`: parsed once on the first proof, freed with the
 last proving context). The glue no longer carries its own copy of the proof assembly
 (synthesize, `groth16_prove`, proof serialization), and a key that cannot be parsed still falls
