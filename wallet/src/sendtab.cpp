@@ -7,6 +7,10 @@
 #include "settings.h"
 #include "rpc.h"
 #include "recurring.h"
+#include "connection.h"
+#include "namepaybox.h"
+#include "namesmodel.h"
+#include <QPointer>
 #include <QScreen>
 
 using json = nlohmann::json;
@@ -51,6 +55,9 @@ void MainWindow::setupSendTab() {
     QObject::connect(ui->Address1, &QLineEdit::textChanged, [=] (auto text) {
         this->addressChanged(1, text);
     });
+
+    // The first recipient's name box (the other recipients get theirs in addAddressSection)
+    ui->sendAddressLayout->insertWidget(1, makeNameBox(1, ui->verticalGroupBox));
 
     // The first Memo button
     QObject::connect(ui->MemoBtn1, &QPushButton::clicked, [=] () {
@@ -250,6 +257,25 @@ void MainWindow::inputComboTextChanged(int index) {
 }
 
     
+// The box under a Pay-to field that looks up a "@name" (see src/namepaybox.h). One per recipient.
+NamePayBox* MainWindow::makeNameBox(int itemNumber, QWidget* parent) {
+    auto nameBox = new NamePayBox([this] (const QString& name, const NamePayBox::Reply& done) {
+        RPC* rpc = this->getRPC();
+        Connection* conn = rpc ? rpc->getConnection() : nullptr;
+        if (!conn) {
+            done(false, json());
+            return;
+        }
+        json payload = {{"jsonrpc", "1.0"}, {"id", "znam"}, {"method", "znam_resolve"},
+                        {"params", json::array({name.toStdString(), "pay"})}};
+        conn->doRPC(payload, [done] (json result) { done(true, result); },
+                    [done] (QNetworkReply*, const json& err) { done(false, err); });
+    }, parent);
+    nameBox->setObjectName(QString("NameBox") % QString::number(itemNumber));
+    QObject::connect(nameBox, &NamePayBox::changed, this, [this, itemNumber] () { this->refreshAddressField(itemNumber); });
+    return nameBox;
+}
+
 void MainWindow::addAddressSection() {
     int itemNumber = ui->sendToWidgets->children().size() - 1;
 
@@ -286,6 +312,10 @@ void MainWindow::addAddressSection() {
     horizontalLayout_12->addWidget(addressBook1);
 
     sendAddressLayout->addLayout(horizontalLayout_12);
+
+    // Pay to a name: "@alice" in the field above is looked up through the daemon and shown here as an ADDRESS to be
+    // confirmed. The box is hidden, and the field is exactly what it was, for anything that does not start with '@'.
+    sendAddressLayout->addWidget(makeNameBox(itemNumber, verticalGroupBox));
 
     auto horizontalLayout_13 = new QHBoxLayout();
     horizontalLayout_13->setSpacing(6);
@@ -351,8 +381,27 @@ void MainWindow::addAddressSection() {
     QTimer::singleShot(10, this, [this] () {ui->sendToScrollArea->ensureWidgetVisible(ui->addAddressButton);});
 }
 
+NamePayBox* MainWindow::nameBoxFor(int itemNumber) const {
+    return ui->sendToWidgets->findChild<NamePayBox*>(QString("NameBox") + QString::number(itemNumber));
+}
+
 void MainWindow::addressChanged(int itemNumber, const QString& text) {
+    // A name ("@alice") is looked up by the box under the field; for anything else this does nothing.
+    if (auto* nb = nameBoxFor(itemNumber))
+        nb->setFieldText(text);
+    refreshAddressField(itemNumber);
+}
+
+void MainWindow::refreshAddressField(int itemNumber) {
+    auto* field = ui->sendToWidgets->findChild<QLineEdit*>(QString("Address") + QString::number(itemNumber));
+    if (!field)
+        return;
+    const QString text = field->text();
     auto addr = AddressBook::addressFromAddressLabel(text);
+    // A name that the user has confirmed stands for its (checked) address; any other entry is itself.
+    auto* nb = nameBoxFor(itemNumber);
+    if (nb)
+        addr = nb->effectiveAddress(addr);
     setMemoEnabled(itemNumber, addr.startsWith("z"));
 
     // Live validation affordance: green border the instant a typed/resolved address
@@ -362,7 +411,11 @@ void MainWindow::addressChanged(int itemNumber, const QString& text) {
     // of the field's "validation" property; the qss border rules do the rest.
     auto* fld = ui->sendToWidgets->findChild<QLineEdit*>(QString("Address") + QString::number(itemNumber));
     if (fld) {
-        const char* state = text.trimmed().isEmpty() ? "empty"
+        // A name that is still being looked up, or whose address waits for the user's confirmation, is neither
+        // valid nor wrong yet: neutral, not red.
+        const bool pendingName = nb && (nb->state() == NamePayBox::State::Waiting || nb->state() == NamePayBox::State::Resolving ||
+                                        (nb->state() == NamePayBox::State::Resolved && nb->usable() && !nb->confirmed()));
+        const char* state = (text.trimmed().isEmpty() || pendingName) ? "empty"
                           : (Settings::isValidAddress(addr) ? "valid" : "invalid");
         if (fld->property("validation").toString() != QString(state)) {
             fld->setProperty("validation", state);
@@ -417,7 +470,10 @@ void MainWindow::setMemoEnabled(int number, bool enabled) {
 void MainWindow::memoButtonClicked(int number, bool includeReplyTo) {
     // Memos can only be used with zAddrs. So check that first
     auto addr = ui->sendToWidgets->findChild<QLineEdit*>(QString("Address") + QString::number(number));
-    if (!AddressBook::addressFromAddressLabel(addr->text()).startsWith("z")) {
+    QString memoTarget = AddressBook::addressFromAddressLabel(addr->text());
+    if (auto* nb = nameBoxFor(number))   // a confirmed "@name" stands for its address
+        memoTarget = nb->effectiveAddress(memoTarget);
+    if (!memoTarget.startsWith("z")) {
         QMessageBox msg(QMessageBox::Critical, tr("Memos can only be used with z-addresses"),
         tr("The memo field can only be used with a z-address.\n") + addr->text() + tr("\ndoesn't look like a z-address"),
         QMessageBox::Ok, this);
@@ -638,6 +694,10 @@ Tx MainWindow::createTxFromSendPage() {
         QString addr = ui->sendToWidgets->findChild<QLineEdit*>(QString("Address") % QString::number(i+1))->text().trimmed();
         // Remove label if it exists
         addr = AddressBook::addressFromAddressLabel(addr);
+        // A name ("@alice") the user has confirmed stands for the ADDRESS that was shown and confirmed: that address,
+        // and nothing about the name, is what z_sendmany receives. Any other entry is used exactly as typed.
+        if (auto* nb = nameBoxFor(i + 1))
+            addr = nb->effectiveAddress(addr);
 
         // If address is sprout, then we can't send change to sapling, because of turnstile.
         if (Settings::getInstance()->isSproutAddress(addr))
@@ -1318,7 +1378,60 @@ bool MainWindow::confirmTx(Tx tx) {
 }
 
 // Send button clicked
+bool MainWindow::checkNameRecipients() {
+    if (nameRecheckPassed_)
+        return true;
+    QVector<NamePayBox*> checking;
+    const int totalItems = ui->sendToWidgets->children().size() - 2;   // the last one is a spacer
+    for (int i = 0; i < totalItems; i++) {
+        auto* fld = ui->sendToWidgets->findChild<QLineEdit*>(QString("Address") + QString::number(i + 1));
+        auto* nb = nameBoxFor(i + 1);
+        if (!fld || !nb)
+            continue;
+        const QString text = fld->text();
+        if (names::parsePayTo(text).kind != names::InputKind::Name)
+            continue;
+        QString why;
+        if (nb->blocksSending(text, &why)) {
+            QMessageBox::warning(this, tr("Confirm the address first"), why);
+            return false;
+        }
+        if (nb->confirmed())
+            checking.push_back(nb);
+    }
+    if (checking.isEmpty())
+        return true;   // no name recipient (or one that did not resolve: its text is then an invalid address, as ever)
+
+    // Ask the node again, now: the owner may have changed the address since it was shown. Sending continues only if
+    // every answer is unchanged; otherwise the box says what happened and nothing is sent.
+    auto remaining = QSharedPointer<int>::create(checking.size());
+    auto allSame = QSharedPointer<bool>::create(true);
+    QPointer<MainWindow> self(this);
+    for (NamePayBox* nb : checking) {
+        nb->recheck([self, remaining, allSame] (bool same) {
+            if (!self)
+                return;
+            if (!same)
+                *allSame = false;
+            if (--*remaining > 0)
+                return;
+            if (*allSame) {
+                self->nameRecheckPassed_ = true;
+                self->sendButton();
+                self->nameRecheckPassed_ = false;
+            } else {
+                QMessageBox::warning(self, tr("The address of a name changed"),
+                    tr("The address a name stands for changed (or could not be checked again) while you were reviewing it, "
+                       "so nothing was sent. The name's box shows what it says now: review the address and confirm it again."));
+            }
+        });
+    }
+    return false;
+}
+
 void MainWindow::sendButton() {
+    if (!checkNameRecipients())
+        return;
     Tx tx = createTxFromSendPage();
 
     // MAJOR-1/MAJOR-2 fail-closed abort: createTxFromSendPage() returns an INVALID
@@ -1547,6 +1660,8 @@ void MainWindow::updateSendPrivacyBadge() {
     QRegExp re("Address[0-9]+", Qt::CaseInsensitive);
     for (auto* fld : ui->sendToWidgets->findChildren<QLineEdit*>(re)) {
         QString a = AddressBook::addressFromAddressLabel(fld->text().trimmed());
+        if (auto* nb = nameBoxFor(fld->objectName().mid(7).toInt()))   // a confirmed "@name" stands for its address
+            a = nb->effectiveAddress(a);
         if (a.isEmpty()) continue;
         anyRecipient = true;
         ToFields t; t.addr = a; t.amount = 0; tx.toAddrs.push_back(t);

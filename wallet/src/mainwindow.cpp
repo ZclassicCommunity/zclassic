@@ -20,6 +20,7 @@
 #include "senttxstore.h"
 #include "connection.h"
 #include "tokensview.h"
+#include "namesview.h"
 
 #include <QSystemTrayIcon>
 #include <QCloseEvent>
@@ -239,6 +240,7 @@ MainWindow::MainWindow(QWidget *parent) :
     // live tab indices (Home/Balance 0, Send 1, Receive 2, Activity 3).
     setupNavRail();
     TokensView::install(this);   // read-only Tokens view: appears only when the daemon runs -zslpindex=1
+    NamesView::install(this);   // Names window: appears only when the daemon runs -znamindex=1
 
     // A funded wallet can show both backup and shielding cards. At large fonts
     // these must scroll instead of squeezing the balance text below its line box.

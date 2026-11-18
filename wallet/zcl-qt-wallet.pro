@@ -75,7 +75,10 @@ SOURCES += \
     src/recurring.cpp \
     src/notifyserver.cpp \
     src/tokensmodel.cpp \
-    src/tokensview.cpp
+    src/tokensview.cpp \
+    src/namesmodel.cpp \
+    src/namepaybox.cpp \
+    src/namesview.cpp
 
 HEADERS += \
     src/releaseversion.h \
@@ -114,7 +117,10 @@ HEADERS += \
     src/addresscombo.h \ 
     src/recurring.h \
     src/tokensmodel.h \
-    src/tokensview.h
+    src/tokensview.h \
+    src/namesmodel.h \
+    src/namepaybox.h \
+    src/namesview.h
 
 FORMS += \
     src/mainwindow.ui \

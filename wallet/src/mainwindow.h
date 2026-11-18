@@ -61,6 +61,8 @@ namespace Ui {
     class MainWindow;
 }
 
+class NamePayBox;
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -488,6 +490,17 @@ private:
     void editSchedule();
 
     void addressChanged(int number, const QString& text);
+    // Everything that depends on what the Pay-to field currently stands for (validation border, memo, badge,
+    // totals). Split out of addressChanged so a change of a name's answer can refresh it without re-reading the text.
+    void refreshAddressField(int number);
+    // Pay to a name ("@alice"): see src/namepaybox.h. The box under the field holds the lookup and the user's
+    // confirmation of the ADDRESS; the transaction only ever carries that address.
+    NamePayBox* nameBoxFor(int number) const;
+    NamePayBox* makeNameBox(int number, QWidget* parent);
+    // False when sending must wait: a name is unconfirmed, still being looked up, or is being checked again just
+    // before sending (sendButton() is then called again by the check itself).
+    bool checkNameRecipients();
+    bool nameRecheckPassed_ = false;
     void amountChanged (int number, const QString& text);
     // PRESENTATION-ONLY helpers (no money/zatoshi math): the live private/public verdict
     // badge above the Send form (echoes sendCategoryOf), and the running "You'll send X +
