@@ -2320,6 +2320,24 @@ bool AbortNode(CValidationState& state, const std::string& strMessage, const std
 
 } // anon namespace
 
+/** Read the undo data of a connected block (read-only; used by the optional ZNAM index, src/znam).
+ *  False when the block has none on disk. */
+bool ReadBlockUndoFromDisk(CBlockUndo& blockundo, const CBlockIndex* pindex)
+{
+    CDiskBlockPos pos;
+    uint256 prevHash;
+    {
+        LOCK(cs_main);
+        if (!pindex || !pindex->pprev)
+            return false;
+        pos = pindex->GetUndoPos();
+        prevHash = pindex->pprev->GetBlockHash();
+    }
+    if (pos.IsNull())
+        return false;
+    return UndoReadFromDisk(blockundo, pos, prevHash);
+}
+
 /**
  * Apply the undo operation of a CTxInUndo to the given chain state.
  * @param undo The undo object.

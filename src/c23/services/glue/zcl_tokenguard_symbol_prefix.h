@@ -28,4 +28,12 @@
 #define slp_build_send zc23_slp_build_send
 #define slp_classify_tx_output zc23_slp_classify_tx_output
 #define slp_parse zc23_slp_parse
+#define znam_build_register zc23_znam_build_register
+#define znam_build_renew zc23_znam_build_renew
+#define znam_build_set_record zc23_znam_build_set_record
+#define znam_build_set_text zc23_znam_build_set_text
+#define znam_build_transfer zc23_znam_build_transfer
+#define znam_build_update zc23_znam_build_update
+#define znam_parse zc23_znam_parse
+#define znam_validate_name zc23_znam_validate_name
 #endif
