@@ -745,3 +745,26 @@ TEST(TransactionBuilder, ConcurrentOutputProofsVerify)
 
     RegtestDeactivateSapling();
 }
+
+// A send makes only as many proofs at once as fit the prover's memory allowance
+// (shared proving keys plus one working set each, at most about 340 MB or an
+// eighth of the machine), never fewer than one, and more memory never lowers it.
+TEST(TransactionBuilder, ProverWorkerLimitFollowsPhysicalMemory)
+{
+    const uint64_t GiB = UINT64_C(1) << 30;
+    EXPECT_EQ(ProverWorkerLimit(0), 2u); // memory unknown: the ceiling
+    EXPECT_EQ(ProverWorkerLimit(64 * GiB), 2u);
+    EXPECT_EQ(ProverWorkerLimit(8 * GiB), 2u);
+    EXPECT_EQ(ProverWorkerLimit(3 * GiB), 2u);
+    EXPECT_EQ(ProverWorkerLimit(2 * GiB), 1u);
+    EXPECT_EQ(ProverWorkerLimit(1 * GiB), 1u);
+    EXPECT_EQ(ProverWorkerLimit(256 * (UINT64_C(1) << 20)), 1u);
+
+    size_t last = 0;
+    for (uint64_t mib = 64; mib <= 65536; mib += 64) {
+        size_t w = ProverWorkerLimit(mib << 20);
+        EXPECT_GE(w, 1u);
+        EXPECT_GE(w, last) << mib << " MiB";
+        last = w;
+    }
+}
