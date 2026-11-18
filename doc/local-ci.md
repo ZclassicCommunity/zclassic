@@ -143,3 +143,14 @@ The Windows wallet is built natively on the Windows PC (static Qt 5.15.2, MinGW
    and run `sh contrib/cross/check-win-deps.sh` and the windows-packaging tests.
 3. Smoke the daemon headlessly first: `sh zcutil/local-ci-smoke.sh --bin <dir> --work <empty scratch dir>`
    (hidden process, scratch datadir, ports 43900-43901, never the real datadir).
+
+## Notes from operating it
+
+* Under the host broker's `normal` class (8 GB memory cap) the debug test build is
+  killed at `--jobs 8`; use `--jobs 3` for `test`. The daemon and wallet stages are fine at 8.
+* Windows `.exe` files and the wallet bundle are not byte-for-byte reproducible between
+  runs (link timestamps); the Linux and macOS daemons are. Compare `SOURCE_COMMIT.txt`
+  and the validation output, not the hashes of two different runs.
+* Not run here: the Python 2 RPC tests of `qa/rpc-tests`, the macOS wallet bundle
+  (`local-ci-macos.sh wallet` builds Qt for about an hour on the first run), and the
+  Windows wallet GUI (built natively on the Windows PC, see above).

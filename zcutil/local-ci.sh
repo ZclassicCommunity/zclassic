@@ -448,7 +448,7 @@ EOF
     # tar run as (mapped) root restores the archive owner, which a one-uid namespace refuses.
     mkdir -p "$ENVDIR/usr/local/bin"
     printf '#!/bin/sh
-exec /bin/tar --no-same-owner "$@"
+exec /bin/tar "$@" --no-same-owner
 ' >"$ENVDIR/usr/local/bin/tar"
     chmod 755 "$ENVDIR/usr/local/bin/tar"
     mkdir -p "$ENVDIR/etc/apt/apt.conf.d" "$ENVDIR/root" "$ENVDIR/ci" "$ENVDIR/w" "$ENVDIR/cache" "$ENVDIR/out"
