@@ -702,8 +702,7 @@ libzcl_c23_a_SOURCES = \
   c23/glue/zcl_c23_glue.c \
   c23/glue/zcl_c23_stubs.c \
   c23/glue/zcl_c23_tree_selftest.c \
-  c23/glue/zcl_c23_sapling_scan.c \
-  c23/compat/zcl_c23_sapling_scan.h \
+  c23/glue/zcl_c23_sapling_scan.c \\n  c23/compat/zcl_c23_sapling_scan.h \
   c23/equihash/zc23_equihash.c \
   c23/equihash/zc23_equihash_vendor.c \
   c23/compat/librustzcash_compat.c \
@@ -901,6 +900,10 @@ EXTRA_DIST = leveldb snark test/tree_root_c_tests.c \
   c23/services/tools/slpscript.c \
   c23/services/tools/znamscript.c
 EXTRA_DIST += c23/tor/check-symbols.sh windows-utf8.manifest
+# The in-tree C23 headers and scripts every build needs (librustzcash.h, the force-included
+# symbol-prefix header, the vendored include trees, symbol-prefix.sh), so a make dist tarball builds.
+EXTRA_DIST += c23/README.md c23/NOTICE c23/LICENSE.z23 c23/Z23_SOURCE.tsv \
+  c23/compat c23/equihash c23/glue c23/sprout_prover c23/vendor c23/tools c23/tor c23/services
 
 clean-local:
 	-$(MAKE) -C leveldb clean
