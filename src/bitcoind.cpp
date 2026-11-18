@@ -89,6 +89,43 @@ static bool EnsureDirectoryExists(const boost::filesystem::path& dir, const char
     return true;
 }
 
+#ifdef WIN32
+/**
+ * Without the Windows "long paths" setting, every path the node opens is limited to MAX_PATH (259
+ * characters). The deepest file below the datadir is the "\chainstate-verify\MANIFEST-000001" of a
+ * LevelDB (34 characters; 36 with larger file numbers), so a datadir this long fails later with a
+ * misleading "Error opening block database". Refuse it up front and say why. When the system has
+ * LongPathsEnabled set the manifest's longPathAware opt-in makes such paths work, so nothing is refused.
+ */
+static bool WinLongPathsEnabled()
+{
+    HKEY hKey;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Control\\FileSystem", 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+        return false;
+    DWORD dwValue = 0, dwSize = sizeof(dwValue), dwType = 0;
+    LONG rc = RegQueryValueExA(hKey, "LongPathsEnabled", NULL, &dwType, (LPBYTE)&dwValue, &dwSize);
+    RegCloseKey(hKey);
+    return rc == ERROR_SUCCESS && dwType == REG_DWORD && dwValue != 0;
+}
+
+static bool WinDataDirLengthOk()
+{
+    static const size_t MAX_PATH_CHARS = 259; // MAX_PATH minus the terminating NUL
+    static const size_t LONGEST_DATADIR_SUFFIX = 36;
+    const std::string dir = GetDataDir(true).string();
+    if (dir.size() + LONGEST_DATADIR_SUFFIX <= MAX_PATH_CHARS || WinLongPathsEnabled())
+        return true;
+    fprintf(stderr,
+            "Error: the data directory path \"%s\" is %u characters long. Windows limits paths to %u characters\n"
+            "unless long paths are enabled, and the node needs up to %u more below the data directory, so the\n"
+            "path may be at most %u characters. Use a shorter -datadir, or enable long paths (set the DWORD\n"
+            "HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\\LongPathsEnabled to 1 and restart Windows).\n",
+            dir.c_str(), (unsigned)dir.size(), (unsigned)MAX_PATH_CHARS, (unsigned)LONGEST_DATADIR_SUFFIX,
+            (unsigned)(MAX_PATH_CHARS - LONGEST_DATADIR_SUFFIX));
+    return false;
+}
+#endif
+
 bool AppInit(int argc, char* argv[])
 {
     boost::thread_group threadGroup;
@@ -204,6 +241,11 @@ bool AppInit(int argc, char* argv[])
                     e.path1().string().c_str(), e.code().message().c_str());
             return false;
         }
+
+#ifdef WIN32
+        if (!WinDataDirLengthOk())
+            return false;
+#endif
 
         // Command-line RPC
         bool fCommandLine = false;
