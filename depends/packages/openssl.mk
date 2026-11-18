@@ -11,6 +11,7 @@ $(package)_config_opts=--prefix=$(host_prefix) --libdir=lib --openssldir=$(host_
 $(package)_config_opts+=no-afalgeng
 $(package)_config_opts+=no-legacy
 $(package)_config_opts+=no-module
+$(package)_config_opts+=no-apps
 $(package)_config_opts+=no-tests
 $(package)_config_opts+=no-docs
 $(package)_config_opts+=no-async
