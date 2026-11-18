@@ -6556,12 +6556,13 @@ static void ProcessAddrList(CNode* pfrom, vector<CAddress>& vAddr)
         if (fReachable) {
             if (!addr.IsTorV3()) {
                 vAddrOk.push_back(addr);
-            } else if (pfrom->fGetAddr) {
-                vAddrOnionOk.push_back(addr); // the answer to our own getaddr
             } else if (pfrom->dOnionAddrTokens >= 1.0) {
-                // A v3 key is any 32 bytes: unasked ones are rationed per peer, or one
-                // peer (every visitor of our onion service shares the source 127.0.0.1)
-                // could fill the whole onion store with made-up addresses.
+                // A v3 key is any 32 bytes: they are rationed per peer, or one peer
+                // (every visitor of our onion service shares the source 127.0.0.1)
+                // could fill the whole onion store with made-up addresses. Our own
+                // getaddr adds one full answer to the allowance when it is sent;
+                // fGetAddr itself is no exemption, since a peer that keeps sending
+                // 1000-entry messages keeps it set.
                 pfrom->dOnionAddrTokens -= 1.0;
                 vAddrOnionOk.push_back(addr);
             } else {
@@ -6699,6 +6700,8 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
             {
                 pfrom->PushMessage("getaddr");
                 pfrom->fGetAddr = true;
+                // room for one full answer (see ProcessAddrList), once per getaddr
+                pfrom->dOnionAddrTokens += MAX_ADDR_TO_SEND;
             }
             AddrManFor(pfrom->addr).Good(pfrom->addr);
         } else {

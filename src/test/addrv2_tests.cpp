@@ -756,17 +756,33 @@ BOOST_AUTO_TEST_CASE(onion_store_additions_are_rationed_per_peer)
     BOOST_CHECK_LE(addrmanOnion.size(), (size_t)ONION_ADDR_TOKENS_INITIAL + 10);
     BOOST_CHECK_GT(addrmanOnion.size(), 0u);
 
-    // the answer to our own getaddr is not rationed
+    // one full answer to our own getaddr is taken (sending getaddr adds
+    // MAX_ADDR_TO_SEND to the allowance, as below) ...
     addrmanOnion.Clear();
     CNode* answerer = NewNode(keep, "8.8.8.8", false);
     answerer->fSendAddrV2 = true;
     answerer->fGetAddr = true;
+    answerer->dOnionAddrTokens += MAX_ADDR_TO_SEND;
     vector<CAddress> v;
     for (uint32_t i = 0; i < 1000; i++)
         v.push_back(MakeV3N(300000 + i));
     CDataStream p = V2Payload(v);
     BOOST_CHECK(ProcessMessage(answerer, "addrv2", p, GetTime()));
     BOOST_CHECK_GT(addrmanOnion.size(), 400u);
+
+    // ... but a peer we asked cannot keep the door open: every 1000-entry
+    // message leaves fGetAddr set, and that alone is no exemption
+    BOOST_CHECK(answerer->fGetAddr);
+    const size_t nAfterAnswer = addrmanOnion.size();
+    for (int m = 1; m <= 5; m++) {
+        vector<CAddress> more;
+        for (uint32_t i = 0; i < 1000; i++)
+            more.push_back(MakeV3N(400000 + m * 1000 + i));
+        CDataStream pm = V2Payload(more);
+        BOOST_CHECK(ProcessMessage(answerer, "addrv2", pm, GetTime()));
+    }
+    BOOST_CHECK_MESSAGE(addrmanOnion.size() <= nAfterAnswer + (size_t)ONION_ADDR_TOKENS_INITIAL + 10,
+                        addrmanOnion.size() << " stored after the answer held " << nAfterAnswer);
 
     addrmanOnion.Clear();
     SetLimited(NET_ONION, wasLimited);
