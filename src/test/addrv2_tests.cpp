@@ -760,7 +760,7 @@ BOOST_AUTO_TEST_CASE(onion_store_selection_weighs_buckets_not_entries)
     // picking by entry would give them about 8 of the ~1000 stored (under 1%);
     // by bucket their one bucket (all 8 share an address group and a source
     // group) weighs against the ~15 the flood can reach (16 address groups under
-    // one source group), about 6% with the fixed key, 80 is the floor
+    // one source group), about 6% with the fixed key, 4% is the floor
     BOOST_TEST_MESSAGE("onion honest picks: " << nHonest << " of " << nPicks);
     BOOST_CHECK_MESSAGE(nHonest > nPicks / 25, nHonest << " honest picks of " << nPicks);
 }
