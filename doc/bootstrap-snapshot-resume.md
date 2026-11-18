@@ -92,7 +92,10 @@ deleted. Reuse means `BootstrapResumeScan` classifies each manifest file:
   trailing chunk is fetched again, a `.part` as long as the file still re-requests its last
   chunk so that it passes through the normal verify-and-rename path; shorter than a chunk or
   longer than the file: deleted);
-* anything the manifest does not name: deleted; symlinks or special files: the scan refuses.
+* anything the manifest does not name: deleted. Symlinks, special files and a directory where a
+  manifest file belongs are deleted too (a symlink is unlinked, never followed, and its target is
+  left alone), so a damaged or planted entry costs a re-fetch of that file instead of failing
+  every later attempt.
 
 A resumed `.part` is only ever as trusted as a freshly downloaded file: the whole-file hash
 decides. If it does not match, the file is deleted and fetched from byte 0 (a second failure

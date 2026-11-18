@@ -1577,7 +1577,12 @@ static void BootstrapFsyncDir(const boost::filesystem::path& dir)
 }
 
 // Remove everything in `staging` that the current manifest does not name (and
-// the staging marker). Refuses symlinks and special files.
+// the staging marker). Symlinks, special files and directories sitting where the
+// manifest expects a file are removed as well: removing a symlink unlinks the link
+// itself and never touches its target, and nothing is ever opened through one. They
+// used to make the scan refuse, which left the staging directory in place and
+// failed every later attempt the same way, so a single planted or damaged entry
+// disabled the bootstrap for good.
 static bool BootstrapSweepStrayStaging(const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging,
                                        size_t& removed, std::string& error)
 {
@@ -1605,15 +1610,22 @@ static bool BootstrapSweepStrayStaging(const CBootstrapSnapshotManifest& manifes
                 continue;
             }
             for (boost::filesystem::recursive_directory_iterator it(top->path()), end; it != end; ++it) {
+                // Lexical, so a link is never resolved to compute the name.
+                const std::string key = it->path().lexically_relative(staging).generic_string();
                 const boost::filesystem::file_status ist = boost::filesystem::symlink_status(it->path());
-                if (ist.type() == boost::filesystem::directory_file)
+                if (ist.type() == boost::filesystem::directory_file) {
+                    // A directory where a manifest file (or its .part) belongs could never be
+                    // replaced by the verified file: drop it, without descending into it.
+                    if (expected.count(key)) {
+                        strays.push_back(it->path());
+                        it.disable_recursion_pending();
+                    }
                     continue;
-                if (ist.type() != boost::filesystem::regular_file) {
-                    error = strprintf("bootstrap staging contains a non-regular entry: %s", it->path().string());
-                    return false;
                 }
-                const std::string key = boost::filesystem::relative(it->path(), staging).generic_string();
-                if (!expected.count(key))
+                // recursive_directory_iterator does not follow directory symlinks, so a
+                // symlink (to a file or a directory) or a special file shows up here as one
+                // entry and is unlinked like any unknown file.
+                if (ist.type() != boost::filesystem::regular_file || !expected.count(key))
                     strays.push_back(it->path());
             }
         }
@@ -3786,7 +3798,10 @@ bool BootstrapPrepareStaging(const boost::filesystem::path& data_dir, const CBoo
     const boost::filesystem::path markerPath = staging / BOOTSTRAP_STAGING_MARKER;
     BootstrapStagingMarker marker;
     bool markerValid = false;
-    if (exists) {
+    // Only a regular file can be a marker: a symlink or a FIFO in its place is not
+    // opened (a FIFO would block the startup thread); the directory is then
+    // treated as having no valid marker and is discarded.
+    if (exists && boost::filesystem::symlink_status(markerPath, ec).type() == boost::filesystem::regular_file) {
         FILE* f = fopen(markerPath.string().c_str(), "rb");
         if (f) {
             char buf[513];

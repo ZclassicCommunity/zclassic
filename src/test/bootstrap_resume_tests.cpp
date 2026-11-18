@@ -39,6 +39,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -472,6 +473,27 @@ BOOST_AUTO_TEST_CASE(prepare_staging_reuses_discards_and_marks)
     BOOST_CHECK(!fs::exists(nextStaging));
 }
 
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(prepare_staging_never_opens_a_marker_that_is_not_a_regular_file)
+{
+    // A FIFO in place of the marker would block the startup thread in fopen(): it is
+    // never opened, and the directory counts as having no valid marker.
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(3);
+    const fs::path dir = tmp.path / BootstrapStagingDirName(s.manifest);
+    fs::create_directories(dir / "blocks");
+    WriteFile(dir / "blocks" / "x", "x");
+    BOOST_REQUIRE_EQUAL(mkfifo((dir / BOOTSTRAP_STAGING_MARKER).string().c_str(), 0600), 0);
+    fs::path staging;
+    BootstrapStagingVerdict verdict;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(BootstrapPrepareStaging(tmp.path, s.manifest, staging, verdict, error), error);
+    BOOST_CHECK_EQUAL(verdict, BSV_DISCARD_BAD_MARKER);
+    BOOST_CHECK(fs::is_regular_file(fs::symlink_status(staging / BOOTSTRAP_STAGING_MARKER)));
+    BOOST_CHECK(!fs::exists(staging / "blocks" / "x"));
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(scan_keeps_verified_resumes_partial_and_deletes_the_rest)
 {
     TempDir tmp;
@@ -558,9 +580,32 @@ BOOST_AUTO_TEST_CASE(scan_keeps_verified_resumes_partial_and_deletes_the_rest)
     evil.vFiles[0].strPath = "../../etc/passwd";
     BOOST_CHECK(!BootstrapResumeScan(evil, staging, pending2, completed2, again, error));
 #ifndef WIN32
-    // a symlink in staging is refused (never followed)
-    fs::create_symlink(tmp.path, staging / "blocks" / "link");
-    BOOST_CHECK(!BootstrapResumeScan(m, staging, pending2, completed2, again, error));
+    // Symlinks in staging are never followed: each link is unlinked and its target is
+    // left alone, and a link standing in for a manifest file means that file is fetched
+    // again. A directory where a manifest file belongs is removed too (it could never be
+    // replaced by the verified file, so keeping it would fail every later attempt).
+    const fs::path outsideDir = tmp.path / "outside";
+    fs::create_directories(outsideDir);
+    WriteFile(outsideDir / "keep.dat", s.contents[0]);
+    fs::create_directory_symlink(outsideDir, staging / "blocks" / "linkdir");
+    fs::remove(staging / m.vFiles[0].strPath);
+    fs::create_symlink(outsideDir / "keep.dat", staging / m.vFiles[0].strPath);
+    fs::remove(staging / m.vFiles[7].strPath);
+    fs::create_directories(staging / m.vFiles[7].strPath / "sub");
+    WriteFile(staging / m.vFiles[7].strPath / "sub" / "x", "x");
+    BootstrapResumeStats links;
+    BOOST_REQUIRE_MESSAGE(BootstrapResumeScan(m, staging, pending2, completed2, links, error), error);
+    BOOST_CHECK_EQUAL(links.strayRemoved, 3);
+    BOOST_CHECK_EQUAL(links.filesKept, 0);
+    BOOST_CHECK(!fs::exists(fs::symlink_status(staging / "blocks" / "linkdir")));
+    BOOST_CHECK(!fs::exists(fs::symlink_status(staging / m.vFiles[0].strPath)));
+    BOOST_CHECK(!fs::exists(fs::symlink_status(staging / m.vFiles[7].strPath)));
+    BOOST_CHECK(fs::is_regular_file(fs::symlink_status(outsideDir / "keep.dat")));
+    BOOST_CHECK(ReadFile(outsideDir / "keep.dat") == s.contents[0]);
+    BOOST_CHECK(fs::exists(staging / (m.vFiles[4].strPath + ".part"))); // unrelated progress survives
+    const std::set<uint32_t> pendLinks(pending2.begin(), pending2.end());
+    BOOST_CHECK(pendLinks.count(0));
+    BOOST_CHECK(pendLinks.count(7));
 #endif
 }
 
