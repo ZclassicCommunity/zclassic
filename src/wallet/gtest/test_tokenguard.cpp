@@ -1048,6 +1048,38 @@ TEST_F(TokenGuardTest, FundTransactionWithTokenInputsKeepsTheChangeLast)
     }
 }
 
+TEST_F(TokenGuardTest, TokenGuardSwitchOffSpendsEverything)
+{
+    StandardScenario();
+    std::set<COutPoint> inputs;
+    std::string strFail;
+
+    struct Restore {
+        ~Restore() { fTokenGuard = true; }
+    } restore;
+
+    // On (the default): more than the ordinary coins hold cannot be sent.
+    ASSERT_TRUE(fTokenGuard);
+    EXPECT_FALSE(Create(wallet, nOrdinaryValue + 1000, true, NULL, inputs, strFail));
+    EXPECT_EQ(0u, strFail.find("Insufficient funds")) << strFail;
+
+    // -tokenguard=0: token-bearing outputs are ordinary coins to every send path.
+    fTokenGuard = false;
+    ASSERT_TRUE(Create(wallet, nOrdinaryValue + 1000, true, NULL, inputs, strFail)) << strFail;
+    EXPECT_GE(CountProtected(inputs), 1u);
+
+    // coin control may name a token output without any override
+    CCoinControl cc;
+    cc.Select(COutPoint(txidFund, 0));
+    cc.Select(COutPoint(txidGenesis, 2));
+    ASSERT_TRUE(Create(wallet, COIN / 2, false, &cc, inputs, strFail)) << strFail;
+    EXPECT_EQ(1u, inputs.count(COutPoint(txidGenesis, 2)));
+    EXPECT_EQ(std::string::npos, strFail.find("carries ZSLP tokens")) << strFail;
+
+    // the classification itself, which zslp_listunspent and the zslp_* RPCs use, does not change
+    EXPECT_TRUE(wallet->mapWallet[txidGenesis].IsTokenBearingOutput(1));
+    EXPECT_FALSE(wallet->mapWallet[txidGenesis].IsTokenGuarded(1));
+}
 
 TEST_F(TokenGuardTest, MergeToAddressSkipsTokenOutputs)
 {

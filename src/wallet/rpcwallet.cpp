@@ -4162,7 +4162,7 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
 
         // Wallet token guard: a coinbase transaction can carry an SLP message
         // like any other, and shielding its token-bearing output burns the tokens.
-        if (out.tx->IsCoinBase() && out.tx->IsTokenBearingOutput(out.i)) {
+        if (out.tx->IsCoinBase() && out.tx->IsTokenGuarded(out.i)) {
             CTxDestination tokenAddress;
             if (ExtractDestination(out.tx->vout[out.i].scriptPubKey, tokenAddress) &&
                 (destinations.size() == 0 || destinations.count(tokenAddress))) {
@@ -4510,7 +4510,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
 
             // Wallet token guard: merging a token-bearing output into an
             // ordinary payment burns the tokens or the mint baton it carries.
-            if (out.tx->IsTokenBearingOutput(out.i)) {
+            if (out.tx->IsTokenGuarded(out.i)) {
                 tokenGuardReport.Exclude(out.tx->vout[out.i].nValue);
                 continue;
             }
