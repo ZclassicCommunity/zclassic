@@ -75,6 +75,7 @@ It covers, in order:
 6. [Linux — single-file dev build (`make-allinone.sh`)](#5-linux--single-file-dev-build-make-allinonesh)
 7. [Linux — portable static-Qt release (`mkrelease.sh`)](#6-linux--portable-static-qt-release-mkreleasesh)
 8. [Windows — static-Qt cross build + manual embed](#7-windows--static-qt-cross-build-from-linux)
+   - [Windows — native Qt-kit release bundle (`build-windows.sh`)](#7b-windows--native-release-bundle-with-the-qt-kit-build-windowssh)
 9. [macOS — `.app` / `.dmg` + ad-hoc codesign (correct ORDER)](#8-macos--app--dmg--ad-hoc-codesign)
 10. [Two pitfalls everyone hits: qt5-websockets & libsodium](#9-the-two-pitfalls-you-must-know)
 11. [Verifying any build](#10-verifying-any-build)
@@ -383,6 +384,67 @@ passes the import check; the GUI requires a rebuild.
 A full static Qt 5.15 installation including QtSvg is required. Build and test
 on a clean Windows environment before publishing; packaging regression tests
 alone do not establish that the wallet GUI starts correctly.
+
+## 7b. Windows — native release bundle with the Qt kit (`build-windows.sh`)
+
+For a Windows host with the stock Qt installer (dynamic Qt 5.15.2, MinGW 8.1). This
+is the dynamic-Qt counterpart of §7 and of `contrib/release/linux.sh`: one command
+builds the GUI, deploys Qt, adds the daemon and zips it as
+`zclwallet-v2.1.2-beta13-windows-x86_64.zip`.
+
+**Prerequisites** (nothing is installed or changed system-wide): Git Bash or MSYS2;
+the Qt kit `C:/Qt/5.15.2/mingw81_64` and its MinGW `C:/Qt/Tools/mingw810_64`;
+OpenSSL 1.1.1 DLLs (the installer's `C:/Qt/Tools/OpenSSL/Win_x64/bin`: Qt 5.15 loads
+`libssl-1_1-x64.dll` and `libcrypto-1_1-x64.dll` at run time for the https update
+check, and OpenSSL 3 does not work); a static `libsodium.a` for x86_64-w64-mingw32;
+a reviewed `zclassicd.exe`, `zclassic-cli.exe`, `zclassic-tx.exe`; Windows PowerShell
+(or `zip`) for the archive.
+
+```sh
+sh wallet/contrib/release/build-windows.sh \
+    C:/Qt/5.15.2/mingw81_64 C:/Qt/Tools/mingw810_64 \
+    C:/path/to/libsodium.a C:/path/to/daemon-dir C:/path/to/new-output-dir
+```
+
+`JOBS=14` sets the make parallelism (default: all CPUs), `ALLINONE=1` also produces
+`...-windows-x86_64-allinone.zip` whose `zclwallet.exe` carries the daemon in the
+ZQWDMON1 footer of §1 (no `zclassicd.exe` next to it; extracted to `%LOCALAPPDATA%`),
+`SKIP_PROBE=1` skips the platform-plugin probe. The output directory must be empty.
+
+Output: `<out>/zclwallet-v2.1.2-beta13-windows-x86_64/` (the bundle, with its own
+per-file `SHA256SUMS.txt`), the `.zip`, `<out>/SHA256SUMS.txt` (hashes of the zips) and
+`<out>/build/` (logs). The script fails if any PE file in the bundle imports a DLL
+that is neither a Windows system DLL nor in the bundle, then runs, from a copy
+with `PATH` reduced to `System32` and `Windows` and `APPDATA`/`LOCALAPPDATA`/
+`USERPROFILE` redirected: `zclwallet.exe --print-profile-paths`, `zclassicd.exe -version`
+and `tests/check-platform` (constructs `QGuiApplication` with the real `windows`
+platform plugin, creates no window, must print `platform=windows`).
+
+Why `windeployqt --debug`: the kit's DLLs and plugins are release builds with a
+`.gnu_debuglink` (separate debug info). `windeployqt` reads that as "debug", sees a
+release `zclwallet.exe`, skips every plugin and stops with "Unable to find the
+platform plugin"; `--release` (with or without `--force`, `--plugindir`,
+`--compiler-runtime`) cannot work around it. `--debug` only changes that matching;
+the files deployed are still the kit's release DLLs. The MinGW runtime DLLs
+(`libgcc_s_seh-1`, `libstdc++-6`, `libwinpthread-1`) are added by the script's import walk.
+The wallet uses QtCore/Gui/Widgets/Network/Svg only (no WebSockets, printing or
+multimedia), so none of those modules are bundled.
+
+Try a build without touching your wallet: set `ZCLWALLET_PROFILE_DIR` to an existing
+empty folder (or run `try-isolated.cmd` from the bundle). The wallet then keeps its
+settings (`.ini`, not the registry), logs, `zclassic.conf` and the node datadir under
+that folder, and shows `[profile: <dir>]` in the title bar.
+
+```bat
+mkdir %USERPROFILE%\zclwallet-profile
+set ZCLWALLET_PROFILE_DIR=%USERPROFILE%\zclwallet-profile
+zclwallet.exe --print-profile-paths
+```
+
+The headless widget tests need a Qt whose `QMessageBox` survives the offscreen
+platform; see `tests/README.md` (and `tests/qt-5.15.2-windows-offscreen.patch`).
+
+---
 
 ## 8. macOS — `.app` / `.dmg` + ad-hoc codesign
 
