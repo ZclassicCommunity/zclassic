@@ -1021,7 +1021,8 @@ protected:
     void BuildSaplingScanBatch(
         const std::vector<std::pair<CBlockIndex*, CBlock>>& window,
         int nWorkers,
-        std::map<SaplingOutPoint, SaplingOutputMatch>& out) const;
+        std::map<SaplingOutPoint, SaplingOutputMatch>& out,
+        bool skipKnownTransactions = false) const;
 
     /**
      * Transient rescan state, set ONLY by ScanForWalletTransactions while

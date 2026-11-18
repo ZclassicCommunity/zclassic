@@ -2018,20 +2018,27 @@ boost::optional<SaplingOutputMatch> CWallet::TrialDecryptSaplingOutput(
     const OutputDescription& output,
     const std::vector<SaplingIncomingViewingKey>& ivks) const
 {
-    for (const SaplingIncomingViewingKey& ivk : ivks) {
-        auto result = SaplingNotePlaintext::decrypt(output.encCiphertext, ivk, output.ephemeralKey, output.cm);
-        if (!result) {
-            continue;
-        }
-        SaplingOutputMatch m;
-        m.ivk = ivk;
-        // Cache the note's plaintext value (a non-invertible CAmount only;
-        // no key material) so balance reads can avoid a re-decrypt.
-        m.value = CAmount(result.get().value());
-        m.address = ivk.address(result.get().d);
-        return m;
+    // One shared pass over the whole ivk list: the output's epk is decompressed
+    // and tabulated once, and the per-key field inversions are batched. The
+    // first matching ivk in snapshot order wins, exactly like the one-key-at-a-
+    // time loop it replaces (see SaplingNotePlaintext::decryptWithFirstMatchingIvk).
+    size_t ivkIndex = 0;
+    SaplingNotePlaintext plaintext;
+    uint256 pk_d;
+    if (!SaplingNotePlaintext::decryptWithFirstMatchingIvk(
+            output.encCiphertext, ivks, output.ephemeralKey, output.cm,
+            ivkIndex, plaintext, pk_d)) {
+        return boost::none;
     }
-    return boost::none;
+    SaplingOutputMatch m;
+    m.ivk = ivks[ivkIndex];
+    // Cache the note's plaintext value (a non-invertible CAmount only;
+    // no key material) so balance reads can avoid a re-decrypt.
+    m.value = CAmount(plaintext.value());
+    // Same value as ivk.address(plaintext.d): decryption already ran
+    // ivk_to_pkd for this (ivk, d), and the diversifier is valid because it did.
+    m.address = SaplingPaymentAddress(plaintext.d, pk_d);
+    return m;
 }
 
 std::pair<mapSaplingNoteData_t, SaplingIncomingViewingKeyMap> CWallet::FindMySaplingNotes(const CTransaction &tx) const
@@ -2695,7 +2702,8 @@ static const size_t WALLET_SCAN_WINDOW_BYTES  = 32 * 1024 * 1024; // 32 MiB
 void CWallet::BuildSaplingScanBatch(
     const std::vector<std::pair<CBlockIndex*, CBlock>>& window,
     int nWorkers,
-    std::map<SaplingOutPoint, SaplingOutputMatch>& out) const
+    std::map<SaplingOutPoint, SaplingOutputMatch>& out,
+    bool skipKnownTransactions) const
 {
     // Freeze the ivk set once for the whole window, in deterministic map-key
     // order. mapSaplingFullViewingKeys does not change during a rescan (no
@@ -2724,6 +2732,9 @@ void CWallet::BuildSaplingScanBatch(
                 continue;
             }
             const uint256 hash = tx.GetHash();
+            if (skipKnownTransactions && mapWallet.count(hash)) {
+                continue; // never consulted: see ScanForWalletTransactions
+            }
             for (uint32_t i = 0; i < tx.vShieldedOutput.size(); ++i) {
                 cells.push_back(Cell{ SaplingOutPoint{hash, i}, &tx.vShieldedOutput[i] });
             }
@@ -2908,7 +2919,10 @@ int CWallet::ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate)
                 }
 
                 std::map<SaplingOutPoint, SaplingOutputMatch> batchMatches;
-                BuildSaplingScanBatch(window, nWorkers, batchMatches);
+                // With fUpdate == false AddToWalletIfInvolvingMe returns for a
+                // transaction the wallet already holds before it looks at any
+                // output, so decrypting those outputs here would be wasted.
+                BuildSaplingScanBatch(window, nWorkers, batchMatches, !fUpdate);
 
                 pScanSaplingBatch = &batchMatches;
                 // Reset on EVERY exit (incl. an exception out of applyBlock),
