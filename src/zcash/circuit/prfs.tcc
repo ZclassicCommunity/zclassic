@@ -16,7 +16,7 @@ public:
         pb_variable_array<FieldT> x,
         pb_variable_array<FieldT> y,
         std::shared_ptr<digest_variable<FieldT>> result
-    ) : gadget<FieldT>(pb), result(result) {
+    ) : gadget<FieldT>(pb, "PRF_gadget"), result(result) {
 
         pb_linear_combination_array<FieldT> IV = SHA256_default_IV(pb);
 

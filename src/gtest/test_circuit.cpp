@@ -24,13 +24,13 @@ template<typename FieldT>
 void test_value_equals(uint64_t i) {
     protoboard<FieldT> pb;
     pb_variable_array<FieldT> num;
-    num.allocate(pb, 64, "");
+    num.allocate(pb, 64, "num");
     num.fill_with_bits(pb, uint64_to_bool_vector(i));
     pb.add_r1cs_constraint(r1cs_constraint<FieldT>(
         packed_addition(num),
         FieldT::one(),
         FieldT::one() * i
-    ), "");
+    ), "num_packed");
     ASSERT_TRUE(pb.is_satisfied());
 }
 
@@ -93,9 +93,9 @@ bool test_merkle_gadget(
     digest_variable<FieldT> commitment2(pb, 256, "commitment2");
 
     pb_variable<FieldT> commitment1_read;
-    commitment1_read.allocate(pb);
+    commitment1_read.allocate(pb, "commitment1_read");
     pb_variable<FieldT> commitment2_read;
-    commitment2_read.allocate(pb);
+    commitment2_read.allocate(pb, "commitment2_read");
 
     merkle_tree_gadget<FieldT> mgadget1(pb, commitment1, root, commitment1_read);
     merkle_tree_gadget<FieldT> mgadget2(pb, commitment2, root, commitment2_read);

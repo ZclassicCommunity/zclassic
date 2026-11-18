@@ -41,7 +41,7 @@ public:
     // for different output `rho`.
     BOOST_STATIC_ASSERT(NumOutputs <= 2);
 
-    joinsplit_gadget(protoboard<FieldT> &pb) : gadget<FieldT>(pb) {
+    joinsplit_gadget(protoboard<FieldT> &pb) : gadget<FieldT>(pb, "joinsplit_gadget") {
         // Verification
         {
             // The verification inputs are all bit-strings of various
@@ -49,7 +49,7 @@ public:
             // pack them into as few field elements as possible. (The
             // more verification inputs you have, the more expensive
             // verification is.)
-            zk_packed_inputs.allocate(pb, verifying_field_element_size());
+            zk_packed_inputs.allocate(pb, verifying_field_element_size(), "zk_packed_inputs");
             pb.set_input_sizes(verifying_field_element_size());
 
             alloc_uint256(zk_unpacked_inputs, zk_merkle_root);
@@ -86,11 +86,11 @@ public:
         // 
         // The first variable of our constraint system is constrained
         // to be one automatically for us, and is known as `ONE`.
-        ZERO.allocate(pb);
+        ZERO.allocate(pb, "ZERO");
 
-        zk_phi.reset(new digest_variable<FieldT>(pb, 252, ""));
+        zk_phi.reset(new digest_variable<FieldT>(pb, 252, "zk_phi"));
 
-        zk_total_uint64.allocate(pb, 64);
+        zk_total_uint64.allocate(pb, 64, "zk_total_uint64");
 
         for (size_t i = 0; i < NumInputs; i++) {
             // Input note gadget for commitments, macs, nullifiers,
@@ -167,14 +167,14 @@ public:
                 1,
                 left_side,
                 right_side
-            ));
+            ), "value_balance");
 
             // #854: Ensure that left_side is a 64-bit integer.
             for (size_t i = 0; i < 64; i++) {
                 generate_boolean_r1cs_constraint<FieldT>(
                     this->pb,
                     zk_total_uint64[i],
-                    ""
+                    "boolean_zk_total_uint64"
                 );
             }
 
@@ -182,7 +182,7 @@ public:
                 1,
                 left_side,
                 packed_addition(zk_total_uint64)
-            ));
+            ), "value_balance_uint64");
         }
     }
 
@@ -335,7 +335,7 @@ public:
         pb_variable_array<FieldT>& packed_into,
         std::shared_ptr<digest_variable<FieldT>>& var
     ) {
-        var.reset(new digest_variable<FieldT>(this->pb, 256, ""));
+        var.reset(new digest_variable<FieldT>(this->pb, 256, "zk_unpacked_uint256"));
         packed_into.insert(packed_into.end(), var->bits.begin(), var->bits.end());
     }
 
@@ -343,7 +343,7 @@ public:
         pb_variable_array<FieldT>& packed_into,
         pb_variable_array<FieldT>& integer
     ) {
-        integer.allocate(this->pb, 64, "");
+        integer.allocate(this->pb, 64, "zk_unpacked_uint64");
         packed_into.insert(packed_into.end(), integer.begin(), integer.end());
     }
 };
