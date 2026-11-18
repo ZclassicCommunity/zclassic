@@ -175,6 +175,11 @@ UniValue generate(const UniValue& params, bool fHelp)
     if (!Params().MineBlocksOnDemand())
         throw JSONRPCError(RPC_METHOD_NOT_FOUND, "This method can only be used on regtest");
 
+    // A block mined now would be written into the block files the reindex or import is still
+    // reading, and the block index it is rebuilding would not know where it went.
+    if (fReindex || fImporting)
+        throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, "The block database is being rebuilt (-reindex or -loadblock); blocks cannot be mined or submitted until that is done");
+
     int nHeightStart = 0;
     int nHeightEnd = 0;
     int nHeight = 0;
@@ -538,6 +543,12 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
     if (IsInitialBlockDownload())
         throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, "ZClassic is downloading blocks...");
 
+    // A block mined now would be written into the block files the reindex or import is still
+    // reading, and the block index it is rebuilding would not know where it went.
+    if (fReindex || fImporting)
+        throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, "The block database is being rebuilt (-reindex or -loadblock); blocks cannot be mined or submitted until that is done");
+
+
     static unsigned int nTransactionsUpdatedLast;
 
     if (!lpval.isNull())
@@ -761,6 +772,9 @@ UniValue submitblock(const UniValue& params, bool fHelp)
         );
 
     CBlock block;
+    if (fReindex || fImporting)
+        throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, "The block database is being rebuilt (-reindex or -loadblock); blocks cannot be mined or submitted until that is done");
+
     if (!DecodeHexBlk(block, params[0].get_str()))
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
 
