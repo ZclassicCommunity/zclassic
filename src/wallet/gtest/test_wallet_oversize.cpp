@@ -130,6 +130,8 @@ protected:
         mapArgs.erase("-rescan");
         if (!strPreviousDataDir.empty())
             mapArgs["-datadir"] = strPreviousDataDir;
+        else
+            mapArgs.erase("-datadir");
         ClearDatadirCache();
         SelectParams(CBaseChainParams::REGTEST); // the network the other wallet tests select
     }
