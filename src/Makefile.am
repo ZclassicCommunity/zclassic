@@ -266,6 +266,9 @@ BITCOIN_CORE_H = \
   zslp/zslpbuild.h \
   zslp/zslpindex.h \
   zslp/zslpservice.h \
+  znam/znamindex.h \
+  znam/znamresolve.h \
+  znam/znamservice.h \
   wallet/wallet.h \
   wallet/wallet_ismine.h \
   wallet/walletdb.h \
@@ -348,6 +351,10 @@ libbitcoin_server_a_SOURCES = \
   rpc/zslp.cpp \
   zslp/zslpindex.cpp \
   zslp/zslpservice.cpp \
+  rpc/znam.cpp \
+  znam/znamindex.cpp \
+  znam/znamresolve.cpp \
+  znam/znamservice.cpp \
   script/sigcache.cpp \
   timedata.cpp \
   torcontrol.cpp \
@@ -405,18 +412,24 @@ libzcl_tokenguard_a_SOURCES = \
   c23/services/glue/zcl_token_guard.h \
   c23/services/glue/zcl_slp_index.c \
   c23/services/glue/zcl_slp_index.h \
+  c23/services/glue/zcl_znam_index.c \
+  c23/services/glue/zcl_znam_index.h \
   c23/services/glue/zcl_tokenguard_symbol_prefix.h \
   c23/services/glue/core/uint256.h \
+  c23/services/glue/script/standard.h \
   c23/services/glue/primitives/transaction.h \
   c23/services/glue/util/log_macros.h \
   c23/services/vendor/contexts/market/modules/zslp/include/zslp/slp.h \
   c23/services/vendor/contexts/market/modules/zslp/src/slp.c \
   c23/services/vendor/core/modules/script/include/script/op_return_push.h \
   c23/services/vendor/engine/modules/overlay/include/overlay/overlay_codec.h \
-  c23/services/vendor/engine/modules/overlay/src/overlay_codec.c
+  c23/services/vendor/engine/modules/overlay/src/overlay_codec.c \
+  c23/services/vendor/contexts/naming/modules/znam/include/znam/znam.h \
+  c23/services/vendor/contexts/naming/modules/znam/src/znam.c
 libzcl_tokenguard_a_CPPFLAGS = $(HARDENED_CPPFLAGS) $(ZCL_C23_STD_DEFS) \
   -iquote $(srcdir)/c23/services/glue \
   -iquote $(srcdir)/c23/services/vendor/contexts/market/modules/zslp/include \
+  -iquote $(srcdir)/c23/services/vendor/contexts/naming/modules/znam/include \
   -iquote $(srcdir)/c23/services/vendor/engine/modules/overlay/include \
   -iquote $(srcdir)/c23/services/vendor/core/modules/script/include
 # The same language level as the C23 crypto core: configure picks -std=c23 when the
@@ -883,7 +896,8 @@ EXTRA_DIST = leveldb snark test/tree_root_c_tests.c \
   c23/services/tools/vendor-files.txt \
   c23/services/tools/z23-vector-check.sh \
   c23/services/tools/z23_vector_shim.h \
-  c23/services/tools/slpscript.c
+  c23/services/tools/slpscript.c \
+  c23/services/tools/znamscript.c
 EXTRA_DIST += c23/tor/check-symbols.sh windows-utf8.manifest
 
 clean-local:

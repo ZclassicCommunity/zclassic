@@ -77,7 +77,10 @@ SOURCES += \
     src/tokensmodel.cpp \
     src/tokenssendmodel.cpp \
     src/tokenssend.cpp \
-    src/tokensview.cpp
+    src/tokensview.cpp \
+    src/namesmodel.cpp \
+    src/namepaybox.cpp \
+    src/namesview.cpp
 
 HEADERS += \
     src/releaseversion.h \
@@ -118,7 +121,10 @@ HEADERS += \
     src/tokensmodel.h \
     src/tokenssendmodel.h \
     src/tokenssend.h \
-    src/tokensview.h
+    src/tokensview.h \
+    src/namesmodel.h \
+    src/namepaybox.h \
+    src/namesview.h
 
 FORMS += \
     src/mainwindow.ui \

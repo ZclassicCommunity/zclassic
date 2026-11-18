@@ -6,4 +6,6 @@ src/c23/services/vendor/contexts/market/modules/zslp/src/slp.c	contexts/market/m
 src/c23/services/vendor/core/modules/script/include/script/op_return_push.h	core/modules/script/include/script/op_return_push.h	0e6670c92e0501035da70b61bbf3f27c5df1600c	5e21cefb3f98afae94f675c69aae4097bca4ddc3	b91dba6c12b9fb1d3f5781c931376d045fd8af2bd0c2f5d2ac24096c8663773e
 src/c23/services/vendor/engine/modules/overlay/include/overlay/overlay_codec.h	engine/modules/overlay/include/overlay/overlay_codec.h	e1c14a2bde3b5d35a6c14b3a58c96e0b79bece60	5e21cefb3f98afae94f675c69aae4097bca4ddc3	unsealed
 src/c23/services/vendor/engine/modules/overlay/src/overlay_codec.c	engine/modules/overlay/src/overlay_codec.c	2d3c4365563e84b88fe69ecc8a73787bd050d5b6	5e21cefb3f98afae94f675c69aae4097bca4ddc3	unsealed
+src/c23/services/vendor/contexts/naming/modules/znam/include/znam/znam.h	contexts/naming/modules/znam/include/znam/znam.h	47ce3f73a5dcbcb174c54715a11a6144895284d0	5e21cefb3f98afae94f675c69aae4097bca4ddc3	unsealed
+src/c23/services/vendor/contexts/naming/modules/znam/src/znam.c	contexts/naming/modules/znam/src/znam.c	ab64c879e68bcd83f07c735f5bb8b00e759be51a	5e21cefb3f98afae94f675c69aae4097bca4ddc3	unsealed
 src/c23/services/LICENSE.z23	LICENSE	d645695673349e3947e8e5ae42332d0ac3164cd7	5e21cefb3f98afae94f675c69aae4097bca4ddc3	unsealed

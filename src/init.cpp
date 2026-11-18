@@ -84,6 +84,7 @@
 #include "sha256.h"
 #include "startuptimer.h"
 #include "zslp/zslpservice.h"
+#include "znam/znamservice.h"
 
 #ifdef ZCL_C23_HAVE_PROVER_THREADS
 // Prover thread budget: -proverthreads=<n>, 0 = auto (min(8, hardware threads)).
@@ -274,6 +275,7 @@ void Shutdown()
 
     // The ZSLP index worker reads blocks and takes cs_main: stop it before the chain DBs are freed below.
     zslp::StopService();
+    znam::StopService();
 
     if (fFeeEstimatesInitialized)
     {
@@ -520,6 +522,8 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-txindex", strprintf(_("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)"), 1));
     strUsage += HelpMessageOpt("-zslpindex", _("Maintain a read-only ZSLP token index in <datadir>/zslpindex, used by the zslp_* rpc calls and the GUI Tokens view. Built in the background; never touches consensus or wallet.dat (default: 0). Not compatible with -prune. See doc/zslp.md"));
     strUsage += HelpMessageOpt("-zslpindexstart=<n>", _("First block height the ZSLP index reads (default: the first block with a ZSLP transaction on mainnet, 0 on testnet and regtest)"));
+    strUsage += HelpMessageOpt("-znamindex", _("Maintain a read-only ZNAM name index in <datadir>/znamindex, used by the znam_* rpc calls and the GUI's resolve-a-name step. Built in the background; never touches consensus or wallet.dat (default: 0). Not compatible with -prune. See doc/znam.md"));
+    strUsage += HelpMessageOpt("-znamindexstart=<n>", _("First block height the ZNAM index reads (default: 0, so no registration is missed)"));
     strUsage += HelpMessageOpt("-bootstrap", strprintf(_("On a fresh datadir, fetch zk-SNARK params and the chain snapshot from a bootstrap peer before normal sync (default: %u)"), 1));
 
     strUsage += HelpMessageGroup(_("Connection options:"));
@@ -3546,6 +3550,15 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         std::string errZslp;
         if (!zslp::StartService(errZslp))
             return InitError(errZslp);
+    }
+
+    // Optional read-only ZNAM name index (off by default). It only reads blocks and their undo data.
+    if (GetBoolArg("-znamindex", false)) {
+        if (fPruneMode)
+            return InitError(_("-znamindex needs the full block files and is not compatible with -prune."));
+        std::string errZnam;
+        if (!znam::StartService(errZnam))
+            return InitError(errZnam);
     }
 
     // Start the thread that notifies listeners of transactions that have been

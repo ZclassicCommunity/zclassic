@@ -84,6 +84,7 @@
 #include "rpc.h"
 #include "settings.h"
 #include "connection.h"
+#include "namepaybox.h"
 #include "notifyserver.h"
 #include "logger.h"
 #include "../filepermissions.h"
@@ -3458,6 +3459,88 @@ private:
             }
             if (tries > 0) armModalDismisser(tries - 1);
         });
+    }
+
+private slots:
+    // ---- pay to a name (src/namepaybox.h): the REAL Send tab, with the node's lookup replaced by a fake ----
+    //
+    // The transaction the Send tab builds carries the ADDRESS the user confirmed, never the name; an entry that is
+    // not a name is used exactly as typed, and a name that was not confirmed is not turned into anything.
+    void nameRecipientIsSentAsTheConfirmedAddress() {
+        const QString T      = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+        const QString PAYEE  = "t1cEFAvXjAZ1JpCCCPrUrcYQr5Kj9FRSXYa";
+        QSettings().setValue("options/autoshield", false);
+        QSettings().sync();
+
+        MainWindow* w = makeWindow();
+        auto* ui = w->ui;
+        auto* bals = new QMap<QString, double>(); (*bals)[T] = 10.0;
+        w->getRPC()->testSetBalances(bals);
+        auto* utxos = new QList<UnspentOutput>();
+        utxos->append(UnspentOutput{ T, "txid0", "10.0", /*conf=*/10, /*spendable=*/true });
+        w->getRPC()->testSetUTXOs(utxos);
+        w->getRPC()->testSetZAddresses(new QList<QString>());
+        ui->inputsCombo->clear();
+        ui->inputsCombo->addItem(T, 10.0);
+        ui->inputsCombo->setCurrentIndex(0);
+        ui->Amount1->setText("1");
+
+        auto* box = w->findChild<NamePayBox*>("NameBox1");
+        QVERIFY2(box, "the first recipient has a name box");
+        int lookups = 0;
+        box->setResolver([&](const QString& name, const NamePayBox::Reply& done) {
+            lookups++;
+            nlohmann::json r = {{"name", name.toStdString()}, {"resolved", true}, {"value", PAYEE.toStdString()},
+                                {"type", "t-address"}, {"kind", "transparent"}, {"payable", true},
+                                {"address", PAYEE.toStdString()}, {"set_height", 100}, {"set_txid", "ab"},
+                                {"set_by_record", false}, {"blocks_since_change", 5000}, {"changed_recently", false},
+                                {"recent_change_blocks", 100}, {"owner", "t1owner"}, {"registered_height", 90},
+                                {"registered_txid", "cd"}, {"expiry_height", 999999}, {"expired", false},
+                                {"warnings", nlohmann::json::array()}, {"records", nlohmann::json::array()},
+                                {"index", {{"synced", true}}}};
+            done(true, r);
+        });
+
+        // 1. an address typed as before: no box, no lookup, the text is the recipient
+        ui->Address1->setText(PAYEE);
+        QVERIFY(!box->isVisibleTo(ui->sendToWidgets));
+        QCOMPARE(w->testCreateTxFromSendPage().toAddrs.at(0).addr, PAYEE);
+        QCOMPARE(lookups, 0);
+
+        // 2. a name: looked up, shown in full, NOT yet a recipient (nothing is confirmed)
+        ui->Address1->setText("@alice");
+        QVERIFY(box->isVisibleTo(ui->sendToWidgets));
+        box->resolveNow();
+        QCOMPARE(lookups, 1);
+        QCOMPARE(box->addressLabel()->text(), PAYEE);
+        QVERIFY(!box->confirmed());
+        QCOMPARE(w->testCreateTxFromSendPage().toAddrs.at(0).addr, QString("@alice"));
+
+        // 3. the user confirms the ADDRESS: the transaction is built with exactly that address
+        box->confirmCheck()->setChecked(true);
+        Tx tx = w->testCreateTxFromSendPage();
+        QVERIFY(!tx.fromAddr.isEmpty());
+        QCOMPARE(tx.toAddrs.at(0).addr, PAYEE);
+        for (const auto& to : tx.toAddrs)
+            QVERIFY2(!to.addr.contains('@') && !to.txtMemo.contains("alice") && !to.encodedMemo.contains("616c696365"), "nothing name-related goes into the transaction");
+
+        // 4. editing the entry drops the confirmation: another name does not inherit it
+        ui->Address1->setText("@alicf");
+        QVERIFY(!box->confirmed());
+        QCOMPARE(w->testCreateTxFromSendPage().toAddrs.at(0).addr, QString("@alicf"));
+
+        // 5. a look-alike spelling is refused and looked up by no one
+        const int before = lookups;
+        ui->Address1->setText(QString("@al") + QChar(0x0456) + "ce");
+        box->resolveNow();
+        QCOMPARE(lookups, before);
+        QVERIFY(box->statusLabel()->text().contains("look-alike"));
+
+        // 6. back to an address: the box goes away and the field is what it always was
+        ui->Address1->setText(PAYEE);
+        QVERIFY(!box->isVisibleTo(ui->sendToWidgets));
+        QCOMPARE(w->testCreateTxFromSendPage().toAddrs.at(0).addr, PAYEE);
+        settleAndDelete(w);
     }
 #endif
 };
