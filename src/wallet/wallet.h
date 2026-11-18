@@ -1383,8 +1383,8 @@ public:
      * (expired or expiring ones are not counted: the mempool never takes them).
      */
     size_t ReacceptWalletTransactions();
-    /** The offer itself, without arming the retry (UpdatedBlockTip). */
-    size_t OfferWalletTransactionsToMempool();
+    /** The offer itself, without arming the retry (UpdatedBlockTip); pnPassedToMempool, when given, receives how many transactions were handed to the mempool (the others lacked their inputs or anchors at this tip). */
+    size_t OfferWalletTransactionsToMempool(size_t* pnPassedToMempool = NULL);
     void ResendWalletTransactions(int64_t nBestBlockTime);
     std::vector<uint256> ResendWalletTransactionsBefore(int64_t nTime);
     CAmount GetBalance() const;
