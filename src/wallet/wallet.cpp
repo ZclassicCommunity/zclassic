@@ -563,13 +563,26 @@ void CWallet::ChainTip(const CBlockIndex *pindex,
                        const SaplingMerkleTree& saplingTree,
                        bool added)
 {
+    if (added && fNoteWitnessesLost) {
+        // A disconnect before this block left witnesses the caches could not
+        // roll back. The chain moves forward again (the connect phase of a
+        // reorg, or the next block): rebuild once, now. The rescan covers the
+        // active chain up to and including this block, so it replaces the
+        // incremental step. Only for the new tip: a rescan in progress never
+        // sees the flag set (ScanForWalletTransactions clears it first).
+        LOCK2(cs_main, cs_wallet);
+        if (fNoteWitnessesLost && chainActive.Tip() == pindex) {
+            RebuildNoteWitnesses();
+            return;
+        }
+    }
     WitnessChainTip(pindex, pblock, sproutTree, saplingTree, added);
     UpdateSaplingNullifierNoteMapForBlock(pblock);
-    if (!added) {
-        // A disconnect the witness caches could not roll back is repaired
-        // after the block is fully processed (no-op when nothing was lost).
-        RebuildNoteWitnesses();
-    }
+    // A disconnect that set fNoteWitnessesLost is not repaired here: in a deep
+    // reorg more disconnects follow, and rescanning after each would cost one
+    // full rescan per WITNESS_CACHE_SIZE blocks. Until the rebuild the
+    // affected notes hold no witness (never a wrong one), so a spend of them
+    // fails cleanly instead of using a wrong anchor.
 }
 
 void CWallet::WitnessChainTip(const CBlockIndex* pindex,
@@ -648,6 +661,11 @@ void CWallet::CollectNoteTxs(std::vector<CWalletTx*>& out)
 
 void CWallet::SetBestChain(const CBlockLocator& loc)
 {
+    // Never write out witnesses a disconnect could not roll back: the flag is
+    // memory only, so a restart would keep those notes without a witness.
+    if (fNoteWitnessesLost) {
+        RebuildNoteWitnesses();
+    }
     CWalletDB walletdb(strWalletFile);
     SetBestChainINTERNAL(walletdb, loc);
 }
@@ -1333,17 +1351,12 @@ void CWallet::RebuildNoteWitnesses()
     if (!fNoteWitnessesLost) {
         return;
     }
-    fNoteWitnessesLost = false;
     if (chainActive.Genesis() == NULL) {
+        fNoteWitnessesLost = false;
         return;
     }
-    // The caches cannot be rolled back this far. Rebuild them the way
-    // -rescan does: clear every witness and rescan the active chain, which
-    // witnesses each note again and re-creates the cache window. The notes
-    // and balances do not change; only the witnesses are recomputed.
-    LogPrintf("%s: wallet witness cache cannot roll back past height %d; rebuilding witnesses by rescanning the chain\n",
-              __func__, chainActive.Height());
-    ClearNoteWitnessCache();
+    // ScanForWalletTransactions sees the flag: it clears every witness and
+    // rescans the active chain from genesis, the way -rescan does.
     ScanForWalletTransactions(chainActive.Genesis(), true);
 }
 
@@ -2890,6 +2903,21 @@ int CWallet::ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate)
 
     {
         LOCK2(cs_main, cs_wallet);
+
+        if (fNoteWitnessesLost) {
+            // A disconnect left witnesses the caches could not roll back (see
+            // DecrementNoteWitnesses). Whatever range was asked for, rebuild
+            // them the way -rescan does: clear every witness and scan the
+            // active chain from genesis, which witnesses each note again and
+            // re-creates the cache window. Notes and balances do not change.
+            // Clearing the flag first also keeps the ChainTip calls of this
+            // scan from starting another rebuild.
+            fNoteWitnessesLost = false;
+            LogPrintf("%s: wallet witness cache could not roll back the disconnected blocks; rebuilding witnesses by rescanning the chain to height %d\n",
+                      __func__, chainActive.Height());
+            ClearNoteWitnessCache();
+            pindex = chainActive.Genesis();
+        }
 
         // no need to read and scan block, if block was created before
         // our wallet birthday (as adjusted for block time variability)

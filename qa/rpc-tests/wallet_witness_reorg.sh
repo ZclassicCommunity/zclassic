@@ -40,6 +40,8 @@ R1="-connect=127.0.0.1:$((BASE + 1))"
 refcheck() {
     local l=$1 want got
     rm -f "$SD/export/ref-$l.dat"
+    # the fallback below restarts node 0, so it must never hide a node that died
+    case $(cli 0 getblockcount 2>/dev/null) in ''|*[!0-9]*) bad "$l: daemon not responding before the reference copy"; return ;; esac
     if ! cli 0 backupwallet "ref-$l.dat" >/dev/null 2>&1; then
         # a binary without a working backupwallet: copy the file with the node stopped
         stop 0; cp "$SD/node0/regtest/wallet.dat" "$SD/export/ref-$l.dat"; start 0 "$BIN" $R1 -disablesafemode || return; sync_to 0
@@ -155,6 +157,58 @@ scn_p2p_reorg() {
     zb=$(zbal 0 "$ZS")
     if [ "$zb" != 0.00000000 ]; then spend_check p2p_reorg "$ZS" "$zb" 0.5; fi
 }
+# rebuilds: how many witness rebuilds (full rescans) node 0 has logged
+rebuilds() { grep -c 'rebuilding witnesses' "$SD/node0/regtest/debug.log"; }
+# local_spend <label> <zaddr> <balance-before> <amount>: shielded spend mined by node 0 itself
+# (node 1 still holds the chain node 0 invalidated); the anchor must be in node 0's chain
+local_spend() {
+    local l=$1 zs=$2 b=$3 amt=$4 r
+    r=$(zsend 0 "$zs" "[{\"address\":\"$(cli 0 getnewaddress)\",\"amount\":$amt}]")
+    case $r in success*) cli 0 generate 1 >/dev/null ;; *) bad "$l: z_sendmany: $r" ;; esac
+    ck "$l: shielded spend at the lowered tip mined, exact balance" "$(zbal 0 "$zs")" "$(add "$b" -$amt -$FEE)"
+}
+# 10: invalidate twice deeper than the cache, with commitments both below and inside the
+# removed range (a stale witness would carry an anchor the shortened chain does not hold):
+# one rebuild per unwind, a spend at the lowered tip, then a deep unwind whose connect
+# phase moves to another branch (the rebuild runs once, at the first connected block)
+scn_deeper_invalidate() {
+    base_note || return
+    mz=$(cli 1 z_getnewaddress)
+    give_z 1 "$mz" 1; cli 1 generate 150 >/dev/null; give_z 1 "$mz" 1; cli 1 generate 80 >/dev/null; sync_to 0
+    first=$(cli 0 getblockhash $(($(cli 0 getblockcount) - 224)))
+    cli 0 invalidateblock "$first" >/dev/null
+    alive deeper_invalidate 0
+    ck "deeper: one rebuild for a 225-block unwind" "$(rebuilds)" 1
+    ck "deeper: note intact" "$(zbal 0 "$ZS")" 4.00000000
+    local_spend deeper "$ZS" 4.00000000 1
+    cli 0 generate 1 >/dev/null   # branch B: two blocks above the fork
+    tipb=$(cli 0 getbestblockhash)
+    cli 0 reconsiderblock "$first" >/dev/null; sync_to 0
+    alive "deeper reconsider" 0
+    cli 0 invalidateblock "$first" >/dev/null
+    alive "deeper: unwind onto branch B" 0
+    ck "deeper: back on branch B" "$(cli 0 getbestblockhash)" "$tipb"
+    ck "deeper: one more rebuild for the unwind and the connect phase" "$(rebuilds)" 2
+    ck "deeper: balance on branch B" "$(zbal 0 "$ZS")" "$(add 4 -1 -$FEE)"
+    local_spend "deeper, branch B" "$ZS" "$(add 4 -1 -$FEE)" 0.5
+}
+# 11: Sprout note (the same template, Sprout tree), invalidate deeper than the cache
+scn_sprout_deep() {
+    NU_ARGS="-nuparams=5ba81b19:230 -nuparams=76b809bb:240"
+    setup2 -disablesafemode || return
+    SP=$(cli 0 z_getnewaddress sprout); give_z 0 "$SP" 3
+    cli 1 generate 130 >/dev/null; sync_to 0
+    ck "sprout note received" "$(zbal 0 "$SP")" 3.00000000
+    first=$(cli 0 getblockhash $(($(cli 0 getblockcount) - 104)))
+    cli 0 invalidateblock "$first" >/dev/null
+    alive sprout_deep 0
+    ck "sprout: one rebuild" "$(rebuilds)" 1
+    ck "sprout: note intact" "$(zbal 0 "$SP")" 3.00000000
+    cli 0 reconsiderblock "$first" >/dev/null; sync_to 0
+    alive "sprout_deep reconsider" 0
+    refcheck sprout_deep
+    spend_check sprout_deep "$SP" 3.00000000 1
+}
 
 run_scn() {
     id=$1; name=$2; fn=$3
@@ -181,6 +235,8 @@ run_scn 6 "note wallet, kill -9, invalidate tip" scn_note_kill9
 run_scn 7 "wallet created over an existing chain" scn_wallet_over_chain
 run_scn 8 "invalidate deeper than the witness cache" scn_deep_invalidate
 run_scn 9 "peer-driven reorg replacing the funding block" scn_p2p_reorg
+run_scn 10 "invalidate twice the cache deep: one rebuild, spend at the lowered tip, unwind onto another branch" scn_deeper_invalidate
+run_scn 11 "Sprout note, invalidate deeper than the cache" scn_sprout_deep
 
 say; say "id|scenario|result|checks"; cat "$RESULTS"
 ! grep -q '|FAIL|' "$RESULTS"

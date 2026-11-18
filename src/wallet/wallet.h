@@ -29,6 +29,7 @@
 #include "base58.h"
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -867,10 +868,15 @@ protected:
     void DecrementNoteWitnesses(const CBlockIndex* pindex);
     /**
      * Set when a disconnect left a note without a witness the cache could not
-     * roll back; RebuildNoteWitnesses clears every witness and rescans the
-     * active chain, then resets it. Memory only (no wallet.dat change).
+     * roll back. The rebuild (clear every witness, rescan the active chain,
+     * see ScanForWalletTransactions) is deferred so a deep reorg pays for one
+     * rescan, not one per WITNESS_CACHE_SIZE blocks: it runs at the next
+     * connected tip, or before the witnesses are written (SetBestChain, which
+     * invalidateblock/parkblock/finalizeblock also signal when they finish).
+     * Memory only (no wallet.dat change). Written under cs_main and
+     * cs_wallet; atomic so it can be tested before taking them.
      */
-    bool fNoteWitnessesLost;
+    std::atomic<bool> fNoteWitnessesLost;
     void RebuildNoteWitnesses();
     /**
      * The witness half of ChainTip. When no wallet transaction carries
