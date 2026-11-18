@@ -398,8 +398,12 @@ void UpdateCoins(const CTransaction& tx, CCoinsViewCache& inputs, int nHeight);
 /** Transaction validation functions */
 
 /** Context-independent validity checks */
-bool CheckTransaction(const CTransaction& tx, CValidationState& state, libzcash::ProofVerifier& verifier);
-bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidationState &state);
+/** fInBlock admits the 413 historical oversize mainnet transactions, matched by (txid, exact size)
+ *  (consensus/oversize_grandfather.h). It is true for a transaction validated as part of a block
+ *  (CheckBlock) and for a transaction the wallet loader reads back from wallet.dat; mempool, relay
+ *  and RPC callers keep the default false and the 102000 byte limit. */
+bool CheckTransaction(const CTransaction& tx, CValidationState& state, libzcash::ProofVerifier& verifier, bool fInBlock = false);
+bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidationState &state, bool fInBlock = false);
 
 /** Check for standard transaction types
  * @return True if all outputs (scriptPubKeys) use only standard transaction forms

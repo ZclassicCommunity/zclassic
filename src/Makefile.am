@@ -174,6 +174,7 @@ BITCOIN_CORE_H = \
   compat/sanity.h \
   compressor.h \
   consensus/consensus.h \
+  consensus/oversize_grandfather.h \
   consensus/params.h \
   consensus/upgrades.h \
   consensus/validation.h \
@@ -519,6 +520,7 @@ libbitcoin_common_a_SOURCES = \
   chainparams.cpp \
   coins.cpp \
   compressor.cpp \
+  consensus/oversize_grandfather.cpp \
   consensus/params.cpp \
   consensus/upgrades.cpp \
   core_read.cpp \
@@ -901,6 +903,7 @@ EXTRA_DIST = leveldb snark test/tree_root_c_tests.c \
   c23/services/tools/slpscript.c \
   c23/services/tools/znamscript.c
 EXTRA_DIST += c23/tor/check-symbols.sh windows-utf8.manifest
+EXTRA_DIST += consensus/z23/oversize_grandfather_table.inc test/data/oversize_grandfather_txids.txt
 
 clean-local:
 	-$(MAKE) -C leveldb clean

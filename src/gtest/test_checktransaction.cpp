@@ -2,7 +2,17 @@
 #include <gmock/gmock.h>
 #include <sodium.h>
 
+#include <fstream>
+#include <iostream>
+#include <set>
+#include <sstream>
+
 #include "main.h"
+#include "init.h"
+#include "consensus/oversize_grandfather.h"
+#include "zcash/Proof.hpp"
+#include "utilstrencodings.h"
+#include "streams.h"
 #include "primitives/transaction.h"
 #include "consensus/validation.h"
 #include "script/sighashtype.h"
@@ -276,6 +286,334 @@ TEST(checktransaction_tests, OversizeSaplingTxns) {
 
     // Revert to default
     RegtestDeactivateSapling();
+}
+
+// ---- Historical oversize transactions (consensus/oversize_grandfather.h) ----
+
+// Pads vout[0].scriptPubKey so the transaction serializes to exactly nSize bytes.
+static CTransaction TxPaddedToSize(CMutableTransaction mtx, unsigned int nSize)
+{
+    mtx.vout[0].scriptPubKey = CScript();
+    for (int i = 0; i < 8; i++) {
+        unsigned int cur = ::GetSerializeSize(CTransaction(mtx), SER_NETWORK, PROTOCOL_VERSION);
+        if (cur == nSize)
+            break;
+        size_t len = mtx.vout[0].scriptPubKey.size() + nSize - cur;
+        mtx.vout[0].scriptPubKey = CScript();
+        mtx.vout[0].scriptPubKey.insert(mtx.vout[0].scriptPubKey.end(), len, OP_NOP);
+    }
+    CTransaction tx(mtx);
+    EXPECT_EQ(::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION), nSize);
+    return tx;
+}
+
+// Reads a file of src/test/data whatever directory the test binary runs from.
+static std::string ReadTestData(const std::string& name)
+{
+    std::vector<std::string> dirs;
+    if (const char* env = getenv("ZCL_TEST_DATA_DIR"))
+        dirs.push_back(env);
+    for (const char* d : {"test/data", "src/test/data", "../src/test/data", "../../src/test/data"})
+        dirs.push_back(d);
+    for (const std::string& d : dirs) {
+        std::ifstream in((d + "/" + name).c_str(), std::ios::in | std::ios::binary);
+        if (in.good()) {
+            std::stringstream ss;
+            ss << in.rdbuf();
+            return ss.str();
+        }
+    }
+    ADD_FAILURE() << "cannot find test data file " << name << " (set ZCL_TEST_DATA_DIR)";
+    return std::string();
+}
+
+// The first canonical oversize transaction: block 478544, 125811 bytes.
+static const char* const OVERSIZE_478544_TXID = "e3eeb123a79945cc74e6107422b124dc130ddd4b61fe5c74087317c256c79700";
+static const unsigned int OVERSIZE_478544_SIZE = 125811;
+
+static CTransaction LoadOversize478544()
+{
+    std::string hex = ReadTestData("oversize_tx_478544.hex");
+    while (!hex.empty() && isspace((unsigned char)hex.back()))
+        hex.pop_back();
+    CTransaction tx;
+    EXPECT_TRUE(IsHex(hex));
+    std::vector<unsigned char> raw = ParseHex(hex);
+    CDataStream ss(raw, SER_NETWORK, PROTOCOL_VERSION);
+    ss >> tx;
+    EXPECT_TRUE(ss.empty());
+    return tx;
+}
+
+TEST(oversize_grandfather_tests, table_is_413_sorted_unique) {
+    ASSERT_EQ(OversizeGrandfatherCount(), 413u);
+    uint256 prev;
+    for (size_t i = 0; i < OversizeGrandfatherCount(); i++) {
+        uint256 txid;
+        uint32_t nSize = 0;
+        ASSERT_TRUE(OversizeGrandfatherEntry(i, txid, nSize));
+        EXPECT_GT(nSize, MAX_TX_SIZE_AFTER_SAPLING) << i;
+        EXPECT_LE(nSize, MAX_TX_SIZE_GRANDFATHER_CEILING) << i;
+        if (i > 0)
+            EXPECT_LT(memcmp(prev.begin(), txid.begin(), 32), 0) << "entry " << i << " not strictly ascending";
+        prev = txid;
+    }
+    uint256 txid;
+    uint32_t nSize;
+    EXPECT_FALSE(OversizeGrandfatherEntry(OversizeGrandfatherCount(), txid, nSize));
+}
+
+TEST(oversize_grandfather_tests, table_equals_z23_txid_list) {
+    // src/test/data/oversize_grandfather_txids.txt is Z23's tools/data/oversize_grandfather_txids.txt
+    // ("height txid size" per line, txids in display order).
+    std::istringstream in(ReadTestData("oversize_grandfather_txids.txt"));
+    std::string line;
+    std::set<uint256> seen;
+    size_t n = 0;
+    int minHeight = 1 << 30, maxHeight = 0;
+    unsigned int maxSize = 0;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#')
+            continue;
+        std::istringstream ls(line);
+        int height = 0;
+        std::string txidHex;
+        unsigned int nSize = 0;
+        ASSERT_TRUE(ls >> height >> txidHex >> nSize) << line;
+        ASSERT_EQ(txidHex.size(), 64u) << line;
+        uint256 txid = uint256S(txidHex);
+        EXPECT_EQ(txid.GetHex(), txidHex);
+        EXPECT_TRUE(IsOversizeGrandfathered(txid, nSize)) << line;
+        EXPECT_TRUE(seen.insert(txid).second) << "duplicate " << txidHex;
+        minHeight = std::min(minHeight, height);
+        maxHeight = std::max(maxHeight, height);
+        maxSize = std::max(maxSize, nSize);
+        n++;
+    }
+    EXPECT_EQ(n, 413u);
+    EXPECT_EQ(n, OversizeGrandfatherCount());
+    EXPECT_EQ(minHeight, 478544);
+    EXPECT_EQ(maxHeight, 1968856);
+    EXPECT_EQ(maxSize, 1922197u);
+    // The list is contained in the table and both have 413 distinct txids, so they are equal.
+    for (size_t i = 0; i < OversizeGrandfatherCount(); i++) {
+        uint256 txid;
+        uint32_t nSize;
+        ASSERT_TRUE(OversizeGrandfatherEntry(i, txid, nSize));
+        EXPECT_EQ(seen.count(txid), 1u);
+    }
+}
+
+TEST(oversize_grandfather_tests, predicate_needs_exact_size) {
+    uint256 txid = uint256S(OVERSIZE_478544_TXID);
+    EXPECT_TRUE(IsOversizeGrandfathered(txid, OVERSIZE_478544_SIZE));
+    EXPECT_FALSE(IsOversizeGrandfathered(txid, OVERSIZE_478544_SIZE - 1));
+    EXPECT_FALSE(IsOversizeGrandfathered(txid, OVERSIZE_478544_SIZE + 1));
+    EXPECT_FALSE(IsOversizeGrandfathered(txid, 0));
+    EXPECT_FALSE(IsOversizeGrandfathered(txid, MAX_TX_SIZE_AFTER_SAPLING));
+    // The byte-reversed txid is not an entry.
+    std::string rev;
+    for (int i = 62; i >= 0; i -= 2)
+        rev += std::string(OVERSIZE_478544_TXID).substr(i, 2);
+    EXPECT_FALSE(IsOversizeGrandfathered(uint256S(rev), OVERSIZE_478544_SIZE));
+    EXPECT_FALSE(IsOversizeGrandfathered(uint256(), OVERSIZE_478544_SIZE));
+    EXPECT_FALSE(IsOversizeGrandfathered(uint256S("01"), 102001));
+}
+
+TEST(oversize_grandfather_tests, listed_tx_passes_only_in_block_context) {
+    CTransaction tx = LoadOversize478544();
+    ASSERT_EQ(tx.GetHash().GetHex(), OVERSIZE_478544_TXID);
+    ASSERT_EQ(::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION), OVERSIZE_478544_SIZE);
+
+    {   // in a block
+        CValidationState state;
+        EXPECT_TRUE(CheckTransactionWithoutProofVerification(tx, state, true)) << state.GetRejectReason();
+    }
+    {   // standalone: mempool, relay, wallet, RPC
+        MockCValidationState state;
+        EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-oversize", false, ::testing::_)).Times(1);
+        EXPECT_FALSE(CheckTransactionWithoutProofVerification(tx, state));
+    }
+    {
+        MockCValidationState state;
+        EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-oversize", false, ::testing::_)).Times(1);
+        EXPECT_FALSE(CheckTransactionWithoutProofVerification(tx, state, false));
+    }
+    {   // CheckTransaction with the proof verifier follows the same rule
+        auto verifier = libzcash::ProofVerifier::Disabled();
+        MockCValidationState state;
+        EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-oversize", false, ::testing::_)).Times(1);
+        EXPECT_FALSE(CheckTransaction(tx, state, verifier));
+    }
+    {
+        auto verifier = libzcash::ProofVerifier::Disabled();
+        CValidationState state;
+        EXPECT_TRUE(CheckTransaction(tx, state, verifier, true)) << state.GetRejectReason();
+    }
+}
+
+TEST(oversize_grandfather_tests, same_size_other_txid_is_rejected_in_block) {
+    CTransaction listed = LoadOversize478544();
+    CMutableTransaction mtx(listed);
+    mtx.nLockTime ^= 1; // same serialized size, different txid
+    CTransaction tx(mtx);
+    ASSERT_EQ(::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION), OVERSIZE_478544_SIZE);
+    ASSERT_NE(tx.GetHash(), listed.GetHash());
+
+    MockCValidationState state;
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-oversize", false, ::testing::_)).Times(1);
+    EXPECT_FALSE(CheckTransactionWithoutProofVerification(tx, state, true));
+}
+
+TEST(oversize_grandfather_tests, unlisted_sizes_unchanged) {
+    // Exactly the limit passes everywhere; one byte more, a mid-range size and
+    // the ceiling (and one over) fail everywhere, in a block and outside.
+    for (bool inBlock : {false, true}) {
+        {
+            CTransaction tx = TxPaddedToSize(GetValidTransaction(), MAX_TX_SIZE_AFTER_SAPLING);
+            CValidationState state;
+            EXPECT_TRUE(CheckTransactionWithoutProofVerification(tx, state, inBlock));
+        }
+        for (unsigned int nSize : {MAX_TX_SIZE_AFTER_SAPLING + 1, 125811u, 1000000u, MAX_TX_SIZE_GRANDFATHER_CEILING, MAX_TX_SIZE_GRANDFATHER_CEILING + 1}) {
+            CTransaction tx = TxPaddedToSize(GetValidTransaction(), nSize);
+            MockCValidationState state;
+            EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-oversize", false, ::testing::_)).Times(1);
+            EXPECT_FALSE(CheckTransactionWithoutProofVerification(tx, state, inBlock)) << nSize << " inBlock=" << inBlock;
+        }
+    }
+}
+
+static CBlock BlockWithTx(const CTransaction& second)
+{
+    CMutableTransaction coinbase;
+    coinbase.vin.resize(1);
+    coinbase.vin[0].prevout.SetNull();
+    coinbase.vin[0].scriptSig = CScript() << 1 << OP_0;
+    coinbase.vout.resize(1);
+    coinbase.vout[0].scriptPubKey = CScript() << OP_TRUE;
+    coinbase.vout[0].nValue = 0;
+    CBlock block;
+    block.vtx.push_back(CTransaction(coinbase));
+    block.vtx.push_back(second);
+    return block;
+}
+
+TEST(oversize_grandfather_tests, check_block_admits_listed_and_rejects_unlisted) {
+    auto verifier = libzcash::ProofVerifier::Disabled();
+    {
+        CBlock block = BlockWithTx(LoadOversize478544());
+        CValidationState state;
+        EXPECT_TRUE(CheckBlock(block, state, verifier, false, false)) << state.GetRejectReason();
+    }
+    {   // an unlisted transaction over the limit in a crafted block
+        CMutableTransaction spend;
+        spend.vin.resize(1);
+        spend.vin[0].prevout.hash = uint256S("0000000000000000000000000000000000000000000000000000000000000001");
+        spend.vin[0].prevout.n = 0;
+        spend.vout.resize(1);
+        spend.vout[0].nValue = 0;
+        CBlock block = BlockWithTx(TxPaddedToSize(spend, MAX_TX_SIZE_AFTER_SAPLING + 1));
+        MockCValidationState state;
+        EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-oversize", false, ::testing::_)).Times(1);
+        EXPECT_FALSE(CheckBlock(block, state, verifier, false, false));
+    }
+    {   // the listed transaction, altered to another txid of the same size
+        CMutableTransaction mtx(LoadOversize478544());
+        mtx.nLockTime ^= 1;
+        CBlock block = BlockWithTx(CTransaction(mtx));
+        MockCValidationState state;
+        EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-txns-oversize", false, ::testing::_)).Times(1);
+        EXPECT_FALSE(CheckBlock(block, state, verifier, false, false));
+    }
+}
+
+// Real-chain check, run only when ZCL_ORDERED_BLK_DIR names a directory of height-ordered
+// blkNNNNN.dat files (records: magic(4) length(4) block; record index == height).
+// Every transaction above MAX_TX_SIZE_AFTER_SAPLING must be one of the 413, pass in a block,
+// fail standalone, and every block holding one must pass CheckBlock.
+TEST(oversize_grandfather_tests, real_chain_all_413) {
+    const char* dir = getenv("ZCL_ORDERED_BLK_DIR");
+    if (!dir) {
+        std::cerr << "ZCL_ORDERED_BLK_DIR not set: real-chain check not run" << std::endl;
+        return;
+    }
+    // CheckTransaction() verifies JoinSplits with pzcashParams; with the disabled verifier it only
+    // needs a non-null object (the gtest main loads `params`).
+    ZCJoinSplit* savedParams = pzcashParams;
+    pzcashParams = params;
+    ASSERT_TRUE(pzcashParams != nullptr);
+    auto verifier = libzcash::ProofVerifier::Disabled();
+    size_t nOver = 0, nBlocksOver = 0, nBigBlocksChecked = 0;
+    unsigned int maxTx = 0, maxBlock = 0;
+    int firstH = -1, lastH = -1;
+    std::set<uint256> found;
+    long height = 0;
+    for (int f = 0; f < 1000; f++) {
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/blk%05d.dat", dir, f);
+        FILE* fp = fopen(path, "rb");
+        if (!fp)
+            break;
+        unsigned char h[8];
+        while (fread(h, 1, 8, fp) == 8) {
+            uint32_t len = h[4] | h[5] << 8 | h[6] << 16 | (uint32_t)h[7] << 24;
+            maxBlock = std::max(maxBlock, (unsigned int)len);
+            if (len <= MAX_TX_SIZE_AFTER_SAPLING) { // no transaction in it can be oversize
+                fseek(fp, len, SEEK_CUR);
+                height++;
+                continue;
+            }
+            std::vector<unsigned char> raw(len);
+            ASSERT_EQ(fread(raw.data(), 1, len, fp), (size_t)len);
+            CDataStream ss(raw, SER_NETWORK, PROTOCOL_VERSION);
+            CBlock block;
+            ss >> block;
+            bool has = false;
+            for (const CTransaction& tx : block.vtx) {
+                unsigned int n = ::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION);
+                if (n <= MAX_TX_SIZE_AFTER_SAPLING)
+                    continue;
+                has = true;
+                nOver++;
+                maxTx = std::max(maxTx, n);
+                if (firstH < 0) firstH = (int)height;
+                lastH = (int)height;
+                EXPECT_TRUE(found.insert(tx.GetHash()).second);
+                EXPECT_TRUE(IsOversizeGrandfathered(tx.GetHash(), n)) << tx.GetHash().GetHex() << " at " << height;
+                CValidationState state;
+                EXPECT_TRUE(CheckTransactionWithoutProofVerification(tx, state, true)) << tx.GetHash().GetHex();
+                CValidationState state2;
+                EXPECT_FALSE(CheckTransactionWithoutProofVerification(tx, state2)) << tx.GetHash().GetHex();
+                EXPECT_EQ(state2.GetRejectReason(), "bad-txns-oversize");
+            }
+            if (has)
+                nBlocksOver++;
+            // CheckBlock (header PoW skipped, merkle root, sizes, every transaction, sigops).
+            CValidationState bstate;
+            EXPECT_TRUE(CheckBlock(block, bstate, verifier, false, true)) << "height " << height << " " << bstate.GetRejectReason();
+            EXPECT_LE(len, 2000000u);
+            nBigBlocksChecked++;
+            height++;
+        }
+        fclose(fp);
+    }
+    std::cerr << "real chain: " << height << " blocks scanned, " << nBigBlocksChecked << " blocks over "
+              << MAX_TX_SIZE_AFTER_SAPLING << " bytes passed CheckBlock, " << nOver << " oversize txs in "
+              << nBlocksOver << " blocks, heights " << firstH << ".." << lastH << ", largest tx " << maxTx
+              << ", largest block " << maxBlock << std::endl;
+    EXPECT_EQ(nOver, 413u);
+    EXPECT_EQ(found.size(), OversizeGrandfatherCount());
+    EXPECT_EQ(nBlocksOver, 171u);
+    EXPECT_EQ(firstH, 478544);
+    EXPECT_EQ(lastH, 1968856);
+    EXPECT_EQ(maxTx, 1922197u);
+    pzcashParams = savedParams;
+    for (size_t i = 0; i < OversizeGrandfatherCount(); i++) {
+        uint256 txid;
+        uint32_t nSize;
+        ASSERT_TRUE(OversizeGrandfatherEntry(i, txid, nSize));
+        EXPECT_EQ(found.count(txid), 1u);
+    }
 }
 
 TEST(checktransaction_tests, bad_txns_vout_negative) {

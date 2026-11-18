@@ -213,7 +213,10 @@ TEST(MainnetBlocks, ShieldedConsensusChecksAcceptRealBlocks)
                     if (groth || fPHGR) {
                         auto verifier = libzcash::ProofVerifier::Strict();
                         CValidationState state;
-                        if (!CheckTransaction(tx, state, verifier)) {
+                        // These transactions come out of mined blocks, so check them the
+                        // way CheckBlock does (fInBlock): that is what admits the 413
+                        // historical oversize transactions, four of which carry JoinSplits.
+                        if (!CheckTransaction(tx, state, verifier, true)) {
                             ok = false;
                             why = "CheckTransaction: " + state.GetRejectReason();
                         }
