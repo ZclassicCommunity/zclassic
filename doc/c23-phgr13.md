@@ -93,8 +93,9 @@ the same field elements (`test_bn254_engine_parity` in Z23).
   its own build script and still uses GMP).
 * PHGR13 proving: `JoinSplitCircuit::prove` with `makeGrothProof == false`, parameter
   generation (`JoinSplit::Generate`), `-savesproutr1cs`.
-* `sprout-proving.key` (910 MB): no longer required, fetched, hashed, served, or checked
-  by the GUI. A copy left in `~/.zcash-params` is ignored.
+* `sprout-proving.key` (910 MB): no longer required, fetched, hashed at startup, or
+  checked by the GUI. A copy left in `~/.zcash-params` is not used, except that a
+  `-bootstrapserve` node still offers it to older releases (see "Peers" below).
 
 ## What changes for users
 
@@ -116,21 +117,30 @@ JoinSplits works as before, including ones created by older binaries. Building a
 transaction without computing its proof (fee estimation) is unchanged.
 
 Peers: the compiled parameter table (`bootstrap.cpp` `ZCASH_PARAM_FILES_RAW`) now lists four
-files, so a new node neither fetches nor serves `sprout-proving.key`, even if the file is
-still on disk. A fresh older node that bootstraps its parameters from a new node fails
-with "zcash param peer does not serve sprout-proving.key" and has to take that one file
-from an older peer. The older release needs it only to start, not to validate. The
-P2P messages are unchanged: files are located by name in the served manifest.
+files, so a new node neither requires nor fetches `sprout-proving.key`. Releases up to
+beta12 still refuse to start without it and fetch it from the compiled bootstrap peers
+(z.cash no longer serves it), so a `-bootstrapserve` node keeps offering it when it holds a
+copy of the compiled size (`ZCASH_PARAM_FILES_LEGACY_SERVED`); the fetching node checks the
+content against its own compiled SHA-256, as for every file. Bootstrap operators must keep
+the file on disk until those releases are retired: a bootstrap node without it makes a
+fresh older node fail with "zcash param peer does not serve sprout-proving.key". The
+older release needs the file only to start, not to validate. The P2P messages are
+unchanged: files are located by name in the served manifest.
 
 ## Tests
 
-* `gtest/test_phgr13.cpp` (13 tests, with `gtest/phgr13_vectors.h`): 14 real mainnet
+* `gtest/test_phgr13.cpp` (15 tests, with `gtest/phgr13_vectors.h`): 14 real mainnet
   JoinSplits (block 241 and every 11,000th after it) through `JSDescription::Verify`;
   every public input changed, swapped points, every point's x and y bits flipped, lead
   bytes (refused at deserialization), non-canonical x (x = q, q+1, all ones, FE2IP = q^2),
-  x not on the curve, all rejected also under `ProofVerifier::Disabled()` where libsnark
-  decoded first; default and random proofs; 8 threads at once; and the "cannot create"
-  error.
+  x not on the curve, a g_B on the twist but outside G2 (libsnark: "point is not in G2"),
+  all rejected also under `ProofVerifier::Disabled()` where libsnark decoded first;
+  default and random proofs; 8 threads at once; the "cannot create" error; and a
+  verifying-key file that is missing, empty, truncated or zero-filled makes `Prepared`
+  throw without replacing the installed key.
+* `gtest/test_param_presence.cpp` `ManifestOffersTheLegacyProvingKeyOnlyWhenHeld`: the
+  served parameter manifest lists `sprout-proving.key` exactly when the node holds it, and
+  its first chunk is served byte for byte.
 * `MainnetBlocks.ShieldedConsensusChecksAcceptRealBlocks` runs every JoinSplit of real
   mainnet block files through `CheckTransaction` (set `ZCL_MAINNET_BLK_FILES`).
 * The 22 tests of `test_proofs.cpp` and `test_circuit.cpp` tested libsnark's own field and
