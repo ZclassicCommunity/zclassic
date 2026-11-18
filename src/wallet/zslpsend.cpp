@@ -92,6 +92,15 @@ std::string AddressOfScript(const CScript& script)
     return EncodeDestination(d);
 }
 
+/** Chain data in an error message: printable ASCII only. */
+std::string Printable(const std::string& s)
+{
+    std::string r;
+    for (size_t i = 0; i < s.size() && i < 32; i++)
+        r += (s[i] >= 0x20 && s[i] < 0x7f) ? s[i] : (char)63;
+    return r;
+}
+
 /** The index must exist, be free of errors, and be at the active tip (cs_main held). */
 bool RequireCurrentIndex(ZslpService& svc, std::string& err, WalletErrKind& kind)
 {
@@ -116,6 +125,8 @@ void GatherCoins(CWallet* wallet, const ZslpIndex& idx, const uint256& token, in
         const COutput& c = coins[i];
         if (!c.fSpendable || c.nDepth < std::max(1, minconf))
             continue;
+        if (!c.tx->IsTokenBearingOutput(c.i))
+            continue; // the wallet token guard is a superset of the index: skip the store lookup for ordinary coins
         OutInfo oi;
         if (!idx.GetOutput(c.tx->GetHash(), c.i, oi) || oi.token != token || oi.role != role)
             continue;
@@ -331,7 +342,7 @@ bool WalletTokenSend(CWallet* wallet, ZslpService& svc, const SendRequest& req, 
         return Fail(err, kind, ERRK_TOKEN_FUNDS,
                     strprintf("insufficient confirmed token balance: this wallet holds %s %s in confirmed outputs (minconf %d) and %s was requested; "
                               "tokens that are unconfirmed, or locked, are not spent",
-                              FormatAmount(balance, ti.decimals), ti.ticker, req.minconf, FormatAmount(total, ti.decimals)));
+                              FormatAmount(balance, ti.decimals), Printable(ti.ticker), req.minconf, FormatAmount(total, ti.decimals)));
 
     TokenLayout layout;
     if (!LayoutSend(req.token, recipients, have, picked[0].script, TokenDust(::minRelayTxFee), layout, perr))
@@ -383,7 +394,7 @@ bool WalletTokenBurn(CWallet* wallet, ZslpService& svc, const BurnRequest& req, 
     if (!PickInputs(all, burn, picked, have))
         return Fail(err, kind, ERRK_TOKEN_FUNDS,
                     strprintf("insufficient confirmed token balance: this wallet holds %s %s in confirmed outputs and %s was asked to be burned",
-                              FormatAmount(balance, ti.decimals), ti.ticker, FormatAmount(burn, ti.decimals)));
+                              FormatAmount(balance, ti.decimals), Printable(ti.ticker), FormatAmount(burn, ti.decimals)));
 
     TokenLayout layout;
     if (!LayoutBurn(req.token, burn, have, picked[0].script, TokenDust(::minRelayTxFee), layout, perr))
