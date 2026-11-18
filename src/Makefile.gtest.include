@@ -18,6 +18,7 @@ zcash_gtest_SOURCES += \
 endif
 zcash_gtest_SOURCES += \
 	gtest/test_tautology.cpp \
+	gtest/test_asyncrpc_opid.cpp \
 	gtest/test_deprecation.cpp \
 	gtest/test_equihash.cpp \
 	gtest/test_equihash_c23.cpp \

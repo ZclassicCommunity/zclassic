@@ -902,7 +902,8 @@ protected:
      * while the rest of the unwind is still pending, so a wallet send whose anchor
      * is valid at the final tip can be refused then and be neither in the chain nor
      * in the mempool: its notes would count as unspent until the next restart.
-     * ChainTip sets it to REACCEPT_TIPS_AFTER_UNWIND on a disconnect;
+     * ChainTip sets it to REACCEPT_TIPS_AFTER_UNWIND on a disconnect, and
+     * ReacceptWalletTransactions (startup, import, rescan) when it refused some;
      * UpdatedBlockTip retries at each new tip until no refused transaction could
      * still be admitted later (an expired one never can) or the count runs out, so
      * a permanently refused one (double spent, or without an expiry height) does
@@ -1375,10 +1376,15 @@ public:
     int ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate = false);
     /**
      * Offers the wallet transactions neither in the chain nor in the mempool to the
-     * mempool. Returns how many were refused that a later tip could still admit
+     * mempool; when some were refused that a later tip could still admit, arms the
+     * retry at the next tips (nReacceptTipsLeft), as after a disconnect: a send that
+     * builds on another one of the wallet's only becomes valid once that one is in a
+     * block. Returns how many were refused that a later tip could still admit
      * (expired or expiring ones are not counted: the mempool never takes them).
      */
     size_t ReacceptWalletTransactions();
+    /** The offer itself, without arming the retry (UpdatedBlockTip). */
+    size_t OfferWalletTransactionsToMempool();
     void ResendWalletTransactions(int64_t nBestBlockTime);
     std::vector<uint256> ResendWalletTransactionsBefore(int64_t nTime);
     CAmount GetBalance() const;
