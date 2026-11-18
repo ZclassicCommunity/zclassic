@@ -293,7 +293,7 @@ std::string SerializeNotes(const CWalletTx& wtx)
     CDataStream ss(SER_DISK, CLIENT_VERSION);
     ss << wtx.mapSproutNoteData;
     ss << wtx.mapSaplingNoteData;
-    return std::string(ss.begin(), ss.end());
+    return std::string(ss.data(), ss.size());
 }
 
 bool HasNotes(const CWalletTx& wtx)
