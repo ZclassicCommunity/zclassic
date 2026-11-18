@@ -70,6 +70,10 @@ static const unsigned int MAX_FREE_TRANSACTION_CREATE_SIZE = 1000;
 static const unsigned int WITNESS_CACHE_SIZE = MAX_REORG_LENGTH + 1;
 //! Most new tips at which the wallet re-offers its transactions after a disconnect (CWallet::UpdatedBlockTip)
 static const int REACCEPT_TIPS_AFTER_UNWIND = 20;
+//! nReacceptTipsLeft after a start-up (import, rescan) offer that refused some: the
+//! REACCEPT_TIPS_AFTER_UNWIND retries begin once the tip has reached the best known header,
+//! so a node that starts behind the network does not spend them on tips far behind
+static const int REACCEPT_WHEN_CAUGHT_UP = -1;
 
 //! Size of HD seed in bytes
 static const size_t HD_WALLET_SEED_LENGTH = 32;
@@ -903,7 +907,8 @@ protected:
      * is valid at the final tip can be refused then and be neither in the chain nor
      * in the mempool: its notes would count as unspent until the next restart.
      * ChainTip sets it to REACCEPT_TIPS_AFTER_UNWIND on a disconnect, and
-     * ReacceptWalletTransactions (startup, import, rescan) when it refused some;
+     * ReacceptWalletTransactions (startup, import, rescan) when it refused some
+     * (to REACCEPT_WHEN_CAUGHT_UP unless a retry is already running);
      * UpdatedBlockTip retries at each new tip until no refused transaction could
      * still be admitted later (an expired one never can) or the count runs out, so
      * a permanently refused one (double spent, or without an expiry height) does
