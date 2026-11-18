@@ -15,6 +15,12 @@ vendored copy: its function zcl_slp_evaluate re-expresses, without Z23's SQL lay
 validity rules of Z23's contexts/market/models/src/zslp_validity.c (Apache-2.0,
 Copyright 2026 Rhett Creighton). The rules, their order and the reason strings are Z23's.
 
+glue/zcl_znam_index.c (the ZNAM name index, doc/znam.md) is likewise zclassicd glue: its
+functions zcl_znam_owner_hash and zcl_znam_evaluate re-express, without Z23's SQL layer,
+the rules of apply_znam in Z23's contexts/explorer/models/src/explorer_index_overlays.c
+and of utxo_classify_script in core/modules/script/src/standard.c (Apache-2.0, Copyright
+2026 Rhett Creighton). The rules and their order are Z23's.
+
 Vendored files must never be edited in this tree. Provenance and identity checks:
 tools/check-vendor.sh against Z23_SOURCE.tsv.
 

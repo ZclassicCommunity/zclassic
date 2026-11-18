@@ -91,6 +91,7 @@ vendor/     VERBATIM Z23 files at the pin in Z23_SOURCE.tsv. Never edit.
               contexts/market/modules/zslp/{include/zslp/slp.h,src/slp.c}
               engine/modules/overlay/{include/overlay/overlay_codec.h,src/overlay_codec.c}
               core/modules/script/include/script/op_return_push.h
+              contexts/naming/modules/znam/{include/znam/znam.h,src/znam.c}   (doc/znam.md)
 glue/       zclassicd-owned.
               zcl_token_guard.{h,c}     the C seam the wallet calls
               zcl_slp_index.{h,c}       the C seam of the ZSLP token index (doc/zslp.md):
@@ -100,12 +101,19 @@ glue/       zclassicd-owned.
                                         contexts/market/models/src/zslp_validity.c, with the
                                         SQLite reads and writes removed. It is glue, not
                                         vendored: Z23's file is welded to its SQL tables.
+              zcl_znam_index.{h,c}      the C seam of the ZNAM name index (doc/znam.md):
+                                        parse, build and name syntax forward to the
+                                        vendored znam.c; zcl_znam_owner_hash and
+                                        zcl_znam_evaluate are a PORT of Z23's apply_znam
+                                        (contexts/explorer/models/src/explorer_index_overlays.c)
+                                        and utxo_classify_script, SQL removed.
+              script/standard.h         MAX_OP_RETURN_RELAY (223), the one name znam.c reads
               core/uint256.h            32-byte container
               primitives/transaction.h  the thinnest struct transaction that
                                         slp_classify_tx_output compiles against
               util/log_macros.h         LOG_* that compile as gnu11 and print nothing
 tools/      check-vendor.sh, revendor.sh, vendor-files.txt,
-            z23-vector-check.sh, z23_vector_shim.h, slpscript.c
+            z23-vector-check.sh, z23_vector_shim.h, slpscript.c, znamscript.c
 Z23_SOURCE.tsv   one row per vendored file: zclassicd path, Z23 path, git blob,
                  Z23 commit, core/MANIFEST.sha3 SHA3-256 (or "unsealed")
 LICENSE.z23, NOTICE
