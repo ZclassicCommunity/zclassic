@@ -919,6 +919,17 @@ void InterruptTorControl()
     }
 }
 
+bool TorControlAddressIsLocal(const std::string& address)
+{
+    std::string host;
+    int port = 0;
+    SplitHostPort(address, port, host);
+    if (host == "localhost")
+        return true;
+    CService service;
+    return Lookup(address.c_str(), service, 9051, false) && service.IsLocal();
+}
+
 void StopTorControl()
 {
     if (gBase) {

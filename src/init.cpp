@@ -2444,9 +2444,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         // it the service targets the P2P port as before and inbound onion peers are
         // simply not recognised (our onion address is then only sent to peers we
         // reached over Tor). Not done for the legacy auto-detected control port, which
-        // may belong to any Tor on the host.
+        // may belong to any Tor on the host, nor for a -torcontrol that is not on this
+        // machine: that Tor does not share our loopback, so it could not reach port+1
+        // (it keeps the P2P port as the target; -bind=<addr>=onion chooses one).
         if (!fOnionTargetBound && GetBoolArg("-listenonion", DEFAULT_LISTEN_ONION) &&
-            (fEmbeddedTor || mapArgs.count("-torcontrol"))) {
+            (fEmbeddedTor || (mapArgs.count("-torcontrol") && TorControlAddressIsLocal(GetArg("-torcontrol", ""))))) {
             CService addrOnionBind(CNetAddr("127.0.0.1"), GetListenPort() + 1);
             std::string strOnionError;
             if (BindListenPort(addrOnionBind, strOnionError, false, true)) {
