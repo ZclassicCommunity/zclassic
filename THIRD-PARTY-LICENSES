@@ -28,8 +28,8 @@ Copyright: 1990, 2016 Oracle and/or its affiliates;
 License: BDB
 
 Files: depends/sources/openssl-*.tar.gz
-Copyright: 1998-2016 The OpenSSL Project and 1995-1998 Eric Young
-License: OpenSSL+SSLeay
+Copyright: 1998-2026 The OpenSSL Project Authors, 1995-1998 Eric A. Young, Tim J. Hudson
+License: Apache-2.0
 
 Files: depends/sources/tor-*.tar.gz
 Copyright: 2001-2004, Roger Dingledine

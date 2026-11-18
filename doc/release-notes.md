@@ -94,3 +94,15 @@ What you notice:
   There the operation fails with "Sprout PHGR13 proofs can no longer be created". Receiving,
   validating and relaying such transactions and blocks works as before.
 - The undocumented `-savesproutr1cs` option is removed.
+
+
+OpenSSL 3.5.9 LTS replaces OpenSSL 1.1.1w
+-----------------------------------------
+
+The bundled OpenSSL (used for wallet encryption and by the embedded Tor's TLS) moves
+from 1.1.1w, which is out of upstream support, to the 3.5.9 LTS release, still linked
+statically and now built with its assembly code. Engines, loadable modules, the legacy
+provider and the command-line tools are not built. Encrypted `wallet.dat` files stay
+compatible in both directions: a wallet encrypted by an older release unlocks in this one,
+and a wallet whose passphrase was changed or whose keys were added here unlocks in an
+older release. OpenSSL 3 is licensed under Apache-2.0 (see `THIRD-PARTY-LICENSES`).
