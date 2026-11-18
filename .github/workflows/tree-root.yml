@@ -1,9 +1,7 @@
 name: C23 tree root checks
+# Manual only: no automatic GitHub Actions runs.
 on:
-  push:
-    paths: ['src/zcash/tree_root.*', 'src/test/tree_root_c_tests.c', '.github/workflows/tree-root.yml']
-  pull_request:
-    paths: ['src/zcash/tree_root.*', 'src/test/tree_root_c_tests.c', '.github/workflows/tree-root.yml']
+  workflow_dispatch:
 jobs:
   c23:
     runs-on: ubuntu-24.04

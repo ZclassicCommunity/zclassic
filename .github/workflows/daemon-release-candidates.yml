@@ -1,7 +1,6 @@
 name: Daemon release candidates
+# Manual only: no automatic GitHub Actions runs.
 on:
-  push:
-    branches: [release/beta11-backend]
   workflow_dispatch:
 permissions:
   contents: read
