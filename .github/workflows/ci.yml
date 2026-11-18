@@ -7,21 +7,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
+# Manual only: CI runs on the project's own machines (zcutil/local-ci.sh). No automatic
+# GitHub Actions runs on push or pull_request.
 on:
-  push:
-    paths-ignore:
-      - 'doc/**'
-      - 'contrib/**'
-      - '**/*.md'
   workflow_dispatch:
-    paths-ignore:
-      - '**/*.md'
-  pull_request:
-    paths-ignore:
-      - 'doc/**'
-      - 'contrib/**'
-      - '**/*.md'
-
 jobs:
   build:
     name: ${{ matrix.name }}
