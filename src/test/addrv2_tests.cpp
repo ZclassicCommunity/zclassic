@@ -601,6 +601,53 @@ BOOST_AUTO_TEST_CASE(self_advertisement_privacy)
 }
 
 
+// The onion service forwards to the main listener (no dedicated onion
+// listener): its visitors arrive from 127.0.0.1 and are not recognised as
+// onion peers. They must not be told the clearnet address of this machine.
+BOOST_AUTO_TEST_CASE(unrecognised_onion_visitor_is_not_told_the_clearnet_address)
+{
+    bool oldListen = fListen;
+    fListen = true;
+    vector<CNode*> keep;
+
+    CAddress onionSvc = MakeV3(78, 8033, 1, 1);
+    CService clearSvc("93.184.216.201", 8033);
+    CNode* visitor = NewNode(keep, "127.0.0.1", true); // main listener, fInboundOnion false
+    visitor->fSuccessfullyConnected = true;
+    CNode* lan = NewNode(keep, "192.168.1.20", true);
+    lan->fSuccessfullyConnected = true;
+    CNode* clear = NewNode(keep, "93.184.216.2", false);
+    clear->fSuccessfullyConnected = true;
+    BOOST_CHECK(!visitor->IsOnionPeer());
+
+    // no onion service: a local peer is still offered the clearnet address
+    BOOST_REQUIRE(AddLocal(clearSvc, LOCAL_MANUAL));
+    CService got;
+    BOOST_CHECK(GetLocal(got, &visitor->addr, false));
+    BOOST_CHECK(got == clearSvc);
+
+    // the onion service is up: nothing at all for the peer of unknown side
+    BOOST_REQUIRE(AddLocal((CService)onionSvc, LOCAL_MANUAL));
+    BOOST_CHECK(!GetLocal(got, &visitor->addr, false));
+    BOOST_CHECK(!GetLocalAddress(&visitor->addr, false).IsRoutable()); // version carries 0.0.0.0
+    BOOST_CHECK(!GetLocal(got, &lan->addr, false));
+    AdvertizeLocal(visitor);
+    BOOST_CHECK(visitor->vAddrToSend.empty());
+    AdvertizeLocal(lan);
+    BOOST_CHECK(lan->vAddrToSend.empty());
+
+    // a routable clearnet peer is unaffected
+    BOOST_REQUIRE(GetLocal(got, &clear->addr, false));
+    BOOST_CHECK(got == clearSvc);
+
+    RemoveLocal(clearSvc);
+    RemoveLocal((CService)onionSvc);
+    fListen = oldListen;
+    for (CNode* x : keep)
+        delete x;
+}
+
+
 // Dialling: the table ThreadOpenConnections picks from, and the limits that
 // keep an onion-only node off clearnet addresses.
 BOOST_AUTO_TEST_CASE(dial_table_selection)
