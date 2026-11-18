@@ -506,6 +506,9 @@ build_interrupted() { # <node> <how: kill|stop>
     say "   interrupting node $n ($how) at indexed height $(printf '%s' "$mid" | jq -r .indexedheight) of $CH"
     if [ "$how" = kill ]; then kill9 "$n"; else stop "$n"; fi
     start "$n" "$ZD" -zslpindex=1 -zslpindexstart=$((GHT - 1)) -connect=127.0.0.1:$((BASE + 0))
+    # kill -9 loses the unflushed chainstate, so the node restarts behind node 0 and catches up again, and the
+    # index follows the node's own tip: wait for node 0's tip first, or the index is compared while it has no work
+    sync "$n"
     wait_index "$n"
     snapshot "$n" >"$TMP/n$n.snap"
     cmp -s "$TMP/ref.snap" "$TMP/n$n.snap" || { diff "$TMP/ref.snap" "$TMP/n$n.snap" | head -6; fail "node $n: the index resumed after $how differs from the reference"; }
