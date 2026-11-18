@@ -138,9 +138,14 @@ bool AppInit(int argc, char* argv[])
         }
 
         
+        // ReadConfigFile appends every repeatable option (-bind, -addnode, ...) to
+        // mapMultiArgs each time it runs, so the file is read a second time only
+        // when the first call found none and a default one was just written.
+        bool fConfigRead = false;
         try
         {
             ReadConfigFile(mapArgs, mapMultiArgs);
+            fConfigRead = true;
         } catch (const missing_zcash_conf& e) {
             boost::filesystem::path config_file_path = GetConfigFile();
 
@@ -166,7 +171,8 @@ bool AppInit(int argc, char* argv[])
 
         try
         {
-            ReadConfigFile(mapArgs, mapMultiArgs);
+            if (!fConfigRead)
+                ReadConfigFile(mapArgs, mapMultiArgs);
         } catch (const missing_zcash_conf& e) {
             fprintf(stderr,
                 (_("Before starting zclassicd, you need to create a configuration file:\n"

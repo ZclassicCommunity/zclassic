@@ -2389,7 +2389,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     bool fOnionTargetBound = false;
     if (fListen) {
         if (mapArgs.count("-bind") || mapArgs.count("-whitebind")) {
+            std::set<std::string> setBindArgs;
             BOOST_FOREACH(const std::string& strBindArg, mapMultiArgs["-bind"]) {
+                // The same address given twice (on the command line and in the conf
+                // file) is bound once: a second bind of a listening address fails.
+                if (!setBindArgs.insert(strBindArg).second)
+                    continue;
                 // <addr>=onion: the listener the onion service points at (see doc/tor.md)
                 std::string strBind = strBindArg;
                 bool fOnionBind = false;
