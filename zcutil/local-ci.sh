@@ -407,13 +407,14 @@ stage() {
     w=$OUT/work/$srcname
     [ -d "$w/src/.git" ] || die "no source clone in $w (run the test build stage first)"
     t0=$(date +%s)
-    rc=0
+    # not `rc`: that name belongs to the callers (do_test, all), which sum up failures
+    st_rc=0
     {
         if [ "$net" = host ] && command -v flock >/dev/null; then flock 9; fi
         ( enter "$w" "$net" sh /ci/local-ci.sh __inner "$inner" )
-    } 9>"$CACHE/.lock" || rc=$?
-    echo "== local-ci: $inner finished in $(( $(date +%s) - t0 ))s (rc $rc)"
-    return $rc
+    } 9>"$CACHE/.lock" || st_rc=$?
+    echo "== local-ci: $inner finished in $(( $(date +%s) - t0 ))s (rc $st_rc)"
+    return $st_rc
 }
 
 do_env_setup() {
@@ -505,9 +506,9 @@ do_test() {
             lb=$OUT/work/$TESTDIR/src/wallet/artifacts/linux-build; mkdir -p "$lb/qt-static" "$lb/openssl"
             EXTRA_BINDS="--ro-bind $tc/qt-static /w/src/wallet/artifacts/linux-build/qt-static --ro-bind $tc/openssl /w/src/wallet/artifacts/linux-build/openssl"
         fi
-        stage "$TESTDIR" none test-run keep || true
+        stage "$TESTDIR" none test-run keep || rc=1
         EXTRA_BINDS=""
-        if [ "$TOR" = 1 ] && [ "$FLAVOR_CUR" = debug ]; then stage "$TESTDIR" host test-tor keep || true; fi
+        if [ "$TOR" = 1 ] && [ "$FLAVOR_CUR" = debug ]; then stage "$TESTDIR" host test-tor keep || rc=1; fi
         summary_test || rc=1
     done
     return $rc
