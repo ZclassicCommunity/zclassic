@@ -193,11 +193,11 @@ static const int64_t BOOTSTRAP_THROUGHPUT_WINDOW_MS = 60 * 1000;
 // than BOOTSTRAP_MIN_THROUGHPUT_BYTES_PER_SEC on average. On a healthy window it
 // advances the window and returns false; before a window completes it returns
 // false (lets the transfer ramp up). Exposed (non-static) for unit tests.
-bool BootstrapDownloadTooSlow(int64_t& windowStartMs, uint64_t& bytesAtWindowStart,
-                              uint64_t totalBytesReceived, int64_t nowMs)
+static bool BootstrapBelowFloor(int64_t windowMs, int64_t& windowStartMs, uint64_t& bytesAtWindowStart,
+                                uint64_t totalBytesReceived, int64_t nowMs)
 {
     const int64_t elapsedMs = nowMs - windowStartMs;
-    if (elapsedMs < BOOTSTRAP_THROUGHPUT_WINDOW_MS) {
+    if (elapsedMs < windowMs) {
         return false; // window not complete yet
     }
     const uint64_t bytesThisWindow = totalBytesReceived - bytesAtWindowStart;
@@ -208,6 +208,13 @@ bool BootstrapDownloadTooSlow(int64_t& windowStartMs, uint64_t& bytesAtWindowSta
     windowStartMs = nowMs;
     bytesAtWindowStart = totalBytesReceived;
     return false;
+}
+
+bool BootstrapDownloadTooSlow(int64_t& windowStartMs, uint64_t& bytesAtWindowStart,
+                              uint64_t totalBytesReceived, int64_t nowMs)
+{
+    return BootstrapBelowFloor(BOOTSTRAP_THROUGHPUT_WINDOW_MS, windowStartMs, bytesAtWindowStart,
+                               totalBytesReceived, nowMs);
 }
 
 // Forward declarations for the bootstrap-handshake/message helpers reused by
@@ -303,6 +310,13 @@ static size_t DiscoverBootstrapPeersFromSocket(SOCKET socket, const CService& pe
 std::vector<std::string> DiscoverBootstrapPeers()
 {
     std::vector<std::string> discovered;
+
+    // The DNS and fixed seeds are clearnet addresses: an onion-only node with
+    // no proxy for them would dial them from its own IP.
+    if (IsLimited(NET_IPV4) && IsLimited(NET_IPV6) && !BootstrapClearnetProxied()) {
+        LogPrintf("Bootstrap: onion-only node without a clearnet proxy; not discovering bootstrap peers from the clearnet seeds\n");
+        return discovered;
+    }
 
     // Wrap the whole thing: discovery must never throw out of init.
     try {
@@ -410,6 +424,13 @@ std::vector<std::string> GetBootstrapPeerList()
     // additional NODE_BOOTSTRAP peers (DiscoverBootstrapPeers) is invoked
     // lazily by the init bootstrap loop only if these fail, so we neither pay
     // its latency nor dial seed peers when a compiled peer already works.
+    // An onion-only node (-onlynet without ipv4/ipv6) with no proxy for the
+    // clearnet addresses would dial them from its own IP. That includes the
+    // common -onlynet=onion with a system Tor found through its control port,
+    // which has no onion proxy yet when the snapshot and the addnode list are
+    // set up (Tor control sets it later): list the onion peers only.
+    if (IsLimited(NET_IPV4) && IsLimited(NET_IPV6) && !BootstrapClearnetProxied())
+        return Params().OnionBootstrapPeers();
     return SelectBootstrapPeers(Params().BootstrapPeers(), Params().OnionBootstrapPeers(),
                                 OnionProxyConfigured(), IsLimited(NET_IPV4) && IsLimited(NET_IPV6),
                                 g_onionBootstrapFallback.load());
@@ -430,6 +451,28 @@ bool BootstrapOnionOnlyActive()
            IsLimited(NET_IPV4) && IsLimited(NET_IPV6);
 }
 
+bool ZcashParamFetchWouldBypassProxy()
+{
+    const std::string proxyArg = GetArg("-proxy", "");
+    if (proxyArg != "" && proxyArg != "0")
+        return true; // all traffic is meant to go through the proxy
+    std::map<std::string, std::vector<std::string> >::const_iterator it = mapMultiArgs.find("-onlynet");
+    if (it == mapMultiArgs.end() || it->second.empty())
+        return false;
+    BOOST_FOREACH(const std::string& snet, it->second) {
+        const enum Network net = ParseNetwork(snet);
+        if (net == NET_IPV4 || net == NET_IPV6)
+            return false;
+    }
+    return true; // onion-only: no clearnet connection, whatever starts Tor
+}
+
+bool BootstrapClearnetProxied()
+{
+    proxyType p;
+    return GetProxy(NET_IPV4, p) && p.IsValid();
+}
+
 bool BootstrapFallbackDue(bool fOnionOnly, int nOnionBootstrapConnected, int nOutbound,
                           int64_t nElapsedSeconds, int64_t nGraceSeconds)
 {
@@ -441,6 +484,17 @@ void BootstrapOnionFallbackCheck()
 {
     if (g_onionBootstrapFallback.load() || !BootstrapOnionOnlyActive())
         return;
+    // Only -onion is set (no -proxy): the clearnet addresses would be dialled
+    // from the node's own IP, which an onion-only operator ruled out.
+    if (!BootstrapClearnetProxied()) {
+        static bool fLogged = false;
+        if (!fLogged) {
+            fLogged = true;
+            LogPrintf("Bootstrap: no proxy for clearnet addresses (-onion without -proxy); "
+                      "staying on onion peers, not falling back to the clearnet bootstrap peers\n");
+        }
+        return;
+    }
     const std::vector<std::string> onion = Params().OnionBootstrapPeers();
     int nOnion = 0, nOutbound = 0;
     {
@@ -474,7 +528,10 @@ std::vector<std::string> GetBootstrapSnapshotPeerList()
     if (mapArgs.count("-bootstrappeer") || !BootstrapOnionOnlyActive())
         return peers;
     // Onion-only: the onion peers first; if they fail, the clearnet ones
-    // through the proxy, as before this list existed.
+    // through the proxy, as before this list existed. Without a proxy for
+    // them (-onion alone) they would be dialled directly: stay on onion.
+    if (!BootstrapClearnetProxied())
+        return peers;
     BOOST_FOREACH(const std::string& peer, Params().BootstrapPeers()) {
         if (std::find(peers.begin(), peers.end(), peer) == peers.end())
             peers.push_back(peer);
@@ -520,33 +577,64 @@ static bool IsRetryableSocketError(int err)
     return err == WSAEWOULDBLOCK || err == WSAEINPROGRESS || err == WSAEINTR;
 }
 
-static bool WaitBootstrapSocket(SOCKET socket, bool write, int timeout_ms, std::string& error)
+// The abort flag of the download this thread works for (a parallel-download
+// worker sets it; null elsewhere). A blocked bootstrap socket wait returns as
+// soon as it is set, so a manager that gives the attempt up is not left
+// waiting for a worker stuck on a peer that sends one byte a minute.
+static thread_local const std::atomic<bool>* t_bootstrapCancel = NULL;
+// Longest single select(): shutdown and cancellation are noticed within this.
+static const int BOOTSTRAP_WAIT_SLICE_MS = 250;
+// A message may take its per-message timeout plus the time its bytes need at
+// this rate: a hard bound on one receive, whatever the peer trickles.
+static const int64_t BOOTSTRAP_SLOWEST_MESSAGE_BYTES_PER_SEC = 16 * 1024;
+
+static int64_t BootstrapMessageDeadline(size_t size, int timeout_ms)
+{
+    return GetTimeMillis() + timeout_ms + (int64_t)size * 1000 / BOOTSTRAP_SLOWEST_MESSAGE_BYTES_PER_SEC;
+}
+
+// Wait until the socket is ready, `deadline_ms` (a GetTimeMillis() instant) passes,
+// shutdown starts or the thread's download is canceled.
+static bool WaitBootstrapSocket(SOCKET socket, bool write, int64_t deadline_ms, std::string& error)
 {
     if (!IsSelectableSocket(socket)) {
         error = "bootstrap socket is not selectable";
         return false;
     }
 
-    fd_set fdset;
-    FD_ZERO(&fdset);
-    FD_SET(socket, &fdset);
-    struct timeval timeout = MillisToTimeval(timeout_ms);
-    const int ret = write ? select(socket + 1, NULL, &fdset, NULL, &timeout)
-                          : select(socket + 1, &fdset, NULL, NULL, &timeout);
-    if (ret > 0) {
-        return true;
+    while (true) {
+        if (ShutdownRequested()) {
+            error = "bootstrap snapshot download aborted: shutdown requested";
+            return false;
+        }
+        if (t_bootstrapCancel && t_bootstrapCancel->load(std::memory_order_relaxed)) {
+            error = "bootstrap snapshot download canceled";
+            return false;
+        }
+        const int64_t left = deadline_ms - GetTimeMillis();
+        if (left <= 0) {
+            error = write ? "bootstrap socket write timeout" : "bootstrap socket read timeout";
+            return false;
+        }
+        fd_set fdset;
+        FD_ZERO(&fdset);
+        FD_SET(socket, &fdset);
+        struct timeval timeout = MillisToTimeval((int)std::min<int64_t>(left, BOOTSTRAP_WAIT_SLICE_MS));
+        const int ret = write ? select(socket + 1, NULL, &fdset, NULL, &timeout)
+                              : select(socket + 1, &fdset, NULL, NULL, &timeout);
+        if (ret > 0) {
+            return true;
+        }
+        if (ret < 0) {
+            error = strprintf("bootstrap socket select failed: %s", NetworkErrorString(WSAGetLastError()));
+            return false;
+        }
     }
-    if (ret == 0) {
-        error = write ? "bootstrap socket write timeout" : "bootstrap socket read timeout";
-        return false;
-    }
-
-    error = strprintf("bootstrap socket select failed: %s", NetworkErrorString(WSAGetLastError()));
-    return false;
 }
 
 static bool SendBootstrapBytes(SOCKET socket, const char* data, size_t size, int timeout_ms, std::string& error)
 {
+    const int64_t deadline = BootstrapMessageDeadline(size, timeout_ms);
     size_t sent = 0;
     while (sent < size) {
         const ssize_t ret = send(socket, data + sent, size - sent, MSG_NOSIGNAL);
@@ -564,7 +652,7 @@ static bool SendBootstrapBytes(SOCKET socket, const char* data, size_t size, int
             error = strprintf("bootstrap socket send failed: %s", NetworkErrorString(err));
             return false;
         }
-        if (!WaitBootstrapSocket(socket, true, timeout_ms, error)) {
+        if (!WaitBootstrapSocket(socket, true, deadline, error)) {
             return false;
         }
     }
@@ -573,6 +661,7 @@ static bool SendBootstrapBytes(SOCKET socket, const char* data, size_t size, int
 
 static bool RecvBootstrapBytes(SOCKET socket, char* data, size_t size, int timeout_ms, std::string& error)
 {
+    const int64_t deadline = BootstrapMessageDeadline(size, timeout_ms);
     size_t received = 0;
     while (received < size) {
         const ssize_t ret = recv(socket, data + received, size - received, 0);
@@ -590,7 +679,7 @@ static bool RecvBootstrapBytes(SOCKET socket, char* data, size_t size, int timeo
             error = strprintf("bootstrap socket recv failed: %s", NetworkErrorString(err));
             return false;
         }
-        if (!WaitBootstrapSocket(socket, false, timeout_ms, error)) {
+        if (!WaitBootstrapSocket(socket, false, deadline, error)) {
             return false;
         }
     }
@@ -2153,13 +2242,20 @@ bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotManifest& 
 // divergent manifest on a second connection is rejected before any chunk from
 // that stream is trusted. `manifestMismatch` (optional) is set when the failure
 // is the manifest differing, which retrying the same peer cannot fix.
-static bool OpenBootstrapStreamAndVerifyManifest(const CService& peerAddress, int timeout_ms, const CBootstrapSnapshotManifest& masterManifest, SOCKET& outSocket, std::string& error, bool* manifestMismatch = NULL)
+static bool OpenBootstrapStreamAndVerifyManifest(const CService& peerAddress, const std::string& peer, int timeout_ms, const CBootstrapSnapshotManifest& masterManifest, SOCKET& outSocket, std::string& error, bool* manifestMismatch = NULL)
 {
     if (manifestMismatch)
         *manifestMismatch = false;
     SOCKET socket = INVALID_SOCKET;
     bool proxyConnectionFailed = false;
-    if (!ConnectSocket(peerAddress, socket, nConnectTimeout, &proxyConnectionFailed)) {
+    // A peer given as a host name behind a name proxy has no address of its own
+    // (ConnectSocketByName leaves 0.0.0.0:0): connect by name again, exactly as
+    // the first connection did.
+    CService byName;
+    const bool connected = peerAddress.IsValid()
+        ? ConnectSocket(peerAddress, socket, nConnectTimeout, &proxyConnectionFailed)
+        : ConnectSocketByName(byName, socket, peer.c_str(), Params().GetDefaultPort(), nConnectTimeout, &proxyConnectionFailed);
+    if (!connected) {
         error = proxyConnectionFailed ? "bootstrap stream proxy connection failed" : "bootstrap stream connection failed";
         return false;
     }
@@ -2198,15 +2294,27 @@ static bool OpenBootstrapStreamAndVerifyManifest(const CService& peerAddress, in
 
 // No byte from any stream for this long: give the attempt up (the staging
 // directory is kept, so the next attempt or start continues from here).
-static const int64_t BOOTSTRAP_STALL_FAIL_MS = 5 * 60 * 1000;
+static int64_t g_bootstrapStallFailMs = 5 * 60 * 1000;
+// Over this window the attempt as a whole (all streams together) must also
+// average the minimum throughput, so a peer that keeps handing out one chunk
+// per reconnect cannot hold the attempt, and the failover to the next peer,
+// off for ever.
+static int64_t g_bootstrapAggregateWindowMs = 5 * 60 * 1000;
+
+void BootstrapSetWatchdogForTests(int64_t stallFailMs, int64_t aggregateWindowMs)
+{
+    g_bootstrapStallFailMs = stallFailMs > 0 ? stallFailMs : 5 * 60 * 1000;
+    g_bootstrapAggregateWindowMs = aggregateWindowMs > 0 ? aggregateWindowMs : 5 * 60 * 1000;
+}
 // A stream that has failed this many times in a row while the attempt has not
 // received a single byte ends the attempt (dead or refusing peer: fail over fast).
 static const int BOOTSTRAP_NO_DATA_MAX_FAILURES = 3;
 
-// Sleep up to `ms`, returning early when the download is being torn down.
-static void BootstrapInterruptibleSleep(int64_t ms, const std::atomic<bool>& abortFlag)
+// Sleep up to `ms`, returning early when the download is being torn down or
+// every file is done.
+static void BootstrapInterruptibleSleep(int64_t ms, const std::atomic<bool>& abortFlag, BootstrapWorkQueue& queue)
 {
-    while (ms > 0 && !abortFlag.load(std::memory_order_relaxed) && !ShutdownRequested()) {
+    while (ms > 0 && !abortFlag.load(std::memory_order_relaxed) && !ShutdownRequested() && !queue.AllDone()) {
         const int64_t slice = std::min<int64_t>(ms, 100);
         MilliSleep(slice);
         ms -= slice;
@@ -2221,7 +2329,8 @@ static void BootstrapInterruptibleSleep(int64_t ms, const std::atomic<bool>& abo
 // jittered delay and reconnects: the others keep going and the configured
 // parallelism comes back as soon as the server accepts the stream again. Only a
 // fatal condition (local I/O error, a file that repeatedly fails its hash, a
-// peer whose manifest changed, shutdown, or five minutes without a single byte)
+// peer whose manifest changed, shutdown, five minutes without a single byte, or
+// a whole-attempt rate below the minimum throughput over five minutes)
 // ends the attempt, and even then the staging directory is kept for the next
 // try. Correctness still rests on the per-file hashes plus the post-import
 // chainstate commitment check, exactly as the single-stream path.
@@ -2261,6 +2370,7 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
     std::atomic<uint64_t> progressBytes(completed);
     std::atomic<bool> abortFlag(false);
     std::atomic<int> activeStreams(0);
+    std::atomic<bool> peerAnswered(false); // some stream completed handshake and manifest
     std::atomic<int> liveWorkers(nStreams);
     std::atomic<uint64_t> reconnects(0);
     CCriticalSection csErr;
@@ -2279,6 +2389,7 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
     boost::thread_group workers;
     for (int w = 0; w < nStreams; ++w) {
         workers.create_thread([&, w]() {
+            t_bootstrapCancel = &abortFlag;
             try {
                 unsigned int seed = (unsigned int)(GetTimeMicros() & 0xffffffffu) ^ (unsigned int)(w * 2654435761u);
                 int failures = 0;
@@ -2298,7 +2409,8 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
                     bool fatal = false;
                     uint64_t got = 0;
                     bool mismatch = false;
-                    if (OpenBootstrapStreamAndVerifyManifest(peerAddress, timeout_ms, manifest, s, e, &mismatch)) {
+                    if (OpenBootstrapStreamAndVerifyManifest(peerAddress, peer, timeout_ms, manifest, s, e, &mismatch)) {
+                        peerAnswered.store(true, std::memory_order_relaxed);
                         const int active = activeStreams.fetch_add(1) + 1;
                         if (failures > 0)
                             LogPrintf("Bootstrap: stream %d reconnected (%d/%d streams active)\n", w, active, nStreams);
@@ -2324,7 +2436,11 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
                     // A peer that is down, or refuses every request, must not hold up
                     // failover to the next bootstrap peer for the whole stall timeout:
                     // with not one byte received in this attempt, give up after a few tries.
-                    if (failures >= BOOTSTRAP_NO_DATA_MAX_FAILURES && progressBytes.load(std::memory_order_relaxed) == completed) {
+                    // A stream the server refused (it is full) while others are connected or
+                    // have been served is not a dead peer: this stream keeps backing off, and
+                    // the throughput and stall watchdogs end an attempt that makes no headway.
+                    if (failures >= BOOTSTRAP_NO_DATA_MAX_FAILURES && !peerAnswered.load(std::memory_order_relaxed) &&
+                        activeStreams.load() == 0 && progressBytes.load(std::memory_order_relaxed) == completed) {
                         recordError(strprintf("bootstrap peer delivered no data after %d attempts: %s", failures, e));
                         break;
                     }
@@ -2333,7 +2449,7 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
                     reconnects.fetch_add(1);
                     LogPrintf("Bootstrap: stream %d failed (%s); reconnecting in %.1f s (%d/%d streams active)\n",
                               w, e, delay / 1000.0, activeStreams.load(), nStreams);
-                    BootstrapInterruptibleSleep(delay, abortFlag);
+                    BootstrapInterruptibleSleep(delay, abortFlag, queue);
                 }
             } catch (const std::exception& ex) {
                 recordError(strprintf("bootstrap stream %d exception: %s", w, ex.what()));
@@ -2354,6 +2470,8 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
     uint64_t stall_bytes = completed;
     const int64_t download_started = GetTimeMillis();
     int64_t last_progress_ms = download_started;
+    int64_t aggregate_window_start_ms = download_started;
+    uint64_t aggregate_bytes_at_start = completed;
     try {
     while (liveWorkers.load(std::memory_order_acquire) > 0) {
         if (ShutdownRequested()) {
@@ -2368,8 +2486,13 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
         if (total_received != stall_bytes) {
             stall_bytes = total_received;
             last_progress_ms = report_ms;
-        } else if (report_ms - last_progress_ms > BOOTSTRAP_STALL_FAIL_MS && !abortFlag.load()) {
-            recordError(strprintf("bootstrap download made no progress for %d s", (int)(BOOTSTRAP_STALL_FAIL_MS / 1000)));
+        } else if (report_ms - last_progress_ms > g_bootstrapStallFailMs && !abortFlag.load()) {
+            recordError(strprintf("bootstrap download made no progress for %d s", (int)(g_bootstrapStallFailMs / 1000)));
+        }
+        if (!abortFlag.load() &&
+            BootstrapBelowFloor(g_bootstrapAggregateWindowMs, aggregate_window_start_ms, aggregate_bytes_at_start,
+                                total_received, report_ms)) {
+            recordError("bootstrap snapshot download too slow (peer stalled or throttling); aborting");
         }
         if (active != last_active) {
             LogPrintf("Bootstrap: %d/%d streams active (%llu files done, %llu pending)\n", active, nStreams,
@@ -3770,6 +3893,18 @@ size_t RemoveStaleBootstrapStaging(const boost::filesystem::path& data_dir, cons
         ++removed;
     }
     return removed;
+}
+
+std::vector<boost::filesystem::path> ListBootstrapStagingDirs(const boost::filesystem::path& data_dir)
+{
+    std::vector<boost::filesystem::path> dirs;
+    boost::system::error_code ec;
+    const size_t prefixLen = strlen(BOOTSTRAP_STAGING_PREFIX);
+    for (boost::filesystem::directory_iterator it(data_dir, ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->path().filename().string().compare(0, prefixLen, BOOTSTRAP_STAGING_PREFIX) == 0)
+            dirs.push_back(it->path());
+    }
+    return dirs;
 }
 
 bool BootstrapPrepareStaging(const boost::filesystem::path& data_dir, const CBootstrapSnapshotManifest& manifest,

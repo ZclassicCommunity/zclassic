@@ -594,6 +594,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-salvagewallet", _("Attempt to recover private keys from a corrupt wallet.dat") + " " + _("on startup"));
     strUsage += HelpMessageOpt("-sendfreetransactions", strprintf(_("Send transactions as zero-fee transactions if possible (default: %u)"), 0));
     strUsage += HelpMessageOpt("-spendzeroconfchange", strprintf(_("Spend unconfirmed change when sending transactions (default: %u)"), 1));
+    strUsage += HelpMessageOpt("-tokenguard", strprintf(_("Keep outputs that carry ZSLP tokens or a mint baton out of automatic coin selection and out of explicit coin-control selections, so ordinary sends never burn them. -tokenguard=0 turns this off for the whole wallet: any such output, including a payment that merely looks like a token output, is then spent like an ordinary coin (default: %u)"), 1));
     strUsage += HelpMessageOpt("-txconfirmtarget=<n>", strprintf(_("If paytxfee is not set, include enough fee so transactions begin confirmation on average within n blocks (default: %u)"), DEFAULT_TX_CONFIRM_TARGET));
     strUsage += HelpMessageOpt("-txexpirydelta", strprintf(_("Set the number of blocks after which a transaction that has not been mined will become invalid (min: %u, default: %u (pre-Buttercup) or %u (post-Buttercup))"), TX_EXPIRING_SOON_THRESHOLD + 1, DEFAULT_PRE_BUTTERCUP_TX_EXPIRY_DELTA, DEFAULT_POST_BUTTERCUP_TX_EXPIRY_DELTA));
     strUsage += HelpMessageOpt("-maxtxfee=<amt>", strprintf(_("Maximum total fees (in %s) to use in a single wallet transaction; setting this too low may abort large transactions (default: %s)"),
@@ -1317,12 +1318,13 @@ bool InitSanityCheck(void)
     // once before use. A corrupted-but-correct-size param slips past this gate
     // but is caught by that loop, which then re-fetches (self-heal) before
     // failing.
-    // An onion-only -embeddedtor node never fetches here: this runs before
-    // Step 6 starts Tor and sets the proxies, so the fetch would dial the
-    // bootstrap peers over clearnet.
-    const bool fParamFetchAllowed = GetBoolArg("-bootstrap", true) && !EmbeddedTorOnionOnlyRequested();
+    // A node told to use a proxy (-proxy) or to stay onion-only (-onlynet
+    // without ipv4/ipv6, with or without -embeddedtor) never fetches here: this
+    // runs before Step 6 starts Tor and sets the proxies, so the fetch would
+    // dial the bootstrap peers directly and expose the node's address.
+    const bool fParamFetchAllowed = GetBoolArg("-bootstrap", true) && !ZcashParamFetchWouldBypassProxy();
     if (!ZcashParamsPresent() && GetBoolArg("-bootstrap", true) && !fParamFetchAllowed)
-        LogPrintf("Zcash parameters are missing; not fetching them from a bootstrap peer before the embedded Tor is up (-onlynet without ipv4/ipv6)\n");
+        LogPrintf("Zcash parameters are missing; not fetching them from a bootstrap peer before the proxy is set up (-proxy, or -onlynet without ipv4/ipv6): run zcutil/fetch-params.sh\n");
     if (!ZcashParamsPresent() && fParamFetchAllowed) {
         std::string paramError = "no bootstrap peer configured";
         BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
@@ -1988,6 +1990,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     }
     bSpendZeroConfChange = GetBoolArg("-spendzeroconfchange", true);
     fSendFreeTransactions = GetBoolArg("-sendfreetransactions", false);
+    fTokenGuard = GetBoolArg("-tokenguard", true);
 
     std::string strWalletFile = GetArg("-wallet", "wallet.dat");
 #endif // ENABLE_WALLET
@@ -2376,7 +2379,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     bool fOnionTargetBound = false;
     if (fListen) {
         if (mapArgs.count("-bind") || mapArgs.count("-whitebind")) {
+            std::set<std::string> setBindArgs;
             BOOST_FOREACH(const std::string& strBindArg, mapMultiArgs["-bind"]) {
+                // The same address given twice (on the command line and in the conf
+                // file) is bound once: a second bind of a listening address fails.
+                if (!setBindArgs.insert(strBindArg).second)
+                    continue;
                 // <addr>=onion: the listener the onion service points at (see doc/tor.md)
                 std::string strBind = strBindArg;
                 bool fOnionBind = false;
@@ -2426,9 +2434,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         // it the service targets the P2P port as before and inbound onion peers are
         // simply not recognised (our onion address is then only sent to peers we
         // reached over Tor). Not done for the legacy auto-detected control port, which
-        // may belong to any Tor on the host.
+        // may belong to any Tor on the host, nor for a -torcontrol that is not on this
+        // machine: that Tor does not share our loopback, so it could not reach port+1
+        // (it keeps the P2P port as the target; -bind=<addr>=onion chooses one).
         if (!fOnionTargetBound && GetBoolArg("-listenonion", DEFAULT_LISTEN_ONION) &&
-            (fEmbeddedTor || mapArgs.count("-torcontrol"))) {
+            (fEmbeddedTor || (mapArgs.count("-torcontrol") && TorControlAddressIsLocal(GetArg("-torcontrol", ""))))) {
             CService addrOnionBind(CNetAddr("127.0.0.1"), GetListenPort() + 1);
             std::string strOnionError;
             if (BindListenPort(addrOnionBind, strOnionError, false, true)) {
@@ -2624,6 +2634,14 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     if (!StubRecoveryAllowedNow(GetDataDir(), anchorForStub.nHeight, skipReason)) {
                         SetBootstrapInfoPhase("skipped", skipReason);
                         LogPrintf("Bootstrap: abandoned-stub recovery skipped: %s\n", skipReason);
+                        // The attempts are used up for this anchor: no download will resume
+                        // here, so a partial snapshot kept for it only takes disk space. A
+                        // cooldown is different: the next start may continue it.
+                        StubRecoveryState exhausted;
+                        if (ReadStubRecoveryMarker(GetDataDir(), exhausted) &&
+                            exhausted.anchorHeight == anchorForStub.nHeight &&
+                            exhausted.attempts >= kStubRecoveryMaxAttempts)
+                            RemoveStaleBootstrapStaging(GetDataDir());
                         if (explicit_peer)
                             return InitError(skipReason);
                         // else fall through to normal sync (NOT eligible).
@@ -2769,6 +2787,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     // the (correct, self-healed) terminal state so the GUI surfaces
                     // "fast-sync unavailable, syncing normally" rather than an error.
                     SetBootstrapInfoPhase("normal_sync", bootstrap_error);
+                    // The partial snapshot stays for the next start to resume, but it
+                    // sits next to the growing chain until then: say where it is.
+                    BOOST_FOREACH(const boost::filesystem::path& keptStaging, ListBootstrapStagingDirs(GetDataDir()))
+                        LogPrintf("Bootstrap: the partial snapshot in %s is kept so a later start can resume it; "
+                                  "it uses up to the full snapshot size and is removed with -bootstrap=0 or once the chain is real\n",
+                                  keptStaging.string());
                     // No snapshot was imported this start. If we moved a genesis-only
                     // datadir aside to attempt it, move it back so the datadir is left
                     // exactly as it was found (and no backup dir accumulates). Only a
@@ -2807,6 +2831,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 conflicts ? "conflicting flag (-reindex/-reindex-chainstate/-loadblock)"
                           : (!GetBoolArg("-bootstrap", true) ? "-bootstrap=0"
                                                              : "no bootstrap peers configured"));
+            // A partial snapshot kept for resume by an earlier start is dead weight
+            // when the operator turned bootstrap off (or asked for a reindex or a
+            // block import): give the disk back instead of keeping it for ever.
+            if (conflicts || !GetBoolArg("-bootstrap", true))
+                RemoveStaleBootstrapStaging(GetDataDir());
         }
     }
 

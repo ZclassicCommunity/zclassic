@@ -58,6 +58,9 @@ bool IsBootstrapFreshChainDatadir(const boost::filesystem::path& data_dir, std::
  *  everything is removed when no bootstrap will run any more. Returns the number removed. */
 size_t RemoveStaleBootstrapStaging(const boost::filesystem::path& data_dir, const std::string& keepName = std::string());
 
+/** The bootstrap-peer-staging-* directories under data_dir (a kept, resumable partial download). */
+std::vector<boost::filesystem::path> ListBootstrapStagingDirs(const boost::filesystem::path& data_dir);
+
 /** Choose and prepare the staging directory for the snapshot `manifest` describes. The name is
  *  stable for a given snapshot anchor (bootstrap_resume.h), so a directory left by an interrupted
  *  attempt is found again. `verdict` says whether it was reused (BSV_REUSE_*) or started clean;
@@ -82,6 +85,10 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
                                        const CBootstrapSnapshotManifest& manifest,
                                        const boost::filesystem::path& staging, int timeout_ms, int nStreams,
                                        std::string& error);
+/** Test hook: shorten the parallel downloader's whole-attempt watchdogs (no byte at all for
+ *  `stallFailMs`; aggregate rate below the minimum throughput over `aggregateWindowMs`).
+ *  A value <= 0 restores the five-minute default. */
+void BootstrapSetWatchdogForTests(int64_t stallFailMs, int64_t aggregateWindowMs);
 // True if the datadir holds only a genesis-height chainstate (initialized but
 // never synced past genesis); such a datadir carries no real chain.
 bool IsGenesisOnlyChainDatadir(const boost::filesystem::path& data_dir, std::string& error);
@@ -174,6 +181,17 @@ std::vector<std::string> SelectBootstrapPeers(const std::vector<std::string>& cl
 //! True when this node is onion-only with an onion proxy configured right now.
 bool BootstrapOnionOnlyActive();
 
+//! True when the arguments say that no connection may leave the node directly
+//! (-proxy, or an -onlynet list without ipv4/ipv6). The Zcash parameter fetch
+//! of init runs before the proxies are set up and would dial the bootstrap
+//! peers directly, so it must be skipped then.
+bool ZcashParamFetchWouldBypassProxy();
+
+//! True when the (IPv4) clearnet bootstrap peers would be dialled through a
+//! proxy. Without one (-onion given but no -proxy) the connection leaves from
+//! the node's own address, so an onion-only node must not use them.
+bool BootstrapClearnetProxied();
+
 //! Whether the clearnet bootstrap peers should now be added to an onion-only
 //! node: it has waited `nGraceSeconds`, no onion bootstrap peer is connected
 //! and it has no other outbound peer (a node with healthy onion peers never
@@ -187,7 +205,8 @@ bool BootstrapFallbackDue(bool fOnionOnly, int nOnionBootstrapConnected, int nOu
 void BootstrapOnionFallbackCheck();
 
 //! Peers for the snapshot fetch: GetBootstrapPeerList(), and for an onion-only
-//! node the clearnet peers (through Tor) are tried after the onion ones.
+//! node the clearnet peers (through the proxy that covers them, never directly)
+//! are tried after the onion ones.
 std::vector<std::string> GetBootstrapSnapshotPeerList();
 
 //! Auto-serve (-bootstrapserve=auto): activate serving from the immutable copy

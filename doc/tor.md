@@ -75,6 +75,12 @@ bucket rules apply: group is `NET_ONION` plus the leading bits of the key,
 the source group is the peer that told us (its v3 address, its clearnet
 address, or 127.0.0.1 for a peer that came in through our onion service, so
 all of those share one source group and cannot fill the table together).
+The choice of the next candidate is made by bucket (an occupied bucket
+first, then an entry in it), so a source group confined to a few buckets
+cannot outweigh the others by its number of entries, and a peer may add
+only a rationed number of v3 addresses it was not asked for (a token
+bucket: 100 to start, one more every 10 s, at most 1000; the answer to our
+own `getaddr` is not rationed).
 Addresses are stored only while the onion network is reachable (a Tor proxy
 is set and `-onlynet` allows it).
 
@@ -92,12 +98,18 @@ Self-advertisement and privacy
   local address table only after `ADD_ONION` succeeded (or `-externalip` was
   given). It is queued from the message handler on its next pass.
 - To tell onion inbound peers from local ones, a node that runs an onion
-  service through the embedded Tor or an explicit `-torcontrol` gets a second
-  loopback listener, the P2P port + 1, and `ADD_ONION` points at it
-  (`-bind=<addr>=onion` chooses another address and port). Connections
-  accepted there are onion peers. Without it (for example a Tor found at the
-  default control port) the service targets the P2P port as before and such
-  peers are not recognised: nothing is sent to them, which is the safe side.
+  service through the embedded Tor or a `-torcontrol` on this machine
+  (loopback address) gets a second loopback listener, the P2P port + 1, and
+  `ADD_ONION` points at it (`-bind=<addr>=onion` chooses another address and
+  port; it can also be written in `zclassic.conf`). Connections accepted
+  there are onion peers. Without it (a Tor found at the default control
+  port, a `-torcontrol` on another host or in another network namespace,
+  whose Tor could not reach a loopback port of this process, or a failed
+  bind) the service targets the P2P port as before and such peers are not
+  recognised. A peer on the main listener that comes from a loopback or
+  unroutable address while an onion address is known is then of unknown side:
+  it gets no local address at all (0.0.0.0 in `version`, no self-advertisement),
+  so the clearnet address of this machine is never linked to the onion service.
 - Relay of a learned v3 address goes only to addrv2 peers. `getaddr` answers
   include the v3 entries for every peer that negotiated `addrv2`, clearnet
   or onion, as Core's answer spans all networks the peer parses: the entries

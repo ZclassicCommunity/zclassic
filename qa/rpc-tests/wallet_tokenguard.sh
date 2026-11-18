@@ -467,5 +467,20 @@ ok "7 token outputs remain flagged; the ordinary change of the SEND (vout 2) is 
 t=$(cli 3 sendtoaddress "$MINER" 0.05)
 no_token_inputs "sendtoaddress after the token SEND" "$(inputs 3 "$t")"
 
+# ---- 8. -tokenguard=0: the whole wallet treats those outputs as ordinary coins ----
+
+say "== 8. restart with -tokenguard=0: the guard is off for the whole wallet"
+stop 3
+start 3 "$ZD" -connect=127.0.0.1:$((BASE + MN)) -tokenguard=0
+sync 3
+# more than the ordinary coins hold, less than the balance: only possible by spending a token-bearing output
+want=$(btc $(( $(zat "$(cli 3 getbalance)") - 2000 )))
+t8=$(cli 3 sendtoaddress "$MINER" "$want") || fail "-tokenguard=0: sendtoaddress of $want was refused"
+if [ "$(inputs 3 "$t8" | grep -Fx -f "$TMP/protected" | wc -l | tr -d ' ')" -ge 1 ]; then
+    ok "-tokenguard=0: sendtoaddress $want spent a token-bearing output, as asked"
+else
+    fail "-tokenguard=0: the payment did not touch a token-bearing output: $(inputs 3 "$t8")"
+fi
+
 PASSED=1
 say "wallet_tokenguard.sh: PASS ($CHECKS checks)"

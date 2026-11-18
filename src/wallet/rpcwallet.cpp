@@ -1811,7 +1811,7 @@ UniValue backupwallet(const UniValue& params, bool fHelp)
     if (fHelp || params.size() != 1)
         throw runtime_error(
             "backupwallet \"destination\"\n"
-            "\nSafely copies wallet.dat to destination filename\n"
+            "\nSafely copies wallet.dat to destination filename; an existing file is never overwritten\n"
             "\nArguments:\n"
             "1. \"destination\"   (string, required) The destination file name, saved in the directory set by the -exportdir option\n"
             "                    (default: the \"backups\" directory inside the data directory, created on first use).\n"
@@ -1836,6 +1836,12 @@ UniValue backupwallet(const UniValue& params, bool fHelp)
         throw JSONRPCError(RPC_WALLET_ERROR, ExportFilenameErrorText(filename));
     }
     boost::filesystem::path exportfilepath = exportdir / filename;
+
+    // Like dumpwallet: never replace a file. -exportdir may be the data
+    // directory, where an overwrite would destroy wallet.dat or another node file.
+    if (boost::filesystem::exists(exportfilepath)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Cannot overwrite existing file " + exportfilepath.string());
+    }
 
     if (!BackupWallet(*pwalletMain, exportfilepath.string()))
         throw JSONRPCError(RPC_WALLET_ERROR, "Error: Wallet backup failed!");
@@ -2642,7 +2648,8 @@ UniValue fundrawtransaction(const UniValue& params, bool fHelp)
                             "2. allowtokeninputs   (boolean, optional, default=false) The transaction may already contain inputs that carry\n"
                             "                      ZSLP tokens or a mint baton (see \"tokenbearing\" in listunspent). By default that is an\n"
                             "                      error, because unless the outputs form a matching token transfer the tokens are burned.\n"
-                            "                      Set to true only when the transaction is a token transfer you built on purpose.\n"
+                            "                      Set to true only when the transaction is a token transfer you built on purpose;\n"
+                            "                      the change output is then always added last, so no output moves.\n"
                             "\nResult:\n"
                             "{\n"
                             "  \"hex\":       \"value\", (string)  The resulting raw transaction (hex-encoded string)\n"
@@ -4160,7 +4167,7 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
 
         // Wallet token guard: a coinbase transaction can carry an SLP message
         // like any other, and shielding its token-bearing output burns the tokens.
-        if (out.tx->IsCoinBase() && out.tx->IsTokenBearingOutput(out.i)) {
+        if (out.tx->IsCoinBase() && out.tx->IsTokenGuarded(out.i)) {
             CTxDestination tokenAddress;
             if (ExtractDestination(out.tx->vout[out.i].scriptPubKey, tokenAddress) &&
                 (destinations.size() == 0 || destinations.count(tokenAddress))) {
@@ -4508,7 +4515,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
 
             // Wallet token guard: merging a token-bearing output into an
             // ordinary payment burns the tokens or the mint baton it carries.
-            if (out.tx->IsTokenBearingOutput(out.i)) {
+            if (out.tx->IsTokenGuarded(out.i)) {
                 tokenGuardReport.Exclude(out.tx->vout[out.i].nValue);
                 continue;
             }

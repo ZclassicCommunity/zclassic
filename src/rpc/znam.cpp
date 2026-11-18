@@ -58,6 +58,22 @@ ZnamService& RequireSyncedIndex()
 {
     ZnamService& svc = RequireIndex();
     ServiceInfo si = svc.GetInfo();
+    if (IsInitialBlockDownload()) {
+        // "synced" only says the index has seen the local tip; a tip that is itself behind the network can miss the
+        // UPDATE or TRANSFER that moved a name.
+        int h;
+        int64_t age;
+        {
+            LOCK(cs_main);
+            h = chainActive.Height();
+            CBlockIndex* tip = chainActive.Tip();
+            age = tip ? GetTime() - tip->GetBlockTime() : 0;
+        }
+        throw JSONRPCError(RPC_MISC_ERROR,
+                           strprintf("The node is still catching up with the network (local tip height %d, %d hours old): names cannot "
+                                     "be resolved or registered safely until it has. Retry when the node is synced.",
+                                     h, (int)(age / 3600)));
+    }
     if (!si.synced)
         throw JSONRPCError(RPC_MISC_ERROR,
                            strprintf("The ZNAM index is not synced with the chain tip (indexed height %d of %d%s). Wait for it and "
@@ -91,8 +107,10 @@ string Utf8Clean(const string& s)
             unsigned char d = (unsigned char)s[i + 1];
             ok = !(c == 0xf0 && d < 0x90) && !(c == 0xf4 && d >= 0x90);
         }
-        if (ok && n == 1 && c < 0x20)
+        if (ok && n == 1 && (c < 0x20 || c == 0x7f))
             ok = false;
+        if (ok && n == 2 && c == 0xc2 && (unsigned char)s[i + 1] < 0xa0)
+            ok = false; // C1 control characters (U+0080-U+009F)
         if (ok) {
             out.append(s, i, n);
             i += n;
@@ -653,13 +671,15 @@ UniValue znam_register(const UniValue& params, bool fHelp)
         CTxDestination d = DecodeDestination(wantOwner);
         if (!boost::get<CKeyID>(&d))
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "owneraddress must be a t-address (P2PKH) of this chain");
+        if (EncodeDestination(d) != wantOwner)
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "owneraddress must be exactly the t-address, with no surrounding whitespace or other extra characters");
     }
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
     RequireUnlocked();
     Entry existing;
     if (svc.Index().GetName(name, existing))
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "The name is already registered (owner " + existing.owner + ", block " + std::to_string(existing.regHeight) + ")");
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "The name is already registered (owner " + Utf8Clean(existing.owner) + ", block " + std::to_string(existing.regHeight) + ")");
     uint256 pending;
     if (PendingFor(name, pending))
         throw JSONRPCError(RPC_INVALID_PARAMETER, "A transaction for this name is already waiting in the mempool (" + pending.GetHex() + "): wait for it to confirm");
@@ -684,10 +704,10 @@ void OwnerSpendFor(const Entry& e, OwnerSpend& spend)
 {
     CTxDestination d = DecodeDestination(e.owner);
     if (!boost::get<CKeyID>(&d))
-        throw JSONRPCError(RPC_WALLET_ERROR, "The owner of this name (" + e.owner + ") is not a P2PKH address: this wallet cannot sign for it");
+        throw JSONRPCError(RPC_WALLET_ERROR, "The owner of this name (" + Utf8Clean(e.owner) + ") is not a P2PKH address: this wallet cannot sign for it");
     string why;
     if (!pwalletMain->HaveKey(*boost::get<CKeyID>(&d)))
-        throw JSONRPCError(RPC_WALLET_ERROR, "This wallet does not hold the key of the name's owner address " + e.owner);
+        throw JSONRPCError(RPC_WALLET_ERROR, "This wallet does not hold the key of the name's owner address " + Utf8Clean(e.owner));
     if (!PickOwnerCoin(e.owner, spend.op, spend.owner, spend.value, why))
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, why);
 }
@@ -768,6 +788,9 @@ UniValue znam_transfer(const UniValue& params, bool fHelp)
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
                            "newowner must be a t-address (P2PKH) of this chain. A P2SH address, a z-address or any other text would "
                            "make the name unspendable: Z23 reads an owner back as a P2PKH address only.");
+    // DecodeDestination skips surrounding whitespace; the record would carry it and no input could ever render to that text.
+    if (EncodeDestination(nd) != newOwner)
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "newowner must be exactly the t-address, with no surrounding whitespace or other extra characters");
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
     RequireUnlocked();

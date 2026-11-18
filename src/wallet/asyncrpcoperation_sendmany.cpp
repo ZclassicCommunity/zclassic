@@ -1038,7 +1038,7 @@ bool AsyncRPCOperation_sendmany::find_utxos(bool fAcceptCoinbase=false) {
         // Wallet token guard: z_sendmany takes UTXOs smallest first, so
         // without this the 546 zatoshi outputs that carry ZSLP tokens or a
         // mint baton would be the FIRST ones spent, and their tokens burned.
-        if (out.tx->IsTokenBearingOutput(out.i)) {
+        if (out.tx->IsTokenGuarded(out.i)) {
             tokenGuardReport_.Exclude(out.tx->vout[out.i].nValue);
             continue;
         }

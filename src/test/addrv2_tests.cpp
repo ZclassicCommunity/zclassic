@@ -21,6 +21,7 @@
 #include "utilstrencodings.h"
 #include "version.h"
 
+#include <set>
 #include <string>
 #include <vector>
 
@@ -601,6 +602,53 @@ BOOST_AUTO_TEST_CASE(self_advertisement_privacy)
 }
 
 
+// The onion service forwards to the main listener (no dedicated onion
+// listener): its visitors arrive from 127.0.0.1 and are not recognised as
+// onion peers. They must not be told the clearnet address of this machine.
+BOOST_AUTO_TEST_CASE(unrecognised_onion_visitor_is_not_told_the_clearnet_address)
+{
+    bool oldListen = fListen;
+    fListen = true;
+    vector<CNode*> keep;
+
+    CAddress onionSvc = MakeV3(78, 8033, 1, 1);
+    CService clearSvc("93.184.216.201", 8033);
+    CNode* visitor = NewNode(keep, "127.0.0.1", true); // main listener, fInboundOnion false
+    visitor->fSuccessfullyConnected = true;
+    CNode* lan = NewNode(keep, "192.168.1.20", true);
+    lan->fSuccessfullyConnected = true;
+    CNode* clear = NewNode(keep, "93.184.216.2", false);
+    clear->fSuccessfullyConnected = true;
+    BOOST_CHECK(!visitor->IsOnionPeer());
+
+    // no onion service: a local peer is still offered the clearnet address
+    BOOST_REQUIRE(AddLocal(clearSvc, LOCAL_MANUAL));
+    CService got;
+    BOOST_CHECK(GetLocal(got, &visitor->addr, false));
+    BOOST_CHECK(got == clearSvc);
+
+    // the onion service is up: nothing at all for the peer of unknown side
+    BOOST_REQUIRE(AddLocal((CService)onionSvc, LOCAL_MANUAL));
+    BOOST_CHECK(!GetLocal(got, &visitor->addr, false));
+    BOOST_CHECK(!GetLocalAddress(&visitor->addr, false).IsRoutable()); // version carries 0.0.0.0
+    BOOST_CHECK(!GetLocal(got, &lan->addr, false));
+    AdvertizeLocal(visitor);
+    BOOST_CHECK(visitor->vAddrToSend.empty());
+    AdvertizeLocal(lan);
+    BOOST_CHECK(lan->vAddrToSend.empty());
+
+    // a routable clearnet peer is unaffected
+    BOOST_REQUIRE(GetLocal(got, &clear->addr, false));
+    BOOST_CHECK(got == clearSvc);
+
+    RemoveLocal(clearSvc);
+    RemoveLocal((CService)onionSvc);
+    fListen = oldListen;
+    for (CNode* x : keep)
+        delete x;
+}
+
+
 // Dialling: the table ThreadOpenConnections picks from, and the limits that
 // keep an onion-only node off clearnet addresses.
 BOOST_AUTO_TEST_CASE(dial_table_selection)
@@ -646,6 +694,100 @@ BOOST_AUTO_TEST_CASE(dial_table_selection)
     SetLimited(NET_IPV6, l6);
     SetLimited(NET_ONION, lo);
     addrmanOnion.Clear();
+}
+
+namespace {
+// A v3 address that differs for every n (MakeV3 has only 256 distinct keys).
+CAddress MakeV3N(uint32_t n)
+{
+    unsigned char key[32];
+    for (int i = 0; i < 32; i++)
+        key[i] = (unsigned char)((n >> ((i % 4) * 8)) ^ (i * 37));
+    CNetAddr ip;
+    ip.SetTorV3(key);
+    CAddress a(CService(ip, 8033), 1);
+    a.nTime = GetTime();
+    return a;
+}
+} // namespace
+
+// One peer's flood of made-up v3 addresses must not outweigh the honest ones
+// in what an onion-only node dials next: the choice is by bucket, and a source
+// group is confined to a few buckets however many addresses it stores.
+BOOST_AUTO_TEST_CASE(onion_store_selection_weighs_buckets_not_entries)
+{
+    CAddrMan store(true);
+    std::set<CService> honest;
+    for (uint32_t i = 0; i < 8; i++) {
+        CAddress a = MakeV3N(i);
+        BOOST_REQUIRE(store.Add(a, MakeV3N(1000 + i))); // each learned from its own source
+        honest.insert(a);
+    }
+    for (uint32_t i = 0; i < 2000; i++)
+        store.Add(MakeV3N(100000 + i), CNetAddr("127.0.0.1")); // the flood, one source
+    BOOST_CHECK_GT(store.size(), 500u); // the flood really was stored
+
+    int nHonest = 0;
+    const int nPicks = 2000;
+    for (int i = 0; i < nPicks; i++)
+        nHonest += honest.count((CService)store.Select(true)) ? 1 : 0;
+    // picking by entry would give them about 8 of the ~1000 stored (under 1%);
+    // by bucket their 8 buckets weigh against the at most 64 the flood can reach
+    BOOST_CHECK_MESSAGE(nHonest > nPicks / 25, nHonest << " honest picks of " << nPicks);
+}
+
+// ... and a peer is rationed in what it may add to the onion store unasked.
+BOOST_AUTO_TEST_CASE(onion_store_additions_are_rationed_per_peer)
+{
+    bool wasLimited = IsLimited(NET_ONION);
+    SetLimited(NET_ONION, false);
+    addrmanOnion.Clear();
+    vector<CNode*> keep;
+    CNode* flooder = NewNode(keep, "127.0.0.1", true); // a visitor of our onion service
+    flooder->fSendAddrV2 = true;
+    for (int m = 0; m < 10; m++) {
+        vector<CAddress> v;
+        for (uint32_t i = 0; i < 1000; i++)
+            v.push_back(MakeV3N(200000 + m * 1000 + i));
+        CDataStream p = V2Payload(v);
+        BOOST_CHECK(ProcessMessage(flooder, "addrv2", p, GetTime()));
+    }
+    // the start allowance (plus a refill second or two), not 10000
+    BOOST_CHECK_LE(addrmanOnion.size(), (size_t)ONION_ADDR_TOKENS_INITIAL + 10);
+    BOOST_CHECK_GT(addrmanOnion.size(), 0u);
+
+    // one full answer to our own getaddr is taken (sending getaddr adds
+    // MAX_ADDR_TO_SEND to the allowance, as below) ...
+    addrmanOnion.Clear();
+    CNode* answerer = NewNode(keep, "8.8.8.8", false);
+    answerer->fSendAddrV2 = true;
+    answerer->fGetAddr = true;
+    answerer->dOnionAddrTokens += MAX_ADDR_TO_SEND;
+    vector<CAddress> v;
+    for (uint32_t i = 0; i < 1000; i++)
+        v.push_back(MakeV3N(300000 + i));
+    CDataStream p = V2Payload(v);
+    BOOST_CHECK(ProcessMessage(answerer, "addrv2", p, GetTime()));
+    BOOST_CHECK_GT(addrmanOnion.size(), 400u);
+
+    // ... but a peer we asked cannot keep the door open: every 1000-entry
+    // message leaves fGetAddr set, and that alone is no exemption
+    BOOST_CHECK(answerer->fGetAddr);
+    const size_t nAfterAnswer = addrmanOnion.size();
+    for (int m = 1; m <= 5; m++) {
+        vector<CAddress> more;
+        for (uint32_t i = 0; i < 1000; i++)
+            more.push_back(MakeV3N(400000 + m * 1000 + i));
+        CDataStream pm = V2Payload(more);
+        BOOST_CHECK(ProcessMessage(answerer, "addrv2", pm, GetTime()));
+    }
+    BOOST_CHECK_MESSAGE(addrmanOnion.size() <= nAfterAnswer + (size_t)ONION_ADDR_TOKENS_INITIAL + 10,
+                        addrmanOnion.size() << " stored after the answer held " << nAfterAnswer);
+
+    addrmanOnion.Clear();
+    SetLimited(NET_ONION, wasLimited);
+    for (CNode* x : keep)
+        delete x;
 }
 
 BOOST_AUTO_TEST_CASE(getaddr_answers_by_negotiation)

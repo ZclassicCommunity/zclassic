@@ -1022,6 +1022,102 @@ TEST_F(TokenGuardTest, ExplicitInputsAreRefusedUnlessOverridden)
     ExpectAutomaticSelectionProtected(wallet);
 }
 
+
+TEST_F(TokenGuardTest, FundTransactionWithTokenInputsKeepsTheChangeLast)
+{
+    StandardScenario();
+    std::string strFail;
+    const COutPoint token(txidGenesis, 1);
+
+    // A hand-built token transfer names its outputs by position: the change
+    // output FundTransaction adds may only go after them, never between.
+    for (int i = 0; i < 40; i++) {
+        CMutableTransaction mtx;
+        mtx.vin.push_back(CTxIn(token));
+        mtx.vout.push_back(CTxOut(COIN / 4, scriptOther));
+        mtx.vout.push_back(CTxOut(COIN / 5, scriptMine));
+        mtx.vout.push_back(CTxOut(COIN / 6, scriptOther));
+        const std::vector<CTxOut> original(mtx.vout);
+        CAmount nFee = 0;
+        int nChangePos = -2;
+        ASSERT_TRUE(wallet->FundTransaction(mtx, nFee, nChangePos, strFail, true)) << strFail;
+        ASSERT_EQ(original.size() + 1, mtx.vout.size());
+        ASSERT_EQ((int)original.size(), nChangePos);
+        for (size_t j = 0; j < original.size(); j++)
+            ASSERT_TRUE(mtx.vout[j] == original[j]) << "output " << j << " moved";
+    }
+}
+
+// Without allowtokeninputs (a GENESIS spends no token input) the OP_RETURN
+// message alone keeps the change out of the token slots.
+TEST_F(TokenGuardTest, FundTransactionWithAnOpReturnKeepsTheChangeLast)
+{
+    StandardScenario();
+    std::string strFail;
+    for (int i = 0; i < 40; i++) {
+        CMutableTransaction mtx;
+        mtx.vout.push_back(Data(SlpGenesis(2, 1000)));
+        mtx.vout.push_back(CTxOut(COIN / 5, scriptOther));
+        mtx.vout.push_back(CTxOut(COIN / 6, scriptMine));
+        const std::vector<CTxOut> original(mtx.vout);
+        CAmount nFee = 0;
+        int nChangePos = -2;
+        ASSERT_TRUE(wallet->FundTransaction(mtx, nFee, nChangePos, strFail, false)) << strFail;
+        ASSERT_EQ(original.size() + 1, mtx.vout.size());
+        ASSERT_EQ((int)original.size(), nChangePos);
+        for (size_t j = 0; j < original.size(); j++)
+            ASSERT_TRUE(mtx.vout[j] == original[j]) << "output " << j << " moved";
+    }
+}
+
+TEST_F(TokenGuardTest, TokenGuardSwitchOffSpendsEverything)
+{
+    StandardScenario();
+    std::set<COutPoint> inputs;
+    std::string strFail;
+
+    struct Restore {
+        ~Restore() { fTokenGuard = true; }
+    } restore;
+
+    // On (the default): more than the ordinary coins hold cannot be sent.
+    ASSERT_TRUE(fTokenGuard);
+    EXPECT_FALSE(Create(wallet, nOrdinaryValue + 1000, true, NULL, inputs, strFail));
+    EXPECT_EQ(0u, strFail.find("Insufficient funds")) << strFail;
+
+    // -tokenguard=0: token-bearing outputs are ordinary coins to every send path.
+    fTokenGuard = false;
+    ASSERT_TRUE(Create(wallet, nOrdinaryValue + 1000, true, NULL, inputs, strFail)) << strFail;
+    EXPECT_GE(CountProtected(inputs), 1u);
+
+    // coin control may name a token output without any override
+    CCoinControl cc;
+    cc.Select(COutPoint(txidFund, 0));
+    cc.Select(COutPoint(txidGenesis, 2));
+    ASSERT_TRUE(Create(wallet, COIN / 2, false, &cc, inputs, strFail)) << strFail;
+    EXPECT_EQ(1u, inputs.count(COutPoint(txidGenesis, 2)));
+    EXPECT_EQ(std::string::npos, strFail.find("carries ZSLP tokens")) << strFail;
+
+    // a token transaction (fAllowTokenOutputs: zslp_send, fundrawtransaction allowtokeninputs)
+    // still never takes an unselected token output as a fee coin: that would burn its tokens
+    CCoinControl tok;
+    tok.fAllowOtherInputs = true;
+    tok.fAllowTokenOutputs = true;
+    tok.Select(COutPoint(txidGenesis, 1));
+    EXPECT_FALSE(Create(wallet, nOrdinaryValue + 1000, true, &tok, inputs, strFail));
+    EXPECT_EQ(0u, strFail.find("Insufficient funds")) << strFail;
+    for (int i = 0; i < 20; i++) {
+        const CAmount nTarget = 1000 + (CAmount)GetRand(nOrdinaryValue - 200000);
+        ASSERT_TRUE(Create(wallet, nTarget, false, &tok, inputs, strFail)) << strFail << " target " << nTarget;
+        ASSERT_EQ(1u, CountProtected(inputs)) << "target " << nTarget;
+        ASSERT_EQ(1u, inputs.count(COutPoint(txidGenesis, 1)));
+    }
+
+    // the classification itself, which zslp_listunspent and the zslp_* RPCs use, does not change
+    EXPECT_TRUE(wallet->mapWallet[txidGenesis].IsTokenBearingOutput(1));
+    EXPECT_FALSE(wallet->mapWallet[txidGenesis].IsTokenGuarded(1));
+}
+
 TEST_F(TokenGuardTest, MergeToAddressSkipsTokenOutputs)
 {
     StandardScenario();

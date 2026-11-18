@@ -118,9 +118,19 @@ themselves. A stream that fails hands its unfinished files back (their `.part` k
 written), waits 1 s doubling to 30 s with +-25 % jitter and reconnects; the others never stop.
 There is no demotion to fewer streams. Fatal conditions end the attempt (staging is kept):
 local I/O errors, a file failing its hash twice, a changed manifest, shutdown, five minutes
-without a byte, or three failures in a row before a single byte arrived (a dead peer: fail
-over to the next one quickly). The init loop then tries the next attempt or peer, which
-resumes from the same staging directory.
+without a byte, a whole-attempt rate (all streams together) under 32 KiB/s over five
+minutes, or three failures in a row before a single byte arrived while no stream had
+connected or been served (a dead peer: fail over to the next one quickly; a server that is
+full and refuses one stream while the others are served is not a dead peer, that stream just
+keeps backing off). A blocked receive notices shutdown or the end of the attempt within a
+quarter of a second, and one message cannot take longer than its timeout plus the time its
+bytes need at 16 KiB/s, so a peer that trickles bytes cannot hold the attempt. A peer given
+as a host name behind a name proxy (`-proxy`, embedded Tor) is reconnected by name for every
+stream, as for the first connection. The init loop then tries the next attempt or peer,
+which resumes from the same staging directory. The kept directory is removed when bootstrap
+is turned off (`-bootstrap=0`) or conflicts with `-reindex`, `-reindex-chainstate` or
+`-loadblock`, when stub recovery has used up its attempts, and once the chain is real; when a
+run falls back to normal sync the log names the kept directory.
 
 Before this change the downloader aborted all streams on the first stream error and retried
 over a *single* connection for the rest of the run (`BootstrapFromPeer` fell back to

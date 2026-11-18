@@ -45,6 +45,7 @@ CAmount maxTxFee = DEFAULT_TRANSACTION_MAXFEE;
 unsigned int nTxConfirmTarget = DEFAULT_TX_CONFIRM_TARGET;
 bool bSpendZeroConfChange = true;
 bool fSendFreeTransactions = false;
+bool fTokenGuard = true;
 bool fPayAtLeastCustomFee = true;
 
 /**
@@ -3627,12 +3628,17 @@ bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, int nConfMine, int
  * vCoins, except one the caller selected explicitly AND asked to be allowed
  * (CCoinControl::fAllowTokenOutputs). AvailableCoins itself is deliberately
  * left alone, so listunspent and balances still show the dust.
+ * -tokenguard=0 lifts this for ordinary sends only: a caller that sets
+ * fAllowTokenOutputs builds a token transaction (zslp_send/mint/burn/genesis,
+ * fundrawtransaction allowtokeninputs=true), where an unselected token output
+ * taken as a fee coin would burn its tokens or make the transaction invalid.
  */
 static void FilterTokenBearingCoins(vector<COutput>& vCoins, const CCoinControl* coinControl, CTokenGuardReport* pReport)
 {
+    const bool fTokenTx = coinControl && coinControl->fAllowTokenOutputs;
     for (vector<COutput>::iterator it = vCoins.begin(); it != vCoins.end();)
     {
-        if (!it->tx->IsTokenBearingOutput(it->i)) {
+        if (!(fTokenTx ? it->tx->IsTokenBearingOutput(it->i) : it->tx->IsTokenGuarded(it->i))) {
             ++it;
             continue;
         }
@@ -3658,14 +3664,14 @@ bool CWallet::SelectCoins(const CAmount& nTargetValue, set<pair<const CWalletTx*
     // selected input that carries tokens or a mint baton is refused rather
     // than silently dropped or silently spent: the caller named it, so the
     // caller is told, and nothing is selected in its place.
-    if (coinControl && coinControl->HasSelected() && !coinControl->fAllowTokenOutputs)
+    if (fTokenGuard && coinControl && coinControl->HasSelected() && !coinControl->fAllowTokenOutputs)
     {
         std::vector<COutPoint> vSelected;
         coinControl->ListSelected(vSelected);
         BOOST_FOREACH(const COutPoint& outpoint, vSelected)
         {
             map<uint256, CWalletTx>::const_iterator it = mapWallet.find(outpoint.hash);
-            if (it != mapWallet.end() && it->second.IsTokenBearingOutput(outpoint.n))
+            if (it != mapWallet.end() && it->second.IsTokenGuarded(outpoint.n))
             {
                 if (pTokenGuardReport) {
                     pTokenGuardReport->fRefusedSelected = true;
@@ -3788,6 +3794,14 @@ bool CWallet::FundTransaction(CMutableTransaction& tx, CAmount &nFeeRet, int& nC
     CCoinControl coinControl;
     coinControl.fAllowOtherInputs = true;
     coinControl.fAllowTokenOutputs = fAllowTokenInputs;
+    // A token transaction names its outputs by position (OP_RETURN at vout[0],
+    // token outputs after it): the change must not be inserted among them. That
+    // holds with token inputs, and for any transaction that already carries an
+    // OP_RETURN message (a hand-built GENESIS has no token input).
+    coinControl.fChangeLast = fAllowTokenInputs;
+    BOOST_FOREACH(const CTxOut& txOut, tx.vout)
+        if (!txOut.scriptPubKey.empty() && txOut.scriptPubKey[0] == OP_RETURN)
+            coinControl.fChangeLast = true;
     BOOST_FOREACH(const CTxIn& txin, tx.vin)
         coinControl.Select(txin.prevout);
 

@@ -4120,7 +4120,7 @@ static bool ActivateBestChainStep(CValidationState &state, CBlockIndex *pindexMo
                     }
                 }
                 if (!pindexOldTip || chainActive.Tip()->nChainWork > pindexOldTip->nChainWork) {
-                    if (fInitReplay && ++nReplayConnected < REPLAY_BATCH)
+                    if (fInitReplay && ++nReplayConnected < REPLAY_BATCH && IsInitialBlockDownload())
                         continue;
                     // We're in a better position than we were. Return temporarily to release the lock.
                     fContinue = false;
@@ -5713,6 +5713,16 @@ bool RewindBlockIndex(const CChainParams& params, bool& clearWitnessCaches)
                 // Reset invalid block marker if it was pointing to this block
                 pindexBestInvalid = NULL;
             }
+            if (pindexIter == pindexBestParked) {
+                // Same for the parked marker: it is only a hint, and the entry is freed below
+                pindexBestParked = nullptr;
+            }
+            // The entry is erased from disk and freed below: the flush at the end must
+            // not write it back (LoadBlockIndexDB marks a FAILED_CHILD dirty, and such a
+            // never-connected block is insufficiently validated), and the failed-block
+            // set must not keep its address.
+            setDirtyBlockIndex.erase(pindexIter);
+            g_failed_blocks.erase(pindexIter);
             // Update indices
             setBlockIndexCandidates.erase(pindexIter);
             auto ret = mapBlocksUnlinked.equal_range(pindexIter->pprev);
@@ -6528,6 +6538,14 @@ static void ProcessAddrList(CNode* pfrom, vector<CAddress>& vAddr)
     vector<CAddress> vAddrOk, vAddrOnionOk;
     int64_t nNow = GetAdjustedTime();
     int64_t nSince = nNow - 10 * 60;
+    unsigned int nOnionAddrsDropped = 0;
+    {
+        const int64_t nTokenNow = GetTime();
+        const int64_t nElapsed = std::max<int64_t>(0, nTokenNow - pfrom->nOnionAddrTokensTime);
+        pfrom->dOnionAddrTokens = std::min<double>(ONION_ADDR_TOKENS_MAX,
+            pfrom->dOnionAddrTokens + nElapsed * ONION_ADDR_TOKENS_PER_SEC);
+        pfrom->nOnionAddrTokensTime = nTokenNow;
+    }
     BOOST_FOREACH(CAddress& addr, vAddr)
     {
         boost::this_thread::interruption_point();
@@ -6569,9 +6587,25 @@ static void ProcessAddrList(CNode* pfrom, vector<CAddress>& vAddr)
             }
         }
         // Do not store addresses outside our network
-        if (fReachable)
-            (addr.IsTorV3() ? vAddrOnionOk : vAddrOk).push_back(addr);
+        if (fReachable) {
+            if (!addr.IsTorV3()) {
+                vAddrOk.push_back(addr);
+            } else if (pfrom->dOnionAddrTokens >= 1.0) {
+                // A v3 key is any 32 bytes: they are rationed per peer, or one peer
+                // (every visitor of our onion service shares the source 127.0.0.1)
+                // could fill the whole onion store with made-up addresses. Our own
+                // getaddr adds one full answer to the allowance when it is sent;
+                // fGetAddr itself is no exemption, since a peer that keeps sending
+                // 1000-entry messages keeps it set.
+                pfrom->dOnionAddrTokens -= 1.0;
+                vAddrOnionOk.push_back(addr);
+            } else {
+                ++nOnionAddrsDropped;
+            }
+        }
     }
+    if (nOnionAddrsDropped > 0)
+        LogPrint("net", "ignored %u Tor v3 addresses from peer=%d: over its rate limit\n", nOnionAddrsDropped, pfrom->id);
     addrman.Add(vAddrOk, pfrom->addr, 2 * 60 * 60);
     // Tor v3 addresses (only ever sent by addrv2 peers) go to the onion store.
     // The source is the peer: its v3 address when we reached it over Tor, its
@@ -6700,6 +6734,8 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
             {
                 pfrom->PushMessage("getaddr");
                 pfrom->fGetAddr = true;
+                // room for one full answer (see ProcessAddrList), once per getaddr
+                pfrom->dOnionAddrTokens += MAX_ADDR_TO_SEND;
             }
             AddrManFor(pfrom->addr).Good(pfrom->addr);
         } else {

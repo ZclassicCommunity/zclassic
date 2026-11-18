@@ -17,7 +17,7 @@
 #   MAKE=...             make program (default: make)
 #   CONFIGURE_FLAGS=...  extra ./configure flags (appended)
 #   STRIP=...            strip program (default: per-target)
-#   ZCL_NO_EMBEDDED_TOR=1  leave embedded Tor out (depends NO_EMBEDDED_TOR=1 and
+#   ZCL_NO_EMBEDDED_TOR=1  (0, no, false or unset keep it in) leave embedded Tor out (depends NO_EMBEDDED_TOR=1 and
 #                        --without-embedded-tor). By default a release is built
 #                        WITH embedded Tor (off at run time, -embeddedtor=0) and
 #                        configure fails if depends did not provide it.
@@ -59,12 +59,15 @@ esac
 
 MAKE="${MAKE:-make}"
 CONFIGURE_FLAGS="${CONFIGURE_FLAGS:-}"
-if [ -n "${ZCL_NO_EMBEDDED_TOR:-}" ]; then
-    export NO_EMBEDDED_TOR=1
-    TOR_FLAG="--without-embedded-tor"
-else
-    TOR_FLAG="--with-embedded-tor=yes"
-fi
+case "${ZCL_NO_EMBEDDED_TOR:-0}" in
+    0|no|NO|false|FALSE)
+        TOR_FLAG="--with-embedded-tor=yes"
+        ;;
+    *)
+        export NO_EMBEDDED_TOR=1
+        TOR_FLAG="--without-embedded-tor"
+        ;;
+esac
 
 # Default to a parallel build if the caller passed no make args.
 MAKEARGS=( "$@" )

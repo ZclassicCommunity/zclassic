@@ -354,19 +354,38 @@ CAddrInfo CAddrMan::Select_(bool newOnly)
 
     // The onion store is small and sparse (a few hundred v3 addresses spread
     // over the 1024 x 64 slots): probing random slots until one is occupied
-    // would take tens of thousands of tries (and sleeps) per selection. Pick
-    // among the entries themselves instead, with the same 50% tried/new split
-    // and the same chance weighting. The buckets still bound what each source
-    // group can store; they just do not shape the choice here.
+    // would take tens of thousands of tries (and sleeps) per selection. List
+    // the occupied buckets instead and choose a bucket, then an entry in it,
+    // with the same 50% tried/new split and the same chance weighting. Choosing
+    // the bucket first keeps the weight the buckets give: a source group is
+    // confined to a few buckets, so however many addresses it stores it cannot
+    // outweigh the other groups by its entry count.
     if (fOnionStore) {
         const bool fTried = !newOnly && nTried > 0 && (nNew == 0 || RandomInt(2) == 0);
+        const int nBuckets = fTried ? ADDRMAN_TRIED_BUCKET_COUNT : ADDRMAN_NEW_BUCKET_COUNT;
+        std::vector<int> vOccupied;
+        for (int b = 0; b < nBuckets; b++) {
+            for (int pos = 0; pos < ADDRMAN_BUCKET_SIZE; pos++) {
+                if ((fTried ? vvTried[b][pos] : vvNew[b][pos]) != -1) {
+                    vOccupied.push_back(b);
+                    break;
+                }
+            }
+        }
+        if (vOccupied.empty())
+            return CAddrInfo();
         double fChanceFactor = 1.0;
         while (1) {
-            int nId = vRandom[RandomInt(vRandom.size())];
+            const int nBucket = vOccupied[RandomInt(vOccupied.size())];
+            std::vector<int> vIds;
+            for (int pos = 0; pos < ADDRMAN_BUCKET_SIZE; pos++) {
+                const int nId = fTried ? vvTried[nBucket][pos] : vvNew[nBucket][pos];
+                if (nId != -1)
+                    vIds.push_back(nId);
+            }
+            const int nId = vIds[RandomInt(vIds.size())];
             assert(mapInfo.count(nId) == 1);
             CAddrInfo& info = mapInfo[nId];
-            if (info.fInTried != fTried)
-                continue;
             if (RandomInt(1 << 30) < fChanceFactor * info.GetChance() * (1 << 30))
                 return info;
             fChanceFactor *= 1.2;

@@ -870,6 +870,10 @@ EXTRA_DIST = leveldb test/tree_root_c_tests.c \
   c23/services/tools/znamscript.c
 EXTRA_DIST += c23/tor/check-symbols.sh windows-utf8.manifest
 EXTRA_DIST += consensus/z23/oversize_grandfather_table.inc test/data/oversize_grandfather_txids.txt
+# The in-tree C23 headers and scripts every build needs (librustzcash.h, the force-included
+# symbol-prefix header, the vendored include trees, symbol-prefix.sh), so a make dist tarball builds.
+EXTRA_DIST += c23/README.md c23/NOTICE c23/LICENSE.z23 c23/Z23_SOURCE.tsv \
+  c23/compat c23/equihash c23/glue c23/sprout_prover c23/vendor c23/tools c23/tor c23/services
 
 clean-local:
 	-$(MAKE) -C leveldb clean

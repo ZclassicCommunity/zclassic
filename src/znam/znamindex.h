@@ -132,6 +132,10 @@ public:
     /** Read the metadata. False (with err) on a store this code cannot read. */
     bool Load(std::string& err);
 
+    /** Forget everything indexed (the format version stays): the next block applied is the first of a new index.
+     *  For an index whose tip is on no chain this node knows; the index is derived data and is rebuilt. */
+    bool Reset(std::string& err);
+
     /** Index a connected block. Atomic: the store moves from the previous best block to this one, or not at all. */
     bool ApplyBlock(const CBlock& block, const OwnerFn& ownerOf, const uint256& hash, int height, bool fSync, std::string& err);
 

@@ -314,6 +314,35 @@ start 1 -zslpindex=1
 connect 1 2
 wait_tip
 
+# ---- 4b. outputs that carry 0 zatoshi -------------------------------------------------------
+say "== 4b. a token output and a mint baton that pay wallet A 0 zatoshi"
+# consensus allows a zero-value output (only relay policy calls it dust, and regtest does not require standard
+# transactions); the index and zslp_listunspent count it, so zslp_send and zslp_mint must be able to spend it
+cli 2 sendtoaddress "$A" 1 >/dev/null
+settle
+u=$(cli 2 listunspent 1 | jq -c '[.[] | select(.spendable and .generated != true and .amount >= 1)] | sort_by(.amount) | .[0]')
+utxid=$(printf '%s' "$u" | jq -r .txid); uvout=$(printf '%s' "$u" | jq -r .vout)
+change=$(btc $(( $(zat "$(printf '%s' "$u" | jq -r .amount)") - 20000 )))
+raw=$(cli 2 createrawtransaction "[{\"txid\":\"$utxid\",\"vout\":$uvout}]" '{}')
+raw=$("$ZTX" -regtest "$raw" "outscript=0:0x$("$SLP" genesis ZV "Zero Value" 2 100)" "outaddr=0:$A" "outaddr=0:$A" "outaddr=$change:$M")
+Z=$(cli 2 sendrawtransaction "$(cli 2 signrawtransaction "$raw" | jq -r .hex)")
+settle
+[ "$(status_of "$Z")" = valid ] || fail "the zero-value GENESIS is not valid: $(cli 2 zslp_gettransaction "$Z")"
+[ "$(tbal 0 "$Z")" = 100 ] || fail "zslp_listunspent shows $(tbal 0 "$Z") of the zero-value token, expected 100"
+cli 0 gettxout "$Z" 1 | jq -e '.value == 0' >/dev/null || fail "the token output does not carry 0 zatoshi"
+ok "wallet A holds 100 units of $Z in a 0 zatoshi output and the baton in another"
+s=$(cli 0 zslp_send "$Z" "[{\"address\":\"$B\",\"amount\":\"40\"}]" | jq -r .txid)
+settle
+[ "$(status_of "$s")" = valid ] || fail "the send of the zero-value token is not valid: $(cli 2 zslp_gettransaction "$s")"
+[ "$(tbal 0 "$Z")" = 60 ] && [ "$(tbal 1 "$Z")" = 40 ] || fail "balances after the send: A $(tbal 0 "$Z"), B $(tbal 1 "$Z")"
+ok "zslp_send spent the 0 zatoshi token output (A 60, B 40)"
+mt=$(cli 0 zslp_mint "$Z" 5 | jq -r .txid)
+settle
+[ "$(status_of "$mt")" = valid ] || fail "the mint with the zero-value baton is not valid: $(cli 2 zslp_gettransaction "$mt")"
+[ "$(tbal 0 "$Z")" = 65 ] || fail "A holds $(tbal 0 "$Z") after the mint, expected 65"
+clean_index "zero-value outputs"
+ok "zslp_mint spent the 0 zatoshi mint baton"
+
 # ---- 5. the index catching up -------------------------------------------------------------
 say "== 5. a restart with the index behind: refused until it is at the tip"
 stop 0

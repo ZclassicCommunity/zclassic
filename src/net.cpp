@@ -124,6 +124,23 @@ bool GetLocal(CService& addr, const CNetAddr *paddrPeer, bool fPeerOnion)
 
     const bool fOnionPeer = fPeerOnion || (paddrPeer && paddrPeer->IsTor());
 
+    // Our onion service forwards to the main listener when no dedicated onion
+    // listener is bound (a Tor control port that was found on its own, or the
+    // port+1 bind failed): an onion visitor then arrives from 127.0.0.1, looking
+    // like a local peer, and is not recognised as an onion peer. Such a peer of
+    // unknown side gets no local address at all: our clearnet one would tell it
+    // which machine runs the onion service.
+    if (!fOnionPeer && paddrPeer && (paddrPeer->IsLocal() || !paddrPeer->IsRoutable())) {
+        CService target;
+        if (!GetOnionServiceTarget(target)) {
+            LOCK(cs_mapLocalHost);
+            for (map<CNetAddr, LocalServiceInfo>::const_iterator it = mapLocalHost.begin(); it != mapLocalHost.end(); ++it) {
+                if ((*it).first.IsTor())
+                    return false;
+            }
+        }
+    }
+
     int nBestScore = -1;
     int nBestReachability = -1;
     {
@@ -2324,6 +2341,8 @@ CNode::CNode(SOCKET hSocketIn, const CAddress& addrIn, const std::string& addrNa
     hashContinue = uint256();
     nStartingHeight = -1;
     fGetAddr = false;
+    dOnionAddrTokens = ONION_ADDR_TOKENS_INITIAL;
+    nOnionAddrTokensTime = GetTime();
     fRelayTxes = false;
     fSentAddr = false;
     fSendAddrV2 = false;

@@ -4,7 +4,9 @@
 
 #include "chainparams.h"
 #include "consensus/validation.h"
+#include "arith_uint256.h"
 #include "main.h"
+#include "txdb.h"
 
 #include "test/test_bitcoin.h"
 
@@ -198,6 +200,52 @@ BOOST_AUTO_TEST_CASE(accept_block_header_genesis_empty_index)
     BOOST_CHECK(pindex->GetBlockHash() == genesisHash);
     // pindex is intentionally not freed: it is still referenced by the
     // dirty-block-index set and is reclaimed at process exit.
+}
+
+// RewindBlockIndex frees every block-index entry that is not sufficiently validated. A restart
+// right after parked out-of-order blocks were flushed leaves pindexBestParked on such an entry; the
+// next unpark then walked freed memory. The marker must not survive the erase.
+BOOST_AUTO_TEST_CASE(rewind_block_index_drops_freed_parked_marker)
+{
+    LOCK(cs_main);
+    CBlockIndex* const tip = chainActive.Tip();
+    BOOST_REQUIRE(tip != NULL);
+
+    // Heap allocated: RewindBlockIndex deletes it. No nCachedBranchId, so it counts as
+    // insufficiently validated, like a downloaded but never connected block.
+    CBlockIndex* parked = new CBlockIndex();
+    const uint256 hash = ArithToUint256(arith_uint256(0x7a11ed));
+    BOOST_REQUIRE(mapBlockIndex.count(hash) == 0);
+    auto it = mapBlockIndex.insert(std::make_pair(hash, parked)).first;
+    parked->phashBlock = &it->first;
+    parked->pprev = tip;
+    parked->nHeight = tip->nHeight + 1;
+    parked->nChainWork = tip->nChainWork + 1;
+    parked->nTx = 1;
+    parked->nChainTx = tip->nChainTx + 1;
+    parked->nStatus = BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA | BLOCK_PARKED_FLAG;
+    parked->BuildSkip();
+
+    const std::vector<CBlockIndex*> all(1, parked);
+    BestChainState s = BestChainStateSave(all);
+    s.pindexBestParked = parked;
+    // Also dirty (as LoadBlockIndexDB leaves a FAILED_CHILD) and in the failed-block set.
+    s.dirty.insert(parked);
+    s.failedBlocks.insert(parked);
+    BestChainStateRestore(s, all);
+    BOOST_REQUIRE(BestChainStateSave(all).pindexBestParked == parked);
+
+    bool clearWitnessCaches = false;
+    BOOST_REQUIRE(RewindBlockIndex(Params(), clearWitnessCaches));
+
+    // The entry is gone from the index (and freed); no marker or set may point at it,
+    // and the final flush must not have written it back to the block tree.
+    BOOST_CHECK(mapBlockIndex.count(hash) == 0);
+    const BestChainState after = BestChainStateSave(std::vector<CBlockIndex*>());
+    BOOST_CHECK(after.pindexBestParked == NULL);
+    BOOST_CHECK(after.failedBlocks.count(parked) == 0);
+    CDiskBlockIndex disk;
+    BOOST_CHECK(!pblocktree->ReadDiskBlockIndex(hash, disk));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

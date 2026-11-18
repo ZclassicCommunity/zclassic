@@ -117,6 +117,27 @@ void LevelKV::Scan(const std::string& prefix,
     }
 }
 
+bool WipeKV(KV* kv, const std::string& keepKey, std::string& err)
+{
+    std::vector<KV::Op> ops;
+    kv->Scan("", [&](const std::string& k, const std::string&) {
+        if (k != keepKey) {
+            KV::Op op;
+            op.key = k;
+            op.erase = true;
+            ops.push_back(op);
+        }
+        return true;
+    });
+    if (ops.empty())
+        return true;
+    if (!kv->WriteBatch(ops, true)) {
+        err = "the index store is not writable";
+        return false;
+    }
+    return true;
+}
+
 // ---- encoding -------------------------------------------------------------
 
 namespace {
@@ -541,6 +562,12 @@ bool ZslpIndex::Load(std::string& err)
         }
     }
     return true;
+}
+
+bool ZslpIndex::Reset(std::string& err)
+{
+    LOCK(cs);
+    return WipeKV(kv, kVerKey, err);
 }
 
 bool ZslpIndex::GetBest(uint256& hash, int& height) const

@@ -47,6 +47,8 @@ extern CAmount maxTxFee;
 extern unsigned int nTxConfirmTarget;
 extern bool bSpendZeroConfChange;
 extern bool fSendFreeTransactions;
+//! Wallet token guard switch (-tokenguard, default on). Off: ordinary spend paths treat token-bearing outputs as plain coins.
+extern bool fTokenGuard;
 extern bool fPayAtLeastCustomFee;
 
 //! -paytxfee default
@@ -657,6 +659,8 @@ public:
     unsigned char GetTokenOutputRole(unsigned int n) const;
     //! True if spending output n as ordinary funds would burn ZSLP tokens or a mint baton.
     bool IsTokenBearingOutput(unsigned int n) const { return GetTokenOutputRole(n) != 0; }
+    //! True if the wallet token guard keeps output n out of ordinary spends: token-bearing, and -tokenguard not 0.
+    bool IsTokenGuarded(unsigned int n) const { return fTokenGuard && IsTokenBearingOutput(n); }
 
     bool WriteToDisk(CWalletDB *pwalletdb);
 
@@ -1333,7 +1337,9 @@ public:
     /**
      * fAllowTokenInputs is the wallet token guard override for the inputs the
      * caller already put in tx. Inputs this function adds are never
-     * token-bearing, whatever the flag says.
+     * token-bearing, whatever the flag says. With the flag set the change
+     * output is appended last, so the outputs of a token transaction (named by
+     * position) never move.
      */
     bool FundTransaction(CMutableTransaction& tx, CAmount& nFeeRet, int& nChangePosRet, std::string& strFailReason, bool fAllowTokenInputs = false);
     bool CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletTx& wtxNew, CReserveKey& reservekey, CAmount& nFeeRet, int& nChangePosRet,

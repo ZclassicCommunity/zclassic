@@ -43,7 +43,8 @@ zclassic-cli znam_listmine
 Every command except `znam_getindexinfo` refuses with a clear error while the index is off. `znam_resolve` and the three wallet commands also refuse
 while the index has not caught up to the chain tip (a stale index can miss the UPDATE that moved a name or the REGISTER
 that took it); `znam_getname` and `znam_listnames` answer with what the index has, and `znam_getname` says whether it is
-synced.
+synced. They also refuse while the node itself is still catching up with the network (initial block download): an index
+that is level with an old local tip is "synced" but can still miss a name change that happened since.
 `-znamindexstart=<n>` sets the first block the index reads; the default is 0, so no registration can be missed.
 
 `z_sendmany` and `sendtoaddress` are **not** changed and never take a name. Paying a name is two steps: resolve it
@@ -306,7 +307,10 @@ Implemented as Z23 does it; none is changed here.
 * **A2. No normalisation, no confusable policy, no reserved names, one-character names.** See 2.3.
 * **A3. A P2SH-funded record is owned by the P2PKH text of the script hash.** `explorer_index_overlays.c:69-72` always uses
   `DEST_KEY_ID`. A name registered from a P2SH input can never be changed (no key hashes to the script hash), and a
-  later TRANSFER to a real P2SH address string (`t3...`) also never matches.
+  later TRANSFER to a real P2SH address string (`t3...`) also never matches. The reverse also holds: a
+  P2SH output whose script hash equals HASH160 of a registrant's public key (possible when the key bytes, read as a
+  script, evaluate true) is spent with that key as the redeem script, and the index reads the spender as the key's
+  owner. Both Z23 and this glue read the owner this way; not changed here.
 * **A4. Only the first input counts.** A transaction that merely has an owner's coin first is a valid owner transaction;
   other inputs may belong to anyone. Wallets that reorder inputs (privacy mixers, coin-selection libraries) can change
   the owner of a record without meaning to.

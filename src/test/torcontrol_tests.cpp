@@ -261,4 +261,20 @@ BOOST_AUTO_TEST_CASE(util_GetTorControlTarget)
         mapArgs.erase("-torcontrol");
 }
 
+// The dedicated onion listener (port+1 on our loopback) only helps a Tor that
+// shares our loopback: a control address elsewhere keeps the P2P port as target.
+BOOST_AUTO_TEST_CASE(util_TorControlAddressIsLocal)
+{
+    BOOST_CHECK(TorControlAddressIsLocal("127.0.0.1:9051"));
+    BOOST_CHECK(TorControlAddressIsLocal("127.0.0.1"));
+    BOOST_CHECK(TorControlAddressIsLocal("127.1.2.3:9051"));
+    BOOST_CHECK(TorControlAddressIsLocal("[::1]:9051"));
+    BOOST_CHECK(TorControlAddressIsLocal("localhost:9051"));
+    BOOST_CHECK(!TorControlAddressIsLocal("172.17.0.1:9051"));
+    BOOST_CHECK(!TorControlAddressIsLocal("192.168.1.5:9051"));
+    BOOST_CHECK(!TorControlAddressIsLocal("93.184.216.34:9051"));
+    BOOST_CHECK(!TorControlAddressIsLocal("tor.example.org:9051"));
+    BOOST_CHECK(!TorControlAddressIsLocal(""));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

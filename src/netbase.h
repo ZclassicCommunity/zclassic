@@ -230,6 +230,8 @@ bool SetProxy(enum Network net, const proxyType &addrProxy);
 bool GetProxy(enum Network net, proxyType &proxyInfoOut);
 bool IsProxy(const CNetAddr &addr);
 bool SetNameProxy(const proxyType &addrProxy);
+/** Forget every proxy, the name proxy and proxy-only mode (tests that set them). */
+void ClearProxies();
 bool HaveNameProxy();
 /**
  * Proxy-only mode (off by default; turned on only for an onion-only
