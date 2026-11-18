@@ -29,6 +29,7 @@ cli() { "$bin/zclassic-cli" -regtest -datadir="$dd" "$@"; }
 failures=0
 ok() { echo "backupwallet-test: PASS $*"; }
 bad() { echo "backupwallet-test: FAIL $*"; failures=$((failures + 1)); }
+fsize() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; } # GNU stat, else BSD/macOS stat
 start() { # [extra args]
     "$bin/zclassicd" -regtest -dnsseed=0 -upnp=0 -listenonion=0 -discover=0 -bind=127.0.0.1 -rpcbind=127.0.0.1 \
         -rpcallowip=127.0.0.1 -debuglogfile=1 -printtoconsole=0 -showmetrics=0 -bootstrap=0 \
@@ -51,7 +52,7 @@ backups=$dd/regtest/backups
 out=$(cli backupwallet wallet-backup_1.dat 2>&1)
 [ "$out" = "$backups/wallet-backup_1.dat" ] && ok "backupwallet returned $out" || bad "backupwallet returned: $out"
 [ -s "$backups/wallet-backup_1.dat" ] && ok "backup file exists and is not empty" || bad "backup file missing or empty"
-bsz=$(stat -c %s "$backups/wallet-backup_1.dat"); wsz=$(stat -c %s "$dd/regtest/wallet.dat")
+bsz=$(fsize "$backups/wallet-backup_1.dat"); wsz=$(fsize "$dd/regtest/wallet.dat")
 [ "$bsz" -ge 1024 ] && [ "$bsz" -le $((wsz * 2)) ] && ok "backup is a plausible wallet copy ($bsz bytes, wallet.dat $wsz)" || bad "backup size $bsz vs wallet.dat $wsz"
 
 # dumpwallet / z_exportwallet use the same directory and name rules
@@ -84,15 +85,15 @@ stop
 # -exportdir may be the directory that holds wallet.dat: the live wallet and the
 # node's other files must never be a destination (copy_file would truncate them)
 start -exportdir="$dd/regtest" || { echo "backupwallet-test: node did not restart (3)"; exit 1; }
-wsz=$(stat -c %s "$dd/regtest/wallet.dat")
+wsz=$(fsize "$dd/regtest/wallet.dat")
 for victim in wallet.dat peers.dat; do
     [ -e "$dd/regtest/$victim" ] || continue
-    vsz=$(stat -c %s "$dd/regtest/$victim")
+    vsz=$(fsize "$dd/regtest/$victim")
     out=$(cli backupwallet "$victim" 2>&1)
     case "$out" in *"Cannot overwrite"*) ok "backupwallet $victim refused: $out" ;; *) bad "backupwallet $victim answered: $out" ;; esac
-    [ "$(stat -c %s "$dd/regtest/$victim")" = "$vsz" ] && ok "$victim keeps its size ($vsz bytes)" || bad "$victim changed size"
+    [ "$(fsize "$dd/regtest/$victim")" = "$vsz" ] && ok "$victim keeps its size ($vsz bytes)" || bad "$victim changed size"
 done
-[ "$(stat -c %s "$dd/regtest/wallet.dat")" -ge $((wsz / 2)) ] && ok "wallet.dat intact" || bad "wallet.dat was truncated"
+[ "$(fsize "$dd/regtest/wallet.dat")" -ge $((wsz / 2)) ] && ok "wallet.dat intact" || bad "wallet.dat was truncated"
 cli getbalance >/dev/null 2>&1 && ok "wallet still answers" || bad "wallet no longer answers"
 stop
 
