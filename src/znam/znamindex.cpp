@@ -514,6 +514,39 @@ IndexStats ZnamIndex::GetStats() const
 
 bool ZnamIndex::ApplyBlock(const CBlock& block, const OwnerFn& ownerOf, const uint256& hash, int height, bool fSync, std::string& err)
 {
+    // First, without any lock of the index: find the messages and learn their owners. `ownerOf` reads the undo file
+    // and takes cs_main, and a thread that holds cs_main may be waiting for the index's own lock (an RPC), so the
+    // index lock must not be held while it runs.
+    struct Found {
+        size_t txIndex;
+        zcl_znam_parsed msg;
+        bool haveOwner;
+        std::string owner;
+        uint256 txid;
+    };
+    std::vector<Found> found;
+    for (size_t i = 0; i < block.vtx.size(); i++) {
+        const CTransaction& tx = block.vtx[i];
+        const CTxOut* out = FirstOpReturn(tx);
+        if (!out)
+            continue;
+        Found f;
+        const std::vector<unsigned char> script(out->scriptPubKey.begin(), out->scriptPubKey.end());
+        if (!zcl_znam_parse_message(script.data(), script.size(), &f.msg))
+            continue;
+        f.txIndex = i;
+        f.haveOwner = false;
+        int rc = ownerOf ? ownerOf(i, f.owner) : 0;
+        if (rc < 0) {
+            err = strprintf("cannot learn the owner of transaction %s in block %d (the undo data of the block is not readable)",
+                            tx.GetHash().GetHex(), height);
+            return false;
+        }
+        f.haveOwner = rc > 0;
+        f.txid = tx.GetHash();
+        found.push_back(f);
+    }
+
     LOCK(cs);
     uint256 best;
     int bestHeight = -1;
@@ -531,25 +564,9 @@ bool ZnamIndex::ApplyBlock(const CBlock& block, const OwnerFn& ownerOf, const ui
     }
     const IndexStats before = st;
 
-    // Transactions are folded in block order: that order IS the first-come-first-served rule.
-    for (size_t i = 0; i < block.vtx.size(); i++) {
-        const CTransaction& tx = block.vtx[i];
-        const CTxOut* out = FirstOpReturn(tx);
-        if (!out)
-            continue;
-        zcl_znam_parsed m;
-        const std::vector<unsigned char> script(out->scriptPubKey.begin(), out->scriptPubKey.end());
-        if (!zcl_znam_parse_message(script.data(), script.size(), &m))
-            continue;
-        std::string owner;
-        int rc = ownerOf ? ownerOf(i, owner) : 0;
-        if (rc < 0) {
-            err = strprintf("cannot learn the owner of transaction %s in block %d (the undo data of the block is not readable)",
-                            tx.GetHash().GetHex(), height);
-            return false;
-        }
-        ApplyMessage(j, st, m, rc > 0, owner, tx.GetHash(), (uint32_t)i, height);
-    }
+    // Messages are folded in block order: that order IS the first-come-first-served rule.
+    for (size_t k = 0; k < found.size(); k++)
+        ApplyMessage(j, st, found[k].msg, found[k].haveOwner, found[k].owner, found[k].txid, (uint32_t)found[k].txIndex, height);
 
     std::vector<KV::Op> ops;
     const bool changed = !j.orig.empty() || memcmp(&before, &st, sizeof(st)) != 0;
