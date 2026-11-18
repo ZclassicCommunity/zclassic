@@ -12,6 +12,8 @@
 #include "namesmodel.h"
 #include <QPointer>
 #include <QScreen>
+#include <QScrollArea>
+#include <QBoxLayout>
 
 using json = nlohmann::json;
 
@@ -1093,19 +1095,54 @@ QString MainWindow::createSaplingAddressSync() {
 
 // Size a dialog to the real height of its (word-wrapped) content so no row is clipped.
 // Shared by the confirm dialog; the height is capped to 90% of the screen so a send with
-// many recipients stays on screen rather than growing off it.
-static void fitConfirmDialogToContent(QDialog* d) {
+// many recipients (or a large font on a small screen) stays on screen rather than growing
+// off it. When the content does not fit under that cap, `scrollable` (the recipients
+// group) moves into a scroll area, so the layout squeezes the scroll area's viewport
+// instead of cutting the wrapped address rows to a fraction of their height. Rows can
+// then be out of view, so the vertical scroll bar is always shown and `scrollNotice`
+// (the row count and total) is added below the scroll area, next to the buttons, so the
+// user is never asked to confirm rows they cannot see without being told.
+static void fitConfirmDialogToContent(QDialog* d, QWidget* scrollable,
+                                      const QString& scrollNotice = QString()) {
     QLayout* lay = d->layout();
     if (!lay)
         return;
     lay->activate();
     const int w = qMax(d->sizeHint().width(), 520);
-    int h = lay->hasHeightForWidth() ? lay->totalHeightForWidth(w) : d->sizeHint().height();
-    h = qMax(h, lay->totalMinimumSize().height());
+    auto contentHeight = [&]() {
+        int h = lay->hasHeightForWidth() ? lay->totalHeightForWidth(w) : d->sizeHint().height();
+        return qMax(h, lay->totalMinimumSize().height());
+    };
+    int h = contentHeight();
+    int cap = h;
     if (QScreen* sc = QGuiApplication::primaryScreen())
-        h = qMin(h, int(sc->availableGeometry().height() * 0.9));
+        cap = int(sc->availableGeometry().height() * 0.9);
+    auto* box = qobject_cast<QBoxLayout*>(lay);
+    if (h > cap && scrollable && box && box->indexOf(scrollable) >= 0) {
+        auto* area = new QScrollArea(d);
+        area->setFrameShape(QFrame::NoFrame);
+        area->setWidgetResizable(true);
+        area->setObjectName(QStringLiteral("confirmScrollArea"));
+        area->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        area->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+        area->setMinimumHeight(scrollable->fontMetrics().lineSpacing() * 4);
+        const int slot = box->indexOf(scrollable);
+        box->insertWidget(slot, area);                        // the group's own slot
+        area->setWidget(scrollable);                          // reparents; the layout drops it
+        if (!scrollNotice.isEmpty()) {
+            auto* notice = new QLabel(scrollNotice, d);
+            notice->setObjectName(QStringLiteral("confirmScrollNotice"));
+            notice->setWordWrap(true);
+            notice->setStyleSheet(QStringLiteral("font-weight: 600;"));
+            box->insertWidget(slot + 1, notice);
+        }
+        lay->activate();
+        h = contentHeight();
+    }
+    h = qMin(h, cap);
     d->setMinimumSize(w, h);
     d->resize(w, h);
+    lay->activate();
 }
 
 bool MainWindow::confirmTx(Tx tx) {
@@ -1346,7 +1383,11 @@ bool MainWindow::confirmTx(Tx tx) {
     // width. Without this the dialog opened at the .ui's 429x371 design size and the
     // layout squeezed the amount/fee rows to half height, so the user could not read
     // what they were about to confirm. Size the dialog to its real content first.
-    fitConfirmDialogToContent(&d);
+    fitConfirmDialogToContent(&d, confirm.sendToAddrs,
+        tr("Scroll to review all %1 rows above (recipients and the miner fee). "
+           "Total of all rows including the fee: %2")
+            .arg(tx.toAddrs.size() + 1)
+            .arg(Settings::getZCLDisplayFormat(totalSpending)));
 
     // Show the dialog and submit it if the user confirms
     if (d.exec() == QDialog::Accepted) {
