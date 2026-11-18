@@ -811,6 +811,11 @@ void ThreadImport(std::vector<boost::filesystem::path> vImportFiles)
             LoadExternalBlockFile(file, &pos);
             nFile++;
         }
+        // The reindex flag is the record that the block index and the chainstate are not
+        // complete on disk. Both live in memory until a flush, so make them durable before
+        // the flag goes: a kill between the two left the flag cleared, an empty block index
+        // next to full block files and a node that started from genesis.
+        FlushStateToDisk();
         pblocktree->WriteReindexing(false);
         fReindex = false;
         LogPrintf("Reindexing finished\n");
@@ -3014,12 +3019,28 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 // the connected chain from the existing blk files under full
                 // ConnectBlock -- rebuilding the UTXO set without a full reindex.
                 pblocktree = new CBlockTreeDB(nBlockTreeDBCache, false, fReindex);
+                // The reindex flag is the only record that the block index was wiped on purpose: a
+                // node killed after the wipe and before the flag is written starts with an empty
+                // index next to full block files, and its sync overwrites them. Write it before the
+                // chainstate is wiped (the long step), and when an earlier -reindex was cut short
+                // (flag found) run it again from the start with a wiped chainstate: the half-built
+                // one may be torn and no longer matches the index that is not loaded.
+                if (fReindex) {
+                    pblocktree->WriteReindexing(true);
+                } else {
+                    bool fWasReindexing = false;
+                    pblocktree->ReadReindexing(fWasReindexing);
+                    if (fWasReindexing) {
+                        LogPrintf("An earlier -reindex did not finish: starting it again\n");
+                        fReindex = true;
+                    }
+                }
                 pcoinsdbview = new CCoinsViewDB(nCoinDBCache, false, fReindex || fReindexChainState);
                 pcoinscatcher = new CCoinsViewErrorCatcher(pcoinsdbview);
                 pcoinsTip = new CCoinsViewCache(pcoinscatcher);
 
                 if (fReindex) {
-                    pblocktree->WriteReindexing(true);
+                    TestCrashPoint("reindex-after-wipe");
                     //If we're reindexing in prune mode, wipe away unusable block files and all undo data files
                     if (fPruneMode)
                         CleanupBlockRevFiles();
