@@ -1,5 +1,6 @@
 #!/bin/bash
-# Peak RSS (VmHWM) and wall time of a z_sendmany at various prover thread settings (Linux: /proc).
+# Peak RSS and wall time of a z_sendmany at various prover thread settings.
+# Linux reads VmHWM from /proc; elsewhere (macOS) the peak is the maximum of a 50 ms `ps -o rss=` sampler.
 # A pt of 0 is the default (automatic) setting; any other value is an explicit -proverthreads.
 # usage: prover_memory_bench.sh --bin DIR --work DIR [--peer-bin DIR] [--base PORT]
 #   env PT_LIST="1 4 0"  N_LIST="1 5 20 40"  R=1  EXTRA="-opt ..."
@@ -20,7 +21,7 @@ mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 SCN_ID=bench; SCN_LOG=$WORK/bench.log; OBS_LOG=$WORK/obs.txt; : >"$SCN_LOG"
 SD=$WORK/sbench; rm -rf "$SD"; mkdir -p "$SD"
 BASE=$PORT_BASE
-trap 'stop_all' EXIT
+trap 'peak_stop; stop_all' EXIT
 OUT=${OUT:-$WORK/bench.txt}; : >"$OUT"
 
 # 0.1 s polling (the library's wait_op polls once a second)
@@ -49,7 +50,21 @@ fund_notes() {
     cli 1 generate 1 >/dev/null; sync_to "$n"
 }
 zrecips() { for k in $(seq 1 "$1"); do cli 1 z_getnewaddress; done | jq -Rsc --argjson amt "$2" 'split("\n")[:-1]|map({address:.,amount:$amt})'; }
-status_kb() { awk -v k="$2" '$1==k":" {print $2}' /proc/$1/status; }
+status_kb() { # pid key; VmHWM falls back to the sampled peak when /proc is absent
+    if [ -r "/proc/$1/status" ]; then awk -v k="$2" '$1==k":" {print $2}' "/proc/$1/status"; return; fi
+    case $2 in
+        VmHWM) cat "$PEAK_FILE" 2>/dev/null ;;
+        *) ps -o rss= -p "$1" | tr -d " " ;;
+    esac
+}
+PEAK_FILE=$WORK/peak_rss_kb; SAMPLER=""
+peak_start() { # pid: sample RSS every 50 ms into $PEAK_FILE (no /proc here)
+    [ -r "/proc/$1/status" ] && { echo 5 >"/proc/$1/clear_refs"; return; }
+    : >"$PEAK_FILE"
+    ( m=0; while kill -0 "$1" 2>/dev/null; do r=$(ps -o rss= -p "$1" | tr -d " "); [ -n "$r" ] && [ "$r" -gt "$m" ] && { m=$r; echo "$m" >"$PEAK_FILE"; }; sleep 0.05; done ) &
+    SAMPLER=$!
+}
+peak_stop() { [ -n "$SAMPLER" ] && { kill "$SAMPLER" 2>/dev/null; wait "$SAMPLER" 2>/dev/null; SAMPLER=""; }; }
 
 start 1 "$PEER_BIN" -connect=127.0.0.1:$((BASE + 0)) || exit 1
 cli 1 generate 112 >/dev/null
@@ -66,10 +81,11 @@ for pt in ${PT_LIST:-1 4 0}; do
         rec=$(zrecips "$R" "$per")
         sleep 3
         rss0=$(status_kb "$pid" VmRSS)
-        echo 5 >/proc/$pid/clear_refs
+        peak_start "$pid"
         t0=$(now)
         r=$(zsend 0 "$zs" "$rec" 1 "$FEE"); t=$(elapsed "$t0")
         hwm=$(status_kb "$pid" VmHWM); rss1=$(status_kb "$pid" VmRSS)
+        peak_stop
         sleep 5; rss2=$(status_kb "$pid" VmRSS)
         case $r in success*) wait_mempool 1 "${r#success }"; mine 1; st=ok ;; *) st="FAIL:$r" ;; esac
         line="pt=$pt N=$N R=$R time=${t}s hwm_kb=$hwm rss_before_kb=$rss0 rss_after_kb=$rss1 rss_after5s_kb=$rss2 $st"
