@@ -278,11 +278,11 @@ BASELINE_SRC=<unmodified build dir> sh qa/rpc-tests/zslp_index.sh src           
 cd wallet/tests && qmake tokens.pro && make && QT_QPA_PLATFORM=offscreen ./tst_tokens   # GUI logic
 cd wallet/tests && qmake tokenssend.pro && make && QT_QPA_PLATFORM=offscreen ./tst_tokenssend   # amounts, wording, both dialogs
 src/test/test_bitcoin --run_test=zslpbuild_tests                                 # amounts, layout, mainnet messages, 120 varied transactions
-sh qa/rpc-tests/zslp_send.sh src                                                 # regtest, three nodes, 134 checks
+sh qa/rpc-tests/zslp_send.sh src                                                 # regtest, three nodes, 138 checks
 PEER_BIN=<dir of an older zclassicd> sh qa/rpc-tests/zslp_send.sh src            # the miner and relay know nothing about tokens
 ```
 
-`zslp_send.sh` makes 65 token transactions (genesis with and without a baton, nine tokens of
+`zslp_send.sh` makes 66 token transactions (genesis with and without a baton, nine tokens of
 0 to 8 decimals, mints, single, 3- and 18-recipient sends, a send of everything a wallet
 holds, burns, a reorg, a restart, refusals) and requires exact token and ZCL balances after
 every step, identical answers from three nodes' indexes, no invalid, unknown or burning

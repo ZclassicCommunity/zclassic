@@ -565,6 +565,17 @@ settle
 [ "$(tbal 0 "$BBB")" = "4950" ] && [ "$(tbal 1 "$BBB")" = "50" ] || fail "BBB after the second send"
 ok "after one confirmation the change is spendable"
 
+say "== minconf and an explicit fee"
+expect_err "insufficient confirmed token balance" cli 0 zslp_send "$BBB" "[{\"address\":\"$B\",\"amount\":\"1\"}]" 50
+expect_err "below the minimum relay fee" cli 0 zslp_send "$BBB" "[{\"address\":\"$B\",\"amount\":\"1\"}]" 1 0.00000001
+expect_err "fee must be between" cli 0 zslp_send "$BBB" "[{\"address\":\"$B\",\"amount\":\"1\"}]" 1 5
+r=$(cli 0 zslp_send "$BBB" "[{\"address\":\"$B\",\"amount\":\"1\"}]" 1 0.0001)
+f1=$(printf '%s' "$r" | jq -r .txid); TXS="$TXS $f1"
+[ "$(printf '%s' "$r" | jq -r .fee)" = "0.00010000" ] || fail "the reported fee is $(printf '%s' "$r" | jq -r .fee), asked for 0.0001"
+settle
+[ "$(fee_of 0 "$f1")" = 10000 ] || fail "the chain says the fee is $(fee_of 0 "$f1") zatoshi, asked for 10000"
+ok "an explicit fee is paid exactly; a fee below the relay minimum or above the maximum is refused; minconf is honoured"
+
 say "== two sends in one block, each from its own confirmed output"
 c1=$(cli 0 zslp_send "$AAA" "[{\"address\":\"$B\",\"amount\":\"250.50\"}]" | jq -r .txid)
 c2=$(cli 0 zslp_send "$AAA" "[{\"address\":\"$B\",\"amount\":\"2.02\"}]" | jq -r .txid)
@@ -706,7 +717,7 @@ for t in $VT; do
     [ "$n" -ge 3 ] || fail "expected A to hold at least three outputs of $t, it holds $n"
     r=$(cli 0 zslp_send "$t" "[{\"address\":\"$B\",\"amount\":\"$(tbal 0 "$t")\"}]")
     [ "$(printf '%s' "$r" | jq -r .tokeninputs)" = "$n" ] || fail "the consolidation spent $(printf '%s' "$r" | jq -r .tokeninputs) of $n outputs"
-    [ "$(printf '%s' "$r" | jq -r .tokenchange)" = "$(amt 0 $(cli 2 zslp_gettoken "$t" | jq -r .decimals))" ] || fail "a send of everything left token change"
+    [ "$(printf '%s' "$r" | jq -r .tokenchange)" = "$(amt 0 $(cli $WN zslp_gettoken "$t" | jq -r .decimals))" ] || fail "a send of everything left token change"
     TXS="$TXS $(printf '%s' "$r" | jq -r .txid)"
 done
 settle
