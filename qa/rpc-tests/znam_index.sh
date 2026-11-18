@@ -36,6 +36,24 @@ command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/zcl-znam-e2e.XXXXXX")
 BASE=$((49000 + ($$ % 700)))
+# Another job on the host may already listen in the block: move on until the block is free.
+port_busy() { # tcp-port -> true when something already listens on it
+    if command -v ss >/dev/null 2>&1; then
+        [ -n "$(ss -Htln "sport = :$1" 2>/dev/null)" ]
+    else
+        lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+    fi
+}
+_try=0
+while [ "$_try" -lt 100 ]; do
+    _i=0; _ok=1
+    while [ "$_i" -lt 120 ]; do
+        if port_busy $((BASE + _i)); then _ok=0; break; fi
+        _i=$((_i + 1))
+    done
+    [ "$_ok" -eq 1 ] && break
+    BASE=$((BASE + 121)); _try=$((_try + 1))
+done
 PIDS=""
 CHECKS=0
 
@@ -299,7 +317,7 @@ say "== 1. register and resolve through the wallet commands"
 expect_error "an upper-case name is refused" "Not a valid ZNAM name" cli 0 znam_register Alice "$T1"
 expect_error "a name with a look-alike Cyrillic letter is refused" "Not a valid ZNAM name" cli 0 znam_register "$(printf 'al\321\226ce')" "$T1"
 expect_error "a target that is not an address is refused" "not a t-address" cli 0 znam_register alice "not-an-address"
-expect_error "a mistyped address is refused" "valid" cli 0 znam_register alice "$(printf '%s' "$T1" | sed 's/.$/x/')" taddr
+expect_error "a mistyped address is refused" "valid" cli 0 znam_register alice "$(printf '%s' "$T1" | sed -e 's/x$/~/' -e 's/[^~]$/x/' -e 's/~$/y/')" taddr
 R1=$(cli 0 znam_register alice "$T1" "" "$O1" | jq -r .txid)
 expect_error "a registration of the same name waiting in the mempool blocks a second one" "already waiting in the mempool" cli 0 znam_register alice "$T2" "" "$O2"
 mine "$R1"

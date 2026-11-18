@@ -39,6 +39,24 @@ command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/zcl-zslp-e2e.XXXXXX")
 BASE=${E2E_PORT_BASE:-$((20000 + ($$ % 20000)))}
+# Another job on the host may already listen in the block: move on until the block is free.
+port_busy() { # tcp-port -> true when something already listens on it
+    if command -v ss >/dev/null 2>&1; then
+        [ -n "$(ss -Htln "sport = :$1" 2>/dev/null)" ]
+    else
+        lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+    fi
+}
+_try=0
+while [ "$_try" -lt 100 ]; do
+    _i=0; _ok=1
+    while [ "$_i" -lt 120 ]; do
+        if port_busy $((BASE + _i)); then _ok=0; break; fi
+        _i=$((_i + 1))
+    done
+    [ "$_ok" -eq 1 ] && break
+    BASE=$((BASE + 121)); _try=$((_try + 1))
+done
 PIDS=""
 CHECKS=0
 DUST=0.00000546
