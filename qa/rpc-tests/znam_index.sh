@@ -586,6 +586,48 @@ snapshot 1 >"$TMP/n1z.snap"
 cmp -s "$TMP/n0z.snap" "$TMP/n1z.snap" || { diff "$TMP/n0z.snap" "$TMP/n1z.snap" | head -6; fail "node 1's index differs from node 0's on the new chain"; }
 ok "node 1 agrees with node 0 on the new chain"
 
+# ---- 8b. owner text in errors, canonical addresses, a node that is still catching up ----
+
+say "== 8b. a hostile owner text never reaches the terminal; whitespace-padded addresses are refused; no names while catching up"
+ESCOWN=$(printf 'x\033[2J\033]0;pwn\007\177\302\233\377')
+ER=$(otx "$O4" "$("$ZS" register esc taddr "$T1")")
+mine "$ER"
+ET=$(otx "$O4" "$("$ZS" transfer esc "$ESCOWN")")
+mine "$ET"
+expect "the hostile owner text is stored as given" "$(cli 0 znam_getname esc | jq -r '.owner | length > 0')" true
+clean_error() { # <label> <command...>: fails with an error that holds no control byte and no invalid UTF-8
+    label=$1; shift
+    if out=$("$@" 2>&1); then fail "$label: succeeded"; fi
+    printf '%s' "$out" | LC_ALL=C grep -q "$(printf '[\001-\010\013-\037\177\200-\377]')" && fail "$label: the error carries a control or non-ASCII byte: $(printf '%s' "$out" | od -c | head -3)"
+    printf '%s' "$out" | grep -qF '?' || fail "$label: the error has no replacement mark: $out"
+    ok "$label: the owner text is clean"
+}
+clean_error "znam_register on a name with a hostile owner" cli 0 znam_register esc "$T1"
+clean_error "znam_update on a name with a hostile owner" cli 0 znam_update esc "$T1"
+clean_error "znam_transfer on a name with a hostile owner" cli 0 znam_transfer esc "$T1"
+NLPAD=$(printf '\n_'); NLPAD=${NLPAD%_}
+for pad in ' ' '  ' "$(printf '\t')" "$(printf '\r')" "$NLPAD"; do
+    expect_error "znam_transfer refuses a trailing-padded address" "no surrounding whitespace" cli 0 znam_transfer frank "$O4$pad"
+    expect_error "znam_transfer refuses a leading-padded address" "no surrounding whitespace" cli 0 znam_transfer frank "$pad$O4"
+    expect_error "znam_register refuses a padded owner address" "no surrounding whitespace" cli 0 znam_register zpadded "$T1" "" "$O4$pad"
+done
+expect "frank was not touched by the refused transfers" "$(nf 0 frank owner)" "$O3"
+# the node is level with its own index but its tip is days old: it is still catching up, so no name is answered
+stop 1; stop 0
+start 0 "$ZD" -znamindex=1 -mocktime=$(( $(date +%s) + 7 * 86400 ))
+wait_index 0
+expect "the index says synced with the old local tip" "$(cli 0 znam_getindexinfo | jq -r .synced)" true
+expect_error "znam_resolve refuses while the node is catching up" "still catching up" cli 0 znam_resolve frank pay
+expect_error "znam_register refuses while the node is catching up" "still catching up" cli 0 znam_register zlate "$T1"
+expect_error "znam_update refuses while the node is catching up" "still catching up" cli 0 znam_update frank "$T1"
+expect_error "znam_transfer refuses while the node is catching up" "still catching up" cli 0 znam_transfer frank "$O4"
+expect "znam_getname still answers best-effort" "$(nf 0 frank owner)" "$O3"
+stop 0
+start 0 "$ZD" -znamindex=1
+start 1 "$ZD" -znamindex=1 -connect=127.0.0.1:$((BASE + 0))
+wait_index 0; wait_index 1
+expect "znam_resolve answers again on a current node" "$(rf 0 frank address)" "$T4"
+
 # ---- 9. the flag-off RPC list ---------------------------------------------
 
 if [ -n "${BASELINE_SRC:-}" ]; then
