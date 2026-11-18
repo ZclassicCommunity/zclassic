@@ -2013,6 +2013,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
     }
 
+    // The crash and checkpoint-interval hooks exist for qa/rpc-tests/wallet_crash_consistency.sh.
+    // A stray line in zclassic.conf must not make a real node exit at a wallet write point.
+    if ((mapArgs.count("-testcrashpoint") || mapArgs.count("-testsetchaininterval")) &&
+        Params().NetworkIDString() != "regtest") {
+        return InitError("-testcrashpoint and -testsetchaininterval may only be used on regtest.");
+    }
+
     if (!mapMultiArgs["-nuparams"].empty()) {
         // Allow overriding network upgrade parameters for testing
         if (Params().NetworkIDString() != "regtest") {
