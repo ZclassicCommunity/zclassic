@@ -780,10 +780,10 @@ BOOST_AUTO_TEST_CASE(resolve_rejects_lookalikes_and_never_folds_case)
         BOOST_CHECK_MESSAGE(Resolve(c.idx, bad[i], 0, tip, 100).status == Resolution::MALFORMED, "not malformed: " + HexStr(std::string(bad[i])));
     BOOST_CHECK_EQUAL(Resolve(c.idx, std::string("alice\0x", 7), 0, tip, 100).status, Resolution::MALFORMED); // an embedded NUL
     // a look-alike made only of allowed characters is a DIFFERENT name: it resolves to nothing, never to alice
-    const char* near[] = {"a1ice", "aIice", "alicee", "alice-", "-alice", "al-ice", "rnartin", "a1ice0"};
-    for (size_t i = 0; i < sizeof(near) / sizeof(near[0]); i++) {
-        Resolution r = Resolve(c.idx, near[i], 0, tip, 100);
-        BOOST_CHECK_MESSAGE(r.status == Resolution::ABSENT || r.status == Resolution::MALFORMED, near[i]);
+    const char* lookalikes[] = {"a1ice", "aIice", "alicee", "alice-", "-alice", "al-ice", "rnartin", "a1ice0"};
+    for (size_t i = 0; i < sizeof(lookalikes) / sizeof(lookalikes[0]); i++) {
+        Resolution r = Resolve(c.idx, lookalikes[i], 0, tip, 100);
+        BOOST_CHECK_MESSAGE(r.status == Resolution::ABSENT || r.status == Resolution::MALFORMED, lookalikes[i]);
     }
     // two names that differ by one look-alike character are two names with two owners
     c.Add({Op(Register("a1ice", TAddr(0x66).c_str()), 0xa2)});
