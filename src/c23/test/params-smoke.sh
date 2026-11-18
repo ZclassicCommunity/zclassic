@@ -12,7 +12,12 @@
 # and diff the output.
 #
 # Cases
-#   intact               all five files present and correct
+#   intact               all four files present and correct (no sprout-proving.key:
+#                        PHGR13 proofs are verified, never created)
+#   legacy-proving-key   an old sprout-proving.key next to them is ignored
+#   missing-vk           sprout-verifying.key absent
+#   corrupt-vk           sprout-verifying.key, right size, one byte flipped (the
+#                        SHA-256 pin is never cached for it)
 #   missing-spend        sapling-spend.params absent
 #   missing-groth16      sprout-groth16.params absent
 #   truncated-output     sapling-output.params cut to half its size
@@ -40,9 +45,9 @@ done
 mkdir -p "$work" || exit 2
 work=$(cd "$work" && pwd)
 [ -z "$(ls -A "$work")" ] || { echo "params-smoke: $work is not empty" >&2; exit 2; }
-FILES="sapling-spend.params sapling-output.params sprout-groth16.params sprout-proving.key sprout-verifying.key"
+FILES="sapling-spend.params sapling-output.params sprout-groth16.params sprout-verifying.key"
 
-mkhome() { # <home>: all five files as symlinks to the real ones
+mkhome() { # <home>: all four files as symlinks to the real ones
     mkdir -p "$1/.zcash-params" || exit 2
     for f in $FILES; do ln -s "$params/$f" "$1/.zcash-params/$f"; done
 }
@@ -82,6 +87,15 @@ run_case() { # <name> <home> <datadir>
 
 echo "# params-smoke ${label:-$bin}"
 h=$work/h-intact; mkhome "$h"; run_case intact "$h" "$work/d-intact"
+
+h=$work/h-legacy; mkhome "$h"; : >"$h/.zcash-params/sprout-proving.key"
+run_case legacy-proving-key "$h" "$work/d-legacy"
+
+h=$work/h-missing-vk; mkhome "$h"; rm "$h/.zcash-params/sprout-verifying.key"
+run_case missing-vk "$h" "$work/d-missing-vk"
+
+h=$work/h-corrupt-vk; mkhome "$h"; flip "$h" sprout-verifying.key
+run_case corrupt-vk "$h" "$work/d-corrupt-vk"
 
 h=$work/h-missing-spend; mkhome "$h"; rm "$h/.zcash-params/sapling-spend.params"
 run_case missing-spend "$h" "$work/d-missing-spend"

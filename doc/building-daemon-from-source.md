@@ -65,18 +65,18 @@ cd /home/rhett/github/zclassic
 
 Ubuntu/Debian package set (`install-deps.sh:56-82`):
 `build-essential pkg-config libc6-dev m4 g++-multilib autoconf libtool automake
-libgmp-dev libdb++-dev libsodium-dev git python3 wget curl zlib1g-dev libssl-dev
+libdb++-dev libsodium-dev git python3 wget curl zlib1g-dev libssl-dev
 libevent-dev`.
 
 Arch set (`install-deps.sh:118-133`):
-`base-devel autoconf automake libtool pkgconf gmp db libsodium curl git python
+`base-devel autoconf automake libtool pkgconf db libsodium curl git python
 wget openssl libevent`.
 
 ### 1.3 The `depends/` system (what gets built, and what it pins)
 
 `./zcutil/build.sh` and `build-release.sh` first build a hermetic dependency
 prefix under `depends/<HOST>/`. `depends/` builds: Boost, OpenSSL, libevent,
-zeromq, libgmp, libsodium, googletest and Berkeley DB (wallet). There is no Rust
+zeromq, libsodium, googletest and Berkeley DB (wallet). There is no Rust
 toolchain and no cargo: the zk-proof code is C23 under `src/c23`
 (Z23, Apache-2.0, see `src/c23/NOTICE`) and is built by the main build.
 
@@ -124,7 +124,7 @@ x86_64-w64-mingw32-g++ -v 2>&1 | sed -n 's/^Thread model: //p'   # MUST be: posi
 
 ### 1.5 Runtime prerequisite (NOT a build prereq): zk parameters
 
-Before *running* `zclassicd` (not before building it), fetch ~1.6 GB of proving
+Before *running* `zclassicd` (not before building it), fetch ~0.8 GB of proving
 parameters:
 
 ```bash
@@ -134,16 +134,14 @@ cd /home/rhett/github/zclassic
 
 Target dir is `~/.zcash-params` on Linux,
 `~/Library/Application Support/ZcashParams` on macOS (`fetch-params.sh:6-8`).
-Files: `sprout-proving.key`, `sprout-verifying.key`, `sapling-spend.params`,
-`sapling-output.params`, `sprout-groth16.params`. The daemon will fail zk
+Files: `sprout-verifying.key`, `sapling-spend.params`,
+`sapling-output.params`, `sprout-groth16.params` (about 780 MB; the 910 MB
+`sprout-proving.key` is no longer needed). The daemon will fail zk
 operations without these, but they are not needed to compile.
 
-> Note on the sprout proving key constant: `fetch-params.sh:11` names it
-> `SPROUT_PKEY_NAME='sprout-proving.key.deprecated-sworn-elves'` (the remote
-> object name); it is fetched to the local file `sprout-proving.key`.
 
 > **NOTE (GUI single-file wallet does NOT pre-download params from z.cash).**
-> z.cash now `403`s the deprecated `sprout-proving.key`, so the GUI no longer
+> z.cash has permanently `403`d the old parameter downloads, so the GUI no longer
 > pre-fetches params over HTTP. Instead the embedded daemon fetches any missing
 > params from a bootstrap peer over P2P, hash-verified
 > (`init.cpp` `InitSanityCheck` → `FetchZcashParamsFromPeer`, default
@@ -185,28 +183,28 @@ This runs depends → `autogen.sh` → `./configure --prefix=/ --disable-tests` 
 `release/x86_64-unknown-linux-gnu/` (`build-release.sh:125-137`). If you pass no
 make args it defaults to `-j$(nproc)` (`build-release.sh:60-61`).
 
-### 2c. Release build for embedding in the GUI (static libgomp)
+### 2c. Release build for embedding in the GUI
 
-A fresh desktop often lacks `libgomp.so.1`; without it the GUI's embedded node
-fails to start ("connection refused"). Statically link it:
+The daemon has no OpenMP dependency (libsnark was removed), so it needs no
+`libgomp.so.1` on the user machine and nothing special at link time:
 
 ```bash
 cd /home/rhett/github/zclassic
-ZQW_STATIC_GOMP=1 ./zcutil/build-release.sh linux -j$(nproc)
+./zcutil/build-release.sh linux -j$(nproc)
 ```
 
-`ZQW_STATIC_GOMP=1` relinks with the static `libgomp.a` + `-Wl,--as-needed` +
-`-ldl` (`build-release.sh:96-123`). **Verify the result has no libgomp dependency**
+`ZQW_STATIC_GOMP=1` is still accepted by `build-release.sh` (older GUI build scripts
+export it) and ignored. **Verify the result has no libgomp dependency**
 (see §5).
 
 > **Glibc floor warning (important for distribution).** A native build on a
 > modern host bakes in a high glibc floor. The currently committed
 > `release/x86_64-unknown-linux-gnu/zclassicd` has floor **GLIBC_2.38** and still
-> `NEEDED libgomp.so.1` — i.e. it was *not* built with `ZQW_STATIC_GOMP` and will
+> `NEEDED libgomp.so.1` — i.e. it predates the removal of libsnark and will
 > **not** run on older distros (symptom on the user's machine:
 > `version GLIBC_2.38 not found`). To produce a **portable** Linux daemon with a
 > low glibc floor, build it inside an old-base (glibc 2.31) sandbox with
-> `--enable-glibc-back-compat --enable-reduce-exports` and `ZQW_STATIC_GOMP=1`;
+> `--enable-glibc-back-compat --enable-reduce-exports`;
 > see §6. The Windows `.exe` has no such floor issue.
 
 ### 2d. Other Linux variants
@@ -249,15 +247,13 @@ Produces stripped `release/x86_64-w64-mingw32/zclassicd.exe` (+ `zclassic-cli.ex
 `zclassic-tx.exe`). `build-release.sh:41-45` errors early if
 `x86_64-w64-mingw32-g++` is missing.
 
-For a daemon to be embedded in the Windows GUI (no libgomp runtime dependency):
+For a daemon to be embedded in the Windows GUI (no libgomp runtime dependency, nothing to link statically):
 
 ```bash
 cd /home/rhett/github/zclassic
-ZQW_STATIC_GOMP=1 ./zcutil/build-release.sh win64 -j$(nproc)
+./zcutil/build-release.sh win64 -j$(nproc)
 ```
 
-(For win64, `build-release.sh:106-110` pulls the **mingw** `libgomp.a` via
-`x86_64-w64-mingw32-gcc -print-file-name=libgomp.a`, matching the PE ABI.)
 
 ### 3b. Manual path (equivalent to what `build.sh` does), then strip
 
@@ -392,7 +388,7 @@ objdump -T /home/rhett/github/zclassic/release/x86_64-unknown-linux-gnu/zclassic
 ### 5.5 No leaked dynamic deps (esp. libgomp)
 
 ```bash
-# Should NOT list libgomp.so.1 if built with ZQW_STATIC_GOMP:
+# Must NOT list libgomp.so.1 (no OpenMP any more):
 objdump -p /home/rhett/github/zclassic/release/x86_64-unknown-linux-gnu/zclassicd | grep NEEDED
 ```
 
@@ -405,7 +401,7 @@ The distributable Linux daemon is built inside an **Ubuntu 20.04 / glibc 2.31
 proot sandbox** that lives **outside the git repo** at `/home/rhett/zclbuild`
 (uncommitted tribal knowledge — see §8). Inside that sandbox the recipe sets
 `CONFIGURE_FLAGS='--enable-glibc-back-compat --enable-reduce-exports'`,
-`ZQW_STATIC_GOMP=1`, then calls `zcutil/build-release.sh linux`, yielding a daemon
+then calls `zcutil/build-release.sh linux`, yielding a daemon
 with a **GLIBC_2.29** floor and no libgomp dependency.
 
 ```bash
@@ -461,7 +457,7 @@ repo) with repo paths parameterized:
 - `/home/rhett/zclbuild/prun` — proot entrypoint (binds the repos into the
   glibc-2.31 sandbox).
 - `/home/rhett/zclbuild/focal/build/03-daemon.sh` — the portable-Linux daemon
-  recipe (host-artifact exclusion + `--enable-glibc-back-compat` + static gomp).
+  recipe (host-artifact exclusion + `--enable-glibc-back-compat`).
 - `/home/rhett/zclbuild/focal/build/{build.sh,02-openssl-qt.sh,04-gui-bundle.sh,05-static-helpers.sh}`
   — the rest of the sandbox orchestration (mostly GUI-side, but `build.sh` drives
   the whole sandbox).
@@ -492,11 +488,11 @@ the `x86_64-w64-mingw32-g++` alternative points at `-win32`. Fix:
 
 **Host-switch object mixing (linux ↔ win64 in the same tree).**
 Symptom: link errors about incompatible object architecture (COFF into ELF or
-vice-versa). Cause: in-tree static libs (`src/snark`, leveldb, univalue) rebuild
+vice-versa). Cause: in-tree static libs (leveldb, univalue) rebuild
 off their own sources, not `config.h`, so a plain `make` won't rebuild them on a
 host switch. Fix: `build-release.sh:76-93` auto-detects the host change and runs
-`make clean` + `make -C src/snark clean`. If building by hand with `build.sh`, run
-those two cleans yourself when switching `HOST`.
+`make clean`. If building by hand with `build.sh`, run
+that clean yourself when switching `HOST`.
 
 **build.sh flag order.**
 Out-of-order `--disable-tests`/`--disable-mining` are silently
@@ -510,10 +506,9 @@ host-prefixed strip for PE; the plain host `strip` cannot process PE.
 `build-release.sh` always passes `--disable-tests`, so `test_bitcoin`/`zcash-gtest`
 won't exist. Do a `build.sh` dev build without `--disable-tests` first (§7).
 
-**High glibc floor / `libgomp.so.1` missing on the user's machine.**
-Native builds bake in the host glibc floor and (without `ZQW_STATIC_GOMP`) need
-`libgomp.so.1`. For distribution build via the proot glibc-2.31 sandbox (§6) with
-`ZQW_STATIC_GOMP=1`. Verify with §5.4 and §5.5.
+**High glibc floor on the user's machine.**
+Native builds bake in the host glibc floor. For distribution build via the
+proot glibc-2.31 sandbox (§6). Verify with §5.4 and §5.5.
 
 **`src/` binaries may not exist.**
 A clean / release-built tree has binaries only in `release/<triple>/`; `src/`

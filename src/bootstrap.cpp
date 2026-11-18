@@ -4526,10 +4526,27 @@ static const ZcashParamSpec ZCASH_PARAM_FILES_RAW[] = {
     {"sapling-output.params", "2f0ebbcbb9bb0bcffe95a397e7eba89c29eb4dde6191c339db88570e3f3fb0e4", 3592860ULL},
     {"sapling-spend.params",  "8e48ffd23abb3a5fd9c5589204f32d9c31285a04b78096ba40a79b75677efc13", 47958396ULL},
     {"sprout-groth16.params", "b685d700c60328498fbde589c8c7c484c722b788b265b72af448a5bf0ee55b50", 725523612ULL},
-    {"sprout-proving.key",    "8bc20a7f013b2b58970cddd2e7ea028975c88ae7ceb9259a5344a16bc2c0eef7", 910173851ULL},
     {"sprout-verifying.key",  "4bd498dae0aacfd8e98dc306338d017d9c08dd0918ead18172bd0aec2fc5df82", 1449ULL},
 };
 static const size_t ZCASH_PARAM_FILE_COUNT = sizeof(ZCASH_PARAM_FILES_RAW) / sizeof(ZCASH_PARAM_FILES_RAW[0]);
+
+// Served when present, never required, fetched or checked at startup. Releases
+// up to beta12 still refuse to start without sprout-proving.key and fetch any
+// missing parameter from the compiled bootstrap peers (z.cash no longer serves
+// that file). A node that still holds a correct copy keeps advertising it so a
+// fresh install of an older release can still start; the fetching node checks
+// the content against its own compiled SHA-256, as for every other file.
+static const ZcashParamSpec ZCASH_PARAM_FILES_LEGACY_SERVED[] = {
+    {"sprout-proving.key",    "8bc20a7f013b2b58970cddd2e7ea028975c88ae7ceb9259a5344a16bc2c0eef7", 910173851ULL},
+};
+static const size_t ZCASH_PARAM_SERVED_COUNT = ZCASH_PARAM_FILE_COUNT +
+    sizeof(ZCASH_PARAM_FILES_LEGACY_SERVED) / sizeof(ZCASH_PARAM_FILES_LEGACY_SERVED[0]);
+
+static const ZcashParamSpec& ZcashParamServedAt(size_t i)
+{
+    return i < ZCASH_PARAM_FILE_COUNT ? ZCASH_PARAM_FILES_RAW[i]
+                                      : ZCASH_PARAM_FILES_LEGACY_SERVED[i - ZCASH_PARAM_FILE_COUNT];
+}
 
 const std::vector<ZcashParamSpec>& GetZcashParamSpecs()
 {
@@ -4545,11 +4562,12 @@ static const ZcashParamSpec& ZcashParamAt(size_t i)
     return ZCASH_PARAM_FILES_RAW[i];
 }
 
+// Any file this node may serve (required or legacy-served).
 static const ZcashParamSpec* FindZcashParam(const std::string& name)
 {
-    for (size_t i = 0; i < ZCASH_PARAM_FILE_COUNT; ++i) {
-        if (name == ZCASH_PARAM_FILES_RAW[i].name) {
-            return &ZCASH_PARAM_FILES_RAW[i];
+    for (size_t i = 0; i < ZCASH_PARAM_SERVED_COUNT; ++i) {
+        if (name == ZcashParamServedAt(i).name) {
+            return &ZcashParamServedAt(i);
         }
     }
     return NULL;
@@ -4624,18 +4642,19 @@ bool GetZcashParamManifest(CBootstrapSnapshotManifest& manifest, std::string& er
     manifest.strNetwork = Params().NetworkIDString();
 
     uint64_t total = 0;
-    for (size_t i = 0; i < ZCASH_PARAM_FILE_COUNT; ++i) {
-        const boost::filesystem::path path = dir / ZcashParamAt(i).name;
+    for (size_t i = 0; i < ZCASH_PARAM_SERVED_COUNT; ++i) {
+        const ZcashParamSpec& param = ZcashParamServedAt(i);
+        const boost::filesystem::path path = dir / param.name;
         if (!boost::filesystem::is_regular_file(path) || !IsSafeBootstrapEntry(path)) {
             continue; // only advertise parameter files we actually hold
         }
         CBootstrapSnapshotFile file;
-        file.strPath = ZcashParamAt(i).name;
+        file.strPath = param.name;
         file.nSize = boost::filesystem::file_size(path);
-        if (file.nSize != ZcashParamAt(i).nSize) {
+        if (file.nSize != param.nSize) {
             continue;
         }
-        file.hashSha256 = ZcashParamExpectedHash(ZcashParamAt(i));
+        file.hashSha256 = ZcashParamExpectedHash(param);
         if (file.nSize > std::numeric_limits<uint64_t>::max() - total) {
             error = "zcash parameter byte size overflow";
             return false;

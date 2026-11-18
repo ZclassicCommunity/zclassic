@@ -8,7 +8,11 @@
 #               which can otherwise collide (seen: bind failure at node startup)
 #   --bin       directory with zclassicd and zclassic-cli: the wallet under test
 #   --peer-bin  binary for the miner/peer node (default: --bin); a different
-#               build here exercises transaction/block interop (scenario 9)
+#               build here exercises transaction/block interop (scenario 9).
+#               Scenarios 3 and 9 need a peer that can create PHGR13 JoinSplits
+#               (a release that still carries libsnark): the current binary
+#               verifies them but cannot create them, so without --peer-bin
+#               they are reported as SKIP
 #   --alt-bin   second binary for cross-version scenario 8 (default: --bin)
 #   --only      comma list of scenario numbers (default: all but 11)
 #   env LOAD_NOTES / LOAD_UTXOS  sizes for scenario 11 (run only when selected)
@@ -45,6 +49,8 @@ run_scn() {
     stop_all
     np=$(grep -c '^PASS' "$SCN_LOG"); nf=$(grep -c '^FAIL' "$SCN_LOG")
     st=PASS; [ "$nf" = 0 ] && [ "$np" -gt 0 ] || st=FAIL
+    # a scenario that cannot run with the given binaries says why in $SD/skip
+    if [ -f "$SD/skip" ] && [ "$nf" = 0 ]; then st="SKIP ($(cat "$SD/skip"))"; fi
     echo "$id|$name|$st|$np pass $nf fail|$(elapsed "$t0")s" >>"$RESULTS"
     say "   -> $st ($np pass, $nf fail)"
     BASE=$((BASE + 7)); [ $BASE -lt 60000 ] || BASE=20000

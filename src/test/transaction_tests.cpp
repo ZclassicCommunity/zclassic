@@ -328,9 +328,8 @@ SetupDummyInputs(CBasicKeyStore& keystoreRet, CCoinsViewCache& coinsRet)
 BOOST_AUTO_TEST_CASE(test_basic_joinsplit_verification)
 {
     // We only check that joinsplits are constructed properly
-    // and verify properly here. libsnark tends to segfault
-    // when our snarks or what-have-you are invalid, so
-    // we can't really catch everything here.
+    // and verify properly here (Groth16: PHGR13 proofs can no longer be created;
+    // their verification is covered by gtest/test_phgr13.cpp and the mainnet block test).
     //
     // See #471, #520, #459 and probably others.
     //
@@ -375,10 +374,11 @@ BOOST_AUTO_TEST_CASE(test_basic_joinsplit_verification)
     auto verifier = libzcash::ProofVerifier::Strict();
 
     {
-        JSDescription jsdesc(false, *pzcashParams, joinSplitPubKey, rt, inputs, outputs, 0, 0);
+        JSDescription jsdesc(true, *pzcashParams, joinSplitPubKey, rt, inputs, outputs, 0, 0);
         BOOST_CHECK(jsdesc.Verify(*pzcashParams, verifier, joinSplitPubKey));
 
-        CDataStream ss(SER_DISK, CLIENT_VERSION);
+        // A Groth16 proof is serialized under a Sapling-version stream (as in a v4 transaction).
+        CDataStream ss(SER_DISK, SAPLING_TX_VERSION | (1 << 31));
         ss << jsdesc;
 
         JSDescription jsdesc_deserialized;
@@ -390,13 +390,13 @@ BOOST_AUTO_TEST_CASE(test_basic_joinsplit_verification)
 
     {
         // Ensure that the balance equation is working.
-        BOOST_CHECK_THROW(JSDescription(false, *pzcashParams, joinSplitPubKey, rt, inputs, outputs, 10, 0), std::invalid_argument);
-        BOOST_CHECK_THROW(JSDescription(false, *pzcashParams, joinSplitPubKey, rt, inputs, outputs, 0, 10), std::invalid_argument);
+        BOOST_CHECK_THROW(JSDescription(true, *pzcashParams, joinSplitPubKey, rt, inputs, outputs, 10, 0), std::invalid_argument);
+        BOOST_CHECK_THROW(JSDescription(true, *pzcashParams, joinSplitPubKey, rt, inputs, outputs, 0, 10), std::invalid_argument);
     }
 
     {
         // Ensure that it won't verify if the root is changed.
-        auto test = JSDescription(false, *pzcashParams, joinSplitPubKey, rt, inputs, outputs, 0, 0);
+        auto test = JSDescription(true, *pzcashParams, joinSplitPubKey, rt, inputs, outputs, 0, 0);
         test.anchor = GetRandHash();
         BOOST_CHECK(!test.Verify(*pzcashParams, verifier, joinSplitPubKey));
     }
