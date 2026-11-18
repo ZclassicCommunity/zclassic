@@ -90,7 +90,8 @@ run_scn() {
 
 # 3: the Windows harness (reorg2.sh), ported. Two nodes, a fork won by the other node over P2P,
 # then seven sends, a six deep invalidateblock, eight blocks on top of it and the old branch
-# reconsidered. The peer stays connected to the wallet node throughout (it follows each restart).
+# reconsidered. The peer follows the fork and is then stopped: a connected peer re-offers the
+# invalidated blocks to the wallet node as soon as it restarts, which makes the comparison racy.
 # After every step the live wallet, the restarted wallet and (at the end) a rescanned copy must
 # agree on balances, notes and mempool.
 R2_NU="-nuparams=5ba81b19:120 -nuparams=76b809bb:140"
@@ -135,6 +136,7 @@ scn_reorg2() {
     stop 1; start 1 "$BIN" -disablesafemode -parkdeepreorg=0 -connect=127.0.0.1:$((BASE + 0)) || return 1
     r2_wait_tip || bad "no sync after the fork"
     ck "a height after the fork" "$(cli 0 getblockcount)" "$(cli 1 getblockcount)"
+    stop 1  # the peer would re-offer the invalidated blocks to each restarted wallet (see above)
     r2_restart after-reorg1
     for k in 1 2 3 4 5 6 7; do r2_send "$Z2" "$Z1" 0.2; cli 0 generate 1 >/dev/null; done
     HT=$(cli 0 getblockcount); BASEH=$((HT - 5)); BH=$(cli 0 getblockhash $BASEH)
