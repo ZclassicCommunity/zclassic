@@ -43,7 +43,8 @@ zclassic-cli znam_listmine
 Every command except `znam_getindexinfo` refuses with a clear error while the index is off. `znam_resolve` and the three wallet commands also refuse
 while the index has not caught up to the chain tip (a stale index can miss the UPDATE that moved a name or the REGISTER
 that took it); `znam_getname` and `znam_listnames` answer with what the index has, and `znam_getname` says whether it is
-synced.
+synced. They also refuse while the node itself is still catching up with the network (initial block download): an index
+that is level with an old local tip is "synced" but can still miss a name change that happened since.
 `-znamindexstart=<n>` sets the first block the index reads; the default is 0, so no registration can be missed.
 
 `z_sendmany` and `sendtoaddress` are **not** changed and never take a name. Paying a name is two steps: resolve it

@@ -58,6 +58,22 @@ ZnamService& RequireSyncedIndex()
 {
     ZnamService& svc = RequireIndex();
     ServiceInfo si = svc.GetInfo();
+    if (IsInitialBlockDownload()) {
+        // "synced" only says the index has seen the local tip; a tip that is itself behind the network can miss the
+        // UPDATE or TRANSFER that moved a name.
+        int h;
+        int64_t age;
+        {
+            LOCK(cs_main);
+            h = chainActive.Height();
+            CBlockIndex* tip = chainActive.Tip();
+            age = tip ? GetTime() - tip->GetBlockTime() : 0;
+        }
+        throw JSONRPCError(RPC_MISC_ERROR,
+                           strprintf("The node is still catching up with the network (local tip height %d, %d hours old): names cannot "
+                                     "be resolved or registered safely until it has. Retry when the node is synced.",
+                                     h, (int)(age / 3600)));
+    }
     if (!si.synced)
         throw JSONRPCError(RPC_MISC_ERROR,
                            strprintf("The ZNAM index is not synced with the chain tip (indexed height %d of %d%s). Wait for it and "
