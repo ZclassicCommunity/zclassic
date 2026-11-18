@@ -12,7 +12,7 @@
 #                        (e.g. "-fsanitize=address,undefined -fno-sanitize-recover=undefined")
 #   --params <dir>       Zcash parameter directory (default: $HOME/.zcash-params)
 #   --golden <dir>       golden corpus (default: src/test/data/c23_golden)
-#   --steps <list>       comma list of: build,replay,mutations,threads,bench (default build,replay,mutations,threads)
+#   --steps <list>       comma list of: build,replay,mutations,threads,scan,bench (default build,replay,mutations,threads,scan)
 #   --prove              replay re-runs every prover (Sapling and Sprout) and emits C23-made
 #                        proofs to <out>/c23made.cases (+ .expect) for the Rust verifier
 #   --threads-only       build only kat_threads (used for -fsanitize=thread)
@@ -24,7 +24,7 @@
 set -u
 
 cc=gcc; std=-std=gnu17; opt=-O3; san=""; out=""; params="${HOME:-}/.zcash-params"; golden=""
-steps="build,replay,mutations,threads"; prove=0; threads_only=0; linked=""; deps=""
+steps="build,replay,mutations,threads,scan"; prove=0; threads_only=0; linked=""; deps=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --cc) cc=$2; shift 2 ;;
@@ -144,6 +144,7 @@ else
     link_test kat_mutgen "$here/kat_mutgen.c"
     link_test kat_threads "$here/kat_threads.c"
     link_test kat_bench "$here/kat_bench.c"
+    link_test kat_scan "$here/kat_scan.c"
 fi
 echo "built tests in $out"
 
@@ -183,6 +184,13 @@ if has_step threads; then
     "$out/kat_threads$exe" --dir "$golden" --params "$params" --threads 16 >"$out/threads.log" 2>&1
     r=$?
     tail -5 "$out/threads.log"
+    [ "$r" -eq 0 ] || rc=1
+fi
+if has_step scan; then
+    echo "== scan (batched ka_agree vs one-at-a-time, adversarial, fixed seed) =="
+    "$out/kat_scan$exe" --pairs "${KAT_SCAN_PAIRS:-200000}" --threads 4 >"$out/scan.log" 2>&1
+    r=$?
+    tail -3 "$out/scan.log"
     [ "$r" -eq 0 ] || rc=1
 fi
 if has_step bench; then
