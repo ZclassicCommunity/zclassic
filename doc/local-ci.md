@@ -125,8 +125,8 @@ with Sapling active), `zslp_index.sh`, the wallet logic and widget tests (Qt fro
 environment), and with `--tor` the two-node, three-node and addrv2 Tor tests (they
 need real Tor network access). The tests run in a network-less namespace with their
 own loopback, so they cannot collide with a running node. One summary table is
-printed and the exit status is non-zero on any failure. The Python 2 RPC tests of
-`qa/rpc-tests` are not run (no Python).
+printed and the exit status is non-zero on any failure. The Python RPC tests that
+were in `qa/rpc-tests` have been removed.
 
 ## Runaway steps: timeouts, log cap, ASLR
 
@@ -188,6 +188,6 @@ The Windows wallet is built natively on the Windows PC (static Qt 5.15.2, MinGW
 * Windows `.exe` files and the wallet bundle are not byte-for-byte reproducible between
   runs (link timestamps); the Linux and macOS daemons are. Compare `SOURCE_COMMIT.txt`
   and the validation output, not the hashes of two different runs.
-* Not run here: the Python 2 RPC tests of `qa/rpc-tests`, the macOS wallet bundle
+* Not run here: the macOS wallet bundle
   (`local-ci-macos.sh wallet` builds Qt for about an hour on the first run), and the
   Windows wallet GUI (built natively on the Windows PC, see above).

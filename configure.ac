@@ -961,9 +961,7 @@ AC_SUBST(ZMQ_LIBS)
 AC_SUBST(TOR_LIBS)
 AC_SUBST(TOR_SYSTEM_LIBS)
 AC_SUBST(LIBZCASH_LIBS)
-AC_CONFIG_FILES([Makefile src/Makefile doc/man/Makefile src/test/buildenv.py])
-AC_CONFIG_FILES([qa/pull-tester/run-bitcoind-for-test.sh],[chmod +x qa/pull-tester/run-bitcoind-for-test.sh])
-AC_CONFIG_FILES([qa/pull-tester/tests-config.sh],[chmod +x qa/pull-tester/tests-config.sh])
+AC_CONFIG_FILES([Makefile src/Makefile doc/man/Makefile])
 
 dnl boost's m4 checks do something really nasty: they export these vars. As a
 dnl result, they leak into secp256k1's configure and crazy things happen.

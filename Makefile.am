@@ -148,7 +148,7 @@ endif
 dist_bin_SCRIPTS = zcutil/fetch-params.sh
 dist_noinst_SCRIPTS = autogen.sh zcutil/build.sh
 
-EXTRA_DIST = THIRD-PARTY-LICENSES contrib/examples/zclassic.conf $(top_srcdir)/share/genbuild.sh qa/pull-tester/rpc-tests.sh qa/pull-tester/run-bitcoin-cli qa/rpc-tests qa/zcash $(DIST_DOCS) zcutil/check-hardening.sh
+EXTRA_DIST = THIRD-PARTY-LICENSES contrib/examples/zclassic.conf $(top_srcdir)/share/genbuild.sh qa/rpc-tests qa/zcash $(DIST_DOCS) zcutil/check-hardening.sh
 
 install-exec-hook:
 	mv $(DESTDIR)$(bindir)/fetch-params.sh $(DESTDIR)$(bindir)/zcash-fetch-params
