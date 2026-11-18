@@ -109,6 +109,8 @@ public:
     // installed Connection is never actually USED on these paths (the seeded
     // Sapling address resolves first), only its non-null-ness is checked.
     void testSetConnection(Connection* c) { conn = c; }
+    void testSetShuttingDown(bool b) { ezShuttingDown = b; }
+    void testDropConnectingMessage() { dropConnectingMessage(); }
     bool testRefreshAuthFromCookie() { return refreshAuthFromCookie(); }
     int  testLastRefreshedBlock() const { return lastRefreshedBlock; }
     // NOTIFY-SRV (1.3) real-seam: drive the ACTUAL onNotifyPush()/notifyDebounce
@@ -167,6 +169,11 @@ public:
     // funded wallet. Default false keeps every existing caller's full-teardown behavior.
     void noConnection(bool preserveBalances = false);
     bool isEmbedded() { return ezclassicd != nullptr; }
+    // True while shutdownZClassicd() is waiting for the node to flush and exit. A second quit request in that window
+    // must not call qApp->quit(): that ends the wait loop early and the node is killed mid-flush.
+    bool isShuttingDown() const { return ezShuttingDown; }
+    static QString connectingMessage();
+    void dropConnectingMessage();
 
     // ---- NOTIFY-SRV push-wiring pure helpers (used by prod + asserted by L1) ----
     // Build the two daemon notify args (-walletnotify / -blocknotify) that invoke THIS

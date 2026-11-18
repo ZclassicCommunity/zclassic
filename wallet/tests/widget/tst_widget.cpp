@@ -2070,6 +2070,80 @@ private slots:
         settleAndDelete(w);
     }
 
+    // ---- first-close notice: "Quit ZClassic now" must really quit --------------------------------
+    // The choice used to call close() from inside the close event it was answering. Qt ignores a nested close()
+    // (the widget is already closing), so nothing happened and `quitting` stayed latched. FAILS if the window is
+    // still open (or the quit never reaches the application) after the button is pressed.
+    void ux14_firstCloseNoticeQuitNowReallyQuits() {
+        MainWindow* w = makeWindow();
+        w->testForceTray();
+        QSettings().remove("tray/hintShown");
+        QSettings().setValue("options/keepintray", true);
+        QSettings().sync();
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            auto* mb = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            if (!mb) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+            for (QAbstractButton* b : mb->buttons())
+                if (mb->buttonRole(b) == QMessageBox::DestructiveRole) { b->click(); return; }
+            mb->reject();
+        };
+        bool timedOut = false;
+        QTimer safety;
+        safety.setSingleShot(true);
+        QObject::connect(&safety, &QTimer::timeout, [&]() { timedOut = true; QApplication::quit(); });
+        safety.start(4000);
+        QTimer::singleShot(0, [&]() { poll(300); w->close(); });
+        QApplication::exec();
+        safety.stop();
+        QVERIFY2(!timedOut, "Quit ZClassic now did not quit the application");
+        QVERIFY(w->isQuitting());
+        QVERIFY2(!w->isVisible(), "the window is still open after Quit ZClassic now");
+        QSettings().remove("tray/hintShown");
+        QSettings().remove("options/keepintray");
+        QSettings().sync();
+        settleAndDelete(w);
+    }
+
+    // ---- a second quit request while the node is flushing must not end the wait -------------------
+    // shutdownZClassicd() waits in a nested event loop; qApp->quit() ends every loop, after which the node's
+    // QProcess is destroyed and killed mid-flush. FAILS if closeEvent quits the application while a shutdown is
+    // already waiting.
+    void ux15_secondQuitDuringShutdownIsIgnored() {
+        MainWindow* w = makeWindow();
+        w->getRPC()->testSetShuttingDown(true);
+        bool waited = false;
+        QTimer later;
+        later.setSingleShot(true);
+        QObject::connect(&later, &QTimer::timeout, [&]() { waited = true; QApplication::quit(); });
+        later.start(400);
+        QTimer::singleShot(0, [&]() { w->doClose(); });
+        QApplication::exec();
+        later.stop();
+        w->getRPC()->testSetShuttingDown(false);
+        QVERIFY2(waited, "a second quit request ended the application while the node was still shutting down");
+        settleAndDelete(w);
+    }
+
+    // ---- the sync poll leaves other status-bar messages alone ---------------------------------------
+    void ux16_syncPollKeepsTheTxidStatusLine() {
+        MainWindow* w = makeWindow();
+        auto* sb = w->ui->statusBar;
+        sb->showMessage(Settings::txidStatusMessage + " deadbeef");
+        w->getRPC()->testDropConnectingMessage();
+        QVERIFY2(sb->currentMessage().startsWith(Settings::txidStatusMessage),
+                 "the txid status line (Copy txid / explorer menu) was cleared by the sync poll");
+        sb->showMessage(tr("Sending..."));
+        w->getRPC()->testDropConnectingMessage();
+        QCOMPARE(sb->currentMessage(), tr("Sending..."));
+        // the connect-time notice is still dropped once the poll has a verdict
+        sb->showMessage(RPC::connectingMessage());
+        w->getRPC()->testDropConnectingMessage();
+        QVERIFY(sb->currentMessage().isEmpty());
+        settleAndDelete(w);
+    }
+
     // ---- P10: coinbase-only "shield everything" is NOT blocked (no change output) ------
     // A miner shielding a coinbase-only t-address via "Send max" sends the whole balance
     // to a single Sapling z-address with NO change -- the daemon legitimately consumes the

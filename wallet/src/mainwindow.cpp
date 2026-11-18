@@ -341,7 +341,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     if (!quitting
             && Settings::getInstance()->getKeepInTray()
             && trayIcon != nullptr
-            && QSystemTrayIcon::isSystemTrayAvailable()) {
+            && trayAvailable()) {
         if (event)
             event->ignore();
 
@@ -356,11 +356,23 @@ void MainWindow::closeEvent(QCloseEvent* event) {
             s.setValue("tray/hintShown", true);
             s.sync();
             if (!askKeepRunningInTray()) {
-                quitApp();      // user chose to stop the node now
+                // User chose to stop the node now. quitApp() calls close(), but we are inside the delivery of a close
+                // event, and Qt ignores a nested close() (QWidget::close_helper returns at once while is_closing is
+                // set): nothing would happen and `quitting` would stay latched. Run it once this event is finished.
+                QTimer::singleShot(0, this, &MainWindow::quitApp);
                 return;
             }
         }
         hide();
+        return;
+    }
+
+    // A shutdown is already waiting for the node to finish flushing (an impatient second quit: File > Exit then a
+    // signal, two signals, a second click on X). Quitting the application now would end that wait early and the
+    // wallet would kill the node mid-flush, so leave the one shutdown in charge: it quits when the node is gone.
+    if (rpc && rpc->isShuttingDown()) {
+        if (event)
+            event->ignore();
         return;
     }
 
@@ -418,6 +430,14 @@ void MainWindow::showFromTray() {
     showNormal();
     raise();
     activateWindow();
+}
+
+bool MainWindow::trayAvailable() const {
+#ifdef ZCL_WIDGET_TEST
+    if (testTrayForced)
+        return true;
+#endif
+    return QSystemTrayIcon::isSystemTrayAvailable();
 }
 
 void MainWindow::quitApp() {

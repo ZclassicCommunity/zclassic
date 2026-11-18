@@ -445,6 +445,10 @@ public:
         if (w && w->getRPC()) {            
             // Blocking call to closeEvent on the UI thread.
             DispatchToMainThread([=] { 
+                // A second SIGINT/SIGTERM while the first quit is still waiting for the node to flush must be a
+                // no-op: quitting now ends that wait early and the node is killed mid-flush.
+                if (w->getRPC()->isShuttingDown())
+                    return;
                 w->doClose(); 
                 QApplication::quit();
             });
