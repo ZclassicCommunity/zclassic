@@ -342,13 +342,17 @@ enter() {
         : >"$CACHE/zcash-params/.seeded"
     fi
     # shellcheck disable=SC2086
-    exec bwrap --unshare-user --uid 0 --gid 0 --unshare-pid --unshare-ipc --unshare-uts $netarg --die-with-parent \
+    # --clearenv: host variables such as TMPDIR (devbuild points it at a host-only scratch
+    # directory), TMP, CCACHE_DIR must not leak into the environment.
+    exec bwrap --clearenv --unshare-user --uid 0 --gid 0 --unshare-pid --unshare-ipc --unshare-uts $netarg --die-with-parent \
         --bind "$ENVDIR" / --dev /dev --proc /proc --bind "$w/tmp" /tmp \
         --ro-bind /etc/resolv.conf /etc/resolv.conf \
         --bind "$w" /w --bind "$CACHE" /cache --bind "$OUT" /out \
         --bind "$CACHE/zcash-params" /root/.zcash-params \
         --ro-bind "$SELF" /ci/local-ci.sh $extra \
         --setenv HOME /root --setenv PATH /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        --setenv TMPDIR /tmp --setenv TMP /tmp --setenv TEMP /tmp --setenv LANG C.UTF-8 --setenv TERM "${TERM:-dumb}" \
+        --setenv ZCL_CI_STEP_TIMEOUT "${ZCL_CI_STEP_TIMEOUT:-14400}" \
         --setenv LD_PRELOAD /usr/local/lib/zcl-nochown.so \
         --setenv ZCL_CI_JOBS "$JOBS" --setenv ZCL_CI_EXPECT_VERSION "${ZCL_CI_EXPECT_VERSION:-}" \
         --chdir /w "$@"
@@ -435,7 +439,7 @@ EOF
     say "apt-get install inside the focal environment (this takes a while the first time)"
     mkdir -p "$CACHE/env-tmp"
     # shellcheck disable=SC2046
-    bwrap --unshare-user --uid 0 --gid 0 --unshare-pid --unshare-ipc --unshare-uts --share-net --die-with-parent \
+    bwrap --clearenv --unshare-user --uid 0 --gid 0 --unshare-pid --unshare-ipc --unshare-uts --share-net --die-with-parent \
         --bind "$ENVDIR" / --dev /dev --proc /proc --bind "$CACHE/env-tmp" /tmp \
         --ro-bind /etc/resolv.conf /etc/resolv.conf \
         --setenv HOME /root --setenv PATH /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
@@ -497,7 +501,7 @@ do_macos() {
     [ "$brc" -eq 0 ] || die "git bundle failed"
     rd=${ZCL_CI_MAC_DIR:-work/zc23-localci}
     ssh "$mac" "mkdir -p $rd/in" && scp -q "$b" "$mac:$rd/in/source.bundle" && scp -q "$REPO/zcutil/local-ci-macos.sh" "$mac:$rd/in/local-ci-macos.sh"
-    ssh "$mac" "cd $rd && ZCL_CI_JOBS=${ZCL_CI_MAC_JOBS:-4} sh in/local-ci-macos.sh --bundle in/source.bundle --commit $COMMIT --out out-$SHORT ${ZCL_CI_MAC_ARGS:-daemon}"
+    ssh "$mac" "cd $rd && sh in/local-ci-macos.sh --bundle in/source.bundle --commit $COMMIT --out out-$SHORT ${ZCL_CI_MAC_ARGS:-daemon}"
     mkdir -p "$OUT/macos" && scp -q -r "$mac:$rd/out-$SHORT/." "$OUT/macos/"
     say "macOS artifacts copied to $OUT/macos"
 }
