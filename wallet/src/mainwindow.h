@@ -97,6 +97,7 @@ public:
     QString testHumaneSendError(const QString& raw) { return humaneSendError(raw); }
     QString testDoSendTxValidations(const Tx& tx) { return doSendTxValidations(tx); }
     void    testShowSendSuccess(const QString& txid) { showSendSuccess(txid); }
+    double  testSpendableOrFallback(const QString& addr) { return spendableOrFallback(addr); }
     // Build the send-page Tx through the REAL createTxFromSendPage() path so the
     // L1 fail-open tests (PRIV-10) exercise the actual production routing.
     Tx   testCreateTxFromSendPage() { return createTxFromSendPage(); }

@@ -2016,6 +2016,60 @@ private slots:
         settleAndDelete(w);
     }
 
+    // ---- P9b: token-bearing outputs are NOT spendable ZCL for the GUI ------------------
+    // listunspent still lists a token-guarded output as spendable=true and only adds "tokenbearing". The
+    // daemon's z_sendmany skips it, so a change sized from it would overshoot and every auto-shield send
+    // from that t-address would fail "Insufficient transparent funds". Parsed through the real
+    // processUnspent(); FAILS if tokenbearing is ignored (change would be 546 zat larger, Send max too).
+    void p9b_tokenBearingOutputIsNotSpendable() {
+        MainWindow* w = makeWindow();
+        const QString T  = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+        const QString ZS = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        QSettings().setValue("options/autoshield", true);
+        QSettings().sync();
+
+        const json reply = json::parse(
+            "[{\"address\":\"" + T.toStdString() + "\",\"txid\":\"a1\",\"amount\":10.0,\"confirmations\":10,"
+            "\"spendable\":true,\"tokenbearing\":false},"
+            "{\"address\":\"" + T.toStdString() + "\",\"txid\":\"a2\",\"amount\":0.00000546,\"confirmations\":10,"
+            "\"spendable\":true,\"tokenbearing\":true},"
+            "{\"address\":\"" + T.toStdString() + "\",\"txid\":\"a3\",\"amount\":1.0,\"confirmations\":10,\"spendable\":true}]");
+        QList<UnspentOutput>* parsed = w->getRPC()->testParseUnspent(reply);
+        QCOMPARE(parsed->size(), 3);
+        QVERIFY(!(*parsed)[0].tokenBearing);
+        QVERIFY((*parsed)[1].tokenBearing);
+        QVERIFY(!(*parsed)[2].tokenBearing);   // an older daemon omits the field
+        w->getRPC()->testSetUTXOs(parsed);
+        auto* bals = new QMap<QString, double>(); (*bals)[T] = 11.00000546;
+        w->getRPC()->testSetBalances(bals);
+        auto* zs = new QList<QString>(); zs->append(ZS);
+        w->getRPC()->testSetZAddresses(zs);
+
+        // Send max / Shield my funds basis: the 546 zat token output is not spendable ZCL.
+        QCOMPARE(w->testSpendableOrFallback(T), 11.0);
+
+        w->ui->inputsCombo->clear();
+        w->ui->inputsCombo->addItem(T, 11.0);
+        w->ui->inputsCombo->setCurrentIndex(0);
+        w->ui->Address1->setText("zs10m00rvkhfm4f7n23e4sxsx275r7ptnggx39ygl0vy46j9mdll5c97gl6dxgpk0njuptg2mn9w5s");
+        w->ui->Amount1->setText("1");
+        Tx tx = w->testCreateTxFromSendPage();
+        QVERIFY(!tx.fromAddr.isEmpty());
+        bool sawChange = false;
+        for (const auto& to : tx.toAddrs) {
+            if (to.addr == ZS) {
+                sawChange = true;
+                // 11 - 1 - fee(0.0001) = 9.9999 ZCL exactly; with the token output counted it would be +546 zat.
+                QCOMPARE((qint64)llround(to.amount * 1e8), (qint64)999990000);
+            }
+        }
+        QVERIFY2(sawChange, "auto-shield change must route to Sapling");
+
+        QSettings().remove("options/autoshield");
+        QSettings().sync();
+        settleAndDelete(w);
+    }
+
     // ---- P10: coinbase-only "shield everything" is NOT blocked (no change output) ------
     // A miner shielding a coinbase-only t-address via "Send max" sends the whole balance
     // to a single Sapling z-address with NO change -- the daemon legitimately consumes the

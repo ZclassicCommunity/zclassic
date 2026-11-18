@@ -1605,11 +1605,14 @@ bool RPC::processUnspent(const json& reply, QMap<QString, double>* balancesMap, 
         // refuses to spend it to a transparent output or alongside change. (find()/end()
         // is used rather than contains() -- the bundled nlohmann::json 3.3 predates it.)
         bool coinbase = it.find("generated") != it.end() && it["generated"].get<json::boolean_t>();
+        // "tokenbearing" (daemon token guard): still spendable=true in the listing, but z_sendmany will not spend it.
+        bool tokenBearing = it.find("tokenbearing") != it.end() && it["tokenbearing"].is_boolean() &&
+                            it["tokenbearing"].get<json::boolean_t>();
 
         newUtxos->push_back(
             UnspentOutput{ qsAddr, QString::fromStdString(it["txid"]),
                             Settings::getDecimalString(it["amount"].get<json::number_float_t>()),
-                            (int)confirmations, it["spendable"].get<json::boolean_t>(), coinbase });
+                            (int)confirmations, it["spendable"].get<json::boolean_t>(), coinbase, tokenBearing });
 
         (*balancesMap)[qsAddr] = (*balancesMap)[qsAddr] + it["amount"].get<json::number_float_t>();
     }

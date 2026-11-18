@@ -87,6 +87,13 @@ public:
     // Install the wallet's UTXO set so confirmedSpendableZat() (the confirmed,
     // non-coinbase change basis) can be driven without a daemon.
     void testSetUTXOs(QList<UnspentOutput>* u)      { delete utxos; utxos = u; }
+    // Parse a listunspent reply through the REAL processUnspent() (tokenbearing, generated, spendable).
+    QList<UnspentOutput>* testParseUnspent(const json& reply) {
+        QMap<QString, double> balances;
+        auto* out = new QList<UnspentOutput>();
+        processUnspent(reply, &balances, out);
+        return out;
+    }
     // SAFE-RACE: install the "fresh" transparent set the NEXT repollTransparentUnspent()
     // splices in (simulates a UTXO landing/leaving at the from-addr during the confirm
     // dwell). One-shot: consumed by the re-poll. Never present in the shipped app build.
