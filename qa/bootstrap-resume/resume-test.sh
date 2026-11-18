@@ -216,8 +216,9 @@ sample_streams() { # <seconds> ; prints "t=<s> percent=<p> streams=<n>" every 0.
     end=$(($(now_ms) + $1 * 1000)); t0=$(now_ms)
     while [ "$(now_ms)" -lt "$end" ]; do
         j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null) || { sleep 0.2; continue; }
-        echo "t=$((($(now_ms) - t0) / 1000)).$((($(now_ms) - t0) % 1000 / 100)) percent=$(echo "$j" | json_num percent) streams=$(echo "$j" | json_num streams)"
-        echo "$j" | grep -q '"phase": *"active"' || break
+        act=0; echo "$j" | grep -q '"phase": *"active"' && act=1
+        echo "t=$((($(now_ms) - t0) / 1000)).$((($(now_ms) - t0) % 1000 / 100)) percent=$(echo "$j" | json_num percent) streams=$(echo "$j" | json_num streams) active=$act"
+        [ "$act" = 1 ] || break
         sleep 0.5
     done
 }
@@ -393,17 +394,23 @@ test_stream() {
     cli "$server_bin" "$sdir" disconnectnode "$victim" >/dev/null 2>&1
     say "disconnected $victim at the server; sampling streams for 25 s (t=seconds percent streams)"
     sample_streams 25 | tee "$work/stream-samples.txt" | awk 'NR % 4 == 1' | head -12
-    min=$(awk -F'streams=' 'NF > 1 && $2 != "" {print $2}' "$work/stream-samples.txt" | sort -n | head -1)
-    last=$(awk -F'streams=' 'NF > 1 && $2 != "" {print $2}' "$work/stream-samples.txt" | tail -1)
+    # Judge recovery only on samples taken while the download was still running: on a fast
+    # host it can finish inside the sampling window, and the stream count then drops to
+    # zero for a reason that has nothing to do with the cut.
+    act_streams() { sed -n 's/.*streams=([0-9][0-9]*) active=1$//p' "$work/stream-samples.txt"; }
+    min=$(act_streams | sort -n | head -1)
+    last=$(act_streams | tail -1)
+    rec=$(act_streams | tail -n +3 | sort -n | tail -1)
+    done_early=$(tail -1 "$work/stream-samples.txt" | grep -c 'active=0$' || true)
     peers=$(cli "$server_bin" "$sdir" getpeerinfo | grep -c '"addr": *"127.0.0.1')
-    say "streams: min after cut ${min:-?}, last ${last:-?}; client connections now at the server: $peers"
+    say "streams: min after cut ${min:-?}, recovered to ${rec:-?}, last while downloading ${last:-?}; client connections now at the server: $peers"
     if grep -aq 'reconnecting\|stream .* failed' "$client_log"; then say "client log:"; grep -a 'stream [0-9]* failed\|stream [0-9]* reconnected\|reconnecting with verified files' "$client_log" | head -4; fi
     echo "$last" >"$work/stream-last.txt"
     echo "$peers" >"$work/stream-peers.txt"
-    if [ "${last:-0}" -ge 4 ] && [ "${peers:-0}" -ge 4 ]; then
+    if [ "${rec:-0}" -ge 4 ] && { [ "${peers:-0}" -ge 4 ] || [ "${done_early:-0}" = 1 ]; }; then
         pass "stream: all 4 streams are connected again ($peers connections at the server)"
     else
-        fail "stream: only ${last:-?} streams / $peers connections at the server after a stream was cut"
+        fail "stream: recovered to only ${rec:-?} streams / $peers connections at the server after a stream was cut"
     fi
     kill_client
     stop_server
