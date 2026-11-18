@@ -7,6 +7,7 @@
 
 #include "base58.h"
 #include "chainparams.h"
+#include "init.h"
 #include "key_io.h"
 #include "main.h"
 #include "primitives/block.h"
@@ -39,6 +40,9 @@ public:
     MOCK_METHOD1(WriteBestBlock, bool(const CBlockLocator& loc));
 };
 
+// init.cpp; StartShutdown() sets it, and nothing else in the tests clears it.
+extern std::atomic<bool> fRequestShutdown;
+
 template void CWallet::SetBestChainINTERNAL<MockWalletDB>(
         MockWalletDB& walletdb, const CBlockLocator& loc);
 
@@ -61,6 +65,7 @@ public:
         CWallet::IncrementNoteWitnesses(pindex, pblock, sproutTree, saplingTree);
     }
     bool NoteWitnessesLost() const { return fNoteWitnessesLost; }
+    void SetNoteWitnessesLost(bool f) { fNoteWitnessesLost = f; }
     void DecrementNoteWitnesses(const CBlockIndex* pindex) {
         CWallet::DecrementNoteWitnesses(pindex);
     }
@@ -1605,6 +1610,22 @@ TEST(WalletTests, SpentSaplingNoteIsFromMe) {
 
     // Revert to default
     RegtestDeactivateSapling();
+}
+
+TEST(WalletTests, SetBestChainDefersPendingRebuildAtShutdown) {
+    // With a witness rebuild pending, the shutdown checkpoint neither runs the
+    // rebuild (a rescan from genesis) nor writes: the flag is still set after
+    // it, and wallet.dat keeps its last consistent checkpoint for the next
+    // start to repair.
+    TestWallet wallet;
+    wallet.SetNoteWitnessesLost(true);
+    CBlockLocator loc;
+    StartShutdown();
+    wallet.CWallet::SetBestChain(loc);
+    const bool fPending = wallet.NoteWitnessesLost();
+    fRequestShutdown = false;
+    EXPECT_TRUE(fPending);
+    EXPECT_FALSE(ShutdownRequested());
 }
 
 TEST(WalletTests, CachedWitnessesEmptyChain) {

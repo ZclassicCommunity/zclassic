@@ -668,6 +668,18 @@ void CWallet::SetBestChain(const CBlockLocator& loc)
     // Never write out witnesses a disconnect could not roll back: the flag is
     // memory only, so a restart would keep those notes without a witness.
     if (fNoteWitnessesLost) {
+        if (ShutdownRequested()) {
+            // The rebuild is a rescan from genesis, minutes or more on a large
+            // wallet: never hold up a shutdown for it. Write nothing instead,
+            // so wallet.dat keeps its last consistent checkpoint (from before
+            // the unwind). That is the state a crash in this window leaves, and
+            // the next start repairs it (ReconcileNoteState drops or cuts the
+            // caches the chain no longer matches and rescans from the oldest
+            // affected note).
+            LogPrintf("%s: wallet witness rebuild pending at shutdown; not writing the wallet checkpoint, the next start repairs the note state\n",
+                      __func__);
+            return;
+        }
         RebuildNoteWitnesses();
     }
     CWalletDB walletdb(strWalletFile);

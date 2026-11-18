@@ -9,11 +9,16 @@
 #   3 kill9        kill -9 after invalidateblock returned
 #   4 clean        a clean stop (the shutdown checkpoint)
 #   5 hook-mid-unwind  _exit(77) inside the 104th DisconnectTip, before the unwind has finished
+#   6 stale-checkpoint  a clean stop that flushed the chain state at the lowered tip while
+#                  wallet.dat still holds the checkpoint from before the unwind (what a shutdown
+#                  with a witness rebuild pending leaves: SetBestChain skips the write; made here
+#                  by restoring the wallet.dat copied before the unwind). ReconcileNoteState must
+#                  repair it.
 # The wallet restarts WITHOUT -rescan. Its balances, z_listunspent and listunspent must equal
 # those of a copy of the same datadir restarted with -rescan, at the lowered tip and again after
 # reconsiderblock, and a shielded spend of the old note must be accepted and mined by the peer.
 #
-# usage: wallet_deep_unwind.sh --bin <dir> --work <dir> [--peer-bin <dir>] [--only 1,2,3,4,5] [--base port]
+# usage: wallet_deep_unwind.sh --bin <dir> --work <dir> [--peer-bin <dir>] [--only 1,2,3,4,5,6] [--base port]
 # Output: <work>/results.txt. Exit status 0 when every variant passed.
 # Needs jq and the Zcash parameters in ~/.zcash-params. Shell only, no Python.
 BIN=""; WORK=""; PEER_BIN=""; ONLY=""; PORT_BASE=""
@@ -48,7 +53,7 @@ refsnap() { # <label> <connect arg>
     REF=$(snap 3); REFTIP=$(cli 3 getbestblockhash); stop 3
 }
 
-variant() { # <label> <crash arg or ''> <how: hook|kill9|clean>
+variant() { # <label> <crash arg or ''> <how: hook|kill9|clean|stale>
     local l=$1 hook=$2 how=$3 pid s1 s2 s3 s4
     setup2 -disablesafemode || return
     ZS=$(cli 0 z_getnewaddress); give_z 0 "$ZS" 4
@@ -56,6 +61,7 @@ variant() { # <label> <crash arg or ''> <how: hook|kill9|clean>
     ck "$l: note received" "$(zbal 0 "$ZS")" 4.00000000
     cli 1 generate 110 >/dev/null; sync_to 0            # the note is now older than the 100-block cache
     stop 0
+    if [ "$how" = stale ]; then cp "$SD/node0/regtest/wallet.dat" "$SD/wallet.pre-unwind"; fi
     start 0 "$BIN" $R1 -disablesafemode $hook || return; sync_to 0   # a checkpoint exists, then the unwind
     first=$(cli 0 getblockhash $(($(cli 0 getblockcount) - 104)))
     pid=$(cat "$SD/node0/pid")
@@ -65,11 +71,17 @@ variant() { # <label> <crash arg or ''> <how: hook|kill9|clean>
               else pass "$l: node died at the hook"; rm -f "$SD/node0/regtest/.lock"; fi ;;
         kill9) kill9 0 ;;
         clean) stop 0 ;;
+        stale) low=$(cli 0 getblockcount); stop 0; cp "$SD/wallet.pre-unwind" "$SD/node0/regtest/wallet.dat" ;;
     esac
     # the peer is stopped: no block can connect before the restarted wallet has been compared
     stop 1
     refsnap "$l" "-connect=0" || return
     start 0 "$BIN" -connect=0 -disablesafemode || return        # plain restart, no -rescan
+    if [ "$how" = stale ]; then
+        ck "$l: restarted at the lowered tip (chain state flushed there)" "$(cli 0 getblockcount)" "$low"
+        n=$(grep -c "Wallet note state repaired at startup" "$SD/node0/regtest/debug.log")
+        ck "$l: start-up repaired the stale note state" "$([ "$n" -ge 1 ] && echo yes)" yes
+    fi
     s1=$(snap 0)
     ck "$l: restart without -rescan equals the -rescan reference (no block connected)" "$s1" "$REF"
     ck "$l: same chain tip as the reference" "$(cli 0 getbestblockhash)" "$REFTIP"
@@ -92,6 +104,7 @@ scn_hook_after() { variant hook-after "-testcrashpoint=rebuild-after-scan" hook;
 scn_kill9() { variant kill9 "" kill9; }
 scn_hook_midunwind() { variant hook-mid-unwind "-testcrashpoint=disconnect-between-sync-and-chaintip:104" hook; }
 scn_clean() { variant clean "" clean; }
+scn_stale() { variant stale-checkpoint "" stale; }
 
 run_scn() {
     id=$1; name=$2; fn=$3
@@ -113,5 +126,6 @@ run_scn 2 "deep unwind, crash after the rebuild, before it is written" scn_hook_
 run_scn 3 "deep unwind, kill -9 after invalidateblock" scn_kill9
 run_scn 4 "deep unwind, clean stop (shutdown checkpoint)" scn_clean
 run_scn 5 "deep unwind, crash inside the 104th disconnect (witness caches already rolled back in memory)" scn_hook_midunwind
+run_scn 6 "deep unwind, clean stop with the pre-unwind wallet checkpoint (rebuild pending at shutdown)" scn_stale
 say; say "id|scenario|result|checks"; cat "$RESULTS"
 ! grep -q '|FAIL|' "$RESULTS"

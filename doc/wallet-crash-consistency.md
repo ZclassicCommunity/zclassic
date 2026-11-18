@@ -89,20 +89,27 @@ rebuild (clear every witness, rescan the active chain from genesis) runs once, a
 
 * the next connected block (`ChainTip`, `added`),
 * the next `SetBestChain`, which includes the periodic write, the write `invalidateblock`,
-  `parkblock` and `finalizeblock` trigger when they finish, and the shutdown checkpoint.
+  `parkblock` and `finalizeblock` trigger when they finish.
 
-Rule: **the rebuild always runs before anything is written.** `SetBestChain` never writes the
-note records, the cache size or the locator while the flag is set, so a clean stop (shutdown
-checkpoint) after a deep unwind persists rebuilt, consistent witnesses.
+Rule: **`SetBestChain` never writes the note records, the cache size or the locator while the
+flag is set.** Outside shutdown it runs the rebuild first and writes the rebuilt state. Once
+shutdown has been requested (the shutdown checkpoint, or a periodic write during shutdown) it
+does not rebuild, because the rebuild is a rescan from genesis that can take minutes on a large
+wallet; it writes nothing and logs `wallet witness rebuild pending at shutdown`. `wallet.dat`
+then keeps its last consistent checkpoint, from before the unwind, while the chain state is
+flushed at the lowered tip, and the next start repairs it (below).
 
-A process that dies between the unwind and the rebuild (kill -9) has persisted only what was
-written before the unwind: the old locator, whose fork with the chain is the unwind point, and
-old witness caches that are ahead of (or beyond) the chain tip. `ReconcileNoteState` handles
-exactly that: caches ahead of the tip by more than they are long are dropped and the rescan
-starts at the block that holds the note; notes whose records were rewritten without witnesses
-(the transaction was re-synced after the disconnect) get `witnessHeight` -1 and the same
-rescan. So the on-disk state after a crash in the lost-witness window is repaired by the
-next start, without `-rescan`. `qa/rpc-tests/wallet_deep_unwind.sh`
-checks the result against a `-rescan` reference for both the kill and the clean stop.
+A process that dies between the unwind and the rebuild (kill -9), or stops with the rebuild
+pending, has persisted only the checkpoint written before the unwind: the old locator, whose
+fork with the chain is at or below the unwind point, and witness caches that are ahead of (or
+beyond) the chain tip. `ReconcileNoteState` handles exactly that: caches ahead of the tip are
+cut back to it when they reach that far and dropped otherwise, with the rescan starting at the
+block that holds the note; notes whose records were rewritten without witnesses (the
+transaction was re-synced after the disconnect) get `witnessHeight` -1 and the same rescan. So
+the on-disk state after a crash or a stop in the lost-witness window is repaired by the next
+start, without `-rescan`. `qa/rpc-tests/wallet_deep_unwind.sh` checks the result against a
+`-rescan` reference for the kill, the crash points, the clean stop, and (variant 6) the state a
+stop with the rebuild pending leaves: chain state at the lowered tip, wallet checkpoint from
+before the unwind.
 
 `rebuild-before-scan` and `rebuild-after-scan` are test crash points inside the rebuild.
