@@ -894,6 +894,16 @@ protected:
      * cs_wallet; atomic so it can be tested before taking them.
      */
     std::atomic<bool> fNoteWitnessesLost;
+    /**
+     * A block was disconnected since the wallet transactions were last offered to
+     * the mempool. The mempool re-admission of a disconnected block runs while the
+     * rest of the unwind is still pending, so a wallet send whose anchor is valid at
+     * the final tip can be refused then and be neither in the chain nor in the
+     * mempool: its notes would count as unspent until the next restart. The wallet
+     * offers them again at each new tip until none is refused (UpdatedBlockTip). Memory only;
+     * set in ChainTip.
+     */
+    std::atomic<bool> fTxsUnwound;
     void RebuildNoteWitnesses();
     /**
      * The witness half of ChainTip. When no wallet transaction carries
@@ -1129,6 +1139,7 @@ public:
         fBroadcastTransactions = false;
         nWitnessCacheSize = 0;
         fNoteWitnessesLost = false;
+        fTxsUnwound = false;
         setNoteTxIndex.clear();
         nNoteTxIndexWalletSize = 0;
     }
@@ -1356,7 +1367,8 @@ public:
          std::vector<boost::optional<SproutWitness>>& witnesses,
          uint256 &final_anchor);
     int ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate = false);
-    void ReacceptWalletTransactions();
+    /** Offers the wallet transactions neither in the chain nor in the mempool to the mempool; returns how many were refused. */
+    size_t ReacceptWalletTransactions();
     void ResendWalletTransactions(int64_t nBestBlockTime);
     std::vector<uint256> ResendWalletTransactionsBefore(int64_t nTime);
     CAmount GetBalance() const;
@@ -1437,6 +1449,8 @@ public:
     CAmount GetCredit(const CTransaction& tx, const isminefilter& filter) const;
     CAmount GetChange(const CTransaction& tx) const;
     void ChainTip(const CBlockIndex *pindex, const CBlock *pblock, const SproutMerkleTree& sproutTree, const SaplingMerkleTree& saplingTree, bool added);
+    /** After an unwind: re-offers the wallet transactions the chain no longer holds to the mempool. */
+    void UpdatedBlockTip(const CBlockIndex *pindex);
     /** Saves witness caches and best block locator to disk. */
     void SetBestChain(const CBlockLocator& loc);
     std::set<std::pair<libzcash::PaymentAddress, uint256>> GetNullifiersForAddresses(const std::set<libzcash::PaymentAddress> & addresses);

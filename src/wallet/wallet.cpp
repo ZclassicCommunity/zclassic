@@ -559,6 +559,18 @@ bool CWallet::ChangeWalletPassphrase(const SecureString& strOldWalletPassphrase,
     return false;
 }
 
+void CWallet::UpdatedBlockTip(const CBlockIndex* pindex)
+{
+    // The mempool holds the wallet transactions the chain allows now, as after a
+    // restart. A disconnect re-offers its transactions before the unwind is over
+    // (their anchors are gone for the moment), and a tx that builds on another one
+    // of the wallet's only becomes valid once that one is back in a block. So
+    // after a disconnect, try again at every new tip until nothing is refused.
+    if (fTxsUnwound.exchange(false) && ReacceptWalletTransactions() > 0) {
+        fTxsUnwound = true;
+    }
+}
+
 void CWallet::ChainTip(const CBlockIndex *pindex, 
                        const CBlock *pblock,
                        const SproutMerkleTree& sproutTree,
@@ -566,6 +578,7 @@ void CWallet::ChainTip(const CBlockIndex *pindex,
                        bool added)
 {
     TestCrashPoint("chaintip-before");
+    if (!added) fTxsUnwound = true;
     if (added && fNoteWitnessesLost) {
         // A disconnect before this block left witnesses the caches could not
         // roll back. The chain moves forward again (the connect phase of a
@@ -3304,13 +3317,14 @@ int CWallet::ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate)
     return ret;
 }
 
-void CWallet::ReacceptWalletTransactions()
+size_t CWallet::ReacceptWalletTransactions()
 {
     // If transactions aren't being broadcasted, don't let them into local mempool either
     if (!fBroadcastTransactions)
-        return;
+        return 0;
     LOCK2(cs_main, cs_wallet);
     std::map<int64_t, CWalletTx*> mapSorted;
+    size_t nRefused = 0;
 
     // Sort pending wallet transactions based on their initial wallet insertion order
     BOOST_FOREACH(PAIRTYPE(const uint256, CWalletTx)& item, mapWallet)
@@ -3332,8 +3346,9 @@ void CWallet::ReacceptWalletTransactions()
         CWalletTx& wtx = *(item.second);
 
         LOCK(mempool.cs);
-        wtx.AcceptToMemoryPool(false);
+        if (!wtx.AcceptToMemoryPool(false)) ++nRefused;
     }
+    return nRefused;
 }
 
 bool CWalletTx::RelayWalletTransaction()

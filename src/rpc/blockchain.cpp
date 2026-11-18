@@ -1107,6 +1107,7 @@ static void NotifyWalletsOfUnwoundTip()
 {
     LOCK(cs_main);
     GetMainSignals().SetBestChain(chainActive.GetLocator());
+    GetMainSignals().UpdatedBlockTip(chainActive.Tip());
 }
 
 UniValue finalizeblock(const UniValue& params, bool fHelp) {
