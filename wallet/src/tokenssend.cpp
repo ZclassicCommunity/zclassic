@@ -5,6 +5,7 @@
 #include "tokenssend.h"
 
 #include <QCheckBox>
+#include <QCloseEvent>
 #include <QComboBox>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -127,6 +128,22 @@ void StepDialog::showPage(Page p)
     stack_->setCurrentIndex(p);
     if (p == FormPage)
         setError(QString());
+}
+
+void StepDialog::reject()
+{
+    if (busy_)
+        return; // the node has not answered yet
+    QDialog::reject();
+}
+
+void StepDialog::closeEvent(QCloseEvent* event)
+{
+    if (busy_) {
+        event->ignore();
+        return;
+    }
+    QDialog::closeEvent(event);
 }
 
 // ---- send -------------------------------------------------------------------------------------

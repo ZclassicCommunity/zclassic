@@ -46,6 +46,9 @@ class StepDialog : public QDialog {
 public:
     enum Page { FormPage = 0, ReviewPage = 1, ResultPage = 2 };
     int page() const;
+    // While a request is with the node the dialog cannot be closed (Escape, the title-bar X, reject()):
+    // the reply callbacks hold this dialog, which is deleted on close, and a send in flight must report.
+    void reject() override;
 
 signals:
     // a transaction was accepted by the node
@@ -57,6 +60,7 @@ protected:
     void setError(const QString& text);
     void setBusy(bool busy);
     void showPage(Page p);
+    void closeEvent(QCloseEvent* event) override;
 
     TokensRpc* rpc_;
     QStackedWidget* stack_ = nullptr;

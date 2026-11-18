@@ -412,6 +412,34 @@ private slots:
         QVERIFY(!send->isEnabled());                                             // no second send from one review
     }
 
+    void sendDialog_cannotCloseWhileTheNodeWorks()
+    {
+        // the reply callbacks hold the dialog (deleted on close in the wallet): it must stay while busy
+        FakeRpc rpc;
+        TokenSendDialog d(&rpc, {aaa()});
+        d.show();
+        d.findChild<QLineEdit*>("toEdit")->setText(kAddr);
+        d.findChild<QLineEdit*>("amountEdit")->setText("12.34");
+        d.findChild<QPushButton*>("reviewButton")->click();
+        QCOMPARE(rpc.calls.size(), 1);
+        QTest::keyClick(&d, Qt::Key_Escape);
+        QVERIFY(d.isVisible());
+        d.reject();
+        QVERIFY(d.isVisible());
+        QVERIFY(!d.close());
+        QVERIFY(d.isVisible());
+        rpc.answer(0, sendReply(false));
+        QCOMPARE(d.page(), int(StepDialog::ReviewPage));
+        d.findChild<QPushButton*>("sendButton")->click();
+        QCOMPARE(rpc.calls.size(), 2);
+        QTest::keyClick(&d, Qt::Key_Escape);
+        QVERIFY(d.isVisible());                                                  // the send is in flight
+        rpc.answer(1, sendReply(true));
+        QCOMPARE(d.page(), int(StepDialog::ResultPage));
+        QTest::keyClick(&d, Qt::Key_Escape);
+        QVERIFY(!d.isVisible());                                                 // idle again: closes as usual
+    }
+
     void sendDialog_badInputNeverReachesTheDaemon()
     {
         FakeRpc rpc;
