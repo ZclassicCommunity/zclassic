@@ -794,10 +794,12 @@ void CleanupBlockRevFiles()
 void ThreadImport(std::vector<boost::filesystem::path> vImportFiles)
 {
     RenameThread("zcl-loadblk");
+    bool fImported = false;
     // -reindex
     if (fReindex) {
         CImportingNow imp;
         int nFile = 0;
+        fImported = true;
         while (true) {
             CDiskBlockPos pos(nFile, 0);
             if (!boost::filesystem::exists(GetBlockPosFilename(pos, "blk")))
@@ -824,6 +826,7 @@ void ThreadImport(std::vector<boost::filesystem::path> vImportFiles)
             CImportingNow imp;
             boost::filesystem::path pathBootstrapOld = GetDataDir() / "bootstrap.dat.old";
             LogPrintf("Importing bootstrap.dat...\n");
+            fImported = true;
             LoadExternalBlockFile(file);
             RenameOver(pathBootstrap, pathBootstrapOld);
         } else {
@@ -837,11 +840,22 @@ void ThreadImport(std::vector<boost::filesystem::path> vImportFiles)
         if (file) {
             CImportingNow imp;
             LogPrintf("Importing blocks file %s...\n", path.string());
+            fImported = true;
             LoadExternalBlockFile(file);
         } else {
             LogPrintf("Warning: Could not open blocks file %s\n", path.string());
         }
     }
+
+#ifdef ENABLE_WALLET
+    // Init offered the wallet's pending transactions to the mempool while the import
+    // was still filling the chain (empty at the start of -reindex): they were refused
+    // or could not be judged, and nothing else offers them again, so their inputs
+    // would count as unspent. Mempool admission only, nothing is relayed.
+    if (fImported && pwalletMain && !ShutdownRequested()) {
+        pwalletMain->ReacceptWalletTransactions();
+    }
+#endif
 
     if (GetBoolArg("-stopafterblockimport", false)) {
         LogPrintf("Stopping after block import\n");
