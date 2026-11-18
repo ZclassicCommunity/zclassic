@@ -14,7 +14,7 @@
 BIN=""; WORK=""; PORT_BASE=""; ONLY=""
 while [ $# -gt 0 ]; do
     case $1 in
-        --bin) BIN=$2; shift 2 ;; --work) WORK=$2; shift 2 ;; --base) PORT_BASE=$2; shift 2 ;; *) echo "bad arg $1" >&2; exit 2 ;;
+        --bin) BIN=$2; shift 2 ;; --work) WORK=$2; shift 2 ;; --base) PORT_BASE=$2; shift 2 ;; --only) ONLY=$2; shift 2 ;; *) echo "bad arg $1" >&2; exit 2 ;;
     esac
 done
 [ -x "$BIN/zclassicd" ] && [ -n "$WORK" ] || { echo "usage: $0 --bin DIR --work DIR [--base port]" >&2; exit 2; }
@@ -74,6 +74,7 @@ scn_reorg_balance() {
 
 run_scn() {
     id=$1; name=$2; fn=$3
+    [ -z "$ONLY" ] || [ "$ONLY" = "$id" ] || return 0
     SCN_ID=$id; SCN_LOG=$WORK/scn$id.log; SD=$WORK/s$id; : >"$SCN_LOG"
     rm -rf "$SD"; mkdir -p "$SD"
     say "== $id. $name"
@@ -87,8 +88,74 @@ run_scn() {
 }
 
 
+# 3: the Windows harness (reorg2.sh), ported. Two nodes, a fork won by the other node over P2P,
+# then seven sends, a six deep invalidateblock, eight blocks on top of it and the old branch
+# reconsidered. The peer stays connected to the wallet node throughout (it follows each restart).
+# After every step the live wallet, the restarted wallet and (at the end) a rescanned copy must
+# agree on balances, notes and mempool.
+R2_NU="-nuparams=5ba81b19:120 -nuparams=76b809bb:140"
+# snapm <n> <minconf>: snap plus transparent balance and the mempool, sorted
+snapm() { printf "%s bal=%s pool=%s" "$(snap "$1" "$2")" "$(cli "$1" getbalance "*" "$2")" "$(cli "$1" getrawmempool | jq -c 'sort')"; }
+# r2_restart <label>: live == restart at minconf 0 and 1, mempool included
+r2_restart() {
+    local lab=$1 L0 L1
+    sleep 2; L0=$(snapm 0 0); L1=$(snapm 0 1)
+    stop 0; start 0 "$BIN" $NODE_ARGS $R2_SF || return 1
+    ck "$lab live == restart, minconf 0" "$(snapm 0 0)" "$L0"
+    ck "$lab live == restart, minconf 1" "$(snapm 0 1)" "$L1"
+}
+r2_send() { # <from> <to> <amount> [<to2> <amount2>]
+    local rec="[{\"address\":\"$2\",\"amount\":$3}]" r
+    [ -n "$4" ] && rec="[{\"address\":\"$2\",\"amount\":$3},{\"address\":\"$4\",\"amount\":$5}]"
+    r=$(zsend 0 "$1" "$rec"); case $r in success*) ;; *) bad "send: $r" ;; esac
+}
+r2_wait_tip() { local t=0; until [ "$(cli 0 getbestblockhash)" = "$(cli 1 getbestblockhash)" ]; do t=$((t+1)); [ $t -lt 120 ] || return 1; sleep 1; done; }
+scn_reorg2() {
+    NU_ARGS=$R2_NU; R2_SF="-disablesafemode -parkdeepreorg=0"
+    local k BR=6 HA HB HT BASEH BH
+    start 0 "$BIN" -disablesafemode -parkdeepreorg=0 || return 1
+    start 1 "$BIN" -disablesafemode -parkdeepreorg=0 -connect=127.0.0.1:$((BASE + 0)) || return 1
+    cli 0 generate 150 >/dev/null; r2_wait_tip
+    Z1=$(cli 0 z_getnewaddress sapling); Z2=$(cli 0 z_getnewaddress sapling); T=$(cli 0 getnewaddress)
+    r=$(wait_op 0 "$(cli 0 z_shieldcoinbase "*" "$Z1" 0.0001 0 | jq -r .opid)"); case $r in success*) ;; *) bad "shieldcoinbase: $r" ;; esac
+    cli 0 generate 1 >/dev/null; r2_wait_tip
+    r2_send "$Z1" "$Z2" 3; cli 0 generate 1 >/dev/null; r2_wait_tip
+    stop 1; stop 0
+    start 0 "$BIN" -disablesafemode -parkdeepreorg=0 -connect=0 || return 1
+    start 1 "$BIN" -disablesafemode -parkdeepreorg=0 -connect=0 || return 1
+    for k in $(seq 1 $BR); do
+        case $((k % 3)) in
+            0) r2_send "$Z2" "$Z1" 0.4 ;;
+            1) r2_send "$Z1" "$Z2" 0.5 "$T" 0.25 ;;
+            2) r2_send "$Z2" "$Z1" 0.3 ;;
+        esac
+        cli 0 generate 1 >/dev/null
+    done
+    cli 1 generate $((BR + 3)) >/dev/null
+    stop 1; start 1 "$BIN" -disablesafemode -parkdeepreorg=0 -connect=127.0.0.1:$((BASE + 0)) || return 1
+    r2_wait_tip || bad "no sync after the fork"
+    ck "a height after the fork" "$(cli 0 getblockcount)" "$(cli 1 getblockcount)"
+    r2_restart after-reorg1
+    for k in 1 2 3 4 5 6 7; do r2_send "$Z2" "$Z1" 0.2; cli 0 generate 1 >/dev/null; done
+    HT=$(cli 0 getblockcount); BASEH=$((HT - 5)); BH=$(cli 0 getblockhash $BASEH)
+    cli 0 invalidateblock "$BH" >/dev/null || bad invalidate
+    ck "height after invalidate" "$(cli 0 getblockcount)" "$((BASEH - 1))"
+    r2_restart after-invalidate
+    cli 0 generate 8 >/dev/null
+    r2_restart after-remine
+    cli 0 reconsiderblock "$BH" >/dev/null 2>&1; sleep 2
+    r2_restart after-reconsider
+    L1=$(snapm 0 1); L0=$(snapm 0 0)
+    stop 0; stop 1; rm -rf "$SD/node3"; cp -a "$SD/node0" "$SD/node3"; rm -f "$SD/node3/regtest/.lock"
+    start 3 "$BIN" $NODE_ARGS $R2_SF -rescan || return 1
+    ck "rescan == live, minconf 1" "$(snap 3 1)" "${L1%% bal=*}"
+    ck "rescan == live, minconf 0" "$(snap 3 0)" "${L0%% bal=*}"
+    stop 3
+}
+
 run_scn 1 "invalidated blocks with shielded sends: live == restart == rescan" scn_invalidate_only
 run_scn 2 "shielded sends dropped by a reorg: live == restart == rescan" scn_reorg_balance
+run_scn 3 "two-node fork, deep invalidate, remine: live == restart == rescan" scn_reorg2
 
 say; say "id|scenario|result|checks"; cat "$RESULTS"
 ! grep -q "|FAIL|" "$RESULTS"

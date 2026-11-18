@@ -571,7 +571,7 @@ void CWallet::UpdatedBlockTip(const CBlockIndex* pindex)
     int nLeft = nReacceptTipsLeft.load();
     if (nLeft <= 0)
         return;
-    size_t nRefused = ReacceptWalletTransactions();
+    size_t nRefused = OfferWalletTransactionsToMempool();
     nReacceptTipsLeft.compare_exchange_strong(nLeft, nRefused > 0 ? nLeft - 1 : 0);
 }
 
@@ -3322,6 +3322,19 @@ int CWallet::ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate)
 }
 
 size_t CWallet::ReacceptWalletTransactions()
+{
+    // A restart is no different from a disconnect: the chain a wallet send builds on
+    // may only come back at later tips (the mempool is empty at start, so a send on
+    // top of another unmined one is refused until that one is in a block). Without
+    // the retry the running wallet would differ from the same wallet after its next
+    // restart, which admits what the chain allows by then.
+    size_t nRefused = OfferWalletTransactionsToMempool();
+    if (nRefused > 0)
+        nReacceptTipsLeft = REACCEPT_TIPS_AFTER_UNWIND;
+    return nRefused;
+}
+
+size_t CWallet::OfferWalletTransactionsToMempool()
 {
     // If transactions aren't being broadcasted, don't let them into local mempool either
     if (!fBroadcastTransactions)
