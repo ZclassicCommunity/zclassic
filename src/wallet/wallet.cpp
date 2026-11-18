@@ -3723,6 +3723,9 @@ bool CWallet::FundTransaction(CMutableTransaction& tx, CAmount &nFeeRet, int& nC
     CCoinControl coinControl;
     coinControl.fAllowOtherInputs = true;
     coinControl.fAllowTokenOutputs = fAllowTokenInputs;
+    // A token transaction names its outputs by position (OP_RETURN at vout[0],
+    // token outputs after it): the change must not be inserted among them.
+    coinControl.fChangeLast = fAllowTokenInputs;
     BOOST_FOREACH(const CTxIn& txin, tx.vin)
         coinControl.Select(txin.prevout);
 

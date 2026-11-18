@@ -1022,6 +1022,33 @@ TEST_F(TokenGuardTest, ExplicitInputsAreRefusedUnlessOverridden)
     ExpectAutomaticSelectionProtected(wallet);
 }
 
+
+TEST_F(TokenGuardTest, FundTransactionWithTokenInputsKeepsTheChangeLast)
+{
+    StandardScenario();
+    std::string strFail;
+    const COutPoint token(txidGenesis, 1);
+
+    // A hand-built token transfer names its outputs by position: the change
+    // output FundTransaction adds may only go after them, never between.
+    for (int i = 0; i < 40; i++) {
+        CMutableTransaction mtx;
+        mtx.vin.push_back(CTxIn(token));
+        mtx.vout.push_back(CTxOut(COIN / 4, scriptOther));
+        mtx.vout.push_back(CTxOut(COIN / 5, scriptMine));
+        mtx.vout.push_back(CTxOut(COIN / 6, scriptOther));
+        const std::vector<CTxOut> original(mtx.vout);
+        CAmount nFee = 0;
+        int nChangePos = -2;
+        ASSERT_TRUE(wallet->FundTransaction(mtx, nFee, nChangePos, strFail, true)) << strFail;
+        ASSERT_EQ(original.size() + 1, mtx.vout.size());
+        ASSERT_EQ((int)original.size(), nChangePos);
+        for (size_t j = 0; j < original.size(); j++)
+            ASSERT_TRUE(mtx.vout[j] == original[j]) << "output " << j << " moved";
+    }
+}
+
+
 TEST_F(TokenGuardTest, MergeToAddressSkipsTokenOutputs)
 {
     StandardScenario();

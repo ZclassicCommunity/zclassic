@@ -1333,7 +1333,9 @@ public:
     /**
      * fAllowTokenInputs is the wallet token guard override for the inputs the
      * caller already put in tx. Inputs this function adds are never
-     * token-bearing, whatever the flag says.
+     * token-bearing, whatever the flag says. With the flag set the change
+     * output is appended last, so the outputs of a token transaction (named by
+     * position) never move.
      */
     bool FundTransaction(CMutableTransaction& tx, CAmount& nFeeRet, int& nChangePosRet, std::string& strFailReason, bool fAllowTokenInputs = false);
     bool CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletTx& wtxNew, CReserveKey& reservekey, CAmount& nFeeRet, int& nChangePosRet,
