@@ -107,8 +107,10 @@ string Utf8Clean(const string& s)
             unsigned char d = (unsigned char)s[i + 1];
             ok = !(c == 0xf0 && d < 0x90) && !(c == 0xf4 && d >= 0x90);
         }
-        if (ok && n == 1 && c < 0x20)
+        if (ok && n == 1 && (c < 0x20 || c == 0x7f))
             ok = false;
+        if (ok && n == 2 && c == 0xc2 && (unsigned char)s[i + 1] < 0xa0)
+            ok = false; // C1 control characters (U+0080-U+009F)
         if (ok) {
             out.append(s, i, n);
             i += n;
@@ -675,7 +677,7 @@ UniValue znam_register(const UniValue& params, bool fHelp)
     RequireUnlocked();
     Entry existing;
     if (svc.Index().GetName(name, existing))
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "The name is already registered (owner " + existing.owner + ", block " + std::to_string(existing.regHeight) + ")");
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "The name is already registered (owner " + Utf8Clean(existing.owner) + ", block " + std::to_string(existing.regHeight) + ")");
     uint256 pending;
     if (PendingFor(name, pending))
         throw JSONRPCError(RPC_INVALID_PARAMETER, "A transaction for this name is already waiting in the mempool (" + pending.GetHex() + "): wait for it to confirm");
@@ -700,10 +702,10 @@ void OwnerSpendFor(const Entry& e, OwnerSpend& spend)
 {
     CTxDestination d = DecodeDestination(e.owner);
     if (!boost::get<CKeyID>(&d))
-        throw JSONRPCError(RPC_WALLET_ERROR, "The owner of this name (" + e.owner + ") is not a P2PKH address: this wallet cannot sign for it");
+        throw JSONRPCError(RPC_WALLET_ERROR, "The owner of this name (" + Utf8Clean(e.owner) + ") is not a P2PKH address: this wallet cannot sign for it");
     string why;
     if (!pwalletMain->HaveKey(*boost::get<CKeyID>(&d)))
-        throw JSONRPCError(RPC_WALLET_ERROR, "This wallet does not hold the key of the name's owner address " + e.owner);
+        throw JSONRPCError(RPC_WALLET_ERROR, "This wallet does not hold the key of the name's owner address " + Utf8Clean(e.owner));
     if (!PickOwnerCoin(e.owner, spend.op, spend.owner, spend.value, why))
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, why);
 }
