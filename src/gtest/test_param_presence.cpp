@@ -10,7 +10,8 @@
 #include <vector>
 #include "bootstrap.h"
 #include "chainparams.h"
-#include "sha256.h"
+#include "crypto/sha256.h"
+#include "utilstrencodings.h"
 #include "uint256.h"
 #include "util.h"
 
@@ -189,7 +190,9 @@ TEST(ParamHash, StandardVectorsAndLegacyBoundaryParity) {
         std::string digest, error;
         ASSERT_TRUE(HashFileSHA256(path, digest, error)) << error;
         EXPECT_TRUE(error.empty());
-        EXPECT_EQ(SHA256::hashString(bytes), digest);
+        unsigned char expected[CSHA256::OUTPUT_SIZE];
+        CSHA256().Write(reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size()).Finalize(expected);
+        EXPECT_EQ(HexStr(expected, expected + sizeof(expected)), digest);
         if (size == 0) EXPECT_EQ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", digest);
     }
     boost::filesystem::ofstream file(path, std::ios::binary | std::ios::trunc);

@@ -80,7 +80,7 @@
 #include "librustzcash.h"
 #include "c23/glue/zcl_c23_glue.h"
 #include "crypto/sha256.h"
-#include "sha256.h"
+#include "utilstrencodings.h"
 #include "startuptimer.h"
 #include "zslp/zslpservice.h"
 #include "znam/znamservice.h"
@@ -957,7 +957,9 @@ static std::string CompiledParamEpoch()
         acc += std::to_string((unsigned long long)s.nSize);
         acc += '\n';
     }
-    return SHA256::hashString(acc);
+    unsigned char digest[CSHA256::OUTPUT_SIZE];
+    CSHA256().Write(reinterpret_cast<const unsigned char*>(acc.data()), acc.size()).Finalize(digest);
+    return HexStr(digest, digest + sizeof(digest));
 }
 
 static boost::filesystem::path ParamVerifyCachePath()
