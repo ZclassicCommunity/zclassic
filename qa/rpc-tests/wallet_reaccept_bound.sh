@@ -15,8 +15,12 @@
 # Checks: the -debug=bench line of each pass says how many transactions were handed to the
 # mempool; over the whole re-sync that must be at most a few (the passes at the last tips, once
 # the anchors are back), where it was one per refused transaction at every tip before; and the
-# send is still re-accepted, relayed, mined and counted exactly (the behaviour the retry exists
-# for is unchanged).
+# send is still mined and counted exactly. The miner (node 1) already holds the send from its
+# relay before the kill, and on this 147 block re-sync the 20 tip retry ends before the anchors
+# are back (every pass hands over 0), so these last checks do not show that node 0 itself
+# re-accepts the send: that the pre-check refuses exactly what AcceptToMemoryPool refuses rests
+# on the code (same view, same HaveCoins/HaveInputs/HaveShieldedRequirements calls), not on
+# this script.
 #
 # usage: wallet_reaccept_bound.sh --bin <dir> --work <dir> [--peer-bin <dir>] [--base port]
 # Output: <work>/results.txt. Exit status 0 when every check passed.
@@ -73,9 +77,9 @@ scn_bound() {
     obs "retry_passes" "$passes"; obs "transactions_handed_to_mempool_over_all_passes" "$handed"
     ck "the retry ran at several tips" "$([ "$passes" -ge 5 ] && echo yes)" yes
     ck "at most 3 transactions handed to the mempool over the whole re-sync" "$([ "$handed" -le 3 ] && echo yes)" yes
-    # the behaviour the retry is for: the send is back, relayed, and counted exactly once mined
+    # the send is in the miner mempool (relayed before the kill) and counted exactly once mined
     w=0; until cli 1 getrawmempool | grep -q "$tx" || [ $w -ge 120 ]; do sleep 1; w=$((w + 1)); done
-    cli 1 getrawmempool | grep -q "$tx" && pass "the pending send reached the miner after the restart" || bad "the pending send did not reach the miner"
+    cli 1 getrawmempool | grep -q "$tx" && pass "the pending send is in the miner mempool" || bad "the pending send is not in the miner mempool"
     mine 1
     w=0; until [ "$(zbal 0 "$zs")" = "$(add "$b0" -4.5 -$FEE)" ] || [ $w -ge 60 ]; do sleep 1; w=$((w + 1)); done
     ck "exact balance after the send is mined" "$(zbal 0 "$zs")" "$(add "$b0" -4.5 -$FEE)"
