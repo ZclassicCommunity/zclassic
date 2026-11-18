@@ -5685,6 +5685,10 @@ bool RewindBlockIndex(const CChainParams& params, bool& clearWitnessCaches)
                 // Reset invalid block marker if it was pointing to this block
                 pindexBestInvalid = NULL;
             }
+            if (pindexIter == pindexBestParked) {
+                // Same for the parked marker: it is only a hint, and the entry is freed below
+                pindexBestParked = nullptr;
+            }
             // Update indices
             setBlockIndexCandidates.erase(pindexIter);
             auto ret = mapBlocksUnlinked.equal_range(pindexIter->pprev);
