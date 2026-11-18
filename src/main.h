@@ -151,6 +151,11 @@ extern CConditionVariable cvBlockChange;
 extern bool fExperimentalMode;
 extern bool fImporting;
 extern bool fReindex;
+/** The block index about to be loaded came with an imported chain snapshot (a bootstrap install
+ *  that is not verified yet, or -bootstrapdatadir in this run). Its failure marks are another
+ *  node's: LoadBlockIndexDB does not keep them over RewindBlockIndex, as before 95499ca26.
+ *  Set by init before the block index is loaded. */
+extern bool fBlockIndexFromSnapshot;
 /** Rebuild only the UTXO/chainstate from the existing (intact) block index and
  *  blk files, without re-reading/rebuilding the block index. Faster than -reindex
  *  and the right recovery for a desynced chainstate (block index intact). */

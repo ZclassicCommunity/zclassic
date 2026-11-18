@@ -2589,6 +2589,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         if (!ImportBootstrapDatadir(bootstrap_source, GetDataDir(), GetBoolArg("-bootstrapforce", false), bootstrap_error)) {
             return InitError(bootstrap_error);
         }
+        fBlockIndexFromSnapshot = true;
     }
 
     // Fetch the chain snapshot from a bootstrap peer. This runs automatically on
@@ -3005,6 +3006,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // where it leaves AppInit2 exactly as the synchronous ZC_LoadParams did.
     std::exception_ptr paramsLoadError;
     bool fLoaded = false;
+    // A bootstrap install is verified after the load below and its marker cleared then; until
+    // that, the block index is the serving node's (see fBlockIndexFromSnapshot). The markers
+    // are written before the install, so a crash before the verification keeps this set.
+    if (BootstrapAnchorPendingExists(GetDataDir()) || BootstrapTrustlessPendingExists(GetDataDir()))
+        fBlockIndexFromSnapshot = true;
     while (!fLoaded) {
         bool fReset = fReindex || fReindexChainState;
         std::string strLoadError;

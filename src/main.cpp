@@ -72,6 +72,7 @@ bool fExperimentalMode = false;
 bool fImporting = false;
 bool fReindex = false;
 bool fReindexChainState = false;
+bool fBlockIndexFromSnapshot = false;
 bool fTxIndex = false;
 bool fHavePruned = false;
 bool fPruneMode = false;
@@ -5396,8 +5397,13 @@ bool static LoadBlockIndexDB()
         // takes the block for insufficiently validated and erases it from the index,
         // which drops the invalidation: a peer re-offering the block after a restart
         // had it accepted and connected again.
+        // Only for marks this node set: an imported snapshot's block index is not verified
+        // (only its UTXO set is), and a failure mark in it, kept, would make this node refuse
+        // for good a chain the source rejected (by hand, or to pin its importers). Such a
+        // block gets no branch ID here and RewindBlockIndex erases it, as before.
         if (pindex->pprev) {
             if ((pindex->nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_CONSENSUS &&
+                (!fBlockIndexFromSnapshot || !(pindex->nStatus & BLOCK_FAILED_MASK)) &&
                 !pindex->nCachedBranchId) {
                 pindex->nCachedBranchId = pindex->pprev->nCachedBranchId;
             }
