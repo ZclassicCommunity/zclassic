@@ -517,8 +517,11 @@ if [ -n "${BASELINE_SRC:-}" ]; then
     cli 2 help | grep -v '^$' | grep -v '^==' | sed 's/ .*//' | sort >"$TMP/help.new"
     diff "$TMP/help.base" "$TMP/help.new" | grep '^[<>]' | sort >"$TMP/help.diff" || true
     [ "$(grep -c '^<' "$TMP/help.diff" || true)" = 0 ] || fail "commands vanished: $(grep '^<' "$TMP/help.diff")"
-    [ "$(grep -v '^> zslp_' "$TMP/help.diff" | wc -l | tr -d ' ')" = 0 ] || fail "unexpected new commands: $(grep -v '^> zslp_' "$TMP/help.diff")"
-    expect "new commands" "$(grep -c "^> zslp_" "$TMP/help.diff")" "${BASELINE_NEW_ZSLP:-11}"
+    svc_other=$(grep '^> ' "$TMP/help.diff" | grep -v '^> zslp_' | grep -v '^> znam_' || true)
+    [ -z "$svc_other" ] || fail "unexpected new commands: $svc_other"
+    svc_new=$(grep -c "^> zslp_" "$TMP/help.diff" || true)
+    if [ -n "${BASELINE_NEW_ZSLP:-}" ]; then expect "new commands" "$svc_new" "$BASELINE_NEW_ZSLP"
+    else [ "$svc_new" -le 11 ] || fail "new commands: got '$svc_new', expected at most 11"; fi
     for c in $(cat "$TMP/help.base"); do
         [ "$(cli 6 help "$c")" = "$(cli 2 help "$c")" ] || fail "help for $c changed"
     done

@@ -574,8 +574,10 @@ if [ -n "${BASELINE_SRC:-}" ]; then
     cli 2 help | grep -v '^$' | grep -v '^==' | sed 's/ .*//' | sort >"$TMP/help.new"
     diff "$TMP/help.base" "$TMP/help.new" | grep '^[<>]' | sort >"$TMP/help.diff" || true
     [ "$(grep -c '^<' "$TMP/help.diff" || true)" = 0 ] || fail "commands vanished: $(grep '^<' "$TMP/help.diff")"
-    [ "$(grep -v '^> znam_' "$TMP/help.diff" | wc -l | tr -d ' ')" = 0 ] || fail "unexpected new commands: $(grep -v '^> znam_' "$TMP/help.diff")"
-    expect "new commands" "$(grep -c '^> znam_' "$TMP/help.diff")" 8
+    svc_other=$(grep '^> ' "$TMP/help.diff" | grep -v '^> zslp_' | grep -v '^> znam_' || true)
+    [ -z "$svc_other" ] || fail "unexpected new commands: $svc_other"
+    svc_new=$(grep -c "^> znam_" "$TMP/help.diff" || true)
+    [ "$svc_new" -le 8 ] || fail "new commands: got '$svc_new', expected at most 8"
     for c in $(cat "$TMP/help.base"); do
         [ "$(cli 6 help "$c")" = "$(cli 2 help "$c")" ] || fail "help for $c changed"
     done

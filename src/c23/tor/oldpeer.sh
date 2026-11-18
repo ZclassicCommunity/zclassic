@@ -30,7 +30,31 @@ ok() { pass=$((pass + 1)); say "PASS $*"; }
 bad() { fail=$((fail + 1)); say "FAIL $*"; }
 check() { if [ "$1" = 0 ]; then ok "$2"; else bad "$2"; fi; }
 
-port() { awk -v seed="$$$(date +%N)" 'BEGIN { srand(seed); print 20000 + int(rand() * 20000) }'; }
+# Pick the base of a block of free loopback ports. Random bases collided with other
+# jobs on a busy shared host, and half the old range (32768+) is the kernel's
+# ephemeral range, so stay below it and probe every port of the block first.
+# ZCL_TEST_PORT_BASE pins the base for a caller that manages ports itself.
+port_busy() { # tcp-port -> true when something already listens on it
+    if command -v ss >/dev/null 2>&1; then
+        [ -n "$(ss -Htln "sport = :$1" 2>/dev/null)" ]
+    else
+        lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+    fi
+}
+port() {
+    if [ -n "${ZCL_TEST_PORT_BASE:-}" ]; then echo "$ZCL_TEST_PORT_BASE"; return; fi
+    _try=0
+    while :; do
+        _base=$(awk -v seed="$$$(date +%s)" -v t="$_try" 'BEGIN { srand(seed + t); print 20000 + int(rand() * 12000) }')
+        _i=0; _ok=1
+        while [ "$_i" -lt 24 ]; do
+            if port_busy $((_base + _i)); then _ok=0; break; fi
+            _i=$((_i + 1))
+        done
+        _try=$((_try + 1))
+        if [ "$_ok" -eq 1 ] || [ "$_try" -ge 200 ]; then echo "$_base"; return; fi
+    done
+}
 PO=$(port); RO=$((PO + 1)); PN=$((PO + 2)); RN=$((PO + 3))
 
 PIDS=

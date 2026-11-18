@@ -47,9 +47,30 @@ listen_of() { # tcp-port -> sorted local listen addresses (ss on Linux, lsof els
     fi
 }
 
-# Free loopback ports: P2P and RPC for each node.
+# Pick the base of a block of free loopback ports. Random bases collided with other
+# jobs on a busy shared host, and half the old range (32768+) is the kernel's
+# ephemeral range, so stay below it and probe every port of the block first.
+# ZCL_TEST_PORT_BASE pins the base for a caller that manages ports itself.
+port_busy() { # tcp-port -> true when something already listens on it
+    if command -v ss >/dev/null 2>&1; then
+        [ -n "$(ss -Htln "sport = :$1" 2>/dev/null)" ]
+    else
+        lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+    fi
+}
 port() {
-    awk -v seed="$$$(date +%s)" 'BEGIN { srand(seed); print 20000 + int(rand() * 20000) }'
+    if [ -n "${ZCL_TEST_PORT_BASE:-}" ]; then echo "$ZCL_TEST_PORT_BASE"; return; fi
+    _try=0
+    while :; do
+        _base=$(awk -v seed="$$$(date +%s)" -v t="$_try" 'BEGIN { srand(seed + t); print 20000 + int(rand() * 12000) }')
+        _i=0; _ok=1
+        while [ "$_i" -lt 24 ]; do
+            if port_busy $((_base + _i)); then _ok=0; break; fi
+            _i=$((_i + 1))
+        done
+        _try=$((_try + 1))
+        if [ "$_ok" -eq 1 ] || [ "$_try" -ge 200 ]; then echo "$_base"; return; fi
+    done
 }
 PA=$(port); RA=$((PA + 1)); PB=$((PA + 2)); RB=$((PA + 3))
 
