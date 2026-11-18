@@ -3501,8 +3501,13 @@ CBootstrapForwardConnectGuard::~CBootstrapForwardConnectGuard()
 /**
  * Return the tip of the chain with the most work in it, that isn't
  * known to be invalid (it's however far from certain to be valid).
+ *
+ * Reference implementation: walks the whole path from the best candidate down
+ * to the active chain on every call. FindMostWorkChain() must select the same
+ * block and make the same changes; this is what it is checked against (under
+ * -checkblockindex and in src/test/findmostwork_tests.cpp). Keep it as it was.
  */
-static CBlockIndex* FindMostWorkChain() {
+static CBlockIndex* FindMostWorkChainReference() {
     AssertLockHeld(cs_main);
     do {
         CBlockIndex *pindexNew = NULL;
@@ -3637,6 +3642,301 @@ static CBlockIndex* FindMostWorkChain() {
             return pindexNew;
     } while(true);
 }
+
+/**
+ * Memo of the last successful path walk of FindMostWorkChainMemoized().
+ *
+ * pindex is the candidate that was returned; every block in
+ * (pindexFloor, pindex] (pindexFloor == NULL: down to and including genesis) had
+ * its data and was neither failed nor parked when BlockPathWalkEpoch() was nEpoch.
+ * It is a pure function of the BLOCK_PATH_WALK_MASK bits of those blocks and of
+ * the (immutable) pprev links, so it stays valid exactly as long as the epoch is
+ * unchanged. The epoch is advanced by CBlockStatus on every change of one of
+ * those bits of any block index entry, which covers every writer of nStatus
+ * (the field has no other write path), and the memo is dropped when the block
+ * index is unloaded (the entries are freed there). Candidate-set, tip, fork
+ * point and pindexFinalized changes do not matter to it: they are re-read on
+ * every call.
+ */
+struct FindMostWorkMemo {
+    CBlockIndex* pindex = NULL;
+    const CBlockIndex* pindexFloor = NULL;
+    int nFloorHeight = -1;
+    uint64_t nEpoch = 0;
+};
+static FindMostWorkMemo g_findMostWorkMemo GUARDED_BY(cs_main);
+
+/**
+ * Return the tip of the chain with the most work in it, that isn't
+ * known to be invalid (it's however far from certain to be valid).
+ *
+ * Same selection and same side effects as FindMostWorkChainReference(), but the
+ * part of the candidate path that was already found valid is not walked again,
+ * which makes connecting N blocks toward a far-ahead best candidate linear
+ * instead of quadratic.
+ */
+static CBlockIndex* FindMostWorkChainMemoized() {
+    AssertLockHeld(cs_main);
+    do {
+        CBlockIndex *pindexNew = NULL;
+
+        // Find the best candidate header.
+        {
+            std::set<CBlockIndex*, CBlockIndexWorkComparator>::reverse_iterator it = setBlockIndexCandidates.rbegin();
+            if (it == setBlockIndexCandidates.rend())
+                return NULL;
+            pindexNew = *it;
+        }
+
+        // If this block will cause a finalized block to be reorged, then we
+        // mark it as invalid.
+        if (pindexFinalized && !AreOnTheSameFork(pindexNew, pindexFinalized)) {
+            LogPrintf("Mark block %s invalid because it forks prior to the "
+                      "finalization point %d.\n",
+                      pindexNew->GetBlockHash().ToString(),
+                      pindexFinalized->nHeight);
+            pindexNew->nStatus |= BLOCK_FAILED_VALID;
+            InvalidChainFound(pindexNew);
+        }
+
+        const CBlockIndex *pindexFork = chainActive.FindFork(pindexNew);
+
+        // Check whether all blocks on the path between the currently active chain and the candidate are valid.
+        // Just going until the active chain is an optimization, as we know all blocks in it are valid already.
+        CBlockIndex *pindexTest = pindexNew;
+        bool hasValidAncestor = true;
+
+        // Skip the part of the path that was already checked. The memo says that
+        // every block in (g_findMostWorkMemo.pindexFloor, pindexNew] had its data
+        // and was neither failed nor parked, and that no BLOCK_PATH_WALK_MASK bit
+        // of any block index entry has changed since (BlockPathWalkEpoch(); every
+        // write to nStatus goes through CBlockStatus). Re-walking that part would
+        // find nothing and change nothing, so it is not walked again: if the fork
+        // point is at or above the memo floor the whole walk is a no-op, otherwise
+        // only the segment from the memo floor down to the fork point is walked.
+        const FindMostWorkMemo& memo = g_findMostWorkMemo;
+        const bool fMemoHit = memo.pindex == pindexNew && memo.nEpoch == BlockPathWalkEpoch();
+        const CBlockIndex *pindexNewFloor = pindexFork;
+        if (fMemoHit) {
+            if ((pindexFork ? pindexFork->nHeight : -1) >= memo.nFloorHeight) {
+                pindexTest = NULL;
+                pindexNewFloor = memo.pindexFloor;
+            } else {
+                pindexTest = const_cast<CBlockIndex*>(memo.pindexFloor);
+            }
+        }
+        while (hasValidAncestor && pindexTest && pindexTest != pindexFork) {
+            assert(pindexTest->nChainTx || pindexTest->nHeight == 0);
+
+            // If this is a parked chain, but it has enough PoW, clear the park
+            // state.
+            bool fParkedChain = pindexTest->nStatus & BLOCK_PARKED_MASK;
+            if (fParkedChain && GetBoolArg("-parkdeepreorg", true)) {
+                const CBlockIndex *pindexTip = chainActive.Tip();
+
+                // During initialization, pindexTip and/or pindexFork may be
+                // null. In this case, we just ignore the fact that the chain is
+                // parked.
+                if (!pindexTip || !pindexFork) {
+                    UnparkBlock(pindexTest);
+                    continue;
+                }
+
+                // A parked chain can be unparked if it has twice as much PoW
+                // accumulated as the main chain has since the fork block.
+                CBlockIndex const *pindexExtraPow = pindexTip;
+                arith_uint256 requiredWork = pindexTip->nChainWork;
+                switch (pindexTip->nHeight - pindexFork->nHeight) {
+                    // Limit the penality for depth 1, 2 and 3 to half a block
+                    // worth of work to ensure we don't fork accidentally.
+                    case 3:
+                    case 2:
+                        pindexExtraPow = pindexExtraPow->pprev;
+                    // FALLTHROUGH
+                    case 1: {
+                        const arith_uint256 deltaWork =
+                            pindexExtraPow->nChainWork - pindexFork->nChainWork;
+                        requiredWork += (deltaWork >> 1);
+                        break;
+                    }
+                    default:
+                        requiredWork +=
+                            pindexExtraPow->nChainWork - pindexFork->nChainWork;
+                        break;
+                }
+
+                if (pindexNew->nChainWork > requiredWork) {
+                    // We have enough, clear the parked state.
+                    LogPrintf("Unpark block %s as its chain has accumulated "
+                              "enough PoW.\n",
+                              pindexTest->GetBlockHash().ToString());
+                    fParkedChain = false;
+                    UnparkBlock(pindexTest);
+                }
+            }
+
+            // Pruned nodes may have entries in setBlockIndexCandidates for
+            // which block files have been deleted.  Remove those as candidates
+            // for the most work chain if we come across them; we can't switch
+            // to a chain unless we have all the non-active-chain parent blocks.
+            bool fFailedChain = pindexTest->nStatus & BLOCK_FAILED_MASK;
+            bool fMissingData = !(pindexTest->nStatus & BLOCK_HAVE_DATA);
+            if (!(fFailedChain || fParkedChain || fMissingData)) {
+                // The current block is acceptable, move to the parent, up to
+                // the fork point.
+                pindexTest = pindexTest->pprev;
+                continue;
+            }
+
+            // Candidate chain is not usable (either invalid or missing data)
+            hasValidAncestor = false;
+            setBlockIndexCandidates.erase(pindexTest);
+
+            if (fFailedChain && (pindexBestInvalid == NULL || pindexNew->nChainWork > pindexBestInvalid->nChainWork))
+                    pindexBestInvalid = pindexNew;
+
+            if (fParkedChain &&
+                (pindexBestParked == nullptr ||
+                 pindexNew->nChainWork > pindexBestParked->nChainWork)) {
+                pindexBestParked = pindexNew;
+            }
+
+            CBlockIndex *pindexFailed = pindexNew;
+            // Remove the entire chain from the set.
+            while (pindexTest != pindexFailed) {
+                if (fFailedChain || fParkedChain) {
+                    pindexFailed->nStatus &= ~BLOCK_FAILED_CHILD;
+                    if (fFailedChain) pindexFailed->nStatus |= BLOCK_FAILED_CHILD;
+                    pindexFailed->nStatus &= ~BLOCK_PARKED_PARENT_FLAG;
+                    if (fParkedChain) pindexFailed->nStatus |= BLOCK_PARKED_PARENT_FLAG;
+                    parkedBlockIndex.Update(pindexFailed);
+                } else if (fMissingData) {
+                    // If we're missing data, then add back to mapBlocksUnlinked,
+                    // so that if the block arrives in the future we can try adding
+                    // to setBlockIndexCandidates again.
+                    mapBlocksUnlinked.insert(std::make_pair(pindexFailed->pprev, pindexFailed));
+                }
+                setBlockIndexCandidates.erase(pindexFailed);
+                pindexFailed = pindexFailed->pprev;
+            }
+
+            if (fFailedChain || fParkedChain) {
+                // We discovered a new chain tip that is either parked or
+                // invalid, we may want to warn.
+                CheckForkWarningConditions();
+            }
+        }
+        if (hasValidAncestor) {
+            // The path (pindexNewFloor, pindexNew] is valid in the current state.
+            // Anything the walk above changed (unparking) only cleared flags on
+            // blocks it had not yet accepted or on blocks that were not failed.
+            g_findMostWorkMemo.pindex = pindexNew;
+            g_findMostWorkMemo.pindexFloor = pindexNewFloor;
+            g_findMostWorkMemo.nFloorHeight = pindexNewFloor ? pindexNewFloor->nHeight : -1;
+            g_findMostWorkMemo.nEpoch = BlockPathWalkEpoch();
+            return pindexNew;
+        }
+    } while(true);
+}
+
+BestChainState BestChainStateSave(const std::vector<CBlockIndex*>& all)
+{
+    LOCK(cs_main);
+    BestChainState s;
+    s.status.reserve(all.size());
+    for (CBlockIndex* p : all) {
+        s.status.push_back(p->nStatus);
+        if (parkedBlockIndex.Contains(p)) s.parked.push_back(p);
+    }
+    s.candidates.assign(setBlockIndexCandidates.begin(), setBlockIndexCandidates.end());
+    s.blocksUnlinked.assign(mapBlocksUnlinked.begin(), mapBlocksUnlinked.end());
+    s.dirty = setDirtyBlockIndex;
+    s.failedBlocks = g_failed_blocks;
+    s.pindexBestInvalid = pindexBestInvalid;
+    s.pindexBestParked = pindexBestParked;
+    s.pindexFinalized = pindexFinalized;
+    s.memoIndex = g_findMostWorkMemo.pindex;
+    s.memoFloor = g_findMostWorkMemo.pindexFloor;
+    s.memoFloorHeight = g_findMostWorkMemo.nFloorHeight;
+    s.memoEpoch = g_findMostWorkMemo.nEpoch;
+    s.epoch = BlockPathWalkEpoch();
+    return s;
+}
+
+void BestChainStateRestore(const BestChainState& s, const std::vector<CBlockIndex*>& all)
+{
+    LOCK(cs_main);
+    assert(s.status.empty() || s.status.size() == all.size());
+    for (size_t i = 0; i < s.status.size(); ++i)
+        all[i]->nStatus = s.status[i];
+    setBlockIndexCandidates.clear();
+    setBlockIndexCandidates.insert(s.candidates.begin(), s.candidates.end());
+    mapBlocksUnlinked.clear();
+    for (const auto& kv : s.blocksUnlinked) mapBlocksUnlinked.insert(kv);
+    parkedBlockIndex.Clear();
+    for (CBlockIndex* p : all) parkedBlockIndex.Update(p);
+    setDirtyBlockIndex = s.dirty;
+    g_failed_blocks = s.failedBlocks;
+    pindexBestInvalid = s.pindexBestInvalid;
+    pindexBestParked = s.pindexBestParked;
+    pindexFinalized = s.pindexFinalized;
+    g_findMostWorkMemo.pindex = s.memoIndex;
+    g_findMostWorkMemo.pindexFloor = s.memoFloor;
+    g_findMostWorkMemo.nFloorHeight = s.memoFloorHeight;
+    g_findMostWorkMemo.nEpoch = s.memoEpoch;
+    // Flags are back to what they were when the epoch had this value, so the memo
+    // (never written by the reference walk) is consistent with them again.
+    BlockPathWalkEpochCounter().store(s.epoch, std::memory_order_relaxed);
+}
+
+bool BestChainStateSame(const BestChainState& a, const BestChainState& b)
+{
+    return a.status == b.status && a.candidates == b.candidates && a.blocksUnlinked == b.blocksUnlinked &&
+           a.parked == b.parked && a.dirty == b.dirty && a.failedBlocks == b.failedBlocks &&
+           a.pindexBestInvalid == b.pindexBestInvalid && a.pindexBestParked == b.pindexBestParked &&
+           a.pindexFinalized == b.pindexFinalized;
+}
+
+/**
+ * Return the tip of the chain with the most work in it, that isn't
+ * known to be invalid (it's however far from certain to be valid).
+ *
+ * With -checkblockindex (on by default on regtest), the reference implementation
+ * is also run, on the same starting state, and the memoised walk must select the
+ * same block and leave every flag, candidate, unlinked block, parked/dirty/failed
+ * entry and best-invalid/parked/finalized marker as the reference left them. This
+ * is a debugging aid and costs O(block index) per call; the reference's own
+ * logging (and, rarely, an -alertnotify from CheckForkWarningConditions) happens
+ * once more than usual.
+ */
+static CBlockIndex* FindMostWorkChain() {
+    AssertLockHeld(cs_main);
+    if (!fCheckBlockIndex)
+        return FindMostWorkChainMemoized();
+
+    std::vector<CBlockIndex*> all;
+    all.reserve(mapBlockIndex.size());
+    for (const auto& entry : mapBlockIndex)
+        all.push_back(entry.second);
+    const BestChainState before = BestChainStateSave(all);
+    CBlockIndex* pindexReference = FindMostWorkChainReference();
+    const BestChainState afterReference = BestChainStateSave(all);
+    BestChainStateRestore(before, all);
+    CBlockIndex* pindexResult = FindMostWorkChainMemoized();
+    const BestChainState afterMemoised = BestChainStateSave(all);
+    assert(pindexResult == pindexReference);
+    assert(BestChainStateSame(afterMemoised, afterReference));
+    return pindexResult;
+}
+
+CBlockIndex* FindMostWorkChainForTest(int mode)
+{
+    LOCK(cs_main);
+    if (mode == 0) return FindMostWorkChainReference();
+    if (mode == 1) return FindMostWorkChainMemoized();
+    return FindMostWorkChain();
+}
+
 
 /** Delete all entries in setBlockIndexCandidates that are worse than the current tip. */
 static void PruneBlockIndexCandidates() {
@@ -5378,7 +5678,9 @@ bool RewindBlockIndex(const CChainParams& params, bool& clearWitnessCaches)
         return AbortNode(state, "Failed to erase from block index database");
     }
 
-    // Erase block indices in-memory
+    // Erase block indices in-memory. The memoised path walk may point at (or
+    // below) entries freed here, and their addresses can be reused.
+    g_findMostWorkMemo = FindMostWorkMemo();
     for (auto pindex : vBlocks) {
         auto ret = mapBlockIndex.find(*pindex->phashBlock);
         if (ret != mapBlockIndex.end()) {
@@ -5406,6 +5708,8 @@ void UnloadBlockIndex()
 {
     LOCK(cs_main);
     setBlockIndexCandidates.clear();
+    // The memoised path walk points into the block index entries freed below.
+    g_findMostWorkMemo = FindMostWorkMemo();
     chainActive.SetTip(NULL);
     pindexFinalized = NULL;
     pindexBestInvalid = NULL;

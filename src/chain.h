@@ -12,6 +12,8 @@
 #include "tinyformat.h"
 #include "uint256.h"
 
+#include <atomic>
+#include <cstdint>
 #include <vector>
 
 #include <boost/foreach.hpp>
@@ -112,6 +114,59 @@ enum BlockStatus: uint32_t {
 //! Blocks with this validity are assumed to satisfy all consensus rules.
 static const BlockStatus BLOCK_VALID_CONSENSUS = BLOCK_VALID_SCRIPTS;
 
+/**
+ * The bits of CBlockIndex::nStatus that the best-chain path walk of
+ * FindMostWorkChain() (main.cpp) reads: a block is usable on a candidate path
+ * only if it has its data and is neither failed nor parked.
+ */
+static const unsigned int BLOCK_PATH_WALK_MASK = BLOCK_HAVE_DATA | BLOCK_FAILED_MASK | BLOCK_PARKED_MASK;
+
+/**
+ * Process-wide change counter for BLOCK_PATH_WALK_MASK. It is advanced by
+ * CBlockStatus whenever any of those bits of any block index entry changes, and
+ * only then; it is never reset or moved backwards by production code.
+ */
+inline std::atomic<uint64_t>& BlockPathWalkEpochCounter()
+{
+    static std::atomic<uint64_t> epoch(0);
+    return epoch;
+}
+
+inline uint64_t BlockPathWalkEpoch()
+{
+    return BlockPathWalkEpochCounter().load(std::memory_order_relaxed);
+}
+
+/**
+ * CBlockIndex::nStatus. It reads as an unsigned int, but every write goes
+ * through the operators below, so a change to any BLOCK_PATH_WALK_MASK bit
+ * advances BlockPathWalkEpoch(). This makes "every writer of the fields the
+ * path walk reads resets the memo" a property the compiler enforces: there is
+ * no way to store to nStatus that bypasses it. Writes that only touch the
+ * validity level, undo, activates-upgrade bits (or rewrite the same value) do
+ * not advance the epoch. Copy construction does not advance it (a copy is not
+ * part of the block graph).
+ */
+class CBlockStatus
+{
+    unsigned int v;
+    void Store(unsigned int n)
+    {
+        if ((v ^ n) & BLOCK_PATH_WALK_MASK)
+            BlockPathWalkEpochCounter().fetch_add(1, std::memory_order_relaxed);
+        v = n;
+    }
+public:
+    CBlockStatus() : v(0) {}
+    CBlockStatus(unsigned int n) : v(n) {}
+    CBlockStatus(const CBlockStatus&) = default;
+    CBlockStatus& operator=(const CBlockStatus& o) { Store(o.v); return *this; }
+    CBlockStatus& operator=(unsigned int n) { Store(n); return *this; }
+    CBlockStatus& operator|=(unsigned int n) { Store(v | n); return *this; }
+    CBlockStatus& operator&=(unsigned int n) { Store(v & n); return *this; }
+    operator unsigned int() const { return v; }
+};
+
 /** The block chain is a tree shaped structure starting with the
  * genesis block at the root, with each block potentially having multiple
  * candidates to be the next block. A blockindex may have multiple pprev pointing
@@ -154,7 +209,7 @@ public:
     unsigned int nChainTx;
 
     //! Verification status of this block. See enum BlockStatus
-    unsigned int nStatus;
+    CBlockStatus nStatus;
 
     //! Branch ID corresponding to the consensus rules used to validate this block.
     //! Only cached if block validity is BLOCK_VALID_CONSENSUS.
@@ -378,7 +433,12 @@ public:
             READWRITE(VARINT(nVersion));
 
         READWRITE(VARINT(nHeight));
-        READWRITE(VARINT(nStatus));
+        // nStatus is a CBlockStatus (see above); (de)serialize it as the plain
+        // unsigned int varint it has always been, so the on-disk format is unchanged.
+        unsigned int nStatusDisk = nStatus;
+        READWRITE(VARINT(nStatusDisk));
+        if (ser_action.ForRead())
+            nStatus = nStatusDisk;
         READWRITE(VARINT(nTx));
         if (nStatus & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO))
             READWRITE(VARINT(nFile));
