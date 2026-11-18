@@ -34,7 +34,7 @@ for b in "$ZD" "$ZCLI" "$ZTX"; do [ -x "$b" ] || { echo "missing $b" >&2; exit 2
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/zcl-zslp-e2e.XXXXXX")
-BASE=$((20000 + ($$ % 20000)))
+BASE=${E2E_PORT_BASE:-$((20000 + ($$ % 20000)))}
 PIDS=""
 CHECKS=0
 DUST=0.00000546

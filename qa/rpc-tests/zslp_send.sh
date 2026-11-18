@@ -413,6 +413,9 @@ expect_err "unknown recipient field" cli 0 zslp_send "$AAA" "[{\"address\":\"$B\
 expect_err "pass confirm=true" cli 0 zslp_burn "$AAA" "1.00" false
 expect_err "does not hold the confirmed mint baton" cli 0 zslp_mint "$CCC" "1.00000000"
 expect_err "does not hold the confirmed mint baton" cli 0 zslp_mint "$BBB" "1"
+LONGNAME=$(awk 'BEGIN { for (i = 0; i < 64; i++) printf "n" }')
+LONGURL=https://$(awk 'BEGIN { for (i = 0; i < 247; i++) printf "a" }')
+expect_err "would not be relayed" cli 0 zslp_genesis "{\"ticker\":\"LONGTOK\",\"name\":\"$LONGNAME\",\"decimals\":8,\"initialquantity\":\"1\",\"documenturl\":\"$LONGURL\",\"documenthash\":\"$(printf '%064d' 7)\"}"
 [ "$(cli 0 getrawmempool | jq length)" = 0 ] || fail "a refused request left something in the mempool"
 ok "every refusal left the mempool empty"
 
@@ -660,6 +663,77 @@ expect_err "protected" cli 0 sendtoaddress "$M" "$(cli 0 getbalance)"
 [ "$(cli $WN zslp_gettoken "$AAA" 1000 | jq -S -c .)" = "$before" ] || fail "the token changed under ordinary sends"
 ok "an ordinary send of the whole balance is refused because token outputs are protected"
 
+# ---- varied transactions -------------------------------------------------------------------
+
+say "== varied transactions: nine tokens with 0 to 8 decimals, every kind of send, mint and burn"
+# n base units of a token with d decimals, as a decimal string
+amt() { awk -v n="$1" -v d="$2" 'BEGIN { s = sprintf("%d", n); if (d == 0) { print s; exit } while (length(s) <= d) s = "0" s; print substr(s, 1, length(s) - d) "." substr(s, length(s) - d + 1) }'; }
+VT=""
+for d in 0 1 2 3 4 5 6 7 8; do
+    q=$(awk -v d=$d 'BEGIN { f = substr("56789012", 1, d); print (d == 0 ? "1234" : "1234." f) }')
+    r=$(cli 0 zslp_genesis "{\"ticker\":\"V$d\",\"name\":\"Varied $d\",\"decimals\":$d,\"initialquantity\":\"$q\"}")
+    VT="$VT $(printf '%s' "$r" | jq -r .tokenid)"
+done
+TOKENS="$TOKENS $VT"; TXS="$TXS $VT"
+settle
+ok "nine tokens created, decimals 0 to 8"
+A3=$(cli 0 getnewaddress)
+
+d=0
+for t in $VT; do
+    x=$(cli 0 zslp_send "$t" "[{\"address\":\"$B\",\"amount\":\"$(amt 1 $d)\"}]" | jq -r .txid); TXS="$TXS $x"
+    d=$((d + 1))
+done
+settle
+d=0
+for t in $VT; do
+    x=$(cli 0 zslp_send "$t" "[{\"address\":\"$B\",\"amount\":\"$(amt 1 $d)\"},{\"address\":\"$A3\",\"amount\":\"$(amt 2 $d)\"},{\"address\":\"$B\",\"amount\":\"$(amt 3 $d)\"}]" | jq -r .txid); TXS="$TXS $x"
+    d=$((d + 1))
+done
+settle
+d=0
+for t in $VT; do
+    x=$(cli 0 zslp_mint "$t" "$(amt 7 $d)" | jq -r .txid); TXS="$TXS $x"
+    d=$((d + 1))
+done
+settle
+ok "single sends, three-recipient sends and mints of the smallest units, for every decimals setting"
+for t in $VT; do conserved "$t"; done
+
+# a send that spends every output the wallet holds of the token: many inputs, one recipient
+for t in $VT; do
+    n=$(tcount 0 "$t")
+    [ "$n" -ge 3 ] || fail "expected A to hold at least three outputs of $t, it holds $n"
+    r=$(cli 0 zslp_send "$t" "[{\"address\":\"$B\",\"amount\":\"$(tbal 0 "$t")\"}]")
+    [ "$(printf '%s' "$r" | jq -r .tokeninputs)" = "$n" ] || fail "the consolidation spent $(printf '%s' "$r" | jq -r .tokeninputs) of $n outputs"
+    [ "$(printf '%s' "$r" | jq -r .tokenchange)" = "$(amt 0 $(cli 2 zslp_gettoken "$t" | jq -r .decimals))" ] || fail "a send of everything left token change"
+    TXS="$TXS $(printf '%s' "$r" | jq -r .txid)"
+done
+settle
+for t in $VT; do [ "$(tbal 0 "$t")" = "0" ] || [ "$(units "$(tbal 0 "$t")")" = 0 ] || fail "A still holds $t"; done
+ok "A sent everything it held of each token, in one transaction each, with no token change"
+for t in $VT; do conserved "$t"; done
+
+# burns by B, three tokens
+for d in 0 4 8; do
+    t=$(echo $VT | cut -d' ' -f$((d + 1)))
+    x=$(cli 1 zslp_burn "$t" "$(amt 1 $d)" true | jq -r .txid); TXS="$TXS $x"
+done
+settle
+ok "B burned one base unit each of V0, V4 and V8"
+
+# the biggest send: 18 recipients and the token change make 19 outputs; one more recipient is refused
+V2=$(echo $VT | cut -d' ' -f3)
+RC=""
+i=0; while [ $i -lt 18 ]; do RC="$RC{\"address\":\"$A3\",\"amount\":\"0.01\"},"; i=$((i + 1)); done
+RC19="$RC{\"address\":\"$A3\",\"amount\":\"0.01\"}"
+expect_err "at most 19" cli 1 zslp_send "$V2" "[$RC19]"
+x=$(cli 1 zslp_send "$V2" "[${RC%,}]" | jq -r .txid); TXS="$TXS $x"
+settle
+[ "$(cli $WN getrawtransaction "$x" 1 | jq -r '.vout | length')" = 21 ] || fail "the 18-recipient send has $(cli $WN getrawtransaction "$x" 1 | jq -r '.vout | length') outputs, expected 21 (message, 18, token change, ZCL change)"
+ok "an 18-recipient send is valid; a 19th recipient (20 token outputs with the change) is refused"
+for t in $VT; do conserved "$t"; done
+
 # ---- the whole run ----------------------------------------------------------------------
 
 say "== the whole run"
@@ -671,6 +745,44 @@ ok "no invalid, unknown or burning transaction: nothing the wallets built destro
 for t in $TOKENS; do conserved "$t"; done
 agree
 ok "all three indexes agree on every token and on all $(echo $TXS | wc -w) transactions"
+
+# ---- a second opinion --------------------------------------------------------------------------
+
+say "== slpverify: raw blocks replayed by an independent ledger with the vendored Z23 rules"
+${CC:-cc} -std=gnu11 -O2 -Wall -Wextra -Werror \
+    -iquote "$SVC/glue" -iquote "$SVC/vendor/contexts/market/modules/zslp/include" \
+    -iquote "$SVC/vendor/engine/modules/overlay/include" -iquote "$SVC/vendor/core/modules/script/include" \
+    "$SVC/tools/slpverify.c" "$SVC/glue/zcl_slp_index.c" \
+    "$SVC/vendor/contexts/market/modules/zslp/src/slp.c" "$SVC/vendor/engine/modules/overlay/src/overlay_codec.c" \
+    -o "$TMP/slpverify"
+h=$(cli 2 getblockcount)
+: >"$TMP/blocks.hex"
+i=1
+while [ $i -le "$h" ]; do
+    cli $WN getblock "$(cli 2 getblockhash $i)" 0 >>"$TMP/blocks.hex"
+    i=$((i + 1))
+done
+"$TMP/slpverify" "$TMP/blocks.hex" 30 >"$TMP/verify.out" || fail "slpverify: $(tail -3 "$TMP/verify.out")"
+nslp=$(sed -n 's/^summary slp \([0-9]*\) .*/\1/p' "$TMP/verify.out")
+ok "slpverify judged $nslp SLP transactions in $h blocks: every one is valid"
+# its token totals and its unspent token outputs are exactly the wallets' view
+{
+    for n in 0 1; do
+        cli $n zslp_listunspent 1 | jq -r '.outputs[] | [.txid, .vout, .tokenid, .role, .amount] | @tsv'
+    done
+} | awk -F'\t' '{ a = $5; gsub(/\./, "", a); sub(/^0+/, "", a); if (a == "") a = "0"; print "unspent", $1, $2, $3, $4, a }' | sort >"$TMP/unspent.node"
+grep '^unspent ' "$TMP/verify.out" | sort >"$TMP/unspent.verify"
+cmp -s "$TMP/unspent.node" "$TMP/unspent.verify" || { diff "$TMP/unspent.node" "$TMP/unspent.verify" | head -8; fail "slpverify and the wallets disagree about the unspent token outputs"; }
+ok "the $(wc -l <"$TMP/unspent.verify" | tr -d ' ') unspent token outputs are the same in slpverify's ledger and in the wallets"
+: >"$TMP/tokens.node"
+for t in $TOKENS; do
+    tk=$(cli $WN zslp_gettoken "$t")
+    echo "token $t minted $(units "$(printf '%s' "$tk" | jq -r .totalminted)") burnedsends $(units "$(printf '%s' "$tk" | jq -r .burnedinsends)") burnedspent $(units "$(printf '%s' "$tk" | jq -r .burnedbyspending)")" >>"$TMP/tokens.node"
+done
+sort "$TMP/tokens.node" >"$TMP/tokens.node.s"
+grep '^token ' "$TMP/verify.out" | sort >"$TMP/tokens.verify"
+cmp -s "$TMP/tokens.node.s" "$TMP/tokens.verify" || { diff "$TMP/tokens.node.s" "$TMP/tokens.verify" | head -8; fail "slpverify and the index disagree about the token totals"; }
+ok "minted, burned-in-sends and burned-by-spending agree for all $(echo $TOKENS | wc -w) tokens"
 
 if [ -n "${DUMP:-}" ]; then
     : >"$DUMP"
