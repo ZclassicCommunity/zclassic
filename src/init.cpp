@@ -639,6 +639,7 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-fuzzmessagestest=<n>", "Randomly fuzz 1 of every <n> network messages");
         strUsage += HelpMessageOpt("-flushwallet", strprintf("Run a thread to flush wallet periodically (default: %u)", 1));
         strUsage += HelpMessageOpt("-testsetchaininterval=<n>", strprintf("Test only: write the wallet checkpoint (locator and note state) at most every <n> seconds while running (default: %u)", DATABASE_WRITE_INTERVAL));
+        strUsage += HelpMessageOpt("-testblockindexinterval=<n>", "Test only: write the block index at most every <n> seconds while running (default: 3600, 300 during initial block download)");
         strUsage += HelpMessageOpt("-testcrashpoint=<name>[:<n>]", "Test only: _exit(77) the <n>th time the named wallet or chain-state write point is reached; the name any matches every point (default: off)");
         strUsage += HelpMessageOpt("-stopafterblockimport", strprintf("Stop running after importing blocks from disk (default: %u)", 0));
         strUsage += HelpMessageOpt("-nuparams=hexBranchId:activationHeight", "Use given activation height for specified network upgrade (regtest-only)");
@@ -2074,9 +2075,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     // The crash and checkpoint-interval hooks exist for qa/rpc-tests/wallet_crash_consistency.sh.
     // A stray line in zclassic.conf must not make a real node exit at a wallet write point.
-    if ((mapArgs.count("-testcrashpoint") || mapArgs.count("-testsetchaininterval")) &&
+    if ((mapArgs.count("-testcrashpoint") || mapArgs.count("-testsetchaininterval") || mapArgs.count("-testblockindexinterval")) &&
         Params().NetworkIDString() != "regtest") {
-        return InitError("-testcrashpoint and -testsetchaininterval may only be used on regtest.");
+        return InitError("-testcrashpoint, -testsetchaininterval and -testblockindexinterval may only be used on regtest.");
     }
 
     if (!mapMultiArgs["-nuparams"].empty()) {
