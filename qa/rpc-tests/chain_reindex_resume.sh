@@ -10,7 +10,8 @@
 # block index and the chainstate are flushed (a kill just after the last block left both empty).
 #
 # Cases: the node leaves at the crash point after the wipe (-testcrashpoint=reindex-after-wipe),
-# and kill -9 at several delays after the start of -reindex. Each is restarted without -reindex
+# kill -9 at several delays after the start of -reindex, and an empty block index without the flag
+# (plain start and -reindex-chainstate). Each is restarted without -reindex
 # and must reach the full height with a chain that verifies and accept a new block.
 #
 # usage: chain_reindex_resume.sh --bin <dir> --work <dir> [--base port]
@@ -40,7 +41,7 @@ H=$(cli getblockcount); sp
 # check <label>: restart without -reindex, wait for the full height, verify, mine
 check() {
     : > "$D/out.log"
-    if ! st; then echo "FAIL $1: restart without -reindex failed: $(grep -m1 -i 'assert\|error' "$D/out.log" | cut -c1-150)"; F=$((F + 1)); return; fi
+    if ! st $2; then echo "FAIL $1: restart without -reindex failed: $(grep -m1 -i 'assert\|error' "$D/out.log" | cut -c1-150)"; F=$((F + 1)); return; fi
     for k in $(seq 300); do [ "$(cli getblockcount 2>/dev/null)" = "$H" ] && break; sleep 0.2; done
     hh=$(cli getblockcount); v=$(cli verifychain 4 0)
     for k in $(seq 100); do cli generate 1 >/dev/null 2>&1 && break; sleep 0.2; done; h2=$(cli getblockcount)
@@ -58,6 +59,15 @@ for d in 0.3 0.6 0.9 1.2 1.5 1.8; do
     "$B/zclassicd" $A0 -datadir="$D" -reindex >> "$D/out.log" 2>&1 & echo $! > "$D/pid"
     sleep $d; kill -9 "$(cat "$D/pid")" 2>/dev/null; while kill -0 "$(cat "$D/pid")" 2>/dev/null; do sleep 0.1; done
     check "kill -9 $d s into -reindex"
+done
+# The flag can only be written once the wiped block index is open again, and a new LevelDB syncs
+# its files on open: a kill in that window (seen under load) leaves an empty index with no flag
+# next to full block files and the old chainstate. A start must reindex, also with
+# -reindex-chainstate, which wipes the chainstate (it used to start from genesis and write over
+# blk00000.dat).
+for x in "" -reindex-chainstate; do
+    i=$((i + 1)); D=$W/it$i; rm -rf "$D"; cp -a "$W/tpl" "$D"; : > "$D/out.log"; rm -rf "$D/regtest/blocks/index"
+    check "empty block index without the flag, restart ${x:-plain}" $x
 done
 echo "reindex-resume: $R ok, $F fail"
 [ "$F" = 0 ] && [ "$R" -gt 0 ]

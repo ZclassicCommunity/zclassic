@@ -3031,8 +3031,24 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 } else {
                     bool fWasReindexing = false;
                     pblocktree->ReadReindexing(fWasReindexing);
+                    // The flag can only be written once the wiped block index is open again, and
+                    // opening a new LevelDB syncs its files: a -reindex killed in that window left an
+                    // empty index with no flag next to full block files. A plain restart then refused
+                    // (the chainstate names a block the index lacks), but one with -reindex-chainstate,
+                    // or with the chainstate gone, started from genesis and wrote over blk00000.dat.
+                    // An index that never recorded a block file while blk00000.dat holds data was lost
+                    // (cut short like that, or removed by hand): rebuild it from the block files.
+                    int nLastBlockFileRecorded = 0;
+                    const boost::filesystem::path pathFirstBlockFile = GetBlockPosFilename(CDiskBlockPos(0, 0), "blk");
+                    boost::system::error_code ecFirstBlockFile;
+                    const bool fFirstBlockFileHoldsData = boost::filesystem::exists(pathFirstBlockFile, ecFirstBlockFile) &&
+                        boost::filesystem::file_size(pathFirstBlockFile, ecFirstBlockFile) > 0 && !ecFirstBlockFile;
                     if (fWasReindexing) {
                         LogPrintf("An earlier -reindex did not finish: starting it again\n");
+                        fReindex = true;
+                    } else if (!pblocktree->ReadLastBlockFile(nLastBlockFileRecorded) && fFirstBlockFileHoldsData) {
+                        LogPrintf("The block index is empty but the block files hold blocks (an interrupted -reindex, or a removed index): reindexing them\n");
+                        pblocktree->WriteReindexing(true);
                         fReindex = true;
                     }
                 }
