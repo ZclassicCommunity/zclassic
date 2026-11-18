@@ -29,6 +29,9 @@ using namespace std;
 
 typedef std::string AsyncRPCOperationId;
 
+/** A random RFC 4122 version 4 UUID in text form (xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx), from GetRandBytes. */
+std::string RandomUuidV4();
+
 typedef enum class operationStateEnum {
     READY = 0,
     EXECUTING,

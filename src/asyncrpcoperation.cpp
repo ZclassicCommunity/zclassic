@@ -4,8 +4,9 @@
 
 #include "asyncrpcoperation.h"
 
+#include "random.h"
+
 #include <boost/uuid/uuid.hpp>
-#include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
 
 #include <string>
@@ -13,8 +14,6 @@
 #include <chrono>
 
 using namespace std;
-
-static boost::uuids::random_generator uuidgen;
 
 static std::map<OperationStatus, std::string> OperationStatusMap = {
     {OperationStatus::READY, "queued"},
@@ -24,13 +23,23 @@ static std::map<OperationStatus, std::string> OperationStatusMap = {
     {OperationStatus::SUCCESS, "success"}
 };
 
+std::string RandomUuidV4()
+{
+    // The node's own CSPRNG: Boost's random_generator reads the platform RNG
+    // (BCryptGenRandom on Windows), which can throw and is not ours to audit.
+    boost::uuids::uuid uuid;
+    GetRandBytes(uuid.data, uuid.size());
+    uuid.data[6] = (uuid.data[6] & 0x0F) | 0x40; // RFC 4122 version 4
+    uuid.data[8] = (uuid.data[8] & 0x3F) | 0x80; // variant 10xx
+    return boost::uuids::to_string(uuid);
+}
+
 /**
  * Every operation instance should have a globally unique id
  */
 AsyncRPCOperation::AsyncRPCOperation() : error_code_(0), error_message_() {
     // Set a unique reference for each operation
-    boost::uuids::uuid uuid = uuidgen();
-    id_ = "opid-" + boost::uuids::to_string(uuid);
+    id_ = "opid-" + RandomUuidV4();
     creation_time_ = (int64_t)time(NULL);
     set_state(OperationStatus::READY);
 }
