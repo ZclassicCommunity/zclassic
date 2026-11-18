@@ -241,6 +241,11 @@ bool BuildAnchorServeSnapshotFromGenesis(const boost::filesystem::path& data_dir
 static std::atomic<bool> fWinShutdownDone(false);
 #endif
 
+#ifdef ENABLE_WALLET
+/** True once the wallet was loaded, checked against the chain and rescanned, so Shutdown() may checkpoint it. */
+static bool fWalletInitComplete = false;
+#endif
+
 void Shutdown()
 {
     LogPrintf("%s: In progress...\n", __func__);
@@ -307,6 +312,14 @@ void Shutdown()
         LOCK(cs_main);
         if (pcoinsTip != NULL) {
             FlushStateToDisk();
+#ifdef ENABLE_WALLET
+            // The coin database was just flushed to this tip. Write the wallet's checkpoint (note
+            // witnesses, nullifiers and the best-block locator, atomically) at the same point, so
+            // the next start does not have to rely on rescanning from an older locator.
+            if (pwalletMain && fWalletInitComplete && chainActive.Tip()) {
+                pwalletMain->SetBestChain(chainActive.GetLocator());
+            }
+#endif
         }
         delete pcoinsTip;
         pcoinsTip = NULL;
@@ -625,6 +638,8 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-dropmessagestest=<n>", "Randomly drop 1 of every <n> network messages");
         strUsage += HelpMessageOpt("-fuzzmessagestest=<n>", "Randomly fuzz 1 of every <n> network messages");
         strUsage += HelpMessageOpt("-flushwallet", strprintf("Run a thread to flush wallet periodically (default: %u)", 1));
+        strUsage += HelpMessageOpt("-testsetchaininterval=<n>", strprintf("Test only: write the wallet checkpoint (locator and note state) at most every <n> seconds while running (default: %u)", DATABASE_WRITE_INTERVAL));
+        strUsage += HelpMessageOpt("-testcrashpoint=<name>[:<n>]", "Test only: _exit(77) the <n>th time the named wallet or chain-state write point is reached; the name any matches every point (default: off)");
         strUsage += HelpMessageOpt("-stopafterblockimport", strprintf("Stop running after importing blocks from disk (default: %u)", 0));
         strUsage += HelpMessageOpt("-nuparams=hexBranchId:activationHeight", "Use given activation height for specified network upgrade (regtest-only)");
         strUsage += HelpMessageOpt("-eqparams=hexBranchId:N:K", "Use given equihash parameters for specified network upgrade"); 
@@ -2036,6 +2051,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
     }
 
+    // The crash and checkpoint-interval hooks exist for qa/rpc-tests/wallet_crash_consistency.sh.
+    // A stray line in zclassic.conf must not make a real node exit at a wallet write point.
+    if ((mapArgs.count("-testcrashpoint") || mapArgs.count("-testsetchaininterval")) &&
+        Params().NetworkIDString() != "regtest") {
+        return InitError("-testcrashpoint and -testsetchaininterval may only be used on regtest.");
+    }
+
     if (!mapMultiArgs["-nuparams"].empty()) {
         // Allow overriding network upgrade parameters for testing
         if (Params().NetworkIDString() != "regtest") {
@@ -3430,6 +3452,14 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             else
                 pindexRescan = chainActive.Genesis();
         }
+        // The note state that was read back (witness caches, nullifiers) is checked against the
+        // active chain before it is trusted. A crash, a reindex or a chain that was rolled back
+        // behind the wallet can leave it ahead of, behind or on another branch than the chain;
+        // a rescan from the locator alone does not see that. This may start the rescan earlier.
+        bool fNoteStateRepaired = false;
+        if (!clearWitnessCaches && !GetBoolArg("-rescan", false) && chainActive.Tip()) {
+            fNoteStateRepaired = pwalletMain->ReconcileNoteState(pindexRescan);
+        }
         if (chainActive.Tip() && chainActive.Tip() != pindexRescan)
         {
             uiInterface.InitMessage(_("Rescanning..."));
@@ -3438,6 +3468,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             pwalletMain->ScanForWalletTransactions(pindexRescan, true);
             LogPrintf(" rescan      %15dms\n", GetTimeMillis() - nStart);
             g_startupTimer.mark("rescan");
+            TestCrashPoint("init-after-rescan");
             pwalletMain->SetBestChain(chainActive.GetLocator());
             nWalletDBUpdated++;
 
@@ -3471,7 +3502,14 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 }
             }
         }
+        else if (fNoteStateRepaired)
+        {
+            // Nothing to scan, but the repaired state has to reach wallet.dat in one atomic write.
+            pwalletMain->SetBestChain(chainActive.GetLocator());
+            nWalletDBUpdated++;
+        }
         pwalletMain->SetBroadcastTransactions(GetBoolArg("-walletbroadcast", true));
+        fWalletInitComplete = true;
     } // (!fDisableWallet)
 #else // ENABLE_WALLET
     LogPrintf("No wallet support compiled in!\n");

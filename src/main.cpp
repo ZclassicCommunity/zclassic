@@ -2990,6 +2990,7 @@ bool static FlushStateToDisk(CValidationState &state, FlushStateMode mode) {
         if (!pcoinsTip->Flush())
             return AbortNode(state, "Failed to write to coin database");
         nLastFlush = nNow;
+        TestCrashPoint("flush-after-coins");
         // Forensic (opt-in: -debug=flush): after a full flush, the durable block
         // index must be at-or-ahead of the coins best block. Capturing both tips
         // here pins down a cross-instance durability gap (e.g. coins persisted past
@@ -3000,8 +3001,9 @@ bool static FlushStateToDisk(CValidationState &state, FlushStateMode mode) {
                  chainActive.Tip() ? chainActive.Tip()->GetBlockHash().ToString() : "(null)",
                  pcoinsTip->GetBestBlock().ToString());
     }
-    if ((mode == FLUSH_STATE_ALWAYS || mode == FLUSH_STATE_PERIODIC) && nNow > nLastSetChain + (int64_t)DATABASE_WRITE_INTERVAL * 1000000) {
+    if ((mode == FLUSH_STATE_ALWAYS || mode == FLUSH_STATE_PERIODIC) && nNow > nLastSetChain + (int64_t)GetArg("-testsetchaininterval", DATABASE_WRITE_INTERVAL) * 1000000) {
         // Update best block in wallet (so we can detect restored wallets).
+        TestCrashPoint("flush-before-setbestchain");
         GetMainSignals().SetBestChain(chainActive.GetLocator());
         nLastSetChain = nNow;
     }
@@ -3129,6 +3131,7 @@ bool static DisconnectTip(CValidationState &state, bool fBare = false) {
     BOOST_FOREACH(const CTransaction &tx, block.vtx) {
         SyncWithWallets(tx, NULL);
     }
+    TestCrashPoint("disconnect-between-sync-and-chaintip");
     // Update cached incremental witnesses
     GetMainSignals().ChainTip(pindexDelete, &block, newSproutTree, newSaplingTree, false);
     return true;
@@ -3511,6 +3514,7 @@ bool static ConnectTip(CValidationState &state, CBlockIndex *pindexNew, CBlock *
 
     // Update chainActive & related variables.
     UpdateTip(pindexNew);
+    TestCrashPoint("connect-after-updatetip");
     // Tell wallet about transactions that went from mempool
     // to conflicted:
     BOOST_FOREACH(const CTransaction &tx, txConflicted) {
@@ -3520,6 +3524,7 @@ bool static ConnectTip(CValidationState &state, CBlockIndex *pindexNew, CBlock *
     BOOST_FOREACH(const CTransaction &tx, pblock->vtx) {
         SyncWithWallets(tx, pblock);
     }
+    TestCrashPoint("connect-between-sync-and-chaintip");
     // Update cached incremental witnesses
     GetMainSignals().ChainTip(pindexNew, pblock, oldSproutTree, oldSaplingTree, true);
 

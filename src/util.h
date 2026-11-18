@@ -78,6 +78,9 @@ bool LogAcceptCategory(const char* category);
 /** Send a string to the log output */
 int LogPrintStr(const std::string &str);
 
+/** Test-only: _exit(77) when -testcrashpoint names this call site (inert otherwise). */
+void TestCrashPoint(const char* name);
+
 #define LogPrintf(...) LogPrint(NULL, __VA_ARGS__)
 
 /**
