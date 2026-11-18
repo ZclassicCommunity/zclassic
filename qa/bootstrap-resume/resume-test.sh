@@ -397,7 +397,7 @@ test_stream() {
     # Judge recovery only on samples taken while the download was still running: on a fast
     # host it can finish inside the sampling window, and the stream count then drops to
     # zero for a reason that has nothing to do with the cut.
-    act_streams() { sed -n 's/.*streams=([0-9][0-9]*) active=1$//p' "$work/stream-samples.txt"; }
+    act_streams() { sed -n 's/.*streams=\([0-9][0-9]*\) active=1$/\1/p' "$work/stream-samples.txt"; }
     min=$(act_streams | sort -n | head -1)
     last=$(act_streams | tail -1)
     rec=$(act_streams | tail -n +3 | sort -n | tail -1)
