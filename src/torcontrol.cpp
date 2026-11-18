@@ -859,7 +859,22 @@ void TorController::Reconnect()
 
 std::string TorController::GetPrivateKeyFile()
 {
-    return (GetDataDir() / "onion_v3_private_key").string();
+    const boost::filesystem::path path = GetDataDir() / "onion_v3_private_key";
+#ifdef WIN32
+    // The key file functions (c23/tor/keyfile.c) take a UTF-8 path, while
+    // path::string() is in the ANSI code page: UTF-8 only under the manifest of
+    // Windows 10 1903 and later. Anything else turns a datadir with a non-ASCII
+    // character in it into "path is not valid UTF-8", and the key is never
+    // read or saved: a new onion address on every start.
+    const std::wstring wide = path.wstring();
+    const int len = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), (int)wide.size(), NULL, 0, NULL, NULL);
+    if (len > 0) {
+        std::string utf8(len, '\0');
+        if (WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), (int)wide.size(), &utf8[0], len, NULL, NULL) == len)
+            return utf8;
+    }
+#endif
+    return path.string();
 }
 
 void TorController::reconnect_cb(evutil_socket_t fd, short what, void *arg)
