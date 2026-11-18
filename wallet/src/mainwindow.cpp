@@ -1745,14 +1745,15 @@ void MainWindow::setSyncStatusBootstrapSnapshot(int pct, qint64 received, qint64
 
     QString detail;
     if (total > 0) {
-        const double gb = 1024.0 * 1024.0 * 1024.0;
-        detail = QString(" • ") % tr("%1 / %2 GB")
-            .arg(received / gb, 0, 'f', 1).arg(total / gb, 0, 'f', 1);
+        const double gib = 1024.0 * 1024.0 * 1024.0;
+        detail = QString(" • ") % tr("%1 / %2 GiB")
+            .arg(received / gib, 0, 'f', 1).arg(total / gib, 0, 'f', 1);
     }
     if (mbps > 0.0) {
-        detail = detail % QString(" • ") % tr("%1 MB/s").arg(mbps, 0, 'f', 1);
+        // The daemon reports MiB/s (2^20 bytes per second).
+        detail = detail % QString(" • ") % tr("%1 MiB/s").arg(mbps, 0, 'f', 1);
         if (total > received) {
-            const qint64 secs = (qint64)((total - received) / (mbps * 1e6));
+            const qint64 secs = (qint64)((total - received) / (mbps * 1048576.0));
             detail = detail % QString(" • ") % (secs < 90 ? tr("under a minute left")
                                                          : tr("about %1 min left").arg((secs + 30) / 60));
         }

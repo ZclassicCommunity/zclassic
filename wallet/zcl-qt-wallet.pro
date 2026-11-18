@@ -108,6 +108,7 @@ HEADERS += \
     src/turnstile.h \
     src/qrcodelabel.h \
     src/connection.h \
+    src/bootstrapprogress.h \
     src/fillediconlabel.h \
     src/addressbook.h \
     src/logger.h \
