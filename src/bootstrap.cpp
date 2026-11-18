@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "bootstrap.h"
+#include "bootstrap_resume.h"
 
 #include "chainparams.h"
 #include "checkpoints.h"
@@ -1455,9 +1456,12 @@ static bool CreateEmptyBootstrapFiles(const CBootstrapSnapshotManifest& manifest
 // Prepare the staging directory for a snapshot download: ensure free space,
 // materialize zero-length files, and pre-create every parent directory so
 // concurrent download streams never race on directory creation.
-// Only reuse completed files from this attempt's private staging directory.
-// Rehash against the validated manifest on every reconnect; .part files never
-// count as verified progress. The final chainstate commitment still gates import.
+// Strict reference check of a staging directory: every complete file must hash to
+// the manifest value (a mismatch is an error, nothing is deleted) and .part files
+// never count as progress. The downloader itself uses the tolerant, parallel
+// BootstrapResumeScan below, which deletes and re-fetches what fails instead of
+// giving up; this stricter form is kept for callers and tests that must never
+// repair anything. The final chainstate commitment still gates import.
 bool BootstrapPendingFiles(const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging,
                            std::vector<uint32_t>& pending, uint64_t& completed, std::string& error)
 {
@@ -1544,44 +1548,370 @@ static bool DownloadBootstrapPrepareStaging(const CBootstrapSnapshotManifest& ma
     return true;
 }
 
-// Download the chunks for the file indices in `order` over a single connection,
-// using a pipelined request window. Writes each file to a .part path, verifies
-// its SHA-256, and renames it into place as its final chunk arrives. Increments
-// `progressBytes` (shared across parallel streams) for every chunk received and
-// aborts promptly if `abortFlag` is set (sibling stream failure or shutdown).
-// The single-stream caller passes logProgress=true to emit progress inline; the
-// parallel manager logs aggregate progress from its own thread (logProgress=false).
-static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, const std::vector<uint32_t>& order, int timeout_ms, std::atomic<uint64_t>& progressBytes, std::atomic<bool>& abortFlag, bool logProgress, std::string& error)
+// ---------------------------------------------------------------------------
+// Resume of an interrupted download
+//
+// A staging directory (BootstrapPrepareStaging) outlives a killed or failed
+// attempt. Nothing in it is trusted: BootstrapResumeScan re-derives, from the
+// manifest the peer served THIS run, which files are complete (final path, right
+// size, SHA-256 equal to the manifest hash), which can continue from an aligned
+// offset (.part), and deletes everything else (corrupt, wrong size, unknown).
+// A resumed .part is only ever as trusted as any freshly downloaded file: it is
+// accepted when its whole-file SHA-256 matches the manifest, and thrown away and
+// re-fetched from byte 0 when it does not. The compiled chainstate commitment
+// check that gates the import is untouched.
+// ---------------------------------------------------------------------------
+
+
+// Best effort: persist a rename/creation in `dir` (POSIX). Correctness never
+// depends on it, because the next start re-verifies every file it keeps.
+static void BootstrapFsyncDir(const boost::filesystem::path& dir)
 {
-    // Request cursor over (position in `order`, byte offset within that file).
-    size_t reqPos = 0;
-    uint64_t reqOffset = 0;
-    auto nextRequest =
-        [&](CBootstrapSnapshotChunkRequest& request) -> bool {
-            while (reqPos < order.size()) {
-                const CBootstrapSnapshotFile& f = manifest.vFiles[order[reqPos]];
-                if (reqOffset >= f.nSize) {
-                    ++reqPos;
-                    reqOffset = 0;
+#ifndef WIN32
+    const int fd = open(dir.string().c_str(), O_RDONLY);
+    if (fd >= 0) {
+        fsync(fd);
+        close(fd);
+    }
+#endif
+}
+
+// Remove everything in `staging` that the current manifest does not name (and
+// the staging marker). Symlinks, special files and directories sitting where the
+// manifest expects a file are removed as well: removing a symlink unlinks the link
+// itself and never touches its target, and nothing is ever opened through one. They
+// used to make the scan refuse, which left the staging directory in place and
+// failed every later attempt the same way, so a single planted or damaged entry
+// disabled the bootstrap for good.
+static bool BootstrapSweepStrayStaging(const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging,
+                                       size_t& removed, std::string& error)
+{
+    removed = 0;
+    std::set<std::string> expected;
+    for (size_t i = 0; i < manifest.vFiles.size(); ++i) {
+        const boost::filesystem::path relative(manifest.vFiles[i].strPath);
+        if (!IsBootstrapSnapshotDataPath(relative)) {
+            error = strprintf("bootstrap manifest has unsafe file path: %s", manifest.vFiles[i].strPath);
+            return false;
+        }
+        expected.insert(relative.generic_string());
+        expected.insert(relative.generic_string() + ".part");
+    }
+    std::vector<boost::filesystem::path> strays;
+    try {
+        for (boost::filesystem::directory_iterator top(staging), topEnd; top != topEnd; ++top) {
+            const std::string name = top->path().filename().string();
+            if (name == BOOTSTRAP_STAGING_MARKER || name == std::string(BOOTSTRAP_STAGING_MARKER) + ".tmp")
+                continue;
+            const boost::filesystem::file_status st = boost::filesystem::symlink_status(top->path());
+            if (st.type() == boost::filesystem::symlink_file || (name != "blocks" && name != "chainstate") ||
+                st.type() != boost::filesystem::directory_file) {
+                strays.push_back(top->path()); // unknown top-level entry (or symlink): drop it wholesale
+                continue;
+            }
+            for (boost::filesystem::recursive_directory_iterator it(top->path()), end; it != end; ++it) {
+                // Lexical, so a link is never resolved to compute the name.
+                const std::string key = it->path().lexically_relative(staging).generic_string();
+                const boost::filesystem::file_status ist = boost::filesystem::symlink_status(it->path());
+                if (ist.type() == boost::filesystem::directory_file) {
+                    // A directory where a manifest file (or its .part) belongs could never be
+                    // replaced by the verified file: drop it, without descending into it.
+                    if (expected.count(key)) {
+                        strays.push_back(it->path());
+                        it.disable_recursion_pending();
+                    }
                     continue;
                 }
-                request.nFileIndex = order[reqPos];
-                request.nOffset = reqOffset;
-                request.nLength = (uint32_t)std::min<uint64_t>(manifest.nChunkSize, f.nSize - reqOffset);
-                reqOffset += request.nLength;
+                // recursive_directory_iterator does not follow directory symlinks, so a
+                // symlink (to a file or a directory) or a special file shows up here as one
+                // entry and is unlinked like any unknown file.
+                if (ist.type() != boost::filesystem::regular_file || !expected.count(key))
+                    strays.push_back(it->path());
+            }
+        }
+        for (size_t i = 0; i < strays.size(); ++i) {
+            boost::filesystem::remove_all(strays[i]);
+            ++removed;
+        }
+    } catch (const boost::filesystem::filesystem_error& e) {
+        error = strprintf("could not sweep bootstrap staging directory: %s", e.what());
+        return false;
+    }
+    return true;
+}
+
+static const int BOOTSTRAP_RESUME_HASH_THREADS = 4;
+
+// Classify and (where needed) clean every file of `manifest` in `staging`. On
+// success `pending` lists the files still to fetch, and `completed` counts the
+// verified bytes plus the aligned bytes of resumable partial files.
+bool BootstrapResumeScan(const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging,
+                                std::vector<uint32_t>& pending, uint64_t& completed,
+                                BootstrapResumeStats& stats, std::string& error)
+{
+    pending.clear();
+    completed = 0;
+    stats = BootstrapResumeStats();
+    const int64_t started = GetTimeMillis();
+    const size_t n = manifest.vFiles.size();
+    {
+        boost::system::error_code mkec;
+        boost::filesystem::create_directories(staging, mkec);
+        if (mkec) {
+            error = strprintf("could not create bootstrap staging directory %s: %s", staging.string(), mkec.message());
+            return false;
+        }
+    }
+
+    for (size_t i = 0; i < n; ++i) {
+        if (!IsBootstrapSnapshotDataPath(boost::filesystem::path(manifest.vFiles[i].strPath))) {
+            error = strprintf("bootstrap manifest has unsafe file path: %s", manifest.vFiles[i].strPath);
+            return false;
+        }
+    }
+    if (!BootstrapSweepStrayStaging(manifest, staging, stats.strayRemoved, error))
+        return false;
+
+    std::vector<BootstrapStagedFileFacts> facts(n);
+    std::vector<size_t> toHash;
+    boost::system::error_code ec;
+    for (size_t i = 0; i < n; ++i) {
+        const CBootstrapSnapshotFile& file = manifest.vFiles[i];
+        if (file.nSize == 0)
+            continue; // created and verified by DownloadBootstrapPrepareStaging
+        const boost::filesystem::path path = staging / boost::filesystem::path(file.strPath);
+        const boost::filesystem::path part(path.string() + ".part");
+        BootstrapStagedFileFacts& f = facts[i];
+        if (boost::filesystem::is_regular_file(path, ec)) {
+            f.finalExists = true;
+            f.finalSize = boost::filesystem::file_size(path, ec);
+            if (ec)
+                f.finalSize = (uint64_t)-1;
+            if (f.finalSize == file.nSize)
+                toHash.push_back(i);
+        }
+        if (boost::filesystem::is_regular_file(part, ec)) {
+            f.partExists = true;
+            f.partSize = boost::filesystem::file_size(part, ec);
+            if (ec)
+                f.partSize = 0;
+        }
+    }
+
+    // Re-hash the files claiming to be complete: cheap next to downloading them.
+    std::vector<char> hashOk(n, 0);
+    std::atomic<size_t> nextHash(0);
+    std::atomic<uint64_t> hashedBytes(0);
+    auto hashWorker = [&]() {
+        for (;;) {
+            const size_t k = nextHash.fetch_add(1);
+            if (k >= toHash.size() || ShutdownRequested())
+                return;
+            const size_t i = toHash[k];
+            const CBootstrapSnapshotFile& file = manifest.vFiles[i];
+            std::string herr;
+            uint256 hash;
+            if (HashBootstrapSnapshotFile(staging / boost::filesystem::path(file.strPath), hash, herr) && hash == file.hashSha256)
+                hashOk[i] = 1;
+            hashedBytes.fetch_add(file.nSize);
+        }
+    };
+    {
+        const int threads = std::max(1, std::min<int>(BOOTSTRAP_RESUME_HASH_THREADS, (int)toHash.size()));
+        boost::thread_group group;
+        for (int t = 1; t < threads; ++t)
+            group.create_thread(hashWorker);
+        hashWorker();
+        boost::this_thread::disable_interruption noInterrupt;
+        group.join_all();
+    }
+    if (ShutdownRequested()) {
+        error = "bootstrap resume canceled: shutdown requested";
+        return false;
+    }
+    stats.bytesHashed = hashedBytes.load();
+
+    for (size_t i = 0; i < n; ++i) {
+        const CBootstrapSnapshotFile& file = manifest.vFiles[i];
+        if (file.nSize == 0)
+            continue;
+        BootstrapStagedFileFacts& f = facts[i];
+        f.finalHashOk = (hashOk[i] != 0);
+        const BootstrapStagedDecision d = BootstrapDecideStagedFile(file.nSize, manifest.nChunkSize, f);
+        const boost::filesystem::path path = staging / boost::filesystem::path(file.strPath);
+        const boost::filesystem::path part(path.string() + ".part");
+        if (d.discardFinal) {
+            boost::filesystem::remove(path, ec);
+            if (ec) {
+                error = strprintf("could not remove corrupt staged file %s: %s", path.string(), ec.message());
+                return false;
+            }
+            ++stats.filesDiscarded;
+            LogPrintf("Bootstrap: staged file %s is corrupt or the wrong size (%llu bytes, expected %llu); it will be downloaded again\n",
+                      file.strPath, (unsigned long long)f.finalSize, (unsigned long long)file.nSize);
+        }
+        if (d.discardPart) {
+            boost::filesystem::remove(part, ec);
+            if (ec) {
+                error = strprintf("could not remove staged partial file %s: %s", part.string(), ec.message());
+                return false;
+            }
+        }
+        switch (d.action) {
+        case BSA_KEEP:
+            completed += file.nSize;
+            stats.bytesKept += file.nSize;
+            ++stats.filesKept;
+            break;
+        case BSA_RESUME_PART:
+            pending.push_back((uint32_t)i);
+            completed += d.resumeOffset;
+            stats.bytesResumed += d.resumeOffset;
+            ++stats.filesResumed;
+            break;
+        case BSA_FETCH_ALL:
+            pending.push_back((uint32_t)i);
+            if (!d.discardFinal)
+                ++stats.filesMissing;
+            break;
+        }
+    }
+    if (completed > manifest.nSnapshotBytes) {
+        error = "bootstrap resume bytes exceed manifest size";
+        return false;
+    }
+    stats.scanMillis = GetTimeMillis() - started;
+    return true;
+}
+
+static void LogBootstrapResumeStats(const BootstrapResumeStats& s)
+{
+    LogPrintf("Bootstrap: staging scan: kept %llu verified files (%s), %llu partial files continue from %s, "
+              "%llu missing, %llu corrupt/wrong-size discarded, %llu stray entries removed; re-hashed %s in %.1f s\n",
+              (unsigned long long)s.filesKept, BootstrapFormatGiB(s.bytesKept),
+              (unsigned long long)s.filesResumed, BootstrapFormatGiB(s.bytesResumed),
+              (unsigned long long)s.filesMissing, (unsigned long long)s.filesDiscarded,
+              (unsigned long long)s.strayRemoved, BootstrapFormatGiB(s.bytesHashed), s.scanMillis / 1000.0);
+}
+
+// Where a stream gets its files from. The legacy single-socket path and the
+// parallel streams share one implementation (a BootstrapWorkQueue).
+class BootstrapFileFeed
+{
+public:
+    virtual ~BootstrapFileFeed() {}
+    //! Next file to fetch and the (chunk-aligned) offset to continue it from.
+    virtual bool Claim(uint32_t& idx, uint64_t& startOffset) = 0;
+    //! Hand back a claimed file that did not finish.
+    virtual void Release(uint32_t idx) = 0;
+    virtual void Complete(uint32_t idx) = 0;
+    //! A file failed its SHA-256 check; returns the number of failures so far.
+    virtual int Strike(uint32_t idx) = 0;
+};
+
+class BootstrapQueueFeed : public BootstrapFileFeed
+{
+public:
+    BootstrapQueueFeed(BootstrapWorkQueue& q, const CBootstrapSnapshotManifest& m, const boost::filesystem::path& s)
+        : queue(q), manifest(m), staging(s) {}
+    bool Claim(uint32_t& idx, uint64_t& startOffset) override
+    {
+        if (!queue.Claim(idx))
+            return false;
+        startOffset = 0;
+        const CBootstrapSnapshotFile& file = manifest.vFiles[idx];
+        const boost::filesystem::path part(
+            (staging / boost::filesystem::path(file.strPath)).string() + ".part");
+        boost::system::error_code ec;
+        if (boost::filesystem::is_regular_file(part, ec)) {
+            if (!queue.MustRestart(idx)) {
+                const uint64_t size = boost::filesystem::file_size(part, ec);
+                if (!ec)
+                    startOffset = BootstrapResumeOffset(size, file.nSize, manifest.nChunkSize);
+            }
+            if (startOffset == 0)
+                boost::filesystem::remove(part, ec);
+        }
+        return true;
+    }
+    void Release(uint32_t idx) override { queue.Release(idx); }
+    void Complete(uint32_t idx) override { queue.Complete(idx); }
+    int Strike(uint32_t idx) override { return queue.AddStrike(idx); }
+
+private:
+    BootstrapWorkQueue& queue;
+    const CBootstrapSnapshotManifest& manifest;
+    const boost::filesystem::path staging;
+};
+
+// A file that fails its SHA-256 twice is not a local glitch: the peer is serving
+// bytes that do not match its own manifest, so stop trying this peer.
+static const int BOOTSTRAP_MAX_FILE_HASH_STRIKES = 2;
+// fsync a partially written file every this many chunks so a power loss costs
+// bounded re-download (a kill -9 loses nothing: the data is in the page cache).
+static const unsigned int BOOTSTRAP_PART_SYNC_CHUNKS = 16;
+
+// Download the chunks for the files a feed hands out, over a single connection,
+// using a pipelined request window. Writes each file to a .part path, verifies
+// its SHA-256, and renames it into place as its final chunk arrives. A file that
+// is cut short stays as a .part and is continued from its last whole chunk by
+// whichever stream claims it next. Increments `progressBytes` (shared across
+// parallel streams) for every chunk received and aborts promptly if `abortFlag`
+// is set (shutdown, or a fatal error on another stream).
+// The single-stream caller passes logProgress=true to emit progress inline; the
+// parallel manager logs aggregate progress from its own thread (logProgress=false).
+// `fatal` (optional) is set when retrying cannot help (local I/O error, shutdown,
+// a file that keeps failing its hash); `bytesReceived` (optional) reports the
+// payload bytes this call took in.
+static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, BootstrapFileFeed& feed, int timeout_ms, std::atomic<uint64_t>& progressBytes, std::atomic<bool>& abortFlag, bool logProgress, std::string& error, bool* fatal = NULL, uint64_t* bytesReceived = NULL)
+{
+    if (fatal)
+        *fatal = false;
+    if (bytesReceived)
+        *bytesReceived = 0;
+
+    // Request cursor over (claimed file, byte offset within that file).
+    bool haveCur = false;
+    uint32_t curIdx = 0;
+    uint64_t curOffset = 0;
+    std::set<uint32_t> outstanding; // claimed and not yet verified+renamed
+    auto nextRequest =
+        [&](CBootstrapSnapshotChunkRequest& request) -> bool {
+            for (;;) {
+                if (!haveCur) {
+                    uint32_t idx = 0;
+                    uint64_t off = 0;
+                    if (!feed.Claim(idx, off)) {
+                        return false;
+                    }
+                    outstanding.insert(idx);
+                    haveCur = true;
+                    curIdx = idx;
+                    curOffset = off;
+                }
+                const CBootstrapSnapshotFile& f = manifest.vFiles[curIdx];
+                if (curOffset >= f.nSize) {
+                    haveCur = false;
+                    continue;
+                }
+                request.nFileIndex = curIdx;
+                request.nOffset = curOffset;
+                request.nLength = (uint32_t)std::min<uint64_t>(manifest.nChunkSize, f.nSize - curOffset);
+                curOffset += request.nLength;
                 return true;
             }
-            return false;
         };
 
     std::deque<CBootstrapSnapshotChunkRequest> inflight;
+    bool ok = true;
     for (size_t i = 0; i < BOOTSTRAP_PIPELINE_DEPTH; ++i) {
         CBootstrapSnapshotChunkRequest request;
         if (!nextRequest(request)) {
             break;
         }
         if (!SendBootstrapChunkRequest(socket, request, timeout_ms, error)) {
-            return false;
+            ok = false;
+            break;
         }
         inflight.push_back(request);
     }
@@ -1589,6 +1919,7 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
     FILE* fp = NULL;
     boost::filesystem::path open_path;
     boost::filesystem::path open_part;
+    unsigned int chunks_since_sync = 0;
     uint64_t stream_received = 0;
     int last_logged_percent = -1;
     uint64_t last_reported_bytes = 0;
@@ -1598,16 +1929,18 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
     const int64_t download_started = GetTimeMillis();
     int64_t throughputWindowStartMs = download_started;
     uint64_t throughputBytesAtWindowStart = 0;
-    bool ok = true;
+    auto setFatal = [&]() { if (fatal) *fatal = true; };
 
     while (ok && !inflight.empty()) {
         if (ShutdownRequested()) {
             error = "bootstrap snapshot download aborted: shutdown requested";
+            setFatal();
             ok = false;
             break;
         }
         if (abortFlag.load(std::memory_order_relaxed)) {
             error = "bootstrap snapshot download canceled (another stream failed)";
+            setFatal();
             ok = false;
             break;
         }
@@ -1641,25 +1974,34 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
             const boost::filesystem::path relative(file.strPath);
             if (!IsBootstrapSnapshotDataPath(relative)) {
                 error = strprintf("bootstrap manifest has unsafe file path: %s", file.strPath);
+                setFatal();
                 ok = false;
                 break;
             }
             open_path = staging / relative;
             open_part = boost::filesystem::path(open_path.string() + ".part");
-            boost::filesystem::create_directories(open_path.parent_path());
-            fp = fopen(open_part.string().c_str(), "wb");
+            boost::system::error_code mkec;
+            boost::filesystem::create_directories(open_path.parent_path(), mkec);
+            // Continuing a partial file: keep what is on disk, write on from the
+            // chunk-aligned offset (this chunk's own offset).
+            fp = fopen(open_part.string().c_str(), request.nOffset > 0 ? "r+b" : "wb");
+            chunks_since_sync = 0;
             if (!fp) {
                 error = strprintf("could not create bootstrap staging file: %s", open_part.string());
+                setFatal();
                 ok = false;
                 break;
             }
         }
 
         if (!WriteBootstrapChunkToFile(open_part, chunk, fp, error)) {
+            setFatal();
             ok = false;
             break;
         }
         stream_received += chunk.vData.size();
+        if (bytesReceived)
+            *bytesReceived = stream_received;
         const uint64_t total_received =
             progressBytes.fetch_add(chunk.vData.size(), std::memory_order_relaxed) + chunk.vData.size();
 
@@ -1677,14 +2019,37 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
             fp = NULL;
             if (!closed) {
                 error = strprintf("could not close bootstrap staging file: %s", open_part.string());
+                setFatal();
                 ok = false;
                 break;
             }
             if (!VerifyBootstrapDownloadedFile(open_part, file, error)) {
+                // Wrong bytes: drop the file (a resumed .part may have been torn by
+                // an earlier crash) and re-fetch it from byte 0.
+                boost::system::error_code rmec;
+                boost::filesystem::remove(open_part, rmec);
+                const int strikes = feed.Strike(request.nFileIndex);
+                error = strprintf("%s (failure %d of %d; the file is fetched again from the start)",
+                                  error, strikes, BOOTSTRAP_MAX_FILE_HASH_STRIKES);
+                if (strikes >= BOOTSTRAP_MAX_FILE_HASH_STRIKES)
+                    setFatal();
                 ok = false;
                 break;
             }
-            boost::filesystem::rename(open_part, open_path);
+            try {
+                boost::filesystem::rename(open_part, open_path);
+            } catch (const boost::filesystem::filesystem_error& e) {
+                error = strprintf("could not move verified bootstrap file into place: %s", e.what());
+                setFatal();
+                ok = false;
+                break;
+            }
+            BootstrapFsyncDir(open_path.parent_path());
+            outstanding.erase(request.nFileIndex);
+            feed.Complete(request.nFileIndex);
+        } else if (++chunks_since_sync >= BOOTSTRAP_PART_SYNC_CHUNKS) {
+            FileCommit(fp);
+            chunks_since_sync = 0;
         }
 
         // Report whole-percent changes immediately and sub-percent transfers
@@ -1694,7 +2059,7 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
         // the parallel manager logs aggregate progress from its own thread.
         if (logProgress) {
             const int percent = manifest.nSnapshotBytes > 0
-                ? (int)((total_received * 100) / manifest.nSnapshotBytes)
+                ? (int)std::min<uint64_t>(100, (total_received * 100) / manifest.nSnapshotBytes)
                 : 100;
             const int64_t report_ms = GetTimeMillis();
             if (percent != last_logged_percent ||
@@ -1703,18 +2068,13 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
                 last_reported_bytes = total_received;
                 last_report_ms = report_ms;
                 const int64_t elapsed_ms = std::max<int64_t>(1, report_ms - download_started);
-                const double mbps = (stream_received / 1048576.0) / (elapsed_ms / 1000.0);
-                LogPrintf("Bootstrap: downloaded %d%% (%llu/%llu bytes, %.1f MB/s)\n",
+                const double mibps = (stream_received / 1048576.0) / (elapsed_ms / 1000.0);
+                LogPrintf("Bootstrap: downloaded %d%% (%llu/%llu bytes, %.1f MiB/s)\n",
                     percent,
                     (unsigned long long)total_received,
                     (unsigned long long)manifest.nSnapshotBytes,
-                    mbps);
-                const std::string progress = strprintf(
-                    "Bootstrap snapshot: %3d%%  %.2f / %.2f GB  %.1f MB/s",
-                    percent,
-                    total_received / 1073741824.0,
-                    manifest.nSnapshotBytes / 1073741824.0,
-                    mbps);
+                    mibps);
+                const std::string progress = BootstrapFormatProgressLine(percent, total_received, manifest.nSnapshotBytes, mibps, 0);
                 // Always feed InitMessage so SetRPCWarmupStatus reflects live
                 // download progress and a GUI child polling getinfo sees it
                 // (noui_InitMessage only LogPrintf's -> no extra console line).
@@ -1725,7 +2085,7 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
                 // status (peer/attempt/mode are filled in by init.cpp; streams=1
                 // for this single-stream/subset path).
                 SetBootstrapInfoProgress(percent, total_received, manifest.nSnapshotBytes,
-                                         mbps, 1, "", 0, 0, 0, 0, "",
+                                         mibps, 1, "", 0, 0, 0, 0, "",
                                          manifest.nVersion);
                 // Console in-place line only when the metrics screen is NOT
                 // drawing (it renders InitMessage on its own managed line;
@@ -1751,11 +2111,16 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
         fclose(fp);
         fp = NULL;
     }
+    // Whatever this stream claimed but did not finish goes back for another turn;
+    // its .part keeps the chunks already written.
+    for (std::set<uint32_t>::const_iterator it = outstanding.begin(); it != outstanding.end(); ++it)
+        feed.Release(*it);
     return ok;
 }
 
 // Single-stream download of the whole snapshot over an already-handshaked
-// socket (the legacy path; used when -bootstrapstreams=1).
+// socket (the legacy path, kept for -bootstrapstreams=1 style callers and tests).
+// Reuses whatever a previous attempt left in `staging`, exactly like the parallel path.
 bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, int timeout_ms, const std::string& peer, std::string& error)
 {
     LogPrintf("Bootstrap: downloading snapshot from peer %s: %u files, %llu bytes (height %d)\n",
@@ -1766,23 +2131,32 @@ bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotManifest& 
 
     std::vector<uint32_t> order;
     uint64_t completed = 0;
-    if (!BootstrapPendingFiles(manifest, staging, order, completed, error) ||
+    BootstrapResumeStats stats;
+    if (!BootstrapResumeScan(manifest, staging, order, completed, stats, error) ||
         !DownloadBootstrapPrepareStaging(manifest, staging, completed, error)) {
         return false;
     }
+    if (stats.filesKept > 0 || stats.filesResumed > 0)
+        LogBootstrapResumeStats(stats);
+    BootstrapWorkQueue queue(order);
+    BootstrapQueueFeed feed(queue, manifest, staging);
     std::atomic<uint64_t> progressBytes(completed);
     std::atomic<bool> abortFlag(false);
-    return DownloadBootstrapFileSubset(socket, manifest, staging, order, timeout_ms,
-                                       progressBytes, abortFlag, /*logProgress=*/true, error);
+    return DownloadBootstrapFileSubset(socket, manifest, staging, feed, timeout_ms,
+                                       progressBytes, abortFlag, /*logProgress=*/true, error) &&
+           queue.AllDone();
 }
 
 // Open a fresh connection to the bootstrap peer, handshake, fetch the manifest,
 // and verify it is byte-identical to the master manifest already validated by
 // the caller. Each parallel download stream calls this, so a peer that serves a
 // divergent manifest on a second connection is rejected before any chunk from
-// that stream is trusted.
-static bool OpenBootstrapStreamAndVerifyManifest(const CService& peerAddress, int timeout_ms, const CBootstrapSnapshotManifest& masterManifest, SOCKET& outSocket, std::string& error)
+// that stream is trusted. `manifestMismatch` (optional) is set when the failure
+// is the manifest differing, which retrying the same peer cannot fix.
+static bool OpenBootstrapStreamAndVerifyManifest(const CService& peerAddress, int timeout_ms, const CBootstrapSnapshotManifest& masterManifest, SOCKET& outSocket, std::string& error, bool* manifestMismatch = NULL)
 {
+    if (manifestMismatch)
+        *manifestMismatch = false;
     SOCKET socket = INVALID_SOCKET;
     bool proxyConnectionFailed = false;
     if (!ConnectSocket(peerAddress, socket, nConnectTimeout, &proxyConnectionFailed)) {
@@ -1813,6 +2187,8 @@ static bool OpenBootstrapStreamAndVerifyManifest(const CService& peerAddress, in
     }
     if (SerializeHash(manifest) != SerializeHash(masterManifest)) {
         error = "bootstrap stream served a manifest that differs from the master manifest";
+        if (manifestMismatch)
+            *manifestMismatch = true;
         CloseSocket(socket);
         return false;
     }
@@ -1820,57 +2196,73 @@ static bool OpenBootstrapStreamAndVerifyManifest(const CService& peerAddress, in
     return true;
 }
 
-// Parallel snapshot download: split the file set across `nStreams` independent
-// connections to the same peer. Defeats single-flow loss-limiting on lossy WAN
-// paths (each flow gets its own congestion window, so aggregate throughput
-// scales ~N x). Each stream owns a disjoint subset of files (no shared file
-// writes, hence no locking) and is independently SHA-256 verified; correctness
-// still rests on the per-file hashes plus the post-import chainstate commitment
-// check, exactly as the single-stream path. Any stream failure aborts the whole
-// download.
-static bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::string& peer, const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, int timeout_ms, int nStreams, std::string& error)
+// No byte from any stream for this long: give the attempt up (the staging
+// directory is kept, so the next attempt or start continues from here).
+static const int64_t BOOTSTRAP_STALL_FAIL_MS = 5 * 60 * 1000;
+// A stream that has failed this many times in a row while the attempt has not
+// received a single byte ends the attempt (dead or refusing peer: fail over fast).
+static const int BOOTSTRAP_NO_DATA_MAX_FAILURES = 3;
+
+// Sleep up to `ms`, returning early when the download is being torn down.
+static void BootstrapInterruptibleSleep(int64_t ms, const std::atomic<bool>& abortFlag)
 {
-    LogPrintf("Bootstrap: downloading snapshot from peer %s over %d parallel streams: %u files, %llu bytes (height %d)\n",
+    while (ms > 0 && !abortFlag.load(std::memory_order_relaxed) && !ShutdownRequested()) {
+        const int64_t slice = std::min<int64_t>(ms, 100);
+        MilliSleep(slice);
+        ms -= slice;
+    }
+}
+
+// Parallel snapshot download: `nStreams` independent connections to the same
+// peer pull files from one shared queue. Defeats single-flow loss-limiting on
+// lossy WAN paths (each flow gets its own congestion window, so aggregate
+// throughput scales ~N x). A stream that fails (timeout, reset, a server that
+// evicted it) hands its unfinished files back to the queue, waits a growing,
+// jittered delay and reconnects: the others keep going and the configured
+// parallelism comes back as soon as the server accepts the stream again. Only a
+// fatal condition (local I/O error, a file that repeatedly fails its hash, a
+// peer whose manifest changed, shutdown, or five minutes without a single byte)
+// ends the attempt, and even then the staging directory is kept for the next
+// try. Correctness still rests on the per-file hashes plus the post-import
+// chainstate commitment check, exactly as the single-stream path.
+bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::string& peer, const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, int timeout_ms, int nStreams, std::string& error)
+{
+    LogPrintf("Bootstrap: downloading snapshot from peer %s over up to %d parallel streams: %u files, %s (%llu bytes) (height %d)\n",
         peer, nStreams,
         (unsigned int)manifest.vFiles.size(),
+        BootstrapFormatGiB(manifest.nSnapshotBytes),
         (unsigned long long)manifest.nSnapshotBytes,
         manifest.nHeight);
 
     std::vector<uint32_t> files;
     uint64_t completed = 0;
-    if (!BootstrapPendingFiles(manifest, staging, files, completed, error) ||
+    BootstrapResumeStats resumeStats;
+    if (!BootstrapResumeScan(manifest, staging, files, completed, resumeStats, error) ||
         !DownloadBootstrapPrepareStaging(manifest, staging, completed, error)) {
         return false;
     }
+    if (resumeStats.filesKept > 0 || resumeStats.filesResumed > 0 || resumeStats.filesDiscarded > 0 || resumeStats.strayRemoved > 0)
+        LogBootstrapResumeStats(resumeStats);
     if (files.empty()) {
         return true; // nothing to fetch over the wire
     }
 
-    // Balance files across streams by total bytes (greedy: assign the largest
-    // remaining file to the currently-smallest bin). Keeps stream finish times
-    // close even when file sizes vary widely.
-    std::sort(files.begin(), files.end(), [&](uint32_t a, uint32_t b) {
+    // Biggest files first: the long poles start early and the small files fill in
+    // the gaps, so the streams finish together.
+    std::stable_sort(files.begin(), files.end(), [&](uint32_t a, uint32_t b) {
         return manifest.vFiles[a].nSize > manifest.vFiles[b].nSize;
     });
     if (nStreams > (int)files.size()) {
         nStreams = (int)files.size();
     }
-    std::vector<std::vector<uint32_t> > groups(nStreams);
-    std::vector<uint64_t> binBytes(nStreams, 0);
-    for (size_t i = 0; i < files.size(); ++i) {
-        int best = 0;
-        for (int b = 1; b < nStreams; ++b) {
-            if (binBytes[b] < binBytes[best]) {
-                best = b;
-            }
-        }
-        groups[best].push_back(files[i]);
-        binBytes[best] += manifest.vFiles[files[i]].nSize;
-    }
 
+    BootstrapWorkQueue queue(files);
+    BootstrapQueueFeed feed(queue, manifest, staging);
     std::atomic<uint64_t> progressBytes(completed);
     std::atomic<bool> abortFlag(false);
-    std::atomic<int> doneCount(0);
+    std::atomic<int> activeStreams(0);
+    std::atomic<int> liveWorkers(nStreams);
+    std::atomic<uint64_t> reconnects(0);
     CCriticalSection csErr;
     std::string firstError;
 
@@ -1887,29 +2279,68 @@ static bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const
     boost::thread_group workers;
     for (int w = 0; w < nStreams; ++w) {
         workers.create_thread([&, w]() {
-            SOCKET s = INVALID_SOCKET;
             try {
-                if (!abortFlag.load(std::memory_order_relaxed)) {
-                    std::string e;
-                    if (!OpenBootstrapStreamAndVerifyManifest(peerAddress, timeout_ms, manifest, s, e)) {
-                        recordError(e);
-                    } else {
-                        std::string de;
-                        if (!DownloadBootstrapFileSubset(s, manifest, staging, groups[w], timeout_ms,
-                                                         progressBytes, abortFlag, /*logProgress=*/false, de)) {
-                            recordError(de);
-                        }
+                unsigned int seed = (unsigned int)(GetTimeMicros() & 0xffffffffu) ^ (unsigned int)(w * 2654435761u);
+                int failures = 0;
+                while (!abortFlag.load(std::memory_order_relaxed) && !queue.AllDone()) {
+                    if (ShutdownRequested()) {
+                        recordError("bootstrap snapshot download aborted: shutdown requested");
+                        break;
                     }
+                    if (!queue.HasPending()) {
+                        // Everything left is in flight on other streams; stay ready
+                        // to take over files they hand back.
+                        MilliSleep(200);
+                        continue;
+                    }
+                    SOCKET s = INVALID_SOCKET;
+                    std::string e;
+                    bool fatal = false;
+                    uint64_t got = 0;
+                    bool mismatch = false;
+                    if (OpenBootstrapStreamAndVerifyManifest(peerAddress, timeout_ms, manifest, s, e, &mismatch)) {
+                        const int active = activeStreams.fetch_add(1) + 1;
+                        if (failures > 0)
+                            LogPrintf("Bootstrap: stream %d reconnected (%d/%d streams active)\n", w, active, nStreams);
+                        const bool ok = DownloadBootstrapFileSubset(s, manifest, staging, feed, timeout_ms,
+                                                                    progressBytes, abortFlag, /*logProgress=*/false,
+                                                                    e, &fatal, &got);
+                        activeStreams.fetch_sub(1);
+                        CloseSocket(s);
+                        if (ok) {
+                            failures = 0;
+                            continue; // queue drained for this stream (or taken by others)
+                        }
+                    } else {
+                        fatal = mismatch;
+                    }
+                    if (fatal) {
+                        recordError(e);
+                        break;
+                    }
+                    if (abortFlag.load(std::memory_order_relaxed))
+                        break;
+                    failures = (got > 0) ? 1 : failures + 1;
+                    // A peer that is down, or refuses every request, must not hold up
+                    // failover to the next bootstrap peer for the whole stall timeout:
+                    // with not one byte received in this attempt, give up after a few tries.
+                    if (failures >= BOOTSTRAP_NO_DATA_MAX_FAILURES && progressBytes.load(std::memory_order_relaxed) == completed) {
+                        recordError(strprintf("bootstrap peer delivered no data after %d attempts: %s", failures, e));
+                        break;
+                    }
+                    seed = seed * 1664525u + 1013904223u;
+                    const int64_t delay = BootstrapReconnectDelayMs(failures, seed >> 8);
+                    reconnects.fetch_add(1);
+                    LogPrintf("Bootstrap: stream %d failed (%s); reconnecting in %.1f s (%d/%d streams active)\n",
+                              w, e, delay / 1000.0, activeStreams.load(), nStreams);
+                    BootstrapInterruptibleSleep(delay, abortFlag);
                 }
             } catch (const std::exception& ex) {
                 recordError(strprintf("bootstrap stream %d exception: %s", w, ex.what()));
             } catch (...) {
                 recordError(strprintf("bootstrap stream %d unknown exception", w));
             }
-            if (s != INVALID_SOCKET) {
-                CloseSocket(s);
-            }
-            doneCount.fetch_add(1, std::memory_order_release);
+            liveWorkers.fetch_sub(1, std::memory_order_release);
         });
     }
 
@@ -1919,35 +2350,45 @@ static bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const
     int64_t last_report_ms = 0;
     int64_t last_emit_ms = 0;
     int last_emit_decile = -1;
+    int last_active = -1;
+    uint64_t stall_bytes = completed;
     const int64_t download_started = GetTimeMillis();
+    int64_t last_progress_ms = download_started;
     try {
-    while (doneCount.load(std::memory_order_acquire) < nStreams) {
+    while (liveWorkers.load(std::memory_order_acquire) > 0) {
         if (ShutdownRequested()) {
             recordError("bootstrap snapshot download aborted: shutdown requested");
         }
         const uint64_t total_received = progressBytes.load(std::memory_order_relaxed);
         const int percent = manifest.nSnapshotBytes > 0
-            ? (int)((total_received * 100) / manifest.nSnapshotBytes)
+            ? (int)std::min<uint64_t>(100, (total_received * 100) / manifest.nSnapshotBytes)
             : 100;
         const int64_t report_ms = GetTimeMillis();
+        const int active = activeStreams.load();
+        if (total_received != stall_bytes) {
+            stall_bytes = total_received;
+            last_progress_ms = report_ms;
+        } else if (report_ms - last_progress_ms > BOOTSTRAP_STALL_FAIL_MS && !abortFlag.load()) {
+            recordError(strprintf("bootstrap download made no progress for %d s", (int)(BOOTSTRAP_STALL_FAIL_MS / 1000)));
+        }
+        if (active != last_active) {
+            LogPrintf("Bootstrap: %d/%d streams active (%llu files done, %llu pending)\n", active, nStreams,
+                      (unsigned long long)queue.DoneCount(), (unsigned long long)(queue.PendingCount() + queue.ClaimedCount()));
+            last_active = active;
+        }
         if (percent != last_logged_percent ||
             (total_received != last_reported_bytes && report_ms - last_report_ms >= 1000)) {
             last_logged_percent = percent;
             last_reported_bytes = total_received;
             last_report_ms = report_ms;
             const int64_t elapsed_ms = std::max<int64_t>(1, report_ms - download_started);
-            const double mbps = ((total_received - completed) / 1048576.0) / (elapsed_ms / 1000.0);
-            LogPrintf("Bootstrap: downloaded %d%% (%llu/%llu bytes, %.1f MB/s, %d streams)\n",
+            const double mibps = (total_received > completed ? (total_received - completed) / 1048576.0 : 0.0) / (elapsed_ms / 1000.0);
+            LogPrintf("Bootstrap: downloaded %d%% (%llu/%llu bytes, %.1f MiB/s, %d/%d streams)\n",
                 percent,
                 (unsigned long long)total_received,
                 (unsigned long long)manifest.nSnapshotBytes,
-                mbps, nStreams);
-            const std::string progress = strprintf(
-                "Bootstrap snapshot: %3d%%  %.2f / %.2f GB  %.1f MB/s  (%d streams)",
-                percent,
-                total_received / 1073741824.0,
-                manifest.nSnapshotBytes / 1073741824.0,
-                mbps, nStreams);
+                mibps, active, nStreams);
+            const std::string progress = BootstrapFormatProgressLine(percent, total_received, manifest.nSnapshotBytes, mibps, active);
             // Always feed InitMessage (RPC warmup status -> GUI getinfo). The
             // GUI parses "Bootstrap snapshot: NN%" out of this; keep the prefix
             // in sync with zcl-qt-wallet src/connection.cpp. noui_InitMessage
@@ -1956,7 +2397,7 @@ static bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const
             // Mirror the same numbers into the structured getbootstrapinfo status
             // (peer/attempt/mode are filled in by init.cpp's connect loop).
             SetBootstrapInfoProgress(percent, total_received, manifest.nSnapshotBytes,
-                                     mbps, nStreams, peer, 0, 0, 0, 0, "",
+                                     mibps, active, peer, 0, 0, 0, 0, "",
                                      manifest.nVersion);
             if (!BootstrapMetricsScreenActive()) {
                 EmitBootstrapProgress(progress, percent, percent >= 100, last_emit_ms, last_emit_decile);
@@ -1967,7 +2408,7 @@ static bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const
     } catch (...) {
         // Never let an exception (e.g. thread interruption) skip the join below:
         // the worker threads hold references to this frame's locals (recordError
-        // captures, the atomics, groups). Signal abort and fall through to join.
+        // captures, the atomics, the queue). Signal abort and fall through to join.
         recordError("bootstrap snapshot download interrupted");
     }
     {
@@ -1981,6 +2422,15 @@ static bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const
         error = firstError;
         return false;
     }
+    if (!queue.AllDone()) {
+        error = "bootstrap download ended with files outstanding";
+        return false;
+    }
+    const int64_t elapsed_ms = std::max<int64_t>(1, GetTimeMillis() - download_started);
+    const uint64_t fetched = progressBytes.load() > completed ? progressBytes.load() - completed : 0;
+    LogPrintf("Bootstrap: download complete: %s fetched in %.1f s (%.1f MiB/s), %llu stream reconnects\n",
+              BootstrapFormatGiB(fetched), elapsed_ms / 1000.0, (fetched / 1048576.0) / (elapsed_ms / 1000.0),
+              (unsigned long long)reconnects.load());
     return true;
 }
 
@@ -3299,13 +3749,16 @@ bool ProvisionalAcceptTrustlessSnapshot(const boost::filesystem::path& data_dir,
     return true;
 }
 
-size_t RemoveStaleBootstrapStaging(const boost::filesystem::path& data_dir)
+size_t RemoveStaleBootstrapStaging(const boost::filesystem::path& data_dir, const std::string& keepName)
 {
     size_t removed = 0;
     boost::system::error_code ec;
+    const size_t prefixLen = strlen(BOOTSTRAP_STAGING_PREFIX);
     for (boost::filesystem::directory_iterator it(data_dir, ec), end; !ec && it != end; it.increment(ec)) {
         const std::string name = it->path().filename().string();
-        if (name.compare(0, 23, "bootstrap-peer-staging-") != 0)
+        if (name.compare(0, prefixLen, BOOTSTRAP_STAGING_PREFIX) != 0)
+            continue;
+        if (!keepName.empty() && name == keepName)
             continue;
         boost::system::error_code rmec;
         boost::filesystem::remove_all(it->path(), rmec);
@@ -3317,6 +3770,82 @@ size_t RemoveStaleBootstrapStaging(const boost::filesystem::path& data_dir)
         ++removed;
     }
     return removed;
+}
+
+bool BootstrapPrepareStaging(const boost::filesystem::path& data_dir, const CBootstrapSnapshotManifest& manifest,
+                             boost::filesystem::path& staging, BootstrapStagingVerdict& verdict, std::string& error)
+{
+    const std::string name = BootstrapStagingDirName(manifest);
+    const uint256 identity = BootstrapStagingIdentity(manifest);
+    const uint256 manifestId = BootstrapManifestId(manifest);
+    staging = data_dir / name;
+
+    // Staging directories of any other snapshot (and the per-epoch directories of
+    // older versions) can never be reused: drop them before using the disk.
+    RemoveStaleBootstrapStaging(data_dir, name);
+
+    boost::system::error_code ec;
+    bool exists = boost::filesystem::is_directory(boost::filesystem::symlink_status(staging, ec));
+    if (!exists && boost::filesystem::symlink_status(staging, ec).type() != boost::filesystem::file_not_found) {
+        // Something else (a file, a symlink) sits where the directory should be.
+        boost::filesystem::remove_all(staging, ec);
+        if (ec) {
+            error = strprintf("could not clear %s: %s", staging.string(), ec.message());
+            return false;
+        }
+    }
+
+    const boost::filesystem::path markerPath = staging / BOOTSTRAP_STAGING_MARKER;
+    BootstrapStagingMarker marker;
+    bool markerValid = false;
+    // Only a regular file can be a marker: a symlink or a FIFO in its place is not
+    // opened (a FIFO would block the startup thread); the directory is then
+    // treated as having no valid marker and is discarded.
+    if (exists && boost::filesystem::symlink_status(markerPath, ec).type() == boost::filesystem::regular_file) {
+        FILE* f = fopen(markerPath.string().c_str(), "rb");
+        if (f) {
+            char buf[513];
+            const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+            fclose(f);
+            buf[n] = '\0';
+            markerValid = ParseBootstrapStagingMarker(std::string(buf, n), marker);
+        }
+    }
+    verdict = BootstrapDecideStagingReuse(exists, markerValid, marker, identity, manifestId);
+
+    if (verdict == BSV_DISCARD_BAD_MARKER || verdict == BSV_DISCARD_OTHER_SNAPSHOT) {
+        boost::filesystem::remove_all(staging, ec);
+        if (ec) {
+            error = strprintf("could not remove staging directory %s: %s", staging.string(), ec.message());
+            return false;
+        }
+    }
+    if (verdict != BSV_REUSE_SAME_MANIFEST) {
+        // Fresh, discarded, or the same anchor under a new manifest: (re)write the
+        // marker (atomically: a torn marker would only cost a restart, never trust).
+        boost::filesystem::create_directories(staging, ec);
+        if (ec) {
+            error = strprintf("could not create staging directory %s: %s", staging.string(), ec.message());
+            return false;
+        }
+        BootstrapStagingMarker fresh;
+        fresh.nVersion = BOOTSTRAP_STAGING_MARKER_VERSION;
+        fresh.identity = identity;
+        fresh.manifestId = manifestId;
+        const boost::filesystem::path tmp = staging / (std::string(BOOTSTRAP_STAGING_MARKER) + ".tmp");
+        std::string werr;
+        if (!WriteDurableDatadirMarker(tmp, FormatBootstrapStagingMarker(fresh), werr)) {
+            error = werr;
+            return false;
+        }
+        boost::filesystem::rename(tmp, markerPath, ec);
+        if (ec) {
+            error = strprintf("could not install staging marker %s: %s", markerPath.string(), ec.message());
+            return false;
+        }
+        BootstrapFsyncDir(staging);
+    }
+    return true;
 }
 
 bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& data_dir, std::string& error)
@@ -3338,29 +3867,22 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
         return false;
     }
 
-    RemoveStaleBootstrapStaging(data_dir);
-    const boost::filesystem::path staging = data_dir / strprintf("bootstrap-peer-staging-%d", GetTime());
+    boost::filesystem::path staging;
     try {
-        boost::filesystem::remove_all(staging);
-        boost::filesystem::create_directories(staging);
-
         if (!BootstrapHandshake(socket, peerAddress, BOOTSTRAP_NET_TIMEOUT_MS, error)) {
             CloseSocket(socket);
-            boost::filesystem::remove_all(staging);
             return false;
         }
 
         CDataStream empty(SER_NETWORK, PROTOCOL_VERSION);
         if (!SendBootstrapMessage(socket, NetMsgType::GETBSMAN, empty, BOOTSTRAP_NET_TIMEOUT_MS, error)) {
             CloseSocket(socket);
-            boost::filesystem::remove_all(staging);
             return false;
         }
 
         CDataStream manifestPayload(SER_NETWORK, PROTOCOL_VERSION);
         if (!ReceiveExpectedBootstrapMessage(socket, NetMsgType::BSMAN, manifestPayload, BOOTSTRAP_NET_TIMEOUT_MS, error)) {
             CloseSocket(socket);
-            boost::filesystem::remove_all(staging);
             return false;
         }
 
@@ -3369,54 +3891,70 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
             manifestPayload >> manifest;
         } catch (const std::exception& e) {
             CloseSocket(socket);
-            boost::filesystem::remove_all(staging);
             error = strprintf("could not decode bootstrap manifest: %s", e.what());
             return false;
         }
 
         if (!ValidateBootstrapSnapshotManifest(manifest, error, fTrustless)) {
             CloseSocket(socket);
-            boost::filesystem::remove_all(staging);
             return false;
         }
 
+        // The manifest connection has done its job: the downloader opens its own.
+        CloseSocket(socket);
+        socket = INVALID_SOCKET;
+
+        // Pick the staging directory for THIS snapshot. A directory left by an
+        // interrupted attempt for the same anchor is kept and continued (its files
+        // are re-verified against the manifest above before any is reused); a
+        // directory of any other snapshot, or without a valid marker, is deleted.
+        BootstrapStagingVerdict verdict = BSV_FRESH;
+        if (!BootstrapPrepareStaging(data_dir, manifest, staging, verdict, error)) {
+            return false;
+        }
+        LogPrintf("Bootstrap: staging directory %s (%s)\n", staging.string(), BootstrapStagingVerdictName(verdict));
+        const bool fResumed = (verdict == BSV_REUSE_SAME_MANIFEST || verdict == BSV_REUSE_SAME_ANCHOR);
+
         // Parallel download streams beat single-flow loss-limiting on lossy WAN
-        // paths. -bootstrapstreams=1 keeps the legacy single-stream path. The
-        // master manifest was validated above; each parallel stream re-fetches
-        // and verifies it matches before any of its chunks are trusted.
+        // paths. -bootstrapstreams=1 runs the same downloader with one stream. The
+        // master manifest was validated above; each stream re-fetches and verifies
+        // it matches before any of its chunks are trusted.
         int nStreams = (int)GetArg("-bootstrapstreams", BOOTSTRAP_DEFAULT_STREAMS);
         if (nStreams < 1) nStreams = 1;
         if (nStreams > BOOTSTRAP_MAX_STREAMS) nStreams = BOOTSTRAP_MAX_STREAMS;
 
-        bool downloadOk;
-        if (nStreams <= 1) {
-            downloadOk = DownloadBootstrapSnapshot(socket, manifest, staging, BOOTSTRAP_NET_TIMEOUT_MS, peer, error);
-            CloseSocket(socket);
-            socket = INVALID_SOCKET;
-        } else {
-            // The parallel downloader opens its own connections; release the
-            // manifest connection (manifest already fetched and validated).
-            CloseSocket(socket);
-            socket = INVALID_SOCKET;
-            downloadOk = DownloadBootstrapSnapshotParallel(peerAddress, peer, manifest, staging, BOOTSTRAP_NET_TIMEOUT_MS, nStreams, error);
-        }
-        // Keep verified files across bounded reconnects. Parallel streams can
-        // exceed a server's per-IP connection allowance; one replacement stream
-        // makes progress without relaxing the server policy. Always re-fetch and
-        // compare the manifest before reusing any downloaded bytes.
-        for (int retry = 0; !downloadOk && retry < 2 && !ShutdownRequested(); ++retry) {
-            LogPrintf("Bootstrap: reconnecting with verified files retained (%d/2): %s\n", retry + 1, error);
-            MilliSleep(1000);
-            error.clear();
-            if (!OpenBootstrapStreamAndVerifyManifest(peerAddress, BOOTSTRAP_NET_TIMEOUT_MS, manifest, socket, error))
-                continue;
-            downloadOk = DownloadBootstrapSnapshot(socket, manifest, staging, BOOTSTRAP_NET_TIMEOUT_MS, peer, error);
-            CloseSocket(socket);
-            socket = INVALID_SOCKET;
-        }
-        if (!downloadOk) {
-            boost::filesystem::remove_all(staging);
+        // Stream failures are handled inside the downloader (the failed stream
+        // reconnects, the others keep going). If it still gives up, the staging
+        // directory is KEPT: the next attempt (or the next start) continues from
+        // the verified files and partial files it holds.
+        if (!DownloadBootstrapSnapshotParallel(peerAddress, peer, manifest, staging, BOOTSTRAP_NET_TIMEOUT_MS, nStreams, error)) {
+            LogPrintf("Bootstrap: download did not complete (%s); keeping %s so the next attempt can resume\n",
+                      error, staging.string());
             return false;
+        }
+
+        // Files that sat on disk across a restart get one more full verification
+        // right before they are installed (the download itself verifies each file
+        // as it arrives; this closes the gap for the resumed ones).
+        if (fResumed) {
+            std::vector<uint32_t> auditPending;
+            uint64_t auditCompleted = 0;
+            BootstrapResumeStats auditStats;
+            const int64_t auditStart = GetTimeMillis();
+            if (!BootstrapResumeScan(manifest, staging, auditPending, auditCompleted, auditStats, error)) {
+                return false;
+            }
+            if (!auditPending.empty() || auditStats.filesDiscarded > 0 || auditStats.strayRemoved > 0) {
+                // Something on disk changed under us after it was verified. It was
+                // deleted by the scan; the next attempt downloads what is missing.
+                error = strprintf("staged bootstrap files changed after verification (%u missing, %u corrupt, %u unexpected); they will be downloaded again",
+                                  (unsigned int)auditPending.size(), (unsigned int)auditStats.filesDiscarded,
+                                  (unsigned int)auditStats.strayRemoved);
+                return false;
+            }
+            LogPrintf("Bootstrap: pre-install audit re-verified %s (%u files) in %.1f s\n",
+                      BootstrapFormatGiB(auditStats.bytesHashed), (unsigned int)auditStats.filesKept,
+                      (GetTimeMillis() - auditStart) / 1000.0);
         }
 
         if (!BootstrapSnapshotPathsExist(staging)) {
@@ -3515,7 +4053,7 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
         }
     } catch (const boost::filesystem::filesystem_error& e) {
         CloseSocket(socket);
-        boost::filesystem::remove_all(staging);
+        // Keep the staging directory: a filesystem error here is not a reason to throw away a multi-GiB download.
         error = e.what();
         return false;
     }
@@ -4262,7 +4800,7 @@ static bool DownloadZcashParamFile(SOCKET socket, uint32_t file_index, uint64_t 
             last_percent = percent;
             const int64_t elapsed_ms = std::max<int64_t>(1, GetTimeMillis() - started);
             EmitBootstrapProgress(
-                strprintf("Fetching params %-22s %3d%%  %.1f MB/s",
+                strprintf("Fetching params %-22s %3d%%  %.1f MiB/s",
                     display_name.c_str(),
                     percent,
                     (received / 1048576.0) / (elapsed_ms / 1000.0)),

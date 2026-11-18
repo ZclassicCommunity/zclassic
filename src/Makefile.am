@@ -155,6 +155,7 @@ BITCOIN_CORE_H = \
   base58.h \
   bech32.h \
   bootstrap.h \
+  bootstrap_resume.h \
   bootstrapvalidation.h \
   bloom.h \
   chain.h \
@@ -319,6 +320,7 @@ libbitcoin_server_a_SOURCES = \
   asyncrpcoperation.cpp \
   asyncrpcqueue.cpp \
   bootstrap.cpp \
+  bootstrap_resume.cpp \
   bootstrapvalidation.cpp \
   bloom.cpp \
   chain.cpp \

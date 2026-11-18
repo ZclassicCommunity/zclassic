@@ -59,7 +59,9 @@ BITCOIN_TESTS =\
   test/bip32_tests.cpp \
   test/p2p_sync_tests.cpp \
   test/bootstrap_snapshot_protocol_tests.cpp \
+  test/bootstrap_resume_tests.cpp \
   test/bloom_tests.cpp \
+  test/blockchaininfo_tests.cpp \
   test/checkblock_tests.cpp \
   test/checkdatasig_tests.cpp \
   test/Checkpoints_tests.cpp \

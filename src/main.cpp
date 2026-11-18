@@ -3597,9 +3597,15 @@ static CBlockIndex* FindMostWorkChainReference() {
 
                 if (pindexNew->nChainWork > requiredWork) {
                     // We have enough, clear the parked state.
-                    LogPrintf("Unpark block %s as its chain has accumulated "
-                              "enough PoW.\n",
-                              pindexTest->GetBlockHash().ToString());
+                    // Unparking a chain that simply extends the tip (the counterpart of
+                    // the debug-level park above) involves no reorg: debug level only.
+                    if (pindexFork == pindexTip)
+                        LogPrint("park", "Unpark block %s: its chain extends the tip (no reorg).\n",
+                                 pindexTest->GetBlockHash().ToString());
+                    else
+                        LogPrintf("Unpark block %s as its chain has accumulated "
+                                  "enough PoW.\n",
+                                  pindexTest->GetBlockHash().ToString());
                     fParkedChain = false;
                     UnparkBlock(pindexTest);
                 }
@@ -4933,8 +4939,18 @@ bool AcceptBlock(CBlock& block, CValidationState& state, CBlockIndex** ppindex, 
     if (GetBoolArg("-parkdeepreorg", true)) {
         const CBlockIndex *pindexFork = chainActive.FindFork(pindex);
         if (pindexFork && pindexFork->nHeight + 1 < pindex->nHeight) {
-            LogPrintf("Park block %s as it would cause a deep reorg.\n",
-                      pindex->GetBlockHash().ToString());
+            // A block that forks off exactly at our tip is not a reorg: it is
+            // simply a descendant of the tip that arrived before its parents (the
+            // normal case for out-of-order blocks beyond the tip, e.g. right after a
+            // snapshot import). It is parked all the same (unchanged) and unparked
+            // as soon as its parents connect, so only log it at debug level; a real
+            // fork below the tip still logs as before.
+            if (pindexFork == chainActive.Tip())
+                LogPrint("park", "Park block %s: it arrived ahead of its parents beyond the tip (no reorg).\n",
+                         pindex->GetBlockHash().ToString());
+            else
+                LogPrintf("Park block %s as it would cause a deep reorg.\n",
+                          pindex->GetBlockHash().ToString());
             pindex->nStatus |= BLOCK_PARKED_FLAG;
             parkedBlockIndex.Update(pindex);
             setDirtyBlockIndex.insert(pindex);
@@ -5433,6 +5449,8 @@ bool static LoadBlockIndexDB()
         chainActive.Tip()->GetBlockHash().ToString(), chainActive.Height(),
         DateTimeStrFormat("%Y-%m-%d %H:%M:%S", chainActive.Tip()->GetBlockTime()),
         Checkpoints::GuessVerificationProgress(chainparams.Checkpoints(), chainActive.Tip()));
+    LogPrintf("%s: best known header height=%d (block index holds %u entries)\n", __func__,
+        pindexBestHeader ? pindexBestHeader->nHeight : -1, (unsigned int)mapBlockIndex.size());
 
     EnforceNodeDeprecation(chainActive.Height(), true);
 
@@ -5687,9 +5705,17 @@ bool RewindBlockIndex(const CChainParams& params, bool& clearWitnessCaches)
     }
 
     benchMark("scan block index");
-    // Set pindexBestHeader to the current chain tip
-    // (since we are about to delete the block it is pointing to)
-    pindexBestHeader = chainActive.Tip();
+    // If the best known header is one of the blocks about to be erased, fall back to
+    // the current chain tip. Do NOT do it when it survives: after a snapshot import that
+    // bundles post-anchor blocks, the index holds headers far above the tip (the anchor)
+    // and this used to pull the best header down to the anchor unconditionally, so
+    // getblockchaininfo reported headers=3126937 while the bundled blocks (3322863)
+    // were being connected, i.e. blocks > headers, until a new header arrived.
+    if (pindexBestHeader == NULL ||
+        std::find(vBlocks.begin(), vBlocks.end(), pindexBestHeader) != vBlocks.end())
+        pindexBestHeader = chainActive.Tip();
+    LogPrintf("%s: best known header height=%d, active tip height=%d, %u block index entries to erase\n", __func__,
+        pindexBestHeader ? pindexBestHeader->nHeight : -1, chainActive.Height(), (unsigned int)vBlocks.size());
 
     // Erase block indices on-disk
     if (!pblocktree->EraseBatchSync(vBlocks)) {

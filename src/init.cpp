@@ -485,7 +485,7 @@ std::string HelpMessage(HelpMessageMode mode)
 #endif
     }
     strUsage += HelpMessageOpt("-datadir=<dir>", _("Specify data directory"));
-    strUsage += HelpMessageOpt("-exportdir=<dir>", _("Specify directory to be used when exporting data"));
+    strUsage += HelpMessageOpt("-exportdir=<dir>", _("Specify directory to be used when exporting data and wallet backups (default: the \"backups\" directory inside the data directory)"));
     strUsage += HelpMessageOpt("-dbcache=<n>", strprintf(_("Set database cache size in megabytes (%d to %d, default: %d)"), nMinDbCache, nMaxDbCache, nDefaultDbCache));
     strUsage += HelpMessageOpt("-loadblock=<file>", _("Imports blocks from external blk000??.dat file") + " " + _("on startup"));
     strUsage += HelpMessageOpt("-maxorphantx=<n>", strprintf(_("Keep at most <n> unconnectable transactions in memory (default: %u)"), DEFAULT_MAX_ORPHAN_TRANSACTIONS));
@@ -2654,6 +2654,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 } else {
                     // Genuinely real chain (or corrupt -> reindex path): existing behavior.
                     SetBootstrapInfoPhase("skipped", bootstrap_error.empty() ? "datadir not eligible" : bootstrap_error);
+                    // A snapshot staging directory kept for resume (an earlier download
+                    // that was interrupted) is dead weight once the node has a real
+                    // chain: no bootstrap will run here again, so give the disk back.
+                    RemoveStaleBootstrapStaging(GetDataDir());
                     // Datadir already has real chain data: skip silently unless the
                     // user explicitly asked to bootstrap into it. A datadir holding
                     // only a genesis-height chainstate (a node that initialized its

@@ -818,14 +818,19 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
     UniValue obj(UniValue::VOBJ);
     obj.push_back(Pair("chain",                 Params().NetworkIDString()));
     obj.push_back(Pair("blocks",                (int)chainActive.Height()));
-    obj.push_back(Pair("headers",               pindexBestHeader ? pindexBestHeader->nHeight : -1));
+    // Every block we have connected has a header we have validated, so the header
+    // count is never below the block count. (RewindBlockIndex no longer drags
+    // pindexBestHeader down to the tip after a snapshot import; this guards the
+    // presentation against any other path that leaves it behind.)
+    int nHeaders = pindexBestHeader ? pindexBestHeader->nHeight : -1;
+    if (nHeaders < chainActive.Height())
+        nHeaders = chainActive.Height();
+    obj.push_back(Pair("headers",               nHeaders));
     // Best estimate of the network tip height. Headers sync ahead of blocks during
     // IBD, so this is >= "blocks" while catching up and equals it once synced. GUI
     // wallets use blocks/estimatedheight for an accurate, block-based progress bar
     // (verificationprogress is a coarse tx-count heuristic, poor for a sync bar).
-    int nEstimatedHeight = chainActive.Height();
-    if (pindexBestHeader && pindexBestHeader->nHeight > nEstimatedHeight)
-        nEstimatedHeight = pindexBestHeader->nHeight;
+    int nEstimatedHeight = nHeaders;
     obj.push_back(Pair("estimatedheight",       nEstimatedHeight));
     // Explicit sync state for GUI wallets, so they need not infer it from block age.
     // initialblockdownload is the node's own IsInitialBlockDownload(); syncphase is one of
@@ -1299,8 +1304,8 @@ UniValue getbootstrapinfo(const UniValue& params, bool fHelp)
             "  \"percent\": n,               (numeric, only when phase==\"active\") 0-100 download progress\n"
             "  \"bytes_received\": n,        (numeric, only when phase==\"active\")\n"
             "  \"bytes_total\": n,           (numeric, only when phase==\"active\")\n"
-            "  \"mbps\": x.x,                (numeric, only when phase==\"active\") download throughput\n"
-            "  \"streams\": n,               (numeric, only when phase==\"active\") parallel streams\n"
+            "  \"mbps\": x.x,                (numeric, only when phase==\"active\") download throughput in MiB/s (2^20 bytes per second)\n"
+            "  \"streams\": n,               (numeric, only when phase==\"active\") parallel streams currently connected\n"
             "  \"peer\": \"host:port\",        (string) current/last bootstrap peer (\"\" if none)\n"
             "  \"peer_index\": n,            (numeric) 1-based index of the peer being tried\n"
             "  \"peer_count\": n,            (numeric) number of bootstrap peers in the list\n"

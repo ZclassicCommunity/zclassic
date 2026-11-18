@@ -549,21 +549,27 @@ const boost::filesystem::path &ZC_GetParamsDir()
     return path;
 }
 
-// Return the user specified export directory.  Create directory if it doesn't exist.
-// If user did not set option, return an empty path.
+// Return the export directory used by backupwallet/dumpwallet/z_exportwallet: the
+// -exportdir option when set, otherwise "backups" inside the (network-specific) data
+// directory. Create the directory if it doesn't exist; never returns an empty path.
 // If there is a filesystem problem, throw an exception.
 const boost::filesystem::path GetExportDir()
 {
     namespace fs = boost::filesystem;
     fs::path path;
+    std::string what;
     if (mapArgs.count("-exportdir")) {
         path = fs::system_complete(mapArgs["-exportdir"]);
-        if (fs::exists(path) && !fs::is_directory(path)) {
-            throw std::runtime_error(strprintf("The -exportdir '%s' already exists and is not a directory", path.string()));
-        }
-        if (!fs::exists(path) && !fs::create_directories(path)) {
-            throw std::runtime_error(strprintf("Failed to create directory at -exportdir '%s'", path.string()));
-        }
+        what = "-exportdir";
+    } else {
+        path = GetDataDir() / "backups";
+        what = "default export directory";
+    }
+    if (fs::exists(path) && !fs::is_directory(path)) {
+        throw std::runtime_error(strprintf("The %s '%s' already exists and is not a directory", what, path.string()));
+    }
+    if (!fs::exists(path) && !fs::create_directories(path)) {
+        throw std::runtime_error(strprintf("Failed to create directory at %s '%s'", what, path.string()));
     }
     return path;
 }

@@ -1,3 +1,4 @@
+#include "bootstrapprogress.h"
 #include "daemonjob.h"
 #include "profilepaths.h"
 #include "connection.h"
@@ -2104,13 +2105,13 @@ void ConnectionLoader::refreshZClassicdState(Connection* connection, std::functi
 
                 // During the bootstrap snapshot download the daemon publishes its
                 // progress as the warmup status, e.g.:
-                //   "Bootstrap snapshot:  42%  4.10 / 9.80 GB  210.5 MB/s  (8 streams)"
+                //   "Bootstrap snapshot:  42%  4.10 / 9.80 GiB  210.5 MiB/s  (8 streams)"
+                // (binary units: older daemons printed the same numbers as "GB"/"MB/s",
+                // and the parsing below accepts both labels)
                 // Drive the real 0-100 bar off that percent. The "Bootstrap snapshot:"
                 // prefix MUST stay in sync with the strprintf() at the snapshot-download
                 // emit sites in daemon src/bootstrap.cpp.
-                static const QRegularExpression reBootstrapPct(
-                    QStringLiteral("Bootstrap snapshot:\\s*(\\d+)%"));
-                QRegularExpressionMatch mPct = reBootstrapPct.match(status);
+                QRegularExpressionMatch mPct = bootstrapPercentRegex().match(status);
 
                 // SELF-HEAL WARMUP_WEDGED watchdog: track whether the warmup status
                 // string and parsed percent are ADVANCING. Reset the no-progress
@@ -2161,12 +2162,12 @@ void ConnectionLoader::refreshZClassicdState(Connection* connection, std::functi
                 if (mPct.hasMatch()) {
                     int pct = mPct.captured(1).toInt();
                     this->setBarPercent(pct);     // switches the bar from busy to 0-100
-                    // Show the "X / Y GB  Z MB/s" tail (after the first '%') as detail.
+                    // Show the "X / Y GiB  Z MiB/s" tail (after the first '%') as detail.
                     QString detail = status.section(QStringLiteral("%"), 1).trimmed();
                     // Add a time estimate from the node's own size/rate figures.
-                    static const QRegularExpression reRate(QStringLiteral(
-                        "([0-9.]+)\\s*/\\s*([0-9.]+)\\s*GB\\s+([0-9.]+)\\s*MB/s"));
-                    QRegularExpressionMatch mr = reRate.match(detail);
+                    // Current daemons print GiB and MiB/s (older ones printed the same
+                    // binary numbers as GB and MB/s), so the "x1024" below is GiB->MiB.
+                    QRegularExpressionMatch mr = bootstrapRateRegex().match(detail);
                     if (mr.hasMatch() && mr.captured(3).toDouble() > 0.05) {
                         const double left = (mr.captured(2).toDouble() - mr.captured(1).toDouble()) * 1024.0;
                         const qint64 secs = (qint64)(left / mr.captured(3).toDouble());
@@ -2353,11 +2354,13 @@ void ConnectionLoader::probeBootstrapProgress(Connection* connection) {
                         ? bi[k].get<double>() : 0.0; };
                 const double got = num("bytes_received"), tot = num("bytes_total"), mbps = num("mbps");
                 if (tot > 0) {
-                    const double gb = 1e9;
-                    dl = QObject::tr("%1 of %2 GB").arg(got / gb, 0, 'f', 1).arg(tot / gb, 0, 'f', 1);
+                    // Binary units throughout: the daemon's "mbps" is MiB/s (2^20 bytes/s)
+                    // and its byte counts are exact, so GiB = 2^30 bytes.
+                    const double gib = 1073741824.0;
+                    dl = QObject::tr("%1 of %2 GiB").arg(got / gib, 0, 'f', 1).arg(tot / gib, 0, 'f', 1);
                     if (mbps > 0.05) {
-                        dl += QObject::tr(" · %1 MB/s").arg(mbps, 0, 'f', 1);
-                        const qint64 secs = (qint64)((tot - got) / (mbps * 1e6));
+                        dl += QObject::tr(" · %1 MiB/s").arg(mbps, 0, 'f', 1);
+                        const qint64 secs = (qint64)((tot - got) / (mbps * 1048576.0));
                         dl += secs < 90 ? QObject::tr(" · under a minute left")
                                         : QObject::tr(" · about %1 min left").arg((secs + 30) / 60);
                     } else {
