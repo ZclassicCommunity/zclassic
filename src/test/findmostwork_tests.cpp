@@ -176,6 +176,7 @@ BOOST_AUTO_TEST_CASE(status_disk_format_is_unchanged)
 
 BOOST_AUTO_TEST_CASE(memo_skips_validated_path_and_is_dropped_on_any_status_change)
 {
+    LOCK(cs_main); // the chain-selection functions under test assert that it is held
     Forest f(1);
     std::vector<CBlockIndex*> chain;
     chain.push_back(f.Add(NULL, GOOD));
@@ -230,6 +231,7 @@ BOOST_AUTO_TEST_CASE(memo_skips_validated_path_and_is_dropped_on_any_status_chan
 
 BOOST_AUTO_TEST_CASE(connecting_toward_a_far_ahead_candidate_does_not_rewalk_the_path)
 {
+    LOCK(cs_main); // the chain-selection functions under test assert that it is held
     // The shape of -reindex-chainstate: the best candidate is the far end of a long
     // chain and the tip moves toward it in steps of up to 32 blocks, one
     // FindMostWorkChain() call per step.
@@ -263,6 +265,7 @@ BOOST_AUTO_TEST_CASE(connecting_toward_a_far_ahead_candidate_does_not_rewalk_the
 
 BOOST_AUTO_TEST_CASE(randomized_differential_against_reference)
 {
+    LOCK(cs_main); // the chain-selection functions under test assert that it is held
     const int trials = 40;
     const int steps = 220;
     int checks = 0, nonNull = 0;
@@ -418,6 +421,7 @@ BOOST_AUTO_TEST_CASE(randomized_differential_against_reference)
 // UnparkBlock() (and so the reference walk) dereferences the tip then.
 BOOST_AUTO_TEST_CASE(randomized_differential_reviewer_extension)
 {
+    LOCK(cs_main); // the chain-selection functions under test assert that it is held
     const char* envTrials = getenv("FMW_TRIALS");
     const char* envSteps = getenv("FMW_STEPS");
     const char* envSeed = getenv("FMW_SEED");

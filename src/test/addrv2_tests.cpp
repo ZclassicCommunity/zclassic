@@ -71,6 +71,25 @@ vector<string> QueuedCommands(CNode& node)
     return out;
 }
 
+// CAddrMan puts a new address in the bucket slot a hash keyed with the table's
+// random key selects, and drops the address when another live entry already
+// has that slot (1 in 64 for two addresses of one /16 from one source). A
+// case that counts the entries a message adds therefore starts from an empty
+// table with a fixed key, where the placement is the same in every run.
+class CAddrManFixedKey : public CAddrMan
+{
+public:
+    explicit CAddrManFixedKey(bool fOnionStoreIn) : CAddrMan(fOnionStoreIn) { nKey.SetNull(); }
+};
+
+void ResetWithFixedKey(CAddrMan& table)
+{
+    CAddrManFixedKey fixed(table.IsOnionStore());
+    CDataStream ss(SER_DISK, CLIENT_VERSION);
+    ss << fixed;
+    ss >> table; // empties the table and takes the key
+}
+
 CDataStream V2Payload(const vector<CAddress>& v)
 {
     CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
@@ -330,6 +349,7 @@ BOOST_AUTO_TEST_CASE(addrv2_with_negotiation_is_processed)
     vector<CNode*> keep;
     CNode* n = NewNode(keep, "8.8.8.8", false);
     n->fSendAddrV2 = true;
+    ResetWithFixedKey(addrman);
     size_t before = addrman.size();
 
     vector<CAddress> v;
@@ -355,6 +375,7 @@ BOOST_AUTO_TEST_CASE(addrv2_with_negotiation_is_processed)
     BOOST_CHECK_THROW(ProcessMessage(n, "addrv2", badMsg, GetTime()), std::ios_base::failure);
     for (CNode* x : keep)
         delete x;
+    addrman.Clear(); // back to a random key
 }
 
 BOOST_AUTO_TEST_CASE(version_handshake_sends_sendaddrv2_before_verack)
@@ -497,6 +518,8 @@ BOOST_AUTO_TEST_CASE(addrv2_v3_goes_to_onion_store)
     vector<CNode*> keep;
     CNode* n = NewNode(keep, "8.8.8.8", false);
     n->fSendAddrV2 = true;
+    ResetWithFixedKey(addrman);
+    ResetWithFixedKey(addrmanOnion);
     size_t mainBefore = addrman.size(), onionBefore = addrmanOnion.size();
 
     vector<CAddress> v;
@@ -519,6 +542,8 @@ BOOST_AUTO_TEST_CASE(addrv2_v3_goes_to_onion_store)
     SetLimited(NET_ONION, wasLimited);
     for (CNode* x : keep)
         delete x;
+    addrman.Clear(); // back to a random key
+    addrmanOnion.Clear();
 }
 
 
