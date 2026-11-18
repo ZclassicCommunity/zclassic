@@ -8,6 +8,10 @@
 
 #include "zcash/util.h"
 #include "librustzcash.h"
+#include "support/cleanse.h"
+
+#include <algorithm>
+#include <cstring>
 
 using namespace libzcash;
 
@@ -190,23 +194,18 @@ boost::optional<SaplingOutgoingPlaintext> SaplingOutgoingPlaintext::decrypt(
     }
 }
 
-boost::optional<SaplingNotePlaintext> SaplingNotePlaintext::decrypt(
-    const SaplingEncCiphertext &ciphertext,
+boost::optional<SaplingNotePlaintext> SaplingNotePlaintext::fromPlaintext(
+    const SaplingEncPlaintext &pt,
     const uint256 &ivk,
-    const uint256 &epk,
-    const uint256 &cmu
+    const uint256 &cmu,
+    uint256 *pk_d_out
 )
 {
-    auto pt = AttemptSaplingEncDecryption(ciphertext, ivk, epk);
-    if (!pt) {
-        return boost::none;
-    }
-
     // Deserialize from the plaintext
     SaplingNotePlaintext ret;
     try {
         CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
-        ss << pt.get();
+        ss << pt;
         ss >> ret;
         assert(ss.size() == 0);
     } catch (const boost::thread_interrupted&) {
@@ -236,7 +235,88 @@ boost::optional<SaplingNotePlaintext> SaplingNotePlaintext::decrypt(
         return boost::none;
     }
 
+    if (pk_d_out != nullptr) {
+        *pk_d_out = pk_d;
+    }
     return ret;
+}
+
+boost::optional<SaplingNotePlaintext> SaplingNotePlaintext::decrypt(
+    const SaplingEncCiphertext &ciphertext,
+    const uint256 &ivk,
+    const uint256 &epk,
+    const uint256 &cmu
+)
+{
+    auto pt = AttemptSaplingEncDecryption(ciphertext, ivk, epk);
+    if (!pt) {
+        return boost::none;
+    }
+
+    return fromPlaintext(pt.get(), ivk, cmu, nullptr);
+}
+
+bool SaplingNotePlaintext::decryptWithFirstMatchingIvk(
+    const SaplingEncCiphertext &ciphertext,
+    const std::vector<SaplingIncomingViewingKey> &ivks,
+    const uint256 &epk,
+    const uint256 &cmu,
+    size_t &ivkIndex,
+    SaplingNotePlaintext &out,
+    uint256 &pk_d
+)
+{
+    if (ivks.empty()) {
+        return false;
+    }
+
+    // Keys are agreed in chunks (one shared inversion per chunk) so that a
+    // match early in a long key list does not pay for the whole list.
+    static const size_t CHUNK = 128;
+    SaplingIvkBatchAgreement agreement(epk, ivks.size());
+    unsigned char ivkBuf[CHUNK * 32];
+    unsigned char dhBuf[CHUNK * 32];
+    unsigned char ok[CHUNK];
+
+    bool found = false;
+    try {
+        for (size_t base = 0; base < ivks.size() && !found; base += CHUNK) {
+            const size_t n = std::min(CHUNK, ivks.size() - base);
+            for (size_t i = 0; i < n; i++) {
+                memcpy(ivkBuf + 32 * i, ivks[base + i].begin(), 32);
+            }
+            agreement.agree(ivkBuf, n, dhBuf, ok);
+            for (size_t i = 0; i < n; i++) {
+                if (!ok[i]) {
+                    continue;
+                }
+                uint256 dhsecret;
+                memcpy(dhsecret.begin(), dhBuf + 32 * i, 32);
+                auto pt = AttemptSaplingEncDecryptionFromDH(ciphertext, dhsecret, epk);
+                memory_cleanse(dhsecret.begin(), 32);
+                if (!pt) {
+                    continue;
+                }
+                uint256 pkd;
+                auto note = fromPlaintext(pt.get(), ivks[base + i], cmu, &pkd);
+                if (!note) {
+                    continue;
+                }
+                ivkIndex = base + i;
+                out = note.get();
+                pk_d = pkd;
+                found = true;
+                break;
+            }
+        }
+    } catch (...) {
+        memory_cleanse(ivkBuf, sizeof(ivkBuf));
+        memory_cleanse(dhBuf, sizeof(dhBuf));
+        throw;
+    }
+    memory_cleanse(ivkBuf, sizeof(ivkBuf));
+    memory_cleanse(dhBuf, sizeof(dhBuf));
+    return found;
 }
 
 boost::optional<SaplingNotePlaintext> SaplingNotePlaintext::decrypt(

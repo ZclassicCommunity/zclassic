@@ -15,13 +15,15 @@
  *   golden records, every thread starting at a different offset, and compare
  *   every verdict and output with the golden value. */
 #include "kat_common.h"
+#include "zcl_c23_sapling_scan.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
-enum kind { K_SPEND, K_OUTPUT, K_MERKLE, K_KA };
+/* K_KB: the same ka_agree records through the batched scan core */
+enum kind { K_SPEND, K_OUTPUT, K_MERKLE, K_KA, K_KB };
 typedef struct {
     enum kind kind;
     unsigned char b[512];
@@ -105,6 +107,7 @@ static void load(const char *dir, const char *file, enum kind kind, int vcol, si
             kat_hexn(&k, 7, it->out, 32);
             break;
         case K_KA:
+        case K_KB:
             kat_hexn(&k, 3, it->b, 32);
             kat_hexn(&k, 4, it->b + 32, 32);
             if (t)
@@ -144,6 +147,17 @@ static bool run_item(const Item *it)
     case K_KA: {
         bool ok = librustzcash_sapling_ka_agree(it->b, it->b + 32, o);
         return ok == it->want && (!ok || memcmp(o, it->out, 32) == 0);
+    }
+    case K_KB: {
+        /* batched core; table width varies with the record so every comb
+         * shape is exercised, from many threads at once */
+        unsigned char dh[32] = {0}, okb = 7;
+        zcl_c23_sapling_scan_ctx *ctx = zcl_c23_sapling_scan_begin(it->b, 1 + (size_t)(it->lineno % 70));
+        if (!ctx)
+            return false;
+        zcl_c23_sapling_scan_agree(ctx, it->b + 32, 1, dh, &okb);
+        zcl_c23_sapling_scan_end(ctx);
+        return (okb != 0) == it->want && (!okb || memcmp(dh, it->out, 32) == 0);
     }
     }
     return false;
@@ -221,6 +235,7 @@ int main(int argc, char **argv)
     /* phase 1 items: merkle + ka_agree, before init */
     load(dir, "merkle_hash.golden", K_MERKLE, 6, 300, 0);
     load(dir, "sapling_ka_agree.golden", K_KA, 5, 60, 40);
+    load(dir, "sapling_ka_agree.golden", K_KB, 5, 120, 80);
     size_t cold_end = g_n;
     int rc = run_threads(nthreads, 0, cold_end, "cold (before init): merkle_hash+ka_agree");
 

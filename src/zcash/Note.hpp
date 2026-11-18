@@ -7,6 +7,7 @@
 #include "NoteEncryption.hpp"
 
 #include <array>
+#include <vector>
 #include <boost/optional.hpp>
 
 namespace libzcash {
@@ -134,6 +135,23 @@ public:
         const uint256 &cmu
     );
 
+    // Exactly equivalent to calling decrypt(ciphertext, ivks[i], epk, cmu) for
+    // i = 0, 1, ... and returning the first success (ivks are tried in the
+    // given order; a key whose AEAD succeeds but whose note then fails
+    // validation is skipped like a non-match), but the per-output work and
+    // the field inversions are shared across all keys (SaplingIvkBatchAgreement).
+    // Returns true and fills ivkIndex (position in ivks), out and pk_d (the
+    // pk_d of out.d under that ivk, i.e. ivk.address(out.d)->pk_d) on a match.
+    static bool decryptWithFirstMatchingIvk(
+        const SaplingEncCiphertext &ciphertext,
+        const std::vector<SaplingIncomingViewingKey> &ivks,
+        const uint256 &epk,
+        const uint256 &cmu,
+        size_t &ivkIndex,
+        SaplingNotePlaintext &out,
+        uint256 &pk_d
+    );
+
     static boost::optional<SaplingNotePlaintext> decrypt(
         const SaplingEncCiphertext &ciphertext,
         const uint256 &epk,
@@ -143,6 +161,13 @@ public:
     );
 
     boost::optional<SaplingNote> note(const SaplingIncomingViewingKey& ivk) const;
+
+private:
+    // The deserialise-and-validate half of decrypt(): the AEAD has already
+    // opened pt under ivk. On success also returns pk_d through pk_d_out.
+    static boost::optional<SaplingNotePlaintext> fromPlaintext(
+        const SaplingEncPlaintext &pt, const uint256 &ivk, const uint256 &cmu, uint256 *pk_d_out);
+public:
 
     virtual ~SaplingNotePlaintext() {}
 
