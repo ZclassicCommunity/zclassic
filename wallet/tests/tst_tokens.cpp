@@ -128,12 +128,13 @@ private slots:
         QVERIFY(!tokens::parseSnapshot(json::object(), nullptr));
     }
 
-    void wording_saysProtectedAndReadOnly()
+    void wording_saysProtectedAndPointsToSend()
     {
         const QString n = tokens::protectedNotice();
         QVERIFY(n.contains("protected"));
         QVERIFY(n.contains("never spends"));
-        QVERIFY(n.contains("Sending tokens is not available"));
+        QVERIFY(n.contains("Send tokens"));            // sending is now a deliberate action of its own
+        QVERIFY(n.contains("ordinary ZCL sends never touch them"));
         QVERIFY(tokens::roleText("mintbaton").contains("Mint baton"));
         QCOMPARE(tokens::roleText("token"), QString("Tokens"));
     }

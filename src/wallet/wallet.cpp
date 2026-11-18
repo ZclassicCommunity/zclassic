@@ -3965,8 +3965,9 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                     }
                     else
                     {
-                        // Insert change txn at random position:
-                        nChangePosRet = GetRandInt(txNew.vout.size()+1);
+                        // Insert change txn at random position (last for a token transaction):
+                        nChangePosRet = (coinControl && coinControl->fChangeLast)
+                            ? (int)txNew.vout.size() : GetRandInt(txNew.vout.size()+1);
                         vector<CTxOut>::iterator position = txNew.vout.begin()+nChangePosRet;
                         txNew.vout.insert(position, newTxOut);
                     }
@@ -4046,7 +4047,8 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                 dPriority = wtxNew.ComputePriority(dPriority, nBytes);
 
                 // Can we complete this as a free transaction?
-                if (fSendFreeTransactions && nBytes <= MAX_FREE_TRANSACTION_CREATE_SIZE)
+                const bool fFixedFee = coinControl && coinControl->nFixedFee >= 0;
+                if (!fFixedFee && fSendFreeTransactions && nBytes <= MAX_FREE_TRANSACTION_CREATE_SIZE)
                 {
                     // Not enough fee: enough priority?
                     double dPriorityNeeded = mempool.estimatePriority(nTxConfirmTarget);
@@ -4059,7 +4061,15 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                         break;
                 }
 
-                CAmount nFeeNeeded = GetMinimumFee(nBytes, nTxConfirmTarget, mempool);
+                CAmount nFeeNeeded = fFixedFee ? coinControl->nFixedFee : GetMinimumFee(nBytes, nTxConfirmTarget, mempool);
+
+                // A fee chosen by the caller (coin control) must still be relayable.
+                if (fFixedFee && nFeeNeeded < ::minRelayTxFee.GetFee(nBytes))
+                {
+                    strFailReason = strprintf(_("The fee %s is below the minimum relay fee %s for a transaction of %u bytes"),
+                                              FormatMoney(nFeeNeeded), FormatMoney(::minRelayTxFee.GetFee(nBytes)), nBytes);
+                    return false;
+                }
 
                 // If we made it here and we aren't even able to meet the relay fee on the next pass, give up
                 // because we must be at the maximum allowed fee.

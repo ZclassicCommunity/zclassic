@@ -14,7 +14,8 @@
 # usage: zslp_index.sh [dir-with-zclassicd-zclassic-cli-zclassic-tx]
 #   env BASELINE_SRC=<dir>  also prove the flag-off behaviour against the unmodified
 #                           zclassicd in <dir>: the RPC `help` list may differ only by
-#                           the seven zslp_* commands (and their category heading)
+#                           the eleven zslp_* commands (and their category heading); set
+#                           BASELINE_NEW_ZSLP=n when the baseline already has some of them
 #   env CC=<compiler>       compiler for slpscript (default: cc)
 #   env KEEP=1              keep the temp directory
 #
@@ -33,7 +34,7 @@ for b in "$ZD" "$ZCLI" "$ZTX"; do [ -x "$b" ] || { echo "missing $b" >&2; exit 2
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/zcl-zslp-e2e.XXXXXX")
-BASE=$((20000 + ($$ % 20000)))
+BASE=${E2E_PORT_BASE:-$((20000 + ($$ % 20000)))}
 PIDS=""
 CHECKS=0
 DUST=0.00000546
@@ -517,7 +518,7 @@ if [ -n "${BASELINE_SRC:-}" ]; then
     diff "$TMP/help.base" "$TMP/help.new" | grep '^[<>]' | sort >"$TMP/help.diff" || true
     [ "$(grep -c '^<' "$TMP/help.diff" || true)" = 0 ] || fail "commands vanished: $(grep '^<' "$TMP/help.diff")"
     [ "$(grep -v '^> zslp_' "$TMP/help.diff" | wc -l | tr -d ' ')" = 0 ] || fail "unexpected new commands: $(grep -v '^> zslp_' "$TMP/help.diff")"
-    expect "new commands" "$(grep -c '^> zslp_' "$TMP/help.diff")" 7
+    expect "new commands" "$(grep -c "^> zslp_" "$TMP/help.diff")" "${BASELINE_NEW_ZSLP:-11}"
     for c in $(cat "$TMP/help.base"); do
         [ "$(cli 6 help "$c")" = "$(cli 2 help "$c")" ] || fail "help for $c changed"
     done

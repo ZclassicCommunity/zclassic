@@ -75,6 +75,8 @@ SOURCES += \
     src/recurring.cpp \
     src/notifyserver.cpp \
     src/tokensmodel.cpp \
+    src/tokenssendmodel.cpp \
+    src/tokenssend.cpp \
     src/tokensview.cpp
 
 HEADERS += \
@@ -114,6 +116,8 @@ HEADERS += \
     src/addresscombo.h \ 
     src/recurring.h \
     src/tokensmodel.h \
+    src/tokenssendmodel.h \
+    src/tokenssend.h \
     src/tokensview.h
 
 FORMS += \

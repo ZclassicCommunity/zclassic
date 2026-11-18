@@ -4745,6 +4745,10 @@ extern UniValue z_importwallet(const UniValue& params, bool fHelp);
 
 extern UniValue z_getpaymentdisclosure(const UniValue& params, bool fHelp); // in rpcdisclosure.cpp
 extern UniValue z_validatepaymentdisclosure(const UniValue &params, bool fHelp);
+extern UniValue zslp_send(const UniValue& params, bool fHelp); // in rpczslp.cpp
+extern UniValue zslp_genesis(const UniValue& params, bool fHelp);
+extern UniValue zslp_mint(const UniValue& params, bool fHelp);
+extern UniValue zslp_burn(const UniValue& params, bool fHelp);
 
 static const CRPCCommand commands[] =
 { //  category              name                        actor (function)           okSafeMode
@@ -4816,7 +4820,11 @@ static const CRPCCommand commands[] =
     { "wallet",             "z_importwallet",           &z_importwallet,           true  },
     // TODO: rearrange into another category
     { "disclosure",         "z_getpaymentdisclosure",   &z_getpaymentdisclosure,   true  },
-    { "disclosure",         "z_validatepaymentdisclosure", &z_validatepaymentdisclosure, true }
+    { "disclosure",         "z_validatepaymentdisclosure", &z_validatepaymentdisclosure, true },
+    { "zslp",               "zslp_send",                &zslp_send,                false },
+    { "zslp",               "zslp_genesis",             &zslp_genesis,             false },
+    { "zslp",               "zslp_mint",                &zslp_mint,                false },
+    { "zslp",               "zslp_burn",                &zslp_burn,                false }
 };
 
 void RegisterWalletRPCCommands(CRPCTable &tableRPC)

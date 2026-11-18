@@ -111,6 +111,7 @@ BITCOIN_TESTS =\
   test/transaction_tests.cpp \
   test/uint256_tests.cpp \
   test/zslp_tests.cpp \
+  test/zslpbuild_tests.cpp \
   test/univalue_tests.cpp \
   test/util_tests.cpp \
   test/sha256compress_tests.cpp

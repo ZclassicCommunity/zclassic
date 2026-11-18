@@ -1,12 +1,17 @@
-# ZSLP token index
+# ZSLP tokens: index, send, create, mint, burn
 
 zclassicd can index ZSLP tokens (SLP Token Type 1) and answer questions about them:
-which tokens exist, who holds how much, what a transaction did to the tokens. It is
-**read-only**: it never touches consensus, never signs, never writes `wallet.dat`, and
-never sends a token. It is **off by default**.
+which tokens exist, who holds how much, what a transaction did to the tokens. With the
+index on, the wallet can also **create, send, mint and burn** tokens
+([below](#sending-creating-minting-and-burning)). Tokens and names are an overlay in
+`OP_RETURN` data: nothing here is consensus, a node that knows nothing about tokens
+relays and mines these transactions as ordinary ones, and `wallet.dat` has no new
+record. Everything is **off by default**; with `-zslpindex` off the daemon behaves as it
+did before.
 
 The rules that decide whether a token transaction is valid come from Z23, the owner's
-C23 ZClassic node, which is also what the ZSLP tokens on mainnet were made with.
+C23 ZClassic node, which is also what the ZSLP tokens on mainnet were made with. The
+transactions the wallet builds follow the layout Z23's own wallet writes.
 
 ## Turn it on
 
@@ -29,7 +34,7 @@ Needs the full block files: it is refused together with `-prune`. If a block fil
 been pruned away or is damaged the index says so (`error` in `zslp_getindexinfo`) and
 waits; it does not guess.
 
-With the flag off, the seven RPC commands below exist and answer
+With the flag off, the eleven RPC commands below exist and answer
 `The ZSLP token index is disabled...`; the daemon does nothing else differently, and no
 `zslpindex` directory is created. The GUI (`wallet/`) shows a **Tokens** view only when
 the daemon reports the index as enabled.
@@ -90,7 +95,8 @@ this index does.)
 
 ## RPC reference
 
-All amounts are strings. All commands are read-only and need `-zslpindex=1`.
+All amounts are strings. All commands need `-zslpindex=1`. The first seven only read; the
+four that change something are described in the next section.
 
 | command | result |
 |---|---|
@@ -106,13 +112,94 @@ The token id is the GENESIS txid. The three existing token-guard behaviours are
 unchanged: `listunspent` marks token outputs `tokenbearing`, and the wallet never uses
 them as ordinary funds (see `src/c23/services/README.md`).
 
+## Sending, creating, minting and burning
+
+| command | what it does |
+|---|---|
+| `zslp_send "tokenid" [{"address":"t1..","amount":"1.50"},...] ( minconf fee dryrun )` | send to one or more transparent addresses; the token change returns to the address of the first token input |
+| `zslp_genesis {"ticker","name","decimals","initialquantity", "documenturl", "documenthash", "batonaddress", "address", "fee", "dryrun"}` | create a token; the token id is the txid of this transaction. `batonaddress` absent: the baton goes to a fresh wallet address; `null`: **no baton**, the supply is fixed for good |
+| `zslp_mint "tokenid" "amount" ( "batonaddress"\|null {"address","minconf","fee","dryrun"} )` | mint more; spends the wallet's baton and writes a new one at the old baton's address (or the one named; `null` closes the supply) |
+| `zslp_burn "tokenid" "amount" confirm ( {"minconf","fee","dryrun"} )` | the **only** way this wallet destroys tokens; `confirm` must be `true` (a dry run does not need it) |
+
+All four need the index on **and at the chain tip** (the index decides which outputs are
+valid tokens), an unlocked wallet (the usual `walletpassphrase` error otherwise) and a
+transparent wallet address; they refuse a z-address with a message that says why. Each
+answers `{txid, tokenid, type, broadcast, amount, tokeninputs, fee, ...}` plus
+`tokenchange`/`changeaddress`/`burned` where they apply and, for a dry run, the signed `hex`.
+`dryrun=true` builds, signs and judges the transaction and returns it **without broadcasting
+it or changing anything**; the GUI uses it to show the exact fee before the user confirms.
+
+**Amounts** are decimal *strings* with at most the token's decimals (`"12.5"`, `"7"`), parsed
+exactly into 64-bit base units: no floating point anywhere, nothing is rounded, a sign, an
+exponent, a JSON number, `.5`, more decimals than the token has, zero, a value of 2^63 or more
+(the token rules treat it as unknown) and any overflow are refused with a message. `fee` is
+a ZCL amount (number or string) and must still meet the relay minimum.
+
+### The transaction
+
+```
+vout[0]      OP_RETURN <SLP message>, value 0
+vout[1..n]   token outputs, 546 zatoshi each (more if -minrelaytxfee makes 546 dust)
+               GENESIS  vout[1] the initial quantity, vout[2] the mint baton (optional)
+               MINT     vout[1] the new quantity,     vout[2] the new baton (optional)
+               SEND     recipients in the order given, then the token change
+vout[n+1]    the ZCL change, LAST (a token output is named by its position, so it must not shift)
+```
+
+This is Z23's layout (`contexts/market/services/src/zslp_command_service.c`: OP_RETURN at
+vout[0], dust 546, token change to the first token input's address, baton at vout[2], the
+SLP messages from the same builder) and the SLP Token Type 1 layout. The message bytes are
+made by the vendored Z23 builders, never by new encoding code. A SEND carries 1 to 19
+outputs including the change; more is refused, not split.
+
+**Which coins.** Token inputs are this wallet's own outputs that the index lists as valid,
+unspent, confirmed (`minconf` at least 1) outputs of that one token; a mint baton only for a
+`zslp_mint`. Z23 spends only confirmed token outputs too, so a token output that is still in
+the mempool (the change of a send in the same block, tokens just received) is **not** spent
+until it has a confirmation: a second send needs the first one confirmed, or other confirmed
+outputs. The ZCL for the fee and the dust outputs comes from ordinary coins through the
+existing token guard; no other token's output and no baton can be taken as fee. A wallet with
+tokens and no ordinary ZCL gets "not enough ordinary ZCL", not a burned token. For a send or
+mint of token T the fee selection also leaves out every ordinary coin that was created by a
+transaction of T whose own status is not VALID: Z23's rules (`validity_note_input_baton` in
+`contexts/market/models/src/zslp_validity.c`) make a SEND or MINT invalid, burning its token
+inputs, when ANY input comes from such a transaction, and anyone can pay a wallet ZCL inside
+one (`qa/rpc-tests/zslp_send_adversarial.sh` does exactly that).
+
+**Checked before anything is broadcast.** The signed transaction goes through the index's own
+validity rules (`ZslpIndex::EvaluateTx`, the same rule function that indexes blocks) and must
+be VALID, name the expected token, spend exactly the chosen token outputs and nothing else
+the index knows, carry exactly the planned quantities, burn exactly what was asked (nothing,
+except for `zslp_burn`), keep its first outputs byte for byte as planned with the ZCL change
+last, and pass `IsStandardTx` (the data-carrier size limit included). Otherwise it is refused
+with a message and nothing is sent. A full `zslp_burn` of the selected outputs sends `[0]`
+and puts a real dust output in vout[1], because the wallet token guard protects every output
+a message names, zero quantity included, and the ZCL change must not land there.
+
+**Rules the creation keeps from Z23:** ticker 1-10 letters or digits, name 1-64 characters
+(letters, digits, space and `- _ . /`), decimals 0-8, a positive first supply of at most
+2,100,000,000,000,000 base units. Extra, beyond what Z23's wallet writes: an optional
+document URL (visible ASCII, 255 bytes) and hash, no baton, and a baton or token address of
+your choice.
+
 ## GUI
 
 When the daemon reports the index as enabled, the wallet shows a **Tokens** button in the
-left rail. It opens a read-only window with the wallet's token balances and token
-outputs, the index status, and a plain statement that those coins are protected from
-ordinary spending and that sending tokens is not available yet. With the index off the
-button is not there.
+left rail. It opens a window with the wallet's token balances and token outputs, the index
+status, and a plain statement that those coins are protected from ordinary spending. From it:
+
+- **Send tokens...** picks a token, a recipient and an amount (the token's decimals, a Max
+  button), then a **review** page that shows what will happen, built from a daemon dry run:
+  the exact ZCL fee, the token change that returns to you and where, that the recipient's
+  output carries 0.00000546 ZCL taken from your ZCL, and that sending cannot be undone. Only
+  then does **Send tokens** broadcast, and a result page shows the transaction id.
+- **Create token... (advanced)** explains what a token and a mint baton are, takes the ticker,
+  name, decimals, first supply and optional document, and goes through the same review and
+  confirm steps.
+
+Both buttons are enabled only when the index is at the tip; locked-wallet, missing-ZCL and
+not-enough-tokens errors are shown in plain words with the daemon's message. The ZCL send
+flow is not touched. With the index off the button is not there.
 
 ## Provenance, in three layers
 
@@ -120,7 +207,17 @@ button is not there.
 |---|---|---|
 | **verbatim Z23** | the SLP wire parser and its codec, byte-identical, hashes pinned | `src/c23/services/vendor/**`, `Z23_SOURCE.tsv` |
 | **glue (C)** | `zcl_slp_parse_message` forwards to the vendored parser. `zcl_slp_evaluate` carries the *decision rules* of Z23's `contexts/market/models/src/zslp_validity.c` (`validity_inputs_total`, `validity_validate_genesis/_mint/_send`, `validate_message`) with the SQLite reads and writes taken out; the reason strings are Z23's. This is a port, not a copy: Z23's file is welded to its SQL tables and cannot be vendored as it is | `src/c23/services/glue/zcl_slp_index.{h,c}` |
-| **new C++** | the store, the per-block undo, the chain follower, the RPC | `src/zslp/`, `src/rpc/zslp.cpp`, `wallet/src/tokens*.{h,cpp}` |
+| **new C++** | the store, the per-block undo, the chain follower, the RPC; for sending: exact amount parsing, Z23's creation rules, the output order, the dry run (`ZslpIndex::EvaluateTx`), the wallet side (input choice, build, check, commit), the four RPCs, the GUI | `src/zslp/` (`zslpbuild.*`, `zslpindex.*`), `src/wallet/zslpsend.*`, `src/wallet/rpczslp.cpp`, `src/rpc/zslp.cpp`, `wallet/src/tokens*.{h,cpp}` |
+
+Nothing new was vendored for sending: the message builders (`slp_build_genesis`, `_mint`,
+`_send`) are in the `slp.c` that was already vendored and are reached through
+`zcl_token_guard_build_*`. Z23's *transaction* construction (`zslp_command_service.c`) is welded to
+its wallet and to its `struct wallet_tx`, so it is re-expressed in C++ on this wallet's
+`CreateTransaction`, with its layout, dust value, change rule and confirmed-inputs rule kept;
+the builder is checked against 8 real mainnet GENESIS, 2 MINT and 8 SEND transactions (the
+message rebuilt from its parsed fields is byte for byte the one on the chain). The only edits to
+existing wallet code are two off-by-default `CCoinControl` fields (`fChangeLast`, `nFixedFee`)
+and the few lines of `CreateTransaction` that read them.
 
 Differences from Z23 that are on purpose: the ancestry walk (depth 256, 1024
 transactions) is not needed because blocks are applied in order and every parent is
@@ -138,8 +235,14 @@ MIT as zclassicd.
 
 - Token Type 1 only. NFT types (65, 129), ZNAM and messaging are not indexed.
 - Transparent outputs only. Shielded transactions never carry ZSLP tokens.
-- Read-only: no token creation, sending, minting or burning from the daemon or the GUI.
-  `createrawtransaction` and `signrawtransaction` remain the only way, as before.
+- Sending, minting and burning use only **confirmed** token outputs of the wallet; a token
+  output that is still unconfirmed waits for one confirmation (Z23's rule). One transaction
+  per call, one token per transaction, at most 19 token outputs; a payment to many more
+  addresses is several calls.
+- No coin control for tokens (which output to spend), no NFT types, no document-hash or
+  baton editing after creation, no shielded tokens.
+- A `-minrelaytxfee` above 0.00001 ZCL/kB (the default is 0.000001) raises the token dust value to the node's own dust
+  threshold, so that the outputs relay; at the default it is Z23's 546 zatoshi.
 - Not compatible with `-prune`.
 - The index trusts the node's own chain. It is a convenience view, not a proof: verify a
   token that matters against the chain.
@@ -178,7 +281,22 @@ make -C src test/test_bitcoin && src/test/test_bitcoin --run_test=zslp_tests    
 sh qa/rpc-tests/zslp_index.sh src                                               # regtest end to end
 BASELINE_SRC=<unmodified build dir> sh qa/rpc-tests/zslp_index.sh src           # also: flag-off RPC list
 cd wallet/tests && qmake tokens.pro && make && QT_QPA_PLATFORM=offscreen ./tst_tokens   # GUI logic
+cd wallet/tests && qmake tokenssend.pro && make && QT_QPA_PLATFORM=offscreen ./tst_tokenssend   # amounts, wording, both dialogs
+src/test/test_bitcoin --run_test=zslpbuild_tests                                 # amounts, layout, mainnet messages, 120 varied transactions
+sh qa/rpc-tests/zslp_send.sh src                                                 # regtest, three nodes, 138 checks
+PEER_BIN=<dir of an older zclassicd> sh qa/rpc-tests/zslp_send.sh src            # the miner and relay know nothing about tokens
 ```
+
+`zslp_send.sh` makes 66 token transactions (genesis with and without a baton, nine tokens of
+0 to 8 decimals, mints, single, 3- and 18-recipient sends, a send of everything a wallet
+holds, burns, a reorg, a restart, refusals) and requires exact token and ZCL balances after
+every step, identical answers from three nodes' indexes, no invalid, unknown or burning
+transaction at the end, the message bytes equal to the vendored Z23 builder's, and the whole
+chain judged again by `src/c23/services/tools/slpverify.c`: a second implementation of the
+block and transaction parser, the ledger and the per-transaction results around the vendored
+rule function (`zcl_slp_evaluate`, the port of Z23's decision rules), compared with the
+wallets' unspent token outputs and the index's totals. It is the vendored rule function, not
+Z23's SQL-bound `zslp_validity.c`, that judges; see "Provenance".
 
 `-zslpindexdelayms=<n>` (hidden, test aid only) slows the worker so a test can
 interrupt it mid-build.

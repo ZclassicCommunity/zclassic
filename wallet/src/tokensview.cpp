@@ -11,6 +11,7 @@
 
 #include <QDialog>
 #include <QFrame>
+#include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
 #include <QPushButton>
@@ -50,6 +51,41 @@ void setCell(QTableWidget* t, int row, int col, const QString& text, const QStri
         item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
     t->setItem(row, col, item);
 }
+
+// The dialogs' view of the daemon: the wallet's own connection. A daemon error arrives as its message.
+class ConnectionRpc : public tokens::TokensRpc {
+public:
+    explicit ConnectionRpc(MainWindow* main) : main_(main) {}
+    void call(const QString& method, const json& params, std::function<void(const json&)> ok,
+              std::function<void(const QString&)> fail) override
+    {
+        RPC* rpc = main_->getRPC();
+        Connection* conn = rpc ? rpc->getConnection() : nullptr;
+        if (!conn) {
+            fail(QObject::tr("The wallet is not connected to the node."));
+            return;
+        }
+        json p = {{"jsonrpc", "1.0"}, {"id", "tokens"}, {"method", method.toStdString()}, {"params", params}};
+        conn->doRPC(p, [ok](const json& result) { ok(result); },
+                    [fail](QNetworkReply* reply, const json& parsed) {
+                        QString msg;
+                        if (parsed.is_object()) {
+                            auto e = parsed.find("error");
+                            if (e != parsed.end() && e->is_object()) {
+                                auto m = e->find("message");
+                                if (m != e->end() && m->is_string())
+                                    msg = QString::fromStdString(m->get<std::string>());
+                            }
+                        }
+                        if (msg.isEmpty())
+                            msg = reply ? reply->errorString() : QObject::tr("The node did not answer.");
+                        fail(msg);
+                    });
+    }
+
+private:
+    MainWindow* main_;
+};
 } // namespace
 
 TokensView* TokensView::install(MainWindow* main)
@@ -58,7 +94,7 @@ TokensView* TokensView::install(MainWindow* main)
 }
 
 TokensView::TokensView(MainWindow* main)
-    : QObject(main), main_(main), timer_(new QTimer(this))
+    : QObject(main), main_(main), timer_(new QTimer(this)), rpc_(new ConnectionRpc(main))
 {
     connect(timer_, &QTimer::timeout, this, &TokensView::poll);
     timer_->start(kPollMs);
@@ -151,9 +187,21 @@ void TokensView::openWindow()
         emptyLabel_ = new QLabel(tr("This wallet holds no tokens."), dialog_);
         lay->addWidget(emptyLabel_);
 
+        auto* row = new QHBoxLayout;
+        sendButton_ = new QPushButton(tr("Send tokens..."), dialog_);
+        sendButton_->setObjectName(QStringLiteral("tokensSendButton"));
+        createButton_ = new QPushButton(tr("Create token... (advanced)"), dialog_);
+        createButton_->setObjectName(QStringLiteral("tokensCreateButton"));
+        row->addWidget(sendButton_);
+        row->addWidget(createButton_);
+        row->addStretch(1);
         auto* close = new QPushButton(tr("Close"), dialog_);
         connect(close, &QPushButton::clicked, dialog_, &QDialog::hide);
-        lay->addWidget(close, 0, Qt::AlignRight);
+        row->addWidget(close);
+        lay->addLayout(row);
+        connect(sendButton_, &QPushButton::clicked, this, &TokensView::openSend);
+        connect(createButton_, &QPushButton::clicked, this, &TokensView::openCreate);
+        updateActionButtons();
     }
     dialog_->show();
     dialog_->raise();
@@ -165,6 +213,8 @@ void TokensView::applyStatus(const tokens::IndexStatus& status)
 {
     if (statusLabel_)
         statusLabel_->setText(tokens::statusLine(status));
+    indexSynced_ = status.synced && status.error.isEmpty();
+    updateActionButtons();
     if (dialog_ && dialog_->isVisible())
         refreshOutputs();
 }
@@ -184,6 +234,8 @@ void TokensView::refreshOutputs()
 
 void TokensView::applySnapshot(const tokens::Snapshot& snap)
 {
+    lastSnap_ = snap;
+    updateActionButtons();
     if (!balances_ || !outputs_)
         return;
     balances_->setRowCount(snap.balances.size());
@@ -207,4 +259,35 @@ void TokensView::applySnapshot(const tokens::Snapshot& snap)
     emptyLabel_->setVisible(snap.outputs.isEmpty());
     balances_->setVisible(!snap.balances.isEmpty());
     outputs_->setVisible(!snap.outputs.isEmpty());
+}
+
+// Sending needs the index at the chain tip (it decides which outputs are valid tokens) and something to
+// send; creating needs the index at the tip. The daemon refuses otherwise, with a clear message; the
+// buttons say why in advance.
+void TokensView::updateActionButtons()
+{
+    if (!sendButton_ || !createButton_)
+        return;
+    const bool hasTokens = !tokens::choicesFromSnapshot(lastSnap_).isEmpty();
+    sendButton_->setEnabled(indexSynced_ && hasTokens);
+    createButton_->setEnabled(indexSynced_);
+    const QString wait = tr("Available when the token index is up to date.");
+    sendButton_->setToolTip(!indexSynced_ ? wait : hasTokens ? QString() : tr("This wallet holds no confirmed tokens to send."));
+    createButton_->setToolTip(indexSynced_ ? tr("Create a new token. Advanced.") : wait);
+}
+
+void TokensView::openSend()
+{
+    auto* d = new tokens::TokenSendDialog(rpc_.get(), tokens::choicesFromSnapshot(lastSnap_), dialog_);
+    d->setAttribute(Qt::WA_DeleteOnClose);
+    connect(d, &tokens::StepDialog::sent, this, [this](const QString&) { refreshOutputs(); });
+    d->open();
+}
+
+void TokensView::openCreate()
+{
+    auto* d = new tokens::TokenCreateDialog(rpc_.get(), dialog_);
+    d->setAttribute(Qt::WA_DeleteOnClose);
+    connect(d, &tokens::StepDialog::sent, this, [this](const QString&) { refreshOutputs(); });
+    d->open();
 }

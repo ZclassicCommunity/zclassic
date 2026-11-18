@@ -262,6 +262,8 @@ BITCOIN_CORE_H = \
   wallet/paymentdisclosuredb.h \
   wallet/rpcwallet.h \
   wallet/tokenguard.h \
+  wallet/zslpsend.h \
+  zslp/zslpbuild.h \
   zslp/zslpindex.h \
   zslp/zslpservice.h \
   wallet/wallet.h \
@@ -380,7 +382,10 @@ libbitcoin_wallet_a_SOURCES = \
   wallet/rpcdisclosure.cpp \
   wallet/rpcdump.cpp \
   wallet/rpcwallet.cpp \
+  wallet/rpczslp.cpp \
   wallet/tokenguard.cpp \
+  wallet/zslpsend.cpp \
+  zslp/zslpbuild.cpp \
   wallet/wallet.cpp \
   wallet/wallet_ismine.cpp \
   wallet/walletdb.cpp \
