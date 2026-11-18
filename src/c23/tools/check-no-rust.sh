@@ -7,7 +7,8 @@
 #   - no Rust runtime symbol (rust_begin_unwind, rust_eh_personality, __rust_alloc,
 #     mangled core::/alloc::/std:: paths, the bellman/pairing/sapling_crypto crates).
 # A binary with no librustzcash_* symbol at all (zclassic-cli) only gets the
-# no-Rust check. Exit 0 when every binary passes, 1 otherwise.
+# no-Rust check. On macOS the linker dead-strips unused shim functions, so the
+# count is only required to be at most 31 there. Exit 0 when every binary passes, 1 otherwise.
 set -u
 [ $# -ge 2 ] || { echo "usage: $0 <nm> <binary>..." >&2; exit 2; }
 nm=$1; shift
@@ -26,6 +27,13 @@ for bin in "$@"; do
     fi
     if [ "$n" -eq 0 ]; then
         echo "check-no-rust: OK   $bin: no librustzcash_* and no Rust symbols"; continue
+    fi
+    # The macOS link uses -dead_strip, which drops every function the binary never
+    # calls: zclassicd keeps 30 of the 31 shim functions and loses the marker,
+    # zclassic-tx keeps 5. There the count can only be bounded from above; the
+    # no-Rust-symbol test above is what proves the absence of Rust on every platform.
+    if [ "$(uname -s)" = Darwin ] && [ "$n" -le 31 ]; then
+        echo "check-no-rust: OK   $bin: $n librustzcash_* from the C23 shim (dead-stripped link), 0 Rust symbols"; continue
     fi
     if [ "$n" -ne 31 ] || [ "$marker" -ne 1 ]; then
         echo "check-no-rust: FAIL $bin: $n librustzcash_* symbols (want 31), C23 marker $marker (want 1)"; rc=1; continue
