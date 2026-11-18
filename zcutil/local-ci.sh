@@ -39,6 +39,10 @@
 #     ZCL_CI_MAC       ssh alias of the Mac for `macos`
 #     ZCL_CI_EXPECT_VERSION  version string the candidates must report
 #                      (default derived from src/clientversion.h: build N -> betaN+1)
+#     ZCL_CI_TIMEOUT_<STEP>  wall-clock limit in seconds of one test step (STEP upper case, - and . as _;
+#                      e.g. ZCL_CI_TIMEOUT_TREE_ROOT_ASAN); ZCL_CI_STEP_TIMEOUT sets one for all other steps
+#     ZCL_CI_LOG_CAP   most bytes kept of one step log (default 268435456); a step that fills it fails
+#     ZCL_CI_NOASLR    0 = do not run the sanitizer step under `setarch -R`
 #
 # Exit status: 0 only when every requested command and check passed.
 # Heavy commands belong behind the host broker, for example:
@@ -195,20 +199,49 @@ inner_test_build() {
     run_logged "$log" ./zcutil/fetch-params.sh || { printf 'fetch-params\tFAIL\t0\n' >>$TD/results.tsv; exit 1; }
 }
 
-# step <name> <cmd...>: run with its own log, record PASS/FAIL/SKIP (rc 77 = skip).
+# Run a command with address-space randomisation off when the kernel allows it.  Sanitizer
+# runtimes can loop on DEADLYSIGNAL when the mmap entropy (vm.mmap_rnd_bits) is higher than
+# their shadow-memory layout expects; ZCL_CI_NOASLR=0 turns this off.
+noaslr() {
+    if [ "${ZCL_CI_NOASLR:-1}" != 0 ] && command -v setarch >/dev/null 2>&1 \
+        && setarch "$(uname -m)" -R true >/dev/null 2>&1; then
+        setarch "$(uname -m)" -R "$@"
+    else
+        "$@"
+    fi
+}
+
+# step <name> <default-timeout-seconds> <cmd...>: run with its own log, record PASS/FAIL/SKIP
+# (rc 77 = skip).  Every step has a wall-clock timeout and a log size cap, so a runaway step
+# (a hang, or a sanitizer printing forever) fails fast instead of filling the disk.
+#   ZCL_CI_TIMEOUT_<NAME>  this step's timeout in seconds (NAME upper case, - and . become _)
+#   ZCL_CI_STEP_TIMEOUT    timeout for every step without a ZCL_CI_TIMEOUT_<NAME>
+#   ZCL_CI_LOG_CAP         most bytes kept of a step log (default 268435456 = 256 MiB)
 step() {
-    name=$1; shift
+    name=$1; dflt=$2; shift 2
+    key=$(printf '%s' "$name" | tr 'a-z.-' 'A-Z__')
+    eval "limit=\${ZCL_CI_TIMEOUT_$key:-\${ZCL_CI_STEP_TIMEOUT:-$dflt}}"
+    cap=${ZCL_CI_LOG_CAP:-268435456}
+    log=$TD/logs/$name.log; rcf=$TD/logs/$name.rc
     t0=$(date +%s)
+    rm -f "$rcf"
     set +e
-    timeout "${ZCL_CI_STEP_TIMEOUT:-14400}" sh /ci/local-ci.sh __inner "$@" >"$TD/logs/$name.log" 2>&1
-    rc=$?
+    # head -c ends the pipe at the cap: the step then dies of SIGPIPE on its next write.
+    { timeout -k 30 "$limit" sh /ci/local-ci.sh __inner "$@" 2>&1; echo $? >"$rcf"; } | head -c "$cap" >"$log"
+    rc=$(cat "$rcf" 2>/dev/null); [ -n "$rc" ] || rc=1
     set -e
     secs=$(( $(date +%s) - t0 ))
+    note=
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then note="timed out after ${limit}s"; rc=124
+    elif [ "$(wc -c <"$log")" -ge "$cap" ]; then note="log reached the $cap byte cap"; [ "$rc" -ne 0 ] || rc=1
+    fi
+    [ -z "$note" ] || printf '\nlocal-ci: step %s: %s (rc %s)\n' "$name" "$note" "$rc" >>"$log"
+    rm -f "$rcf"
     st=PASS
     [ "$rc" -eq 0 ] || st=FAIL
     [ "$rc" -ne 77 ] || st=SKIP
     printf '%s\t%s\t%s\n' "$name" "$st" "$secs" >>$TD/results.tsv
-    echo "[$st] $name (${secs}s, rc $rc)"
+    echo "[$st] $name (${secs}s, rc $rc${note:+, $note})"
 }
 
 # Each of these is a function so `step` can run it in a subshell with set -e off.
@@ -217,7 +250,7 @@ t_norust()   { make -C src check-c23-no-rust; }
 t_torsyms()  { make -C src check-c23-tor-symbols TOR_LIBDIR="/w/src/depends/$HOST/lib"; }
 t_treeroot() {
     cc -std=c2x -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Isrc \
-        src/zcash/tree_root.c src/test/tree_root_c_tests.c -o /tmp/tree-root-test && env -u LD_PRELOAD /tmp/tree-root-test
+        src/zcash/tree_root.c src/test/tree_root_c_tests.c -o /tmp/tree-root-test && { unset LD_PRELOAD; noaslr /tmp/tree-root-test; }
 }
 t_testbitcoin() { ./src/test/test_bitcoin; }
 t_gtest()       { ./src/zcash-gtest; }
@@ -267,28 +300,28 @@ inner_test_run() {
     inner_common
     HOST=$(./depends/config.guess)
     mkdir -p $TD/logs
-    step check-c23-vendor t_vendor
-    step check-c23-no-rust t_norust
-    step check-c23-tor-symbols t_torsyms
-    step test_bitcoin-full t_testbitcoin
-    step zcash-gtest-full t_gtest
-    step regtest-smoke t_smoke
+    step check-c23-vendor 1800 t_vendor
+    step check-c23-no-rust 1800 t_norust
+    step check-c23-tor-symbols 1800 t_torsyms
+    step test_bitcoin-full 7200 t_testbitcoin
+    step zcash-gtest-full 7200 t_gtest
+    step regtest-smoke 3600 t_smoke
     if [ "$FLAVOR" = release ]; then return 0; fi   # release flavor: unit suites + smoke only
-    step tree-root-asan t_treeroot
-    step c23-run-linked t_c23linked
-    step wallet_matrix-1-9 t_matrix
-    step wallet_tokenguard t_tokenguard
-    step wallet_tokenguard-sapling t_tokenguard_sapling
-    step zslp_index t_zslp
-    step wallet-qt-logic-widget t_wallet_qt
+    step tree-root-asan 900 t_treeroot
+    step c23-run-linked 7200 t_c23linked
+    step wallet_matrix-1-9 10800 t_matrix
+    step wallet_tokenguard 3600 t_tokenguard
+    step wallet_tokenguard-sapling 3600 t_tokenguard_sapling
+    step zslp_index 3600 t_zslp
+    step wallet-qt-logic-widget 7200 t_wallet_qt
 }
 
 inner_test_tor() {
     inner_common
     mkdir -p $TD/logs
-    step tor-twonode t_tor twonode.sh
-    step tor-threenode t_tor threenode.sh
-    step tor-addrv2gossip t_tor addrv2gossip.sh
+    step tor-twonode 3600 t_tor twonode.sh
+    step tor-threenode 3600 t_tor threenode.sh
+    step tor-addrv2gossip 3600 t_tor addrv2gossip.sh
 }
 # (steps run as `local-ci.sh __inner <t_function> [args]` so `timeout` can wrap them)
 
@@ -318,12 +351,12 @@ while [ $# -gt 0 ]; do
         --flavor) FLAVOR=$2; shift 2 ;;
         --pick) PICKS="$PICKS $2"; shift 2 ;;
         --jobs) JOBS=$2; shift 2 ;;
-        -h|--help) sed -n '2,45p' "$SELF"; exit 0 ;;
+        -h|--help) sed -n '2,49p' "$SELF"; exit 0 ;;
         -*) die "unknown option $1" ;;
         *) break ;;
     esac
 done
-CMD=${1:-}; [ -n "$CMD" ] || { sed -n '2,45p' "$SELF"; exit 2; }
+CMD=${1:-}; [ -n "$CMD" ] || { sed -n '2,49p' "$SELF"; exit 2; }
 ENVDIR=${ZCL_CI_ENV:-$HOME/work/zc23-localci-env}
 CACHE=${ZCL_CI_CACHE:-$HOME/work/zc23-localci-cache}
 if [ -z "$JOBS" ]; then JOBS=$(getconf _NPROCESSORS_ONLN); [ "$JOBS" -le 8 ] || JOBS=8; fi
@@ -352,6 +385,11 @@ enter() {
     [ -z "$GOLDEN" ] || extra="$extra --ro-bind $GOLDEN /golden"
     [ -z "${ZCL_CI_PREV_BIN:-}" ] || extra="$extra --ro-bind $ZCL_CI_PREV_BIN /prev"
     mkdir -p "$CACHE/zcash-params" "$CACHE/home-tmp"
+    # step limits and the log cap reach the steps (--clearenv drops everything else)
+    passenv=""
+    for kv in $(env | grep -E '^ZCL_CI_(TIMEOUT_[A-Z0-9_]+|STEP_TIMEOUT|LOG_CAP|NOASLR)=[0-9A-Za-z]*$' || true); do
+        passenv="$passenv --setenv ${kv%%=*} ${kv#*=}"
+    done
     if [ ! -e "$CACHE/zcash-params/.seeded" ]; then
         # Reuse an existing parameter set instead of re-downloading ~900 MB.
         if [ -d "$HOME/.zcash-params" ]; then cp -n "$HOME"/.zcash-params/* "$CACHE/zcash-params/" 2>/dev/null || true; fi
@@ -368,7 +406,7 @@ enter() {
         --ro-bind "$SELF" /ci/local-ci.sh $extra \
         --setenv HOME /root --setenv PATH /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
         --setenv TMPDIR /tmp --setenv TMP /tmp --setenv TEMP /tmp --setenv LANG C.UTF-8 --setenv TERM "${TERM:-dumb}" \
-        --setenv ZCL_CI_STEP_TIMEOUT "${ZCL_CI_STEP_TIMEOUT:-14400}" \
+        $passenv \
         --setenv ZCL_CI_TESTDIR "$TESTDIR" --setenv ZCL_CI_FLAVOR "$FLAVOR_CUR" \
         --setenv ZCL_CI_JOBS "$JOBS" --setenv ZCL_CI_EXPECT_VERSION "${ZCL_CI_EXPECT_VERSION:-}" \
         --chdir /w "$@"

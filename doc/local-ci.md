@@ -119,6 +119,34 @@ own loopback, so they cannot collide with a running node. One summary table is
 printed and the exit status is non-zero on any failure. The Python 2 RPC tests of
 `qa/rpc-tests` are not run (no Python).
 
+## Runaway steps: timeouts, log cap, ASLR
+
+Every `test` step runs under `timeout` and writes its log through `head -c`, so a hang or
+a step that prints forever fails fast instead of filling the disk (once a sanitizer step looped
+on `AddressSanitizer:DEADLYSIGNAL` for 33 minutes and wrote an 18 GB log). A step that times
+out, or whose log reaches the cap, is recorded as FAIL and the reason is appended to its log.
+
+| Variable | Meaning |
+| --- | --- |
+| `ZCL_CI_TIMEOUT_<STEP>` | seconds for one step; `<STEP>` is the step name in upper case with `-` and `.` as `_` (`ZCL_CI_TIMEOUT_TREE_ROOT_ASAN=300`) |
+| `ZCL_CI_STEP_TIMEOUT` | seconds for every step without its own `ZCL_CI_TIMEOUT_<STEP>`; overrides the built-in defaults |
+| `ZCL_CI_LOG_CAP` | most bytes kept of one step log (default 268435456, 256 MiB) |
+| `ZCL_CI_NOASLR` | `0` runs the sanitizer step without `setarch -R` |
+
+Built-in defaults: 30 minutes for the `check-c23-*` steps, 15 minutes for `tree-root-asan`,
+one hour for the smoke, tokenguard, zslp and Tor steps, two hours for `test_bitcoin-full`,
+`zcash-gtest-full`, `c23-run-linked` and the wallet Qt tests, three hours for
+`wallet_matrix-1-9`. The sanitizer step runs under `setarch "$(uname -m)" -R` (address-space
+randomisation off) when the kernel allows it: an older ASan runtime inside the focal root
+filesystem cannot place its shadow memory under a high `vm.mmap_rnd_bits` and dies in a signal
+loop now and then. The limits apply to steps; the build stages are bounded by the broker.
+
+## Exit status
+
+`local-ci.sh` exits 0 only when every requested command passed. For `test` that means no step
+FAILED in any flavor (a SKIP does not fail), the test run itself completed, and the build
+stage succeeded; `all` fails when any of its commands fails.
+
 ## Verifying artifacts
 
 ```sh
