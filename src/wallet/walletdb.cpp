@@ -468,7 +468,14 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             ssValue >> wtx;
             CValidationState state;
             auto verifier = libzcash::ProofVerifier::Strict();
-            if (!(CheckTransaction(wtx, state, verifier) && (wtx.GetHash() == hash) && state.IsValid()))
+            // A stored wallet transaction may be one of the 413 historical oversize
+            // mainnet transactions (consensus/oversize_grandfather.h). Those were mined
+            // and are identified by (txid, exact size), so accept them here as CheckBlock
+            // does. With the strict limit such a record failed this check on every start:
+            // the wallet reported a wallet.dat read error, dropped the transaction and
+            // forced a full rescan each time. Nothing else is relaxed: relaying an
+            // unconfirmed wallet transaction still goes through the strict mempool check.
+            if (!(CheckTransaction(wtx, state, verifier, true) && (wtx.GetHash() == hash) && state.IsValid()))
                 return false;
 
             // Undo serialize changes in 31600
