@@ -311,6 +311,13 @@ std::vector<std::string> DiscoverBootstrapPeers()
 {
     std::vector<std::string> discovered;
 
+    // The DNS and fixed seeds are clearnet addresses: an onion-only node with
+    // no proxy for them would dial them from its own IP.
+    if (IsLimited(NET_IPV4) && IsLimited(NET_IPV6) && !BootstrapClearnetProxied()) {
+        LogPrintf("Bootstrap: onion-only node without a clearnet proxy; not discovering bootstrap peers from the clearnet seeds\n");
+        return discovered;
+    }
+
     // Wrap the whole thing: discovery must never throw out of init.
     try {
         // 1) Gather candidate addresses from the active network's DNS seeds,
@@ -417,6 +424,13 @@ std::vector<std::string> GetBootstrapPeerList()
     // additional NODE_BOOTSTRAP peers (DiscoverBootstrapPeers) is invoked
     // lazily by the init bootstrap loop only if these fail, so we neither pay
     // its latency nor dial seed peers when a compiled peer already works.
+    // An onion-only node (-onlynet without ipv4/ipv6) with no proxy for the
+    // clearnet addresses would dial them from its own IP. That includes the
+    // common -onlynet=onion with a system Tor found through its control port,
+    // which has no onion proxy yet when the snapshot and the addnode list are
+    // set up (Tor control sets it later): list the onion peers only.
+    if (IsLimited(NET_IPV4) && IsLimited(NET_IPV6) && !BootstrapClearnetProxied())
+        return Params().OnionBootstrapPeers();
     return SelectBootstrapPeers(Params().BootstrapPeers(), Params().OnionBootstrapPeers(),
                                 OnionProxyConfigured(), IsLimited(NET_IPV4) && IsLimited(NET_IPV6),
                                 g_onionBootstrapFallback.load());

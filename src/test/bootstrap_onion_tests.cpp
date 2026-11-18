@@ -122,6 +122,24 @@ BOOST_AUTO_TEST_CASE(onion_only_without_a_clearnet_proxy_never_uses_the_clearnet
     BOOST_CHECK(!ListsAnyClearnetBootstrapPeer(vAddedNodes));
 }
 
+// -onlynet=onion with a system Tor found through its control port: no proxy
+// at all yet when init builds the snapshot and addnode lists (Tor control sets
+// the onion proxy later). The clearnet bootstrap peers must not be listed, and
+// discovery must not dial the clearnet seeds.
+BOOST_AUTO_TEST_CASE(onion_only_before_any_proxy_never_lists_the_clearnet_peers)
+{
+    NetworkStateGuard guard;
+    SetLimited(NET_IPV4);
+    SetLimited(NET_IPV6);
+    BOOST_REQUIRE(!BootstrapOnionOnlyActive()); // no onion proxy yet
+    BOOST_CHECK(!BootstrapClearnetProxied());
+
+    BOOST_CHECK(!ListsAnyClearnetBootstrapPeer(GetBootstrapPeerList()));
+    BOOST_CHECK(!ListsAnyClearnetBootstrapPeer(GetBootstrapSnapshotPeerList()));
+    BOOST_CHECK(GetBootstrapPeerList() == Params().OnionBootstrapPeers());
+    BOOST_CHECK(DiscoverBootstrapPeers().empty());
+}
+
 // The same node with a proxy for the clearnet addresses (-proxy): the
 // clearnet peers stay available behind the onion ones.
 BOOST_AUTO_TEST_CASE(onion_only_with_a_clearnet_proxy_keeps_the_clearnet_peers_as_a_later_choice)
