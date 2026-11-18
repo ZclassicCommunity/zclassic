@@ -65,6 +65,7 @@
 #include "sapling/sapling.h"
 #include "witness_codec.h"
 #include "zcl_c23_sapling_scan.h"
+#include "support/cleanse.h"
 
 /* A Jubjub point in extended coordinates whose Z is known nonzero. */
 #define SCAN_DIGITS 64
@@ -537,6 +538,7 @@ static void mul_one(const zcl_c23_sapling_scan_ctx *ctx, struct jub_point *out,
         }
     }
     *out = acc;
+    memory_cleanse(&acc, sizeof(acc));
 }
 
 void zcl_c23_sapling_scan_agree(const zcl_c23_sapling_scan_ctx *ctx,
@@ -571,7 +573,7 @@ void zcl_c23_sapling_scan_agree(const zcl_c23_sapling_scan_ctx *ctx,
             mul_one(ctx, &pts[cnt], dig);
             zs[cnt] = pts[cnt].z;
             idx[cnt++] = done + i;
-            memset(dig, 0, sizeof(dig));
+            memory_cleanse(dig, sizeof(dig));
         }
         batch_inv(zs, prefix, cnt);
         for (size_t c = 0; c < cnt; c++) {
@@ -585,7 +587,9 @@ void zcl_c23_sapling_scan_agree(const zcl_c23_sapling_scan_ctx *ctx,
             out[31] |= (uint8_t)((xb[0] & 1) << 7);
             ok[idx[c]] = 1;
         }
-        memset(pts, 0, sizeof(pts));
+        memory_cleanse(pts, sizeof(pts));
+        memory_cleanse(zs, sizeof(zs));
+        memory_cleanse(prefix, sizeof(prefix));
         done += m;
     }
 
