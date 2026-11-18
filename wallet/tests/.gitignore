@@ -6,3 +6,4 @@
 /.qmake.stash
 *.o
 *.moc
+/build-windows/
