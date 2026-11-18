@@ -13,12 +13,17 @@
 #include "primitives/transaction.h"
 #include "random.h"
 #include "streams.h"
+#include "util.h"
 #include "utilstrencodings.h"
 #include "version.h"
 #include "zcash/JoinSplit.hpp"
 #include "zcash/Proof.hpp"
 
+#include <boost/filesystem.hpp>
+
 #include <atomic>
+#include <fstream>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -352,4 +357,70 @@ TEST(phgr13, concurrent_verification)
     }
     for (auto& th : threads) th.join();
     EXPECT_EQ(failures.load(), 0);
+}
+
+TEST(phgr13, off_subgroup_g2_is_rejected_even_when_not_checking)
+{
+    // x = 2 + 1*u (FE2IP integer q + 2) is on the twist y^2 = x^3 + 3/(9+u) but the
+    // point is not in the order-r subgroup: libsnark's to_libsnark_g2 threw "point is
+    // not in G2" for both signs (checked against the base Proof.cpp + libsnark).
+    // x = 1 + 1*u is not on the curve. Each replaces g_B of every vector.
+    const char* OFF_SUBGROUP[] = {
+        "0a000000000000000000000000000000000000000000000000000000000000000030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd49",
+        "0b000000000000000000000000000000000000000000000000000000000000000030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd49",
+        "0a000000000000000000000000000000000000000000000000000000000000000030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd48",
+    };
+    for (const Fixture& f : All()) {
+        for (const char* hex : OFF_SUBGROUP) {
+            const std::vector<unsigned char> g = ParseHex(hex);
+            ASSERT_EQ(g.size(), 65u);
+            std::vector<unsigned char> w = f.wire;
+            std::copy(g.begin(), g.end(), w.begin() + SPANS[2].off);
+            Fixture m = WithWire(f, w);
+            EXPECT_FALSE(Strict(m)) << "height " << f.height << " g_B " << hex;
+            EXPECT_FALSE(Disabled(m)) << "height " << f.height << " g_B " << hex;
+        }
+    }
+}
+
+TEST(phgr13, a_verifying_key_that_does_not_load_is_refused_and_leaves_the_key)
+{
+    // ZC_LoadParams checks the SHA-256 pin first; this is the loader below it.
+    // A file that cannot be read or parsed throws (startup fails, as with
+    // libsnark's loadFromFile for a missing file) and must not replace the
+    // installed key.
+    const boost::filesystem::path dir =
+        boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("phgr13-vk-%%%%%%%%");
+    boost::filesystem::create_directories(dir);
+    const boost::filesystem::path real = ZC_GetParamsDir() / "sprout-verifying.key";
+    std::ifstream in(real.string(), std::ios::binary);
+    std::vector<char> key((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    ASSERT_EQ(key.size(), 1449u);
+
+    auto write = [&](const char* name, const std::vector<char>& bytes) {
+        const boost::filesystem::path p = dir / name;
+        std::ofstream out(p.string(), std::ios::binary);
+        out.write(bytes.data(), bytes.size());
+        return p.string();
+    };
+    std::vector<std::string> bad = {
+        (dir / "missing.key").string(),
+        write("empty.key", std::vector<char>()),
+        write("truncated.key", std::vector<char>(key.begin(), key.begin() + 1000)),
+        write("zeros.key", std::vector<char>(key.size(), 0)),
+    };
+    for (const std::string& p : bad) {
+        EXPECT_THROW(ZCJoinSplit::Prepared(p), std::runtime_error) << p;
+    }
+    // The installed key is still the real one.
+    for (const Fixture& f : All()) {
+        EXPECT_TRUE(Strict(f)) << "height " << f.height;
+    }
+    // Loading the real key again is accepted and changes nothing.
+    std::unique_ptr<ZCJoinSplit> again(ZCJoinSplit::Prepared(write("again.key", key)));
+    EXPECT_TRUE(again != nullptr);
+    for (const Fixture& f : All()) {
+        EXPECT_TRUE(Strict(f)) << "height " << f.height;
+    }
+    boost::filesystem::remove_all(dir);
 }
