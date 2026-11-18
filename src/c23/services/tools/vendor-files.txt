@@ -3,3 +3,5 @@ contexts/market/modules/zslp/src/slp.c
 core/modules/script/include/script/op_return_push.h
 engine/modules/overlay/include/overlay/overlay_codec.h
 engine/modules/overlay/src/overlay_codec.c
+contexts/naming/modules/znam/include/znam/znam.h
+contexts/naming/modules/znam/src/znam.c
