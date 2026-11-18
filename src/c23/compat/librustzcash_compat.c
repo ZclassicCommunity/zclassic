@@ -53,6 +53,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#elif defined(__APPLE__)
+#include <malloc/malloc.h>
+#endif
+
 #if !defined(_WIN32)
 #include <errno.h>
 #include <fcntl.h>
@@ -273,6 +279,8 @@ bool zcl_c23_params_initialized(void)
     return atomic_load_explicit(&g_init, memory_order_acquire);
 }
 
+static void prime_parsed_keys(void);
+
 /* The prover thread budget is one process-wide value that every proof reads
  * when it starts. A caller that proves several things at once (the transaction
  * builder) divides it among the proofs for the duration of the batch so the
@@ -318,6 +326,7 @@ void zcl_c23_set_prover_threads(unsigned n)
 
 unsigned zcl_c23_prover_budget_enter(unsigned concurrent_proofs)
 {
+    prime_parsed_keys();
     pthread_mutex_lock(&g_budget_mu);
     if (g_budget_depth++ == 0)
         g_budget_workers = concurrent_proofs ? concurrent_proofs : 1;
@@ -1272,6 +1281,162 @@ bool zcl_c23_batch_verify(const zcl_c23_batch *b, bool *bad_is_output,
 /* Proving                                                                   */
 /* ------------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------------ */
+/* Shared parsed proving keys                                               */
+/* ------------------------------------------------------------------------ */
+
+/* Z23's sapling_create_*_proof parse the raw proving key (groth16_pk_read)
+ * inside every proof: about 72 MB of curve points for a spend and 5 MB for an
+ * output, rebuilt and checked point by point per proof, so the proofs of one
+ * transaction that run at the same time each carry a private copy. Here the
+ * key is parsed once, on the first proof, and every proof of every proving
+ * context reads that one copy (a proof only reads the key). It lives while any
+ * proving context does and is freed with the last, so a wallet that is not
+ * sending holds none of it, and the heap is handed back to the system then.
+ *
+ * The proof is assembled from the same vendored steps that
+ * sapling_create_spend_proof and sapling_create_output_proof run (synthesize,
+ * groth16_prove, serialize), so the proofs are the same ones; a key that
+ * cannot be parsed falls back to those functions. TEMPORARY: once Z23 provides
+ * the *_parsed variants of those two functions this block calls them instead
+ * and drops its own assembly. */
+static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER;
+static unsigned g_pctx_live;                 /* live proving contexts; g_pk_mu */
+static struct groth16_pk g_pk_spend, g_pk_output;
+static bool g_pk_spend_ok, g_pk_output_ok;   /* parsed and resident; g_pk_mu */
+
+/* Returns freed heap to the operating system after a batch of proofs. The
+ * proofs allocate several 10 MB buffers per proof on several threads, and the
+ * allocator keeps what it is given back (per-thread arenas) until asked. */
+static void release_heap_memory(void)
+{
+#if defined(__GLIBC__)
+    (void)malloc_trim(0);
+#elif defined(__APPLE__)
+    (void)malloc_zone_pressure_relief(NULL, 0);
+#endif
+}
+
+static const struct groth16_pk *parsed_key(struct groth16_pk *slot, bool *ok,
+                                           const uint8_t *raw, size_t len)
+{
+    pthread_mutex_lock(&g_pk_mu);
+    if (!*ok && g_pctx_live > 0 && groth16_pk_read(slot, raw, len))
+        *ok = true;
+    const struct groth16_pk *key = *ok ? slot : NULL;
+    pthread_mutex_unlock(&g_pk_mu);
+    return key;
+}
+
+static void pctx_live_add(void)
+{
+    pthread_mutex_lock(&g_pk_mu);
+    g_pctx_live++;
+    pthread_mutex_unlock(&g_pk_mu);
+}
+
+static void pctx_live_drop(void)
+{
+    bool last = false;
+    pthread_mutex_lock(&g_pk_mu);
+    if (g_pctx_live > 0 && --g_pctx_live == 0) {
+        if (g_pk_spend_ok)
+            groth16_pk_free(&g_pk_spend);
+        if (g_pk_output_ok)
+            groth16_pk_free(&g_pk_output);
+        g_pk_spend_ok = g_pk_output_ok = false;
+        last = true;
+    }
+    pthread_mutex_unlock(&g_pk_mu);
+    if (last)
+        release_heap_memory();
+}
+
+/* Parses both keys now if a proving context is alive. The transaction builder
+ * calls it (through zcl_c23_prover_budget_enter) before its workers start, so
+ * the parse has the whole thread budget and no worker waits on it. */
+static void prime_parsed_keys(void)
+{
+    const struct zcl_pk_set *pks = atomic_load_explicit(&g_pks, memory_order_acquire);
+    if (!pks || !pks->spend || !pks->output)
+        return;
+    (void)parsed_key(&g_pk_spend, &g_pk_spend_ok, pks->spend, pks->spend_len);
+    (void)parsed_key(&g_pk_output, &g_pk_output_ok, pks->output, pks->output_len);
+}
+
+/* The 192-byte proof: A (G1, 48) || B (G2, 96) || C (G1, 48), each compressed
+ * (bit 7 set, bit 6 infinity, bit 5 y sign), as sapling_circuit.c writes it. */
+static void proof_write(uint8_t out[GROTH_PROOF_SIZE],
+                        const struct groth16_proof *proof)
+{
+    struct fp ax, ay, cx, cy;
+    struct fp2 bx, by;
+    g1_to_affine(&ax, &ay, &proof->a);
+    fp_to_bytes(out, &ax);
+    out[0] &= 0x1F;
+    out[0] |= 0x80;
+    if (fp_lexicographically_largest(&ay))
+        out[0] |= 0x20;
+    g2_to_affine(&bx, &by, &proof->b);
+    fp_to_bytes(out + 48, &bx.c1);
+    fp_to_bytes(out + 96, &bx.c0);
+    out[48] &= 0x1F;
+    out[48] |= 0x80;
+    if (fp2_lexicographically_largest(&by))
+        out[48] |= 0x20;
+    g1_to_affine(&cx, &cy, &proof->c);
+    fp_to_bytes(out + 144, &cx);
+    out[144] &= 0x1F;
+    out[144] |= 0x80;
+    if (fp_lexicographically_largest(&cy))
+        out[144] |= 0x20;
+}
+
+/* Proves a synthesized circuit against a parsed key and wipes the witness. */
+static bool prove_system(const struct groth16_pk *key,
+                         struct constraint_system *cs, bool synthesized,
+                         uint8_t out[GROTH_PROOF_SIZE])
+{
+    struct groth16_proof gp;
+    bool ok = synthesized && groth16_prove(key, cs, &gp);
+    if (ok)
+        proof_write(out, &gp);
+    if (cs->witness)
+        memory_cleanse(cs->witness, cs->cap_vars * sizeof(struct fr));
+    cs_free(cs);
+    return ok;
+}
+
+static bool spend_proof_make(const struct zcl_pk_set *pks,
+                             const struct sapling_spend_witness *wit,
+                             const struct sapling_spend_inputs *pub,
+                             uint8_t out[GROTH_PROOF_SIZE])
+{
+    const struct groth16_pk *key =
+        parsed_key(&g_pk_spend, &g_pk_spend_ok, pks->spend, pks->spend_len);
+    if (!key)
+        return sapling_create_spend_proof(pks->spend, pks->spend_len, wit, pub,
+                                          out);
+    struct constraint_system cs;
+    cs_init(&cs);
+    return prove_system(key, &cs, sapling_spend_synthesize(&cs, wit, pub), out);
+}
+
+static bool output_proof_make(const struct zcl_pk_set *pks,
+                              const struct sapling_output_witness *wit,
+                              const struct sapling_output_inputs *pub,
+                              uint8_t out[GROTH_PROOF_SIZE])
+{
+    const struct groth16_pk *key =
+        parsed_key(&g_pk_output, &g_pk_output_ok, pks->output, pks->output_len);
+    if (!key)
+        return sapling_create_output_proof(pks->output, pks->output_len, wit,
+                                           pub, out);
+    struct constraint_system cs;
+    cs_init(&cs);
+    return prove_system(key, &cs, sapling_output_synthesize(&cs, wit, pub), out);
+}
+
 #define PCTX_MAGIC UINT64_C(0x7a63323370637478) /* "zc23pctx" */
 
 /* rustzcash.rs:1140-1143 SaplingProvingContext { bsk: Fs, bvk: Point }. The
@@ -1301,6 +1466,7 @@ void *librustzcash_sapling_proving_ctx_init(void)
     c->magic = PCTX_MAGIC;
     fs_zero(&c->bsk);
     jub_identity(&c->bvk);
+    pctx_live_add();
     return c;
 }
 
@@ -1312,6 +1478,7 @@ void librustzcash_sapling_proving_ctx_free(void *ctx)
     struct zcl_pctx *c = pctx_get(ctx);
     memory_cleanse(c, sizeof(*c));
     free(c);
+    pctx_live_drop();
 }
 
 /* Folds the value-commitment accumulators of `src` into `dst`: bsk adds and bvk
@@ -1461,7 +1628,7 @@ bool librustzcash_sapling_spend_proof(void *ctx, const unsigned char *ak,
         goto out;
     memcpy(pub.anchor, anchor, 32);
 
-    if (!sapling_create_spend_proof(pks->spend, pks->spend_len, &wit, &pub, proof))
+    if (!spend_proof_make(pks, &wit, &pub, proof))
         zcl_panic("proving should not fail");
 
     /* rustzcash.rs:1505-1515 nf from the FULL u64 position (the circuit uses
@@ -1561,7 +1728,7 @@ bool librustzcash_sapling_output_proof(void *ctx, const unsigned char *esk,
         !sapling_compute_cm(diversifier, pk_d_c, value, rcm, pub.cm))
         zcl_panic("internal: output public inputs failed on validated inputs");
 
-    if (!sapling_create_output_proof(pks->output, pks->output_len, &wit, &pub, proof))
+    if (!output_proof_make(pks, &wit, &pub, proof))
         zcl_panic("proving should not fail");
 
     /* rustzcash.rs:1235-1245 ctx.bvk -= cv (no self-verification in Rust) */
