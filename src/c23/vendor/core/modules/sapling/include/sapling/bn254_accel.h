@@ -37,4 +37,8 @@ bool bn254_accel_mont_mul_adx(uint64_t r[4], const uint64_t a[4],
  * that makes that combination impossible to ship again. */
 const void *bn254_accel_adx_code(void);
 
+/* True when the CPU has BMI2 and ADX, i.e. when the MULX multiply (and the
+ * engine instance built on it) can run here. */
+bool bn254_accel_cpu_has_adx(void);
+
 #endif /* ZCL_SAPLING_BN254_ACCEL_H */

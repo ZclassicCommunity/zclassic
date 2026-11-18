@@ -146,17 +146,17 @@ void TransactionBuilder::SendChangeTo(CTxDestination& changeAddr)
     zChangeAddr = boost::none;
 }
 
-// Measured peak heap of the native prover on x86-64 Linux (massif of one spend
-// proof, then the daemon's VmHWM over z_sendmany of 1 to 40 notes at 1, 4 and 8
-// threads): the parsed proving keys a whole send shares (72 MB spend + 5 MB
-// output, plus slack), and the working set of one proof in flight (constraint
-// system, QAP vectors, MSM buckets), about 120 MB with the vendored constraint
-// system as it is and about 60 MB once Z23's exact-size constraint storage is
-// re-vendored: lower kProverWorkerBytes then and the limit rises from 2 to 4.
-// The raw parameter files the process holds are not counted: they are there
-// idle too. The ceiling keeps a default send near 400 MB for the whole daemon.
+// Measured peak RSS of the daemon over z_sendmany of 20 notes at -proverthreads
+// 2, 4, 8 and 16 (1, 2, 4 and 8 proofs in flight, regtest, x86-64 Linux, the
+// vendored Z23 with exact-size constraint storage and keys parsed once): 202,
+// 266, 381 and 612 MB, so each further proof in flight costs 58 to 63 MB (the
+// same sweep before the re-vendor: 266, 391, 631 and 1110 MB, 120 MB each).
+// The parsed proving keys a whole send shares are 72 MB (spend) + 5 MB (output),
+// plus slack. The raw parameter files the process holds are not counted: they
+// are there idle too. The ceiling keeps a default send near 400 MB for the whole
+// daemon. See doc/perf/prover-memory.md.
 static const uint64_t kProverSharedBytes = UINT64_C(90) << 20;
-static const uint64_t kProverWorkerBytes = UINT64_C(120) << 20;
+static const uint64_t kProverWorkerBytes = UINT64_C(60) << 20;
 static const uint64_t kProverCeilingBytes = UINT64_C(340) << 20;
 
 static std::atomic<size_t> g_proverWorkerCap(0);

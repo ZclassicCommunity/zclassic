@@ -97,6 +97,18 @@ bool sapling_params_loaded(void);
 const uint8_t *sapling_get_output_pk(size_t *len);
 const uint8_t *sapling_get_spend_pk(size_t *len);
 
+/* The same two keys, parsed (groth16_pk_read) once and shared. The first call
+ * parses, later calls return the one copy; sapling_proving_session_acquire
+ * parses both when it arms proving. NULL when no proving key is loaded or it
+ * cannot be parsed, in which case a proof falls back to parsing the raw bytes
+ * for itself. The key is read-only for every proof running against it, and
+ * valid until the last proving session ends or the raw bytes are
+ * released (sapling_free_params), which cannot happen while a proving context
+ * is alive. */
+struct groth16_pk;
+const struct groth16_pk *sapling_get_spend_pk_parsed(void);
+const struct groth16_pk *sapling_get_output_pk_parsed(void);
+
 /* Free all loaded verification keys. */
 void sapling_free_params(void);
 
@@ -106,6 +118,8 @@ bool sapling_test_pair_arm_buffers(const uint8_t *spend, size_t spend_len,
                                    const uint8_t *output, size_t output_len);
 bool sapling_test_pair_prefix_ok(const uint8_t *spend, size_t spend_len,
                                  const uint8_t *output, size_t output_len);
+/* Test-only: true while either parsed proving key is resident. */
+bool sapling_test_pk_parsed_resident(void);
 #endif
 
 #endif

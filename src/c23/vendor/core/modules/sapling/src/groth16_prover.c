@@ -229,6 +229,39 @@ size_t cs_alloc_aux(struct constraint_system *cs, const struct fr *value)
     return cs_alloc_var(cs, value);
 }
 
+/* Stores a copy of src in dst in an allocation of exactly src->num_terms
+ * entries. A constraint is written once and never appended to, so the
+ * doubling capacity (first allocation 8 terms) lc_add_term gives a gadget's
+ * scratch combination is pure waste there: most combinations hold one to three
+ * terms and a spend circuit stores about 3 x 100,000 of them. Same terms in
+ * the same order, so every proof is unchanged. */
+static bool lc_copy_exact(struct linear_combination *dst,
+                          const struct linear_combination *src)
+{
+    lc_init(dst);
+    if (src->num_terms == 0)
+        return true;
+    if (src->num_terms > SIZE_MAX / sizeof(struct lc_term)) {
+        dst->oom_error = true;
+        LOG_FAIL("groth16", "lc_copy_exact: term count overflow (%zu)",
+                 src->num_terms);
+    }
+    size_t bytes = src->num_terms * sizeof(struct lc_term);
+    struct lc_term *terms = g_cs_realloc(NULL, bytes, "lc_terms");
+    if (!terms) {
+        dst->oom_error = true;
+        LOG_FAIL("groth16",
+                 "lc_copy_exact: alloc failed (terms=%zu bytes=%zu); "
+                 "constraint dropped, LC marked oom_error",
+                 src->num_terms, bytes);
+    }
+    memcpy(terms, src->terms, bytes);
+    dst->terms = terms;
+    dst->num_terms = src->num_terms;
+    dst->cap = src->num_terms;
+    return true;
+}
+
 bool cs_enforce(struct constraint_system *cs,
                 const struct linear_combination *a,
                 const struct linear_combination *b,
@@ -267,32 +300,13 @@ bool cs_enforce(struct constraint_system *cs,
     lc_init(&con->b);
     lc_init(&con->c);
 
-    for (size_t i = 0; i < a->num_terms; i++) {
-        if (!lc_add_term(&con->a, a->terms[i].var, &a->terms[i].coeff)) {
-            cs->oom_error = true;
-            lc_free(&con->a); lc_free(&con->b); lc_free(&con->c);
-            LOG_FAIL("groth16",
-                     "cs_enforce: deep-copy a[%zu/%zu] lc_add_term failed",
-                     i, a->num_terms);
-        }
-    }
-    for (size_t i = 0; i < b->num_terms; i++) {
-        if (!lc_add_term(&con->b, b->terms[i].var, &b->terms[i].coeff)) {
-            cs->oom_error = true;
-            lc_free(&con->a); lc_free(&con->b); lc_free(&con->c);
-            LOG_FAIL("groth16",
-                     "cs_enforce: deep-copy b[%zu/%zu] lc_add_term failed",
-                     i, b->num_terms);
-        }
-    }
-    for (size_t i = 0; i < c->num_terms; i++) {
-        if (!lc_add_term(&con->c, c->terms[i].var, &c->terms[i].coeff)) {
-            cs->oom_error = true;
-            lc_free(&con->a); lc_free(&con->b); lc_free(&con->c);
-            LOG_FAIL("groth16",
-                     "cs_enforce: deep-copy c[%zu/%zu] lc_add_term failed",
-                     i, c->num_terms);
-        }
+    if (!lc_copy_exact(&con->a, a) || !lc_copy_exact(&con->b, b) ||
+        !lc_copy_exact(&con->c, c)) {
+        cs->oom_error = true;
+        lc_free(&con->a); lc_free(&con->b); lc_free(&con->c);
+        LOG_FAIL("groth16", "cs_enforce: constraint copy failed "
+                 "(a=%zu b=%zu c=%zu terms); CS marked oom_error",
+                 a->num_terms, b->num_terms, c->num_terms);
     }
     cs->num_constraints++;
     return true;

@@ -152,6 +152,7 @@ static bool native_output_proof_raw(
 
     size_t pk_len = 0;
     const uint8_t *pk = sapling_get_output_pk(&pk_len);
+    const struct groth16_pk *parsed_pk = sapling_get_output_pk_parsed();
     if (native_output_proof_inputs_missing(ctx, esk, diversifier, pk_d, rcm,
                                            cv, zkproof, pk, pk_len))
         goto cleanup;
@@ -168,7 +169,10 @@ static bool native_output_proof_raw(
     if (!sapling_value_commit(value, rcv, pub.cv) ||
         !sapling_ka_derivepublic(diversifier, esk, pub.epk) ||
         !sapling_compute_cm(diversifier, pk_d, value, rcm, pub.cm) ||
-        !sapling_create_output_proof(pk, pk_len, &wit, &pub, zkproof) ||
+        !(parsed_pk ? sapling_create_output_proof_parsed(parsed_pk, &wit, &pub,
+                                                         zkproof)
+                    : sapling_create_output_proof(pk, pk_len, &wit, &pub,
+                                                  zkproof)) ||
         !native_accumulate_rcv(ctx, rcv, true))
         goto cleanup;
     memcpy(cv, pub.cv, 32);
@@ -208,6 +212,7 @@ static bool native_spend_proof_raw(
 
     size_t pk_len = 0;
     const uint8_t *pk = sapling_get_spend_pk(&pk_len);
+    const struct groth16_pk *parsed_pk = sapling_get_spend_pk_parsed();
     if (native_spend_proof_inputs_missing(ctx, ak, nsk, diversifier, rcm, ar,
                                           anchor, witness, cv, rk) ||
         !zkproof || !pk || pk_len == 0)
@@ -225,7 +230,10 @@ static bool native_spend_proof_raw(
     if (!sapling_spend_parse_witness(witness, witness_len, &wit) ||
         !sapling_spend_derive_public(&wit, &pub) ||
         memcmp(pub.anchor, anchor, 32) != 0 ||
-        !sapling_create_spend_proof(pk, pk_len, &wit, &pub, zkproof) ||
+        !(parsed_pk ? sapling_create_spend_proof_parsed(parsed_pk, &wit, &pub,
+                                                        zkproof)
+                    : sapling_create_spend_proof(pk, pk_len, &wit, &pub,
+                                                 zkproof)) ||
         !native_accumulate_rcv(ctx, rcv, false))
         goto cleanup;
     memcpy(cv, pub.cv, 32);

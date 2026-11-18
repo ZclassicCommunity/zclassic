@@ -406,17 +406,13 @@ static bool serialize_proof(uint8_t out[192], const struct groth16_proof *proof)
     return true;
 }
 
-bool sapling_create_spend_proof(const uint8_t *pk_data, size_t pk_len,
-                                 const struct sapling_spend_witness *wit,
-                                 const struct sapling_spend_inputs *pub,
-                                 uint8_t proof_out[192])
+/* Synthesizes the spend circuit and proves it against an already parsed key.
+ * The key is only read, so any number of threads can prove against one. */
+bool sapling_create_spend_proof_parsed(const struct groth16_pk *pk,
+                                       const struct sapling_spend_witness *wit,
+                                       const struct sapling_spend_inputs *pub,
+                                       uint8_t proof_out[192])
 {
-    /* Load proving key */
-    struct groth16_pk pk;
-    if (!groth16_pk_read(&pk, pk_data, pk_len))
-        LOG_FAIL("sapling_circuit",
-                 "create_spend_proof: groth16_pk_read failed (pk_len=%zu)", pk_len);
-
     /* Synthesize circuit */
     struct constraint_system cs;
     cs_init(&cs);
@@ -425,18 +421,16 @@ bool sapling_create_spend_proof(const uint8_t *pk_data, size_t pk_len,
         if (cs.witness)
             memory_cleanse(cs.witness, cs.cap_vars * sizeof(struct fr));
         cs_free(&cs);
-        groth16_pk_free(&pk);
         LOG_FAIL("sapling_circuit",
                  "create_spend_proof: sapling_spend_synthesize failed");
     }
 
     /* Generate proof */
     struct groth16_proof proof;
-    if (!groth16_prove(&pk, &cs, &proof)) {
+    if (!groth16_prove(pk, &cs, &proof)) {
         if (cs.witness)
             memory_cleanse(cs.witness, cs.cap_vars * sizeof(struct fr));
         cs_free(&cs);
-        groth16_pk_free(&pk);
         LOG_FAIL("sapling_circuit",
                  "create_spend_proof: groth16_prove failed");
     }
@@ -450,7 +444,60 @@ bool sapling_create_spend_proof(const uint8_t *pk_data, size_t pk_len,
     if (cs.witness)
         memory_cleanse(cs.witness, cs.cap_vars * sizeof(struct fr));
     cs_free(&cs);
+    return true;
+}
+
+bool sapling_create_spend_proof(const uint8_t *pk_data, size_t pk_len,
+                                 const struct sapling_spend_witness *wit,
+                                 const struct sapling_spend_inputs *pub,
+                                 uint8_t proof_out[192])
+{
+    /* Load proving key */
+    struct groth16_pk pk;
+    if (!groth16_pk_read(&pk, pk_data, pk_len))
+        LOG_FAIL("sapling_circuit",
+                 "create_spend_proof: groth16_pk_read failed (pk_len=%zu)", pk_len);
+
+    bool ok = sapling_create_spend_proof_parsed(&pk, wit, pub, proof_out);
     groth16_pk_free(&pk);
+    return ok;
+}
+
+/* Synthesizes the output circuit and proves it against an already parsed key
+ * (read only, shareable between threads). */
+bool sapling_create_output_proof_parsed(const struct groth16_pk *pk,
+                                        const struct sapling_output_witness *wit,
+                                        const struct sapling_output_inputs *pub,
+                                        uint8_t proof_out[192])
+{
+    struct constraint_system cs;
+    cs_init(&cs);
+
+    if (!sapling_output_synthesize(&cs, wit, pub)) {
+        if (cs.witness)
+            memory_cleanse(cs.witness, cs.cap_vars * sizeof(struct fr));
+        cs_free(&cs);
+        LOG_FAIL("sapling_circuit",
+                 "create_output_proof: sapling_output_synthesize failed");
+    }
+
+    struct groth16_proof proof;
+    if (!groth16_prove(pk, &cs, &proof)) {
+        if (cs.witness)
+            memory_cleanse(cs.witness, cs.cap_vars * sizeof(struct fr));
+        cs_free(&cs);
+        LOG_FAIL("sapling_circuit",
+                 "create_output_proof: groth16_prove failed");
+    }
+
+    serialize_proof(proof_out, &proof);
+
+    /* The constraint witness vector holds the secret output assignments
+     * (value, rcv, esk, rcm). The proof is now produced; wipe the witness
+     * scalars before freeing (output-neutral). */
+    if (cs.witness)
+        memory_cleanse(cs.witness, cs.cap_vars * sizeof(struct fr));
+    cs_free(&cs);
     return true;
 }
 
@@ -464,36 +511,7 @@ bool sapling_create_output_proof(const uint8_t *pk_data, size_t pk_len,
         LOG_FAIL("sapling_circuit",
                  "create_output_proof: groth16_pk_read failed (pk_len=%zu)", pk_len);
 
-    struct constraint_system cs;
-    cs_init(&cs);
-
-    if (!sapling_output_synthesize(&cs, wit, pub)) {
-        if (cs.witness)
-            memory_cleanse(cs.witness, cs.cap_vars * sizeof(struct fr));
-        cs_free(&cs);
-        groth16_pk_free(&pk);
-        LOG_FAIL("sapling_circuit",
-                 "create_output_proof: sapling_output_synthesize failed");
-    }
-
-    struct groth16_proof proof;
-    if (!groth16_prove(&pk, &cs, &proof)) {
-        if (cs.witness)
-            memory_cleanse(cs.witness, cs.cap_vars * sizeof(struct fr));
-        cs_free(&cs);
-        groth16_pk_free(&pk);
-        LOG_FAIL("sapling_circuit",
-                 "create_output_proof: groth16_prove failed");
-    }
-
-    serialize_proof(proof_out, &proof);
-
-    /* The constraint witness vector holds the secret output assignments
-     * (value, rcv, esk, rcm). The proof is now produced; wipe the witness
-     * scalars before freeing (output-neutral). */
-    if (cs.witness)
-        memory_cleanse(cs.witness, cs.cap_vars * sizeof(struct fr));
-    cs_free(&cs);
+    bool ok = sapling_create_output_proof_parsed(&pk, wit, pub, proof_out);
     groth16_pk_free(&pk);
-    return true;
+    return ok;
 }

@@ -30,6 +30,7 @@
 #define bls12_381_multi_pairing_check zc23_bls12_381_multi_pairing_check
 #define bls12_381_pairing zc23_bls12_381_pairing
 #define bn254_accel_adx_code zc23_bn254_accel_adx_code
+#define bn254_accel_cpu_has_adx zc23_bn254_accel_cpu_has_adx
 #define bn254_accel_implementation zc23_bn254_accel_implementation
 #define bn254_accel_mont_mul_adx zc23_bn254_accel_mont_mul_adx
 #define bn254_accel_mont_mul_portable zc23_bn254_accel_mont_mul_portable
@@ -53,6 +54,7 @@
 #define bn_fq2_neg zc23_bn_fq2_neg
 #define bn_fq2_one zc23_bn_fq2_one
 #define bn_fq2_sq zc23_bn_fq2_sq
+#define bn_fq2_sqrt zc23_bn_fq2_sqrt
 #define bn_fq2_sub zc23_bn_fq2_sub
 #define bn_fq2_zero zc23_bn_fq2_zero
 #define bn_fq6_add zc23_bn_fq6_add
@@ -359,14 +361,18 @@
 #define sapling_compute_rk zc23_sapling_compute_rk
 #define sapling_create_binding_sig zc23_sapling_create_binding_sig
 #define sapling_create_output_proof zc23_sapling_create_output_proof
+#define sapling_create_output_proof_parsed zc23_sapling_create_output_proof_parsed
 #define sapling_create_spend_proof zc23_sapling_create_spend_proof
+#define sapling_create_spend_proof_parsed zc23_sapling_create_spend_proof_parsed
 #define sapling_crh_ivk zc23_sapling_crh_ivk
 #define sapling_diversifier_to_gd zc23_sapling_diversifier_to_gd
 #define sapling_final_check zc23_sapling_final_check
 #define sapling_free_params zc23_sapling_free_params
 #define sapling_generate_r zc23_sapling_generate_r
 #define sapling_get_output_pk zc23_sapling_get_output_pk
+#define sapling_get_output_pk_parsed zc23_sapling_get_output_pk_parsed
 #define sapling_get_spend_pk zc23_sapling_get_spend_pk
+#define sapling_get_spend_pk_parsed zc23_sapling_get_spend_pk_parsed
 #define sapling_init_params zc23_sapling_init_params
 #define sapling_install_embedded_vks zc23_sapling_install_embedded_vks
 #define sapling_ivk_to_pkd zc23_sapling_ivk_to_pkd

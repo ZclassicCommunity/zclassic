@@ -1297,21 +1297,16 @@ bool zcl_c23_batch_verify(const zcl_c23_batch *b, bool *bad_is_output,
 /* Shared parsed proving keys                                               */
 /* ------------------------------------------------------------------------ */
 
-/* Z23's sapling_create_*_proof parse the raw proving key (groth16_pk_read)
- * inside every proof: about 72 MB of curve points for a spend and 5 MB for an
- * output, rebuilt and checked point by point per proof, so the proofs of one
- * transaction that run at the same time each carry a private copy. Here the
- * key is parsed once, on the first proof, and every proof of every proving
- * context reads that one copy (a proof only reads the key). It lives while any
- * proving context does and is freed with the last, so a wallet that is not
- * sending holds none of it, and the heap is handed back to the system then.
- *
- * The proof is assembled from the same vendored steps that
- * sapling_create_spend_proof and sapling_create_output_proof run (synthesize,
- * groth16_prove, serialize), so the proofs are the same ones; a key that
- * cannot be parsed falls back to those functions. TEMPORARY: once Z23 provides
- * the *_parsed variants of those two functions this block calls them instead
- * and drops its own assembly. */
+/* Z23 sapling_create_*_proof parse the raw proving key (groth16_pk_read)
+ * inside every proof. Z23 also offers sapling_create_*_proof_parsed, which take
+ * an already parsed key (read-only, any number of threads), and keeps its own
+ * parsed copy for raw bytes it loaded itself (sapling_get_*_pk_parsed, tied to
+ * its own sessions). This glue holds the raw keys it verified at init (g_pks),
+ * not Z23, so it keeps the parsed copy here: parsed once, on the first proof,
+ * read by every proof of every proving context, freed with the last proving
+ * context so a wallet that is not sending holds none of it, and the heap is
+ * handed back to the system then. A key that cannot be parsed falls back to
+ * the per-proof functions, which parse for themselves. */
 static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER;
 static unsigned g_pctx_live;                 /* live proving contexts; g_pk_mu */
 static struct groth16_pk g_pk_spend, g_pk_output;
@@ -1386,49 +1381,6 @@ static void prime_parsed_keys(void)
     (void)parsed_key(&g_pk_output, &g_pk_output_ok, pks->output, pks->output_len);
 }
 
-/* The 192-byte proof: A (G1, 48) || B (G2, 96) || C (G1, 48), each compressed
- * (bit 7 set, bit 6 infinity, bit 5 y sign), as sapling_circuit.c writes it. */
-static void proof_write(uint8_t out[GROTH_PROOF_SIZE],
-                        const struct groth16_proof *proof)
-{
-    struct fp ax, ay, cx, cy;
-    struct fp2 bx, by;
-    g1_to_affine(&ax, &ay, &proof->a);
-    fp_to_bytes(out, &ax);
-    out[0] &= 0x1F;
-    out[0] |= 0x80;
-    if (fp_lexicographically_largest(&ay))
-        out[0] |= 0x20;
-    g2_to_affine(&bx, &by, &proof->b);
-    fp_to_bytes(out + 48, &bx.c1);
-    fp_to_bytes(out + 96, &bx.c0);
-    out[48] &= 0x1F;
-    out[48] |= 0x80;
-    if (fp2_lexicographically_largest(&by))
-        out[48] |= 0x20;
-    g1_to_affine(&cx, &cy, &proof->c);
-    fp_to_bytes(out + 144, &cx);
-    out[144] &= 0x1F;
-    out[144] |= 0x80;
-    if (fp_lexicographically_largest(&cy))
-        out[144] |= 0x20;
-}
-
-/* Proves a synthesized circuit against a parsed key and wipes the witness. */
-static bool prove_system(const struct groth16_pk *key,
-                         struct constraint_system *cs, bool synthesized,
-                         uint8_t out[GROTH_PROOF_SIZE])
-{
-    struct groth16_proof gp;
-    bool ok = synthesized && groth16_prove(key, cs, &gp);
-    if (ok)
-        proof_write(out, &gp);
-    if (cs->witness)
-        memory_cleanse(cs->witness, cs->cap_vars * sizeof(struct fr));
-    cs_free(cs);
-    return ok;
-}
-
 static bool spend_proof_make(const struct zcl_pk_set *pks,
                              const struct sapling_spend_witness *wit,
                              const struct sapling_spend_inputs *pub,
@@ -1436,12 +1388,9 @@ static bool spend_proof_make(const struct zcl_pk_set *pks,
 {
     const struct groth16_pk *key =
         parsed_key(&g_pk_spend, &g_pk_spend_ok, pks->spend, pks->spend_len);
-    if (!key)
-        return sapling_create_spend_proof(pks->spend, pks->spend_len, wit, pub,
-                                          out);
-    struct constraint_system cs;
-    cs_init(&cs);
-    return prove_system(key, &cs, sapling_spend_synthesize(&cs, wit, pub), out);
+    return key ? sapling_create_spend_proof_parsed(key, wit, pub, out)
+               : sapling_create_spend_proof(pks->spend, pks->spend_len, wit,
+                                            pub, out);
 }
 
 static bool output_proof_make(const struct zcl_pk_set *pks,
@@ -1451,12 +1400,9 @@ static bool output_proof_make(const struct zcl_pk_set *pks,
 {
     const struct groth16_pk *key =
         parsed_key(&g_pk_output, &g_pk_output_ok, pks->output, pks->output_len);
-    if (!key)
-        return sapling_create_output_proof(pks->output, pks->output_len, wit,
-                                           pub, out);
-    struct constraint_system cs;
-    cs_init(&cs);
-    return prove_system(key, &cs, sapling_output_synthesize(&cs, wit, pub), out);
+    return key ? sapling_create_output_proof_parsed(key, wit, pub, out)
+               : sapling_create_output_proof(pks->output, pks->output_len, wit,
+                                             pub, out);
 }
 
 #define PCTX_MAGIC UINT64_C(0x7a63323370637478) /* "zc23pctx" */

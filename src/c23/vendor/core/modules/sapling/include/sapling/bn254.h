@@ -57,6 +57,9 @@ void bn_fq2_mul(struct bn_fq2 *r, const struct bn_fq2 *a, const struct bn_fq2 *b
 void bn_fq2_sq(struct bn_fq2 *r, const struct bn_fq2 *a);
 void bn_fq2_inv(struct bn_fq2 *r, const struct bn_fq2 *a);
 void bn_fq2_mul_by_nonresidue(struct bn_fq2 *r, const struct bn_fq2 *a);
+/* Square root in Fq2. False iff a is not a square (the accept set of libsnark's
+ * Fp2_model::sqrt). Which root is returned is unspecified. r may alias a. */
+bool bn_fq2_sqrt(struct bn_fq2 *r, const struct bn_fq2 *a);
 
 /* Fq6 = Fq2[v] / (v^3 - xi)  where xi = 9+u */
 struct bn_fq6 {
@@ -100,7 +103,9 @@ void bn_g1_double(struct bn_g1 *r, const struct bn_g1 *a);
 void bn_g1_to_affine(struct bn_fq *ax, struct bn_fq *ay, const struct bn_g1 *p);
 void bn_g1_scalar_mul(struct bn_g1 *r, const struct bn_g1 *p, const uint64_t scalar[4]);
 
-/* Decompress G1 point (33 bytes: 1 leading byte + 32 BE x-coordinate) */
+/* Decode a zclassicd CompressedG1 (33 bytes: lead byte 0x02|y_lsb, then x as
+ * 32 big-endian bytes, x < q). Any other lead byte is refused; there is no
+ * encoding of the point at infinity (zclassicd Proof.hpp:97-111). */
 bool bn_g1_decompress(struct bn_g1 *p, const uint8_t data[33]);
 
 /* G2: y^2 = x^3 + b' over Fq2 (Jacobian coordinates) */
@@ -120,7 +125,10 @@ void bn254_g2_one(struct bn_g2 *out);
 /* True iff the affine G2 point (z assumed 1) is on the BN254 twist curve. */
 bool bn_g2_is_on_curve(const struct bn_g2 *p);
 
-/* Decompress G2 point (65 bytes: 1 leading byte + 64 BE x-coordinate) */
+/* Decode a zclassicd CompressedG2 (65 bytes: lead byte 0x0a|y_gt, then x as a
+ * 64-byte big-endian FE2IP integer c1*q + c0 < q^2). Refuses any other lead
+ * byte, a non-square x^3 + b', and a point outside the order-r subgroup
+ * (zclassicd Proof.hpp:147-161, Proof.cpp:147-171). */
 bool bn_g2_decompress(struct bn_g2 *p, const uint8_t data[65]);
 
 /* Optimal Ate pairing on BN-254 */
@@ -210,5 +218,42 @@ bool sprout_verify_phgr13(const uint8_t proof[296],
                           const uint8_t cm2[32],
                           uint64_t vpub_old,
                           uint64_t vpub_new);
+
+#ifdef ZCL_TESTING
+/* ── Test hooks (bn254.c, ZCL_TESTING builds only) ─────────────
+ *
+ * The pairing, decoders and verifier run on one of two instances of the same
+ * engine (bn254_engine.inc): the portable multiply and the BMI2+ADX one. The
+ * hooks let test_bn254_engine_parity pick the instance and reach the internal
+ * operations it compares against the frozen pre-engine implementation. Not
+ * thread-safe against concurrent verifiers (the selection is global). */
+
+/* 0 = automatic, 1 = portable, 2 = BMI2+ADX. False (nothing changed) when the
+ * instance cannot run on this CPU. */
+bool bn254_test_select_engine(int which);
+const char *bn254_test_engine_name(void);
+
+/* Product of the Miller loops of n pairs, before the final exponentiation;
+ * pairs with an identity operand contribute 1. */
+void bn254_test_miller(struct bn_fq12 *r, const struct bn_g1 *p, const struct bn_g2 *q, size_t n);
+void bn254_test_final_exp(struct bn_fq12 *f);
+bool bn254_test_g2_in_subgroup(const struct bn_g2 *p);
+
+void bn254_test_fq12_mul(struct bn_fq12 *r, const struct bn_fq12 *a, const struct bn_fq12 *b);
+void bn254_test_fq12_sqr(struct bn_fq12 *r, const struct bn_fq12 *a);
+void bn254_test_fq12_cyc_sqr(struct bn_fq12 *r, const struct bn_fq12 *a);
+void bn254_test_fq12_inv(struct bn_fq12 *r, const struct bn_fq12 *a);
+void bn254_test_fq12_frob(struct bn_fq12 *r, const struct bn_fq12 *a, int power);
+void bn254_test_fq12_mul_by_024(struct bn_fq12 *f, const struct bn_fq2 *x0,
+                                const struct bn_fq2 *x4, const struct bn_fq2 *x2);
+void bn254_test_fq6_mul(struct bn_fq6 *r, const struct bn_fq6 *a, const struct bn_fq6 *b);
+void bn254_test_fq6_sqr(struct bn_fq6 *r, const struct bn_fq6 *a);
+void bn254_test_fq_inv(struct bn_fq *r, const struct bn_fq *a);
+bool bn254_test_fq_sqrt(struct bn_fq *r, const struct bn_fq *a);
+
+/* acc = ic[0] + sum in[i] * ic[i+1] as ppzksnark_verify computes it. */
+void bn254_test_msm(struct bn_g1 *acc, const struct ppzksnark_vk *vk,
+                    const uint64_t (*in)[4], size_t n);
+#endif
 
 #endif
