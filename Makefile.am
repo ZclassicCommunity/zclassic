@@ -29,6 +29,7 @@ COVERAGE_INFO = baseline_filtered_combined.info baseline.info \
 dist-hook:
 	-$(MAKE) -C $(top_distdir)/src/leveldb clean
 	-$(MAKE) -C $(top_distdir)/src/secp256k1 distclean
+	-find $(top_distdir)/src/c23 \( -name '*.o' -o -name '*.a' -o -name '.dirstamp' -o -name '.deps' \) -prune -exec rm -rf {} +
 	-$(GIT) archive --format=tar HEAD -- src/clientversion.cpp | $(AMTAR) -C $(top_distdir) -xf -
 
 distcheck-hook:
