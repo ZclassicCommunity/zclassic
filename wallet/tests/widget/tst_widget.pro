@@ -88,6 +88,7 @@ HEADERS += \
     ../../src/addresscombo.h \
     ../../src/notifyserver.h \
     ../../src/tokensmodel.h \
+    ../../src/pollguard.h \
     ../../src/tokensview.h \
     ../../src/tokenssend.h \
     ../../src/logger.h \

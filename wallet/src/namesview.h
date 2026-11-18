@@ -12,6 +12,7 @@
 #include <QObject>
 
 #include "namesmodel.h"
+#include "pollguard.h"
 
 class MainWindow;
 class QDialog;
@@ -51,7 +52,7 @@ private:
     QLineEdit*    updTarget_   = nullptr;
     QPushButton*  railButton_  = nullptr;
     bool          available_   = false;
-    bool          inFlight_    = false;
+    PollGuard     pollGuard_;   // one poll at a time, never stuck by a restart (see pollguard.h)
 };
 
 #endif // ZCL_NAMESVIEW_H

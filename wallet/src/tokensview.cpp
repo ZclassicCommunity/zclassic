@@ -23,6 +23,8 @@ using json = nlohmann::json;
 
 namespace {
 const int kPollMs = 15000;
+// How long a dialog request may stay unanswered before it is reported as "outcome unknown".
+const int kCallTimeoutMs = 120000;
 
 json payload(const char* method, json params = json::array())
 {
@@ -65,9 +67,33 @@ public:
             fail(QObject::tr("The wallet is not connected to the node."));
             return;
         }
+        if (conn->isShuttingDown()) {
+            // doRPC() would drop the call without answering either callback and the dialog would wait for ever.
+            fail(QObject::tr("The node is restarting. Check your transactions before trying again."));
+            return;
+        }
+        // Answer exactly once. Connection::doRPC() never answers a call that a shutdown or a restart drops, and
+        // nothing else bounds the wait: the dialog (which cannot be closed while it waits) would lock the whole
+        // wallet. A late answer, if it ever comes, is ignored.
+        auto answered = std::make_shared<bool>(false);
+        QTimer::singleShot(kCallTimeoutMs, main_, [answered, fail]() {
+            if (*answered)
+                return;
+            *answered = true;
+            fail(QObject::tr("The node did not answer in time. The outcome is unknown: check your transactions before "
+                             "trying again."));
+        });
         json p = {{"jsonrpc", "1.0"}, {"id", "tokens"}, {"method", method.toStdString()}, {"params", params}};
-        conn->doRPC(p, [ok](const json& result) { ok(result); },
-                    [fail](QNetworkReply* reply, const json& parsed) {
+        conn->doRPC(p, [ok, answered](const json& result) {
+                        if (*answered)
+                            return;
+                        *answered = true;
+                        ok(result);
+                    },
+                    [fail, answered](QNetworkReply* reply, const json& parsed) {
+                        if (*answered)
+                            return;
+                        *answered = true;
                         QString msg;
                         if (parsed.is_object()) {
                             auto e = parsed.find("error");
@@ -105,18 +131,20 @@ void TokensView::poll()
 {
     RPC* rpc = main_->getRPC();
     Connection* conn = rpc ? rpc->getConnection() : nullptr;
-    if (!conn || inFlight_)
+    if (!conn)
         return;
-    inFlight_ = true;
+    const PollGuard::Ticket ticket = pollGuard_.begin(conn, conn->isShuttingDown());
+    if (ticket == 0)
+        return;
     // A daemon without the index (or an old daemon without the command) answers with an error: the view hides.
-    conn->doRPC(payload("zslp_getindexinfo"), [this](const json& result) {
-        inFlight_ = false;
+    conn->doRPC(payload("zslp_getindexinfo"), [this, ticket](const json& result) {
+        pollGuard_.end(ticket);
         const tokens::IndexStatus st = tokens::parseIndexInfo(result);
         setAvailable(st.enabled);
         if (st.enabled)
             applyStatus(st);
-    }, [this](QNetworkReply*, const json&) {
-        inFlight_ = false;
+    }, [this, ticket](QNetworkReply*, const json&) {
+        pollGuard_.end(ticket);
         setAvailable(false);
     });
 }

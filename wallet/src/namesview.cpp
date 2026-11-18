@@ -70,12 +70,14 @@ void NamesView::poll()
 {
     RPC* rpc = main_->getRPC();
     Connection* conn = rpc ? rpc->getConnection() : nullptr;
-    if (!conn || inFlight_)
+    if (!conn)
         return;
-    inFlight_ = true;
+    const PollGuard::Ticket ticket = pollGuard_.begin(conn, conn->isShuttingDown());
+    if (ticket == 0)
+        return;
     // A daemon without the index answers {"enabled": false}; an old daemon answers an error. Either way: hidden.
-    conn->doRPC(payload("znam_getindexinfo"), [this](const json& result) {
-        inFlight_ = false;
+    conn->doRPC(payload("znam_getindexinfo"), [this, ticket](const json& result) {
+        pollGuard_.end(ticket);
         const names::IndexStatus st = names::parseIndexInfo(result);
         setAvailable(st.enabled);
         if (st.enabled && statusLabel_)
@@ -83,8 +85,8 @@ void NamesView::poll()
                                             : tr("Name index is building: %1%.").arg(int(st.progress * 100)));
         if (st.enabled && dialog_ && dialog_->isVisible())
             refreshNames();
-    }, [this](QNetworkReply*, const json&) {
-        inFlight_ = false;
+    }, [this, ticket](QNetworkReply*, const json&) {
+        pollGuard_.end(ticket);
         setAvailable(false);
     });
 }
