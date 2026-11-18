@@ -66,8 +66,6 @@
 #include <boost/thread.hpp>
 #include <openssl/crypto.h>
 
-#include <libsnark/common/profiling.hpp>
-
 #if ENABLE_ZMQ
 #include "zmq/zmqnotificationinterface.h"
 #endif
@@ -701,7 +699,7 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-rpcservertimeout=<n>", strprintf("Timeout during HTTP requests (default: %d)", DEFAULT_HTTP_SERVER_TIMEOUT));
     }
 
-    // Disabled until we can lock notes and also tune performance of libsnark which by default uses multiple threads
+    // Disabled until we can lock notes
     //strUsage += HelpMessageOpt("-rpcasyncthreads=<n>", strprintf(_("Set the number of threads to service Async RPC calls (default: %d)"), 1));
 
     if (mode == HMM_BITCOIND) {
@@ -1305,7 +1303,6 @@ bool InitSanityCheck(void)
     boost::filesystem::path sapling_output = ZC_GetParamsDir() / "sapling-output.params";
     boost::filesystem::path sapling_spend = ZC_GetParamsDir() / "sapling-spend.params";
     boost::filesystem::path sprout_groth16 = ZC_GetParamsDir() / "sprout-groth16.params";
-    boost::filesystem::path pk_path = ZC_GetParamsDir() / "sprout-proving.key";
     boost::filesystem::path vk_path = ZC_GetParamsDir() / "sprout-verifying.key";
 
     // If parameters are missing, fetch them from a bootstrap peer over the P2P
@@ -1341,7 +1338,6 @@ bool InitSanityCheck(void)
     }
 
     if (!(
-        boost::filesystem::exists(pk_path) &&
         boost::filesystem::exists(vk_path) &&
         boost::filesystem::exists(sapling_spend) &&
         boost::filesystem::exists(sapling_output) &&
@@ -1396,8 +1392,8 @@ bool InitSanityCheck(void)
 
         // FOLLOW-UP C: sprout-verifying.key is the SOLE consensus-relevant zk param
         // whose only pre-load integrity gate is the SHA-256 below (the 3 Sapling/
-        // Groth16 params have an independent BLAKE2b gate in librustzcash; the
-        // 910 MB sprout-proving.key is prove-only / local-liveness). The vk is
+        // Groth16 params have an independent BLAKE2b gate in the C23 core; there is
+        // no PHGR13 proving key any more: nothing here creates Sprout proofs). The vk is
         // tiny (1449 bytes), so re-hashing it every launch is free, and it is the
         // key consumed by JoinSplit verify() during tx/block validation -- so we
         // never honor a cached skip for it: a same-size+same-mtime silent on-disk
@@ -1530,12 +1526,10 @@ static void ZC_LoadParams(
     boost::filesystem::path sapling_output = ZC_GetParamsDir() / "sapling-output.params";
     boost::filesystem::path sapling_spend = ZC_GetParamsDir() / "sapling-spend.params";
     boost::filesystem::path sprout_groth16 = ZC_GetParamsDir() / "sprout-groth16.params";
-    boost::filesystem::path pk_path = ZC_GetParamsDir() / "sprout-proving.key";
     boost::filesystem::path vk_path = ZC_GetParamsDir() / "sprout-verifying.key";
 
     // redundant checks on startup is ok and more secure
     if (!(
-        boost::filesystem::exists(pk_path) &&
         boost::filesystem::exists(vk_path) &&
         boost::filesystem::exists(sapling_spend) &&
         boost::filesystem::exists(sapling_output) &&
@@ -1554,7 +1548,7 @@ static void ZC_LoadParams(
     LogPrintf("Loading verifying key from %s\n", vk_path.string().c_str());
     gettimeofday(&tv_start, 0);
 
-    pzcashParams = ZCJoinSplit::Prepared(vk_path.string(), pk_path.string());
+    pzcashParams = ZCJoinSplit::Prepared(vk_path.string());
 
     gettimeofday(&tv_end, 0);
     elapsed = float(tv_end.tv_sec-tv_start.tv_sec) + (tv_end.tv_usec-tv_start.tv_usec)/float(1000000);
@@ -1722,8 +1716,6 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             return InitError(_("Payment disclosure requires -experimentalfeatures."));
         } else if (mapArgs.count("-zmergetoaddress")) {
             return InitError(_("RPC method z_mergetoaddress requires -experimentalfeatures."));
-        } else if (mapArgs.count("-savesproutr1cs")) {
-            return InitError(_("Saving the Sprout R1CS requires -experimentalfeatures."));
         }
     }
 
@@ -2177,10 +2169,6 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         threadGroup.create_thread(&ThreadShowMetricsScreen);
     }
 
-    // These must be disabled for now, they are buggy and we probably don't
-    // want any of libsnark's profiling in production anyway.
-    libsnark::inhibit_profiling_info = true;
-    libsnark::inhibit_profiling_counters = true;
 
     g_startupTimer.mark("datadir-lock+threads");
     // Initialize Zclassic circuit parameters
@@ -2188,14 +2176,6 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     zcParamsLoader.Start(chainparams);
     g_startupTimer.mark("zk-snark params (started)");
 
-    if (GetBoolArg("-savesproutr1cs", false)) {
-        zcParamsLoader.Join();
-        boost::filesystem::path r1cs_path = ZC_GetParamsDir() / "r1cs";
-
-        LogPrintf("Saving Sprout R1CS to %s\n", r1cs_path.string());
-
-        pzcashParams->saveR1CS(r1cs_path.string());
-    }
 
     /* Start the RPC server already.  It will be started in "warmup" mode
      * and not really process calls already (but it will signify connections

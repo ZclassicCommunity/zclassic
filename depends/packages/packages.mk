@@ -1,5 +1,5 @@
 proton_packages := proton
-zcash_packages := libgmp libsodium
+zcash_packages := libsodium
 packages := boost openssl libevent zeromq $(zcash_packages) googletest
 native_packages := native_ccache
 

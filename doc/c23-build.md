@@ -49,7 +49,7 @@ archive of the daemon defines one. `make check-c23-vendor` verifies both vendore
   cross compile, a full mingw configure run needs a mingw `depends` prefix).
 - **Optimisation.** The C23 objects always end with `-O3`, whatever `CFLAGS`
   says. Release `CFLAGS`/`CXXFLAGS` from `depends` are `-O3` on Linux, Windows
-  and macOS, and libsnark is built with `OPTFLAGS=-O3`. A prefix built before
+  and macOS. A prefix built before
   this change has `-O2` in `share/config.site`; rebuild `depends` or the
   daemon's C++ stays at `-O2`.
 - **No `-march`.** Nothing in the release flags selects an instruction set.

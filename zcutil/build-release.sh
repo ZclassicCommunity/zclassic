@@ -83,7 +83,7 @@ if [ ! -f "$CONFIG_SITE_FILE" ]; then
 fi
 
 # Detect whether the tree was last configured for a DIFFERENT host. The in-tree
-# static libs (leveldb, univalue, snark) key off their own sources, not
+# static libs (leveldb, univalue) key off their own sources, not
 # config.h, so a plain `make` will NOT rebuild them on a host switch and the
 # link mixes object architectures (e.g. COFF libs into an ELF binary). Capture
 # the previous host before ./configure overwrites config.log.
@@ -98,39 +98,16 @@ CONFIG_SITE="$CONFIG_SITE_FILE" ./configure --prefix=/ --disable-tests $TOR_FLAG
 if [ -n "$PREV_HOST" ] && [ "$PREV_HOST" != "$HOST" ]; then
     echo "==> host changed ($PREV_HOST -> $HOST): cleaning stale build outputs to avoid mixing object architectures"
     "$MAKE" clean || true
-    # snark is in EXTRA_DIST (not SUBDIRS) so the top-level clean misses it.
-    "$MAKE" -C src/snark clean || true
 fi
 
 echo "==> [3/4] building zclassicd / zclassic-cli / zclassic-tx"
+# ZQW_STATIC_GOMP used to statically link the OpenMP runtime (libgomp), which
+# libsnark needed. The daemon no longer uses OpenMP, so there is nothing to link:
+# the variable is still accepted (older release scripts set it) and ignored.
 if [ -n "${ZQW_STATIC_GOMP:-}" ]; then
-    # Statically embed libgomp (OpenMP runtime) so the release node does NOT need
-    # libgomp.so.1 installed on the user's machine -- a fresh desktop often lacks it,
-    # which made the GUI's embedded node fail to start ("connection refused"). The
-    # implicit dynamic -lgomp from -fopenmp is dropped by --as-needed once the static
-    # archive (placed in LIBS, after the objects) resolves the OpenMP symbols; -ldl
-    # satisfies libgomp.a's dlopen/dlsym. Read the configured Makefile's LDFLAGS/LIBS
-    # first so the depends -L path and -lanl/-lrt are preserved (not clobbered).
-    # Use the TARGET's compiler so the static libgomp.a matches the binary's ABI:
-    # a win64 cross-build needs the mingw (PE) libgomp.a, not the host (ELF) one.
-    if [ "$TARGET" = "win64" ]; then
-        GOMPA="$(x86_64-w64-mingw32-gcc -print-file-name=libgomp.a 2>/dev/null)"
-    else
-        GOMPA="$(gcc -print-file-name=libgomp.a)"
-    fi
-    if [ ! -f "$GOMPA" ]; then
-        echo "error: ZQW_STATIC_GOMP set but static libgomp.a not found ($GOMPA)" >&2
-        exit 1
-    fi
-    CUR_LDFLAGS="$(sed -n 's/^LDFLAGS = //p' src/Makefile | head -1)"
-    CUR_LIBS="$(sed -n 's/^LIBS = //p' src/Makefile | head -1)"
-    echo "    (static libgomp: $GOMPA)"
-    "$MAKE" "${MAKEARGS[@]}" \
-        LDFLAGS="$CUR_LDFLAGS -Wl,--as-needed" \
-        LIBS="$CUR_LIBS $GOMPA -ldl"
-else
-    "$MAKE" "${MAKEARGS[@]}"
+    echo "    (ZQW_STATIC_GOMP is ignored: the daemon has no OpenMP dependency)"
 fi
+"$MAKE" "${MAKEARGS[@]}"
 
 OUT="release/$HOST"
 mkdir -p "$OUT"

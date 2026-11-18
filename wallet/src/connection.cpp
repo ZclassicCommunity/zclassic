@@ -267,9 +267,9 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
     // (downloadParams() is retained but no longer on the startup path.)
     if (!verifyParams()) {
         main->logger->write("zk-params not all present locally; deferring to the daemon's hash-verified peer-fetch");
-        // Item 3: params are missing, so the daemon will peer-fetch ~1.7GB before it even
+        // Item 3: params are missing, so the daemon will peer-fetch ~780MB before it even
         // binds its RPC port (ZC_LoadParams runs before AppInitServers). Latch this so the
-        // refused-connection warmup branch below shows the accurate "one-time 1.7GB, 10-20
+        // refused-connection warmup branch below shows the accurate "one-time 780MB, 10-20
         // min" copy instead of a frozen "Almost ready" line for the whole download. Latch-
         // only (never cleared back to false here): once the params land, getinfo succeeds
         // and the snapshot/IBD pollers overwrite the status text every poll regardless.
@@ -370,7 +370,7 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
                 // Static fallback FIRST (covers the brief pre-RPC-bind window and an
                 // older daemon with no getbootstrapinfo).
                 //
-                // Item 3: on a FRESH install the daemon peer-fetches ~1.7GB of zk-params
+                // Item 3: on a FRESH install the daemon peer-fetches ~780MB of zk-params
                 // in ZC_LoadParams BEFORE it binds its RPC port (ZC_LoadParams precedes
                 // AppInitServers in init.cpp). During that 10-20 min the port is fully
                 // REFUSING, so this branch — not getbootstrapinfo — is all the user sees,
@@ -382,7 +382,7 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
                 // below takes over with real percent.
                 if (ezParamFetchLikely) {
                     this->showInformation(QObject::tr("Step 1 of 3: Getting the security files ready…"),
-                        QObject::tr("One-time download of about 1.7 GB — on a typical home "
+                        QObject::tr("One-time download of about 780 MB — on a typical home "
                             "connection this takes 10–20 minutes. You only do this once."));
                 } else {
                     this->showInformation(QObject::tr("Step 2 of 3: Starting your wallet…"),
@@ -525,13 +525,13 @@ void ConnectionLoader::createZClassicConf() {
 void ConnectionLoader::downloadParams(std::function<void(void)> cb) {
     main->logger->write("Adding params to download queue");
 
-    // P1-7: make sure there is enough room before pulling ~1.7GB of security files.
+    // P1-7: make sure there is enough room before pulling ~780MB of security files.
     if (!ensureEnoughDiskSpace(zcashParamsDir()))
         return;
 
     // P1-1: this is Step 1 of onboarding.
     this->showInformation(QObject::tr("Step 1 of 3: Getting the security files ready…"),
-                          QObject::tr("One-time download of about 1.7 GB — on a typical home connection this takes 10–20 minutes. You only do this once."));
+                          QObject::tr("One-time download of about 780 MB — on a typical home connection this takes 10–20 minutes. You only do this once."));
 
     // Add all the files to the download queue
     downloadQueue = new QQueue<QUrl>();
@@ -539,7 +539,6 @@ void ConnectionLoader::downloadParams(std::function<void(void)> cb) {
     
     downloadQueue->enqueue(QUrl("https://z.cash/downloads/sapling-output.params"));
     downloadQueue->enqueue(QUrl("https://z.cash/downloads/sapling-spend.params"));    
-    downloadQueue->enqueue(QUrl("https://z.cash/downloads/sprout-proving.key"));
     downloadQueue->enqueue(QUrl("https://z.cash/downloads/sprout-verifying.key"));
     downloadQueue->enqueue(QUrl("https://z.cash/downloads/sprout-groth16.params"));
 
@@ -2655,7 +2654,6 @@ bool ConnectionLoader::verifyParams() {
 
     if (!QFile(paramsDir.filePath("sapling-output.params")).exists()) return false;
     if (!QFile(paramsDir.filePath("sapling-spend.params")).exists()) return false;
-    if (!QFile(paramsDir.filePath("sprout-proving.key")).exists()) return false;
     if (!QFile(paramsDir.filePath("sprout-verifying.key")).exists()) return false;
     if (!QFile(paramsDir.filePath("sprout-groth16.params")).exists()) return false;
 
@@ -3145,7 +3143,7 @@ std::shared_ptr<ConnectionConfig> ConnectionLoader::loadFromSettings() {
 
 
 
-// P1-7: refuse to start a ~1.7GB download / heavy sync when the disk is nearly full.
+// P1-7: refuse to start a ~780MB download / heavy sync when the disk is nearly full.
 bool ConnectionLoader::ensureEnoughDiskSpace(const QString& path) {
     QStorageInfo storage(path);
     if (!storage.isValid() || !storage.isReady()) {

@@ -107,7 +107,7 @@ To produce macOS binaries, run the native build on macOS (Apple Silicon arm64 bu
 
 ### First Run: Fetch ZCash Parameters
 
-Before running `zclassicd`, obtain the ZCash proving parameters (~1.6 GB):
+Before running `zclassicd`, obtain the ZCash proving parameters (~0.8 GB):
 
 ```bash
 ./zcutil/fetch-params.sh

@@ -16,6 +16,12 @@ fresh() { local n=$1; shift; start "$n" "$BIN" -connect=127.0.0.1:$((BASE + 1)) 
 
 # ---------------------------------------------------------------- 3
 scn_sprout() {
+    # Sprout notes before Sapling exist only as PHGR13 JoinSplits, which a current
+    # binary verifies but can no longer create: the miner must be a binary that can.
+    if [ "$PEER_BIN" = "$BIN" ]; then
+        echo "needs a PHGR13-capable miner (--peer-bin <previous release>): the binary under test cannot create PHGR13 proofs" >"$SD/skip"
+        return
+    fi
     NU_ARGS="-nuparams=5ba81b19:230 -nuparams=76b809bb:240"
     setup2 || return
     sp=$(cli 0 z_getnewaddress sprout); sp2=$(cli 0 z_getnewaddress sprout)
@@ -27,16 +33,19 @@ scn_sprout() {
     ck "sprout note received (t->sprout)" "$(zbal 0 "$sp")" 4.00000000
     ck "sprout memo" "$(cli 0 z_listreceivedbyaddress "$sp" | jq -r '.[0].memo' | cut -c1-10)" 48656c6c6f
     ta=$(cli 0 getnewaddress)
-    zconfirm 0 "$sp" "[{\"address\":\"$ta\",\"amount\":1}]" >/dev/null
-    ck "sprout -> t before Sapling: z balance" "$(zbal 0 "$sp")" "$(add 4 -1 -$FEE)"
-    ck "sprout -> t before Sapling: t balance" "$(bal 0)" 1.00000000
-    zconfirm 0 "$sp" "[{\"address\":\"$sp2\",\"amount\":1}]" >/dev/null
-    ck "sprout -> sprout before Sapling" "$(zbal 0 "$sp2")" 1.00000000
+    # The binary under test cannot create a PHGR13 proof: both spends before Sapling are
+    # refused with an error that says why, and nothing changes.
+    r=$(zsend 0 "$sp" "[{\"address\":\"$ta\",\"amount\":1}]")
+    ck "sprout -> t before Sapling is refused, naming PHGR13" "$(printf %s "$r" | grep -c 'PHGR13 proofs can no longer be created')" 1
+    r=$(zsend 0 "$sp" "[{\"address\":\"$sp2\",\"amount\":1}]")
+    ck "sprout -> sprout before Sapling is refused, naming PHGR13" "$(printf %s "$r" | grep -c 'PHGR13 proofs can no longer be created')" 1
+    ck "refused spends leave the note untouched" "$(zbal 0 "$sp")" 4.00000000
+    obs "sprout_spend_before_sapling" "$(printf %s "$r" | cut -c1-150)"
     s1=$(snap 0); stop 0; start 0 "$BIN" -connect=127.0.0.1:$((BASE + 1)); ck "restart keeps sprout notes" "$(snap 0)" "$s1"
     # cross Sapling activation with the wallet holding Sprout notes
     cli 1 generate 135 >/dev/null; sync_to 0
     ck "chain is past Sapling" "$([ "$(cli 0 getblockcount)" -gt 241 ] && echo yes)" yes
-    ck "sprout notes survive activation" "$(zbal 0 "$sp")" "$(add 4 -1 -$FEE -1 -$FEE)"
+    ck "sprout notes survive activation" "$(zbal 0 "$sp")" 4.00000000
     zs=$(cli 0 z_getnewaddress)
     r=$(zsend 0 "$sp" "[{\"address\":\"$zs\",\"amount\":0.5}]"); obs "sprout_to_sapling_after_activation" "$(printf %s "$r" | sed 's/success .*/success/' | cut -c1-100)"
     case $r in success*) mine 1; ck "sprout -> sapling moved value" "$(zbal 0 "$zs")" 0.50000000 ;; esac

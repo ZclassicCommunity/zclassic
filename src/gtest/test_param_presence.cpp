@@ -22,7 +22,6 @@ const ParamFile kParams[] = {
     {"sapling-output.params", 3592860ULL},
     {"sapling-spend.params",  47958396ULL},
     {"sprout-groth16.params", 725523612ULL},
-    {"sprout-proving.key",    910173851ULL},
     {"sprout-verifying.key",  1449ULL},
 };
 const size_t kParamCount = sizeof(kParams) / sizeof(kParams[0]);
@@ -111,7 +110,7 @@ TEST(ParamPresence, AllPresentCorrectSize) {
 TEST(ParamPresence, MissingFileNotPresent) {
     boost::filesystem::path dir = MakeTmpDir();
     // Use only the small files so this case never needs sparse support; the
-    // largest two (groth16, proving.key) are intentionally absent, which is
+    // largest (groth16) is intentionally absent, which is
     // exactly what we assert is "not present". Build all but [0] (output),
     // restricting to files <= kMaxNonSparseSize so writes are always cheap.
     for (size_t i = 1; i < kParamCount; ++i) {
