@@ -1076,6 +1076,21 @@ TEST_F(TokenGuardTest, TokenGuardSwitchOffSpendsEverything)
     EXPECT_EQ(1u, inputs.count(COutPoint(txidGenesis, 2)));
     EXPECT_EQ(std::string::npos, strFail.find("carries ZSLP tokens")) << strFail;
 
+    // a token transaction (fAllowTokenOutputs: zslp_send, fundrawtransaction allowtokeninputs)
+    // still never takes an unselected token output as a fee coin: that would burn its tokens
+    CCoinControl tok;
+    tok.fAllowOtherInputs = true;
+    tok.fAllowTokenOutputs = true;
+    tok.Select(COutPoint(txidGenesis, 1));
+    EXPECT_FALSE(Create(wallet, nOrdinaryValue + 1000, true, &tok, inputs, strFail));
+    EXPECT_EQ(0u, strFail.find("Insufficient funds")) << strFail;
+    for (int i = 0; i < 20; i++) {
+        const CAmount nTarget = 1000 + (CAmount)GetRand(nOrdinaryValue - 200000);
+        ASSERT_TRUE(Create(wallet, nTarget, false, &tok, inputs, strFail)) << strFail << " target " << nTarget;
+        ASSERT_EQ(1u, CountProtected(inputs)) << "target " << nTarget;
+        ASSERT_EQ(1u, inputs.count(COutPoint(txidGenesis, 1)));
+    }
+
     // the classification itself, which zslp_listunspent and the zslp_* RPCs use, does not change
     EXPECT_TRUE(wallet->mapWallet[txidGenesis].IsTokenBearingOutput(1));
     EXPECT_FALSE(wallet->mapWallet[txidGenesis].IsTokenGuarded(1));

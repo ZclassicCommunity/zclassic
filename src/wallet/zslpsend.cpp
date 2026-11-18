@@ -244,11 +244,11 @@ bool BuildAndSend(CWallet* wallet, ZslpService& svc, const TokenLayout& layout, 
     cc.fAllowOtherInputs = true; // ordinary ZCL coins may be added for the fee, but never token outputs
     cc.fChangeLast = true;       // the ZCL change must not take a token slot
     cc.nFixedFee = fixedFee;
-    if (!inputs.empty()) {
-        cc.fAllowTokenOutputs = true; // only the outputs selected below
-        for (size_t i = 0; i < inputs.size(); i++)
-            cc.Select(inputs[i].op);
-    }
+    // A token transaction: only the outputs selected below (none for a GENESIS) may
+    // carry tokens, whatever -tokenguard says about ordinary sends.
+    cc.fAllowTokenOutputs = true;
+    for (size_t i = 0; i < inputs.size(); i++)
+        cc.Select(inputs[i].op);
 
     std::vector<CRecipient> vecSend;
     for (size_t i = 0; i < layout.vout.size(); i++) {

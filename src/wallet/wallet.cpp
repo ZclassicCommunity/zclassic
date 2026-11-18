@@ -3563,12 +3563,17 @@ bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, int nConfMine, int
  * vCoins, except one the caller selected explicitly AND asked to be allowed
  * (CCoinControl::fAllowTokenOutputs). AvailableCoins itself is deliberately
  * left alone, so listunspent and balances still show the dust.
+ * -tokenguard=0 lifts this for ordinary sends only: a caller that sets
+ * fAllowTokenOutputs builds a token transaction (zslp_send/mint/burn/genesis,
+ * fundrawtransaction allowtokeninputs=true), where an unselected token output
+ * taken as a fee coin would burn its tokens or make the transaction invalid.
  */
 static void FilterTokenBearingCoins(vector<COutput>& vCoins, const CCoinControl* coinControl, CTokenGuardReport* pReport)
 {
+    const bool fTokenTx = coinControl && coinControl->fAllowTokenOutputs;
     for (vector<COutput>::iterator it = vCoins.begin(); it != vCoins.end();)
     {
-        if (!it->tx->IsTokenGuarded(it->i)) {
+        if (!(fTokenTx ? it->tx->IsTokenBearingOutput(it->i) : it->tx->IsTokenGuarded(it->i))) {
             ++it;
             continue;
         }
