@@ -78,6 +78,7 @@
 #include <sys/prctl.h>
 #endif
 
+#include <atomic>
 #include <boost/algorithm/string/case_conv.hpp> // for to_lower()
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/predicate.hpp> // for startswith() and endswith()
@@ -1052,4 +1053,41 @@ int GetNumCores()
 // Obtain the application startup time (used for uptime calculation)
 int64_t GetStartupTime() {
     return nStartupTime;
+}
+
+/**
+ * Test-only crash hook. Inert unless -testcrashpoint=<name>[:<n>] is given, in
+ * which case the process leaves immediately with _exit(77) (no destructors, no
+ * flushes, like a kill -9 that lands at exactly this point) the <n>th time
+ * (default 1) execution passes the call site registered under <name>. The
+ * name "any" matches every call site, so "any:<n>" kills at the <n>th hook of
+ * any kind. Used by qa/rpc-tests/wallet_crash_consistency.sh.
+ */
+void TestCrashPoint(const char* name)
+{
+    struct Spec {
+        std::string name;
+        long n = 1;
+        bool armed = false;
+        Spec() {
+            std::string s = GetArg("-testcrashpoint", "");
+            if (s.empty()) return;
+            size_t colon = s.rfind(':');
+            if (colon != std::string::npos) {
+                n = atol(s.substr(colon + 1).c_str());
+                if (n < 1) n = 1;
+                s = s.substr(0, colon);
+            }
+            name = s;
+            armed = !name.empty();
+        }
+    };
+    static const Spec spec;
+    if (!spec.armed) return;
+    if (spec.name != "any" && spec.name != name) return;
+    static std::atomic<long> hits(0);
+    if (++hits < spec.n) return;
+    fprintf(stderr, "testcrashpoint: exiting at %s (hit %ld)\n", name, (long)hits);
+    LogPrintf("testcrashpoint: exiting at %s (hit %ld)\n", name, (long)hits);
+    _exit(77);
 }

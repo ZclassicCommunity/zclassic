@@ -853,6 +853,19 @@ public:
 
     void ClearNoteWitnessCache();
 
+    /**
+     * Startup self-check of the note state read from wallet.dat against the active chain.
+     *
+     * pindexRescan is the block the startup rescan would begin at (the fork of the stored
+     * best-block locator). Witness caches that are ahead of the chain tip are cut back to it,
+     * caches that do not match what the chain committed to are dropped, a Sapling nullifier
+     * that is missing next to its witness is derived again, and pindexRescan is lowered to the
+     * first block the rescan has to include so every cache can be brought to the tip.
+     * Nothing is deleted from the wallet but cached witness data, which a rescan rebuilds.
+     * Returns true if the in-memory state changed and should be written back.
+     */
+    bool ReconcileNoteState(CBlockIndex*& pindexRescan);
+
 protected:
     /**
      * pindex is the new tip being connected.
@@ -927,6 +940,7 @@ protected:
 
     template <typename WalletDB>
     void SetBestChainINTERNAL(WalletDB& walletdb, const CBlockLocator& loc) {
+        TestCrashPoint("setbestchain-begin");
         if (!walletdb.TxnBegin()) {
             // This needs to be done atomically, so don't do it at all
             LogPrintf("SetBestChain(): Couldn't start atomic write\n");
@@ -947,6 +961,7 @@ protected:
                     }
                 }
             }
+            TestCrashPoint("setbestchain-after-txs");
             if (!walletdb.WriteWitnessCacheSize(nWitnessCacheSize)) {
                 LogPrintf("SetBestChain(): Failed to write nWitnessCacheSize, aborting atomic write\n");
                 walletdb.TxnAbort();
@@ -957,6 +972,7 @@ protected:
                 walletdb.TxnAbort();
                 return;
             }
+            TestCrashPoint("setbestchain-after-locator");
         } catch (const std::exception &exc) {
             // Unexpected failure
             LogPrintf("SetBestChain(): Unexpected error during atomic write:\n");
@@ -969,6 +985,7 @@ protected:
             LogPrintf("SetBestChain(): Couldn't commit atomic write\n");
             return;
         }
+        TestCrashPoint("setbestchain-after-commit");
     }
 
 private:
