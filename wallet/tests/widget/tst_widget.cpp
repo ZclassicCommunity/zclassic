@@ -47,6 +47,10 @@
 #include <QFontMetrics>
 #include <QWidget>
 #include <QDialog>
+#include <QDialogButtonBox>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QScreen>
 #include <QTimer>
 #include <QSettings>
 #include <QMessageBox>
@@ -1120,6 +1124,90 @@ private slots:
         QVERIFY2(clipped.isEmpty(), qPrintable("confirm dialog rows clipped: " + clipped));
         Settings::getInstance()->setSyncing(false);
         Settings::getInstance()->setPeers(8);
+        settleAndDelete(w);
+    }
+
+    // A send whose rows do not fit under the dialog's 90%-of-screen cap scrolls the
+    // recipients instead of squeezing them. The user must not be able to confirm rows
+    // they cannot see without being told: the scroll bar is always shown, a notice with
+    // the row count and total sits OUTSIDE the scroll area, the buttons stay on screen,
+    // every row keeps its full wrapped height and the rows stay in send order.
+    void ux3b_confirmDialogScrollKeepsTotalsAndButtonsVisible() {
+        MainWindow* w = makeWindow();
+        w->testSeedBalances();
+        const QString T  = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+        const QString ZS = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        const int n = 16;
+        Tx tx; tx.fromAddr = T; tx.fee = 0.0001;
+        for (int i = 0; i < n; ++i) {
+            ToFields a; a.addr = ZS; a.amount = 0.01 * (i + 1);
+            a.txtMemo = QStringLiteral("memo for row %1").arg(i + 1);
+            tx.toAddrs.append(a);
+        }
+
+        QString problems = QStringLiteral("dialog never appeared");
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            QWidget* dlg = QApplication::activeModalWidget();
+            if (!dlg) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+            problems.clear();
+            auto* area = dlg->findChild<QScrollArea*>("confirmScrollArea");
+            auto* notice = dlg->findChild<QLabel*>("confirmScrollNotice");
+            auto* buttons = dlg->findChild<QDialogButtonBox*>("buttonBox");
+            if (!area) problems += "no scroll area for an overfull dialog; ";
+            if (!notice) problems += "no scroll notice; ";
+            if (!buttons) problems += "no button box; ";
+            if (QScreen* sc = QGuiApplication::primaryScreen())
+                if (dlg->height() > int(sc->availableGeometry().height() * 0.9) + 1)
+                    problems += QString("dialog h=%1 exceeds the screen cap; ").arg(dlg->height());
+            if (area) {
+                if (area->verticalScrollBarPolicy() != Qt::ScrollBarAlwaysOn)
+                    problems += "vertical scroll bar policy is not AlwaysOn; ";
+                if (!area->verticalScrollBar()->isVisibleTo(dlg) || area->verticalScrollBar()->maximum() <= 0)
+                    problems += "scroll bar not visible or nothing to scroll; ";
+                if (!(area->focusPolicy() & Qt::TabFocus))
+                    problems += "scroll area cannot be reached with the keyboard; ";
+                if (notice && area->isAncestorOf(notice)) problems += "notice scrolls away; ";
+                if (buttons && area->isAncestorOf(buttons)) problems += "buttons scroll away; ";
+            }
+            const QRect inside = dlg->rect();
+            for (QWidget* must : {static_cast<QWidget*>(notice), static_cast<QWidget*>(buttons)}) {
+                if (!must) continue;
+                const QRect r(must->mapTo(dlg, QPoint(0, 0)), must->size());
+                if (!must->isVisibleTo(dlg) || !inside.contains(r) || must->height() < must->minimumSizeHint().height())
+                    problems += QString("%1 not fully on the dialog; ").arg(must->objectName());
+            }
+            if (notice) {
+                if (!notice->text().contains(QString::number(n + 1)))
+                    problems += "notice lacks the row count: " + notice->text() + "; ";
+                double total = tx.fee;
+                for (const auto& t : tx.toAddrs) total += t.amount;
+                if (!notice->text().contains(Settings::getZCLDisplayFormat(total)))
+                    problems += "notice lacks the total: " + notice->text() + "; ";
+            }
+            int lastY = -1;
+            for (int i = 1; i <= n; ++i) {
+                QLabel* a = dlg->findChild<QLabel*>(QString("Addr%1").arg(i));
+                QLabel* m = dlg->findChild<QLabel*>(QString("Memo%1").arg(i));
+                if (!a || !m) { problems += QString("row %1 missing; ").arg(i); continue; }
+                const int y = a->mapTo(dlg, QPoint(0, 0)).y();
+                if (y <= lastY) problems += QString("row %1 out of order; ").arg(i);
+                lastY = y;
+            }
+            for (QLabel* l : dlg->findChildren<QLabel*>()) {
+                if (!l->isVisibleTo(dlg) || l->text().isEmpty()) continue;
+                int need = l->hasHeightForWidth() ? l->heightForWidth(l->width()) : l->sizeHint().height();
+                if (l->height() + 1 < need)
+                    problems += QString("%1 h=%2 need=%3; ").arg(l->objectName()).arg(l->height()).arg(need);
+            }
+            if (!dlg->findChild<QLabel*>("minerFee")) problems += "fee row missing; ";
+            if (auto* qd = qobject_cast<QDialog*>(dlg)) qd->reject();
+        };
+        QTimer::singleShot(0, [&]() { poll(300); });
+        w->testConfirmTx(tx);
+        ++_modalGen;
+        QVERIFY2(problems.isEmpty(), qPrintable("scrolling confirm dialog: " + problems));
         settleAndDelete(w);
     }
 
