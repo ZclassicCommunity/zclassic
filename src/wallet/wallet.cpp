@@ -3730,8 +3730,13 @@ bool CWallet::FundTransaction(CMutableTransaction& tx, CAmount &nFeeRet, int& nC
     coinControl.fAllowOtherInputs = true;
     coinControl.fAllowTokenOutputs = fAllowTokenInputs;
     // A token transaction names its outputs by position (OP_RETURN at vout[0],
-    // token outputs after it): the change must not be inserted among them.
+    // token outputs after it): the change must not be inserted among them. That
+    // holds with token inputs, and for any transaction that already carries an
+    // OP_RETURN message (a hand-built GENESIS has no token input).
     coinControl.fChangeLast = fAllowTokenInputs;
+    BOOST_FOREACH(const CTxOut& txOut, tx.vout)
+        if (!txOut.scriptPubKey.empty() && txOut.scriptPubKey[0] == OP_RETURN)
+            coinControl.fChangeLast = true;
     BOOST_FOREACH(const CTxIn& txin, tx.vin)
         coinControl.Select(txin.prevout);
 

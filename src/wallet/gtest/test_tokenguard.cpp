@@ -1048,6 +1048,28 @@ TEST_F(TokenGuardTest, FundTransactionWithTokenInputsKeepsTheChangeLast)
     }
 }
 
+// Without allowtokeninputs (a GENESIS spends no token input) the OP_RETURN
+// message alone keeps the change out of the token slots.
+TEST_F(TokenGuardTest, FundTransactionWithAnOpReturnKeepsTheChangeLast)
+{
+    StandardScenario();
+    std::string strFail;
+    for (int i = 0; i < 40; i++) {
+        CMutableTransaction mtx;
+        mtx.vout.push_back(Data(SlpGenesis(2, 1000)));
+        mtx.vout.push_back(CTxOut(COIN / 5, scriptOther));
+        mtx.vout.push_back(CTxOut(COIN / 6, scriptMine));
+        const std::vector<CTxOut> original(mtx.vout);
+        CAmount nFee = 0;
+        int nChangePos = -2;
+        ASSERT_TRUE(wallet->FundTransaction(mtx, nFee, nChangePos, strFail, false)) << strFail;
+        ASSERT_EQ(original.size() + 1, mtx.vout.size());
+        ASSERT_EQ((int)original.size(), nChangePos);
+        for (size_t j = 0; j < original.size(); j++)
+            ASSERT_TRUE(mtx.vout[j] == original[j]) << "output " << j << " moved";
+    }
+}
+
 TEST_F(TokenGuardTest, TokenGuardSwitchOffSpendsEverything)
 {
     StandardScenario();
