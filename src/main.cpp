@@ -4612,8 +4612,11 @@ bool FindBlockPos(CValidationState &state, CDiskBlockPos &pos, unsigned int nAdd
     }
 
     vinfoBlockFile[nFile].AddBlock(nHeight, nTime);
+    // Known position (reindex): pos.nPos is the DATA start, after the 8-byte
+    // magic+length header that nAddSize also counts, so the record ends at
+    // pos.nPos + nAddSize - 8. Counting the header twice leaves an 8-byte hole.
     if (fKnown)
-        vinfoBlockFile[nFile].nSize = std::max(pos.nPos + nAddSize, vinfoBlockFile[nFile].nSize);
+        vinfoBlockFile[nFile].nSize = std::max(pos.nPos + nAddSize - 8, vinfoBlockFile[nFile].nSize);
     else
         vinfoBlockFile[nFile].nSize += nAddSize;
 
@@ -5926,6 +5929,11 @@ bool LoadExternalBlockFile(FILE* fileIn, CDiskBlockPos *dbp)
                 blkdat.SetPos(nBlockPos);
                 CBlock block;
                 blkdat >> block;
+                // A well-formed record consumes exactly its declared length. A stale or
+                // misaligned header can deserialize into garbage; reject it so the scan
+                // resumes one byte past that magic (nRewind) and finds the real record.
+                if (blkdat.GetPos() != nBlockPos + nSize)
+                    throw std::ios_base::failure("block record length does not match its header");
                 nRewind = blkdat.GetPos();
 
                 // detect out of order blocks, and store them for later
