@@ -22,6 +22,7 @@
 #include "c23/services/glue/zcl_slp_index.h"
 #include "c23/services/glue/zcl_token_guard.h"
 
+#include <boost/filesystem.hpp>
 #include <boost/test/unit_test.hpp>
 #include <set>
 #include <univalue.h>
@@ -906,6 +907,46 @@ BOOST_AUTO_TEST_CASE(review_random_reorgs_equal_rebuild)
     BOOST_TEST_MESSAGE(strprintf("random reorgs: %u valid, %u invalid, %u unknown, %u burn transactions survive", nValid, nInvalid, nUnknown, nBurn));
     // the sequences must exercise every outcome, or the comparison proves little
     BOOST_CHECK(nValid > 100 && nInvalid > 100 && nUnknown > 10 && nBurn > 10);
+}
+
+// The LevelDB-backed store must take empty values and an empty scan prefix:
+// the ZNAM index writes records whose value is empty. A build with the checked
+// standard library (--enable-debug) aborted here in CDBBatch::Write, which
+// took &ss[0] of an empty stream.
+BOOST_AUTO_TEST_CASE(leveldb_store_accepts_empty_values_and_prefix)
+{
+    const boost::filesystem::path dir = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+    {
+        LevelKV kv(dir.string(), 1 << 20, true, false);
+        std::vector<KV::Op> ops;
+        KV::Op a; a.key = "a"; a.erase = false; a.value = "";
+        KV::Op b; b.key = "b"; b.erase = false; b.value = "x";
+        ops.push_back(a);
+        ops.push_back(b);
+        BOOST_CHECK(kv.WriteBatch(ops, false));
+
+        std::string v = "sentinel";
+        BOOST_CHECK(kv.Get("a", v));
+        BOOST_CHECK(v.empty());
+        BOOST_CHECK(kv.Get("b", v));
+        BOOST_CHECK_EQUAL(v, "x");
+
+        std::vector<std::pair<std::string, std::string> > seen;
+        kv.Scan("", [&](const std::string& k, const std::string& val) {
+            seen.push_back(std::make_pair(k, val));
+            return true;
+        });
+        BOOST_REQUIRE_EQUAL(seen.size(), (size_t)2);
+        BOOST_CHECK(seen[0] == std::make_pair(std::string("a"), std::string()));
+        BOOST_CHECK(seen[1] == std::make_pair(std::string("b"), std::string("x")));
+
+        std::vector<KV::Op> del;
+        KV::Op e; e.key = "a"; e.erase = true;
+        del.push_back(e);
+        BOOST_CHECK(kv.WriteBatch(del, false));
+        BOOST_CHECK(!kv.Get("a", v));
+    }
+    boost::filesystem::remove_all(dir);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
