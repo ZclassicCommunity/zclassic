@@ -60,6 +60,7 @@ public:
                                 SaplingMerkleTree& saplingTree) {
         CWallet::IncrementNoteWitnesses(pindex, pblock, sproutTree, saplingTree);
     }
+    bool NoteWitnessesLost() const { return fNoteWitnessesLost; }
     void DecrementNoteWitnesses(const CBlockIndex* pindex) {
         CWallet::DecrementNoteWitnesses(pindex);
     }
@@ -1660,9 +1661,72 @@ TEST(WalletTests, CachedWitnessesEmptyChain) {
     EXPECT_TRUE((bool) sproutWitnesses[1]);
     EXPECT_TRUE((bool) saplingWitnesses[0]);
 
-    // Until #1302 is implemented, this should triggger an assertion
-    EXPECT_DEATH(wallet.DecrementNoteWitnesses(&index),
-                 ".*nWitnessCacheSize > 0.*");
+    // The cache holds only this block, so rolling it back empties it. This
+    // used to abort the daemon (assert nWitnessCacheSize > 0); the notes of
+    // the removed block simply lose their witness and nothing is lost.
+    wallet.DecrementNoteWitnesses(&index);
+    EXPECT_EQ(0, wallet.nWitnessCacheSize);
+    EXPECT_FALSE(wallet.NoteWitnessesLost());
+    ::GetWitnessesAndAnchors(wallet, sproutNotes, saplingNotes, sproutWitnesses, saplingWitnesses);
+    EXPECT_FALSE((bool) sproutWitnesses[0]);
+    EXPECT_FALSE((bool) sproutWitnesses[1]);
+    EXPECT_FALSE((bool) saplingWitnesses[0]);
+}
+
+TEST(WalletTests, DecrementWithoutCacheDoesNotAbort) {
+    // A wallet that never saw a block connect (new wallet, wallet created
+    // over an existing chain, reorg to genesis) must survive a disconnect.
+    TestWallet wallet;
+    CBlock block;
+    CBlockIndex index(block);
+    index.nHeight = 7;
+    EXPECT_EQ(0, wallet.nWitnessCacheSize);
+    wallet.DecrementNoteWitnesses(&index);
+    wallet.DecrementNoteWitnesses(&index);
+    EXPECT_EQ(0, wallet.nWitnessCacheSize);
+    EXPECT_FALSE(wallet.NoteWitnessesLost());
+}
+
+TEST(WalletTests, DecrementPastCacheMarksOlderNotesLost) {
+    // A note confirmed in an older block, whose cache is one block deep,
+    // cannot be rolled back to the block below: the wallet must say so
+    // (to rebuild its witnesses) instead of keeping a stale witness.
+    TestWallet wallet;
+    auto sk = libzcash::SproutSpendingKey::random();
+    wallet.AddSproutSpendingKey(sk);
+
+    CWalletTx wtx = GetValidSproutReceive(sk, 10, true, 4);
+    JSOutPoint jsoutpt {wtx.GetHash(), 0, 0};
+    auto nullifier = GetSproutNote(sk, wtx, 0, 0).nullifier(sk);
+    mapSproutNoteData_t sproutNoteData;
+    sproutNoteData[jsoutpt] = SproutNoteData {sk.address(), nullifier};
+    wtx.SetSproutNoteData(sproutNoteData);
+    wallet.AddToWallet(wtx, true, NULL);
+    CBlock block;
+    block.vtx.push_back(wtx);
+    CBlockIndex index(block);
+    index.nHeight = 5;
+    SproutMerkleTree sproutTree;
+    SaplingMerkleTree saplingTree;
+    wallet.IncrementNoteWitnesses(&index, &block, sproutTree, saplingTree);
+    EXPECT_EQ(1, wallet.nWitnessCacheSize);
+    // The transaction is recorded in a different (older) block than the one removed.
+    uint256 otherBlock = GetRandHash();
+    uint256 thisBlock = GetRandHash();
+    wallet.mapWallet[wtx.GetHash()].hashBlock = otherBlock;
+    index.phashBlock = &thisBlock;
+    wallet.DecrementNoteWitnesses(&index);
+    EXPECT_EQ(0, wallet.nWitnessCacheSize);
+    EXPECT_TRUE(wallet.NoteWitnessesLost());
+    // Rolling back a block that held the note itself loses nothing.
+    TestWallet wallet2;
+    wallet2.AddSproutSpendingKey(sk);
+    wallet2.AddToWallet(wtx, true, NULL);
+    wallet2.IncrementNoteWitnesses(&index, &block, sproutTree, saplingTree);
+    wallet2.mapWallet[wtx.GetHash()].hashBlock = thisBlock;
+    wallet2.DecrementNoteWitnesses(&index);
+    EXPECT_EQ(0, wallet2.nWitnessCacheSize);
+    EXPECT_FALSE(wallet2.NoteWitnessesLost());
 }
 
 TEST(WalletTests, CachedWitnessesChainTip) {

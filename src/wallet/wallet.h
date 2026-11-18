@@ -866,6 +866,13 @@ protected:
      */
     void DecrementNoteWitnesses(const CBlockIndex* pindex);
     /**
+     * Set when a disconnect left a note without a witness the cache could not
+     * roll back; RebuildNoteWitnesses clears every witness and rescans the
+     * active chain, then resets it. Memory only (no wallet.dat change).
+     */
+    bool fNoteWitnessesLost;
+    void RebuildNoteWitnesses();
+    /**
      * The witness half of ChainTip. When no wallet transaction carries
      * Sprout or Sapling note data, a connected block only advances
      * nWitnessCacheSize: there is nothing to copy, append, witness or
@@ -1094,6 +1101,7 @@ public:
         nTimeFirstKey = 0;
         fBroadcastTransactions = false;
         nWitnessCacheSize = 0;
+        fNoteWitnessesLost = false;
         setNoteTxIndex.clear();
         nNoteTxIndexWalletSize = 0;
     }
