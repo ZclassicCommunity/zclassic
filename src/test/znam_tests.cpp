@@ -469,6 +469,104 @@ BOOST_AUTO_TEST_CASE(transfer_to_a_text_that_is_not_an_owner_loses_the_name)
     BOOST_CHECK_EQUAL(c.ValueNow("bob"), TAddr(0x11));
 }
 
+namespace {
+/** A ZNAM script assembled by hand, so a field can start with a NUL byte (the vendored builders use strlen). */
+CScript RawMsg(int cmd, const std::string& name, const std::vector<std::string>& fields)
+{
+    std::vector<unsigned char> b(1, 0x6a);
+    auto push = [&b](const std::string& d) {
+        b.push_back((unsigned char)d.size());
+        b.insert(b.end(), d.begin(), d.end());
+    };
+    push("ZNAM");
+    push(std::string(1, '\x01'));
+    push(std::string(1, (char)cmd));
+    push(name);
+    for (size_t i = 0; i < fields.size(); i++)
+        push(fields[i]);
+    return Msg(b.data(), b.size());
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(a_field_that_starts_with_nul_is_saved_as_z23_saves_it)
+{
+    // Z23 overwrites one field of the row it read with snprintf and then runs db_znam_entry_validate on the whole
+    // buffer: an empty-as-C-string value passes validates_presence_of while the old text's bytes from index 1 on are
+    // still there, and is stored as "" (doc/znam.md, A9). Found by a differential run against Z23's own apply code.
+    const std::string t1 = TAddr(0x11);
+    const std::string nul3 = std::string("\0abc", 4);
+
+    // UPDATE with a target that starts with NUL: the target becomes ""
+    Chain c;
+    c.Add({Op(Register("alice", t1.c_str()), 0xa1)});
+    c.Add({Op(RawMsg(CMD_UPDATE, "alice", {std::string(1, (char)TYPE_TADDR), nul3}), 0xa1)});
+    BOOST_CHECK_EQUAL(c.ValueNow("alice"), "");
+    BOOST_CHECK_EQUAL(c.OwnerNow("alice"), OwnerOf(0xa1));
+    // a row with a blank target refuses RENEW and TRANSFER (the validator sees an all-zero target) ...
+    Entry e;
+    BOOST_REQUIRE(c.Get("alice", e));
+    const int expiry = e.expiryHeight;
+    c.Add({Op(Renew("alice"), 0xee)});
+    BOOST_REQUIRE(c.Get("alice", e));
+    BOOST_CHECK_EQUAL(e.expiryHeight, expiry);
+    c.Add({Op(Transfer("alice", OwnerOf(0xa2).c_str()), 0xa1)});
+    BOOST_CHECK_EQUAL(c.OwnerNow("alice"), OwnerOf(0xa1));
+    // ... and another blank UPDATE (the old target is now empty), but a real UPDATE repairs it
+    c.Add({Op(RawMsg(CMD_UPDATE, "alice", {std::string(1, (char)TYPE_TADDR), nul3}), 0xa1)});
+    BOOST_CHECK_EQUAL(c.ValueNow("alice"), "");
+    c.Add({Op(Update("alice", t1.c_str()), 0xa1)});
+    BOOST_CHECK_EQUAL(c.ValueNow("alice"), t1);
+    // resolution treats the blank target as no payable address
+    c.Add({Op(RawMsg(CMD_UPDATE, "alice", {std::string(1, (char)TYPE_TADDR), nul3}), 0xa1)});
+    Resolution r = Resolve(c.idx, "alice", 0, (int)c.hashes.size(), 100);
+    BOOST_CHECK(r.status == Resolution::NO_TARGET);
+
+    // UPDATE over a one-character target: the buffer is all zero, so Z23 refuses it
+    Chain d;
+    d.Add({Op(Register("bob", "x", TYPE_ONION), 0xa1)});
+    d.Add({Op(RawMsg(CMD_UPDATE, "bob", {std::string(1, (char)TYPE_TADDR), nul3}), 0xa1)});
+    BOOST_CHECK_EQUAL(d.ValueNow("bob"), "x");
+
+    // TRANSFER to an owner that starts with NUL: the owner becomes "" and nobody controls the name any more
+    Chain f;
+    f.Add({Op(Register("carol", t1.c_str()), 0xa1)});
+    f.Add({Op(RawMsg(CMD_TRANSFER, "carol", {nul3}), 0xa1)});
+    BOOST_CHECK_EQUAL(f.OwnerNow("carol"), "");
+    f.Add({Op(Update("carol", TAddr(0x12).c_str()), 0xa1)});
+    BOOST_CHECK_EQUAL(f.ValueNow("carol"), t1);
+    BOOST_REQUIRE(f.Get("carol", e));
+    const int expiry2 = e.expiryHeight;
+    f.Add({Op(Renew("carol"), 0xee)}); // no owner: the validator refuses the row
+    BOOST_REQUIRE(f.Get("carol", e));
+    BOOST_CHECK_EQUAL(e.expiryHeight, expiry2);
+
+    // both blocks unwind exactly
+    while (!f.hashes.empty())
+        f.Pop();
+    BOOST_CHECK(!f.Get("carol", e));
+}
+
+BOOST_AUTO_TEST_CASE(renew_stops_where_z23s_int32_expiry_would_overflow)
+{
+    zcl_znam_parsed m;
+    memset(&m, 0, sizeof(m));
+    m.command = CMD_RENEW;
+    strcpy(m.name, "alice");
+    zcl_znam_entry cur;
+    memset(&cur, 0, sizeof(cur));
+    strcpy(cur.owner, "owner");
+    strcpy(cur.target_value, "target");
+    cur.target_type = TYPE_TADDR;
+    zcl_znam_result res;
+    cur.expiry_height = 0x7fffffff - 210240;
+    zcl_znam_evaluate(&m, 1, &cur, 0, "", 10, &res);
+    BOOST_CHECK_EQUAL(res.effect, ZCL_ZNAM_EFFECT_EXTEND);
+    BOOST_CHECK_EQUAL(res.entry.expiry_height, 0x7fffffff);
+    cur.expiry_height = 0x7fffffff - 210239;
+    zcl_znam_evaluate(&m, 1, &cur, 0, "", 10, &res);
+    BOOST_CHECK_EQUAL(res.effect, ZCL_ZNAM_EFFECT_NONE);
+}
+
 // ---- undo, atomicity ----------------------------------------------------------------
 
 BOOST_AUTO_TEST_CASE(disconnect_restores_the_exact_state)

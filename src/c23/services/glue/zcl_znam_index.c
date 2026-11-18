@@ -95,6 +95,29 @@ static void copy_str(char *dst, size_t cap, const char *src)
     dst[n] = '\0';
 }
 
+/* Z23 saves a changed name row through db_znam_save, which first runs
+ * db_znam_entry_validate (models/znam.c:154-180) on the WHOLE row. That row
+ * comes from row_to_znam (memset, then snprintf of each stored C string,
+ * models/znam.c:258-284), and the apply step overwrites one field with
+ * snprintf (explorer_index_overlays.c:120-122, :136-137). snprintf of a value
+ * that is empty as a C string (a pushed field that starts with a NUL byte)
+ * writes only that NUL, so the old bytes from index 1 on survive in the buffer.
+ * validates_presence_of compares the whole buffer with zeros
+ * (activerecord.h:121-125), so it still passes whenever the old text had two
+ * or more characters, and the row is stored as "" (sqlite3_bind_text with
+ * length -1). Returns 1 when the overwritten field passes presence. */
+static bool presence_after_overwrite(const char *old_text, const char *new_text)
+{
+    return new_text[0] != '\0' || strlen(old_text) > 1;
+}
+
+/* The fields a save does not change are present when their stored text is not
+ * empty (row_to_znam leaves an empty one all zero). */
+static bool row_presence(const struct zcl_znam_entry *e)
+{
+    return e->owner[0] != '\0' && e->target_value[0] != '\0';
+}
+
 static void ignore(struct zcl_znam_result *out, const char *reason)
 {
     out->effect = ZCL_ZNAM_EFFECT_NONE;
@@ -145,6 +168,11 @@ void zcl_znam_evaluate(const struct zcl_znam_parsed *msg, int has_entry,
             ignore(out, "the model refused the entry (empty target)");
             return;
         }
+        /* validates_non_negative(expiry_height): see RENEW below */
+        if (height < 0 || (int64_t)height + ZCL_ZNAM_REGISTRATION_TERM_BLOCKS > INT32_MAX) {
+            ignore(out, "the model refused the entry (expiry height out of range)");
+            return;
+        }
         memset(&out->entry, 0, sizeof(out->entry));
         copy_str(out->entry.owner, ZCL_ZNAM_OWNER_MAX + 1, owner);
         out->entry.target_type = msg->target_type;
@@ -163,8 +191,11 @@ void zcl_znam_evaluate(const struct zcl_znam_parsed *msg, int has_entry,
             ignore(out, "the first input is not the name's owner");
             return;
         }
-        if (!msg->target_value[0]) {
-            ignore(out, "the model refused the entry (empty target)");
+        /* db_znam_entry_validate on the overwritten row: an empty new target is
+         * STORED as "" unless the old target had at most one character (see
+         * presence_after_overwrite). The owner matched, so it is present. */
+        if (!presence_after_overwrite(current->target_value, msg->target_value) || !current->owner[0]) {
+            ignore(out, "the model refused the entry (blank target)");
             return;
         }
         out->entry.target_type = msg->target_type;
@@ -183,8 +214,12 @@ void zcl_znam_evaluate(const struct zcl_znam_parsed *msg, int has_entry,
             ignore(out, "the first input is not the name's owner");
             return;
         }
-        if (!msg->new_owner[0]) {
-            ignore(out, "the model refused the entry (empty owner)");
+        /* db_znam_entry_validate on the overwritten row: an empty new owner is
+         * STORED as "" (the old owner always has 2+ characters here, so the
+         * name is then owned by nobody), and a row whose target is blank is
+         * refused whatever the new owner. */
+        if (!presence_after_overwrite(current->owner, msg->new_owner) || !current->target_value[0]) {
+            ignore(out, "the model refused the entry (blank owner or target)");
             return;
         }
         memset(out->entry.owner, 0, sizeof(out->entry.owner));
@@ -233,8 +268,21 @@ void zcl_znam_evaluate(const struct zcl_znam_parsed *msg, int has_entry,
             ignore(out, "name is not registered");
             return;
         }
+        /* db_znam_entry_validate: the row must still have an owner and a
+         * target, and expiry_height must stay non-negative. Z23 adds in int32
+         * (overflow, in practice a wrap to a negative value that the validator
+         * refuses); here the sum is taken in 64 bits and refused past INT32_MAX. */
+        if (!row_presence(current)) {
+            ignore(out, "the model refused the entry (blank owner or target)");
+            return;
+        }
         int32_t base = current->expiry_height > height ? current->expiry_height : height;
-        out->entry.expiry_height = base + ZCL_ZNAM_REGISTRATION_TERM_BLOCKS;
+        int64_t next = (int64_t)base + ZCL_ZNAM_REGISTRATION_TERM_BLOCKS;
+        if (next > INT32_MAX || next < 0) {
+            ignore(out, "the model refused the entry (expiry height out of range)");
+            return;
+        }
+        out->entry.expiry_height = (int32_t)next;
         out->effect = ZCL_ZNAM_EFFECT_EXTEND;
         return;
     }

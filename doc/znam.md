@@ -121,8 +121,11 @@ All are evaluated in `apply_znam` (`explorer_index_overlays.c:209-260`), after `
 | RENEW | name exists; **anyone**; `expiry` = max(expiry, height) + 210240; sets `last_update_txid` | `:172-186` |
 
 After the model's own validation (`models/znam.c:155-183`: type `1..7`, owner and target non-empty, non-negative
-heights): a field that is empty as a C string (the first byte is NUL) makes the model refuse the write, so the message is
-dropped (A9).
+heights), run on the whole row before every save of a name. A field that is empty as a C string (the first byte is NUL)
+is NOT always refused: REGISTER, SET_RECORD and SET_TEXT build a zeroed record and refuse it, but UPDATE and TRANSFER
+overwrite one field of the row they read, and the presence check compares the whole buffer, so an empty new target or
+owner is stored as `""` whenever the old text had two or more characters. A row with a blank owner or target then
+refuses RENEW and TRANSFER, and a blank owner can never sign again (A9).
 
 SET_TEXT with key `zid` also feeds Z23's identity projection (`explorer_index_overlays.c:201-206`); that feed is **not**
 implemented here (A11).
@@ -317,8 +320,19 @@ Implemented as Z23 does it; none is changed here.
 * **A7. Expiry is never enforced** and RENEW is permissionless. The term is decoration (2.7).
 * **A8. Targets are never validated** against their type or as addresses; a typed `t-address` record can hold any text.
 * **A9. C-string semantics.** Fields are copied into fixed buffers and stored as C strings: an embedded NUL truncates the
-  value, and a value empty after truncation is refused by the model as "save failed" (`models/znam.c:166-178`). A target
-  that begins with a NUL byte makes a REGISTER silently not register. Same in zclassicd.
+  value. Whether a value that is empty after truncation is refused depends on the command, through an accident of
+  buffer reuse: REGISTER, SET_RECORD and SET_TEXT write into a zeroed struct, so `validates_presence_of`
+  (`activerecord.h:121-125`, a whole-buffer `memcmp`) refuses it, and a target that begins with NUL makes a REGISTER
+  silently not register. UPDATE and TRANSFER `snprintf` the new value over the row `row_to_znam` read
+  (`models/znam.c:258-284`, `explorer_index_overlays.c:120-122,136-137`), which writes only the NUL and leaves the old
+  bytes from index 1 on; presence passes and the row is stored as `""` (`sqlite3_bind_text` with length -1). So an owner
+  can blank the target (the name then pays nobody), or TRANSFER to `"\0..."` and leave the name owned by nobody, frozen
+  for good. A row with a blank owner or target fails validation on every later save: RENEW and TRANSFER of it are
+  ignored. RENEW also stops when Z23's int32 `expiry_height` would pass `INT32_MAX` (signed overflow in Z23; the
+  validator refuses the negative result). zclassicd reproduces all of this (`zcl_znam_index.c`, test
+  `a_field_that_starts_with_nul_is_saved_as_z23_saves_it`); the first version of this port did not, and a differential
+  run against Z23's own apply code found it. Probably unintended in Z23: the owner should decide whether the parser
+  should refuse any field that contains a NUL.
 * **A10. SET_TEXT with an empty value** is stored as an empty row, not a deletion (`models/znam.c:551-582`); the resolver
   treats empty as absent (`name_resolver.c:151-155`).
 * **A11. SET_TEXT `zid`** also feeds the identity projection (`explorer_index_overlays.c:201-206`); not implemented here.
