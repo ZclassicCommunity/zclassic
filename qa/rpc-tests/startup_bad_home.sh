@@ -24,7 +24,16 @@ check() { # <label> <command...>
 }
 : >"$work/afile"
 check "HOME is a file" env HOME="$work/afile" "$bin/zclassicd" -regtest
-check "HOME unset" env -u HOME "$bin/zclassicd" -regtest
+# With HOME unset the default directory falls back to / (Linux) or /Library/Application Support (macOS).
+# Where that is writable (root, or uid 0 in the local-ci user namespace over a writable focal tree) the
+# node would create /.zclassic and /.zcash-params there and fail later for an unrelated reason, so the
+# case proves nothing and pollutes the host: skip it.
+fallback=/; [ "$(uname -s)" = Darwin ] && fallback="/Library/Application Support"
+if [ -w "$fallback" ]; then
+    echo "startup_bad_home: SKIP HOME unset ($fallback is writable)"
+else
+    check "HOME unset" env -u HOME "$bin/zclassicd" -regtest
+fi
 # a read-only HOME only fails for a user that is not root (root writes anywhere)
 if [ "$(id -u)" -ne 0 ]; then
     check "HOME read-only" env HOME="$work/ro" "$bin/zclassicd" -regtest

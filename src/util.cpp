@@ -663,11 +663,6 @@ bool RenameOver(boost::filesystem::path src, boost::filesystem::path dest)
 #endif /* WIN32 */
 }
 
-/**
- * Ignores exceptions thrown by Boost's create_directory if the requested directory exists.
- * Specifically handles case where path p exists, but it wasn't possible for the user to
- * write to the parent directory.
- */
 std::string RandomSuffix(size_t n)
 {
     static const char hexdigits[] = "0123456789abcdef";
@@ -695,6 +690,11 @@ boost::filesystem::path UniquePath(const std::string& model)
     return boost::filesystem::path(name);
 }
 
+/**
+ * Ignores exceptions thrown by Boost's create_directory if the requested directory exists.
+ * Specifically handles case where path p exists, but it wasn't possible for the user to
+ * write to the parent directory.
+ */
 bool TryCreateDirectory(const boost::filesystem::path& p)
 {
     try
