@@ -103,7 +103,7 @@ if [ -z "$linked" ] && { has_step build || [ ! -f "$lib" ]; }; then
         compile "$root/$rel" "$out/obj/v_$b.o"
         objs="$objs $out/obj/v_$b.o"
     done
-    for gf in zcl_c23_stubs zcl_c23_tree_selftest zcl_c23_test_glue; do
+    for gf in zcl_c23_stubs zcl_c23_tree_selftest zcl_c23_test_glue zcl_c23_sapling_scan; do
         compile "$g/$gf.c" "$out/obj/g_$gf.o"
         objs="$objs $out/obj/g_$gf.o"
     done
