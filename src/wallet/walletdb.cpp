@@ -1179,27 +1179,25 @@ bool BackupWallet(const CWallet& wallet, const string& strDest)
                 // Copy wallet.dat atomically: write and verify a temporary file next to
                 // the destination, then rename it over. The database stays closed
                 // (and the lock held) until the source has been read again.
-                boost::filesystem::path pathTmp = pathDest;
-                pathTmp += ".tmp." + boost::filesystem::unique_path("%%%%%%%%").string();
+                // pathTmp stays empty until named, so the catch can never remove pathDest.
+                boost::filesystem::path pathTmp;
                 try {
-                    boost::filesystem::copy_file(pathSrc, pathTmp, boost::filesystem::copy_options::none);
-                    FILE* ftmp = fopen(pathTmp.string().c_str(), "rb+");
-                    if (!ftmp)
-                        throw std::runtime_error("cannot reopen the temporary copy");
-                    FileCommit(ftmp);
-                    fclose(ftmp);
+                    pathTmp = pathDest.string() + ".tmp." + boost::filesystem::unique_path("%%%%%%%%%%%%%%%%").string();
+                    // Exclusive create (never follows a planted name); synchronize_data
+                    // fdatasyncs (F_FULLFSYNC on macOS, FlushFileBuffers on Windows) and
+                    // reports its failure, unlike FileCommit.
+                    boost::filesystem::copy_file(pathSrc, pathTmp, boost::filesystem::copy_options::synchronize_data);
                     std::string digestSrc, digestTmp, err;
-                    if (boost::filesystem::file_size(pathSrc) != boost::filesystem::file_size(pathTmp))
-                        throw std::runtime_error("size of the copy differs from the wallet file");
                     if (!HashFileSHA256(pathSrc, digestSrc, err) || !HashFileSHA256(pathTmp, digestTmp, err))
                         throw std::runtime_error(err);
                     if (digestSrc != digestTmp)
                         throw std::runtime_error("SHA-256 of the copy differs from the wallet file");
-                    if (!RenameOver(pathTmp, pathDest))
-                        throw std::runtime_error("cannot rename the verified copy onto the destination");
+                    // Throws with the OS error; MoveFileExW(REPLACE_EXISTING) on Windows.
+                    boost::filesystem::rename(pathTmp, pathDest);
                 } catch (const std::exception& e) {
                     boost::system::error_code ec;
-                    boost::filesystem::remove(pathTmp, ec);
+                    if (!pathTmp.empty())
+                        boost::filesystem::remove(pathTmp, ec);
                     LogPrintf("error copying wallet.dat to %s - %s\n", pathDest.string(), e.what());
                     return false;
                 }
