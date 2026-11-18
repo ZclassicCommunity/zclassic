@@ -129,6 +129,10 @@ QString genesisResultText(const GenesisDraft& d, const GenesisCheck& check, cons
 // The daemon's message, with a plain-language lead in front when it is one the user can act on.
 QString friendlyError(const QString& daemonMessage);
 
+// The failure a dialog call reports when the node never answered: the transaction may still have been sent, so a
+// result page must show it as it is, never under "was not sent" (that invites a second send).
+QString outcomeUnknownText();
+
 } // namespace tokens
 
 #endif // ZCL_TOKENSSENDMODEL_H

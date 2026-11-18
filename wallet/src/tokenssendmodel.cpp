@@ -189,7 +189,7 @@ SendCheck checkSend(const TokenChoice& token, const QString& address, const QStr
     quint64 have = 0;
     if (balanceUnits(token.balance, token.decimals, &have) && a.units > have) {
         c.error = QObject::tr("You hold %1 %2 in confirmed outputs; %3 is more than that.")
-                      .arg(token.balance, displayTicker(token.ticker, token.tokenId), a.normalized);
+                      .arg(token.balance, tokenLabel(token.ticker, token.tokenId), a.normalized);
         return c;
     }
     c.ok = true;
@@ -244,8 +244,10 @@ QString sendReviewText(const TokenChoice& token, const SendCheck& check, const T
 {
     const QString t = displayTicker(token.ticker, token.tokenId);
     QStringList lines;
-    lines << QObject::tr("You are about to send %1 %2").arg(check.amount, t);
+    lines << QObject::tr("You are about to send %1 %2").arg(check.amount, tokenLabel(token.ticker, token.tokenId));
     lines << QObject::tr("to %1").arg(check.address);
+    // Tickers are not unique: the full id is what says which token this is.
+    lines << QObject::tr("Token id: %1").arg(token.tokenId);
     lines << QString();
     bool change = false;
     for (QChar ch : plan.tokenChange)
@@ -268,7 +270,7 @@ QString sendReviewText(const TokenChoice& token, const SendCheck& check, const T
 
 QString sendResultText(const TokenChoice& token, const SendCheck& check, const TxPlan& plan)
 {
-    const QString t = displayTicker(token.ticker, token.tokenId);
+    const QString t = tokenLabel(token.ticker, token.tokenId);
     return QObject::tr("Sent %1 %2 to %3.\n\nTransaction: %4\nFee: %5 ZCL\n\n"
                        "It is on its way to the network. The tokens count as received after the transaction is "
                        "confirmed in a block; until then your change is not spendable either.")
@@ -420,6 +422,12 @@ QString friendlyError(const QString& m)
     if (lead.isEmpty())
         return m;
     return lead + QStringLiteral("\n\n") + QObject::tr("Details: %1").arg(m);
+}
+
+QString outcomeUnknownText()
+{
+    return QObject::tr("The node did not answer in time. The outcome is unknown: check your transactions before "
+                       "trying again.");
 }
 
 } // namespace tokens

@@ -371,6 +371,7 @@ public:
     MainWindow*                         main;
 
     void shutdown();
+    bool isShuttingDown() const { return shutdownInProgress; }
 
     void doRPC(const json& payload, const std::function<void(json)>& cb, 
                const std::function<void(QNetworkReply*, const json&)>& ne);

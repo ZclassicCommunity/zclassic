@@ -16,6 +16,10 @@ struct UnspentOutput {
     // basis must EXCLUDE these. C++14 default member init keeps this an aggregate,
     // so existing brace-initializers without the field still compile (coinbase=false).
     bool    coinbase = false;
+    // listunspent "tokenbearing": the daemon guard keeps a ZSLP-bearing output out of ordinary spends, but still
+    // lists it as spendable and counts it in every balance. z_sendmany skips it, so the GUI must keep it out of
+    // every spendable-amount calculation (auto-shield change, Send max, Shield my funds).
+    bool    tokenBearing = false;
 };
 
 class BalancesTableModel : public QAbstractTableModel

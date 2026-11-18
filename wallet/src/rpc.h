@@ -87,6 +87,13 @@ public:
     // Install the wallet's UTXO set so confirmedSpendableZat() (the confirmed,
     // non-coinbase change basis) can be driven without a daemon.
     void testSetUTXOs(QList<UnspentOutput>* u)      { delete utxos; utxos = u; }
+    // Parse a listunspent reply through the REAL processUnspent() (tokenbearing, generated, spendable).
+    QList<UnspentOutput>* testParseUnspent(const json& reply) {
+        QMap<QString, double> balances;
+        auto* out = new QList<UnspentOutput>();
+        processUnspent(reply, &balances, out);
+        return out;
+    }
     // SAFE-RACE: install the "fresh" transparent set the NEXT repollTransparentUnspent()
     // splices in (simulates a UTXO landing/leaving at the from-addr during the confirm
     // dwell). One-shot: consumed by the re-poll. Never present in the shipped app build.
@@ -102,6 +109,8 @@ public:
     // installed Connection is never actually USED on these paths (the seeded
     // Sapling address resolves first), only its non-null-ness is checked.
     void testSetConnection(Connection* c) { conn = c; }
+    void testSetShuttingDown(bool b) { ezShuttingDown = b; }
+    void testDropConnectingMessage() { dropConnectingMessage(); }
     bool testRefreshAuthFromCookie() { return refreshAuthFromCookie(); }
     int  testLastRefreshedBlock() const { return lastRefreshedBlock; }
     // NOTIFY-SRV (1.3) real-seam: drive the ACTUAL onNotifyPush()/notifyDebounce
@@ -160,6 +169,11 @@ public:
     // funded wallet. Default false keeps every existing caller's full-teardown behavior.
     void noConnection(bool preserveBalances = false);
     bool isEmbedded() { return ezclassicd != nullptr; }
+    // True while shutdownZClassicd() is waiting for the node to flush and exit. A second quit request in that window
+    // must not call qApp->quit(): that ends the wait loop early and the node is killed mid-flush.
+    bool isShuttingDown() const { return ezShuttingDown; }
+    static QString connectingMessage();
+    void dropConnectingMessage();
 
     // ---- NOTIFY-SRV push-wiring pure helpers (used by prod + asserted by L1) ----
     // Build the two daemon notify args (-walletnotify / -blocknotify) that invoke THIS

@@ -19,6 +19,18 @@
 
 using json = nlohmann::json;
 
+QString RPC::connectingMessage() {
+    return QObject::tr("Connected — checking blockchain…");
+}
+
+// Remove only the connect-time notice. Every other status-bar message (the "Tx submitted ... txid" line that the
+// right-click Copy txid / explorer menu reads, "Sending...", "Transaction couldn't be sent") belongs to its owner and
+// must outlive the sync poll.
+void RPC::dropConnectingMessage() {
+    if (main->ui->statusBar->currentMessage() == connectingMessage())
+        main->ui->statusBar->clearMessage();
+}
+
 RPC::RPC(MainWindow* main) {
     auto cl = new ConnectionLoader(main, this);
 
@@ -352,7 +364,7 @@ void RPC::setConnection(Connection* c) {
     // Don't claim "Ready!" here -- we've only just connected to the node; it may
     // still be syncing. The real status (Syncing %/Connected) is set by the
     // getblockchaininfo poll a moment later.
-    ui->statusBar->showMessage(QObject::tr("Connected — checking blockchain…"));
+    ui->statusBar->showMessage(connectingMessage());
 
     // See if we need to remove the reindex/rescan flags from the zclassic.conf file
     auto zclassicConfLocation = Settings::getInstance()->getZClassicdConfLocation();
@@ -1438,7 +1450,7 @@ void RPC::getInfoThenRefresh(bool force) {
             // The "Connected — checking blockchain…" message from connect time is stale
             // once the poll has a verdict. A private regtest chain legitimately has no
             // peers: do not flag that with a warning icon.
-            main->ui->statusBar->clearMessage();
+            dropConnectingMessage();
             if (verdict.kind == SyncState::LocalNetwork)
                 main->statusIcon->setPixmap(connectedPm);
 
@@ -1605,11 +1617,14 @@ bool RPC::processUnspent(const json& reply, QMap<QString, double>* balancesMap, 
         // refuses to spend it to a transparent output or alongside change. (find()/end()
         // is used rather than contains() -- the bundled nlohmann::json 3.3 predates it.)
         bool coinbase = it.find("generated") != it.end() && it["generated"].get<json::boolean_t>();
+        // "tokenbearing" (daemon token guard): still spendable=true in the listing, but z_sendmany will not spend it.
+        bool tokenBearing = it.find("tokenbearing") != it.end() && it["tokenbearing"].is_boolean() &&
+                            it["tokenbearing"].get<json::boolean_t>();
 
         newUtxos->push_back(
             UnspentOutput{ qsAddr, QString::fromStdString(it["txid"]),
                             Settings::getDecimalString(it["amount"].get<json::number_float_t>()),
-                            (int)confirmations, it["spendable"].get<json::boolean_t>(), coinbase });
+                            (int)confirmations, it["spendable"].get<json::boolean_t>(), coinbase, tokenBearing });
 
         (*balancesMap)[qsAddr] = (*balancesMap)[qsAddr] + it["amount"].get<json::number_float_t>();
     }

@@ -123,6 +123,10 @@ private slots:
     void recheckFailsClosed();
     void unpayableRecordOffersNoAddress();
     void effectiveAddressOnlyForTheNameTyped();
+    void ownerMarkupIsShownAsPlainText();
+    void ownerPercentSequencesStayLiteral();
+    void replyAfterTheBoxIsGoneIsIgnored();
+    void recheckReplyAfterTheBoxIsGoneFailsClosed();
 };
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -652,6 +656,74 @@ void TstNames::effectiveAddressOnlyForTheNameTyped()
     QCOMPARE(box.effectiveAddress(QStringLiteral("@alic")), QStringLiteral("@alic"));
     QCOMPARE(box.effectiveAddress(QStringLiteral("@alice2")), QStringLiteral("@alice2"));
     QCOMPARE(box.effectiveAddress(QString()), QString());
+}
+
+// The owner of a name is whatever 1-63 bytes its last TRANSFER carried. Qt would render a label that looks like
+// markup as HTML (an <img src="file://host/x"> then fetches the host), so every label here is plain text.
+void TstNames::ownerMarkupIsShownAsPlainText()
+{
+    FakeLookup f;
+    QWidget top;
+    NamePayBox box(f.fn(), &top);
+    top.show();
+    box.setFieldText(QStringLiteral("@alice"));
+    box.resolveNow();
+    json r = resolvedReply();
+    r["owner"] = "<img src=\"file://203.0.113.5/x\"><b>trusted</b>";
+    f.answer(true, r);
+    QCOMPARE((int)box.state(), (int)NamePayBox::State::Resolved);
+    QCOMPARE((int)box.infoLabel()->textFormat(), (int)Qt::PlainText);
+    QCOMPARE((int)box.statusLabel()->textFormat(), (int)Qt::PlainText);
+    QCOMPARE((int)box.addressLabel()->textFormat(), (int)Qt::PlainText);
+    QCOMPARE((int)box.warningLabel()->textFormat(), (int)Qt::PlainText);
+    QVERIFY(box.infoLabel()->text().contains(QLatin1String("<img src=\"file://203.0.113.5/x\"><b>trusted</b>")));
+}
+
+void TstNames::ownerPercentSequencesStayLiteral()
+{
+    Resolution res;
+    json r = resolvedReply("alice", kAddrT, 1000, 500, false, 900);
+    r["owner"] = "<b>trusted</b> %4 %5";
+    QVERIFY(parseResolution(r, &res));
+    const Assessment a = assess(res);
+    QVERIFY(a.info.contains(QLatin1String("<b>trusted</b> %4 %5")));   // not replaced by the later facts
+    QCOMPARE(a.info.count(QLatin1String("1000")), 1);                    // the set height appears once, where it belongs
+    QVERIFY(a.info.contains(QLatin1String("aa11bb22")));
+}
+
+// The Send tab deletes a recipient row at once; the node can answer a lookup much later.
+void TstNames::replyAfterTheBoxIsGoneIsIgnored()
+{
+    FakeLookup f;
+    QWidget top;
+    auto* box = new NamePayBox(f.fn(), &top);
+    top.show();
+    box->setFieldText(QStringLiteral("@alice"));
+    box->resolveNow();
+    QCOMPARE(f.pending.size(), 1);
+    delete box;
+    f.answer(true, resolvedReply());   // must be a no-op (ASan: no heap-use-after-free)
+    QVERIFY(true);
+}
+
+void TstNames::recheckReplyAfterTheBoxIsGoneFailsClosed()
+{
+    FakeLookup f;
+    QWidget top;
+    auto* box = new NamePayBox(f.fn(), &top);
+    top.show();
+    box->setFieldText(QStringLiteral("@alice"));
+    box->resolveNow();
+    f.answer(true, resolvedReply());
+    box->confirmCheck()->setChecked(true);
+    int calls = 0;
+    bool result = true;
+    box->recheck([&](bool ok) { ++calls; result = ok; });
+    QCOMPARE(f.pending.size(), 1);
+    delete box;
+    f.answer(true, resolvedReply());
+    QCOMPARE(calls, 1);   // the send path is still told
+    QVERIFY(!result);     // and nothing is sent on the strength of a row that no longer exists
 }
 
 QTEST_MAIN(TstNames)

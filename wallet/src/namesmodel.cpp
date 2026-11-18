@@ -271,11 +271,9 @@ Assessment assess(const Resolution& r)
         a.warnings << w;
     }
     a.info = tr("Registered at block %1 (%2 blocks ago) by %3. This address was set at block %4 (transaction %5).")
-                 .arg(r.registeredHeight)
-                 .arg(age < 0 ? 0 : age)
-                 .arg(r.owner.isEmpty() ? tr("an unknown owner") : r.owner)
-                 .arg(r.setHeight)
-                 .arg(shortTxid(r.setTxid));
+                 .arg(QString::number(r.registeredHeight), QString::number(age < 0 ? 0 : age),
+                      r.owner.isEmpty() ? tr("an unknown owner") : r.owner, // chain text: substituted in one pass so a "%4" in it stays literal
+                      QString::number(r.setHeight), shortTxid(r.setTxid));
     return a;
 }
 

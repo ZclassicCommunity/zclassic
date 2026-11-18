@@ -7,6 +7,7 @@
 
 #include <QtTest>
 
+#include "pollguard.h"
 #include "tokensmodel.h"
 
 using json = nlohmann::json;
@@ -137,6 +138,31 @@ private slots:
         QVERIFY(n.contains("ordinary ZCL sends never touch them"));
         QVERIFY(tokens::roleText("mintbaton").contains("Mint baton"));
         QCOMPARE(tokens::roleText("token"), QString("Tokens"));
+    }
+
+    // A poll must not stay blocked after a node restart: the old connection never answers (doRPC drops the call and
+    // its reply during a shutdown) and the new one is a different object.
+    void pollGuardNeverGetsStuck()
+    {
+        int connA = 0, connB = 0;
+        PollGuard g;
+        const PollGuard::Ticket t1 = g.begin(&connA, false, 1000);
+        QVERIFY(t1 != 0);
+        QCOMPARE(g.begin(&connA, false, 2000), PollGuard::Ticket(0));   // one at a time
+        QCOMPARE(g.begin(&connA, true, 2000), PollGuard::Ticket(0));    // shutting down: nothing is sent
+        QCOMPARE(g.begin(nullptr, false, 2000), PollGuard::Ticket(0));
+        // the restart replaced the connection: the request that will never be answered no longer blocks
+        const PollGuard::Ticket t2 = g.begin(&connB, false, 3000);
+        QVERIFY(t2 != 0 && t2 != t1);
+        g.end(t1);                                                       // a late answer to the abandoned request
+        QVERIFY(g.inFlight());
+        g.end(t2);
+        QVERIFY(!g.inFlight());
+        // the same connection, but the reply was dropped: give up after the stale limit
+        const PollGuard::Ticket t3 = g.begin(&connB, false, 4000);
+        QVERIFY(t3 != 0);
+        QCOMPARE(g.begin(&connB, false, 4000 + 59999), PollGuard::Ticket(0));
+        QVERIFY(g.begin(&connB, false, 4000 + 60000) != 0);
     }
 
     void helpers()

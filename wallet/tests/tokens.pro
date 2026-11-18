@@ -22,4 +22,4 @@ SOURCES += \
     ../src/tokensmodel.cpp \
     tst_tokens.cpp
 
-HEADERS += ../src/tokensmodel.h
+HEADERS += ../src/tokensmodel.h ../src/pollguard.h

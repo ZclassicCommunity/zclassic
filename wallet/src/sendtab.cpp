@@ -879,7 +879,7 @@ Tx MainWindow::createTxFromSendPage() {
 }
 
 // Sum, in integer zatoshis, the CONFIRMED (confirmations > 0), spendable UTXOs the GUI
-// holds for `addr`. z_sendmany spends only confirmed notes, so this -- not the
+// holds for `addr`, minus token-bearing outputs (the daemon token guard never spends those). z_sendmany spends only confirmed notes, so this -- not the
 // unconfirmed-inclusive getAllBalances() total -- is the correct basis for the auto-shield
 // change. With includeCoinbase=false the result also excludes coinbase UTXOs, matching the
 // daemon's input set for a has-change (multi-output) send; includeCoinbase=true gives the
@@ -890,7 +890,7 @@ qint64 MainWindow::confirmedSpendableZat(const QString& addr, bool includeCoinba
         return 0;
     qint64 sum = 0;
     for (const UnspentOutput& u : *rpc->getUTXOs()) {
-        if (u.address == addr && u.confirmations > 0 && u.spendable
+        if (u.address == addr && u.confirmations > 0 && u.spendable && !u.tokenBearing
                 && (includeCoinbase || !u.coinbase))
             sum += toZat(u.amount.toDouble());
     }

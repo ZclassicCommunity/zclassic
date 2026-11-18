@@ -159,8 +159,13 @@ TokenSendDialog::TokenSendDialog(TokensRpc* rpc, const QVector<TokenChoice>& cho
     auto* fl = new QFormLayout(form);
     tokenBox_ = new QComboBox(form);
     tokenBox_->setObjectName(QStringLiteral("tokenBox"));
-    for (const TokenChoice& c : choices_)
-        tokenBox_->addItem(displayTicker(c.ticker, c.tokenId) + QStringLiteral("  (") + c.balance + QLatin1Char(')'));
+    for (const TokenChoice& c : choices_) {
+        int same = 0;
+        for (const TokenChoice& o : choices_)
+            same += displayTicker(o.ticker, o.tokenId).compare(displayTicker(c.ticker, c.tokenId), Qt::CaseInsensitive) == 0;
+        tokenBox_->addItem(tokenLabel(c.ticker, c.tokenId) + QStringLiteral("  (") + c.balance + QLatin1Char(')') +
+                           (same > 1 ? tr("  - another token has this ticker") : QString()));
+    }
     fl->addRow(tr("Token"), tokenBox_);
     availableLabel_ = plainLabel(QString(), form, false);
     availableLabel_->setObjectName(QStringLiteral("availableLabel"));
@@ -203,7 +208,7 @@ TokenChoice TokenSendDialog::current() const
 void TokenSendDialog::onTokenChanged()
 {
     const TokenChoice c = current();
-    availableLabel_->setText(tr("Available (confirmed): %1 %2").arg(c.balance, displayTicker(c.ticker, c.tokenId)));
+    availableLabel_->setText(tr("Available (confirmed): %1 %2").arg(c.balance, tokenLabel(c.ticker, c.tokenId)));
     setError(QString());
 }
 
@@ -263,7 +268,10 @@ void TokenSendDialog::onSend()
         },
         [this](const QString& message) {
             setBusy(false);
-            resultLabel_->setText(tr("The transaction was not sent.\n\n%1").arg(friendlyError(message)));
+            // No answer is not a refusal: the node may have sent it, so never call it "not sent".
+            resultLabel_->setText(message == outcomeUnknownText()
+                                      ? message
+                                      : tr("The transaction was not sent.\n\n%1").arg(friendlyError(message)));
             showPage(ResultPage);
         });
 }
@@ -376,7 +384,10 @@ void TokenCreateDialog::onSend()
         },
         [this](const QString& message) {
             setBusy(false);
-            resultLabel_->setText(tr("The token was not created.\n\n%1").arg(friendlyError(message)));
+            // No answer is not a refusal: the node may have created it, so never call it "not created".
+            resultLabel_->setText(message == outcomeUnknownText()
+                                      ? message
+                                      : tr("The token was not created.\n\n%1").arg(friendlyError(message)));
             showPage(ResultPage);
         });
 }

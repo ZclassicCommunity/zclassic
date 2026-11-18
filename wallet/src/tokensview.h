@@ -15,6 +15,7 @@
 
 #include <memory>
 
+#include "pollguard.h"
 #include "tokensmodel.h"
 #include "tokenssend.h"
 
@@ -61,7 +62,7 @@ private:
     bool          indexSynced_ = false;
     std::unique_ptr<tokens::TokensRpc> rpc_;
     bool          available_   = false;
-    bool          inFlight_    = false;
+    PollGuard     pollGuard_;   // one poll at a time, never stuck by a restart (see pollguard.h)
 };
 
 #endif // ZCL_TOKENSVIEW_H

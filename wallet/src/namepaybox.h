@@ -86,6 +86,8 @@ private:
     void applyReply(int token, bool ok, const nlohmann::json& reply);
     void showResolution();
     void clearAnswer();
+    void recheckReply(int token, const names::Resolution& before, bool ok, const nlohmann::json& reply,
+                      const std::function<void(bool)>& done);
 
     ResolveFn resolve_;
     QTimer* timer_;

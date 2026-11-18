@@ -2016,6 +2016,134 @@ private slots:
         settleAndDelete(w);
     }
 
+    // ---- P9b: token-bearing outputs are NOT spendable ZCL for the GUI ------------------
+    // listunspent still lists a token-guarded output as spendable=true and only adds "tokenbearing". The
+    // daemon's z_sendmany skips it, so a change sized from it would overshoot and every auto-shield send
+    // from that t-address would fail "Insufficient transparent funds". Parsed through the real
+    // processUnspent(); FAILS if tokenbearing is ignored (change would be 546 zat larger, Send max too).
+    void p9b_tokenBearingOutputIsNotSpendable() {
+        MainWindow* w = makeWindow();
+        const QString T  = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+        const QString ZS = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        QSettings().setValue("options/autoshield", true);
+        QSettings().sync();
+
+        const json reply = json::parse(
+            "[{\"address\":\"" + T.toStdString() + "\",\"txid\":\"a1\",\"amount\":10.0,\"confirmations\":10,"
+            "\"spendable\":true,\"tokenbearing\":false},"
+            "{\"address\":\"" + T.toStdString() + "\",\"txid\":\"a2\",\"amount\":0.00000546,\"confirmations\":10,"
+            "\"spendable\":true,\"tokenbearing\":true},"
+            "{\"address\":\"" + T.toStdString() + "\",\"txid\":\"a3\",\"amount\":1.0,\"confirmations\":10,\"spendable\":true}]");
+        QList<UnspentOutput>* parsed = w->getRPC()->testParseUnspent(reply);
+        QCOMPARE(parsed->size(), 3);
+        QVERIFY(!(*parsed)[0].tokenBearing);
+        QVERIFY((*parsed)[1].tokenBearing);
+        QVERIFY(!(*parsed)[2].tokenBearing);   // an older daemon omits the field
+        w->getRPC()->testSetUTXOs(parsed);
+        auto* bals = new QMap<QString, double>(); (*bals)[T] = 11.00000546;
+        w->getRPC()->testSetBalances(bals);
+        auto* zs = new QList<QString>(); zs->append(ZS);
+        w->getRPC()->testSetZAddresses(zs);
+
+        // Send max / Shield my funds basis: the 546 zat token output is not spendable ZCL.
+        QCOMPARE(w->testSpendableOrFallback(T), 11.0);
+
+        w->ui->inputsCombo->clear();
+        w->ui->inputsCombo->addItem(T, 11.0);
+        w->ui->inputsCombo->setCurrentIndex(0);
+        w->ui->Address1->setText("zs10m00rvkhfm4f7n23e4sxsx275r7ptnggx39ygl0vy46j9mdll5c97gl6dxgpk0njuptg2mn9w5s");
+        w->ui->Amount1->setText("1");
+        Tx tx = w->testCreateTxFromSendPage();
+        QVERIFY(!tx.fromAddr.isEmpty());
+        bool sawChange = false;
+        for (const auto& to : tx.toAddrs) {
+            if (to.addr == ZS) {
+                sawChange = true;
+                // 11 - 1 - fee(0.0001) = 9.9999 ZCL exactly; with the token output counted it would be +546 zat.
+                QCOMPARE((qint64)llround(to.amount * 1e8), (qint64)999990000);
+            }
+        }
+        QVERIFY2(sawChange, "auto-shield change must route to Sapling");
+
+        QSettings().remove("options/autoshield");
+        QSettings().sync();
+        settleAndDelete(w);
+    }
+
+    // ---- first-close notice: "Quit ZClassic now" must really quit --------------------------------
+    // The choice used to call close() from inside the close event it was answering. Qt ignores a nested close()
+    // (the widget is already closing), so nothing happened and `quitting` stayed latched. FAILS if the window is
+    // still open (or the quit never reaches the application) after the button is pressed.
+    void ux14_firstCloseNoticeQuitNowReallyQuits() {
+        MainWindow* w = makeWindow();
+        w->testForceTray();
+        QSettings().remove("tray/hintShown");
+        QSettings().setValue("options/keepintray", true);
+        QSettings().sync();
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            auto* mb = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            if (!mb) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+            for (QAbstractButton* b : mb->buttons())
+                if (mb->buttonRole(b) == QMessageBox::DestructiveRole) { b->click(); return; }
+            mb->reject();
+        };
+        bool timedOut = false;
+        QTimer safety;
+        safety.setSingleShot(true);
+        QObject::connect(&safety, &QTimer::timeout, [&]() { timedOut = true; QApplication::quit(); });
+        safety.start(4000);
+        QTimer::singleShot(0, [&]() { poll(300); w->close(); });
+        QApplication::exec();
+        safety.stop();
+        QVERIFY2(!timedOut, "Quit ZClassic now did not quit the application");
+        QVERIFY(w->isQuitting());
+        QVERIFY2(!w->isVisible(), "the window is still open after Quit ZClassic now");
+        QSettings().remove("tray/hintShown");
+        QSettings().remove("options/keepintray");
+        QSettings().sync();
+        settleAndDelete(w);
+    }
+
+    // ---- a second quit request while the node is flushing must not end the wait -------------------
+    // shutdownZClassicd() waits in a nested event loop; qApp->quit() ends every loop, after which the node's
+    // QProcess is destroyed and killed mid-flush. FAILS if closeEvent quits the application while a shutdown is
+    // already waiting.
+    void ux15_secondQuitDuringShutdownIsIgnored() {
+        MainWindow* w = makeWindow();
+        w->getRPC()->testSetShuttingDown(true);
+        bool waited = false;
+        QTimer later;
+        later.setSingleShot(true);
+        QObject::connect(&later, &QTimer::timeout, [&]() { waited = true; QApplication::quit(); });
+        later.start(400);
+        QTimer::singleShot(0, [&]() { w->doClose(); });
+        QApplication::exec();
+        later.stop();
+        w->getRPC()->testSetShuttingDown(false);
+        QVERIFY2(waited, "a second quit request ended the application while the node was still shutting down");
+        settleAndDelete(w);
+    }
+
+    // ---- the sync poll leaves other status-bar messages alone ---------------------------------------
+    void ux16_syncPollKeepsTheTxidStatusLine() {
+        MainWindow* w = makeWindow();
+        auto* sb = w->ui->statusBar;
+        sb->showMessage(Settings::txidStatusMessage + " deadbeef");
+        w->getRPC()->testDropConnectingMessage();
+        QVERIFY2(sb->currentMessage().startsWith(Settings::txidStatusMessage),
+                 "the txid status line (Copy txid / explorer menu) was cleared by the sync poll");
+        sb->showMessage(tr("Sending..."));
+        w->getRPC()->testDropConnectingMessage();
+        QCOMPARE(sb->currentMessage(), tr("Sending..."));
+        // the connect-time notice is still dropped once the poll has a verdict
+        sb->showMessage(RPC::connectingMessage());
+        w->getRPC()->testDropConnectingMessage();
+        QVERIFY(sb->currentMessage().isEmpty());
+        settleAndDelete(w);
+    }
+
     // ---- P10: coinbase-only "shield everything" is NOT blocked (no change output) ------
     // A miner shielding a coinbase-only t-address via "Send max" sends the whole balance
     // to a single Sapling z-address with NO change -- the daemon legitimately consumes the

@@ -97,6 +97,8 @@ public:
     QString testHumaneSendError(const QString& raw) { return humaneSendError(raw); }
     QString testDoSendTxValidations(const Tx& tx) { return doSendTxValidations(tx); }
     void    testShowSendSuccess(const QString& txid) { showSendSuccess(txid); }
+    void testForceTray() { testTrayForced = true; setupTrayIcon(); }
+    double  testSpendableOrFallback(const QString& addr) { return spendableOrFallback(addr); }
     // Build the send-page Tx through the REAL createTxFromSendPage() path so the
     // L1 fail-open tests (PRIV-10) exercise the actual production routing.
     Tx   testCreateTxFromSendPage() { return createTxFromSendPage(); }
@@ -335,6 +337,10 @@ private:
     void resizeEvent(QResizeEvent* event) override;
 
     void setupTrayIcon();
+    bool trayAvailable() const;   // the system tray exists (a test can force it)
+#ifdef ZCL_WIDGET_TEST
+    bool testTrayForced = false;
+#endif
     QSystemTrayIcon* trayIcon       = nullptr;
     bool             quitting       = false;
     bool             trayHintShown  = false;
