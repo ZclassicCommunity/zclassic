@@ -72,7 +72,7 @@ say() { echo "== local-ci: $*"; }
 # They are selected by `local-ci.sh __inner <stage>` and are POSIX sh.
 
 inner_common() {
-    export DEBIAN_FRONTEND=noninteractive NO_PROTON=1
+    export DEBIAN_FRONTEND=noninteractive
     export SOURCES_PATH=/cache/depends-sources BASE_CACHE=/cache/depends-built
     export CCACHE_DIR=/cache/ccache CCACHE_MAXSIZE=20G CCACHE_COMPRESS=1
     mkdir -p "$SOURCES_PATH" "$BASE_CACHE" "$CCACHE_DIR"

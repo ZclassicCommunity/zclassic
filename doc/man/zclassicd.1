@@ -417,7 +417,8 @@ Accept public REST requests (default: 0)
 .IP
 Bind to given address to listen for JSON\-RPC connections. Use
 [host]:port notation for IPv6. This option can be specified multiple
-times (default: bind to all interfaces)
+times (default: bind to localhost only, ::1 and 127.0.0.1; this option is ignored unless
+-rpcallowip is also given, and -rpcallowip without -rpcbind binds all interfaces)
 .HP
 \fB\-rpcuser=\fR<user>
 .IP

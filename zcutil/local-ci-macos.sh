@@ -41,7 +41,6 @@ bundle=$(cd "$(dirname "$bundle")" && pwd)/$(basename "$bundle")
 out=$(cd "$out" && pwd)
 JOBS=${ZCL_CI_JOBS:-4}
 PORT_BASE=${ZCL_CI_PORT_BASE:-41200}
-export NO_PROTON=1
 export SOURCES_PATH="$ROOT/cache/depends-sources" BASE_CACHE="$ROOT/cache/depends-built"
 # Fixed absolute path so depends/Qt prefixes stay valid between runs.
 SRC=$ROOT/work/src
