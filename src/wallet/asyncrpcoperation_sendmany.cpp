@@ -568,12 +568,13 @@ bool AsyncRPCOperation_sendmany::main_impl() {
         zOutputsDeque.push_back(o);
     }
 
-    // When spending notes, take a snapshot of note witnesses and anchors as the treestate will
+    // When spending notes, take a snapshot of the witnesses and anchors of the selected notes (zInputsDeque,
+    // not every candidate note, so an unused note cannot block the send) as the treestate will
     // change upon arrival of new blocks which contain joinsplit transactions.  This is likely
     // to happen as creating a chained joinsplit transaction can take longer than the block interval.
     if (z_sprout_inputs_.size() > 0) {
         LOCK2(cs_main, pwalletMain->cs_wallet);
-        for (auto t : z_sprout_inputs_) {
+        for (auto t : zInputsDeque) {
             JSOutPoint jso = std::get<0>(t);
             std::vector<JSOutPoint> vOutPoints = { jso };
             uint256 inputAnchor;
