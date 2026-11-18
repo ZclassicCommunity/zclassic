@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "wallet/wallet.h"
+#include <type_traits>
 
 #include "checkpoints.h"
 #include "coincontrol.h"
@@ -563,8 +564,10 @@ void CWallet::ChainTip(const CBlockIndex *pindex,
                        const SaplingMerkleTree& saplingTree,
                        bool added)
 {
+    TestCrashPoint("chaintip-before");
     WitnessChainTip(pindex, pblock, sproutTree, saplingTree, added);
     UpdateSaplingNullifierNoteMapForBlock(pblock);
+    TestCrashPoint("chaintip-after");
 }
 
 void CWallet::WitnessChainTip(const CBlockIndex* pindex,
@@ -1024,6 +1027,178 @@ void CWallet::ClearNoteWitnessCache()
         }
     }
     nWitnessCacheSize = 0;
+}
+
+namespace {
+
+/** The commitment tree root the active chain committed to at the end of pindex, for a witness type. */
+uint256 ChainAnchorOf(const CBlockIndex* pindex, const SaplingWitness*) { return pindex->hashFinalSaplingRoot; }
+uint256 ChainAnchorOf(const CBlockIndex* pindex, const SproutWitness*) { return pindex->hashFinalSproutRoot; }
+
+struct NoteStateStats {
+    size_t nNotes = 0;
+    size_t nTruncated = 0;      //!< witness caches cut back to the chain tip
+    size_t nRebuilt = 0;        //!< witness caches dropped because they do not match the chain
+    size_t nMissingWitness = 0; //!< confirmed notes that had no witness at all
+};
+
+/**
+ * Make one note's witness cache something the block-by-block updates can resume
+ * from, or drop it so a rescan rebuilds it.
+ *
+ * nForkHeight is the height the wallet's best-block locator shares with the
+ * active chain: blocks up to there are taken as seen by the wallet, blocks
+ * after it are going to be scanned again. nTipHeight is the active chain tip.
+ * nTxHeight is the height of the block that holds the note's transaction on
+ * the active chain, or -1 if it is not in that chain.
+ * Lowers nRescanHeight to the first block the rescan has to include. Returns
+ * true if the note was changed.
+ */
+template <typename NoteData>
+bool ReconcileNoteWitnesses(NoteData& nd, int nForkHeight, int nTipHeight, int nTxHeight,
+                            const CChain& chain, int& nRescanHeight, NoteStateStats& stats)
+{
+    typedef typename std::remove_reference<decltype(nd.witnesses.front())>::type Witness;
+    bool fChanged = false;
+    stats.nNotes++;
+    LogPrint("wallet", "%s: note witnessHeight=%d witnesses=%u nullifier=%d txHeight=%d fork=%d tip=%d\n", __func__,
+             nd.witnessHeight, (unsigned)nd.witnesses.size(), (int)(bool)nd.nullifier, nTxHeight, nForkHeight, nTipHeight);
+
+    if (nd.witnesses.empty()) {
+        // Nothing cached. A note that is not in the chain yet (unconfirmed) gets its witness
+        // when its block is connected. One that is confirmed needs a rescan to the block that
+        // holds it, and must not carry a witness height that would make the scan skip that block.
+        // Either way the height may only be -1 (never witnessed) or the chain tip (what every
+        // connected block sets it to): any other value fails the height assertions of the next
+        // block that is connected or disconnected.
+        if (nTxHeight >= 0) {
+            if (nd.witnessHeight != -1) {
+                nd.witnessHeight = -1;
+                fChanged = true;
+            }
+            if (nTxHeight <= nForkHeight) stats.nMissingWitness++;
+            if (nTxHeight < nRescanHeight) nRescanHeight = nTxHeight;
+        } else if (nd.witnessHeight != -1 && nd.witnessHeight != nTipHeight) {
+            nd.witnessHeight = -1;
+            stats.nRebuilt++;
+            fChanged = true;
+        }
+        return fChanged;
+    }
+
+    bool fValid = true;
+    if (nd.witnessHeight > nTipHeight) {
+        // The chain is behind the wallet (the chain state is flushed less often than the
+        // wallet is written). The cache keeps one witness per block: cut it back to the tip.
+        size_t k = (size_t)(nd.witnessHeight - nTipHeight);
+        if (k < nd.witnesses.size()) {
+            for (size_t i = 0; i < k; i++) nd.witnesses.pop_front();
+            nd.witnessHeight = nTipHeight;
+            stats.nTruncated++;
+            fChanged = true;
+        } else {
+            fValid = false;
+        }
+    }
+    if (fValid && nd.witnessHeight < 0) {
+        fValid = false;
+    }
+    if (fValid && nd.witnessHeight != nForkHeight) {
+        // Not the state the locator promises: check it against what the chain committed to.
+        const CBlockIndex* pindex = chain[nd.witnessHeight];
+        if (!pindex || nd.witnesses.front().root() != ChainAnchorOf(pindex, (const Witness*)nullptr)) {
+            fValid = false;
+        } else if (nd.witnessHeight < nRescanHeight) {
+            // Behind the locator: the rescan has to run forward from where this cache ends.
+            nRescanHeight = nd.witnessHeight;
+        }
+    }
+    if (!fValid) {
+        nd.witnesses.clear();
+        nd.witnessHeight = -1;
+        stats.nRebuilt++;
+        fChanged = true;
+        // Witnessing a note needs the block that contains it.
+        if (nTxHeight >= 0 && nTxHeight < nRescanHeight) {
+            nRescanHeight = nTxHeight;
+        }
+    }
+    return fChanged;
+}
+
+} // namespace
+
+bool CWallet::ReconcileNoteState(CBlockIndex*& pindexRescan)
+{
+    LOCK2(cs_main, cs_wallet);
+    if (!pindexRescan || !chainActive.Tip()) {
+        return false;
+    }
+    const int nForkHeight = pindexRescan->nHeight;
+    const int nTipHeight = chainActive.Height();
+    int nRescanHeight = nForkHeight;
+    NoteStateStats stats;
+    bool fChanged = false;
+    size_t nNullifiers = 0;
+
+    std::vector<CWalletTx*> noteTxs;
+    CollectNoteTxs(noteTxs);
+    for (CWalletTx* pwtx : noteTxs) {
+        int nTxHeight = -1;
+        if (!pwtx->hashBlock.IsNull()) {
+            BlockMap::iterator mi = mapBlockIndex.find(pwtx->hashBlock);
+            if (mi != mapBlockIndex.end() && chainActive.Contains(mi->second)) {
+                nTxHeight = mi->second->nHeight;
+            }
+        }
+        for (auto& item : pwtx->mapSproutNoteData) {
+            fChanged |= ReconcileNoteWitnesses(item.second, nForkHeight, nTipHeight, nTxHeight, chainActive, nRescanHeight, stats);
+        }
+        bool fSaplingChanged = false;
+        for (auto& item : pwtx->mapSaplingNoteData) {
+            fSaplingChanged |= ReconcileNoteWitnesses(item.second, nForkHeight, nTipHeight, nTxHeight, chainActive, nRescanHeight, stats);
+        }
+        fChanged |= fSaplingChanged;
+
+        // A Sapling nullifier is derived from the position its witness carries. A record that
+        // has the witness but not the nullifier (an older build could write one) would make the
+        // note read as unspent for good, because no later block touches it. Derive it now.
+        bool fDerive = false;
+        for (const auto& item : pwtx->mapSaplingNoteData) {
+            if (!item.second.witnesses.empty() && !item.second.nullifier &&
+                mapSaplingFullViewingKeys.count(item.second.ivk)) {
+                fDerive = true;
+                nNullifiers++;
+            }
+        }
+        if (fDerive) {
+            UpdateSaplingNullifierNoteMapWithTx(*pwtx);
+            fChanged = true;
+        }
+    }
+
+    // nWitnessCacheSize must stay at least as large as every cache.
+    size_t nMax = 0;
+    for (CWalletTx* pwtx : noteTxs) {
+        for (const auto& item : pwtx->mapSproutNoteData) nMax = std::max(nMax, item.second.witnesses.size());
+        for (const auto& item : pwtx->mapSaplingNoteData) nMax = std::max(nMax, item.second.witnesses.size());
+    }
+    if ((int64_t)nMax > nWitnessCacheSize) {
+        nWitnessCacheSize = (int64_t)nMax;
+        fChanged = true;
+    }
+
+    if (nRescanHeight < nForkHeight) {
+        pindexRescan = chainActive[nRescanHeight];
+        fChanged = true;
+    }
+    if (fChanged) {
+        LogPrintf("Wallet note state repaired at startup: %u notes checked, %u witness caches cut back to the chain tip, "
+                  "%u dropped (rescan from block %d), %u confirmed notes without witness, %u nullifiers recomputed\n",
+                  (unsigned)stats.nNotes, (unsigned)stats.nTruncated, (unsigned)stats.nRebuilt,
+                  pindexRescan->nHeight, (unsigned)stats.nMissingWitness, (unsigned)nNullifiers);
+    }
+    return fChanged;
 }
 
 template<typename NoteDataMap>
@@ -1733,6 +1908,7 @@ bool CWallet::AddToWallet(const CWalletTx& wtxIn, bool fFromLoadWallet, CWalletD
         if (fInsertedNew || fUpdated)
             if (!wtx.WriteToDisk(pwalletdb))
                 return false;
+        TestCrashPoint("addtowallet-after-write");
 
         // Break debit/credit balance caches:
         wtx.MarkDirty();
@@ -1764,6 +1940,12 @@ bool CWallet::UpdatedNoteData(const CWalletTx& wtxIn, CWalletTx& wtx)
                 tmp.at(nd.first).witnesses.assign(
                         nd.second.witnesses.cbegin(), nd.second.witnesses.cend());
             }
+            // A note found again (a block reconnected, a transaction re-announced after a
+            // disconnect, a reindex) arrives with no nullifier; the cached one stays valid
+            // because the note is the same, and without it the note would read as unspent.
+            if (!tmp.at(nd.first).nullifier && nd.second.nullifier) {
+                tmp.at(nd.first).nullifier = nd.second.nullifier;
+            }
             tmp.at(nd.first).witnessHeight = nd.second.witnessHeight;
         }
         // Now copy over the updated note data
@@ -1779,6 +1961,12 @@ bool CWallet::UpdatedNoteData(const CWalletTx& wtxIn, CWalletTx& wtx)
             if (tmp.count(nd.first) && nd.second.witnesses.size() > 0) {
                 tmp.at(nd.first).witnesses.assign(
                         nd.second.witnesses.cbegin(), nd.second.witnesses.cend());
+            }
+            // See the Sprout loop above: keep the cached nullifier together with the witness it
+            // was derived from, so the record written to wallet.dat never has a witness but no
+            // nullifier (which reads as an unspent note until something rewrites the record).
+            if (!tmp.at(nd.first).nullifier && nd.second.nullifier) {
+                tmp.at(nd.first).nullifier = nd.second.nullifier;
             }
             tmp.at(nd.first).witnessHeight = nd.second.witnessHeight;
         }

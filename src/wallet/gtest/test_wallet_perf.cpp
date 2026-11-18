@@ -165,6 +165,8 @@ struct Chain {
                 for (const uint256& cm : js.commitments) sprout.append(cm);
             for (const OutputDescription& od : tx.vShieldedOutput) sapling.append(od.cm);
         }
+        bi.hashFinalSaplingRoot = sapling.root();
+        bi.hashFinalSproutRoot = sprout.root();
     }
 
     void Clear() {
@@ -298,6 +300,16 @@ TEST(WalletPerf, DISABLED_Bench)
                 { LOCK(cs_main); loc = chainActive.GetLocator(); }
                 WPERF_TIME(timer, "SetBestChain", wallet.SetBestChain(loc));
             }
+        }
+
+        // Start-up check of the persisted note state: with the locator one block behind the tip every
+        // cache is compared with the chain; with the locator at the tip none is.
+        {
+            LOCK2(cs_main, wallet.cs_wallet);
+            CBlockIndex* pr = &chain.index[chain.index.size() - 2];
+            WPERF_TIME(timer, "ReconcileNoteState (every cache checked)", wallet.ReconcileNoteState(pr));
+            pr = chainActive.Tip();
+            WPERF_TIME(timer, "ReconcileNoteState (locator at tip)", wallet.ReconcileNoteState(pr));
         }
 
         // Reorg: disconnect and reconnect the last five blocks.
