@@ -671,6 +671,8 @@ UniValue znam_register(const UniValue& params, bool fHelp)
         CTxDestination d = DecodeDestination(wantOwner);
         if (!boost::get<CKeyID>(&d))
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "owneraddress must be a t-address (P2PKH) of this chain");
+        if (EncodeDestination(d) != wantOwner)
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "owneraddress must be exactly the t-address, with no surrounding whitespace or other extra characters");
     }
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
@@ -786,6 +788,9 @@ UniValue znam_transfer(const UniValue& params, bool fHelp)
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
                            "newowner must be a t-address (P2PKH) of this chain. A P2SH address, a z-address or any other text would "
                            "make the name unspendable: Z23 reads an owner back as a P2PKH address only.");
+    // DecodeDestination skips surrounding whitespace; the record would carry it and no input could ever render to that text.
+    if (EncodeDestination(nd) != newOwner)
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "newowner must be exactly the t-address, with no surrounding whitespace or other extra characters");
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
     RequireUnlocked();
