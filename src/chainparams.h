@@ -178,6 +178,9 @@ protected:
  */
 const CChainParams &Params();
 
+/** True once SelectParams() has chosen a network; Params() asserts before that. */
+bool ParamsAreSelected();
+
 /** Return parameters for the given network. */
 CChainParams &Params(CBaseChainParams::Network network);
 

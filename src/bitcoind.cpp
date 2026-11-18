@@ -294,7 +294,9 @@ bool AppInit(int argc, char* argv[])
     }
     catch (const boost::filesystem::filesystem_error& e) {
         // A path problem while starting up (permissions, read-only filesystem, path too long): one clear line.
-        fprintf(stderr, "Error: %s: \"%s\"\n", e.code().message().c_str(), e.path1().string().c_str());
+        fprintf(stderr, "Error: %s: \"%s\"\n"
+                "Check the directory permissions and the HOME environment variable, or choose another location with -datadir=<dir>.\n",
+                e.code().message().c_str(), e.path1().string().c_str());
         LogPrintf("AppInit: %s\n", e.what());
         fRet = false;
     }

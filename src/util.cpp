@@ -468,7 +468,10 @@ boost::filesystem::path GetDefaultDataDir()
 #ifdef MAC_OSX
     // Mac
     pathRet /= "Library/Application Support";
-    TryCreateDirectory(pathRet);
+    // A HOME without Library/ (fresh or service account) leaves create_directory() without a parent;
+    // create the whole chain. A failure is reported by the caller when it creates the data directory.
+    boost::system::error_code ec;
+    fs::create_directories(pathRet, ec);
     return pathRet / "ZClassic";
 #else
     // Unix
@@ -504,7 +507,9 @@ static boost::filesystem::path ZC_GetBaseParamsDir()
 #ifdef MAC_OSX
     // Mac
     pathRet /= "Library/Application Support";
-    TryCreateDirectory(pathRet);
+    // See GetDefaultDataDir(): create the whole chain; a failure is reported when the params directory is created.
+    boost::system::error_code ec;
+    fs::create_directories(pathRet, ec);
     return pathRet / "ZcashParams";
 #else
     // Unix

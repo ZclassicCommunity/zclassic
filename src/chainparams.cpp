@@ -575,6 +575,10 @@ const CChainParams &Params() {
     return *pCurrentParams;
 }
 
+bool ParamsAreSelected() {
+    return pCurrentParams != 0;
+}
+
 CChainParams &Params(CBaseChainParams::Network network) {
     switch (network) {
         case CBaseChainParams::MAIN:

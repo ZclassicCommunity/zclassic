@@ -270,7 +270,10 @@ void Shutdown()
         pwalletMain->Flush(false);
 #endif
 #ifdef ENABLE_MINING
-    GenerateBitcoins(false, 0, Params());
+    // AppInit() can fail (unusable data or params directory, bad option) before SelectParams(); no miner
+    // threads exist then and Params() would assert.
+    if (ParamsAreSelected())
+        GenerateBitcoins(false, 0, Params());
 #endif
     StopNode();
     StopTorControl();
@@ -344,10 +347,14 @@ void Shutdown()
 #endif
 
 #ifndef WIN32
-    try {
-        boost::filesystem::remove(GetPidFile());
-    } catch (const boost::filesystem::filesystem_error& e) {
-        LogPrintf("%s: Unable to remove pidfile: %s\n", __func__, e.what());
+    // The pid file is written only after the network is selected; the net-specific data directory
+    // (and so GetPidFile()) is not available before that.
+    if (ParamsAreSelected()) {
+        try {
+            boost::filesystem::remove(GetPidFile());
+        } catch (const boost::filesystem::filesystem_error& e) {
+            LogPrintf("%s: Unable to remove pidfile: %s\n", __func__, e.what());
+        }
     }
 #endif
     UnregisterAllValidationInterfaces();
