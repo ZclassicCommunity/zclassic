@@ -162,7 +162,7 @@ struct StateFixture : public ::testing::Test {
 
     void SetUp() override {
         RegtestActivateSapling();
-        dir = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("wns-%%%%-%%%%");
+        dir = boost::filesystem::temp_directory_path() / UniquePath("wns-%%%%-%%%%");
         boost::filesystem::create_directories(dir);
         mapArgs["-datadir"] = dir.string();
         ClearDatadirCache();

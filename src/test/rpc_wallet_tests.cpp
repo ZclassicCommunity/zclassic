@@ -418,7 +418,7 @@ BOOST_AUTO_TEST_CASE(rpc_wallet_z_exportwallet)
 
     // Set up paths
     boost::filesystem::path tmppath = boost::filesystem::temp_directory_path();
-    boost::filesystem::path tmpfilename = boost::filesystem::unique_path("%%%%%%%%");
+    boost::filesystem::path tmpfilename = UniquePath("%%%%%%%%");
     boost::filesystem::path exportfilepath = tmppath / tmpfilename;
 
     // without -exportdir the export no longer fails: it goes to <datadir>/backups
@@ -507,7 +507,7 @@ BOOST_AUTO_TEST_CASE(rpc_wallet_z_importwallet)
 
     // write test data to file
     boost::filesystem::path temp = boost::filesystem::temp_directory_path() /
-            boost::filesystem::unique_path();
+            UniquePath();
     const std::string path = temp.string();
     std::ofstream file(path);
     file << testWalletDump;

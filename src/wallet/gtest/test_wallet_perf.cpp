@@ -225,7 +225,7 @@ TEST(WalletPerf, DISABLED_Bench)
 
     RegtestActivateSapling();
     const char* base = getenv("WPERF_DIR");
-    boost::filesystem::path dir = (base ? boost::filesystem::path(base) : boost::filesystem::temp_directory_path()) / boost::filesystem::unique_path("wperf-%%%%-%%%%-%%%%");
+    boost::filesystem::path dir = (base ? boost::filesystem::path(base) : boost::filesystem::temp_directory_path()) / UniquePath("wperf-%%%%-%%%%-%%%%");
     boost::filesystem::create_directories(dir);
     mapArgs["-datadir"] = dir.string();
     ClearDatadirCache();

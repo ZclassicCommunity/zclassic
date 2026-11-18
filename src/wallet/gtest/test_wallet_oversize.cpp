@@ -114,7 +114,7 @@ protected:
         // One Berkeley DB environment serves the whole gtest binary. Restart it
         // in a fresh temp datadir so the wallet files live where GetDataDir() says.
         ResetWalletEnvironment();
-        pathDataDir = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("zcl-walletoversize-%%%%-%%%%-%%%%");
+        pathDataDir = boost::filesystem::temp_directory_path() / UniquePath("zcl-walletoversize-%%%%-%%%%-%%%%");
         boost::filesystem::create_directories(pathDataDir);
         strPreviousDataDir = mapArgs.count("-datadir") ? mapArgs["-datadir"] : "";
         mapArgs["-datadir"] = pathDataDir.string();

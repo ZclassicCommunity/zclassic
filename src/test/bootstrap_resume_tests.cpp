@@ -89,7 +89,7 @@ std::string ReadFile(const fs::path& path)
 
 struct TempDir {
     fs::path path;
-    TempDir() : path(fs::temp_directory_path() / fs::unique_path("bootstrap-resume-test-%%%%-%%%%-%%%%")) { fs::create_directories(path); }
+    TempDir() : path(fs::temp_directory_path() / UniquePath("bootstrap-resume-test-%%%%-%%%%-%%%%")) { fs::create_directories(path); }
     ~TempDir() { boost::system::error_code ec; fs::remove_all(path, ec); }
 };
 

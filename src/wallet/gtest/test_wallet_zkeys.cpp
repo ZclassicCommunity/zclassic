@@ -221,7 +221,7 @@ TEST(wallet_zkeys_tests, write_zkey_direct_to_db) {
 
     // Get temporary and unique path for file.
     // Note: / operator to append paths
-    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / UniquePath();
     boost::filesystem::create_directories(pathTemp);
     mapArgs["-datadir"] = pathTemp.string();
 
@@ -294,7 +294,7 @@ TEST(wallet_zkeys_tests, WriteViewingKeyDirectToDB) {
 
     // Get temporary and unique path for file.
     // Note: / operator to append paths
-    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / UniquePath();
     boost::filesystem::create_directories(pathTemp);
     mapArgs["-datadir"] = pathTemp.string();
 
@@ -340,7 +340,7 @@ TEST(wallet_zkeys_tests, write_cryptedzkey_direct_to_db) {
 
     // Get temporary and unique path for file.
     // Note: / operator to append paths
-    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / UniquePath();
     boost::filesystem::create_directories(pathTemp);
     mapArgs["-datadir"] = pathTemp.string();
 
@@ -416,7 +416,7 @@ TEST(wallet_zkeys_tests, WriteCryptedSaplingZkeyDirectToDb) {
 
     // Get temporary and unique path for file.
     // Note: / operator to append paths
-    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / UniquePath();
     boost::filesystem::create_directories(pathTemp);
     mapArgs["-datadir"] = pathTemp.string();
 

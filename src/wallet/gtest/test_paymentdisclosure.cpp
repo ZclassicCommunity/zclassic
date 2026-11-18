@@ -92,7 +92,7 @@ public:
 TEST(paymentdisclosure, mainnet) {
     SelectParams(CBaseChainParams::MAIN);
 
-    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / UniquePath();
     boost::filesystem::create_directories(pathTemp);
     mapArgs["-datadir"] = pathTemp.string();
 

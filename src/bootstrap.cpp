@@ -1271,7 +1271,7 @@ bool BackupGenesisOnlyChainData(const boost::filesystem::path& data_dir, boost::
     const boost::filesystem::path chainstate_dir = data_dir / "chainstate";
     try {
         const boost::filesystem::path backup =
-            data_dir / boost::filesystem::unique_path(strprintf("bootstrap-genesis-backup-%d-%%%%-%%%%-%%%%", GetTime()));
+            data_dir / strprintf("bootstrap-genesis-backup-%d-%s", GetTime(), RandomSuffix(12));
         boost::filesystem::create_directories(backup);
         if (boost::filesystem::exists(blocks_dir))
             boost::filesystem::rename(blocks_dir, backup / "blocks");
@@ -1381,7 +1381,7 @@ bool ImportBootstrapDatadir(const boost::filesystem::path& source_root, const bo
 
         boost::filesystem::path backup;
         if (has_existing) {
-            backup = data_dir / boost::filesystem::unique_path(strprintf("bootstrap-backup-%d-%%%%-%%%%-%%%%", GetTime()));
+            backup = data_dir / strprintf("bootstrap-backup-%d-%s", GetTime(), RandomSuffix(12));
             boost::filesystem::create_directories(backup);
             if (boost::filesystem::exists(blocks_dir))
                 boost::filesystem::rename(blocks_dir, backup / "blocks");

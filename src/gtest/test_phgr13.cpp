@@ -391,7 +391,7 @@ TEST(phgr13, a_verifying_key_that_does_not_load_is_refused_and_leaves_the_key)
     // libsnark's loadFromFile for a missing file) and must not replace the
     // installed key.
     const boost::filesystem::path dir =
-        boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("phgr13-vk-%%%%%%%%");
+        boost::filesystem::temp_directory_path() / UniquePath("phgr13-vk-%%%%%%%%");
     boost::filesystem::create_directories(dir);
     const boost::filesystem::path real = ZC_GetParamsDir() / "sprout-verifying.key";
     std::ifstream in(real.string(), std::ios::binary);

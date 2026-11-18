@@ -668,6 +668,33 @@ bool RenameOver(boost::filesystem::path src, boost::filesystem::path dest)
  * Specifically handles case where path p exists, but it wasn't possible for the user to
  * write to the parent directory.
  */
+std::string RandomSuffix(size_t n)
+{
+    static const char hexdigits[] = "0123456789abcdef";
+    std::vector<unsigned char> raw((n + 1) / 2);
+    if (!raw.empty())
+        GetRandBytes(raw.data(), raw.size());
+    std::string out;
+    out.reserve(n);
+    for (size_t i = 0; i < n; i++) {
+        unsigned char b = raw[i / 2];
+        out.push_back(hexdigits[(i % 2 == 0) ? (b >> 4) : (b & 0x0F)]);
+    }
+    return out;
+}
+
+boost::filesystem::path UniquePath(const std::string& model)
+{
+    const size_t nPercent = std::count(model.begin(), model.end(), '%');
+    const std::string rnd = RandomSuffix(nPercent);
+    std::string name(model);
+    size_t k = 0;
+    for (size_t i = 0; i < name.size(); i++)
+        if (name[i] == '%')
+            name[i] = rnd[k++];
+    return boost::filesystem::path(name);
+}
+
 bool TryCreateDirectory(const boost::filesystem::path& p)
 {
     try

@@ -57,7 +57,7 @@ bool WriteSizedFile(const boost::filesystem::path& p, uint64_t size) {
 
 boost::filesystem::path MakeTmpDir() {
     boost::filesystem::path dir = boost::filesystem::temp_directory_path() /
-        boost::filesystem::unique_path("zcl_params_%%%%%%%%");
+        UniquePath("zcl_params_%%%%%%%%");
     boost::filesystem::create_directories(dir);
     return dir;
 }

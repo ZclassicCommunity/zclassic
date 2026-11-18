@@ -59,7 +59,7 @@ protected:
         SelectParams(CBaseChainParams::REGTEST);
         bitdb.Flush(true);
         bitdb.Reset();
-        dataDir = fs::temp_directory_path() / fs::unique_path("zcl-backupwallet-%%%%-%%%%-%%%%");
+        dataDir = fs::temp_directory_path() / UniquePath("zcl-backupwallet-%%%%-%%%%-%%%%");
         outDir = dataDir / "out";
         fs::create_directories(outDir);
         prevDataDir = mapArgs.count("-datadir") ? mapArgs["-datadir"] : "";

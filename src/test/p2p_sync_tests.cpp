@@ -67,7 +67,7 @@ BOOST_AUTO_TEST_CASE(sync_phase_classification)
 // in the datadir forever.
 BOOST_AUTO_TEST_CASE(stale_bootstrap_staging_removed)
 {
-    const boost::filesystem::path dir = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("z23-staging-%%%%-%%%%");
+    const boost::filesystem::path dir = boost::filesystem::temp_directory_path() / UniquePath("z23-staging-%%%%-%%%%");
     boost::filesystem::create_directories(dir / "bootstrap-peer-staging-100" / "blocks");
     boost::filesystem::create_directories(dir / "bootstrap-peer-staging-200" / "chainstate");
     boost::filesystem::create_directories(dir / "blocks");

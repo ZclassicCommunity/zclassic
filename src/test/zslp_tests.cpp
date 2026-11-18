@@ -946,7 +946,7 @@ BOOST_AUTO_TEST_CASE(review_random_reorgs_equal_rebuild)
 // took &ss[0] of an empty stream.
 BOOST_AUTO_TEST_CASE(leveldb_store_accepts_empty_values_and_prefix)
 {
-    const boost::filesystem::path dir = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+    const boost::filesystem::path dir = boost::filesystem::temp_directory_path() / UniquePath();
     {
         LevelKV kv(dir.string(), 1 << 20, true, false);
         std::vector<KV::Op> ops;

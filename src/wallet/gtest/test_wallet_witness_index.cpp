@@ -349,7 +349,7 @@ struct DbEnvGuard {
             SelectBaseParams(CBaseChainParams::REGTEST);
         }
         if (!mapArgs.count("-datadir")) {
-            boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+            boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / UniquePath();
             boost::filesystem::create_directories(pathTemp);
             mapArgs["-datadir"] = pathTemp.string();
             ClearDatadirCache();

@@ -1182,7 +1182,7 @@ bool BackupWallet(const CWallet& wallet, const string& strDest)
                 // pathTmp stays empty until named, so the catch can never remove pathDest.
                 boost::filesystem::path pathTmp;
                 try {
-                    pathTmp = pathDest.string() + ".tmp." + boost::filesystem::unique_path("%%%%%%%%%%%%%%%%").string();
+                    pathTmp = pathDest.string() + ".tmp." + RandomSuffix(16);
                     // Exclusive create (never follows a planted name); synchronize_data
                     // fdatasyncs (F_FULLFSYNC on macOS, FlushFileBuffers on Windows) and
                     // reports its failure, unlike FileCommit.

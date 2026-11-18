@@ -203,7 +203,7 @@ static mode_t FileMode(const std::string& path)
 BOOST_AUTO_TEST_CASE(onion_keyfile_owner_only)
 {
     boost::filesystem::path dir = boost::filesystem::temp_directory_path() /
-                                  boost::filesystem::unique_path("zcl-keyfile-%%%%-%%%%-%%%%");
+                                  UniquePath("zcl-keyfile-%%%%-%%%%-%%%%");
     BOOST_REQUIRE(boost::filesystem::create_directories(dir));
     const std::string path = (dir / "onion_v3_private_key").string();
     const std::string key = "ED25519-V3:test-key-material-not-a-real-key";

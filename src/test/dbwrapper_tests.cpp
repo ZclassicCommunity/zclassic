@@ -34,7 +34,7 @@ BOOST_FIXTURE_TEST_SUITE(dbwrapper_tests, BasicTestingSetup)
 BOOST_AUTO_TEST_CASE(dbwrapper)
 {
     {
-        path ph = temp_directory_path() / unique_path();
+        path ph = temp_directory_path() / UniquePath();
         CDBWrapper dbw(ph, (1 << 20), true, false);
         char key = 'k';
         uint256 in = GetRandHash();
@@ -50,7 +50,7 @@ BOOST_AUTO_TEST_CASE(dbwrapper)
 BOOST_AUTO_TEST_CASE(dbwrapper_batch)
 {
     {
-        path ph = temp_directory_path() / unique_path();
+        path ph = temp_directory_path() / UniquePath();
         CDBWrapper dbw(ph, (1 << 20), true, false);
 
         char key = 'i';
@@ -85,7 +85,7 @@ BOOST_AUTO_TEST_CASE(dbwrapper_batch)
 BOOST_AUTO_TEST_CASE(dbwrapper_iterator)
 {
     {
-        path ph = temp_directory_path() / unique_path();
+        path ph = temp_directory_path() / UniquePath();
         CDBWrapper dbw(ph, (1 << 20), true, false);
 
         // The two keys are intentionally chosen for ordering
@@ -123,7 +123,7 @@ BOOST_AUTO_TEST_CASE(dbwrapper_iterator)
 
 BOOST_AUTO_TEST_CASE(iterator_ordering)
 {
-    path ph = temp_directory_path() / unique_path();
+    path ph = temp_directory_path() / UniquePath();
     CDBWrapper dbw(ph, (1 << 20), true, false);
     for (int x=0x00; x<256; ++x) {
         uint8_t key = x;
@@ -189,7 +189,7 @@ BOOST_AUTO_TEST_CASE(iterator_string_ordering)
 {
     char buf[10];
 
-    path ph = temp_directory_path() / unique_path();
+    path ph = temp_directory_path() / UniquePath();
     CDBWrapper dbw(ph, (1 << 20), true, false);
     for (int x=0x00; x<10; ++x) {
         for (int y = 0; y < 10; y++) {

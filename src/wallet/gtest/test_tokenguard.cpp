@@ -173,14 +173,14 @@ protected:
         // new one in a fresh temp datadir, so this test's wallet files live
         // where GetDataDir() says they do.
         ResetWalletEnvironment();
-        pathDataDir = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("zcl-tokenguard-%%%%-%%%%-%%%%");
+        pathDataDir = boost::filesystem::temp_directory_path() / UniquePath("zcl-tokenguard-%%%%-%%%%-%%%%");
         boost::filesystem::create_directories(pathDataDir);
         strPreviousDataDir = mapArgs.count("-datadir") ? mapArgs["-datadir"] : "";
         mapArgs["-datadir"] = pathDataDir.string();
         ClearDatadirCache();
         mapArgs["-keypool"] = "3";
 
-        walletFile = boost::filesystem::unique_path("tokenguard-%%%%-%%%%.dat").string();
+        walletFile = UniquePath("tokenguard-%%%%-%%%%.dat").string();
         wallet = OpenWallet(walletFile);
 
         CPubKey pubkey;
@@ -1229,7 +1229,7 @@ TEST_F(TokenGuardTest, NothingIsPersistedAndABackupIsStillProtected)
     // Back the wallet file up and open the copy as a different wallet, as a
     // restore would. Nothing but the transactions came along, and the copy
     // protects the same outputs.
-    boost::filesystem::path pathBackup = GetDataDir() / boost::filesystem::unique_path("tokenguard-backup-%%%%-%%%%.dat");
+    boost::filesystem::path pathBackup = GetDataDir() / UniquePath("tokenguard-backup-%%%%-%%%%.dat");
     ASSERT_TRUE(BackupWallet(*wallet, pathBackup.string()));
 
     // Close the original and tear the database environment down, so the copy
