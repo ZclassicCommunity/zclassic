@@ -771,6 +771,21 @@ void FileCommit(FILE *fileout)
 #endif
 }
 
+/** fsync a directory so a rename into it is durable. Nothing to do on Windows. */
+bool DirectoryCommit(const boost::filesystem::path& dir)
+{
+#ifdef WIN32
+    return true;
+#else
+    int fd = open(dir.empty() ? "." : dir.string().c_str(), O_RDONLY);
+    if (fd < 0)
+        return false;
+    bool ok = fsync(fd) == 0;
+    close(fd);
+    return ok;
+#endif
+}
+
 bool TruncateFile(FILE *file, unsigned int length) {
 #if defined(WIN32)
     return _chsize(_fileno(file), length) == 0;
