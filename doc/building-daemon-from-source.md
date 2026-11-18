@@ -435,11 +435,11 @@ make -C src bitcoin_test_check      # src/Makefile.test.include:147
 # zcash gtest suite (runs src/zcash-gtest):
 make -C src zcash-gtest_check       # src/Makefile.gtest.include:74
 
-# misc local checks (bitcoin-util-test.py + secp256k1 + univalue):
+# misc local checks (secp256k1 + univalue):
 make check-local                    # src/Makefile.test.include:153
 
-# Python RPC integration tests:
-qa/pull-tester/rpc-tests.sh
+# RPC integration tests (shell, regtest): see qa/rpc-tests/README.md
+sh qa/rpc-tests/wallet_matrix.sh src
 ```
 
 > There is no verified single top-level `make check` aggregator; the verified

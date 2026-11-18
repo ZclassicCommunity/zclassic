@@ -25,7 +25,7 @@ LICENSE.z23, NOTICE      Apache-2.0 text and notice for the vendored subtree.
 
 ## Pin
 
-`aa9eed8322b686cf9ee5443adfe9bb6063d985e7` (Z23 origin/main, 2026-11-16). `revendor.sh`
+`3e680284b633f101deeb363f19264dbfd83cfee7` (Z23 commit; Z23_SOURCE.tsv is the authority). `revendor.sh`
 and `check-vendor.sh` (with `Z23_REPO=<path>`) refuse any pin that does not contain
 `55245e2bd` ("reject non-canonical Fr encodings as zclassicd does"). Without it the
 verifier would accept `cm >= q`, `anchor >= q` and `y = q` point encodings that

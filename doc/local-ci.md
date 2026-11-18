@@ -93,6 +93,15 @@ embedded manifest with `activeCodePage` UTF-8. macOS: `otool -L` allows only
 (only processes of this run are ever signalled). Unlike the workflow, a failed
 `! grep` is a real failure here.
 
+Every release binary also passes `zcutil/check-hardening.sh` (POSIX sh, binutils only;
+`make -C src check-security` runs the same script). ELF: PIE, full RELRO (`GNU_RELRO` +
+`BIND_NOW`), non-executable stack, `__stack_chk_fail` present (FORTIFY `_chk` symbols and
+the CET IBT/SHSTK note are reported as info). PE: `DYNAMIC_BASE`, `NX_COMPAT`,
+`HIGH_ENTROPY_VA` and a non-empty `.reloc` section, because without relocations ASLR does
+not apply. Mach-O: the PIE flag via `otool -hv` (skipped with a message when `otool` is
+absent). One PASS/FAIL/INFO/SKIP line per check; any FAIL makes the stage fail. Run it by
+hand on any binary: `sh zcutil/check-hardening.sh path/to/zclassicd`.
+
 `test` runs two builds of the test suites (`--flavor debug|release|both`, default both):
 
 * **debug** (as `ci.yml`): `DEBUG=1` depends and `--enable-debug`, which in this fork
@@ -116,8 +125,8 @@ with Sapling active), `zslp_index.sh`, the wallet logic and widget tests (Qt fro
 environment), and with `--tor` the two-node, three-node and addrv2 Tor tests (they
 need real Tor network access). The tests run in a network-less namespace with their
 own loopback, so they cannot collide with a running node. One summary table is
-printed and the exit status is non-zero on any failure. The Python 2 RPC tests of
-`qa/rpc-tests` are not run (no Python).
+printed and the exit status is non-zero on any failure. The Python RPC tests that
+were in `qa/rpc-tests` have been removed.
 
 ## Runaway steps: timeouts, log cap, ASLR
 
@@ -179,6 +188,6 @@ The Windows wallet is built natively on the Windows PC (static Qt 5.15.2, MinGW
 * Windows `.exe` files and the wallet bundle are not byte-for-byte reproducible between
   runs (link timestamps); the Linux and macOS daemons are. Compare `SOURCE_COMMIT.txt`
   and the validation output, not the hashes of two different runs.
-* Not run here: the Python 2 RPC tests of `qa/rpc-tests`, the macOS wallet bundle
+* Not run here: the macOS wallet bundle
   (`local-ci-macos.sh wallet` builds Qt for about an hour on the first run), and the
   Windows wallet GUI (built natively on the Windows PC, see above).

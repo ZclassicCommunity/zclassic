@@ -80,7 +80,7 @@
 #include "librustzcash.h"
 #include "c23/glue/zcl_c23_glue.h"
 #include "crypto/sha256.h"
-#include "sha256.h"
+#include "utilstrencodings.h"
 #include "startuptimer.h"
 #include "zslp/zslpservice.h"
 #include "znam/znamservice.h"
@@ -703,7 +703,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageGroup(_("RPC server options:"));
     strUsage += HelpMessageOpt("-server", _("Accept command line and JSON-RPC commands"));
     strUsage += HelpMessageOpt("-rest", strprintf(_("Accept public REST requests (default: %u)"), 0));
-    strUsage += HelpMessageOpt("-rpcbind=<addr>", _("Bind to given address to listen for JSON-RPC connections. Use [host]:port notation for IPv6. This option can be specified multiple times (default: bind to all interfaces)"));
+    strUsage += HelpMessageOpt("-rpcbind=<addr>", _("Bind to given address to listen for JSON-RPC connections. Use [host]:port notation for IPv6. This option can be specified multiple times (default: bind to localhost only, ::1 and 127.0.0.1; this option is ignored unless -rpcallowip is also given, and -rpcallowip without -rpcbind binds all interfaces)"));
     strUsage += HelpMessageOpt("-rpcuser=<user>", _("Username for JSON-RPC connections"));
     strUsage += HelpMessageOpt("-rpcpassword=<pw>", _("Password for JSON-RPC connections"));
     strUsage += HelpMessageOpt("-rpcport=<port>", strprintf(_("Listen for JSON-RPC connections on <port> (default: %u or testnet: %u)"), 8023, 18023));
@@ -957,7 +957,9 @@ static std::string CompiledParamEpoch()
         acc += std::to_string((unsigned long long)s.nSize);
         acc += '\n';
     }
-    return SHA256::hashString(acc);
+    unsigned char digest[CSHA256::OUTPUT_SIZE];
+    CSHA256().Write(reinterpret_cast<const unsigned char*>(acc.data()), acc.size()).Finalize(digest);
+    return HexStr(digest, digest + sizeof(digest));
 }
 
 static boost::filesystem::path ParamVerifyCachePath()

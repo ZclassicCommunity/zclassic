@@ -120,7 +120,7 @@ LIBZCASH_H = \
   zcash/Zcash.h \
   zcash/zip32.h
 
-.PHONY: FORCE check-symbols check-security check-c23-vendor check-c23-no-rust check-c23-tor-symbols
+.PHONY: FORCE check-security check-c23-vendor check-c23-no-rust check-c23-tor-symbols
 # bitcoin core #
 BITCOIN_CORE_H = \
   addrman.h \
@@ -320,7 +320,6 @@ libbitcoin_server_a_SOURCES = \
   policy/fees.cpp \
   pow.cpp \
   rest.cpp \
-  sha256.cpp \
   rpc/blockchain.cpp \
   rpc/mining.cpp \
   rpc/misc.cpp \
@@ -472,7 +471,7 @@ ZCL_C23_HASH_SOURCES = \
   c23/glue/zcl_c23_hash_log.c \
   c23/glue/zcl_c23_hash_names.h \
   c23/glue/zcl_c23_compat.h
-ZCL_C23_HASH_CPPFLAGS = \
+ZCL_C23_HASH_CPPFLAGS = $(HARDENED_CPPFLAGS) \
   -iquote $(srcdir)/c23/glue \
   -iquote $(srcdir)/c23/vendor/core/modules/crypto/include \
   -iquote $(srcdir)/c23/vendor/platform/modules/util/include \
@@ -890,16 +889,10 @@ clean-local:
 	$(AM_V_CXX) $(OBJCXX) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) \
 	  $(CPPFLAGS) $(AM_CXXFLAGS) $(AM_CXXFLAGS) $(PIE_FLAGS) $(CXXFLAGS) -c -o $@ $<
 
-check-symbols: $(bin_PROGRAMS)
-if GLIBC_BACK_COMPAT
-	@echo "Checking glibc back compat of [$(bin_PROGRAMS)]..."
-	$(AM_V_at) READELF=$(READELF) CPPFILT=$(CPPFILT) $(top_srcdir)/contrib/devtools/symbol-check.py $(bin_PROGRAMS)
-endif
-
 check-security: $(bin_PROGRAMS)
 if HARDEN
 	@echo "Checking binary security of [$(bin_PROGRAMS)]..."
-	$(AM_V_at) READELF=$(READELF) OBJDUMP=$(OBJDUMP) $(top_srcdir)/contrib/devtools/security-check.py $(bin_PROGRAMS)
+	$(AM_V_at) READELF=$(READELF) OBJDUMP=$(OBJDUMP) sh $(top_srcdir)/zcutil/check-hardening.sh $(bin_PROGRAMS)
 endif
 
 strip: $(bin_PROGRAMS)

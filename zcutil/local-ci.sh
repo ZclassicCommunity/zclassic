@@ -72,7 +72,7 @@ say() { echo "== local-ci: $*"; }
 # They are selected by `local-ci.sh __inner <stage>` and are POSIX sh.
 
 inner_common() {
-    export DEBIAN_FRONTEND=noninteractive NO_PROTON=1
+    export DEBIAN_FRONTEND=noninteractive
     export SOURCES_PATH=/cache/depends-sources BASE_CACHE=/cache/depends-built
     export CCACHE_DIR=/cache/ccache CCACHE_MAXSIZE=20G CCACHE_COMPRESS=1
     mkdir -p "$SOURCES_PATH" "$BASE_CACHE" "$CCACHE_DIR"
@@ -104,6 +104,13 @@ run_logged() {
 
 check_fail() { echo "CHECK FAILED: $*" >&2; exit 1; }
 
+# hardening <validation-file> <binary>...: exploit-mitigation check (PIE/RELRO/NX/canary, PE ASLR).
+hardening() {
+    v=$1; shift
+    if out=$(sh zcutil/check-hardening.sh "$@" 2>&1); then echo "$out" | tee -a "$v"
+    else echo "$out" | tee -a "$v"; check_fail "hardening check failed (zcutil/check-hardening.sh)"; fi
+}
+
 # Windows system-DLL allowlist, identical to the workflow.
 WIN_DLL_ALLOW='^(advapi32|bcrypt|crypt32|iphlpapi|kernel32|msvcrt|netapi32|ntdll|ole32|oleaut32|psapi|secur32|shell32|shlwapi|user32|userenv|version|winmm|ws2_32|wtsapi32)\.dll$'
 
@@ -124,6 +131,7 @@ inner_daemon_linux() {
         echo "$binary: highest $highest" | tee -a "$cand/validation.txt"
         [ "$(printf '%s\nGLIBC_2.31\n' "$highest" | sort -V | tail -1)" = GLIBC_2.31 ] || check_fail "$binary needs $highest (floor GLIBC_2.31)"
     done
+    hardening "$cand/validation.txt" "$cand"/zclassic*
     if grep -E 'not found|libgomp' "$cand/validation.txt"; then check_fail "unexpected dynamic dependency (see above)"; fi
     want=$(expected_version)
     "$cand/zclassicd" --version | tee -a "$cand/validation.txt" | head -3
@@ -152,6 +160,7 @@ inner_daemon_win64() {
         echo "$binary: manifests=$n activeCodePage-UTF-8=$u" | tee -a "$cand/validation.txt"
         [ "$n" -eq 1 ] && [ "$u" -eq 1 ] || check_fail "$binary: expected exactly one manifest with activeCodePage UTF-8"
     done
+    hardening "$cand/validation.txt" "$cand"/*.exe
     printf '%s\n' "$COMMIT" >"$cand/SOURCE_COMMIT.txt"
     (cd "$cand" && sha256sum zclassic* >SHA256SUMS.txt && sha256sum -c SHA256SUMS.txt)
     say "daemon-win64 OK: $cand"

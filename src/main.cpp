@@ -2605,6 +2605,7 @@ static int64_t nTimeConnect = 0;
 static int64_t nTimeIndex = 0;
 static int64_t nTimeCallbacks = 0;
 static int64_t nTimeTotal = 0;
+static int64_t nTimeCheckBlock = 0;
 
 bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pindex, CCoinsViewCache& view, bool fJustCheck, bool fScratchView)
 {
@@ -2625,7 +2626,13 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
     // Check it again to verify JoinSplit proofs, and in case a previous version let a bad block in
     // For blocks before checkpoint: skip expensive signature checks AND structural validation (hash chain is sufficient)
-    if (!CheckBlock(block, state, fExpensiveChecks ? verifier : disabledVerifier, !fJustCheck, !fJustCheck, fExpensiveChecks))
+    // Timer only (-debug=bench): this re-check includes the Equihash solution check.
+    const int64_t nTimeCheck0 = GetTimeMicros();
+    const bool fBlockCheckOk = CheckBlock(block, state, fExpensiveChecks ? verifier : disabledVerifier, !fJustCheck, !fJustCheck, fExpensiveChecks);
+    const int64_t nTimeCheck1 = GetTimeMicros();
+    nTimeCheckBlock += nTimeCheck1 - nTimeCheck0;
+    LogPrint("bench", "    - CheckBlock re-check: %.2fms [%.2fs]\n", 0.001 * (nTimeCheck1 - nTimeCheck0), nTimeCheckBlock * 0.000001);
+    if (!fBlockCheckOk)
         return false;
 
     // verify that the view's current state corresponds to the previous block
@@ -3392,6 +3399,8 @@ static int64_t nTimeConnectTotal = 0;
 static int64_t nTimeFlush = 0;
 static int64_t nTimeChainState = 0;
 static int64_t nTimePostConnect = 0;
+static int64_t nTimeBlockChecked = 0;
+static int64_t nTimeFinalize = 0;
 
 /**
  * Connect a new block to chainActive. pblock is either NULL or a pointer to a CBlock
@@ -3476,7 +3485,11 @@ bool static ConnectTip(CValidationState &state, CBlockIndex *pindexNew, CBlock *
     {
         CCoinsViewCache view(pcoinsTip);
         bool rv = ConnectBlock(*pblock, state, pindexNew, view);
+        const int64_t nTimeSig0 = GetTimeMicros();
         GetMainSignals().BlockChecked(*pblock, state);
+        const int64_t nTimeSig1 = GetTimeMicros();
+        nTimeBlockChecked += nTimeSig1 - nTimeSig0;
+        LogPrint("bench", "  - BlockChecked signal: %.2fms [%.2fs]\n", (nTimeSig1 - nTimeSig0) * 0.001, nTimeBlockChecked * 0.000001);
         if (!rv) {
             if (state.IsInvalid())
                 InvalidBlockFound(pindexNew, state);
@@ -3484,6 +3497,7 @@ bool static ConnectTip(CValidationState &state, CBlockIndex *pindexNew, CBlock *
         }
 
         // Update the finalized block.
+        const int64_t nTimeFin0 = GetTimeMicros();
         const CBlockIndex *pindexToFinalize = FindBlockToFinalize(pindexNew);
         if (pindexToFinalize && !FinalizeBlockInternal(state, pindexToFinalize))
         {
@@ -3492,6 +3506,9 @@ bool static ConnectTip(CValidationState &state, CBlockIndex *pindexNew, CBlock *
                          pindexNew->GetBlockHash().ToString(),
                          FormatStateMessage(state));
         }
+        const int64_t nTimeFin1 = GetTimeMicros();
+        nTimeFinalize += nTimeFin1 - nTimeFin0;
+        LogPrint("bench", "  - Finalize: %.2fms [%.2fs]\n", (nTimeFin1 - nTimeFin0) * 0.001, nTimeFinalize * 0.000001);
 
         mapBlockSource.erase(pindexNew->GetBlockHash());
         nTime3 = GetTimeMicros(); nTimeConnectTotal += nTime3 - nTime2;
