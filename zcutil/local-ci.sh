@@ -281,6 +281,7 @@ t_matrix() {
     # shellcheck disable=SC2086
     sh qa/rpc-tests/wallet_matrix.sh --bin /w/src/src --work $TD/matrix --only 1,2,3,4,5,6,7,8,9 --base 30000 $peer
 }
+t_txutil()      { sh qa/rpc-tests/zclassic_tx_util.sh /w/src/src; }
 t_tokenguard()  { sh qa/rpc-tests/wallet_tokenguard.sh /w/src/src; }
 t_tokenguard_sapling() { E2E_NODE_ARGS="-nuparams=5ba81b19:1 -nuparams=76b809bb:1" sh qa/rpc-tests/wallet_tokenguard.sh /w/src/src; }
 t_zslp()        { sh qa/rpc-tests/zslp_index.sh /w/src/src; }
@@ -315,6 +316,7 @@ inner_test_run() {
     step test_bitcoin-full 7200 t_testbitcoin
     step zcash-gtest-full 7200 t_gtest
     step regtest-smoke 3600 t_smoke
+    step zclassic-tx-util 600 t_txutil
     if [ "$FLAVOR" = release ]; then return 0; fi   # release flavor: unit suites + smoke only
     step tree-root-asan 900 t_treeroot
     step c23-run-linked 7200 t_c23linked

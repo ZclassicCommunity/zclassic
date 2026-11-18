@@ -10,3 +10,5 @@ datadirs and checks their behaviour through `zclassic-cli`. Run one with its sou
 The header of each script lists its environment variables and what it checks. The old
 Python test framework has been removed; `zcutil/local-ci.sh` runs the scripts that
 belong to the release gate.
+
+`zclassic_tx_util.sh <dir>` runs every case of `data/zclassic_tx_util/cases.json` through `zclassic-tx` (needs jq).
