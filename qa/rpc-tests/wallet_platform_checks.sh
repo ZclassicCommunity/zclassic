@@ -128,14 +128,16 @@ chk_kill() {
     fund_notes 0 "$zs" 20 1
     rec=$(zrecips 1 19.5)
     # (a) kill -9 while the proof is being built
-    op=$(cli 0 z_sendmany "$zs" "$rec" 1 "$FEE"); sleep 1; kill9 0; start 0 "$BIN" $R
+    # A node killed before its first chainstate flush restarts from height 0 and
+    # re-syncs from the peer: wait for that before reading wallet state.
+    op=$(cli 0 z_sendmany "$zs" "$rec" 1 "$FEE"); sleep 1; kill9 0; start 0 "$BIN" $R; sync_to 0
     ck "kill during proving: notes intact" "$(zbal 0 "$zs")" 20.00000000
     ck "kill during proving: nothing in miner mempool" "$(cli 1 getrawmempool | jq length)" 0
     r=$(zsend 0 "$zs" "$rec" 1 "$FEE"); case $r in success*) wait_mempool 1 "${r#success }"; mine 1 ;; *) bad "kill during proving: respend: $r" ;; esac
     ck "kill during proving: respend exact" "$(zbal 0 "$zs")" "$(add 20 -19.5 -$FEE)"
     # (b) kill -9 right after acceptance (z_sendmany reported success), before it is mined
     fund_notes 0 "$zs" 5 1; b0=$(zbal 0 "$zs"); rec=$(zrecips 1 4.5)
-    r=$(zsend 0 "$zs" "$rec" 1 "$FEE"); kill9 0; start 0 "$BIN" $R
+    r=$(zsend 0 "$zs" "$rec" 1 "$FEE"); kill9 0; start 0 "$BIN" $R; sync_to 0
     case $r in success*)
         w=0; until cli 1 getrawmempool | grep -q "${r#success }" || [ $w -ge 120 ]; do sleep 1; w=$((w + 1)); done
         obs "kill_after_accept_relayed_after_s" "$w"
@@ -208,7 +210,7 @@ chk_encrypt() {
     case $r in success*) wait_mempool 1 "${r#success }"; mine 1 ;; *) bad "encrypt: unlocked multi-note spend: $r" ;; esac
     ck "encrypt: change exact" "$(zbal 0 "$zs")" "$(add 6 -4.9 -$FEE)"; ck "encrypt: recipient exact" "$(zbal 1 "$d")" 4.50000000
     cli 0 walletlock; ckerr "encrypt: locked again" 'passphrase|locked|unlock' 0 z_getnewaddress
-    cli 0 walletpassphrase pw1 600 >/dev/null; s1=$(snap 0); kill9 0; start 0 "$BIN" $R; sync_to 0
+    cli 0 walletpassphrase pw1 600 >/dev/null; s1=$(snap 0); kill9 0; start 0 "$BIN" $R; sync_to 0; sync_to 0
     ck "encrypt: kill -9 while unlocked: balances identical" "$(snap 0 | sed 's/txs=.*//')" "$(printf %s "$s1" | sed 's/txs=.*//')"
     r=$(zsend 0 "$zs" "[{\"address\":\"$d\",\"amount\":0.1}]"); printf %s "$r" | grep -Eqi 'passphrase|locked|unlock' && pass "encrypt: still locked after kill -9" || bad "encrypt: after kill -9: $r"
     ckerr "encrypt: change passphrase with the wrong old one" 'incorrect|passphrase' 0 walletpassphrasechange nope pw2
