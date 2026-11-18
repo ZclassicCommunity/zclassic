@@ -77,6 +77,23 @@ start -exportdir="$work/elsewhere" || { echo "backupwallet-test: node did not re
 out=$(cli backupwallet explicit.dat 2>&1)
 [ "$out" = "$work/elsewhere/explicit.dat" ] && [ -s "$work/elsewhere/explicit.dat" ] && ok "explicit -exportdir used: $out" || bad "explicit -exportdir: $out"
 [ ! -e "$backups/explicit.dat" ] && ok "default directory untouched when -exportdir is given" || bad "wrote into the default directory despite -exportdir"
+out=$(cli backupwallet explicit.dat 2>&1)
+case "$out" in *"Cannot overwrite"*) ok "backupwallet refuses to replace an existing backup" ;; *) bad "backupwallet replaced an existing file: $out" ;; esac
+stop
+
+# -exportdir may be the directory that holds wallet.dat: the live wallet and the
+# node's other files must never be a destination (copy_file would truncate them)
+start -exportdir="$dd/regtest" || { echo "backupwallet-test: node did not restart (3)"; exit 1; }
+wsz=$(stat -c %s "$dd/regtest/wallet.dat")
+for victim in wallet.dat peers.dat; do
+    [ -e "$dd/regtest/$victim" ] || continue
+    vsz=$(stat -c %s "$dd/regtest/$victim")
+    out=$(cli backupwallet "$victim" 2>&1)
+    case "$out" in *"Cannot overwrite"*) ok "backupwallet $victim refused: $out" ;; *) bad "backupwallet $victim answered: $out" ;; esac
+    [ "$(stat -c %s "$dd/regtest/$victim")" = "$vsz" ] && ok "$victim keeps its size ($vsz bytes)" || bad "$victim changed size"
+done
+[ "$(stat -c %s "$dd/regtest/wallet.dat")" -ge $((wsz / 2)) ] && ok "wallet.dat intact" || bad "wallet.dat was truncated"
+cli getbalance >/dev/null 2>&1 && ok "wallet still answers" || bad "wallet no longer answers"
 stop
 
 if [ $failures -eq 0 ]; then echo "backupwallet-test: ALL PASSED"; exit 0; fi

@@ -1129,6 +1129,24 @@ bool BackupWallet(const CWallet& wallet, const string& strDest)
 {
     if (!wallet.fFileBacked)
         return false;
+
+    // The destination must not be the wallet file itself: copy_file opens the
+    // destination with O_TRUNC before it compares the two files, which would
+    // cut wallet.dat to zero bytes. Decide this before the database is closed.
+    boost::filesystem::path pathSrc = GetDataDir() / wallet.strWalletFile;
+    boost::filesystem::path pathDest(strDest);
+    if (boost::filesystem::is_directory(pathDest))
+        pathDest /= wallet.strWalletFile;
+    try {
+        if (boost::filesystem::exists(pathDest) && boost::filesystem::equivalent(pathSrc, pathDest)) {
+            LogPrintf("BackupWallet: refusing to back up %s onto itself\n", pathDest.string());
+            return false;
+        }
+    } catch (const boost::filesystem::filesystem_error& e) {
+        LogPrintf("BackupWallet: cannot compare %s with the wallet file - %s\n", pathDest.string(), e.what());
+        return false;
+    }
+
     while (true)
     {
         {
@@ -1141,10 +1159,6 @@ bool BackupWallet(const CWallet& wallet, const string& strDest)
                 bitdb.mapFileUseCount.erase(wallet.strWalletFile);
 
                 // Copy wallet.dat
-                boost::filesystem::path pathSrc = GetDataDir() / wallet.strWalletFile;
-                boost::filesystem::path pathDest(strDest);
-                if (boost::filesystem::is_directory(pathDest))
-                    pathDest /= wallet.strWalletFile;
 
                 try {
                     boost::filesystem::copy_file(pathSrc, pathDest, boost::filesystem::copy_options::overwrite_existing);

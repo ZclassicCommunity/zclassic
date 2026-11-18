@@ -1806,7 +1806,7 @@ UniValue backupwallet(const UniValue& params, bool fHelp)
     if (fHelp || params.size() != 1)
         throw runtime_error(
             "backupwallet \"destination\"\n"
-            "\nSafely copies wallet.dat to destination filename\n"
+            "\nSafely copies wallet.dat to destination filename; an existing file is never overwritten\n"
             "\nArguments:\n"
             "1. \"destination\"   (string, required) The destination file name, saved in the directory set by the -exportdir option\n"
             "                    (default: the \"backups\" directory inside the data directory, created on first use).\n"
@@ -1831,6 +1831,12 @@ UniValue backupwallet(const UniValue& params, bool fHelp)
         throw JSONRPCError(RPC_WALLET_ERROR, ExportFilenameErrorText(filename));
     }
     boost::filesystem::path exportfilepath = exportdir / filename;
+
+    // Like dumpwallet: never replace a file. -exportdir may be the data
+    // directory, where an overwrite would destroy wallet.dat or another node file.
+    if (boost::filesystem::exists(exportfilepath)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Cannot overwrite existing file " + exportfilepath.string());
+    }
 
     if (!BackupWallet(*pwalletMain, exportfilepath.string()))
         throw JSONRPCError(RPC_WALLET_ERROR, "Error: Wallet backup failed!");
