@@ -1,0 +1,498 @@
+#!/bin/sh
+# TEST-ONLY. Kill-and-resume, corruption, manifest-change and stream-recovery tests for
+# the bootstrap snapshot download, against a local bootstrap server on regtest.
+#
+# usage: sh qa/bootstrap-resume/resume-test.sh --bin <dir with zclassicd, zclassic-cli>
+#            --work <empty scratch dir> [--mode <list>] [--port-base <n>]
+#            [--kills <n>] [--files <n>] [--file-mib <n>] [--kbps <n>]
+#            [--old-server-bin <dir>] [--old-client-bin <dir>]
+#
+# How it works. A regtest chain is mined, frozen into a "serve" directory exactly like a
+# self-snapshot (blocks/, chainstate/ plus a ".meta" with the UTXO-set commitment), and padded
+# with --files extra block files of ~--file-mib MiB so the download takes a while. A server node
+# (-bootstrapserve, rate limited with -bootstrapservemaxtotalkbps) serves it. A client with a
+# fresh datadir fetches it with -bootstrapmode=trustless -bootstrappeer=127.0.0.1:<port>: the same
+# BootstrapFromPeer / parallel downloader / staging code as mainnet; only the final trust anchor
+# differs (regtest has no compiled anchor, so the v2 trustless commitment path is used).
+#
+# Modes (comma separated, default all):
+#   kills     kill -9 the client at random instants --kills times, restart each time, finish; the
+#             imported chain must end on the server's best block, and the bytes the server served in
+#             total must stay close to one copy of the snapshot.
+#   single    one interrupted sync (kill at ~30%), restart, finish: time and bytes.
+#   corrupt   flip a byte in a staged complete file and truncate another; restart: both are detected
+#             and fetched again, never imported.
+#   manifest  grow the served snapshot between runs (same anchor: staged files are reused), then serve
+#             a different snapshot (staging is discarded).
+#   stream    cut one client stream at the server mid-download: parallelism must come back.
+#   slots     the server serves at most --slots peers at once (-bootstrapservemaxpeers); how does a
+#             4-stream client fare? (not part of "all": it takes a minute of timeouts on old servers)
+#   interop   new client against an OLD server binary and an OLD client against the new server.
+# Never point this at a real datadir; it creates and deletes its own under --work.
+set -u
+
+bin=""; work=""; base=50100; modes="all"; kills=32; files=24; filemib=24; kbps=262144
+oldserver=""; oldclient=""; serverargs=""; slots=3
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --bin) bin=$2; shift 2 ;;
+        --work) work=$2; shift 2 ;;
+        --mode) modes=$2; shift 2 ;;
+        --port-base) base=$2; shift 2 ;;
+        --kills) kills=$2; shift 2 ;;
+        --files) files=$2; shift 2 ;;
+        --file-mib) filemib=$2; shift 2 ;;
+        --kbps) kbps=$2; shift 2 ;;
+        --old-server-bin) oldserver=$2; shift 2 ;;
+        --old-client-bin) oldclient=$2; shift 2 ;;
+        --server-args) serverargs=$2; shift 2 ;;
+        --slots) slots=$2; shift 2 ;;
+        *) echo "resume-test: unknown argument $1" >&2; exit 2 ;;
+    esac
+done
+[ -x "$bin/zclassicd" ] && [ -x "$bin/zclassic-cli" ] && [ -n "$work" ] || {
+    echo "usage: resume-test.sh --bin <dir> --work <dir> [options]" >&2; exit 2; }
+mkdir -p "$work" || exit 2
+work=$(cd "$work" && pwd)
+[ -z "$(ls -A "$work")" ] || { echo "resume-test: $work is not empty" >&2; exit 2; }
+
+sp=$base; sr=$((base + 1)); cp=$((base + 2)); cr=$((base + 3)); op=$((base + 4)); orp=$((base + 5)); gp=$((base + 6)); gr=$((base + 7))
+common="-regtest -dnsseed=0 -upnp=0 -listenonion=0 -discover=0 -bind=127.0.0.1 -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -debuglogfile=1 -printtoconsole=0 -showmetrics=0 -disablewallet"
+failures=0
+want() {
+    case ",$modes," in *,"$1",*) return 0 ;; esac
+    [ "$1" != slots ] && case ",$modes," in *,all,*) return 0 ;; esac
+    return 1
+}
+say() { echo "resume-test: $*"; }
+pass() { echo "resume-test: PASS $*"; }
+fail() { echo "resume-test: FAIL $*"; failures=$((failures + 1)); }
+
+mkconf() { # <datadir> <rpcport>
+    mkdir -p "$1/regtest" && printf 'rpcuser=bs\nrpcpassword=bs%s\nrpcport=%s\n' "$$" "$2" >"$1/zclassic.conf"
+}
+cli() { # <bindir> <datadir> args...
+    b=$1; d=$2; shift 2
+    "$b/zclassic-cli" -regtest -datadir="$d" "$@"
+}
+wait_rpc() { # <bindir> <datadir> [seconds]
+    i=0; lim=${3:-120}
+    while [ $i -lt $lim ]; do
+        cli "$1" "$2" getblockcount >/dev/null 2>&1 && return 0
+        sleep 1; i=$((i + 1))
+    done
+    return 1
+}
+stop_node() { # <bindir> <datadir>
+    cli "$1" "$2" stop >/dev/null 2>&1
+    i=0
+    while [ $i -lt 90 ] && [ -f "$2/regtest/zclassicd.pid" ]; do sleep 1; i=$((i + 1)); done
+}
+now_ms() { date +%s%3N; }
+rand_range() { # <lo> <hi> : integer in [lo, hi]
+    r=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
+    echo $(($1 + r % ($2 - $1 + 1)))
+}
+sleep_ms() { # <ms>
+    s=$(($1 / 1000)); m=$(($1 % 1000))
+    sleep "$s.$(printf '%03d' "$m")"
+}
+json_num() { # <key> : reads JSON from stdin
+    sed -n "s/.*\"$1\": *\\([0-9.]*\\).*/\\1/p" | head -1
+}
+
+# ---------------------------------------------------------------------------------------------
+# fixture
+# ---------------------------------------------------------------------------------------------
+srcdir=$work/src; serve=$work/serve; sdir=$work/server; cdir=$work/client
+make_fixture() {
+    say "building the regtest fixture (chain, serve dir, $files padding files of ~$filemib MiB)"
+    mkconf "$srcdir" "$gr"
+    # shellcheck disable=SC2086
+    "$bin/zclassicd" -regtest -dnsseed=0 -upnp=0 -listenonion=0 -discover=0 -bind=127.0.0.1 -rpcbind=127.0.0.1 \
+        -rpcallowip=127.0.0.1 -debuglogfile=1 -printtoconsole=0 -showmetrics=0 -bootstrap=0 \
+        -datadir="$srcdir" -port=$gp -listen=0 -connect=0 -daemon >/dev/null 2>&1 || return 1
+    wait_rpc "$bin" "$srcdir" || return 1
+    cli "$bin" "$srcdir" generate 220 >/dev/null || return 1
+    info=$(cli "$bin" "$srcdir" gettxoutsetinfo) || return 1
+    fx_height=$(echo "$info" | sed -n 's/.*"height": *\([0-9]*\).*/\1/p' | head -1)
+    fx_best=$(echo "$info" | sed -n 's/.*"bestblock": *"\([0-9a-f]*\)".*/\1/p' | head -1)
+    fx_commit=$(echo "$info" | sed -n 's/.*"hash_chainstate_full": *"\([0-9a-f]*\)".*/\1/p' | head -1)
+    [ -n "$fx_height" ] && [ -n "$fx_best" ] && [ -n "$fx_commit" ] || { echo "no txoutsetinfo: $info"; return 1; }
+    stop_node "$bin" "$srcdir"
+    mkdir -p "$serve"
+    cp -a "$srcdir/regtest/blocks" "$serve/blocks" && cp -a "$srcdir/regtest/chainstate" "$serve/chainstate" || return 1
+    rm -f "$serve/blocks/index/LOCK" "$serve/chainstate/LOCK"
+    # one random block reused with a distinct header and length per file keeps every file unique
+    head -c $((filemib * 1048576)) /dev/urandom >"$work/pad.bin"
+    i=1
+    while [ $i -le "$files" ]; do
+        {
+            printf 'padding-file-%s-' "$i"
+            head -c $((filemib * 1048576 - i * 4097)) "$work/pad.bin"
+        } >"$serve/blocks/blk$(printf '%05d' "$i").dat"
+        i=$((i + 1))
+    done
+    rm -f "$work/pad.bin"
+    echo "$fx_height $fx_best $fx_commit" >"$work/serve.meta"
+    snapshot_bytes=$(find "$serve" -type f -printf '%s\n' | awk '{s += $1} END {print s}')
+    snapshot_files=$(find "$serve" -type f | wc -l)
+    say "fixture: height $fx_height best $fx_best; $snapshot_files files, $snapshot_bytes bytes"
+}
+
+# ---------------------------------------------------------------------------------------------
+# server and client control
+# ---------------------------------------------------------------------------------------------
+server_bin=$bin
+start_server() { # [extra args]
+    mkconf "$sdir" "$sr"
+    # shellcheck disable=SC2086
+    "$server_bin/zclassicd" $common -bootstrap=0 -datadir="$sdir" -port=$sp -listen=1 -connect=0 \
+        -bootstrapserve=1 -bootstrapsourcedir="$serve" -bootstrapservemaxtotalkbps=$kbps \
+        -debug=net -bootstrapservemaxbytesperday=0 $serverargs "$@" >/dev/null 2>&1 &
+    SPID=$!
+    wait_rpc "$server_bin" "$sdir" 60 || { fail "server did not start (see $sdir/regtest/debug.log)"; return 1; }
+}
+stop_server() {
+    stop_node "$server_bin" "$sdir"
+    wait "$SPID" 2>/dev/null
+}
+client_bin=$bin
+start_client() { # [extra args]; leaves the pid in CPID
+    mkconf "$cdir" "$cr"
+    # shellcheck disable=SC2086
+    "$client_bin/zclassicd" $common -datadir="$cdir" -port=$cp -listen=0 -connect=0 -bootstrap=1 \
+        -bootstrapmode=trustless -bootstrappeer=127.0.0.1:$sp "$@" >/dev/null 2>&1 &
+    CPID=$!
+}
+kill_client() {
+    kill -9 "$CPID" 2>/dev/null
+    wait "$CPID" 2>/dev/null
+    rm -f "$cdir/regtest/zclassicd.pid" "$cdir/regtest/.lock"
+}
+client_log=$cdir/regtest/debug.log
+server_log=$sdir/regtest/debug.log
+staging_state() { # prints: files=<n> parts=<n> bytes=<n>
+    st=$(ls -d "$cdir"/regtest/bootstrap-peer-staging-* 2>/dev/null | head -1)
+    if [ -z "$st" ]; then echo "files=0 parts=0 bytes=0"; return; fi
+    f=$(find "$st" -type f ! -name '*.part' ! -name '.z23-staging*' | wc -l)
+    p=$(find "$st" -type f -name '*.part' | wc -l)
+    b=$(find "$st" -type f ! -name '.z23-staging*' -printf '%s\n' | awk '{s += $1} END {print s + 0}')
+    echo "files=$f parts=$p bytes=$b"
+}
+served_bytes() { # sums the chunk payload bytes the server logged from line $1 on
+    tail -n +"${1:-1}" "$server_log" | grep -a 'sending bootstrap snapshot chunk' |
+        sed 's/.*bytes=\([0-9]*\).*/\1/' | awk '{s += $1} END {print s + 0}'
+}
+log_lines() { wc -l <"$server_log" 2>/dev/null || echo 0; }
+wait_imported() { # <bindir> ; waits until the client answers RPC and has the fixture height
+    i=0
+    while [ $i -lt 300 ]; do
+        h=$(cli "$1" "$cdir" getblockcount 2>/dev/null)
+        [ "$h" = "$fx_height" ] && return 0
+        kill -0 "$CPID" 2>/dev/null || return 1
+        sleep 1; i=$((i + 1))
+    done
+    return 1
+}
+check_imported() { # <label>
+    h=$(cli "$client_bin" "$cdir" getblockcount 2>/dev/null)
+    b=$(cli "$client_bin" "$cdir" getbestblockhash 2>/dev/null)
+    if [ "$h" = "$fx_height" ] && [ "$b" = "$fx_best" ]; then
+        pass "$1: imported height $h, best block $b equals the server's"
+        return 0
+    fi
+    fail "$1: client at height '$h' best '$b', expected $fx_height $fx_best"
+    return 1
+}
+fresh_client() {
+    rm -rf "$cdir"
+}
+end_client() {
+    stop_node "$client_bin" "$cdir"
+    wait "$CPID" 2>/dev/null
+}
+sample_streams() { # <seconds> ; prints "t=<s> percent=<p> streams=<n>" every 0.5 s while the client downloads
+    end=$(($(now_ms) + $1 * 1000)); t0=$(now_ms)
+    while [ "$(now_ms)" -lt "$end" ]; do
+        j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null) || { sleep 0.2; continue; }
+        echo "t=$((($(now_ms) - t0) / 1000)).$((($(now_ms) - t0) % 1000 / 100)) percent=$(echo "$j" | json_num percent) streams=$(echo "$j" | json_num streams)"
+        echo "$j" | grep -q '"phase": *"active"' || break
+        sleep 0.5
+    done
+}
+
+# ---------------------------------------------------------------------------------------------
+# tests
+# ---------------------------------------------------------------------------------------------
+test_kills() {
+    say "== kill -9 at $kills random instants, restart each time =="
+    fresh_client; start_server || return 1
+    from=$(log_lines)
+    n=0; finished=0
+    while [ $n -lt "$kills" ]; do
+        start_client
+        t=$(rand_ms_for_kill)
+        sleep_ms "$t"
+        if ! kill -0 "$CPID" 2>/dev/null; then say "client exited by itself after $n kills"; finished=1; break; fi
+        h=$(cli "$client_bin" "$cdir" getblockcount 2>/dev/null)
+        if [ "$h" = "$fx_height" ]; then say "client finished the import after $n kills (kill window too long); stopping the kill loop"; finished=1; break; fi
+        kill_client
+        n=$((n + 1))
+        say "kill $n at +${t} ms: staging $(staging_state)"
+    done
+    if [ $finished -eq 0 ]; then
+        start_client
+        if ! wait_imported "$client_bin"; then fail "kills: client never reached height $fx_height"; tail -20 "$client_log"; end_client; stop_server; return 1; fi
+    fi
+    check_imported "kills (${n} kills)"
+    served=$(served_bytes "$from")
+    ratio=$(awk -v a="$served" -v b="$snapshot_bytes" 'BEGIN {printf "%.3f", a / b}')
+    say "server served $served bytes in total for $n kills; snapshot is $snapshot_bytes bytes (ratio $ratio)"
+    # one copy plus the chunks lost to torn tails and the unfinished chunks in flight at each kill
+    limit=$(awk -v b="$snapshot_bytes" -v n="$n" 'BEGIN {printf "%d", b * 1.35 + n * 20 * 1048576}')
+    if [ "$served" -le "$limit" ]; then pass "kills: total bytes served stayed within bound ($served <= $limit)"; else fail "kills: served $served > bound $limit"; fi
+    if grep -aq 'hash mismatch' "$client_log"; then say "note: a staged file failed verification during the kill loop (expected after a torn write):"; grep -a 'hash mismatch\|corrupt or the wrong size' "$client_log" | head -5; fi
+    if ls -d "$cdir"/regtest/bootstrap-peer-staging-* >/dev/null 2>&1; then fail "kills: staging directory still present after a successful import"; else pass "kills: staging directory removed after the import"; fi
+    grep -a 'staging scan\|staging directory\|pre-install audit\|download complete' "$client_log" | tail -6
+    end_client; stop_server
+}
+rand_ms_for_kill() { rand_range 2200 $((kill_max_ms)); }
+
+test_single() {
+    say "== one interrupted sync: kill at ~30%, restart, finish =="
+    fresh_client; start_server || return 1
+    from=$(log_lines)
+    t0=$(now_ms)
+    start_client
+    pct=0
+    while [ "$pct" -lt 30 ]; do
+        j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null)
+        pct=$(echo "$j" | json_num percent); pct=${pct:-0}
+        kill -0 "$CPID" 2>/dev/null || { fail "single: client exited early"; stop_server; return 1; }
+        sleep 0.2
+    done
+    kill_client
+    t1=$(now_ms)
+    st=$(staging_state)
+    served1=$(served_bytes "$from")
+    say "killed at ${pct}% after $(((t1 - t0) / 1000)) s; staging $st; served so far $served1 bytes"
+    t2=$(now_ms)
+    start_client
+    if ! wait_imported "$client_bin"; then fail "single: restarted client never finished"; tail -20 "$client_log"; end_client; stop_server; return 1; fi
+    t3=$(now_ms)
+    served=$(served_bytes "$from")
+    say "RESULT interrupted sync: first run $(((t1 - t0) / 1000)) s, second run $(((t3 - t2) / 1000)) s, total $(((t3 - t0) / 1000)) s; server served $served bytes for a $snapshot_bytes byte snapshot (ratio $(awk -v a="$served" -v b="$snapshot_bytes" 'BEGIN {printf "%.3f", a / b}'))"
+    check_imported "single"
+    grep -a 'staging scan\|staging directory' "$client_log" | tail -3
+    end_client; stop_server
+}
+
+test_corrupt() {
+    say "== corrupted and truncated staged files =="
+    fresh_client; start_server || return 1
+    from=$(log_lines)
+    start_client
+    # let it finish a good number of files, then kill
+    pct=0
+    while [ "$pct" -lt 40 ]; do
+        j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null)
+        pct=$(echo "$j" | json_num percent); pct=${pct:-0}
+        kill -0 "$CPID" 2>/dev/null || { fail "corrupt: client exited early"; stop_server; return 1; }
+        sleep 0.2
+    done
+    kill_client
+    st=$(ls -d "$cdir"/regtest/bootstrap-peer-staging-* | head -1)
+    victims=$(find "$st/blocks" -type f -name 'blk000*.dat' ! -name '*.part' | sort | head -2)
+    v1=$(echo "$victims" | sed -n 1p); v2=$(echo "$victims" | sed -n 2p)
+    [ -n "$v1" ] && [ -n "$v2" ] || { fail "corrupt: not enough complete staged files to damage"; stop_server; return 1; }
+    # flip one byte in the middle of v1 (same size), truncate v2, add a stray file and a bogus .part
+    sz=$(stat -c %s "$v1")
+    printf 'X' | dd of="$v1" bs=1 seek=$((sz / 2)) conv=notrunc 2>/dev/null
+    sz2=$(stat -c %s "$v2")
+    truncate -s $((sz2 - 777)) "$v2"
+    echo stray >"$st/blocks/stray-file.dat"
+    say "damaged $(basename "$v1") (flipped byte), $(basename "$v2") (truncated), added a stray file"
+    start_client
+    if ! wait_imported "$client_bin"; then fail "corrupt: client never finished"; tail -20 "$client_log"; end_client; stop_server; return 1; fi
+    check_imported "corrupt"
+    if grep -aq "$(basename "$v1") is corrupt or the wrong size" "$client_log"; then pass "corrupt: flipped-byte file detected and discarded"; else fail "corrupt: flipped file not reported"; fi
+    if grep -aq "$(basename "$v2") is corrupt or the wrong size" "$client_log"; then pass "corrupt: truncated file detected and discarded"; else fail "corrupt: truncated file not reported"; fi
+    if grep -aq 'stray entries removed' "$client_log" && grep -a 'staging scan' "$client_log" | tail -1 | grep -q '1 stray'; then pass "corrupt: stray file removed"; else fail "corrupt: stray file not removed"; fi
+    end_client; stop_server
+}
+
+test_manifest() {
+    say "== changed manifest: same anchor keeps files, different snapshot discards =="
+    fresh_client; start_server || return 1
+    start_client
+    pct=0
+    while [ "$pct" -lt 35 ]; do
+        j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null)
+        pct=$(echo "$j" | json_num percent); pct=${pct:-0}
+        kill -0 "$CPID" 2>/dev/null || { fail "manifest: client exited early"; stop_server; return 1; }
+        sleep 0.2
+    done
+    kill_client
+    before=$(staging_state); say "staging before the server grows: $before"
+    stop_server
+    # the server grows the snapshot: one more block file (same chain anchor)
+    { printf 'grown-'; head -c $((3 * 1048576)) /dev/urandom; } >"$serve/blocks/blk99999.dat"
+    start_server || return 1
+    from=$(log_lines)
+    start_client
+    if ! wait_imported "$client_bin"; then fail "manifest: client never finished after the server grew"; tail -20 "$client_log"; end_client; stop_server; return 1; fi
+    check_imported "manifest (grown)"
+    if grep -a 'bootstrap-peer-staging' "$client_log" | grep -aq 'same anchor, manifest changed'; then pass "manifest: grown snapshot reused the staging directory"; else fail "manifest: grown snapshot did not report reuse"; fi
+    kept=$(grep -a 'staging scan' "$client_log" | tail -1 | sed -n 's/.*kept \([0-9]*\) verified files.*/\1/p')
+    if [ "${kept:-0}" -gt 0 ]; then pass "manifest: $kept verified files kept across the manifest change"; else fail "manifest: no files kept across the manifest change"; fi
+    end_client
+    stop_server
+    rm -f "$serve/blocks/blk99999.dat"
+
+    # a different snapshot: stage some of the original, then serve a snapshot at another tip
+    fresh_client; start_server || return 1
+    start_client
+    pct=0
+    while [ "$pct" -lt 25 ]; do
+        j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null)
+        pct=$(echo "$j" | json_num percent); pct=${pct:-0}
+        kill -0 "$CPID" 2>/dev/null || { fail "manifest: client exited early (2)"; stop_server; return 1; }
+        sleep 0.2
+    done
+    kill_client
+    old=$(ls -d "$cdir"/regtest/bootstrap-peer-staging-* | head -1)
+    stop_server
+    cp "$work/serve.meta" "$work/serve.meta.orig"
+    printf '%s %s %s\n' "$((fx_height + 1))" "0000000000000000000000000000000000000000000000000000000000000abc" "$fx_commit" >"$work/serve.meta"
+    start_server || return 1
+    start_client
+    sleep 12
+    if [ -d "$old" ]; then fail "manifest: the staging directory of the other snapshot was kept"; else pass "manifest: staging of a different snapshot was discarded"; fi
+    new=$(ls -d "$cdir"/regtest/bootstrap-peer-staging-* 2>/dev/null | head -1)
+    if [ -n "$new" ] && [ "$new" != "$old" ]; then pass "manifest: fresh staging directory $(basename "$new") for the new snapshot"; else fail "manifest: no new staging directory"; fi
+    kill_client
+    mv "$work/serve.meta.orig" "$work/serve.meta"
+    stop_server
+}
+
+test_stream() {
+    say "== stream recovery: cut one stream at the server =="
+    fresh_client; start_server || return 1
+    start_client
+    # wait until 4 streams are up
+    i=0
+    while [ $i -lt 200 ]; do
+        s=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null | json_num streams)
+        [ "${s:-0}" -ge 4 ] && break
+        sleep 0.2; i=$((i + 1))
+    done
+    say "streams before the cut: ${s:-0}"
+    victim=$(cli "$server_bin" "$sdir" getpeerinfo | sed -n 's/.*"addr": *"\(127.0.0.1:[0-9]*\)".*/\1/p' | head -1)
+    [ -n "$victim" ] || { fail "stream: no client connection found at the server"; kill_client; stop_server; return 1; }
+    cli "$server_bin" "$sdir" disconnectnode "$victim" >/dev/null 2>&1
+    say "disconnected $victim at the server; sampling streams for 25 s (t=seconds percent streams)"
+    sample_streams 25 | tee "$work/stream-samples.txt" | awk 'NR % 4 == 1' | head -12
+    min=$(awk -F'streams=' 'NF > 1 && $2 != "" {print $2}' "$work/stream-samples.txt" | sort -n | head -1)
+    last=$(awk -F'streams=' 'NF > 1 && $2 != "" {print $2}' "$work/stream-samples.txt" | tail -1)
+    peers=$(cli "$server_bin" "$sdir" getpeerinfo | grep -c '"addr": *"127.0.0.1')
+    say "streams: min after cut ${min:-?}, last ${last:-?}; client connections now at the server: $peers"
+    if grep -aq 'reconnecting\|stream .* failed' "$client_log"; then say "client log:"; grep -a 'stream [0-9]* failed\|stream [0-9]* reconnected\|reconnecting with verified files' "$client_log" | head -4; fi
+    echo "$last" >"$work/stream-last.txt"
+    echo "$peers" >"$work/stream-peers.txt"
+    if [ "${last:-0}" -ge 4 ] && [ "${peers:-0}" -ge 4 ]; then
+        pass "stream: all 4 streams are connected again ($peers connections at the server)"
+    else
+        fail "stream: only ${last:-?} streams / $peers connections at the server after a stream was cut"
+    fi
+    kill_client
+    stop_server
+}
+
+test_slots() {
+    say "== a server limited to -bootstrapservemaxpeers=$slots serves a 4-stream client =="
+    fresh_client
+    serverargs="-bootstrapservemaxpeers=$slots"
+    start_server || { serverargs=""; return 1; }
+    t0=$(now_ms)
+    start_client
+    if ! wait_imported "$client_bin"; then fail "slots: client never finished"; tail -20 "$client_log"; end_client; stop_server; serverargs=""; return 1; fi
+    t1=$(now_ms)
+    say "RESULT slots=$slots: download+import took $(((t1 - t0) / 1000)) s; stream failures: $(grep -ac 'stream [0-9]* failed' "$client_log"); read timeouts: $(grep -ac 'read timeout' "$client_log")"
+    grep -a 'stream [0-9]* failed\|stream [0-9]* reconnected' "$client_log" | head -6
+    check_imported "slots"
+    end_client; stop_server
+    serverargs=""
+}
+
+test_interop() {
+    say "== interop with old binaries =="
+    if [ -n "$oldserver" ]; then
+        say "-- new client, OLD server ($oldserver)"
+        fresh_client
+        server_bin=$oldserver; start_server -debug=net || { server_bin=$bin; return 1; }
+        from=$(log_lines)
+        start_client
+        pct=0
+        while [ "$pct" -lt 30 ]; do
+            j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null)
+            pct=$(echo "$j" | json_num percent); pct=${pct:-0}
+            kill -0 "$CPID" 2>/dev/null || break
+            sleep 0.2
+        done
+        kill_client
+        say "killed at ${pct}%: staging $(staging_state)"
+        start_client
+        if wait_imported "$client_bin"; then
+            check_imported "old server"
+            grep -a 'staging scan' "$client_log" | tail -1
+            kept=$(grep -a 'staging scan' "$client_log" | tail -1 | sed -n 's/.*kept \([0-9]*\) verified files.*/\1/p')
+            [ "${kept:-0}" -gt 0 ] && pass "interop: resume against an old server reused $kept verified files" || fail "interop: nothing reused against the old server"
+        else
+            fail "interop: client did not finish against the old server"; tail -20 "$client_log"
+        fi
+        end_client
+        server_bin=$oldserver; stop_server; server_bin=$bin
+    else
+        say "(no --old-server-bin: skipped)"
+    fi
+    if [ -n "$oldclient" ]; then
+        say "-- OLD client ($oldclient), new server"
+        fresh_client
+        start_server || return 1
+        client_bin=$oldclient; start_client
+        if wait_imported "$oldclient"; then
+            check_imported "old client"
+        else
+            fail "interop: old client did not finish against the new server"; tail -20 "$client_log"
+        fi
+        end_client
+        client_bin=$bin
+        stop_server
+    else
+        say "(no --old-client-bin: skipped)"
+    fi
+}
+
+# the longest a kill is delayed: startup (~2 s) plus a slice of the download. The download takes about
+# snapshot_bytes / rate; spread the kills so that roughly --kills of them are needed to get through.
+make_fixture || { echo "resume-test: could not build the fixture"; exit 1; }
+rate_bps=$((kbps * 1000 / 8))
+dl_ms=$((snapshot_bytes * 1000 / rate_bps))
+kill_max_ms=$((2500 + dl_ms * 2 / (kills + 1)))
+say "expected download time at $kbps kbit/s: $((dl_ms / 1000)) s; kill window 2200..$kill_max_ms ms"
+
+want kills && test_kills
+want single && test_single
+want corrupt && test_corrupt
+want manifest && test_manifest
+want stream && test_stream
+want slots && test_slots
+want interop && test_interop
+
+if [ $failures -eq 0 ]; then
+    echo "resume-test: ALL PASSED"
+    exit 0
+fi
+echo "resume-test: $failures FAILURE(S)"
+exit 1

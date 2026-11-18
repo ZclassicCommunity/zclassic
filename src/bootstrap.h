@@ -7,6 +7,7 @@
 
 #include "net.h"
 #include "protocol.h"
+#include "bootstrap_resume.h"
 #include "streams.h"
 
 #include <stdint.h>
@@ -50,10 +51,37 @@ static const int64_t BOOTSTRAP_ONION_GRACE_SECONDS = 300;
 bool BootstrapSnapshotPathsExist(const boost::filesystem::path& root);
 bool IsBootstrapFreshChainDatadir(const boost::filesystem::path& data_dir, std::string& error);
 
-/** Remove leftover bootstrap-peer-staging-* directories (an interrupted or killed snapshot download
- *  leaves up to the whole snapshot size behind; the next attempt always starts a new directory).
- *  Returns the number of directories removed. */
-size_t RemoveStaleBootstrapStaging(const boost::filesystem::path& data_dir);
+/** Remove bootstrap-peer-staging-* directories under data_dir, except the one named keepName
+ *  (empty keepName removes them all). An interrupted or killed snapshot download leaves its
+ *  staging directory behind so the next attempt can resume it; only directories of a different
+ *  snapshot (or of older, per-epoch naming) are removed while a download is in progress, and
+ *  everything is removed when no bootstrap will run any more. Returns the number removed. */
+size_t RemoveStaleBootstrapStaging(const boost::filesystem::path& data_dir, const std::string& keepName = std::string());
+
+/** Choose and prepare the staging directory for the snapshot `manifest` describes. The name is
+ *  stable for a given snapshot anchor (bootstrap_resume.h), so a directory left by an interrupted
+ *  attempt is found again. `verdict` says whether it was reused (BSV_REUSE_*) or started clean;
+ *  directories of other snapshots and directories without a valid marker are deleted. Nothing in a
+ *  reused directory is trusted: the downloader re-verifies every file against `manifest`. */
+bool BootstrapPrepareStaging(const boost::filesystem::path& data_dir, const CBootstrapSnapshotManifest& manifest,
+                             boost::filesystem::path& staging, BootstrapStagingVerdict& verdict, std::string& error);
+
+/** Classify every file of `manifest` in `staging` against the manifest's SHA-256 hashes (see
+ *  bootstrap_resume.h for the decision rules): complete verified files are kept, partial files
+ *  are marked to continue from a chunk-aligned offset, corrupt/wrong-size/unknown files are
+ *  deleted. `pending` receives the manifest indices still to fetch; `completed` the verified
+ *  bytes plus the bytes of resumable partial files. Hashing runs on a few threads. */
+bool BootstrapResumeScan(const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging,
+                         std::vector<uint32_t>& pending, uint64_t& completed,
+                         BootstrapResumeStats& stats, std::string& error);
+
+/** Download a manifest's files into `staging` over up to `nStreams` parallel connections to
+ *  `peerAddress`, reusing what BootstrapResumeScan finds there. A failed stream is retried with
+ *  backoff while the others continue; see the definition for the fatal conditions. */
+bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::string& peer,
+                                       const CBootstrapSnapshotManifest& manifest,
+                                       const boost::filesystem::path& staging, int timeout_ms, int nStreams,
+                                       std::string& error);
 // True if the datadir holds only a genesis-height chainstate (initialized but
 // never synced past genesis); such a datadir carries no real chain.
 bool IsGenesisOnlyChainDatadir(const boost::filesystem::path& data_dir, std::string& error);

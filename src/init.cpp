@@ -2683,6 +2683,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 } else {
                     // Genuinely real chain (or corrupt -> reindex path): existing behavior.
                     SetBootstrapInfoPhase("skipped", bootstrap_error.empty() ? "datadir not eligible" : bootstrap_error);
+                    // A snapshot staging directory kept for resume (an earlier download
+                    // that was interrupted) is dead weight once the node has a real
+                    // chain: no bootstrap will run here again, so give the disk back.
+                    RemoveStaleBootstrapStaging(GetDataDir());
                     // Datadir already has real chain data: skip silently unless the
                     // user explicitly asked to bootstrap into it. A datadir holding
                     // only a genesis-height chainstate (a node that initialized its
