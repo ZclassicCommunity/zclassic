@@ -16,6 +16,7 @@
 #include "streams.h"
 #include "sync.h"
 #include "util.h"
+#include "validationinterface.h"
 
 #include <stdint.h>
 
@@ -1097,6 +1098,17 @@ UniValue getmempoolinfo(const UniValue& params, bool fHelp)
     return mempoolInfoToJSON();
 }
 
+// Blocks an unwind (finalizeblock, invalidateblock, parkblock) disconnected may
+// have left wallet witnesses only a rescan can rebuild, which the wallet defers
+// until the disconnects are over (CWallet::ChainTip). Unless the chain moved
+// forward again, nothing else tells it they are until its next periodic
+// write, so record the new tip now (the wallet rebuilds before writing).
+static void NotifyWalletsOfUnwoundTip()
+{
+    LOCK(cs_main);
+    GetMainSignals().SetBestChain(chainActive.GetLocator());
+}
+
 UniValue finalizeblock(const UniValue& params, bool fHelp) {
     if (fHelp || params.size() != 1) {
         throw std::runtime_error(
@@ -1129,6 +1141,7 @@ UniValue finalizeblock(const UniValue& params, bool fHelp) {
     if (state.IsValid()) {
         ActivateBestChain(state);
     }
+    NotifyWalletsOfUnwoundTip();
 
     if (!state.IsValid()) {
         throw JSONRPCError(RPC_DATABASE_ERROR, state.GetRejectReason());
@@ -1167,6 +1180,7 @@ UniValue invalidateblock(const UniValue& params, bool fHelp)
     if (state.IsValid()) {
         ActivateBestChain(state);
     }
+    NotifyWalletsOfUnwoundTip();
 
     if (!state.IsValid()) {
         throw JSONRPCError(RPC_DATABASE_ERROR, state.GetRejectReason());
@@ -1205,6 +1219,7 @@ UniValue parkblock(const UniValue& params, bool fHelp) {
     if (state.IsValid()) {
         ActivateBestChain(state);
     }
+    NotifyWalletsOfUnwoundTip();
 
     if (!state.IsValid()) {
         throw JSONRPCError(RPC_DATABASE_ERROR, state.GetRejectReason());
