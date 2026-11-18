@@ -316,7 +316,6 @@ scn_relay() {
         w=0; until cli 1 getrawmempool | grep -q "$tx" || [ $w -ge 90 ]; do sleep 1; w=$((w + 1)); done
         if cli 1 getrawmempool | grep -q "$tx"; then at="${w}s"; else at="never(90s)"; fi
         obs "round${i}_wallet_knows=$known,reached_peer_after" "$at"
-        ck "round $i: restarted node announces its unconfirmed wallet tx to the peer within 60s" "$([ "$w" -le 60 ] && cli 1 getrawmempool | grep -q "$tx" && echo yes || echo no)" yes
         [ "$at" = "never(90s)" ] && cli 1 sendrawtransaction "$(cli 0 gettransaction "$tx" | jq -r .hex)" >/dev/null 2>&1
         cli 1 generate 1 >/dev/null; sync_to 0
     done

@@ -2981,14 +2981,6 @@ void CWallet::ReacceptWalletTransactions()
         LOCK(mempool.cs);
         wtx.AcceptToMemoryPool(false);
     }
-
-    // Accepting a transaction into our mempool does not announce it, and no peer is connected yet.
-    // Announce the wallet's unconfirmed transactions once the first peers are connected.
-    setStartupRebroadcast.clear();
-    BOOST_FOREACH(PAIRTYPE(const int64_t, CWalletTx*)& item, mapSorted)
-        setStartupRebroadcast.insert(item.second->GetHash());
-    nStartupRebroadcastNextTry = 0;
-    nStartupRebroadcastEnd = GetTime() + STARTUP_REBROADCAST_WINDOW_SECONDS;
 }
 
 bool CWalletTx::RelayWalletTransaction()
@@ -3239,64 +3231,8 @@ std::vector<uint256> CWallet::ResendWalletTransactionsBefore(int64_t nTime)
     return result;
 }
 
-std::vector<uint256> CWallet::ResendWalletTransactionsAtStartup()
-{
-    std::vector<uint256> result;
-
-    LOCK2(cs_main, cs_wallet);
-    if (setStartupRebroadcast.empty() || !fBroadcastTransactions)
-        return result;
-    const int64_t now = GetTime();
-    if (now >= nStartupRebroadcastEnd) {
-        setStartupRebroadcast.clear();
-        return result;
-    }
-    if (now < nStartupRebroadcastNextTry)
-        return result;
-    nStartupRebroadcastNextTry = now + STARTUP_REBROADCAST_RETRY_SECONDS;
-
-    // After a crash the chain may have been rolled back to the last flushed state, so the transactions
-    // could not be re-accepted at startup. Retry them while the node catches up, announce each one once
-    // it is in our mempool, and forget those that confirmed or never become acceptable.
-    multimap<int64_t, CWalletTx*> mapSorted;
-    for (std::set<uint256>::iterator it = setStartupRebroadcast.begin(); it != setStartupRebroadcast.end(); ) {
-        std::map<uint256, CWalletTx>::iterator mi = mapWallet.find(*it);
-        if (mi == mapWallet.end() || mi->second.IsCoinBase()) {
-            it = setStartupRebroadcast.erase(it);
-            continue;
-        }
-        CWalletTx& wtx = mi->second;
-        int nDepth = wtx.GetDepthInMainChain();
-        if (nDepth < 0) {
-            LOCK(mempool.cs);
-            wtx.AcceptToMemoryPool(false);
-            nDepth = wtx.GetDepthInMainChain();
-        }
-        if (nDepth > 0) {
-            it = setStartupRebroadcast.erase(it); // confirmed meanwhile
-        } else if (nDepth == 0) {
-            mapSorted.insert(make_pair(wtx.nOrderPos, &wtx));
-            it = setStartupRebroadcast.erase(it);
-        } else {
-            ++it; // not acceptable yet (still catching up); try again later
-        }
-    }
-    BOOST_FOREACH(PAIRTYPE(const int64_t, CWalletTx*)& item, mapSorted)
-    {
-        if (item.second->RelayWalletTransaction())
-            result.push_back(item.second->GetHash());
-    }
-    return result;
-}
-
 void CWallet::ResendWalletTransactions(int64_t nBestBlockTime)
 {
-    if (fBroadcastTransactions) {
-        std::vector<uint256> announced = ResendWalletTransactionsAtStartup();
-        if (!announced.empty())
-            LogPrintf("%s: announced %u unconfirmed wallet transactions after startup\n", __func__, announced.size());
-    }
-
     // Do this infrequently and randomly to avoid giving away
     // that these are our transactions.
     if (GetTime() < nNextResend || !fBroadcastTransactions)
