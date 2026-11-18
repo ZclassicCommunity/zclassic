@@ -322,7 +322,11 @@ bool AsyncRPCOperation_mergetoaddress::main_impl()
         std::vector<boost::optional<SaplingWitness>> witnesses;
         {
             LOCK2(cs_main, pwalletMain->cs_wallet);
-            pwalletMain->GetSaplingNoteWitnesses(saplingOPs, witnesses, anchor);
+            bool consistent = pwalletMain->GetSaplingNoteWitnesses(saplingOPs, witnesses, anchor);
+            std::string witnessError;
+            if (!saplingOPs.empty() && !CheckSaplingSpendWitnesses(consistent, witnesses, anchor, *pcoinsTip, witnessError)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, witnessError);
+            }
         }
 
         // Add Sapling spends
@@ -470,7 +474,11 @@ bool AsyncRPCOperation_mergetoaddress::main_impl()
             std::vector<JSOutPoint> vOutPoints = {jso};
             uint256 inputAnchor;
             std::vector<boost::optional<SproutWitness>> vInputWitnesses;
-            pwalletMain->GetSproutNoteWitnesses(vOutPoints, vInputWitnesses, inputAnchor);
+            bool consistent = pwalletMain->GetSproutNoteWitnesses(vOutPoints, vInputWitnesses, inputAnchor);
+            std::string witnessError;
+            if (!CheckSproutSpendWitnesses(consistent, vInputWitnesses, inputAnchor, *pcoinsTip, witnessError)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, witnessError);
+            }
             jsopWitnessAnchorMap[jso.ToString()] = MergeToAddressWitnessAnchorData{vInputWitnesses[0], inputAnchor};
         }
     }
@@ -837,7 +845,11 @@ UniValue AsyncRPCOperation_mergetoaddress::perform_joinsplit(MergeToAddressJSInf
     uint256 anchor;
     {
         LOCK(cs_main);
-        pwalletMain->GetSproutNoteWitnesses(outPoints, witnesses, anchor);
+        bool consistent = pwalletMain->GetSproutNoteWitnesses(outPoints, witnesses, anchor);
+        std::string witnessError;
+        if (!outPoints.empty() && !CheckSproutSpendWitnesses(consistent, witnesses, anchor, *pcoinsTip, witnessError)) {
+            throw std::runtime_error(witnessError);
+        }
     }
     return perform_joinsplit(info, witnesses, anchor);
 }

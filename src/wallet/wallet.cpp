@@ -2124,7 +2124,7 @@ bool CWallet::IsSaplingNullifierFromMe(const uint256& nullifier) const
     return false;
 }
 
-void CWallet::GetSproutNoteWitnesses(std::vector<JSOutPoint> notes,
+bool CWallet::GetSproutNoteWitnesses(std::vector<JSOutPoint> notes,
                                      std::vector<boost::optional<SproutWitness>>& witnesses,
                                      uint256 &final_anchor)
 {
@@ -2140,7 +2140,10 @@ void CWallet::GetSproutNoteWitnesses(std::vector<JSOutPoint> notes,
             if (!rt) {
                 rt = witnesses[i]->root();
             } else {
-                assert(*rt == witnesses[i]->root());
+                if (*rt != witnesses[i]->root()) {
+                    witnesses.assign(notes.size(), boost::none);
+                    return false;
+                }
             }
         }
         i++;
@@ -2149,9 +2152,10 @@ void CWallet::GetSproutNoteWitnesses(std::vector<JSOutPoint> notes,
     if (rt) {
         final_anchor = *rt;
     }
+    return true;
 }
 
-void CWallet::GetSaplingNoteWitnesses(std::vector<SaplingOutPoint> notes,
+bool CWallet::GetSaplingNoteWitnesses(std::vector<SaplingOutPoint> notes,
                                       std::vector<boost::optional<SaplingWitness>>& witnesses,
                                       uint256 &final_anchor)
 {
@@ -2167,7 +2171,10 @@ void CWallet::GetSaplingNoteWitnesses(std::vector<SaplingOutPoint> notes,
             if (!rt) {
                 rt = witnesses[i]->root();
             } else {
-                assert(*rt == witnesses[i]->root());
+                if (*rt != witnesses[i]->root()) {
+                    witnesses.assign(notes.size(), boost::none);
+                    return false;
+                }
             }
         }
         i++;
@@ -2176,6 +2183,64 @@ void CWallet::GetSaplingNoteWitnesses(std::vector<SaplingOutPoint> notes,
     if (rt) {
         final_anchor = *rt;
     }
+    return true;
+}
+
+static const char* const WITNESS_OUT_OF_STEP_HINT =
+    "The wallet note data is out of step with the chain. Restart the node with -rescan to rebuild it, then retry.";
+
+template <typename W>
+static bool CheckSpendWitnessesCommon(bool consistent,
+                                      const std::vector<boost::optional<W>>& witnesses,
+                                      std::string& strError)
+{
+    if (!consistent) {
+        strError = std::string("The witnesses of the selected notes do not share one anchor. ") + WITNESS_OUT_OF_STEP_HINT;
+        return false;
+    }
+    for (const auto& w : witnesses) {
+        if (!w) {
+            strError = std::string("A selected note has no witness. ") + WITNESS_OUT_OF_STEP_HINT;
+            return false;
+        }
+    }
+    return true;
+}
+
+bool CheckSaplingSpendWitnesses(bool consistent,
+                                const std::vector<boost::optional<SaplingWitness>>& witnesses,
+                                const uint256& anchor,
+                                const CCoinsViewCache& view,
+                                std::string& strError)
+{
+    if (!CheckSpendWitnessesCommon(consistent, witnesses, strError)) {
+        return false;
+    }
+    SaplingMerkleTree tree;
+    if (anchor.IsNull() || !view.GetSaplingAnchorAt(anchor, tree)) {
+        strError = "The Sapling anchor " + anchor.GetHex() + " of the selected notes is not known to the chain, so the transaction would be rejected. " +
+                   WITNESS_OUT_OF_STEP_HINT;
+        return false;
+    }
+    return true;
+}
+
+bool CheckSproutSpendWitnesses(bool consistent,
+                               const std::vector<boost::optional<SproutWitness>>& witnesses,
+                               const uint256& anchor,
+                               const CCoinsViewCache& view,
+                               std::string& strError)
+{
+    if (!CheckSpendWitnessesCommon(consistent, witnesses, strError)) {
+        return false;
+    }
+    SproutMerkleTree tree;
+    if (anchor.IsNull() || !view.GetSproutAnchorAt(anchor, tree)) {
+        strError = "The Sprout anchor " + anchor.GetHex() + " of the selected notes is not known to the chain, so the transaction would be rejected. " +
+                   WITNESS_OUT_OF_STEP_HINT;
+        return false;
+    }
+    return true;
 }
 
 isminetype CWallet::IsMine(const CTxIn &txin) const

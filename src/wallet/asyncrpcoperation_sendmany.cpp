@@ -434,7 +434,11 @@ bool AsyncRPCOperation_sendmany::main_impl() {
         std::vector<boost::optional<SaplingWitness>> witnesses;
         {
             LOCK2(cs_main, pwalletMain->cs_wallet);
-            pwalletMain->GetSaplingNoteWitnesses(ops, witnesses, anchor);
+            bool consistent = pwalletMain->GetSaplingNoteWitnesses(ops, witnesses, anchor);
+            std::string witnessError;
+            if (!ops.empty() && !CheckSaplingSpendWitnesses(consistent, witnesses, anchor, *pcoinsTip, witnessError)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, witnessError);
+            }
         }
 
         // Add Sapling spends
@@ -574,7 +578,11 @@ bool AsyncRPCOperation_sendmany::main_impl() {
             std::vector<JSOutPoint> vOutPoints = { jso };
             uint256 inputAnchor;
             std::vector<boost::optional<SproutWitness>> vInputWitnesses;
-            pwalletMain->GetSproutNoteWitnesses(vOutPoints, vInputWitnesses, inputAnchor);
+            bool consistent = pwalletMain->GetSproutNoteWitnesses(vOutPoints, vInputWitnesses, inputAnchor);
+            std::string witnessError;
+            if (!CheckSproutSpendWitnesses(consistent, vInputWitnesses, inputAnchor, *pcoinsTip, witnessError)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, witnessError);
+            }
             jsopWitnessAnchorMap[ jso.ToString() ] = WitnessAnchorData{ vInputWitnesses[0], inputAnchor };
         }
     }
@@ -1122,7 +1130,11 @@ UniValue AsyncRPCOperation_sendmany::perform_joinsplit(AsyncJoinSplitInfo & info
     uint256 anchor;
     {
         LOCK(cs_main);
-        pwalletMain->GetSproutNoteWitnesses(outPoints, witnesses, anchor);
+        bool consistent = pwalletMain->GetSproutNoteWitnesses(outPoints, witnesses, anchor);
+        std::string witnessError;
+        if (!outPoints.empty() && !CheckSproutSpendWitnesses(consistent, witnesses, anchor, *pcoinsTip, witnessError)) {
+            throw std::runtime_error(witnessError);
+        }
     }
     return perform_joinsplit(info, witnesses, anchor);
 }
