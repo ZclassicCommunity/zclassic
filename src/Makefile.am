@@ -702,7 +702,8 @@ libzcl_c23_a_SOURCES = \
   c23/glue/zcl_c23_glue.c \
   c23/glue/zcl_c23_stubs.c \
   c23/glue/zcl_c23_tree_selftest.c \
-  c23/glue/zcl_c23_sapling_scan.c \\n  c23/compat/zcl_c23_sapling_scan.h \
+  c23/glue/zcl_c23_sapling_scan.c \
+  c23/compat/zcl_c23_sapling_scan.h \
   c23/equihash/zc23_equihash.c \
   c23/equihash/zc23_equihash_vendor.c \
   c23/compat/librustzcash_compat.c \
