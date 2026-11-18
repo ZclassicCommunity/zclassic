@@ -90,6 +90,19 @@ unlock 0 "$P2"
 ck "new build: new passphrase unlocks" "$(cli 0 getwalletinfo | jq '.unlocked_until > 0')" true
 st_after=$(state 0 "$za"); keys_after=$(keys 0)
 ck "new build: keys unchanged after passphrase change" "$keys_after" "$keys_plain"
+# Secrets the NEW build encrypts itself under the master key (not only the master key record):
+# import a transparent and a Sapling key from the unencrypted miner; the old build must decrypt both.
+imp_ta=$(cli 1 getnewaddress); imp_tk=$(cli 1 dumpprivkey "$imp_ta")
+imp_za=$(cli 1 z_getnewaddress sapling); imp_zk=$(cli 1 z_exportkey "$imp_za")
+[ -n "$imp_tk" ] && [ -n "$imp_zk" ] || bad "new build: miner keys to import are empty"
+cli 0 importprivkey "$imp_tk" "" false >/dev/null 2>&1 || bad "new build: importprivkey failed"
+cli 0 z_importkey "$imp_zk" no >/dev/null 2>&1 || bad "new build: z_importkey failed"
+ck "new build: imported keys stored and exported back" \
+    "$(cli 0 dumpprivkey "$imp_ta") $(cli 0 z_exportkey "$imp_za")" "$imp_tk $imp_zk"
+st_after=$(state 0 "$za"); keys_imp=$(keys 0)
+cli 0 walletlock >/dev/null 2>&1
+ckerr "new build: imported transparent key refused while locked" "locked|passphrase" 0 dumpprivkey "$imp_ta"
+ckerr "new build: imported Sapling key refused while locked" "locked|passphrase" 0 z_exportkey "$imp_za"
 stop 0
 
 # ---- OLD build opens the wallet the NEW build re-encrypted -----------------
@@ -101,7 +114,9 @@ t0=$(now); unlock 0 "$P2"; t1=$(now)
 obs walletpassphrase_old_seconds "$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.2f", b - a }')"
 ck "old build: unlocked with the new passphrase" "$(cli 0 getwalletinfo | jq '.unlocked_until > 0')" true
 ck "old build: state identical to the new build's" "$(state 0 "$za")" "$st_after"
-ck "old build: keys identical" "$(keys 0)" "$keys_plain"
+ck "old build: keys identical (original plus new-build imports)" "$(keys 0)" "$keys_imp"
+ck "old build: decrypts the keys the new build encrypted" \
+    "$(cli 0 dumpprivkey "$imp_ta") $(cli 0 z_exportkey "$imp_za")" "$imp_tk $imp_zk"
 alive "old build" 0
 stop 0
 
