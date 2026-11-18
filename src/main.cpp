@@ -4092,7 +4092,7 @@ static bool ActivateBestChainStep(CValidationState &state, CBlockIndex *pindexMo
                     }
                 }
                 if (!pindexOldTip || chainActive.Tip()->nChainWork > pindexOldTip->nChainWork) {
-                    if (fInitReplay && ++nReplayConnected < REPLAY_BATCH)
+                    if (fInitReplay && ++nReplayConnected < REPLAY_BATCH && IsInitialBlockDownload())
                         continue;
                     // We're in a better position than we were. Return temporarily to release the lock.
                     fContinue = false;
