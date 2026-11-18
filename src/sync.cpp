@@ -121,7 +121,21 @@ static void push_lock(void* c, const CLockLocation& locklocation, bool fTry)
 
     (*lockstack).push_back(std::make_pair(c, locklocation));
 
-    if (!fTry) {
+    // A mutex this thread already holds is re-entered, never waited for, so
+    // taking it again cannot be one half of a deadlock and establishes no
+    // order against the locks taken before it. Its order against those was
+    // recorded when it was first taken - unless that was a TRY_LOCK, which
+    // does not wait either. Without this, TRY_LOCK(a); TRY_LOCK(b); LOCK(b)
+    // recorded "a before b" as if the thread could block on b holding a.
+    bool fReentrant = false;
+    for (size_t n = 0; n + 1 < lockstack->size(); n++) {
+        if ((*lockstack)[n].first == c) {
+            fReentrant = true;
+            break;
+        }
+    }
+
+    if (!fTry && !fReentrant) {
         BOOST_FOREACH (const PAIRTYPE(void*, CLockLocation) & i, (*lockstack)) {
             if (i.first == c)
                 break;
