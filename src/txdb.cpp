@@ -222,8 +222,12 @@ bool CBlockTreeDB::ReadBlockFileInfo(int nFile, CBlockFileInfo &info) {
 }
 
 bool CBlockTreeDB::WriteReindexing(bool fReindexing) {
+    // Setting the flag is synced: -reindex has just wiped the block index, and only the
+    // flag tells the next start so. Lost in a power cut, that start would find an empty
+    // index next to full block files and write new blocks over them. Clearing it needs
+    // no sync: a lost clear only runs the reindex once more.
     if (fReindexing)
-        return Write(DB_REINDEX_FLAG, '1');
+        return Write(DB_REINDEX_FLAG, '1', true);
     else
         return Erase(DB_REINDEX_FLAG);
 }

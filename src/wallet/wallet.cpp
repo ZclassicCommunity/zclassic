@@ -569,6 +569,21 @@ void CWallet::UpdatedBlockTip(const CBlockIndex* pindex)
     // Bounded: a transaction refused for good would otherwise cost a full pass at
     // every block. A disconnect meanwhile resets the count and the CAS keeps that.
     int nLeft = nReacceptTipsLeft.load();
+    if (nLeft == REACCEPT_WHEN_CAUGHT_UP) {
+        // A start-up offer refused some, maybe only because the node is behind the
+        // network (inputs not seen yet, coinbase not mature yet): the retries begin
+        // once the tip has reached the best known header, not on tips far behind it.
+        bool fCaughtUp;
+        {
+            LOCK(cs_main);
+            fCaughtUp = pindexBestHeader == NULL || pindex->nHeight >= pindexBestHeader->nHeight;
+        }
+        if (!fCaughtUp)
+            return;
+        // On failure (a disconnect armed the retry meanwhile) nLeft holds that count.
+        if (nReacceptTipsLeft.compare_exchange_strong(nLeft, REACCEPT_TIPS_AFTER_UNWIND))
+            nLeft = REACCEPT_TIPS_AFTER_UNWIND;
+    }
     if (nLeft <= 0)
         return;
     const int64_t nTimeOffer0 = GetTimeMicros();
@@ -3330,10 +3345,12 @@ size_t CWallet::ReacceptWalletTransactions()
     // may only come back at later tips (the mempool is empty at start, so a send on
     // top of another unmined one is refused until that one is in a block). Without
     // the retry the running wallet would differ from the same wallet after its next
-    // restart, which admits what the chain allows by then.
+    // restart, which admits what the chain allows by then. The retry waits until the
+    // node has caught up (UpdatedBlockTip), unless one is already running.
     size_t nRefused = OfferWalletTransactionsToMempool();
     if (nRefused > 0)
-        nReacceptTipsLeft = REACCEPT_TIPS_AFTER_UNWIND;
+        nReacceptTipsLeft = nReacceptTipsLeft.load() > 0 ? REACCEPT_TIPS_AFTER_UNWIND
+                                                         : REACCEPT_WHEN_CAUGHT_UP;
     return nRefused;
 }
 

@@ -646,6 +646,7 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-fuzzmessagestest=<n>", "Randomly fuzz 1 of every <n> network messages");
         strUsage += HelpMessageOpt("-flushwallet", strprintf("Run a thread to flush wallet periodically (default: %u)", 1));
         strUsage += HelpMessageOpt("-testsetchaininterval=<n>", strprintf("Test only: write the wallet checkpoint (locator and note state) at most every <n> seconds while running (default: %u)", DATABASE_WRITE_INTERVAL));
+        strUsage += HelpMessageOpt("-testblockindexinterval=<n>", "Test only: write the block index at most every <n> seconds while running (default: 3600, 300 during initial block download)");
         strUsage += HelpMessageOpt("-testcrashpoint=<name>[:<n>]", "Test only: _exit(77) the <n>th time the named wallet or chain-state write point is reached; the name any matches every point (default: off)");
         strUsage += HelpMessageOpt("-stopafterblockimport", strprintf("Stop running after importing blocks from disk (default: %u)", 0));
         strUsage += HelpMessageOpt("-nuparams=hexBranchId:activationHeight", "Use given activation height for specified network upgrade (regtest-only)");
@@ -818,6 +819,11 @@ void ThreadImport(std::vector<boost::filesystem::path> vImportFiles)
             LoadExternalBlockFile(file, &pos);
             nFile++;
         }
+        // The reindex flag is the record that the block index and the chainstate are not
+        // complete on disk. Both live in memory until a flush, so make them durable before
+        // the flag goes: a kill between the two left the flag cleared, an empty block index
+        // next to full block files and a node that started from genesis.
+        FlushStateToDisk();
         pblocktree->WriteReindexing(false);
         fReindex = false;
         LogPrintf("Reindexing finished\n");
@@ -2076,9 +2082,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     // The crash and checkpoint-interval hooks exist for qa/rpc-tests/wallet_crash_consistency.sh.
     // A stray line in zclassic.conf must not make a real node exit at a wallet write point.
-    if ((mapArgs.count("-testcrashpoint") || mapArgs.count("-testsetchaininterval")) &&
+    if ((mapArgs.count("-testcrashpoint") || mapArgs.count("-testsetchaininterval") || mapArgs.count("-testblockindexinterval")) &&
         Params().NetworkIDString() != "regtest") {
-        return InitError("-testcrashpoint and -testsetchaininterval may only be used on regtest.");
+        return InitError("-testcrashpoint, -testsetchaininterval and -testblockindexinterval may only be used on regtest.");
     }
 
     if (!mapMultiArgs["-nuparams"].empty()) {
@@ -3021,12 +3027,44 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 // the connected chain from the existing blk files under full
                 // ConnectBlock -- rebuilding the UTXO set without a full reindex.
                 pblocktree = new CBlockTreeDB(nBlockTreeDBCache, false, fReindex);
+                // The reindex flag is the only record that the block index was wiped on purpose: a
+                // node killed after the wipe and before the flag is written starts with an empty
+                // index next to full block files, and its sync overwrites them. Write it before the
+                // chainstate is wiped (the long step), and when an earlier -reindex was cut short
+                // (flag found) run it again from the start with a wiped chainstate: the half-built
+                // one may be torn and no longer matches the index that is not loaded.
+                if (fReindex) {
+                    pblocktree->WriteReindexing(true);
+                } else {
+                    bool fWasReindexing = false;
+                    pblocktree->ReadReindexing(fWasReindexing);
+                    // The flag can only be written once the wiped block index is open again, and
+                    // opening a new LevelDB syncs its files: a -reindex killed in that window left an
+                    // empty index with no flag next to full block files. A plain restart then refused
+                    // (the chainstate names a block the index lacks), but one with -reindex-chainstate,
+                    // or with the chainstate gone, started from genesis and wrote over blk00000.dat.
+                    // An index that never recorded a block file while blk00000.dat holds data was lost
+                    // (cut short like that, or removed by hand): rebuild it from the block files.
+                    int nLastBlockFileRecorded = 0;
+                    const boost::filesystem::path pathFirstBlockFile = GetBlockPosFilename(CDiskBlockPos(0, 0), "blk");
+                    boost::system::error_code ecFirstBlockFile;
+                    const bool fFirstBlockFileHoldsData = boost::filesystem::exists(pathFirstBlockFile, ecFirstBlockFile) &&
+                        boost::filesystem::file_size(pathFirstBlockFile, ecFirstBlockFile) > 0 && !ecFirstBlockFile;
+                    if (fWasReindexing) {
+                        LogPrintf("An earlier -reindex did not finish: starting it again\n");
+                        fReindex = true;
+                    } else if (!pblocktree->ReadLastBlockFile(nLastBlockFileRecorded) && fFirstBlockFileHoldsData) {
+                        LogPrintf("The block index is empty but the block files hold blocks (an interrupted -reindex, or a removed index): reindexing them\n");
+                        pblocktree->WriteReindexing(true);
+                        fReindex = true;
+                    }
+                }
                 pcoinsdbview = new CCoinsViewDB(nCoinDBCache, false, fReindex || fReindexChainState);
                 pcoinscatcher = new CCoinsViewErrorCatcher(pcoinsdbview);
                 pcoinsTip = new CCoinsViewCache(pcoinscatcher);
 
                 if (fReindex) {
-                    pblocktree->WriteReindexing(true);
+                    TestCrashPoint("reindex-after-wipe");
                     //If we're reindexing in prune mode, wipe away unusable block files and all undo data files
                     if (fPruneMode)
                         CleanupBlockRevFiles();

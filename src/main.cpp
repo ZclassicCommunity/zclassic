@@ -1886,6 +1886,9 @@ CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
 
 int64_t BlockIndexWriteInterval(bool fInitialBlockDownload)
 {
+    // Regtest only (init.cpp rejects it elsewhere): lets qa scripts reach a block-index write without a full flush.
+    if (mapArgs.count("-testblockindexinterval"))
+        return GetArg("-testblockindexinterval", DATABASE_WRITE_INTERVAL);
     return fInitialBlockDownload ? DATABASE_WRITE_INTERVAL_IBD : DATABASE_WRITE_INTERVAL;
 }
 
@@ -4278,6 +4281,17 @@ static bool UnwindBlock(CValidationState& state, CBlockIndex *pindex, bool inval
         }
     }
 
+    // The coins on disk must reach the disconnected tip before any block-index write can
+    // carry the failed or parked flags of the blocks just disconnected: a block-index write
+    // that is durable while the on-disk coins still name one of them as their best block
+    // leaves a node that cannot start (every block index candidate is pruned as worse
+    // than a tip that is itself flagged) and needs -reindex. Flush here, before the flags
+    // are set; the flush below makes the flags durable once the coins no longer depend on
+    // the blocks they name.
+    if (pindex_was_in_chain && !FlushStateToDisk(state, FLUSH_STATE_ALWAYS)) {
+        return false;
+    }
+
     // Now mark the blocks we just disconnected as descendants invalid
     // (note this may not be all descendants).
     while (pindex_was_in_chain && invalid_walk_tip != pindex) {
@@ -4311,6 +4325,11 @@ static bool UnwindBlock(CValidationState& state, CBlockIndex *pindex, bool inval
 
     if (invalidate) {
         InvalidChainFound(pindex);
+    }
+
+    // The flags are safe to write now (see above): make the request durable.
+    if (pindex_was_in_chain && !FlushStateToDisk(state, FLUSH_STATE_ALWAYS)) {
+        return false;
     }
 
     // Only notify about a new block tip if the active chain was modified.
@@ -5371,8 +5390,15 @@ bool static LoadBlockIndexDB()
         // Genesis block has a branch ID of zero by definition, but has no
         // validity status because it is side-loaded into a fresh chain.
         // Activation blocks will have branch IDs set (read from disk).
+        // The level the block reached counts, not a later failure mark: a block
+        // invalidateblock marked (or one descending from it) was fully validated
+        // and had its branch ID in the running process. Without it RewindBlockIndex
+        // takes the block for insufficiently validated and erases it from the index,
+        // which drops the invalidation: a peer re-offering the block after a restart
+        // had it accepted and connected again.
         if (pindex->pprev) {
-            if (pindex->IsValid(BLOCK_VALID_CONSENSUS) && !pindex->nCachedBranchId) {
+            if ((pindex->nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_CONSENSUS &&
+                !pindex->nCachedBranchId) {
                 pindex->nCachedBranchId = pindex->pprev->nCachedBranchId;
             }
         } else {
