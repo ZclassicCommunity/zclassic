@@ -721,6 +721,72 @@ BOOST_AUTO_TEST_CASE(dial_table_selection)
     addrmanOnion.Clear();
 }
 
+// Outbound candidate choice on a table of a few addresses (a fresh node on a small
+// network): a draw of an address of a connected group does not end the round, an
+// address tried within the last minute is never redialled, and a node on a
+// non-default port is still reached.
+BOOST_AUTO_TEST_CASE(outbound_candidate_small_table)
+{
+    bool l4 = IsLimited(NET_IPV4), l6 = IsLimited(NET_IPV6);
+    SetLimited(NET_IPV4, false);
+    SetLimited(NET_IPV6, false);
+    const unsigned short port = Params().GetDefaultPort();
+    const int64_t now = GetAdjustedTime();
+    const CNetAddr source("93.184.216.1");
+    CAddress connected = MakeV4("93.184.216.10", port, 1, now);
+    CAddress recent = MakeV4("94.185.1.2", port, 1, now);
+    CAddress odd = MakeV4("95.186.3.4", port + 1, 1, now);
+    std::set<std::vector<unsigned char> > setConnected;
+    setConnected.insert(connected.GetGroup());
+
+    {
+        // Only a connected-group address, a node tried 30 s ago, and one on another
+        // port: the recent one is never returned (not even once 30 draws have
+        // passed), the other-port one is, within the one call.
+        CAddrMan man;
+        BOOST_REQUIRE(man.Add(connected, source));
+        BOOST_REQUIRE(man.Add(recent, source));
+        BOOST_REQUIRE(man.Add(odd, source));
+        man.Good(recent, now - 30);   // a tried-table entry: it is drawn one time in two
+        man.Attempt(recent, now - 30);
+        int nOdd = 0;
+        for (int i = 0; i < 40; i++) {
+            CAddress pick = SelectOutboundCandidate(man, setConnected, now);
+            BOOST_CHECK(pick != connected);
+            BOOST_CHECK(pick != recent);
+            if (pick == odd)
+                nOdd++;
+        }
+        BOOST_CHECK_GE(nOdd, 36);
+    }
+    {
+        // The same node tried 90 s ago may be dialled again, but only after the
+        // relaxation of the 10 minute rule.
+        CAddrMan man;
+        BOOST_REQUIRE(man.Add(connected, source));
+        BOOST_REQUIRE(man.Add(recent, source));
+        man.Good(recent, now - 90);   // a tried-table entry: it is drawn one time in two
+        man.Attempt(recent, now - 90);
+        int nRecent = 0;
+        for (int i = 0; i < 40; i++) {
+            CAddress pick = SelectOutboundCandidate(man, setConnected, now);
+            BOOST_CHECK(pick != connected);
+            if (pick == recent)
+                nRecent++;
+        }
+        BOOST_CHECK_GE(nRecent, 36);
+    }
+    {
+        CAddrMan empty;
+        BOOST_CHECK(!SelectOutboundCandidate(empty, setConnected, now).IsValid());
+        CAddrMan onlyConnected;
+        BOOST_REQUIRE(onlyConnected.Add(connected, source));
+        BOOST_CHECK(!SelectOutboundCandidate(onlyConnected, setConnected, now).IsValid());
+    }
+    SetLimited(NET_IPV4, l4);
+    SetLimited(NET_IPV6, l6);
+}
+
 namespace {
 // A v3 address that differs for every n (MakeV3 has only 256 distinct keys).
 CAddress MakeV3N(uint32_t n)

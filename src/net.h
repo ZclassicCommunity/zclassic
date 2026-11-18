@@ -182,6 +182,10 @@ extern CAddrMan addrmanOnion;
  * empty or nRand == 0 (one time in four, nRand is GetRand(4)).
  */
 CAddrMan& SelectDialTable(bool fOnionProxy, uint32_t nRand);
+/** The next outbound address to dial from man, or an invalid one: not on a network group in
+ *  setConnected, not our own, not limited, not tried within the last minute, and a node on a
+ *  port other than the default only after enough other draws (see ThreadOpenConnections). */
+CAddress SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow);
 /** The table an address belongs to: Tor v3 in the onion store, the rest in addrman. */
 inline CAddrMan& AddrManFor(const CNetAddr& addr) { return addr.IsTorV3() ? addrmanOnion : addrman; }
 /** Maximum number of connections to simultaneously allow (aka connection slots) */
