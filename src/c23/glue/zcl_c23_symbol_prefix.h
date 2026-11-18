@@ -30,6 +30,7 @@
 #define bls12_381_multi_pairing_check zc23_bls12_381_multi_pairing_check
 #define bls12_381_pairing zc23_bls12_381_pairing
 #define bn254_accel_adx_code zc23_bn254_accel_adx_code
+#define bn254_accel_cpu_has_adx zc23_bn254_accel_cpu_has_adx
 #define bn254_accel_implementation zc23_bn254_accel_implementation
 #define bn254_accel_mont_mul_adx zc23_bn254_accel_mont_mul_adx
 #define bn254_accel_mont_mul_portable zc23_bn254_accel_mont_mul_portable
@@ -53,6 +54,7 @@
 #define bn_fq2_neg zc23_bn_fq2_neg
 #define bn_fq2_one zc23_bn_fq2_one
 #define bn_fq2_sq zc23_bn_fq2_sq
+#define bn_fq2_sqrt zc23_bn_fq2_sqrt
 #define bn_fq2_sub zc23_bn_fq2_sub
 #define bn_fq2_zero zc23_bn_fq2_zero
 #define bn_fq6_add zc23_bn_fq6_add
@@ -244,7 +246,7 @@
 #define g2_from_compressed zc23_g2_from_compressed
 #define g2_from_uncompressed zc23_g2_from_uncompressed
 #define g2_identity zc23_g2_identity
-#define g2_in_subgroup zc23_g2_in_subgroup
+#define g2_in_subgroup(...) zc23_g2_in_subgroup(__VA_ARGS__)
 #define g2_is_identity zc23_g2_is_identity
 #define g2_msm zc23_g2_msm
 #define g2_neg zc23_g2_neg

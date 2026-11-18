@@ -22,6 +22,8 @@
 #            built with or without the current header. Run it after re-vendoring
 #            when `check` reports a new unprefixed name, then rebuild.
 set -u
+# Globals that gen renames with a function-like macro (see gen below).
+FNLIKE="g2_in_subgroup"
 mode=${1:-}; nm=${2:-}; lib=${3:-}
 [ -n "$mode" ] && [ -n "$nm" ] && [ -f "$lib" ] || {
     echo "usage: $0 check <nm> <archive> | gen <nm> <archive> <header>" >&2; exit 2; }
@@ -57,7 +59,8 @@ gen)
     [ -n "$hdr" ] || { echo "usage: $0 gen <nm> <archive> <header>" >&2; exit 2; }
     # Names the current header already renames (so zc23_<name> maps back to <name>).
     : >"$tmp.old"
-    [ -f "$hdr" ] && sed -n 's/^#define \([A-Za-z_][A-Za-z0-9_]*\) zc23_\1$/\1/p' "$hdr" | sort -u >"$tmp.old"
+    [ -f "$hdr" ] && sed -n -e 's/^#define \([A-Za-z_][A-Za-z0-9_]*\) zc23_\1$/\1/p' \
+        -e 's/^#define \([A-Za-z_][A-Za-z0-9_]*\)(\.\.\.) zc23_\1(__VA_ARGS__)$/\1/p' "$hdr" | sort -u >"$tmp.old"
     awk -v oldf="$tmp.old" '
         BEGIN { while ((getline l < oldf) > 0) old[l] = 1 }
         /^(librustzcash_|zcl_c23_|zcl_token_guard_|zcl_slp_|zcl_tor_|zcl_keyfile_)/ { next }
@@ -74,7 +77,14 @@ gen)
         echo " * The public ABI (librustzcash_*, zcl_c23_*) is not renamed. */"
         echo "#ifndef ZCL_C23_SYMBOL_PREFIX_H"
         echo "#define ZCL_C23_SYMBOL_PREFIX_H"
-        sed 's/.*/#define & zc23_&/' "$tmp.names"
+        # Names the core uses as pasted tokens or struct members elsewhere (the
+        # BN254 engine builds bne_<instance>_<name> from them) must not be
+        # object-like macros: a function-like macro renames the calls and the
+        # definition and leaves a bare identifier alone. g2_in_subgroup is the
+        # BLS12-381 check (bls12_381.h) and also an engine function name.
+        awk -v fl="$FNLIKE" 'BEGIN { n = split(fl, a, " "); for (i = 1; i <= n; i++) f[a[i]] = 1 }
+            ($0 in f) { print "#define " $0 "(...) zc23_" $0 "(__VA_ARGS__)"; next }
+            { print "#define " $0 " zc23_" $0 }' "$tmp.names"
         echo "#endif"
     } >"$hdr.new" && mv "$hdr.new" "$hdr"
     echo "symbol-prefix: wrote $hdr ($(wc -l <"$tmp.names" | tr -d ' ') names)"
