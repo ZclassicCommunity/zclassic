@@ -18,6 +18,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <deque>
 #include <vector>
 
@@ -406,6 +407,213 @@ BOOST_AUTO_TEST_CASE(randomized_differential_against_reference)
     BOOST_TEST_MESSAGE("differential checks: " << checks << ", with a selected block: " << nonNull);
     BOOST_CHECK(checks > 5000);
     BOOST_CHECK(nonNull > 1000);
+}
+
+// Reviewer extension: a longer randomized differential run with more operation
+// types, aimed at the memo specifically (bit flips on the memoised path and on
+// the segment below its floor, tip moves below the floor, heavy parked branches
+// that the walk unparks by PoW, no-tip walks, finalization points off the
+// active chain, toggling -parkdeepreorg, ABA flips). FMW_TRIALS / FMW_STEPS /
+// FMW_SEED override the size. A NULL tip is never combined with parked blocks:
+// UnparkBlock() (and so the reference walk) dereferences the tip then.
+BOOST_AUTO_TEST_CASE(randomized_differential_reviewer_extension)
+{
+    const char* envTrials = getenv("FMW_TRIALS");
+    const char* envSteps = getenv("FMW_STEPS");
+    const char* envSeed = getenv("FMW_SEED");
+    const int trials = envTrials ? atoi(envTrials) : 60;
+    const int steps = envSteps ? atoi(envSteps) : 300;
+    const uint64_t seed0 = envSeed ? strtoull(envSeed, NULL, 10) : 777000;
+    int checks = 0, nonNull = 0, memoHitSkip = 0, memoHitSegment = 0, unparkedByWalk = 0;
+    int opCount[24] = {0};
+    for (int trial = 0; trial < trials; ++trial) {
+        Forest f(seed0 + trial);
+        Rng& rng = f.rng;
+        f.Add(NULL, GOOD | BLOCK_VALID_SCRIPTS);
+        const int initial = 10 + rng.Below(60);
+        for (int i = 0; i < initial; ++i)
+            f.Add(f.all[f.all.size() - 1 - rng.Below(std::min<size_t>(f.all.size(), rng.Below(2) ? 3 : f.all.size()))],
+                  rng.Below(10) ? GOOD : BLOCK_VALID_TREE);
+        SetTipTo(f.all[0]);
+        {
+            BestChainState s = BestChainStateSave(f.all);
+            s.candidates.assign(1, f.all.back());
+            for (CBlockIndex* p : f.all)
+                if ((p->nStatus & BLOCK_HAVE_DATA) && rng.Below(3) == 0) s.candidates.push_back(p);
+            BestChainStateRestore(s, f.all);
+        }
+
+        for (int step = 0; step < steps; ++step) {
+            const std::vector<CBlockIndex*>& all = f.all;
+            auto randomBlock = [&]() { return all[rng.Below(all.size())]; };
+            auto parkedAny = [&]() { for (CBlockIndex* p : all) if (p->nStatus & BLOCK_PARKED_MASK) return true; return false; };
+            auto addCandidate = [&](CBlockIndex* p) {
+                BestChainState s = BestChainStateSave(all);
+                s.candidates.push_back(p);
+                BestChainStateRestore(s, all);
+            };
+            const unsigned int flipBits[] = {BLOCK_HAVE_DATA, BLOCK_FAILED_VALID, BLOCK_FAILED_CHILD,
+                                             BLOCK_PARKED_FLAG, BLOCK_PARKED_PARENT_FLAG};
+            auto flip = [&](CBlockIndex* b, bool aba) {
+                const unsigned int bit = flipBits[rng.Below(5)];
+                const unsigned int old = b->nStatus;
+                b->nStatus = old ^ bit;
+                if (aba) b->nStatus = old; // changed and changed back: the epoch still moved twice
+                SyncParked(all);
+            };
+            const BestChainState cur = BestChainStateSave(all);
+            if (!chainActive.Tip()) SetTipTo(randomBlock()); // ResetBlockFailureFlags/UnparkBlock also dereference the tip
+
+            const int op = rng.Below(24);
+            ++opCount[op];
+            switch (op) {
+            case 0: case 1: case 2: { // new block
+                CBlockIndex* parent = rng.Below(4) ? all[all.size() - 1 - rng.Below(std::min<size_t>(8, all.size()))] : randomBlock();
+                const bool data = rng.Below(8) != 0;
+                CBlockIndex* p = f.Add(parent, data ? GOOD : BLOCK_VALID_TREE);
+                if (data && rng.Below(3) != 0) addCandidate(p);
+                if (!data) {
+                    BestChainState s = BestChainStateSave(all);
+                    s.blocksUnlinked.push_back(std::make_pair(parent, p));
+                    BestChainStateRestore(s, all);
+                }
+                break;
+            }
+            case 3: { // invalidate-like, recorded as a failed block
+                CBlockIndex* b = randomBlock();
+                b->nStatus |= BLOCK_FAILED_VALID;
+                for (CBlockIndex* d : all)
+                    if (d != b && d->nHeight > b->nHeight && d->GetAncestor(b->nHeight) == b && rng.Below(3)) d->nStatus |= BLOCK_FAILED_CHILD;
+                BestChainState s = BestChainStateSave(all);
+                s.failedBlocks.insert(b);
+                BestChainStateRestore(s, all);
+                break;
+            }
+            case 4: SyncParked(all); ResetBlockFailureFlags(randomBlock()); break;
+            case 5: { // park-like
+                CBlockIndex* b = randomBlock();
+                b->nStatus |= BLOCK_PARKED_FLAG;
+                for (CBlockIndex* d : all)
+                    if (d != b && d->nHeight > b->nHeight && d->GetAncestor(b->nHeight) == b) d->nStatus |= BLOCK_PARKED_PARENT_FLAG;
+                SyncParked(all);
+                break;
+            }
+            case 6: SyncParked(all); if (rng.Below(2)) UnparkBlock(randomBlock()); else UnparkBlockAndChildren(randomBlock()); break;
+            case 7: flip(randomBlock(), false); break;
+            case 8: case 9: { // advance toward the best candidate
+                if (!cur.candidates.empty()) {
+                    CBlockIndex* best = cur.candidates.back();
+                    SetTipTo(best->GetAncestor(std::min(chainActive.Height() + 1 + int(rng.Below(40)), best->nHeight)));
+                }
+                break;
+            }
+            case 10: SetTipTo(randomBlock()); break;
+            case 11: { // finalization point: on the active chain, or anywhere
+                BestChainState s = BestChainStateSave(all);
+                if (!rng.Below(3) || !chainActive.Tip()) s.pindexFinalized = NULL;
+                else if (rng.Below(4)) s.pindexFinalized = chainActive.Tip()->GetAncestor(std::max(0, chainActive.Height() - int(rng.Below(6))));
+                else s.pindexFinalized = randomBlock();
+                BestChainStateRestore(s, all);
+                break;
+            }
+            case 12: { // candidate set edits
+                CBlockIndex* b = randomBlock();
+                BestChainState s = BestChainStateSave(all);
+                if (rng.Below(2)) { if (b->nStatus & BLOCK_HAVE_DATA) s.candidates.push_back(b); }
+                else if (!s.candidates.empty()) s.candidates.erase(s.candidates.begin() + rng.Below(s.candidates.size()));
+                BestChainStateRestore(s, all);
+                break;
+            }
+            case 13: { // no tip (not with parked blocks: UnparkBlock with a NULL tip dereferences it in the reference too)
+                if (parkedAny()) break;
+                BestChainState s = BestChainStateSave(all);
+                s.pindexFinalized = NULL;
+                BestChainStateRestore(s, all);
+                SetTipTo(NULL);
+                break;
+            }
+            case 14: { // heavy parked branch: the walk may unpark it by PoW
+                CBlockIndex* base = chainActive.Tip() && rng.Below(3) ? chainActive.Tip()->GetAncestor(std::max(0, chainActive.Height() - int(rng.Below(5)))) : randomBlock();
+                const int len = 1 + rng.Below(30);
+                CBlockIndex* p = base;
+                for (int i = 0; i < len; ++i) {
+                    p = f.Add(p, GOOD | (i == 0 ? BLOCK_PARKED_FLAG : BLOCK_PARKED_PARENT_FLAG));
+                    p->nChainWork = p->pprev->nChainWork + arith_uint256(1 + rng.Below(6));
+                }
+                SyncParked(all);
+                addCandidate(p);
+                break;
+            }
+            case 15: // toggle -parkdeepreorg
+                if (mapArgs.count("-parkdeepreorg")) mapArgs.erase("-parkdeepreorg");
+                else mapArgs["-parkdeepreorg"] = "0";
+                break;
+            case 16: { // extend the memoised candidate, or its path
+                CBlockIndex* m = cur.memoIndex ? cur.memoIndex : randomBlock();
+                CBlockIndex* p = f.Add(rng.Below(2) ? m : m->GetAncestor(std::max(0, m->nHeight - int(rng.Below(5)))), GOOD);
+                addCandidate(p);
+                break;
+            }
+            case 17: case 18: { // flip a bit on the memoised path (above the floor), possibly ABA
+                if (!cur.memoIndex) break;
+                const int lo = cur.memoFloorHeight + 1;
+                const int h = lo + int(rng.Below(std::max(1, cur.memoIndex->nHeight - lo + 1)));
+                flip(cur.memoIndex->GetAncestor(std::min(h, cur.memoIndex->nHeight)), op == 18);
+                break;
+            }
+            case 19: { // flip a bit at or below the memo floor
+                if (!cur.memoFloor) break;
+                flip(const_cast<CBlockIndex*>(cur.memoFloor)->GetAncestor(std::max(0, cur.memoFloorHeight - int(rng.Below(6)))), false);
+                break;
+            }
+            case 20: { // tip to below the memo floor on the same path (segment walk), or to a side branch of it
+                if (!cur.memoFloor) break;
+                CBlockIndex* fl = const_cast<CBlockIndex*>(cur.memoFloor);
+                CBlockIndex* t = fl->GetAncestor(std::max(0, cur.memoFloorHeight - 1 - int(rng.Below(10))));
+                if (rng.Below(3) == 0) t = f.Add(t, GOOD);
+                SetTipTo(t);
+                break;
+            }
+            case 21: { // tip onto the memoised path, above the floor
+                if (!cur.memoIndex) break;
+                const int lo = std::max(0, cur.memoFloorHeight);
+                SetTipTo(cur.memoIndex->GetAncestor(lo + int(rng.Below(std::max(1, cur.memoIndex->nHeight - lo + 1)))));
+                break;
+            }
+            default: break; // repeat the call unchanged
+            }
+
+            const int calls = 1 + rng.Below(3);
+            for (int c = 0; c < calls; ++c) {
+                const BestChainState before = BestChainStateSave(all);
+                const bool hit = before.memoIndex && before.memoEpoch == BlockPathWalkEpoch() &&
+                                 !before.candidates.empty() && before.candidates.back() == before.memoIndex;
+                const CBlockIndex* fork = hit ? chainActive.FindFork(before.memoIndex) : NULL;
+                CBlockIndex* sel = NULL;
+                const bool ok = Differential(all, 1 + ((step + c) & 1), &sel);
+                BOOST_REQUIRE_MESSAGE(ok, "memoised and reference walks differ: seed " << (seed0 + trial) << " step " << step << " call " << c << " op " << op);
+                ++checks;
+                if (hit) { if ((fork ? fork->nHeight : -1) >= before.memoFloorHeight) ++memoHitSkip; else ++memoHitSegment; }
+                const BestChainState after = BestChainStateSave(all);
+                for (size_t i = 0; i < all.size(); ++i)
+                    if ((before.status[i] & BLOCK_PARKED_MASK) && !(after.status[i] & BLOCK_PARKED_MASK)) { ++unparkedByWalk; break; }
+                if (sel) ++nonNull;
+                if (sel && rng.Below(2) && chainActive.Tip()) {
+                    int h = std::min(chainActive.Height() + 1 + int(rng.Below(32)), sel->nHeight);
+                    if (h >= 0) SetTipTo(sel->GetAncestor(h));
+                }
+            }
+        }
+        mapArgs.erase("-parkdeepreorg");
+    }
+    std::string ops;
+    for (int i = 0; i < 24; ++i) ops += strprintf(" %d:%d", i, opCount[i]);
+    BOOST_TEST_MESSAGE("reviewer differential checks: " << checks << ", selected: " << nonNull << ", memo skip hits: " << memoHitSkip
+                       << ", memo segment hits: " << memoHitSegment << ", walks that unparked: " << unparkedByWalk << ", ops:" << ops);
+    BOOST_CHECK(checks > 0);
+    BOOST_CHECK(memoHitSkip > 0);
+    BOOST_CHECK(memoHitSegment > 0);
+    BOOST_CHECK(unparkedByWalk > 0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
