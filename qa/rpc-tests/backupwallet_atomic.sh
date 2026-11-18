@@ -1,5 +1,5 @@
 #!/bin/sh
-# TEST-ONLY. backupwallet is atomic and verified, against a real regtest daemon: the backup is
+# TEST-ONLY. backupwallet is atomic and verified, against a real regtest daemon: the backup
 # opens as the same wallet in a fresh datadir; a refused
 # overwrite, an unwritable destination and the wallet file itself all fail cleanly, leave the
 # old file (or the wallet) untouched and no *.tmp.* behind.
