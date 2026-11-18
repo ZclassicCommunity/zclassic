@@ -299,9 +299,26 @@ void FlushStateToDisk();
 /** Prune block files and flush state to disk. */
 void PruneAndFlush();
 
-/** (try to) add transaction to memory pool **/
+/** Default and minimum for -mempoolmaxbytes: cap on the summed serialized size of mempool transactions. */
+static const uint64_t DEFAULT_MEMPOOL_MAX_BYTES = 300000000;
+static const uint64_t MIN_MEMPOOL_MAX_BYTES = 5000000;
+/** Current cap (-mempoolmaxbytes). */
+extern uint64_t nMempoolMaxBytes;
+
+/**
+ * True when a transaction of nTxSize serialized bytes fits under nMempoolMaxBytes
+ * next to the transactions already in the pool (pool.GetTotalTxSize()). Otherwise
+ * returns false and fills strError. Never evicts anything.
+ */
+bool CheckMempoolCapacity(CTxMemPool& pool, size_t nTxSize, std::string& strError);
+
+/**
+ * (try to) add transaction to memory pool.
+ * fEnforceMempoolCap=false exempts the -mempoolmaxbytes check; only DisconnectTip uses it,
+ * for transactions that were already in a block and are returned to the pool on a reorg.
+ **/
 bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransaction &tx, bool fLimitFree,
-                        bool* pfMissingInputs, bool fRejectAbsurdFee=false);
+                        bool* pfMissingInputs, bool fRejectAbsurdFee=false, bool fEnforceMempoolCap=true);
 
 
 struct CNodeStateStats {

@@ -506,6 +506,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-dbcache=<n>", strprintf(_("Set database cache size in megabytes (%d to %d, default: %d)"), nMinDbCache, nMaxDbCache, nDefaultDbCache));
     strUsage += HelpMessageOpt("-loadblock=<file>", _("Imports blocks from external blk000??.dat file") + " " + _("on startup"));
     strUsage += HelpMessageOpt("-maxorphantx=<n>", strprintf(_("Keep at most <n> unconnectable transactions in memory (default: %u)"), DEFAULT_MAX_ORPHAN_TRANSACTIONS));
+    strUsage += HelpMessageOpt("-mempoolmaxbytes=<n>", strprintf(_("Maximum total size in bytes of transactions held in the mempool; a new transaction that would exceed it is refused with reason \"mempool full\" and nothing is evicted (default: %u, minimum: %u)"), DEFAULT_MEMPOOL_MAX_BYTES, MIN_MEMPOOL_MAX_BYTES));
     strUsage += HelpMessageOpt("-mempooltxinputlimit=<n>", _("[DEPRECATED FROM OVERWINTER] Set the maximum number of transparent inputs in a transaction that the mempool will accept (default: 0 = no limit applied)"));
     strUsage += HelpMessageOpt("-par=<n>", strprintf(_("Set the number of script verification threads (%u to %d, 0 = auto, <0 = leave that many cores free, default: %d)"),
         -GetNumCores(), MAX_SCRIPTCHECK_THREADS, DEFAULT_SCRIPTCHECK_THREADS));
@@ -2020,6 +2021,15 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
     }
 #endif
+
+    if (mapArgs.count("-mempoolmaxbytes")) {
+        int64_t nCap = GetArg("-mempoolmaxbytes", (int64_t)DEFAULT_MEMPOOL_MAX_BYTES);
+        if (nCap < (int64_t)MIN_MEMPOOL_MAX_BYTES) {
+            return InitError(strprintf(_("-mempoolmaxbytes=%s is too small: the minimum is %u bytes (0 does not mean unlimited)"), mapArgs["-mempoolmaxbytes"], MIN_MEMPOOL_MAX_BYTES));
+        }
+        nMempoolMaxBytes = (uint64_t)nCap;
+    }
+    LogPrintf("Mempool total size cap: %u bytes\n", nMempoolMaxBytes);
 
     // Default value of 0 for mempooltxinputlimit means no limit is applied
     if (mapArgs.count("-mempooltxinputlimit")) {

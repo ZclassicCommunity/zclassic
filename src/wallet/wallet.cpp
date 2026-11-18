@@ -4160,10 +4160,23 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
 /**
  * Call after CreateTransaction unless you want to abort
  */
-bool CWallet::CommitTransaction(CWalletTx& wtxNew, CReserveKey& reservekey)
+bool CWallet::CommitTransaction(CWalletTx& wtxNew, CReserveKey& reservekey, std::string* pstrError)
 {
     {
         LOCK2(cs_main, cs_wallet);
+        if (fBroadcastTransactions) {
+            // Refuse before the transaction is recorded or its inputs are marked spent: the
+            // -mempoolmaxbytes cap would reject it from the pool anyway, and a transaction the
+            // wallet holds but the pool will not take only confuses balances.
+            std::string strCapError;
+            if (!CheckMempoolCapacity(mempool, ::GetSerializeSize(static_cast<const CTransaction&>(wtxNew), SER_NETWORK, PROTOCOL_VERSION), strCapError)) {
+                LogPrintf("CommitTransaction(): %s\n", strCapError);
+                if (pstrError) {
+                    *pstrError = strCapError;
+                }
+                return false;
+            }
+        }
         LogPrintf("CommitTransaction:\n%s", wtxNew.ToString());
         {
             // This is only to keep the database open to defeat the auto-flush for the
