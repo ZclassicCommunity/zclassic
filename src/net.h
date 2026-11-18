@@ -48,6 +48,10 @@ static const int TIMEOUT_INTERVAL = 20 * 60;
 static const unsigned int MAX_INV_SZ = 50000;
 /** The maximum number of new addresses to accumulate before announcing. */
 static const unsigned int MAX_ADDR_TO_SEND = 1000;
+/** Tor v3 addresses a peer may add to the onion store unasked: refill rate per second, burst, start. */
+static const double ONION_ADDR_TOKENS_PER_SEC = 0.1;
+static const double ONION_ADDR_TOKENS_MAX = 1000;
+static const double ONION_ADDR_TOKENS_INITIAL = 100;
 /** Maximum length of incoming protocol messages (no message over 2 MiB is currently acceptable). */
 static const unsigned int MAX_PROTOCOL_MESSAGE_LENGTH = 2 * 1024 * 1024;
 /** Maximum length of strSubVer in `version` message */
@@ -361,6 +365,10 @@ public:
     std::vector<CAddress> vAddrToSend;
     CRollingBloomFilter addrKnown;
     bool fGetAddr;
+    // Token bucket for the Tor v3 addresses this peer may add to the onion store
+    // without having been asked for them (see ProcessAddrList).
+    double dOnionAddrTokens;
+    int64_t nOnionAddrTokensTime;
 
     // inventory based relay
     mruset<CInv> setInventoryKnown;

@@ -6500,6 +6500,14 @@ static void ProcessAddrList(CNode* pfrom, vector<CAddress>& vAddr)
     vector<CAddress> vAddrOk, vAddrOnionOk;
     int64_t nNow = GetAdjustedTime();
     int64_t nSince = nNow - 10 * 60;
+    unsigned int nOnionAddrsDropped = 0;
+    {
+        const int64_t nTokenNow = GetTime();
+        const int64_t nElapsed = std::max<int64_t>(0, nTokenNow - pfrom->nOnionAddrTokensTime);
+        pfrom->dOnionAddrTokens = std::min<double>(ONION_ADDR_TOKENS_MAX,
+            pfrom->dOnionAddrTokens + nElapsed * ONION_ADDR_TOKENS_PER_SEC);
+        pfrom->nOnionAddrTokensTime = nTokenNow;
+    }
     BOOST_FOREACH(CAddress& addr, vAddr)
     {
         boost::this_thread::interruption_point();
@@ -6541,9 +6549,24 @@ static void ProcessAddrList(CNode* pfrom, vector<CAddress>& vAddr)
             }
         }
         // Do not store addresses outside our network
-        if (fReachable)
-            (addr.IsTorV3() ? vAddrOnionOk : vAddrOk).push_back(addr);
+        if (fReachable) {
+            if (!addr.IsTorV3()) {
+                vAddrOk.push_back(addr);
+            } else if (pfrom->fGetAddr) {
+                vAddrOnionOk.push_back(addr); // the answer to our own getaddr
+            } else if (pfrom->dOnionAddrTokens >= 1.0) {
+                // A v3 key is any 32 bytes: unasked ones are rationed per peer, or one
+                // peer (every visitor of our onion service shares the source 127.0.0.1)
+                // could fill the whole onion store with made-up addresses.
+                pfrom->dOnionAddrTokens -= 1.0;
+                vAddrOnionOk.push_back(addr);
+            } else {
+                ++nOnionAddrsDropped;
+            }
+        }
     }
+    if (nOnionAddrsDropped > 0)
+        LogPrint("net", "ignored %u Tor v3 addresses from peer=%d: over its rate limit\n", nOnionAddrsDropped, pfrom->id);
     addrman.Add(vAddrOk, pfrom->addr, 2 * 60 * 60);
     // Tor v3 addresses (only ever sent by addrv2 peers) go to the onion store.
     // The source is the peer: its v3 address when we reached it over Tor, its

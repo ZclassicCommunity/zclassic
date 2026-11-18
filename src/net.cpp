@@ -2341,6 +2341,8 @@ CNode::CNode(SOCKET hSocketIn, const CAddress& addrIn, const std::string& addrNa
     hashContinue = uint256();
     nStartingHeight = -1;
     fGetAddr = false;
+    dOnionAddrTokens = ONION_ADDR_TOKENS_INITIAL;
+    nOnionAddrTokensTime = GetTime();
     fRelayTxes = false;
     fSentAddr = false;
     fSendAddrV2 = false;
