@@ -85,6 +85,16 @@ int zcl_znam_owner_hash(const uint8_t *script, size_t len, uint8_t hash20[20])
     return 0;
 }
 
+/* Copy a C string into a buffer of `cap` bytes, always NUL terminated. */
+static void copy_str(char *dst, size_t cap, const char *src)
+{
+    size_t n = strlen(src);
+    if (n > cap - 1)
+        n = cap - 1;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
 static void ignore(struct zcl_znam_result *out, const char *reason)
 {
     out->effect = ZCL_ZNAM_EFFECT_NONE;
@@ -136,9 +146,9 @@ void zcl_znam_evaluate(const struct zcl_znam_parsed *msg, int has_entry,
             return;
         }
         memset(&out->entry, 0, sizeof(out->entry));
-        strncpy(out->entry.owner, owner, ZCL_ZNAM_OWNER_MAX);
+        copy_str(out->entry.owner, ZCL_ZNAM_OWNER_MAX + 1, owner);
         out->entry.target_type = msg->target_type;
-        strncpy(out->entry.target_value, msg->target_value, ZCL_ZNAM_VALUE_MAX);
+        copy_str(out->entry.target_value, ZCL_ZNAM_VALUE_MAX + 1, msg->target_value);
         out->entry.reg_height = height;
         out->entry.expiry_height = height + ZCL_ZNAM_REGISTRATION_TERM_BLOCKS;
         out->effect = ZCL_ZNAM_EFFECT_REGISTER;
@@ -159,7 +169,7 @@ void zcl_znam_evaluate(const struct zcl_znam_parsed *msg, int has_entry,
         }
         out->entry.target_type = msg->target_type;
         memset(out->entry.target_value, 0, sizeof(out->entry.target_value));
-        strncpy(out->entry.target_value, msg->target_value, ZCL_ZNAM_VALUE_MAX);
+        copy_str(out->entry.target_value, ZCL_ZNAM_VALUE_MAX + 1, msg->target_value);
         out->effect = ZCL_ZNAM_EFFECT_SET_TARGET;
         return;
     case ZCL_ZNAM_CMD_TRANSFER:
@@ -178,7 +188,7 @@ void zcl_znam_evaluate(const struct zcl_znam_parsed *msg, int has_entry,
             return;
         }
         memset(out->entry.owner, 0, sizeof(out->entry.owner));
-        strncpy(out->entry.owner, msg->new_owner, ZCL_ZNAM_OWNER_MAX);
+        copy_str(out->entry.owner, ZCL_ZNAM_OWNER_MAX + 1, msg->new_owner);
         out->effect = ZCL_ZNAM_EFFECT_SET_OWNER;
         return;
     case ZCL_ZNAM_CMD_SET_RECORD:
@@ -196,7 +206,7 @@ void zcl_znam_evaluate(const struct zcl_znam_parsed *msg, int has_entry,
             return;
         }
         out->record_type = msg->target_type;
-        strncpy(out->record_value, msg->target_value, ZCL_ZNAM_VALUE_MAX);
+        copy_str(out->record_value, ZCL_ZNAM_VALUE_MAX + 1, msg->target_value);
         out->effect = ZCL_ZNAM_EFFECT_SET_RECORD;
         return;
     case ZCL_ZNAM_CMD_SET_TEXT:
@@ -213,8 +223,8 @@ void zcl_znam_evaluate(const struct zcl_znam_parsed *msg, int has_entry,
             ignore(out, "the model refused the record (empty key)");
             return;
         }
-        strncpy(out->text_key, msg->text_key, ZCL_ZNAM_TEXT_KEY_MAX);
-        strncpy(out->text_value, msg->text_value, ZCL_ZNAM_TEXT_VAL_MAX);
+        copy_str(out->text_key, ZCL_ZNAM_TEXT_KEY_MAX + 1, msg->text_key);
+        copy_str(out->text_value, ZCL_ZNAM_TEXT_VAL_MAX + 1, msg->text_value);
         out->effect = ZCL_ZNAM_EFFECT_SET_TEXT;
         return;
     case ZCL_ZNAM_CMD_RENEW: {
