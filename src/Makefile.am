@@ -471,7 +471,7 @@ ZCL_C23_HASH_SOURCES = \
   c23/glue/zcl_c23_hash_log.c \
   c23/glue/zcl_c23_hash_names.h \
   c23/glue/zcl_c23_compat.h
-ZCL_C23_HASH_CPPFLAGS = \
+ZCL_C23_HASH_CPPFLAGS = $(HARDENED_CPPFLAGS) \
   -iquote $(srcdir)/c23/glue \
   -iquote $(srcdir)/c23/vendor/core/modules/crypto/include \
   -iquote $(srcdir)/c23/vendor/platform/modules/util/include \

@@ -500,6 +500,13 @@ if test x$use_hardening != xno; then
     AX_CHECK_LINK_FLAG([[-Wl,-z,now]], [HARDENED_LDFLAGS="$HARDENED_LDFLAGS -Wl,-z,now"],[AC_MSG_ERROR(Cannot enable BIND_NOW)])
   fi
 
+  if test x$TARGET_OS = xlinux && test x$host_cpu = xx86_64; then
+    # Linux x86_64 only: not mingw (no support), not darwin (Apple toolchain).
+    # Both are accepted-or-skipped, so an older compiler still configures.
+    AX_CHECK_COMPILE_FLAG([-fstack-clash-protection],[HARDENED_CXXFLAGS="$HARDENED_CXXFLAGS -fstack-clash-protection"],[AC_MSG_WARN(Cannot enable -fstack-clash-protection)])
+    AX_CHECK_COMPILE_FLAG([-fcf-protection=full],[HARDENED_CXXFLAGS="$HARDENED_CXXFLAGS -fcf-protection=full"],[AC_MSG_WARN(Cannot enable -fcf-protection=full)])
+  fi
+
   if test x$TARGET_OS != xwindows; then
     # All windows code is PIC, forcing it on just adds useless compile warnings
     AX_CHECK_COMPILE_FLAG([-fPIE],[PIE_FLAGS="-fPIE"],[AC_MSG_ERROR(Cannot enable -fPIE)])
