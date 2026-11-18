@@ -742,6 +742,7 @@ CAddress MakeV3N(uint32_t n)
 BOOST_AUTO_TEST_CASE(onion_store_selection_weighs_buckets_not_entries)
 {
     CAddrMan store(true);
+    ResetWithFixedKey(store); // a fixed table key: the same bucket layout in every run
     std::set<CService> honest;
     for (uint32_t i = 0; i < 8; i++) {
         CAddress a = MakeV3N(i);
@@ -753,11 +754,14 @@ BOOST_AUTO_TEST_CASE(onion_store_selection_weighs_buckets_not_entries)
     BOOST_CHECK_GT(store.size(), 500u); // the flood really was stored
 
     int nHonest = 0;
-    const int nPicks = 2000;
+    const int nPicks = 10000; // the fixed layout gives ~5.9%, the floor is 4%: 8 sigma, not 3.6
     for (int i = 0; i < nPicks; i++)
         nHonest += honest.count((CService)store.Select(true)) ? 1 : 0;
     // picking by entry would give them about 8 of the ~1000 stored (under 1%);
-    // by bucket their 8 buckets weigh against the at most 64 the flood can reach
+    // by bucket their one bucket (all 8 share an address group and a source
+    // group) weighs against the ~15 the flood can reach (16 address groups under
+    // one source group), about 6% with the fixed key, 80 is the floor
+    BOOST_TEST_MESSAGE("onion honest picks: " << nHonest << " of " << nPicks);
     BOOST_CHECK_MESSAGE(nHonest > nPicks / 25, nHonest << " honest picks of " << nPicks);
 }
 
@@ -944,6 +948,7 @@ BOOST_AUTO_TEST_CASE(services_above_max_size)
 // Bitcoin Core does for an oversized addr/addrv2).
 BOOST_AUTO_TEST_CASE(addrv2_adversarial_inputs)
 {
+    ResetWithFixedKey(addrman); // the random key could put the far-future address in a taken slot
     vector<CNode*> keep;
     CNode* n = NewNode(keep, "8.8.8.8", false);
     n->fSendAddrV2 = true;
@@ -1115,6 +1120,7 @@ BOOST_AUTO_TEST_CASE(addrv2_adversarial_inputs)
     }
     for (CNode* y : keep)
         delete y;
+    addrman.Clear(); // back to a random key
 }
 
 BOOST_AUTO_TEST_SUITE_END()
