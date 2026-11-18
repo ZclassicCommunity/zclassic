@@ -113,6 +113,16 @@ Logging: call `zcl_c23_log_refresh()` after argument parsing (c23/glue/WIRING.md
   source only when the build did not define it (needed for `open` under strict
   `-std=c23`; the production `-std=gnu17` does not need it).
 
+## 5a. Sprout PHGR13 (`zcl_c23_phgr13.{h,c}`)
+
+Not part of the librustzcash ABI: the three-function door between
+`src/zcash/JoinSplit.cpp` and the vendored `sprout_verify_phgr13` (bn254.c), which
+replaced libsnark. `zcl_c23_phgr13_load_vk` installs `sprout-verifying.key` once
+(`ZC_LoadParams`, after the SHA-256 pin), `zcl_c23_phgr13_proof_decodes` is the decoding
+half that runs even under `ProofVerifier::Disabled()`, `zcl_c23_phgr13_verify` is the
+full check. Thread-safety, the list of checks it preserves and the proof that the accept
+set is libsnark's: `doc/c23-phgr13.md`.
+
 ## 6. What to run after wiring
 
 - `nm -g zclassicd | grep -c ' T librustzcash_'` must print 31 (32 Rust names minus

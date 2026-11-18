@@ -231,3 +231,13 @@ bool bn254_accel_mont_mul_adx(uint64_t r[4], const uint64_t a[4],
     (void)r; (void)a; (void)b;
     return false;
 }
+
+bool bn254_accel_cpu_has_adx(void)
+{
+    bn_detect_cpu();
+#if defined(__x86_64__) || defined(_M_X64)
+    return g_cpu_bmi2 && g_cpu_adx;
+#else
+    return false;
+#endif
+}

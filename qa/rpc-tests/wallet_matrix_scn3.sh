@@ -116,20 +116,28 @@ scn_crossver() {
 
 # ---------------------------------------------------------------- 9
 scn_interop() {
+    # The pre-Sapling Sprout JoinSplits are PHGR13: only the previous release (the
+    # peer) can create them; the binary under test verifies them.
+    if [ "$PEER_BIN" = "$BIN" ]; then
+        echo "needs a PHGR13-capable peer (--peer-bin <previous release>): the binary under test cannot create PHGR13 proofs" >"$SD/skip"
+        return
+    fi
     NU_ARGS="-nuparams=5ba81b19:230 -nuparams=76b809bb:240"
     setup2 || return
     sp=$(cli 0 z_getnewaddress sprout); ms=$(cli 1 z_getnewaddress sprout)
     mt=$(cli 1 getnewaddress)
     in_tip() { cli 1 getblock "$(cli 1 getbestblockhash)" | jq -r --arg t "$1" '[.tx[]|select(.==$t)]|length'; }
-    # pre-Sapling era: Sprout JoinSplit (PHGR) both ways
+    # pre-Sapling era: the peer makes the PHGR13 JoinSplit, node 0 verifies it; node 0 cannot make one
     give_z 0 "$sp" 3
-    t=$(zconfirm 0 "$sp" "[{\"address\":\"$mt\",\"amount\":1}]"); ck "sprout->t (PHGR) mined by the peer" "$(cli 1 getrawtransaction "$t" 1 | jq -r '.confirmations')" 1
+    r=$(zsend 0 "$sp" "[{\"address\":\"$mt\",\"amount\":1}]")
+    ck "sprout->t (PHGR13) is refused on node 0, naming PHGR13" "$(printf %s "$r" | grep -c 'PHGR13 proofs can no longer be created')" 1
+    ck "node 0 holds the peer-made sprout note" "$(zbal 0 "$sp")" 3.00000000
     mtt=$(cli 1 getnewaddress)
     cli 1 sendtoaddress "$mtt" 3 >/dev/null; cli 1 generate 1 >/dev/null
     t=$(zconfirm 1 "$mtt" "[{\"address\":\"$ms\",\"amount\":2}]"); sync_to 0
     ck "peer sprout note" "$(zbal 1 "$ms")" 2.00000000
     t=$(zconfirm 1 "$ms" "[{\"address\":\"$sp\",\"amount\":1}]"); sync_to 0
-    ck "peer sprout->sprout, node 0 receives (PHGR)" "$(zbal 0 "$sp")" "$(add 3 -1 -$FEE 1)"
+    ck "peer sprout->sprout, node 0 receives (PHGR)" "$(zbal 0 "$sp")" "$(add 3 1)"
     cli 1 generate 135 >/dev/null; sync_to 0
     zs=$(cli 0 z_getnewaddress); mz=$(cli 1 z_getnewaddress)
     ta=$(give_t 0 5)

@@ -31,11 +31,12 @@ and `check-vendor.sh` (with `Z23_REPO=<path>`) refuse any pin that does not cont
 verifier would accept `cm >= q`, `anchor >= q` and `y = q` point encodings that
 librustzcash rejects (consensus fork).
 
-The closure (82 files: 34 `.c`, 48 headers, plus LICENSE) is derived from
+The closure (86 files: 36 `.c`, 49 headers, 1 `.inc`, plus LICENSE) is derived from
 `tools/vendor-seeds.txt` by following quoted includes (`tools/derive-closure.sh`). It
 contains the verifier, prover, ZIP-32/FF1, Sprout Groth16 verify, embedded verifying keys,
-and (params-loader Option B) `params_init.c` with its SHA-512 pins, bn254 (only to parse
-the PHGR13 verifying key), sha256/sha512, file_io, file_stream, utilstrencodings.
+and (params-loader Option B) `params_init.c` with its SHA-512 pins, bn254 (the Sprout
+PHGR13 verifier: the daemon verifies every pre-Sapling JoinSplit with it; see
+`doc/c23-phgr13.md`), sha256/sha512, file_io, file_stream, utilstrencodings.
 Replaced by glue instead of vendored: `log_level.c`, `cleanse.c`, `random.c`,
 `incremental_merkle_tree.c`, `note_encryption.c`.
 

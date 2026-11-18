@@ -9,18 +9,14 @@ namespace libzcash {
 const unsigned char G1_PREFIX_MASK = 0x02;
 const unsigned char G2_PREFIX_MASK = 0x0a;
 
-// Element in the base field
+// Element in the base field, as the 32 big-endian bytes of the wire format.
+// Whether it is a canonical element of Fq (< q) is decided when the proof is
+// verified (zcl_c23_phgr13_*), not when it is deserialized.
 class Fq {
 private:
     base_blob<256> data;
 public:
     Fq() : data() { }
-
-    template<typename libsnark_Fq>
-    Fq(libsnark_Fq element);
-
-    template<typename libsnark_Fq>
-    libsnark_Fq to_libsnark_fq() const;
 
     ADD_SERIALIZE_METHODS;
 
@@ -42,18 +38,13 @@ public:
     }
 };
 
-// Element in the extension field
+// Element in the extension field: the 64 big-endian bytes of the FE2IP integer
+// c1 * q + c0 of the wire format (checked < q^2 when the proof is verified).
 class Fq2 {
 private:
     base_blob<512> data;
 public:
     Fq2() : data() { }
-
-    template<typename libsnark_Fq2>
-    Fq2(libsnark_Fq2 element);
-
-    template<typename libsnark_Fq2>
-    libsnark_Fq2 to_libsnark_fq2() const;
 
     ADD_SERIALIZE_METHODS;
 
@@ -83,12 +74,6 @@ private:
 
 public:
     CompressedG1() : y_lsb(false), x() { }
-
-    template<typename libsnark_G1>
-    CompressedG1(libsnark_G1 point);
-
-    template<typename libsnark_G1>
-    libsnark_G1 to_libsnark_g1() const;
 
     ADD_SERIALIZE_METHODS;
 
@@ -134,12 +119,6 @@ private:
 public:
     CompressedG2() : y_gt(false), x() { }
 
-    template<typename libsnark_G2>
-    CompressedG2(libsnark_G2 point);
-
-    template<typename libsnark_G2>
-    libsnark_G2 to_libsnark_g2() const;
-
     ADD_SERIALIZE_METHODS;
 
     template <typename Stream, typename Operation>
@@ -175,7 +154,11 @@ public:
     }
 };
 
-// Compressed zkSNARK proof
+// Size of a serialized PHGRProof: g_A, g_A', g_B, g_B', g_C, g_C', g_K, g_H.
+static const size_t PHGR_PROOF_SIZE = 6 * 33 + 65 + 33;
+
+// Compressed zkSNARK proof (PHGR13, "BCTV14"). Existing transactions carry
+// these on mainnet; they are verified, never created (see JoinSplit.cpp).
 class PHGRProof {
 private:
     CompressedG1 g_A;
@@ -190,16 +173,13 @@ private:
 public:
     PHGRProof() : g_A(), g_A_prime(), g_B(), g_B_prime(), g_C(), g_C_prime(), g_K(), g_H() { }
 
-    // Produces a compressed proof using a libsnark zkSNARK proof
-    template<typename libsnark_proof>
-    PHGRProof(const libsnark_proof& proof);
-
-    // Produces a libsnark zkSNARK proof out of this proof,
-    // or throws an exception if it is invalid.
-    template<typename libsnark_proof>
-    libsnark_proof to_libsnark_proof() const;
-
+    // A proof of random bytes with valid lead bytes, which no verifier
+    // accepts. Used where a transaction needs some proof to serialize.
     static PHGRProof random_invalid();
+
+    // The PHGR_PROOF_SIZE wire bytes of this proof, exactly as serialized into
+    // a transaction (what the verifier decodes).
+    void ToBytes(unsigned char out[PHGR_PROOF_SIZE]) const;
 
     ADD_SERIALIZE_METHODS;
 
@@ -235,8 +215,6 @@ public:
     }
 };
 
-void initialize_curve_params();
-
 class ProofVerifier {
 private:
     bool perform_verification;
@@ -250,26 +228,16 @@ public:
     ProofVerifier(ProofVerifier&&);
     ProofVerifier& operator=(ProofVerifier&&);
 
-    // Creates a verification context that strictly verifies
-    // all proofs using libsnark's API.
+    // Creates a verification context that strictly verifies all proofs.
     static ProofVerifier Strict();
 
-    // Creates a verification context that performs no
-    // verification, used when avoiding duplicate effort
-    // such as during reindexing.
+    // Creates a verification context that performs no pairing checks,
+    // used when avoiding duplicate effort such as during reindexing.
+    // A PHGR proof whose points do not decode is still rejected.
     static ProofVerifier Disabled();
 
-    template <typename VerificationKey,
-              typename ProcessedVerificationKey,
-              typename PrimaryInput,
-              typename Proof
-              >
-    bool check(
-        const VerificationKey& vk,
-        const ProcessedVerificationKey& pvk,
-        const PrimaryInput& pi,
-        const Proof& p
-    );
+    // True for Strict(): the five pairing checks are run.
+    bool performs_verification() const { return perform_verification; }
 };
 
 }

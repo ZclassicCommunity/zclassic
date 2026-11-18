@@ -71,3 +71,26 @@ defaults and never fetches a config file over the network. To customize a node,
 create `zclassic.conf` in the datadir yourself (or pass options on the command
 line / via `-conf=`); see the example configuration and the `-conf` documentation.
 
+
+
+libsnark is gone: Sprout PHGR13 proofs are verified by the C23 core
+--------------------------------------------------------------------
+
+The old Sprout JoinSplit proofs (PHGR13, before Sapling) used to be checked with libsnark,
+a 19,000-line C++ library that also pulled in libgmp and OpenMP. They are now checked by
+the same C23 code that checks Sapling and Sprout-Groth16 proofs. The accept/reject verdict
+for every proof is unchanged (see `doc/c23-phgr13.md` for the evidence), and so is the
+chain: no consensus rule changed.
+
+What you notice:
+
+- `sprout-proving.key` (910 MB) is no longer needed, downloaded or checked at startup. The
+  required parameter files are now about 780 MB instead of 1.7 GB. An existing copy is
+  harmless and can be deleted.
+- Verification of the pre-Sapling part of the chain is several times faster.
+- The binary no longer depends on libgmp or the OpenMP runtime (libgomp).
+- A node can no longer *create* a PHGR13 JoinSplit. That is only ever possible on a chain
+  that has not activated Sapling (regtest, private test chains); on mainnet nothing changes.
+  There the operation fails with "Sprout PHGR13 proofs can no longer be created". Receiving,
+  validating and relaying such transactions and blocks works as before.
+- The undocumented `-savesproutr1cs` option is removed.

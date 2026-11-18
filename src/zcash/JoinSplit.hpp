@@ -56,20 +56,21 @@ class JoinSplit {
 public:
     virtual ~JoinSplit() {}
 
-    static void Generate(const std::string r1csPath,
-                         const std::string vkPath,
-                         const std::string pkPath);
-    static JoinSplit<NumInputs, NumOutputs>* Prepared(const std::string vkPath,
-                                                      const std::string pkPath);
+    // Loads sprout-verifying.key (the caller has checked its SHA-256 pin) and
+    // installs it as the PHGR13 verifying key. Throws std::runtime_error when
+    // the file cannot be read or parsed.
+    static JoinSplit<NumInputs, NumOutputs>* Prepared(const std::string vkPath);
 
     static uint256 h_sig(const uint256& randomSeed,
                          const std::array<uint256, NumInputs>& nullifiers,
                          const uint256& joinSplitPubKey
                         );
 
-    virtual void saveR1CS(std::string path) = 0;
-
-    // Compute nullifiers, macs, note commitments & encryptions, and SNARK proof
+    // Compute nullifiers, macs, note commitments & encryptions, and SNARK proof.
+    // Only Groth16 proofs can be created (makeGrothProof == true). A PHGR13
+    // proof cannot: with computeProof == false the proof is left empty as
+    // before, with computeProof == true this throws std::runtime_error
+    // (PHGR13 JoinSplits ended with Sapling; verifying them still works).
     virtual SproutProof prove(
         bool makeGrothProof,
         const std::array<JSInput, NumInputs>& inputs,

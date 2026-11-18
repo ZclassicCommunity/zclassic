@@ -47,7 +47,7 @@ jobs:
             daemon-focal-${{ matrix.platform }}-
       - name: Build Linux daemon
         if: matrix.target == 'linux'
-        run: ZQW_STATIC_GOMP=1 CONFIGURE_FLAGS=--disable-man bash zcutil/build-release.sh linux -j3
+        run: CONFIGURE_FLAGS=--disable-man bash zcutil/build-release.sh linux -j3
       - name: Build static Windows daemon
         if: matrix.target == 'win64'
         run: CONFIGURE_FLAGS='--disable-man LDFLAGS=-static' bash zcutil/build-release.sh win64 -j3
