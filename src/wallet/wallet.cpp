@@ -571,7 +571,10 @@ void CWallet::UpdatedBlockTip(const CBlockIndex* pindex)
     int nLeft = nReacceptTipsLeft.load();
     if (nLeft <= 0)
         return;
-    size_t nRefused = OfferWalletTransactionsToMempool();
+    const int64_t nTimeOffer0 = GetTimeMicros();
+    size_t nPassed = 0;
+    size_t nRefused = OfferWalletTransactionsToMempool(&nPassed);
+    LogPrint("bench", "  - Wallet mempool re-offer at tip: %.2fms (%u refused, %u handed to the mempool)\n", 0.001 * (GetTimeMicros() - nTimeOffer0), (unsigned)nRefused, (unsigned)nPassed);
     nReacceptTipsLeft.compare_exchange_strong(nLeft, nRefused > 0 ? nLeft - 1 : 0);
 }
 
@@ -3334,7 +3337,22 @@ size_t CWallet::ReacceptWalletTransactions()
     return nRefused;
 }
 
-size_t CWallet::OfferWalletTransactionsToMempool()
+/**
+ * Whether the transparent inputs, anchors and nullifiers of tx are there at the current tip,
+ * judged as AcceptToMemoryPool judges them. cs_main and mempool.cs held.
+ */
+static bool WalletTxPrerequisitesMet(const CTransaction& tx)
+{
+    CCoinsViewMemPool viewMemPool(pcoinsTip, mempool);
+    CCoinsViewCache view(&viewMemPool);
+    BOOST_FOREACH(const CTxIn& txin, tx.vin) {
+        if (!view.HaveCoins(txin.prevout.hash))
+            return false;
+    }
+    return view.HaveInputs(tx) && view.HaveShieldedRequirements(tx);
+}
+
+size_t CWallet::OfferWalletTransactionsToMempool(size_t* pnPassedToMempool)
 {
     // If transactions aren't being broadcasted, don't let them into local mempool either
     if (!fBroadcastTransactions)
@@ -3364,6 +3382,18 @@ size_t CWallet::OfferWalletTransactionsToMempool()
         CWalletTx& wtx = *(item.second);
 
         LOCK(mempool.cs);
+        // AcceptToMemoryPool verifies the JoinSplit and Sapling proofs of a transaction (milliseconds each) before it
+        // looks for its inputs and anchors; at the start of a catch-up, with the chain below those
+        // anchors, that was paid again at every tip. The prerequisites decide the same outcome (a
+        // refusal) without the proofs, so a transaction that lacks them is not handed over.
+        const bool fShielded = !wtx.vjoinsplit.empty() || !wtx.vShieldedSpend.empty() || !wtx.vShieldedOutput.empty();
+        if (fShielded && !WalletTxPrerequisitesMet(wtx)) {
+            if (!IsExpiringSoonTx(wtx, nNextHeight))
+                ++nRefused;
+            continue;
+        }
+        if (pnPassedToMempool)
+            ++*pnPassedToMempool;
         if (!wtx.AcceptToMemoryPool(false) && !IsExpiringSoonTx(wtx, nNextHeight))
             ++nRefused;
     }

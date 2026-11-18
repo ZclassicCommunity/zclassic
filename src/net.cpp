@@ -1435,6 +1435,59 @@ CAddrMan& SelectDialTable(bool fOnionProxy, uint32_t nRand)
     return addrman;
 }
 
+/** An address tried less than this many seconds ago is never dialled again, however
+ *  small the table (see SelectOutboundCandidate). */
+static const int64_t OUTBOUND_MIN_REDIAL_SECONDS = 60;
+/** Draws from the table in one selection round. */
+static const int OUTBOUND_MAX_DRAWS = 300;
+
+CAddress SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow)
+{
+    int nTries = 0;
+    for (int nDraws = 0; nDraws < OUTBOUND_MAX_DRAWS; nDraws++)
+    {
+        CAddrInfo addr = man.Select();
+
+        // an empty table: nothing to choose from this round
+        if (!addr.IsValid())
+            break;
+
+        // An address on the network group of an outbound peer, or one of our own, is
+        // not a candidate, but it does not use up the round either: on a small table
+        // (a fresh node knows a handful of addresses) one such draw would otherwise
+        // end the round before the port and recency rules could let anything through.
+        if (setConnected.count(addr.GetGroup()) || IsLocal(addr))
+            continue;
+
+        // If we didn't find an appropriate destination after trying 100 addresses fetched from addrman,
+        // stop this loop, and let the outer loop run again (which sleeps, adds seed nodes, recalculates
+        // already-connected network ranges, ...) before trying new addrman addresses.
+        nTries++;
+        if (nTries > 100)
+            break;
+
+        if (IsLimited(addr))
+            continue;
+
+        // never redial within a minute: on a small table the relaxation below would
+        // otherwise hand the same address (one that answers and drops us at once is
+        // the one the tried table keeps) to every round and starve the others
+        if (nANow - addr.nLastTry < OUTBOUND_MIN_REDIAL_SECONDS)
+            continue;
+
+        // only consider very recently tried nodes after 30 failed attempts
+        if (nANow - addr.nLastTry < 600 && nTries < 30)
+            continue;
+
+        // do not allow non-default ports, unless after 50 invalid addresses selected already
+        if (addr.GetPort() != Params().GetDefaultPort() && nTries < 50)
+            continue;
+
+        return addr;
+    }
+    return CAddress();
+}
+
 void ThreadOpenConnections()
 {
     // Connect to specific addresses
@@ -1509,36 +1562,9 @@ void ThreadOpenConnections()
         proxyType proxyOnion;
         CAddrMan* pmanSelect = &SelectDialTable(GetProxy(NET_ONION, proxyOnion), GetRand(4));
 
-        int nTries = 0;
-        while (true)
-        {
-            CAddrInfo addr = pmanSelect->Select();
-
-            // if we selected an invalid address, restart
-            if (!addr.IsValid() || setConnected.count(addr.GetGroup()) || IsLocal(addr))
-                break;
-
-            // If we didn't find an appropriate destination after trying 100 addresses fetched from addrman,
-            // stop this loop, and let the outer loop run again (which sleeps, adds seed nodes, recalculates
-            // already-connected network ranges, ...) before trying new addrman addresses.
-            nTries++;
-            if (nTries > 100)
-                break;
-
-            if (IsLimited(addr))
-                continue;
-
-            // only consider very recently tried nodes after 30 failed attempts
-            if (nANow - addr.nLastTry < 600 && nTries < 30)
-                continue;
-
-            // do not allow non-default ports, unless after 50 invalid addresses selected already
-            if (addr.GetPort() != Params().GetDefaultPort() && nTries < 50)
-                continue;
-
-            addrConnect = addr;
-            break;
-        }
+        CAddress addrPick = SelectOutboundCandidate(*pmanSelect, setConnected, nANow);
+        if (addrPick.IsValid())
+            addrConnect = addrPick;
 
         if (addrConnect.IsValid())
             OpenNetworkConnection(addrConnect, &grant);
