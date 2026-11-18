@@ -434,7 +434,11 @@ bool AsyncRPCOperation_sendmany::main_impl() {
         std::vector<boost::optional<SaplingWitness>> witnesses;
         {
             LOCK2(cs_main, pwalletMain->cs_wallet);
-            pwalletMain->GetSaplingNoteWitnesses(ops, witnesses, anchor);
+            bool consistent = pwalletMain->GetSaplingNoteWitnesses(ops, witnesses, anchor);
+            std::string witnessError;
+            if (!ops.empty() && !CheckSaplingSpendWitnesses(consistent, witnesses, anchor, *pcoinsTip, witnessError)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, witnessError);
+            }
         }
 
         // Add Sapling spends
@@ -564,17 +568,22 @@ bool AsyncRPCOperation_sendmany::main_impl() {
         zOutputsDeque.push_back(o);
     }
 
-    // When spending notes, take a snapshot of note witnesses and anchors as the treestate will
+    // When spending notes, take a snapshot of the witnesses and anchors of the selected notes (zInputsDeque,
+    // not every candidate note, so an unused note cannot block the send) as the treestate will
     // change upon arrival of new blocks which contain joinsplit transactions.  This is likely
     // to happen as creating a chained joinsplit transaction can take longer than the block interval.
     if (z_sprout_inputs_.size() > 0) {
         LOCK2(cs_main, pwalletMain->cs_wallet);
-        for (auto t : z_sprout_inputs_) {
+        for (auto t : zInputsDeque) {
             JSOutPoint jso = std::get<0>(t);
             std::vector<JSOutPoint> vOutPoints = { jso };
             uint256 inputAnchor;
             std::vector<boost::optional<SproutWitness>> vInputWitnesses;
-            pwalletMain->GetSproutNoteWitnesses(vOutPoints, vInputWitnesses, inputAnchor);
+            bool consistent = pwalletMain->GetSproutNoteWitnesses(vOutPoints, vInputWitnesses, inputAnchor);
+            std::string witnessError;
+            if (!CheckSproutSpendWitnesses(consistent, vInputWitnesses, inputAnchor, *pcoinsTip, witnessError)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, witnessError);
+            }
             jsopWitnessAnchorMap[ jso.ToString() ] = WitnessAnchorData{ vInputWitnesses[0], inputAnchor };
         }
     }
@@ -1122,7 +1131,11 @@ UniValue AsyncRPCOperation_sendmany::perform_joinsplit(AsyncJoinSplitInfo & info
     uint256 anchor;
     {
         LOCK(cs_main);
-        pwalletMain->GetSproutNoteWitnesses(outPoints, witnesses, anchor);
+        bool consistent = pwalletMain->GetSproutNoteWitnesses(outPoints, witnesses, anchor);
+        std::string witnessError;
+        if (!outPoints.empty() && !CheckSproutSpendWitnesses(consistent, witnesses, anchor, *pcoinsTip, witnessError)) {
+            throw std::runtime_error(witnessError);
+        }
     }
     return perform_joinsplit(info, witnesses, anchor);
 }

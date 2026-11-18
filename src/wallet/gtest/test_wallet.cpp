@@ -3026,3 +3026,102 @@ TEST(WalletTests, SproutCachedDecryptFallbackOnNone) {
     chainActive.SetTip(NULL);
     mapBlockIndex.erase(blockHash);
 }
+
+// Spend gate: inconsistent / missing witnesses and unknown anchors must be
+// refused with a clear error before any proving, never abort the daemon.
+TEST(WalletTests, SaplingWitnessesWithDifferentRootsAreRefusedNotAsserted) {
+    TestWallet wallet;
+    auto sk = libzcash::SproutSpendingKey::random();
+    wallet.AddSproutSpendingKey(sk);
+
+    auto wtxA = GetValidSproutReceive(sk, 10, true, 4);
+    auto wtxB = GetValidSproutReceive(sk, 11, true, 4);
+    auto notesA = SetSaplingNoteData(wtxA);
+    auto notesB = SetSaplingNoteData(wtxB);
+    wallet.AddToWallet(wtxA, true, NULL);
+    wallet.AddToWallet(wtxB, true, NULL);
+
+    SaplingMerkleTree treeA;
+    SaplingMerkleTree treeB;
+    treeB.append(GetRandHash());
+    ASSERT_NE(treeA.witness().root(), treeB.witness().root());
+    wallet.mapWallet[wtxA.GetHash()].mapSaplingNoteData[notesA[0]].witnesses.push_front(treeA.witness());
+    wallet.mapWallet[wtxB.GetHash()].mapSaplingNoteData[notesB[0]].witnesses.push_front(treeB.witness());
+
+    std::vector<SaplingOutPoint> ops {notesA[0], notesB[0]};
+    std::vector<boost::optional<SaplingWitness>> witnesses;
+    uint256 anchor;
+    bool consistent = true;
+    ASSERT_NO_THROW(consistent = wallet.GetSaplingNoteWitnesses(ops, witnesses, anchor));
+    EXPECT_FALSE(consistent);
+    ASSERT_EQ(2u, witnesses.size());
+    EXPECT_FALSE((bool) witnesses[0]);
+    EXPECT_FALSE((bool) witnesses[1]);
+
+    CCoinsView dummy;
+    CCoinsViewCache view(&dummy);
+    std::string err;
+    EXPECT_FALSE(CheckSaplingSpendWitnesses(consistent, witnesses, anchor, view, err));
+    EXPECT_NE(std::string::npos, err.find("-rescan"));
+    EXPECT_NE(std::string::npos, err.find("do not share one anchor"));
+
+    // A single note on its own is consistent.
+    std::vector<SaplingOutPoint> one {notesA[0]};
+    consistent = wallet.GetSaplingNoteWitnesses(one, witnesses, anchor);
+    EXPECT_TRUE(consistent);
+    ASSERT_EQ(1u, witnesses.size());
+    EXPECT_TRUE((bool) witnesses[0]);
+    EXPECT_EQ(treeA.witness().root(), anchor);
+}
+
+TEST(WalletTests, SaplingSpendWithoutWitnessIsRefused) {
+    CCoinsView dummy;
+    CCoinsViewCache view(&dummy);
+    std::vector<boost::optional<SaplingWitness>> witnesses(1);
+    std::string err;
+    EXPECT_FALSE(CheckSaplingSpendWitnesses(true, witnesses, uint256(), view, err));
+    EXPECT_NE(std::string::npos, err.find("no witness"));
+    EXPECT_NE(std::string::npos, err.find("-rescan"));
+}
+
+TEST(WalletTests, SaplingSpendAnchorUnknownToChainIsRefused) {
+    SaplingMerkleTree tree;
+    tree.append(GetRandHash());
+    std::vector<boost::optional<SaplingWitness>> witnesses {tree.witness()};
+    uint256 anchor = tree.root();
+
+    CCoinsView dummy;
+    CCoinsViewCache view(&dummy);
+    std::string err;
+    EXPECT_FALSE(CheckSaplingSpendWitnesses(true, witnesses, anchor, view, err));
+    EXPECT_NE(std::string::npos, err.find("not known to the chain"));
+    EXPECT_NE(std::string::npos, err.find(anchor.GetHex()));
+
+    // Once the chain knows the anchor (not necessarily as the tip root) the gate passes.
+    view.PushAnchor(tree);
+    SaplingMerkleTree later = tree;
+    later.append(GetRandHash());
+    view.PushAnchor(later);
+    err.clear();
+    EXPECT_TRUE(CheckSaplingSpendWitnesses(true, witnesses, anchor, view, err));
+    EXPECT_TRUE(err.empty());
+}
+
+TEST(WalletTests, SproutSpendGateRefusesBadWitnessSets) {
+    SproutMerkleTree tree;
+    tree.append(GetRandHash());
+    std::vector<boost::optional<SproutWitness>> witnesses {tree.witness()};
+    uint256 anchor = tree.root();
+
+    CCoinsView dummy;
+    CCoinsViewCache view(&dummy);
+    std::string err;
+    EXPECT_FALSE(CheckSproutSpendWitnesses(false, witnesses, anchor, view, err));
+    EXPECT_NE(std::string::npos, err.find("-rescan"));
+    EXPECT_FALSE(CheckSproutSpendWitnesses(true, std::vector<boost::optional<SproutWitness>>(1), anchor, view, err));
+    EXPECT_NE(std::string::npos, err.find("no witness"));
+    EXPECT_FALSE(CheckSproutSpendWitnesses(true, witnesses, anchor, view, err));
+    EXPECT_NE(std::string::npos, err.find("not known to the chain"));
+    view.PushAnchor(tree);
+    EXPECT_TRUE(CheckSproutSpendWitnesses(true, witnesses, anchor, view, err));
+}

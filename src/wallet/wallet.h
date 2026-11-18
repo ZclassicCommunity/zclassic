@@ -1338,7 +1338,8 @@ public:
     bool FundTransaction(CMutableTransaction& tx, CAmount& nFeeRet, int& nChangePosRet, std::string& strFailReason, bool fAllowTokenInputs = false);
     bool CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletTx& wtxNew, CReserveKey& reservekey, CAmount& nFeeRet, int& nChangePosRet,
                            std::string& strFailReason, const CCoinControl *coinControl = NULL, bool sign = true);
-    bool CommitTransaction(CWalletTx& wtxNew, CReserveKey& reservekey);
+    /** On failure pstrError (if given) receives the reason when one is known, e.g. "mempool full". */
+    bool CommitTransaction(CWalletTx& wtxNew, CReserveKey& reservekey, std::string* pstrError = nullptr);
 
     static CFeeRate minTxFee;
     static CAmount GetMinimumFee(unsigned int nTxBytes, unsigned int nConfirmTarget, const CTxMemPool& pool);
@@ -1374,11 +1375,14 @@ public:
     bool IsSproutNullifierFromMe(const uint256& nullifier) const;
     bool IsSaplingNullifierFromMe(const uint256& nullifier) const;
 
-    void GetSproutNoteWitnesses(
+    // Both return false (and clear every witness) when the selected notes
+    // carry witnesses with different roots: the wallet note data is out of
+    // step and the caller must refuse the spend (no assert, no abort).
+    bool GetSproutNoteWitnesses(
          std::vector<JSOutPoint> notes,
          std::vector<boost::optional<SproutWitness>>& witnesses,
          uint256 &final_anchor);
-    void GetSaplingNoteWitnesses(
+    bool GetSaplingNoteWitnesses(
          std::vector<SaplingOutPoint> notes,
          std::vector<boost::optional<SaplingWitness>>& witnesses,
          uint256 &final_anchor);
@@ -1704,5 +1708,26 @@ public:
     SpendingKeyAddResult operator()(const libzcash::InvalidEncoding& no) const;    
 };
 
+
+
+/**
+ * Pre-proving gate for a spend of wallet notes. Returns false and sets
+ * strError (an RPC-ready message) when the witnesses of the selected notes
+ * did not share one root (consistent == false), a selected note has no
+ * witness, or the anchor is not one the chain knows (the same
+ * GetXxxAnchorAt test mempool admission makes), so no proving time is spent
+ * on a transaction that would be rejected. Does not require the anchor to be
+ * the tip root. Caller holds cs_main.
+ */
+bool CheckSaplingSpendWitnesses(bool consistent,
+                                const std::vector<boost::optional<SaplingWitness>>& witnesses,
+                                const uint256& anchor,
+                                const CCoinsViewCache& view,
+                                std::string& strError);
+bool CheckSproutSpendWitnesses(bool consistent,
+                               const std::vector<boost::optional<SproutWitness>>& witnesses,
+                               const uint256& anchor,
+                               const CCoinsViewCache& view,
+                               std::string& strError);
 
 #endif // BITCOIN_WALLET_WALLET_H

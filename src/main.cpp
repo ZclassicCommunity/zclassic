@@ -1430,8 +1430,23 @@ CAmount GetMinRelayFee(const CTransaction& tx, unsigned int nBytes, bool fAllowF
 }
 
 
+uint64_t nMempoolMaxBytes = DEFAULT_MEMPOOL_MAX_BYTES;
+
+bool CheckMempoolCapacity(CTxMemPool& pool, size_t nTxSize, std::string& strError)
+{
+    // GetTotalTxSize() is the sum of serialized transaction sizes: O(1), deterministic and the
+    // same unit as block size, unlike DynamicMemoryUsage() which depends on allocator overhead.
+    uint64_t nTotal = pool.GetTotalTxSize();
+    if (nTotal + nTxSize > nMempoolMaxBytes) {
+        strError = strprintf("mempool full: %u bytes in pool + %u byte transaction exceeds -mempoolmaxbytes=%u; wait for a block to be mined or raise -mempoolmaxbytes",
+                             nTotal, (uint64_t)nTxSize, nMempoolMaxBytes);
+        return false;
+    }
+    return true;
+}
+
 bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransaction &tx, bool fLimitFree,
-                        bool* pfMissingInputs, bool fRejectAbsurdFee)
+                        bool* pfMissingInputs, bool fRejectAbsurdFee, bool fEnforceMempoolCap)
 {
     AssertLockHeld(cs_main);
     if (pfMissingInputs)
@@ -1603,6 +1618,12 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
 
         CTxMemPoolEntry entry(tx, nFees, GetTime(), dPriority, chainActive.Height(), mempool.HasNoInputsOf(tx), fSpendsCoinbase, consensusBranchId);
         unsigned int nSize = entry.GetTxSize();
+
+        // Memory cap: refuse (never evict) when this transaction would push the pool over
+        // -mempoolmaxbytes. Not a peer fault, so no DoS score.
+        std::string strCapError;
+        if (fEnforceMempoolCap && !CheckMempoolCapacity(pool, nSize, strCapError))
+            return state.DoS(0, error("AcceptToMemoryPool: %s", strCapError), REJECT_INSUFFICIENTFEE, "mempool full");
 
         // Accept a tx if it contains joinsplits and has at least the default fee specified by z_sendmany.
         if (tx.vjoinsplit.size() > 0 && nFees >= ASYNC_RPC_OPERATION_DEFAULT_MINERS_FEE) {
@@ -3072,10 +3093,11 @@ bool static DisconnectTip(CValidationState &state, bool fBare = false) {
     if (!fBare) {
         // Resurrect mempool transactions from the disconnected block.
         BOOST_FOREACH(const CTransaction &tx, block.vtx) {
+            // These were already in a block: the -mempoolmaxbytes cap must not drop them on a reorg.
             // ignore validation errors in resurrected transactions
             list<CTransaction> removed;
             CValidationState stateDummy;
-            if (tx.IsCoinBase() || !AcceptToMemoryPool(mempool, stateDummy, tx, false, NULL))
+            if (tx.IsCoinBase() || !AcceptToMemoryPool(mempool, stateDummy, tx, false, NULL, false, false))
                 mempool.remove(tx, removed, true);
         }
         if (sproutAnchorBeforeDisconnect != sproutAnchorAfterDisconnect) {
