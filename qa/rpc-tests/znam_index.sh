@@ -13,7 +13,10 @@
 #
 # usage: znam_index.sh [dir-with-zclassicd-zclassic-cli-zclassic-tx]
 #   env BASELINE_SRC=<dir>  also prove the flag-off behaviour against an unmodified zclassicd in <dir>: the RPC
-#                           `help` list may differ only by the znam_* commands (and their category heading)
+#                           `help` list may differ only by the znam_* commands (and their category heading).
+#                           The help text of every baseline command must be unchanged; when the baseline is
+#                           an older release, name the commands that later work changed on purpose in
+#                           BASELINE_HELP_CHANGED="cmd cmd ..." (exact list; a failing run prints the real one)
 #   env CC=<compiler>       compiler for znamscript (default: cc)
 #   env KEEP=1              keep the temp directory
 #
@@ -578,10 +581,20 @@ if [ -n "${BASELINE_SRC:-}" ]; then
     [ -z "$svc_other" ] || fail "unexpected new commands: $svc_other"
     svc_new=$(grep -c "^> znam_" "$TMP/help.diff" || true)
     [ "$svc_new" -le 8 ] || fail "new commands: got '$svc_new', expected at most 8"
+    # Collect every baseline command whose help text differs, so one run names them
+    # all. Against the commit just before the index nothing may differ. Against an
+    # older release the commands that later work changed on purpose are declared in
+    # BASELINE_HELP_CHANGED; an undeclared difference fails, and so does a declared
+    # one that did not happen.
+    norm() { printf '%s\n' "$@" | sort | tr '\n' ' ' | sed 's/ *$//'; }
+    changed=""
     for c in $(cat "$TMP/help.base"); do
-        [ "$(cli 6 help "$c")" = "$(cli 2 help "$c")" ] || fail "help for $c changed"
+        [ "$(cli 6 help "$c")" = "$(cli 2 help "$c")" ] || changed="$changed $c"
     done
-    ok "the help text of all $(wc -l <"$TMP/help.base" | tr -d ' ') baseline commands is unchanged"
+    changed=$(norm $changed)
+    declared=$(norm ${BASELINE_HELP_CHANGED:-})
+    [ "$changed" = "$declared" ] || fail "help text differs from the baseline for [$changed]; declared in BASELINE_HELP_CHANGED: [$declared]"
+    ok "the help text of all $(wc -l <"$TMP/help.base" | tr -d ' ') baseline commands is unchanged${declared:+, except the declared: $declared}"
     stop 6
 fi
 
