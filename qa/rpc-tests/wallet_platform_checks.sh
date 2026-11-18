@@ -150,7 +150,8 @@ chk_kill() {
     start 0 "$BIN" $R; h=$(cli 0 getblockcount)
     obs "kill_during_generate_height_gain" "$((h - s0))"
     ck "kill during generate: verifychain" "$(cli 0 verifychain 4 0)" true
-    sync_to 1 0; sync_to 0 1 2>/dev/null
+    # the restarted node keeps importing blocks from disk after RPC is up: compare both tips afresh until they agree
+    w=0; until [ "$(cli 0 getbestblockhash)" = "$(cli 1 getbestblockhash)" ] || [ $w -ge 240 ]; do sleep 1; w=$((w + 1)); done; obs "kill_during_generate_converged_after_s" "$w"
     ck "kill during generate: same tip as peer" "$(cli 0 getbestblockhash)" "$(cli 1 getbestblockhash)"
     ck "kill during generate: wallet balance = spendable coins" "$(bal 0)" "$(cli 0 listunspent 1 | jq -r '[.[].amount]|add // 0' | f8)"
     ck "kill during generate: note balance survived" "$(zbal 0 "$zs")" "$(add "$b0" -4.5 -$FEE)"
