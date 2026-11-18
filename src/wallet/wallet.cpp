@@ -566,9 +566,13 @@ void CWallet::UpdatedBlockTip(const CBlockIndex* pindex)
     // (their anchors are gone for the moment), and a tx that builds on another one
     // of the wallet's only becomes valid once that one is back in a block. So
     // after a disconnect, try again at every new tip until nothing is refused.
-    if (fTxsUnwound.exchange(false) && ReacceptWalletTransactions() > 0) {
-        fTxsUnwound = true;
-    }
+    // Bounded: a transaction refused for good would otherwise cost a full pass at
+    // every block. A disconnect meanwhile resets the count and the CAS keeps that.
+    int nLeft = nReacceptTipsLeft.load();
+    if (nLeft <= 0)
+        return;
+    size_t nRefused = ReacceptWalletTransactions();
+    nReacceptTipsLeft.compare_exchange_strong(nLeft, nRefused > 0 ? nLeft - 1 : 0);
 }
 
 void CWallet::ChainTip(const CBlockIndex *pindex, 
@@ -578,7 +582,7 @@ void CWallet::ChainTip(const CBlockIndex *pindex,
                        bool added)
 {
     TestCrashPoint("chaintip-before");
-    if (!added) fTxsUnwound = true;
+    if (!added) nReacceptTipsLeft = REACCEPT_TIPS_AFTER_UNWIND;
     if (added && fNoteWitnessesLost) {
         // A disconnect before this block left witnesses the caches could not
         // roll back. The chain moves forward again (the connect phase of a
@@ -3325,6 +3329,7 @@ size_t CWallet::ReacceptWalletTransactions()
     LOCK2(cs_main, cs_wallet);
     std::map<int64_t, CWalletTx*> mapSorted;
     size_t nRefused = 0;
+    const int nNextHeight = chainActive.Height() + 1;
 
     // Sort pending wallet transactions based on their initial wallet insertion order
     BOOST_FOREACH(PAIRTYPE(const uint256, CWalletTx)& item, mapWallet)
@@ -3346,7 +3351,8 @@ size_t CWallet::ReacceptWalletTransactions()
         CWalletTx& wtx = *(item.second);
 
         LOCK(mempool.cs);
-        if (!wtx.AcceptToMemoryPool(false)) ++nRefused;
+        if (!wtx.AcceptToMemoryPool(false) && !IsExpiringSoonTx(wtx, nNextHeight))
+            ++nRefused;
     }
     return nRefused;
 }

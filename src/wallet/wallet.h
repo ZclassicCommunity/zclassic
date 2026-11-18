@@ -68,6 +68,8 @@ static const unsigned int MAX_FREE_TRANSACTION_CREATE_SIZE = 1000;
 //  Should be large enough that we can expect not to reorg beyond our cache
 //  unless there is some exceptional network disruption.
 static const unsigned int WITNESS_CACHE_SIZE = MAX_REORG_LENGTH + 1;
+//! Most new tips at which the wallet re-offers its transactions after a disconnect (CWallet::UpdatedBlockTip)
+static const int REACCEPT_TIPS_AFTER_UNWIND = 20;
 
 //! Size of HD seed in bytes
 static const size_t HD_WALLET_SEED_LENGTH = 32;
@@ -895,15 +897,19 @@ protected:
      */
     std::atomic<bool> fNoteWitnessesLost;
     /**
-     * A block was disconnected since the wallet transactions were last offered to
-     * the mempool. The mempool re-admission of a disconnected block runs while the
-     * rest of the unwind is still pending, so a wallet send whose anchor is valid at
-     * the final tip can be refused then and be neither in the chain nor in the
-     * mempool: its notes would count as unspent until the next restart. The wallet
-     * offers them again at each new tip until none is refused (UpdatedBlockTip). Memory only;
-     * set in ChainTip.
+     * Tips left at which the wallet offers its transactions to the mempool again
+     * after a disconnect. The mempool re-admission of a disconnected block runs
+     * while the rest of the unwind is still pending, so a wallet send whose anchor
+     * is valid at the final tip can be refused then and be neither in the chain nor
+     * in the mempool: its notes would count as unspent until the next restart.
+     * ChainTip sets it to REACCEPT_TIPS_AFTER_UNWIND on a disconnect;
+     * UpdatedBlockTip retries at each new tip until no refused transaction could
+     * still be admitted later (an expired one never can) or the count runs out, so
+     * a permanently refused one (double spent, or without an expiry height) does
+     * not cost a full pass under cs_main at every block until the next restart.
+     * Memory only.
      */
-    std::atomic<bool> fTxsUnwound;
+    std::atomic<int> nReacceptTipsLeft;
     void RebuildNoteWitnesses();
     /**
      * The witness half of ChainTip. When no wallet transaction carries
@@ -1139,7 +1145,7 @@ public:
         fBroadcastTransactions = false;
         nWitnessCacheSize = 0;
         fNoteWitnessesLost = false;
-        fTxsUnwound = false;
+        nReacceptTipsLeft = 0;
         setNoteTxIndex.clear();
         nNoteTxIndexWalletSize = 0;
     }
@@ -1367,7 +1373,11 @@ public:
          std::vector<boost::optional<SproutWitness>>& witnesses,
          uint256 &final_anchor);
     int ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate = false);
-    /** Offers the wallet transactions neither in the chain nor in the mempool to the mempool; returns how many were refused. */
+    /**
+     * Offers the wallet transactions neither in the chain nor in the mempool to the
+     * mempool. Returns how many were refused that a later tip could still admit
+     * (expired or expiring ones are not counted: the mempool never takes them).
+     */
     size_t ReacceptWalletTransactions();
     void ResendWalletTransactions(int64_t nBestBlockTime);
     std::vector<uint256> ResendWalletTransactionsBefore(int64_t nTime);

@@ -17,6 +17,10 @@
 #include "sync.h"
 #include "util.h"
 #include "validationinterface.h"
+#ifdef ENABLE_WALLET
+#include "init.h"
+#include "wallet/wallet.h"
+#endif
 
 #include <stdint.h>
 
@@ -1107,7 +1111,13 @@ static void NotifyWalletsOfUnwoundTip()
 {
     LOCK(cs_main);
     GetMainSignals().SetBestChain(chainActive.GetLocator());
-    GetMainSignals().UpdatedBlockTip(chainActive.Tip());
+#ifdef ENABLE_WALLET
+    // The wallet alone, not the UpdatedBlockTip signal: that also reaches ZMQ,
+    // which would publish hashblock for a tip it already announced (or that did
+    // not change, when nothing was unwound).
+    if (pwalletMain)
+        pwalletMain->UpdatedBlockTip(chainActive.Tip());
+#endif
 }
 
 UniValue finalizeblock(const UniValue& params, bool fHelp) {
