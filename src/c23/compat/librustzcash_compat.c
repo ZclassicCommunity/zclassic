@@ -56,7 +56,10 @@
 #if defined(__GLIBC__)
 #include <malloc.h>
 #elif defined(__APPLE__)
-#include <malloc/malloc.h>
+/* <malloc/malloc.h> fails to compile here with the macOS 26 SDK and the depends flags
+   (unknown type name malloc_zone_t). Only this libSystem entry point is needed,
+   present since macOS 10.7. */
+extern size_t malloc_zone_pressure_relief(void *zone, size_t goal);
 #endif
 
 #if !defined(_WIN32)
