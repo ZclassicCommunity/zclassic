@@ -173,11 +173,71 @@ bool PickInputs(const std::vector<TokenCoin>& all, uint64_t need, std::vector<To
     return have >= need;
 }
 
+/** Coins locked for the duration of one build only (cs_wallet is held throughout), released on every path. */
+class ScopedFeeExclusion
+{
+public:
+    explicit ScopedFeeExclusion(CWallet* w) : wallet(w) {}
+    ~ScopedFeeExclusion()
+    {
+        for (size_t i = 0; i < locked.size(); i++)
+            wallet->UnlockCoin(locked[i]);
+    }
+    void Lock(COutPoint op)
+    {
+        wallet->LockCoin(op);
+        locked.push_back(op);
+    }
+    size_t Count() const { return locked.size(); }
+
+private:
+    CWallet* wallet;
+    std::vector<COutPoint> locked;
+};
+
+/**
+ * Z23's rules (validity_note_input_baton) make a SEND or MINT of token T UNKNOWN or INVALID when ANY input,
+ * an ordinary ZCL fee input included, was created by a transaction of T whose own status is not VALID
+ * (send_parent_unknown, send_ancestry_invalid, mint_parent_unknown, mint_baton_lineage_invalid), and such a
+ * transaction burns every token input it has. Anyone can pay this wallet ordinary ZCL inside an invalid
+ * transaction of T, so those coins are kept out of the fee selection of a transaction of T. (The check after
+ * the build would refuse the transaction anyway; this keeps the wallet able to send.)
+ */
+void ExcludePoisonedFeeCoins(CWallet* wallet, const ZslpIndex& idx, const uint256& token,
+                             const std::set<COutPoint>& intended, ScopedFeeExclusion& excl)
+{
+    std::vector<COutput> coins;
+    wallet->AvailableCoins(coins, false, NULL, false, true);
+    std::map<uint256, bool> poisoned; // creating txid -> excluded
+    for (size_t i = 0; i < coins.size(); i++) {
+        const COutput& c = coins[i];
+        const uint256 txid = c.tx->GetHash();
+        if (intended.count(COutPoint(txid, c.i)) || wallet->IsLockedCoin(txid, c.i))
+            continue;
+        std::map<uint256, bool>::iterator it = poisoned.find(txid);
+        if (it == poisoned.end()) {
+            TxInfo ti;
+            const bool bad = idx.GetTx(txid, ti) && ti.type != 0 && ti.token == token && ti.status != STATUS_VALID;
+            it = poisoned.insert(std::make_pair(txid, bad)).first;
+        }
+        if (it->second)
+            excl.Lock(COutPoint(txid, c.i));
+    }
+}
+
 /** Build, check, and (unless a dry run) broadcast. cs_main and cs_wallet are held by the caller. */
 bool BuildAndSend(CWallet* wallet, ZslpService& svc, const TokenLayout& layout, const std::vector<TokenCoin>& inputs,
                   const Expect& want, CAmount fixedFee, bool dryRun, CReserveKey& ownerKey, bool ownerKeyUsed,
                   TokenTxResult& res, std::string& err, WalletErrKind& kind)
 {
+    ScopedFeeExclusion excluded(wallet);
+    if (!want.genesis) {
+        std::set<COutPoint> chosen;
+        for (size_t i = 0; i < inputs.size(); i++)
+            chosen.insert(inputs[i].op);
+        ExcludePoisonedFeeCoins(wallet, svc.Index(), want.token, chosen, excluded);
+    }
+
     CCoinControl cc;
     cc.fAllowOtherInputs = true; // ordinary ZCL coins may be added for the fee, but never token outputs
     cc.fChangeLast = true;       // the ZCL change must not take a token slot
@@ -201,8 +261,12 @@ bool BuildAndSend(CWallet* wallet, ZslpService& svc, const TokenLayout& layout, 
     std::string reason;
     if (!wallet->CreateTransaction(vecSend, wtx, changeKey, nFee, nChangePos, reason, &cc)) {
         const bool funds = reason.find("Insufficient funds") != std::string::npos;
+        const std::string left = excluded.Count() == 0 ? "" :
+            strprintf(" (%u coin(s) paid to this wallet inside a non-valid transaction of this token were left out: "
+                      "spending one here would make the token transaction invalid and burn its tokens)",
+                      (unsigned)excluded.Count());
         return Fail(err, kind, funds ? ERRK_ZCL_FUNDS : ERRK_STATE,
-                    funds ? "not enough ordinary ZCL for the fee and the token dust outputs (token outputs and mint batons are never used as ZCL): " + reason
+                    funds ? "not enough ordinary ZCL for the fee and the token dust outputs (token outputs and mint batons are never used as ZCL)" + left + ": " + reason
                           : reason);
     }
 

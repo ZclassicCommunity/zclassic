@@ -15,7 +15,10 @@
 //  3. lays the outputs out as src/zslp/zslpbuild.h describes, and lets the
 //     ordinary wallet code add ZCL inputs for the fee. Token-bearing outputs of
 //     any other token or baton stay out of that selection (the wallet token
-//     guard, src/wallet/tokenguard.h, is NOT switched off for them);
+//     guard, src/wallet/tokenguard.h, is NOT switched off for them). For a MINT
+//     or SEND of token T, ordinary coins created by a transaction of T that is
+//     not VALID are left out of the fee selection as well: Z23's rules would make
+//     the new transaction invalid (and burn its tokens) if it spent one;
 //  4. before anything is broadcast, runs the built and signed transaction
 //     through the same validity rules the index uses (ZslpIndex::EvaluateTx):
 //     it must be VALID, name the expected token, spend exactly the intended
@@ -112,7 +115,10 @@ struct BurnRequest {
 };
 
 /** Each returns true and fills `res`, or returns false with `err` and `kind`; on false nothing was broadcast and
- *  no wallet state changed. The caller has already required an unlocked wallet. */
+ *  no wallet state changed, with one exception shared with every wallet send: when the checked transaction is
+ *  committed but this node's mempool then refuses it (CWallet::CommitTransaction), it stays in the wallet, its
+ *  inputs count as spent, and the wallet rebroadcasts it as usual. The caller has already required an unlocked
+ *  wallet. */
 bool WalletTokenSend(CWallet* wallet, ZslpService& svc, const SendRequest& req, TokenTxResult& res,
                      std::string& err, WalletErrKind& kind);
 bool WalletTokenGenesis(CWallet* wallet, ZslpService& svc, const GenesisRequest& req, TokenTxResult& res,

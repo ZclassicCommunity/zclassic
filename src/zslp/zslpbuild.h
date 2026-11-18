@@ -35,8 +35,9 @@
 
 namespace zslp {
 
-//! Value of every token and baton output. Z23's ZSLP_DUST_ZAT; it is exactly the dust threshold of a
-//! P2PKH output at the default -minrelaytxfee. TokenDust() raises it if the local policy asks for more.
+//! Value of every token and baton output: Z23's ZSLP_DUST_ZAT (the SLP convention). zclassicd's default
+//! -minrelaytxfee (100 zatoshi/kB) puts the P2PKH dust threshold at 54, so 546 relays; TokenDust() raises it
+//! when the local policy asks for more (a -minrelaytxfee above 0.00001 ZCL/kB).
 static const CAmount TOKEN_DUST = 546;
 
 //! Z23's creation limits (zslp_service.h): ticker 1..10 alphanumeric, name 1..64, decimals 0..8,

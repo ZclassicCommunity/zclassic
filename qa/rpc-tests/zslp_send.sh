@@ -20,7 +20,7 @@
 #   env CC=<compiler>   compiler for slpscript (default: cc)
 #   env KEEP=1          keep the temp directory
 #   env DUMP=<file>     write every block of the run as raw hex, one per line, in height order
-#                       (for the Z23 interop harness, qa/zslp/z23_validity_check.sh)
+#                       (to replay the run elsewhere; no such harness is in this tree yet)
 #
 # Needs: jq, a C compiler, the Zcash parameters in ~/.zcash-params.
 # Every node runs on 127.0.0.1 with its own temp datadir; ports 49000-49999.

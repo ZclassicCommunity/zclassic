@@ -159,7 +159,12 @@ the mempool (the change of a send in the same block, tokens just received) is **
 until it has a confirmation: a second send needs the first one confirmed, or other confirmed
 outputs. The ZCL for the fee and the dust outputs comes from ordinary coins through the
 existing token guard; no other token's output and no baton can be taken as fee. A wallet with
-tokens and no ordinary ZCL gets "not enough ordinary ZCL", not a burned token.
+tokens and no ordinary ZCL gets "not enough ordinary ZCL", not a burned token. For a send or
+mint of token T the fee selection also leaves out every ordinary coin that was created by a
+transaction of T whose own status is not VALID: Z23's rules (`validity_note_input_baton` in
+`contexts/market/models/src/zslp_validity.c`) make a SEND or MINT invalid, burning its token
+inputs, when ANY input comes from such a transaction, and anyone can pay a wallet ZCL inside
+one (`qa/rpc-tests/zslp_send_adversarial.sh` does exactly that).
 
 **Checked before anything is broadcast.** The signed transaction goes through the index's own
 validity rules (`ZslpIndex::EvaluateTx`, the same rule function that indexes blocks) and must
@@ -236,7 +241,7 @@ MIT as zclassicd.
   addresses is several calls.
 - No coin control for tokens (which output to spend), no NFT types, no document-hash or
   baton editing after creation, no shielded tokens.
-- `-minrelaytxfee` above the default raises the token dust value with the node's own dust
+- A `-minrelaytxfee` above 0.00001 ZCL/kB (the default is 0.000001) raises the token dust value to the node's own dust
   threshold, so that the outputs relay; at the default it is Z23's 546 zatoshi.
 - Not compatible with `-prune`.
 - The index trusts the node's own chain. It is a convenience view, not a proof: verify a
