@@ -3237,28 +3237,19 @@ void CWallet::ResendWalletTransactions(int64_t nBestBlockTime)
     // that these are our transactions.
     if (GetTime() < nNextResend || !fBroadcastTransactions)
         return;
-    // This is only reached once the node has a peer and is out of initial block download. The
-    // first rebroadcast after startup used to wait a random 0-30 minutes (and then for a new block
-    // to arrive), so a transaction sent just before a crash stayed invisible for a long time after
-    // restart. Do the first pass 1-3 minutes after the first call instead (still randomised so the
-    // timing does not single out our transactions), and cover every unconfirmed wallet transaction
-    // because no block has been received yet this session to anchor the cutoff on.
-    const bool fFirst = (nNextResend == 0);
-    if (fFirst) {
-        nNextResend = GetTime() + 60 + GetRand(120);
-        return;
-    }
-    const bool fStartupPass = (nLastResend == 0);
+    bool fFirst = (nNextResend == 0);
     nNextResend = GetTime() + GetRand(30 * 60);
+    if (fFirst)
+        return;
 
-    // Only do it if there's been a new block since last time (not for the startup pass)
-    if (!fStartupPass && nBestBlockTime < nLastResend)
+    // Only do it if there's been a new block since last time
+    if (nBestBlockTime < nLastResend)
         return;
     nLastResend = GetTime();
 
     // Rebroadcast unconfirmed txes older than 5 minutes before the last
     // block was found:
-    std::vector<uint256> relayed = ResendWalletTransactionsBefore(fStartupPass ? GetTime() : nBestBlockTime-5*60);
+    std::vector<uint256> relayed = ResendWalletTransactionsBefore(nBestBlockTime-5*60);
     if (!relayed.empty())
         LogPrintf("%s: rebroadcast %u unconfirmed transactions\n", __func__, relayed.size());
 }
