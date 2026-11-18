@@ -5689,6 +5689,12 @@ bool RewindBlockIndex(const CChainParams& params, bool& clearWitnessCaches)
                 // Same for the parked marker: it is only a hint, and the entry is freed below
                 pindexBestParked = nullptr;
             }
+            // The entry is erased from disk and freed below: the flush at the end must
+            // not write it back (LoadBlockIndexDB marks a FAILED_CHILD dirty, and such a
+            // never-connected block is insufficiently validated), and the failed-block
+            // set must not keep its address.
+            setDirtyBlockIndex.erase(pindexIter);
+            g_failed_blocks.erase(pindexIter);
             // Update indices
             setBlockIndexCandidates.erase(pindexIter);
             auto ret = mapBlocksUnlinked.equal_range(pindexIter->pprev);

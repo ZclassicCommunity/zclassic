@@ -6,6 +6,7 @@
 #include "consensus/validation.h"
 #include "arith_uint256.h"
 #include "main.h"
+#include "txdb.h"
 
 #include "test/test_bitcoin.h"
 
@@ -228,15 +229,23 @@ BOOST_AUTO_TEST_CASE(rewind_block_index_drops_freed_parked_marker)
     const std::vector<CBlockIndex*> all(1, parked);
     BestChainState s = BestChainStateSave(all);
     s.pindexBestParked = parked;
+    // Also dirty (as LoadBlockIndexDB leaves a FAILED_CHILD) and in the failed-block set.
+    s.dirty.insert(parked);
+    s.failedBlocks.insert(parked);
     BestChainStateRestore(s, all);
     BOOST_REQUIRE(BestChainStateSave(all).pindexBestParked == parked);
 
     bool clearWitnessCaches = false;
     BOOST_REQUIRE(RewindBlockIndex(Params(), clearWitnessCaches));
 
-    // The entry is gone from the index (and freed); the marker must not point at it.
+    // The entry is gone from the index (and freed); no marker or set may point at it,
+    // and the final flush must not have written it back to the block tree.
     BOOST_CHECK(mapBlockIndex.count(hash) == 0);
-    BOOST_CHECK(BestChainStateSave(std::vector<CBlockIndex*>()).pindexBestParked == NULL);
+    const BestChainState after = BestChainStateSave(std::vector<CBlockIndex*>());
+    BOOST_CHECK(after.pindexBestParked == NULL);
+    BOOST_CHECK(after.failedBlocks.count(parked) == 0);
+    CDiskBlockIndex disk;
+    BOOST_CHECK(!pblocktree->ReadDiskBlockIndex(hash, disk));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
