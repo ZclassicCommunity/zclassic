@@ -116,8 +116,6 @@ qa/pull-tester/test.*/*
 
 libzcashconsensus.pc
 
-contrib/debian/files
-contrib/debian/substvars
 
 # C23 crypto core build stamp
 src/c23-symbols.stamp

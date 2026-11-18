@@ -19,7 +19,6 @@ jobs:
     timeout-minutes: 180
     env:
       DEBIAN_FRONTEND: noninteractive
-      NO_PROTON: '1'
     steps:
       - name: Install build tools
         run: |
@@ -98,8 +97,6 @@ jobs:
   macos:
     runs-on: macos-15
     timeout-minutes: 240
-    env:
-      NO_PROTON: '1'
     steps:
       - name: Install build tools
         run: |

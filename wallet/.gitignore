@@ -7,6 +7,7 @@ x64/
 artifacts/
 .vscode/
 res/libsodium.a
+res/liblibsodium.a
 res/libsodium/libsodium*
 src/ui_*.h
 *.autosave
