@@ -403,11 +403,17 @@ test_stream() {
     rec=$(act_streams | tail -n +3 | sort -n | tail -1)
     done_early=$(tail -1 "$work/stream-samples.txt" | grep -c 'active=0$' || true)
     peers=$(cli "$server_bin" "$sdir" getpeerinfo | grep -c '"addr": *"127.0.0.1')
+    # The server-side count is only comparable while the client still runs all four
+    # streams: near the end of a download fewer files than streams are left and the
+    # streams close one by one, so the download can end (or taper) between the last
+    # sample and the getpeerinfo above. Ask the client again after reading the server.
+    j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null) || j=""
+    still4=0; echo "$j" | grep -q '"phase": *"active"' && [ "$(echo "$j" | json_num streams)" -ge 4 ] 2>/dev/null && [ "${last:-0}" -ge 4 ] && still4=1
     say "streams: min after cut ${min:-?}, recovered to ${rec:-?}, last while downloading ${last:-?}; client connections now at the server: $peers"
     if grep -aq 'reconnecting\|stream .* failed' "$client_log"; then say "client log:"; grep -a 'stream [0-9]* failed\|stream [0-9]* reconnected\|reconnecting with verified files' "$client_log" | head -4; fi
     echo "$last" >"$work/stream-last.txt"
     echo "$peers" >"$work/stream-peers.txt"
-    if [ "${rec:-0}" -ge 4 ] && { [ "${peers:-0}" -ge 4 ] || [ "${done_early:-0}" = 1 ]; }; then
+    if [ "${rec:-0}" -ge 4 ] && { [ "${peers:-0}" -ge 4 ] || [ "${done_early:-0}" = 1 ] || [ "$still4" = 0 ]; }; then
         pass "stream: all 4 streams are connected again ($peers connections at the server)"
     else
         fail "stream: recovered to only ${rec:-?} streams / $peers connections at the server after a stream was cut"
