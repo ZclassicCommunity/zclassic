@@ -768,3 +768,42 @@ TEST(TransactionBuilder, ProverWorkerLimitFollowsPhysicalMemory)
         last = w;
     }
 }
+
+// The parsed proving keys a send shares are held while a proving context lives
+// and handed back with the last one, so a wallet that is not sending holds none.
+TEST(TransactionBuilder, ParsedProvingKeysAreReleasedWithTheLastContext)
+{
+    auto consensusParams = RegtestActivateSapling();
+
+    CBasicKeyStore keyStore;
+    CKey tsk = AddTestCKeyToKeyStore(keyStore);
+    auto scriptPubKey = GetScriptForDestination(tsk.GetPubKey().GetID());
+    auto sk = libzcash::SaplingSpendingKey::random();
+    auto fvk = sk.full_viewing_key();
+    auto pa = sk.default_address();
+
+    auto build = [&]() {
+        auto builder = TransactionBuilder(consensusParams, 1, &keyStore);
+        builder.SetFee(10000);
+        builder.AddTransparentInput(COutPoint(), scriptPubKey, 100000);
+        builder.SendChangeTo(pa, fvk.ovk);
+        builder.AddSaplingOutput(fvk.ovk, pa, 20000, {});
+        auto tx = builder.Build().GetTxOrThrow();
+        std::string reason;
+        EXPECT_TRUE(SaplingConsensusCheck(tx, 2, reason)) << reason;
+    };
+
+    EXPECT_FALSE(zcl_c23_proving_keys_parsed());
+    build();
+    EXPECT_FALSE(zcl_c23_proving_keys_parsed()); // the build's last context is gone
+
+    void* held = librustzcash_sapling_proving_ctx_init();
+    build();
+    EXPECT_TRUE(zcl_c23_proving_keys_parsed());  // a live context keeps the shared copy
+    build();                                      // and the next send reuses it
+    EXPECT_TRUE(zcl_c23_proving_keys_parsed());
+    librustzcash_sapling_proving_ctx_free(held);
+    EXPECT_FALSE(zcl_c23_proving_keys_parsed());
+
+    RegtestDeactivateSapling();
+}

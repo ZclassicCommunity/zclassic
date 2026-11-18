@@ -1328,6 +1328,16 @@ static const struct groth16_pk *parsed_key(struct groth16_pk *slot, bool *ok,
     return key;
 }
 
+/* True while the shared parsed proving keys are resident (a proving context is
+ * alive and a proof has parsed them). For diagnostics and tests. */
+bool zcl_c23_proving_keys_parsed(void)
+{
+    pthread_mutex_lock(&g_pk_mu);
+    bool resident = g_pk_spend_ok || g_pk_output_ok;
+    pthread_mutex_unlock(&g_pk_mu);
+    return resident;
+}
+
 static void pctx_live_add(void)
 {
     pthread_mutex_lock(&g_pk_mu);
