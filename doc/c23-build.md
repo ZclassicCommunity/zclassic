@@ -130,3 +130,63 @@ note commitment tree calls for every append and root. Proof creation is 8x
 to 19x slower across the rounds (`zcbenchmark createsaplingspend`: 8.65 s
 against 0.45-0.83 s): `groth16_prover.c` loads the proving key again for every
 proof and prints `Proving key loaded: ...` to stdout each time.
+
+## Wallet trial decryption
+
+Every Sapling output a wallet sees (each block it connects, each mempool
+transaction, each `-rescan` / key import) is trial-decrypted against every
+incoming viewing key. The cost per (key, output) pair is one Jubjub scalar
+multiplication, so it grows with keys x outputs; `ka_agree` above is that
+operation, about 70-110 us.
+
+`c23/glue/zcl_c23_sapling_scan.c` (zclassicd glue, not vendored; a candidate
+to upstream into Z23, which trial-decrypts one key at a time) does the work
+for one output against many keys at once: the output's `epk` is decompressed
+once (no inversion, square root with precomputed roots of unity), a signed
+radix-16 comb of affine multiples of `[8] epk` is built once, each key costs 64
+mixed additions plus a few doublings (none with many keys), and the results
+share one inversion. `SaplingNotePlaintext::decryptWithFirstMatchingIvk` then
+runs the unchanged KDF, AEAD and note validation in key order, so the first
+matching key wins exactly as before. `CWallet::TrialDecryptSaplingOutput`
+uses it, which covers block connect, mempool and the parallel rescan. The
+core is constant time in the key, like `jub_scalar_mul`, and checks itself
+against the vendored primitives at first use; if that fails the one-at-a-time
+path is used.
+
+Per (key, output), best of 7 per output on a shared host (`SaplingScanBatch.
+PerOutputCostBreakdown` in `zcash-gtest`):
+
+| keys | one at a time | batched |
+|---|---|---|
+| 1 | 68-77 us | 56 us |
+| 3 | | 31 us |
+| 10 | | 17 us |
+| 50 | | 11 us |
+| 200 | | 9 us |
+
+Real mainnet blocks (the last five `blk*.dat` files, 691,020 blocks,
+46,229 Sapling outputs, about 0.07 outputs per block; trial decryption only,
+`SaplingScanBatch.MainnetOutputsAgreeAndTiming`):
+
+| keys | one at a time | batched |
+|---|---|---|
+| 1 | 78 us/pair, 192k blocks/s | 63 us/pair, 236k blocks/s |
+| 20 | 83 us/pair, 9.0k blocks/s | 17 us/pair, 44k blocks/s |
+
+Regtest wallet rescan, 2581 blocks, 4800 outputs sent to the wallet's keys
+and to foreign keys, `-par=1` (CPU seconds of the whole process, startup
+included; the identical notes and balances are checked by hash):
+
+| keys | before | after |
+|---|---|---|
+| 10 | 6.6 s | 3.3 s |
+| 50 | 21.7 s | 6.1 s |
+| 200 | 68 s | 17 s |
+
+Tests: `src/gtest/test_sapling_scan_batch.cpp` compares the batched path with
+`librustzcash_sapling_ka_agree` and with the serial `decrypt` loop on random
+and edge inputs, replays the 2028 Rust-oracle golden `ka_agree` records
+(`ZCL_C23_GOLDEN_DIR`) and compares every epk of real mainnet blocks
+(`ZCL_MAINNET_BLK_FILES`, read from copies). `c23/test/kat_threads.c` replays
+the golden records through the batched core from 16 threads (clean under
+`-fsanitize=thread`, run with `setarch x86_64 -R`).
