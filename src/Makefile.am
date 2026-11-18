@@ -689,7 +689,7 @@ libzcl_c23_a_SOURCES = \
   c23/vendor/core/modules/crypto/src/sha512.c \
   c23/vendor/core/modules/crypto/src/simd_dispatch.c \
   c23/vendor/core/modules/sapling/src/bls12_381.c \
-  c23/vendor/core/modules/sapling/src/bn254.c \
+  c23/glue/zcl_c23_bn254.c \
   c23/vendor/core/modules/sapling/src/bn254_accel.c \
   c23/vendor/core/modules/sapling/src/circuit_bits.c \
   c23/vendor/core/modules/sapling/src/circuit_gadgets.c \

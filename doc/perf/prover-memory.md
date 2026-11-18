@@ -33,7 +33,7 @@ retained size after the send at 832 MB; `MALLOC_MMAP_THRESHOLD_=1 MiB` lowers wh
   freed with the last proving context, and the heap is returned to the system then
   (`malloc_trim`, `malloc_zone_pressure_relief`).
 - Left automatic, a send makes at most as many proofs at once as fit in about 340 MB or an eighth
-  of physical memory (`ProverWorkerLimit`; two today, four after Z23 patch 1 is re-vendored).
+  of physical memory (`ProverWorkerLimit`; four since Z23 3e680284b6 was re-vendored, see the last section).
   An explicit `-proverthreads` lifts the cap.
 - Z23 patches (`z23-provermem-patch`): constraints stored at exact size (86.9 MB to 25 MB of terms
   per proof in flight) and a parsed-key API. See the lane description.
@@ -84,3 +84,39 @@ with several proofs, which is why the daemon numbers move and these barely do.
 See the Z23 lane description: coefficient table for constraint terms, exact `constraints[]`
 capacity, MSM over affine key points, and mapping the 52 MB of raw parameter bytes instead of
 holding them (idle RSS near 30 MB).
+
+## After the re-vendor (Z23 3e680284b6)
+
+The vendored Z23 now stores constraint terms at exact size and offers
+`sapling_create_{spend,output}_proof_parsed`. The glue calls those two functions with the
+parsed key it keeps (the raw keys it verified at init are the glue's own, not Z23 params_init's, so
+the parsed copy stays in `librustzcash_compat.c`: parsed once on the first proof, freed with the
+last proving context). The glue no longer carries its own copy of the proof assembly
+(synthesize, `groth16_prove`, proof serialization), and a key that cannot be parsed still falls
+back to the per-proof functions. Proof bytes and verification results are unchanged (golden
+corpus, below).
+
+`kProverWorkerBytes` is measured, not assumed. Peak RSS of the daemon over `z_sendmany` of 20
+notes, explicit `-proverthreads` (workers = threads / 2, no cap), regtest, `z23-r2`:
+
+| threads | proofs in flight | before (15ef1f004) | after | per further proof |
+|---------|------------------|--------------------|-------|-------------------|
+| 2       | 1                | 266 MB             | 202 MB | |
+| 4       | 2                | 391 MB             | 266 MB | 63 MB (was 125) |
+| 8       | 4                | 631 MB             | 381 MB | 58 MB (was 120) |
+| 16      | 8                | 1110 MB            | 612 MB | 58 MB (was 120) |
+
+`kProverWorkerBytes` goes from 120 MB to 60 MB, so the automatic limit rises from two proofs at
+once to four (an eighth of 2 GiB of RAM: two). Default settings (8 prover threads here), median of
+three runs, peak RSS in MB (wall time in s), one recipient:
+
+| notes | before (15ef1f004, 2 proofs) | re-vendored, limit still 2 | re-vendored, limit 4 (final) |
+|-------|------------------------------|----------------------------|------------------------------|
+| 1     | 268 (1.0)                    | 207 (0.9)                  | 206 (0.9)                    |
+| 5     | 398 (2.8)                    | 284 (2.6)                  | 374 (2.9)                    |
+| 20    | 400 (9.7)                    | 284 (9.5)                  | 396 (8.2)                    |
+| 40    | 407 (19.0)                   | 286 (18.8)                 | 395 (16.3)                   |
+
+The limit-4 column spends the same ceiling the earlier branch did (a default send near 400 MB)
+for more parallel proofs, and is faster at 20 and 40 notes; the limit-2 column shows what the
+exact-size storage alone saves. Times are good to about +-15 % on this shared host.

@@ -5,6 +5,7 @@
 #include "sapling/params_init.h"
 #include "sapling/bls12_381.h"
 #include "sapling/bn254.h"
+#include "sapling/groth16_prover.h"
 #include "sapling/sapling.h"
 #include "sapling/sapling_prover.h"
 #include "sapling/sprout.h"
@@ -130,6 +131,49 @@ static uint8_t *spend_pk_data = NULL;
 static size_t spend_pk_len = 0;
 static uint8_t *output_pk_data = NULL;
 static size_t output_pk_len = 0;
+
+/* ── Parsed proving keys ─────────────────────────────────────────────────
+ *
+ * groth16_pk_read expands a proving key into curve points: about 72 MB for the
+ * spend key and 5 MB for the output key, from 48 MB and 3.6 MB of file. Parsing
+ * it inside every proof made each proof, and so each concurrent proof of one
+ * send, carry its own copy and spend a few hundred milliseconds re-checking
+ * every point. The keys are parsed once, on first use, and every proof reads
+ * the one copy. It is released with the last proving session (and with the
+ * raw bytes it came from: a failed arming, sapling_free_params), when no proof
+ * can be running: a proof runs inside a proving context, which holds a
+ * session. pk_parsed_mu is a leaf lock, never held while taking params_mu,
+ * so a self-test running under params_mu may build the keys. */
+static pthread_mutex_t pk_parsed_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct groth16_pk spend_pk_parsed;
+static struct groth16_pk output_pk_parsed;
+static bool spend_pk_parsed_ok = false;
+static bool output_pk_parsed_ok = false;
+
+static const struct groth16_pk *pk_parsed_get(struct groth16_pk *slot,
+                                              bool *have,
+                                              const uint8_t *const *raw,
+                                              const size_t *raw_len)
+{
+    pthread_mutex_lock(&pk_parsed_mu);
+    if (!*have && *raw && *raw_len > 0 && groth16_pk_read(slot, *raw, *raw_len))
+        *have = true;
+    const struct groth16_pk *pk = *have ? slot : NULL;
+    pthread_mutex_unlock(&pk_parsed_mu);
+    return pk;
+}
+
+static void pk_parsed_release(void)
+{
+    pthread_mutex_lock(&pk_parsed_mu);
+    if (spend_pk_parsed_ok)
+        groth16_pk_free(&spend_pk_parsed);
+    if (output_pk_parsed_ok)
+        groth16_pk_free(&output_pk_parsed);
+    spend_pk_parsed_ok = false;
+    output_pk_parsed_ok = false;
+    pthread_mutex_unlock(&pk_parsed_mu);
+}
 
 /* ── Serialising the loaders ─────────────────────────────────────────────
  *
@@ -322,6 +366,13 @@ static void params_arm_proving_locked(const char *params_dir,
                  "consensus verification remains active",
                  zclassic_sapling_prover_backend(),
                  zclassic_sapling_prover_status());
+
+    /* The self-test's two proofs parsed the shared keys (about 77 MB). This
+     * is the boot loader of a full set: no proving session is open (none can
+     * be while no proving key was resident), so nothing else holds them.
+     * Without this they would stay resident from boot until the first send's
+     * last session ended. A send parses them again on its first proof. */
+    pk_parsed_release();
 }
 
 enum {
@@ -654,6 +705,19 @@ const uint8_t *sapling_get_spend_pk(size_t *len)
     return spend_pk_data;
 }
 
+const struct groth16_pk *sapling_get_spend_pk_parsed(void)
+{
+    return pk_parsed_get(&spend_pk_parsed, &spend_pk_parsed_ok,
+                         (const uint8_t *const *)&spend_pk_data, &spend_pk_len);
+}
+
+const struct groth16_pk *sapling_get_output_pk_parsed(void)
+{
+    return pk_parsed_get(&output_pk_parsed, &output_pk_parsed_ok,
+                         (const uint8_t *const *)&output_pk_data,
+                         &output_pk_len);
+}
+
 static void pair_selftest_forget_locked(void);
 
 void sapling_free_params(void)
@@ -678,6 +742,7 @@ void sapling_free_params(void)
      * released key, reportable via sprout_phgr_vk_loaded(). */
     params_release_phgr_vk();
     params_release_groth16_vks();
+    pk_parsed_release();
     free(spend_pk_data);
     free(output_pk_data);
     spend_pk_data = NULL; spend_pk_len = 0;
@@ -1029,6 +1094,7 @@ static bool params_pair_prefix_matches(const uint8_t *spend, size_t spend_len,
 
 static void params_discard_proving_keys_locked(void)
 {
+    pk_parsed_release();
     free(spend_pk_data);
     free(output_pk_data);
     spend_pk_data = NULL; spend_pk_len = 0;
@@ -1086,6 +1152,12 @@ static bool params_pair_arm_locked(const char *params_dir,
         SAPLING_OUTPUT_PARAMS_BLAKE2B,
         (const uint8_t *)SAPLING_PAIR_SPROUT_SENTINEL,
         strlen(SAPLING_PAIR_SPROUT_SENTINEL), "none");
+
+    /* Parse both keys now, while no proof is in flight and the whole thread
+     * budget is free, so the self-test and every proof of the send share them.
+     * A failure here is not fatal: each proof then parses for itself. */
+    (void)sapling_get_spend_pk_parsed();
+    (void)sapling_get_output_pk_parsed();
 
     if (!pair_selftest_passes_locked(files)) {
         zclassic_sapling_prover_unarm();
@@ -1243,8 +1315,12 @@ bool sapling_proving_session_acquire(void)
 void sapling_proving_session_release(void)
 {
     pthread_mutex_lock(&params_mu);
-    if (proving_sessions > 0 && --proving_sessions == 0 &&
-        atomic_load(&proving_mode) == SAPLING_PROVING_PAIR_ARMED) {
+    bool last = proving_sessions > 0 && --proving_sessions == 0;
+    /* The parsed keys serve a send: they go with its last session even when
+     * the raw bytes stay (a full set loaded at boot). */
+    if (last)
+        pk_parsed_release();
+    if (last && atomic_load(&proving_mode) == SAPLING_PROVING_PAIR_ARMED) {
         zclassic_sapling_prover_unarm();
         params_discard_proving_keys_locked();
         atomic_store(&proving_mode, SAPLING_PROVING_NONE);
@@ -1296,6 +1372,14 @@ bool sapling_test_pair_prefix_ok(const uint8_t *spend, size_t spend_len,
                                  const uint8_t *output, size_t output_len)
 {
     return params_pair_prefix_matches(spend, spend_len, output, output_len);
+}
+
+bool sapling_test_pk_parsed_resident(void)
+{
+    pthread_mutex_lock(&pk_parsed_mu);
+    bool resident = spend_pk_parsed_ok || output_pk_parsed_ok;
+    pthread_mutex_unlock(&pk_parsed_mu);
+    return resident;
 }
 #endif
 

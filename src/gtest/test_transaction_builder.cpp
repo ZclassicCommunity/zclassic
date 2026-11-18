@@ -768,11 +768,12 @@ TEST(TransactionBuilder, TestKeyIsValidOnEveryNetwork)
 TEST(TransactionBuilder, ProverWorkerLimitFollowsPhysicalMemory)
 {
     const uint64_t GiB = UINT64_C(1) << 30;
-    EXPECT_EQ(ProverWorkerLimit(0), 2u); // memory unknown: the ceiling
-    EXPECT_EQ(ProverWorkerLimit(64 * GiB), 2u);
-    EXPECT_EQ(ProverWorkerLimit(8 * GiB), 2u);
-    EXPECT_EQ(ProverWorkerLimit(3 * GiB), 2u);
-    EXPECT_EQ(ProverWorkerLimit(2 * GiB), 1u);
+    // (340 MiB ceiling - 90 MiB shared keys) / 60 MiB per proof = 4
+    EXPECT_EQ(ProverWorkerLimit(0), 4u); // memory unknown: the ceiling
+    EXPECT_EQ(ProverWorkerLimit(64 * GiB), 4u);
+    EXPECT_EQ(ProverWorkerLimit(8 * GiB), 4u);
+    EXPECT_EQ(ProverWorkerLimit(3 * GiB), 4u);
+    EXPECT_EQ(ProverWorkerLimit(2 * GiB), 2u); // an eighth is 256 MiB: (256 - 90) / 60
     EXPECT_EQ(ProverWorkerLimit(1 * GiB), 1u);
     EXPECT_EQ(ProverWorkerLimit(256 * (UINT64_C(1) << 20)), 1u);
 

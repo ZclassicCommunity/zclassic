@@ -230,4 +230,18 @@ bool sapling_create_output_proof(const uint8_t *pk_data, size_t pk_len,
                                   const struct sapling_output_inputs *pub,
                                   uint8_t proof_out[192]);
 
+/* The same two proofs against a proving key that is already parsed
+ * (groth16_pk_read), so the key is not parsed again for every proof. The key
+ * is only read: any number of threads may prove against one parsed key at the
+ * same time, provided it outlives every call. Byte-for-byte the same proofs
+ * as the functions above for the same randomness. */
+bool sapling_create_spend_proof_parsed(const struct groth16_pk *pk,
+                                       const struct sapling_spend_witness *wit,
+                                       const struct sapling_spend_inputs *pub,
+                                       uint8_t proof_out[192]);
+bool sapling_create_output_proof_parsed(const struct groth16_pk *pk,
+                                        const struct sapling_output_witness *wit,
+                                        const struct sapling_output_inputs *pub,
+                                        uint8_t proof_out[192]);
+
 #endif

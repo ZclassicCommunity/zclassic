@@ -91,8 +91,11 @@ does what librustzcash does (rustzcash.rs:191-280):
    Sprout prover.
 
    The parsed form of those keys (about 77 MB of curve points) is not kept: the first proof of
-   a send parses it once, every proof of every proving context reads that copy, and the last
-   proving context to be freed releases it and returns the heap to the system. Left
+   a send parses it once (`groth16_pk_read`), every proof of every proving context reads that copy
+   through Z23 `sapling_create_{spend,output}_proof_parsed`, and the last proving context to be
+   freed releases it and returns the heap to the system. The glue holds the raw keys itself, so it
+   keeps the parsed copy; Z23 `sapling_get_*_pk_parsed` and its proving sessions belong to the
+   raw bytes Z23 `params_init` loads, which this build does not use. Left
    automatic, a send also limits the proofs it makes at once (`ProverWorkerLimit`); see
    `doc/perf/prover-memory.md`.
 
