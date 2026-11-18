@@ -178,6 +178,17 @@ std::vector<std::string> SelectBootstrapPeers(const std::vector<std::string>& cl
 //! True when this node is onion-only with an onion proxy configured right now.
 bool BootstrapOnionOnlyActive();
 
+//! True when the arguments say that no connection may leave the node directly
+//! (-proxy, or an -onlynet list without ipv4/ipv6). The Zcash parameter fetch
+//! of init runs before the proxies are set up and would dial the bootstrap
+//! peers directly, so it must be skipped then.
+bool ZcashParamFetchWouldBypassProxy();
+
+//! True when the (IPv4) clearnet bootstrap peers would be dialled through a
+//! proxy. Without one (-onion given but no -proxy) the connection leaves from
+//! the node's own address, so an onion-only node must not use them.
+bool BootstrapClearnetProxied();
+
 //! Whether the clearnet bootstrap peers should now be added to an onion-only
 //! node: it has waited `nGraceSeconds`, no onion bootstrap peer is connected
 //! and it has no other outbound peer (a node with healthy onion peers never
@@ -191,7 +202,8 @@ bool BootstrapFallbackDue(bool fOnionOnly, int nOnionBootstrapConnected, int nOu
 void BootstrapOnionFallbackCheck();
 
 //! Peers for the snapshot fetch: GetBootstrapPeerList(), and for an onion-only
-//! node the clearnet peers (through Tor) are tried after the onion ones.
+//! node the clearnet peers (through the proxy that covers them, never directly)
+//! are tried after the onion ones.
 std::vector<std::string> GetBootstrapSnapshotPeerList();
 
 //! Auto-serve (-bootstrapserve=auto): activate serving from the immutable copy

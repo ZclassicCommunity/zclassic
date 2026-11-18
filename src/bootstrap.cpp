@@ -437,6 +437,28 @@ bool BootstrapOnionOnlyActive()
            IsLimited(NET_IPV4) && IsLimited(NET_IPV6);
 }
 
+bool ZcashParamFetchWouldBypassProxy()
+{
+    const std::string proxyArg = GetArg("-proxy", "");
+    if (proxyArg != "" && proxyArg != "0")
+        return true; // all traffic is meant to go through the proxy
+    std::map<std::string, std::vector<std::string> >::const_iterator it = mapMultiArgs.find("-onlynet");
+    if (it == mapMultiArgs.end() || it->second.empty())
+        return false;
+    BOOST_FOREACH(const std::string& snet, it->second) {
+        const enum Network net = ParseNetwork(snet);
+        if (net == NET_IPV4 || net == NET_IPV6)
+            return false;
+    }
+    return true; // onion-only: no clearnet connection, whatever starts Tor
+}
+
+bool BootstrapClearnetProxied()
+{
+    proxyType p;
+    return GetProxy(NET_IPV4, p) && p.IsValid();
+}
+
 bool BootstrapFallbackDue(bool fOnionOnly, int nOnionBootstrapConnected, int nOutbound,
                           int64_t nElapsedSeconds, int64_t nGraceSeconds)
 {
@@ -448,6 +470,17 @@ void BootstrapOnionFallbackCheck()
 {
     if (g_onionBootstrapFallback.load() || !BootstrapOnionOnlyActive())
         return;
+    // Only -onion is set (no -proxy): the clearnet addresses would be dialled
+    // from the node's own IP, which an onion-only operator ruled out.
+    if (!BootstrapClearnetProxied()) {
+        static bool fLogged = false;
+        if (!fLogged) {
+            fLogged = true;
+            LogPrintf("Bootstrap: no proxy for clearnet addresses (-onion without -proxy); "
+                      "staying on onion peers, not falling back to the clearnet bootstrap peers\n");
+        }
+        return;
+    }
     const std::vector<std::string> onion = Params().OnionBootstrapPeers();
     int nOnion = 0, nOutbound = 0;
     {
@@ -481,7 +514,10 @@ std::vector<std::string> GetBootstrapSnapshotPeerList()
     if (mapArgs.count("-bootstrappeer") || !BootstrapOnionOnlyActive())
         return peers;
     // Onion-only: the onion peers first; if they fail, the clearnet ones
-    // through the proxy, as before this list existed.
+    // through the proxy, as before this list existed. Without a proxy for
+    // them (-onion alone) they would be dialled directly: stay on onion.
+    if (!BootstrapClearnetProxied())
+        return peers;
     BOOST_FOREACH(const std::string& peer, Params().BootstrapPeers()) {
         if (std::find(peers.begin(), peers.end(), peer) == peers.end())
             peers.push_back(peer);

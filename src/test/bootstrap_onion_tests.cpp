@@ -4,9 +4,14 @@
 
 #include "bootstrap.h"
 #include "chainparams.h"
+#include "net.h"
 #include "netbase.h"
+#include "sync.h"
+#include "util.h"
 #include "test/test_bitcoin.h"
 
+#include <algorithm>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -70,6 +75,101 @@ BOOST_AUTO_TEST_CASE(fallback_due_rules)
     // outbound peers: stay on Tor.
     BOOST_CHECK(!BootstrapFallbackDue(true, 1, 1, 600, 300));
     BOOST_CHECK(!BootstrapFallbackDue(true, 0, 3, 600, 300));
+}
+
+namespace {
+// Leaves the process-wide proxy and network-limit state as it found it.
+struct NetworkStateGuard {
+    ~NetworkStateGuard()
+    {
+        ClearProxies();
+        SetLimited(NET_IPV4, false);
+        SetLimited(NET_IPV6, false);
+    }
+};
+
+bool ListsAnyClearnetBootstrapPeer(const std::vector<std::string>& peers)
+{
+    for (const std::string& clear : Params().BootstrapPeers())
+        if (std::find(peers.begin(), peers.end(), clear) != peers.end())
+            return true;
+    return false;
+}
+} // namespace
+
+// -onlynet=onion -onion=<tor> with no -proxy: nothing covers the clearnet
+// addresses, so the snapshot peer list and the addnode fallback must stay on
+// the onion peers instead of dialling the bootstrap servers from the node's IP.
+BOOST_AUTO_TEST_CASE(onion_only_without_a_clearnet_proxy_never_uses_the_clearnet_peers)
+{
+    NetworkStateGuard guard;
+    SetLimited(NET_IPV4);
+    SetLimited(NET_IPV6);
+    BOOST_REQUIRE(SetProxy(NET_ONION, proxyType(CService("127.0.0.1", 9050))));
+    BOOST_REQUIRE(BootstrapOnionOnlyActive());
+    BOOST_CHECK(!BootstrapClearnetProxied());
+
+    const std::vector<std::string> peers = GetBootstrapSnapshotPeerList();
+    BOOST_CHECK(peers == Params().OnionBootstrapPeers());
+    BOOST_CHECK(!ListsAnyClearnetBootstrapPeer(peers));
+
+    {
+        LOCK(cs_vAddedNodes);
+        vAddedNodes.clear();
+    }
+    BootstrapOnionFallbackCheck(); // no connections at all: the grace rule would fire
+    LOCK(cs_vAddedNodes);
+    BOOST_CHECK(!ListsAnyClearnetBootstrapPeer(vAddedNodes));
+}
+
+// The same node with a proxy for the clearnet addresses (-proxy): the
+// clearnet peers stay available behind the onion ones.
+BOOST_AUTO_TEST_CASE(onion_only_with_a_clearnet_proxy_keeps_the_clearnet_peers_as_a_later_choice)
+{
+    NetworkStateGuard guard;
+    SetLimited(NET_IPV4);
+    SetLimited(NET_IPV6);
+    BOOST_REQUIRE(SetProxy(NET_ONION, proxyType(CService("127.0.0.1", 9050))));
+    BOOST_REQUIRE(SetProxy(NET_IPV4, proxyType(CService("127.0.0.1", 9050))));
+    BOOST_CHECK(BootstrapClearnetProxied());
+
+    const std::vector<std::string> peers = GetBootstrapSnapshotPeerList();
+    const std::vector<std::string>& onion = Params().OnionBootstrapPeers();
+    BOOST_REQUIRE_EQUAL(peers.size(), onion.size() + Params().BootstrapPeers().size());
+    BOOST_CHECK(std::equal(onion.begin(), onion.end(), peers.begin()));
+    BOOST_CHECK(ListsAnyClearnetBootstrapPeer(peers));
+}
+
+// The Zcash parameter fetch of init runs before -proxy / -onlynet take effect:
+// it is only allowed when nothing says that connections must not leave directly.
+BOOST_AUTO_TEST_CASE(param_fetch_is_refused_when_it_would_bypass_the_proxy)
+{
+    const std::map<std::string, std::string> savedArgs = mapArgs;
+    const std::map<std::string, std::vector<std::string> > savedMulti = mapMultiArgs;
+    struct Restore {
+        const std::map<std::string, std::string>& a;
+        const std::map<std::string, std::vector<std::string> >& m;
+        ~Restore() { mapArgs = a; mapMultiArgs = m; }
+    } restore{savedArgs, savedMulti};
+
+    mapArgs.clear();
+    mapMultiArgs.clear();
+    BOOST_CHECK(!ZcashParamFetchWouldBypassProxy()); // plain node
+
+    mapArgs["-proxy"] = "127.0.0.1:9050";
+    mapMultiArgs["-proxy"].push_back("127.0.0.1:9050");
+    BOOST_CHECK(ZcashParamFetchWouldBypassProxy()); // -proxy, no -embeddedtor
+    mapArgs["-proxy"] = "0";
+    BOOST_CHECK(!ZcashParamFetchWouldBypassProxy()); // -proxy=0 means none
+    mapArgs.erase("-proxy");
+
+    mapMultiArgs["-onlynet"].push_back("onion");
+    mapArgs["-onlynet"] = "onion";
+    mapArgs["-onion"] = "127.0.0.1:9050";
+    BOOST_CHECK(ZcashParamFetchWouldBypassProxy()); // onion-only with an external Tor
+
+    mapMultiArgs["-onlynet"].push_back("ipv4");
+    BOOST_CHECK(!ZcashParamFetchWouldBypassProxy()); // clearnet allowed again
 }
 
 BOOST_AUTO_TEST_SUITE_END()

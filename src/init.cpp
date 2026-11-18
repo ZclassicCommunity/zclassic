@@ -1320,12 +1320,13 @@ bool InitSanityCheck(void)
     // once before use. A corrupted-but-correct-size param slips past this gate
     // but is caught by that loop, which then re-fetches (self-heal) before
     // failing.
-    // An onion-only -embeddedtor node never fetches here: this runs before
-    // Step 6 starts Tor and sets the proxies, so the fetch would dial the
-    // bootstrap peers over clearnet.
-    const bool fParamFetchAllowed = GetBoolArg("-bootstrap", true) && !EmbeddedTorOnionOnlyRequested();
+    // A node told to use a proxy (-proxy) or to stay onion-only (-onlynet
+    // without ipv4/ipv6, with or without -embeddedtor) never fetches here: this
+    // runs before Step 6 starts Tor and sets the proxies, so the fetch would
+    // dial the bootstrap peers directly and expose the node's address.
+    const bool fParamFetchAllowed = GetBoolArg("-bootstrap", true) && !ZcashParamFetchWouldBypassProxy();
     if (!ZcashParamsPresent() && GetBoolArg("-bootstrap", true) && !fParamFetchAllowed)
-        LogPrintf("Zcash parameters are missing; not fetching them from a bootstrap peer before the embedded Tor is up (-onlynet without ipv4/ipv6)\n");
+        LogPrintf("Zcash parameters are missing; not fetching them from a bootstrap peer before the proxy is set up (-proxy, or -onlynet without ipv4/ipv6): run zcutil/fetch-params.sh\n");
     if (!ZcashParamsPresent() && fParamFetchAllowed) {
         std::string paramError = "no bootstrap peer configured";
         BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
