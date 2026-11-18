@@ -236,14 +236,14 @@ chk_interop() {
     TX=$SD/interop_txids; : >"$TX"; rec_tx() { printf '%s %s\n' "$1" "$2" >>"$TX"; }
     sp=$(cli 0 z_getnewaddress sprout); sp2=$(cli 0 z_getnewaddress sprout); ta=$(cli 0 getnewaddress)
     ck "chain before Sapling" "$([ "$(cli 0 getblockcount)" -lt 230 ] && echo yes)" yes
-    give_z 0 "$sp" 4 48656c6c6f; rec_tx sprout_shield "$(cli 1 getrawmempool | head -1)"
+    give_z 0 "$sp" 4 48656c6c6f; rec_tx sprout_shield "$(cli 0 z_listreceivedbyaddress "$sp" | jq -r ".[0].txid")"
     t=$(zconfirm 0 "$sp" "[{\"address\":\"$ta\",\"amount\":1}]"); rec_tx sprout_to_t "$t"
     t=$(zconfirm 0 "$sp" "[{\"address\":\"$sp2\",\"amount\":1}]"); rec_tx sprout_to_sprout "$t"
     t=$(zconfirm 0 "$sp" "[{\"address\":\"$(cli 1 z_getnewaddress sprout)\",\"amount\":0.5}]"); rec_tx sprout_to_peer_sprout "$t"
     cli 1 generate 135 >/dev/null; sync_to 0
     zs=$(cli 0 z_getnewaddress); zs2=$(cli 0 z_getnewaddress)
-    t=$(zconfirm 0 "$sp" "[{\"address\":\"$zs\",\"amount\":0.5}]"); rec_tx sprout_to_sapling "$t"
-    t=$(zconfirm 0 "$sp2" "[{\"address\":\"$zs2\",\"amount\":0.3}]"); rec_tx sprout2_to_sapling "$t"
+    t=$(zconfirm 0 "$sp" "[{\"address\":\"$ta\",\"amount\":0.5}]"); rec_tx sprout_to_t_2 "$t"   # Sprout and Sapling never mix in one z_sendmany: go through a t address
+    t=$(zconfirm 0 "$ta" "[{\"address\":\"$zs\",\"amount\":0.9}]"); rec_tx t_to_sapling_after_sprout "$t"
     # sapling shield (coinbase and plain), memo, multi-recipient, multi-note
     ma=$(cli 1 getnewaddress); mz=$(cli 1 z_getnewaddress); cli 1 generate 5 >/dev/null
     op=$(cli 1 z_shieldcoinbase "*" "$mz" 0.0001 2>/dev/null | jq -r .opid); r=$(wait_op 1 "$op"); case $r in success*) rec_tx shieldcoinbase "${r#success }"; cli 1 generate 1 >/dev/null ;; *) bad "shieldcoinbase: $r" ;; esac
