@@ -41,7 +41,9 @@ while [ "$i" -lt "$total" ]; do
     else "$exe" "$@" </dev/null >"$tmp/out" 2>"$tmp/err"; fi
     rc=$?
     bad=""
-    if [ -n "$want" ] && ! cmp -s "$tmp/out" "$data/$want"; then bad="output differs from $want"; fi
+    # zclassic-tx.exe writes CRLF in text mode; the old harness read stdout with universal newlines.
+    tr -d '\r' <"$tmp/out" >"$tmp/out.lf"
+    if [ -n "$want" ] && ! cmp -s "$tmp/out.lf" "$data/$want"; then bad="output differs from $want"; fi
     [ "$rc" -eq "$wantrc" ] || bad="$bad return code $rc, want $wantrc"
     if [ -z "$bad" ]; then echo "zclassic_tx_util: PASS $name"
     else echo "zclassic_tx_util: FAIL $name:$bad"; failures=$((failures + 1)); fi
