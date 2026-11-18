@@ -73,6 +73,13 @@ QString roleText(const QString& role);
 // The ticker, or a short form of the token id when the creator left it empty.
 QString displayTicker(const QString& ticker, const QString& tokenId);
 
+// First and last 8 characters of a token id (the whole id when short).
+QString shortTokenId(const QString& tokenId);
+
+// The ticker with the short token id after it, "USDZ [0123abcd...89abcdef]": what a picker, a review and a result show,
+// because tickers are not unique and any token can use any ticker.
+QString tokenLabel(const QString& ticker, const QString& tokenId);
+
 // "ab12cd34...ef56:1"
 QString shortOutpoint(const QString& txid, int vout);
 

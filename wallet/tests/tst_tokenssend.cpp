@@ -271,6 +271,41 @@ private slots:
         QVERIFY(sendReviewText(u, checkSend(u, kAddr, "1"), parseTxPlan(sendReply(false))).contains("40f47139..."));
     }
 
+    // Anyone can create a token with any ticker (and any ticker can hide a right-to-left override), so two
+    // different tokens can look the same; the id is what tells them apart.
+    void lookalike_tickers_are_distinguishable()
+    {
+        TokenChoice a = aaa();
+        TokenChoice b = aaa();
+        b.tokenId = "11f47139acb5c3088aa282a48c58324a43177ec2704d5aa748f03c3d098285ff";
+        QVERIFY(tokenLabel(a.ticker, a.tokenId) != tokenLabel(b.ticker, b.tokenId));
+        QVERIFY(tokenLabel(a.ticker, a.tokenId).contains("40f47139...09828568"));
+        const SendCheck c = checkSend(b, kAddr, "1");
+        const QString review = sendReviewText(b, c, parseTxPlan(sendReply(false)));
+        QVERIFY(review.contains(b.tokenId));
+        QVERIFY(review.contains("11f47139...098285ff"));
+        QVERIFY(sendResultText(b, c, parseTxPlan(sendReply(true))).contains("11f47139...098285ff"));
+        // bidi and format controls are not shown
+        QCOMPARE(displayTicker(QString("AB") + QChar(0x202E) + "00", kTok), QString("AB00"));
+        QCOMPARE(displayTicker(QString(QChar(0x202E)), kTok), QString("40f47139..."));
+    }
+
+    void picker_rows_show_the_token_id()
+    {
+        FakeRpc rpc;
+        TokenChoice a = aaa();
+        TokenChoice b = aaa();
+        b.tokenId = "11f47139acb5c3088aa282a48c58324a43177ec2704d5aa748f03c3d098285ff";
+        TokenSendDialog d(&rpc, {a, b});
+        auto* box = d.findChild<QComboBox*>("tokenBox");
+        QVERIFY(box);
+        QVERIFY(box->itemText(0) != box->itemText(1));
+        QVERIFY(box->itemText(0).contains("40f47139...09828568"));
+        QVERIFY(box->itemText(1).contains("11f47139...098285ff"));
+        QVERIFY(box->itemText(0).contains("another token has this ticker"));
+        QVERIFY(d.findChild<QLabel*>("availableLabel")->text().contains("40f47139...09828568"));
+    }
+
     void result_text()
     {
         const SendCheck c = checkSend(aaa(), kAddr, "12.34");

@@ -131,9 +131,31 @@ QString roleText(const QString& role)
 
 QString displayTicker(const QString& ticker, const QString& tokenId)
 {
-    if (!ticker.trimmed().isEmpty())
-        return ticker;
+    // A ticker is chain text. Format and control characters (the right-to-left override U+202E and its kin) would
+    // visually reorder what is shown after it, such as the balance in a picker row: drop them.
+    QString clean;
+    clean.reserve(ticker.size());
+    for (QChar ch : ticker) {
+        const QChar::Category cat = ch.category();
+        if (cat == QChar::Other_Format || cat == QChar::Other_Control || cat == QChar::Separator_Line ||
+            cat == QChar::Separator_Paragraph)
+            continue;
+        clean.append(ch);
+    }
+    if (!clean.trimmed().isEmpty())
+        return clean;
     return tokenId.left(8) + QStringLiteral("...");
+}
+
+QString shortTokenId(const QString& tokenId)
+{
+    return tokenId.length() > 16 ? tokenId.left(8) + QStringLiteral("...") + tokenId.right(8) : tokenId;
+}
+
+QString tokenLabel(const QString& ticker, const QString& tokenId)
+{
+    // Anyone can create a token with any ticker: only the id tells two of them apart.
+    return displayTicker(ticker, tokenId) + QStringLiteral(" [") + shortTokenId(tokenId) + QLatin1Char(']');
 }
 
 QString shortOutpoint(const QString& txid, int vout)
