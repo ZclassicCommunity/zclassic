@@ -72,6 +72,7 @@
 #endif
 
 #include "witness_codec.h"
+#include "zcl_c23_sapling_scan.h"
 #include "zip32_codec.h"
 
 #include "base/log_level.h"
@@ -217,6 +218,14 @@ static inline void warm(void)
         if (pthread_once(&g_warm_once, warm_body) != 0)
             zcl_panic("pthread_once failed during warm-up");
     }
+}
+
+/* Exported for the batched scan glue (c23/glue/zcl_c23_sapling_scan.c), which
+ * calls vendored Jubjub primitives directly and so needs the same one-time,
+ * race-free initialisation every librustzcash_* entry point performs. */
+void zcl_c23_compat_warm(void)
+{
+    warm();
 }
 
 /* ------------------------------------------------------------------------ */
