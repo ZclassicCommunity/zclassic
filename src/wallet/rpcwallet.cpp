@@ -4009,6 +4009,9 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
         contextualTx.nVersion = 2; // Tx format should support vjoinsplits
     }
 
+    // Spending (signing, or decrypting shielded keys) needs the wallet keys: fail now, not in the async operation.
+    EnsureWalletIsUnlocked();
+
     // Create operation and add to global queue
     std::shared_ptr<AsyncRPCQueue> q = getAsyncRPCQueue();
     std::shared_ptr<AsyncRPCOperation> operation( new AsyncRPCOperation_sendmany(builder, contextualTx, fromaddress, taddrRecipients, zaddrRecipients, nMinDepth, nFee, contextInfo) );
@@ -4070,6 +4073,9 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
         );
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
+
+    // Spending needs the wallet keys (signing, or decrypting shielded keys): fail now, not in the async operation.
+    EnsureWalletIsUnlocked();
 
     // Validate the from address
     auto fromaddress = params[0].get_str();
@@ -4327,6 +4333,9 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
+    // Spending needs the wallet keys (signing, or decrypting shielded keys): fail now, not in the async operation.
+    EnsureWalletIsUnlocked();
+
     bool useAnyUTXO = false;
     bool useAnySprout = false;
     bool useAnySapling = false;
@@ -4564,7 +4573,10 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
                     estimatedTxSize += increase;
                     auto zaddr = entry.address;
                     SproutSpendingKey zkey;
-                    pwalletMain->GetSproutSpendingKey(zaddr, zkey);
+                    if (!pwalletMain->GetSproutSpendingKey(zaddr, zkey)) {
+                        EnsureWalletIsUnlocked();
+                        throw JSONRPCError(RPC_INVALID_PARAMETER, "Could not find spending key for payment address.");
+                    }
                     sproutNoteInputs.emplace_back(entry.jsop, entry.plaintext.note(zaddr), nValue, zkey);
                     mergedNoteValue += nValue;
                 }
@@ -4588,6 +4600,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
                     estimatedTxSize += increase;
                     libzcash::SaplingExtendedSpendingKey extsk;
                     if (!pwalletMain->GetSaplingExtendedSpendingKey(entry.address, extsk)) {
+                        EnsureWalletIsUnlocked();
                         throw JSONRPCError(RPC_INVALID_PARAMETER, "Could not find spending key for payment address.");
                     }
                     saplingNoteInputs.emplace_back(entry.op, entry.note, nValue, extsk.expsk);

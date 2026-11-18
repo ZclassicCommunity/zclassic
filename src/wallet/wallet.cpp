@@ -1952,7 +1952,7 @@ mapSproutNoteData_t CWallet::FindMySproutNotes(const CTransaction &tx) const
     // Transparent-only transactions cannot contain Sprout notes. Avoid taking
     // the key-store lock and preparing scan state for the common empty case.
     if (tx.vjoinsplit.empty()) return {};
-    LOCK(cs_SpendingKeyStore);
+    LOCK2(cs_KeyStore, cs_SpendingKeyStore);
     uint256 hash = tx.GetHash();
 
     mapSproutNoteData_t noteData;
@@ -2040,7 +2040,7 @@ std::pair<mapSaplingNoteData_t, SaplingIncomingViewingKeyMap> CWallet::FindMySap
     // transaction during initial sync. Spend-only transactions have no new
     // notes either; their nullifier/ownership processing remains in the caller.
     if (tx.vShieldedOutput.empty()) return {};
-    LOCK(cs_SpendingKeyStore);
+    LOCK2(cs_KeyStore, cs_SpendingKeyStore);
     uint256 hash = tx.GetHash();
 
     mapSaplingNoteData_t noteData;

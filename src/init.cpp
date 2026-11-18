@@ -33,6 +33,7 @@
 #include "script/standard.h"
 #include "script/sigcache.h"
 #include "scheduler.h"
+#include "dbwrapper.h"
 #include "txdb.h"
 #include "mapport.h"
 #include "torcontrol.h"
@@ -1488,8 +1489,13 @@ bool InitSanityCheck(void)
     g_startupTimer.mark("param-hash-loop");
 
     boost::filesystem::path data_dir = GetDataDir();
-    if (!boost::filesystem::is_directory(data_dir)){
-        boost::filesystem::create_directories(data_dir);
+    {
+        boost::system::error_code dirEc;
+        if (!boost::filesystem::is_directory(data_dir, dirEc)) {
+            boost::filesystem::create_directories(data_dir, dirEc);
+            if (dirEc)
+                return InitError(strprintf(_("Cannot create the data directory \"%s\": %s"), data_dir.string(), dirEc.message()));
+        }
     }
 
     fprintf(stdout, "Network: %s\n", Params().NetworkIDString().c_str());
@@ -2871,7 +2877,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     boost::filesystem::path blocksDir = GetDataDir() / "blocks";
     if (!boost::filesystem::exists(blocksDir))
     {
-        boost::filesystem::create_directories(blocksDir);
+        boost::system::error_code blocksEc;
+        boost::filesystem::create_directories(blocksDir, blocksEc);
+        if (blocksEc)
+            return InitError(strprintf(_("Cannot create the blocks directory \"%s\": %s"), blocksDir.string(), blocksEc.message()));
         bool linked = false;
         for (unsigned int i = 1; i < 10000; i++) {
             boost::filesystem::path source = GetDataDir() / strprintf("blk%04u.dat", i);
@@ -3038,6 +3047,15 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     break;
                 }
                 g_startupTimer.mark(".verifydb");
+            } catch (const dbwrapper_error& e) {
+                LogPrintf("%s\n", e.what());
+                if (e.IsEnvironmental()) {
+                    // Permissions, a read-only or full disk, a path that is too long or a held lock:
+                    // rebuilding the block database cannot fix these, so do not offer -reindex.
+                    return InitError(strprintf(_("Unable to open the block database: %s"), e.what()));
+                }
+                strLoadError = _("Error opening block database");
+                break;
             } catch (const std::exception& e) {
                 if (fDebug) LogPrintf("%s\n", e.what());
                 strLoadError = _("Error opening block database");

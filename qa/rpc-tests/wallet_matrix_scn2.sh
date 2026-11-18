@@ -142,6 +142,16 @@ scn_encrypt() {
     r=$(zsend 0 "$zs" "[{\"address\":\"$other\",\"amount\":1}]"); case $r in *assphrase*|*nlock*|*ocked*) pass "z_sendmany while locked fails cleanly: $(printf %s "$r" | cut -c1-90)" ;; *) bad "z_sendmany while locked: $r" ;; esac; alive "z_sendmany while locked"; cli 0 getblockcount >/dev/null 2>&1 || { say "  (daemon died; restarting it, still locked)"; start 0 "$BIN" -connect=127.0.0.1:$((BASE + 1)); }
     # the same constructor path for a Sprout from-address (no notes needed: the key lookup comes first)
     r=$(zsend 0 "$sp" "[{\"address\":\"$other\",\"amount\":1}]"); case $r in *assphrase*|*nlock*|*ocked*) pass "z_sendmany from Sprout while locked fails cleanly" ;; *) bad "z_sendmany from Sprout while locked: $r" ;; esac; alive "z_sendmany from Sprout while locked"; cli 0 getblockcount >/dev/null 2>&1 || { say "  (daemon died; restarting it, still locked)"; start 0 "$BIN" -connect=127.0.0.1:$((BASE + 1)); }
+    # every spending RPC refuses up front (a synchronous RPC error, not an opid that fails later)
+    ckerr "z_sendmany from a t-address while locked" "assphrase" 0 z_sendmany "$ta" "[{\"address\":\"$other\",\"amount\":1}]"
+    ckerr "z_sendmany from Sapling while locked is a direct RPC error" "assphrase" 0 z_sendmany "$zs" "[{\"address\":\"$other\",\"amount\":1}]"
+    ckerr "z_sendmany from Sprout while locked is a direct RPC error" "assphrase" 0 z_sendmany "$sp" "[{\"address\":\"$other\",\"amount\":1}]"
+    ckerr "z_mergetoaddress from Sprout while locked" "assphrase" 0 z_mergetoaddress "[\"$sp\"]" "$sp"
+    ckerr "z_mergetoaddress from Sapling while locked" "assphrase" 0 z_mergetoaddress "[\"$zs\"]" "$zs"
+    ckerr "z_mergetoaddress from t-addresses while locked" "assphrase" 0 z_mergetoaddress "[\"$ta\"]" "$zs"
+    ckerr "z_shieldcoinbase while locked" "assphrase" 0 z_shieldcoinbase "*" "$zs"
+    ckerr "z_exportkey while locked" "assphrase" 0 z_exportkey "$zs"
+    alive "spending RPCs while locked"
     obs "z_getnewaddress_while_locked" "$(errtxt 0 z_getnewaddress | sed 's/OK:.*/OK/')"
     ckerr "dumpprivkey while locked" "unlock|locked|passphrase" 0 dumpprivkey "$ta"
     ckerr "walletpassphrase wrong" "incorrect|passphrase" 0 walletpassphrase "nope" 600

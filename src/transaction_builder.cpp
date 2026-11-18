@@ -63,7 +63,7 @@ TransactionBuilder::TransactionBuilder(
 void TransactionBuilder::SetExpiryHeight(uint32_t nExpiryHeight)
 {
     if (nExpiryHeight < nHeight || nExpiryHeight <= 0 || nExpiryHeight >= TX_EXPIRY_HEIGHT_THRESHOLD) {
-        throw new std::runtime_error("TransactionBuilder::SetExpiryHeight: invalid expiry height");
+        throw std::runtime_error("TransactionBuilder::SetExpiryHeight: invalid expiry height");
     }
     mtx.nExpiryHeight = nExpiryHeight;
 }
