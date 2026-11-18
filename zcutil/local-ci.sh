@@ -25,6 +25,9 @@
 #     --commit REV  commit to build (default HEAD of this checkout; it is cloned
 #                   fresh, uncommitted changes are NOT included)
 #     --tor         also run the Tor two/three-node and addrv2 tests (needs network)
+#     --flavor F    test build flavor: debug (checked libstdc++, lock-order checks, as ci.yml),
+#                   release (the configuration that ships; unit suites and smoke only) or both (default)
+#     --pick REV    cherry-pick REV on top of the commit in the TEST builds only (repeatable)
 #     --jobs N      make parallelism (default min(8, nproc))
 #
 #   environment
@@ -54,7 +57,7 @@ DAEMON_PKGS="build-essential libtool autotools-dev automake pkg-config bsdmainut
 MINGW_PKGS="g++-mingw-w64-x86-64"
 WALLET_PKGS="ca-certificates curl git build-essential perl pkg-config xz-utils libsodium-dev libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxi-dev libxrender-dev libxcb1-dev libxcb-util0-dev libxcb-glx0-dev libxcb-keysyms1-dev libxcb-image0-dev libxcb-shm0-dev libxcb-icccm4-dev libxcb-sync-dev libxcb-xfixes0-dev libxcb-shape0-dev libxcb-randr0-dev libxcb-render-util0-dev libxcb-xinerama0-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev"
 # Test-only extras: tools the shell tests call, and Qt for the wallet logic/widget tests.
-TEST_PKGS="file procps jq bc rsync strace qtbase5-dev libqt5svg5-dev qttools5-dev-tools fonts-dejavu-core"
+TEST_PKGS="file procps iproute2 jq bc rsync strace qtbase5-dev libqt5svg5-dev qttools5-dev-tools fonts-dejavu-core"
 
 die() { echo "local-ci: $*" >&2; exit 1; }
 say() { echo "== local-ci: $*"; }
@@ -73,6 +76,7 @@ inner_common() {
     cd /w/src
     JOBS=${ZCL_CI_JOBS:-8}
     COMMIT=$(git rev-parse HEAD)
+    TD=/out/${ZCL_CI_TESTDIR:-test}; FLAVOR=${ZCL_CI_FLAVOR:-debug}
 }
 
 expected_version() {
@@ -174,16 +178,21 @@ inner_wallet_linux() {
 
 inner_test_build() {
     inner_common
-    mkdir -p /out/test/logs
-    log=/out/test/logs/build.log; : >"$log"
-    say "clean build with tests (DEBUG depends, as ci.yml), jobs $JOBS"
-    export DEBUG=1 CONFIGURE_FLAGS="--enable-tests --disable-man"
+    mkdir -p $TD/logs
+    log=$TD/logs/build.log; : >"$log"
+    export CONFIGURE_FLAGS="--enable-tests --disable-man"
+    if [ "$FLAVOR" = debug ]; then
+        # As ci.yml: debug depends and --enable-debug (checked C++ library, lock-order checking).
+        say "clean DEBUG build with tests (checked library, lock-order checks), jobs $JOBS"; export DEBUG=1
+    else
+        say "clean RELEASE-configured build with tests (the configuration that ships), jobs $JOBS"
+    fi
     t0=$(date +%s)
     if run_logged "$log" ./zcutil/build.sh -j"$JOBS"; then rc=0; else rc=1; fi
-    printf 'build-tests\t%s\t%s\n' "$([ $rc -eq 0 ] && echo PASS || echo FAIL)" "$(( $(date +%s) - t0 ))" >>/out/test/results.tsv
+    printf 'build-tests\t%s\t%s\n' "$([ $rc -eq 0 ] && echo PASS || echo FAIL)" "$(( $(date +%s) - t0 ))" >>$TD/results.tsv
     [ $rc -eq 0 ] || exit 1
     say "Zcash parameters"
-    run_logged "$log" ./zcutil/fetch-params.sh || { printf 'fetch-params\tFAIL\t0\n' >>/out/test/results.tsv; exit 1; }
+    run_logged "$log" ./zcutil/fetch-params.sh || { printf 'fetch-params\tFAIL\t0\n' >>$TD/results.tsv; exit 1; }
 }
 
 # step <name> <cmd...>: run with its own log, record PASS/FAIL/SKIP (rc 77 = skip).
@@ -191,14 +200,14 @@ step() {
     name=$1; shift
     t0=$(date +%s)
     set +e
-    timeout "${ZCL_CI_STEP_TIMEOUT:-14400}" sh /ci/local-ci.sh __inner "$@" >"/out/test/logs/$name.log" 2>&1
+    timeout "${ZCL_CI_STEP_TIMEOUT:-14400}" sh /ci/local-ci.sh __inner "$@" >"$TD/logs/$name.log" 2>&1
     rc=$?
     set -e
     secs=$(( $(date +%s) - t0 ))
     st=PASS
     [ "$rc" -eq 0 ] || st=FAIL
     [ "$rc" -ne 77 ] || st=SKIP
-    printf '%s\t%s\t%s\n' "$name" "$st" "$secs" >>/out/test/results.tsv
+    printf '%s\t%s\t%s\n' "$name" "$st" "$secs" >>$TD/results.tsv
     echo "[$st] $name (${secs}s, rc $rc)"
 }
 
@@ -208,27 +217,27 @@ t_norust()   { make -C src check-c23-no-rust; }
 t_torsyms()  { make -C src check-c23-tor-symbols TOR_LIBDIR="/w/src/depends/$HOST/lib"; }
 t_treeroot() {
     cc -std=c2x -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Isrc \
-        src/zcash/tree_root.c src/test/tree_root_c_tests.c -o /tmp/tree-root-test && /tmp/tree-root-test
+        src/zcash/tree_root.c src/test/tree_root_c_tests.c -o /tmp/tree-root-test && env -u LD_PRELOAD /tmp/tree-root-test
 }
 t_testbitcoin() { ./src/test/test_bitcoin; }
 t_gtest()       { ./src/zcash-gtest; }
 t_c23linked() {
     [ -d /golden ] || { echo "no golden corpus (set ZCL_CI_GOLDEN)"; return 77; }
-    sh src/c23/test/run.sh --out /out/test/c23 --linked src/libzcl_c23.a --deps "/w/src/depends/$HOST" --golden /golden
+    sh src/c23/test/run.sh --out $TD/c23 --linked src/libzcl_c23.a --deps "/w/src/depends/$HOST" --golden /golden
 }
 t_smoke() {
-    rm -rf /out/test/smoke
+    rm -rf $TD/smoke
     if [ -d /prev ]; then
-        sh src/c23/test/regtest-smoke.sh --bin /w/src/src --work /out/test/smoke --peer-bin /prev --port-base 38232
+        sh src/c23/test/regtest-smoke.sh --bin /w/src/src --work $TD/smoke --peer-bin /prev --port-base 38232
     else
-        sh src/c23/test/regtest-smoke.sh --bin /w/src/src --work /out/test/smoke --port-base 38232
+        sh src/c23/test/regtest-smoke.sh --bin /w/src/src --work $TD/smoke --port-base 38232
     fi
 }
 t_matrix() {
-    rm -rf /out/test/matrix
+    rm -rf $TD/matrix
     if [ -d /prev ]; then peer="--peer-bin /prev"; else peer=""; fi
     # shellcheck disable=SC2086
-    sh qa/rpc-tests/wallet_matrix.sh --bin /w/src/src --work /out/test/matrix --only 1,2,3,4,5,6,7,8,9 --base 30000 $peer
+    sh qa/rpc-tests/wallet_matrix.sh --bin /w/src/src --work $TD/matrix --only 1,2,3,4,5,6,7,8,9 --base 30000 $peer
 }
 t_tokenguard()  { sh qa/rpc-tests/wallet_tokenguard.sh /w/src/src; }
 t_tokenguard_sapling() { E2E_NODE_ARGS="-nuparams=5ba81b19:1 -nuparams=76b809bb:1" sh qa/rpc-tests/wallet_tokenguard.sh /w/src/src; }
@@ -239,12 +248,16 @@ t_tor() { # <script> [args]  -- uses the release candidate when present
     sh "src/c23/tor/$s" "$bindir" default "$@"
 }
 t_wallet_qt() {
-    command -v qmake >/dev/null || { echo "no Qt in the environment"; return 77; }
+    # The wallet needs Qt 5.14+ (Qt::endl); focal's distro Qt is 5.12.  Use the pinned static Qt 5.15 of the
+    # wallet bundle toolchain when it exists, else the distro qmake.
+    qmake=qmake; qp=""
+    if [ -x /w/src/wallet/artifacts/linux-build/qt-static/bin/qmake ]; then qmake=/w/src/wallet/artifacts/linux-build/qt-static/bin/qmake; qp=QTPLUGIN.platforms=qoffscreen; fi
+    command -v "$qmake" >/dev/null || { echo "no Qt in the environment"; return 77; }
     cd wallet
     cp /usr/lib/x86_64-linux-gnu/libsodium.a res/libsodium.a
     mkdir -p artifacts/logic artifacts/widget
-    (cd artifacts/logic && qmake ../../tests/tests.pro CONFIG+=release && make -j4)
-    (cd artifacts/widget && qmake ../../tests/widget/tst_widget.pro CONFIG+=release && make -j4)
+    (cd artifacts/logic && $qmake ../../tests/tests.pro CONFIG+=release $qp && make -j4)
+    (cd artifacts/widget && $qmake ../../tests/widget/tst_widget.pro CONFIG+=release $qp && make -j4)
     export QT_QPA_PLATFORM=offscreen ZCL_SHOTS_DIR="$PWD/artifacts/shots"
     artifacts/logic/tst_logic -o artifacts/logic-results.txt,txt
     artifacts/widget/tst_widget -o artifacts/widget-results.txt,txt
@@ -253,15 +266,16 @@ t_wallet_qt() {
 inner_test_run() {
     inner_common
     HOST=$(./depends/config.guess)
-    mkdir -p /out/test/logs
+    mkdir -p $TD/logs
     step check-c23-vendor t_vendor
     step check-c23-no-rust t_norust
     step check-c23-tor-symbols t_torsyms
-    step tree-root-asan t_treeroot
     step test_bitcoin-full t_testbitcoin
     step zcash-gtest-full t_gtest
-    step c23-run-linked t_c23linked
     step regtest-smoke t_smoke
+    if [ "$FLAVOR" = release ]; then return 0; fi   # release flavor: unit suites + smoke only
+    step tree-root-asan t_treeroot
+    step c23-run-linked t_c23linked
     step wallet_matrix-1-9 t_matrix
     step wallet_tokenguard t_tokenguard
     step wallet_tokenguard-sapling t_tokenguard_sapling
@@ -271,7 +285,7 @@ inner_test_run() {
 
 inner_test_tor() {
     inner_common
-    mkdir -p /out/test/logs
+    mkdir -p $TD/logs
     step tor-twonode t_tor twonode.sh
     step tor-threenode t_tor threenode.sh
     step tor-addrv2gossip t_tor addrv2gossip.sh
@@ -295,12 +309,14 @@ if [ "${1:-}" = "__inner" ]; then
     exit 0
 fi
 
-EXTRA_BINDS=""
+EXTRA_BINDS=""; PICKS=""; FLAVOR=both; FLAVOR_CUR=debug; TESTDIR=test
 COMMIT_REV=HEAD; TOR=0; JOBS=${ZCL_CI_JOBS:-}
 while [ $# -gt 0 ]; do
     case $1 in
         --commit) COMMIT_REV=$2; shift 2 ;;
         --tor) TOR=1; shift ;;
+        --flavor) FLAVOR=$2; shift 2 ;;
+        --pick) PICKS="$PICKS $2"; shift 2 ;;
         --jobs) JOBS=$2; shift 2 ;;
         -h|--help) sed -n '2,45p' "$SELF"; exit 0 ;;
         -*) die "unknown option $1" ;;
@@ -353,7 +369,7 @@ enter() {
         --setenv HOME /root --setenv PATH /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
         --setenv TMPDIR /tmp --setenv TMP /tmp --setenv TEMP /tmp --setenv LANG C.UTF-8 --setenv TERM "${TERM:-dumb}" \
         --setenv ZCL_CI_STEP_TIMEOUT "${ZCL_CI_STEP_TIMEOUT:-14400}" \
-        --setenv LD_PRELOAD /usr/local/lib/zcl-nochown.so \
+        --setenv ZCL_CI_TESTDIR "$TESTDIR" --setenv ZCL_CI_FLAVOR "$FLAVOR_CUR" \
         --setenv ZCL_CI_JOBS "$JOBS" --setenv ZCL_CI_EXPECT_VERSION "${ZCL_CI_EXPECT_VERSION:-}" \
         --chdir /w "$@"
 }
@@ -366,6 +382,15 @@ prepare_src() {
     git clone -q --no-hardlinks --no-checkout "$REPO" "$w/src"
     git -C "$w/src" checkout -q --detach "$COMMIT"
     [ "$(git -C "$w/src" rev-parse HEAD)" = "$COMMIT" ] || die "checkout mismatch"
+    # --pick: extra commits applied on top, for the test builds only (e.g. a test-harness fix
+    # not yet in the release branch).  They are listed in $OUT/test*/PICKS.txt.
+    case $job in
+        test|test-release)
+            for p in $PICKS; do
+                git -C "$w/src" -c user.name=local-ci -c user.email=local-ci@localhost cherry-pick -x "$p" >/dev/null \
+                    || die "cherry-pick of $p failed"
+            done ;;
+    esac
     if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no 2>/dev/null)" ] && [ "$COMMIT_REV" = HEAD ]; then
         echo "local-ci: note: the working tree has uncommitted changes; building committed $SHORT only" >&2
     fi
@@ -384,7 +409,7 @@ stage() {
     t0=$(date +%s)
     rc=0
     {
-        if command -v flock >/dev/null; then flock 9; fi
+        if [ "$net" = host ] && command -v flock >/dev/null; then flock 9; fi
         ( enter "$w" "$net" sh /ci/local-ci.sh __inner "$inner" )
     } 9>"$CACHE/.lock" || rc=$?
     echo "== local-ci: $inner finished in $(( $(date +%s) - t0 ))s (rc $rc)"
@@ -420,6 +445,12 @@ int fchown(int f, uid_t u, gid_t g) { (void)f; (void)u; (void)g; return 0; }
 int fchownat(int d, const char *p, uid_t u, gid_t g, int fl) { (void)d; (void)p; (void)u; (void)g; (void)fl; return 0; }
 EOF
     cc -O2 -shared -fPIC -o "$ENVDIR/usr/local/lib/zcl-nochown.so" "$dl/nochown.c"
+    # tar run as (mapped) root restores the archive owner, which a one-uid namespace refuses.
+    mkdir -p "$ENVDIR/usr/local/bin"
+    printf '#!/bin/sh
+exec /bin/tar --no-same-owner "$@"
+' >"$ENVDIR/usr/local/bin/tar"
+    chmod 755 "$ENVDIR/usr/local/bin/tar"
     mkdir -p "$ENVDIR/etc/apt/apt.conf.d" "$ENVDIR/root" "$ENVDIR/ci" "$ENVDIR/w" "$ENVDIR/cache" "$ENVDIR/out"
     echo 'APT::Sandbox::User "root";' >"$ENVDIR/etc/apt/apt.conf.d/99zc-localci"
     cat >"$ENVDIR/root/zc-install.sh" <<EOF
@@ -448,9 +479,9 @@ EOF
 }
 
 summary_test() {
-    r=$OUT/test/results.tsv
+    r=$OUT/$TESTDIR/results.tsv
     [ -f "$r" ] || { echo "no test results"; return 1; }
-    echo; echo "== test summary ($OUT/test, logs in $OUT/test/logs)"
+    echo; echo "== test summary, $FLAVOR_CUR build ($OUT/$TESTDIR, logs in $OUT/$TESTDIR/logs)"
     printf '%-34s %-6s %8s\n' STEP RESULT SECONDS
     awk -F'\t' '{ printf "%-34s %-6s %8s\n", $1, $2, $3 }' "$r"
     nfail=$(awk -F'\t' '$2 == "FAIL"' "$r" | wc -l)
@@ -460,12 +491,26 @@ summary_test() {
 }
 
 do_test() {
-    mkdir -p "$OUT/test/logs"; rm -f "$OUT/test/results.tsv"; : >"$OUT/test/results.tsv"
-    # Reuse one clean clone for the build and the run stages (and the Tor stage).
-    stage test host test-build || { summary_test || true; return 1; }
-    stage test none test-run keep || true
-    if [ "$TOR" = 1 ]; then stage test host test-tor keep || true; fi
-    summary_test
+    rc=0
+    case $FLAVOR in both) fl="debug release" ;; debug|release) fl=$FLAVOR ;; *) die "--flavor must be debug, release or both" ;; esac
+    for FLAVOR_CUR in $fl; do
+        if [ "$FLAVOR_CUR" = debug ]; then TESTDIR=test; else TESTDIR=test-release; fi
+        mkdir -p "$OUT/$TESTDIR/logs"; rm -f "$OUT/$TESTDIR/results.tsv"; : >"$OUT/$TESTDIR/results.tsv"
+        printf '%s\n' $PICKS >"$OUT/$TESTDIR/PICKS.txt"
+        # Reuse one clean clone for the build and the run stages (and the Tor stage).
+        if ! stage "$TESTDIR" host test-build; then summary_test || true; rc=1; continue; fi
+        # Mount the wallet bundle's static Qt 5.15 + OpenSSL (if built) where the wallet tests expect them.
+        tc=$CACHE/wallet-linux-toolchain
+        if [ -x "$tc/qt-static/bin/qmake" ]; then
+            lb=$OUT/work/$TESTDIR/src/wallet/artifacts/linux-build; mkdir -p "$lb/qt-static" "$lb/openssl"
+            EXTRA_BINDS="--ro-bind $tc/qt-static /w/src/wallet/artifacts/linux-build/qt-static --ro-bind $tc/openssl /w/src/wallet/artifacts/linux-build/openssl"
+        fi
+        stage "$TESTDIR" none test-run keep || true
+        EXTRA_BINDS=""
+        if [ "$TOR" = 1 ] && [ "$FLAVOR_CUR" = debug ]; then stage "$TESTDIR" host test-tor keep || true; fi
+        summary_test || rc=1
+    done
+    return $rc
 }
 
 cmd_one() {
@@ -484,6 +529,7 @@ cmd_one() {
             stage wallet-linux host wallet-linux keep ;;
         test) do_test ;;
         macos) do_macos ;;
+        retry-step) need_env; [ -n "${RETRY_FN:-}" ] || die "usage: RETRY_FN=t_treeroot local-ci.sh retry-step"; stage test none "$RETRY_FN" keep ;;
         clean) rm -rf "${OUT:?}/work"; say "removed $OUT/work" ;;
         shell) need_env; prepare_src shell; ( enter "$OUT/work/shell" host sh -c 'cd /w/src; exec bash -i' ) ;;
         *) die "unknown command $1" ;;

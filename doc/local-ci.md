@@ -93,7 +93,22 @@ embedded manifest with `activeCodePage` UTF-8. macOS: `otool -L` allows only
 (only processes of this run are ever signalled). Unlike the workflow, a failed
 `! grep` is a real failure here.
 
-`test` builds clean with tests (`DEBUG=1`, as `ci.yml`) and runs: `check-c23-vendor`,
+`test` runs two builds of the test suites (`--flavor debug|release|both`, default both):
+
+* **debug** (as `ci.yml`): `DEBUG=1` depends and `--enable-debug`, which in this fork
+  turns on the checked C++ standard library (`_GLIBCXX_DEBUG`) and lock-order checking.
+  It finds container/iterator misuse and lock-order bugs that a release build hides, and
+  also runs the full list below. Expect findings that never show in a release build.
+* **release**: the configuration that ships (same depends as the daemon candidates, so
+  they come from the cache). It runs `check-c23-*`, full `test_bitcoin`, full
+  `zcash-gtest` and the regtest smoke, so a release-only problem is not missed.
+
+`--pick REV` cherry-picks a commit (for example a harness fix not yet on the release
+branch) onto the test builds only; the picks are recorded in `test*/PICKS.txt`.
+Results are in `test/` (debug) and `test-release/`.
+
+The debug stage runs:
+`check-c23-vendor`,
 `check-c23-no-rust`, `check-c23-tor-symbols`, the tree-root ASan/UBSan check, full
 `test_bitcoin`, full `zcash-gtest`, `src/c23/test/run.sh --linked` (golden corpus),
 `regtest-smoke.sh`, `wallet_matrix.sh` scenarios 1-9, `wallet_tokenguard.sh` (plain and

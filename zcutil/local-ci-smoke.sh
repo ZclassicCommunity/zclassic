@@ -39,8 +39,9 @@ sub8() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.8f", a - b }'; }
 fail() { echo "local-ci-smoke: FAIL $*"; cleanup; exit 1; }
 cleanup() {
     cli stop >/dev/null 2>&1
-    i=0; while [ $i -lt 60 ] && [ -f "$dd/regtest/zclassicd.pid" ]; do sleep 1; i=$((i + 1)); done
-    kill "$pid" >/dev/null 2>&1
+    # The node is gone when its RPC no longer answers (a pid file path differs per platform).
+    i=0; while [ $i -lt 90 ] && cli getblockcount >/dev/null 2>&1; do sleep 1; i=$((i + 1)); done
+    i=0; while [ $i -lt 30 ] && kill -0 "$pid" 2>/dev/null; do sleep 1; i=$((i + 1)); done
 }
 
 "$bin/zclassicd$exe" -regtest -datadir="$(nat "$dd")" -port=$p2p -dnsseed=0 -bootstrap=0 -upnp=0 -listen=0 \
@@ -108,6 +109,6 @@ echo "ok  z->t: remainder $b2, transparent $t2"
 
 [ "$(cli getblockcount)" = 105 ] || fail "unexpected final height $(cli getblockcount)"
 cleanup
-sleep 1
-if kill -0 "$pid" 2>/dev/null; then echo "local-ci-smoke: FAIL node still running"; kill -9 "$pid"; exit 1; fi
+
+if kill -0 "$pid" 2>/dev/null || cli getblockcount >/dev/null 2>&1; then echo "local-ci-smoke: FAIL node still running"; kill -9 "$pid" 2>/dev/null; exit 1; fi
 echo "local-ci-smoke: PASS"
