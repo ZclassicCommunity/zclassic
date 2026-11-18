@@ -2637,6 +2637,14 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     if (!StubRecoveryAllowedNow(GetDataDir(), anchorForStub.nHeight, skipReason)) {
                         SetBootstrapInfoPhase("skipped", skipReason);
                         LogPrintf("Bootstrap: abandoned-stub recovery skipped: %s\n", skipReason);
+                        // The attempts are used up for this anchor: no download will resume
+                        // here, so a partial snapshot kept for it only takes disk space. A
+                        // cooldown is different: the next start may continue it.
+                        StubRecoveryState exhausted;
+                        if (ReadStubRecoveryMarker(GetDataDir(), exhausted) &&
+                            exhausted.anchorHeight == anchorForStub.nHeight &&
+                            exhausted.attempts >= kStubRecoveryMaxAttempts)
+                            RemoveStaleBootstrapStaging(GetDataDir());
                         if (explicit_peer)
                             return InitError(skipReason);
                         // else fall through to normal sync (NOT eligible).
@@ -2782,6 +2790,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     // the (correct, self-healed) terminal state so the GUI surfaces
                     // "fast-sync unavailable, syncing normally" rather than an error.
                     SetBootstrapInfoPhase("normal_sync", bootstrap_error);
+                    // The partial snapshot stays for the next start to resume, but it
+                    // sits next to the growing chain until then: say where it is.
+                    BOOST_FOREACH(const boost::filesystem::path& keptStaging, ListBootstrapStagingDirs(GetDataDir()))
+                        LogPrintf("Bootstrap: the partial snapshot in %s is kept so a later start can resume it; "
+                                  "it uses up to the full snapshot size and is removed with -bootstrap=0 or once the chain is real\n",
+                                  keptStaging.string());
                     // No snapshot was imported this start. If we moved a genesis-only
                     // datadir aside to attempt it, move it back so the datadir is left
                     // exactly as it was found (and no backup dir accumulates). Only a
@@ -2820,6 +2834,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 conflicts ? "conflicting flag (-reindex/-reindex-chainstate/-loadblock)"
                           : (!GetBoolArg("-bootstrap", true) ? "-bootstrap=0"
                                                              : "no bootstrap peers configured"));
+            // A partial snapshot kept for resume by an earlier start is dead weight
+            // when the operator turned bootstrap off (or asked for a reindex or a
+            // block import): give the disk back instead of keeping it for ever.
+            if (conflicts || !GetBoolArg("-bootstrap", true))
+                RemoveStaleBootstrapStaging(GetDataDir());
         }
     }
 

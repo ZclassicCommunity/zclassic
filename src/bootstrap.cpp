@@ -3881,6 +3881,18 @@ size_t RemoveStaleBootstrapStaging(const boost::filesystem::path& data_dir, cons
     return removed;
 }
 
+std::vector<boost::filesystem::path> ListBootstrapStagingDirs(const boost::filesystem::path& data_dir)
+{
+    std::vector<boost::filesystem::path> dirs;
+    boost::system::error_code ec;
+    const size_t prefixLen = strlen(BOOTSTRAP_STAGING_PREFIX);
+    for (boost::filesystem::directory_iterator it(data_dir, ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->path().filename().string().compare(0, prefixLen, BOOTSTRAP_STAGING_PREFIX) == 0)
+            dirs.push_back(it->path());
+    }
+    return dirs;
+}
+
 bool BootstrapPrepareStaging(const boost::filesystem::path& data_dir, const CBootstrapSnapshotManifest& manifest,
                              boost::filesystem::path& staging, BootstrapStagingVerdict& verdict, std::string& error)
 {

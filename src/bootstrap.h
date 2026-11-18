@@ -58,6 +58,9 @@ bool IsBootstrapFreshChainDatadir(const boost::filesystem::path& data_dir, std::
  *  everything is removed when no bootstrap will run any more. Returns the number removed. */
 size_t RemoveStaleBootstrapStaging(const boost::filesystem::path& data_dir, const std::string& keepName = std::string());
 
+/** The bootstrap-peer-staging-* directories under data_dir (a kept, resumable partial download). */
+std::vector<boost::filesystem::path> ListBootstrapStagingDirs(const boost::filesystem::path& data_dir);
+
 /** Choose and prepare the staging directory for the snapshot `manifest` describes. The name is
  *  stable for a given snapshot anchor (bootstrap_resume.h), so a directory left by an interrupted
  *  attempt is found again. `verdict` says whether it was reused (BSV_REUSE_*) or started clean;
