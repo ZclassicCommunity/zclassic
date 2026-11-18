@@ -3,6 +3,7 @@
 # Reuses the wallet_matrix.sh harness (helpers, PASS/FAIL accounting, observations).
 #
 # usage: wallet_platform_checks.sh --bin <dir> --work <dir> [--peer-bin <dir>] [--only a,b,..] [--base port]
+#   env PT_LIST="1 4 0" prover-thread settings for the timing check (0 = default)
 #   checks: timing   z_sendmany of 1/5/20/40 notes to 1 and 10 recipients at -proverthreads=1,4,default
 #                    (wall time and peak RSS of the wallet node in <work>/timings.txt)
 #           concurrent  two z_sendmany in flight at once from different addresses
@@ -61,7 +62,7 @@ tobs() { echo "$SCN_ID.$1 = $2" >>"$WORK/timings.txt"; say "  time $1 = $2"; }
 # ------------------------------------------------------------------ timing
 chk_timing() {
     setup2 || return
-    for pt in 1 4 0; do
+    for pt in ${PT_LIST:-1 4 0}; do
         restart0 -proverthreads=$pt || return
         for N in 1 5 20 40; do for R in 1 10; do
             zs=$(cli 0 z_getnewaddress); cli 1 generate 30 >/dev/null; sync_to 0
