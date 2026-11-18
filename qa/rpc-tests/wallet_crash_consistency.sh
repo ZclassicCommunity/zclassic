@@ -27,18 +27,20 @@
 # Output: <work>/results.txt (one line per seed), <work>/hits.txt (how often every crash
 # point fired). Failures keep the crashed datadir under <work>/fail-<seed>-<iter>/.
 # Needs jq and the Zcash parameters in ~/.zcash-params. Shell only, no Python.
-BIN=""; WORK=""; PEER_BIN=""; PORT_BASE=""; NOHOOKS=0; ONLY=""
+#   --ref-bin   binary of the -rescan reference node (default: --bin); an older release here
+#               makes the reference independent of the wallet code under test
+BIN=""; WORK=""; PEER_BIN=""; REF_BIN=""; PORT_BASE=""; NOHOOKS=0; ONLY=""
 SEEDS="11 23 37 41 53 67 79 83 97 101 113 127"; ITERS=25
 while [ $# -gt 0 ]; do
     case $1 in
-        --bin) BIN=$2; shift 2 ;; --work) WORK=$2; shift 2 ;; --peer-bin) PEER_BIN=$2; shift 2 ;;
+        --bin) BIN=$2; shift 2 ;; --work) WORK=$2; shift 2 ;; --peer-bin) PEER_BIN=$2; shift 2 ;; --ref-bin) REF_BIN=$2; shift 2 ;;
         --seeds) SEEDS=$2; shift 2 ;; --iters) ITERS=$2; shift 2 ;; --base) PORT_BASE=$2; shift 2 ;;
         --no-hooks) NOHOOKS=1; shift ;; --only) ONLY=$2; shift 2 ;; *) echo "bad arg $1" >&2; exit 2 ;;
     esac
 done
 [ -x "$BIN/zclassicd" ] && [ -n "$WORK" ] || { echo "usage: $0 --bin DIR --work DIR [--peer-bin DIR] [--seeds \"..\"] [--iters N] [--no-hooks]" >&2; exit 2; }
 command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
-PEER_BIN=${PEER_BIN:-$BIN}
+PEER_BIN=${PEER_BIN:-$BIN}; REF_BIN=${REF_BIN:-$BIN}
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/wallet_matrix_lib.sh"
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
@@ -120,6 +122,14 @@ converge() {
 settle_mempools() {
     sm=0
     while [ $sm -lt 4 ]; do
+        # A pending wallet transaction that a restart put back into a node's mempool reaches the peer
+        # only when the wallet resends it (minutes later, at random), and the other node may never
+        # have taken it back (it restarted on a shorter chain): hand every one to the peer to mine.
+        for mn in 0 2; do
+            for mx in $(cli "$mn" getrawmempool 2>/dev/null | jq -r '.[]' 2>/dev/null); do
+                mh=$(cli "$mn" getrawtransaction "$mx" 2>/dev/null) && cli 1 sendrawtransaction "$mh" >/dev/null 2>&1
+            done
+        done
         n0=$(cli 0 getrawmempool 2>/dev/null | jq length 2>/dev/null); n2=$(cli 2 getrawmempool 2>/dev/null | jq length 2>/dev/null)
         n1=$(cli 1 getrawmempool 2>/dev/null | jq length 2>/dev/null)
         [ "${n0:-0}" = 0 ] && [ "${n1:-0}" = 0 ] && [ "${n2:-0}" = 0 ] && return 0
@@ -135,6 +145,20 @@ snapshot() {
     tl=$(cli "$1" listunspent 1 9999999 2>/dev/null | jq -r '.[]|"\(.txid):\(.vout):\(.amount)"' 2>/dev/null | sort)
     printf 'total %s\nz\n%s\nt\n%s\n' "$t" "$zl" "$tl"
 }
+# selfcheck <n>: a node's own view must not count a note or an output twice: no outpoint listed twice,
+# and the private total equals the sum of the listed unspent notes (both at one confirmation).
+# Prints nothing when consistent, a reason otherwise.
+selfcheck() {
+    zj=$(cli "$1" z_listunspent 1 9999999 true 2>/dev/null); tj=$(cli "$1" listunspent 1 9999999 2>/dev/null)
+    [ -n "$zj" ] && [ -n "$tj" ] || { echo "node $1 did not answer"; return; }
+    zd=$(printf '%s' "$zj" | jq -r '.[]|"\(.txid):\(.jsindex // "s"):\(.jsoutindex // .outindex)"' | sort | uniq -d | wc -l)
+    td=$(printf '%s' "$tj" | jq -r '.[]|"\(.txid):\(.vout)"' | sort | uniq -d | wc -l)
+    zs=$(printf '%s' "$zj" | jq '[.[].amount * 100000000 | round] | add // 0')
+    pv=$(cli "$1" z_gettotalbalance 1 2>/dev/null | jq '.private | tonumber * 100000000 | round')
+    [ "$zd" = 0 ] || echo "node $1 lists $zd shielded notes twice"
+    [ "$td" = 0 ] || echo "node $1 lists $td transparent outputs twice"
+    [ "$zs" = "$pv" ] || echo "node $1 private total $pv zat != sum of its unspent notes $zs zat"
+}
 
 # ---- scenario ---------------------------------------------------------------
 HOOKS="addtowallet-after-write chaintip-before chaintip-after connect-after-updatetip connect-between-sync-and-chaintip disconnect-between-sync-and-chaintip flush-after-coins flush-before-setbestchain setbestchain-begin setbestchain-after-txs setbestchain-after-locator setbestchain-after-commit init-after-rescan any"
@@ -148,7 +172,10 @@ setup_seed() {
     ZA=$(cli 0 z_getnewaddress); ZB=$(cli 0 z_getnewaddress); ZC=$(cli 0 z_getnewaddress)
     SP1=$(cli 0 z_getnewaddress sprout); SP2=$(cli 0 z_getnewaddress sprout)
     TA=$(cli 0 getnewaddress); TB=$(cli 0 getnewaddress); MT=$(cli 1 getnewaddress)
-    cli 0 sendtoaddress "$TA" 20 >/dev/null; cli 0 sendtoaddress "$TB" 20 >/dev/null; cli 1 generate 1 >/dev/null; sync_to 0 || return 1
+    cli 0 sendtoaddress "$TA" 20 >/dev/null; cli 0 sendtoaddress "$TB" 20 >/dev/null
+    # the peer gets transparent funds of its own, so it can pay the wallet (incoming t, Sapling, Sprout)
+    for k in 1 2 3 4; do cli 0 sendtoaddress "$MT" 5 >/dev/null; done
+    cli 1 generate 1 >/dev/null; sync_to 0 || return 1
     o=$(cli 0 z_shieldcoinbase "*" "$ZA" 0.0001 5 2>/dev/null | jq -r .opid); qwait_op 0 "$o"; cli 1 generate 1 >/dev/null; sync_to 0 || return 1
     # a Sprout note and a Sapling note from t funds
     zq "$TA" "[{\"address\":\"$SP1\",\"amount\":5}]"; cli 1 generate 1 >/dev/null
@@ -163,8 +190,12 @@ reorg_tip() {
 
 # act: one random wallet action on node 0 (or the chain)
 act() {
-    rnd 16
+    rnd 19
     case $R in
+        # incoming funds from the peer: a transparent payment, a Sapling note, a Sprout note
+        16) cli 1 sendtoaddress "$TA" 0.07 >/dev/null 2>&1 ;;
+        17) o=$(cli 1 z_sendmany "$MT" "[{\"address\":\"$ZB\",\"amount\":0.09}]" 1 0.0001 2>/dev/null) && qwait_op 1 "$o" ;;
+        18) o=$(cli 1 z_sendmany "$MT" "[{\"address\":\"$SP2\",\"amount\":0.06}]" 1 0.0001 2>/dev/null) && qwait_op 1 "$o" ;;
         0|1) zq "$ZA" "[{\"address\":\"$ZB\",\"amount\":0.01},{\"address\":\"$ZC\",\"amount\":0.02},{\"address\":\"$ZA\",\"amount\":0.03}]" ;;
         2) zq "$ZB" "[{\"address\":\"$ZC\",\"amount\":0.005}]" ;;
         3) o=$(cli 0 z_mergetoaddress "[\"$ZA\",\"$ZB\",\"$ZC\"]" "$ZA" 0.0001 0 0 2>/dev/null | jq -r .opid); qwait_op 0 "$o" ;;
@@ -269,7 +300,7 @@ verify() {
             start_try 0 "$BIN" -reindex -connect=127.0.0.1:$((BASE + 1)) || { bad "$it $label: node 0 did not restart even with -reindex"; keep_fail "$it"; return 1; }
         else bad "$it $label: node 0 did not restart after the crash ($(tail -n 1 "$SD/node0/stdout.log" 2>/dev/null | cut -c1-200))"; keep_fail "$it"; return 1; fi
     fi
-    rs=0; until start_try 2 "$BIN" -rescan $RI -connect=127.0.0.1:$((BASE + 1)); do
+    rs=0; until start_try 2 "$REF_BIN" -rescan $RI -connect=127.0.0.1:$((BASE + 1)); do
         rs=$((rs + 1))
         [ $rs -lt 3 ] || { bad "$it $label: reference node did not start ($(tail -n 1 "$SD/node2/stdout.log" 2>/dev/null | cut -c1-200))"; keep_fail "$it"; return 1; }
         sleep 5; rm -f "$SD/node2/regtest/.lock"
@@ -287,6 +318,12 @@ verify() {
         printf 'restarted:\n%s\nrescanned:\n%s\n' "$s0" "$s2" >"$SD/diff-$it.txt"
         keep_fail "$it"; return 1
     fi
+    sc=$(selfcheck 0)
+    if [ -n "$sc" ]; then
+        stop_try 2 || true
+        bad "$it $label: $(printf '%s' "$sc" | tr '\n' ';')"; printf 'selfcheck:\n%s\n%s\n' "$sc" "$s0" >"$SD/diff-$it.txt"
+        keep_fail "$it"; return 1
+    fi
     # Whatever the first restart repaired in memory has to be on disk: restart once more, by a clean
     # stop or by another kill -9, and ask again. The reference is unchanged (same chain, no crash).
     rnd 2
@@ -301,7 +338,13 @@ verify() {
     # a node that was killed re-connects the blocks it lost; give the wallet up to 40 s to show them
     w=0; while [ "$s0b" != "$s2b" ] && [ $w -lt 20 ]; do sleep 2; w=$((w + 1)); s0b=$(snapshot 0); s2b=$(snapshot 2); done
     [ $w -gt 0 ] && [ "$s0b" = "$s2b" ] && obs "settle_after_second_restart_$it" "$((w * 2))s"
+    sc=$(selfcheck 0; selfcheck 2)
     stop_try 2 || true
+    if [ -n "$sc" ]; then
+        bad "$it $label: $(printf '%s' "$sc" | tr '\n' ';')"
+        printf 'selfcheck:\n%s\nnode 0:\n%s\nreference:\n%s\n' "$sc" "$s0b" "$s2b" >"$SD/diff-$it.txt"
+        keep_fail "$it"; return 1
+    fi
     if [ "$s0b" = "$s2b" ]; then pass "$it $label"; return 0; fi
     bad "$it $label: after a second restart the wallet differs from the rescanned reference"
     printf 'second restart:\n%s\nrescanned:\n%s\n' "$s0b" "$s2b" >"$SD/diff-$it.txt"
@@ -313,7 +356,8 @@ verify() {
       echo "--- node 0 debug.log tail:"; tail -n 40 "$SD/node0/regtest/debug.log" | cut -c1-200; } >>"$SD/diff-$it.txt" 2>&1
     keep_fail "$it"; return 1
 }
-keep_fail() { f=$WORK/fail-$SEED-$1; rm -rf "$f"; mkdir -p "$f"; cp -a "$SD/crashimg" "$f/crashed-datadir" 2>/dev/null; cp "$SD"/diff-$1.txt "$f/" 2>/dev/null; echo "seed=$SEED iter=$1" >"$f/WHY"; }
+keep_fail() { f=$WORK/fail-$SEED-$1; rm -rf "$f"; mkdir -p "$f"; cp -a "$SD/crashimg" "$f/crashed-datadir" 2>/dev/null; cp "$SD"/diff-$1.txt "$f/" 2>/dev/null
+    cp "$SD/node0/stdout.log" "$f/node0-stdout.log" 2>/dev/null; cp "$SD/node2/stdout.log" "$f/ref-stdout.log" 2>/dev/null; echo "seed=$SEED iter=$1" >"$f/WHY"; }
 
 hit_note() { echo "$1 $2" >>"$HITS"; }
 
