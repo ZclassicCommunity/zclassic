@@ -1267,6 +1267,8 @@ UniValue unparkblock(const UniValue& params, bool fHelp) {
         CBlockIndex *pblockindex = mapBlockIndex[hash];
         UnparkBlockAndChildren(pblockindex);
     }
+    // As durable as parkblock, which flushes: see reconsiderblock.
+    FlushStateToDisk();
 
     CValidationState state;
     ActivateBestChain(state);
@@ -1304,6 +1306,12 @@ UniValue reconsiderblock(const UniValue& params, bool fHelp)
         CBlockIndex* pblockindex = mapBlockIndex[hash];
         ResetBlockFailureFlags(pblockindex);
     }
+    // invalidateblock writes its failure flags to disk at once, and failed blocks keep their
+    // branch ID over a restart, so the flags survive it. A reconsider kept in memory only was
+    // lost by a kill: the node came back with the blocks still failed and refused the peers'
+    // chain until reconsiderblock was run again. Clearing flags is always safe to write (the
+    // on-disk coins never name a failed block, see UnwindBlock).
+    FlushStateToDisk();
 
     CValidationState state;
     ActivateBestChain(state);

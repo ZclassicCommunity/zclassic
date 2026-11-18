@@ -59,6 +59,18 @@ wait_height 0 106 || true
 ck "the reconsidered branch survives a restart and takes the child" "$(cli 0 getbestblockhash)" "$(cli 1 getbestblockhash)"
 ck "no rewind at start" "$(grep -c 'First insufficiently validated' "$SD/node0/regtest/debug.log")" 0
 
+# The failure flags survive a restart (and invalidateblock writes them at once), so the request that
+# clears them must be as durable: a reconsiderblock or unparkblock lost by a kill -9 left the node
+# on the lowered tip, refusing the peer's chain.
+wait_best() { local t=0; until [ "$(cli 0 getbestblockhash)" = "$1" ]; do t=$((t+1)); [ $t -lt 30 ] || return 1; sleep 1; done; }
+BEST=$(cli 0 getbestblockhash); B3=$(cli 0 getblockhash 103)
+cli 0 invalidateblock "$B3" >/dev/null; cli 0 reconsiderblock "$B3" >/dev/null
+kill9 0; start 0 "$BIN" $A -connect=0 || exit 1; wait_best "$BEST" || true
+ck "reconsiderblock survives a kill -9" "$(cli 0 getbestblockhash)" "$BEST"
+cli 0 parkblock "$B3" >/dev/null; cli 0 unparkblock "$B3" >/dev/null
+kill9 0; start 0 "$BIN" $A -connect=0 || exit 1; wait_best "$BEST" || true
+ck "unparkblock survives a kill -9" "$(cli 0 getbestblockhash)" "$BEST"
+
 np=$(grep -c "^PASS" "$SCN_LOG"); nf=$(grep -c "^FAIL" "$SCN_LOG")
 say "invalidateblock_restart: $np pass, $nf fail"
 [ "$nf" = 0 ] && [ "$np" -gt 0 ]
