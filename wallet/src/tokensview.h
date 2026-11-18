@@ -2,18 +2,21 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-// Read-only "Tokens" view. It appears (a rail button, and a window it opens) only
+// "Tokens" view. It appears (a rail button, and a window it opens) only
 // when the daemon reports that its ZSLP token index is switched on
 // (zslp_getindexinfo answers; with the index off the daemon answers with an error
 // and nothing is shown). It lists the wallet's token balances and token outputs and
-// says plainly that those outputs are protected from ordinary spending. It sends
-// nothing and changes nothing.
+// says plainly that those outputs are protected from ordinary spending. From it the user can send tokens
+// and, as an advanced step, create a token (src/tokenssend.*); the ZCL send flow is not involved.
 #ifndef ZCL_TOKENSVIEW_H
 #define ZCL_TOKENSVIEW_H
 
 #include <QObject>
 
+#include <memory>
+
 #include "tokensmodel.h"
+#include "tokenssend.h"
 
 class MainWindow;
 class QDialog;
@@ -32,6 +35,8 @@ public:
 private slots:
     void poll();
     void openWindow();
+    void openSend();
+    void openCreate();
 
 private:
     explicit TokensView(MainWindow* main);
@@ -40,6 +45,7 @@ private:
     void applyStatus(const tokens::IndexStatus& status);
     void applySnapshot(const tokens::Snapshot& snap);
     void refreshOutputs();
+    void updateActionButtons();
 
     MainWindow*   main_;
     QTimer*       timer_;
@@ -49,6 +55,11 @@ private:
     QTableWidget* balances_    = nullptr;
     QTableWidget* outputs_     = nullptr;
     QPushButton*  railButton_  = nullptr;
+    QPushButton*  sendButton_  = nullptr;
+    QPushButton*  createButton_ = nullptr;
+    tokens::Snapshot lastSnap_;
+    bool          indexSynced_ = false;
+    std::unique_ptr<tokens::TokensRpc> rpc_;
     bool          available_   = false;
     bool          inFlight_    = false;
 };

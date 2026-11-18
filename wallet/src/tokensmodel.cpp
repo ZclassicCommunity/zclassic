@@ -119,7 +119,7 @@ QString protectedNotice()
     return QObject::tr(
         "These are ZSLP tokens your wallet holds. Each token sits on a small ZCL output. Those outputs are "
         "protected: your wallet never spends them as ordinary funds, because that would destroy the tokens. "
-        "This view only shows them. Sending tokens is not available yet.");
+        "To move them on purpose use Send tokens below; ordinary ZCL sends never touch them.");
 }
 
 QString roleText(const QString& role)
