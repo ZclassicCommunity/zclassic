@@ -496,6 +496,12 @@ bool ZnamIndex::Load(std::string& err)
     return true;
 }
 
+bool ZnamIndex::Reset(std::string& err)
+{
+    LOCK(cs);
+    return zslp::WipeKV(kv, kVerKey, err);
+}
+
 bool ZnamIndex::GetBest(uint256& hash, int& height) const
 {
     LOCK(cs);

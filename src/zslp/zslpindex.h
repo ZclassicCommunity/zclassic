@@ -55,6 +55,10 @@ public:
                       const std::function<bool(const std::string&, const std::string&)>& fn) const = 0;
 };
 
+/** Erase every key of the store except `keepKey`, in ONE atomic batch: a crash leaves the old data or none, never
+ *  a half-wiped index that a rebuild would then continue from. False (with err) if the store cannot be written. */
+bool WipeKV(KV* kv, const std::string& keepKey, std::string& err);
+
 /** In-memory store, for tests. */
 class MemKV : public KV
 {
@@ -210,6 +214,10 @@ public:
 
     /** Undo the best block. `hash` must be the best block; the new best is prevHash/prevHeight. */
     bool DisconnectBlock(const uint256& hash, const uint256& prevHash, int prevHeight, std::string& err);
+
+    /** Forget everything indexed (the format version stays): the next block applied is the first of a new index.
+     *  For an index whose tip is on no chain this node knows; the index is derived data and is rebuilt. */
+    bool Reset(std::string& err);
 
     bool GetBest(uint256& hash, int& height) const;
     IndexStats GetStats() const;

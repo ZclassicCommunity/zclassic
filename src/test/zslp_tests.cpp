@@ -457,6 +457,37 @@ BOOST_AUTO_TEST_CASE(disconnect_restores_the_exact_state)
     BOOST_CHECK_EQUAL(c.Bal(0xa1, tok), 1000u);
 }
 
+BOOST_AUTO_TEST_CASE(reset_forgets_everything_and_the_blocks_apply_again)
+{
+    // An index whose tip is on no chain this node knows is wiped and rebuilt (ZslpService::Step).
+    Chain c;
+    CTransaction g = Tx(std::vector<COutPoint>(), {GenesisMsg(1000, 2), P2PKH(0xa1), P2PKH(0xb1)});
+    const uint256 tok = g.GetHash();
+    c.Add(std::vector<CTransaction>(1, g));
+    const std::map<std::string, std::string> afterGenesis = c.kv.m;
+    CTransaction s = Tx({COutPoint(tok, 1)}, {SendMsg(tok, {400, 500}), P2PKH(0xc1), P2PKH(0xc2)});
+    c.Add(std::vector<CTransaction>(1, s));
+    uint256 best;
+    int height = -1;
+    BOOST_REQUIRE(c.idx.GetBest(best, height));
+
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(c.idx.Reset(err), err);
+    BOOST_CHECK(!c.idx.GetBest(best, height));
+    BOOST_CHECK_EQUAL(c.kv.m.size(), 1u);
+    BOOST_CHECK(c.kv.m.count("mver") == 1);
+    TokenInfo t;
+    BOOST_CHECK(!c.idx.GetToken(tok, t));
+    BOOST_CHECK(c.idx.Reset(err)); // an empty index resets too
+    BOOST_CHECK(c.idx.Load(err));
+
+    // the chain is applied again from the start and gives the same store as before
+    c.hashes.clear();
+    c.Add(std::vector<CTransaction>(1, g));
+    BOOST_CHECK(c.kv.m == afterGenesis);
+}
+
+
 BOOST_AUTO_TEST_CASE(a_block_is_one_atomic_batch)
 {
     Chain c;

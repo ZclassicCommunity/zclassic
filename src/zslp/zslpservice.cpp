@@ -92,7 +92,7 @@ ServiceInfo ZslpService::GetInfo() const
 
 bool ZslpService::Step()
 {
-    enum { IDLE, CONNECT, DISCONNECT } action = IDLE;
+    enum { IDLE, CONNECT, DISCONNECT, RESET } action = IDLE;
     const CBlockIndex* pindex = NULL;
     uint256 prevHash;
     int prevHeight = -1;
@@ -106,19 +106,24 @@ bool ZslpService::Step()
         tipHeight = chainActive.Height();
         if (haveBest) {
             BlockMap::const_iterator mi = mapBlockIndex.find(best);
-            if (mi == mapBlockIndex.end()) {
+            if (mi == mapBlockIndex.end() && chainActive.Height() >= bestHeight) {
+                // The index tip is no block of any chain this node knows, and the active chain has already
+                // reached that height: the tip will not come back (an unclean shutdown lost it from the block
+                // index and the chain moved on, or this index belongs to another chain). The index is derived
+                // data: start it again instead of waiting for ever.
+                action = RESET;
+            } else if (mi == mapBlockIndex.end()) {
                 SetError(strprintf("the index tip %s is not in the block index (reindex in progress, or this index belongs to another chain): waiting", best.GetHex()));
                 return false;
-            }
-            const CBlockIndex* pb = mi->second;
-            if (!chainActive.Contains(pb)) {
+            } else if (!chainActive.Contains(mi->second)) {
+                const CBlockIndex* pb = mi->second;
                 action = DISCONNECT;
                 pindex = pb;
                 if (pb->pprev) {
                     prevHash = pb->pprev->GetBlockHash();
                     prevHeight = pb->pprev->nHeight;
                 }
-            } else if (const CBlockIndex* next = chainActive.Next(pb)) {
+            } else if (const CBlockIndex* next = chainActive.Next(mi->second)) {
                 action = CONNECT;
                 pindex = next;
             }
@@ -133,6 +138,16 @@ bool ZslpService::Step()
     }
 
     std::string err;
+    if (action == RESET) {
+        LogPrintf("zslp: the index tip %s is not in the block index and the chain is past its height %d: rebuilding the index from height %d\n",
+                  best.GetHex(), bestHeight, startHeight);
+        if (!index.Reset(err)) {
+            SetError("cannot rebuild the index: " + err);
+            return false;
+        }
+        SetError("");
+        return true;
+    }
     if (action == DISCONNECT) {
         if (!index.DisconnectBlock(pindex->GetBlockHash(), prevHash, prevHeight, err)) {
             SetError("disconnect failed: " + err);
