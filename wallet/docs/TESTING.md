@@ -35,7 +35,7 @@ profile: QSettings (IniFormat in `<dir>/settings`, not the registry/plist), the 
 `*.dat` stores (`<dir>/appdata`), the extracted-daemon cache (`<dir>/cache`), the notify socket
 (`<dir>/run`), default save-dialog folder (`<dir>/exports`), and `zclassic.conf` plus the node
 datadir (`<dir>/ZClassic`, passed to the embedded daemon as `-datadir=`). The window title shows
-`[profile: <dir>]` while it is active. Only the 1.7 GB zk-SNARK params keep their default
+`[profile: <dir>]` while it is active. Only the 0.8 GB zk-SNARK params keep their default
 location (read-only); `ZCLWALLET_PARAMS_DIR` moves the wallet's own params check (the daemon
 has no params-dir option). A set-but-missing directory is a fatal error, never a silent fallback.
 All of this is one header, `src/profilepaths.h`; new code must resolve state locations through it.

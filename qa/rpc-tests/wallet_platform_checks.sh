@@ -233,15 +233,26 @@ chk_encrypt() {
 # ----------------------------------------------------------------- interop
 # >= 20 varied shielded transactions on a chain that crosses Sapling activation
 chk_interop() {
+    # Before Sapling a Sprout JoinSplit is PHGR13, which a current binary verifies but
+    # cannot create: the miner/peer (a release that still carries libsnark) makes them.
+    if [ "$PEER_BIN" = "$BIN" ]; then
+        echo "needs a PHGR13-capable miner (--peer-bin <previous release>): the binary under test cannot create PHGR13 proofs" >"$SD/skip"
+        return
+    fi
     NU_ARGS="-nuparams=5ba81b19:230 -nuparams=76b809bb:240"
     setup2 || return
     TX=$SD/interop_txids; : >"$TX"; rec_tx() { printf '%s %s\n' "$1" "$2" >>"$TX"; }
     sp=$(cli 0 z_getnewaddress sprout); sp2=$(cli 0 z_getnewaddress sprout); ta=$(cli 0 getnewaddress)
     ck "chain before Sapling" "$([ "$(cli 0 getblockcount)" -lt 230 ] && echo yes)" yes
     give_z 0 "$sp" 4 48656c6c6f; rec_tx sprout_shield "$(cli 0 z_listreceivedbyaddress "$sp" | jq -r ".[0].txid")"
-    t=$(zconfirm 0 "$sp" "[{\"address\":\"$ta\",\"amount\":1}]"); rec_tx sprout_to_t "$t"
-    t=$(zconfirm 0 "$sp" "[{\"address\":\"$sp2\",\"amount\":1}]"); rec_tx sprout_to_sprout "$t"
-    t=$(zconfirm 0 "$sp" "[{\"address\":\"$(cli 1 z_getnewaddress sprout)\",\"amount\":0.5}]"); rec_tx sprout_to_peer_sprout "$t"
+    # the peer spends its own Sprout notes with PHGR13 proofs; node 0 verifies them
+    msp=$(cli 1 z_getnewaddress sprout); mta=$(cli 1 getnewaddress); cli 1 sendtoaddress "$mta" 5 >/dev/null; cli 1 generate 1 >/dev/null; sync_to 0
+    t=$(zconfirm 1 "$mta" "[{\"address\":\"$msp\",\"amount\":3}]"); rec_tx peer_t_to_sprout "$t"; sync_to 0
+    t=$(zconfirm 1 "$msp" "[{\"address\":\"$ta\",\"amount\":1}]"); rec_tx sprout_to_t "$t"; sync_to 0
+    t=$(zconfirm 1 "$msp" "[{\"address\":\"$sp2\",\"amount\":1}]"); rec_tx sprout_to_sprout "$t"; sync_to 0
+    ck "node 0 received the peer's PHGR13 sprout->sprout" "$(zbal 0 "$sp2")" 1.00000000
+    r=$(zsend 0 "$sp" "[{\"address\":\"$ta\",\"amount\":1}]")
+    ck "node 0 cannot create a PHGR13 spend before Sapling (clear error)" "$(printf %s "$r" | grep -c 'PHGR13 proofs can no longer be created')" 1
     cli 1 generate 135 >/dev/null; sync_to 0
     zs=$(cli 0 z_getnewaddress); zs2=$(cli 0 z_getnewaddress)
     t=$(zconfirm 0 "$sp" "[{\"address\":\"$ta\",\"amount\":0.5}]"); rec_tx sprout_to_t_2 "$t"   # Sprout and Sapling never mix in one z_sendmany: go through a t address
@@ -286,6 +297,8 @@ run_chk() {
     t0=$(now); ( $fn ) 2>&1 | tee "$WORK/chk_$id.out" >/dev/null; stop_all
     np=$(grep -c '^PASS' "$SCN_LOG"); nf=$(grep -c '^FAIL' "$SCN_LOG")
     st=PASS; [ "$nf" = 0 ] && [ "$np" -gt 0 ] || st=FAIL
+    # a check that cannot run with the given binaries says why in $SD/skip
+    if [ -f "$SD/skip" ] && [ "$nf" = 0 ]; then st="SKIP ($(cat "$SD/skip"))"; fi
     echo "$id|$st|$np pass $nf fail|$(elapsed "$t0")s" >>"$RESULTS"; say "   -> $st ($np pass, $nf fail)"
     BASE=$((BASE + 17)); [ $BASE -lt 60000 ] || BASE=20000
 }

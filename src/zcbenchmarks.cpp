@@ -95,13 +95,12 @@ double benchmark_sleep()
 double benchmark_parameter_loading()
 {
     // FIXME: this is duplicated with the actual loading code
-    boost::filesystem::path pk_path = ZC_GetParamsDir() / "sprout-proving.key";
     boost::filesystem::path vk_path = ZC_GetParamsDir() / "sprout-verifying.key";
 
     struct timeval tv_start;
     timer_start(tv_start);
 
-    auto newParams = ZCJoinSplit::Prepared(vk_path.string(), pk_path.string());
+    auto newParams = ZCJoinSplit::Prepared(vk_path.string());
 
     double ret = timer_stop(tv_start);
 
