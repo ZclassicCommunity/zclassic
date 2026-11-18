@@ -80,8 +80,7 @@ public:
             if (*answered)
                 return;
             *answered = true;
-            fail(QObject::tr("The node did not answer in time. The outcome is unknown: check your transactions before "
-                             "trying again."));
+            fail(tokens::outcomeUnknownText());
         });
         json p = {{"jsonrpc", "1.0"}, {"id", "tokens"}, {"method", method.toStdString()}, {"params", params}};
         conn->doRPC(p, [ok, answered](const json& result) {

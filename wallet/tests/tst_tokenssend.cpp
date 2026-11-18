@@ -548,6 +548,42 @@ private slots:
         QCOMPARE(sent.count(), 0);
     }
 
+    // The node never answered the real send (the dialog's 120 s timeout): it may have broadcast it, so the result
+    // page must say the outcome is unknown and must not say "not sent", which invites a second send.
+    void sendDialog_noAnswerIsNotCalledNotSent()
+    {
+        FakeRpc rpc;
+        TokenSendDialog d(&rpc, {aaa()});
+        d.findChild<QLineEdit*>("toEdit")->setText(kAddr);
+        d.findChild<QLineEdit*>("amountEdit")->setText("1");
+        d.findChild<QPushButton*>("reviewButton")->click();
+        rpc.answer(0, sendReply(false));
+        d.findChild<QPushButton*>("sendButton")->click();
+        rpc.answerError(1, tokens::outcomeUnknownText());
+        QCOMPARE(d.page(), int(StepDialog::ResultPage));
+        const QString t = d.findChild<QLabel*>("resultLabel")->text();
+        QVERIFY2(!t.contains("not sent"), qPrintable(t));
+        QVERIFY(t.contains("outcome is unknown"));
+
+        FakeRpc rpc2;
+        TokenCreateDialog c(&rpc2);
+        c.findChild<QLineEdit*>("tickerEdit")->setText("TST");
+        c.findChild<QLineEdit*>("nameEdit")->setText("Test token");
+        c.findChild<QLineEdit*>("quantityEdit")->setText("1000");
+        c.findChild<QPushButton*>("reviewButton")->click();
+        QCOMPARE(rpc2.calls.size(), 1);
+        rpc2.answer(0, json{{"txid", "0e543b8cc4a11d8180d67d4baf46f3faf42cddf8f8ee41de312ce18310552f55"},
+                            {"tokenid", kTok}, {"type", "genesis"}, {"broadcast", false}, {"amount", "1000"},
+                            {"tokeninputs", 0}, {"fee", 0.00000481}});
+        QCOMPARE(c.page(), int(StepDialog::ReviewPage));
+        c.findChild<QPushButton*>("sendButton")->click();
+        rpc2.answerError(1, tokens::outcomeUnknownText());
+        QCOMPARE(c.page(), int(StepDialog::ResultPage));
+        const QString ct = c.findChild<QLabel*>("resultLabel")->text();
+        QVERIFY2(!ct.contains("not created"), qPrintable(ct));
+        QVERIFY(ct.contains("outcome is unknown"));
+    }
+
     void sendDialog_maxAndTokenSwitch()
     {
         FakeRpc rpc;

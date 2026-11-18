@@ -424,4 +424,10 @@ QString friendlyError(const QString& m)
     return lead + QStringLiteral("\n\n") + QObject::tr("Details: %1").arg(m);
 }
 
+QString outcomeUnknownText()
+{
+    return QObject::tr("The node did not answer in time. The outcome is unknown: check your transactions before "
+                       "trying again.");
+}
+
 } // namespace tokens
