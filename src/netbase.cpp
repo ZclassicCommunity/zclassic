@@ -603,6 +603,14 @@ bool IsProxyOnly() {
     return fProxyOnlyMode;
 }
 
+void ClearProxies() {
+    LOCK(cs_proxyInfos);
+    for (int i = 0; i < NET_MAX; i++)
+        proxyInfo[i] = proxyType();
+    nameProxy = proxyType();
+    fProxyOnlyMode = false;
+}
+
 bool IsProxy(const CNetAddr &addr) {
     LOCK(cs_proxyInfos);
     for (int i = 0; i < NET_MAX; i++) {

@@ -82,6 +82,10 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
                                        const CBootstrapSnapshotManifest& manifest,
                                        const boost::filesystem::path& staging, int timeout_ms, int nStreams,
                                        std::string& error);
+/** Test hook: shorten the parallel downloader's whole-attempt watchdogs (no byte at all for
+ *  `stallFailMs`; aggregate rate below the minimum throughput over `aggregateWindowMs`).
+ *  A value <= 0 restores the five-minute default. */
+void BootstrapSetWatchdogForTests(int64_t stallFailMs, int64_t aggregateWindowMs);
 // True if the datadir holds only a genesis-height chainstate (initialized but
 // never synced past genesis); such a datadir carries no real chain.
 bool IsGenesisOnlyChainDatadir(const boost::filesystem::path& data_dir, std::string& error);

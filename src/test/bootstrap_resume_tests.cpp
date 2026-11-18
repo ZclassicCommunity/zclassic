@@ -627,7 +627,8 @@ class FakeBootstrapServer
 {
 public:
     FakeBootstrapServer(const Snapshot& snap) : snapshot(snap), listenFd(-1), port(0), stopping(false),
-        connections(0), live(0), maxLive(0), maxLiveAfterFault(0), faulted(false), chunkDelayMs(0)
+        connections(0), live(0), maxLive(0), maxLiveAfterFault(0), faulted(false), chunkDelayMs(0),
+        firstChunkDelayMs(0), maxOpenConnections(0), oneChunkPerConnectionThenSilent(false), trickleChunks(false), open(0)
     {
         listenFd = socket(AF_INET, SOCK_STREAM, 0);
         BOOST_REQUIRE(listenFd >= 0);
@@ -673,9 +674,17 @@ public:
     // The manifest served to connection `conn` (default: the snapshot's).
     std::function<CBootstrapSnapshotManifest(int conn)> manifestFor;
     std::atomic<int> chunkDelayMs;
+    // The first chunk served on each connection waits this long (a slow server).
+    std::atomic<int> firstChunkDelayMs;
+    // A connection that would be the (n+1)th simultaneous one is closed right after accept.
+    std::atomic<int> maxOpenConnections;
+    // After one chunk, a connection stays open and serves nothing more.
+    std::atomic<bool> oneChunkPerConnectionThenSilent;
+    // Chunks go out one byte at a time, 100 ms apart.
+    std::atomic<bool> trickleChunks;
 
     // --- observations ---
-    std::atomic<int> connections, live, maxLive, maxLiveAfterFault;
+    std::atomic<int> connections, live, maxLive, maxLiveAfterFault, open;
     std::atomic<bool> faulted;
     std::vector<ChunkLogEntry> Log() { std::lock_guard<std::mutex> lock(mtx); return chunkLog; }
     uint64_t FirstOffsetRequested(uint32_t file)
@@ -757,6 +766,11 @@ private:
             if (fd < 0)
                 return;
             const int conn = connections.fetch_add(1);
+            if (maxOpenConnections > 0 && open.load() >= maxOpenConnections) {
+                close(fd); // full: refused right after accept
+                continue;
+            }
+            open.fetch_add(1);
             std::lock_guard<std::mutex> lock(mtx);
             fds.push_back(fd);
             handlers.push_back(std::thread([this, fd, conn]() { Handle(fd, conn); }));
@@ -767,8 +781,9 @@ private:
     {
         struct Closer {
             int fd;
-            ~Closer() { shutdown(fd, SHUT_RDWR); close(fd); }
-        } closer{fd};
+            std::atomic<int>& open;
+            ~Closer() { shutdown(fd, SHUT_RDWR); close(fd); open.fetch_sub(1); }
+        } closer{fd, open};
         std::string command;
         CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
         if (!RecvFrame(fd, command, payload) || command != "version")
@@ -826,6 +841,11 @@ private:
                     NoteFault();
                     return; // closes the connection (RST/EOF from the client's view)
                 }
+                if (oneChunkPerConnectionThenSilent && seq >= 1) {
+                    while (!stopping)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                    return;
+                }
                 ++seq;
                 {
                     std::lock_guard<std::mutex> lock(mtx);
@@ -834,6 +854,8 @@ private:
                 }
                 if (chunkDelayMs > 0)
                     std::this_thread::sleep_for(std::chrono::milliseconds(chunkDelayMs.load()));
+                if (seq == 1 && firstChunkDelayMs > 0)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(firstChunkDelayMs.load()));
                 std::string bytes = data.substr(req.nOffset, req.nLength);
                 if (tamper)
                     tamper(conn, req.nFileIndex, req.nOffset, bytes);
@@ -843,6 +865,18 @@ private:
                 chunk.vData.assign(bytes.begin(), bytes.end());
                 CDataStream cp(SER_NETWORK, PROTOCOL_VERSION);
                 cp << chunk;
+                if (trickleChunks) {
+                    CSerializeData message;
+                    std::string error;
+                    if (!BuildBootstrapNetworkMessage(NetMsgType::BSCHK, cp, message, error))
+                        return;
+                    for (size_t i = 0; i < message.size() && !stopping; ++i) {
+                        if (!SendAll(fd, message.data() + i, 1))
+                            return;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                    continue;
+                }
                 if (!SendFrame(fd, NetMsgType::BSCHK, cp))
                     return;
             }
@@ -1074,6 +1108,211 @@ BOOST_AUTO_TEST_CASE(a_dead_peer_fails_over_quickly_and_keeps_the_staging_direct
     // not the five-minute stall timeout: the next bootstrap peer is tried within seconds
     BOOST_CHECK_LT(GetTimeMillis() - t0, 30000);
     BOOST_CHECK(fs::exists(staging / s.manifest.vFiles[0].strPath)); // earlier progress untouched
+}
+
+// A full server refuses one of the four streams right after accept while the
+// other three are being served slowly: three refusals in a row on the one
+// stream must not end the attempt (it used to, because no chunk had completed
+// yet), the streams that are being served finish the snapshot.
+BOOST_AUTO_TEST_CASE(a_refused_stream_does_not_end_an_attempt_the_others_are_serving)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(24);
+    FakeBootstrapServer server(s);
+    server.maxOpenConnections = 3;
+    server.firstChunkDelayMs = 4500; // longer than the ~3-4 s the refused stream needs to fail three times
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(server.Address(), "fake", s.manifest, tmp.path / "staging", 5000, 4, error), error);
+    CheckAllFilesMatch(s, tmp.path / "staging");
+    BOOST_TEST_MESSAGE("refused-stream test: " << server.connections.load() << " connections, max open " << server.maxLive.load());
+    BOOST_CHECK_GE(server.connections.load(), 4); // the fourth stream really was refused and retried
+}
+
+// A peer that serves one chunk per connection and then goes silent must not
+// keep the attempt (and the failover to another peer) alive for ever: the
+// attempt as a whole has to average the minimum throughput.
+BOOST_AUTO_TEST_CASE(a_peer_that_serves_one_chunk_per_connection_is_given_up_on)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(8);
+    FakeBootstrapServer server(s);
+    server.oneChunkPerConnectionThenSilent = true;
+    BootstrapSetWatchdogForTests(60 * 1000, 2000);
+    const int64_t t0 = GetTimeMillis();
+    std::string error;
+    const bool ok = DownloadBootstrapSnapshotParallel(server.Address(), "fake", s.manifest, tmp.path / "staging", 5000, 2, error);
+    BootstrapSetWatchdogForTests(0, 0);
+    BOOST_CHECK(!ok);
+    BOOST_CHECK_MESSAGE(error.find("too slow") != std::string::npos, error);
+    // the workers sit in a 5 s receive: the manager's decision reaches them at once
+    BOOST_CHECK_LT(GetTimeMillis() - t0, 4500);
+}
+
+// A peer that trickles one byte every 100 ms inside a single message keeps
+// every worker inside one receive: giving the attempt up must still end it.
+BOOST_AUTO_TEST_CASE(a_trickling_peer_cannot_hold_the_attempt_after_the_watchdog_fires)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(4);
+    FakeBootstrapServer server(s);
+    server.trickleChunks = true;
+    BootstrapSetWatchdogForTests(1500, 0);
+    const int64_t t0 = GetTimeMillis();
+    std::string error;
+    const bool ok = DownloadBootstrapSnapshotParallel(server.Address(), "fake", s.manifest, tmp.path / "staging", 5000, 2, error);
+    BootstrapSetWatchdogForTests(0, 0);
+    BOOST_CHECK(!ok);
+    BOOST_CHECK_MESSAGE(error.find("no progress") != std::string::npos, error);
+    BOOST_CHECK_LT(GetTimeMillis() - t0, 6000);
+}
+
+// A minimal SOCKS5 server that only does what a name proxy does: it takes the
+// destination as a host name and connects to it itself.
+class FakeNameProxy
+{
+public:
+    FakeNameProxy(uint16_t targetPort) : target(targetPort), listenFd(-1), port(0), stopping(false), requests(0)
+    {
+        listenFd = socket(AF_INET, SOCK_STREAM, 0);
+        BOOST_REQUIRE(listenFd >= 0);
+        int one = 1;
+        setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        sockaddr_in sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        BOOST_REQUIRE_EQUAL(bind(listenFd, (sockaddr*)&sa, sizeof(sa)), 0);
+        BOOST_REQUIRE_EQUAL(listen(listenFd, 16), 0);
+        socklen_t len = sizeof(sa);
+        BOOST_REQUIRE_EQUAL(getsockname(listenFd, (sockaddr*)&sa, &len), 0);
+        port = ntohs(sa.sin_port);
+        acceptor = std::thread([this]() {
+            while (!stopping) {
+                const int fd = accept(listenFd, NULL, NULL);
+                if (fd < 0)
+                    return;
+                std::lock_guard<std::mutex> lock(mtx);
+                fds.push_back(fd);
+                handlers.push_back(std::thread([this, fd]() { Serve(fd); }));
+            }
+        });
+    }
+    ~FakeNameProxy()
+    {
+        stopping = true;
+        shutdown(listenFd, SHUT_RDWR);
+        close(listenFd);
+        if (acceptor.joinable())
+            acceptor.join();
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            for (size_t i = 0; i < fds.size(); ++i)
+                shutdown(fds[i], SHUT_RDWR);
+        }
+        for (size_t i = 0; i < handlers.size(); ++i)
+            if (handlers[i].joinable())
+                handlers[i].join();
+    }
+    uint16_t Port() const { return port; }
+    std::atomic<int> requests;
+    std::string lastHost;
+
+private:
+    static bool RecvAll(int fd, unsigned char* p, size_t n)
+    {
+        size_t got = 0;
+        while (got < n) {
+            const ssize_t r = recv(fd, p + got, n - got, 0);
+            if (r <= 0)
+                return false;
+            got += (size_t)r;
+        }
+        return true;
+    }
+    void Serve(int fd)
+    {
+        unsigned char b[300];
+        if (!RecvAll(fd, b, 2) || b[0] != 5 || !RecvAll(fd, b + 2, b[1]))
+            return;
+        const unsigned char choose[2] = {5, 0};
+        if (send(fd, choose, 2, MSG_NOSIGNAL) != 2)
+            return;
+        if (!RecvAll(fd, b, 5) || b[3] != 3) // ATYP must be a domain name
+            return;
+        const size_t hostLen = b[4];
+        if (!RecvAll(fd, b + 5, hostLen + 2))
+            return;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            lastHost.assign((const char*)b + 5, hostLen);
+        }
+        requests.fetch_add(1);
+        const int up = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        sa.sin_port = htons(target);
+        if (up < 0 || connect(up, (sockaddr*)&sa, sizeof(sa)) != 0) {
+            if (up >= 0)
+                close(up);
+            return;
+        }
+        const unsigned char ok[10] = {5, 0, 0, 1, 0, 0, 0, 0, 0, 0};
+        if (send(fd, ok, sizeof(ok), MSG_NOSIGNAL) != (ssize_t)sizeof(ok)) {
+            close(up);
+            return;
+        }
+        // relay both ways until either side closes
+        std::thread back([fd, up]() {
+            char buf[8192];
+            ssize_t r;
+            while ((r = recv(up, buf, sizeof(buf), 0)) > 0)
+                if (send(fd, buf, (size_t)r, MSG_NOSIGNAL) != r)
+                    break;
+            shutdown(fd, SHUT_RDWR);
+        });
+        char buf[8192];
+        ssize_t r;
+        while ((r = recv(fd, buf, sizeof(buf), 0)) > 0)
+            if (send(up, buf, (size_t)r, MSG_NOSIGNAL) != r)
+                break;
+        shutdown(up, SHUT_RDWR);
+        back.join();
+        close(up);
+    }
+
+    uint16_t target;
+    int listenFd;
+    uint16_t port;
+    std::atomic<bool> stopping;
+    std::thread acceptor;
+    std::mutex mtx;
+    std::vector<int> fds;
+    std::vector<std::thread> handlers;
+};
+
+// A peer named by host name behind a name proxy has no address (the first
+// connection went through the proxy by name): every stream must reconnect by
+// name as well, with one stream as with several.
+BOOST_AUTO_TEST_CASE(streams_reconnect_by_name_through_a_name_proxy)
+{
+    for (int streams = 1; streams <= 3; streams += 2) {
+        TempDir tmp;
+        const Snapshot s = MakeSnapshot(5);
+        FakeBootstrapServer server(s);
+        FakeNameProxy proxy(server.Address().GetPort());
+        BOOST_REQUIRE(SetNameProxy(proxyType(CService("127.0.0.1", proxy.Port()))));
+        std::string error;
+        const bool ok = DownloadBootstrapSnapshotParallel(CService("0.0.0.0", 0),
+            strprintf("snapshot.invalid:%u", (unsigned int)server.Address().GetPort()),
+            s.manifest, tmp.path / "staging", 5000, streams, error);
+        ClearProxies();
+        BOOST_REQUIRE_MESSAGE(ok, error);
+        CheckAllFilesMatch(s, tmp.path / "staging");
+        BOOST_CHECK_GE(proxy.requests.load(), streams);
+        BOOST_CHECK_EQUAL(proxy.lastHost, "snapshot.invalid");
+    }
 }
 
 #endif // !WIN32
