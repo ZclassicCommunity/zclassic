@@ -20,6 +20,13 @@ public:
     //! spent as asked. It never makes the wallet pick a token-bearing output
     //! on its own: only outputs in the selected set are affected.
     bool fAllowTokenOutputs;
+    //! Put the ZCL change output LAST instead of at a random position. Used by
+    //! the ZSLP token transactions, whose token outputs are named by position
+    //! (vout[1]..vout[n]) and must not be shifted. Default false: unchanged.
+    bool fChangeLast;
+    //! Pay exactly this fee instead of the estimated one (-1: estimate, the
+    //! default). It must still meet the minimum relay fee. Used by zslp_send.
+    CAmount nFixedFee;
 
     CCoinControl()
     {
@@ -31,6 +38,8 @@ public:
         destChange = CNoDestination();
         fAllowOtherInputs = false;
         fAllowTokenOutputs = false;
+        fChangeLast = false;
+        nFixedFee = -1;
         setSelected.clear();
     }
 

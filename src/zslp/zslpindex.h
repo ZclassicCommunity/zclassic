@@ -171,6 +171,22 @@ struct HolderBalance {
     uint64_t amount;
 };
 
+/** What the rules say about a transaction that is NOT in the index yet (a candidate the wallet has built):
+ *  the answer ApplyBlock would give if it were the next transaction of the chain, computed from the current
+ *  store without changing it. */
+struct Evaluation {
+    bool isSlp;              //! the first OP_RETURN output parses as an SLP message
+    int type;                //! 1 GENESIS, 2 MINT, 3 SEND, 0 = not an SLP message
+    int status;              //! STATUS_* (meaningful when isSlp)
+    std::string reason;      //! Z23's reason code
+    uint256 token;           //! the token the message names (the candidate's own txid for a GENESIS)
+    uint64_t inputUnits, outputUnits, mintedUnits, burnedUnits; //! as for a VALID message; burnedUnits also counts
+                                                                 //! units a non-carrying transaction would destroy
+    std::vector<TxInput> spent;     //! token and baton outputs the indexed store holds among its inputs
+    std::vector<TxOutput> created;  //! token and baton outputs it would create (empty unless VALID)
+    Evaluation() : isSlp(false), type(0), status(0), inputUnits(0), outputUnits(0), mintedUnits(0), burnedUnits(0) {}
+};
+
 /** Holder key of a scriptPubKey. */
 std::string AddrKeyForScript(const std::vector<unsigned char>& scriptPubKey);
 /** "1abc..." for P2PKH/P2SH under the active chain params, "script:<hash160>" otherwise, "" for none. */
@@ -210,6 +226,10 @@ public:
     std::vector<HolderBalance> GetHolders(const uint256& token, size_t skip, size_t count) const;
     /** Sum of the unspent TOKEN amounts of one token (for consistency checks). */
     bool SumUnspent(const uint256& token, uint64_t& out) const;
+
+    /** Dry run: judge `tx` by the rules of the validity code (src/c23/services) against the CURRENT store, as
+     *  if it were the next transaction after the indexed tip. Read-only. False (with err) on a corrupt store. */
+    bool EvaluateTx(const CTransaction& tx, Evaluation& out, std::string& err) const;
 
 private:
     KV* kv;

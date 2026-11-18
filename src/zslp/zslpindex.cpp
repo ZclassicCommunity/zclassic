@@ -1000,4 +1000,124 @@ bool ZslpIndex::SumUnspent(const uint256& token, uint64_t& out) const
     return !overflow;
 }
 
+bool ZslpIndex::EvaluateTx(const CTransaction& tx, Evaluation& out, std::string& err) const
+{
+    out = Evaluation();
+    LOCK(cs);
+    const uint256 txid = tx.GetHash();
+    const bool coinbase = tx.IsCoinBase();
+
+    // Same lookups as ProcessTx, read-only: the unspent token/baton records among the inputs.
+    std::map<COutPoint, OutInfo> spentAt;
+    if (!coinbase) {
+        for (size_t i = 0; i < tx.vin.size(); i++) {
+            std::string v;
+            if (!kv->Get(KeyOut(tx.vin[i].prevout.hash, tx.vin[i].prevout.n), v))
+                continue;
+            OutInfo rec;
+            if (!DecodeOut(v, rec)) {
+                err = "corrupt token output record";
+                return false;
+            }
+            spentAt[tx.vin[i].prevout] = rec;
+            TxInput ti;
+            ti.txid = tx.vin[i].prevout.hash; ti.vout = tx.vin[i].prevout.n;
+            ti.token = rec.token; ti.amount = rec.amount; ti.role = rec.role;
+            out.spent.push_back(ti);
+        }
+    }
+
+    zcl_slp_parsed msg;
+    const int nMsg = MessageOutput(tx);
+    if (nMsg >= 0) {
+        const CScript& s = tx.vout[nMsg].scriptPubKey;
+        out.isSlp = zcl_slp_parse_message(&s[0], s.size(), &msg) != 0;
+    }
+
+    if (!out.isSlp) {
+        out.type = 0;
+        out.reason = "token_outputs_spent_by_ordinary_transaction";
+        for (size_t i = 0; i < out.spent.size(); i++)
+            if (out.spent[i].role == ROLE_TOKEN && !AddU64(out.burnedUnits, out.spent[i].amount))
+                out.burnedUnits = UINT64_MAX;
+        return true;
+    }
+
+    out.type = msg.type;
+    uint256 target;
+    if (msg.type == ZCL_SLP_TX_GENESIS)
+        target = txid;
+    else
+        ReverseTokenId(msg.token_id_wire, target);
+    out.token = target;
+
+    std::map<uint256, int> parentStatus; // prev txid -> its status for this token, -1 when not an SLP tx of it
+    std::vector<zcl_slp_input> in(tx.vin.size());
+    for (size_t i = 0; i < tx.vin.size(); i++) {
+        memset(&in[i], 0, sizeof(in[i]));
+        if (coinbase)
+            continue;
+        std::map<COutPoint, OutInfo>::const_iterator sp = spentAt.find(tx.vin[i].prevout);
+        if (sp != spentAt.end()) {
+            in[i].has_ledger = 1;
+            in[i].role = sp->second.role;
+            memcpy(in[i].token_id, sp->second.token.begin(), 32);
+            in[i].amount = sp->second.amount;
+        }
+        const uint256& prevHash = tx.vin[i].prevout.hash;
+        std::map<uint256, int>::iterator ps = parentStatus.find(prevHash);
+        if (ps == parentStatus.end()) {
+            std::string pv;
+            TxInfo parent;
+            const bool same = kv->Get(KeyTx(prevHash), pv) && DecodeTx(pv, parent) && parent.type != 0 &&
+                              parent.token == target;
+            ps = parentStatus.insert(std::make_pair(prevHash, same ? parent.status : -1)).first;
+        }
+        if (ps->second >= 0) {
+            in[i].parent_same_token = 1;
+            in[i].parent_status = ps->second;
+        }
+    }
+    zcl_slp_eval ev;
+    memset(&ev, 0, sizeof(ev));
+    zcl_slp_evaluate(&msg, target.begin(), tx.vout.size(), in.empty() ? NULL : &in[0], in.size(), &ev);
+    out.status = ev.status;
+    out.reason = ev.reason ? ev.reason : "";
+    out.inputUnits = ev.input_units;
+
+    const bool valid = ev.status == ZCL_SLP_STATUS_VALID;
+    const bool carries = valid && msg.type == ZCL_SLP_TX_SEND;
+    if (carries) {
+        out.burnedUnits = ev.burned_units;
+    } else {
+        for (size_t i = 0; i < out.spent.size(); i++)
+            if (out.spent[i].role == ROLE_TOKEN && !AddU64(out.burnedUnits, out.spent[i].amount))
+                out.burnedUnits = UINT64_MAX;
+    }
+    if (!valid)
+        return true;
+
+    out.outputUnits = ev.output_units;
+    out.mintedUnits = ev.minted_units;
+    std::vector<std::pair<unsigned int, std::pair<uint64_t, int> > > outs;
+    if (msg.type == ZCL_SLP_TX_SEND) {
+        for (int i = 0; i < msg.num_outputs; i++)
+            if (msg.output_quantities[i] > 0)
+                outs.push_back(std::make_pair((unsigned int)i + 1, std::make_pair(msg.output_quantities[i], (int)ROLE_TOKEN)));
+    } else {
+        if (msg.quantity > 0)
+            outs.push_back(std::make_pair(1u, std::make_pair(msg.quantity, (int)ROLE_TOKEN)));
+        if (msg.mint_baton_vout)
+            outs.push_back(std::make_pair((unsigned int)msg.mint_baton_vout, std::make_pair((uint64_t)0, (int)ROLE_BATON)));
+    }
+    for (size_t i = 0; i < outs.size(); i++) {
+        TxOutput to;
+        to.vout = outs[i].first; to.token = target; to.amount = outs[i].second.first; to.role = outs[i].second.second;
+        const CScript& spk = tx.vout[outs[i].first].scriptPubKey;
+        to.addr = AddrKeyForScript(std::vector<unsigned char>(spk.begin(), spk.end()));
+        out.created.push_back(to);
+    }
+    return true;
+}
+
 } // namespace zslp
