@@ -13,6 +13,7 @@
 #                           outputs. It proves this test can see the bug.
 #   env CC=<compiler>       compiler for slpscript (default: cc)
 #   env KEEP=1              keep the temp directory
+#   env E2E_PORT_BASE=<n>   first port (default derives from the PID)
 #   env E2E_NODE_ARGS=...   extra arguments for every node, for example
 #                           "-nuparams=5ba81b19:1 -nuparams=76b809bb:1" to run with
 #                           Overwinter and Sapling active (TransactionBuilder paths)
@@ -34,7 +35,7 @@ for b in "$ZD" "$ZCLI" "$ZTX"; do [ -x "$b" ] || { echo "missing $b" >&2; exit 2
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/zcl-tokenguard-e2e.XXXXXX")
-BASE=$((20000 + ($$ % 20000)))
+BASE=${E2E_PORT_BASE:-$((20000 + ($$ % 20000)))}
 PIDS=""
 MN=0
 CHECKS=0

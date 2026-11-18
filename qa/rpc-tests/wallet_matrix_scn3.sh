@@ -179,7 +179,7 @@ scn_load() {
         cli 1 sendmany "" "$addrs" >/dev/null; cli 1 generate 1 >/dev/null; i=$((i + 1))
     done
     sync_to 0; obs_t "build_${NU}_utxos" "$(elapsed "$t0")"
-    ck "utxo count" "$(cli 0 listunspent | jq length)" "$NU"
+    ck "utxo count" "$(cli 0 listunspent | jq length)" "$((i * 1000))"  # built in whole 1000-output transactions
     # notes: miner funds a t address then z_sendmany 50 recipients per transaction
     t0=$(now); fa=$(cli 1 getnewaddress); mzl=$(cli 1 z_getnewaddress); cli 1 sendtoaddress "$fa" "$(awk -v n="$NN" 'BEGIN{print n*0.01+5}')" >/dev/null; cli 1 generate 1 >/dev/null
     r=$(zsend 1 "$fa" "[{\"address\":\"$mzl\",\"amount\":$(awk -v n="$NN" 'BEGIN{print n*0.01+3}')}]" 1 0.001); case $r in success*) cli 1 generate 1 >/dev/null ;; *) bad "load: miner shielding: $r" ;; esac
@@ -196,12 +196,13 @@ scn_load() {
     obs_t listtransactions "$(tm cli 0 listtransactions '*' 100000)"
     zb=$(zbal 0 "$zs"); ck "z balance exact (one of 50 addresses)" "$zb" "$(awk -v n="$i" 'BEGIN{printf "%.8f", n*0.01}')"
     d=$(cli 1 getnewaddress)
+    spend=$(awk -v n="$i" 'BEGIN { printf "%.3f", n * 0.01 * 0.875 }')   # 35 of 40 notes of this address (0.35 at the default size)
     # sendmany spending many transparent coins
     t0=$(now); tx=$(cli 0 sendtoaddress "$d" "$(awk -v n="$NU" 'BEGIN{print n*0.01*0.5}')"); obs_t "sendtoaddress_half_of_utxos" "$(elapsed "$t0")"
     wait_mempool 1 "$tx"; mine 1
     # z_sendmany spending many notes (about 150)
-    t0=$(now); r=$(zsend 0 "$zs" "[{\"address\":\"$d\",\"amount\":0.35}]" 1 0.001); obs_t "z_sendmany_spends_35_notes" "$(elapsed "$t0")"
-    case $r in success*) mine 1; ck "z_sendmany many notes: balance" "$(zbal 0 "$zs")" "$(add "$zb" -0.35 -0.001)" ;; *) bad "z_sendmany many notes: $r" ;; esac
+    t0=$(now); r=$(zsend 0 "$zs" "[{\"address\":\"$d\",\"amount\":$spend}]" 1 0.001); obs_t "z_sendmany_spends_35_notes" "$(elapsed "$t0")"
+    case $r in success*) mine 1; ck "z_sendmany many notes: balance" "$(zbal 0 "$zs")" "$(add "$zb" -$spend -0.001)" ;; *) bad "z_sendmany many notes: $r" ;; esac
     t0=$(now); mg=$(cli 0 z_mergetoaddress '["ANY_TADDR"]' "$zs" 0.0001 500); r=$(wait_op 0 "$(printf %s "$mg" | jq -r .opid)"); obs_t "z_mergetoaddress_500_utxos" "$(elapsed "$t0")"; mine 1
     zt0=$(cli 0 z_gettotalbalance 0 | jq -r .private | f8); t0=$(now); mg=$(cli 0 z_mergetoaddress "$(printf %s "$rec" | jq -c '[.[].address]')" "$zs" 0.0001 0 200); r=$(wait_op 0 "$(printf %s "$mg" | jq -r .opid)"); obs_t "z_mergetoaddress_200_notes" "$(elapsed "$t0")"
     w=0; while [ "$(cli 0 z_gettotalbalance 0 | jq -r .private | f8)" != "$(add "$zt0" -0.0001)" ] && [ $w -lt 300 ]; do sleep 0.1; w=$((w + 1)); done; obs_t "merge_effect_visible_in_wallet_after_op_success" "$(awk -v w=$w 'BEGIN{printf "%.1f", w/10}')"

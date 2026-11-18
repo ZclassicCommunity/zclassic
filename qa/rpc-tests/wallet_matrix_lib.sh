@@ -31,7 +31,14 @@ btc() { awk -v z="$1" 'BEGIN { printf "%.8f", z / 100000000 }'; }
 # add <a> <b> ...: signed sum of amounts, 8 decimals
 add() { awk 'BEGIN { s = 0; for (i = 1; i < ARGC; i++) s += ARGV[i] * 100000000; printf "%.8f", s / 100000000 }' "$@"; }
 n8() { awk -v z="$1" 'BEGIN { printf "%.8f", z }'; }
-now() { date +%s.%N; }
+# now: seconds with a fraction where the platform can give one (GNU date has %N,
+# BSD/macOS date prints a literal N: fall back to perl's Time::HiRes, then whole seconds)
+now() {
+    case $(date +%N 2>/dev/null) in
+        ''|*[!0-9]*) perl -MTime::HiRes=time -e 'printf "%.3f\n", time' 2>/dev/null || date +%s ;;
+        *) date +%s.%N ;;
+    esac
+}
 elapsed() { awk -v a="$1" -v b="$(now)" 'BEGIN { printf "%.1f", b - a }'; }
 
 # ---- nodes ----------------------------------------------------------------
