@@ -90,6 +90,12 @@ does what librustzcash does (rustzcash.rs:191-280):
    parsed `Parameters`, and hands the `sprout-groth16.params` path (UTF-8) to the
    Sprout prover.
 
+   The parsed form of those keys (about 77 MB of curve points) is not kept: the first proof of
+   a send parses it once, every proof of every proving context reads that copy, and the last
+   proving context to be freed releases it and returns the heap to the system. Left
+   automatic, a send also limits the proofs it makes at once (`ProverWorkerLimit`); see
+   `doc/perf/prover-memory.md`.
+
 Measured on Windows (gcc 16, warm page cache): init 0.84 s. Proving never reads a file
 again, so the first spend proof of a send costs the same as any other.
 

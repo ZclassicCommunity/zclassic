@@ -41,6 +41,7 @@
 #include "util.h"
 #include "utilmoneystr.h"
 #include "validationinterface.h"
+#include "transaction_builder.h"
 #ifdef ENABLE_WALLET
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
@@ -87,6 +88,22 @@
 #include "znam/znamservice.h"
 
 #ifdef ZCL_C23_HAVE_PROVER_THREADS
+// Total physical memory in bytes, 0 when the platform cannot say.
+static uint64_t PhysicalMemoryBytes()
+{
+#if defined(WIN32)
+    MEMORYSTATUSEX st;
+    st.dwLength = sizeof(st);
+    return GlobalMemoryStatusEx(&st) ? (uint64_t)st.ullTotalPhys : 0;
+#elif defined(_SC_PHYS_PAGES) && defined(_SC_PAGESIZE)
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long size = sysconf(_SC_PAGESIZE);
+    return pages > 0 && size > 0 ? (uint64_t)pages * (uint64_t)size : 0;
+#else
+    return 0;
+#endif
+}
+
 // Prover thread budget: -proverthreads=<n>, 0 = auto (min(8, hardware threads)).
 static unsigned ProverThreadBudget()
 {
@@ -493,7 +510,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-par=<n>", strprintf(_("Set the number of script verification threads (%u to %d, 0 = auto, <0 = leave that many cores free, default: %d)"),
         -GetNumCores(), MAX_SCRIPTCHECK_THREADS, DEFAULT_SCRIPTCHECK_THREADS));
 #ifdef ZCL_C23_HAVE_PROVER_THREADS
-    strUsage += HelpMessageOpt("-proverthreads=<n>", _("Set the number of threads used to create Sapling proofs (1 to 64, 0 = auto: the lesser of 8 and the hardware threads, default: 0)"));
+    strUsage += HelpMessageOpt("-proverthreads=<n>", _("Set the number of threads used to create Sapling proofs (1 to 64, 0 = auto: the lesser of 8 and the hardware threads, default: 0). Left automatic, a send also makes only as many proofs at once as fit in about 340 MB or an eighth of physical memory, whichever is less; an explicit value lifts that limit"));
 #endif
 #ifndef WIN32
     strUsage += HelpMessageOpt("-pid=<file>", strprintf(_("Specify pid file (default: %s)"), "zclassicd.pid"));
@@ -1874,6 +1891,18 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
 #ifdef ZCL_C23_HAVE_PROVER_THREADS
     zcl_c23_set_prover_threads(ProverThreadBudget());
+    // Left automatic, a send also makes only as many proofs at once as fit in
+    // the prover's memory allowance (about 340 MB, or an eighth of physical
+    // memory), the thread budget then spread over fewer proofs; an explicit
+    // -proverthreads is the person's own choice and is not capped.
+    if (GetArg("-proverthreads", 0) > 0) {
+        SetProverWorkerCap(0);
+    } else {
+        const size_t proofsAtOnce = ProverWorkerLimit(PhysicalMemoryBytes());
+        SetProverWorkerCap(proofsAtOnce);
+        LogPrintf("Prover memory allowance: at most %u proofs at once (%u MiB of physical memory)\n",
+                  (unsigned)proofsAtOnce, (unsigned)(PhysicalMemoryBytes() >> 20));
+    }
 #endif
 
     fServer = GetBoolArg("-server", false);

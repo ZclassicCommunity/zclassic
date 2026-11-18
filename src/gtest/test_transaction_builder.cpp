@@ -761,3 +761,65 @@ TEST(TransactionBuilder, TestKeyIsValidOnEveryNetwork)
     EXPECT_TRUE(tsk2.IsValid());
     EXPECT_EQ(tsk.GetPubKey(), tsk2.GetPubKey());
 }
+
+// A send makes only as many proofs at once as fit the prover's memory allowance
+// (shared proving keys plus one working set each, at most about 340 MB or an
+// eighth of the machine), never fewer than one, and more memory never lowers it.
+TEST(TransactionBuilder, ProverWorkerLimitFollowsPhysicalMemory)
+{
+    const uint64_t GiB = UINT64_C(1) << 30;
+    EXPECT_EQ(ProverWorkerLimit(0), 2u); // memory unknown: the ceiling
+    EXPECT_EQ(ProverWorkerLimit(64 * GiB), 2u);
+    EXPECT_EQ(ProverWorkerLimit(8 * GiB), 2u);
+    EXPECT_EQ(ProverWorkerLimit(3 * GiB), 2u);
+    EXPECT_EQ(ProverWorkerLimit(2 * GiB), 1u);
+    EXPECT_EQ(ProverWorkerLimit(1 * GiB), 1u);
+    EXPECT_EQ(ProverWorkerLimit(256 * (UINT64_C(1) << 20)), 1u);
+
+    size_t last = 0;
+    for (uint64_t mib = 64; mib <= 65536; mib += 64) {
+        size_t w = ProverWorkerLimit(mib << 20);
+        EXPECT_GE(w, 1u);
+        EXPECT_GE(w, last) << mib << " MiB";
+        last = w;
+    }
+}
+
+// The parsed proving keys a send shares are held while a proving context lives
+// and handed back with the last one, so a wallet that is not sending holds none.
+TEST(TransactionBuilder, ParsedProvingKeysAreReleasedWithTheLastContext)
+{
+    auto consensusParams = RegtestActivateSapling();
+
+    CBasicKeyStore keyStore;
+    CKey tsk = AddTestCKeyToKeyStore(keyStore);
+    auto scriptPubKey = GetScriptForDestination(tsk.GetPubKey().GetID());
+    auto sk = libzcash::SaplingSpendingKey::random();
+    auto fvk = sk.full_viewing_key();
+    auto pa = sk.default_address();
+
+    auto build = [&]() {
+        auto builder = TransactionBuilder(consensusParams, 1, &keyStore);
+        builder.SetFee(10000);
+        builder.AddTransparentInput(COutPoint(), scriptPubKey, 100000);
+        builder.SendChangeTo(pa, fvk.ovk);
+        builder.AddSaplingOutput(fvk.ovk, pa, 20000, {});
+        auto tx = builder.Build().GetTxOrThrow();
+        std::string reason;
+        EXPECT_TRUE(SaplingConsensusCheck(tx, 2, reason)) << reason;
+    };
+
+    EXPECT_FALSE(zcl_c23_proving_keys_parsed());
+    build();
+    EXPECT_FALSE(zcl_c23_proving_keys_parsed()); // the build's last context is gone
+
+    void* held = librustzcash_sapling_proving_ctx_init();
+    build();
+    EXPECT_TRUE(zcl_c23_proving_keys_parsed());  // a live context keeps the shared copy
+    build();                                      // and the next send reuses it
+    EXPECT_TRUE(zcl_c23_proving_keys_parsed());
+    librustzcash_sapling_proving_ctx_free(held);
+    EXPECT_FALSE(zcl_c23_proving_keys_parsed());
+
+    RegtestDeactivateSapling();
+}

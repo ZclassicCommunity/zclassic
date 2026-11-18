@@ -418,6 +418,10 @@ extern "C" {
     /// and still sign with a single binding key. `src` is not freed.
     void zcl_c23_sapling_proving_ctx_merge(void *dst, const void *src);
 
+    /// True while the shared parsed Sapling proving keys are resident: from the
+    /// first proof of a send until its last proving context is freed.
+    bool zcl_c23_proving_keys_parsed(void);
+
 #ifdef __cplusplus
 }
 #endif

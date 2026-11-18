@@ -146,6 +146,38 @@ void TransactionBuilder::SendChangeTo(CTxDestination& changeAddr)
     zChangeAddr = boost::none;
 }
 
+// Measured peak heap of the native prover on x86-64 Linux (massif of one spend
+// proof, then the daemon's VmHWM over z_sendmany of 1 to 40 notes at 1, 4 and 8
+// threads): the parsed proving keys a whole send shares (72 MB spend + 5 MB
+// output, plus slack), and the working set of one proof in flight (constraint
+// system, QAP vectors, MSM buckets), about 120 MB with the vendored constraint
+// system as it is and about 60 MB once Z23's exact-size constraint storage is
+// re-vendored: lower kProverWorkerBytes then and the limit rises from 2 to 4.
+// The raw parameter files the process holds are not counted: they are there
+// idle too. The ceiling keeps a default send near 400 MB for the whole daemon.
+static const uint64_t kProverSharedBytes = UINT64_C(90) << 20;
+static const uint64_t kProverWorkerBytes = UINT64_C(120) << 20;
+static const uint64_t kProverCeilingBytes = UINT64_C(340) << 20;
+
+static std::atomic<size_t> g_proverWorkerCap(0);
+
+size_t ProverWorkerLimit(uint64_t physicalBytes)
+{
+    // The rest of the machine is the node, the wallet and whatever else the
+    // person is running.
+    uint64_t allowance = kProverCeilingBytes;
+    if (physicalBytes != 0 && physicalBytes / 8 < allowance) {
+        allowance = physicalBytes / 8;
+    }
+    const uint64_t workers = allowance > kProverSharedBytes ? (allowance - kProverSharedBytes) / kProverWorkerBytes : 0;
+    return workers > 0 ? static_cast<size_t>(workers) : 1;
+}
+
+void SetProverWorkerCap(size_t workers)
+{
+    g_proverWorkerCap.store(workers);
+}
+
 namespace {
 
 // A proof job is not yet made, made, or failed. A worker that stops early after
@@ -214,11 +246,16 @@ bool ProveOutput(void* ctx, OutputProofJob& job)
  * this thread with the whole budget, and a lone spend with many outputs gets
  * one worker for the spend and one for the outputs. A budget below four, or a
  * transaction with nothing to overlap, is made on this thread on `ctx` itself.
+ * The workers are also capped (SetProverWorkerCap) so the memory of the proofs
+ * in flight stays bounded; the budget is then shared among fewer of them, each
+ * on more threads.
  */
 size_t ProofWorkers(size_t nSpends, size_t nOutputs, size_t budget)
 {
     size_t want = nSpends > 0 ? nSpends + (nOutputs > 3 ? 1 : 0) : nOutputs;
-    return std::min(want, budget / 2);
+    size_t workers = std::min(want, budget / 2);
+    const size_t cap = g_proverWorkerCap.load();
+    return cap != 0 ? std::min(workers, cap) : workers;
 }
 
 void ProveSaplingDescriptions(void* ctx, std::vector<SpendProofJob>& spendJobs, std::vector<OutputProofJob>& outputJobs)
