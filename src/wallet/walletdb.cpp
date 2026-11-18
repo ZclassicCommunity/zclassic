@@ -1054,6 +1054,15 @@ DBErrors CWalletDB::ZapWalletTx(CWallet* pwallet, vector<CWalletTx>& vWtx)
     if (err != DB_LOAD_OK)
         return err;
 
+    // The transactions are erased one by one here and found again only by the -rescan that
+    // -zapwallettxes implies. Point the best-block locator at no block first, so that a process
+    // that dies before that rescan has ended rescans from genesis on its next start, instead of
+    // trusting a locator that promises transactions which are no longer in the file. The write
+    // reaches the log before any erase does. An empty locator is what older releases also read
+    // as "rescan from genesis".
+    if (!vTxHash.empty() && !WriteBestBlock(CBlockLocator()))
+        return DB_CORRUPT;
+
     // erase each wallet TX
     BOOST_FOREACH (uint256& hash, vTxHash) {
         if (!EraseTx(hash))

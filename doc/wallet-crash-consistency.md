@@ -57,6 +57,15 @@ old witnesses and their height, and now keeps the old nullifier with them. Befor
 nullifier was dropped, the record written to disk had a witness but no nullifier, and the
 note read as unspent after the next restart because the locator was already past its block.
 
+## `-zapwallettxes`
+
+`-zapwallettxes` erases every wallet transaction, one auto-committed erase at a time, and only
+the `-rescan` it implies finds them again. The locator is now set to an empty locator before the
+first erase (the write reaches the log first), so a process that dies before that rescan has
+ended rescans from genesis on its next plain start instead of trusting a locator that promises
+transactions which are no longer in the file. Older releases read an empty locator the same way.
+`qa/rpc-tests/wallet_zap_interrupt.sh` covers it.
+
 ## Test hooks
 
 `-testcrashpoint=<name>[:<n>]` exits the process with status 77 (like `kill -9` at that
@@ -65,6 +74,7 @@ spot) the n-th time the named point is reached; `any` matches every point. Point
 `connect-between-sync-and-chaintip`, `disconnect-between-sync-and-chaintip`,
 `flush-after-coins`, `flush-before-setbestchain`, `setbestchain-begin`,
 `setbestchain-after-txs`, `setbestchain-after-locator`, `setbestchain-after-commit`,
-`init-after-rescan`. The option does nothing unless it is given. The regression test is
+`init-after-rescan`. The option does nothing unless it is given, and both it and
+`-testsetchaininterval` stop the node at start-up with an error on any network but regtest. The regression test is
 `qa/rpc-tests/wallet_crash_consistency.sh`; unit tests are in
 `src/wallet/gtest/test_wallet_note_state.cpp`.
