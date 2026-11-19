@@ -1565,7 +1565,7 @@ static void mk_split(const char *s, size_t len, MkLines *out)
             more = xstrndup(s + e + 1, e2 - e - 1);
             ln[strlen(ln) - 1] = ' ';
             joined = (char *)xrealloc(NULL, strlen(ln) + strlen(more) + 2);
-            sprintf(joined, "%s%s", ln, more);
+            snprintf(joined, strlen(ln) + strlen(more) + 2, "%s%s", ln, more);
             free(ln);
             free(more);
             ln = joined;

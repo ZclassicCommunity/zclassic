@@ -596,8 +596,8 @@ void cxx_defs(const char *src, size_t n, CxxDefs *out)
                         if (!strchr(nm, ':') || 1) {
                             for (size_t k = 0; k < sp; k++)
                                 if (stack[k].kind == 1 && strlen(pre) + strlen(stack[k].name) + 3 < sizeof pre) {
-                                    strcat(pre, stack[k].name);
-                                    strcat(pre, "::");
+                                    memcpy(pre + strlen(pre), stack[k].name, strlen(stack[k].name) + 1);
+                                    memcpy(pre + strlen(pre), "::", 3);
                                 }
                         }
                         if (allcaps(nm, strlen(nm))) { /* BOOST_AUTO_TEST_CASE(arg) */

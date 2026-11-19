@@ -20,5 +20,5 @@ zcutil/local-ci.sh --commit <sha> --only test_bitcoin-full,zcash-gtest-full test
 Rules for tests and where the layout is explained:
 
 - `src/test/AGENTS.md` and `src/gtest/AGENTS.md` for the two binaries, `qa/AGENTS.md` for the shell tests, `wallet/docs/TESTING.md` for the Qt wallet.
-- The agent-oriented testing guide is `doc/agent/TESTING.md` (a separate work unit; until it exists, use the files above and `zcutil/bin/zcl-dev guide <path>`).
+- The agent-oriented testing guide is `doc/agent/TESTING.md` (a separate work unit; until it exists, use the files above and `zcutil/bin/zcl-dev guide <path>`). <!-- doc-path-ok -->
 - Naming and the Boost pattern: `src/test/README.md`. Add a new file to `src/Makefile.test.include` or `src/Makefile.gtest.include` and to `zcutil/dev/impact.rules`.

@@ -521,8 +521,8 @@ static void group_host(void)
         if (!is_regular(f)) {
             nmiss++;
             if (strlen(missing) + strlen(params_files[i]) + 2 < sizeof missing) {
-                if (*missing) strcat(missing, ",");
-                strcat(missing, params_files[i]);
+                if (*missing) memcpy(missing + strlen(missing), ",", 2);
+                memcpy(missing + strlen(missing), params_files[i], strlen(params_files[i]) + 1);
             }
         }
     }
@@ -608,8 +608,8 @@ static void group_repo(void)
         if (!is_regular(f)) {
             nmiss++;
             if (strlen(missing) + strlen(bins[i]) + 2 < sizeof missing) {
-                if (*missing) strcat(missing, ",");
-                strcat(missing, bins[i]);
+                if (*missing) memcpy(missing + strlen(missing), ",", 2);
+                memcpy(missing + strlen(missing), bins[i], strlen(bins[i]) + 1);
             }
         }
     }

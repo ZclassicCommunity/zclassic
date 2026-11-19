@@ -405,7 +405,7 @@ static void record(struct scan *sc, size_t hs, size_t open, size_t po, size_t ns
     squash(nm, sizeof nm, s, ns, ne);
     for (size_t i = 0; i < sc->depth && i < NAMES_MAX; i++) {
         if (!sc->names[i]) continue;
-        if (strlen(qual) + strlen(sc->names[i]) + 3 < sizeof qual) { strcat(qual, sc->names[i]); strcat(qual, "::"); }
+        if (strlen(qual) + strlen(sc->names[i]) + 3 < sizeof qual) { memcpy(qual + strlen(qual), sc->names[i], strlen(sc->names[i]) + 1); memcpy(qual + strlen(qual), "::", 3); }
     }
     char key[1000];
     size_t pe = pc < open ? pc : open;

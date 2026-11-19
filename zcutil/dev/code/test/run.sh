@@ -35,9 +35,9 @@ chmod +x "$tb/zcl-dev"
 git -C "$work" init -q
 git -C "$work" add -A
 git -C "$work" -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m fixture
-jq=
-for c in "$bindir/jsonq" "$bindir/jsonq.exe"; do [ -x "$c" ] && jq=$c && break; done
-[ -n "$jq" ] || { echo "FAIL: jsonq is required (make -C zcutil/tools)"; exit 1; }
+jsq=
+for c in "$bindir/jsonq" "$bindir/jsonq.exe"; do [ -x "$c" ] && jsq=$c && break; done
+[ -n "$jsq" ] || { echo "FAIL: jsonq is required (make -C zcutil/tools)"; exit 1; }
 fails=0
 z() { (cd "$work" && "$tb/zcl-dev-code" "$@"); }
 # case_ <name> <expected-exit> <cmd...>: compare stdout+stderr with golden/<name>.out
@@ -115,7 +115,7 @@ check "c_entry found inside extern C" sh -c "cd '$work' && '$tb/zcl-dev-code' sy
 # JSON output validates through jsonq.
 for sub in "map" "owner src/common.h" "impact src/a.h --tests" "cost src/a.h" "file src/core.cpp" "body src/core.cpp Counter::Twice" "sym Max" "refs a_value" "recent --since=1d"; do
     # shellcheck disable=SC2086
-    check "json valid: $sub" sh -c "cd '$work' && '$tb/zcl-dev-code' $sub --json | '$jq' type ."
+    check "json valid: $sub" sh -c "cd '$work' && '$tb/zcl-dev-code' $sub --json | '$jsq' type ."
 done
 
 # Paging: 600 includers of common.h overflow one 16 KiB page; --after walks the rest.
@@ -136,15 +136,15 @@ while :; do
     json=$(cd "$work" && "$tb/zcl-dev-code" impact src/common.h --json --after=$after)
     size=$(printf '%s' "$json" | wc -c)
     [ "$size" -lt 16384 ] || { echo "FAIL json page at $after is $size bytes"; fails=$((fails + 1)); break; }
-    n=$(printf '%s' "$json" | "$jq" count rows)
+    n=$(printf '%s' "$json" | "$jsq" count rows)
     rows=$((rows + n))
     pages=$((pages + 1))
-    next=$(printf '%s' "$json" | "$jq" get next)
+    next=$(printf '%s' "$json" | "$jsq" get next)
     [ "$next" = null ] && break
     after=$next
     [ $pages -lt 200 ] || { echo "FAIL paging does not terminate"; fails=$((fails + 1)); break; }
 done
-total=$(cd "$work" && "$tb/zcl-dev-code" impact src/common.h --json | "$jq" get total)
+total=$(cd "$work" && "$tb/zcl-dev-code" impact src/common.h --json | "$jsq" get total)
 if [ "$rows" = "$total" ] && [ "$pages" -gt 1 ]; then echo "ok   paging walked $rows of $total rows in $pages pages"; else echo "FAIL paging: $rows rows of $total in $pages pages"; fails=$((fails + 1)); fi
 
 # A hollow scan is a failure, never a pass.

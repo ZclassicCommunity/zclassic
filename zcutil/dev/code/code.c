@@ -127,7 +127,7 @@ static void out_row(Out *o, ...)
     if (len > ROW_MAX) { /* bound every row so a page stays under PAGE_BYTES */
         row[ROW_MAX - 3] = 0;
         utf8_trim(row);
-        strcat(row, "...");
+        memcpy(row + strlen(row), "...", 4);
     }
     if (o->nrows == o->caprows) {
         o->caprows = o->caprows ? o->caprows * 2 : 64;
@@ -204,11 +204,11 @@ static char *row_render(const Out *o, const char *row)
     for (size_t c = 0; c < nc; c++) {
         const char *e = c + 1 < nc ? strchr(p, '\t') : NULL; /* the last column takes the rest */
         size_t l = e ? (size_t)(e - p) : strlen(p);
-        len += (size_t)sprintf(b + len, "%s\"%s\":", c ? "," : "", names[c]);
+        len += (size_t)snprintf(b + len, cap - len, "%s\"%s\":", c ? "," : "", names[c]);
         if (isint[c] && l == 0) {
-            len += (size_t)sprintf(b + len, "null");
+            len += (size_t)snprintf(b + len, cap - len, "null");
         } else if (isint[c]) {
-            len += (size_t)sprintf(b + len, "%ld", strtol(p, NULL, 10));
+            len += (size_t)snprintf(b + len, cap - len, "%ld", strtol(p, NULL, 10));
         } else {
             b[len++] = '"';
             for (size_t q = 0; q < l; q++) {
@@ -217,7 +217,7 @@ static char *row_render(const Out *o, const char *row)
                     b[len++] = '\\';
                     b[len++] = (char)ch;
                 } else if (ch < 0x20) {
-                    len += (size_t)sprintf(b + len, "\\u%04x", ch);
+                    len += (size_t)snprintf(b + len, cap - len, "\\u%04x", ch);
                 } else {
                     b[len++] = (char)ch;
                 }
@@ -720,7 +720,7 @@ static int cmd_owner(Out *o, const char *arg)
         int built = !cmd_append_arg(cmd, sizeof cmd, ex) && !cmd_append_arg(cmd, sizeof cmd, "guide") &&
                     !cmd_append_arg(cmd, sizeof cmd, path);
 #ifdef _WIN32
-        if (built && strlen(cmd) + 2 < sizeof cmd) strcat(cmd, "\"");
+        if (built && strlen(cmd) + 2 < sizeof cmd) memcpy(cmd + strlen(cmd), "\"", 2);
         else built = 0;
 #endif
         ZList g = {0};
