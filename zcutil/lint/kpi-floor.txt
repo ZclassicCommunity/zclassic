@@ -7,7 +7,7 @@ bash_lines	113
 jq_uses	264
 banned_str	13
 files_over_1500	20
-complexity_debt	6209
+complexity_debt	6202
 undocumented_flags	16
 broken_md_links	0
 doc_path_debt	0

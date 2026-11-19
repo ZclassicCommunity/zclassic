@@ -386,10 +386,12 @@ extern "C" {
     bool zcl_c23_batch_verify(const zcl_c23_batch *batch,
                               bool *bad_is_output, size_t *bad_index);
 
-    /// Diagnostics: "none" before init, "resident" once init holds the
-    /// verified Sapling proving keys (as librustzcash does). The last
-    /// refusal is always NULL: proving no longer loads anything, so nothing
-    /// is refused at proof time. Kept for ABI stability.
+    /// Diagnostics: "none" before init. ZCL_PARAMS_VERIFY=boot: "resident"
+    /// once init holds the verified Sapling proving keys (as librustzcash
+    /// does). Default (lazy) mode: "registered" after init, "resident" while
+    /// the parsed proving keys are held (a send is under way). A refused
+    /// proof is reported in debug.log; the last refusal stays NULL here, kept
+    /// for ABI stability.
     const char *zcl_c23_proving_status(void);
     const char *zcl_c23_proving_last_refusal(void);
 
@@ -421,6 +423,22 @@ extern "C" {
     /// True while the shared parsed Sapling proving keys are resident: from the
     /// first proof of a send until its last proving context is freed.
     bool zcl_c23_proving_keys_parsed(void);
+
+    /// Lazy mode (the default; ZCL_PARAMS_VERIFY=boot turns it off): hashes
+    /// sprout-groth16.params once per process, again only after the file
+    /// changes, and returns true when it has the canonical digest; on false
+    /// `err` explains why. librustzcash_sprout_prove calls it first and aborts
+    /// on false (its ABI has no failure value); a caller that wants an error
+    /// instead calls it before proving. Always true in boot mode (init hashed
+    /// the file).
+    bool zcl_c23_sprout_params_ready(char *err, size_t errsz);
+
+    /// Test diagnostics: raw parameter bytes held by the process (boot mode:
+    /// the Sapling pair, for life; lazy mode: 0 except while a load is being
+    /// parsed), and how many times lazy mode has read, verified and parsed the
+    /// Sapling proving keys.
+    size_t zcl_c23_params_bytes_resident(void);
+    unsigned zcl_c23_proving_keys_loads(void);
 
 #ifdef __cplusplus
 }
