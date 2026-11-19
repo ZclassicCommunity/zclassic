@@ -1,0 +1,2 @@
+FAIL unregistered: src/test/new_tests.cpp is not listed in BITCOIN_TESTS of src/Makefile.test.include
+FAIL unregistered: src/gtest/test_new.cpp is not listed in zcash_gtest_SOURCES of src/Makefile.gtest.include

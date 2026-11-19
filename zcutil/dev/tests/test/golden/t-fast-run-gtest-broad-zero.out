@@ -1,0 +1,11 @@
+note: broad: run zcutil/local-ci.sh test-changed (broad rule: src/core/engine.cpp); running the full test_bitcoin and zcash-gtest
+== src/test/test_bitcoin --log_level=test_suite
+fake test_bitcoin --log_level=test_suite
+== exit 0
+== src/zcash-gtest
+fake zcash-gtest 
+[==========] Running 0 tests from suites.
+[  PASSED  ] 0 tests.
+t-fast: FAIL gtest ran 0 tests: the filter matched nothing
+== exit 1
+t-fast: 2 command(s), 1 failed
