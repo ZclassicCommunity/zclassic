@@ -30,6 +30,8 @@
 #include <QTcpServer>
 #include "repairlocation.h"
 #include "profilepaths.h"
+#include "profilefailure.h"
+#include "cookiestale.h"
 #include "daemonjob.h"
 #include <QTemporaryDir>
 #include "walletbackup.h"
@@ -961,6 +963,11 @@ private slots:
 
     // --- First-run trust: send-gate staleness predicate (pure) ---
     void sendgate_staleWhenPollStops();               // Settings::syncGateIsStale boundary
+    void cookie_staleRequestIsRetriedNotHealed();
+    void cookie_retryIsBoundedAndNeverForConfCredentials();
+    void profilefailure_boxIsSkippedWhereItCouldAbortOrBlock();
+    void profilefailure_headlessModesKeepStderrOnly();
+    void profilefailure_messageSaysWhatAndWhatToDo();
     void profile_unsetKeepsDefaults();
     void profile_setRedirectsEveryPath();
     void profile_settingsAreIniInsideProfile();
@@ -2431,6 +2438,114 @@ void TestLogic::sendgate_staleWhenPollStops() {
     // Past the window: stale.
     QVERIFY(Settings::syncGateIsStale(now, now - (W + 1)));
     QVERIFY(Settings::syncGateIsStale(now, now - 10 * W));
+}
+
+// First launch: the node binds its RPC port before it writes the auth cookie, so a first
+// request can carry no/older credentials and get a 401 that is NOT a real desync. Only
+// that case is retried; a 401 that carried the current cookie keeps the heal path.
+void TestLogic::cookie_staleRequestIsRetriedNotHealed() {
+    const QString cookie = "__cookie__:AbCd1234";
+    // fresh profile: request went out with empty creds, cookie now exists -> retry
+    QVERIFY(CookieStale::sentCredsAreStale("", "", cookie));
+    // request carried an older cookie, node has since written a new one -> retry
+    QVERIFY(CookieStale::sentCredsAreStale("__cookie__", "OldOld", cookie));
+    // request carried exactly the current cookie: genuine mismatch -> heal path
+    QVERIFY(!CookieStale::sentCredsAreStale("__cookie__", "AbCd1234", cookie));
+    // no cookie on disk: nothing newer to retry with -> heal path as before
+    QVERIFY(!CookieStale::sentCredsAreStale("", "", QString()));
+    QVERIFY(!CookieStale::sentCredsAreStale("zcl-qt-wallet", "secret", QString()));
+    // a cookie value containing ':' is compared whole
+    QVERIFY(!CookieStale::sentCredsAreStale("__cookie__", "a:b", "__cookie__:a:b"));
+}
+
+// The retry is bounded and has memory, so it can never starve the heal (a leftover .cookie
+// from a killed node plus a node that keeps answering 401 must reach the heal, not spin).
+void TestLogic::cookie_retryIsBoundedAndNeverForConfCredentials() {
+    using CookieStale::shouldRetry;
+    CookieStale::RetryState st;
+    // conf rpcuser/rpcpassword (not from the cookie path) + a different cookie on disk:
+    // the first 401 falls through to the heal and nothing is remembered
+    QVERIFY(!shouldRetry(false, "zcl-qt-wallet", "confpass", "__cookie__:Leftover", st));
+    QCOMPARE(st.retries, 0);
+    // empty credentials (cookie not yet written when the request went out): retried once
+    QVERIFY(shouldRetry(false, "", "", "__cookie__:First", st));
+    QCOMPARE(st.retries, 1);
+    // the retry carried that cookie (cookie auth) and still got 401: unchanged cookie -> heal
+    QVERIFY(!shouldRetry(true, "__cookie__", "First", "__cookie__:First", st));
+    // the request carried an older cookie than the one on disk, but that very cookie was
+    // already retried against: heal, no loop
+    QVERIFY(!shouldRetry(true, "__cookie__", "Old", "__cookie__:First", st));
+    // a genuinely newer cookie (node restarted again) is retried once more...
+    QVERIFY(shouldRetry(true, "__cookie__", "First", "__cookie__:Second", st));
+    QCOMPARE(st.retries, 2);
+    // ...but the hard cap is two retries per loader
+    QVERIFY(!shouldRetry(true, "__cookie__", "Second", "__cookie__:Third", st));
+    QCOMPARE(st.retries, CookieStale::kMaxRetries);
+    // no cookie on disk: never a retry
+    CookieStale::RetryState fresh;
+    QVERIFY(!shouldRetry(false, "", "", QString(), fresh));
+    // the state keeps only a hash, never the cookie
+    QCOMPARE(st.lastHash.size(), 32);
+}
+
+// The profile-folder message box is skipped where it would abort or block forever.
+void TestLogic::profilefailure_boxIsSkippedWhereItCouldAbortOrBlock() {
+    using ProfileFailure::boxPossible;
+    QVERIFY(!boxPossible("offscreen", ":0", true, true));
+    QVERIFY(!boxPossible("offscreen:fontdir=/x", ":0", true, true));
+    QVERIFY(!boxPossible("minimal", ":0", true, true));
+    QVERIFY(!boxPossible("", ":99", false, true));        // DISPLAY set but no X socket: would abort (134)
+    QVERIFY(!boxPossible("", "", false, true));           // no DISPLAY
+    QVERIFY(!boxPossible("", "remote:0", true, true));    // not a local display: do not risk it
+    QVERIFY(boxPossible("", ":0", true, true));
+    QVERIFY(boxPossible("xcb", ":1.0", true, true));
+    QVERIFY(boxPossible("", QString(), true, false));     // macOS: no display check
+    QVERIFY(!ProfileFailure::x11SocketFor("remote:0"));
+    QVERIFY(!ProfileFailure::x11SocketFor(":notanumber"));
+}
+
+// A bad profile dir must be visible (Windows GUI has no console) but headless modes
+// keep stderr + exit code only; the message names the folder and the remedy, and the
+// helper never creates the directory.
+void TestLogic::profilefailure_headlessModesKeepStderrOnly() {
+    auto headless = [](std::initializer_list<const char*> a) {
+        QList<QByteArray> store; store << "zclwallet";
+        for (const char* s : a) store << s;
+        QVector<char*> v; for (QByteArray& b : store) v << b.data();
+        return ProfileFailure::isHeadlessInvocation(v.size(), v.data());
+    };
+    QVERIFY(!headless({}));
+    QVERIFY(!headless({"--profile-dir", "C:/nope"}));
+    QVERIFY(!headless({"zclassic:t1abc"}));
+    QVERIFY(headless({"--print-profile-paths"}));
+    QVERIFY(headless({"--profile-dir", "x", "--notify", "id"}));
+    QVERIFY(headless({"--headless"}));
+    QVERIFY(headless({"--help"}));
+}
+
+void TestLogic::profilefailure_messageSaysWhatAndWhatToDo() {
+    QTemporaryDir tmp; QVERIFY(tmp.isValid());
+    const QString missing = tmp.filePath("typo-profile");
+    const QString t = ProfileFailure::dialogText(missing);
+    QVERIFY(t.contains(QDir::toNativeSeparators(missing)));
+    QVERIFY(t.contains("does not exist"));
+    QVERIFY(t.contains("Create that folder"));
+    QVERIFY(t.contains("remove"));
+    QVERIFY(ProfileFailure::stderrLine(missing).contains("must name an existing directory"));
+    // set-but-empty is equally visible and says so
+    const QString e = ProfileFailure::dialogText(QString());
+    QVERIFY(e.contains("empty"));
+    QVERIFY(e.contains("existing folder"));
+    // the Qt box carries the text and is an error box
+    std::unique_ptr<QMessageBox> box(ProfileFailure::makeBox(missing));
+    QCOMPARE(box->text(), t);
+    QCOMPARE(box->icon(), QMessageBox::Critical);
+    // nothing was created
+    QVERIFY(!QFileInfo::exists(missing));
+    qputenv("ZCLWALLET_PROFILE_DIR", missing.toLocal8Bit());
+    QVERIFY(!ProfilePaths::valid());
+    QVERIFY(!QFileInfo::exists(missing));
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
 }
 
 // ---- Profile override (ZCLWALLET_PROFILE_DIR) -------------------------------------

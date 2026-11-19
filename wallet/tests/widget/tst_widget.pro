@@ -63,6 +63,7 @@ SOURCES += \
     ../../src/turnstile.cpp \
     ../../src/qrcodelabel.cpp \
     ../../src/connection.cpp \
+    ../../src/connection_cookie.cpp \
     ../../src/fillediconlabel.cpp \
     ../../src/addressbook.cpp \
     ../../src/logger.cpp \

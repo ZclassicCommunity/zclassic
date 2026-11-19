@@ -89,6 +89,8 @@
 #include "senttxstore.h"
 #include "settings.h"
 #include "connection.h"
+#include "stopretry.h"
+#include "closeflow.h"
 #include "namepaybox.h"
 #include "notifyserver.h"
 #include "logger.h"
@@ -225,6 +227,14 @@ protected:
     }
     void hang(QTcpSocket*) {}                         // never answered
     void drop(QTcpSocket* s) { s->abort(); }          // the connection dies without an answer
+    void stopListening() { server.close(); }          // the port is closed: new connections are refused
+    void writeRaw(QTcpSocket* s, int status, const char* text, const char* ctype, const std::string& body) {
+        QByteArray h = QByteArray("HTTP/1.1 ") + QByteArray::number(status) + " " + text + "\r\nContent-Type: " + ctype +
+                       "\r\nContent-Length: " + QByteArray::number((int)body.size()) + "\r\nConnection: keep-alive\r\n\r\n";
+        s->write(h);
+        s->write(body.data(), (qint64)body.size());
+        s->flush();
+    }
 
 private:
     QTcpServer server;
@@ -4543,9 +4553,269 @@ private slots:
         SentTxStore::deleteHistory();
         settleAndDelete(w);
     }
+
+    // ======================================================================================================
+    // Closing while the node is still starting: the closing state is shown at once and `stop` is re-sent
+    // until the node accepts it (see src/stopretry.h). The node refuses the first request with the
+    // warm-up error (-28), as zclassicd does while loading.
+    // ======================================================================================================
+private:
+    class StopNode : public FakeNode {
+    public:
+        enum Refusal { Warmup28, Busy503Json, Html503, Reset };
+        int refuse = 1;                 // answer this many stop requests with `refusal`, then accept
+        Refusal refusal = Warmup28;
+        bool goAway = false;            // after the refusals: kill the connection and close the port
+    protected:
+        void handle(const Req& r, QTcpSocket* s) override {
+            if (r.method != "stop") { FakeNode::handle(r, s); return; }
+            if (count("stop") <= refuse) {
+                switch (refusal) {
+                    case Warmup28:    rpcError(s, -28, "Loading block index..."); break;
+                    case Busy503Json: writeRaw(s, 503, "Service Unavailable", "application/json",
+                                        "{\"result\":null,\"error\":{\"code\":-32603,\"message\":\"RPC server busy: work queue full "
+                                        "(depth 16, threads 4); retry, or raise -rpcworkqueue / -rpcthreads\"},\"id\":null}"); break;
+                    case Html503:     writeRaw(s, 503, "Service Unavailable", "text/html",
+                                        "<html><body>Service Unavailable</body></html>"); break;
+                    case Reset:       drop(s); break;
+                }
+            } else if (goAway) { drop(s); stopListening(); }
+            else result(s, "ZClassic server stopping");
+        }
+    };
+
+private slots:
+    void stop_isRetriedUntilTheNodeAccepts() {
+        StopNode node;
+        node.refuse = 2;
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        Connection* c = w->getRPC()->getConnection();
+        c->shutdown();      // the close path does this right after the first stop: retries must still go out
+        StopRetrier st(c, 50);
+        QElapsedTimer t; t.start();
+        while (!st.delivered() && t.elapsed() < 8000) { st.tick(); QTest::qWait(20); }
+        QVERIFY(st.delivered());
+        QCOMPARE(node.count("stop"), 3);
+        QCOMPARE(st.attempts(), 3);
+        QTest::qWait(200);
+        st.tick();                                  // delivered: nothing more is sent
+        QTest::qWait(100);
+        QCOMPARE(node.count("stop"), 3);
+        settleAndDelete(w);
+    }
+
+    void stop_retryDecisionsArePure() {
+        QVERIFY(StopRetrier::shouldSend(false, false, 0, 0, 0, 500));           // first attempt: at once
+        QVERIFY(!StopRetrier::shouldSend(false, true, 1, 0, 9999, 500));        // one in flight: never doubled
+        QVERIFY(!StopRetrier::shouldSend(false, false, 1, 100, 599, 500));      // too soon
+        QVERIFY(StopRetrier::shouldSend(false, false, 1, 100, 600, 500));       // interval passed: retry
+        QVERIFY(!StopRetrier::shouldSend(true, false, 3, 0, 99999, 500));       // delivered: stop retrying
+        QVERIFY(StopRetrier::isDelivered(QNetworkReply::NoError));
+        QVERIFY(!StopRetrier::isDelivered(QNetworkReply::ConnectionRefusedError));
+        QVERIFY(!StopRetrier::isDelivered(QNetworkReply::InternalServerError)); // -28 is HTTP 500
+    }
+
+    // Retrying stops once more requests are pointless: the node answered 200, answers a 503 that is not the
+    // JSON busy reply (HTTP server shutting down), or REFUSES the connection after having been reachable.
+    // A busy 503, a reset or a timeout keep retrying; a refused port before it was ever reachable keeps going.
+    void stop_classifyIsPure() {
+        using R = StopRetrier;
+        QCOMPARE(R::classify(QNetworkReply::NoError, 200, false), R::Delivered);
+        QCOMPARE(R::classify(QNetworkReply::ConnectionRefusedError, 0, false), R::Retry);        // not up yet
+        QCOMPARE(R::classify(QNetworkReply::ConnectionRefusedError, 0, true), R::GiveUp);        // port closed after being up
+        QCOMPARE(R::classify(QNetworkReply::RemoteHostClosedError, 0, true), R::Retry);          // reset: maybe busy
+        QCOMPARE(R::classify(QNetworkReply::TimeoutError, 0, true), R::Retry);
+        QCOMPARE(R::classify(QNetworkReply::InternalServerError, 500, false), R::Retry);         // -28, listening
+        QCOMPARE(R::classify(QNetworkReply::AuthenticationRequiredError, 401, false), R::Retry);
+        QCOMPARE(R::classify(QNetworkReply::ServiceUnavailableError, 503, false, false), R::GiveUp);   // shutting down
+        QCOMPARE(R::classify(QNetworkReply::ServiceUnavailableError, 503, true, true), R::Retry);      // busy
+        QVERIFY(R::isBusyReply("application/json", "{\"error\":{\"message\":\"RPC server busy: work queue full\"}}"));
+        QVERIFY(R::isBusyReply("application/json; charset=utf-8", "RPC server busy"));
+        QVERIFY(!R::isBusyReply("text/html", "RPC server busy"));                                // not JSON
+        QVERIFY(!R::isBusyReply("application/json", "{\"error\":{\"message\":\"other\"}}"));     // other body
+    }
+
+private:
+    // Drive a StopRetrier against a StopNode until `done` or the budget ends.
+    template <class F> bool runRetrier(StopRetrier& st, F done, int budgetMs = 8000) {
+        QElapsedTimer t; t.start();
+        while (!done() && t.elapsed() < budgetMs) { st.tick(); QTest::qWait(20); }
+        return done();
+    }
+
+private slots:
+
+    // 503 "RPC server busy" (JSON): the node is running and has not taken the stop: keep retrying until accepted.
+    void stop_busy503JsonKeepsRetryingThenSucceeds() {
+        StopNode node;
+        node.refuse = 3; node.refusal = StopNode::Busy503Json;
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        Connection* c = w->getRPC()->getConnection();
+        c->shutdown();
+        StopRetrier st(c, 50);
+        QVERIFY(runRetrier(st, [&]() { return st.delivered() || st.gaveUp(); }));
+        QVERIFY(st.delivered());
+        QVERIFY(!st.gaveUp());
+        QCOMPARE(node.count("stop"), 4);
+        settleAndDelete(w);
+    }
+
+    // 503 that is not the JSON busy reply is the HTTP server shutting down: give up, send nothing more.
+    void stop_html503GivesUp() {
+        StopNode node;
+        node.refuse = 99; node.refusal = StopNode::Html503;
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        Connection* c = w->getRPC()->getConnection();
+        c->shutdown();
+        StopRetrier st(c, 50);
+        QVERIFY(runRetrier(st, [&]() { return st.delivered() || st.gaveUp(); }));
+        QVERIFY(st.gaveUp());
+        QVERIFY(!st.delivered());
+        QTest::qWait(300);
+        st.tick();
+        QTest::qWait(100);
+        QCOMPARE(node.count("stop"), 1);
+        settleAndDelete(w);
+    }
+
+    // A reset (connection dropped without an answer) may be a busy node: keep retrying until accepted.
+    void stop_resetKeepsRetrying() {
+        StopNode node;
+        node.refuse = 2; node.refusal = StopNode::Reset;
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        Connection* c = w->getRPC()->getConnection();
+        c->shutdown();
+        StopRetrier st(c, 50);
+        QVERIFY(runRetrier(st, [&]() { return st.delivered() || st.gaveUp(); }));
+        QVERIFY(st.delivered());
+        QVERIFY(!st.gaveUp());
+        settleAndDelete(w);
+    }
+
+    // The node was reachable (answered -28), then its port is closed: a REFUSED connection means it has
+    // exited, so stop retrying and send nothing more.
+    void stop_refusedAfterBeingReachableGivesUp() {
+        StopNode node;
+        node.refuse = 1; node.refusal = StopNode::Warmup28; node.goAway = true;
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        Connection* c = w->getRPC()->getConnection();
+        c->shutdown();
+        StopRetrier st(c, 50);
+        QVERIFY(runRetrier(st, [&]() { return st.delivered() || st.gaveUp(); }));
+        QVERIFY(st.gaveUp());
+        QVERIFY(!st.delivered());
+        const int sent = node.count("stop");          // 1st: -28, 2nd: dropped (Qt may re-send once on a dead socket)
+        QVERIFY2(sent >= 2 && sent <= 3, qPrintable(QString::number(sent)));
+        QTest::qWait(300);
+        st.tick();
+        QTest::qWait(100);
+        QCOMPARE(node.count("stop"), sent);
+        settleAndDelete(w);
+    }
+
+    // The closing notice is really on screen when the Assist returns (one event-loop pass), and an event
+    // delivered during that pass is already treated as part of an expected shutdown: RPC::noteExpectedShutdown()
+    // runs first, so a process-finished event (queued here) does not reach the crash handler (which would
+    // call noConnection(), change the status line, and offer a restart).
+    void close_noticeIsPaintedAndEventsDuringItAreExpectedShutdown() {
+        StopNode node;
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        QProcess child;
+        child.start(QCoreApplication::applicationFilePath(), {"--sleep-child"});
+        QVERIFY(child.waitForStarted(5000));
+        w->getRPC()->setEZClassicd(&child);          // wires finished -> RPC::handleEZClassicdCrash
+        const bool wasHeadless = Settings::getInstance()->isHeadless();
+        Settings::getInstance()->setHeadless(false);   // the notice is really built and shown
+        w->statusLabel->setText("sentinel");
+
+        int delivered = 0;
+        QTimer::singleShot(0, w, [&]() { delivered++; });
+        QMetaObject::invokeMethod(w, [&]() { delivered++; }, Qt::QueuedConnection);
+        // the node "exits" while the notice is being painted (delivered by that one event-loop pass)
+        QMetaObject::invokeMethod(w, [&]() { emit child.finished(1, QProcess::CrashExit); }, Qt::QueuedConnection);
+        {
+            CloseFlow::Assist assist(w, w->getRPC());
+            QCOMPARE(delivered, 2);                  // the pass ran: queued work was delivered...
+            QCOMPARE(w->statusLabel->text(), QString("sentinel"));   // ...and the crash handler stayed quiet
+            QDialog* notice = w->findChild<QDialog*>("closingNotice");
+            QVERIFY(notice && notice->isVisible());
+            QVERIFY(notice->windowHandle() && notice->windowHandle()->isExposed());   // really on screen
+            QVERIFY(notice->grab().toImage().width() > 0);
+        }
+        Settings::getInstance()->setHeadless(wasHeadless);
+        child.kill();
+        child.waitForFinished(3000);
+        w->getRPC()->setEZClassicd(nullptr);
+        settleAndDelete(w);
+    }
+
+    // No owned running node (external node, or the process is not running): a neutral text, never
+    // "stopping the ZClassic node safely".
+    void close_noticeIsNeutralWithoutAnOwnedNode() {
+        StopNode node;
+        MainWindow* w = makeWindow();
+        attachNode(w, node);                         // an attached node the wallet did not start
+        const bool wasHeadless = Settings::getInstance()->isHeadless();
+        Settings::getInstance()->setHeadless(false);
+        {
+            CloseFlow::Assist assist(w, w->getRPC());
+            QDialog* notice = w->findChild<QDialog*>("closingNotice");
+            QVERIFY(notice && notice->isVisible());
+            QLabel* status = notice->findChild<QLabel*>("closingNoticeStatus");
+            QVERIFY(status);
+            QCOMPARE(status->text(), QString::fromUtf8("Closing\u2026"));
+            QVERIFY(!status->text().contains("stopping"));
+        }
+        Settings::getInstance()->setHeadless(wasHeadless);
+        QCOMPARE(node.count("stop"), 0);             // and no stop is ever sent for a node we do not own
+        settleAndDelete(w);
+    }
+
+    // The close path's helper: a node process that is still running. The notice is on screen at once
+    // (before any wait), carries the plain text, and stop is re-sent after the first -28 refusal even though
+    // nothing else is sending it.
+    void close_showsClosingStateAtOnceAndRetriesStop() {
+        StopNode node;
+        node.refuse = 1;
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        QProcess child;
+        child.start(QCoreApplication::applicationFilePath(), {"--sleep-child"});   // lives ~20 s
+        QVERIFY(child.waitForStarted(5000));
+        w->getRPC()->setEZClassicd(&child);
+        const bool wasHeadless = Settings::getInstance()->isHeadless();
+        Settings::getInstance()->setHeadless(false);
+        {
+            QElapsedTimer t; t.start();
+            CloseFlow::Assist assist(w, w->getRPC());
+            QVERIFY2(t.elapsed() < 1000, "constructing the closing state must not wait");
+            QDialog* notice = w->findChild<QDialog*>("closingNotice");
+            QVERIFY(notice && notice->isVisible());
+            QLabel* status = notice->findChild<QLabel*>("closingNoticeStatus");
+            QVERIFY(status);
+            QVERIFY(status->text().contains("stopping the ZClassic node safely"));
+            QTRY_VERIFY_WITH_TIMEOUT(node.count("stop") >= 2, 6000);   // refused once (-28), then accepted
+        }
+        Settings::getInstance()->setHeadless(wasHeadless);
+        child.kill();
+        child.waitForFinished(3000);
+        w->getRPC()->setEZClassicd(nullptr);
+        settleAndDelete(w);
+    }
 };
 
 int main(int argc, char* argv[]) {
+    if (argc == 2 && QByteArray(argv[1]) == "--sleep-child") {
+        QCoreApplication child(argc, argv);
+        QTimer::singleShot(20000, &child, &QCoreApplication::quit);
+        return child.exec();
+    }
     if (argc == 2 && QByteArray(argv[1]) == "--fast-sync-child") {
         QCoreApplication child(argc, argv);
         QTimer::singleShot(750, &child, &QCoreApplication::quit);

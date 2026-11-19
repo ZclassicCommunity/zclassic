@@ -2093,7 +2093,7 @@ void ConnectionLoader::refreshZClassicdState(Connection* connection, std::functi
                 // a single bounded cookie-only restart. With cookie auth in place this
                 // branch is rarely reached at all; it is belt-and-suspenders.
                 if (Settings::getInstance()->useEmbedded() && ezclassicd != nullptr) {
-                    if (this->handleEmbeddedAuthFailure())
+                    if (this->retryOrHealAuth(connection->config))
                         return;   // heal started/escalated — do NOT fall through to showError
                 }
 

@@ -19,6 +19,7 @@
 #include "turnstile.h"
 #include "senttxstore.h"
 #include "connection.h"
+#include "closeflow.h"
 #include "tokensview.h"
 #include "namesview.h"
 
@@ -382,13 +383,12 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         return;
     }
 
-    // Real shutdown. Let the RPC know to shut down any running service.
+    // Real shutdown: show the closing state at once, re-send stop until accepted, stop the node.
     quitting = true;
+    CloseFlow::Assist closeAssist(this, rpc);
     rpc->shutdownZClassicd();
 
-    // Bubble up
-    if (event)
-        QMainWindow::closeEvent(event);
+    if (event) QMainWindow::closeEvent(event);   // bubble up
 
     // quit-on-last-window-closed is now disabled for the WHOLE GUI lifetime (set
     // in main(); never re-enabled by applyTraySetting), so closing the window no

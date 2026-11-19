@@ -2,6 +2,7 @@
 #define CONNECTION_H
 
 #include "mainwindow.h"
+#include "cookiestale.h"
 #include "ui_connection.h"
 #include "precompiled.h"
 #include <atomic>
@@ -134,6 +135,11 @@ private:
     // node. Returns true if a heal was started/handled (caller must not fall through to
     // any showError); false to let the caller take the external-node path.
     bool handleEmbeddedAuthFailure();
+    // First-launch race (cookiestale.h): a 401 whose request predates the cookie now on disk
+    // is retried with the current cookie (no restart); otherwise the heal above runs.
+    // Defined in connection_cookie.cpp.
+    bool retryWithCurrentCookie(const std::shared_ptr<ConnectionConfig>& sent);
+    bool retryOrHealAuth(const std::shared_ptr<ConnectionConfig>& sent);
 
     Connection* makeConnection(std::shared_ptr<ConnectionConfig> config);
 
@@ -303,6 +309,7 @@ private:
     // detect that the loader was destroyed (use_count drops to 1 / the bool is false)
     // and bail before touching any freed member. Reset/destroyed in the destructor.
     std::shared_ptr<bool> ezAlive = std::make_shared<bool>(true);
+    CookieStale::RetryState cookieRetry;   // bounded memory for retryWithCurrentCookie (cookiestale.h)
 
     // Optional getbootstrapinfo enrichment: tri-state cache so an old daemon is
     // probed at most once. -1 unknown, 0 absent, 1 present.

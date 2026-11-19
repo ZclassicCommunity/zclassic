@@ -68,6 +68,7 @@ SOURCES += \
     src/turnstile.cpp \
     src/qrcodelabel.cpp \
     src/connection.cpp \
+    src/connection_cookie.cpp \
     src/fillediconlabel.cpp \
     src/addressbook.cpp \
     src/logger.cpp \
@@ -88,6 +89,10 @@ HEADERS += \
     src/embeddeddaemon.h \
     src/daemonjob.h \
     src/profilepaths.h \
+    src/profilefailure.h \
+    src/stopretry.h \
+    src/closeflow.h \
+    src/cookiestale.h \
     src/notifyserver.h \
     src/securerandom.h \
     src/privatefile.h \
