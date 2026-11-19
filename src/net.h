@@ -367,7 +367,14 @@ public:
     int64_t nTimeOffset;
     CAddress addr;
     std::string addrName;
+    /** The address this peer says it sees us at (its version message). Written by the
+     *  message handler, read by the opencon threads: use GetAddrLocal / SetAddrLocal. */
+    CService GetAddrLocal() const { LOCK(cs_addrLocal); return addrLocal; }
+    void SetAddrLocal(const CService& addrIn) { LOCK(cs_addrLocal); addrLocal = addrIn; }
+private:
+    mutable CCriticalSection cs_addrLocal;
     CService addrLocal;
+public:
     int nVersion;
     // strSubVer is whatever byte array we read from the wire. However, this field is intended
     // to be printed out, displayed to humans in various forms and so on. So we sanitize it and

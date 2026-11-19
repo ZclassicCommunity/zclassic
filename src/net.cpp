@@ -214,8 +214,9 @@ int GetnScore(const CService& addr)
 bool IsPeerAddrLocalGood(CNode *pnode)
 {
     // a peer on the onion side only knows us as the Tor exit: nothing to learn
-    return fDiscover && !pnode->IsOnionPeer() && pnode->addr.IsRoutable() && pnode->addrLocal.IsRoutable() &&
-           !IsLimited(pnode->addrLocal.GetNetwork());
+    const CService addrLocal = pnode->GetAddrLocal();
+    return fDiscover && !pnode->IsOnionPeer() && pnode->addr.IsRoutable() && addrLocal.IsRoutable() &&
+           !IsLimited(addrLocal.GetNetwork());
 }
 
 // pushes our own address to a peer
@@ -230,7 +231,7 @@ void AdvertizeLocal(CNode *pnode)
         if (IsPeerAddrLocalGood(pnode) && (!addrLocal.IsRoutable() ||
              GetRand((GetnScore(addrLocal) > LOCAL_MANUAL) ? 8:2) == 0))
         {
-            addrLocal.SetIP(pnode->addrLocal);
+            addrLocal.SetIP(pnode->GetAddrLocal());
         }
         if (addrLocal.IsRoutable())
         {
@@ -655,7 +656,8 @@ void CNode::copyStats(CNodeStats &stats)
     stats.dPingWait = (((double)nPingUsecWait) / 1e6);
 
     // Leave string empty if addrLocal invalid (not filled in yet)
-    stats.addrLocal = addrLocal.IsValid() ? addrLocal.ToString() : "";
+    const CService addrLocalCopy = GetAddrLocal();
+    stats.addrLocal = addrLocalCopy.IsValid() ? addrLocalCopy.ToString() : "";
 }
 
 // requires LOCK(cs_vRecvMsg)
@@ -1708,7 +1710,7 @@ static void OpenConnectionsLoop(int nDialer)
             BOOST_FOREACH(CNode* pnode, vNodes) {
                 if (!pnode->fInbound) {
                     setConnected.insert(pnode->addr.GetGroup());
-                    vReportedLocal.push_back(std::make_pair(CNetAddr(pnode->addr), CNetAddr(pnode->addrLocal)));
+                    vReportedLocal.push_back(std::make_pair(CNetAddr(pnode->addr), CNetAddr(pnode->GetAddrLocal())));
                 }
             }
         }
