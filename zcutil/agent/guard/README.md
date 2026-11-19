@@ -84,14 +84,20 @@ scripts.
   production node. `-regtest -datadir="$dd"` (a variable) and `-regtest` alone are test calls: the
   regtest node has its own port and wallet. `curl -d '{"method":"sendtoaddress"}'` is a test call
   when the URL names a numeric port other than 8023, 8232, 8233, 8332 or 8033-8035.
-- Datadir names: only the exact default names count, `.zclassic` and `.zcash-params` (and
-  `%APPDATA%\Zclassic`, `%APPDATA%\ZcashParams`); `.zclassic-test`, `.zclassic-c23` and the like are
-  not the default datadir. They count where the node keeps them (the home, `/home/u`, `/Users/u`,
-  `/root`, the Windows spellings, a bare relative name after a `cd`); the same name under `/tmp`,
-  `$TMPDIR`, `$(mktemp -d)` or an unknown variable (`$D/.zclassic`) is a scratch copy. **An unknown
-  variable is never taken to be the default datadir, for deletes and for reindex alike**
-  (`rm -rf "$D/.zclassic"`, `zclassicd -reindex -datadir="$DATADIR"` are allowed). A `-datadir` held
-  in a variable is a test directory when its name says so (`$work`, `$tmp`, `$testdir`, `$dd`).
+- Datadir names, for deletes, moves, overwrites and other writes (`rm -r`, `Remove-Item -Recurse`,
+  `rd /s`, `mv` away, `rsync --delete` onto, redirects), locally or over ssh: `.zclassic`,
+  `.zclassic-NAME`, `.zclassic_NAME` (`~/.zclassic-c23`, `~/.zclassic-bootstrap`,
+  `~/.zclassic-oracle`, and paths inside them), `.zcash-params`, and `%APPDATA%\Zclassic*`,
+  `%APPDATA%\ZcashParams`. On the project's hosts the lane names are production node datadirs. They
+  count where the node keeps them (the home, `/home/u`, `/Users/u`, `/root`, the Windows spellings,
+  a bare relative name after a `cd`); the same name under `/tmp`, `$TMPDIR`, `$(mktemp -d)`, below a
+  work directory (`~/work/.zclassic-c23`) or an unknown variable (`$D/.zclassic`) is a scratch copy.
+  Reads are never refused. **The exact default name** (`.zclassic`, `.zcash-params`,
+  `%APPDATA%\Zclassic`) is what the start, reindex/rescan and spend/export decisions go by, so
+  `zclassicd -reindex -datadir=$HOME/.zclassic-test` is a copy and is allowed. **An unknown variable
+  is never taken to be a datadir, for deletes and for reindex alike** (`rm -rf "$D/.zclassic"`,
+  `zclassicd -reindex -datadir="$DATADIR"` are allowed). A `-datadir` held in a variable is a test
+  directory when its name says so (`$work`, `$tmp`, `$testdir`, `$dd`).
 - `zclassicd`: starting a node, also on the default datadir, is allowed (it is not on the never-do
   list). `-reindex`, `-reindex-chainstate` and `-rescan` are refused only on the default datadir: with
   no `-datadir` or `-conf` at all (also with `-testnet`), or with one that names `~/.zclassic` or
@@ -106,7 +112,8 @@ scripts.
   repository found by walking up from the working directory (`git -C dir` and `cd dir` move it).
   Allowed: any named feature branch, `--force-with-lease`, a delete of any other branch (`:feature`,
   `--delete`), and a plain force of a branch other than master or release (`--force`, `-f`, `+ref`),
-  which also prints a note on stderr.
+  which also prints a note on stderr. A bare `git push --force`/`-f` (no named branch) is refused unless
+  the branch in effect is known and is not master or release.
 - Git identity: the fleet commits as the owner with `git -c user.name=... -c user.email=... commit` on
   hosts that carry no identity, so an override is ordinary and allowed. Refused is authoring as the
   tool itself: `-c user.*`, `git config user.*`, `--author`, `GIT_AUTHOR_*`, `GIT_COMMITTER_*` and `EMAIL`

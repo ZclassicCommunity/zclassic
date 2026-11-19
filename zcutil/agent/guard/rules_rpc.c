@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "rules_int.h"
 
@@ -164,4 +165,26 @@ bool ag_quoted_method(const char *q, size_t n)
     while (i < n && (q[i] == ' ' || q[i] == '\t')) i++;
     for (j = i; j < n && ag_is_word_char(q[j]); j++) {}
     return j > i && ag_is_method(q + i, j - i);
+}
+
+/* SQL text that writes: a write verb, or PRAGMA with an assignment (sqlq / sqlite3 on a datadir). */
+bool ag_sql_has_write(const char *s, size_t len)
+{
+    static const char *const verbs[] = {"insert", "update", "delete", "drop", "alter",
+                                        "create", "replace", "vacuum", "attach", "pragma"};
+    size_t i = 0;
+    while (i < len) {
+        size_t j = i;
+        while (j < len && ag_is_word_char(s[j])) j++;
+        if (j == i) {
+            i++;
+            continue;
+        }
+        for (size_t k = 0; k < sizeof verbs / sizeof verbs[0]; k++) {
+            if (strlen(verbs[k]) != j - i || strncasecmp(s + i, verbs[k], j - i) != 0) continue;
+            if (k < 9 || memchr(s + j, '=', len - j)) return true;
+        }
+        i = j;
+    }
+    return false;
 }

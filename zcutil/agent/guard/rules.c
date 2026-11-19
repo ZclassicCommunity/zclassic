@@ -803,6 +803,7 @@ struct ddscan {
     int np;
     bool appdata;
     int mac; /* 1 after Library, 2 after Application, then Support sets appdata */
+    bool family; /* also the lane names: .zclassic-c23, .zclassic_old, %APPDATA%Zclassic-x */
 };
 
 /* A separator that starts a new word or option value (= , space, quote, paren) starts a new path:
@@ -819,10 +820,12 @@ static void dd_gap(struct ddscan *d, const char *g, const char *end)
     }
 }
 
-/* .zclassic* or .zcash-params in a place where the node keeps them (see rules_home.c). */
+/* .zclassic or .zcash-params in a place where the node keeps them (see rules_home.c). With family,
+ * also .zclassic-NAME and .zclassic_NAME: on the project's hosts those are production node datadirs. */
 static bool dd_dotname(const struct ddscan *d, const char *p, size_t n)
 {
-    if (!comp_is_ci(p, n, ".zclassic") && !comp_is_ci(p, n, ".zcash-params")) return false;
+    bool lane = d->family && n > 9 && comp_starts_ci(p, n, ".zclassic") && (p[9] == '-' || p[9] == '_');
+    if (!lane && !comp_is_ci(p, n, ".zclassic") && !comp_is_ci(p, n, ".zcash-params")) return false;
     return d->np > 16 || ag_dd_name_in_home(d->pre, d->prl, d->np);
 }
 
@@ -831,6 +834,7 @@ static bool dd_appname(const struct ddscan *d, const char *p, size_t n)
 {
     if (!d->appdata) return false;
     if (comp_is_ci(p, n, "zclassic") || comp_is_ci(p, n, "zcashparams")) return true;
+    if (d->family && comp_starts_ci(p, n, "zclassic")) return true;
     return n == 8 && (comp_starts_ci(p, n, "zclass~") || comp_starts_ci(p, n, "zcashp~")) &&
            isdigit((unsigned char)p[7]);
 }
@@ -853,12 +857,13 @@ static void dd_track(struct ddscan *d, const char *p, size_t n)
  * ~/Library/Application Support/Zclassic or .../ZcashParams (the path words split at the space,
  * so the two-word name is three components). The dot-names count only in a home position
  * (ag_dd_name_in_home): /tmp/zt/.zclassic and $D/.zclassic are test copies. */
-static bool mentions_datadir(const char *w)
+static bool dd_scan(const char *w, bool family)
 {
     struct ddscan d;
     const char *p = w, *prev_end = w;
     size_t n = 0;
     memset(&d, 0, sizeof d);
+    d.family = family;
     while (next_comp(&p, &n)) {
         dd_gap(&d, prev_end, p);
         if (dd_dotname(&d, p, n) || dd_appname(&d, p, n)) return true;
@@ -867,6 +872,18 @@ static bool mentions_datadir(const char *w)
         prev_end = p;
     }
     return false;
+}
+
+/* A place a delete or write must not touch: the default datadir and the lane datadirs. */
+static bool mentions_datadir(const char *w)
+{
+    return dd_scan(w, true);
+}
+
+/* The default datadir only (exact names): what start, reindex and spend decisions go by. */
+static bool mentions_default_datadir(const char *w)
+{
+    return dd_scan(w, false);
 }
 
 static bool is_vendor_path(const char *w)
@@ -1698,7 +1715,7 @@ static bool opt_dir_real(const struct cmdv *v, const char *name)
         parse_opts(v, pass == 1, &p);
         for (int i = 0; i < p.n; i++)
             if (strcmp(p.o[i].name, name) == 0 &&
-                (!p.o[i].eq || !p.o[i].val[0] || mentions_datadir(p.o[i].val)))
+                (!p.o[i].eq || !p.o[i].val[0] || mentions_default_datadir(p.o[i].val)))
                 return true;
     }
     return false;
@@ -2238,27 +2255,6 @@ static const char *wr_sed(const struct cmdv *v)
     return NULL;
 }
 
-static bool sql_has_write(const char *s, size_t len)
-{
-    static const char *const verbs[] = {"insert", "update", "delete", "drop", "alter",
-                                        "create", "replace", "vacuum", "attach", "pragma"};
-    size_t i = 0;
-    while (i < len) {
-        size_t j = i;
-        while (j < len && ag_is_word_char(s[j])) j++;
-        if (j == i) {
-            i++;
-            continue;
-        }
-        for (size_t k = 0; k < sizeof verbs / sizeof verbs[0]; k++) {
-            if (strlen(verbs[k]) != j - i || strncasecmp(s + i, verbs[k], j - i) != 0) continue;
-            if (k < 9 || memchr(s + j, '=', len - j)) return true;
-        }
-        i = j;
-    }
-    return false;
-}
-
 /* sqlq / sqlite3: a write only with a SQL write verb AND a datadir operand. */
 static const char *wr_sql(const struct cmdv *v)
 {
@@ -2267,9 +2263,9 @@ static const char *wr_sql(const struct cmdv *v)
     for (int i = 0; i < v->na; i++) {
         const char *p = path_rule(v->a[i]);
         if (p) r = r ? r : p;
-        else wr = wr || sql_has_write(v->a[i], strlen(v->a[i]));
+        else wr = wr || ag_sql_has_write(v->a[i], strlen(v->a[i]));
     }
-    if (v->sg->hd_has && sql_has_write(v->c->src + v->sg->hd_off, v->sg->hd_len)) wr = true;
+    if (v->sg->hd_has && ag_sql_has_write(v->c->src + v->sg->hd_off, v->sg->hd_len)) wr = true;
     return wr ? r : NULL;
 }
 
@@ -3211,7 +3207,7 @@ static void note_xargs_repl(char **w, int from, int to)
  * A pattern that opens with a wildcard (*.dat) is too generic to count on its own. */
 static bool pattern_names_datadir(const char *p)
 {
-    static const char *const names[] = {"zclassic", ".zclassic", ".zcash-params",
+    static const char *const names[] = {"zclassic", ".zclassic", ".zclassic-c23", ".zcash-params",
                                         "zcashparams", "wallet.dat"};
     if (!p[0] || strchr("*?[", p[0])) return false;
     for (size_t k = 0; k < sizeof names / sizeof names[0]; k++)
@@ -4224,6 +4220,7 @@ static bool ps_name_word(const char *w)
     while (next_comp(&p, &n)) {
         if (comp_is_ci(p, n, "zclassic") || comp_is_ci(p, n, "zcashparams") ||
             comp_is_ci(p, n, ".zclassic") || comp_is_ci(p, n, ".zcash-params") ||
+            comp_starts_ci(p, n, ".zclassic-") || comp_starts_ci(p, n, ".zclassic_") ||
             (comp_starts_ci(p, n, "zclass~") && n == 8) || (comp_starts_ci(p, n, "zcashp~") && n == 8))
             hit = true;
         p += n;

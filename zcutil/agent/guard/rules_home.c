@@ -69,8 +69,7 @@ bool ag_dd_name_in_home(const char *const *pre, const size_t *prl, int np)
     switch (np - i) {
     case 1: return comp_is_home(pre[i], prl[i]) || is_ci(pre[i], prl[i], "root");
     case 2:
-        return is_ci(pre[i], prl[i], "home") || is_ci(pre[i], prl[i], "users") ||
-               comp_is_home(pre[i], prl[i]);
+        return is_ci(pre[i], prl[i], "home") || is_ci(pre[i], prl[i], "users");
     case 3: return braced_default(pre, prl, i);
     default: return false;
     }

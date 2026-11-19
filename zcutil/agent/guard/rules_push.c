@@ -7,11 +7,13 @@
  * delete of any other branch (`:feature`, --delete) is ordinary. A force of a named branch other than
  * master or release (--force, -f, +ref) is allowed with a note on stderr: it is the agent's own
  * feature branch. A push that names no branch (a bare push, `origin`, HEAD) pushes the current
- * branch: it is refused only when that branch is master. The current branch is the one a
+ * branch: it is refused when that branch is master, and a bare force of a branch that cannot be
+ * determined is refused too. The current branch is the one a
  * `git checkout -b X`, `git switch -c X`, `git checkout X` or `git switch X` earlier in the same
  * command put us on, else the one HEAD names in the repository at the working directory (found by
- * walking up to the root; `git -C dir` and `cd dir` move it). Where the branch cannot be read the
- * push is allowed, because most pushes are of a feature branch. --dry-run and --help only look. */
+ * walking up to the root; `git -C dir` and `cd dir` move it). Where the branch cannot be read an
+ * unforced push is allowed, because most pushes are of a feature branch. --dry-run and --help only
+ * look. */
 
 #include <ctype.h>
 #include <stdbool.h>
@@ -170,14 +172,15 @@ static bool find_head(const char *dir, char *out, size_t cap)
     return false;
 }
 
-/* The current branch is master: by the checkout or switch seen earlier in the command, else by
- * HEAD of the repository at dir. */
-static bool on_master(const char *dir)
+/* The current branch: 1 master, 0 another branch, -1 not known. A checkout or switch seen earlier in
+ * the command decides, else HEAD of the repository at dir. */
+static int branch_state(const char *dir)
 {
     char path[2 * PATH_CAP], line[512];
     if (s_branch[0]) return strcmp(s_branch, "master") == 0;
-    if (!dir[0] || !find_head(dir, path, sizeof path)) return false;
-    if (!read_first_line(path, line, sizeof line)) return false;
+    if (!dir[0] || !find_head(dir, path, sizeof path)) return -1;
+    if (!read_first_line(path, line, sizeof line) || strncmp(line, "ref: refs/heads/", 16) != 0)
+        return -1;
     return strcmp(line, "ref: refs/heads/master") == 0;
 }
 
@@ -255,12 +258,29 @@ static void push_refspec(const char *w, struct pushst *s)
     if (strcmp(w, "HEAD") == 0) s->head = true;
 }
 
+/* The directory the push runs in: `git -C dash_c` below the working directory, else the working
+ * directory; "" when unknown (a -C into a variable). */
+static void push_dir(const char *dash_c, char *dir, size_t cap)
+{
+    if (dash_c && resolve_dir(s_cwd, dash_c, dir, cap)) return;
+    snprintf(dir, cap, "%s", dash_c ? "" : s_cwd);
+}
+
+/* A push that names no branch pushes the current one: refused on master, and a force is refused
+ * too when the branch cannot be determined. */
+static bool unnamed_push_refused(const struct pushst *s, const char *dir)
+{
+    int b;
+    if (!((s->pos < 2 && !s->tags) || s->head)) return false;
+    b = branch_state(dir);
+    return b == 1 || (b < 0 && s->force);
+}
+
 const char *ag_push_rule(char **a, int na, const char *dash_c)
 {
     struct pushst s = {false, false, false, false, 0};
     char dir[PATH_CAP];
-    if (!dash_c || !resolve_dir(s_cwd, dash_c, dir, sizeof dir))
-        snprintf(dir, sizeof dir, "%s", dash_c ? "" : s_cwd);
+    push_dir(dash_c, dir, sizeof dir);
     for (int i = 0; i < na; i++) {
         if (a[i][0] == '-' && a[i][1]) {
             if (push_option(a, na, &i, &s)) return NULL;
@@ -268,8 +288,7 @@ const char *ag_push_rule(char **a, int na, const char *dash_c)
             push_refspec(a[i], &s);
         }
     }
-    if (s.master) return R_PUSH;
-    if (((s.pos < 2 && !s.tags) || s.head) && on_master(dir)) return R_PUSH;
+    if (s.master || unnamed_push_refused(&s, dir)) return R_PUSH;
     if (s.force) ag_note_text("forced push of a branch other than master or release: allowed");
     return NULL;
 }

@@ -61,6 +61,7 @@ bool ag_mentions_identity_key(const char *s);
 bool ag_starts_tmpvar(const char *v);
 /* rules_rpc.c: a quoted string that is, or starts with, a spend or export method name. */
 bool ag_quoted_method(const char *q, size_t n);
+bool ag_sql_has_write(const char *s, size_t len);
 
 /* rules.c: leave a note on stderr for an allowed call (see ag_note). */
 void ag_note_text(const char *text);
