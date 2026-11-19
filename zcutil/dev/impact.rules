@@ -39,6 +39,7 @@ src/addrman.*|src/addrv2.h|src/net.*|src/netbase.*|src/protocol.*|src/mapport.*|
 
 # ---- node startup, RPC, tools
 src/init.cpp|src/init.h|src/bitcoind.cpp|src/noui.*|src/ui_interface.h|src/util.*|src/utilstrencodings.*|src/utilmoneystr.*|src/utiltime.*|src/clientversion.*|src/version.h|src/random.*|src/support/*|src/scheduler.*|src/sync.*|src/threadsafety.h|src/reverselock.h|src/prevector.h|src/memusage.h|src/serialize.h|src/streams.h|src/tinyformat.h|src/startuptimer.*|src/metrics.*|src/amount.*|src/univalue/*	test_bitcoin-full zcash-gtest-full regtest-smoke startup-bad-home qa/rpc-tests/startup_bad_home.sh qa/rpc-tests/startup_conf_staging.sh qa/rpc-tests/rpc_bind_conflict.sh
+src/paramcache.*	test_bitcoin-full regtest-smoke startup-bad-home qa/rpc-tests/startup_bad_home.sh
 src/rpc/*|src/httprpc.*|src/httpserver.*|src/rest.cpp|src/asyncrpc*|src/validationinterface.*|src/core_io.h|src/core_memusage.h|src/core_read.cpp|src/core_write.cpp|src/compressor.*|src/utiltest.*|src/zcbenchmarks.*|src/bitcoin-cli.cpp	test_bitcoin-full zcash-gtest-full regtest-smoke zclassic-tx-util
 src/bitcoin-tx.cpp|qa/rpc-tests/zclassic_tx_util.sh|qa/rpc-tests/data/*	zclassic-tx-util qa/rpc-tests/zclassic_tx_util.sh
 qa/rpc-tests/startup_*|qa/rpc-tests/rpc_bind_conflict.sh	startup-bad-home qa/rpc-tests/startup_bad_home.sh qa/rpc-tests/startup_conf_staging.sh

@@ -121,3 +121,13 @@ RPC tuning errors and the LevelDB file budget
   unknown type no longer aborts processing of the whole message (formatting it for the log used
   to throw). The unknown entry is ignored and the remaining entries are handled, as in Bitcoin
   Core. Such messages no longer produce a per-message exception line in the log.
+
+Startup
+-------
+
+- The verified-parameters cache now lives beside the parameters, as
+  `zclassic-params-verify.cache` in the params directory (`~/.zcash-params`), so a new
+  datadir, wallet profile or test node no longer re-hashes about 780 MB of zk parameters
+  on its first start. The old `params-verify.cache` in the datadir is read only while the
+  new file is absent and is never written again. A read-only params directory only costs
+  the re-hash; `-noparamcache` still hashes every file.

@@ -164,6 +164,7 @@ BITCOIN_CORE_H = \
   httpserver.h \
   init.h \
   phasetimer.h \
+  paramcache.h \
   shutdownmarker.h \
   startuptimer.h \
   key.h \
@@ -315,6 +316,7 @@ libbitcoin_server_a_SOURCES = \
   httprpc.cpp \
   httpserver.cpp \
   init.cpp \
+  paramcache.cpp \
   shutdownmarker.cpp \
   startuptimer.cpp \
   dbwrapper.cpp \

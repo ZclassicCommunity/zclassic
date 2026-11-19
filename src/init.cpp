@@ -84,6 +84,7 @@
 #include "utilstrencodings.h"
 #include "startuptimer.h"
 #include "phasetimer.h"
+#include "paramcache.h"
 #include "shutdownmarker.h"
 #include "zslp/zslpservice.h"
 #include "znam/znamservice.h"
@@ -264,26 +265,37 @@ static bool fChainLoadVerified = false;
  *  verifiably clean: the startup load finished, no reindex, import or bootstrap validation is in
  *  flight, nothing raised a fatal warning (AbortNode and thread exceptions set strMiscWarning),
  *  and the flushed coins best block is the chain tip. */
+/** Why the bootstrap state forbids a clean-shutdown marker, or NULL. */
+static const char* BootstrapCleanMarkerBlocker()
+{
+    const int bvState = GetBootstrapValidationStatus().state;
+    if (bvState != BVS_DISABLED && bvState != BVS_VALIDATED)
+        return "bootstrap validation in progress";
+    if (BootstrapAnchorPendingExists(GetDataDir()) || BootstrapTrustlessPendingExists(GetDataDir()))
+        return "bootstrap install pending";
+    return NULL;
+}
+
+/** Why this stop may not write a clean-shutdown marker, or NULL when it may. The checks run in
+ *  this order and stop at the first that fails. */
+static const char* CleanMarkerBlocker(bool fTipCaptured, const ShutdownBinding& binding)
+{
+    if (!fTipCaptured || !fChainLoadVerified)
+        return "chain databases were not loaded and verified";
+    if (fReindex || fReindexChainState || fImporting || mapArgs.count("-reindex") || mapArgs.count("-reindex-chainstate"))
+        return "reindex or block import in progress";
+    if (!strMiscWarning.empty())
+        return "a fatal error or warning was raised";
+    if (binding.coinsBest != binding.tipHash)
+        return "coins database is not at the chain tip";
+    return BootstrapCleanMarkerBlocker();
+}
+
 static void MaybeWriteCleanShutdownMarker(bool fTipCaptured, ShutdownBinding binding)
 {
     if (!fDatadirLockHeld || !ParamsAreSelected())
         return;
-    const char* why = NULL;
-    if (!fTipCaptured || !fChainLoadVerified)
-        why = "chain databases were not loaded and verified";
-    else if (fReindex || fReindexChainState || fImporting || mapArgs.count("-reindex") || mapArgs.count("-reindex-chainstate"))
-        why = "reindex or block import in progress";
-    else if (!strMiscWarning.empty())
-        why = "a fatal error or warning was raised";
-    else if (binding.coinsBest != binding.tipHash)
-        why = "coins database is not at the chain tip";
-    else {
-        const int bvState = GetBootstrapValidationStatus().state;
-        if (bvState != BVS_DISABLED && bvState != BVS_VALIDATED)
-            why = "bootstrap validation in progress";
-        else if (BootstrapAnchorPendingExists(GetDataDir()) || BootstrapTrustlessPendingExists(GetDataDir()))
-            why = "bootstrap install pending";
-    }
+    const char* why = CleanMarkerBlocker(fTipCaptured, binding);
     if (why) {
         LogPrintf("Shutdown: no clean shutdown marker: %s\n", why);
         return;
@@ -317,6 +329,44 @@ static std::string DescribeLockHolder(const boost::filesystem::path& pidfile)
     return strprintf(_("The lock is held but pid %d is not running; another process holds it or the filesystem does not release locks (network share)."), pid);
 }
 #endif
+
+/** Under cs_main: flush the chain state (and the wallet checkpoint at the same tip), capture the
+ *  tip and coins best block for the clean-shutdown marker, then close the chain databases. */
+static void ShutdownFlushAndCloseChain(bool& fTipCaptured, ShutdownBinding& binding)
+{
+    LOCK(cs_main);
+    {
+        PhaseTimer t("Shutdown", "flush-state");
+        if (pcoinsTip != NULL) {
+            FlushStateToDisk();
+#ifdef ENABLE_WALLET
+            // The coin database was just flushed to this tip. Write the wallet's checkpoint (note
+            // witnesses, nullifiers and the best-block locator, atomically) at the same point, so
+            // the next start does not have to rely on rescanning from an older locator.
+            if (pwalletMain && fWalletInitComplete && chainActive.Tip()) {
+                pwalletMain->SetBestChain(chainActive.GetLocator());
+            }
+#endif
+            if (chainActive.Tip()) {
+                binding.tipHash = chainActive.Tip()->GetBlockHash();
+                binding.tipHeight = chainActive.Height();
+                binding.coinsBest = pcoinsTip->GetBestBlock();
+                fTipCaptured = true;
+            }
+        }
+    }
+    {
+        PhaseTimer t("Shutdown", "db-close");
+        delete pcoinsTip;
+        pcoinsTip = NULL;
+        delete pcoinscatcher;
+        pcoinscatcher = NULL;
+        delete pcoinsdbview;
+        pcoinsdbview = NULL;
+        delete pblocktree;
+        pblocktree = NULL;
+    }
+}
 
 void Shutdown()
 {
@@ -408,40 +458,7 @@ void Shutdown()
     // Chain tip and coins best block as flushed below, for the clean-shutdown marker.
     bool fMarkerTipCaptured = false;
     ShutdownBinding markerBinding;
-    {
-        LOCK(cs_main);
-        {
-            PhaseTimer t("Shutdown", "flush-state");
-            if (pcoinsTip != NULL) {
-                FlushStateToDisk();
-#ifdef ENABLE_WALLET
-                // The coin database was just flushed to this tip. Write the wallet's checkpoint (note
-                // witnesses, nullifiers and the best-block locator, atomically) at the same point, so
-                // the next start does not have to rely on rescanning from an older locator.
-                if (pwalletMain && fWalletInitComplete && chainActive.Tip()) {
-                    pwalletMain->SetBestChain(chainActive.GetLocator());
-                }
-#endif
-                if (chainActive.Tip()) {
-                    markerBinding.tipHash = chainActive.Tip()->GetBlockHash();
-                    markerBinding.tipHeight = chainActive.Height();
-                    markerBinding.coinsBest = pcoinsTip->GetBestBlock();
-                    fMarkerTipCaptured = true;
-                }
-            }
-        }
-        {
-            PhaseTimer t("Shutdown", "db-close");
-            delete pcoinsTip;
-            pcoinsTip = NULL;
-            delete pcoinscatcher;
-            pcoinscatcher = NULL;
-            delete pcoinsdbview;
-            pcoinsdbview = NULL;
-            delete pblocktree;
-            pblocktree = NULL;
-        }
-    }
+    ShutdownFlushAndCloseChain(fMarkerTipCaptured, markerBinding);
     MaybeWriteCleanShutdownMarker(fMarkerTipCaptured, markerBinding);
 #ifdef ENABLE_WALLET
     {
@@ -672,7 +689,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-mempooltxinputlimit=<n>", _("[DEPRECATED FROM OVERWINTER] Set the maximum number of transparent inputs in a transaction that the mempool will accept (default: 0 = no limit applied)"));
     strUsage += HelpMessageOpt("-par=<n>", strprintf(_("Set the number of script verification threads (%u to %d, 0 = auto, <0 = leave that many cores free, default: %d)"),
         -GetNumCores(), MAX_SCRIPTCHECK_THREADS, DEFAULT_SCRIPTCHECK_THREADS));
-    strUsage += HelpMessageOpt("-paramcache", _("Keep a cache of verified proving-parameter files so a match need not be re-hashed at startup; -noparamcache hashes every file (default: 1)"));
+    strUsage += HelpMessageOpt("-paramcache", _("Keep a cache of verified proving-parameter files in the parameter directory so a match need not be re-hashed at startup; -noparamcache hashes every file (default: 1)"));
     strUsage += HelpMessageOpt("-parkdeepreorg", _("Park the competing chain of a reorg deeper than one block until it has enough work to take over (default: 1)"));
 #ifdef ZCL_C23_HAVE_PROVER_THREADS
     strUsage += HelpMessageOpt("-proverthreads=<n>", _("Set the number of threads used to create Sapling proofs (1 to 64, 0 = auto: the lesser of 8 and the hardware threads, default: 0). Left automatic, a send also makes only as many proofs at once as fit in about 340 MB or an eighth of physical memory, whichever is less; an explicit value lifts that limit"));
@@ -786,7 +803,7 @@ std::string HelpMessage(HelpMessageMode mode)
     if (showDebug)
     {
         strUsage += HelpMessageOpt("-checkpoints", strprintf("Disable expensive verification for known chain history (default: %u)", 1));
-        strUsage += HelpMessageOpt("-dbmaxopenfiles=<n>", "Maximum number of files each LevelDB database (block index, chainstate) keeps open (default: derived from the file descriptor budget)");
+        strUsage += HelpMessageOpt("-dbmaxopenfiles=<n>", "Maximum number of files each LevelDB database (block index, chainstate) keeps open (default: derived from the file descriptor budget). Each open table keeps its index and bloom filter blocks in memory outside -dbcache");
         strUsage += HelpMessageOpt("-checkblockindex", "Run block index consistency checks (default: 0, 1 in regtest)");
         strUsage += HelpMessageOpt("-checkmempool=<n>", "Run mempool consistency checks on one in <n> operations, 0 = never (default: 0, 1 in regtest)");
         strUsage += HelpMessageOpt("-dblogsize=<n>", strprintf("Flush database activity from memory pool to disk log every <n> megabytes (default: %u)", 100));
@@ -1073,160 +1090,6 @@ static bool check_file_hash(const std::string& path, const std::string& hash)
     }
     return true;
 }
-
-// ---------------------------------------------------------------------------
-// Verified-params cache (params-verify.cache, 0600 in DATADIR)
-//
-// PURPOSE: turn the dominant cold-start cost -- re-hashing ~1.69 GB of zk-SNARK
-// params on EVERY launch (param-hash-loop ~= 5.1 s / 80.8% of AppInit2) -- into
-// ~stat-cost on the common, unchanged case, WITHOUT ever loading an unverified
-// param.
-//
-// SAFETY INVARIANT (load-bearing): a re-hash is SKIPPED for a param ONLY when
-// ALL of these hold, otherwise we run the FULL check_file_hash exactly as today:
-//   (a) file_size(path) == spec.nSize                 (the COMPILED size)
-//   (b) cache record exists with size==cur_size AND mtime==cur_mtime
-//   (c) record.verifiedHash == spec.sha256hex          (the LIVE COMPILED hash)
-//   (d) cache file's binary-epoch == this binary's compiled-table epoch
-//   (e) cache file is owner-only (st_uid==geteuid, no group/other write bits)
-// The cache NEVER supplies a hash to trust: (c) compares the cached hash to the
-// compiled constant (.rodata, not attacker-writable). The cache only answers
-// "did THIS (size,mtime) already hash to the value the binary already requires".
-// Forging a skip-and-load of malicious identical-size content requires a SHA-256
-// second preimage (infeasible). A different-uid planted cache is rejected by (e).
-//
-// KNOWN, ACCEPTED RESIDUAL: a bit-rot/torn write that preserves BOTH size AND
-// mtime is skipped and the corrupt param loads -- a regression of today's
-// every-launch hash. This is BOUNDED and NON-CONSENSUS: zk params are firewalled
-// from block/tx/PoW; a corrupt param makes a shielded proof FAIL/REJECT (never
-// forges one or forks the chain), fails LOUDLY at use, and self-heals via the
-// existing bootstrap re-fetch. Pass -noparamcache to force today's full hash.
-namespace {
-
-struct ParamCacheRecord {
-    uint64_t size;
-    int64_t  mtime;            // std::time_t, 1s granularity (boost last_write_time)
-    std::string verifiedHash;  // 64-hex lowercase
-};
-
-// Cheap epoch over the COMPILED spec table: name|hash|size per file. A binary
-// with any different compiled hash/size yields a different epoch, invalidating
-// the entire cache (Model 4: downgrade / multi-version).
-static std::string CompiledParamEpoch()
-{
-    std::string acc;
-    BOOST_FOREACH(const ZcashParamSpec& s, GetZcashParamSpecs()) {
-        acc += s.name;
-        acc += '|';
-        acc += s.sha256hex;
-        acc += '|';
-        acc += std::to_string((unsigned long long)s.nSize);
-        acc += '\n';
-    }
-    unsigned char digest[CSHA256::OUTPUT_SIZE];
-    CSHA256().Write(reinterpret_cast<const unsigned char*>(acc.data()), acc.size()).Finalize(digest);
-    return HexStr(digest, digest + sizeof(digest));
-}
-
-static boost::filesystem::path ParamVerifyCachePath()
-{
-    return GetDataDir() / "params-verify.cache";
-}
-
-// Returns true and fills `out` ONLY if the cache file is present, owner-only
-// (st_uid==geteuid, no group/other WRITE bits), strictly well-formed, and its
-// stored epoch equals the freshly-computed compiled epoch. ANY doubt => false
-// (caller treats as a cold cache and full-hashes every file).
-static bool LoadVerifiedParamCache(std::map<std::string, ParamCacheRecord>& out)
-{
-    out.clear();
-    const boost::filesystem::path p = ParamVerifyCachePath();
-#ifndef WIN32
-    // Mandatory on-READ ownership/mode gate: a cache writable by anyone other
-    // than us (group/other-writable, or owned by a different uid) is ignored.
-    // 0600-on-write is not enough; an attacker of a DIFFERENT uid must never be
-    // able to plant a honored cache in a misconfigured/shared DATADIR.
-    struct stat st;
-    if (::stat(p.string().c_str(), &st) != 0) return false;
-    if (!S_ISREG(st.st_mode)) return false;
-    if (st.st_uid != geteuid()) return false;
-    if (st.st_mode & (S_IWGRP | S_IWOTH)) return false;
-#endif
-    std::ifstream in(p.string().c_str());
-    if (!in.good()) return false;
-
-    std::string line;
-    bool epochOk = false;
-    const std::string wantEpoch = CompiledParamEpoch();
-    std::map<std::string, ParamCacheRecord> recs;
-    while (std::getline(in, line)) {
-        if (line.empty()) continue;
-        std::istringstream ls(line);
-        std::string key;
-        if (!(ls >> key)) return false;
-        if (key == "v") {
-            std::string v;
-            if (!(ls >> v) || v != "1") return false;  // unknown format => fail closed
-        } else if (key == "epoch") {
-            std::string e;
-            if (!(ls >> e) || e.size() != 64) return false;
-            epochOk = (e == wantEpoch);                 // mismatch => discard whole cache
-        } else if (key == "p") {
-            std::string name, hash;
-            unsigned long long sz; long long mt;
-            if (!(ls >> name >> sz >> mt >> hash)) return false;
-            if (hash.size() != 64) return false;
-            for (char c : hash)
-                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
-            if (recs.count(name)) return false;          // duplicate => malformed
-            ParamCacheRecord r;
-            r.size = (uint64_t)sz;
-            r.mtime = (int64_t)mt;
-            r.verifiedHash = hash;
-            recs[name] = r;
-        } else {
-            return false;                                // unknown key => fail closed
-        }
-    }
-    if (!epochOk) return false;                          // missing or wrong epoch line
-    out.swap(recs);
-    return true;
-}
-
-// Atomically rewrite the whole cache 0600 in DATADIR: tmp (O_CREAT|O_WRONLY|
-// O_TRUNC, 0600) -> FileCommit(fdatasync) -> RenameOver. A kill mid-write can
-// never leave a half-record a future parse misreads as a valid skip.
-static void StoreVerifiedParamCache(const std::map<std::string, ParamCacheRecord>& recs)
-{
-    const boost::filesystem::path finalPath = ParamVerifyCachePath();
-    const boost::filesystem::path tmpPath = finalPath.string() + ".tmp";
-#ifndef WIN32
-    int fd = ::open(tmpPath.string().c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0600);
-    if (fd < 0) return;
-    FILE* f = fdopen(fd, "wb");
-    if (!f) { ::close(fd); return; }
-#else
-    FILE* f = fopen(tmpPath.string().c_str(), "wb");
-    if (!f) return;
-#endif
-    fprintf(f, "v 1\n");
-    fprintf(f, "epoch %s\n", CompiledParamEpoch().c_str());
-    for (std::map<std::string, ParamCacheRecord>::const_iterator it = recs.begin();
-         it != recs.end(); ++it) {
-        fprintf(f, "p %s %llu %lld %s\n",
-                it->first.c_str(),
-                (unsigned long long)it->second.size,
-                (long long)it->second.mtime,
-                it->second.verifiedHash.c_str());
-    }
-    FileCommit(f);
-    fclose(f);
-    if (!RenameOver(tmpPath, finalPath)) {
-        boost::filesystem::remove(tmpPath);
-    }
-}
-
-} // anonymous namespace
 
 static bool VerifyImportedBootstrapAnchor(std::string& error)
 {
@@ -1564,20 +1427,20 @@ bool InitSanityCheck(void)
     const std::vector<ZcashParamSpec>& zcash_param_specs = GetZcashParamSpecs();
     bool fParamRefetched = false;
 
-    // Verified-params cache (see helpers above check_file_hash). Load once; an
-    // empty map (missing/garbage/foreign-owner/epoch-mismatch cache, or the
-    // -noparamcache escape hatch) means every file is full-hashed exactly as
+    // Verified-params cache (paramcache.h), beside the params. Load once; an
+    // empty map (missing/garbage/foreign-owner/epoch- or params-dir-mismatch
+    // cache, or -noparamcache) means every file is full-hashed exactly as
     // before. A SKIP is permitted ONLY when current size==compiled size AND a
     // record's (size,mtime) matches the file AND record.verifiedHash equals the
     // LIVE compiled spec.sha256hex -- the cache can never widen what counts as
     // valid, only avoid recomputing a match it already proved.
     const bool fUseParamCache = GetBoolArg("-paramcache", true) && !GetBoolArg("-noparamcache", false);
-    std::map<std::string, ParamCacheRecord> paramCache;
+    ParamCacheRecords paramCache;
+    ParamCacheSource paramCacheSource = PARAMCACHE_NONE;
     if (fUseParamCache) {
-        (void)LoadVerifiedParamCache(paramCache); // empty on any doubt
+        paramCacheSource = LoadVerifiedParamCache(ZC_GetParamsDir(), GetDataDir(), paramCache); // empty on any doubt
     }
-    std::map<std::string, ParamCacheRecord> verifiedRecords;
-    bool fCacheDirty = false;
+    ParamCacheRecords verifiedRecords;
     int nSkipped = 0, nHashed = 0;
 
     for (size_t i = 0; i < zcash_param_specs.size(); ++i) {
@@ -1600,7 +1463,7 @@ bool InitSanityCheck(void)
             boost::system::error_code ec1, ec2;
             const uintmax_t curSize = boost::filesystem::file_size(path, ec1);
             const std::time_t curMtime = boost::filesystem::last_write_time(path, ec2);
-            std::map<std::string, ParamCacheRecord>::const_iterator it = paramCache.find(spec.name);
+            ParamCacheRecords::const_iterator it = paramCache.find(spec.name);
             std::string compiledHash(spec.sha256hex);
             std::transform(compiledHash.begin(), compiledHash.end(), compiledHash.begin(), ::tolower);
             if (!ec1 && !ec2 &&
@@ -1659,16 +1522,15 @@ bool InitSanityCheck(void)
                 r.verifiedHash = compiledHash;
                 verifiedRecords[spec.name] = r;
             }
-            fCacheDirty = true;
             ++nHashed;
         }
     }
 
-    // Persist the cache only when something was (re)hashed or the on-disk set
-    // differs from what we verified this run (also rewrites a stale/cold cache).
+    // Persist when this run's records differ from the primary file (cold, legacy or changed);
+    // an unchanged primary, which other nodes may share, is not rewritten.
     if (fUseParamCache &&
-        (fCacheDirty || verifiedRecords.size() != paramCache.size())) {
-        StoreVerifiedParamCache(verifiedRecords);
+        (paramCacheSource != PARAMCACHE_PRIMARY || verifiedRecords != paramCache)) {
+        StoreVerifiedParamCache(ZC_GetParamsDir(), verifiedRecords);
     }
     LogPrintf("param-cache: %d skipped, %d hashed (cache %s)\n",
               nSkipped, nHashed, fUseParamCache ? "on" : "off");
@@ -3329,9 +3191,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     LogPrintf("Prune: pruned datadir may not have more than %d blocks; -checkblocks=%d may fail\n",
                         MIN_BLOCKS_TO_KEEP, GetArg("-checkblocks", 288));
                 }
-                // After a verified clean stop (marker consumed, files unchanged, same tip and coins
-                // best block) the full depth re-checks blocks that were checked at the previous
-                // start and not touched since: check the newest 6 at the same level instead.
+                // Clean stop matched (same tip and coins best block; file names, sizes and mtimes, not
+                // contents): check the newest 6 blocks at the same level. Blocks connected during earlier
+                // short starts are not re-checked at full depth until a start without a matching marker.
                 const char* fullWhy = NULL;
                 if (!GetBoolArg("-cleanshutdownmarker", true))
                     fullWhy = "disabled";
