@@ -1,0 +1,38 @@
+/* zcl-mcp tool table: one row per tool, in tools/list order.
+ *   ZCL_TOOL(name, builder, description, input_schema_json)
+ * Every tool is read-only: the builder turns validated arguments into a fixed argv of a zcutil/bin
+ * tool (zcl-dev, zcl-lint), never a shell string. Adding a tool is one builder in zcl-mcp.c and one
+ * row here; there is deliberately no tool that runs an arbitrary command, spends, signs or pushes. */
+ZCL_TOOL("zcl_guide", build_guide,
+         "Brief for the files you will touch: nearest AGENTS.md rules, local-ci steps, lessons, traps, first commands.",
+         "{\"type\":\"object\",\"properties\":{\"paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1,\"maxItems\":8,\"description\":\"repository-relative paths\"}},\"required\":[\"paths\"],\"additionalProperties\":false}")
+ZCL_TOOL("zcl_select", build_select,
+         "Which local-ci steps the diff against base needs (default origin/master).",
+         "{\"type\":\"object\",\"properties\":{\"base\":{\"type\":\"string\",\"description\":\"git ref, default origin/master\"}},\"additionalProperties\":false}")
+ZCL_TOOL("zcl_tests", build_tests,
+         "The smallest focused test set (Boost suites, gtest suites, qa scripts, ci steps) for each path.",
+         "{\"type\":\"object\",\"properties\":{\"paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1,\"maxItems\":8}},\"required\":[\"paths\"],\"additionalProperties\":false}")
+ZCL_TOOL("zcl_code", build_code,
+         "Code intelligence: map | owner <path> | impact <path> [--tests] [--depth=N] | file <path> | sym <name> | refs <name> | cost <path> | recent [--since=7d] | body <path> <func>. Optional --after=N pages.",
+         "{\"type\":\"object\",\"properties\":{\"sub\":{\"type\":\"string\",\"enum\":[\"map\",\"owner\",\"impact\",\"file\",\"sym\",\"refs\",\"cost\",\"recent\",\"body\"]},\"args\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"maxItems\":5}},\"required\":[\"sub\"],\"additionalProperties\":false}")
+ZCL_TOOL("zcl_wiki", build_wiki,
+         "Walk the docs tree one topic at a time; omit topic for the root.",
+         "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\"},\"after\":{\"type\":\"integer\",\"minimum\":0}},\"additionalProperties\":false}")
+ZCL_TOOL("zcl_read", build_read,
+         "Read a tracked repository file in chunks of at most 16 KiB; key and wallet files are refused.",
+         "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"bytes\":{\"type\":\"integer\",\"minimum\":1}},\"required\":[\"path\"],\"additionalProperties\":false}")
+ZCL_TOOL("zcl_lessons", build_lessons,
+         "Search the lessons, traps and facts documents (words are ANDed).",
+         "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\",\"description\":\"up to 8 words\"}},\"required\":[\"q\"],\"additionalProperties\":false}")
+ZCL_TOOL("zcl_know", build_know,
+         "Answer from the closed facts table; UNKNOWN when no row names the term.",
+         "{\"type\":\"object\",\"properties\":{\"term\":{\"type\":\"string\"}},\"required\":[\"term\"],\"additionalProperties\":false}")
+ZCL_TOOL("zcl_lint", build_lint,
+         "Run one read-only lint rule (never updates a baseline or reseals).",
+         "{\"type\":\"object\",\"properties\":{\"rule\":{\"type\":\"string\",\"enum\":[\"no-new-jq\",\"no-new-bash\",\"banned-str\",\"md-links\",\"vendor\",\"no-python\",\"filesize\",\"complexity\",\"long-functions\",\"warnsupp\",\"doc-claims\",\"doc-paths\",\"version-facts\",\"victory\",\"secretlog\",\"testiso\",\"shellport\",\"wallclock\",\"consensus-seal\"]}},\"required\":[\"rule\"],\"additionalProperties\":false}")
+ZCL_TOOL("zcl_receipt", build_receipt,
+         "Latest local-ci receipt of one step, read from <dir>/receipts.jsonl (default the checkout root).",
+         "{\"type\":\"object\",\"properties\":{\"step\":{\"type\":\"string\"},\"dir\":{\"type\":\"string\",\"description\":\"receipt directory inside the checkout\"}},\"required\":[\"step\"],\"additionalProperties\":false}")
+ZCL_TOOL("zcl_doctor", build_doctor,
+         "What this host lacks to build and test zclassicd, with the fix for each gap.",
+         "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}")
