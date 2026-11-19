@@ -104,7 +104,9 @@ how much init reads depends on the environment variable `ZCL_PARAMS_VERIFY`
   this into an RPC error is left for a sealed change or a wallet-side caller).
 - `boot`: exactly the old behaviour: all three files hashed at init (the 692 MiB
   Sprout file on a second thread), any mismatch aborts, and the raw Sapling
-  bytes stay resident for the life of the process.
+  bytes stay resident for the life of the process. The mutation step of
+  `src/c23/test/run.sh` runs in this mode, because its expected output is Rust's,
+  which hashes every file at init.
 
 Measurements are in [perf/prover-memory.md](perf/prover-memory.md).
 

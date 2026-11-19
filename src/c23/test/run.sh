@@ -162,7 +162,7 @@ if has_step replay; then
     [ "$r" -eq 0 ] || rc=1
 fi
 if has_step mutations; then
-    echo "== mutations (expected = Rust librustzcash output) =="
+    echo "== mutations (expected = Rust librustzcash output; ZCL_PARAMS_VERIFY=boot, as Rust hashes at init) =="
     vec=$here/vectors
     "$out/kat_mutgen$exe" --golden "$golden" --out "$out/mutations.cases" >"$out/mutgen.log" 2>&1 || { cat "$out/mutgen.log"; exit 2; }
     if ! cmp -s "$out/mutations.cases" "$vec/mutations.cases"; then
@@ -171,8 +171,6 @@ if has_step mutations; then
     fi
     pdir=$out/pdir
     sh "$here/make-pdir.sh" "$params" "$pdir" || exit 2
-    # The expected output is Rust's, which hashes all three files at init and
-    # aborts on a corrupt Sprout file there: compare in boot mode (doc/c23-build.md).
     ZCL_PARAMS_VERIFY=boot "$out/kat_cases$exe" --cases "$vec/mutations.cases" --params "$params" --pdir "$pdir" \
         >"$out/mutations.c23.out" 2>"$out/mutations.c23.err"
     "$out/kat_cases$exe" --compare "$vec/mutations.cases" "$vec/mutations.rust.out" "$out/mutations.c23.out" \
