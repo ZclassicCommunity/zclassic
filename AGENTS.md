@@ -26,10 +26,10 @@ zcutil/local-ci.sh --commit <sha> test-changed <outdir>          # steps chosen 
 zcutil/local-ci.sh --commit <sha> all <outdir>              # full candidate; macOS: zcutil/local-ci-macos.sh
 make -C zcutil check                                        # every developer tool's selftest (zcutil/bin/zcl-dev help lists subcommands)
 zcutil/bin/zcl-dev doctor                                   # what this host lacks to build and test, with the fix for each gap
-zcutil/bin/zcl-dev verify [--base ref]                      # one trip for committed changes: select, focused tests when built, zcl-lint all, test-changed hint
+zcutil/bin/zcl-dev verify [--base ref]                      # one trip for committed changes: select, focused tests when built (needs the zcl-dev-t-fast alias), zcl-lint all, test-changed hint; on Windows lint is UNAVAILABLE (exit 2), run it on a POSIX host
 zcutil/bin/zcl-dev code map|owner|impact|file|sym|refs ...  # code intelligence: navigate before searching
 zcutil/bin/zcl-dev wiki [topic]                             # walk the docs and source trees one topic at a time
-zcutil/bin/zcl-dev lessons find <words>                        # search lessons, traps and facts (add: lessons add)
+zcutil/bin/zcl-dev lessons find <words>                     # search lessons, traps and facts (add: lessons add)
 zcutil/bin/zcl-dev know <term>                              # closed FACTS table answer, UNKNOWN when no row; know --check validates it
 zcutil/bin/zcl-dev gen --check rpc-parity                   # also: gen --check flags, gen rpc-reference|args-reference|inventory
 zcutil/bin/zcl-lint all                                     # every lint rule and ratchet; zcl-lint kpi prints the tree-health floor

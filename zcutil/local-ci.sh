@@ -320,7 +320,7 @@ step() {
 # and knowledge gates. Each gate that a unit did not ship is skipped by name, never faked: check-tests
 # runs only when its binary was built.
 t_devtools() {
-    make -C zcutil check || return 1
+    MAKEFLAGS= make -C zcutil check || return 1   # serial: the selftests run tools that make is still linking
     zcutil/bin/zcl-lint all || return 1
     if [ -x zcutil/bin/zcl-dev-check-tests ]; then zcutil/bin/zcl-dev check-tests || return 1
     else echo "check-dev-tools: zcl-dev check-tests is not built in this tree, skipped"; fi
@@ -602,7 +602,7 @@ do_dry() {
 do_devtools() {
     prepare_src dev-tools
     ZCL_CI_HOSTSRC=$OUT/work/dev-tools/src; export ZCL_CI_HOSTSRC
-    TD=$OUT/dev-tools; FLAVOR=debug; STEP_RUN="sh $SELF __inner"
+    TD=$OUT/dev-tools; FLAVOR=host; STEP_RUN="sh $SELF __inner"
     mkdir -p "$TD/logs"; : >"$TD/results.tsv"
     RCPT_OUT=$OUT; RCPT_COMMIT=$COMMIT; RCPT_TREE=$(git -C "$REPO" rev-parse "$COMMIT^{tree}"); RCPT_ENVFILE=
     step check-dev-tools 600 h_devtools

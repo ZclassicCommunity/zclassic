@@ -85,7 +85,7 @@ do_dev_tools() {
     cd "$SRC"
     mkdir -p "$out/logs"
     log=$out/logs/dev-tools-macos.log
-    { make -C zcutil -j"$JOBS" check &&
+    { make -C zcutil -j"$JOBS" && make -C zcutil check &&
       zcutil/bin/zcl-lint all &&
       { [ ! -x zcutil/bin/zcl-dev-check-tests ] || zcutil/bin/zcl-dev check-tests; } &&
       zcutil/bin/zcl-dev know --check &&
