@@ -472,6 +472,21 @@ bool static InitWarning(const std::string &str)
     return true;
 }
 
+/**
+ * Tell the operator that a reindex is about to run without them having asked for it in this start
+ * (the block index was found empty next to block files, or an earlier -reindex was cut short): the
+ * debug log is off by default, so a node that silently spent hours rebuilding looked hung.
+ * The text goes to the RPC warmup status (what the Qt wallet's start-up screen shows), to stderr as a
+ * warning, and into getblockchaininfo ("reindexing", "reindexreason") once the RPC server answers.
+ */
+static void AnnounceAutomaticReindex(const std::string& reason)
+{
+    strReindexReason = reason;
+    const std::string msg = strprintf(_("Reindexing the block database: %s. This rebuilds the block index and chain state from the block files already on disk and can take several hours; the node is not stuck. It is safe to stop and restart the node at any time: an interrupted reindex starts again from the beginning by itself."), reason);
+    uiInterface.InitMessage(msg);
+    InitWarning(msg);
+}
+
 bool static Bind(const CService &addr, unsigned int flags) {
     if (!(flags & BF_EXPLICIT) && IsLimited(addr))
         return false;
@@ -522,6 +537,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-datadir=<dir>", _("Specify data directory"));
     strUsage += HelpMessageOpt("-exportdir=<dir>", _("Specify directory to be used when exporting data and wallet backups (default: the \"backups\" directory inside the data directory)"));
     strUsage += HelpMessageOpt("-dbcache=<n>", strprintf(_("Set database cache size in megabytes (%d to %d, default: %d)"), nMinDbCache, nMaxDbCache, nDefaultDbCache));
+    strUsage += HelpMessageOpt("-dbflushinterval=<n>", strprintf(_("At the chain tip, write the chain state (coins, block index, block files) to disk at most every <n> seconds, so a crash or kill loses at most that much of the durable height; 0 means once a day (default: %u). Initial block download flushes only when the cache is full"), DATABASE_FLUSH_INTERVAL_TIP));
     strUsage += HelpMessageOpt("-loadblock=<file>", _("Imports blocks from external blk000??.dat file") + " " + _("on startup"));
     strUsage += HelpMessageOpt("-maxorphantx=<n>", strprintf(_("Keep at most <n> unconnectable transactions in memory (default: %u)"), DEFAULT_MAX_ORPHAN_TRANSACTIONS));
     strUsage += HelpMessageOpt("-mempoolmaxbytes=<n>", strprintf(_("Maximum total size in bytes of transactions held in the mempool; a new transaction that would exceed it is refused with reason \"mempool full\" and nothing is evicted (default: %u, minimum: %u)"), DEFAULT_MEMPOOL_MAX_BYTES, MIN_MEMPOOL_MAX_BYTES));
@@ -647,6 +663,8 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-flushwallet", strprintf("Run a thread to flush wallet periodically (default: %u)", 1));
         strUsage += HelpMessageOpt("-testsetchaininterval=<n>", strprintf("Test only: write the wallet checkpoint (locator and note state) at most every <n> seconds while running (default: %u)", DATABASE_WRITE_INTERVAL));
         strUsage += HelpMessageOpt("-testblockindexinterval=<n>", "Test only: write the block index at most every <n> seconds while running (default: 3600, 300 during initial block download)");
+        strUsage += HelpMessageOpt("-testprunetarget=<bytes>", "Test only (regtest): prune block files down to this many bytes, below the 550 MiB minimum of -prune");
+        strUsage += HelpMessageOpt("-testmaxblockfilesize=<bytes>", "Test only (regtest): start a new block file after this many bytes (at least 4096; default: 134217728)");
         strUsage += HelpMessageOpt("-testcrashpoint=<name>[:<n>]", "Test only: _exit(77) the <n>th time the named wallet or chain-state write point is reached; the name any matches every point (default: off)");
         strUsage += HelpMessageOpt("-stopafterblockimport", strprintf("Stop running after importing blocks from disk (default: %u)", 0));
         strUsage += HelpMessageOpt("-nuparams=hexBranchId:activationHeight", "Use given activation height for specified network upgrade (regtest-only)");
@@ -1952,8 +1970,16 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         return InitError(_("Prune cannot be configured with a negative value."));
     }
     nPruneTarget = (uint64_t) nSignedPruneTarget;
+    // Regtest only: a prune target in bytes below the 550 MiB minimum, so qa scripts can prune a small chain.
+    const bool fTestPruneTarget = mapArgs.count("-testprunetarget") > 0;
+    if (fTestPruneTarget) {
+        const int64_t nTestTarget = GetArg("-testprunetarget", 0);
+        if (nTestTarget <= 0)
+            return InitError("-testprunetarget must be a positive number of bytes.");
+        nPruneTarget = (uint64_t) nTestTarget;
+    }
     if (nPruneTarget) {
-        if (nPruneTarget < MIN_DISK_SPACE_FOR_BLOCK_FILES) {
+        if (nPruneTarget < MIN_DISK_SPACE_FOR_BLOCK_FILES && !fTestPruneTarget) {
             return InitError(strprintf(_("Prune configured below the minimum of %d MB.  Please use a higher number."), MIN_DISK_SPACE_FOR_BLOCK_FILES / 1024 / 1024));
         }
         LogPrintf("Prune configured to target %uMiB on disk for block and undo files.\n", nPruneTarget / 1024 / 1024);
@@ -2082,9 +2108,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     // The crash and checkpoint-interval hooks exist for qa/rpc-tests/wallet_crash_consistency.sh.
     // A stray line in zclassic.conf must not make a real node exit at a wallet write point.
-    if ((mapArgs.count("-testcrashpoint") || mapArgs.count("-testsetchaininterval") || mapArgs.count("-testblockindexinterval")) &&
+    if ((mapArgs.count("-testcrashpoint") || mapArgs.count("-testsetchaininterval") || mapArgs.count("-testblockindexinterval") || mapArgs.count("-testprunetarget") || mapArgs.count("-testmaxblockfilesize")) &&
         Params().NetworkIDString() != "regtest") {
-        return InitError("-testcrashpoint, -testsetchaininterval and -testblockindexinterval may only be used on regtest.");
+        return InitError("-testcrashpoint, -testsetchaininterval, -testblockindexinterval, -testprunetarget and -testmaxblockfilesize may only be used on regtest.");
     }
 
     if (!mapMultiArgs["-nuparams"].empty()) {
@@ -3040,6 +3066,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 // (flag found) run it again from the start with a wiped chainstate: the half-built
                 // one may be torn and no longer matches the index that is not loaded.
                 if (fReindex) {
+                    if (strReindexReason.empty())
+                        strReindexReason = "requested with -reindex (or by the start-up repair path)";
                     pblocktree->WriteReindexing(true);
                 } else {
                     bool fWasReindexing = false;
@@ -3058,9 +3086,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                         boost::filesystem::file_size(pathFirstBlockFile, ecFirstBlockFile) > 0 && !ecFirstBlockFile;
                     if (fWasReindexing) {
                         LogPrintf("An earlier -reindex did not finish: starting it again\n");
+                        AnnounceAutomaticReindex(_("an earlier -reindex did not finish, so it starts again from the beginning"));
                         fReindex = true;
                     } else if (!pblocktree->ReadLastBlockFile(nLastBlockFileRecorded) && fFirstBlockFileHoldsData) {
                         LogPrintf("The block index is empty but the block files hold blocks (an interrupted -reindex, or a removed index): reindexing them\n");
+                        AnnounceAutomaticReindex(_("the block index is empty but the block files hold blocks (an interrupted -reindex, or a removed index)"));
                         pblocktree->WriteReindexing(true);
                         fReindex = true;
                     }

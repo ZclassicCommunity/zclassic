@@ -1171,7 +1171,7 @@ BOOST_AUTO_TEST_CASE(a_trickling_peer_cannot_hold_the_attempt_after_the_watchdog
 class FakeNameProxy
 {
 public:
-    FakeNameProxy(uint16_t targetPort) : target(targetPort), listenFd(-1), port(0), stopping(false), requests(0)
+    FakeNameProxy(uint16_t targetPort) : target(targetPort), listenFd(-1), port(0), stopping(false), requests(0), unnamedRequests(0), foreignHosts(0)
     {
         listenFd = socket(AF_INET, SOCK_STREAM, 0);
         BOOST_REQUIRE(listenFd >= 0);
@@ -1214,7 +1214,10 @@ public:
                 handlers[i].join();
     }
     uint16_t Port() const { return port; }
-    std::atomic<int> requests;
+    std::atomic<int> requests;          // CONNECT requests that named a host
+    std::atomic<int> unnamedRequests;   // CONNECT requests that carried an address instead of a name
+    std::atomic<int> foreignHosts;      // named requests whose host is not expectedHost
+    std::string expectedHost;           // set before the first connection
     std::string lastHost;
 
 private:
@@ -1237,14 +1240,20 @@ private:
         const unsigned char choose[2] = {5, 0};
         if (send(fd, choose, 2, MSG_NOSIGNAL) != 2)
             return;
-        if (!RecvAll(fd, b, 5) || b[3] != 3) // ATYP must be a domain name
+        if (!RecvAll(fd, b, 5))
             return;
+        if (b[3] != 3) { // ATYP must be a domain name
+            unnamedRequests.fetch_add(1);
+            return;
+        }
         const size_t hostLen = b[4];
         if (!RecvAll(fd, b + 5, hostLen + 2))
             return;
         {
             std::lock_guard<std::mutex> lock(mtx);
             lastHost.assign((const char*)b + 5, hostLen);
+            if (lastHost != expectedHost)
+                foreignHosts.fetch_add(1);
         }
         requests.fetch_add(1);
         const int up = socket(AF_INET, SOCK_STREAM, 0);
@@ -1302,6 +1311,7 @@ BOOST_AUTO_TEST_CASE(streams_reconnect_by_name_through_a_name_proxy)
         const Snapshot s = MakeSnapshot(5);
         FakeBootstrapServer server(s);
         FakeNameProxy proxy(server.Address().GetPort());
+        proxy.expectedHost = "snapshot.invalid";
         BOOST_REQUIRE(SetNameProxy(proxyType(CService("127.0.0.1", proxy.Port()))));
         std::string error;
         const bool ok = DownloadBootstrapSnapshotParallel(CService("0.0.0.0", 0),
@@ -1310,7 +1320,13 @@ BOOST_AUTO_TEST_CASE(streams_reconnect_by_name_through_a_name_proxy)
         ClearProxies();
         BOOST_REQUIRE_MESSAGE(ok, error);
         CheckAllFilesMatch(s, tmp.path / "staging");
-        BOOST_CHECK_GE(proxy.requests.load(), streams);
+        // The number of connections is not fixed: a stream opens one only while files are still
+        // pending, so with a small snapshot the first stream can fetch every file before the other
+        // streams look at the queue (nStreams is also capped by the file count). What must hold is that
+        // at least one connection was made and that EVERY connection went through the proxy by name.
+        BOOST_CHECK_GE(proxy.requests.load(), 1);
+        BOOST_CHECK_EQUAL(proxy.unnamedRequests.load(), 0);
+        BOOST_CHECK_EQUAL(proxy.foreignHosts.load(), 0);
         BOOST_CHECK_EQUAL(proxy.lastHost, "snapshot.invalid");
     }
 }

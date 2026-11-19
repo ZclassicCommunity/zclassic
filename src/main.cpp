@@ -71,6 +71,7 @@ int nScriptCheckThreads = 0;
 bool fExperimentalMode = false;
 bool fImporting = false;
 bool fReindex = false;
+std::string strReindexReason;
 bool fReindexChainState = false;
 bool fBlockIndexFromSnapshot = false;
 bool fTxIndex = false;
@@ -1885,12 +1886,34 @@ CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
     }
 }
 
+/** Largest size of one blk?????.dat. Regtest only (init.cpp rejects the option elsewhere): lets qa scripts
+ *  roll over and prune block files without writing hundreds of MiB. */
+static unsigned int MaxBlockFileSize()
+{
+    if (mapArgs.count("-testmaxblockfilesize"))
+        return (unsigned int)std::max<int64_t>(4096, std::min<int64_t>(GetArg("-testmaxblockfilesize", MAX_BLOCKFILE_SIZE), MAX_BLOCKFILE_SIZE));
+    return MAX_BLOCKFILE_SIZE;
+}
+
 int64_t BlockIndexWriteInterval(bool fInitialBlockDownload)
 {
     // Regtest only (init.cpp rejects it elsewhere): lets qa scripts reach a block-index write without a full flush.
     if (mapArgs.count("-testblockindexinterval"))
         return GetArg("-testblockindexinterval", DATABASE_WRITE_INTERVAL);
     return fInitialBlockDownload ? DATABASE_WRITE_INTERVAL_IBD : DATABASE_WRITE_INTERVAL;
+}
+
+int64_t ChainstateFlushInterval(bool fInitialBlockDownload)
+{
+    // During initial block download the large coins cache is what makes the sync fast: flush only when it
+    // is full (or after the legacy 24 h). At the tip every flush is small, so keep the durable height close.
+    if (fInitialBlockDownload)
+        return DATABASE_FLUSH_INTERVAL;
+    int64_t n = GetArg("-dbflushinterval", DATABASE_FLUSH_INTERVAL_TIP);
+    // 0 (or negative) keeps the legacy interval, and no value may exceed it.
+    if (n <= 0 || n > (int64_t)DATABASE_FLUSH_INTERVAL)
+        return DATABASE_FLUSH_INTERVAL;
+    return n;
 }
 
 bool HeadersRequestTimedOut(int64_t nNow, int64_t nRequestedAt, int64_t nTimeoutSeconds)
@@ -2955,7 +2978,7 @@ bool static FlushStateToDisk(CValidationState &state, FlushStateMode mode) {
     // It's been a while since we wrote the block index to disk. Do this frequently, so we don't need to redownload after a crash.
     bool fPeriodicWrite = mode == FLUSH_STATE_PERIODIC && nNow > nLastWrite + BlockIndexWriteInterval(IsInitialBlockDownload()) * 1000000;
     // It's been very long since we flushed the cache. Do this infrequently, to optimize cache usage.
-    bool fPeriodicFlush = mode == FLUSH_STATE_PERIODIC && nNow > nLastFlush + (int64_t)DATABASE_FLUSH_INTERVAL * 1000000;
+    bool fPeriodicFlush = mode == FLUSH_STATE_PERIODIC && nNow > nLastFlush + ChainstateFlushInterval(IsInitialBlockDownload()) * 1000000;
     // Combine all conditions that result in a full cache flush.
     bool fDoFullFlush = (mode == FLUSH_STATE_ALWAYS) || fCacheLarge || fCacheCritical || fPeriodicFlush || fFlushForPrune;
     // Write blocks and block index to disk.
@@ -4630,7 +4653,7 @@ bool FindBlockPos(CValidationState &state, CDiskBlockPos &pos, unsigned int nAdd
     }
 
     if (!fKnown) {
-        while (vinfoBlockFile[nFile].nSize + nAddSize >= MAX_BLOCKFILE_SIZE) {
+        while (vinfoBlockFile[nFile].nSize + nAddSize >= MaxBlockFileSize()) {
             nFile++;
             if (vinfoBlockFile.size() <= nFile) {
                 vinfoBlockFile.resize(nFile + 1);
