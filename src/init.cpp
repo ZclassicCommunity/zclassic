@@ -3274,6 +3274,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 ArmBootstrapTipHold(bvHeight, bvHash);
             }
         }
+        TestCrashPoint("bootstrap-install-before-marker-clear");
         BootstrapTrustlessPendingClear(GetDataDir());
         LogPrintf("Bootstrap snapshot provisionally accepted at height %d (%s); background validation will confirm it\n",
             bvHeight, bvHash.ToString());
@@ -3304,6 +3305,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         GetBootstrapAnchorPending(GetDataDir(), advertisedTipHeight, advertisedTipHash);
         // Verified: clear the marker so subsequent restarts skip the (now
         // redundant) re-verification.
+        TestCrashPoint("bootstrap-install-before-marker-clear");
         BootstrapAnchorPendingClear(GetDataDir());
         LogPrintf("Bootstrap snapshot verified at height %d (%s); server advertised post-anchor tip height %d (%s)\n",
             chainActive.Height(),

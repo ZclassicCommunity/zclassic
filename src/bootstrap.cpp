@@ -1437,8 +1437,10 @@ static bool InstallStagedBootstrapChainData(const boost::filesystem::path& stagi
 
         boost::filesystem::rename(staging / "blocks", blocks_dir);
         installed_blocks = true;
+        TestCrashPoint("bootstrap-install-after-blocks-rename");
         boost::filesystem::rename(staging / "chainstate", chainstate_dir);
         installed_chainstate = true;
+        TestCrashPoint("bootstrap-install-after-chainstate-rename");
         boost::filesystem::remove_all(staging);
         return true;
     } catch (const boost::filesystem::filesystem_error& e) {
@@ -4149,6 +4151,7 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
         // by the normal forward block-validation path. So v3 (and v1) take the anchor
         // path; only nVersion==2 in trustless mode is the trustless case.
         const bool fTrustlessV2 = (fTrustless && manifest.nVersion == 2);
+        TestCrashPoint("bootstrap-install-before-marker");
         if (fTrustlessV2) {
             if (!WriteBootstrapTrustlessPending(data_dir, manifest.nHeight, manifest.hashBlock,
                                                 manifest.hashChainstateSerialized)) {
@@ -4176,6 +4179,7 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
             }
         }
 
+        TestCrashPoint("bootstrap-install-after-marker");
         if (!InstallStagedBootstrapChainData(staging, data_dir, error)) {
             // The install failed and cleaned up any partial data; drop the marker
             // we just wrote so a restart does not try to verify a snapshot that
