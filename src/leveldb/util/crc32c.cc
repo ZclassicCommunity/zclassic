@@ -17,6 +17,17 @@
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
 #define LEVELDB_CRC32C_X86 1
 #include <nmmintrin.h>
+#elif defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+// ARMv8 CRC32C instructions (Apple Silicon, Linux aarch64), detected at run time
+// and verified against the portable code once before use.
+#define LEVELDB_CRC32C_ARM 1
+#include <arm_acle.h>
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <asm/hwcap.h>
+#include <sys/auxv.h>
+#endif
 #endif
 
 namespace leveldb {
@@ -360,6 +371,98 @@ static uint32_t ExtendHardware(uint32_t crc, const char* buf, size_t size) {
 static bool DetectHardware() {
   __builtin_cpu_init();
   return __builtin_cpu_supports("sse4.2");
+}
+
+bool HaveHardwareCrc32c() {
+  static const bool have = DetectHardware();
+  return have;
+}
+
+uint32_t Extend(uint32_t crc, const char* buf, size_t size) {
+  if (HaveHardwareCrc32c()) {
+    return ExtendHardware(crc, buf, size);
+  }
+  return ExtendPortable(crc, buf, size);
+}
+#elif defined(LEVELDB_CRC32C_ARM)
+#if defined(__clang__)
+#define LEVELDB_CRC32C_ARM_TARGET __attribute__((target("crc")))
+#else
+#define LEVELDB_CRC32C_ARM_TARGET __attribute__((target("+crc")))
+#endif
+
+LEVELDB_CRC32C_ARM_TARGET
+static uint32_t ExtendHardware(uint32_t crc, const char* buf, size_t size) {
+  const uint8_t *p = reinterpret_cast<const uint8_t *>(buf);
+  uint32_t l = crc ^ 0xffffffffu;
+  while (size >= 8) {
+    uint64_t v;
+    memcpy(&v, p, sizeof(v));  // unaligned load; little-endian only (checked below)
+    l = __crc32cd(l, v);
+    p += 8;
+    size -= 8;
+  }
+  if (size >= 4) {
+    uint32_t v;
+    memcpy(&v, p, sizeof(v));
+    l = __crc32cw(l, v);
+    p += 4;
+    size -= 4;
+  }
+  while (size > 0) {
+    l = __crc32cb(l, *p++);
+    size--;
+  }
+  return l ^ 0xffffffffu;
+}
+
+// True when the CPU advertises the ARMv8 CRC32 extension. No compile-time ISA
+// predicate: the binary is portable across aarch64 CPUs.
+static bool ArmCrc32Present() {
+#if defined(__APPLE__)
+  int v = 0;
+  size_t len = sizeof(v);
+  if (sysctlbyname("hw.optional.armv8_crc32", &v, &len, NULL, 0) == 0 && v == 1) {
+    return true;
+  }
+  v = 0;
+  len = sizeof(v);
+  return sysctlbyname("hw.optional.arm.FEAT_CRC32", &v, &len, NULL, 0) == 0 &&
+         v == 1;
+#elif defined(__linux__) && defined(HWCAP_CRC32)
+  return (getauxval(AT_HWCAP) & HWCAP_CRC32) != 0;
+#else
+  return false;
+#endif
+}
+
+// One-time differential check of the hardware path against the portable
+// tables over lengths 0..4099 (every length below 64, then step 257) on a
+// fixed LCG buffer. Any divergence disables the hardware path.
+static bool HardwareSelfCheck() {
+  static const size_t kMax = 4099;
+  uint8_t buf[kMax + 1];
+  uint32_t s = 0x12345678u;
+  for (size_t i = 0; i <= kMax; i++) {
+    s = s * 1664525u + 1013904223u;
+    buf[i] = static_cast<uint8_t>(s >> 24);
+  }
+  const char* b = reinterpret_cast<const char*>(buf);
+  for (size_t n = 0; n <= kMax; n += (n < 64 ? 1 : 257)) {
+    if (ExtendHardware(0, b, n) != ExtendPortable(0, b, n) ||
+        ExtendHardware(0xdeadbeefu, b, n) != ExtendPortable(0xdeadbeefu, b, n)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool DetectHardware() {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
+  return false;
+#else
+  return ArmCrc32Present() && HardwareSelfCheck();
+#endif
 }
 
 bool HaveHardwareCrc32c() {
