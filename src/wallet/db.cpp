@@ -33,6 +33,15 @@ unsigned int nWalletDBUpdated;
 
 CDBEnv bitdb;
 
+// Only call when no DbEnv that was given errfile can still write to it.
+void CDBEnv::CloseErrFile()
+{
+    if (errfile) {
+        fclose(errfile);
+        errfile = NULL;
+    }
+}
+
 void CDBEnv::EnvShutdown()
 {
     if (!fDbEnvInit)
@@ -42,6 +51,7 @@ void CDBEnv::EnvShutdown()
     int ret = dbenv->close(0);
     if (ret != 0)
         LogPrintf("CDBEnv::EnvShutdown: Error %d shutting down database environment: %s\n", ret, DbEnv::strerror(ret));
+    CloseErrFile();
     if (!fMockDb)
         DbEnv(u_int32_t{0}).remove(strPath.c_str(), 0);
 }
@@ -49,12 +59,13 @@ void CDBEnv::EnvShutdown()
 void CDBEnv::Reset()
 {
     delete dbenv;
+    CloseErrFile();
     dbenv = new DbEnv(DB_CXX_NO_EXCEPTIONS);
     fDbEnvInit = false;
     fMockDb = false;
 }
 
-CDBEnv::CDBEnv() : dbenv(NULL)
+CDBEnv::CDBEnv() : errfile(NULL), dbenv(NULL)
 {
     Reset();
 }
@@ -64,6 +75,7 @@ CDBEnv::~CDBEnv()
     EnvShutdown();
     delete dbenv;
     dbenv = NULL;
+    CloseErrFile();
 }
 
 void CDBEnv::Close()
@@ -94,7 +106,9 @@ bool CDBEnv::Open(const boost::filesystem::path& pathIn)
     dbenv->set_lg_max(1048576);
     dbenv->set_lk_max_locks(40000);
     dbenv->set_lk_max_objects(40000);
-    dbenv->set_errfile(fopen(pathErrorFile.string().c_str(), "a")); /// debug
+    CloseErrFile(); // a failed earlier Open() may have left one behind
+    errfile = fopen(pathErrorFile.string().c_str(), "a");
+    dbenv->set_errfile(errfile); /// debug
     dbenv->set_flags(DB_AUTO_COMMIT, 1);
     dbenv->set_flags(DB_TXN_WRITE_NOSYNC, 1);
     dbenv->log_set_config(DB_LOG_AUTO_REMOVE, 1);
