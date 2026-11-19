@@ -19,6 +19,7 @@
 #     test          clean test build + every local test; one summary table
 #     test-changed  `test` restricted (as --only) to the steps `zcl-dev select` picks for
 #                   the commits between ZCL_CI_BASE (default origin/master) and --commit
+#     dry           three fake steps through the real step/receipt code, no root filesystem
 #     macos         run local-ci-macos.sh on the Mac named by ZCL_CI_MAC (ssh alias)
 #     all           daemon-linux daemon-win64 wallet-linux test (+ macos if ZCL_CI_MAC set)
 #     shell         interactive shell in the focal environment (for debugging)
@@ -48,6 +49,9 @@
 #     ZCL_CI_LOG_CAP   most bytes kept of one step log (default 268435456); a step that fills it fails
 #     ZCL_CI_NOASLR    0 = do not run the sanitizer step under `setarch -R`
 #
+# Output: logs under <outdir>/logs and <outdir>/test*/logs, and one JSON receipt per step in
+# <outdir>/receipts.jsonl (doc/local-ci.md); `zcutil/dev/zcl-dev receipt <step> <outdir>` prints one.
+#
 # Exit status: 0 only when every requested command and check passed.
 # Heavy commands belong behind the host broker, for example:
 #   devbuild --wait --project z23 --class normal --cpu-limit 8 zcutil/local-ci.sh all
@@ -70,6 +74,44 @@ TEST_PKGS="file procps iproute2 jq bc rsync strace qtbase5-dev libqt5svg5-dev qt
 die() { echo "local-ci: $*" >&2; exit 1; }
 say() { echo "== local-ci: $*"; }
 
+# ---------------------------------------------------------------- receipts
+# receipt <stage> <step> <verdict> <seconds> <started-epoch> <logfile>
+# appends one JSON line to $RCPT_OUT/receipts.jsonl (no-op when RCPT_OUT is unset).  Fields:
+# commit, tree (git tree hash), stage, step, verdict, seconds, started (UTC), os, arch (no host
+# name), gcc, mingw, glibc (versions as seen where the step ran), env_names + env_sha256 (the
+# names of the build-relevant variables that are set, and a SHA-256 over their NAME=value lines;
+# values are never written), log_sha256.  POSIX sh and the usual sha256sum/shasum only.
+RCPT_VARS="CONFIGURE_FLAGS DEBUG HOST CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS MAKEFLAGS ZQW_STATIC_GOMP E2E_NODE_ARGS"
+
+sha256_stdin() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi
+}
+json_str() { printf '%s' "$1" | tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+tool_ver() { if command -v "$1" >/dev/null 2>&1; then "$@" 2>&1 | sed -n 1p; fi; }
+
+receipt() {
+    [ -n "${RCPT_OUT:-}" ] || return 0
+    r_stage=$1; r_step=$2; r_verdict=$3; r_secs=$4; r_start=$5; r_log=$6
+    r_when=$(date -u -d "@$r_start" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$r_start" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)
+    if [ -n "${RCPT_ENVFILE:-}" ] && [ -f "$RCPT_ENVFILE" ]; then
+        r_gcc=$(sed -n 3p "$RCPT_ENVFILE"); r_mingw=$(sed -n 4p "$RCPT_ENVFILE"); r_glibc=$(sed -n 5p "$RCPT_ENVFILE")
+    else
+        r_gcc=$(tool_ver gcc --version); r_mingw=$(tool_ver x86_64-w64-mingw32-g++ --version); r_glibc=$(tool_ver ldd --version)
+    fi
+    r_names=$( { for n in $RCPT_VARS; do eval "[ -n \"\${$n+x}\" ]" && echo "$n"; done
+                 env | sed -n 's/^\(ZCL_CI_[A-Za-z0-9_]*\)=.*/\1/p'; } | sort -u)
+    r_pairs=$(for n in $r_names; do eval "printf '%s=%s\\n' \"$n\" \"\${$n}\""; done)
+    r_envsha=$(printf '%s\n' "$r_pairs" | sha256_stdin)
+    r_list=""
+    for n in $r_names; do r_list="$r_list${r_list:+,}\"$n\""; done
+    r_logsha=""
+    [ ! -f "$r_log" ] || r_logsha=$(sha256_stdin <"$r_log")
+    printf '{"commit":"%s","tree":"%s","stage":"%s","step":"%s","verdict":"%s","seconds":%s,"started":"%s","os":"%s","arch":"%s","gcc":"%s","mingw":"%s","glibc":"%s","env_names":[%s],"env_sha256":"%s","log_sha256":"%s"}\n' \
+        "${RCPT_COMMIT:-}" "${RCPT_TREE:-}" "$(json_str "$r_stage")" "$(json_str "$r_step")" "$r_verdict" "$r_secs" "$r_when" \
+        "$(uname -s)" "$(uname -m)" "$(json_str "$r_gcc")" "$(json_str "$r_mingw")" "$(json_str "$r_glibc")" \
+        "$r_list" "$r_envsha" "$r_logsha" >>"$RCPT_OUT/receipts.jsonl"
+}
+
 # ------------------------------------------------------------------- inner
 # Everything below `inner_*` runs INSIDE the focal environment as (mapped) root,
 # with the clean source clone at /w/src, caches at /cache, outputs at /out.
@@ -85,6 +127,7 @@ inner_common() {
     JOBS=${ZCL_CI_JOBS:-8}
     COMMIT=$(git rev-parse HEAD)
     TD=/out/${ZCL_CI_TESTDIR:-test}; FLAVOR=${ZCL_CI_FLAVOR:-debug}
+    RCPT_OUT=/out; RCPT_COMMIT=$COMMIT; RCPT_TREE=$(git rev-parse "HEAD^{tree}")
 }
 
 expected_version() {
@@ -207,9 +250,17 @@ inner_test_build() {
     t0=$(date +%s)
     if run_logged "$log" ./zcutil/build.sh -j"$JOBS"; then rc=0; else rc=1; fi
     printf 'build-tests\t%s\t%s\n' "$([ $rc -eq 0 ] && echo PASS || echo FAIL)" "$(( $(date +%s) - t0 ))" >>$TD/results.tsv
+    receipt "test-build/$FLAVOR" build-tests "$([ $rc -eq 0 ] && echo PASS || echo FAIL)" "$(( $(date +%s) - t0 ))" "$t0" "$log"
     [ $rc -eq 0 ] || exit 1
     say "Zcash parameters"
-    run_logged "$log" ./zcutil/fetch-params.sh || { printf 'fetch-params\tFAIL\t0\n' >>$TD/results.tsv; exit 1; }
+    t0=$(date +%s)
+    if run_logged "$log" ./zcutil/fetch-params.sh; then
+        receipt "test-build/$FLAVOR" fetch-params PASS "$(( $(date +%s) - t0 ))" "$t0" "$log"
+    else
+        printf 'fetch-params\tFAIL\t0\n' >>$TD/results.tsv
+        receipt "test-build/$FLAVOR" fetch-params FAIL "$(( $(date +%s) - t0 ))" "$t0" "$log"
+        exit 1
+    fi
 }
 
 # Run a command with address-space randomisation off when the kernel allows it.  Sanitizer
@@ -243,7 +294,8 @@ step() {
     rm -f "$rcf"
     set +e
     # head -c ends the pipe at the cap: the step then dies of SIGPIPE on its next write.
-    { timeout -k 30 "$limit" sh /ci/local-ci.sh __inner "$@" 2>&1; echo $? >"$rcf"; } | head -c "$cap" >"$log"
+    # STEP_RUN is `sh /ci/local-ci.sh __inner` inside the rootfs; `dry` points it at this checkout.
+    { timeout -k 30 "$limit" ${STEP_RUN:-sh /ci/local-ci.sh __inner} "$@" 2>&1; echo $? >"$rcf"; } | head -c "$cap" >"$log"
     rc=$(cat "$rcf" 2>/dev/null); [ -n "$rc" ] || rc=1
     set -e
     secs=$(( $(date +%s) - t0 ))
@@ -257,6 +309,7 @@ step() {
     [ "$rc" -eq 0 ] || st=FAIL
     [ "$rc" -ne 77 ] || st=SKIP
     printf '%s\t%s\t%s\n' "$name" "$st" "$secs" >>$TD/results.tsv
+    receipt "test-run/$FLAVOR" "$name" "$st" "$secs" "$t0" "$log"
     echo "[$st] $name (${secs}s, rc $rc${note:+, $note})"
 }
 
@@ -346,6 +399,10 @@ inner_test_tor() {
     step tor-addrv2gossip 3600 t_tor addrv2gossip.sh
 }
 # (steps run as `local-ci.sh __inner <t_function> [args]` so `timeout` can wrap them)
+# Fake steps for `dry` (plumbing check, no root filesystem).
+t_dry_pass() { echo "dry pass"; }
+t_dry_fail() { echo "dry fail"; return 1; }
+t_dry_skip() { echo "dry skip"; return 77; }
 
 # ------------------------------------------------------------------- outer
 OUTER_ONLY=1
@@ -358,6 +415,7 @@ if [ "${1:-}" = "__inner" ]; then
         test-build)   inner_test_build ;;
         test-run)     inner_test_run ;;
         test-tor)     inner_test_tor ;;
+        t_dry_*) fn=$2; shift 2; "$fn" "$@"; exit $? ;;
         t_*) fn=$2; shift 2; inner_common; HOST=$(./depends/config.guess); "$fn" "$@"; exit $? ;;
         *) die "unknown inner stage ${2:-}" ;;
     esac
@@ -476,7 +534,25 @@ stage() {
         ( enter "$w" "$net" sh /ci/local-ci.sh __inner "$inner" )
     } 9>"$CACHE/.lock" || st_rc=$?
     echo "== local-ci: $inner finished in $(( $(date +%s) - t0 ))s (rc $st_rc)"
+    case $inner in
+        daemon-linux|daemon-win64|wallet-linux)
+            RCPT_OUT=$OUT; RCPT_COMMIT=$COMMIT; RCPT_TREE=$(git -C "$REPO" rev-parse "$COMMIT^{tree}")
+            RCPT_ENVFILE=$ENVDIR/root/ZCL-CI-ENV.txt
+            receipt stage "$inner" "$([ "$st_rc" -eq 0 ] && echo PASS || echo FAIL)" "$(( $(date +%s) - t0 ))" "$t0" "$OUT/logs/$inner.log" ;;
+    esac
     return $st_rc
+}
+
+# do_dry: three fake steps through the real step() and receipt() code, no root filesystem.
+# Used to check the plumbing (--only filter, results.tsv, receipts.jsonl) in seconds.
+do_dry() {
+    TD=$OUT/dry; FLAVOR=debug; STEP_RUN="sh $SELF __inner"
+    mkdir -p "$TD/logs"; : >"$TD/results.tsv"
+    RCPT_OUT=$OUT; RCPT_COMMIT=$COMMIT; RCPT_TREE=$(git -C "$REPO" rev-parse "$COMMIT^{tree}"); RCPT_ENVFILE=
+    step dry-pass 60 t_dry_pass
+    step dry-fail 60 t_dry_fail
+    step dry-skip 60 t_dry_skip
+    say "dry results in $TD/results.tsv, receipts in $OUT/receipts.jsonl"
 }
 
 # do_test_changed: `test` restricted to the steps zcl-dev select maps from the diff.
@@ -610,6 +686,7 @@ cmd_one() {
             stage wallet-linux host wallet-linux keep ;;
         test) do_test ;;
         test-changed) do_test_changed ;;
+        dry) do_dry ;;
         macos) do_macos ;;
         retry-step) need_env; [ -n "${RETRY_FN:-}" ] || die "usage: RETRY_FN=t_treeroot local-ci.sh retry-step"; stage test none "$RETRY_FN" keep ;;
         clean) rm -rf "${OUT:?}/work"; say "removed $OUT/work" ;;

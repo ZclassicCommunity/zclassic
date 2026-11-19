@@ -6,7 +6,7 @@ nothing runs on push or pull request.
 
 | Script | Where it runs | What it does |
 | --- | --- | --- |
-| `zcutil/local-ci.sh` | Linux build host | `env-setup`, `daemon-linux`, `daemon-win64`, `wallet-linux`, `test`, `macos`, `all`, `shell`, `clean` |
+| `zcutil/local-ci.sh` | Linux build host | `env-setup`, `daemon-linux`, `daemon-win64`, `wallet-linux`, `test`, `test-changed`, `dry`, `macos`, `all`, `shell`, `clean` (options `--only`, `--tor`, `--flavor`, `--pick`) |
 | `zcutil/local-ci-macos.sh` | the Mac | macOS daemon candidate and macOS wallet bundle |
 | `zcutil/local-ci-smoke.sh` | anywhere (Linux, macOS, Windows under Git Bash/MSYS2) | headless Sapling regtest smoke with exact balances |
 
@@ -75,6 +75,59 @@ smoke and wallet-matrix tests), `ZCL_CI_MAC`, `ZCL_CI_MAC_DIR`, `ZCL_CI_MAC_JOBS
 Caches make repeat runs fast: depends are rebuilt only when a recipe changes and
 ccache serves unchanged objects. Two runs never write the caches at once (flock).
 
+
+## Running only what changed
+
+`zcutil/dev/zcl-dev` (a small C tool, `make -C zcutil/dev`) maps a diff to the steps that
+need to run, using the rules in `zcutil/dev/impact.rules`:
+
+```sh
+zcutil/dev/zcl-dev guide src/wallet/wallet.cpp     # rules, steps, scripts, lessons, traps, first commands
+zcutil/dev/zcl-dev select [base-ref]               # steps for `git diff base...HEAD` (default origin/master)
+zcutil/dev/zcl-dev check-rules                     # every source file has a rule, every rule matches a file
+zcutil/local-ci.sh --commit <sha> --only wallet_matrix-1-9,zslp_index test <outdir>
+ZCL_CI_BASE=<base-ref> zcutil/local-ci.sh --commit <sha> test-changed <outdir>
+```
+
+`--only` takes a comma list of `test` step names (the names in the results table); the
+build always runs, the other steps are neither run nor recorded, and the flavors keep
+their usual split (the debug-only steps do not run in the release flavor). A path with no
+rule selects everything; Markdown and `doc/` select only `check-dev-tools`. Stages
+(`daemon-linux`, `daemon-win64`, `wallet-linux`) are separate commands: `select` lists them
+under `stages:` and `test-changed` prints them as "also needed". A new step needs a rule
+in `impact.rules` (`check-rules` checks that its name is a `step` in `local-ci.sh`).
+
+## Receipts
+
+Every step appends one JSON line to `<outdir>/receipts.jsonl`, in the order it finished:
+the build (`build-tests`, `fetch-params`), every test step, and the three candidate stages.
+
+| Field | Meaning |
+| --- | --- |
+| `commit`, `tree` | the commit built and its git tree hash |
+| `stage`, `step` | `test-run/<flavor>`, `test-build/<flavor>` or `stage`; the step name |
+| `verdict`, `seconds` | `PASS`, `FAIL` or `SKIP`; wall-clock seconds |
+| `started` | start time, UTC, ISO 8601 |
+| `os`, `arch` | `uname -s` and `uname -m` of where the step ran (no host name) |
+| `gcc`, `mingw`, `glibc` | first line of `gcc --version`, `x86_64-w64-mingw32-g++ --version` and `ldd --version` inside the focal rootfs (stages read them from `ZCL-CI-ENV.txt`); empty if absent |
+| `env_names`, `env_sha256` | names of the build-relevant variables that are set (`CONFIGURE_FLAGS`, `DEBUG`, `HOST`, `CC`, `CXX`, `CFLAGS`, `CXXFLAGS`, `CPPFLAGS`, `LDFLAGS`, `MAKEFLAGS`, `ZQW_STATIC_GOMP`, `E2E_NODE_ARGS`, and every `ZCL_CI_*`) and the SHA-256 of their sorted `NAME=value` lines; values are never written |
+| `log_sha256` | SHA-256 of the step's log file, so a receipt pins what was read |
+
+The environment is the one the step ran in: test steps run under `--clearenv`, so their
+digest covers what the CI passes in, not the host's shell. A receipt says what ran and
+what it printed; it does not make the result true: read the log it hashes.
+
+```sh
+zcutil/dev/zcl-dev receipt wallet_tokenguard <outdir>     # the latest receipt of one step
+grep '"verdict":"FAIL"' <outdir>/receipts.jsonl           # every failure of a run
+sha256sum <outdir>/test/logs/wallet_tokenguard.log        # must equal its log_sha256
+```
+
+`zcutil/local-ci.sh dry <outdir>` runs three fake steps (pass, fail, skip) through the real
+`step` and `receipt` code with no root filesystem; `make -C zcutil/dev check` uses it to
+test the receipts and `--only`. Receipts use only POSIX sh, `sha256sum` or `shasum`, and
+`uname`; there is no `jq`.
+
 ## Where artifacts land
 
 `<outdir>/daemon-linux-x86_64/`, `daemon-windows-x86_64/`, `daemon-macos-arm64/`
@@ -117,7 +170,7 @@ branch) onto the test builds only; the picks are recorded in `test*/PICKS.txt`.
 Results are in `test/` (debug) and `test-release/`.
 
 The debug stage runs:
-`check-c23-vendor`,
+`check-dev-tools` (the `zcl-dev` fixture tests, `check-rules`, `check-docs`), `check-c23-vendor`,
 `check-c23-no-rust`, `check-c23-tor-symbols`, the tree-root ASan/UBSan check, full
 `test_bitcoin`, full `zcash-gtest`, `src/c23/test/run.sh --linked` (golden corpus),
 `regtest-smoke.sh`, `wallet_matrix.sh` scenarios 1-9, `wallet_tokenguard.sh` (plain and
