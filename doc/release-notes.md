@@ -106,3 +106,14 @@ provider and the command-line tools are not built. Encrypted `wallet.dat` files 
 compatible in both directions: a wallet encrypted by an older release unlocks in this one,
 and a wallet whose passphrase was changed or whose keys were added here unlocks in an
 older release. OpenSSL 3 is licensed under Apache-2.0 (see `THIRD-PARTY-LICENSES`).
+
+
+Limits on two peer requests
+---------------------------
+
+- A `getblocks` or `getheaders` request whose block locator has more than 101 entries is
+  no longer served: the peer is disconnected, without a ban score (an honest locator has
+  under 40 entries even at height 5,000,000). A peer's second
+  `mempool` request within 60 seconds is ignored, without a reply or a ban score;
+  whitelisted peers are exempt. Neither changes consensus or which blocks and
+  transactions are accepted.
