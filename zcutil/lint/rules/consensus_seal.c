@@ -102,33 +102,12 @@ static void die_git(void)
     exit(2);
 }
 
-/* lint_root is spliced into a single-quoted shell command: refuse a root that would break the quoting or
- * overflow the command buffer. */
-static void check_root(void)
+/* Runs `git -C root <args>` without a shell and returns its whole stdout (NUL-terminated, length in *len); exits 2
+ * on failure. */
+static char *git_out(char *const args[], size_t *len)
 {
-    if (strchr(lint_root, '\'') || strlen(lint_root) > 400) {
-        fprintf(stderr, "zcl-lint: --root must be at most 400 bytes with no single quote\n");
-        exit(2);
-    }
-}
-
-/* Runs `git -C root <args>` and returns its whole stdout (NUL-terminated, length in *len); exits 2 on failure. */
-static char *git_out(const char *args, size_t *len)
-{
-    char cmd[1200];
-    snprintf(cmd, sizeof cmd, "git -C '%s' %s", lint_root, args);
-    FILE *p = popen(cmd, "r");
-    if (!p) { fprintf(stderr, "zcl-lint: cannot run git\n"); exit(2); }
-    size_t cap = 4096, n = 0, r;
-    char *buf = lint_xrealloc(NULL, cap);
-    while ((r = fread(buf + n, 1, cap - n, p)) > 0) {
-        n += r;
-        if (n == cap) { cap *= 2; buf = lint_xrealloc(buf, cap); }
-    }
-    if (pclose(p) != 0) { fprintf(stderr, "zcl-lint: git %s failed in %s\n", args, lint_root); exit(2); }
-    buf = lint_xrealloc(buf, n + 1);
-    buf[n] = '\0';
-    *len = n;
+    char *buf = lint_git_out(args, len);
+    if (!buf) { fprintf(stderr, "zcl-lint: git %s failed in %s\n", args[0], lint_root); exit(2); }
     return buf;
 }
 
@@ -137,7 +116,7 @@ static char *git_out(const char *args, size_t *len)
 static void load_index_sealed(struct ents *out)
 {
     size_t n, i = 0;
-    char *buf = git_out("ls-files -s -z", &n);
+    char *buf = git_out((char *[]){"ls-files", "-s", "-z", NULL}, &n);
     while (i < n) {
         char *ent = buf + i; /* "<mode> <sha> <stage>\t<path>", NUL-terminated by -z */
         i += strlen(ent) + 1;
@@ -161,7 +140,9 @@ static void load_index_sealed(struct ents *out)
 /* Sealed paths that differ on disk from the index (edited, deleted) or are untracked, sorted and unique. */
 static void load_worktree_dirty(struct ents *out)
 {
-    static const char *const cmds[] = {"diff --name-only -z", "ls-files --others --exclude-standard -z"};
+    static char *const diff_args[] = {"diff", "--name-only", "-z", NULL};
+    static char *const other_args[] = {"ls-files", "--others", "--exclude-standard", "-z", NULL};
+    char *const *const cmds[] = {diff_args, other_args};
     for (size_t c = 0; c < 2; c++) {
         size_t n, i = 0;
         char *buf = git_out(cmds[c], &n);
@@ -222,13 +203,13 @@ static bool load_seal(struct ents *out, bool *exists)
 /* The short HEAD commit for the log line; "unborn" when there is none yet. */
 static void git_head(char *out, size_t cap)
 {
-    char cmd[1200];
-    snprintf(cmd, sizeof cmd, "git -C '%s' rev-parse --short=12 HEAD", lint_root);
-    FILE *p = popen(cmd, "r");
+    char *argv[] = { "git", "-C", (char *)lint_root, "rev-parse", "--short=12", "HEAD", NULL };
+    struct lint_proc p;
+    int opened = lint_proc_open(&p, NULL, argv, 0) == 0;
     out[0] = '\0';
-    if (p) {
-        if (!fgets(out, (int)cap, p)) out[0] = '\0';
-        if (pclose(p) != 0) out[0] = '\0';
+    if (opened) {
+        if (!fgets(out, (int)cap, p.fp)) out[0] = '\0';
+        if (lint_proc_close(&p) != 0) out[0] = '\0';
     }
     size_t n = strlen(out);
     while (n && (out[n - 1] == '\n' || out[n - 1] == '\r')) out[--n] = '\0';
@@ -253,7 +234,7 @@ static int write_seal(const struct ents *now)
 static void seal_blob(char out[BLOB_HEX + 1])
 {
     size_t n;
-    char *b = git_out("hash-object -- " SEAL_REL, &n);
+    char *b = git_out((char *[]){"hash-object", "--", SEAL_REL, NULL}, &n);
     if (n < BLOB_HEX || !is_lower_hex(b, BLOB_HEX)) die_git();
     memcpy(out, b, BLOB_HEX);
     out[BLOB_HEX] = '\0';
@@ -306,7 +287,6 @@ static int append_log(const char *reason, const char *changes, size_t files)
 int lint_rule_consensus_seal(bool update)
 {
     (void)update; /* no baseline; the driver refuses --update-baseline for this rule */
-    check_root();
     if (lint_reseal && (!lint_reason || !*lint_reason)) {
         printf("FAIL consensus-seal: --reseal needs --reason \"<why this consensus change is needed>\"; nothing written\n");
         return 2;

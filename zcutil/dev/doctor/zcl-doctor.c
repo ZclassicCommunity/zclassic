@@ -17,8 +17,6 @@
 #define _DEFAULT_SOURCE 1
 #include <ctype.h>
 #include <errno.h>
-#include <ctype.h>
-#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -112,6 +110,86 @@ static int run_cmd(const char *cmd, char *out, size_t cap)
     if (rc == -1) return -1;
     return WIFEXITED(rc) ? WEXITSTATUS(rc) : 128;
 #endif
+}
+
+
+
+#ifdef _WIN32
+/* Windows has only a command line, so refuse any argument cmd.exe could read as syntax. */
+static int run_argv(char *const argv[], const char *cwd, char *out, size_t cap)
+{
+    char line[2400];
+    size_t used = 0;
+    if (cwd) {
+        if (strpbrk(cwd, "\"'%&|<>^!`$;()\r\n")) return -1;
+        used = (size_t)snprintf(line, sizeof line, "cd /d \"%s\" && ", cwd);
+    }
+    for (size_t i = 0; argv[i]; i++) {
+        if (strpbrk(argv[i], "\"'%&|<>^!`$;()\r\n")) return -1;
+        int w = snprintf(line + used, sizeof line - used, "%s\"%s\"", i ? " " : "", argv[i]);
+        if (w < 0 || (size_t)w >= sizeof line - used) return -1;
+        used += (size_t)w;
+    }
+    if (used + 6 >= sizeof line) return -1;
+    memcpy(line + used, " 2>&1", 6);
+    return run_cmd(line, out, cap);
+}
+#else
+/* In the forked child: stdout and stderr to the pipe, enter cwd, exec. Never returns. */
+static void argv_child(const int fd[2], char *const argv[], const char *cwd)
+{
+    if (dup2(fd[1], 1) < 0 || dup2(fd[1], 2) < 0) _exit(127);
+    close(fd[0]);
+    close(fd[1]);
+    if (cwd && chdir(cwd) != 0) _exit(127);
+    execvp(argv[0], argv);
+    _exit(127);
+}
+
+/* Read the pipe to its end, keeping up to cap-1 bytes. */
+static void argv_drain(int fd, char *out, size_t cap)
+{
+    size_t n = 0;
+    char buf[512];
+    ssize_t r;
+    while ((r = read(fd, buf, sizeof buf)) > 0 || (r < 0 && errno == EINTR)) {
+        if (r <= 0 || !out || n + 1 >= cap) continue;
+        size_t take = (size_t)r < cap - 1 - n ? (size_t)r : cap - 1 - n;
+        memcpy(out + n, buf, take);
+        n += take;
+        out[n] = 0;
+    }
+}
+
+/* Run a program from an argv array with stderr merged into the output, optionally in `cwd`: no shell, so a quote
+ * or metacharacter in --root, a PATH entry or a probe path stays data. Returns the exit status, -1 on spawn
+ * failure. */
+static int run_argv(char *const argv[], const char *cwd, char *out, size_t cap)
+{
+    int fd[2];
+    if (out && cap) out[0] = 0;
+    if (pipe(fd) != 0) return -1;
+    fflush(stdout);
+    fflush(stderr);
+    pid_t pid = fork();
+    if (pid == 0) argv_child(fd, argv, cwd);
+    close(fd[1]);
+    if (pid < 0) { close(fd[0]); return -1; }
+    argv_drain(fd[0], out, cap);
+    close(fd[0]);
+    int st = 0;
+    pid_t w;
+    do w = waitpid(pid, &st, 0); while (w < 0 && errno == EINTR);
+    if (w < 0) return -1;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 128;
+}
+#endif
+
+/* First line of `<prog> --version`. */
+static void tool_version(const char *prog, char *out, size_t cap)
+{
+    char *argv[] = { (char *)prog, "--version", NULL };
+    run_argv(argv, NULL, out, cap);
 }
 
 static void first_line(char *s, size_t keep)
@@ -276,13 +354,19 @@ static int make_private_dir(char *out, size_t cap, const char *prefix)
 /* Does `compiler flags` accept the source text? Writes a probe file under TMPDIR. */
 static int probe_compile(const char *compiler, const char *flags, const char *ext, const char *src)
 {
-    char dir[700], file[800], cmd[1700], out[512];
+    char dir[700], file[800], out[512], fl[200];
     if (!make_private_dir(dir, sizeof dir, "zcl-doctor-probe")) return 0;
     snprintf(file, sizeof file, "%s/probe%s", dir, ext);
     int rc = -1;
     if (write_file(file, src)) {
-        snprintf(cmd, sizeof cmd, "\"%s\" %s -fsyntax-only \"%s\" 2>&1", compiler, flags, file);
-        rc = run_cmd(cmd, out, sizeof out);
+        char *argv[16] = { (char *)compiler };
+        int k = 1;
+        snprintf(fl, sizeof fl, "%s", flags);
+        for (char *t = strtok(fl, " "); t && k < 12; t = strtok(NULL, " ")) argv[k++] = t;
+        argv[k++] = "-fsyntax-only";
+        argv[k++] = file;
+        argv[k] = NULL;
+        rc = run_argv(argv, NULL, out, sizeof out);
     }
     remove(file);
     rmdir(dir);
@@ -293,11 +377,10 @@ static int probe_compile(const char *compiler, const char *flags, const char *ex
 
 static void check_tool(const char *id, const char *const names[], const char *pkgs, const char *why)
 {
-    char path[1100], cmd[1200], ver[160] = "";
+    char path[1100], ver[160] = "";
     for (int i = 0; names[i]; i++) {
         if (!find_prog(names[i], path, sizeof path)) continue;
-        snprintf(cmd, sizeof cmd, "\"%s\" --version 2>&1", path);
-        run_cmd(cmd, ver, sizeof ver);
+        tool_version(path, ver, sizeof ver);
         first_line(ver, 80);
         add("tools", id, ST_OK, 0, "%s%s%s", names[i], *ver ? ": " : "", ver);
         return;
@@ -335,11 +418,10 @@ static void group_tools(void)
 {
     static const char *const cxxn[] = {"g++", "c++", "clang++", 0};
     static const char *const ccn[] = {"cc", "gcc", "clang", 0};
-    char fix[240], ver[160] = "", cmd[1200];
+    char fix[240], ver[160] = "";
     cxx_path[0] = cc_path[0] = 0;
     if (pick_compiler("CXX", cxxn, cxx_path, sizeof cxx_path, cxx_name, sizeof cxx_name)) {
-        snprintf(cmd, sizeof cmd, "\"%s\" --version 2>&1", cxx_path);
-        run_cmd(cmd, ver, sizeof ver);
+        tool_version(cxx_path, ver, sizeof ver);
         first_line(ver, 80);
         add("tools", "cxx", ST_OK, 0, "%s: %s", cxx_name, ver);
     } else {
@@ -348,8 +430,7 @@ static void group_tools(void)
     }
     ver[0] = 0;
     if (pick_compiler("CC", ccn, cc_path, sizeof cc_path, cc_name, sizeof cc_name)) {
-        snprintf(cmd, sizeof cmd, "\"%s\" --version 2>&1", cc_path);
-        run_cmd(cmd, ver, sizeof ver);
+        tool_version(cc_path, ver, sizeof ver);
         first_line(ver, 80);
         add("tools", "cc", ST_OK, 0, "%s: %s", cc_name, ver);
     } else {
@@ -415,13 +496,13 @@ static void group_build(void)
     }
 
     /* depends/<triplet> built for this host. */
-    char guess[1100], cmd[1300], triplet[160] = "", cfg[1400];
+    char guess[1100], triplet[160] = "", cfg[1400];
     snprintf(guess, sizeof guess, "%s/depends/config.guess", root);
     if (!is_regular(guess)) {
         add("build", "depends", ST_FAIL, "run from a zclassicd checkout or pass --root=DIR", "no depends/config.guess under %s", root);
     } else {
-        snprintf(cmd, sizeof cmd, "sh \"%s\" 2>&1", guess);
-        run_cmd(cmd, triplet, sizeof triplet);
+        char *argv[] = { "sh", guess, NULL };
+        run_argv(argv, NULL, triplet, sizeof triplet);
         first_line(triplet, 100);
         snprintf(cfg, sizeof cfg, "%s/depends/%s/share/config.site", root, triplet);
         if (*triplet && is_regular(cfg))
@@ -442,8 +523,8 @@ static void group_build(void)
     if (!find_prog("x86_64-w64-mingw32-g++", gpp, sizeof gpp)) {
         add("build", "mingw", ST_ADVISORY, "sh zcutil/setup-mingw-toolchain.sh", "x86_64-w64-mingw32-g++ not on PATH (only needed for Windows builds)");
     } else {
-        snprintf(cmd, sizeof cmd, "\"%s\" -v 2>&1", gpp);
-        run_cmd(cmd, out, sizeof out);
+        char *argv[] = { gpp, "-v", NULL };
+        run_argv(argv, NULL, out, sizeof out);
         char *tm = strstr(out, "Thread model: ");
         char model[32] = "unknown";
         if (tm) sscanf(tm + 14, "%31s", model);
@@ -619,9 +700,9 @@ static void group_repo(void)
         add("repo", "zcutil-bin", ST_ADVISORY, "make -C zcutil", "not built in zcutil/bin: %s", missing);
 
     /* git hooks (installed by the hooks unit; absent before it lands). */
-    char out[300], cmd[1300];
-    snprintf(cmd, sizeof cmd, "git -C \"%s\" config --get core.hooksPath 2>&1", root);
-    int rc = run_cmd(cmd, out, sizeof out);
+    char out[300];
+    char *hargv[] = { "git", "-C", root, "config", "--get", "core.hooksPath", NULL };
+    int rc = run_argv(hargv, NULL, out, sizeof out);
     first_line(out, 200);
     if (rc == 0 && *out)
         add("repo", "git-hooks", ST_OK, 0, "core.hooksPath = %s", out);
@@ -640,9 +721,9 @@ static void group_repo(void)
     if (!is_regular(chk) || !is_regular(tsv)) {
         add("repo", "vendor", ST_ADVISORY, 0, "no vendored manifest to verify");
     } else {
-        snprintf(cmd, sizeof cmd, "cd \"%s\" && sh src/c23/tools/check-vendor.sh zcutil/tools/Z23_SOURCE.tsv 2>&1", root);
+        char *vargv[] = { "sh", "src/c23/tools/check-vendor.sh", "zcutil/tools/Z23_SOURCE.tsv", NULL };
         char vo[400];
-        rc = run_cmd(cmd, vo, sizeof vo);
+        rc = run_argv(vargv, root, vo, sizeof vo);
         first_line(vo, 120);
         if (rc == 0)
             add("repo", "vendor", ST_OK, 0, "vendored Z23 files match zcutil/tools/Z23_SOURCE.tsv");
@@ -811,6 +892,17 @@ static void make_stubs(const char *dir)
     stub(dir, "cc", "echo \"cc stub 14.0\"");
 }
 
+#ifndef _WIN32
+/* A quote, a dollar and a command substitution in an argument stay data. */
+static void selftest_argv_data(void)
+{
+    char got[64];
+    char *qargv[] = { "/bin/sh", "-c", "printf %s \"$1\"", "sh", "a'b\"$(echo X);c", NULL };
+    int qrc = run_argv(qargv, NULL, got, sizeof got);
+    EXPECT(qrc == 0 && !strcmp(got, "a'b\"$(echo X);c"), "run_argv must pass quotes and metacharacters through as data: %d '%s'", qrc, got);
+}
+#endif
+
 static int selftest(void)
 {
     char dir[700], p[900];
@@ -879,6 +971,9 @@ static int selftest(void)
     c = find_check("mingw");
     EXPECT(c && c->st == ST_OK, "posix thread model must be ok");
 
+#ifndef _WIN32
+    selftest_argv_data();
+#endif
     putenv(restore);
     snprintf(p, sizeof p, "rm -rf \"%s\"", dir);
     run_cmd(p, 0, 0);

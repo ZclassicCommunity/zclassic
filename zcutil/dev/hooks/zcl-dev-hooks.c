@@ -168,8 +168,16 @@ static int has_suffix_ci(const char *s, const char *x)
     return 1;
 }
 
-/* Safe to put inside double quotes in a shell command. */
-static int quotable(const char *s) { return !strpbrk(s, "\"\r\n$`%!"); }
+/* Safe to put inside double quotes in a shell command: no character that closes or expands the quotes, and on
+ * POSIX no backslash (a trailing one would escape the closing quote). */
+static int quotable(const char *s)
+{
+#ifdef _WIN32
+    return !strpbrk(s, "\"\r\n$`%!");
+#else
+    return !strpbrk(s, "\"\\\r\n$`%!");
+#endif
+}
 
 static int is_hex(const char *s, size_t len)
 {
@@ -828,7 +836,7 @@ static char *hooks_path(const Repo *r)
 {
     char cmd[1400];
     if (!quotable(r->top)) die("unsupported characters in the work tree path");
-    snprintf(cmd, sizeof cmd, "git -C \"%s\" config --get core.hooksPath", r->top);
+    if (snprintf(cmd, sizeof cmd, "git -C \"%s\" config --get core.hooksPath", r->top) >= (int)sizeof cmd) die("the work tree path is too long");
     return git_line(cmd, NULL); /* exit 1 when unset */
 }
 
@@ -870,7 +878,8 @@ static int cmd_install(int force, int json)
     }
     free(hp);
     char cmd[1400];
-    snprintf(cmd, sizeof cmd, "git -C \"%s\" config core.hooksPath " HOOKS_PATH, r.top);
+    if (!quotable(r.top)) die("unsupported characters in the work tree path");
+    if (snprintf(cmd, sizeof cmd, "git -C \"%s\" config core.hooksPath " HOOKS_PATH, r.top) >= (int)sizeof cmd) die("the work tree path is too long");
     if (run(cmd, NULL) != 0) die("git config core.hooksPath failed");
     if (json) puts("{\"installed\":true,\"hooks_path\":\"" HOOKS_PATH "\"}");
     else puts("core.hooksPath = " HOOKS_PATH);

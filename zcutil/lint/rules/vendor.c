@@ -19,15 +19,20 @@ int lint_rule_vendor(bool update)
     int bad = 0, n = 0;
     for (size_t i = 0; i < lint_nfiles; i++) {
         if (!lint_has_suffix(lint_files[i], "Z23_SOURCE.tsv")) continue;
-        char dir[600], cmd[2400];
+        char dir[600];
+        if (strlen(lint_files[i]) >= sizeof dir) { printf("FAIL vendor: path too long to check: %.80s...\n", lint_files[i]); bad++; continue; }
         snprintf(dir, sizeof dir, "%s", lint_files[i]);
         *strrchr(dir, '/') = '\0';
         char own[700];
         snprintf(own, sizeof own, "%s/tools/check-vendor.sh", dir);        /* a root with its own checker */
-        if (lint_is_tracked(own)) snprintf(cmd, sizeof cmd, "sh '%s/%s' '%s/%s'", lint_root, own, lint_root, dir);
-        else snprintf(cmd, sizeof cmd, "sh '%s/src/c23/tools/check-vendor.sh' '%s/%s'", lint_root, lint_root, lint_files[i]);
+        char *script = lint_rootpath(lint_is_tracked(own) ? own : "src/c23/tools/check-vendor.sh");
+        char *target = lint_rootpath(lint_is_tracked(own) ? dir : lint_files[i]);
         n++;
-        if (lint_run(cmd)) { printf("FAIL vendor: %s does not match its vendored tree\n", lint_files[i]); bad++; }
+        char *argv[] = { "sh", "--", script, target, NULL };
+        int bad_run = lint_run_argv(argv, false);
+        free(script);
+        free(target);
+        if (bad_run) { printf("FAIL vendor: %s does not match its vendored tree\n", lint_files[i]); bad++; }
     }
     if (!n) { printf("FAIL vendor: no Z23_SOURCE.tsv manifest is tracked\n"); return 2; }
     if (!bad) printf("vendor: ok (%d manifests)\n", n);

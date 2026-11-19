@@ -48,9 +48,11 @@ static bool has_victory(const char *low)
 
 static bool commit_exists(const char *hex)
 {
-    char cmd[400];
-    snprintf(cmd, sizeof cmd, "git -C '%s' cat-file -e '%s^{commit}' >/dev/null 2>&1", lint_root, hex);
-    return lint_run(cmd) == 0;
+    char spec[200];
+    if (strlen(hex) > 100) return false;
+    snprintf(spec, sizeof spec, "%s^{commit}", hex);
+    char *argv[] = { "git", "-C", (char *)lint_root, "cat-file", "-e", spec, NULL };
+    return lint_run_argv(argv, true) == 0;
 }
 
 static bool has_ok(const char *para)

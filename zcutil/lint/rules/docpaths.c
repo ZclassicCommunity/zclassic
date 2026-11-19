@@ -94,9 +94,8 @@ static bool suffix_match(const char *tok)
 /* Build outputs named in documents are git-ignored paths. */
 static bool ignored(const char *tok)
 {
-    char cmd[1300];
-    snprintf(cmd, sizeof cmd, "git -C '%s' check-ignore -q --no-index -- '%s' >/dev/null 2>&1", lint_root, tok);
-    return lint_run(cmd) == 0;
+    char *argv[] = { "git", "-C", (char *)lint_root, "check-ignore", "-q", "--no-index", "--", (char *)tok, NULL };
+    return lint_run_argv(argv, true) == 0;
 }
 
 static bool resolves(const char *docdir, const char *p)

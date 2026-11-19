@@ -15,6 +15,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
 #include <sys/wait.h>
 #endif
 
@@ -79,17 +81,10 @@ size_t lint_nfiles;
 
 void lint_load_tracked(void)
 {
-    char cmd[1200];
-    snprintf(cmd, sizeof cmd, "git -C '%s' ls-files -z", lint_root);
-    FILE *p = popen(cmd, "r");
-    if (!p) { fprintf(stderr, "zcl-lint: cannot run git\n"); exit(2); }
-    size_t cap = 4096, n = 0, r;
-    char *buf = lint_xrealloc(NULL, cap);
-    while ((r = fread(buf + n, 1, cap - n, p)) > 0) {
-        n += r;
-        if (n == cap) { cap *= 2; buf = lint_xrealloc(buf, cap); }
-    }
-    if (pclose(p) != 0 || n == 0) { fprintf(stderr, "zcl-lint: git ls-files failed in %s\n", lint_root); exit(2); }
+    char *args[] = { "ls-files", "-z", NULL };
+    size_t n = 0;
+    char *buf = lint_git_out(args, &n);
+    if (!buf || n == 0) { fprintf(stderr, "zcl-lint: git ls-files failed in %s\n", lint_root); exit(2); }
     size_t i = 0, fc = 0;
     while (i < n) {
         if (lint_nfiles == fc) { fc = fc ? fc * 2 : 1024; lint_files = lint_xrealloc(lint_files, fc * sizeof *lint_files); }
@@ -298,17 +293,129 @@ void lint_scrub_c_line(char *s, bool *blk)
     }
 }
 
-int lint_run(const char *cmd)
+
+/* ---- child processes without a shell ------------------------------------------------------ */
+/* Arguments reach a program as an argv array on POSIX, so no root, tracked file name or document token can
+ * break out of quoting. The Windows build has only a command string, so it refuses every argument that cmd.exe
+ * or the CRT could read as syntax instead of quoting it. */
+
+#ifdef _WIN32
+static bool win_arg_ok(const char *a)
 {
-    fflush(stdout);
-    int rc = system(cmd);
-    if (rc == 0) return 0;
-#ifndef _WIN32
-    if (rc != -1 && WIFEXITED(rc) && WEXITSTATUS(rc) == 2) return 2; /* the script reported a hollow scan */
-#else
-    if (rc == 2) return 2;
+    return a[0] != '\0' && strlen(a) < 1000 && !strpbrk(a, "\"'%&|<>^!`$;()\r\n\t");
+}
+/* "a" "b" ... (+ redirection); NULL when an argument is unsafe or the line would be truncated. */
+static char *win_line(const char *cwd, char *const argv[], int flags)
+{
+    size_t cap = 64;
+    for (size_t i = 0; argv[i]; i++) { if (!win_arg_ok(argv[i])) return NULL; cap += strlen(argv[i]) + 3; }
+    if (cwd) { if (!win_arg_ok(cwd)) return NULL; cap += strlen(cwd) + 12; }
+    char *s = lint_xrealloc(NULL, cap), *w = s;
+    if (cwd) w += snprintf(w, cap, "cd /d \"%s\" && ", cwd);
+    for (size_t i = 0; argv[i]; i++) w += snprintf(w, cap - (size_t)(w - s), "%s\"%s\"", i ? " " : "", argv[i]);
+    if (flags & LINT_PROC_QUIET) snprintf(w, cap - (size_t)(w - s), " >NUL 2>&1");
+    else if (flags & LINT_PROC_MERGE) snprintf(w, cap - (size_t)(w - s), " 2>&1");
+    return s;
+}
 #endif
-    return 1;
+
+#ifndef _WIN32
+/* In the forked child: wire stdout (and stderr) to the pipe or the null device, enter cwd, exec. Never returns. */
+static void child_exec(const char *cwd, char *const argv[], int flags, const int fd[2])
+{
+    if (flags & LINT_PROC_QUIET) {
+        int nul = open("/dev/null", O_WRONLY);
+        if (nul < 0 || dup2(nul, 1) < 0 || dup2(nul, 2) < 0) _exit(127);
+    } else if (!(flags & LINT_PROC_INHERIT)) {
+        if (dup2(fd[1], 1) < 0) _exit(127);
+        if ((flags & LINT_PROC_MERGE) && dup2(fd[1], 2) < 0) _exit(127);
+        close(fd[0]);
+        close(fd[1]);
+    }
+    if (cwd && chdir(cwd) != 0) _exit(127);
+    execvp(argv[0], argv);
+    _exit(127);
+}
+#endif
+
+int lint_proc_open(struct lint_proc *p, const char *cwd, char *const argv[], int flags)
+{
+    p->fp = NULL;
+    p->pid = -1;
+    fflush(stdout);
+    fflush(stderr);
+#ifndef _WIN32
+    int fd[2] = { -1, -1 };
+    bool piped = !(flags & (LINT_PROC_QUIET | LINT_PROC_INHERIT));
+    if (piped && pipe(fd) != 0) return -1;
+    pid_t pid = fork();
+    if (pid == 0) child_exec(cwd, argv, flags, fd);
+    if (piped) close(fd[1]);
+    if (pid < 0) { if (piped) close(fd[0]); return -1; }
+    p->pid = (long)pid;
+    if (piped && !(p->fp = fdopen(fd[0], "r"))) { close(fd[0]); lint_proc_close(p); return -1; }
+    return 0;
+#else
+    char *line = win_line(cwd, argv, flags);
+    if (!line) { fprintf(stderr, "zcl-lint: refusing an argument that cmd.exe could read as syntax\n"); return -1; }
+    if (!(flags & LINT_PROC_MERGE) && (flags & (LINT_PROC_QUIET | LINT_PROC_INHERIT))) { p->pid = system(line); free(line); return p->pid == -1 ? -1 : 0; }
+    p->fp = popen(line, "r");
+    free(line);
+    return p->fp ? 0 : -1;
+#endif
+}
+
+int lint_proc_close(struct lint_proc *p)
+{
+#ifndef _WIN32
+    if (p->fp) { fclose(p->fp); p->fp = NULL; }
+    int st = 0;
+    pid_t r;
+    do r = waitpid((pid_t)p->pid, &st, 0); while (r < 0 && errno == EINTR);
+    p->pid = -1;
+    if (r < 0 || !WIFEXITED(st)) return -1;
+    return WEXITSTATUS(st);
+#else
+    if (p->fp) { int st = pclose(p->fp); p->fp = NULL; return st; }
+    return (int)p->pid;
+#endif
+}
+
+int lint_status_argv(const char *cwd, char *const argv[], bool quiet)
+{
+    struct lint_proc p;
+    if (lint_proc_open(&p, cwd, argv, quiet ? LINT_PROC_QUIET : LINT_PROC_INHERIT) != 0) return -1;
+    return lint_proc_close(&p);
+}
+
+int lint_run_argv(char *const argv[], bool quiet)
+{
+    int st = lint_status_argv(NULL, argv, quiet);
+    if (st == 0) return 0;
+    return st == 2 ? 2 : 1; /* 2: the script reported a hollow scan */
+}
+
+/* Whole stdout of `git -C <lint_root> <args...>` (NUL-terminated, length in *len); NULL when git cannot run or
+ * exits nonzero. */
+char *lint_git_out(char *const args[], size_t *len)
+{
+    char *argv[16] = { "git", "-C", (char *)lint_root };
+    size_t k = 3;
+    for (size_t i = 0; args[i] && k < 15; i++) argv[k++] = args[i];
+    argv[k] = NULL;
+    struct lint_proc p;
+    if (lint_proc_open(&p, NULL, argv, 0) != 0) return NULL;
+    size_t cap = 4096, n = 0, r;
+    char *buf = lint_xrealloc(NULL, cap);
+    while ((r = fread(buf + n, 1, cap - n, p.fp)) > 0) {
+        n += r;
+        if (n == cap) { cap *= 2; buf = lint_xrealloc(buf, cap); }
+    }
+    if (lint_proc_close(&p) != 0) { free(buf); return NULL; }
+    buf = lint_xrealloc(buf, n + 1);
+    buf[n] = '\0';
+    *len = n;
+    return buf;
 }
 
 /* Blank sh comments (a # at the start of a word) and quoted text. Heredoc bodies are not recognised. */

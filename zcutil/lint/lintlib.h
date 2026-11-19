@@ -9,6 +9,7 @@
 #define ZCL_LINTLIB_H
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 
 /* Shared by the driver (zcl-lint.c) and every rule (rules/<rule>.c). A rule is one file under rules/ plus one
  * row in rules.def; it needs nothing but this header. */
@@ -26,7 +27,17 @@ char *lint_slurp(const char *rel, size_t *len);    /* whole tracked file, NUL-te
 bool lint_has_prefix(const char *s, const char *p);
 bool lint_has_suffix(const char *s, const char *x);
 int lint_cmp_str(const void *a, const void *b);
-int lint_run(const char *cmd);                     /* system(); 0 on success, else 1 */
+/* Child processes run from an argv array, never through a shell: no --root, tracked file name or document token
+ * can break out of quoting. Windows refuses arguments cmd.exe could read as syntax. */
+#define LINT_PROC_QUIET 1   /* stdout and stderr to the null device, no pipe */
+#define LINT_PROC_MERGE 2   /* stderr joins the stdout pipe */
+#define LINT_PROC_INHERIT 4 /* no pipe: the child shares our stdout and stderr */
+struct lint_proc { FILE *fp; long pid; };
+int lint_proc_open(struct lint_proc *p, const char *cwd, char *const argv[], int flags); /* 0, or -1 */
+int lint_proc_close(struct lint_proc *p);          /* exit status 0..255, -1 when it could not run or was killed */
+int lint_status_argv(const char *cwd, char *const argv[], bool quiet);  /* exit status or -1 */
+int lint_run_argv(char *const argv[], bool quiet); /* 0 on success, 2 when it exited 2 (hollow scan), else 1 */
+char *lint_git_out(char *const args[], size_t *len); /* stdout of git -C <root> <args>; NULL on failure */
 
 /* Git tracked-file iteration (git ls-files -z), sorted bytewise. Loaded once by lint_load_tracked(). */
 extern char **lint_files;

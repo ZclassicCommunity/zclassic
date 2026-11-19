@@ -153,20 +153,17 @@ static void from_check_rules(struct metric *m)
     FILE *t = fopen(bin, "rb");
     if (!t) { free(bin); unavailable(m, "zcutil/bin/zcl-dev not built"); return; }
     fclose(t);
-    size_t n = strlen(lint_root) + strlen(bin) + 64;
-    char *cmd = lint_xrealloc(NULL, n);
-    snprintf(cmd, n, "cd \"%s\" && \"%s\" check-rules 2>&1", lint_root, bin);
-    FILE *p = popen(cmd, "r");
-    free(cmd);
     free(bin);
-    if (!p) { unavailable(m, "cannot run zcl-dev check-rules"); return; }
+    char *argv[] = { "zcutil/bin/zcl-dev", "check-rules", NULL };
+    struct lint_proc pr;
+    if (lint_proc_open(&pr, lint_root, argv, LINT_PROC_MERGE) != 0) { unavailable(m, "cannot run zcl-dev check-rules"); return; }
     char line[1024];
     long unmapped = 0, lines = 0;
-    while (fgets(line, sizeof line, p)) {
+    while (fgets(line, sizeof line, pr.fp)) {
         lines++;
         if (strstr(line, "FAIL: no rule matches")) unmapped++;
     }
-    int st = pclose(p);
+    int st = lint_proc_close(&pr);
     if (st == 0 && lines > 0) set(m, 0);
     else if (unmapped > 0) set(m, unmapped);
     else unavailable(m, "zcl-dev check-rules did not run to a verdict");

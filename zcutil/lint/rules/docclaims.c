@@ -63,18 +63,6 @@ static bool safe_pathspec(const char *s)
     return safe_word(s, "_./-+@*:!") && s[0] != '/' && s[0] != '-' && !strstr(s, "..");
 }
 
-/* Exit status of a shell command: 0..255, or -1 when it could not run or died on a signal. */
-static int run_status(const char *cmd)
-{
-    int st = system(cmd);
-#ifndef _WIN32
-    if (st == -1 || !WIFEXITED(st)) return -1;
-    return WEXITSTATUS(st);
-#else
-    return st;
-#endif
-}
-
 static bool step_exists(const char *name)
 {
     char *txt = lint_slurp("zcutil/local-ci.sh", NULL);
@@ -96,7 +84,6 @@ static bool step_exists(const char *name)
 static const char *eval_claim(char **a, int n, bool *malformed)
 {
     static char reason[160];
-    char cmd[2600];
     *malformed = true;
     if (!n) return "empty claim";
     const char *p = a[0];
@@ -112,8 +99,8 @@ static const char *eval_claim(char **a, int n, bool *malformed)
     }
     if (sym) {
         if (n != 3 || !safe_word(a[1], "_.:-") || a[1][0] == '-' || !safe_pathspec(a[2])) return "needs a symbol and one pathspec";
-        snprintf(cmd, sizeof cmd, "git -C '%s' grep -qwF -e '%s' -- '%s' >/dev/null 2>&1", lint_root, a[1], a[2]);
-        int rc = run_status(cmd);
+        char *gargv[] = { "git", "-C", (char *)lint_root, "grep", "-qwF", "-e", a[1], "--", a[2], NULL };
+        int rc = lint_status_argv(NULL, gargv, true);
         *malformed = false;
         if (rc != 0 && rc != 1) return "git grep failed";
         if ((rc == 0) == want) return NULL;
@@ -127,9 +114,10 @@ static const char *eval_claim(char **a, int n, bool *malformed)
         FILE *f = fopen(bin, "rb");
         if (!f) { free(bin); return "zcutil/bin/zcl-lint is not built"; }
         fclose(f);
-        snprintf(cmd, sizeof cmd, "'%s' --root '%s' '%s' >/dev/null 2>&1", bin, lint_root, a[1]);
+        char *rargv[] = { bin, "--root", (char *)lint_root, a[1], NULL };
+        int st = lint_status_argv(NULL, rargv, true);
         free(bin);
-        if (run_status(cmd) == 0) return NULL;
+        if (st == 0) return NULL;
         snprintf(reason, sizeof reason, "rule %s does not pass", a[1]);
         return reason;
     }

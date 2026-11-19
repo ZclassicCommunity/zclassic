@@ -22,7 +22,9 @@ int lint_rule_no_python(bool update)
     bool have = stat(p, &st) == 0;
     free(p);
     if (!have) { printf("FAIL no-python: zcutil/check-no-python.sh not present, nothing scanned\n"); return 2; }
-    char cmd[1200];
-    snprintf(cmd, sizeof cmd, "sh '%s/zcutil/check-no-python.sh'", lint_root);
-    return lint_run(cmd);
+    char *script = lint_rootpath("zcutil/check-no-python.sh");
+    char *argv[] = { "sh", "--", script, NULL };
+    int rc = lint_run_argv(argv, false);
+    free(script);
+    return rc;
 }
