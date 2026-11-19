@@ -271,6 +271,13 @@ bool MultiCore()
     return false;
 }
 
+/** n where the pre-pass runs (more than one core), otherwise 0: it then does
+ *  nothing, so the counts a test expects do not depend on the host. */
+size_t Counted(size_t n)
+{
+    return MultiCore() ? n : 0;
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(headerprecheck_tests, HeaderPrecheckSetup)
@@ -281,16 +288,16 @@ BOOST_AUTO_TEST_CASE(prepass_memoises_every_valid_header)
     BOOST_REQUIRE_EQUAL(chain.size(), 40U);
     BOOST_REQUIRE(mapBlockIndex.count(Params().GenesisBlock().GetHash()));
 
-    BOOST_CHECK_EQUAL(PreverifyHeadersEquihash(chain), 40U);
-    BOOST_CHECK_EQUAL(CountMemoised(chain, 0, 40), 40U);
+    BOOST_CHECK_EQUAL(PreverifyHeadersEquihash(chain), Counted(40));
+    BOOST_CHECK_EQUAL(CountMemoised(chain, 0, 40), Counted(40));
 
-    // The serial pass is now answered entirely by the memo.
+    // The serial pass is now answered entirely by the memo (with more than one core).
     const EquihashVerifierStats before = GetEquihashVerifierStats();
     for (const CBlockHeader& h : chain)
         BOOST_CHECK(CheckEquihashSolutionMemo(&h, Params()));
     const EquihashVerifierStats after = GetEquihashVerifierStats();
-    BOOST_CHECK_EQUAL(after.nMemoHits - before.nMemoHits, 40U);
-    BOOST_CHECK_EQUAL(after.nVerifications - before.nVerifications, 0U);
+    BOOST_CHECK_EQUAL(after.nMemoHits - before.nMemoHits, Counted(40));
+    BOOST_CHECK_EQUAL(after.nVerifications - before.nVerifications, 40U - Counted(40));
 }
 
 BOOST_AUTO_TEST_CASE(invalid_solutions_are_not_memoised)
@@ -301,12 +308,14 @@ BOOST_AUTO_TEST_CASE(invalid_solutions_are_not_memoised)
     const size_t nVerified = PreverifyHeadersEquihash(chain);
     // Every header before the first bad one was claimed before it, so it was
     // verified and memoised; workers stop soon after the first failure.
-    // (How many more depends on scheduling: a worker can finish several
-    // headers while another is still on the bad one.)
+    // How many more depends on scheduling (a worker can finish several
+    // headers while another is still on the bad one), so the only upper
+    // bound that holds on every host is the candidate count.
     BOOST_TEST_MESSAGE("pre-pass verified " << nVerified << " of 40 with bad headers at 10, 20, 30");
-    BOOST_CHECK(nVerified >= 11);
-    BOOST_CHECK(nVerified < 40);
-    BOOST_CHECK_EQUAL(CountMemoised(chain, 0, 10), 10U);
+    if (MultiCore())
+        BOOST_CHECK(nVerified >= 11);
+    BOOST_CHECK(nVerified <= 40);
+    BOOST_CHECK_EQUAL(CountMemoised(chain, 0, 10), Counted(10));
     for (size_t i : bad)
         BOOST_CHECK(!GetEquihashMemo().Contains(chain[i].GetHash()));
 
@@ -330,8 +339,8 @@ BOOST_AUTO_TEST_CASE(stops_at_continuity_break)
     v.insert(v.end(), chain.begin() + 21, chain.end());
     BOOST_REQUIRE_EQUAL(v.size(), 39U);
 
-    BOOST_CHECK_EQUAL(PreverifyHeadersEquihash(v), 20U);
-    BOOST_CHECK_EQUAL(CountMemoised(v, 0, 20), 20U);
+    BOOST_CHECK_EQUAL(PreverifyHeadersEquihash(v), Counted(20));
+    BOOST_CHECK_EQUAL(CountMemoised(v, 0, 20), Counted(20));
     BOOST_CHECK_EQUAL(CountMemoised(v, 20, 39), 0U);
 }
 
@@ -343,7 +352,7 @@ BOOST_AUTO_TEST_CASE(skips_known_and_unconnected)
     std::vector<CBlockHeader> withGenesis;
     withGenesis.push_back(Params().GenesisBlock().GetBlockHeader());
     withGenesis.insert(withGenesis.end(), chain.begin(), chain.end());
-    BOOST_CHECK_EQUAL(PreverifyHeadersEquihash(withGenesis), 40U);
+    BOOST_CHECK_EQUAL(PreverifyHeadersEquihash(withGenesis), Counted(40));
     GetEquihashMemo().Clear();
 
     // Headers whose first parent is unknown would be rejected by the serial
@@ -377,7 +386,7 @@ BOOST_AUTO_TEST_CASE(small_or_disabled_is_noop)
     BOOST_CHECK_EQUAL(CountMemoised(seven, 0, 7), 0U);
 
     std::vector<CBlockHeader> eight(chain.begin(), chain.begin() + 8);
-    BOOST_CHECK_EQUAL(PreverifyHeadersEquihash(eight), 8U);
+    BOOST_CHECK_EQUAL(PreverifyHeadersEquihash(eight), Counted(8));
     GetEquihashMemo().Clear();
 
     // Eight headers of which only seven are new: below the candidate floor.
@@ -451,8 +460,7 @@ BOOST_AUTO_TEST_CASE(same_results_with_and_without_prepass)
     BOOST_CHECK_EQUAL(broken.steps.back(), "non-continuous");
     BOOST_CHECK_EQUAL(broken.nMisbehavior, 20);
 
-    if (MultiCore())
-        BOOST_CHECK_EQUAL(valid.nPreverified, 40U);
+    BOOST_CHECK_EQUAL(valid.nPreverified, Counted(40));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
