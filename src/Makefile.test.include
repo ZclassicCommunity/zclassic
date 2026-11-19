@@ -63,6 +63,7 @@ BITCOIN_TESTS =\
   test/getarg_tests.cpp \
   test/hash_tests.cpp \
   test/headerprecheck_tests.cpp \
+  test/httpserver_tests.cpp \
   test/key_tests.cpp \
   test/dbwrapper_tests.cpp \
   test/main_tests.cpp \

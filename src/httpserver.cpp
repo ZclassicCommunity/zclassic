@@ -12,6 +12,9 @@
 #include "sync.h"
 #include "ui_interface.h"
 
+#include <univalue.h>
+
+#include <atomic>
 #include <deque>
 #include <stdio.h>
 #include <stdlib.h>
@@ -184,10 +187,48 @@ struct evhttp* eventHTTP = 0;
 static std::vector<CSubNet> rpc_allow_subnets;
 //! Work queue for handling longer requests off the event loop thread
 static WorkQueue<HTTPClosure>* workQueue = 0;
+//! Configured work queue depth and worker thread count, reported in busy replies
+static int busyQueueDepth = DEFAULT_HTTP_WORKQUEUE;
+static int busyThreads = DEFAULT_HTTP_THREADS;
+//! Requests rejected because the work queue was full, since the last busy log line
+static std::atomic<uint64_t> busyRejected{0};
+//! Time (seconds) of the last busy log line; at most one line per BUSY_LOG_INTERVAL
+static std::atomic<int64_t> busyLastLog{0};
+static const int64_t BUSY_LOG_INTERVAL = 10;
 //! Handlers for (sub)paths
 std::vector<HTTPPathHandler> pathHandlers;
 //! Bound listening sockets
 std::vector<evhttp_bound_socket *> boundSockets;
+
+std::string BuildBusyReply(int depth, int threads)
+{
+    UniValue error(UniValue::VOBJ);
+    error.pushKV("code", static_cast<int>(RPC_INTERNAL_ERROR));
+    error.pushKV("message", strprintf("RPC server busy: work queue full (depth %d, threads %d); retry, or raise -rpcworkqueue / -rpcthreads", depth, threads));
+    UniValue reply(UniValue::VOBJ);
+    reply.pushKV("result", UniValue());
+    reply.pushKV("error", error);
+    reply.pushKV("id", UniValue());
+    return reply.write();
+}
+
+bool ValidateRpcTuning(int64_t threads, int64_t workqueue, int64_t timeout, std::string& err)
+{
+    if (threads < 1 || threads > 256) {
+        err = strprintf("-rpcthreads=%d is invalid: must be between 1 and 256 (default %d)", threads, DEFAULT_HTTP_THREADS);
+        return false;
+    }
+    if (workqueue < 1 || workqueue > 65536) {
+        err = strprintf("-rpcworkqueue=%d is invalid: must be between 1 and 65536 (default %d)", workqueue, DEFAULT_HTTP_WORKQUEUE);
+        return false;
+    }
+    if (timeout < 1 || timeout > 86400) {
+        err = strprintf("-rpcservertimeout=%d is invalid: must be between 1 and 86400 (default %d)", timeout, DEFAULT_HTTP_SERVER_TIMEOUT);
+        return false;
+    }
+    err.clear();
+    return true;
+}
 
 /** Check if a network address is allowed to access the HTTP server */
 static bool ClientAllowed(const CNetAddr& netaddr)
@@ -290,8 +331,17 @@ static void http_request_cb(struct evhttp_request* req, void* arg)
         assert(workQueue);
         if (workQueue->Enqueue(item.get()))
             item.release(); /* if true, queue took ownership */
-        else
-            item->req->WriteReply(HTTP_INTERNAL, "Work queue depth exceeded");
+        else {
+            // Queue full: 503 with a JSON-RPC body that names the knobs to raise
+            busyRejected++;
+            int64_t now = GetTime();
+            int64_t last = busyLastLog.load();
+            if (now - last >= BUSY_LOG_INTERVAL && busyLastLog.compare_exchange_strong(last, now))
+                LogPrintf("HTTP: work queue full, rejected %u request(s) in the last interval (depth %d, threads %d)\n",
+                    (unsigned)busyRejected.exchange(0), busyQueueDepth, busyThreads);
+            item->req->WriteHeader("Content-Type", "application/json");
+            item->req->WriteReply(HTTP_SERVICE_UNAVAILABLE, BuildBusyReply(busyQueueDepth, busyThreads));
+        }
     } else {
         hreq->WriteReply(HTTP_NOTFOUND);
     }
@@ -398,6 +448,16 @@ bool InitHTTPServer()
     struct evhttp* http = 0;
     struct event_base* base = 0;
 
+    // Refuse out-of-range tuning instead of clamping it silently
+    std::string tuningErr;
+    if (!ValidateRpcTuning(GetArg("-rpcthreads", DEFAULT_HTTP_THREADS),
+                           GetArg("-rpcworkqueue", DEFAULT_HTTP_WORKQUEUE),
+                           GetArg("-rpcservertimeout", DEFAULT_HTTP_SERVER_TIMEOUT), tuningErr)) {
+        LogPrintf("%s\n", tuningErr);
+        uiInterface.ThreadSafeMessageBox(tuningErr, "", CClientUIInterface::MSG_ERROR);
+        return false;
+    }
+
     if (!InitHTTPAllowList())
         return false;
 
@@ -452,6 +512,8 @@ bool InitHTTPServer()
     LogPrint("http", "Initialized HTTP server\n");
     int workQueueDepth = std::max((long)GetArg("-rpcworkqueue", DEFAULT_HTTP_WORKQUEUE), 1L);
     LogPrintf("HTTP: creating work queue of depth %d\n", workQueueDepth);
+    busyQueueDepth = workQueueDepth;
+    busyThreads = std::max((long)GetArg("-rpcthreads", DEFAULT_HTTP_THREADS), 1L);
 
     workQueue = new WorkQueue<HTTPClosure>(workQueueDepth);
     eventBase = base;
