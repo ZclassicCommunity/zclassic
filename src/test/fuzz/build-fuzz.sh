@@ -4,9 +4,8 @@
 # touches autotools or the default build; see README.md.
 #
 # usage: build-fuzz.sh <builddir-with-configured-tree> <outdir> [cxx]
-#   builddir  the configured and built tree (the directory holding src/Makefile
-#             and src/libbitcoin_server.a); in-tree and out-of-tree builds both work (it is read through
-#             that src/Makefile)
+#   builddir  the configured and built tree, in or out of the source tree (the
+#             directory holding src/Makefile and src/libbitcoin_server.a)
 #   outdir    receives fuzz_block, fuzz_tx, fuzz_p2p_payload
 #   cxx       C++ compiler, default g++. A clang++ links libFuzzer
 #             (-fsanitize=fuzzer); any other compiler links replay_main.cpp,
@@ -38,34 +37,27 @@ mkv() { make -s --no-print-directory -C "$SRC" -o Makefile -o config.status -f M
 DEFS=$(mkv DEFS)
 DEFAULT_INCLUDES=$(mkv DEFAULT_INCLUDES)
 CPPFLAGS=$(mkv CPPFLAGS)
-AM_CPPFLAGS=$(mkv AM_CPPFLAGS)
-INCLUDES=$(mkv BITCOIN_INCLUDES)
+AM_CPPFLAGS=$(mkv AM_CPPFLAGS) INCLUDES=$(mkv BITCOIN_INCLUDES)
 LDFLAGS=$(mkv LDFLAGS)
-BOOST_LIBS=$(mkv BOOST_LIBS)
-BDB_LIBS=$(mkv BDB_LIBS)
+BOOST_LIBS=$(mkv BOOST_LIBS) BDB_LIBS=$(mkv BDB_LIBS)
 SSL_LIBS=$(mkv SSL_LIBS)
 CRYPTO_LIBS=$(mkv CRYPTO_LIBS)
 EVENT_LIBS=$(mkv EVENT_LIBS)
 EVENT_PT_LIBS=$(mkv EVENT_PTHREADS_LIBS)
 ZCASH_LIBS=$(mkv LIBZCASH_LIBS)
-TOR_LIBS=$(mkv TOR_LIBS)
-TOR_SYS_LIBS=$(mkv TOR_SYSTEM_LIBS)
+TOR_LIBS=$(mkv TOR_LIBS) TOR_SYS_LIBS=$(mkv TOR_SYSTEM_LIBS)
 ZMQ_LIBS=$(mkv ZMQ_LIBS)
 
-
-# Static libraries, in test_bitcoin's LDADD order (src/Makefile.test.include).
+# Static libraries, in test_bitcoin's LDADD order (src/Makefile.test.include), then two
+# that only some configurations build: with ZMQ, init.o needs libbitcoin_zmq.a.
 ARCHIVES=
 for a in libbitcoin_wallet.a libbitcoin_server.a libzcl_tokenguard.a libzcl_tor.a libbitcoin_cli.a \
          libbitcoin_common.a libbitcoin_util.a crypto/libbitcoin_crypto.a libzcl_c23_hash.a \
          univalue/.libs/libunivalue.a leveldb/libleveldb.a leveldb/libmemenv.a \
-         secp256k1/.libs/libsecp256k1.a libzcash.a libzcl_c23.a libzcl_c23_seam.a; do
+         secp256k1/.libs/libsecp256k1.a libzcash.a libzcl_c23.a libzcl_c23_seam.a \
+         libbitcoin_consensus.a libbitcoin_zmq.a; do
     [ -f "$SRC/$a" ] && ARCHIVES="$ARCHIVES $SRC/$a"
 done
-# libbitcoin_consensus.a exists only in some configurations.
-[ -f "$SRC/libbitcoin_consensus.a" ] && ARCHIVES="$ARCHIVES $SRC/libbitcoin_consensus.a"
-# With ZMQ enabled, init.o needs CZMQNotificationInterface from libbitcoin_zmq.a
-# whenever the harness link pulls init.o in; the test_bitcoin LDADD does not list it.
-[ -f "$SRC/libbitcoin_zmq.a" ] && ARCHIVES="$ARCHIVES $SRC/libbitcoin_zmq.a"
 
 SAN="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 case $CXX in
@@ -73,18 +65,13 @@ case $CXX in
     *)       MODE=replay;    DRIVER="$HERE/replay_main.cpp"; COMPILE_SAN="$SAN" ;;
 esac
 
-# Follow the tree's own dialect: configure may name -std= in CXX and again in
-# CXXFLAGS, and the compiler obeys the last one, so take the last of the two.
+# The tree's own dialect: the last -std= of CXX and CXXFLAGS, as the compiler takes it.
 STD=$(echo "$(mkv CXX) $(mkv CXXFLAGS)" | sed -n 's/.*\(-std=[a-z+0-9]*\).*/\1/p')
 [ -n "$STD" ] || STD=-std=c++11
 
-# GNU ld and lld need the archives in a group (they depend on each other in
-# a cycle); the macOS linker resolves across archives on its own and has no
-# --start-group.
-case $(uname -s) in
-    Darwin) GROUP_BEGIN= ; GROUP_END= ;;
-    *)      GROUP_BEGIN=-Wl,--start-group; GROUP_END=-Wl,--end-group ;;
-esac
+# GNU ld and lld need the archives grouped; the macOS linker has no --start-group.
+GROUP_BEGIN=-Wl,--start-group GROUP_END=-Wl,--end-group
+[ "$(uname -s)" != Darwin ] || GROUP_BEGIN= GROUP_END=
 
 # The include flags are relative to src/ (-I.), so compile from there.
 cd "$SRC"
