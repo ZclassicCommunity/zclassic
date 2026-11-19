@@ -1,0 +1,8 @@
+# zcl-lint wallclock baseline: assertions decided by elapsed real time per path.
+# Shrink-only: lower a count or delete a row when it falls; never raise one or add a path.
+# Regenerate with: zcl-lint wallclock --update-baseline (refused while anything rose).
+src/c23/test/regtest-smoke.sh	1
+src/test/addrman_tests.cpp	1
+src/test/addrv2_tests.cpp	2
+src/test/bootstrap_resume_tests.cpp	3
+src/test/embeddedtor_tests.cpp	1

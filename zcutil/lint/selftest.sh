@@ -118,7 +118,9 @@ printf 'int answer(void) { return 42; }\n' > zcutil/tools/vendor/x/a.c; printf '
 run 1 'does not match its vendored tree' vendor
 rm zcutil/tools/vendor/x/extra.c; track
 # `all`, and the python hook: hollow (exit 2) when zcutil/check-no-python.sh is absent, run (and fatal) when present
-for r in no-new-jq no-new-bash banned-str md-links; do "$bin" --root . $r --update-baseline >/dev/null 2>&1; done
+# the safety rules scan src/ and qa/: give them something to scan
+mkdir -p src qa; echo "int x;" > src/f.c; echo "echo ok" > qa/ok.sh; track
+for r in no-new-jq no-new-bash banned-str md-links secretlog testiso shellport wallclock; do "$bin" --root . $r --update-baseline >/dev/null 2>&1; done
 run 2 "nothing scanned" no-python
 printf 'exit 7\n' > zcutil/check-no-python.sh; track
 run 1 '' all
