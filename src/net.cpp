@@ -89,8 +89,10 @@ limitedmap<CInv, int64_t> mapAlreadyAskedFor(MAX_INV_SZ);
 static deque<string> vOneShots;
 static CCriticalSection cs_vOneShots;
 
-static set<CNetAddr> setservAddNodeAddresses;
-static CCriticalSection cs_setservAddNodeAddresses;
+/** The addresses the -addnode entries resolved to, each with its entry, rebuilt by every
+ *  round of ThreadOpenAddedConnections. */
+static std::map<CNetAddr, std::string> mapAddNodeAddresses;
+static CCriticalSection cs_mapAddNodeAddresses;
 
 vector<std::string> vAddedNodes;
 CCriticalSection cs_vAddedNodes;
@@ -99,6 +101,9 @@ NodeId nLastNodeId = 0;
 CCriticalSection cs_nLastNodeId;
 
 static CSemaphore *semOutbound = NULL;
+/** Outbound slots (semOutbound's count): MAX_OUTBOUND_CONNECTIONS, or fewer with a small
+ *  -maxconnections. Set in StartNode before the threads start. */
+static int nMaxOutbound = MAX_OUTBOUND_CONNECTIONS;
 static boost::condition_variable messageHandlerCondition;
 
 // Signals for message handling
@@ -214,8 +219,9 @@ int GetnScore(const CService& addr)
 bool IsPeerAddrLocalGood(CNode *pnode)
 {
     // a peer on the onion side only knows us as the Tor exit: nothing to learn
-    return fDiscover && !pnode->IsOnionPeer() && pnode->addr.IsRoutable() && pnode->addrLocal.IsRoutable() &&
-           !IsLimited(pnode->addrLocal.GetNetwork());
+    const CService addrLocal = pnode->GetAddrLocal();
+    return fDiscover && !pnode->IsOnionPeer() && pnode->addr.IsRoutable() && addrLocal.IsRoutable() &&
+           !IsLimited(addrLocal.GetNetwork());
 }
 
 // pushes our own address to a peer
@@ -230,7 +236,7 @@ void AdvertizeLocal(CNode *pnode)
         if (IsPeerAddrLocalGood(pnode) && (!addrLocal.IsRoutable() ||
              GetRand((GetnScore(addrLocal) > LOCAL_MANUAL) ? 8:2) == 0))
         {
-            addrLocal.SetIP(pnode->addrLocal);
+            addrLocal.SetIP(pnode->GetAddrLocal());
         }
         if (addrLocal.IsRoutable())
         {
@@ -418,8 +424,36 @@ CNode* FindNode(const CService& addr)
     return NULL;
 }
 
-CNode* ConnectNode(CAddress addrConnect, const char *pszDest)
+int OutboundConnectTimeout(bool fDirect, bool fTimeoutSet, int nAttempts, int64_t nLastTry, int64_t nLastSuccess, int nDefaultTimeout)
 {
+    // through a proxy (Tor) the time goes to the proxy, not to the TCP handshake;
+    // and a -timeout the user chose is the user's
+    if (!fDirect || fTimeoutSet)
+        return nDefaultTimeout;
+    // the first contact with an address we know nothing of; any later dial gets the full time
+    if (nAttempts == 0 && nLastTry == 0 && nLastSuccess == 0)
+        return std::min(nDefaultTimeout, FIRST_DIAL_CONNECT_TIMEOUT);
+    return nDefaultTimeout;
+}
+
+bool DialFailureCounts(int nTimeoutUsed, int nFullTimeout, int64_t nElapsedMillis)
+{
+    if (nTimeoutUsed >= nFullTimeout)
+        return true;
+    // ran (nearly) to the shortened timeout: the full one would not have expired yet
+    return nElapsedMillis + DIAL_TIMEOUT_SLACK_MILLIS < nTimeoutUsed;
+}
+
+bool FixedSeedsWanted(size_t nTableSize)
+{
+    return nTableSize < FIXED_SEEDS_THIN_TABLE;
+}
+
+CNode* ConnectNode(CAddress addrConnect, const char *pszDest, int nTimeout)
+{
+    if (nTimeout <= 0)
+        nTimeout = nConnectTimeout;
+
     if (pszDest == NULL) {
         if (IsLocal(addrConnect))
             return NULL;
@@ -441,8 +475,9 @@ CNode* ConnectNode(CAddress addrConnect, const char *pszDest)
     // Connect
     SOCKET hSocket;
     bool proxyConnectionFailed = false;
-    if (pszDest ? ConnectSocketByName(addrConnect, hSocket, pszDest, Params().GetDefaultPort(), nConnectTimeout, &proxyConnectionFailed) :
-                  ConnectSocket(addrConnect, hSocket, nConnectTimeout, &proxyConnectionFailed))
+    const int64_t nDialStart = GetTimeMillis();
+    if (pszDest ? ConnectSocketByName(addrConnect, hSocket, pszDest, Params().GetDefaultPort(), nTimeout, &proxyConnectionFailed) :
+                  ConnectSocket(addrConnect, hSocket, nTimeout, &proxyConnectionFailed))
     {
         if (!IsSelectableSocket(hSocket)) {
             LogPrintf("Cannot create connection: non-selectable socket created (fd >= FD_SETSIZE ?)\n");
@@ -466,8 +501,12 @@ CNode* ConnectNode(CAddress addrConnect, const char *pszDest)
         return pnode;
     } else if (!proxyConnectionFailed) {
         // If connecting to the node failed, and failure is not caused by a problem connecting to
-        // the proxy, mark this as an attempt.
-        AddrManFor(addrConnect).Attempt(addrConnect);
+        // the proxy, mark this as an attempt. A dial we cut short ourselves (a shorter timeout
+        // than -timeout ran out) updates the last-try time but is not counted as a failure,
+        // or a node slower than the short timeout would turn terrible without ever being
+        // given the full one.
+        const bool fCount = DialFailureCounts(nTimeout, nConnectTimeout, GetTimeMillis() - nDialStart);
+        AddrManFor(addrConnect).Attempt(addrConnect, GetAdjustedTime(), fCount);
     }
 
     return NULL;
@@ -636,7 +675,8 @@ void CNode::copyStats(CNodeStats &stats)
     stats.dPingWait = (((double)nPingUsecWait) / 1e6);
 
     // Leave string empty if addrLocal invalid (not filled in yet)
-    stats.addrLocal = addrLocal.IsValid() ? addrLocal.ToString() : "";
+    const CService addrLocalCopy = GetAddrLocal();
+    stats.addrLocal = addrLocalCopy.IsValid() ? addrLocalCopy.ToString() : "";
 }
 
 // requires LOCK(cs_vRecvMsg)
@@ -1441,7 +1481,8 @@ static const int64_t OUTBOUND_MIN_REDIAL_SECONDS = 60;
 /** Draws from the table in one selection round. */
 static const int OUTBOUND_MAX_DRAWS = 300;
 
-CAddress SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow)
+CAddrInfo SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow,
+                                  const COutboundSkip& skip)
 {
     int nTries = 0;
     for (int nDraws = 0; nDraws < OUTBOUND_MAX_DRAWS; nDraws++)
@@ -1457,6 +1498,13 @@ CAddress SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsig
         // (a fresh node knows a handful of addresses) one such draw would otherwise
         // end the round before the port and recency rules could let anything through.
         if (setConnected.count(addr.GetGroup()) || IsLocal(addr))
+            continue;
+
+        // Nor is a host in skip.hosts (our own address as our peers see it, or an
+        // -addnode host, which the addcon thread keeps connected on its own port),
+        // or an IPv6 address when this host has no IPv6 route: each would cost a
+        // connect timeout (or a second slot for one server) and could not help.
+        if (skip.hosts.count(CNetAddr(addr)) || (skip.fNoIPv6Route && addr.GetNetwork() == NET_IPV6))
             continue;
 
         // If we didn't find an appropriate destination after trying 100 addresses fetched from addrman,
@@ -1479,14 +1527,138 @@ CAddress SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsig
         if (nANow - addr.nLastTry < 600 && nTries < 30)
             continue;
 
+        // nor, before as many draws, an address addrman counts as terrible: not seen
+        // for a month (peers gossip addresses years old), or tried often without a
+        // success. On a small table these are most of the dead addresses, and each
+        // one dialled costs a connect timeout before a live peer is reached.
+        if (addr.IsTerrible(nANow) && nTries < 30)
+            continue;
+
         // do not allow non-default ports, unless after 50 invalid addresses selected already
         if (addr.GetPort() != Params().GetDefaultPort() && nTries < 50)
             continue;
 
         return addr;
     }
-    return CAddress();
+    return CAddrInfo();
 }
+
+/** Network groups an outbound dial is in progress to (see CDialGroupReservation). */
+static std::set<std::vector<unsigned char> > setDialingGroups;
+static CCriticalSection cs_setDialingGroups;
+
+bool ReserveDialGroup(const std::vector<unsigned char>& group)
+{
+    LOCK(cs_setDialingGroups);
+    return setDialingGroups.insert(group).second;
+}
+
+void ReleaseDialGroup(const std::vector<unsigned char>& group)
+{
+    LOCK(cs_setDialingGroups);
+    setDialingGroups.erase(group);
+}
+
+std::set<std::vector<unsigned char> > DialingGroups()
+{
+    LOCK(cs_setDialingGroups);
+    return setDialingGroups;
+}
+
+bool OutboundGroupConnected(const std::vector<unsigned char>& group)
+{
+    LOCK(cs_vNodes);
+    BOOST_FOREACH(CNode* pnode, vNodes)
+        if (!pnode->fInbound && pnode->addr.GetGroup() == group)
+            return true;
+    return false;
+}
+
+int CountOutboundPeers()
+{
+    int nOutbound = 0;
+    LOCK(cs_vNodes);
+    BOOST_FOREACH(CNode* pnode, vNodes)
+        if (!pnode->fInbound)
+            nOutbound++;
+    return nOutbound;
+}
+
+bool ParallelDialWanted(int nOutbound, int nMaxOutboundSlots)
+{
+    return nOutbound < std::min(PARALLEL_DIAL_OUTBOUND_TARGET, nMaxOutboundSlots);
+}
+
+std::set<CNetAddr> PeerReportedLocal(const std::vector<std::pair<CNetAddr, CNetAddr> >& vReports)
+{
+    std::map<CNetAddr, std::set<std::vector<unsigned char> > > mapGroups;
+    for (const std::pair<CNetAddr, CNetAddr>& report : vReports)
+        if (report.second.IsRoutable())
+            mapGroups[report.second].insert(report.first.GetGroup());
+    std::set<CNetAddr> setLocal;
+    for (const auto& entry : mapGroups)
+        if (entry.second.size() >= 2)
+            setLocal.insert(entry.first);
+    return setLocal;
+}
+
+// Whether the operating system has a usable IPv6 route: a global source address that
+// is not a Teredo tunnel. connect() on a UDP socket sends nothing; it only makes the
+// system choose a route and a source address, which getsockname() then reads. The
+// destination is any global IPv6 address (here a public DNS resolver's).
+static bool ProbeIPv6Route()
+{
+    static const unsigned char pchProbe[16] = {0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x88};
+    struct sockaddr_in6 dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin6_family = AF_INET6;
+    dst.sin6_port = htons(53);
+    memcpy(&dst.sin6_addr, pchProbe, 16);
+    SOCKET s = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET)
+        return false;
+    bool fRoute = false;
+    if (connect(s, (struct sockaddr*)&dst, sizeof(dst)) != SOCKET_ERROR) {
+        struct sockaddr_in6 src;
+        memset(&src, 0, sizeof(src));
+        socklen_t len = sizeof(src);
+        if (getsockname(s, (struct sockaddr*)&src, &len) != SOCKET_ERROR && src.sin6_family == AF_INET6) {
+            CNetAddr addrSource(src.sin6_addr);
+            fRoute = addrSource.IsRoutable() && !addrSource.IsRFC4380();
+        }
+    }
+    CloseSocket(s);
+    return fRoute;
+}
+
+bool HostHasIPv6Route()
+{
+    static CCriticalSection cs_route;
+    static int64_t nChecked = 0;
+    static bool fRoute = true;
+    LOCK(cs_route);
+    const int64_t nNow = GetTime();
+    if (nChecked != 0 && nNow - nChecked < 60)
+        return fRoute;
+    const bool fWas = fRoute;
+    fRoute = ProbeIPv6Route();
+    if (nChecked == 0 || fRoute != fWas)
+        LogPrint("net", "IPv6 route %s: IPv6 addresses %s dialled\n", fRoute ? "found" : "not found", fRoute ? "are" : "are not");
+    nChecked = nNow;
+    return fRoute;
+}
+
+std::set<CNetAddr> CurrentAddNodeHosts(const std::map<CNetAddr, std::string>& mapResolved, const std::vector<std::string>& vAdded)
+{
+    const std::set<std::string> setAdded(vAdded.begin(), vAdded.end());
+    std::set<CNetAddr> setHosts;
+    for (const auto& entry : mapResolved)
+        if (setAdded.count(entry.second))
+            setHosts.insert(entry.first);
+    return setHosts;
+}
+
+static void OpenConnectionsLoop(int nDialer);
 
 void ThreadOpenConnections()
 {
@@ -1509,22 +1681,47 @@ void ThreadOpenConnections()
         }
     }
 
+    OpenConnectionsLoop(0);
+}
+
+static void ThreadOpenConnectionsDialer(int nDialer)
+{
+    // the -connect list is dialled by ThreadOpenConnections alone
+    if (mapArgs.count("-connect") && mapMultiArgs["-connect"].size() > 0)
+        return;
+    OpenConnectionsLoop(nDialer);
+}
+
+static void OpenConnectionsLoop(int nDialer)
+{
     // Initiate network connections
-    int64_t nStart = GetTime();
     while (true)
     {
-        ProcessOneShot();
+        if (nDialer == 0)
+            ProcessOneShot();
 
         MilliSleep(500);
 
-        CSemaphoreGrant grant(*semOutbound);
+        // The extra dialers only run while the node holds few outbound peers, and
+        // do not take an outbound slot while they wait.
+        if (nDialer > 0 && !ParallelDialWanted(CountOutboundPeers(), nMaxOutbound))
+            continue;
+
+        // The first dialer waits for a free outbound slot. The others only take one
+        // that is free now, so they never queue in front of the -addnode thread; a
+        // dialer that finds none tries again next round.
+        CSemaphoreGrant grant(*semOutbound, nDialer > 0);
+        if (!grant)
+            continue;
         boost::this_thread::interruption_point();
 
-        // Add seed nodes if DNS seeds are all down (an infrastructure attack?).
-        if (addrman.size() == 0 && (GetTime() - nStart > 60)) {
+        // Add the fixed seed nodes while the table is thin: on a fresh start (the DNS
+        // seeds give a handful of addresses at best, often none), or if DNS seeds are
+        // all down (an infrastructure attack?). They go through the same selection.
+        if (nDialer == 0 && FixedSeedsWanted(addrman.size())) {
             static bool done = false;
             if (!done) {
-                LogPrintf("Adding fixed seed nodes as DNS doesn't seem to be available.\n");
+                LogPrintf("Adding fixed seed nodes: the address table holds %d addresses.\n", addrman.size());
                 addrman.Add(convertSeed6(Params().FixedSeeds()), CNetAddr("127.0.0.1"));
                 done = true;
             }
@@ -1535,19 +1732,42 @@ void ThreadOpenConnections()
         //
         CAddress addrConnect;
 
-        // Only connect out to one peer per network group (/16 for IPv4).
+        // Only connect out to one peer per network group (/16 for IPv4), counting
+        // the groups other dialers are connecting to. Those are read first: a dial
+        // that finishes adds its node to vNodes before it releases its group, so
+        // a group is always seen in one of the two.
         // Do this here so we don't have to critsect vNodes inside mapAddresses critsect.
-        int nOutbound = 0;
-        set<vector<unsigned char> > setConnected;
+        set<vector<unsigned char> > setConnected = DialingGroups();
+        std::vector<std::pair<CNetAddr, CNetAddr> > vReportedLocal;
         {
             LOCK(cs_vNodes);
             BOOST_FOREACH(CNode* pnode, vNodes) {
                 if (!pnode->fInbound) {
                     setConnected.insert(pnode->addr.GetGroup());
-                    nOutbound++;
+                    vReportedLocal.push_back(std::make_pair(CNetAddr(pnode->addr), CNetAddr(pnode->GetAddrLocal())));
                 }
             }
         }
+
+        // Hosts not to dial: our own public address once two outbound peers on
+        // different network groups report it (one peer alone cannot make us avoid
+        // an address), and the -addnode hosts (the bootstrap servers among them).
+        COutboundSkip skip;
+        skip.hosts = PeerReportedLocal(vReportedLocal);
+        std::vector<std::string> vAddedNow;
+        {
+            LOCK(cs_vAddedNodes);
+            vAddedNow = vAddedNodes;
+        }
+        std::map<CNetAddr, std::string> mapAddNodeNow;
+        {
+            LOCK(cs_mapAddNodeAddresses);
+            mapAddNodeNow = mapAddNodeAddresses;
+        }
+        std::set<CNetAddr> setAddNodeHosts = CurrentAddNodeHosts(mapAddNodeNow, vAddedNow);
+        skip.hosts.insert(setAddNodeHosts.begin(), setAddNodeHosts.end());
+        proxyType proxyIPv6;
+        skip.fNoIPv6Route = !IsLimited(NET_IPV6) && !GetProxy(NET_IPV6, proxyIPv6) && !HostHasIPv6Route();
 
         int64_t nANow = GetAdjustedTime();
 
@@ -1562,12 +1782,23 @@ void ThreadOpenConnections()
         proxyType proxyOnion;
         CAddrMan* pmanSelect = &SelectDialTable(GetProxy(NET_ONION, proxyOnion), GetRand(4));
 
-        CAddress addrPick = SelectOutboundCandidate(*pmanSelect, setConnected, nANow);
+        CAddrInfo addrPick = SelectOutboundCandidate(*pmanSelect, setConnected, nANow, skip);
         if (addrPick.IsValid())
             addrConnect = addrPick;
 
-        if (addrConnect.IsValid())
-            OpenNetworkConnection(addrConnect, &grant);
+        if (!addrConnect.IsValid())
+            continue;
+
+        // Hold the group while dialling. Another dialer may have taken it, or
+        // connected to it, since setConnected was read: then this round is over.
+        CDialGroupReservation reservation(addrConnect.GetGroup());
+        if (!reservation || OutboundGroupConnected(addrConnect.GetGroup()))
+            continue;
+        proxyType proxyDial;
+        const bool fDirect = !addrConnect.IsTor() && !GetProxy(addrConnect.GetNetwork(), proxyDial);
+        OpenNetworkConnection(addrConnect, &grant, NULL, false,
+                              OutboundConnectTimeout(fDirect, mapArgs.count("-timeout") > 0, addrPick.GetAttempts(),
+                                                     addrPick.nLastTry, addrPick.GetLastSuccess(), nConnectTimeout));
     }
 }
 
@@ -1606,17 +1837,20 @@ void ThreadOpenAddedConnections()
         }
 
         list<vector<CService> > lservAddressesToAdd(0);
+        std::map<CNetAddr, std::string> mapResolved;
         BOOST_FOREACH(const std::string& strAddNode, lAddresses) {
             vector<CService> vservNode(0);
             if(Lookup(strAddNode.c_str(), vservNode, Params().GetDefaultPort(), fNameLookup, 0))
             {
                 lservAddressesToAdd.push_back(vservNode);
-                {
-                    LOCK(cs_setservAddNodeAddresses);
-                    BOOST_FOREACH(const CService& serv, vservNode)
-                        setservAddNodeAddresses.insert(serv);
-                }
+                BOOST_FOREACH(const CService& serv, vservNode)
+                    mapResolved[serv] = strAddNode;
             }
+        }
+        {
+            // rebuilt each round, so an entry removed with addnode remove stops counting
+            LOCK(cs_mapAddNodeAddresses);
+            mapAddNodeAddresses.swap(mapResolved);
         }
         // Attempt to connect to each IP for each addnode entry until at least one is successful per addnode entry
         // (keeping in mind that addnode entries can have many IPs if fNameLookup)
@@ -1643,7 +1877,7 @@ void ThreadOpenAddedConnections()
 }
 
 // if successful, this moves the passed grant to the constructed node
-bool OpenNetworkConnection(const CAddress& addrConnect, CSemaphoreGrant *grantOutbound, const char *pszDest, bool fOneShot)
+bool OpenNetworkConnection(const CAddress& addrConnect, CSemaphoreGrant *grantOutbound, const char *pszDest, bool fOneShot, int nTimeout)
 {
     //
     // Initiate outbound network connection
@@ -1657,7 +1891,7 @@ bool OpenNetworkConnection(const CAddress& addrConnect, CSemaphoreGrant *grantOu
     } else if (FindNode(std::string(pszDest)))
         return false;
 
-    CNode* pnode = ConnectNode(addrConnect, pszDest);
+    CNode* pnode = ConnectNode(addrConnect, pszDest, nTimeout);
     boost::this_thread::interruption_point();
 
     if (!pnode)
@@ -1920,7 +2154,7 @@ void StartNode(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     if (semOutbound == NULL) {
         // initialize semaphore
-        int nMaxOutbound = min(MAX_OUTBOUND_CONNECTIONS, nMaxConnections);
+        nMaxOutbound = min(MAX_OUTBOUND_CONNECTIONS, nMaxConnections);
         semOutbound = new CSemaphore(nMaxOutbound);
     }
 
@@ -1946,6 +2180,14 @@ void StartNode(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     // Initiate outbound connections
     threadGroup.create_thread(boost::bind(&TraceThread<void (*)()>, "opencon", &ThreadOpenConnections));
+
+    // Further dialers while the node holds few outbound peers: a dead address costs
+    // a whole connect timeout, so one dialer alone spends most of a fresh start waiting.
+    static const char* const pszDialerNames[] = {"opencon1", "opencon2", "opencon3", "opencon4", "opencon5", "opencon6", "opencon7"};
+    static_assert(MAX_PARALLEL_DIALS - 1 <= (int)(sizeof(pszDialerNames) / sizeof(pszDialerNames[0])), "a name for every dialer");
+    for (int i = 1; i < MAX_PARALLEL_DIALS; i++)
+        threadGroup.create_thread(boost::bind(&TraceThread<boost::function<void()> >, pszDialerNames[i - 1],
+                                              boost::function<void()>(boost::bind(&ThreadOpenConnectionsDialer, i))));
 
     // Process messages
     threadGroup.create_thread(boost::bind(&TraceThread<void (*)()>, "msghand", &ThreadMessageHandler));

@@ -31,6 +31,7 @@
 #include <boost/foreach.hpp>
 #include <boost/signals2/signal.hpp>
 
+class CAddrInfo;
 class CAddrMan;
 class CBlockIndex;
 class CScheduler;
@@ -79,8 +80,23 @@ CNode* FindNode(const CNetAddr& ip);
 CNode* FindNode(const CSubNet& subNet);
 CNode* FindNode(const std::string& addrName);
 CNode* FindNode(const CService& ip);
-CNode* ConnectNode(CAddress addrConnect, const char *pszDest = NULL);
-bool OpenNetworkConnection(const CAddress& addrConnect, CSemaphoreGrant *grantOutbound = NULL, const char *strDest = NULL, bool fOneShot = false);
+/** nTimeout: connect timeout in milliseconds, 0 for -timeout (nConnectTimeout). */
+CNode* ConnectNode(CAddress addrConnect, const char *pszDest = NULL, int nTimeout = 0);
+bool OpenNetworkConnection(const CAddress& addrConnect, CSemaphoreGrant *grantOutbound = NULL, const char *strDest = NULL, bool fOneShot = false, int nTimeout = 0);
+/** Connect timeout (ms) for the first contact with an address (never dialled, in this run
+ *  or before, and never reached) by a direct (not proxied) dial from the address table, when
+ *  -timeout is not given: a live node completes the TCP handshake within a fraction of a
+ *  second (measured: under 0.1 s), a dead one never does. Any later dial gets -timeout. */
+static const int FIRST_DIAL_CONNECT_TIMEOUT = 2000;
+/** The connect timeout for an outbound dial: FIRST_DIAL for a first contact as above,
+ *  otherwise nDefaultTimeout (-timeout). */
+int OutboundConnectTimeout(bool fDirect, bool fTimeoutSet, int nAttempts, int64_t nLastTry, int64_t nLastSuccess, int nDefaultTimeout);
+/** A failed dial that ran to within this of a shortened timeout counts as cut short. */
+static const int DIAL_TIMEOUT_SLACK_MILLIS = 100;
+/** Whether a failed dial counts as a failed attempt in addrman: not when it ran out a timeout
+ *  shorter than the full one (nFullTimeout, -timeout), which would not yet have expired. A
+ *  refusal or an unreachable network within the short window still counts. */
+bool DialFailureCounts(int nTimeoutUsed, int nFullTimeout, int64_t nElapsedMillis);
 unsigned short GetListenPort();
 bool BindListenPort(const CService &bindAddr, std::string& strError, bool fWhitelisted = false, bool fOnion = false);
 void StartNode(boost::thread_group& threadGroup, CScheduler& scheduler);
@@ -185,7 +201,61 @@ CAddrMan& SelectDialTable(bool fOnionProxy, uint32_t nRand);
 /** The next outbound address to dial from man, or an invalid one: not on a network group in
  *  setConnected, not our own, not limited, not tried within the last minute, and a node on a
  *  port other than the default only after enough other draws (see ThreadOpenConnections). */
-CAddress SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow);
+struct COutboundSkip
+{
+    /** Hosts (any port) not to dial: our own address as peers see it, the -addnode hosts. */
+    std::set<CNetAddr> hosts;
+    /** This host has no usable IPv6 route (see HostHasIPv6Route). */
+    bool fNoIPv6Route = false;
+};
+CAddrInfo SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow,
+                                  const COutboundSkip& skip = COutboundSkip());
+/** Our public address(es) as our peers report it: vReports holds (peer address, the address
+ *  that peer says it sees us at). An address counts only when peers on two network groups
+ *  report it, so one peer cannot make us avoid dialling some host. */
+std::set<CNetAddr> PeerReportedLocal(const std::vector<std::pair<CNetAddr, CNetAddr> >& vReports);
+/** Whether the system has a global, non-Teredo IPv6 source address to route to the IPv6
+ *  internet (asked of the OS without sending anything; cached for a minute). */
+bool HostHasIPv6Route();
+/** The hosts of the -addnode entries still in vAdded, from mapResolved (address -> the entry
+ *  it was resolved from): an entry removed with addnode remove no longer keeps its host out
+ *  of the outbound selection, even before the next -addnode round re-resolves the list. */
+std::set<CNetAddr> CurrentAddNodeHosts(const std::map<CNetAddr, std::string>& mapResolved, const std::vector<std::string>& vAdded);
+/** The fixed seeds go into the table while it holds fewer addresses than this. */
+static const size_t FIXED_SEEDS_THIN_TABLE = 16;
+bool FixedSeedsWanted(size_t nTableSize);
+
+/** Outbound dialers (opencon threads) that run at once while the node holds fewer than
+ *  PARALLEL_DIAL_OUTBOUND_TARGET outbound peers. A dead address costs a whole connect
+ *  timeout and on a small network most of the table is dead, so a single dialer spent
+ *  most of a fresh start waiting. Above the target only the first dialer runs. */
+static const int MAX_PARALLEL_DIALS = 8;
+static const int PARALLEL_DIAL_OUTBOUND_TARGET = 8;
+/** Whether the extra dialers run, given the number of outbound peers and of outbound
+ *  slots: below PARALLEL_DIAL_OUTBOUND_TARGET, or below the slot count if that is smaller
+ *  (a small -maxconnections). */
+bool ParallelDialWanted(int nOutbound, int nMaxOutboundSlots);
+int CountOutboundPeers();
+/** Whether an outbound peer on this network group is connected. */
+bool OutboundGroupConnected(const std::vector<unsigned char>& group);
+/** The network groups outbound dials are in progress to. A dialer counts them as
+ *  connected, so concurrent dials keep one outbound peer per group. */
+std::set<std::vector<unsigned char> > DialingGroups();
+/** Take a group for one dial; false when another dial holds it. */
+bool ReserveDialGroup(const std::vector<unsigned char>& group);
+void ReleaseDialGroup(const std::vector<unsigned char>& group);
+/** A group held for the length of one dial. */
+class CDialGroupReservation
+{
+    std::vector<unsigned char> group;
+    bool fHeld;
+public:
+    explicit CDialGroupReservation(const std::vector<unsigned char>& groupIn) : group(groupIn), fHeld(ReserveDialGroup(groupIn)) {}
+    ~CDialGroupReservation() { if (fHeld) ReleaseDialGroup(group); }
+    CDialGroupReservation(const CDialGroupReservation&) = delete;
+    CDialGroupReservation& operator=(const CDialGroupReservation&) = delete;
+    explicit operator bool() const { return fHeld; }
+};
 /** The table an address belongs to: Tor v3 in the onion store, the rest in addrman. */
 inline CAddrMan& AddrManFor(const CNetAddr& addr) { return addr.IsTorV3() ? addrmanOnion : addrman; }
 /** Maximum number of connections to simultaneously allow (aka connection slots) */
@@ -308,7 +378,14 @@ public:
     int64_t nTimeOffset;
     CAddress addr;
     std::string addrName;
+    /** The address this peer says it sees us at (its version message). Written by the
+     *  message handler, read by the opencon threads: use GetAddrLocal / SetAddrLocal. */
+    CService GetAddrLocal() const { LOCK(cs_addrLocal); return addrLocal; }
+    void SetAddrLocal(const CService& addrIn) { LOCK(cs_addrLocal); addrLocal = addrIn; }
+private:
+    mutable CCriticalSection cs_addrLocal;
     CService addrLocal;
+public:
     int nVersion;
     // strSubVer is whatever byte array we read from the wire. However, this field is intended
     // to be printed out, displayed to humans in various forms and so on. So we sanitize it and

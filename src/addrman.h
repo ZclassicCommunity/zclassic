@@ -236,8 +236,8 @@ protected:
     //! Add an entry to the "new" table.
     bool Add_(const CAddress &addr, const CNetAddr& source, int64_t nTimePenalty);
 
-    //! Mark an entry as attempted to connect.
-    void Attempt_(const CService &addr, int64_t nTime);
+    //! Mark an entry as attempted to connect; fCountFailure: count it in nAttempts.
+    void Attempt_(const CService &addr, int64_t nTime, bool fCountFailure);
 
     //! Select an address to connect to, if newOnly is set to true, only the new table is selected from.
     CAddrInfo Select_(bool newOnly);
@@ -555,13 +555,14 @@ public:
         }
     }
 
-    //! Mark an entry as connection attempted to.
-    void Attempt(const CService &addr, int64_t nTime = GetAdjustedTime())
+    //! Mark an entry as connection attempted to. With fCountFailure false only nLastTry is
+    //! updated, not nAttempts (a dial cut short by our own shorter timeout says little).
+    void Attempt(const CService &addr, int64_t nTime = GetAdjustedTime(), bool fCountFailure = true)
     {
         {
             LOCK(cs);
             Check();
-            Attempt_(addr, nTime);
+            Attempt_(addr, nTime, fCountFailure);
             Check();
         }
     }

@@ -787,6 +787,259 @@ BOOST_AUTO_TEST_CASE(outbound_candidate_small_table)
     SetLimited(NET_IPV6, l6);
 }
 
+// An address not seen for more than a month (peers gossip ones years old) is passed over
+// while a fresh one is there to dial, but is still dialled when nothing else is.
+BOOST_AUTO_TEST_CASE(outbound_candidate_skips_terrible)
+{
+    bool l4 = IsLimited(NET_IPV4), l6 = IsLimited(NET_IPV6);
+    SetLimited(NET_IPV4, false);
+    SetLimited(NET_IPV6, false);
+    const unsigned short port = Params().GetDefaultPort();
+    const int64_t now = GetAdjustedTime();
+    const CNetAddr source("93.184.216.1");
+    CAddress ancient = MakeV4("94.185.1.2", port, 1, now - 40 * 24 * 60 * 60);
+    CAddress fresh = MakeV4("95.186.3.4", port, 1, now - 3600);
+    std::set<std::vector<unsigned char> > setConnected;
+    {
+        CAddrMan man;
+        BOOST_REQUIRE(man.Add(ancient, source));
+        BOOST_REQUIRE(man.Add(fresh, source));
+        BOOST_REQUIRE(CAddrInfo(ancient, source).IsTerrible(now));
+        BOOST_REQUIRE(!CAddrInfo(fresh, source).IsTerrible(now));
+        int nFresh = 0;
+        for (int i = 0; i < 40; i++) {
+            CAddress pick = SelectOutboundCandidate(man, setConnected, now);
+            if (pick == fresh)
+                nFresh++;
+        }
+        // the ancient one only after 30 straight draws of it, about 2^-30 a call
+        BOOST_CHECK_EQUAL(nFresh, 40);
+    }
+    {
+        CAddrMan man;
+        BOOST_REQUIRE(man.Add(ancient, source));
+        BOOST_CHECK(SelectOutboundCandidate(man, setConnected, now) == ancient);
+    }
+    SetLimited(NET_IPV4, l4);
+    SetLimited(NET_IPV6, l6);
+}
+
+// Direct dials from the table, without an explicit -timeout: the first contact with an
+// address we know nothing of waits FIRST_DIAL (never longer than -timeout), any later dial
+// -timeout. A dial through a proxy (Tor), or with -timeout given, always waits -timeout.
+BOOST_AUTO_TEST_CASE(outbound_connect_timeout)
+{
+    const int64_t now = GetTime();
+    const int D = DEFAULT_CONNECT_TIMEOUT;
+    BOOST_CHECK(FIRST_DIAL_CONNECT_TIMEOUT < DEFAULT_CONNECT_TIMEOUT);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 0, 0, 0, D), FIRST_DIAL_CONNECT_TIMEOUT);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 1, 0, 0, D), D);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 0, now - 30, 0, D), D);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 0, 0, now - 3600, D), D);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 0, 0, 0, 1000), 1000);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(false, false, 0, 0, 0, D), D);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, true, 0, 0, 0, 20000), 20000);
+
+    // A dial that ran out the shortened timeout is not a counted failure; one refused (or
+    // unreachable) within it is, and so is any failure of a full-length dial.
+    BOOST_CHECK(!DialFailureCounts(FIRST_DIAL_CONNECT_TIMEOUT, D, FIRST_DIAL_CONNECT_TIMEOUT));
+    BOOST_CHECK(!DialFailureCounts(FIRST_DIAL_CONNECT_TIMEOUT, D, FIRST_DIAL_CONNECT_TIMEOUT - 50));
+    BOOST_CHECK(DialFailureCounts(FIRST_DIAL_CONNECT_TIMEOUT, D, 120));
+    BOOST_CHECK(DialFailureCounts(D, D, D));
+    BOOST_CHECK(DialFailureCounts(D, D, 10));
+
+    // A node slower than the short timeout: its cut-short first dial is recorded as a try
+    // but not as a failure, so it neither turns terrible nor loses chance for it, and the
+    // next dial gives it the full -timeout. A counted failure would leave a mark.
+    const CNetAddr source("93.184.216.1");
+    CAddress slow = MakeV4("94.185.1.2", Params().GetDefaultPort(), 1, now - 3600);
+    CAddrMan man;
+    BOOST_REQUIRE(man.Add(slow, source));
+    CAddrInfo info = man.Select();
+    BOOST_REQUIRE(info == slow);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, info.GetAttempts(), info.nLastTry, info.GetLastSuccess(), D), FIRST_DIAL_CONNECT_TIMEOUT);
+    for (int i = 0; i < 5; i++)
+        man.Attempt(slow, now - 3600 + i, DialFailureCounts(FIRST_DIAL_CONNECT_TIMEOUT, D, FIRST_DIAL_CONNECT_TIMEOUT));
+    info = man.Select();
+    BOOST_REQUIRE(info == slow);
+    BOOST_CHECK_EQUAL(info.GetAttempts(), 0);
+    BOOST_CHECK(!info.IsTerrible(now));
+    BOOST_CHECK(info.nLastTry != 0);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, info.GetAttempts(), info.nLastTry, info.GetLastSuccess(), D), D);
+    man.Attempt(slow, now, true);
+    info = man.Select();
+    BOOST_CHECK_EQUAL(info.GetAttempts(), 1);
+}
+
+// Hosts not to dial: our own address once peers on two groups report it, the -addnode
+// hosts on any port, IPv6 when the host has no IPv6 route. None of them uses up the round.
+BOOST_AUTO_TEST_CASE(outbound_candidate_skip_hosts)
+{
+    bool l4 = IsLimited(NET_IPV4), l6 = IsLimited(NET_IPV6);
+    SetLimited(NET_IPV4, false);
+    SetLimited(NET_IPV6, false);
+    const unsigned short port = Params().GetDefaultPort();
+    const int64_t now = GetAdjustedTime();
+    const CNetAddr source("93.184.216.1");
+    CAddress self = MakeV4("209.91.235.157", port + 1, 1, now - 3600);
+    CAddress server = MakeV4("74.50.74.102", port, 1, now - 3600);
+    CAddress other = MakeV4("95.186.3.4", port, 1, now - 3600);
+    CAddress v6(CService(CNetAddr("2a0d:e487:217f:782::1"), port), 1);
+    v6.nTime = now - 3600;
+
+    // PeerReportedLocal: two peers on different groups must agree
+    std::vector<std::pair<CNetAddr, CNetAddr> > vReports;
+    vReports.push_back(std::make_pair(CNetAddr("1.2.3.4"), CNetAddr("209.91.235.157")));
+    BOOST_CHECK(PeerReportedLocal(vReports).empty());
+    vReports.push_back(std::make_pair(CNetAddr("1.2.9.9"), CNetAddr("209.91.235.157")));   // same /16
+    BOOST_CHECK(PeerReportedLocal(vReports).empty());
+    vReports.push_back(std::make_pair(CNetAddr("5.6.7.8"), CNetAddr("209.91.235.157")));
+    vReports.push_back(std::make_pair(CNetAddr("9.9.9.9"), CNetAddr("0.0.0.0")));          // not routable
+    vReports.push_back(std::make_pair(CNetAddr("8.8.4.4"), CNetAddr("0.0.0.0")));
+    std::set<CNetAddr> setLocal = PeerReportedLocal(vReports);
+    BOOST_CHECK_EQUAL(setLocal.size(), 1U);
+    BOOST_CHECK(setLocal.count(CNetAddr("209.91.235.157")));
+
+    CAddrMan man;
+    BOOST_REQUIRE(man.Add(self, source));
+    BOOST_REQUIRE(man.Add(server, source));
+    BOOST_REQUIRE(man.Add(other, source));
+    BOOST_REQUIRE(man.Add(v6, source));
+    COutboundSkip skip;
+    skip.hosts = setLocal;
+    skip.hosts.insert(CNetAddr("74.50.74.102"));    // an -addnode host, dialled there on another port
+    skip.fNoIPv6Route = true;
+    std::set<std::vector<unsigned char> > setConnected;
+    for (int i = 0; i < 40; i++)
+        BOOST_CHECK(SelectOutboundCandidate(man, setConnected, now, skip) == other);
+
+    // without the skips the server and the IPv6 address are dialled (self is on another
+    // port, so it waits behind the default-port ones)
+    std::set<CNetAddr> setPicked;
+    for (int i = 0; i < 400; i++)
+        setPicked.insert(CNetAddr(SelectOutboundCandidate(man, setConnected, now)));
+    BOOST_CHECK(setPicked.count(CNetAddr(server)));
+    BOOST_CHECK(setPicked.count(CNetAddr(v6)));
+    SetLimited(NET_IPV4, l4);
+    SetLimited(NET_IPV6, l6);
+}
+
+// An -addnode host is kept out of the outbound selection only while its entry is in the
+// -addnode list: after addnode remove it is dialled again on its normal port.
+BOOST_AUTO_TEST_CASE(addnode_remove_frees_host)
+{
+    bool l4 = IsLimited(NET_IPV4);
+    SetLimited(NET_IPV4, false);
+    const unsigned short port = Params().GetDefaultPort();
+    const int64_t now = GetAdjustedTime();
+    std::map<CNetAddr, std::string> mapResolved;
+    mapResolved[CNetAddr("74.50.74.102")] = "74.50.74.102:8035";
+    mapResolved[CNetAddr("205.209.104.118")] = "205.209.104.118:8035";
+    std::vector<std::string> vAdded;
+    vAdded.push_back("74.50.74.102:8035");
+    vAdded.push_back("205.209.104.118:8035");
+    BOOST_CHECK_EQUAL(CurrentAddNodeHosts(mapResolved, vAdded).size(), 2U);
+
+    vAdded.erase(vAdded.begin());   // addnode 74.50.74.102:8035 remove
+    std::set<CNetAddr> setHosts = CurrentAddNodeHosts(mapResolved, vAdded);
+    BOOST_CHECK_EQUAL(setHosts.size(), 1U);
+    BOOST_CHECK(!setHosts.count(CNetAddr("74.50.74.102")));
+    BOOST_CHECK(setHosts.count(CNetAddr("205.209.104.118")));
+
+    CAddrMan man;
+    CAddress server = MakeV4("74.50.74.102", port, 1, now - 3600);
+    BOOST_REQUIRE(man.Add(server, CNetAddr("93.184.216.1")));
+    COutboundSkip skip;
+    skip.hosts = setHosts;
+    std::set<std::vector<unsigned char> > setConnected;
+    BOOST_CHECK(SelectOutboundCandidate(man, setConnected, now, skip) == server);
+    BOOST_CHECK(CurrentAddNodeHosts(mapResolved, std::vector<std::string>()).empty());
+    SetLimited(NET_IPV4, l4);
+}
+
+// The fixed seeds go into the table while it is thin (a fresh start), not only after a
+// minute with an empty table.
+BOOST_AUTO_TEST_CASE(fixed_seeds_thin_table)
+{
+    BOOST_CHECK(FixedSeedsWanted(0));
+    BOOST_CHECK(FixedSeedsWanted(3));
+    BOOST_CHECK(FixedSeedsWanted(FIXED_SEEDS_THIN_TABLE - 1));
+    BOOST_CHECK(!FixedSeedsWanted(FIXED_SEEDS_THIN_TABLE));
+    BOOST_CHECK(!Params(CBaseChainParams::MAIN).FixedSeeds().empty());
+}
+
+// Concurrent dialers: a group being dialled is held by one dialer, counts as connected
+// for the others (so the one-outbound-peer-per-group rule holds while dials overlap),
+// and is free again when the dial ends. The extra dialers run only below the target.
+BOOST_AUTO_TEST_CASE(parallel_dial_groups)
+{
+    bool l4 = IsLimited(NET_IPV4), l6 = IsLimited(NET_IPV6);
+    SetLimited(NET_IPV4, false);
+    SetLimited(NET_IPV6, false);
+    const unsigned short port = Params().GetDefaultPort();
+    const int64_t now = GetAdjustedTime();
+    const CNetAddr source("93.184.216.1");
+    CAddress a = MakeV4("94.185.1.2", port, 1, now - 3600);
+    CAddress aSameGroup = MakeV4("94.185.7.9", port, 1, now - 3600);
+    CAddress b = MakeV4("95.186.3.4", port, 1, now - 3600);
+    BOOST_REQUIRE(a.GetGroup() == aSameGroup.GetGroup());
+
+    BOOST_CHECK(DialingGroups().empty());
+    BOOST_CHECK(!OutboundGroupConnected(a.GetGroup()));
+    {
+        CDialGroupReservation first(a.GetGroup());
+        BOOST_CHECK(bool(first));
+        {
+            // a second dialer cannot take the group, whichever address it drew
+            CDialGroupReservation second(aSameGroup.GetGroup());
+            BOOST_CHECK(!second);
+        }
+        // the failed reservation did not release the held one
+        BOOST_CHECK_EQUAL(DialingGroups().count(a.GetGroup()), 1U);
+
+        // a dialer that counts the held group as connected only picks the other one
+        CAddrMan man;
+        BOOST_REQUIRE(man.Add(a, source));
+        BOOST_REQUIRE(man.Add(aSameGroup, source));
+        BOOST_REQUIRE(man.Add(b, source));
+        std::set<std::vector<unsigned char> > setConnected = DialingGroups();
+        for (int i = 0; i < 20; i++) {
+            CAddress pick = SelectOutboundCandidate(man, setConnected, now);
+            BOOST_CHECK(pick == b);
+        }
+    }
+    BOOST_CHECK(DialingGroups().empty());
+    {
+        CDialGroupReservation again(aSameGroup.GetGroup());
+        BOOST_CHECK(bool(again));
+    }
+    BOOST_CHECK(DialingGroups().empty());
+
+    BOOST_CHECK(MAX_PARALLEL_DIALS > 1);
+    BOOST_CHECK(ParallelDialWanted(0, 16));
+    BOOST_CHECK(ParallelDialWanted(PARALLEL_DIAL_OUTBOUND_TARGET - 1, 16));
+    BOOST_CHECK(!ParallelDialWanted(PARALLEL_DIAL_OUTBOUND_TARGET, 16));
+    // a small -maxconnections: the extra dialers stop at the slot count
+    BOOST_CHECK(ParallelDialWanted(2, 3));
+    BOOST_CHECK(!ParallelDialWanted(3, 3));
+    BOOST_CHECK(!ParallelDialWanted(1, 1));
+    BOOST_CHECK(!ParallelDialWanted(0, 0));
+
+    // an extra dialer takes a slot only if one is free now, never waiting for it
+    {
+        CSemaphore sem(1);
+        CSemaphoreGrant first(sem, true);
+        BOOST_CHECK(bool(first));
+        CSemaphoreGrant extra(sem, true);
+        BOOST_CHECK(!bool(extra));
+        first.Release();
+        CSemaphoreGrant again(sem, true);
+        BOOST_CHECK(bool(again));
+    }
+    SetLimited(NET_IPV4, l4);
+    SetLimited(NET_IPV6, l6);
+}
+
 namespace {
 // A v3 address that differs for every n (MakeV3 has only 256 distinct keys).
 CAddress MakeV3N(uint32_t n)

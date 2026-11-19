@@ -145,8 +145,9 @@ public:
         vSeeds.clear();
 
         vSeeds.push_back(CDNSSeedData("zclnet.net", "dnsseed.zclnet.net"));
-        vSeeds.push_back(CDNSSeedData("zslp.org", "dnsseed.zslp.org"));
-        // The community DNS seeds above are frequently unreachable, which can leave
+        // (dnsseed.zslp.org was dropped: zslp.org no longer resolves, NXDOMAIN, and
+        // its failed lookup held up the seeds below by one to three seconds.)
+        // The community DNS seed above is frequently unreachable, which can leave
         // a fresh node with no addresses to dial. Seed the known-good bootstrap
         // servers directly: CDNSSeedData accepts a literal IP (LookupHost resolves
         // it as-is), so the seeding path always yields at least these live peers.
