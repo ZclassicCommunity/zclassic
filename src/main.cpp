@@ -327,6 +327,8 @@ struct CNodeState {
     //! Whether this is an inbound connection (we did not dial it). Used by the
     //! peer-aware finalization gate to weight independent OUTBOUND corroboration.
     bool fInbound;
+    //! When (GetTime() seconds) we last answered this peer's mempool request, or 0.
+    int64_t nLastMempoolServed;
 
     CNodeState() {
         fCurrentlyConnected = false;
@@ -343,6 +345,7 @@ struct CNodeState {
         nBlocksInFlightValidHeaders = 0;
         fPreferredDownload = false;
         fInbound = false;
+        nLastMempoolServed = 0;
     }
 };
 
@@ -6714,11 +6717,30 @@ static void ProcessAddrList(CNode* pfrom, vector<CAddress>& vAddr)
         pfrom->fGetAddr = false;
 }
 
+/** A mempool request inside the peer's cooldown is ignored: no reply, no ban score. Requires cs_main. */
+static bool MempoolRequestThrottled(CNode* pfrom)
+{
+    AssertLockHeld(cs_main);
+    CNodeState* state = State(pfrom->GetId());
+    if (state == NULL || pfrom->fWhitelisted)
+        return false;
+    int64_t nNow = GetTime();
+    if (MempoolRequestInCooldown(state->nLastMempoolServed, nNow)) {
+        LogPrint("net", "mempool request ignored, last served %ds ago (cooldown %ds) peer=%d\n",
+                 nNow - state->nLastMempoolServed, MEMPOOL_REQUEST_COOLDOWN, pfrom->id);
+        return true;
+    }
+    state->nLastMempoolServed = nNow;
+    return false;
+}
+
 static void ProcessMempoolMessage(CNode* pfrom)
 {
     int currentHeight = GetHeight();
 
     LOCK2(cs_main, pfrom->cs_filter);
+    if (MempoolRequestThrottled(pfrom))
+        return;
     ServeMempool(pfrom, currentHeight);
 }
 

@@ -58,6 +58,7 @@ BITCOIN_TESTS =\
   test/DoS_tests.cpp \
   test/wire_robustness_tests.cpp \
   test/p2p_message_limits_tests.cpp \
+  test/p2pserve_tests.cpp \
   test/equihash_tests.cpp \
   test/equihashmemo_tests.cpp \
   test/getarg_tests.cpp \

@@ -18,11 +18,30 @@
 
 #include <vector>
 
+bool LocatorOverCap(CNode* pfrom, const CBlockLocator& locator, const char* strCommand)
+{
+    if (locator.vHave.size() <= MAX_LOCATOR_SZ)
+        return false;
+    LogPrint("net", "%s locator has %u entries, over the cap of %u; disconnecting peer=%d\n",
+             strCommand, (unsigned int)locator.vHave.size(), MAX_LOCATOR_SZ, pfrom->id);
+    pfrom->fDisconnect = true;
+    return true;
+}
+
+bool MempoolRequestInCooldown(int64_t nLastServed, int64_t nNow)
+{
+    // a clock that went backwards ends the cooldown instead of extending it
+    return nLastServed != 0 && nNow >= nLastServed && nNow - nLastServed < MEMPOOL_REQUEST_COOLDOWN;
+}
+
 void ServeGetBlocks(CNode* pfrom, CDataStream& vRecv, const CChainParams& chainparams)
 {
     CBlockLocator locator;
     uint256 hashStop;
     vRecv >> locator >> hashStop;
+
+    if (LocatorOverCap(pfrom, locator, "getblocks"))
+        return;
 
     LOCK(cs_main);
 
@@ -66,6 +85,9 @@ void ServeGetHeaders(CNode* pfrom, CDataStream& vRecv)
     CBlockLocator locator;
     uint256 hashStop;
     vRecv >> locator >> hashStop;
+
+    if (LocatorOverCap(pfrom, locator, "getheaders"))
+        return;
 
     LOCK(cs_main);
 
