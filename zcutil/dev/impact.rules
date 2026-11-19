@@ -68,3 +68,6 @@ zcutil/consensus.seal	zcl-lint check-dev-tools
 zcutil/lint/*	zcl-lint check-dev-tools
 zcutil/tools/Makefile|zcutil/tools/.gitignore|zcutil/tools/test-jsonq.sh	build-jsonq check-dev-tools
 qa/lib/*|qa/rpc-tests/jsonq_lib.sh	ALL
+
+# ---- agent entry points and skills (documents; the docs and wiring checks)
+.claude/*	check-dev-tools

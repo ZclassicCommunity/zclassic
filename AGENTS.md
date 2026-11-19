@@ -25,6 +25,15 @@ zcutil/local-ci.sh --commit <sha> --only <steps> test <outdir>   # own-machine C
 zcutil/local-ci.sh --commit <sha> test-changed <outdir>          # steps chosen by zcl-dev select
 zcutil/local-ci.sh --commit <sha> all <outdir>              # full candidate; macOS: zcutil/local-ci-macos.sh
 make -C zcutil check                                        # every developer tool's selftest (zcutil/bin/zcl-dev help lists subcommands)
+zcutil/bin/zcl-dev doctor                                   # what this host lacks to build and test, with the fix for each gap
+zcutil/bin/zcl-dev verify [--base ref]                      # one trip for committed changes: select, focused tests when built, zcl-lint all, test-changed hint
+zcutil/bin/zcl-dev code map|owner|impact|file|sym|refs ...  # code intelligence: navigate before searching
+zcutil/bin/zcl-dev wiki [topic]                             # walk the docs and source trees one topic at a time
+zcutil/bin/zcl-dev lessons find <words>                        # search lessons, traps and facts (add: lessons add)
+zcutil/bin/zcl-dev know <term>                              # closed FACTS table answer, UNKNOWN when no row; know --check validates it
+zcutil/bin/zcl-dev gen --check rpc-parity                   # also: gen --check flags, gen rpc-reference|args-reference|inventory
+zcutil/bin/zcl-lint all                                     # every lint rule and ratchet; zcl-lint kpi prints the tree-health floor
+zcutil/local-ci.sh --commit <sha> dev-tools <outdir>        # the check-dev-tools step alone, with a receipt
 ```
 
 Run a single qa script as `sh qa/rpc-tests/<script>.sh <dir-with-zclassicd>`. Unit tests: `src/test/test_bitcoin --run_test=<suite>` after a `--enable-tests` build ([doc/unit-tests.md](doc/unit-tests.md)). Where the host has a build broker (for example `devbuild --wait`), run heavy commands behind it.
@@ -50,6 +59,7 @@ Run the test and read the log: an exit status behind a pipe, a hash, a green sum
 
 - Build, release, platforms: [doc/building-quickstart.md](doc/building-quickstart.md), [doc/building-daemon-from-source.md](doc/building-daemon-from-source.md), [wallet/docs/BUILDING.md](wallet/docs/BUILDING.md).
 - Local CI, step names, receipts: [doc/local-ci.md](doc/local-ci.md).
+- Agent documents: [doc/agent/README.md](doc/agent/README.md) (index), [doc/agent/WIKI.md](doc/agent/WIKI.md) (walking the docs), [doc/agent/KPI.md](doc/agent/KPI.md) (tree-health floor), [zcutil/lint/README.md](zcutil/lint/README.md) (lint rules and ratchets). The MCP server for agents is `zcutil/agent/mcp/` (`zcutil/bin/zcl-mcp`).
 - C23 core and vendoring: [src/c23/README.md](src/c23/README.md), [doc/c23-build.md](doc/c23-build.md).
 - Wallet durability: [doc/wallet-crash-consistency.md](doc/wallet-crash-consistency.md). Wallet tests: [wallet/docs/TESTING.md](wallet/docs/TESTING.md).
 - Tests: [doc/unit-tests.md](doc/unit-tests.md), [qa/rpc-tests/README.md](qa/rpc-tests/README.md).

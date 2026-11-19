@@ -12,8 +12,8 @@ Release candidates are built and tested on the owner's own machines.
 
 | Script | Where it runs | What it does |
 | --- | --- | --- |
-| `zcutil/local-ci.sh` | Linux build host | `env-setup`, `daemon-linux`, `daemon-win64`, `wallet-linux`, `test`, `test-changed`, `dry`, `macos`, `all`, `shell`, `clean` (options `--only`, `--tor`, `--flavor`, `--pick`) |
-| `zcutil/local-ci-macos.sh` | the Mac | macOS daemon candidate, wallet GUI and tests (Homebrew Qt 5), macOS wallet bundle |
+| `zcutil/local-ci.sh` | Linux build host | `env-setup`, `daemon-linux`, `daemon-win64`, `wallet-linux`, `test`, `test-changed`, `dev-tools`, `dry`, `macos`, `all`, `shell`, `clean` (options `--only`, `--tor`, `--flavor`, `--pick`) |
+| `zcutil/local-ci-macos.sh` | the Mac | the check-dev-tools step (`dev-tools`), macOS daemon candidate, wallet GUI and tests (Homebrew Qt 5), macOS wallet bundle |
 | `zcutil/embedded-tor-check.sh` | anywhere | bounded embedded-Tor check of a daemon candidate (run by the macOS stage) |
 | `zcutil/local-ci-smoke.sh` | anywhere (Linux, macOS, Windows under Git Bash/MSYS2) | headless Sapling regtest smoke with exact balances |
 
@@ -66,6 +66,7 @@ Mac, from the Linux host (copies the bundle and script, runs, copies artifacts b
 ZCL_CI_MAC=mac zcutil/local-ci.sh --commit <sha> macos <outdir>      # daemon
 ZCL_CI_MAC=mac ZCL_CI_MAC_ARGS=wallet-tests zcutil/local-ci.sh --commit <sha> macos <outdir>   # wallet GUI + tests (Homebrew qt@5)
 ZCL_CI_MAC=mac ZCL_CI_MAC_ARGS=all zcutil/local-ci.sh --commit <sha> macos <outdir>   # + wallet bundle
+ZCL_CI_MAC=mac ZCL_CI_MAC_ARGS=dev-tools zcutil/local-ci.sh --commit <sha> macos <outdir>   # check-dev-tools only (the same step as on Linux)
 ```
 
 or directly on the Mac:
@@ -95,6 +96,8 @@ zcutil/bin/zcl-dev select [base-ref]               # steps for `git diff base...
 zcutil/bin/zcl-dev check-rules                     # every source file has a rule, every rule matches a file
 zcutil/local-ci.sh --commit <sha> --only wallet_matrix-1-9,zslp_index test <outdir>
 ZCL_CI_BASE=<base-ref> zcutil/local-ci.sh --commit <sha> test-changed <outdir>
+zcutil/bin/zcl-dev verify [--base ref]             # one trip for committed changes: select, t-fast (when built), zcl-lint all, then the test-changed hint
+zcutil/local-ci.sh --commit <sha> dev-tools <outdir>   # the check-dev-tools step alone, on the host, with a receipt
 ```
 
 `--only` takes a comma list of `test` step names (the names in the results table; a name
@@ -180,7 +183,7 @@ branch) onto the test builds only; the picks are recorded in `test*/PICKS.txt`.
 Results are in `test/` (debug) and `test-release/`.
 
 The debug stage runs:
-`check-dev-tools` (the `zcl-dev` fixture tests, `check-rules`, `check-docs`), `check-c23-vendor`, `check-tools-vendor`, `build-jsonq` (builds and tests `zcutil/bin/jsonq`, which the shell tests use), `zcl-lint` (zcutil/lint ratchets),
+`check-dev-tools` (`make -C zcutil check`: every developer tool's selftest, `zcl-dev check-rules` and `check-docs`; then `zcl-lint all`, `zcl-dev check-tests` when built, `zcl-dev know --check`, `zcl-dev gen --check rpc-parity` and `flags`), `check-c23-vendor`, `check-tools-vendor`, `build-jsonq` (builds and tests `zcutil/bin/jsonq`, which the shell tests use), `zcl-lint` (zcutil/lint ratchets),
 `check-c23-no-rust`, `check-c23-tor-symbols`, `check-no-python` (with its self-test), `key1-guard`
 (KEY-1 wallet secrecy guard, with poisoned-copy cases), `seed-generator` (byte-for-byte `chainparamsseeds.h`),
 `zmq-sub-example`, `wallet-embed-footer` and `wallet-mockrpc` (the C23/sh tools that replaced the

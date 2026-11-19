@@ -5,8 +5,9 @@
 # GitHub.  zcutil/local-ci.sh `macos` copies the bundle and this script over ssh and
 # runs it for you.
 #
-# usage: sh local-ci-macos.sh --bundle <file.bundle> --commit <sha> --out <dir> [daemon|wallet-tests|wallet|all]
+# usage: sh local-ci-macos.sh --bundle <file.bundle> --commit <sha> --out <dir> [dev-tools|daemon|wallet-tests|wallet|all]
 #
+#   dev-tools  the check-dev-tools step of local-ci.sh (developer tool selftests, zcl-lint all, know, gen gates)
 #   daemon  static macOS daemon with embedded Tor, otool allowlist, --version,
 #           regtest smoke, bounded embedded-Tor check  -> <out>/daemon-macos-arm64
 #   wallet-tests  Homebrew Qt 5: build the GUI, the logic tests and the widget tests
@@ -29,7 +30,7 @@ while [ $# -gt 0 ]; do
         --bundle) bundle=$2; shift 2 ;;
         --commit) commit=$2; shift 2 ;;
         --out) out=$2; shift 2 ;;
-        daemon|wallet-tests|wallet|all) what=$1; shift ;;
+        dev-tools|daemon|wallet-tests|wallet|all) what=$1; shift ;;
         -h|--help) sed -n "2,23p" "$0"; exit 0 ;;
         *) echo "local-ci-macos: unknown argument $1" >&2; exit 2 ;;
     esac
@@ -76,6 +77,24 @@ expected_version() {
 
 # Processes whose command line mentions one of OUR directories (never anyone else's).
 leftovers() { ps -axo pid=,command= | grep -F -e "$ROOT" -e "$out" | grep -v grep | grep -F zclassicd || true; }
+
+# The same commands as t_devtools in zcutil/local-ci.sh (keep the two in step).
+do_dev_tools() {
+    say "dev-tools: $commit"
+    checkout
+    cd "$SRC"
+    mkdir -p "$out/logs"
+    log=$out/logs/dev-tools-macos.log
+    { make -C zcutil -j"$JOBS" check &&
+      zcutil/bin/zcl-lint all &&
+      { [ ! -x zcutil/bin/zcl-dev-check-tests ] || zcutil/bin/zcl-dev check-tests; } &&
+      zcutil/bin/zcl-dev know --check &&
+      zcutil/bin/zcl-dev gen --check rpc-parity &&
+      zcutil/bin/zcl-dev gen --check flags; } >"$log" 2>&1 \
+        || { tail -40 "$log"; die "check-dev-tools failed (log $log)"; }
+    tail -3 "$log"
+    say "dev-tools OK"
+}
 
 do_daemon() {
     say "daemon: $commit"
@@ -185,5 +204,6 @@ case $what in
     daemon) do_daemon ;;
     wallet-tests) do_wallet_tests ;;
     wallet) do_wallet ;;
-    all) do_daemon; do_wallet_tests; do_wallet ;;
+    dev-tools) do_dev_tools ;;
+    all) do_dev_tools; do_daemon; do_wallet_tests; do_wallet ;;
 esac
