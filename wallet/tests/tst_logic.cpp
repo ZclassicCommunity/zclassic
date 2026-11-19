@@ -2838,6 +2838,9 @@ void TestLogic::health_eachAttentionStateIsReported() {
     QVERIFY(one({{"witness_rebuild_pending", true}}, false, "being rebuilt"));          // also while catching up
     QVERIFY(one({{"sapling", {{"witness_missing", 2}}}}, true, "2 shielded note(s) cannot be spent yet"));
     QVERIFY(one({{"checkpoint_height", 1998000}}, true, "2000 blocks ago"));
+    QVERIFY(one({{"checkpoint_failed", true}, {"checkpoint_failures", 1}}, true, "could not be saved"));
+    // a failed write is reported once, not together with the lag it causes
+    QVERIFY(one({{"checkpoint_failed", true}, {"checkpoint_height", 1998000}}, true, "could not be saved"));
     QVERIFY(one({{"pending_sends", {{"not_in_mempool", 1}}}}, true, "not in the node's mempool"));
     QVERIFY(one({{"pending_sends", {{"expiring_soon", 3}}}}, true, "will expire within a few blocks"));
     QVERIFY(one({{"pending_sends", {{"expired", 1}}}}, true, "funds are back in your balance") ||

@@ -292,3 +292,23 @@ every other baseline row moved with its code or fell (file sizes and complexity 
 
 The 133 lines are the new qa script `qa/rpc-tests/chain_crash_sweep.sh` (134 lines, `wave2/p2p-serve-guards`) less 1 line saved
 elsewhere by the other units. It is debt, to be paid by porting the sweep to C23 or by shell removed elsewhere; nothing else was baselined.
+## Wallet checkpoint after catch-up
+
+The checkpoint written once the node has caught up (`CWallet::CheckpointIfLagging`, `src/wallet/walletcheckpoint.cpp`) and the
+`checkpoint_failed` / `checkpoint_failures` health fields touch three files that sit at their file-size baseline. This raises exactly
+these rows, by what the change adds to them (the new code itself is in a new file); it is debt for a later reviewed split and not a precedent.
+
+| path | old | new |
+|---|---|---|
+| `src/wallet/rpcwallet.cpp` | 5009 | 5011 |
+| `src/wallet/wallet.cpp` | 6465 | 6470 |
+| `src/wallet/wallet.h` | 1979 | 1987 |
+
+kpi floor (`kpi-floor.txt`): `shell_lines` 23945 -> 24045, the new `qa/rpc-tests/wallet_checkpoint_after_catchup.sh` (100 lines; leased
+ports, `jsonq_lib.sh` helpers, no `jq`).
+
+## Integration re-seed 2026-11-19 (release candidate rc8)
+
+Merging the wallet save-point fix onto the wave 2 base adds both sides new test scripts:
+
+- kpi-floor `shell_lines`: 24078 -> 24178 (the 100-line `qa/rpc-tests/wallet_checkpoint_after_catchup.sh`).
