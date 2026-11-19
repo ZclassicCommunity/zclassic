@@ -1,0 +1,9 @@
+#!/bin/sh
+# Shim: the logic is C, in zcutil/bin/zcl-dev-hook (build: make -C zcutil). Linked worktrees fall back to the primary checkout build.
+top=$(git rev-parse --show-toplevel) || exit 1
+prim=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
+for d in "$top" "$prim"; do
+	for x in "" .exe; do
+		[ -x "$d/zcutil/bin/zcl-dev-hook$x" ] && exec "$d/zcutil/bin/zcl-dev-hook$x" pre-commit "$@"
+	done
+done; echo "zcl-dev-hook is not built: run make -C zcutil (or git commit --no-verify)" >&2; exit 1

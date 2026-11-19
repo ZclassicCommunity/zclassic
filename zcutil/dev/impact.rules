@@ -17,6 +17,7 @@ src/.clang-format|zcutil/check-hardening.sh|zcutil/fetch-params.sh|zcutil/zsync.
 # ---- local CI and the developer tool
 zcutil/Makefile|zcutil/local-ci.sh|zcutil/local-ci-macos.sh|zcutil/dev/*|zcutil/tools/Z23_SOURCE.tsv|zcutil/tools/LICENSE.z23|zcutil/tools/NOTICE|zcutil/tools/revendor.sh|zcutil/tools/vendor-files.txt|zcutil/tools/vendor/*	check-dev-tools
 zcutil/local-ci-smoke.sh	check-dev-tools regtest-smoke
+zcutil/githooks/*	check-dev-tools
 
 # ---- C23 core
 src/c23/vendor/*|src/c23/services/vendor/*|src/c23/Z23_SOURCE.tsv|src/c23/services/Z23_SOURCE.tsv|src/c23/LICENSE.z23|src/c23/NOTICE|src/c23/services/LICENSE.z23|src/c23/services/NOTICE|src/c23/tools/*|src/c23/services/tools/*	check-c23-vendor check-c23-no-rust c23-run-linked test_bitcoin-full
