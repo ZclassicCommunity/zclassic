@@ -105,6 +105,12 @@ static const unsigned int DATABASE_WRITE_INTERVAL = 60 * 60;
 static const unsigned int DATABASE_WRITE_INTERVAL_IBD = 5 * 60;
 /** Time to wait (in seconds) between flushing chainstate to disk. */
 static const unsigned int DATABASE_FLUSH_INTERVAL = 24 * 60 * 60;
+/** Time to wait (in seconds) between flushing chainstate to disk once the node is at the chain tip
+ *  (not in initial block download); default for -dbflushinterval. At the tip a flush writes only the
+ *  few blocks since the last one, so it is cheap; without it a crash or kill -9 loses every block
+ *  since the last block index write (their index entries are only in memory) and the node must
+ *  fetch them again from peers, which may not serve old blocks. */
+static const unsigned int DATABASE_FLUSH_INTERVAL_TIP = 10 * 60;
 /** Maximum length of reject messages. */
 static const unsigned int MAX_REJECT_MESSAGE_LENGTH = 111;
 static const int64_t DEFAULT_MAX_TIP_AGE = 24 * 60 * 60;
@@ -252,6 +258,8 @@ bool IsInitialBlockDownload();
  *  gone unanswered for more than nTimeoutSeconds at nNow (microseconds). */
 /** Seconds between periodic block index writes. */
 int64_t BlockIndexWriteInterval(bool fInitialBlockDownload);
+/** Seconds between full chainstate flushes (coins, block index, block files). */
+int64_t ChainstateFlushInterval(bool fInitialBlockDownload);
 
 bool HeadersRequestTimedOut(int64_t nNow, int64_t nRequestedAt, int64_t nTimeoutSeconds);
 
