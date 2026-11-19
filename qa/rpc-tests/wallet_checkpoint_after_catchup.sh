@@ -46,9 +46,11 @@ await_cp() {
     printf "%s\n" "$v"
 }
 rescans() { grep -c "Rescanning last" "$(LOG 0)"; }
-snap() { # snap <n> <label>: the balances of node n in one line
-    printf "%s|%s|%s" "$(cli "$1" z_gettotalbalance 1 | jq -cS .)" "$(cli "$1" listunspent 1 | jq -cS "[.[] | {txid, vout, amount}] | sort_by(.txid, .vout)")" \
-        "$(cli "$1" z_listunspent 1 | jq -cS "[.[] | {txid, amount, address}] | sort_by(.txid, .address)")"
+snap() { # snap <n>: the balances and unspent outputs of node n in one line
+    sn_t=$(cli "$1" z_gettotalbalance 1 | jget total)
+    sn_a=$(cli "$1" listunspent 1 | jpick txid | sort | paste -sd, -; cli "$1" listunspent 1 | jsatlist | sort | paste -sd, -)
+    sn_b=$(cli "$1" z_listunspent 1 | jpick txid | sort | paste -sd, -; cli "$1" z_listunspent 1 | jsatlist | sort | paste -sd, -)
+    printf "%s|%s|%s" "$sn_t" "$sn_a" "$sn_b"
 }
 
 scn_catchup() {

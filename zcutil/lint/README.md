@@ -262,3 +262,18 @@ Not baselined, fixed instead:
   `qa/rpc-tests/jsonq_lib.sh` helpers; no `no-new-jq`, `testiso` or `shellport` row was added. `install-kill-test.sh` and
   `multi-server-test.sh` are named in `zcutil/dev/impact.rules`; `mainnet-e2e.sh` is a manual script (about 10 GiB from the public
   servers): `resume-test.sh` prints the command line to run it by hand, as `wallet_witness_retire.sh` does for its perf script.
+
+## Wallet checkpoint after catch-up
+
+The checkpoint written once the node has caught up (`CWallet::CheckpointIfLagging`, `src/wallet/walletcheckpoint.cpp`) and the
+`checkpoint_failed` / `checkpoint_failures` health fields touch three files that sit at their file-size baseline. This raises exactly
+these rows, by what the change adds to them (the new code itself is in a new file); it is debt for a later reviewed split and not a precedent.
+
+| path | old | new |
+|---|---|---|
+| `src/wallet/rpcwallet.cpp` | 5009 | 5011 |
+| `src/wallet/wallet.cpp` | 6465 | 6470 |
+| `src/wallet/wallet.h` | 1979 | 1987 |
+
+kpi floor (`kpi-floor.txt`): `shell_lines` 23945 -> 24045, the new `qa/rpc-tests/wallet_checkpoint_after_catchup.sh` (100 lines; leased
+ports, `jsonq_lib.sh` helpers, no `jq`).

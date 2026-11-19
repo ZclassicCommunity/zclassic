@@ -11,9 +11,9 @@ src/test/bootstrap_snapshot_protocol_tests.cpp	2617
 src/test/rpc_wallet_tests.cpp	2151
 src/test/rust_oracle/gen_golden.cpp	2984
 src/wallet/gtest/test_wallet.cpp	3362
-src/wallet/rpcwallet.cpp	5009
-src/wallet/wallet.cpp	6465
-src/wallet/wallet.h	1979
+src/wallet/rpcwallet.cpp	5011
+src/wallet/wallet.cpp	6470
+src/wallet/wallet.h	1987
 wallet/src/connection.cpp	3306
 wallet/src/mainwindow.cpp	4061
 wallet/src/rpc.cpp	2846
