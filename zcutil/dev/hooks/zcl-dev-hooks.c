@@ -35,6 +35,16 @@
  * refused (no receipt covers a script); an empty diff needs at least one PASS receipt for the sha.
  * Receipts are $ZCL_CI_OUT/receipts.jsonl, else $HOME/work/zc23-localci-out/<9-char sha>/
  * (run local-ci with that exact directory name, e.g. the first 9 characters of the sha).
+ * A NEW protected ref (no remote commit to replace) is judged against the remote's master tip as the
+ * trusted base gate (refs/remotes/<remote>/master, else `git ls-remote`): the required set is
+ * united with what master's impact.rules and local-ci.sh require, and a pushed commit whose rules
+ * or local-ci.sh differ from master's requires ALL. A new release/<name> with no master known is
+ * refused (ZCL_PUSH_OK still works). Creating master itself on an empty remote has nothing to trust
+ * and uses the pushed commit's gate.
+ * This is a guard against mistakes, not an authority: receipts are self-attested, unauthenticated
+ * lines anyone can append (or point ZCL_CI_OUT at); the receipt tree field is not checked against the
+ * commit; `git push --no-verify` writes no override log; merge and cherry-pick run no pre-commit; tags
+ * are not gated. A pass is not proof that the commit was tested.
  * Override ZCL_PUSH_OK=<reason>: printed and appended to <common git dir>/zcl-push-overrides.log.
  * Exit codes: 0 allowed, 1 refused, 2 broken (cannot run git, bad arguments).
  */
@@ -613,16 +623,18 @@ static int required_at(const Repo *r, const char *base, const char *sha, const c
 /* The required set for base..sha: the union of what the rules and step list of the pushed commit
  * require and what those of the base (the remote ref being updated) require, so a push can add
  * steps but never remove them. A push that changes the rules or local-ci.sh itself requires the
- * full set (both sides). A new ref (EMPTY_TREE base) has no remote gate to compare with. */
-static int required_steps(const Repo *r, const char *base, const char *sha, Names *req, int *any_pass, int *all_mode, char *msg, size_t cap)
+ * full set (both sides). A new ref (EMPTY_TREE base) is compared with gate, the remote's master tip (NULL only when master itself is being created). */
+static int required_steps(const Repo *r, const char *base, const char *gate, const char *sha, Names *req, int *any_pass, int *all_mode, char *msg, size_t cap)
 {
     if (required_at(r, base, sha, sha, 1, req, any_pass, all_mode, msg, cap)) return 1;
-    int has_base = strcmp(base, EMPTY_TREE) != 0;
-    if (has_base) {
+    int is_new = !strcmp(base, EMPTY_TREE);
+    const char *trusted = is_new ? gate : base; /* the gate to hold the pushed commit to; NULL only when bootstrapping master */
+    if (trusted) {
         Names breq = {0};
         int bany = 0, ball = 0, rc;
         char bmsg[512];
-        rc = required_at(r, base, sha, base, 0, &breq, &bany, &ball, bmsg, sizeof bmsg);
+        rc = required_at(r, base, sha, trusted, 0, &breq, &bany, &ball, bmsg, sizeof bmsg);
+        if (rc == 2 && is_new) { snprintf(msg, cap, "base rules: %s", bmsg); names_free(&breq); return 1; }
         if (rc == 1) { snprintf(msg, cap, "base rules: %s", bmsg); names_free(&breq); return 1; }
         if (rc == 0) {
             for (size_t i = 0; i < breq.n; i++) names_add(req, breq.v[i]);
@@ -631,23 +643,23 @@ static int required_steps(const Repo *r, const char *base, const char *sha, Name
         names_free(&breq);
     }
     char cmd[512];
-    snprintf(cmd, sizeof cmd, "git diff --quiet %s %s -- zcutil/dev/impact.rules zcutil/local-ci.sh", base, sha);
-    if (has_base && run(cmd, NULL) != 0) { /* changed (1) or unreadable: the gate itself moved, so require everything */
+    snprintf(cmd, sizeof cmd, "git diff --quiet %s %s -- zcutil/dev/impact.rules zcutil/local-ci.sh", trusted ? trusted : sha, sha);
+    if (trusted && run(cmd, NULL) != 0) { /* changed (1) or unreadable: the gate itself moved, so require everything */
         *all_mode = 1;
         if (add_all(req, sha, 1, msg, cap)) return 1;
-        add_all(req, base, 0, msg, cap);
+        add_all(req, trusted, 0, msg, cap);
     }
     if (req->n) *any_pass = 0;
     return 0;
 }
 
 /* Fills msg with why the receipts do not cover base..sha; returns 0 when they do. */
-static int check_receipts(const Repo *r, const char *base, const char *sha, char *msg, size_t cap)
+static int check_receipts(const Repo *r, const char *base, const char *gate, const char *sha, char *msg, size_t cap)
 {
     Names req = {0};
     int any_pass, all_mode;
     msg[0] = 0;
-    if (required_steps(r, base, sha, &req, &any_pass, &all_mode, msg, cap)) { names_free(&req); return 1; }
+    if (required_steps(r, base, gate, sha, &req, &any_pass, &all_mode, msg, cap)) { names_free(&req); return 1; }
     char *path = receipts_path(sha);
     Rcpt *rcs;
     size_t nr = load_receipts(path, sha, &rcs);
@@ -704,8 +716,31 @@ static int protected_ref(const char *ref)
     return ieq_prefix(ref, "refs/heads/master") && !ref[17] ? 1 : ieq_prefix(ref, "refs/heads/release/");
 }
 
+/* The remote's master tip, the trusted gate for a new protected ref: the local tracking ref, else
+ * ls-remote. Caller frees; NULL when unknown or the remote name is unusable. */
+static char *trusted_master(const char *remote)
+{
+    char cmd[1400];
+    if (!remote[0] || !quotable(remote) || remote[0] == '-') return NULL;
+    snprintf(cmd, sizeof cmd, "git rev-parse --verify -q \"refs/remotes/%s/master^{commit}\"", remote);
+    char *s = git_line(cmd, NULL);
+    if (s && is_sha(s)) return s;
+    free(s);
+    snprintf(cmd, sizeof cmd, "git ls-remote -- \"%s\" refs/heads/master", remote);
+    s = git_line(cmd, NULL);
+    if (s) {
+        char *tab = strpbrk(s, "	 ");
+        if (tab) {
+            *tab = 0;
+            if (is_sha(s)) return s;
+        }
+    }
+    free(s);
+    return NULL;
+}
+
 /* Why one update of a protected ref is not allowed; "" when it is. */
-static void judge(const Repo *r, const char *rref, const char *lsha, const char *rsha, char *why, size_t cap)
+static void judge(const Repo *r, const char *remote, const char *rref, const char *lsha, const char *rsha, char *why, size_t cap)
 {
     why[0] = 0;
     if (is_zero(lsha)) { snprintf(why, cap, "deleting %s is not allowed", rref); return; }
@@ -723,12 +758,22 @@ static void judge(const Repo *r, const char *rref, const char *lsha, const char 
         }
     }
     if (!verifiable) return;
-    char msg[2048];
-    if (check_receipts(r, zero_remote ? EMPTY_TREE : rsha, lsha, msg, sizeof msg))
+    char msg[2048], *gate = NULL;
+    if (zero_remote && !ieq_prefix(rref, "refs/heads/master")) { /* a new release/<name> ref: hold it to master's gate */
+        gate = trusted_master(remote);
+        if (!gate) {
+            snprintf(why + w, cap - w, "%sno trusted master gate: cannot find the remote's master (refs/remotes/%s/master or ls-remote); a new %s would take its gate from the pushed commit",
+                     w ? "; " : "", remote, rref);
+            return;
+        }
+    }
+    int bad = check_receipts(r, zero_remote ? EMPTY_TREE : rsha, gate, lsha, msg, sizeof msg);
+    free(gate);
+    if (bad)
         snprintf(why + w, cap - w, "%s%s", w ? "; " : "", msg);
 }
 
-static int pre_push(void)
+static int pre_push(const char *remote)
 {
     Repo r = repo_open();
     char lref[512], lsha[80], rref[512], rsha[80], line[2048];
@@ -738,7 +783,7 @@ static int pre_push(void)
         if (!protected_ref(rref)) continue;
         if (!is_sha(lsha) || !is_sha(rsha)) die("malformed ref update line from git");
         char why[4096];
-        judge(&r, rref, lsha, rsha, why, sizeof why);
+        judge(&r, remote, rref, lsha, rsha, why, sizeof why);
         if (!why[0]) continue;
         const char *ov = getenv("ZCL_PUSH_OK");
         if (ov && *ov) { record_override(&r, rref, rsha, lsha, ov); continue; }
@@ -841,7 +886,7 @@ int main(int argc, char **argv)
     const char *cmd = argc >= 2 ? argv[1] : "";
     if (!strcmp(cmd, "--purpose")) { puts("install and inspect the git hooks (install | status)"); return 0; }
     if (!strcmp(cmd, "pre-commit")) return pre_commit();
-    if (!strcmp(cmd, "pre-push")) return pre_push();
+    if (!strcmp(cmd, "pre-push")) return pre_push(argc >= 3 ? argv[2] : "");
     int json = 0, force = 0;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--json")) json = 1;

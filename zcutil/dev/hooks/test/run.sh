@@ -210,6 +210,24 @@ expect "missing local-ci.sh under ALL is refused, not a die" 1 "cannot read zcut
 expect "missing local-ci.sh can use the logged override" 0 "ZCL_PUSH_OK override" env ZCL_PUSH_OK="no local-ci yet" git push -q origin nolc:refs/heads/release/2.0
 git checkout -q master; git branch -q -D nolc
 
+# a NEW protected ref does not take its gate from the pushed commit: master's gate applies
+git checkout -q -b newr
+printf '*	-
+' >zcutil/dev/impact.rules
+echo n >>src/a.c; git add -A; ci newr1; newr1=$(git rev-parse HEAD)
+rcpt "$newr1" unit-a PASS
+expect "new release/x whose commit narrows the rules is refused without the base-required receipts" 1 "unit-b: no receipt" git push -q origin newr:refs/heads/release/x
+expect "same for a case variant" 1 "unit-b: no receipt" git push -q origin newr:refs/heads/Release/Y
+git update-ref -d refs/remotes/origin/master
+expect "tracking ref unknown: master read with ls-remote, still refused" 1 "unit-b: no receipt" git push -q origin newr:refs/heads/release/x
+git fetch -q origin
+expect "narrowing is refused with the logged override still available" 0 "ZCL_PUSH_OK override" env ZCL_PUSH_OK="newref test" git push -q origin newr:refs/heads/release/x
+git push -q origin :refs/heads/release/x --no-verify
+git remote add empty "$work/empty.git"; git init -q --bare "$work/empty.git"
+expect "no master on the remote: a new release/x is refused, not trusted" 1 "no trusted master gate" git push -q empty newr:refs/heads/release/x
+expect "no master on the remote: the override still works" 0 "ZCL_PUSH_OK override" env ZCL_PUSH_OK="bootstrap" git push -q empty newr:refs/heads/release/x
+git checkout -q master; git branch -q -D newr
+
 # protected refs are matched case-insensitively
 expect "case variant of master is protected" 1 "no local-ci receipt" git push -q origin HEAD:refs/heads/Master
 expect "case variant of release/ is protected" 1 "no local-ci receipt" git push -q origin HEAD:refs/heads/Release/x
