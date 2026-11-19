@@ -9,6 +9,7 @@
 #include "mainwindow.h"
 #include "connection.h"
 #include "notifyserver.h"
+#include "sendflow.h"
 
 using json = nlohmann::json;
 
@@ -30,6 +31,12 @@ struct WatchedTx {
     Tx tx;
     std::function<void(QString, QString)> completed;
     std::function<void(QString, QString)> error;
+    // Optional: transient states for the user ("Sending...", "Outcome unknown..."): progress(opid, text).
+    std::function<void(QString, QString)> progress;
+    bool    keyed        = false;   // the send carries an idempotency key (the node keeps a journal for it)
+    bool    unknown      = false;   // last verdict was "outcome unknown": only the journal can change it
+    int     missed       = 0;       // consecutive polls in which the node did not list the operation
+    QString lastProgress;
 };
 
 class RPC
@@ -56,10 +63,13 @@ public:
     void checkForUpdate(bool silent = true);
     void refreshZCLPrice();
 
+    // One idempotency key per call (= per user confirmation). If the answer to z_sendmany is lost, the call is repeated
+    // with the same key; the node never builds a second transaction. progress (optional) reports transient states.
     void executeTransaction(Tx tx, 
         const std::function<void(QString opid)> submitted,
         const std::function<void(QString opid, QString txid)> computed,
-        const std::function<void(QString opid, QString errStr)> error);
+        const std::function<void(QString opid, QString errStr)> error,
+        const std::function<void(QString opid, QString text)> progress = nullptr);
 
     void fillTxJsonParams(json& params, Tx tx);
     void sendZTransaction(json params, const std::function<void(json)>& cb, const std::function<void(QString)>& err);
@@ -109,6 +119,9 @@ public:
     // installed Connection is never actually USED on these paths (the seeded
     // Sapling address resolves first), only its non-null-ness is checked.
     void testSetConnection(Connection* c) { conn = c; }
+    // Send-once timing (an unanswered z_sendmany is abandoned after timeoutMs, then repeated with growing pauses from baseMs).
+    void testSetSendTiming(int timeoutMs, int baseMs) { sendTimeoutMs = timeoutMs; sendRetryBaseMs = baseMs; }
+    int  testDaemonTakesSendKey() const { return daemonTakesSendKey; }
     void testSetShuttingDown(bool b) { ezShuttingDown = b; }
     void testDropConnectingMessage() { dropConnectingMessage(); }
     bool testRefreshAuthFromCookie() { return refreshAuthFromCookie(); }
@@ -403,6 +416,17 @@ private:
     QList<QString>*             taddresses                  = nullptr;
     
     QMap<QString, WatchedTx>    watchingOps;
+
+    // Send once: one idempotency key per confirmation, repeated with the same key when an answer is lost (sendflow.h).
+    struct SendAttempt;
+    void sendAttempt(const std::shared_ptr<SendAttempt>& at);
+    void applyVerdicts(const QMap<QString, sendflow::QueueEntry>& queue, bool journalKnown,
+                       const QMap<QString, sendflow::JournalEntry>& journal);
+    int                         daemonTakesSendKey          = -1;     // -1 not known yet, 0 older node (no 5th parameter), 1 yes
+    int                         sendTimeoutMs               = 60000;  // an unanswered z_sendmany is abandoned and repeated
+    int                         sendRetryBaseMs             = 1000;
+    // Cleared in ~RPC: timers and replies that outlive the object check it first.
+    std::shared_ptr<bool>       alive                       = std::make_shared<bool>(true);
 
     TxTableModel*               transactionsTableModel      = nullptr;
     BalancesTableModel*         balancesTableModel          = nullptr;

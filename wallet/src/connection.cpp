@@ -3211,11 +3211,11 @@ Connection::~Connection() {
     delete request;
 }
 
-void Connection::doRPC(const json& payload, const std::function<void(json)>& cb, 
+QNetworkReply* Connection::doRPC(const json& payload, const std::function<void(json)>& cb, 
                        const std::function<void(QNetworkReply*, const json&)>& ne) {
     if (shutdownInProgress) {
         // Ignoring RPC because shutdown in progress
-        return;
+        return nullptr;
     }
 
     QNetworkReply *reply = restclient->post(*request, QByteArray::fromStdString(payload.dump()));
@@ -3228,7 +3228,8 @@ void Connection::doRPC(const json& payload, const std::function<void(json)>& cb,
         }
         
         if (reply->error() != QNetworkReply::NoError) {
-            auto parsed = json::parse(reply->readAll(), nullptr, false);
+            // (an abandoned request, abort()ed by the caller, has no body and is not open any more)
+            auto parsed = json::parse(reply->isOpen() ? reply->readAll() : QByteArray(), nullptr, false);
             ne(reply, parsed);
             
             return;
@@ -3247,6 +3248,7 @@ void Connection::doRPC(const json& payload, const std::function<void(json)>& cb,
 
         cb(parsed["result"]);
     });
+    return reply;
 }
 
 void Connection::doRPCWithDefaultErrorHandling(const json& payload, const std::function<void(json)>& cb) {

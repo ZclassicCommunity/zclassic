@@ -48,6 +48,7 @@
 #include "addressbook.h"       // shim
 #include "privacybadgedelegate.h"   // PRIV-13/14: classify/labelFor/colorFor (real)
 #include "securerandom.h"      // CONF-1/NOTIFY-SRV: CSPRNG secret generation (real)
+#include "sendflow.h"          // send once: the pure rules (real)
 #include <QSet>
 #include <QRegularExpression>
 #include <QFileInfo>
@@ -963,6 +964,14 @@ private slots:
     void profile_blankValueFailsClosed();
     void daemonjob_everyLaunchPathUsesTheJob();
     void daemonjob_armedAfterEveryStart();
+    void sendflow_keysAreValidAndDistinct();
+    void sendflow_classifyTheAnswerToTheCall();
+    void sendflow_retryPaceIsBounded();
+    void sendflow_whatTheUserIsToldAboutAKeyedSend();
+    void sendflow_anUnkeyedSendOnAnOlderNode();
+    void sendflow_theJournalIsOnlyAskedWhenItDecides();
+    void sendflow_parseWhatTheNodeSays();
+    void sendflow_ownWordingIsNotRewritten();
 
 private:
     QString sandboxAppData() const {
@@ -2243,6 +2252,162 @@ void TestLogic::daemonjob_armedAfterEveryStart() {
     QCOMPARE(DaemonJob::start(&bad, "Z:/definitely/not/here.exe", {}), 0ul);
     QVERIFY2(DaemonJob::entries().size() <= before, "failed launch must not record a job");
 #endif
+}
+
+
+// ---- send once (src/sendflow.h): the rules that decide what the user is told about a send ----
+
+void TestLogic::sendflow_keysAreValidAndDistinct() {
+    QSet<QString> seen;
+    const QRegularExpression ok("^[A-Za-z0-9._:-]{1,128}$");
+    for (int i = 0; i < 200; ++i) {
+        const QString k = sendflow::newKey();
+        QVERIFY2(ok.match(k).hasMatch(), qPrintable(k));
+        QVERIFY2(k.size() >= 32, "enough entropy: a 128-bit floor needs at least 22 base62 characters");
+        QVERIFY2(!seen.contains(k), "a key must never repeat");
+        seen.insert(k);
+    }
+}
+
+void TestLogic::sendflow_classifyTheAnswerToTheCall() {
+    using sendflow::CallClass;
+    QString msg;
+    // no usable answer at all: may or may not have been queued
+    QCOMPARE(sendflow::classifyCall(nlohmann::json::parse("garbage", nullptr, false), 0, true, &msg), CallClass::Ambiguous);
+    QCOMPARE(sendflow::classifyCall(nlohmann::json("Unknown error"), 0, true, &msg), CallClass::Ambiguous);
+    QCOMPARE(sendflow::classifyCall(nlohmann::json::object(), 502, true, &msg), CallClass::Ambiguous);
+    QCOMPARE(sendflow::classifyCall(nlohmann::json::object(), 503, true, &msg), CallClass::Ambiguous);
+    // the node answered with a JSON-RPC error: nothing was queued
+    nlohmann::json e = {{"result", nullptr}, {"error", {{"code", -6}, {"message", "Insufficient funds"}}}};
+    QCOMPARE(sendflow::classifyCall(e, 500, true, &msg), CallClass::Definitive);
+    QCOMPARE(msg, QString("Insufficient funds"));
+    // the credentials were refused before the call was looked at
+    QCOMPARE(sendflow::classifyCall(nlohmann::json::object(), 401, true, &msg), CallClass::Definitive);
+    QVERIFY(msg.contains("401"));
+    // an older node: its usage text for too many parameters (and only when the key was sent)
+    nlohmann::json old = {{"error", {{"code", -1}, {"message", "z_sendmany \"fromaddress\" [{\"address\":... ,\"amount\":...},...] ( minconf ) ( fee )\n\nSend multiple times."}}}};
+    QCOMPARE(sendflow::classifyCall(old, 500, true, &msg), CallClass::KeyUnsupported);
+    QCOMPARE(sendflow::classifyCall(old, 500, false, &msg), CallClass::Definitive);
+    // a node that knows the key and refuses something else about the call is final, never a reason to drop the key
+    nlohmann::json newer = {{"error", {{"code", -1}, {"message", "z_sendmany \"fromaddress\" ... ( \"idempotency_key\" )\n\nusage"}}}};
+    QCOMPARE(sendflow::classifyCall(newer, 500, true, &msg), CallClass::Definitive);
+    nlohmann::json badKey = {{"error", {{"code", -8}, {"message", "Invalid parameter, idempotency_key must be 1 to 128 characters"}}}};
+    QCOMPARE(sendflow::classifyCall(badKey, 500, true, &msg), CallClass::Definitive);
+    // an error from another call is not the old node's usage text
+    nlohmann::json other = {{"error", {{"code", -4}, {"message", "Wallet is locked"}}}};
+    QCOMPARE(sendflow::classifyCall(other, 500, true, &msg), CallClass::Definitive);
+}
+
+void TestLogic::sendflow_retryPaceIsBounded() {
+    QCOMPARE(sendflow::retryDelayMs(1), 1000);
+    QCOMPARE(sendflow::retryDelayMs(2), 2000);
+    QCOMPARE(sendflow::retryDelayMs(3), 4000);
+    QCOMPARE(sendflow::retryDelayMs(4), 8000);
+    QCOMPARE(sendflow::retryDelayMs(5), 15000);
+    QCOMPARE(sendflow::retryDelayMs(500), 15000);
+    QCOMPARE(sendflow::retryDelayMs(0), 1000);
+    QCOMPARE(sendflow::retryDelayMs(3, 20), 80);
+    // the whole window stays far below the time after which a node releases an unmined key (20 blocks past expiry)
+    qint64 total = 0;
+    for (int a = 1; a < sendflow::kMaxSendAttempts; ++a) total += sendflow::retryDelayMs(a);
+    QVERIFY(total < 20 * 60 * 1000);
+}
+
+namespace {
+sendflow::QueueEntry Q(const char* status, const char* txid = "", const char* err = "", bool lastErr = false) {
+    sendflow::QueueEntry q; q.present = true; q.status = status; q.txid = txid; q.error = err; q.hasLastError = lastErr; return q;
+}
+sendflow::JournalEntry J(const char* state, const char* txid = "") {
+    sendflow::JournalEntry j; j.present = true; j.state = state; j.txid = txid; return j;
+}
+}
+
+void TestLogic::sendflow_whatTheUserIsToldAboutAKeyedSend() {
+    using sendflow::State;
+    const sendflow::QueueEntry none;
+    const sendflow::JournalEntry nojournal;
+    // live operation
+    QCOMPARE(sendflow::resolve(true, Q("queued"), false, nojournal).state, State::Sending);
+    QCOMPARE(sendflow::resolve(true, Q("executing"), false, nojournal).state, State::Sending);
+    auto done = sendflow::resolve(true, Q("success", "tx1"), false, nojournal);
+    QCOMPARE(done.state, State::Sent); QCOMPARE(done.txid, QString("tx1"));
+    // the broadcast failed after the build: the journal still holds it
+    auto v = sendflow::resolve(true, Q("failed", "", "refused"), true, J("outcome_unknown", "tx2"));
+    QCOMPARE(v.state, State::Unknown); QCOMPARE(v.txid, QString("tx2"));
+    QVERIFY(v.text.contains("Outcome unknown")); QVERIFY(v.text.contains("will not send again"));
+    // ...and later the journal settles it
+    QCOMPARE(sendflow::resolve(true, Q("failed", "", "refused"), true, J("committed", "tx2")).state, State::Sent);
+    QCOMPARE(sendflow::resolve(true, Q("failed", "", "refused"), true, J("committed", "tx2")).txid, QString("tx2"));
+    auto ex = sendflow::resolve(true, Q("failed", "", "refused"), true, J("expired"));
+    QCOMPARE(ex.state, State::Expired); QVERIFY(ex.text.contains("Funds are available again"));
+    // failed before anything was built: the record is erased, the reason is the node's
+    auto f = sendflow::resolve(true, Q("failed", "", "Insufficient funds"), true, nojournal);
+    QCOMPARE(f.state, State::Failed); QCOMPARE(f.text, QString("Insufficient funds"));
+    auto rel = sendflow::resolve(true, Q("failed", "", "boom"), true, J("released"));
+    QCOMPARE(rel.state, State::Failed); QCOMPARE(rel.text, QString("boom"));
+    // gone from the queue (restart)
+    QCOMPARE(sendflow::resolve(true, none, true, J("committed", "tx3")).state, State::Sent);
+    QCOMPARE(sendflow::resolve(true, none, true, J("outcome_unknown", "tx3")).state, State::Unknown);
+    QCOMPARE(sendflow::resolve(true, none, true, J("expired")).state, State::Expired);
+    QCOMPARE(sendflow::resolve(true, none, true, J("started")).state, State::Sending);
+    QCOMPARE(sendflow::resolve(true, none, true, J("released")).state, State::Failed);
+    auto gone = sendflow::resolve(true, none, true, nojournal);
+    QCOMPARE(gone.state, State::Failed); QVERIFY(gone.text.contains("Nothing was sent"));
+    // the node answers for the id from its journal (built, not in a block or the mempool): the txid rides on it
+    QCOMPARE(sendflow::resolve(true, Q("executing", "tx4", "", true), false, nojournal).state, State::Unknown);
+    QCOMPARE(sendflow::resolve(true, Q("executing", "", "", true), false, nojournal).state, State::Unknown);
+}
+
+void TestLogic::sendflow_anUnkeyedSendOnAnOlderNode() {
+    using sendflow::State;
+    const sendflow::JournalEntry nojournal;
+    QCOMPARE(sendflow::resolve(false, Q("executing"), false, nojournal).state, State::Sending);
+    QCOMPARE(sendflow::resolve(false, Q("success", "tx"), false, nojournal).state, State::Sent);
+    QCOMPARE(sendflow::resolve(false, Q("failed", "", "nope"), false, nojournal).state, State::Failed);
+    // the queue forgot it: the wallet cannot tell, and says so instead of "failed"
+    auto lost = sendflow::resolve(false, sendflow::QueueEntry(), false, nojournal);
+    QCOMPARE(lost.state, State::Lost);
+    QVERIFY(lost.text.contains("Check your transactions before sending again"));
+    // a journal is never consulted for a send that has no key
+    QVERIFY(!sendflow::needsJournal(false, sendflow::QueueEntry(), false));
+    QVERIFY(!sendflow::needsJournal(false, Q("failed"), true));
+}
+
+void TestLogic::sendflow_theJournalIsOnlyAskedWhenItDecides() {
+    QVERIFY(!sendflow::needsJournal(true, Q("executing"), false));
+    QVERIFY(!sendflow::needsJournal(true, Q("success", "tx"), false));
+    QVERIFY(sendflow::needsJournal(true, Q("failed"), false));
+    QVERIFY(sendflow::needsJournal(true, sendflow::QueueEntry(), false));
+    QVERIFY(sendflow::needsJournal(true, Q("executing"), true));      // already of unknown outcome
+}
+
+void TestLogic::sendflow_parseWhatTheNodeSays() {
+    auto q = sendflow::parseQueueEntry(nlohmann::json::parse(
+        R"({"id":"opid-1","status":"success","result":{"txid":"aa"}})"));
+    QVERIFY(q.present); QCOMPARE(q.status, QString("success")); QCOMPARE(q.txid, QString("aa"));
+    auto f = sendflow::parseQueueEntry(nlohmann::json::parse(
+        R"({"id":"opid-1","status":"failed","error":{"code":-4,"message":"boom"}})"));
+    QCOMPARE(f.error, QString("boom"));
+    auto b = sendflow::parseQueueEntry(nlohmann::json::parse(
+        R"({"id":"opid-1","status":"executing","txid":"bb","expiryheight":9,"last_error":{"code":-1,"message":"m"}})"));
+    QCOMPARE(b.txid, QString("bb")); QVERIFY(b.hasLastError);
+    QVERIFY(!sendflow::parseQueueEntry(nlohmann::json("x")).present);
+    QVERIFY(!sendflow::parseJournalEntry(nlohmann::json::array()).present);
+    auto j = sendflow::parseJournalEntry(nlohmann::json::parse(R"({"opid":"o","state":"committed","txid":"cc","stored_state":"committed"})"));
+    QVERIFY(j.present); QCOMPARE(j.state, QString("committed")); QCOMPARE(j.txid, QString("cc"));
+    // wrong types never throw
+    auto w = sendflow::parseQueueEntry(nlohmann::json::parse(R"({"status":5,"result":3,"error":"x"})"));
+    QVERIFY(w.present); QVERIFY(w.status.isEmpty());
+}
+
+void TestLogic::sendflow_ownWordingIsNotRewritten() {
+    for (const QString& s : { sendflow::unknownText(), sendflow::expiredText(), sendflow::lostText(),
+                              sendflow::interruptedText(), sendflow::gaveUpText(), sendflow::oldNodeAmbiguousText() })
+        QVERIFY(sendflow::isFlowText(s));
+    QVERIFY(!sendflow::isFlowText("Insufficient funds"));
+    // none of them invites the user to simply try again, except the ones where nothing was sent
+    QVERIFY(!sendflow::unknownText().contains("try again", Qt::CaseInsensitive));
+    QVERIFY(!sendflow::gaveUpText().contains("try again", Qt::CaseInsensitive));
 }
 
 QTEST_MAIN(TestLogic)

@@ -373,7 +373,8 @@ public:
     void shutdown();
     bool isShuttingDown() const { return shutdownInProgress; }
 
-    void doRPC(const json& payload, const std::function<void(json)>& cb, 
+    // Returns the request in flight (null when nothing was sent: shutting down), so a caller can abandon it.
+    QNetworkReply* doRPC(const json& payload, const std::function<void(json)>& cb, 
                const std::function<void(QNetworkReply*, const json&)>& ne);
     void doRPCWithDefaultErrorHandling(const json& payload, const std::function<void(json)>& cb);
     void doRPCIgnoreError(const json& payload, const std::function<void(json)>& cb) ;

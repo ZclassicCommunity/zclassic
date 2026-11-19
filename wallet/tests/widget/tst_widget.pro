@@ -89,6 +89,7 @@ HEADERS += \
     ../../src/notifyserver.h \
     ../../src/tokensmodel.h \
     ../../src/pollguard.h \
+    ../../src/sendflow.h \
     ../../src/tokensview.h \
     ../../src/tokenssend.h \
     ../../src/logger.h \
