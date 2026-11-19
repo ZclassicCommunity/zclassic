@@ -31,7 +31,7 @@
 # Never point this at a real datadir; it creates and deletes its own under --work.
 set -u
 
-bin=""; work=""; base=50100; modes="all"; kills=32; files=24; filemib=24; kbps=262144
+bin=""; work=""; base=""; modes="all"; kills=32; files=24; filemib=24; kbps=262144
 oldserver=""; oldclient=""; serverargs=""; slots=3
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -56,6 +56,8 @@ mkdir -p "$work" || exit 2
 work=$(cd "$work" && pwd)
 [ -z "$(ls -A "$work")" ] || { echo "resume-test: $work is not empty" >&2; exit 2; }
 
+. "$(dirname "$0")/../lib/isolation.sh"
+iso_base base "$base" 16
 sp=$base; sr=$((base + 1)); cp=$((base + 2)); cr=$((base + 3)); op=$((base + 4)); orp=$((base + 5)); gp=$((base + 6)); gr=$((base + 7))
 common="-regtest -dnsseed=0 -upnp=0 -listenonion=0 -discover=0 -bind=127.0.0.1 -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -debuglogfile=1 -printtoconsole=0 -showmetrics=0 -disablewallet"
 failures=0
@@ -109,7 +111,7 @@ make_fixture() {
     say "building the regtest fixture (chain, serve dir, $files padding files of ~$filemib MiB)"
     mkconf "$srcdir" "$gr"
     # shellcheck disable=SC2086
-    "$bin/zclassicd" -regtest -dnsseed=0 -upnp=0 -listenonion=0 -discover=0 -bind=127.0.0.1 -rpcbind=127.0.0.1 \
+    $ZCL_RUN "$bin/zclassicd" -regtest -dnsseed=0 -upnp=0 -listenonion=0 -discover=0 -bind=127.0.0.1 -rpcbind=127.0.0.1 \
         -rpcallowip=127.0.0.1 -debuglogfile=1 -printtoconsole=0 -showmetrics=0 -bootstrap=0 \
         -datadir="$srcdir" -port=$gp -listen=0 -connect=0 -daemon >/dev/null 2>&1 || return 1
     wait_rpc "$bin" "$srcdir" || return 1
@@ -147,7 +149,7 @@ server_bin=$bin
 start_server() { # [extra args]
     mkconf "$sdir" "$sr"
     # shellcheck disable=SC2086
-    "$server_bin/zclassicd" $common -bootstrap=0 -datadir="$sdir" -port=$sp -listen=1 -connect=0 \
+    $ZCL_RUN "$server_bin/zclassicd" $common -bootstrap=0 -datadir="$sdir" -port=$sp -listen=1 -connect=0 \
         -bootstrapserve=1 -bootstrapsourcedir="$serve" -bootstrapservemaxtotalkbps=$kbps \
         -debug=net -bootstrapservemaxbytesperday=0 $serverargs "$@" >/dev/null 2>&1 &
     SPID=$!
@@ -161,7 +163,7 @@ client_bin=$bin
 start_client() { # [extra args]; leaves the pid in CPID
     mkconf "$cdir" "$cr"
     # shellcheck disable=SC2086
-    "$client_bin/zclassicd" $common -datadir="$cdir" -port=$cp -listen=0 -connect=0 -bootstrap=1 \
+    $ZCL_RUN "$client_bin/zclassicd" $common -datadir="$cdir" -port=$cp -listen=0 -connect=0 -bootstrap=1 \
         -bootstrapmode=trustless -bootstrappeer=127.0.0.1:$sp "$@" >/dev/null 2>&1 &
     CPID=$!
 }

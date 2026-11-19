@@ -1,0 +1,37 @@
+# zcl-lint no-new-jq baseline: lines mentioning jq in shell scripts per path.
+# Shrink-only: lower a count or delete a row when it falls; never raise one or add a path.
+# Regenerate with: zcl-lint no-new-jq --update-baseline (refused while anything rose).
+qa/rpc-tests/bootstrap_import_invalidation.sh	4
+qa/rpc-tests/chain_reindex_resume.sh	4
+qa/rpc-tests/invalidateblock_restart.sh	3
+qa/rpc-tests/mempool_cap.sh	4
+qa/rpc-tests/prover_memory_bench.sh	2
+qa/rpc-tests/prune_invalidate_reconsider.sh	3
+qa/rpc-tests/reindex_stale_header.sh	2
+qa/rpc-tests/token_name_rules.sh	4
+qa/rpc-tests/wallet_crash_consistency.sh	15
+qa/rpc-tests/wallet_crash_targeted.sh	3
+qa/rpc-tests/wallet_deep_unwind.sh	5
+qa/rpc-tests/wallet_encrypt_crossversion.sh	7
+qa/rpc-tests/wallet_matrix.sh	2
+qa/rpc-tests/wallet_matrix_lib.sh	2
+qa/rpc-tests/wallet_matrix_scn1.sh	15
+qa/rpc-tests/wallet_matrix_scn2.sh	6
+qa/rpc-tests/wallet_matrix_scn3.sh	13
+qa/rpc-tests/wallet_platform_checks.sh	8
+qa/rpc-tests/wallet_reaccept_bound.sh	4
+qa/rpc-tests/wallet_reindex_interrupt.sh	2
+qa/rpc-tests/wallet_reindex_unconfirmed.sh	3
+qa/rpc-tests/wallet_reorg_balance.sh	6
+qa/rpc-tests/wallet_startup_reaccept.sh	3
+qa/rpc-tests/wallet_tokenguard.sh	18
+qa/rpc-tests/wallet_witness_reorg.sh	4
+qa/rpc-tests/wallet_zap_interrupt.sh	3
+qa/rpc-tests/znam_index.sh	13
+qa/rpc-tests/zslp_index.sh	14
+qa/rpc-tests/zslp_send.sh	43
+qa/rpc-tests/zslp_send_adversarial.sh	18
+qa/rpc-tests/zslp_stale_tip.sh	3
+qa/zslp/mainnet_crosscheck.sh	12
+qa/zslp/make_fixtures.sh	15
+zcutil/local-ci.sh	1

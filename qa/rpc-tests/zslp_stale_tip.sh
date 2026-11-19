@@ -18,15 +18,17 @@
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
+. "$HERE/../lib/isolation.sh"
 TOP=$(cd "$HERE/../.." && pwd)
 SRC=${1:-$TOP/src}
 ZD=$SRC/zclassicd
 ZCLI=$SRC/zclassic-cli
 for b in "$ZD" "$ZCLI"; do [ -x "$b" ] || { echo "missing $b" >&2; exit 2; }; done
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
+. "$(dirname "$0")/jsonq_lib.sh"
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/zcl-stale-tip.XXXXXX")
-BASE=${E2E_PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${E2E_PORT_BASE:-}" 128
 port_busy() {
     if command -v ss >/dev/null 2>&1; then
         [ -n "$(ss -Htln "sport = :$1" 2>/dev/null)" ]
@@ -36,7 +38,7 @@ port_busy() {
 }
 _try=0
 while port_busy "$BASE" || port_busy $((BASE + 1)) || port_busy $((BASE + 100)) || port_busy $((BASE + 101)); do
-    BASE=$((BASE + 7)); _try=$((_try + 1)); [ $_try -lt 200 ] || { echo "no free port block" >&2; exit 2; }
+    iso_rebase BASE 128 7; _try=$((_try + 1)); [ $_try -lt 200 ] || { echo "no free port block" >&2; exit 2; }
 done
 PIDS=""
 CHECKS=0
@@ -72,7 +74,7 @@ start() { # <n> [extra args]
     if [ ! -f "$dir/zclassic.conf" ]; then
         { echo "regtest=1"; echo "rpcuser=stale"; echo "rpcpassword=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"; } >"$dir/zclassic.conf"
     fi
-    "$ZD" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 \
+    $ZCL_RUN "$ZD" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 \
         -listen=1 -bind=127.0.0.1 -port=$((BASE + n)) \
         -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -rpcport=$((BASE + 100 + n)) \
         -dnsseed=0 -discover=0 -listenonion=0 -upnp=0 -keypool=5 -debuglogfile=1 -parkdeepreorg=0 \
@@ -109,9 +111,9 @@ wait_indexes() {
         while :; do
             info=$(cli "$1" "$rpc" 2>/dev/null || true)
             tip=$(cli "$1" getbestblockhash)
-            if [ -n "$info" ] && [ "$(printf '%s' "$info" | jq -r '.indexedblock')" = "$tip" ] &&
-               [ "$(printf '%s' "$info" | jq -r '.synced')" = true ] &&
-               [ -z "$(printf '%s' "$info" | jq -r '.error // empty')" ]; then break; fi
+            if [ -n "$info" ] && [ "$(printf '%s' "$info" | jget indexedblock)" = "$tip" ] &&
+               [ "$(printf '%s' "$info" | jget synced)" = true ] &&
+               [ -z "$(printf '%s' "$info" | jgetd error "")" ]; then break; fi
             t=$((t + 1)); [ $t -lt 120 ] || fail "$rpc of node $1 did not reach the tip: $info"
             sleep 1
         done

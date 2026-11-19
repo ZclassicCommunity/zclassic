@@ -18,7 +18,7 @@ command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/wallet_matrix_lib.sh"
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
-BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 SD=$WORK/mempool_cap; rm -rf "$SD"; mkdir -p "$SD"
 SCN_ID=mempool_cap; SCN_LOG=$WORK/mempool_cap.log; OBS_LOG=$WORK/obs.txt; : >"$SCN_LOG"; : >"$OBS_LOG"
 trap 'stop_all' EXIT
@@ -65,20 +65,20 @@ serr=$(cli 0 sendtoaddress "$(sed -n 1p "$SD/addrs.txt")" 0.01 2>&1) && serr=""
 obs small_txs_accepted "$m"
 case $serr in *"mempool full"*) pass "sendtoaddress fails with the clear error: $(printf %s "$serr" | cut -c1-200)" ;; *) bad "sendtoaddress error [$(printf %s "$serr" | cut -c1-200)] lacks 'mempool full'" ;; esac
 case $serr in *mempoolmaxbytes*) pass "error names -mempoolmaxbytes" ;; *) bad "error does not name -mempoolmaxbytes" ;; esac
-bytes=$(cli 0 getmempoolinfo | jq .bytes)
+bytes=$(cli 0 getmempoolinfo | jget bytes)
 [ "$bytes" -le $CAP ] && pass "mempool bytes $bytes <= cap $CAP" || bad "mempool bytes $bytes exceeds cap $CAP"
-cnt=$(cli 0 getmempoolinfo | jq .size)
+cnt=$(cli 0 getmempoolinfo | jget size)
 
 # a refused send leaves the mempool and wallet untouched (nothing evicted, nothing recorded)
-tx0=$(cli 0 listtransactions "*" 1000000 | jq length)
+tx0=$(cli 0 listtransactions "*" 1000000 | jlen)
 cli 0 sendtoaddress "$(sed -n 2p "$SD/addrs.txt")" 0.01 >/dev/null 2>&1 && bad "send unexpectedly succeeded while full"
-ck "mempool size unchanged by a refused send" "$(cli 0 getmempoolinfo | jq .size)" "$cnt"
-ck "wallet transaction list unchanged by a refused send" "$(cli 0 listtransactions "*" 1000000 | jq length)" "$tx0"
+ck "mempool size unchanged by a refused send" "$(cli 0 getmempoolinfo | jget size)" "$cnt"
+ck "wallet transaction list unchanged by a refused send" "$(cli 0 listtransactions "*" 1000000 | jlen)" "$tx0"
 alive "while full"
 
 # 4. a block frees the pool and sending works again
 cli 0 generate 1 >/dev/null
-after=$(cli 0 getmempoolinfo | jq .size)
+after=$(cli 0 getmempoolinfo | jget size)
 # a block holds at most 2 MB, so a 5 MB pool drains over several blocks: it must shrink
 [ "$after" -lt "$cnt" ] && pass "block mined: mempool shrank from $cnt to $after transactions" || bad "mempool did not shrink after a block ($cnt -> $after)"
 if t=$(cli 0 sendtoaddress "$(sed -n 3p "$SD/addrs.txt")" 0.01 2>&1) && [ ${#t} -eq 64 ]; then pass "sendtoaddress works again after a block"; else bad "send after block failed: [$t]"; fi
@@ -87,9 +87,9 @@ if t=$(cli 0 sendtoaddress "$(sed -n 3p "$SD/addrs.txt")" 0.01 2>&1) && [ ${#t} 
 # in a block, so the cap must not drop them): refill the pool, then disconnect the block
 blk=$(cli 0 getbestblockhash)
 f=0; while cli 0 sendmany "" "$BIG" >/dev/null 2>&1; do f=$((f + 1)); [ $f -lt 150 ] || break; done
-before=$(cli 0 getmempoolinfo | jq .bytes)
+before=$(cli 0 getmempoolinfo | jget bytes)
 cli 0 invalidateblock "$blk" >/dev/null 2>&1
-back=$(cli 0 getmempoolinfo | jq .bytes)
+back=$(cli 0 getmempoolinfo | jget bytes)
 obs reorg_bytes "$before -> $back"
 [ "$back" -gt "$CAP" ] && pass "reorg keeps resurrected transactions past the cap ($before -> $back > $CAP)" || bad "reorg bytes $before -> $back not above cap $CAP"
 alive "after reorg"

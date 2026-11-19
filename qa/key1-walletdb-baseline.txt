@@ -1,0 +1,7 @@
+# KEY-1 baseline: the whitespace-free key-bearing Read*/Write* lines of
+# src/wallet/walletdb.cpp (the audited key store). Only lines NOT listed fail the guard.
+# Regenerate with: key1-guard --write-baseline, and review the diff.
+boolCWalletDB::WriteKey(constCPubKey&vchPubKey,constCPrivKey&vchPrivKey,constCKeyMetadata&keyMeta)
+boolCWalletDB::WriteZKey(constlibzcash::SproutPaymentAddress&addr,constlibzcash::SproutSpendingKey&key,constCKeyMetadata&keyMeta)
+boolCWalletDB::WriteSaplingZKey(constlibzcash::SaplingIncomingViewingKey&ivk,
+boolCWalletDB::WriteHDSeed(constHDSeed&seed)

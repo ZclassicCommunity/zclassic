@@ -1,7 +1,7 @@
 #!/bin/sh
 # Verify src/c23/services/vendor/ is byte-identical to the Z23 pin recorded in
 # Z23_SOURCE.tsv.
-# usage: check-vendor.sh [services-dir]   (default: the directory above this script)
+# usage: check-vendor.sh [services-dir | path/to/Z23_SOURCE.tsv]   (default: the directory above this script)
 # Optional env Z23_REPO=<path>: additionally compare every recorded blob id
 # with the blob id Z23 itself has at the pinned commit.
 # Fails (non-zero) on: blob drift, missing file, unlisted file under vendor/,
@@ -10,8 +10,10 @@
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 svc=${1:-$(dirname "$here")}
+# The argument may also be a manifest file (any Z23_SOURCE.tsv): its directory is the vendored root.
+[ -f "$svc" ] && svc=$(dirname "$svc")
 svc=$(cd "$svc" && pwd) || exit 2
-root=$(cd "$svc/../../.." && pwd)
+root=$(cd "$svc" && cd "$(git rev-parse --show-cdup 2>/dev/null)" && pwd) || root=$(cd "$svc/../../.." && pwd)
 tsv="$svc/Z23_SOURCE.tsv"
 [ -f "$tsv" ] || { echo "FAIL: missing $tsv" >&2; exit 1; }
 fail=0
@@ -65,7 +67,7 @@ find "$svc/vendor" -type f \
     ! -name '.dirstamp' ! -name '*.gcno' ! -name '*.gcda' >"$listed.found"
 while IFS= read -r f; do
     rel=${f#"$root"/}
-    [ "$rel" = src/c23/services/vendor/.gitattributes ] && continue
+    [ "$rel" = "${svc#"$root"/}/vendor/.gitattributes" ] && continue
     grep -qxF "$rel" "$listed" || bad "unlisted file $rel"
 done <"$listed.found"
 

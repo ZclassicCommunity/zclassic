@@ -30,7 +30,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 for f in "$HERE"/wallet_matrix_scn?.sh; do . "$f"; done
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 RESULTS=$WORK/results.txt; OBS_LOG=$WORK/obs.txt; : >"$RESULTS"; : >"$OBS_LOG"
-BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 trap 'stop_all' EXIT
 
 R1="-connect=127.0.0.1:$((BASE + 1))"
@@ -49,8 +49,8 @@ refcheck() {
     rm -rf "$SD/node3"; mkdir -p "$SD/node3/regtest"; cp "$SD/export/ref-$l.dat" "$SD/node3/regtest/wallet.dat"
     start 3 "$BIN" -connect=127.0.0.1:$((BASE + 1)) -rescan || return
     sync_to 3
-    want=$(printf 'z=%s notes=%s t=%s' "$(cli 0 z_gettotalbalance 0 | jq -r .private | f8)" "$(cli 0 z_listunspent 0 | jq -c '[.[]|(.amount*100000000|round)]|sort')" "$(bal 0 '*' 0)")
-    got=$(printf 'z=%s notes=%s t=%s' "$(cli 3 z_gettotalbalance 0 | jq -r .private | f8)" "$(cli 3 z_listunspent 0 | jq -c '[.[]|(.amount*100000000|round)]|sort')" "$(bal 3 '*' 0)")
+    want=$(printf 'z=%s notes=%s t=%s' "$(cli 0 z_gettotalbalance 0 | jget private | f8)" "$(cli 0 z_listunspent 0 | jq -c '[.[]|(.amount*100000000|round)]|sort')" "$(bal 0 '*' 0)")
+    got=$(printf 'z=%s notes=%s t=%s' "$(cli 3 z_gettotalbalance 0 | jget private | f8)" "$(cli 3 z_listunspent 0 | jq -c '[.[]|(.amount*100000000|round)]|sort')" "$(bal 3 '*' 0)")
     ck "$l: wallet equals the -rescan reference" "$got" "$want"
     stop 3
 }
@@ -222,7 +222,7 @@ run_scn() {
     st=PASS; [ "$nf" = 0 ] && [ "$np" -gt 0 ] || st=FAIL
     echo "$id|$name|$st|$np pass $nf fail" >>"$RESULTS"
     say "   -> $st ($np pass, $nf fail)"
-    BASE=$((BASE + 7)); [ $BASE -lt 60000 ] || BASE=20000
+    iso_rebase BASE 112 7
     R1="-connect=127.0.0.1:$((BASE + 1))"
 }
 

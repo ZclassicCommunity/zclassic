@@ -5,7 +5,7 @@
 #
 # NEVER point this at a live node's datadir: it opens the datadir (blocks/, chainstate/) read-write
 # like any node. Copy blocks/ and chainstate/ to a scratch directory first. The node it starts has
-# no peers, no wallet, no listening socket, and its own RPC port (28732), and is stopped at the end.
+# no peers, no wallet, no listening socket, and its own leased RPC port, and is stopped at the end.
 #
 # Output files in <out-dir>:
 #   progress.log     one line every 30 s while indexing, then "SYNCED after N seconds"
@@ -21,9 +21,11 @@ D=$1; Z=$2; OUT=$3; shift 3
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 [ -x "$Z/zclassicd" ] && [ -x "$Z/zclassic-cli" ] || { echo "no zclassicd/zclassic-cli in $Z" >&2; exit 2; }
 mkdir -p "$OUT"
-CLI="$Z/zclassic-cli -datadir=$D -rpcport=28732 -rpcuser=scan -rpcpassword=scan"
-"$Z/zclassicd" -datadir="$D" -zslpindex=1 "$@" -connect=0 -listen=0 -dnsseed=0 -discover=0 -listenonion=0 \
-    -bootstrap=0 -disablewallet -upnp=0 -showmetrics=0 -server=1 -port=28733 -rpcport=28732 \
+. "$(dirname "$0")/../lib/isolation.sh"
+iso_base PB "${ZSLP_PORT_BASE:-}" 4   # PB = p2p port, PB+1 = rpc port
+CLI="$Z/zclassic-cli -datadir=$D -rpcport=$((PB + 1)) -rpcuser=scan -rpcpassword=scan"
+$ZCL_RUN "$Z/zclassicd" -datadir="$D" -zslpindex=1 "$@" -connect=0 -listen=0 -dnsseed=0 -discover=0 -listenonion=0 \
+    -bootstrap=0 -disablewallet -upnp=0 -showmetrics=0 -server=1 -port=$PB -rpcport=$((PB + 1)) \
     -rpcuser=scan -rpcpassword=scan -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -daemon=0 >"$OUT/node.out" 2>&1 &
 PID=$!
 trap 'kill $PID 2>/dev/null' INT TERM

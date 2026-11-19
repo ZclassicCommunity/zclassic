@@ -45,7 +45,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/wallet_matrix_lib.sh"
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 RESULTS=$WORK/results.txt; HITS=$WORK/hits.txt; : >"$RESULTS"; : >"$HITS"
-BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 trap 'stop_all' EXIT
 
 # ---- reproducible randomness (LCG; the shell's $RANDOM is not portable) ------
@@ -61,7 +61,7 @@ qwait_op() {
     [ -n "$2" ] || return 0
     qt=0
     while alive_n "$1" && [ $qt -lt 600 ]; do
-        qs=$(cli "$1" z_getoperationstatus "[\"$2\"]" 2>/dev/null | jq -r '.[0].status' 2>/dev/null)
+        qs=$(cli "$1" z_getoperationstatus "[\"$2\"]" 2>/dev/null | jget "[0].status" 2>/dev/null)
         case $qs in success|failed|cancelled) cli "$1" z_getoperationresult "[\"$2\"]" >/dev/null 2>&1; return 0 ;; esac
         qt=$((qt + 1)); sleep 0.5
     done
@@ -87,7 +87,7 @@ start_once() {
     mkdir -p "$dir" "$SD/export"; echo "$bd" >"$dir/bindir"
     [ -f "$dir/zclassic.conf" ] || { echo "regtest=1"; echo "rpcuser=cc"; echo "rpcpassword=cc$n"; } >"$dir/zclassic.conf"
     rm -f "$dir/regtest/.lock"
-    "$bd/zclassicd" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 \
+    $ZCL_RUN "$bd/zclassicd" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 \
         -listen=1 -bind=127.0.0.1 -port=$((BASE + n)) \
         -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -rpcport=$((BASE + 100 + n)) \
         -dnsseed=0 -discover=0 -listenonion=0 -upnp=0 -keypool=10 -debuglogfile=1 -exportdir="$SD/export" \
@@ -176,7 +176,7 @@ setup_seed() {
     # the peer gets transparent funds of its own, so it can pay the wallet (incoming t, Sapling, Sprout)
     for k in 1 2 3 4; do cli 0 sendtoaddress "$MT" 5 >/dev/null; done
     cli 1 generate 1 >/dev/null; sync_to 0 || return 1
-    o=$(cli 0 z_shieldcoinbase "*" "$ZA" 0.0001 5 2>/dev/null | jq -r .opid); qwait_op 0 "$o"; cli 1 generate 1 >/dev/null; sync_to 0 || return 1
+    o=$(cli 0 z_shieldcoinbase "*" "$ZA" 0.0001 5 2>/dev/null | jget opid); qwait_op 0 "$o"; cli 1 generate 1 >/dev/null; sync_to 0 || return 1
     # a Sprout note and a Sapling note from t funds
     zq "$TA" "[{\"address\":\"$SP1\",\"amount\":5}]"; cli 1 generate 1 >/dev/null
     sync_to 0
@@ -198,8 +198,8 @@ act() {
         18) o=$(cli 1 z_sendmany "$MT" "[{\"address\":\"$SP2\",\"amount\":0.06}]" 1 0.0001 2>/dev/null) && qwait_op 1 "$o" ;;
         0|1) zq "$ZA" "[{\"address\":\"$ZB\",\"amount\":0.01},{\"address\":\"$ZC\",\"amount\":0.02},{\"address\":\"$ZA\",\"amount\":0.03}]" ;;
         2) zq "$ZB" "[{\"address\":\"$ZC\",\"amount\":0.005}]" ;;
-        3) o=$(cli 0 z_mergetoaddress "[\"$ZA\",\"$ZB\",\"$ZC\"]" "$ZA" 0.0001 0 0 2>/dev/null | jq -r .opid); qwait_op 0 "$o" ;;
-        4) o=$(cli 0 z_shieldcoinbase "*" "$ZB" 0.0001 2>/dev/null | jq -r .opid); qwait_op 0 "$o" ;;
+        3) o=$(cli 0 z_mergetoaddress "[\"$ZA\",\"$ZB\",\"$ZC\"]" "$ZA" 0.0001 0 0 2>/dev/null | jget opid); qwait_op 0 "$o" ;;
+        4) o=$(cli 0 z_shieldcoinbase "*" "$ZB" 0.0001 2>/dev/null | jget opid); qwait_op 0 "$o" ;;
         5) cli 0 sendtoaddress "$(cli 0 getnewaddress)" 0.5 >/dev/null 2>&1 ;;
         6) zq "$TB" "[{\"address\":\"$ZA\",\"amount\":1}]" ;;
         7) zq "$SP1" "[{\"address\":\"$SP2\",\"amount\":0.05}]" ;;
@@ -237,7 +237,7 @@ sc_stale() {
     case $R in
         0|1|2) zq "$ZA" "[{\"address\":\"$ZA\",\"amount\":0.02},{\"address\":\"$ZC\",\"amount\":0.01}]"
                cli 1 generate 1 >/dev/null 2>&1; converge 0 1 || return 0
-               o=$(cli 0 z_mergetoaddress "[\"$ZA\"]" "$ZB" 0.0001 0 0 2>/dev/null | jq -r .opid); qwait_op 0 "$o" ;;
+               o=$(cli 0 z_mergetoaddress "[\"$ZA\"]" "$ZB" 0.0001 0 0 2>/dev/null | jget opid); qwait_op 0 "$o" ;;
         3) zq "$SP1" "[{\"address\":\"$SP1\",\"amount\":0.05}]"
            cli 1 generate 1 >/dev/null 2>&1; converge 0 1 || return 0
            zq "$SP1" "[{\"address\":\"$SP2\",\"amount\":0.04}]" ;;
@@ -405,7 +405,7 @@ run_seed() {
     st=PASS; [ "$nf" = 0 ] && [ "$np" -gt 0 ] || st=FAIL
     echo "$SEED|$st|$np pass $nf fail|$(elapsed "$t0")s" >>"$RESULTS"
     say "   -> seed $SEED $st ($np pass, $nf fail)"
-    BASE=$((BASE + 7)); [ $BASE -lt 60000 ] || BASE=20000
+    iso_rebase BASE 112 7
 }
 
 for s in $SEEDS; do run_seed "$s"; done

@@ -27,15 +27,15 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/wallet_matrix_lib.sh"
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 RESULTS=$WORK/results.txt; OBS_LOG=$WORK/obs.txt; : >"$RESULTS"; : >"$OBS_LOG"
-BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 trap stop_all EXIT
 NODE_ARGS="-disablesafemode -connect=0"
 
 # snap <n>: transparent balances at minconf 0 and 1, unspent outputs, mempool size, exact
 snap() {
-    printf "t0=%s t1=%s tot0=%s utxo=%s pool=%s" "$(bal "$1" '*' 0)" "$(bal "$1" '*' 1)" "$(cli "$1" z_gettotalbalance 0 | jq -c .total)" \
+    printf "t0=%s t1=%s tot0=%s utxo=%s pool=%s" "$(bal "$1" '*' 0)" "$(bal "$1" '*' 1)" "$(cli "$1" z_gettotalbalance 0 | jraw total)" \
         "$(cli "$1" listunspent 0 | jq -c "[.[]|.txid[0:8]+\":\"+(.vout|tostring)+\":\"+(.confirmations|tostring)]|sort")" \
-        "$(cli "$1" getrawmempool | jq -c length)"
+        "$(cli "$1" getrawmempool | jlen)"
 }
 
 # 1: node 0 holds mature non-coinbase funds and one unconfirmed transparent send
@@ -43,17 +43,17 @@ scn_reindex_unconfirmed() {
     start 0 "$BIN" $NODE_ARGS || return
     cli 0 generate 110 >/dev/null
     Z1=$(cli 0 z_getnewaddress sapling); T=$(cli 0 getnewaddress)
-    r=$(wait_op 0 "$(cli 0 z_shieldcoinbase "*" "$Z1" 0.0001 0 | jq -r .opid)"); case $r in success*) ;; *) bad "shieldcoinbase: $r" ;; esac
+    r=$(wait_op 0 "$(cli 0 z_shieldcoinbase "*" "$Z1" 0.0001 0 | jget opid)"); case $r in success*) ;; *) bad "shieldcoinbase: $r" ;; esac
     cli 0 generate 1 >/dev/null
     r=$(zsend 0 "$Z1" "[{\"address\":\"$T\",\"amount\":5}]"); case $r in success*) ;; *) bad "fund t address: $r" ;; esac
     cli 0 generate 2 >/dev/null
     cli 0 sendtoaddress "$(cli 0 getnewaddress)" 0.51 >/dev/null || bad "sendtoaddress"
     BEFORE=$(snap 0)
-    ck "one transaction pending" "$(cli 0 getrawmempool | jq -c length)" 1
+    ck "one transaction pending" "$(cli 0 getrawmempool | jlen)" 1
     stop 0; start 0 "$BIN" $NODE_ARGS || return
     ck "restart keeps the pending send" "$(snap 0)" "$BEFORE"
     stop 0; start 0 "$BIN" $NODE_ARGS -reindex || return
-    t=0; until [ "$(cli 0 getblockcount)" = 113 ] && [ "$(cli 0 getrawmempool | jq -c length)" = 1 ]; do
+    t=0; until [ "$(cli 0 getblockcount)" = 113 ] && [ "$(cli 0 getrawmempool | jlen)" = 1 ]; do
         t=$((t + 1)); [ $t -lt 60 ] || break; sleep 1
     done
     ck "height after -reindex" "$(cli 0 getblockcount)" 113
@@ -71,7 +71,7 @@ run_scn() {
     st=PASS; [ "$nf" = 0 ] && [ "$np" -gt 0 ] || st=FAIL
     echo "$id|$name|$st|$np pass $nf fail" >>"$RESULTS"
     say "   -> $st ($np pass, $nf fail)"
-    BASE=$((BASE + 7)); [ $BASE -lt 60000 ] || BASE=20000
+    iso_rebase BASE 112 7
 }
 
 run_scn 1 "unconfirmed send survives -reindex" scn_reindex_unconfirmed

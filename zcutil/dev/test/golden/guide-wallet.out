@@ -1,0 +1,19 @@
+== wallet/src/w.cpp
+
+rules (wallet/AGENTS.md):
+  - Custody: never spend.
+  - Use ZCLWALLET_PROFILE_DIR.
+
+ci steps: wallet-gui
+ci stages: daemon-linux
+
+lessons (doc/agent/LESSONS.md):
+  DONE wallet/src/w.cpp — keep custody: the wallet never spends.
+
+traps (doc/agent/TRAPS.md):
+  (2) Wallet GUI
+
+first commands:
+  $ zcutil/local-ci.sh --commit HEAD --only wallet-gui test <outdir>
+  $ zcutil/local-ci.sh --commit HEAD daemon-linux <outdir>
+  $ zcutil/dev/zcl-dev select

@@ -12,7 +12,7 @@
 #    gracefully (loads everything before the damage) and the node stays up.
 #
 # usage: reindex_stale_header.sh --bin <dir> --work <dir> [--base port]
-# Needs jq (the shared helpers use it). Never point this at a real datadir.
+# Needs jq (the shared helpers use it for money arithmetic). Never point this at a real datadir.
 BIN=""; WORK=""; PORT_BASE=""
 while [ $# -gt 0 ]; do
     case $1 in
@@ -26,7 +26,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/wallet_matrix_lib.sh"
 NU_ARGS=""   # default regtest upgrade heights: the blocks (287-byte records) the reproduction was found with
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
-BASE=${PORT_BASE:-$((24000 + ($$ % 15000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 SD=$WORK/stale; rm -rf "$SD"; mkdir -p "$SD"; : >"$SD/pids"
 SCN_LOG=$WORK/checks.log; : >"$SCN_LOG"; SCN_ID=stale; OBS_LOG=$WORK/obs.log; : >"$OBS_LOG"
 trap 'stop_all' EXIT

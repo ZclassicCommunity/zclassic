@@ -70,7 +70,6 @@ install_ubuntu_debian() {
 
         # Additional utilities
         git
-        python3
         wget
         curl
 
@@ -124,7 +123,6 @@ install_arch() {
         libsodium
         curl
         git
-        python
         wget
         openssl
         libevent

@@ -31,7 +31,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 for f in "$HERE"/wallet_matrix_scn?.sh; do . "$f"; done
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 RESULTS=$WORK/results.txt; OBS_LOG=$WORK/obs.txt; : >"$RESULTS"; : >"$OBS_LOG"; : >"$WORK/timings.txt"
-BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 trap 'stop_all' EXIT
 
 # pid of node <n>'s daemon; rss_start/rss_stop bracket a peak-RSS (KiB) sample of it
@@ -53,7 +53,7 @@ fund_notes() {
     for op in $ops; do r=$(wait_op 1 "$op"); case $r in success*) ;; *) bad "fund_notes: $r" ;; esac; done
     cli 1 generate 1 >/dev/null; sync_to "$n"
 }
-nnotes() { cli "$1" z_listunspent 1 9999999 false "[\"$2\"]" | jq length; }
+nnotes() { cli "$1" z_listunspent 1 9999999 false "[\"$2\"]" | jlen; }
 # recips of <count> fresh node-1 z addresses of <amount> each
 zrecips() { for k in $(seq 1 "$1"); do cli 1 z_getnewaddress; done | jq -Rsc --argjson amt "$2" 'split("\n")[:-1]|map({address:.,amount:$amt})'; }
 restart0() { stop 0; start 0 "$BIN" -connect=127.0.0.1:$((BASE + 1)) "$@"; }
@@ -109,8 +109,8 @@ chk_merge() {
     fund_notes 0 "$zs" 100 1
     ck "100 notes funded" "$(nnotes 0 "$zs")" 100
     t0=$(now); rss_start 0
-    mg=$(cli 0 z_mergetoaddress "[\"$zs\"]" "$zd" 0.0001 0 100); op=$(printf %s "$mg" | jq -r .opid)
-    ck "merge: remaining notes reported" "$(printf %s "$mg" | jq -r .remainingNotes)" 0
+    mg=$(cli 0 z_mergetoaddress "[\"$zs\"]" "$zd" 0.0001 0 100); op=$(printf %s "$mg" | jget opid)
+    ck "merge: remaining notes reported" "$(printf %s "$mg" | jget remainingNotes)" 0
     r=$(wait_op 0 "$op"); t=$(elapsed "$t0"); rss_stop; rss=$(cat "$RSS_FILE")
     tobs "z_mergetoaddress_100_notes" "${t}s peak_rss_kb=$rss"
     case $r in success*) wait_mempool 1 "${r#success }"; mine 1
@@ -132,7 +132,7 @@ chk_kill() {
     # re-syncs from the peer: wait for that before reading wallet state.
     op=$(cli 0 z_sendmany "$zs" "$rec" 1 "$FEE"); sleep 1; kill9 0; start 0 "$BIN" $R; sync_to 0
     ck "kill during proving: notes intact" "$(zbal 0 "$zs")" 20.00000000
-    ck "kill during proving: nothing in miner mempool" "$(cli 1 getrawmempool | jq length)" 0
+    ck "kill during proving: nothing in miner mempool" "$(cli 1 getrawmempool | jlen)" 0
     r=$(zsend 0 "$zs" "$rec" 1 "$FEE"); case $r in success*) wait_mempool 1 "${r#success }"; mine 1 ;; *) bad "kill during proving: respend: $r" ;; esac
     ck "kill during proving: respend exact" "$(zbal 0 "$zs")" "$(add 20 -19.5 -$FEE)"
     # (b) kill -9 right after acceptance (z_sendmany reported success), before it is mined
@@ -189,7 +189,7 @@ chk_paths() {
     nfd=$(printf 'dat\303\251 cafe\314\201 u\314\210 n\314\203 \345\220\215 spaced')   # decomposed (NFD) accents
     SD_ROOT=$SD
     SD="$SD_ROOT/$nfc"; mkdir -p "$SD"; paths_flow "NFC path"; stop_all
-    SD="$SD_ROOT/$nfd"; mkdir -p "$SD"; BASE=$((BASE + 7)); paths_flow "NFD path"; stop_all
+    SD="$SD_ROOT/$nfd"; mkdir -p "$SD"; iso_rebase BASE 112 7; paths_flow "NFD path"; stop_all
     SD=$SD_ROOT
 }
 
@@ -246,7 +246,7 @@ chk_interop() {
     TX=$SD/interop_txids; : >"$TX"; rec_tx() { printf '%s %s\n' "$1" "$2" >>"$TX"; }
     sp=$(cli 0 z_getnewaddress sprout); sp2=$(cli 0 z_getnewaddress sprout); ta=$(cli 0 getnewaddress)
     ck "chain before Sapling" "$([ "$(cli 0 getblockcount)" -lt 230 ] && echo yes)" yes
-    give_z 0 "$sp" 4 48656c6c6f; rec_tx sprout_shield "$(cli 0 z_listreceivedbyaddress "$sp" | jq -r ".[0].txid")"
+    give_z 0 "$sp" 4 48656c6c6f; rec_tx sprout_shield "$(cli 0 z_listreceivedbyaddress "$sp" | jget "[0].txid")"
     # the peer spends its own Sprout notes with PHGR13 proofs; node 0 verifies them
     msp=$(cli 1 z_getnewaddress sprout); mta=$(cli 1 getnewaddress); cli 1 sendtoaddress "$mta" 5 >/dev/null; cli 1 generate 1 >/dev/null; sync_to 0
     t=$(zconfirm 1 "$mta" "[{\"address\":\"$msp\",\"amount\":3}]"); rec_tx peer_t_to_sprout "$t"; sync_to 0
@@ -261,7 +261,7 @@ chk_interop() {
     t=$(zconfirm 0 "$ta" "[{\"address\":\"$zs\",\"amount\":0.9}]"); rec_tx t_to_sapling_after_sprout "$t"
     # sapling shield (coinbase and plain), memo, multi-recipient, multi-note
     ma=$(cli 1 getnewaddress); mz=$(cli 1 z_getnewaddress); cli 1 generate 5 >/dev/null
-    op=$(cli 1 z_shieldcoinbase "*" "$mz" 0.0001 2>/dev/null | jq -r .opid); r=$(wait_op 1 "$op"); case $r in success*) rec_tx shieldcoinbase "${r#success }"; cli 1 generate 1 >/dev/null ;; *) bad "shieldcoinbase: $r" ;; esac
+    op=$(cli 1 z_shieldcoinbase "*" "$mz" 0.0001 2>/dev/null | jget opid); r=$(wait_op 1 "$op"); case $r in success*) rec_tx shieldcoinbase "${r#success }"; cli 1 generate 1 >/dev/null ;; *) bad "shieldcoinbase: $r" ;; esac
     sync_to 0
     cli 1 sendtoaddress "$ma" 20 >/dev/null; cli 1 generate 1 >/dev/null
     r=$(zsend 1 "$ma" "[{\"address\":\"$zs\",\"amount\":5,\"memo\":\"48656c6c6f2053617069\"}]"); rec_tx t_to_sapling_memo "${r#success }"; cli 1 generate 1 >/dev/null
@@ -272,8 +272,8 @@ chk_interop() {
     t=$(zconfirm 0 "$zs" "[{\"address\":\"$mz\",\"amount\":0.1,\"memo\":\"6d656d6f\"},{\"address\":\"$ma\",\"amount\":0.1}]"); rec_tx sapling_mixed_memo "$t"
     fund_notes 0 "$zs2" 12 0.1; cli 1 generate 1 >/dev/null; sync_to 0
     t=$(zconfirm 0 "$zs2" "[{\"address\":\"$mz\",\"amount\":1.1}]"); rec_tx sapling_multi_note_spend "$t"
-    mg=$(cli 0 z_mergetoaddress "[\"$zs2\"]" "$zs" 0.0001 0 50); r=$(wait_op 0 "$(printf %s "$mg" | jq -r .opid)"); case $r in success*) rec_tx merge_notes "${r#success }"; wait_mempool 1 "${r#success }"; mine 1 ;; *) bad "merge: $r" ;; esac
-    mg=$(cli 0 z_mergetoaddress '["ANY_TADDR"]' "$zs2" 0.0001 50); r=$(wait_op 0 "$(printf %s "$mg" | jq -r .opid)"); case $r in success*) rec_tx merge_t_to_z "${r#success }"; wait_mempool 1 "${r#success }"; mine 1 ;; *) obs "merge_t_to_z" "$r" ;; esac
+    mg=$(cli 0 z_mergetoaddress "[\"$zs2\"]" "$zs" 0.0001 0 50); r=$(wait_op 0 "$(printf %s "$mg" | jget opid)"); case $r in success*) rec_tx merge_notes "${r#success }"; wait_mempool 1 "${r#success }"; mine 1 ;; *) bad "merge: $r" ;; esac
+    mg=$(cli 0 z_mergetoaddress '["ANY_TADDR"]' "$zs2" 0.0001 50); r=$(wait_op 0 "$(printf %s "$mg" | jget opid)"); case $r in success*) rec_tx merge_t_to_z "${r#success }"; wait_mempool 1 "${r#success }"; mine 1 ;; *) obs "merge_t_to_z" "$r" ;; esac
     for i in 1 2 3 4 5 6; do
         t=$(zconfirm 0 "$zs" "[{\"address\":\"$zs2\",\"amount\":0.0$i}]"); rec_tx "sapling_z_to_z_$i" "$t"
     done
@@ -302,7 +302,7 @@ run_chk() {
     # a check that cannot run with the given binaries says why in $SD/skip
     if [ -f "$SD/skip" ] && [ "$nf" = 0 ]; then st="SKIP ($(cat "$SD/skip"))"; fi
     echo "$id|$st|$np pass $nf fail|$(elapsed "$t0")s" >>"$RESULTS"; say "   -> $st ($np pass, $nf fail)"
-    BASE=$((BASE + 17)); [ $BASE -lt 60000 ] || BASE=20000
+    iso_rebase BASE 112 17
 }
 run_chk timing chk_timing
 run_chk concurrent chk_concurrent

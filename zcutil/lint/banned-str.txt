@@ -1,0 +1,9 @@
+# zcl-lint banned-str baseline: calls to strcpy, strcat, sprintf, vsprintf, gets per path.
+# Shrink-only: lower a count or delete a row when it falls; never raise one or add a path.
+# Regenerate with: zcl-lint banned-str --update-baseline (refused while anything rose).
+src/c23/services/tools/slpverify.c	1
+src/c23/test/kat_cases.c	3
+src/c23/test/kat_mutgen.c	3
+src/c23/test/kat_scan.c	2
+src/test/znam_tests.cpp	3
+src/uint256.cpp	1

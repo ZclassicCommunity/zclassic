@@ -64,6 +64,7 @@ archive of the daemon defines one. `make check-c23-vendor` verifies both vendore
 ```sh
 make -C src check-c23-no-rust     # 31 librustzcash_* from the shim, 0 Rust symbols, per binary
 make -C src check-c23-vendor      # vendored files match Z23_SOURCE.tsv
+make -C src check-tools-vendor    # zcutil/tools/vendor (jsonq) matches zcutil/tools/Z23_SOURCE.tsv
 sh src/c23/test/run.sh --out <dir> --linked src/libzcl_c23.a --deps <depends prefix> \
     --golden <c23_golden>         # KAT replay + mutations + threads against the linked archive
 sh src/c23/test/regtest-smoke.sh --bin src --work <empty dir> [--peer-bin <other build>/src]

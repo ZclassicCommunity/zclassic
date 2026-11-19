@@ -7,7 +7,7 @@
 #   env DAEMON_ENV  "VAR=val" exported to the node 0 daemon only (e.g. MALLOC_ARENA_MAX=2)
 #   env OUT=<file>  where the result lines go (default <work>/bench.txt)
 # Regtest only, temporary datadirs under --work; pick --base inside a free port range.
-BIN=""; WORK=""; PEER_BIN=""; PORT_BASE=51000
+BIN=""; WORK=""; PEER_BIN=""; PORT_BASE=""
 while [ $# -gt 0 ]; do
     case $1 in
         --bin) BIN=$2; shift 2 ;; --work) WORK=$2; shift 2 ;; --peer-bin) PEER_BIN=$2; shift 2 ;;
@@ -20,7 +20,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 SCN_ID=bench; SCN_LOG=$WORK/bench.log; OBS_LOG=$WORK/obs.txt; : >"$SCN_LOG"
 SD=$WORK/sbench; rm -rf "$SD"; mkdir -p "$SD"
-BASE=$PORT_BASE
+iso_base BASE "$PORT_BASE" 112
 trap 'peak_stop; stop_all' EXIT
 OUT=${OUT:-$WORK/bench.txt}; : >"$OUT"
 
@@ -29,10 +29,10 @@ wait_op() {
     [ -n "$2" ] || { echo "failed (no operation id)"; return 0; }
     local t s; t=0
     while :; do
-        s=$(cli "$1" z_getoperationstatus "[\"$2\"]" | jq -c '.[0]')
-        case $(printf '%s' "$s" | jq -r .status) in
-            success) printf 'success %s\n' "$(printf '%s' "$s" | jq -r .result.txid)"; return 0 ;;
-            failed) printf 'failed %s\n' "$(printf '%s' "$s" | jq -r .error.message)"; return 0 ;;
+        s=$(cli "$1" z_getoperationstatus "[\"$2\"]" | jraw '[0]')
+        case $(printf '%s' "$s" | jget status) in
+            success) printf 'success %s\n' "$(printf '%s' "$s" | jget result.txid)"; return 0 ;;
+            failed) printf 'failed %s\n' "$(printf '%s' "$s" | jget error.message)"; return 0 ;;
         esac
         t=$((t + 1)); [ $t -lt 18000 ] || { echo "timeout"; return 1; }
         sleep 0.1

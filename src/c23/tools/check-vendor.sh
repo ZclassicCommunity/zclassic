@@ -1,6 +1,7 @@
 #!/bin/sh
 # Verify src/c23/vendor/ is byte-identical to the Z23 pin recorded in Z23_SOURCE.tsv.
-# usage: check-vendor.sh [c23-dir]      (default: the directory above this script)
+# usage: check-vendor.sh [c23-dir | manifest.tsv]   (default: the directory above this script)
+#   A manifest path (for example zcutil/tools/Z23_SOURCE.tsv) checks the vendor/ directory beside it.
 # Optional env Z23_REPO=<path>: additionally prove the pin contains 55245e2bd.
 # Fails (non-zero) on: blob drift, missing file, unlisted file under vendor/,
 # malformed row, inconsistent commit column, or (when openssl has sha3) a
@@ -8,9 +9,8 @@
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 c23=${1:-$(dirname "$here")}
-c23=$(cd "$c23" && pwd) || exit 2
+case "$c23" in *.tsv) tsv=$(cd "$(dirname "$c23")" && pwd)/$(basename "$c23"); c23=$(dirname "$tsv") ;; *) c23=$(cd "$c23" && pwd) || exit 2; tsv="$c23/Z23_SOURCE.tsv" ;; esac
 root=$(cd "$c23/../.." && pwd)
-tsv="$c23/Z23_SOURCE.tsv"
 [ -f "$tsv" ] || { echo "FAIL: missing $tsv" >&2; exit 1; }
 fail=0
 bad() { echo "FAIL: $*" >&2; fail=1; }
@@ -63,7 +63,7 @@ find "$c23/vendor" -type f ! -name "*.o" ! -name "*.obj" ! -name "*.lo" ! -name 
     ! -name "*.Tpo" ! -name ".dirstamp" ! -name "*.gcno" ! -name "*.gcda" >"$listed.found"
 while IFS= read -r f; do
     rel=${f#"$root"/}
-    [ "$rel" = src/c23/vendor/.gitattributes ] && continue
+    [ "$rel" = "${c23#"$root"/}/vendor/.gitattributes" ] && continue
     grep -qxF "$rel" "$listed" || bad "unlisted file $rel"
 done <"$listed.found"
 rm -f "$listed.found"
