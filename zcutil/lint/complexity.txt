@@ -92,9 +92,12 @@ src/crypto/equihash.cpp	Equihash<N,K>::OptimisedSolve(3)	50
 src/gtest/test_equihash_c23.cpp	TEST_F(EquihashC23,DISABLED_FullHistoryReplay)	18
 src/gtest/test_mainnet_blocks.cpp	TEST(MainnetBlocks,ShieldedConsensusChecksAcceptRealBlocks)	28
 src/gtest/test_sapling_scan_batch.cpp	TEST(SaplingScanBatch,MainnetOutputsAgreeAndTiming)	25
-src/init.cpp	AppInit2(2)	407
+src/headerprecheck.cpp	PreverifyHeadersEquihash(1)	21
+src/init.cpp	AppInit2(2)	424
 src/init.cpp	InitSanityCheck(0)	43
 src/init.cpp	LoadVerifiedParamCache(1)	25
+src/init.cpp	MaybeWriteCleanShutdownMarker(2)	18
+src/init.cpp	Shutdown(0)	16
 src/key.cpp	ec_privkey_import_der(4)	19
 src/main.cpp	AcceptBlock(5)	23
 src/main.cpp	AcceptBlockHeader(3)	16
@@ -106,7 +109,7 @@ src/main.cpp	CheckBlockIndex(0)	71
 src/main.cpp	CheckTransactionWithoutProofVerification(3)	56
 src/main.cpp	ConnectBlock(6)	57
 src/main.cpp	ConnectTip(3)	18
-src/main.cpp	ContextualCheckTransaction(5)	43
+src/main.cpp	ContextualCheckTransaction(5)	44
 src/main.cpp	EvaluateTipCorroboration(10)	17
 src/main.cpp	FindMostWorkChainMemoized(0)	40
 src/main.cpp	FindMostWorkChainReference(0)	36
@@ -117,7 +120,7 @@ src/main.cpp	LoadBlockIndexDB(0)	46
 src/main.cpp	LoadExternalBlockFile(2)	24
 src/main.cpp	ProcessAddrList(2)	22
 src/main.cpp	ProcessGetData(1)	30
-src/main.cpp	ProcessMessage(4)	195
+src/main.cpp	ProcessMessage(4)	196
 src/main.cpp	ProcessMessages(1)	18
 src/main.cpp	ReceivedBlockTransactions(4)	16
 src/main.cpp	RewindBlockIndex(2)	35
@@ -129,6 +132,8 @@ src/net.cpp	AttemptToEvictConnection(1)	22
 src/net.cpp	COnionAddrDB::Read(1)	16
 src/net.cpp	Discover(1)	16
 src/net.cpp	GetLocal(3)	16
+src/net.cpp	OpenConnectionsLoop(1)	18
+src/net.cpp	SelectOutboundCandidate(4)	17
 src/net.cpp	ThreadMessageHandler(0)	16
 src/net.cpp	ThreadSocketHandler(0)	61
 src/netbase.cpp	CNetAddr::GetGroup(0)	16
@@ -160,6 +165,7 @@ src/script/script.cpp	GetOpName(1)	115
 src/script/script_error.cpp	ScriptErrorString(1)	34
 src/script/sigencoding.cpp	IsValidSignatureEncoding(1)	19
 src/script/standard.cpp	Solver(3)	33
+src/shutdownmarker.cpp	ParseBinding(2)	16
 src/sync.cpp	potential_deadlock_detected(3)	19
 src/test/addrv2_tests.cpp	BOOST_AUTO_TEST_CASE(addrv2_adversarial_inputs)	23
 src/test/bootstrap_resume_tests.cpp	FakeBootstrapServer::Handle(2)	36
@@ -168,6 +174,7 @@ src/test/coins_tests.cpp	BOOST_AUTO_TEST_CASE(coins_cache_simulation_test)	20
 src/test/coins_tests.cpp	BOOST_AUTO_TEST_CASE(updatecoins_simulation_test)	17
 src/test/findmostwork_tests.cpp	BOOST_AUTO_TEST_CASE(randomized_differential_against_reference)	53
 src/test/findmostwork_tests.cpp	BOOST_AUTO_TEST_CASE(randomized_differential_reviewer_extension)	90
+src/test/fuzz/fuzz_p2p_payload.cpp	LLVMFuzzerTestOneInput(2)	18
 src/test/policyestimator_tests.cpp	BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)	27
 src/test/prevector_tests.cpp	BOOST_AUTO_TEST_CASE(PrevectorTestInt)	20
 src/test/rust_oracle/gen_golden.cpp	gen_binding_bundles(0)	43
@@ -186,6 +193,7 @@ src/test/rust_oracle/golden_replay.c	main(2)	16
 src/test/rust_oracle/golden_replay.c	replay_file(4)	24
 src/test/rust_oracle/golden_replay.c	replay_pbundle(1)	35
 src/test/sighash_tests.cpp	RandomTransaction(3)	17
+src/test/wire_robustness_tests.cpp	Mutate(4)	17
 src/test/znam_tests.cpp	BOOST_AUTO_TEST_CASE(random_chains_match_the_model_and_reorgs_equal_a_rebuild)	28
 src/test/znam_tests.cpp	Model::Apply(9)	23
 src/test/zslp_tests.cpp	BOOST_AUTO_TEST_CASE(mainnet_fixtures)	16
@@ -426,7 +434,7 @@ zcutil/dev/zcl-dev.c	find_lessons(3)	18
 zcutil/dev/zcl-dev.c	main(2)	22
 zcutil/dev/zcl-port-stress.c	main(2)	20
 zcutil/dev/zcl-port.c	cmd_lease(2)	16
-zcutil/dev/zcl-port.c	main(2)	28
+zcutil/dev/zcl-port.c	main(2)	26
 zcutil/lint/lintlib.c	lint_ratchet(5)	20
 zcutil/lint/lintlib.c	lint_scrub_c_line(2)	16
 zcutil/lint/rules/consensus_seal.c	lint_rule_consensus_seal(1)	42
