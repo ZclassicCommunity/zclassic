@@ -146,7 +146,7 @@ served_bytes() { # <n> [from-line]
 log_lines() { wc -l <"$work/server$1/regtest/debug.log" 2>/dev/null || echo 0; }
 wait_imported() { # waits for the fixture height; prints nothing
     i=0
-    while [ $i -lt 400 ]; do
+    while [ $i -lt "${WAIT_ITER:-400}" ]; do
         h=$(cli "$client_bin" "$cdir" getblockcount 2>/dev/null)
         [ "$h" = "$fx_height" ] && return 0
         kill -0 "$CPID" 2>/dev/null || return 1
@@ -221,6 +221,7 @@ test_one() {
 # with the throttled server listed first and last. Not part of "all". An old client uses one server only.
 test_cmp() {
     low=$((kbps / 8))
+    WAIT_ITER=2400 # an old client stays on the throttled server
     say "== comparison: server 1 capped at $low kbit/s, server 2 at $kbps; old = ${basebin:-none}, new = $bin =="
     for order in "1 2" "2 1"; do
         for who in old new; do
@@ -241,7 +242,7 @@ test_both() {
     start_client "1 2"
     seen=0; sn=0
     i=0
-    while [ $i -lt 400 ]; do
+    while [ $i -lt "${WAIT_ITER:-400}" ]; do
         j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null)
         n=$(echo "$j" | json_num servers_in_use)
         if [ "${n:-0}" = 2 ]; then seen=1; sn=$(echo "$j" | grep -c '"state": *"ok"'); echo "$j" | tr -d '\n ' | sed 's/.*"servers"/"servers"/' | cut -c1-300; break; fi
