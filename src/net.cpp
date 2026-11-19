@@ -422,15 +422,24 @@ CNode* FindNode(const CService& addr)
     return NULL;
 }
 
-int OutboundConnectTimeout(bool fDirect, bool fTimeoutSet, int nAttempts, int64_t nLastSuccess, int nDefaultTimeout)
+int OutboundConnectTimeout(bool fDirect, bool fTimeoutSet, int nAttempts, int64_t nLastTry, int64_t nLastSuccess, int nDefaultTimeout)
 {
     // through a proxy (Tor) the time goes to the proxy, not to the TCP handshake;
     // and a -timeout the user chose is the user's
     if (!fDirect || fTimeoutSet)
         return nDefaultTimeout;
-    if (nAttempts == 0 && nLastSuccess == 0)
+    // the first contact with an address we know nothing of; any later dial gets the full time
+    if (nAttempts == 0 && nLastTry == 0 && nLastSuccess == 0)
         return std::min(nDefaultTimeout, FIRST_DIAL_CONNECT_TIMEOUT);
-    return std::min(nDefaultTimeout, DIRECT_DIAL_CONNECT_TIMEOUT);
+    return nDefaultTimeout;
+}
+
+bool DialFailureCounts(int nTimeoutUsed, int nFullTimeout, int64_t nElapsedMillis)
+{
+    if (nTimeoutUsed >= nFullTimeout)
+        return true;
+    // ran (nearly) to the shortened timeout: the full one would not have expired yet
+    return nElapsedMillis + DIAL_TIMEOUT_SLACK_MILLIS < nTimeoutUsed;
 }
 
 bool FixedSeedsWanted(size_t nTableSize)
@@ -464,6 +473,7 @@ CNode* ConnectNode(CAddress addrConnect, const char *pszDest, int nTimeout)
     // Connect
     SOCKET hSocket;
     bool proxyConnectionFailed = false;
+    const int64_t nDialStart = GetTimeMillis();
     if (pszDest ? ConnectSocketByName(addrConnect, hSocket, pszDest, Params().GetDefaultPort(), nTimeout, &proxyConnectionFailed) :
                   ConnectSocket(addrConnect, hSocket, nTimeout, &proxyConnectionFailed))
     {
@@ -489,8 +499,12 @@ CNode* ConnectNode(CAddress addrConnect, const char *pszDest, int nTimeout)
         return pnode;
     } else if (!proxyConnectionFailed) {
         // If connecting to the node failed, and failure is not caused by a problem connecting to
-        // the proxy, mark this as an attempt.
-        AddrManFor(addrConnect).Attempt(addrConnect);
+        // the proxy, mark this as an attempt. A dial we cut short ourselves (a shorter timeout
+        // than -timeout ran out) updates the last-try time but is not counted as a failure,
+        // or a node slower than the short timeout would turn terrible without ever being
+        // given the full one.
+        const bool fCount = DialFailureCounts(nTimeout, nConnectTimeout, GetTimeMillis() - nDialStart);
+        AddrManFor(addrConnect).Attempt(addrConnect, GetAdjustedTime(), fCount);
     }
 
     return NULL;
@@ -1764,7 +1778,7 @@ static void OpenConnectionsLoop(int nDialer)
         const bool fDirect = !addrConnect.IsTor() && !GetProxy(addrConnect.GetNetwork(), proxyDial);
         OpenNetworkConnection(addrConnect, &grant, NULL, false,
                               OutboundConnectTimeout(fDirect, mapArgs.count("-timeout") > 0, addrPick.GetAttempts(),
-                                                     addrPick.GetLastSuccess(), nConnectTimeout));
+                                                     addrPick.nLastTry, addrPick.GetLastSuccess(), nConnectTimeout));
     }
 }
 

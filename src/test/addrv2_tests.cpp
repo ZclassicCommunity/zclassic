@@ -824,38 +824,51 @@ BOOST_AUTO_TEST_CASE(outbound_candidate_skips_terrible)
     SetLimited(NET_IPV6, l6);
 }
 
-// Direct dials from the table, without an explicit -timeout: the first dial of an address
-// never dialled or reached waits FIRST_DIAL, later ones DIRECT_DIAL, never longer than
-// -timeout. A dial through a proxy (Tor), or with -timeout given, waits -timeout.
+// Direct dials from the table, without an explicit -timeout: the first contact with an
+// address we know nothing of waits FIRST_DIAL (never longer than -timeout), any later dial
+// -timeout. A dial through a proxy (Tor), or with -timeout given, always waits -timeout.
 BOOST_AUTO_TEST_CASE(outbound_connect_timeout)
 {
     const int64_t now = GetTime();
     const int D = DEFAULT_CONNECT_TIMEOUT;
-    BOOST_CHECK(FIRST_DIAL_CONNECT_TIMEOUT < DIRECT_DIAL_CONNECT_TIMEOUT);
-    BOOST_CHECK(DIRECT_DIAL_CONNECT_TIMEOUT < DEFAULT_CONNECT_TIMEOUT);
-    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 0, 0, D), FIRST_DIAL_CONNECT_TIMEOUT);
-    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 1, 0, D), DIRECT_DIAL_CONNECT_TIMEOUT);
-    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 0, now - 3600, D), DIRECT_DIAL_CONNECT_TIMEOUT);
-    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 0, 0, 1000), 1000);
-    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 3, now - 3600, 1500), 1500);
-    // proxied, or -timeout given: -timeout
-    BOOST_CHECK_EQUAL(OutboundConnectTimeout(false, false, 0, 0, D), D);
-    BOOST_CHECK_EQUAL(OutboundConnectTimeout(false, false, 3, 0, D), D);
-    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, true, 0, 0, 20000), 20000);
-    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, true, 2, 0, 20000), 20000);
+    BOOST_CHECK(FIRST_DIAL_CONNECT_TIMEOUT < DEFAULT_CONNECT_TIMEOUT);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 0, 0, 0, D), FIRST_DIAL_CONNECT_TIMEOUT);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 1, 0, 0, D), D);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 0, now - 30, 0, D), D);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 0, 0, now - 3600, D), D);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 0, 0, 0, 1000), 1000);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(false, false, 0, 0, 0, D), D);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, true, 0, 0, 0, 20000), 20000);
 
-    // a failed first dial counts as an attempt, so the next one waits the longer time
+    // A dial that ran out the shortened timeout is not a counted failure; one refused (or
+    // unreachable) within it is, and so is any failure of a full-length dial.
+    BOOST_CHECK(!DialFailureCounts(FIRST_DIAL_CONNECT_TIMEOUT, D, FIRST_DIAL_CONNECT_TIMEOUT));
+    BOOST_CHECK(!DialFailureCounts(FIRST_DIAL_CONNECT_TIMEOUT, D, FIRST_DIAL_CONNECT_TIMEOUT - 50));
+    BOOST_CHECK(DialFailureCounts(FIRST_DIAL_CONNECT_TIMEOUT, D, 120));
+    BOOST_CHECK(DialFailureCounts(D, D, D));
+    BOOST_CHECK(DialFailureCounts(D, D, 10));
+
+    // A node slower than the short timeout: its cut-short first dial is recorded as a try
+    // but not as a failure, so it neither turns terrible nor loses chance for it, and the
+    // next dial gives it the full -timeout. A counted failure would leave a mark.
     const CNetAddr source("93.184.216.1");
-    CAddress a = MakeV4("94.185.1.2", Params().GetDefaultPort(), 1, now - 3600);
+    CAddress slow = MakeV4("94.185.1.2", Params().GetDefaultPort(), 1, now - 3600);
     CAddrMan man;
-    BOOST_REQUIRE(man.Add(a, source));
+    BOOST_REQUIRE(man.Add(slow, source));
     CAddrInfo info = man.Select();
-    BOOST_REQUIRE(info == a);
-    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, info.GetAttempts(), info.GetLastSuccess(), D), FIRST_DIAL_CONNECT_TIMEOUT);
-    man.Attempt(a, now);
+    BOOST_REQUIRE(info == slow);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, info.GetAttempts(), info.nLastTry, info.GetLastSuccess(), D), FIRST_DIAL_CONNECT_TIMEOUT);
+    for (int i = 0; i < 5; i++)
+        man.Attempt(slow, now - 3600 + i, DialFailureCounts(FIRST_DIAL_CONNECT_TIMEOUT, D, FIRST_DIAL_CONNECT_TIMEOUT));
     info = man.Select();
-    BOOST_REQUIRE(info == a);
-    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, info.GetAttempts(), info.GetLastSuccess(), D), DIRECT_DIAL_CONNECT_TIMEOUT);
+    BOOST_REQUIRE(info == slow);
+    BOOST_CHECK_EQUAL(info.GetAttempts(), 0);
+    BOOST_CHECK(!info.IsTerrible(now));
+    BOOST_CHECK(info.nLastTry != 0);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, info.GetAttempts(), info.nLastTry, info.GetLastSuccess(), D), D);
+    man.Attempt(slow, now, true);
+    info = man.Select();
+    BOOST_CHECK_EQUAL(info.GetAttempts(), 1);
 }
 
 // Hosts not to dial: our own address once peers on two groups report it, the -addnode

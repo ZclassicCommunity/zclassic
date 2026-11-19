@@ -320,7 +320,7 @@ bool CAddrMan::Add_(const CAddress& addr, const CNetAddr& sourceIn, int64_t nTim
     return fNew;
 }
 
-void CAddrMan::Attempt_(const CService& addr, int64_t nTime)
+void CAddrMan::Attempt_(const CService& addr, int64_t nTime, bool fCountFailure)
 {
     CAddrInfo* pinfo = Find(addr);
 
@@ -336,7 +336,8 @@ void CAddrMan::Attempt_(const CService& addr, int64_t nTime)
 
     // update info
     info.nLastTry = nTime;
-    info.nAttempts++;
+    if (fCountFailure)
+        info.nAttempts++;
 }
 
 CAddrInfo CAddrMan::Select_(bool newOnly)

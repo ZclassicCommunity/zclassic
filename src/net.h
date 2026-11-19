@@ -83,15 +83,20 @@ CNode* FindNode(const CService& ip);
 /** nTimeout: connect timeout in milliseconds, 0 for -timeout (nConnectTimeout). */
 CNode* ConnectNode(CAddress addrConnect, const char *pszDest = NULL, int nTimeout = 0);
 bool OpenNetworkConnection(const CAddress& addrConnect, CSemaphoreGrant *grantOutbound = NULL, const char *strDest = NULL, bool fOneShot = false, int nTimeout = 0);
-/** Connect timeouts (ms) for a direct (not proxied) outbound dial from the address table,
- *  when -timeout is not given: a live node completes the TCP handshake within a fraction
- *  of a second (measured: under 0.1 s), a dead one never does. The first dial of an address
- *  never dialled or reached gets FIRST_DIAL, any later one DIRECT_DIAL. */
+/** Connect timeout (ms) for the first contact with an address (never dialled, in this run
+ *  or before, and never reached) by a direct (not proxied) dial from the address table, when
+ *  -timeout is not given: a live node completes the TCP handshake within a fraction of a
+ *  second (measured: under 0.1 s), a dead one never does. Any later dial gets -timeout. */
 static const int FIRST_DIAL_CONNECT_TIMEOUT = 2000;
-static const int DIRECT_DIAL_CONNECT_TIMEOUT = 3000;
-/** The connect timeout for an outbound dial: the shorter ones above for a direct dial
- *  without an explicit -timeout, otherwise nDefaultTimeout (-timeout). */
-int OutboundConnectTimeout(bool fDirect, bool fTimeoutSet, int nAttempts, int64_t nLastSuccess, int nDefaultTimeout);
+/** The connect timeout for an outbound dial: FIRST_DIAL for a first contact as above,
+ *  otherwise nDefaultTimeout (-timeout). */
+int OutboundConnectTimeout(bool fDirect, bool fTimeoutSet, int nAttempts, int64_t nLastTry, int64_t nLastSuccess, int nDefaultTimeout);
+/** A failed dial that ran to within this of a shortened timeout counts as cut short. */
+static const int DIAL_TIMEOUT_SLACK_MILLIS = 100;
+/** Whether a failed dial counts as a failed attempt in addrman: not when it ran out a timeout
+ *  shorter than the full one (nFullTimeout, -timeout), which would not yet have expired. A
+ *  refusal or an unreachable network within the short window still counts. */
+bool DialFailureCounts(int nTimeoutUsed, int nFullTimeout, int64_t nElapsedMillis);
 unsigned short GetListenPort();
 bool BindListenPort(const CService &bindAddr, std::string& strError, bool fWhitelisted = false, bool fOnion = false);
 void StartNode(boost::thread_group& threadGroup, CScheduler& scheduler);
