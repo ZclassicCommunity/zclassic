@@ -9,19 +9,19 @@ A private, single-file ZClassic wallet — with a full ZClassic node built right
 
 ## Download & run
 
-**Windows, Linux and macOS: [v2.1.2-beta12](https://github.com/ZclassicCommunity/zclassic/releases/tag/v2.1.2-beta12).**
+**Windows, Linux and macOS: [v2.1.2-beta13](https://github.com/ZclassicCommunity/zclassic/releases/tag/v2.1.2-beta13).**
 
 Download the **one** file for your computer and open it:
 
 | Your computer | Download | First-time open |
 |---|---|---|
-| **Windows** | `zclwallet-v2.1.2-beta12-win64.exe` | Double-click. If you see **"Windows protected your PC"**, click **More info → Run anyway**. |
-| **macOS 15+** (Apple Silicon) | `zclwallet-v2.1.2-beta12-macos-arm64.dmg` | Open the `.dmg` and drag **ZclWallet** to Applications. On first launch macOS says **"Apple could not verify … is free from malware"** — that's expected (the app is signed but not yet notarized). See **[Opening on macOS](#opening-on-macos)** just below. |
-| **Linux** | `zclwallet-v2.1.2-beta12-linux-x86_64` | `chmod +x zclwallet-v2.1.2-beta12-linux-x86_64 && ./zclwallet-v2.1.2-beta12-linux-x86_64` — or right-click → Properties → *Allow executing as program*, then double-click. _(glibc ≥ 2.31; system X11/XCB libraries required; no Qt or OpenSSL install needed.)_ |
+| **Windows** | `zclwallet-v2.1.2-beta13-win64.exe` | Double-click. If you see **"Windows protected your PC"**, click **More info → Run anyway**. |
+| **macOS 14+** (Apple Silicon) | `zclwallet-v2.1.2-beta13-macos-arm64.dmg` | Open the `.dmg` and drag **ZclWallet** to Applications. On first launch macOS says **"Apple could not verify … is free from malware"** — that's expected (the app is signed but not yet notarized). See **[Opening on macOS](#opening-on-macos)** just below. |
+| **Linux** | `zclwallet-v2.1.2-beta13-linux-x86_64` | `chmod +x zclwallet-v2.1.2-beta13-linux-x86_64 && ./zclwallet-v2.1.2-beta13-linux-x86_64` — or right-click → Properties → *Allow executing as program*, then double-click. _(glibc ≥ 2.31; system X11/XCB libraries required; no Qt or OpenSSL install needed.)_ |
 
 ### Opening on macOS
 
-The beta12 app targets **macOS 15 or newer on Apple Silicon** and was tested natively on macOS 26. It is ad-hoc signed, not Apple-notarized. Verify its checksum first. If Gatekeeper blocks it, use **System Settings → Privacy & Security → Open Anyway** for the verified app.
+The beta13 app targets **macOS 14 or newer on Apple Silicon** and was tested natively on macOS 26. It is ad-hoc signed, not Apple-notarized. Verify its checksum first. If Gatekeeper blocks it, use **System Settings → Privacy & Security → Open Anyway** for the verified app.
 
 ## What happens on first launch
 
@@ -37,6 +37,16 @@ ZClassic supports **shielded z-addresses**, which keep your balances and transfe
 - The **Balance** tab shows your **Shielded** and **Transparent** funds separately, plus the **Total** — so you always know what's private and what's public.
 
 The tabs are: **Balance · Send · Receive · Transactions · zclassicd**.
+
+## Beta13: new wallet and node
+
+Beta13 is a new wallet and a new node (both v2.1.2-beta13). The shielded cryptography is now C23 (no Rust, no libsnark), start-up and balance queries are faster, and wallet state survives hard kills and reorganisations with correct balances. Close your older wallet normally, keep your data directory and open beta13; back up your wallet first.
+
+- **Fast sync** uses every snapshot server at once, checks every byte against the trusted snapshot manifest, and the download screen shows how many servers are in use. A kill during the snapshot install no longer needs manual cleanup.
+- **Faster connections:** a fresh wallet finds its first peers in a fraction of the time (measured on a Windows home PC: 3 peers in 0.75 s instead of 8.6 s, median of 5 fresh starts).
+- **Wallet health:** the status bar shows "Wallet needs attention" only when something needs it (hover for details). A healthy wallet shows nothing.
+- **Retried sends cannot pay twice:** `z_sendmany` accepts an `idempotency_key` and the node keeps a durable send journal (`z_listsendjournal`); spent notes are retired from per-block work, so the wallet file is smaller.
+- No consensus rule, checkpoint or activation height changed. See the [beta13 release notes](../doc/release-notes-beta13.md) for the full list and known issues.
 
 ## Beta12: automatic checkpoint sync
 
@@ -79,7 +89,7 @@ Compare the result against the matching line in `SHA256SUMS.txt`.
 
 The wallet runs its own embedded `zclassicd` automatically — most people never think about it. If you already run a ZClassic node, the wallet connects to that instead.
 
-To run a **node only** (no GUI, e.g. on a server), download `zclassicd` from the [beta12 release (unchanged beta11 node)](https://github.com/ZclassicCommunity/zclassic/releases/tag/v2.1.2-beta12) and run it — **no flags or config needed**. It fetches the params and a snapshot and syncs by itself.
+To run a **node only** (no GUI, e.g. on a server), download `zclassicd` from the [beta13 release](https://github.com/ZclassicCommunity/zclassic/releases/tag/v2.1.2-beta13) and run it — **no flags or config needed**. It fetches the params and a snapshot and syncs by itself.
 
 _(To run the wallet itself without the GUI, pass `--headless`.)_
 
