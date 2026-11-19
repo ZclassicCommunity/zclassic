@@ -54,8 +54,16 @@ src/zslp/*|src/znam/*|qa/zslp/*|qa/rpc-tests/zslp_*|qa/rpc-tests/znam_*|qa/rpc-t
 src/test/*|src/gtest/*|src/utiltest.*	test_bitcoin-full zcash-gtest-full
 
 # ---- qa scripts that no CI step runs yet
-qa/rpc-tests/README.md|qa/rpc-tests/prover_memory_bench.sh|qa/zcash/*|qa/key1-guard.py	check-dev-tools
+qa/rpc-tests/README.md|qa/rpc-tests/prover_memory_bench.sh|qa/zcash/*	check-dev-tools
 
 # ---- Qt wallet
 wallet/src/*|wallet/tests/*|wallet/res/*|wallet/singleapplication/*|wallet/zcl-qt-wallet.pro|wallet/application.qrc|wallet/zclwallet_*|wallet/wsclient.html|wallet/public_key.asc|wallet/LICENSE*|wallet/.gitignore	wallet-qt-logic-widget wallet-linux
 wallet/contrib/*	wallet-linux
+
+# ---- tooling merged from the developer-tool branches
+qa/key1-guard.c|qa/key1-guard.sh|qa/key1-walletdb-baseline.txt	key1-guard check-dev-tools
+zcutil/check-no-python.sh	check-no-python check-dev-tools
+zcutil/embedded-tor-check.sh	check-dev-tools
+zcutil/lint/*	zcl-lint check-dev-tools
+zcutil/tools/Makefile|zcutil/tools/.gitignore|zcutil/tools/test-jsonq.sh	build-jsonq check-dev-tools
+qa/lib/*|qa/rpc-tests/jsonq_lib.sh	ALL

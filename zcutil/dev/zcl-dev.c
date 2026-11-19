@@ -562,7 +562,7 @@ static char *clip(const char *s, size_t max)
     n = max;
     while (n && ((unsigned char)s[n] & 0xC0) == 0x80) n--;
     memcpy(r, s, n);
-    strcpy(r + n, "...");
+    memcpy(r + n, "...", 4);
     return r;
 }
 

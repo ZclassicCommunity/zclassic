@@ -279,7 +279,7 @@ static int self_test(const char *wallet_h)
     char *copy = malloc(body.n + 64);
     if (!copy) return 2;
     memcpy(copy, body.p, body.n);
-    strcpy(copy + body.n, "\n        READWRITE(SpendingKey);\n");
+    snprintf(copy + body.n, 64, "\n        READWRITE(SpendingKey);\n");
     span poisoned = {copy, strlen(copy)};
     int poison = 0, other = 0;
     char tok[512];

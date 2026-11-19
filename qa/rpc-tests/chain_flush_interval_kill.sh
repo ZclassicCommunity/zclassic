@@ -25,7 +25,6 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ -x "$B/zclassicd" ] && [ -n "$W" ] || { echo "usage: $0 --bin DIR --work DIR [--base port]" >&2; exit 2; }
-command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
 . "$(dirname "$0")/../lib/isolation.sh"
 iso_base P "$P" 16; R=0; F=0
 rm -rf "$W"; mkdir -p "$W"; W=$(cd "$W" && pwd)

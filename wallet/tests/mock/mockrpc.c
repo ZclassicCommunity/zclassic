@@ -395,9 +395,8 @@ static char *dir_default(const char *argv0, const char *leaf)
     size_t dn = slash ? (size_t)(slash - argv0) : 1;
     char *p = malloc(dn + strlen(leaf) + 3);
     if (!p) return NULL;
-    if (slash) { memcpy(p, argv0, dn); p[dn] = '\0'; } else strcpy(p, ".");
-    strcat(p, "/");
-    strcat(p, leaf);
+    if (slash) { memcpy(p, argv0, dn); p[dn] = '\0'; } else { p[0] = '.'; p[1] = '\0'; }
+    snprintf(p + strlen(p), strlen(leaf) + 2, "/%s", leaf);
     return p;
 }
 
