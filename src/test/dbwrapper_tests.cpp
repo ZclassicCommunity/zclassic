@@ -13,6 +13,7 @@
 
 #include <boost/assign/std/vector.hpp> // for 'operator+=()'
 #include <boost/assert.hpp>
+#include <algorithm>
 #include <map>
 #include <boost/test/unit_test.hpp>
                     
@@ -275,6 +276,30 @@ BOOST_AUTO_TEST_CASE(dbwrapper_max_open_files_budget)
     BOOST_CHECK(n >= 64 && n <= 1000);
 #endif
     BOOST_CHECK_EQUAL(n, LevelDBMaxOpenFilesForTest()); // computed once
+}
+
+BOOST_AUTO_TEST_CASE(dbwrapper_max_open_files_pure)
+{
+    const int conns = 125;
+    const long reserve = LevelDBFdReserve(conns);
+    for (long soft : {1024L, 4096L, 65536L}) {
+        long e2 = std::max(64L, std::min(1000L, (soft - reserve) / 2));
+        long e3 = std::max(64L, std::min(1000L, (soft - reserve) / 3));
+        BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(soft, conns, 2, -1), e2);
+        BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(soft, conns, 3, -1), e3);
+    }
+    // soft 1024: two databases and three databases differ (the 32-bit -zslpindex case)
+    BOOST_CHECK(ComputeLevelDBMaxOpenFiles(1024, conns, 3, -1) < ComputeLevelDBMaxOpenFiles(1024, conns, 2, -1));
+    // an override above the budget is clamped to it; below the budget it is kept
+    BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(1024, conns, 3, 4000), (1024 - reserve) / 3);
+    BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(65536, conns, 3, 2000), 2000);
+    BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(65536, conns, 3, 9999), 4096);
+    // an override below 64 goes to 64
+    BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(65536, conns, 2, 10), 64);
+    BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(65536, conns, 2, 0), 64);
+    // win32 (soft < 0): fixed budget, override only bounded
+    BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(-1, conns, 3, -1), 512);
+    BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(-1, conns, 3, 2000), 2000);
 }
 
 BOOST_AUTO_TEST_CASE(dbwrapper_reopen_roundtrip)

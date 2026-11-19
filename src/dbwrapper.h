@@ -21,6 +21,10 @@ static const size_t DBWRAPPER_PREALLOC_VALUE_SIZE = 1024;
 
 /** LevelDB max_open_files budget per database, derived from the process fd limit (see dbwrapper.cpp). */
 int LevelDBMaxOpenFilesForTest();
+/** Pure budget: soft fd limit (-1 on Win32), max connections, LevelDB database count, -dbmaxopenfiles (-1 if unset). */
+int ComputeLevelDBMaxOpenFiles(long soft, int maxConnections, int ndb, int override);
+/** Descriptors reserved for everything that is not a LevelDB table. */
+int LevelDBFdReserve(int maxConnections);
 
 class dbwrapper_error : public std::runtime_error
 {
