@@ -4555,10 +4555,12 @@ private:
     class StopNode : public FakeNode {
     public:
         int refuse = 1;     // answer this many stop requests with RPC_IN_WARMUP, then accept
+        bool dropAfterRefuse = false;   // after the refusals, kill the connection instead of accepting
     protected:
         void handle(const Req& r, QTcpSocket* s) override {
             if (r.method != "stop") { FakeNode::handle(r, s); return; }
             if (count("stop") <= refuse) rpcError(s, -28, "Loading block index...");
+            else if (dropAfterRefuse) drop(s);
             else result(s, "ZClassic server stopping");
         }
     };
@@ -4593,6 +4595,96 @@ private slots:
         QVERIFY(StopRetrier::isDelivered(QNetworkReply::NoError));
         QVERIFY(!StopRetrier::isDelivered(QNetworkReply::ConnectionRefusedError));
         QVERIFY(!StopRetrier::isDelivered(QNetworkReply::InternalServerError)); // -28 is HTTP 500
+    }
+
+    // Retrying stops once more requests are pointless: the node answered 200, answers 503, or goes away
+    // after having been reachable (it is exiting); a refused port before it was ever reachable keeps going.
+    void stop_classifyIsPure() {
+        using R = StopRetrier;
+        QCOMPARE(R::classify(QNetworkReply::NoError, 200, false), R::Delivered);
+        QCOMPARE(R::classify(QNetworkReply::ConnectionRefusedError, 0, false), R::Retry);        // not up yet
+        QCOMPARE(R::classify(QNetworkReply::ConnectionRefusedError, 0, true), R::GiveUp);        // gone after being up
+        QCOMPARE(R::classify(QNetworkReply::RemoteHostClosedError, 0, true), R::GiveUp);
+        QCOMPARE(R::classify(QNetworkReply::InternalServerError, 500, false), R::Retry);         // -28, listening
+        QCOMPARE(R::classify(QNetworkReply::AuthenticationRequiredError, 401, false), R::Retry);
+        QCOMPARE(R::classify(QNetworkReply::ServiceUnavailableError, 503, false), R::GiveUp);    // HTTP server stopping
+    }
+
+    void stop_givesUpWhenTheNodeExitsAfterBeingReachable() {
+        StopNode node;
+        node.refuse = 1;
+        node.dropAfterRefuse = true;        // 1st: -28 (reachable), 2nd: connection dies (exiting)
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        Connection* c = w->getRPC()->getConnection();
+        c->shutdown();
+        StopRetrier st(c, 50);
+        QElapsedTimer t; t.start();
+        while (!st.gaveUp() && t.elapsed() < 8000) { st.tick(); QTest::qWait(20); }
+        QVERIFY(st.gaveUp());
+        QVERIFY(!st.delivered());
+        const int sent = node.count("stop");
+        // 2 requests of ours; Qt may transparently re-send one on a dead keep-alive connection
+        QVERIFY2(sent >= 2 && sent <= 3, qPrintable(QString::number(sent)));
+        QTest::qWait(300);
+        st.tick();
+        QTest::qWait(100);
+        QCOMPARE(node.count("stop"), sent);   // nothing more is sent against an exiting node
+        settleAndDelete(w);
+    }
+
+    // Between the close click and RPC::shutdownZClassicd setting its expected-shutdown flag no queued
+    // event may be delivered: a queued poll error / process-finished would be handled as an unexpected
+    // failure (error box, crash handler, restart). The notice is painted without an event loop.
+    void close_noQueuedEventRunsBeforeTheShutdownFlags() {
+        StopNode node;
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        QProcess child;
+        child.start(QCoreApplication::applicationFilePath(), {"--sleep-child"});
+        QVERIFY(child.waitForStarted(5000));
+        w->getRPC()->setEZClassicd(&child);
+        const bool wasHeadless = Settings::getInstance()->isHeadless();
+        Settings::getInstance()->setHeadless(false);   // the notice is really built and shown
+
+        int delivered = 0;
+        QTimer::singleShot(0, w, [&]() { delivered++; });                                   // queued timer
+        QMetaObject::invokeMethod(w, [&]() { delivered++; }, Qt::QueuedConnection);        // queued call (a poll reply)
+        QCoreApplication::postEvent(w, new QEvent(QEvent::User));                            // posted event
+        {
+            CloseFlow::Assist assist(w, w->getRPC());
+            QCOMPARE(delivered, 0);                  // nothing ran while the notice was built and shown
+            QDialog* notice = w->findChild<QDialog*>("closingNotice");
+            QVERIFY(notice && notice->isVisible());
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(delivered, 2, 2000);   // and they are delivered once the loop runs
+        Settings::getInstance()->setHeadless(wasHeadless);
+        child.kill();
+        child.waitForFinished(3000);
+        w->getRPC()->setEZClassicd(nullptr);
+        settleAndDelete(w);
+    }
+
+    // No owned running node (external node, or the process is not running): a neutral text, never
+    // "stopping the ZClassic node safely".
+    void close_noticeIsNeutralWithoutAnOwnedNode() {
+        StopNode node;
+        MainWindow* w = makeWindow();
+        attachNode(w, node);                         // an attached node the wallet did not start
+        const bool wasHeadless = Settings::getInstance()->isHeadless();
+        Settings::getInstance()->setHeadless(false);
+        {
+            CloseFlow::Assist assist(w, w->getRPC());
+            QDialog* notice = w->findChild<QDialog*>("closingNotice");
+            QVERIFY(notice && notice->isVisible());
+            QLabel* status = notice->findChild<QLabel*>("closingNoticeStatus");
+            QVERIFY(status);
+            QCOMPARE(status->text(), QString::fromUtf8("Closing\u2026"));
+            QVERIFY(!status->text().contains("stopping"));
+        }
+        Settings::getInstance()->setHeadless(wasHeadless);
+        QCOMPARE(node.count("stop"), 0);             // and no stop is ever sent for a node we do not own
+        settleAndDelete(w);
     }
 
     // The close path's helper: a node process that is still running. The notice is on screen at once
