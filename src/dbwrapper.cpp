@@ -25,32 +25,57 @@ extern int nMaxConnections;
 // Mirrors MIN_CORE_FILEDESCRIPTORS in init.cpp.
 static const int DBWRAPPER_CORE_FILEDESCRIPTORS = 150;
 
-static int ComputeLevelDBMaxOpenFiles(int& softLimit)
+static const int DBWRAPPER_MIN_OPEN_FILES = 64;
+static const int DBWRAPPER_MAX_OPEN_FILES = 1000;
+static const int DBWRAPPER_MAX_OVERRIDE = 4096;
+static const int DBWRAPPER_WIN32_OPEN_FILES = 512;
+
+int LevelDBFdReserve(int maxConnections)
 {
-    softLimit = -1;
-    if (mapArgs.count("-dbmaxopenfiles"))
-        return std::max(64, std::min(4096, (int)GetArg("-dbmaxopenfiles", 64)));
+    // Core fds, peer connections, plus blk/rev files, wallet, RPC, Tor and LevelDB logs.
+    return DBWRAPPER_CORE_FILEDESCRIPTORS + std::max(maxConnections, 0) + 128;
+}
+
+int ComputeLevelDBMaxOpenFiles(long soft, int maxConnections, int ndb, int override)
+{
+    if (soft < 0) // Win32 handles: conservative fixed budget
+        return override < 0 ? DBWRAPPER_WIN32_OPEN_FILES : std::max(DBWRAPPER_MIN_OPEN_FILES, std::min(DBWRAPPER_MAX_OVERRIDE, override));
+    long each = (soft - LevelDBFdReserve(maxConnections)) / std::max(ndb, 1);
+    long budget = std::max<long>(DBWRAPPER_MIN_OPEN_FILES, std::min<long>(DBWRAPPER_MAX_OPEN_FILES, each));
+    if (override < 0)
+        return (int)budget;
+    long n = std::max(DBWRAPPER_MIN_OPEN_FILES, std::min(DBWRAPPER_MAX_OVERRIDE, override));
+    return (int)std::min(n, std::max<long>(DBWRAPPER_MIN_OPEN_FILES, each));
+}
+
+static long LevelDBSoftLimit()
+{
 #ifdef WIN32
-    return 512; // Win32 handles: conservative fixed budget
+    return -1;
 #else
     struct rlimit lim;
-    int64_t s = 1024;
-    if (getrlimit(RLIMIT_NOFILE, &lim) == 0)
-        s = (lim.rlim_cur == RLIM_INFINITY || lim.rlim_cur > 65536) ? 65536 : (int64_t)lim.rlim_cur;
-    softLimit = (int)s;
-    // Reserve: core fds, peer connections, plus blk/rev files, wallet, RPC, Tor and LevelDB logs.
-    int64_t reserve = DBWRAPPER_CORE_FILEDESCRIPTORS + std::max(nMaxConnections, 0) + 128;
-    int64_t each = (s - reserve) / 2; // block index and chainstate share the budget
-    return (int)std::max<int64_t>(64, std::min<int64_t>(1000, each));
+    if (getrlimit(RLIMIT_NOFILE, &lim) != 0)
+        return 1024;
+    return (lim.rlim_cur == RLIM_INFINITY || lim.rlim_cur > 65536) ? 65536 : (long)lim.rlim_cur;
 #endif
+}
+
+int LevelDBDatabaseCount(bool zslpIndex, bool znamIndex)
+{
+    // block index and chainstate, plus one store per optional index
+    return 2 + (zslpIndex ? 1 : 0) + (znamIndex ? 1 : 0);
 }
 
 static int LevelDBMaxOpenFiles()
 {
     static const int budget = []() {
-        int softLimit = -1;
-        int n = ComputeLevelDBMaxOpenFiles(softLimit);
-        LogPrintf("LevelDB max_open_files=%d (fd soft limit %d)\n", n, softLimit);
+        long soft = LevelDBSoftLimit();
+        int ndb = LevelDBDatabaseCount(GetBoolArg("-zslpindex", false), GetBoolArg("-znamindex", false));
+        int requested = mapArgs.count("-dbmaxopenfiles") ? (int)GetArg("-dbmaxopenfiles", DBWRAPPER_MIN_OPEN_FILES) : -1;
+        int n = ComputeLevelDBMaxOpenFiles(soft, nMaxConnections, ndb, requested);
+        if (requested >= DBWRAPPER_MIN_OPEN_FILES && n < std::min(requested, DBWRAPPER_MAX_OVERRIDE))
+            LogPrintf("WARNING: -dbmaxopenfiles=%d exceeds the file descriptor budget (fd soft limit %ld, %d databases); using %d\n", requested, soft, ndb, n);
+        LogPrintf("LevelDB max_open_files=%d (fd soft limit %d)\n", n, (int)soft);
         return n;
     }();
     return budget;

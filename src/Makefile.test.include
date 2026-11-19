@@ -80,6 +80,7 @@ BITCOIN_TESTS =\
   test/onion_v3_tests.cpp \
   test/pmt_tests.cpp \
   test/policyestimator_tests.cpp \
+  test/protocol_tests.cpp \
   test/pow_tests.cpp \
   test/parkedblockindex_tests.cpp \
   test/findmostwork_tests.cpp \

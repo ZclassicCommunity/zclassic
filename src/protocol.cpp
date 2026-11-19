@@ -149,5 +149,7 @@ const char* CInv::GetCommand() const
 
 std::string CInv::ToString() const
 {
+    if (!IsKnownType())
+        return strprintf("unknown(%d) %s", type, hash.ToString());
     return strprintf("%s %s", GetCommand(), hash.ToString());
 }
