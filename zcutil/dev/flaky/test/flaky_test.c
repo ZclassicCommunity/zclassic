@@ -140,12 +140,15 @@ static void test_work_and_jobs(const char *tmp)
     run_tool(&r, (const char *[]){"-n", "2", "--keep", "--", "sh", "-c",
              "echo \"$1\" >\"$1/marker\"; echo \"$2\" >\"$1/num\"; echo \"$TMPDIR\" >\"$1/tmpdir\"", "sh", "@WORK@", "@RUN@", NULL});
     line_after(&r, "run directory: ", dir, sizeof dir);
-    snprintf(p, sizeof p, "%s/run-2/num", dir);
+    snprintf(p, sizeof p, "%s/run-2/work/num", dir);
     CHECK("@RUN@ substituted", r.code == 0 && file_has(p, "2\n"));
-    snprintf(p, sizeof p, "%s/run-2/marker", dir);
-    CHECK("@WORK@ substituted", strstr(dir, "run-2") == NULL && file_has(p, dir) && file_has(p, "/run-2\n"));
-    snprintf(p, sizeof p, "%s/run-2/tmpdir", dir);
-    CHECK("TMPDIR is the run directory", file_has(p, "/run-2\n"));
+    snprintf(p, sizeof p, "%s/run-2/work/marker", dir);
+    CHECK("@WORK@ substituted", strstr(dir, "run-2") == NULL && file_has(p, dir) && file_has(p, "/run-2/work\n"));
+    snprintf(p, sizeof p, "%s/run-2/work/tmpdir", dir);
+    CHECK("TMPDIR is run-<k>/tmp", file_has(p, "/run-2/tmp\n"));
+    /* the command sees an empty work directory (qa scripts refuse a non-empty --work) */
+    run_tool(&r, (const char *[]){"-n", "2", "--", "sh", "-c", "[ -z \"$(ls -A \"$1\")\" ]", "sh", "@WORK@", NULL});
+    CHECK("@WORK@ is empty when the command starts", r.code == 0 && has(&r, "PASS: 2 runs"));
 
     /* the same fixture under --jobs 3 gives the same verdict */
     const char *flaky = "if [ \"$ZCL_FLAKY_RUN\" = 2 ] || [ \"$ZCL_FLAKY_RUN\" = 5 ]; then exit 1; fi; sleep 0.2";

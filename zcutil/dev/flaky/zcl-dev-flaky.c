@@ -47,6 +47,8 @@ struct run {
     double secs;
     char dir[PATH_BUF];
     char log[PATH_BUF];
+    char work[PATH_BUF]; /* run-<k>/work: empty when the command starts */
+    char tmp[PATH_BUF];  /* run-<k>/tmp: TMPDIR */
 #ifndef _WIN32
     pid_t pid;
     double t0;
@@ -275,7 +277,7 @@ static void child_exec(char **av, const char *dir, int k, int logfd, int errfd)
 static int launch(const struct cfg *c, struct run *r, int k)
 {
     int ep[2], err = 0;
-    char **av = build_argv(c, r->dir, k);
+    char **av = build_argv(c, r->work, k);
     int logfd = open(r->log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (!av || logfd < 0 || pipe(ep) != 0) {
         free_argv(av);
@@ -286,7 +288,7 @@ static int launch(const struct cfg *c, struct run *r, int k)
     fcntl(ep[1], F_SETFD, FD_CLOEXEC);
     r->t0 = now_s();
     r->pid = fork();
-    if (r->pid == 0) child_exec(av, r->dir, k, logfd, ep[1]);
+    if (r->pid == 0) child_exec(av, r->tmp, k, logfd, ep[1]);
     close(ep[1]);
     close(logfd);
     free_argv(av);
@@ -316,7 +318,7 @@ static void finish(struct run *r, int status, int why)
 }
 
 /* Kill the whole group, then reap its leader. The kill comes first: until the leader is reaped its pid cannot
- * be reused, so the signal cannot reach an unrelated group. Nothing a run leaves behind outlives it. */
+ * be reused, so the signal cannot reach an unrelated group. Processes that stay in the group die; one that calls setsid or setpgid escapes. */
 static void kill_and_reap(struct run *r, int why)
 {
     int st = 0;
@@ -491,7 +493,9 @@ static int setup_runs(const struct cfg *c, struct run *runs, const char *dir)
     for (int i = 0; i < c->n; i++) {
         snprintf(runs[i].dir, sizeof runs[i].dir, "%s/run-%d", dir, i + 1);
         snprintf(runs[i].log, sizeof runs[i].log, "%s/log", runs[i].dir);
-        if (mkdir(runs[i].dir, 0777) != 0) return -1;
+        snprintf(runs[i].work, sizeof runs[i].work, "%s/work", runs[i].dir);
+        snprintf(runs[i].tmp, sizeof runs[i].tmp, "%s/tmp", runs[i].dir);
+        if (mkdir(runs[i].dir, 0777) != 0 || mkdir(runs[i].work, 0777) != 0 || mkdir(runs[i].tmp, 0777) != 0) return -1;
     }
     return 0;
 }
