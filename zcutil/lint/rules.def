@@ -2,7 +2,7 @@
  *   LINT_RULE(name, function, baseline)
  * function is `int fn(bool update)` defined in rules/<file>.c and declared by this table;
  * baseline says the rule has a shrink-only zcutil/lint/<name>.txt (so --update-baseline applies).
- * Adding a rule is one new file under rules/ plus one row here (also add the file to RULES in Makefile). */
+ * Adding a rule is one new file under rules/ plus one row here (the Makefile picks up every file under rules/ by wildcard). */
 LINT_RULE("no-new-jq", lint_rule_no_new_jq, true)
 LINT_RULE("no-new-bash", lint_rule_no_new_bash, true)
 LINT_RULE("banned-str", lint_rule_banned_str, true)

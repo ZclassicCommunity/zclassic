@@ -14,6 +14,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
 
 const char *lint_root = ".";
 
@@ -299,7 +302,13 @@ int lint_run(const char *cmd)
 {
     fflush(stdout);
     int rc = system(cmd);
-    return rc == 0 ? 0 : 1;
+    if (rc == 0) return 0;
+#ifndef _WIN32
+    if (rc != -1 && WIFEXITED(rc) && WEXITSTATUS(rc) == 2) return 2; /* the script reported a hollow scan */
+#else
+    if (rc == 2) return 2;
+#endif
+    return 1;
 }
 
 /* Blank sh comments (a # at the start of a word) and quoted text. Heredoc bodies are not recognised. */

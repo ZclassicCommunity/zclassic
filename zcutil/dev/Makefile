@@ -14,6 +14,7 @@ BIN = ../bin
 LDLIBS_PORT =
 ifneq ($(EXEEXT),)
 LDLIBS_PORT = -lws2_32
+CFLAGS += -D__USE_MINGW_ANSI_STDIO=1
 endif
 
 all: $(BIN)/zcl-dev$(EXEEXT) $(BIN)/zcl-port$(EXEEXT)
@@ -24,7 +25,7 @@ $(BIN)/zcl-dev$(EXEEXT): zcl-dev.c $(HDR)
 
 $(BIN)/zcl-port$(EXEEXT): zcl-port.c
 	mkdir -p $(BIN)
-	$(CC) $(STD) -Wall -Wextra $(CFLAGS) -o $@ zcl-port.c $(LDLIBS_PORT)
+	$(CC) $(STD) $(WARN) $(CFLAGS) -o $@ zcl-port.c $(LDLIBS_PORT)
 
 check: $(BIN)/zcl-dev$(EXEEXT)
 	sh test/run.sh $(BIN)/zcl-dev$(EXEEXT)

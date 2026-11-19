@@ -29,7 +29,7 @@ int lint_rule_vendor(bool update)
         n++;
         if (lint_run(cmd)) { printf("FAIL vendor: %s does not match its vendored tree\n", lint_files[i]); bad++; }
     }
-    if (!n) { printf("FAIL vendor: no Z23_SOURCE.tsv manifest is tracked\n"); return 1; }
+    if (!n) { printf("FAIL vendor: no Z23_SOURCE.tsv manifest is tracked\n"); return 2; }
     if (!bad) printf("vendor: ok (%d manifests)\n", n);
     return bad ? 1 : 0;
 }

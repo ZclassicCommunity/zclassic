@@ -31,6 +31,8 @@
 #else
 #include <dirent.h>
 #include <unistd.h>
+#include <signal.h>
+#include <sys/wait.h>
 #endif
 
 #include "platform/modules/platform/include/platform/glob_match.h"
@@ -796,10 +798,58 @@ static int find_sub(const char *cmd, char *out, size_t cap)
     return 0;
 }
 
+/* Quote one argument by the CommandLineToArgvW rules (MSVCRT re-parses the joined command line).
+ * Returns a malloc()ed string. Compiled everywhere so `zcl-dev __quote` can test it off Windows. */
+static char *quote_arg(const char *a)
+{
+    size_t n = strlen(a), cap = 2 * n + 3, o = 0;
+    char *q = xrealloc(NULL, cap);
+    if (*a && !strpbrk(a, " \t\n\v\"")) { memcpy(q, a, n + 1); return q; }
+    q[o++] = '"';
+    for (size_t i = 0;; i++) {
+        size_t bs = 0;
+        while (a[i] == '\\') { bs++; i++; }
+        if (!a[i]) { for (size_t k = 0; k < 2 * bs; k++) q[o++] = '\\'; break; }
+        if (a[i] == '"') { for (size_t k = 0; k < 2 * bs + 1; k++) q[o++] = '\\'; }
+        else for (size_t k = 0; k < bs; k++) q[o++] = '\\';
+        q[o++] = a[i];
+    }
+    q[o++] = '"';
+    q[o] = 0;
+    return q;
+}
+
+#ifndef _WIN32
+/* Run `path --purpose` without a shell, with a 5 s alarm; returns a stream of its stdout. */
+static pid_t purpose_pid;
+static FILE *purpose_pipe(const char *path)
+{
+    int fd[2];
+    if (pipe(fd)) return NULL;
+    pid_t pid = fork();
+    if (pid < 0) { close(fd[0]); close(fd[1]); return NULL; }
+    if (!pid) {
+        alarm(5);
+        dup2(fd[1], 1);
+        close(fd[0]); close(fd[1]);
+        execl(path, path, "--purpose", (char *)NULL);
+        _exit(127);
+    }
+    close(fd[1]);
+    purpose_pid = pid;
+    return fdopen(fd[0], "r");
+}
+#endif
+
 static int run_sub(const char *path, char **args)
 {
 #ifdef _WIN32
-    intptr_t rc = _spawnv(_P_WAIT, path, (const char *const *)args);
+    size_t na = 0;
+    while (args[na]) na++;
+    char **qa = xrealloc(NULL, (na + 1) * sizeof *qa);
+    for (size_t i = 0; i < na; i++) qa[i] = quote_arg(args[i]);
+    qa[na] = NULL;
+    intptr_t rc = _spawnv(_P_WAIT, path, (const char *const *)qa);
     if (rc == -1) die("cannot run %s", path);
     return (int)rc;
 #else
@@ -857,13 +907,24 @@ static int cmd_help(void)
     qsort(names.v, names.n, sizeof *names.v, name_cmp);
     if (names.n) puts("\ndiscovered (zcl-dev-<cmd> --purpose):");
     for (size_t i = 0; i < names.n; i++) {
-        char path[1400], cmd[1500], line[256] = "";
+        char path[1400], line[256] = "";
         if (find_sub(names.v[i], path, sizeof path)) {
+#ifdef _WIN32
+            char cmd[1500];
             snprintf(cmd, sizeof cmd, "\"%s\" --purpose", path);
             FILE *p = popen(cmd, "r");
+#else
+            FILE *p = purpose_pipe(path);
+#endif
             if (p) {
                 if (!fgets(line, sizeof line, p)) line[0] = 0;
+#ifdef _WIN32
                 pclose(p);
+#else
+                fclose(p);
+                kill(purpose_pid, SIGKILL);
+                waitpid(purpose_pid, NULL, 0);
+#endif
                 line[strcspn(line, "\r\n")] = 0;
             }
         }
@@ -888,8 +949,17 @@ int main(int argc, char **argv)
         return 2;
     }
     const char *cmd = argv[a++];
+    if (!strcmp(cmd, "__quote")) { /* test hook: one quoted argument per line */
+        for (; a < argc; a++) { char *q = quote_arg(argv[a]); puts(q); free(q); }
+        return 0;
+    }
     if (!strcmp(cmd, "help")) {
         if (dir && chdir(dir)) die("cannot chdir to %s", dir);
+        { /* find the repo root when there is one, so zcutil/bin is listed from a subdirectory */
+            List l = {0};
+            if (!cmd_lines("git rev-parse --show-toplevel", &l) && l.n && chdir(l.v[0]))
+                die("cannot chdir to %s", l.v[0]);
+        }
         return cmd_help();
     }
     if (!strcmp(cmd, "receipt")) {

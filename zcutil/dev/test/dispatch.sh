@@ -29,4 +29,17 @@ rc=0; HELLO_RC=7 "$zd" -C "$work/repo" hello >/dev/null || rc=$?
 out=$("$zd" help) || fail "help failed"
 printf '%s\n' "$out" | grep -q '^  guide ' || fail "help lacks built-in guide"
 printf '%s\n' "$out" | grep -q '^  hello  *prints its arguments$' || fail "help lacks discovered hello: $out"
+# Windows argv quoting (CommandLineToArgvW rules), exercised on every host.
+cat >"$work/want" <<'EOF2'
+plain
+"b c"
+"d\"e"
+""
+x\\
+"x y\\\\"
+"p q\\\"r"
+"C:\sp ace\\"
+EOF2
+"$zd" __quote plain 'b c' 'd"e' '' 'x\\' 'x y\\' 'p q\"r' 'C:\sp ace\' >"$work/got"
+cmp -s "$work/got" "$work/want" || fail "quoting: got $(cat "$work/got")"
 echo "ok   dispatch"
