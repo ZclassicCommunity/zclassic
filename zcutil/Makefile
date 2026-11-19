@@ -13,8 +13,16 @@ endif
 
 all check clean: $(SUBDIRS:%=%.rule)
 
+# `check` builds every tool once, first and alone: some subdirectories' selftests run tools from other
+# subdirectories (zcl-lint, zcl-dev), so under `make -j` they must not start while those still link.
+ifneq ($(filter check,$(MAKECMDGOALS)),)
+$(SUBDIRS:%=%.rule): built
+endif
+built:
+	$(MAKE) all EXEEXT=$(EXEEXT)
+
 # Pass `all`, `check` or `clean` through to each subdirectory, in order.
 %.rule:
 	$(MAKE) -C $* $(MAKECMDGOALS) EXEEXT=$(EXEEXT)
 
-.PHONY: all check clean
+.PHONY: all check clean built
