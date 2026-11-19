@@ -678,12 +678,16 @@ TEST_F(RetireFixture, AnUnwindThatReachesTheSpendBringsTheNoteBack)
     { LOCK2(cs_main, wallet->cs_wallet); ASSERT_TRUE(Note(a).fRetired); }
 
     // an operator invalidateblock/parkblock goes as deep as it likes: unwind to just above the spend
+    unsigned int nDisconnected = 0;
     while (TipHeight() >= nSpendHeight) {
         chain.Disconnect(*wallet);
+        nDisconnected++;
         LOCK2(cs_main, wallet->cs_wallet);
         if (chainActive.Height() >= nSpendHeight) {
             EXPECT_TRUE(Note(a).fRetired) << "at height " << chainActive.Height();
-            EXPECT_FALSE(wallet->WitnessesLost());
+            // the rebuild is armed exactly when the cache size reaches zero and the frozen list of the only
+            // note is trimmed to nothing (WITNESS_CACHE_SIZE disconnects), not before
+            EXPECT_EQ(nDisconnected >= WITNESS_CACHE_SIZE, wallet->WitnessesLost()) << "after " << nDisconnected << " disconnects";
             EXPECT_TRUE(wallet->IsSaplingSpent(nf));
         }
     }
