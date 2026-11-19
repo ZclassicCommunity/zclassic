@@ -106,9 +106,11 @@ struct RecordingDB {
         return writes++ != failAt;
     }
     bool TxnBegin() { inTxn = true; ops.push_back("begin"); return true; }
-    bool TxnCommit() { inTxn = false; committed = true; ops.push_back("commit"); return true; }
+    bool TxnCommit() { inTxn = false; ops.push_back("commit"); if (failCommit) return false; committed = true; return true; }
     bool TxnAbort() { inTxn = false; aborted = true; ops.push_back("abort"); return true; }
-    bool WriteTx(uint256, const CWalletTx&) { return WriteStep("tx"); }
+    std::vector<uint256> written;
+    bool failCommit = false;
+    bool WriteTx(uint256 h, const CWalletTx&) { written.push_back(h); return WriteStep("tx"); }
     bool WriteWitnessCacheSize(int64_t) { return WriteStep("cachesize"); }
     bool WriteBestBlock(const CBlockLocator&) { return WriteStep("locator"); }
 };
@@ -747,4 +749,165 @@ TEST_F(RetireFixture, ASproutNoteIsRetiredToo)
     EXPECT_FALSE(od.fRetired);
     EXPECT_FALSE(od.witnesses.empty());
     EXPECT_EQ(chainActive.Height(), od.witnessHeight);
+}
+
+// ---- the checkpoint writes only the note transactions that changed ----------------------------
+
+namespace {
+
+struct CheckpointFixture : public RetireFixture {
+    CBlockLocator Loc() { LOCK(cs_main); return chainActive.GetLocator(); }
+    /** One checkpoint into a recording database; returns what it wrote. */
+    std::vector<uint256> Checkpoint(RecordingDB& db) {
+        LOCK2(cs_main, wallet->cs_wallet);
+        wallet->Checkpoint(db, chainActive.GetLocator());
+        return db.written;
+    }
+    std::vector<uint256> Checkpoint() { RecordingDB db; return Checkpoint(db); }
+    static std::vector<uint256> Sorted(std::vector<uint256> v) { std::sort(v.begin(), v.end()); return v; }
+};
+
+} // namespace
+
+TEST_F(CheckpointFixture, AnUnchangedWalletWritesNoTransaction)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint())) << "the first checkpoint writes what the blocks changed";
+    RecordingDB db;
+    EXPECT_TRUE(Checkpoint(db).empty()) << "nothing changed since";
+    // the cache size and the locator still go in one database transaction
+    std::vector<std::string> want = {"begin", "cachesize", "locator", "commit"};
+    EXPECT_EQ(want, db.ops);
+    EXPECT_TRUE(db.committed);
+    {
+        LOCK(wallet->cs_wallet);
+        EXPECT_EQ(0u, wallet->CountDirtyNoteTxs());
+    }
+}
+
+TEST_F(CheckpointFixture, ABlockMarksEveryLiveNoteTransaction)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    Checkpoint();
+    Mine(0);
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint())) << "every witness moved";
+    EXPECT_TRUE(Checkpoint().empty());
+}
+
+TEST_F(CheckpointFixture, ADisconnectMarksEveryLiveNoteTransaction)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0); Mine(0);
+    Checkpoint();
+    chain.Disconnect(*wallet);
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint()));
+    EXPECT_TRUE(Checkpoint().empty());
+}
+
+TEST_F(CheckpointFixture, ARetiredNoteIsWrittenOnceAndThenLeftOut)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    uint256 sp = MineSpendOf(a);
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE);
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint())) << "spent but not yet deep: both are live";
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1 + (int)RETIRE_SWEEP_INTERVAL);
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        ASSERT_TRUE(Note(a).fRetired);
+    }
+    // the retiring block changed both: a (emptied) and b (moved)
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint()));
+    Mine(0);
+    EXPECT_EQ(std::vector<uint256>({b}), Checkpoint()) << "only the unspent note moves";
+    Mine(0); Mine(0);
+    EXPECT_EQ(std::vector<uint256>({b}), Checkpoint());
+}
+
+TEST_F(CheckpointFixture, AFailedCheckpointLeavesTheRecordsMarked)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    {
+        RecordingDB db;
+        db.failAt = 1; // the second transaction
+        Checkpoint(db);
+        EXPECT_TRUE(db.aborted);
+        EXPECT_FALSE(db.committed);
+    }
+    {
+        RecordingDB db;
+        db.failAt = 2; // the cache size
+        Checkpoint(db);
+        EXPECT_TRUE(db.aborted);
+    }
+    {
+        RecordingDB db;
+        db.failCommit = true;
+        EXPECT_EQ(2u, Checkpoint(db).size());
+        EXPECT_FALSE(db.committed);
+    }
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint())) << "still written once a checkpoint goes through";
+    EXPECT_TRUE(Checkpoint().empty());
+}
+
+TEST_F(CheckpointFixture, ReconcileMarksTheRecordsItRepairs)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    Checkpoint();
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        Note(a).nullifier = boost::none; // what an older build could leave in wallet.dat
+        CBlockIndex* pindexRescan = chainActive.Tip();
+        ASSERT_TRUE(wallet->ReconcileNoteState(pindexRescan));
+    }
+    EXPECT_EQ(std::vector<uint256>({a}), Checkpoint()) << "only the repaired record";
+    {
+        // a cache that is ahead of the chain is cut back: only that note
+        LOCK2(cs_main, wallet->cs_wallet);
+        int nTip = chainActive.Height();
+        chainActive.SetTip(&chain.index[nTip - 1]);
+        CBlockIndex* pindexRescan = chainActive.Tip();
+        ASSERT_TRUE(wallet->ReconcileNoteState(pindexRescan));
+    }
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint()));
+}
+
+TEST_F(CheckpointFixture, ClearingTheWitnessCacheMarksEveryNoteTransaction)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    Checkpoint();
+    { LOCK(wallet->cs_wallet); wallet->ClearNoteWitnessCache(); }
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint()));
+}
+
+TEST_F(CheckpointFixture, ANewNoteTransactionAndAMergedOneAreMarked)
+{
+    uint256 a = Mine(1000); Mine(0);
+    Checkpoint();
+    // a note that arrives unconfirmed (AddToWallet inserts it)
+    CMutableTransaction mtx = BaseTx(rng);
+    mtx.vShieldedOutput.push_back(SaplingOutputTo(rng, addr, 5000));
+    CTransaction tx(mtx);
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        wallet->SyncTransaction(tx, nullptr);
+    }
+    EXPECT_EQ(std::vector<uint256>({tx.GetHash()}), Checkpoint());
+    // and the block that confirms it (merge: hashBlock, merkle branch, witness)
+    CBlock block;
+    block.vtx.push_back(CTransaction(BaseTx(rng)));
+    block.vtx.push_back(tx);
+    chain.Connect(*wallet, block);
+    EXPECT_EQ(Sorted({a, tx.GetHash()}), Sorted(Checkpoint()));
+}
+
+TEST_F(CheckpointFixture, ATransactionThatLeavesTheWalletIsNotWritten)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        wallet->MarkNoteTxDirty(GetRandHash()); // a hash the wallet does not hold
+    }
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint()));
+    EXPECT_TRUE(Checkpoint().empty());
+    LOCK(wallet->cs_wallet);
+    EXPECT_EQ(0u, wallet->CountDirtyNoteTxs());
 }

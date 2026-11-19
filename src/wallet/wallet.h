@@ -909,6 +909,20 @@ public:
     /** Number of notes currently retired (memory only; rebuilt by RetireSpentNotes). */
     size_t CountRetiredNotes() const;
 
+    /**
+     * Record that this wallet transaction's note data changed since it was last written to wallet.dat,
+     * so the next SetBestChain writes it. EVERY code path that changes a note record (witnesses,
+     * witnessHeight, nullifier, the retired state) must call this or MarkNoteTxsDirty: a change
+     * that is not marked reaches wallet.dat only when something else rewrites the transaction.
+     * Conservative on purpose: marking a transaction whose data did not change costs one write.
+     * Requires cs_wallet.
+     */
+    void MarkNoteTxDirty(const uint256& hash);
+    /** Same for a batch of collected note transactions. */
+    void MarkNoteTxsDirty(const std::vector<CWalletTx*>& txs);
+    /** Number of note transactions the next SetBestChain would write. */
+    size_t CountDirtyNoteTxs() const;
+
 protected:
     /**
      * pindex is the new tip being connected.
@@ -986,6 +1000,13 @@ protected:
      */
     std::set<uint256> setNoteTxRetired;
     /**
+     * Wallet transactions whose note data (witnesses, witnessHeight, nullifier, ...) changed since
+     * SetBestChain last wrote them: the checkpoint writes these and nothing else (see
+     * MarkNoteTxDirty). Memory only: what is loaded from wallet.dat is clean. A transaction may be
+     * listed without having note data or after it left the wallet; the checkpoint skips those.
+     */
+    std::set<uint256> setNoteTxDirty;
+    /**
      * (height of the block, txid) of the wallet transactions whose spend retired a note, so a
      * disconnect that reaches that height (an operator invalidateblock/parkblock deeper than
      * the reorg limit) can bring those notes back (UnretireNotesSpentFrom).
@@ -1041,20 +1062,30 @@ protected:
             LogPrintf("SetBestChain(): Couldn't start atomic write\n");
             return;
         }
+        // The note transactions that were written in this database transaction: they are clean
+        // only once it commits.
+        std::vector<uint256> vWritten;
         try {
-            for (std::pair<const uint256, CWalletTx>& wtxItem : mapWallet) {
-                auto wtx = wtxItem.second;
-                // We skip transactions for which mapSproutNoteData and mapSaplingNoteData
-                // are empty. This covers transactions that have no Sprout or Sapling data
-                // (i.e. are purely transparent), as well as shielding and unshielding
-                // transactions in which we only have transparent addresses involved.
-                if (!(wtx.mapSproutNoteData.empty() && wtx.mapSaplingNoteData.empty())) {
-                    if (!walletdb.WriteTx(wtxItem.first, wtx)) {
-                        LogPrintf("SetBestChain(): Failed to write CWalletTx, aborting atomic write\n");
-                        walletdb.TxnAbort();
-                        return;
-                    }
+            // Only transactions whose note data changed since they were last written, in txid
+            // order, by reference (the writer serializes a const transaction). Transactions
+            // without Sprout or Sapling data (purely transparent ones, shielding and
+            // unshielding transactions in which only transparent addresses are ours) are never
+            // written here, and a retired note's transaction only when its record changed.
+            for (const uint256& hash : setNoteTxDirty) {
+                std::map<uint256, CWalletTx>::const_iterator mi = mapWallet.find(hash);
+                if (mi == mapWallet.end()) {
+                    continue; // left the wallet
                 }
+                const CWalletTx& wtx = mi->second;
+                if (wtx.mapSproutNoteData.empty() && wtx.mapSaplingNoteData.empty()) {
+                    continue;
+                }
+                if (!walletdb.WriteTx(hash, wtx)) {
+                    LogPrintf("SetBestChain(): Failed to write CWalletTx, aborting atomic write\n");
+                    walletdb.TxnAbort();
+                    return;
+                }
+                vWritten.push_back(hash);
             }
             TestCrashPoint("setbestchain-after-txs");
             if (!walletdb.WriteWitnessCacheSize(nWitnessCacheSize)) {
@@ -1079,6 +1110,20 @@ protected:
             // Couldn't commit all to db, but in-memory state is fine
             LogPrintf("SetBestChain(): Couldn't commit atomic write\n");
             return;
+        }
+        // Durable together with the locator: only now are those records clean (on any failure
+        // above they stay marked and the next checkpoint writes them again). Entries for
+        // transactions without note data or that left the wallet are dropped with them.
+        for (const uint256& hash : vWritten) {
+            setNoteTxDirty.erase(hash);
+        }
+        for (std::set<uint256>::iterator it = setNoteTxDirty.begin(); it != setNoteTxDirty.end();) {
+            std::map<uint256, CWalletTx>::const_iterator mi = mapWallet.find(*it);
+            if (mi == mapWallet.end() || (mi->second.mapSproutNoteData.empty() && mi->second.mapSaplingNoteData.empty())) {
+                it = setNoteTxDirty.erase(it);
+            } else {
+                ++it;
+            }
         }
         TestCrashPoint("setbestchain-after-commit");
     }
@@ -1210,6 +1255,7 @@ public:
         nReacceptTipsLeft = 0;
         setNoteTxIndex.clear();
         setNoteTxRetired.clear();
+        setNoteTxDirty.clear();
         setRetiredSpends.clear();
         nRetireSweepHeight = -1;
         nNoteTxIndexWalletSize = 0;

@@ -696,6 +696,26 @@ void CWallet::NoteTxIndexAdd(const uint256& hash, const CWalletTx& wtx)
     }
 }
 
+void CWallet::MarkNoteTxDirty(const uint256& hash)
+{
+    AssertLockHeld(cs_wallet);
+    setNoteTxDirty.insert(hash);
+}
+
+void CWallet::MarkNoteTxsDirty(const std::vector<CWalletTx*>& txs)
+{
+    AssertLockHeld(cs_wallet);
+    for (const CWalletTx* pwtx : txs) {
+        setNoteTxDirty.insert(pwtx->GetHash());
+    }
+}
+
+size_t CWallet::CountDirtyNoteTxs() const
+{
+    LOCK(cs_wallet);
+    return setNoteTxDirty.size();
+}
+
 void CWallet::CollectNoteTxs(std::vector<CWalletTx*>& out, bool fIncludeRetired)
 {
     AssertLockHeld(cs_wallet);
@@ -1035,6 +1055,7 @@ void CWallet::SyncMetaData(pair<typename TxSpendMap<T>::iterator, typename TxSpe
         copyTo->nTimeSmart = copyFrom->nTimeSmart;
         copyTo->fFromMe = copyFrom->fFromMe;
         copyTo->strFromAccount = copyFrom->strFromAccount;
+        MarkNoteTxDirty(hash); // a note transaction used to be rewritten at every checkpoint
         // nOrderPos not copied on purpose
         // cached members not copied on purpose
     }
@@ -1143,6 +1164,9 @@ void CWallet::ClearNoteWitnessCache()
 {
     LOCK(cs_wallet);
     for (std::pair<const uint256, CWalletTx>& wtxItem : mapWallet) {
+        if (!wtxItem.second.mapSproutNoteData.empty() || !wtxItem.second.mapSaplingNoteData.empty()) {
+            MarkNoteTxDirty(wtxItem.first);
+        }
         for (mapSproutNoteData_t::value_type& item : wtxItem.second.mapSproutNoteData) {
             item.second.witnesses.clear();
             item.second.witnessHeight = -1;
@@ -1356,8 +1380,12 @@ size_t CWallet::RetireSpentNotesLocked()
     CollectNoteTxs(noteTxs);
     for (CWalletTx* pwtx : noteTxs) {
         bool fFlags = false;
+        const size_t nStoredBefore = nStored;
         RetireNotes(pwtx->mapSproutNoteData, sproutDeep, setRetiredSpends, nStored, fFlags);
         RetireNotes(pwtx->mapSaplingNoteData, saplingDeep, setRetiredSpends, nStored, fFlags);
+        if (nStored != nStoredBefore) {
+            MarkNoteTxDirty(pwtx->GetHash()); // the stored record changes
+        }
         if (fFlags) {
             NoteTxIndexAdd(pwtx->GetHash(), *pwtx);
         }
@@ -1414,6 +1442,7 @@ void CWallet::UnretireNotesSpentFrom(int nHeight)
         if (fBack) {
             nBack++;
             NoteTxIndexAdd(pwtx->GetHash(), *pwtx);
+            MarkNoteTxDirty(pwtx->GetHash());
         }
     }
     if (nBack > 0) {
@@ -1475,14 +1504,15 @@ bool CWallet::ReconcileNoteState(CBlockIndex*& pindexRescan)
                 nTxHeight = mi->second->nHeight;
             }
         }
+        bool fTxChanged = false;
         for (auto& item : pwtx->mapSproutNoteData) {
-            fChanged |= ReconcileNoteWitnesses(item.second, nForkHeight, nTipHeight, nTxHeight, chainActive, nRescanHeight, stats);
+            fTxChanged |= ReconcileNoteWitnesses(item.second, nForkHeight, nTipHeight, nTxHeight, chainActive, nRescanHeight, stats);
         }
         bool fSaplingChanged = false;
         for (auto& item : pwtx->mapSaplingNoteData) {
             fSaplingChanged |= ReconcileNoteWitnesses(item.second, nForkHeight, nTipHeight, nTxHeight, chainActive, nRescanHeight, stats);
         }
-        fChanged |= fSaplingChanged;
+        fTxChanged |= fSaplingChanged;
 
         // A Sapling nullifier is derived from the position its witness carries. A record that
         // has the witness but not the nullifier (an older build could write one) would make the
@@ -1497,7 +1527,11 @@ bool CWallet::ReconcileNoteState(CBlockIndex*& pindexRescan)
         }
         if (fDerive) {
             UpdateSaplingNullifierNoteMapWithTx(*pwtx);
+            fTxChanged = true;
+        }
+        if (fTxChanged) {
             fChanged = true;
+            MarkNoteTxDirty(pwtx->GetHash());
         }
     }
 
@@ -1659,6 +1693,9 @@ void CWallet::IncrementNoteWitnesses(const CBlockIndex* pindex,
     // nothing. noteTxs is in txid order, like a mapWallet walk.
     std::vector<CWalletTx*> noteTxs;
     CollectNoteTxs(noteTxs);
+    // Every live note gets a new witness, a longer list or a new height with this block: its
+    // transaction is written at the next checkpoint. A retired note is not in the list.
+    MarkNoteTxsDirty(noteTxs);
 
     for (CWalletTx* pwtx : noteTxs) {
        ::CopyPreviousWitnesses(pwtx->mapSproutNoteData, pindex->nHeight, nWitnessCacheSize);
@@ -1816,6 +1853,9 @@ void CWallet::DecrementNoteWitnesses(const CBlockIndex* pindex)
     // loops here and are skipped.
     std::vector<CWalletTx*> noteTxs;
     CollectNoteTxs(noteTxs);
+    // Every live note moves (its witness list or its height), and a note that became live again
+    // above changed too.
+    MarkNoteTxsDirty(noteTxs);
     for (CWalletTx* pwtx : noteTxs) {
         if (::DecrementNoteWitnesses(pwtx->mapSproutNoteData, pindex->nHeight, indexHash, pwtx->hashBlock, nSizeAfter)) {
             fNoteWitnessesLost = true;
@@ -2115,6 +2155,10 @@ void CWallet::UpdateNullifierNoteMapWithTx(const CWalletTx& wtx)
  */
 void CWallet::UpdateSaplingNullifierNoteMapWithTx(CWalletTx& wtx) {
     LOCK(cs_wallet);
+    // This changes the stored nullifier (derived, or erased with its witness) of the notes below.
+    if (!wtx.mapSaplingNoteData.empty()) {
+        MarkNoteTxDirty(wtx.GetHash());
+    }
 
     for (mapSaplingNoteData_t::value_type &item : wtx.mapSaplingNoteData) {
         SaplingOutPoint op = item.first;
@@ -2271,8 +2315,12 @@ bool CWallet::AddToWallet(const CWalletTx& wtxIn, bool fFromLoadWallet, CWalletD
                 fUpdated = true;
             }
         }
-        // New or merged note data: keep the witness index a superset.
+        // New or merged note data: keep the witness index a superset, and write it at the next
+        // checkpoint (the write below does not make the checkpoint skip it: one extra write).
         NoteTxIndexAdd(hash, wtx);
+        if (fInsertedNew || fUpdated) {
+            MarkNoteTxDirty(hash);
+        }
 
         //// debug print
         LogPrintf("AddToWallet %s  %s%s\n", wtxIn.GetHash().ToString(), (fInsertedNew ? "new" : ""), (fUpdated ? "update" : ""));
@@ -2459,6 +2507,7 @@ void CWallet::EraseFromWallet(const uint256 &hash)
             nNoteTxIndexWalletSize--;
             setNoteTxIndex.erase(hash);
             setNoteTxRetired.erase(hash);
+            setNoteTxDirty.erase(hash);
             CWalletDB(strWalletFile).EraseTx(hash);
         }
     }
