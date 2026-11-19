@@ -239,9 +239,12 @@ test_kills() {
     say "== kill -9 at $kills random instants, restart each time =="
     fresh_client; start_server || return 1
     from=$(log_lines); cyc=$from; prevb=0
+    chunk=1048576 # the snapshot chunk size
+    allow_total=0
     n=0; finished=0
     while [ $n -lt "$kills" ]; do
         ra=$(restart_args); [ -z "$ra" ] || say "the previous run had finished its bootstrap; restarting it without -bootstrap"
+        cl=$(wc -l <"$client_log" 2>/dev/null || echo 0)
         start_client $ra
         t=$(rand_ms_for_kill)
         sleep_ms "$t"
@@ -252,18 +255,23 @@ test_kills() {
         n=$((n + 1))
         sq=$(served_bytes "$cyc"); cyc=$(log_lines)
         ss=$(staging_state); nb=${ss##*bytes=}
-        # What the run lost: bytes the server queued for it that did not end up in the staging directory. A
-        # killed run loses what was in flight, at most one full window of every stream (4 streams x 16 chunks
-        # of 1 MiB) plus the last partial chunk of each .part file it resumed.
+        # What a killed run loses is what was in flight at the kill (requests the server had queued that the client
+        # never stored; the client's status line says how many were in flight, and is repeated when that moves by 4)
+        # plus the last chunk of every partial file it resumed (always requested again).
+        infl=$(tail -n +$((cl + 1)) "$client_log" | sed -n 's/.*, \([0-9][0-9]*\) requests in flight.*/\1/p' | sort -n | tail -1)
+        resumed=$(tail -n +$((cl + 1)) "$client_log" | sed -n 's/.*staging scan: .*, \([0-9][0-9]*\) partial files continue.*/\1/p' | tail -1)
+        allow=$(( (${infl:-0} + 4 + ${resumed:-0}) * chunk ))
         lost=$((sq - (nb - prevb)))
-        say "kill $n at +${t} ms: staging $ss (this run: server queued $sq bytes, staged $((nb - prevb)), lost $lost)"
+        say "kill $n at +${t} ms: staging $ss (this run: server queued $sq bytes, staged $((nb - prevb)), lost $lost; ${infl:-0} requests in flight, ${resumed:-0} partial files resumed, allowed $allow)"
         if [ "$nb" -gt 0 ]; then
-            if [ "$lost" -gt $((4 * 16 * 1048576 + 4 * 1048576)) ]; then fail "kills: run $n lost $lost bytes, more than one full request window"; fi
+            allow_total=$((allow_total + allow))
+            if [ "$lost" -gt "$allow" ]; then fail "kills: run $n lost $lost bytes, more than its ${infl:-0}+4 requests in flight and ${resumed:-0} resumed partial files allow ($allow)"; fi
             prevb=$nb
         else
             prevb=0
         fi
     done
+    cl=$(wc -l <"$client_log" 2>/dev/null || echo 0)
     if [ $finished -eq 0 ]; then
         start_client $(restart_args)
         if ! wait_imported "$client_bin"; then
@@ -274,11 +282,14 @@ test_kills() {
     served=$(served_bytes "$from")
     ratio=$(awk -v a="$served" -v b="$snapshot_bytes" 'BEGIN {printf "%.3f", a / b}')
     say "server served $served bytes in total for $n kills; snapshot is $snapshot_bytes bytes (ratio $ratio)"
-    # one copy plus, per kill, at most one full request window in flight (4 streams x 16 chunks of 1 MiB) and the
-    # last chunk of each resumed .part; each run is also checked on its own above
-    limit=$(awk -v b="$snapshot_bytes" -v n="$n" 'BEGIN {printf "%d", b * 1.02 + n * 68 * 1048576}')
+    # one copy plus what the killed runs could lose (the per-run allowances above) plus the last chunk of each
+    # partial file the final run resumed; no multiplier
+    resumed=$(tail -n +$((cl + 1)) "$client_log" | sed -n 's/.*staging scan: .*, \([0-9][0-9]*\) partial files continue.*/\1/p' | tail -1)
+    limit=$((snapshot_bytes + allow_total + ${resumed:-0} * chunk))
     if [ "$served" -le "$limit" ]; then pass "kills: total bytes served stayed within bound ($served <= $limit)"; else fail "kills: served $served > bound $limit"; fi
-    if grep -aq 'hash mismatch' "$client_log"; then say "note: a staged file failed verification during the kill loop (expected after a torn write):"; grep -a 'hash mismatch\|corrupt or the wrong size' "$client_log" | head -5; fi
+    # No torn write is injected here (kill -9 leaves the page cache intact and a resume starts at a whole chunk),
+    # so a staged file that fails its hash is a bug.
+    if grep -aq 'hash mismatch' "$client_log"; then fail "kills: a staged file failed verification although no torn write was injected"; grep -a 'hash mismatch' "$client_log" | head -3; else pass "kills: no staged file failed verification"; fi
     if ls -d "$cdir"/regtest/bootstrap-peer-staging-* >/dev/null 2>&1; then fail "kills: staging directory still present after a successful import"; else pass "kills: staging directory removed after the import"; fi
     grep -a 'staging scan\|staging directory\|pre-install audit\|download complete' "$client_log" | tail -6
     end_client; stop_server
