@@ -120,3 +120,37 @@ three runs, peak RSS in MB (wall time in s), one recipient:
 The limit-4 column spends the same ceiling the earlier branch did (a default send near 400 MB)
 for more parallel proofs, and is faster at 20 and 40 notes; the limit-2 column shows what the
 exact-size storage alone saves. Times are good to about +-15 % on this shared host.
+
+## Lazy proving parameters
+
+Since the raw Sapling bytes went into the table above as "fixed (process)", the default mode no
+longer keeps them (`ZCL_PARAMS_VERIFY`, see `doc/c23-build.md`): init hashes the 51.6 MB Sapling
+pair and frees it at once, and only checks the size of `sprout-groth16.params` instead of
+streaming its 692 MiB through BLAKE2b. The first proof of a send reads and re-verifies the pair
+before parsing it; `ZCL_PARAMS_VERIFY=boot` restores the old behaviour.
+
+Host `z23-r1` (shared, load average 9 to 35), regtest, fresh datadir, `-nuparams` for Sapling at
+height 1, warm page cache, two rounds each (both shown). `rchar` is read from `/proc/<pid>/io` from
+exec until the log line "Loaded Sapling parameters"; the first start has an empty verified-params
+cache, so `init.cpp`'s SHA-256 gate also reads every file; the second start finds the cache warm.
+Idle RSS is read 5 s after RPC answers. A send is `z_sendmany` from a transparent address to one
+Sapling address (output proofs only), `execution_secs` of the operation.
+
+| | base 8ee9727e7 | this change, lazy (default) | this change, `ZCL_PARAMS_VERIFY=boot` |
+|---|---|---|---|
+| read to "Loaded Sapling parameters", cold cache | 1554 MB | 829 MB | 1554 MB |
+| read to "Loaded Sapling parameters", warm cache | 777 MB | 51.7 MB | 777 MB |
+| time to that line, warm cache | 707-741 ms | 93-115 ms | 706 ms |
+| shim init ("Loaded Sapling parameters in") | 0.66-0.68 s | 0.058-0.059 s | 0.66 s |
+| idle RSS after start | 81.3-82.2 MB | 30.2-30.9 MB | 81.8-81.9 MB |
+| RSS after a send | 84.2-84.5 MB | 32.3-33.3 MB | 84.0-84.7 MB |
+| first send of the process | 0.133-0.161 s | 0.220-0.244 s | 0.145 s |
+| second send | 0.115-0.128 s | 0.195-0.199 s | 0.102 s |
+| first send after a restart | 0.145-0.165 s | 0.227-0.234 s | 0.135 s |
+
+So start-up reads 725 MB less per start, the shim's part of start-up falls from 0.67 s to 0.06 s,
+an idle node holds about 51 MB less, and each send pays 60 to 100 ms to read, hash and parse the
+Sapling pair again (every send, because the parsed keys are released with the send's last proving
+context, as before). The first Sprout proof of a process additionally hashes the Sprout file once
+(about 0.6 s here, what the boot-mode init spent on it). In the standalone shim smoke (`compat_smoke`, warm cache) init went from 703 ms
+to 62 ms and the first spend proof from 531 ms to 599 ms.
