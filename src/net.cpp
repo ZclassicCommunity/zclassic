@@ -13,6 +13,7 @@
 
 #include "addrman.h"
 #include "addrv2.h"
+#include "banlist.h"
 #include "chainparams.h"
 #include "clientversion.h"
 #include "embeddedtor.h"
@@ -32,6 +33,9 @@
 
 // Dump addresses to peers.dat every 15 minutes (900s)
 #define DUMP_ADDRESSES_INTERVAL 900
+
+// Write banlist.dat within 5 seconds of a change to the ban list
+#define DUMP_BANLIST_INTERVAL 5
 
 #if !defined(HAVE_MSG_NOSIGNAL) && !defined(MSG_NOSIGNAL)
 #define MSG_NOSIGNAL 0
@@ -550,13 +554,15 @@ void CNode::PushVersion()
 
 
 
-std::map<CSubNet, int64_t> CNode::setBanned;
+banmap_t CNode::setBanned;
 CCriticalSection CNode::cs_setBanned;
+std::atomic<bool> CNode::fBanlistDirty(false);
 
 void CNode::ClearBanned()
 {
     LOCK(cs_setBanned);
     setBanned.clear();
+    fBanlistDirty = true;
 }
 
 bool CNode::IsBanned(CNetAddr ip)
@@ -605,6 +611,7 @@ void CNode::Ban(const CSubNet& subNet, int64_t bantimeoffset, bool sinceUnixEpoc
     LOCK(cs_setBanned);
     if (setBanned[subNet] < banTime)
         setBanned[subNet] = banTime;
+    fBanlistDirty = true;
 }
 
 bool CNode::Unban(const CNetAddr &addr) {
@@ -614,15 +621,41 @@ bool CNode::Unban(const CNetAddr &addr) {
 
 bool CNode::Unban(const CSubNet &subNet) {
     LOCK(cs_setBanned);
-    if (setBanned.erase(subNet))
+    if (setBanned.erase(subNet)) {
+        fBanlistDirty = true;
         return true;
+    }
     return false;
 }
 
-void CNode::GetBanned(std::map<CSubNet, int64_t> &banMap)
+void CNode::GetBanned(banmap_t &banMap)
 {
     LOCK(cs_setBanned);
     banMap = setBanned; //create a thread safe copy
+}
+
+void CNode::SetBanned(const banmap_t &banMap)
+{
+    LOCK(cs_setBanned);
+    setBanned = banMap;
+}
+
+size_t CNode::SweepBanned()
+{
+    int64_t now = GetTime();
+    size_t nRemoved = 0;
+    LOCK(cs_setBanned);
+    for (banmap_t::iterator it = setBanned.begin(); it != setBanned.end(); ) {
+        if (it->second <= now) {
+            setBanned.erase(it++);
+            nRemoved++;
+        } else {
+            ++it;
+        }
+    }
+    if (nRemoved)
+        fBanlistDirty = true;
+    return nRemoved;
 }
 
 
@@ -1431,6 +1464,8 @@ void DumpAddresses()
 {
     int64_t nStart = GetTimeMillis();
 
+    DumpBanlist();
+
     CAddrDB adb;
     adb.Write(addrman);
 
@@ -2149,6 +2184,7 @@ void StartNode(boost::thread_group& threadGroup, CScheduler& scheduler)
         if (addrmanOnion.size() > 0)
             LogPrintf("Loaded %i Tor v3 addresses from onion_peers.dat\n", addrmanOnion.size());
     }
+    LoadBanlist();
     fAddressesInitialized = true;
 
     if (semOutbound == NULL) {
@@ -2193,6 +2229,9 @@ void StartNode(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     // Dump network addresses
     scheduler.scheduleEvery(&DumpAddresses, DUMP_ADDRESSES_INTERVAL);
+
+    // Persist ban-list changes within seconds, off the message and RPC threads
+    scheduler.scheduleEvery(&DumpBanlist, DUMP_BANLIST_INTERVAL);
 }
 
 bool StopNode()
@@ -2395,60 +2434,6 @@ bool CAddrDB::Write(const CAddrMan& addr)
     // replace existing peers.dat, if any, with new peers.dat.XXXX
     if (!RenameOver(pathTmp, pathAddr))
         return error("%s: Rename-into-place failed", __func__);
-
-    return true;
-}
-
-bool CAddrDB::Read(CAddrMan& addr)
-{
-    // open input file, and associate with CAutoFile
-    FILE *file = fopen(pathAddr.string().c_str(), "rb");
-    CAutoFile filein(file, SER_DISK, CLIENT_VERSION);
-    if (filein.IsNull())
-        return error("%s: Failed to open file %s", __func__, pathAddr.string());
-
-    // use file size to size memory buffer
-    int fileSize = boost::filesystem::file_size(pathAddr);
-    int dataSize = fileSize - sizeof(uint256);
-    // Don't try to resize to a negative number if file is small
-    if (dataSize < 0)
-        dataSize = 0;
-    vector<unsigned char> vchData;
-    vchData.resize(dataSize);
-    uint256 hashIn;
-
-    // read data and checksum from file
-    try {
-        filein.read((char *)&vchData[0], dataSize);
-        filein >> hashIn;
-    }
-    catch (const std::exception& e) {
-        return error("%s: Deserialize or I/O error - %s", __func__, e.what());
-    }
-    filein.fclose();
-
-    CDataStream ssPeers(vchData, SER_DISK, CLIENT_VERSION);
-
-    // verify stored checksum matches input data
-    uint256 hashTmp = Hash(ssPeers.begin(), ssPeers.end());
-    if (hashIn != hashTmp)
-        return error("%s: Checksum mismatch, data corrupted", __func__);
-
-    unsigned char pchMsgTmp[4];
-    try {
-        // de-serialize file header (network specific magic number) and ..
-        ssPeers >> FLATDATA(pchMsgTmp);
-
-        // ... verify the network matches ours
-        if (memcmp(pchMsgTmp, Params().MessageStart(), sizeof(pchMsgTmp)))
-            return error("%s: Invalid network magic number", __func__);
-
-        // de-serialize address data into one CAddrMan object
-        ssPeers >> addr;
-    }
-    catch (const std::exception& e) {
-        return error("%s: Deserialize or I/O error - %s", __func__, e.what());
-    }
 
     return true;
 }

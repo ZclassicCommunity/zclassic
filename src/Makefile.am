@@ -124,6 +124,7 @@ LIBZCASH_H = \
 # bitcoin core #
 BITCOIN_CORE_H = \
   addrman.h \
+  banlist.h \
   amount.h \
   arith_uint256.h \
   asyncrpcoperation.h \
@@ -329,6 +330,8 @@ libbitcoin_server_a_SOURCES = \
   miner.cpp \
   net.cpp \
   netoutbound.cpp \
+  banlist.cpp \
+  peersdat.cpp \
   noui.cpp \
   p2pserve.cpp \
   policy/fees.cpp \

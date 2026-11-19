@@ -33,6 +33,9 @@
 
 class CAddrInfo;
 class CAddrMan;
+
+/** Banned subnets and the time each ban ends (seconds since the epoch). */
+typedef std::map<CSubNet, int64_t> banmap_t;
 class CBlockIndex;
 class CScheduler;
 class CNode;
@@ -427,7 +430,7 @@ protected:
 
     // Denial-of-service detection/prevention
     // Key is IP address, value is banned-until-time
-    static std::map<CSubNet, int64_t> setBanned;
+    static banmap_t setBanned;
     static CCriticalSection cs_setBanned;
 
     // Whitelisted ranges. Any node connecting from these is automatically
@@ -786,7 +789,13 @@ public:
     static void Ban(const CSubNet &subNet, int64_t bantimeoffset = 0, bool sinceUnixEpoch = false);
     static bool Unban(const CNetAddr &ip);
     static bool Unban(const CSubNet &ip);
-    static void GetBanned(std::map<CSubNet, int64_t> &banmap);
+    static void GetBanned(banmap_t &banmap);
+    //! Replace the ban list (start-up load); marks nothing dirty.
+    static void SetBanned(const banmap_t &banmap);
+    //! Erase bans that have ended; returns how many were removed.
+    static size_t SweepBanned();
+    //! Set by every change to the ban list; the scheduler writes banlist.dat when it is set.
+    static std::atomic<bool> fBanlistDirty;
 
     void copyStats(CNodeStats &stats);
 
