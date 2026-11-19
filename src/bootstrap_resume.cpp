@@ -233,6 +233,8 @@ std::string BootstrapFormatProgressLine(int percent, uint64_t received, uint64_t
 BootstrapPeerBoard::BootstrapPeerBoard(size_t nPeers, int nStreams, const BootstrapPeerPolicy& policy)
     : pol(policy), peers(nPeers), streams(nStreams > 0 ? (size_t)nStreams : 0)
 {
+    if (!peers.empty())
+        peers[0].answered = true;
 }
 
 int BootstrapPeerBoard::AttachedLocked(int peer) const
@@ -315,9 +317,82 @@ int BootstrapPeerBoard::StreamPeer(int s) const
     return (s >= 0 && (size_t)s < streams.size() && streams[s].connected) ? streams[s].peer : -1;
 }
 
-int BootstrapPeerBoard::Assign(int s, int64_t nowMs)
+void BootstrapPeerBoard::SetUnfinishedSource(const std::function<std::vector<uint8_t>()>& fn)
 {
     std::lock_guard<std::mutex> lock(mtx);
+    unfinishedFn = fn;
+}
+
+bool BootstrapPeerBoard::PinBlocksLocked(uint32_t file, int peer) const
+{
+    std::map<uint32_t, int>::const_iterator it = pinned.find(file);
+    if (it == pinned.end() || it->second == peer)
+        return false;
+    const int pin = it->second;
+    // A pin on a peer that is gone or keeps failing to connect would hold the file for ever: it does not count then.
+    return pin >= 0 && (size_t)pin < peers.size() && Usable(peers[pin]) && peers[pin].failures < 3;
+}
+
+bool BootstrapPeerBoard::HoldsWorkLocked(int peer, const std::vector<uint8_t>& unfinished, const std::map<uint32_t, uint64_t>* only) const
+{
+    if (only && !only->empty()) {
+        for (std::map<uint32_t, uint64_t>::const_iterator it = only->begin(); it != only->end(); ++it)
+            if (PeerHasLocked(peer, it->first) && !PinBlocksLocked(it->first, peer))
+                return true;
+        return false;
+    }
+    if (unfinished.empty())
+        return true; // the board has no view of the queue
+    for (size_t f = 0; f < unfinished.size(); ++f)
+        if (unfinished[f] && PeerHasLocked(peer, (uint32_t)f) && !PinBlocksLocked((uint32_t)f, peer))
+            return true;
+    return false;
+}
+
+bool BootstrapPeerBoard::ComparableLocked(int peer, const StreamState& victim, const std::vector<uint8_t>& unfinished, int64_t nowMs) const
+{
+    if (peer < 0 || (size_t)peer >= peers.size() || peer == victim.peer)
+        return false;
+    const PeerState& p = peers[peer];
+    // A server that never answered, failed to connect since, or is being avoided (deferred or just moved off),
+    // or holds none of the files the victim still has, is no reason to move a stream: a stream sent to it
+    // would get nothing or nothing at all.
+    if (!Usable(p) || !p.answered || p.failures > 0 || nowMs < p.penaltyUntilMs)
+        return false;
+    return HoldsWorkLocked(peer, unfinished, &victim.remaining);
+}
+
+bool BootstrapPeerBoard::CanBenchLocked(size_t b, const std::vector<uint8_t>* unfinished, int64_t file) const
+{
+    bool anyOther = false;
+    for (size_t q = 0; q < peers.size(); ++q)
+        if (q != b && Usable(peers[q]))
+            anyOther = true;
+    if (!anyOther)
+        return false;
+    // Another usable server that has answered must hold every file `b` could still serve: a server that never
+    // answered holds nothing as far as anyone knows.
+    std::vector<uint32_t> need;
+    if (file >= 0)
+        need.push_back((uint32_t)file);
+    for (size_t f = 0; unfinished && f < unfinished->size(); ++f)
+        if ((*unfinished)[f] && PeerHasLocked((int)b, (uint32_t)f))
+            need.push_back((uint32_t)f);
+    for (size_t i = 0; i < need.size(); ++i) {
+        bool other = false;
+        for (size_t q = 0; q < peers.size() && !other; ++q)
+            other = q != b && Usable(peers[q]) && PeerHasLocked((int)q, need[i]);
+        if (!other)
+            return false;
+    }
+    return true;
+}
+
+int BootstrapPeerBoard::Assign(int s, int64_t nowMs, bool* anyUseful)
+{
+    std::lock_guard<std::mutex> lock(mtx);
+    if (anyUseful)
+        *anyUseful = true;
     if (s < 0 || (size_t)s >= streams.size())
         return -1;
     // Known per-stream rate of each usable peer (live, else the last one seen).
@@ -332,11 +407,28 @@ int BootstrapPeerBoard::Assign(int s, int64_t nowMs)
         rate[p] = r;
         best = std::max(best, r);
     }
+    // Servers that have something for this stream: one that has not answered yet (it must be probed) or that
+    // holds a pending file the stream may fetch. When no server does, the caller waits instead of connecting.
+    const std::vector<uint8_t> unfinished = unfinishedFn ? unfinishedFn() : std::vector<uint8_t>();
+    std::vector<bool> useful(peers.size(), false);
+    bool any = false;
+    for (size_t p = 0; p < peers.size(); ++p) {
+        if (!Usable(peers[p]))
+            continue;
+        useful[p] = !peers[p].answered || HoldsWorkLocked((int)p, unfinished, NULL);
+        any = any || useful[p];
+    }
+    if (!any) {
+        if (anyUseful)
+            *anyUseful = false;
+        for (size_t p = 0; p < peers.size(); ++p)
+            useful[p] = Usable(peers[p]);
+    }
     int pick = -1;
     bool pickAvoid = true;
     double pickLoad = 0;
     for (size_t p = 0; p < peers.size(); ++p) {
-        if (!Usable(peers[p]))
+        if (!Usable(peers[p]) || !useful[p])
             continue;
         const bool avoid = nowMs < peers[p].cooldownUntilMs || nowMs < peers[p].penaltyUntilMs;
         const double factor = (rate[p] < 0 || best <= 0) ? 1.0 : std::max(0.05, rate[p] / best);
@@ -403,6 +495,7 @@ void BootstrapPeerBoard::ConnectFailed(int peer, int64_t nowMs)
         return;
     PeerState& p = peers[peer];
     ++p.failures;
+    p.lastPerStream = -1; // what it gave before it stopped answering says nothing about it now
     const int shift = std::min(p.failures - 1, 16);
     p.cooldownUntilMs = nowMs + std::min<int64_t>(pol.failBackoffMaxMs, pol.failBackoffBaseMs << shift);
 }
@@ -466,6 +559,25 @@ void BootstrapPeerBoard::NoteRelease(int s, uint32_t file)
 void BootstrapPeerBoard::NoteComplete(int s, uint32_t file)
 {
     std::lock_guard<std::mutex> lock(mtx);
+    {
+        // A file that failed with mixed suppliers and then verified when ONE server fetched it from byte 0: the
+        // other suppliers of the failed attempt were the culprits. Two such files bench a server (never while it is
+        // the only holder of a file still to come).
+        std::map<uint32_t, int>::const_iterator pin = pinned.find(file);
+        std::map<uint32_t, std::set<int> >::iterator sus = suspects.find(file);
+        std::map<uint32_t, std::set<int> >::const_iterator con = contributors.find(file);
+        if (pin != pinned.end() && sus != suspects.end() && con != contributors.end() && con->second.size() == 1 &&
+            *con->second.begin() == pin->second) {
+            const std::vector<uint8_t> unfinished = unfinishedFn ? unfinishedFn() : std::vector<uint8_t>();
+            for (std::set<int>::const_iterator b = sus->second.begin(); b != sus->second.end(); ++b) {
+                if (*b < 0 || (size_t)*b >= peers.size() || !Usable(peers[*b]))
+                    continue;
+                if (++peers[*b].liarStrikes >= 2 && CanBenchLocked((size_t)*b, unfinished.empty() ? NULL : &unfinished, -1))
+                    peers[*b].banned = true;
+            }
+        }
+        suspects.erase(file);
+    }
     pinned.erase(file);
     if (s >= 0 && (size_t)s < streams.size())
         streams[s].remaining.erase(file);
@@ -476,6 +588,8 @@ bool BootstrapPeerBoard::PeerHasLocked(int peer, uint32_t file) const
 {
     if (peer < 0 || (size_t)peer >= peers.size())
         return false;
+    if (!peers[peer].answered)
+        return false; // a server that never sent its manifest holds nothing as far as we know
     const std::vector<uint8_t>& has = peers[peer].has;
     return has.empty() || (file < has.size() && has[file]);
 }
@@ -483,8 +597,10 @@ bool BootstrapPeerBoard::PeerHasLocked(int peer, uint32_t file) const
 void BootstrapPeerBoard::SetPeerHas(int peer, const std::vector<uint8_t>& has)
 {
     std::lock_guard<std::mutex> lock(mtx);
-    if (peer >= 0 && (size_t)peer < peers.size())
+    if (peer >= 0 && (size_t)peer < peers.size()) {
         peers[peer].has = has;
+        peers[peer].answered = true;
+    }
 }
 
 bool BootstrapPeerBoard::EveryFileHasHolder(const std::vector<uint8_t>& unfinished) const
@@ -532,18 +648,6 @@ void BootstrapPeerBoard::MaskPinned(int s, std::vector<uint8_t>& mask) const
     }
 }
 
-// Is there a usable peer other than `b` that can serve `file`?
-static bool OtherHolder(const std::vector<std::vector<uint8_t> >& has, const std::vector<bool>& usable, size_t b, uint32_t file)
-{
-    for (size_t q = 0; q < has.size(); ++q) {
-        if (q == b || !usable[q])
-            continue;
-        if (has[q].empty() || (file < has[q].size() && has[q][file]))
-            return true;
-    }
-    return false;
-}
-
 bool BootstrapPeerBoard::HashFailed(int s, uint32_t file, const std::vector<uint8_t>* unfinished)
 {
     std::lock_guard<std::mutex> lock(mtx);
@@ -554,6 +658,7 @@ bool BootstrapPeerBoard::HashFailed(int s, uint32_t file, const std::vector<uint
         contributors.erase(it); // the file is fetched again from byte 0
     }
     pinned.erase(file);
+    suspects.erase(file);
     const int reporter = (s >= 0 && (size_t)s < streams.size()) ? streams[s].peer : -1;
     if (blamed.empty() && reporter >= 0)
         blamed.insert(reporter);
@@ -566,22 +671,7 @@ bool BootstrapPeerBoard::HashFailed(int s, uint32_t file, const std::vector<uint
         peers[b].strikes++;
         // Never bench a peer that is the only holder of a file still to come: this covers the primary while it
         // is the only source of some pending file, and the last peer able to serve everything that remains.
-        std::vector<std::vector<uint8_t> > has;
-        std::vector<bool> usable;
-        for (size_t q = 0; q < peers.size(); ++q) {
-            has.push_back(peers[q].has);
-            usable.push_back(Usable(peers[q]));
-        }
-        bool ban = false;
-        for (size_t q = 0; q < peers.size(); ++q)
-            if (q != b && usable[q])
-                ban = true;
-        if (ban && !OtherHolder(has, usable, b, file))
-            ban = false;
-        for (size_t f = 0; ban && unfinished && f < unfinished->size(); ++f)
-            if ((*unfinished)[f] && PeerHasLocked((int)b, (uint32_t)f) && !OtherHolder(has, usable, b, (uint32_t)f))
-                ban = false;
-        if (ban)
+        if (CanBenchLocked(b, unfinished, (int64_t)file))
             peers[b].banned = true;
     } else {
         int pick = -1;
@@ -591,8 +681,16 @@ bool BootstrapPeerBoard::HashFailed(int s, uint32_t file, const std::vector<uint
             pick = (int)q; // the primary when it can serve the file, else the first that can
             break;
         }
-        if (pick >= 0)
+        if (pick >= 0) {
             pinned[file] = pick;
+            // If that one server gets it right, the others that supplied the failed attempt were the culprits.
+            std::set<int> others;
+            for (std::set<int>::const_iterator b = blamed.begin(); b != blamed.end(); ++b)
+                if (*b >= 0 && *b != pick)
+                    others.insert(*b);
+            if (!others.empty())
+                suspects[file] = others;
+        }
     }
     for (size_t q = 0; q < peers.size(); ++q)
         if ((int)q != reporter && Usable(peers[q]))
@@ -644,6 +742,7 @@ std::vector<BootstrapMove> BootstrapPeerBoard::Rebalance(int64_t nowMs, const st
     // A short window is noisy (a capped server hands out chunks in quanta): a server is judged slow only
     // when even its most generous estimate (window or average since attach) is slow, and another server fast
     // only by its most conservative one. A wrong move costs the stream's whole window in flight.
+    const std::vector<uint8_t> unfinished = unfinishedFn ? unfinishedFn() : std::vector<uint8_t>();
     std::vector<double> generous(peers.size(), -1), conservative(peers.size(), -1);
     for (size_t p = 0; p < peers.size(); ++p) {
         if (!Usable(peers[p]))
@@ -665,10 +764,6 @@ std::vector<BootstrapMove> BootstrapPeerBoard::Rebalance(int64_t nowMs, const st
         if (n) {
             generous[p] = sumG / n;
             conservative[p] = sumC / n;
-        } else if (peers[p].lastPerStream > 0) {
-            // No stream of it is running now (its streams ran out of files): what it last gave a stream still
-            // tells an idle stream whether it pays to take over a slow holder's file.
-            generous[p] = conservative[p] = peers[p].lastPerStream;
         }
     }
 
@@ -695,20 +790,22 @@ std::vector<BootstrapMove> BootstrapPeerBoard::Rebalance(int64_t nowMs, const st
         moves.push_back(mv);
     }
 
-    // slow peers: one stream per peer per call, never the last stream of a peer (it keeps the rate measured)
+    // slow peers: one stream per peer per call, never the last stream of a peer (it keeps the rate measured).
+    // Only LIVE rates are compared, and only against a server that could really take the stream (it answered,
+    // has not failed to connect since, is not being avoided, and holds one of the files the stream still has).
     for (size_t p = 0; p < peers.size(); ++p) {
         if (!Usable(peers[p]) || generous[p] < 0 || AttachedLocked((int)p) < 2)
-            continue;
-        double bestOther = -1;
-        for (size_t q = 0; q < peers.size(); ++q)
-            if (q != p && Usable(peers[q]) && conservative[q] > bestOther)
-                bestOther = conservative[q];
-        if (bestOther <= 0 || generous[p] >= pol.slowFraction * bestOther)
             continue;
         for (size_t i = 0; i < streams.size(); ++i) {
             StreamState& st = streams[i];
             if (st.peer != (int)p || !st.connected || st.move || st.idle ||
                 nowMs - st.lastMoveMs < pol.moveCooldownMs || StreamRate(st, nowMs, true) < 0)
+                continue;
+            double bestOther = -1;
+            for (size_t q = 0; q < peers.size(); ++q)
+                if (q != p && ComparableLocked((int)q, st, unfinished, nowMs) && conservative[q] > bestOther)
+                    bestOther = conservative[q];
+            if (bestOther <= 0 || generous[p] >= pol.slowFraction * bestOther)
                 continue;
             BootstrapMove mv;
             mv.stream = (int)i;
@@ -740,9 +837,13 @@ std::vector<BootstrapMove> BootstrapPeerBoard::Rebalance(int64_t nowMs, const st
             // Only another server can take the file over faster: the same server gives the idle stream no
             // more than the victim has, and the move would only throw away the victim's requests in flight.
             double bestRate = 0;
-            for (size_t p = 0; p < peers.size(); ++p)
-                if ((int)p != st.peer && Usable(peers[p]))
-                    bestRate = std::max(bestRate, conservative[p]);
+            for (size_t p = 0; p < peers.size(); ++p) {
+                if (!ComparableLocked((int)p, st, unfinished, nowMs))
+                    continue;
+                // its live rate, else what it last gave a stream (its streams may have run out of files)
+                const double r = conservative[p] > 0 ? conservative[p] : peers[p].lastPerStream;
+                bestRate = std::max(bestRate, r);
+            }
             uint64_t left = 0;
             for (std::map<uint32_t, uint64_t>::const_iterator f = st.remaining.begin(); f != st.remaining.end(); ++f)
                 left += f->second;

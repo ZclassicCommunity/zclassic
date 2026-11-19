@@ -2664,6 +2664,7 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
     SetBootstrapInfoServers(std::vector<BootstrapInfoServer>()); // a new attempt: no breakdown yet
     BootstrapWorkQueue queue(files);
     BootstrapPeerBoard board((size_t)nPeers, nStreams, g_bootstrapPeerPolicy);
+    board.SetUnfinishedSource([&queue, &manifest]() { return queue.UnfinishedMask(manifest.vFiles.size()); });
     std::atomic<uint64_t> progressBytes(completed);
     std::atomic<bool> abortFlag(false);
     std::atomic<int> activeStreams(0);
@@ -2704,6 +2705,7 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
                 unsigned int seed = (unsigned int)(GetTimeMicros() & 0xffffffffu) ^ (unsigned int)(w * 2654435761u);
                 int failures = 0;
                 int gaveNothing = 0; // consecutive connections that had no file for this server
+                int idleN = 0;       // consecutive pauses because no server had anything for this stream
                 while (!abortFlag.load(std::memory_order_relaxed) && !queue.AllDone()) {
                     if (ShutdownRequested()) {
                         recordError("bootstrap snapshot download aborted: shutdown requested");
@@ -2717,11 +2719,23 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
                         continue;
                     }
                     board.SetIdle(w, false);
-                    const int pi = board.Assign(w, GetTimeMillis());
+                    bool anyUseful = true;
+                    const int pi = board.Assign(w, GetTimeMillis(), &anyUseful);
                     if (pi < 0) {
                         recordError("no usable bootstrap server left: every one served a different snapshot or bytes that failed verification");
                         break;
                     }
+                    if (!anyUseful) {
+                        // No server holds a pending file this stream may fetch (they are all in flight on other streams,
+                        // or pinned to a server that is not answering): wait a growing while instead of connecting to
+                        // find out. Only when no server has anything; with one that has, Assign has sent the stream there.
+                        board.Detach(w);
+                        const int64_t idleWait = std::min<int64_t>(8000, (int64_t)250 << std::min(idleN, 5));
+                        ++idleN;
+                        BootstrapInterruptibleSleep(idleWait, abortFlag, queue);
+                        continue;
+                    }
+                    idleN = 0;
                     moved[w].store(false);
                     // Clear, then look at the abort flag again: an abort landing in between sets abortFlag before it sets
                     // cancel, so it is never lost.
@@ -2792,10 +2806,12 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
                                 // Nothing pending that this connection may fetch (the server holds none of the files left, or
                                 // they are pinned to another server): leave it alone for a growing while instead of
                                 // reconnecting every few hundred ms.
+                                // The deferral outlasts the pause, so the stream is not sent straight back; Assign now picks
+                                // among the servers that do have something and the pause is short.
                                 const int64_t wait = std::min<int64_t>(8000, (int64_t)250 << std::min(gaveNothing, 5));
                                 ++gaveNothing;
-                                board.Defer(pi, GetTimeMillis() + wait);
-                                BootstrapInterruptibleSleep(wait, abortFlag, queue);
+                                board.Defer(pi, GetTimeMillis() + 2 * wait + 1000);
+                                BootstrapInterruptibleSleep(50, abortFlag, queue);
                             } else {
                                 gaveNothing = 0;
                             }
