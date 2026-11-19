@@ -1990,6 +1990,22 @@ BOOST_AUTO_TEST_CASE(peer_board_does_not_steal_from_a_stream_that_just_connected
     BOOST_CHECK_EQUAL(d.Assign(1, 3300), 0); // the victim's server is avoided for a while
 }
 
+BOOST_AUTO_TEST_CASE(peer_board_does_not_move_streams_when_every_server_is_quiet)
+{
+    // all servers stop delivering at once: that is this side (a starved host), and a move would only throw away
+    // the requests in flight
+    BootstrapPeerPolicy pol;
+    pol.windowMs = 1000;
+    pol.stallMs = 2000;
+    BootstrapPeerBoard b(2, 4, pol);
+    for (int s = 0; s < 4; ++s)
+        b.Attach(s, b.Assign(s, 0), 0);
+    for (int64_t t = 100; t <= 1000; t += 100)
+        for (int s = 0; s < 4; ++s)
+            b.NoteChunk(s, 10 + s, 1000, t);
+    BOOST_CHECK(b.Rebalance(4000).empty());
+}
+
 BOOST_AUTO_TEST_CASE(peer_board_a_stream_is_not_taken_from_a_fast_server_to_a_slow_one)
 {
     // A stream that gets a small share of a fast server's cap just now must not be "stolen" for a slow server

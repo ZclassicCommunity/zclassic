@@ -279,6 +279,7 @@ private:
     //! `b` may be benched: another usable peer holds every file `b` could still serve (and `file`, if >= 0)
     bool CanBenchLocked(size_t b, const std::vector<uint8_t>* unfinished, int64_t file) const;
     bool PeerQuietLocked(int peer, int64_t nowMs) const;             //!< no stream of `peer` got a byte for stallMs
+    bool OtherPeerFeedingLocked(int peer, int64_t nowMs) const;      //!< some other server delivered within stallMs
     double StreamLifeRate(const StreamState& st, int64_t nowMs) const;  //!< bytes per second since the stream attached
 
     mutable std::mutex mtx;
