@@ -16,6 +16,7 @@
 #include "uint256.h"
 
 #include <deque>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <set>
@@ -123,6 +124,8 @@ public:
     bool ClaimAllowed(const std::vector<uint8_t>& allowed, uint32_t& idx);
     //! True if a pending file is marked in `allowed`.
     bool HasPendingAllowed(const std::vector<uint8_t>& allowed) const;
+    //! Per file (0..nFiles-1): 1 if it is pending or claimed, i.e. not yet verified and in place.
+    std::vector<uint8_t> UnfinishedMask(size_t nFiles) const;
     //! Hand a claimed, unfinished file back (it is retried before untouched files).
     void Release(uint32_t idx);
     void Complete(uint32_t idx);
@@ -172,9 +175,10 @@ struct BootstrapPeerPolicy {
     double stealFactor;       //!< ... and the idle stream's peer is at least this much faster than the holder's
     int64_t failBackoffBaseMs;
     int64_t failBackoffMaxMs;
+    int maxConnectsPerMinute;  //!< connection attempts one server may get in a minute (a refusing server is not hammered)
     BootstrapPeerPolicy()
         : windowMs(10000), stallMs(20000), slowFraction(0.5), moveCooldownMs(30000), penaltyMs(30000),
-          stealMinSeconds(15), stealFactor(2.0), failBackoffBaseMs(2000), failBackoffMaxMs(60000) {}
+          stealMinSeconds(15), stealFactor(2.0), failBackoffBaseMs(2000), failBackoffMaxMs(60000), maxConnectsPerMinute(60) {}
 };
 
 struct BootstrapPeerSnapshot {
@@ -190,6 +194,7 @@ struct BootstrapPeerSnapshot {
 enum BootstrapMoveReason { BMR_STALLED, BMR_SLOW, BMR_STEAL, BMR_UNUSABLE };
 struct BootstrapMove {
     int stream;
+    int peer; //!< the peer the stream was attached to when the move was decided (-1 unknown)
     BootstrapMoveReason reason;
 };
 
@@ -217,11 +222,22 @@ public:
     void NoteClaim(int s, uint32_t file, uint64_t remaining, bool resumed);
     void NoteRelease(int s, uint32_t file);
     void NoteComplete(int s, uint32_t file);
-    //! `file` failed verification while stream `s` fetched it: blame the peers that supplied its bytes.
+    //! `file` failed verification while stream `s` fetched it. A peer that alone supplied the bytes is benched
+    //! (unless that would leave a file unfinished with no other holder: `unfinished` is the board of files not yet
+    //! in place, NULL = unknown). With several or unknown suppliers nobody is blamed: the file is pinned to ONE peer
+    //! (the primary if it can serve it) and fetched again from byte 0 from it, so the next result names one server.
     //! Returns true if another usable peer remains (the failure then costs a retry, not the attempt).
-    bool HashFailed(int s, uint32_t file);
+    bool HashFailed(int s, uint32_t file, const std::vector<uint8_t>* unfinished = NULL);
+    //! The peers' file lists: `has` is indexed by the trusted manifest (empty = serves every file).
+    void SetPeerHas(int peer, const std::vector<uint8_t>& has);
+    //! Remove from `mask` the files stream `s` must not fetch because they are pinned to another peer.
+    void MaskPinned(int s, std::vector<uint8_t>& mask) const;
+    //! True if every file marked in `unfinished` can still come from some usable peer.
+    bool EveryFileHasHolder(const std::vector<uint8_t>& unfinished) const;
+    //! Record a connection attempt to `peer`; false (and not recorded) if it already had its share this minute.
+    bool AllowConnect(int peer, int64_t nowMs);
     //! Streams to move off their peer now (stalled, slow, or robbed by an idle stream). Marks them moved.
-    std::vector<BootstrapMove> Rebalance(int64_t nowMs);
+    std::vector<BootstrapMove> Rebalance(int64_t nowMs, const std::function<void(const BootstrapMove&)>& apply = std::function<void(const BootstrapMove&)>());
     BootstrapPeerSnapshot Peer(int peer, int64_t nowMs) const;
     size_t UsablePeers() const;
     int StreamPeer(int s) const; //!< attached peer or -1
@@ -237,6 +253,8 @@ private:
     struct PeerState {
         bool ignored, banned, partial; int strikes; int failures; int64_t cooldownUntilMs; int64_t penaltyUntilMs;
         uint64_t bytes; double lastPerStream;
+        std::vector<uint8_t> has;           // files it can serve (indexed by trusted manifest); empty = all
+        std::deque<int64_t> connects;       // times of recent connection attempts
         PeerState() : ignored(false), banned(false), partial(false), strikes(0), failures(0), cooldownUntilMs(0),
                       penaltyUntilMs(0), bytes(0), lastPerStream(-1) {}
     };
@@ -244,6 +262,7 @@ private:
     double StreamRate(const StreamState& st, int64_t nowMs, bool matureOnly) const; //!< bytes/s over the window; <0 if matureOnly and too young
     double PeerPerStreamRate(int peer, int64_t nowMs) const;        //!< mean over mature streams, <0 if none
     int AttachedLocked(int peer) const;                              //!< streams on `peer` not asked to move
+    bool PeerHasLocked(int peer, uint32_t file) const;               //!< `peer` can serve `file` (unknown = yes)
     bool PeerQuietLocked(int peer, int64_t nowMs) const;             //!< no stream of `peer` got a byte for stallMs
     double StreamLifeRate(const StreamState& st, int64_t nowMs) const;  //!< bytes per second since the stream attached
 
@@ -252,6 +271,7 @@ private:
     std::vector<PeerState> peers;
     std::vector<StreamState> streams;
     std::map<uint32_t, std::set<int> > contributors; //!< file -> peers that supplied its bytes (-1 = unknown origin)
+    std::map<uint32_t, int> pinned;                  //!< file -> the one peer that fetches it again from byte 0 after a shared-blame failure
 };
 
 //! "host:port 2 streams 41.0 MiB/s 3.20 GiB, host2:port ..." for the log and getbootstrapinfo.
