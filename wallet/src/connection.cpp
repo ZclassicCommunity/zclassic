@@ -2372,6 +2372,10 @@ void ConnectionLoader::probeBootstrapProgress(Connection* connection) {
                     dl = QObject::tr("%1 of %2 GiB").arg(got / gib, 0, 'f', 1).arg(tot / gib, 0, 'f', 1);
                     if (mbps > 0.05) {
                         dl += QObject::tr(" · %1 MiB/s").arg(mbps, 0, 'f', 1);
+                        // Several download servers in use (getbootstrapinfo servers_in_use): say so.
+                        const int servers = (int)num("servers_in_use");
+                        if (servers > 1)
+                            dl += QObject::tr(" · %1 servers").arg(servers);
                         const qint64 secs = (qint64)((tot - got) / (mbps * 1048576.0));
                         dl += secs < 90 ? QObject::tr(" · under a minute left")
                                         : QObject::tr(" · about %1 min left").arg((secs + 30) / 60);

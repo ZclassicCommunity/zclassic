@@ -2780,27 +2780,32 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // genesisBackupDir restore handles failure with no extra code.
     bool fStubRecovery = false;
     {
-        // D1 crash recovery: InstallStagedBootstrapChainData renames blocks/ then
-        // chainstate/ non-atomically, AFTER the anchor/trustless pending marker has
-        // been written and fsync'd. A kill between the two renames leaves blocks/
-        // present but chainstate/ absent — an incomplete install. On the next start
-        // that blocks-only datadir is NOT genesis-only (IsGenesisOnlyChainDatadir
-        // returns false for a missing/over-size chainstate or a blocks/-only dir),
-        // so without this guard BootstrapDatadirEligible would classify it as real
-        // chain data and silently skip re-bootstrapping, while the verify step never
-        // runs (chainstate/ is gone). Detect the incomplete install by: a pending
-        // marker EXISTS but the installed snapshot paths do NOT, and treat it as a
-        // FAILED import — remove the partial chain data, clear the marker, and let
-        // eligibility re-run below so the node re-bootstraps into a fresh datadir.
-        if ((BootstrapAnchorPendingExists(GetDataDir()) ||
-             BootstrapTrustlessPendingExists(GetDataDir())) &&
-            !BootstrapSnapshotPathsExist(GetDataDir())) {
-            LogPrintf("Bootstrap: a pending-import marker is present but the installed "
-                      "snapshot is incomplete (blocks/ or chainstate/ missing); treating "
-                      "the prior import as failed and re-bootstrapping\n");
-            RemoveFailedPeerBootstrapChainData(GetDataDir());
-            BootstrapAnchorPendingClear(GetDataDir());
-            BootstrapTrustlessPendingClear(GetDataDir());
+        // Crash recovery for the install step. BootstrapFromPeer writes the pending marker
+        // (fsync'd), then InstallStagedBootstrapChainData renames blocks/ and chainstate/ out of
+        // the staging directory one after the other. A kill at any point leaves one of:
+        // nothing installed (stale marker: cleared), blocks/ alone (moved back into its staging
+        // directory, so the next install re-verifies every file; nothing is deleted), or both
+        // (installed, verification still due: the marker-keyed verification below runs, and the
+        // datadir must not be judged for a new bootstrap, which would refuse it as "not fresh").
+        // blocks/ and chainstate/ without the marker are the user's chain data and stay refused.
+        bool fInstallPendingVerify = false;
+        {
+            std::string recoverError;
+            switch (RecoverInterruptedBootstrapInstall(GetDataDir(), recoverError)) {
+            case BIR_NONE:
+                break;
+            case BIR_STALE_MARKER:
+            case BIR_ROLLED_BACK:
+                LogPrintf("Bootstrap: recovered from an interrupted install; re-bootstrapping\n");
+                RemoveFailedPeerBootstrapChainData(GetDataDir());
+                break;
+            case BIR_INSTALLED:
+                LogPrintf("Bootstrap: an installed snapshot was not verified before the last shutdown; verifying it after the databases open\n");
+                fInstallPendingVerify = true;
+                break;
+            case BIR_REFUSE:
+                return InitError(recoverError);
+            }
         }
         const bool explicit_peer = mapArgs.count("-bootstrappeer");
         const bool enabled = GetBoolArg("-bootstrap", true) && !GetBootstrapPeerList().empty();
@@ -2813,7 +2818,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             return InitError(_("-bootstrappeer cannot be used with -bootstrapdatadir, -reindex, -reindex-chainstate, or -loadblock"));
         }
 
-        if (enabled && !conflicts) {
+        if (enabled && !conflicts && !fInstallPendingVerify) {
             const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
             // Option B: trustless mode accepts a peer's self-snapshot at its own
             // tip and verifies it by background re-derivation, so it does NOT
@@ -2924,7 +2929,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     if (ShutdownRequested())
                         return false;
                     if (explicit_peer)
-                        return InitError(bootstrap_error);
+                        return InitError(bootstrap_error + "; no interrupted bootstrap install was found (the bootstrap pending marker is absent), so this is existing chain data and it is left untouched");
                 }
             }
             if (fDatadirEligible) {
@@ -2962,7 +2967,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                                                  peerIndex, nBootstrapPeers,
                                                  attempt, nBootstrapAttempts,
                                                  fTrustlessMode ? "trustless" : "anchor", 0);
-                        if (BootstrapFromPeer(peer, GetDataDir(), bootstrap_error)) {
+                        if (BootstrapFromPeer(peer, GetDataDir(), bootstrap_error, BootstrapAlternatesFor(bootstrapPeers, peer))) {
                             bootstrap_snapshot_ran = true;
                             break;
                         }
@@ -3448,6 +3453,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 ArmBootstrapTipHold(bvHeight, bvHash);
             }
         }
+        TestCrashPoint("bootstrap-install-before-marker-clear");
         BootstrapTrustlessPendingClear(GetDataDir());
         LogPrintf("Bootstrap snapshot provisionally accepted at height %d (%s); background validation will confirm it\n",
             bvHeight, bvHash.ToString());
@@ -3478,6 +3484,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         GetBootstrapAnchorPending(GetDataDir(), advertisedTipHeight, advertisedTipHash);
         // Verified: clear the marker so subsequent restarts skip the (now
         // redundant) re-verification.
+        TestCrashPoint("bootstrap-install-before-marker-clear");
         BootstrapAnchorPendingClear(GetDataDir());
         LogPrintf("Bootstrap snapshot verified at height %d (%s); server advertised post-anchor tip height %d (%s)\n",
             chainActive.Height(),
