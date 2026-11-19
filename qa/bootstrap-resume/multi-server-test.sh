@@ -260,15 +260,23 @@ test_skew() {
     low=$((kbps / 8))
     say "== skew: server 1 capped at $low kbit/s, server 2 at $kbps =="
     fresh_client; start_server 1 $low && start_server 2 $kbps || return 1
+    # the best single server on the same fixture: what two servers must not fall behind
+    download "2" || { stop_server 1; stop_server 2; return 1; }
+    alone_ms=$DL_MS
+    check_imported "skew (fast server alone)"
+    end_client
+    fresh_client
     l1=$(log_lines 1); l2=$(log_lines 2)
     download "1 2" || { stop_server 1; stop_server 2; return 1; }
     b1=$(served_bytes 1 $l1); b2=$(served_bytes 2 $l2)
     rate=$(awk -v b=$snapshot_bytes -v ms=$DL_MS 'BEGIN {printf "%.1f", b / 1048576 / (ms / 1000)}')
+    alone=$(awk -v b=$snapshot_bytes -v ms=$alone_ms 'BEGIN {printf "%.1f", b / 1048576 / (ms / 1000)}')
     sum=$(awk -v a=$low -v b=$kbps 'BEGIN {printf "%.1f", (a + b) * 1000 / 8 / 1048576}')
-    fast=$(awk -v b=$kbps 'BEGIN {printf "%.1f", b * 1000 / 8 / 1048576}')
-    say "RESULT skew: $((DL_MS / 1000)) s, $rate MiB/s overall (caps sum $sum MiB/s, fast server alone $fast MiB/s); slow server served $b1 bytes, fast $b2 bytes"
+    say "RESULT skew: $((DL_MS / 1000)) s, $rate MiB/s with both (caps sum $sum MiB/s); the fast server alone $((alone_ms / 1000)) s, $alone MiB/s; slow server served $b1 bytes, fast $b2 bytes"
     check_imported "skew"
     [ "$b2" -gt $((b1 * 2)) ] && pass "skew: the fast server served most bytes" || fail "skew: fast server $b2 vs slow $b1"
+    # two servers must never be slower than the best one alone by more than noise (15%)
+    [ $((DL_MS * 100)) -le $((alone_ms * 115)) ] && pass "skew: both servers ($DL_MS ms) are not slower than the fast one alone ($alone_ms ms)" || fail "skew: both servers took $DL_MS ms, the fast one alone $alone_ms ms"
     grep -a 'moves off' "$client_log" | head -5
     end_client; stop_server 1; stop_server 2
 }
