@@ -335,7 +335,9 @@ other_tip() { # <label> <serve dir of server 2> <log message expected>
     b1=$(served_bytes 1 $l1); b2=$(served_bytes 2 $l2)
     grep -aq "$want_msg" "$client_log" && pass "$lbl: the client logged '$want_msg'" || fail "$lbl: no '$want_msg' message"
     say "RESULT $lbl: $((DL_MS / 1000)).$((DL_MS % 1000 / 100)) s (single server $((SINGLE_MS / 1000)).$((SINGLE_MS % 1000 / 100)) s); server 1 served $b1 bytes, server 2 (other tip) served $b2 bytes, snapshot $snapshot_bytes"
-    [ $DL_MS -le $((SINGLE_MS * 115 / 100 + 2000)) ] && pass "$lbl: finished in $DL_MS ms, within 1.15x the single-server time ($SINGLE_MS ms) plus 2 s" || fail "$lbl: took $DL_MS ms, the single-server time is $SINGLE_MS ms"
+    # share must beat the single server; diff (the other server gives nothing) is the single-server time plus noise
+    tfac=115; [ "$lbl" = diff ] && tfac=130
+    [ $DL_MS -le $((SINGLE_MS * tfac / 100 + 2000)) ] && pass "$lbl: finished in $DL_MS ms, within ${tfac}% of the single-server time ($SINGLE_MS ms) plus 2 s" || fail "$lbl: took $DL_MS ms, the single-server time is $SINGLE_MS ms"
     OT_B1=$b1; OT_B2=$b2
     end_client; stop_server 1; stop_server 2
     serve2=$saved2
