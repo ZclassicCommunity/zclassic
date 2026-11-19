@@ -13,6 +13,7 @@
 
 #include <boost/assign/std/vector.hpp> // for 'operator+=()'
 #include <boost/assert.hpp>
+#include <map>
 #include <boost/test/unit_test.hpp>
                     
 using namespace std;
@@ -263,6 +264,58 @@ BOOST_AUTO_TEST_CASE(dbwrapper_environmental_errors)
     }
     BOOST_CHECK(thrown);
     remove_all(dir);
+}
+
+BOOST_AUTO_TEST_CASE(dbwrapper_max_open_files_budget)
+{
+    int n = LevelDBMaxOpenFilesForTest();
+#ifdef WIN32
+    BOOST_CHECK_EQUAL(n, 512);
+#else
+    BOOST_CHECK(n >= 64 && n <= 1000);
+#endif
+    BOOST_CHECK_EQUAL(n, LevelDBMaxOpenFilesForTest()); // computed once
+}
+
+BOOST_AUTO_TEST_CASE(dbwrapper_reopen_roundtrip)
+{
+    path ph = temp_directory_path() / UniquePath();
+    const int nKeys = 20000;
+    std::map<uint256, uint256> expected;
+    {
+        CDBWrapper dbw(ph, (1 << 20), false, true);
+        for (int b = 0; b < 8; b++) {
+            CDBBatch batch(dbw);
+            for (int i = 0; i < nKeys / 8; i++) {
+                uint256 k = GetRandHash();
+                uint256 v = GetRandHash();
+                expected[k] = v;
+                batch.Write(k, v);
+            }
+            BOOST_CHECK(dbw.WriteBatch(batch, b == 7));
+        }
+    }
+    {
+        CDBWrapper dbw(ph, (1 << 20), false, false);
+        for (std::map<uint256, uint256>::const_iterator it = expected.begin(); it != expected.end(); ++it) {
+            uint256 v;
+            BOOST_CHECK(dbw.Read(it->first, v));
+            BOOST_CHECK(v == it->second);
+        }
+        size_t seen = 0;
+        CDBIterator* it = dbw.NewIterator();
+        for (it->SeekToFirst(); it->Valid(); it->Next()) {
+            uint256 k, v;
+            BOOST_CHECK(it->GetKey(k));
+            BOOST_CHECK(it->GetValue(v));
+            std::map<uint256, uint256>::const_iterator e = expected.find(k);
+            BOOST_CHECK(e != expected.end() && e->second == v);
+            seen++;
+        }
+        BOOST_CHECK_EQUAL(seen, expected.size());
+        delete it;
+    }
+    boost::filesystem::remove_all(ph);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
