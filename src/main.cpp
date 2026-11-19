@@ -1886,6 +1886,15 @@ CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
     }
 }
 
+/** Largest size of one blk?????.dat. Regtest only (init.cpp rejects the option elsewhere): lets qa scripts
+ *  roll over and prune block files without writing hundreds of MiB. */
+static unsigned int MaxBlockFileSize()
+{
+    if (mapArgs.count("-testmaxblockfilesize"))
+        return (unsigned int)std::max<int64_t>(4096, std::min<int64_t>(GetArg("-testmaxblockfilesize", MAX_BLOCKFILE_SIZE), MAX_BLOCKFILE_SIZE));
+    return MAX_BLOCKFILE_SIZE;
+}
+
 int64_t BlockIndexWriteInterval(bool fInitialBlockDownload)
 {
     // Regtest only (init.cpp rejects it elsewhere): lets qa scripts reach a block-index write without a full flush.
@@ -4644,7 +4653,7 @@ bool FindBlockPos(CValidationState &state, CDiskBlockPos &pos, unsigned int nAdd
     }
 
     if (!fKnown) {
-        while (vinfoBlockFile[nFile].nSize + nAddSize >= MAX_BLOCKFILE_SIZE) {
+        while (vinfoBlockFile[nFile].nSize + nAddSize >= MaxBlockFileSize()) {
             nFile++;
             if (vinfoBlockFile.size() <= nFile) {
                 vinfoBlockFile.resize(nFile + 1);

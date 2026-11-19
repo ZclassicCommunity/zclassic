@@ -663,6 +663,8 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-flushwallet", strprintf("Run a thread to flush wallet periodically (default: %u)", 1));
         strUsage += HelpMessageOpt("-testsetchaininterval=<n>", strprintf("Test only: write the wallet checkpoint (locator and note state) at most every <n> seconds while running (default: %u)", DATABASE_WRITE_INTERVAL));
         strUsage += HelpMessageOpt("-testblockindexinterval=<n>", "Test only: write the block index at most every <n> seconds while running (default: 3600, 300 during initial block download)");
+        strUsage += HelpMessageOpt("-testprunetarget=<bytes>", "Test only (regtest): prune block files down to this many bytes, below the 550 MiB minimum of -prune");
+        strUsage += HelpMessageOpt("-testmaxblockfilesize=<bytes>", "Test only (regtest): start a new block file after this many bytes (at least 4096; default: 134217728)");
         strUsage += HelpMessageOpt("-testcrashpoint=<name>[:<n>]", "Test only: _exit(77) the <n>th time the named wallet or chain-state write point is reached; the name any matches every point (default: off)");
         strUsage += HelpMessageOpt("-stopafterblockimport", strprintf("Stop running after importing blocks from disk (default: %u)", 0));
         strUsage += HelpMessageOpt("-nuparams=hexBranchId:activationHeight", "Use given activation height for specified network upgrade (regtest-only)");
@@ -1968,8 +1970,16 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         return InitError(_("Prune cannot be configured with a negative value."));
     }
     nPruneTarget = (uint64_t) nSignedPruneTarget;
+    // Regtest only: a prune target in bytes below the 550 MiB minimum, so qa scripts can prune a small chain.
+    const bool fTestPruneTarget = mapArgs.count("-testprunetarget") > 0;
+    if (fTestPruneTarget) {
+        const int64_t nTestTarget = GetArg("-testprunetarget", 0);
+        if (nTestTarget <= 0)
+            return InitError("-testprunetarget must be a positive number of bytes.");
+        nPruneTarget = (uint64_t) nTestTarget;
+    }
     if (nPruneTarget) {
-        if (nPruneTarget < MIN_DISK_SPACE_FOR_BLOCK_FILES) {
+        if (nPruneTarget < MIN_DISK_SPACE_FOR_BLOCK_FILES && !fTestPruneTarget) {
             return InitError(strprintf(_("Prune configured below the minimum of %d MB.  Please use a higher number."), MIN_DISK_SPACE_FOR_BLOCK_FILES / 1024 / 1024));
         }
         LogPrintf("Prune configured to target %uMiB on disk for block and undo files.\n", nPruneTarget / 1024 / 1024);
@@ -2098,9 +2108,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     // The crash and checkpoint-interval hooks exist for qa/rpc-tests/wallet_crash_consistency.sh.
     // A stray line in zclassic.conf must not make a real node exit at a wallet write point.
-    if ((mapArgs.count("-testcrashpoint") || mapArgs.count("-testsetchaininterval") || mapArgs.count("-testblockindexinterval")) &&
+    if ((mapArgs.count("-testcrashpoint") || mapArgs.count("-testsetchaininterval") || mapArgs.count("-testblockindexinterval") || mapArgs.count("-testprunetarget") || mapArgs.count("-testmaxblockfilesize")) &&
         Params().NetworkIDString() != "regtest") {
-        return InitError("-testcrashpoint, -testsetchaininterval and -testblockindexinterval may only be used on regtest.");
+        return InitError("-testcrashpoint, -testsetchaininterval, -testblockindexinterval, -testprunetarget and -testmaxblockfilesize may only be used on regtest.");
     }
 
     if (!mapMultiArgs["-nuparams"].empty()) {
