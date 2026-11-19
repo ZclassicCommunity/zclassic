@@ -34,3 +34,8 @@ Exit codes: 0 data read, 1 a MISMATCH, 2 nothing readable (hollow) or bad argume
 - `--json` prints the same data as one object (`outdirs_total`, `outdirs_read`, `unavailable`, `mismatch`, `steps`).
 
 `make -C zcutil/dev/timings check` runs `--selftest` and compares golden outputs over `test/fixture` (three good outdirs, one without receipts, one corrupt line, a MISMATCH, all unreadable). The driver is `test/timings_test.c` (C, for the same shell-lines reason as flaky); `UPDATE=1 zcutil/bin/timings_test zcutil/bin/zcl-dev-timings zcutil/dev/timings/test` rewrites the goldens.
+
+## Empty files and flavors
+
+- A `results.tsv` with no step rows (local-ci creates it empty before the build stage, so an early failure leaves exactly that) is listed as `unavailable: <path>: empty (no step rows)`, not read as a zero-step success; the outdir then falls back to `receipts.jsonl`, or counts as unreadable when there is none.
+- Debug (`test/`) and release (`test-release/`) rows are kept apart. Receipts carry the flavor in their stage (`test-run/<flavor>`). A step that has rows for both flavors is printed once per flavor as `name [debug]` and `name [release]` (JSON adds a `flavor` field), SLOWER compares only within a flavor, and MISMATCH compares a `results.tsv` row only with receipts of the same flavor. A root `results.tsv` or a receipt with another stage has no flavor: it matches any flavor, and joins the first row of its step (so with both flavors present its row is attributed to whichever came first).

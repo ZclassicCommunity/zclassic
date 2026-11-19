@@ -6,11 +6,13 @@
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
 #include <ftw.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static const char *tool;
@@ -163,6 +165,93 @@ static void test_work_and_jobs(const char *tmp)
     CHECK("--jobs 3 runs three at once", r.code == 0 && has(&r, "PASS: 3 runs"));
 }
 
+/* pid written by a fixture run into path, 0 until it is there */
+static long read_pid(const char *path)
+{
+    char buf[64] = {0};
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    return n && buf[n - 1] == '\n' ? atol(buf) : 0;
+}
+
+static void nap(int ms)
+{
+    struct timespec ts = {0, (long)ms * 1000000L};
+    nanosleep(&ts, NULL);
+}
+
+/* Both fixture runs have written their pid; 0 when they did not within 10 s. */
+static int wait_pids(const char *share, long *pid)
+{
+    char p[4400];
+    for (int tries = 0; tries < 200; tries++) {
+        int have = 0;
+        for (int k = 0; k < 2; k++) {
+            snprintf(p, sizeof p, "%s/pid.%d", share, k + 1);
+            if ((pid[k] = read_pid(p)) > 0) have++;
+        }
+        if (have == 2) return 1;
+        nap(50);
+    }
+    return 0;
+}
+
+static int all_dead(const long *pid)
+{
+    for (int tries = 0; tries < 100; tries++) {
+        if (kill((pid_t)pid[0], 0) != 0 && kill((pid_t)pid[1], 0) != 0) return 1;
+        nap(50);
+    }
+    return 0;
+}
+
+/* Signal the runner while two long sleeps run: it must exit 2, say INTERRUPTED and leave no child alive. */
+static void test_signal(const char *tmp, int sig, const char *name)
+{
+    char share[4300], outp[4400], title[128], script[] = "echo $$ >\"$1/pid.$2\"; exec sleep 300";
+    char *const args[] = {(char *)tool, "-n", "2", "--jobs", "2", "--", "sh", "-c", script, "sh", share, "@RUN@", NULL};
+    long pid[2] = {0, 0};
+    snprintf(share, sizeof share, "%s/sig%d", tmp, sig);
+    snprintf(outp, sizeof outp, "%s/sig%d.out", tmp, sig);
+    mkdir(share, 0755);
+    pid_t runner = fork();
+    if (runner == 0) {
+        if (!freopen(outp, "w", stdout)) _exit(127);
+        dup2(1, 2);
+        execv(tool, args);
+        _exit(127);
+    }
+    int started = wait_pids(share, pid), st = 0;
+    if (started) kill(runner, sig);
+    else kill(runner, SIGKILL);
+    waitpid(runner, &st, 0);
+    snprintf(title, sizeof title, "%s: runner exits 2 and says INTERRUPTED", name);
+    CHECK(title, started && WIFEXITED(st) && WEXITSTATUS(st) == 2 && file_has(outp, "INTERRUPTED: signal"));
+    snprintf(title, sizeof title, "%s: no child survives the runner", name);
+    CHECK(title, started && all_dead(pid));
+    for (int k = 0; k < 2; k++) if (pid[k] > 0) kill((pid_t)pid[k], SIGKILL);
+}
+
+static void test_limits(void)
+{
+    struct res r;
+    char dir[4200];
+    run_tool(&r, (const char *[]){"-n", "1", "--", "sh", "-c", "exit 0", NULL});
+    CHECK("passing report says the directory was removed", r.code == 0 && has(&r, "run directory: removed")
+          && !has(&r, "run directory: /"));
+    run_tool(&r, (const char *[]){"-n", "1", "--json", "--", "sh", "-c", "exit 0", NULL});
+    CHECK("passing --json has dir null", r.code == 0 && has(&r, "\"dir\":null"));
+    run_tool(&r, (const char *[]){"-n", "2", "--keep", "--", "sh", "-c", "exit 0", NULL});
+    line_after(&r, "run directory: ", dir, sizeof dir);
+    CHECK("--keep report names an existing directory", exists(dir, "run-1/log"));
+    setenv("ZCL_FLAKY_LOG_CAP", "100000", 1);
+    run_tool(&r, (const char *[]){"-n", "1", "--timeout", "60", "--", "sh", "-c", "head -c 3000000 /dev/zero; sleep 30", NULL});
+    unsetenv("ZCL_FLAKY_LOG_CAP");
+    CHECK("a runaway log is killed and fails", r.code == 1 && has(&r, "FAILING: 1 runs") && has(&r, "(killed: log passed"));
+}
+
 int main(int argc, char **argv)
 {
     char tmp[4200];
@@ -177,6 +266,10 @@ int main(int argc, char **argv)
     test_verdicts();
     test_errors();
     test_work_and_jobs(tmp);
+    test_limits();
+    test_signal(tmp, SIGINT, "SIGINT");
+    test_signal(tmp, SIGTERM, "SIGTERM");
+    test_signal(tmp, SIGHUP, "SIGHUP");
     nftw(tmp, rm_cb, 16, FTW_DEPTH | FTW_PHYS);
     if (failures) { printf("zcl-dev-flaky tests: %d failure(s)\n", failures); return 1; }
     puts("zcl-dev-flaky tests: ok");

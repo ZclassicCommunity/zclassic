@@ -31,6 +31,7 @@
 #define JOBS_MAX 4
 #define TIMEOUT_DEFAULT 900
 #define PATH_BUF 4096
+#define LOG_CAP (256LL * 1024 * 1024) /* a run whose log passes this is killed and fails (local-ci caps step logs the same) */
 
 struct cfg {
     int n, jobs, timeout, keep, json;
@@ -41,6 +42,7 @@ struct cfg {
 struct run {
     int code;      /* exit status; 128+signal when killed by a signal */
     int timed_out; /* killed by our deadline */
+    int oversize;  /* killed because its log passed LOG_CAP */
     int ran;       /* finished */
     double secs;
     char dir[PATH_BUF];
@@ -152,7 +154,25 @@ static int run_main(int argc, char **argv)
 
 #else
 
-static int is_failure(const struct run *r) { return r->timed_out || r->code != 0; }
+static int is_failure(const struct run *r) { return r->timed_out || r->oversize || r->code != 0; }
+
+/* ---------------------------------------------------------------- signals */
+
+/* Each run is its own process group, so a terminal Ctrl-C never reaches it: the runner catches the
+ * signal itself, kills every group and reports INTERRUPTED. No SA_RESTART, so sleeps return at once. */
+static volatile sig_atomic_t g_sig;
+
+static void on_signal(int sig) { g_sig = sig; }
+
+static void install_signals(void)
+{
+    static const int sigs[] = {SIGINT, SIGTERM, SIGHUP};
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_signal;
+    sigemptyset(&sa.sa_mask);
+    for (size_t i = 0; i < sizeof sigs / sizeof *sigs; i++) sigaction(sigs[i], &sa, NULL);
+}
 
 /* ---------------------------------------------------------------- filesystem */
 
@@ -283,50 +303,81 @@ static int launch(const struct cfg *c, struct run *r, int k)
     return 0;
 }
 
-static void finish(struct run *r, int status, int timed_out)
+enum { WHY_EXIT, WHY_TIMEOUT, WHY_OVERSIZE };
+
+static void finish(struct run *r, int status, int why)
 {
     r->secs = now_s() - r->t0;
     r->ran = 1;
-    r->timed_out = timed_out;
+    r->timed_out = why == WHY_TIMEOUT;
+    r->oversize = why == WHY_OVERSIZE;
     if (WIFEXITED(status)) r->code = WEXITSTATUS(status);
     else r->code = 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
-    kill(-r->pid, SIGKILL); /* nothing a run leaves behind outlives it */
+}
+
+/* Kill the whole group, then reap its leader. The kill comes first: until the leader is reaped its pid cannot
+ * be reused, so the signal cannot reach an unrelated group. Nothing a run leaves behind outlives it. */
+static void kill_and_reap(struct run *r, int why)
+{
+    int st = 0;
+    kill(-r->pid, SIGKILL);
+    waitpid(r->pid, &st, 0);
+    finish(r, st, why);
+}
+
+static long long g_log_cap = LOG_CAP; /* ZCL_FLAKY_LOG_CAP overrides it (bytes; the tests use it) */
+
+static int log_oversize(const struct run *r)
+{
+    struct stat sb;
+    return stat(r->log, &sb) == 0 && (long long)sb.st_size > g_log_cap;
 }
 
 /* Poll one running run: 1 when it finished this call. */
 static int poll_one(struct run *r, int timeout)
 {
-    int st = 0;
-    pid_t w = waitpid(r->pid, &st, WNOHANG);
-    if (w == r->pid) { finish(r, st, 0); return 1; }
+    siginfo_t si;
+    memset(&si, 0, sizeof si);
+    /* WNOWAIT leaves the leader a zombie, so the group kill below still names our own group */
+    if (waitid(P_PID, (id_t)r->pid, &si, WEXITED | WNOHANG | WNOWAIT) == 0 && si.si_pid == r->pid) {
+        kill_and_reap(r, WHY_EXIT);
+        return 1;
+    }
+    if (log_oversize(r)) { kill_and_reap(r, WHY_OVERSIZE); return 1; }
     if (now_s() - r->t0 <= timeout) return 0;
-    kill(-r->pid, SIGKILL);
-    waitpid(r->pid, &st, 0);
-    finish(r, st, 1);
+    kill_and_reap(r, WHY_TIMEOUT);
     return 1;
 }
 
-static void abort_all(struct run *runs, int upto)
+/* Kill and reap every run that is still going among runs[0..upto); returns how many. */
+static int abort_all(struct run *runs, int upto)
 {
-    int st;
+    int st, killed = 0;
     for (int i = 0; i < upto; i++) {
         if (runs[i].ran || runs[i].pid <= 0) continue;
         kill(-runs[i].pid, SIGKILL);
         waitpid(runs[i].pid, &st, 0);
+        runs[i].pid = 0;
+        killed++;
     }
+    return killed;
 }
 
-/* Drive all runs; returns 0, or -1 after printing BROKEN. */
-static int drive(const struct cfg *c, struct run *runs)
+enum { DRIVE_OK = 0, DRIVE_BROKEN = -1, DRIVE_INTERRUPTED = -2 };
+
+/* Drive all runs; returns DRIVE_OK, or DRIVE_BROKEN after printing BROKEN, or DRIVE_INTERRUPTED after a
+ * signal (every running group already killed and reaped, *killed says how many). */
+static int drive(const struct cfg *c, struct run *runs, int *killed)
 {
     int next = 0, running = 0, done = 0;
     struct timespec nap = {0, 20 * 1000 * 1000};
     while (done < c->n) {
-        while (running < c->jobs && next < c->n) {
+        if (g_sig) { *killed = abort_all(runs, next); return DRIVE_INTERRUPTED; }
+        while (running < c->jobs && next < c->n && !g_sig) {
             if (launch(c, &runs[next], next + 1) != 0) {
                 printf("BROKEN: cannot start `%s`: %s\n", c->argv[0], strerror(errno));
                 abort_all(runs, next);
-                return -1;
+                return DRIVE_BROKEN;
             }
             next++;
             running++;
@@ -336,7 +387,7 @@ static int drive(const struct cfg *c, struct run *runs)
             if (!runs[i].ran && poll_one(&runs[i], c->timeout)) { done++; running--; }
         if (done == before) nanosleep(&nap, NULL);
     }
-    return 0;
+    return DRIVE_OK;
 }
 
 /* ---------------------------------------------------------------- report */
@@ -390,6 +441,9 @@ static void json_str(FILE *f, const char *s)
     fputc('"', f);
 }
 
+/* The run directory survives a report when --keep is given or some run failed. */
+static int dir_kept(const struct cfg *c, const struct summary *s) { return c->keep || s->failures > 0; }
+
 static void report_json(const struct cfg *c, const struct run *runs, const struct summary *s,
                         const char *verdict, const char *dir)
 {
@@ -398,7 +452,8 @@ static void report_json(const struct cfg *c, const struct run *runs, const struc
     printf("{\"verdict\":\"%s\",\"runs\":%d,\"failures\":%d,\"jobs\":%d,\"timeout\":%d,"
            "\"min_s\":%.3f,\"median_s\":%.3f,\"max_s\":%.3f,\"exit_codes\":\"%s\",\"dir\":",
            verdict, c->n, s->failures, c->jobs, c->timeout, s->min, s->med, s->max, codes);
-    json_str(stdout, dir);
+    if (dir_kept(c, s)) json_str(stdout, dir);
+    else fputs("null", stdout);
     fputs(",\"first_failing_log\":", stdout);
     if (s->first_fail >= 0) json_str(stdout, runs[s->first_fail].log);
     else fputs("null", stdout);
@@ -416,8 +471,10 @@ static void report_text(const struct cfg *c, const struct run *runs, const struc
     printf("exit codes seen: %s\n", codes);
     if (s->first_fail >= 0)
         printf("first failing log: %s%s\n", runs[s->first_fail].log,
-               runs[s->first_fail].timed_out ? " (killed on timeout)" : "");
-    printf("run directory: %s\n", dir);
+               runs[s->first_fail].timed_out ? " (killed on timeout)"
+               : runs[s->first_fail].oversize ? " (killed: log passed 256 MiB)" : "");
+    if (dir_kept(c, s)) printf("run directory: %s\n", dir);
+    else puts("run directory: removed (every run passed; --keep keeps it)");
 }
 
 /* Remove what a passing run left (its whole directory) unless --keep; tidy an empty stamp directory. */
@@ -452,7 +509,16 @@ static int run_main(int argc, char **argv)
         free(runs);
         return 2;
     }
-    if (drive(&c, runs) != 0) { rmtree(dir); free(runs); return 2; }
+    const char *cap_env = getenv("ZCL_FLAKY_LOG_CAP");
+    if (cap_env && atoll(cap_env) > 0) g_log_cap = atoll(cap_env);
+    install_signals();
+    int killed = 0, rc = drive(&c, runs, &killed);
+    if (rc == DRIVE_INTERRUPTED) {
+        printf("INTERRUPTED: signal %d; killed %d running group(s); partial logs kept under %s\n", (int)g_sig, killed, dir);
+        free(runs);
+        return 2;
+    }
+    if (rc != DRIVE_OK) { rmtree(dir); free(runs); return 2; }
     summarize(&c, runs, &s);
     const char *verdict = verdict_of(c.n, s.failures);
     if (c.json) report_json(&c, runs, &s, verdict, dir);
