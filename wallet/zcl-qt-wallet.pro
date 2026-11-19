@@ -90,6 +90,8 @@ HEADERS += \
     src/daemonjob.h \
     src/profilepaths.h \
     src/profilefailure.h \
+    src/stopretry.h \
+    src/closeflow.h \
     src/cookiestale.h \
     src/notifyserver.h \
     src/securerandom.h \

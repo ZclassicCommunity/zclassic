@@ -89,6 +89,8 @@
 #include "senttxstore.h"
 #include "settings.h"
 #include "connection.h"
+#include "stopretry.h"
+#include "closeflow.h"
 #include "namepaybox.h"
 #include "notifyserver.h"
 #include "logger.h"
@@ -4543,9 +4545,95 @@ private slots:
         SentTxStore::deleteHistory();
         settleAndDelete(w);
     }
+
+    // ======================================================================================================
+    // Closing while the node is still starting: the closing state is shown at once and `stop` is re-sent
+    // until the node accepts it (see src/stopretry.h). The node refuses the first request with the
+    // warm-up error (-28), as zclassicd does while loading.
+    // ======================================================================================================
+private:
+    class StopNode : public FakeNode {
+    public:
+        int refuse = 1;     // answer this many stop requests with RPC_IN_WARMUP, then accept
+    protected:
+        void handle(const Req& r, QTcpSocket* s) override {
+            if (r.method != "stop") { FakeNode::handle(r, s); return; }
+            if (count("stop") <= refuse) rpcError(s, -28, "Loading block index...");
+            else result(s, "ZClassic server stopping");
+        }
+    };
+
+private slots:
+    void stop_isRetriedUntilTheNodeAccepts() {
+        StopNode node;
+        node.refuse = 2;
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        Connection* c = w->getRPC()->getConnection();
+        c->shutdown();      // the close path does this right after the first stop: retries must still go out
+        StopRetrier st(c, 50);
+        QElapsedTimer t; t.start();
+        while (!st.delivered() && t.elapsed() < 8000) { st.tick(); QTest::qWait(20); }
+        QVERIFY(st.delivered());
+        QCOMPARE(node.count("stop"), 3);
+        QCOMPARE(st.attempts(), 3);
+        QTest::qWait(200);
+        st.tick();                                  // delivered: nothing more is sent
+        QTest::qWait(100);
+        QCOMPARE(node.count("stop"), 3);
+        settleAndDelete(w);
+    }
+
+    void stop_retryDecisionsArePure() {
+        QVERIFY(StopRetrier::shouldSend(false, false, 0, 0, 0, 500));           // first attempt: at once
+        QVERIFY(!StopRetrier::shouldSend(false, true, 1, 0, 9999, 500));        // one in flight: never doubled
+        QVERIFY(!StopRetrier::shouldSend(false, false, 1, 100, 599, 500));      // too soon
+        QVERIFY(StopRetrier::shouldSend(false, false, 1, 100, 600, 500));       // interval passed: retry
+        QVERIFY(!StopRetrier::shouldSend(true, false, 3, 0, 99999, 500));       // delivered: stop retrying
+        QVERIFY(StopRetrier::isDelivered(QNetworkReply::NoError));
+        QVERIFY(!StopRetrier::isDelivered(QNetworkReply::ConnectionRefusedError));
+        QVERIFY(!StopRetrier::isDelivered(QNetworkReply::InternalServerError)); // -28 is HTTP 500
+    }
+
+    // The close path's helper: a node process that is still running. The notice is on screen at once
+    // (before any wait), carries the plain text, and stop is re-sent after the first -28 refusal even though
+    // nothing else is sending it.
+    void close_showsClosingStateAtOnceAndRetriesStop() {
+        StopNode node;
+        node.refuse = 1;
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        QProcess child;
+        child.start(QCoreApplication::applicationFilePath(), {"--sleep-child"});   // lives ~20 s
+        QVERIFY(child.waitForStarted(5000));
+        w->getRPC()->setEZClassicd(&child);
+        const bool wasHeadless = Settings::getInstance()->isHeadless();
+        Settings::getInstance()->setHeadless(false);
+        {
+            QElapsedTimer t; t.start();
+            CloseFlow::Assist assist(w, w->getRPC());
+            QVERIFY2(t.elapsed() < 1000, "constructing the closing state must not wait");
+            QDialog* notice = w->findChild<QDialog*>("closingNotice");
+            QVERIFY(notice && notice->isVisible());
+            QLabel* status = notice->findChild<QLabel*>("closingNoticeStatus");
+            QVERIFY(status);
+            QVERIFY(status->text().contains("stopping the ZClassic node safely"));
+            QTRY_VERIFY_WITH_TIMEOUT(node.count("stop") >= 2, 6000);   // refused once (-28), then accepted
+        }
+        Settings::getInstance()->setHeadless(wasHeadless);
+        child.kill();
+        child.waitForFinished(3000);
+        w->getRPC()->setEZClassicd(nullptr);
+        settleAndDelete(w);
+    }
 };
 
 int main(int argc, char* argv[]) {
+    if (argc == 2 && QByteArray(argv[1]) == "--sleep-child") {
+        QCoreApplication child(argc, argv);
+        QTimer::singleShot(20000, &child, &QCoreApplication::quit);
+        return child.exec();
+    }
     if (argc == 2 && QByteArray(argv[1]) == "--fast-sync-child") {
         QCoreApplication child(argc, argv);
         QTimer::singleShot(750, &child, &QCoreApplication::quit);
