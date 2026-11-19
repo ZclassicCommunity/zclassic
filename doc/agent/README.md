@@ -8,3 +8,6 @@ Commands: `zcl-dev guide <paths>`, `zcl-dev lessons find <query>`, `zcl-dev know
 - [TRAPS.md](TRAPS.md): what not to do, why, and where, grouped by the paths that trigger each section.
 - [FACTS.tsv](FACTS.tsv): subject, relation, object, context, confidence and why, over a closed vocabulary. `zcl-dev know <term>` answers from it, or says `UNKNOWN`.
 - [WIKI.md](WIKI.md): how `zcl-dev wiki`, `zcl-dev read`, `zcl-dev lessons` and `zcl-dev know` behave.
+- [THE_ZCLASSICD_WAY.md](THE_ZCLASSICD_WAY.md): the one development loop, from orienting to release, and what never happens.
+- [DEFENSIVE_CODING.md](DEFENSIVE_CODING.md): numbered rules for safe C++, C and shell here (peer input, amounts, locks, threads, durable writes, RPC errors, logging privacy, tests), each with an example and its enforcing lint or test.
+- [CONSENSUS_PARITY.md](CONSENSUS_PARITY.md): what counts as consensus, the evidence ladder for a validation-path change, and the quirks that must not be tidied.
