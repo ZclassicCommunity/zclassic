@@ -45,9 +45,15 @@ What beta13 changes for users (details in the [beta13 notes](doc/release-notes-b
 - Peak memory for a 20-40 note shielded send about 850 MB to about 390 MB.
 - A hard kill no longer leaves a spent shielded note counted as unspent; a reorganisation no longer aborts the daemon and the wallet shows the same balance as after a restart; `backupwallet` verifies its copy before renaming it into place.
 - Sync from genesis works; `-reindex` and `invalidateblock` are reliable; peer selection is better; interrupted snapshot downloads resume.
+- Faster peer connections: a fresh node dials several addresses at once and uses its fixed seeds early (measured on a Windows home PC: 3 peers in 0.75 s instead of 8.6 s, median of 5 fresh starts).
+- Fast sync uses every snapshot server it knows at once and still verifies every byte against the trusted snapshot manifest; a node killed during the snapshot install recovers by itself on the next start. `getbootstrapinfo` shows `servers` and `servers_in_use`.
+- Wallet: witnesses of long-spent notes are retired (smaller wallet file, less work per block); `z_sendmany` accepts an `idempotency_key` and a durable send journal (`z_listsendjournal`) keeps a retried send from paying twice; `getwalletinfo` reports `health`, and the wallet shows a notice only when something needs attention.
+- Node: `getrpcinfo` and a slow-RPC warning (`-rpcslowlog`), HTTP 503 with an explanation when the RPC server is overloaded, a cache of verified shielded transactions, parallel header Equihash checks, a shorter start-up check after a clean shutdown, and LevelDB open files sized from the system limit.
 - Embedded Tor is optional (`-embeddedtor=1`) and off by default. `debug.log` is off by default (`-debuglogfile`).
 
-Known issues: a node killed while a downloaded snapshot is being installed can refuse the next start (remove the partial `blocks` and `chainstate` folders the install created and start again; a fix is coming), and a pruned node cannot reorganise onto a reconsidered fork more than 288 blocks heavier. Earlier changes: [beta12 notes](doc/release-notes-beta12.md) and [beta11 notes](doc/release-notes-beta11.md).
+Known issue: a pruned node cannot reorganise onto a reconsidered fork more than 288 blocks heavier. Going back to an older wallet after this version has spent many shielded notes has one limit, described in the [beta13 notes](doc/release-notes-beta13.md). Earlier changes: [beta12 notes](doc/release-notes-beta12.md) and [beta11 notes](doc/release-notes-beta11.md).
+
+For developers: the source tree has no Python and no hosted CI; the developer tools (`zcl-dev`, `zcl-lint` and others) are written in C. See `AGENTS.md` and `doc/agent/`.
 
 The Windows wallet is one file: run `zclwallet-v2.1.2-beta13-win64.exe`; no installer, no extra DLLs. Windows binaries are unsigned and may trigger SmartScreen ("More info", then "Run anyway"). The Mac wallet and node are ad-hoc signed, not Apple-notarized; they were tested natively on macOS 26 only.
 
@@ -131,6 +137,8 @@ Uses `~/.zclassic` as the data directory.
 # Adjust parallel download connections (1–16, default 4)
 ./src/zclassicd -bootstrapstreams=8
 ```
+
+When the node knows several snapshot servers (the compiled-in list, or `-bootstrappeer` given more than once), the download spreads its streams over all of them, takes identical files from whichever server has them, and carries on if one goes away. Every byte is still checked against the trusted snapshot manifest. `getbootstrapinfo` reports `servers` and `servers_in_use`.
 
 ### Full Validation from Genesis (No Fast-Sync)
 
