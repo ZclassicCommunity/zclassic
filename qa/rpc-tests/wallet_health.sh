@@ -11,6 +11,8 @@
 # 5  a reorg deeper than the witness cache: the rebuild has run (witness_rebuild_pending false),
 #    every unspent confirmed note has a witness at the lowered tip
 # 6  restart: the same counts, checkpoint_height at the tip after a clean stop
+# 7  (run id 6) every note count against a brute-force recount from z_listunspent,
+#    z_listreceivedbyaddress and the mempool, in three wallet states
 #
 # witness_rebuild_pending = true cannot be sampled over RPC (the rebuild runs inside the
 # invalidateblock call that causes it, which holds cs_main); the gtest wallet_health covers it.
@@ -137,6 +139,49 @@ scn_restart() {
     ck "restart: new block, witness ready at the new tip" "$(hv 'sapling|.witness_ready') $(hv tip_height)" "1 $(cli 1 getblockcount)"
 }
 
+# recount <label>: every note count of the report against what z_listunspent, z_listreceivedbyaddress and the
+# mempool say independently (sapling notes have "outindex", sprout notes "jsindex")
+recount() {
+    local l=$1 u rcv_s rcv_p a mp mine_mp t
+    u=$(cli 0 z_listunspent 0 9999999)
+    rcv_s=0; rcv_p=0
+    for a in $(cli 0 z_listaddresses | jq -r '.[]'); do
+        case $a in zs*|zregtestsapling*|ztestsapling*) rcv_s=$((rcv_s + $(cli 0 z_listreceivedbyaddress "$a" 0 | jq length))) ;;
+                   *) rcv_p=$((rcv_p + $(cli 0 z_listreceivedbyaddress "$a" 0 | jq length))) ;; esac
+    done
+    for pool in sapling:outindex sprout:jsindex; do
+        p=${pool%%:*}; f=${pool#*:}
+        ck "$l: $p notes_unspent = z_listunspent 0" "$(hv "$p.notes_unspent")" "$(echo "$u" | jq --arg f "$f" '[.[]|select(has($f))]|length')"
+        ck "$l: $p unconfirmed = z_listunspent at depth 0" "$(hv "$p.unconfirmed")" "$(echo "$u" | jq --arg f "$f" '[.[]|select(has($f) and .confirmations == 0)]|length')"
+        ck "$l: $p witness_ready = confirmed unspent notes (all witnesses at the tip)" "$(hv "$p.witness_ready")" "$(echo "$u" | jq --arg f "$f" '[.[]|select(has($f) and .confirmations > 0)]|length')"
+        ck "$l: $p witness_missing + witness_stale = 0" "$(hv "$p|.witness_missing + .witness_stale")" 0
+        [ "$p" = sapling ] && t=$rcv_s || t=$rcv_p
+        ck "$l: $p notes_spent + notes_unspent = every note received (z_listreceivedbyaddress 0 skips dead transactions)" "$(hv "$p|.notes_spent + .notes_unspent")" "$t"
+        ck "$l: $p unmined_dead = 0 (no dead transaction in this scenario)" "$(hv "$p.unmined_dead")" 0
+        ck "$l: $p witnesses_held_unspent >= witness_ready" "$(hv "$p|.witnesses_held_unspent >= .witness_ready")" true
+    done
+    mine_mp=0
+    for t in $(cli 0 getrawmempool | jq -r '.[]'); do cli 0 gettransaction "$t" >/dev/null 2>&1 && mine_mp=$((mine_mp + 1)); done
+    ck "$l: pending_sends.in_mempool = wallet transactions in the mempool" "$(hv pending_sends.in_mempool)" "$mine_mp"
+    ck "$l: tip_height = getblockcount" "$(hv tip_height)" "$(cli 0 getblockcount)"
+}
+
+scn_recount() {
+    fund || return
+    give_z 0 "$ZS" 1.5; give_z 0 "$ZS" 0.75
+    ZB=$(cli 1 z_getnewaddress sapling)
+    recount "three sapling notes, one sprout"
+    zconfirm 0 "$ZS" "[{\"address\":\"$ZB\",\"amount\":2}]" 1 "$FEE" >/dev/null
+    r=$(zsend 0 "$ZS" "[{\"address\":\"$ZB\",\"amount\":0.5}]" 1 "$FEE")
+    case $r in success*) wait_mempool 1 "${r#success }"; txst "${r#success }" >/dev/null ;; *) bad "recount: send: $r"; return ;; esac
+    recount "one send mined, one pending"
+    ck "one pending send is counted" "$(hv pending_sends.in_mempool)" 1
+    mine 1
+    recount "both mined"
+    t0=$(now); i=0; while [ $i -lt 20 ]; do cli 0 getwalletinfo >/dev/null; i=$((i + 1)); done
+    obs "getwalletinfo_20_calls_s" "$(elapsed "$t0")"
+}
+
 run_scn() {
     id=$1; name=$2; fn=$3
     if [ -n "$ONLY" ]; then case ",$ONLY," in *",$id,"*) ;; *) return 0 ;; esac; fi
@@ -156,6 +201,7 @@ run_scn 2 "pending then mined send" scn_pending
 run_scn 3 "send that expires unmined" scn_expire
 run_scn 4 "reorg deeper than the witness cache" scn_deep
 run_scn 5 "restart" scn_restart
+run_scn 6 "every count against a brute-force recount" scn_recount
 
 say; say "id|scenario|result|checks"; cat "$RESULTS"
 ! grep -q "|FAIL|" "$RESULTS"
