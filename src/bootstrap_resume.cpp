@@ -244,6 +244,14 @@ int BootstrapPeerBoard::AttachedLocked(int peer) const
     return n;
 }
 
+double BootstrapPeerBoard::StreamLifeRate(const StreamState& st, int64_t nowMs) const
+{
+    const int64_t age = nowMs - st.attachedMs;
+    if (!st.connected || age <= 0)
+        return 0;
+    return st.bytes * 1000.0 / age;
+}
+
 bool BootstrapPeerBoard::PeerQuietLocked(int peer, int64_t nowMs) const
 {
     for (size_t i = 0; i < streams.size(); ++i) {
@@ -538,6 +546,33 @@ std::vector<BootstrapMove> BootstrapPeerBoard::Rebalance(int64_t nowMs)
         if (Usable(peers[p]))
             per[p] = PeerPerStreamRate((int)p, nowMs);
 
+    // A short window is noisy (a capped server hands out chunks in quanta): a server is judged slow only
+    // when even its most generous estimate (window or average since attach) is slow, and another server fast
+    // only by its most conservative one. A wrong move costs the stream's whole window in flight.
+    std::vector<double> generous(peers.size(), -1), conservative(peers.size(), -1);
+    for (size_t p = 0; p < peers.size(); ++p) {
+        if (!Usable(peers[p]))
+            continue;
+        double sumG = 0, sumC = 0;
+        int n = 0;
+        for (size_t i = 0; i < streams.size(); ++i) {
+            const StreamState& st = streams[i];
+            if (st.peer != (int)p || st.move || st.idle)
+                continue;
+            const double rw = StreamRate(st, nowMs, true);
+            if (rw < 0)
+                continue;
+            const double rl = StreamLifeRate(st, nowMs);
+            sumG += std::max(rw, rl);
+            sumC += std::min(rw, rl);
+            ++n;
+        }
+        if (n) {
+            generous[p] = sumG / n;
+            conservative[p] = sumC / n;
+        }
+    }
+
     for (size_t i = 0; i < streams.size(); ++i) {
         StreamState& st = streams[i];
         if (!st.connected || st.move || st.peer < 0)
@@ -562,13 +597,13 @@ std::vector<BootstrapMove> BootstrapPeerBoard::Rebalance(int64_t nowMs)
 
     // slow peers: one stream per peer per call, never the last stream of a peer (it keeps the rate measured)
     for (size_t p = 0; p < peers.size(); ++p) {
-        if (!Usable(peers[p]) || per[p] < 0 || AttachedLocked((int)p) < 2)
+        if (!Usable(peers[p]) || generous[p] < 0 || AttachedLocked((int)p) < 2)
             continue;
         double bestOther = -1;
         for (size_t q = 0; q < peers.size(); ++q)
-            if (q != p && Usable(peers[q]) && per[q] > bestOther)
-                bestOther = per[q];
-        if (bestOther <= 0 || per[p] >= pol.slowFraction * bestOther)
+            if (q != p && Usable(peers[q]) && conservative[q] > bestOther)
+                bestOther = conservative[q];
+        if (bestOther <= 0 || generous[p] >= pol.slowFraction * bestOther)
             continue;
         for (size_t i = 0; i < streams.size(); ++i) {
             StreamState& st = streams[i];
@@ -603,11 +638,11 @@ std::vector<BootstrapMove> BootstrapPeerBoard::Rebalance(int64_t nowMs)
             double bestRate = 0;
             for (size_t p = 0; p < peers.size(); ++p)
                 if ((int)p != st.peer && Usable(peers[p]))
-                    bestRate = std::max(bestRate, per[p]);
+                    bestRate = std::max(bestRate, conservative[p]);
             uint64_t left = 0;
             for (std::map<uint32_t, uint64_t>::const_iterator f = st.remaining.begin(); f != st.remaining.end(); ++f)
                 left += f->second;
-            const double r = std::max(1.0, StreamRate(st, nowMs, false));
+            const double r = std::max(1.0, std::max(StreamRate(st, nowMs, false), StreamLifeRate(st, nowMs)));
             const double secs = left / r;
             if (secs > pol.stealMinSeconds && bestRate >= pol.stealFactor * r && secs > victimSeconds) {
                 victim = (int)i;
