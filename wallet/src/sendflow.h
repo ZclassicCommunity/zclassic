@@ -55,11 +55,26 @@ inline bool jsonErrorMessage(const json& parsed, QString* msg) {
     return true;
 }
 
+inline int jsonErrorCode(const json& parsed) {
+    if (parsed.is_discarded() || !parsed.is_object()) return 0;
+    auto e = parsed.find("error");
+    if (e == parsed.end() || !e->is_object()) return 0;
+    auto c = e->find("code");
+    return (c != e->end() && c->is_number_integer()) ? c->get<int>() : 0;
+}
+
+// RPC_IN_WARMUP: a node that is still starting answers every call with this before looking at it.
+constexpr int kRpcInWarmup = -28;
+
 // httpStatus is 0 when no HTTP answer was received at all.
 inline CallClass classifyCall(const json& parsed, int httpStatus, bool keySent, QString* message) {
     QString m;
     if (jsonErrorMessage(parsed, &m)) {
         if (message) *message = m;
+        // A keyed call to a node that is still starting (it restarted while the wallet was waiting for an answer):
+        // the call was not looked at, and an earlier attempt may have been queued. Ask again with the same key.
+        if (keySent && jsonErrorCode(parsed) == kRpcInWarmup)
+            return CallClass::Ambiguous;
         // An older zclassicd throws its usage text (RPC_MISC_ERROR) when it gets more parameters than it knows. The
         // text names the call and, of course, not the key parameter.
         if (keySent && m.startsWith(QLatin1String("z_sendmany")) && !m.contains(QLatin1String("idempotency_key")))
@@ -176,10 +191,20 @@ inline QString oldNodeAmbiguousText() {
                        "Check your transactions before sending again.");
 }
 
+// A repeat of a keyed call (the answer to an earlier attempt was lost) that the node refused: the refusal says nothing
+// about the earlier attempt, which may have been queued. Never "failed, try again".
+inline QString retryRefusedPrefix() {
+    return QObject::tr("The node refused a repeat of this payment, and an earlier attempt may already have been queued.");
+}
+inline QString retryRefusedText(const QString& reason) {
+    return retryRefusedPrefix() + QLatin1Char(' ')
+         + QObject::tr("This wallet will not send it again: check your transactions before sending again. (%1)").arg(reason);
+}
+
 // True for the wallet's own wording above: it already says what to do, so it is shown as it is.
 inline bool isFlowText(const QString& s) {
     return s == unknownText() || s == expiredText() || s == lostText() || s == interruptedText() || s == gaveUpText()
-        || s == oldNodeAmbiguousText();
+        || s == oldNodeAmbiguousText() || s.startsWith(retryRefusedPrefix());
 }
 
 // Does deciding this operation need the journal? Only for a keyed send whose queue entry says failed or is gone, or

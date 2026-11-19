@@ -2299,6 +2299,10 @@ void TestLogic::sendflow_classifyTheAnswerToTheCall() {
     // an error from another call is not the old node's usage text
     nlohmann::json other = {{"error", {{"code", -4}, {"message", "Wallet is locked"}}}};
     QCOMPARE(sendflow::classifyCall(other, 500, true, &msg), CallClass::Definitive);
+    // a node that is still starting did not look at the call: a keyed call is asked again; without a key, as before
+    nlohmann::json warm = {{"error", {{"code", -28}, {"message", "Loading block index..."}}}};
+    QCOMPARE(sendflow::classifyCall(warm, 500, true, &msg), CallClass::Ambiguous);
+    QCOMPARE(sendflow::classifyCall(warm, 500, false, &msg), CallClass::Definitive);
 }
 
 void TestLogic::sendflow_retryPaceIsBounded() {
@@ -2411,6 +2415,11 @@ void TestLogic::sendflow_ownWordingIsNotRewritten() {
     // none of them invites the user to simply try again, except the ones where nothing was sent
     QVERIFY(!sendflow::unknownText().contains("try again", Qt::CaseInsensitive));
     QVERIFY(!sendflow::gaveUpText().contains("try again", Qt::CaseInsensitive));
+    // a refused repeat keeps the node's reason and is never "try again"
+    const QString rr = sendflow::retryRefusedText("Wallet is locked");
+    QVERIFY(sendflow::isFlowText(rr));
+    QVERIFY(rr.contains("Wallet is locked"));
+    QVERIFY(!rr.contains("try again", Qt::CaseInsensitive));
 }
 
 

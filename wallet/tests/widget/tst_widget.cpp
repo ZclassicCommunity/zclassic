@@ -4097,6 +4097,59 @@ private slots:
         settleAndDelete(w);
     }
 
+    // The answer to the first call is lost (the node got it), then the node restarts. A repeat that meets the starting
+    // node (-28) is asked again with the same key; a repeat the node refuses is never reported as "not sent", because
+    // the first attempt may have been queued.
+    void sendOnce_aRepeatIsNeverReportedAsNotSent_data() {
+        QTest::addColumn<bool>("refuseRepeat");
+        QTest::newRow("warmup, then the stored operation") << false;
+        QTest::newRow("warmup, then a refusal")             << true;
+    }
+    void sendOnce_aRepeatIsNeverReportedAsNotSent() {
+        QFETCH(bool, refuseRepeat);
+        class Restarting : public SendNode {
+        public:
+            int  calls = 0;
+            bool refuse = false;
+        protected:
+            void handle(const Req& r, QTcpSocket* s) override {
+                if (r.method == "z_sendmany") {
+                    calls++;
+                    if (calls == 1) { built++; hang(s); return; }                   // queued; the answer is lost
+                    if (calls == 2) { rpcError(s, -28, "Loading block index..."); return; }
+                    if (refuse) { rpcError(s, -13, "Error: Please enter the wallet passphrase with walletpassphrase first."); return; }
+                    result(s, std::string("opid-1"));
+                    return;
+                }
+                SendNode::handle(r, s);
+            }
+        } node;
+        node.refuse = refuseRepeat;
+        node.queueEntry = [](const QString& id) { return successEntry(id, SendNode::txid()); };
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        w->getRPC()->testSetSendTiming(200, 20);
+        SendRec rec;
+        runSend(w, sendTx(), rec);
+        QTRY_VERIFY_WITH_TIMEOUT(!rec.completedTxids.isEmpty() || !rec.errors.isEmpty(), 15000);
+        QVERIFY(node.calls >= 3);                                               // the warmup answer did not end it
+        const auto sends = node.of("z_sendmany");
+        for (const auto& s : sends) QVERIFY(s.params[4] == sends.first().params[4]);
+        QCOMPARE(node.built, 1);
+        if (!refuseRepeat) {
+            QVERIFY2(rec.errors.isEmpty(), qPrintable(rec.errors.join("|")));
+            QCOMPARE(rec.completedTxids, QStringList() << SendNode::txid());
+        } else {
+            QCOMPARE(rec.errors.size(), 1);
+            QVERIFY2(rec.errors[0].startsWith(sendflow::retryRefusedPrefix()), qPrintable(rec.errors[0]));
+            QVERIFY(rec.errors[0].contains("walletpassphrase"));                 // the node's reason is still shown
+            QCOMPARE(w->testHumaneSendError(rec.errors[0]), rec.errors[0]);      // not turned into "nothing was sent"
+            QVERIFY(!rec.errors[0].contains("try again", Qt::CaseInsensitive));
+            QVERIFY(!rec.errors[0].contains("Nothing was sent", Qt::CaseInsensitive));
+        }
+        settleAndDelete(w);
+    }
+
     // A JSON-RPC answer is final: reported once, nothing repeated.
     void sendOnce_aRefusalIsReportedOnceAndNotRepeated() {
         class Refusing : public SendNode {

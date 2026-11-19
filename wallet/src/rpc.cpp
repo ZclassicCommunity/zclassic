@@ -2189,10 +2189,14 @@ void RPC::sendAttempt(const std::shared_ptr<SendAttempt>& at) {
             QString msg;
             const int http = r ? r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() : 0;
             switch (sendflow::classifyCall(parsed, http, at->useKey, &msg)) {
-            case sendflow::CallClass::Definitive:
+            case sendflow::CallClass::Definitive: {
                 at->done = true;
-                at->error("", msg.isEmpty() && r ? r->errorString() : msg);
+                const QString reason = msg.isEmpty() && r ? r->errorString() : msg;
+                // A refusal of a repeat says nothing about the earlier attempt whose answer was lost: it may have been
+                // queued. Only the first call of a confirmation can be reported as "not sent".
+                at->error("", at->useKey && at->attempts > 1 ? sendflow::retryRefusedText(reason) : reason);
                 break;
+            }
             case sendflow::CallClass::KeyUnsupported:
                 // An older node (the GUI may attach to an external one) refused the 5th parameter before doing anything.
                 daemonTakesSendKey = 0;
