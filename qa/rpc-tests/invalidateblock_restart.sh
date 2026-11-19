@@ -22,7 +22,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 SD=$WORK/s; rm -rf "$SD"; mkdir -p "$SD"
 SCN_ID=1; SCN_LOG=$WORK/checks.txt; OBS_LOG=$WORK/obs.txt; : >"$SCN_LOG"; : >"$OBS_LOG"
-BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 trap stop_all EXIT
 A="-disablesafemode -parkdeepreorg=0"
 PEER="-connect=127.0.0.1:$BASE"

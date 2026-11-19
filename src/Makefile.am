@@ -788,6 +788,7 @@ EXTRA_zclassic_cli_DEPENDENCIES = c23-symbols.stamp
 check-c23-vendor:
 	sh $(srcdir)/c23/tools/check-vendor.sh
 	sh $(srcdir)/c23/services/tools/check-vendor.sh $(srcdir)/c23/services
+	sh $(srcdir)/c23/services/tools/check-vendor.sh $(top_srcdir)/zcutil/tools/Z23_SOURCE.tsv
 
 
 # Embedded Tor keeps Tor's own generic names (tor_*, crypto_*, ...). Prove no other

@@ -22,18 +22,9 @@ mkdir -p "$work" || exit 2
 work=$(cd "$work" && pwd)
 [ -z "$(ls -A "$work")" ] || { echo "rpc-bind-test: $work is not empty" >&2; exit 2; }
 
-# four consecutive free ports: a p2p and an rpc port per daemon
-port_free() { ! ss -ltn 2>/dev/null | awk '{print $4}' | grep -q "[:.]$1\$"; }
-if [ -z "$base" ]; then
-    base=$((20000 + $$ % 20000))
-    n=0
-    while [ $n -lt 200 ]; do
-        ok=1; p=$base
-        while [ $p -lt $((base + 4)) ]; do port_free $p || ok=0; p=$((p + 1)); done
-        [ $ok = 1 ] && break
-        base=$((base + 7)); n=$((n + 1))
-    done
-fi
+# four consecutive free ports (a p2p and an rpc port per daemon), leased
+. "$(dirname "$0")/../lib/isolation.sh"
+iso_base base "$base" 16
 pa=$base; ra=$((base + 1)); pb=$((base + 2))
 
 da=$work/a; db=$work/b
@@ -49,13 +40,13 @@ cleanup() { clia stop >/dev/null 2>&1; [ -n "${bpid:-}" ] && kill "$bpid" 2>/dev
 trap cleanup EXIT INT TERM
 
 # no -rpcallowip / -rpcbind: the default bind set
-"$bin/zclassicd" $flags -datadir="$da" -port=$pa -daemon >/dev/null 2>&1 || { echo "rpc-bind-test: first daemon did not launch"; exit 1; }
+$ZCL_RUN "$bin/zclassicd" $flags -datadir="$da" -port=$pa -daemon >/dev/null 2>&1 || { echo "rpc-bind-test: first daemon did not launch"; exit 1; }
 i=0; up=0
 while [ $i -lt 120 ]; do clia getblockcount >/dev/null 2>&1 && { up=1; break; }; sleep 1; i=$((i + 1)); done
 [ $up = 1 ] || { echo "rpc-bind-test: first daemon did not start"; exit 1; }
 ok "first daemon serves RPC on port $ra"
 
-"$bin/zclassicd" $flags -datadir="$db" -port=$pb -printtoconsole=0 >"$work/b.out" 2>&1 &
+$ZCL_RUN "$bin/zclassicd" $flags -datadir="$db" -port=$pb -printtoconsole=0 >"$work/b.out" 2>&1 &
 bpid=$!
 i=0
 while [ $i -lt 60 ] && kill -0 "$bpid" 2>/dev/null; do sleep 1; i=$((i + 1)); done
@@ -94,7 +85,7 @@ if command -v nc >/dev/null 2>&1; then
     if ss -ltn 2>/dev/null | awk '{print $4}' | grep -q "^127.0.0.1:$rc_port\$"; then
         dc=$work/c; mkdir -p "$dc"
         printf 'rpcuser=bind\nrpcpassword=bind%s\nrpcport=%s\n' "$$" "$rc_port" >"$dc/zclassic.conf"
-        "$bin/zclassicd" $flags -datadir="$dc" -port=$((pb + 1)) -printtoconsole=0 >"$work/c.out" 2>&1 &
+        $ZCL_RUN "$bin/zclassicd" $flags -datadir="$dc" -port=$((pb + 1)) -printtoconsole=0 >"$work/c.out" 2>&1 &
         bpid=$!
         i=0
         while [ $i -lt 60 ] && kill -0 "$bpid" 2>/dev/null; do sleep 1; i=$((i + 1)); done

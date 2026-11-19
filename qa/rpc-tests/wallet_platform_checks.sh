@@ -31,7 +31,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 for f in "$HERE"/wallet_matrix_scn?.sh; do . "$f"; done
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 RESULTS=$WORK/results.txt; OBS_LOG=$WORK/obs.txt; : >"$RESULTS"; : >"$OBS_LOG"; : >"$WORK/timings.txt"
-BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 trap 'stop_all' EXIT
 
 # pid of node <n>'s daemon; rss_start/rss_stop bracket a peak-RSS (KiB) sample of it
@@ -189,7 +189,7 @@ chk_paths() {
     nfd=$(printf 'dat\303\251 cafe\314\201 u\314\210 n\314\203 \345\220\215 spaced')   # decomposed (NFD) accents
     SD_ROOT=$SD
     SD="$SD_ROOT/$nfc"; mkdir -p "$SD"; paths_flow "NFC path"; stop_all
-    SD="$SD_ROOT/$nfd"; mkdir -p "$SD"; BASE=$((BASE + 7)); paths_flow "NFD path"; stop_all
+    SD="$SD_ROOT/$nfd"; mkdir -p "$SD"; iso_rebase BASE 112 7; paths_flow "NFD path"; stop_all
     SD=$SD_ROOT
 }
 
@@ -302,7 +302,7 @@ run_chk() {
     # a check that cannot run with the given binaries says why in $SD/skip
     if [ -f "$SD/skip" ] && [ "$nf" = 0 ]; then st="SKIP ($(cat "$SD/skip"))"; fi
     echo "$id|$st|$np pass $nf fail|$(elapsed "$t0")s" >>"$RESULTS"; say "   -> $st ($np pass, $nf fail)"
-    BASE=$((BASE + 17)); [ $BASE -lt 60000 ] || BASE=20000
+    iso_rebase BASE 112 17
 }
 run_chk timing chk_timing
 run_chk concurrent chk_concurrent

@@ -23,6 +23,7 @@
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
+. "$HERE/../lib/isolation.sh"
 TOP=$(cd "$HERE/../.." && pwd)
 SRC=${1:-$TOP/src}
 SVC=$TOP/src/c23/services
@@ -33,7 +34,7 @@ for b in "$ZD" "$ZCLI" "$ZTX"; do [ -x "$b" ] || { echo "missing $b" >&2; exit 2
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/zcl-zslp-adv.XXXXXX")
-BASE=${ZSLP_PORT_BASE:-$((49000 + ($$ % 600)))}
+iso_base BASE "${ZSLP_PORT_BASE:-}" 128
 used_ports=$( (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | awk '{print $4}' | sed 's/.*://' | sort -u)
 while :; do
     clash=0
@@ -41,7 +42,7 @@ while :; do
         printf '%s\n' "$used_ports" | grep -qx "$((BASE + off))" && clash=1
     done
     [ $clash = 0 ] && break
-    BASE=$((BASE + 10)); [ $BASE -lt 49880 ] || { echo "no free port range in 49000-49999" >&2; exit 2; }
+    iso_rebase BASE 128 10
 done
 PIDS=""
 CHECKS=0
@@ -78,7 +79,7 @@ start() {
     if [ ! -f "$dir/zclassic.conf" ]; then
         { echo "regtest=1"; echo "rpcuser=adv"; echo "rpcpassword=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"; } >"$dir/zclassic.conf"
     fi
-    "$ZD" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 \
+    $ZCL_RUN "$ZD" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 \
         -listen=1 -bind=127.0.0.1 -port=$((BASE + n)) \
         -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -rpcport=$((BASE + 100 + n)) \
         -dnsseed=0 -discover=0 -listenonion=0 -upnp=0 -keypool=20 -debuglogfile=1 -parkdeepreorg=0 \

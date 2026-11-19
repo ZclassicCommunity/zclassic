@@ -30,7 +30,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 for f in "$HERE"/wallet_matrix_scn?.sh; do . "$f"; done
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 RESULTS=$WORK/results.txt; OBS_LOG=$WORK/obs.txt; : >"$RESULTS"; : >"$OBS_LOG"
-BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 trap 'stop_all' EXIT
 
 R1="-connect=127.0.0.1:$((BASE + 1))"
@@ -222,7 +222,7 @@ run_scn() {
     st=PASS; [ "$nf" = 0 ] && [ "$np" -gt 0 ] || st=FAIL
     echo "$id|$name|$st|$np pass $nf fail" >>"$RESULTS"
     say "   -> $st ($np pass, $nf fail)"
-    BASE=$((BASE + 7)); [ $BASE -lt 60000 ] || BASE=20000
+    iso_rebase BASE 112 7
     R1="-connect=127.0.0.1:$((BASE + 1))"
 }
 

@@ -7,6 +7,8 @@
 NU_ARGS="-nuparams=5ba81b19:1 -nuparams=76b809bb:1"
 FEE=0.0001
 
+. "$(dirname "$0")/../lib/isolation.sh"
+
 say() { printf '%s\n' "$*"; }
 
 # ---- assertions: append PASS/FAIL lines to $SCN_LOG, never abort ----------
@@ -53,7 +55,7 @@ start() {
     if [ ! -f "$dir/zclassic.conf" ]; then
         { echo "regtest=1"; echo "rpcuser=wm"; echo "rpcpassword=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"; } >"$dir/zclassic.conf"
     fi
-    "$bd/zclassicd" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 \
+    $ZCL_RUN "$bd/zclassicd" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 \
         -listen=1 -bind=127.0.0.1 -port=$((BASE + n)) \
         -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -rpcport=$((BASE + 100 + n)) \
         -dnsseed=0 -discover=0 -listenonion=0 -upnp=0 -keypool=10 -debuglogfile=1 -exportdir="$SD/export" \

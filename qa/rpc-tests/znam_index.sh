@@ -26,6 +26,7 @@
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
+. "$HERE/../lib/isolation.sh"
 TOP=$(cd "$HERE/../.." && pwd)
 SRC=${1:-$TOP/src}
 SVC=$TOP/src/c23/services
@@ -36,7 +37,7 @@ for b in "$ZD" "$ZCLI" "$ZTX"; do [ -x "$b" ] || { echo "missing $b" >&2; exit 2
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/zcl-znam-e2e.XXXXXX")
-BASE=${E2E_PORT_BASE:-$((20000 + ($$ % 10000)))}
+iso_base BASE "${E2E_PORT_BASE:-}" 128
 # Another job on the host may already listen in the block: move on until the block is free.
 port_busy() { # tcp-port -> true when something already listens on it
     if command -v ss >/dev/null 2>&1; then
@@ -53,7 +54,7 @@ while [ "$_try" -lt 100 ]; do
         _i=$((_i + 1))
     done
     [ "$_ok" -eq 1 ] && break
-    BASE=$((BASE + 121)); _try=$((_try + 1))
+    iso_rebase BASE 128 121; _try=$((_try + 1))
 done
 PIDS=""
 CHECKS=0
@@ -97,7 +98,7 @@ start() {
             echo "rpcpassword=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
         } >"$dir/zclassic.conf"
     fi
-    "$bin" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 \
+    $ZCL_RUN "$bin" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 \
         -listen=1 -bind=127.0.0.1 -port=$((BASE + n)) \
         -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -rpcport=$((BASE + 100 + n)) \
         -dnsseed=0 -discover=0 -listenonion=0 -upnp=0 -keypool=5 -debuglogfile=1 -parkdeepreorg=0 \

@@ -1,0 +1,16 @@
+zclassicd developer tooling: vendored Z23 process-group launcher (zcutil/tools/vendor)
+
+zcutil/tools/vendor/tools/process_group_exec.c is copied byte for byte from the Z23
+repository (zclassic23), commit recorded in Z23_SOURCE.tsv, and is licensed under the
+Apache License, Version 2.0 (full text in LICENSE.z23):
+
+    Copyright 2026 Rhett Creighton
+
+The rest of zclassicd remains under the MIT license (see COPYING). The file keeps the
+notice it carries; that notice is part of the byte-identical copy.
+
+It is a developer tool only: tests build it as zcutil/bin/zcl-run (host compiler, with
+-include stdbool.h because the POSIX half of the upstream file relies on a C23 bool).
+It is never linked into zclassicd or the wallet. Integrity is checked by
+c23/services/tools/check-vendor.sh zcutil/tools/Z23_SOURCE.tsv. To re-vendor: copy the
+file from Z23 at the new commit, update the two rows (blob id = git hash-object).

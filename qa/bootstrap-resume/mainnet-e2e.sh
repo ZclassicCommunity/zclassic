@@ -11,7 +11,7 @@
 # The node uses ONLY the scratch datadir (-datadir=<work>/dd), -listen=0 and the given ports. It never
 # touches any other datadir. It is a client of the public bootstrap peers like any fresh user node.
 set -u
-bin=""; work=""; killpct=30; base=50600; stay=10
+bin=""; work=""; killpct=30; base=""; stay=10
 while [ $# -gt 0 ]; do
     case "$1" in
         --bin) bin=$2; shift 2 ;;
@@ -29,13 +29,15 @@ work=$(cd "$work" && pwd)
 [ -z "$(ls -A "$work")" ] || { echo "mainnet-e2e: $work is not empty" >&2; exit 2; }
 dd=$work/dd
 mkdir -p "$dd"
+. "$(dirname "$0")/../lib/isolation.sh"
+iso_base base "$base" 16
 printf 'rpcuser=e2e\nrpcpassword=e2e%s\nrpcport=%s\n' "$$" "$((base + 1))" >"$dd/zclassic.conf"
 cli() { "$bin/zclassic-cli" -datadir="$dd" "$@"; }
 say() { echo "mainnet-e2e: $(date +%H:%M:%S) $*"; }
 now_s() { date +%s; }
 jnum() { sed -n "s/.*\"$1\": *\\([0-9.]*\\).*/\\1/p" | head -1; }
 start() {
-    "$bin/zclassicd" -datadir="$dd" -port=$base -listen=0 -disablewallet -showmetrics=0 -printtoconsole=0 -debuglogfile=1 \
+    $ZCL_RUN "$bin/zclassicd" -datadir="$dd" -port=$base -listen=0 -disablewallet -showmetrics=0 -printtoconsole=0 -debuglogfile=1 \
         -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 "$@" >/dev/null 2>&1 &
     PID=$!
 }
