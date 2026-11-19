@@ -688,7 +688,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-mempooltxinputlimit=<n>", _("[DEPRECATED FROM OVERWINTER] Set the maximum number of transparent inputs in a transaction that the mempool will accept (default: 0 = no limit applied)"));
     strUsage += HelpMessageOpt("-par=<n>", strprintf(_("Set the number of script verification threads (%u to %d, 0 = auto, <0 = leave that many cores free, default: %d)"),
         -GetNumCores(), MAX_SCRIPTCHECK_THREADS, DEFAULT_SCRIPTCHECK_THREADS));
-    strUsage += HelpMessageOpt("-paramcache", _("Keep a cache of verified proving-parameter files so a match need not be re-hashed at startup; -noparamcache hashes every file (default: 1)"));
+    strUsage += HelpMessageOpt("-paramcache", _("Keep a cache of verified proving-parameter files in the parameter directory so a match need not be re-hashed at startup; -noparamcache hashes every file (default: 1)"));
     strUsage += HelpMessageOpt("-parkdeepreorg", _("Park the competing chain of a reorg deeper than one block until it has enough work to take over (default: 1)"));
 #ifdef ZCL_C23_HAVE_PROVER_THREADS
     strUsage += HelpMessageOpt("-proverthreads=<n>", _("Set the number of threads used to create Sapling proofs (1 to 64, 0 = auto: the lesser of 8 and the hardware threads, default: 0). Left automatic, a send also makes only as many proofs at once as fit in about 340 MB or an eighth of physical memory, whichever is less; an explicit value lifts that limit"));
@@ -1425,20 +1425,20 @@ bool InitSanityCheck(void)
     const std::vector<ZcashParamSpec>& zcash_param_specs = GetZcashParamSpecs();
     bool fParamRefetched = false;
 
-    // Verified-params cache (paramcache.h). Load once; an
-    // empty map (missing/garbage/foreign-owner/epoch-mismatch cache, or the
-    // -noparamcache escape hatch) means every file is full-hashed exactly as
+    // Verified-params cache (paramcache.h), beside the params. Load once; an
+    // empty map (missing/garbage/foreign-owner/epoch- or params-dir-mismatch
+    // cache, or -noparamcache) means every file is full-hashed exactly as
     // before. A SKIP is permitted ONLY when current size==compiled size AND a
     // record's (size,mtime) matches the file AND record.verifiedHash equals the
     // LIVE compiled spec.sha256hex -- the cache can never widen what counts as
     // valid, only avoid recomputing a match it already proved.
     const bool fUseParamCache = GetBoolArg("-paramcache", true) && !GetBoolArg("-noparamcache", false);
-    std::map<std::string, ParamCacheRecord> paramCache;
+    ParamCacheRecords paramCache;
+    ParamCacheSource paramCacheSource = PARAMCACHE_NONE;
     if (fUseParamCache) {
-        (void)LoadVerifiedParamCache(GetDataDir(), paramCache); // empty on any doubt
+        paramCacheSource = LoadVerifiedParamCache(ZC_GetParamsDir(), GetDataDir(), paramCache); // empty on any doubt
     }
-    std::map<std::string, ParamCacheRecord> verifiedRecords;
-    bool fCacheDirty = false;
+    ParamCacheRecords verifiedRecords;
     int nSkipped = 0, nHashed = 0;
 
     for (size_t i = 0; i < zcash_param_specs.size(); ++i) {
@@ -1461,7 +1461,7 @@ bool InitSanityCheck(void)
             boost::system::error_code ec1, ec2;
             const uintmax_t curSize = boost::filesystem::file_size(path, ec1);
             const std::time_t curMtime = boost::filesystem::last_write_time(path, ec2);
-            std::map<std::string, ParamCacheRecord>::const_iterator it = paramCache.find(spec.name);
+            ParamCacheRecords::const_iterator it = paramCache.find(spec.name);
             std::string compiledHash(spec.sha256hex);
             std::transform(compiledHash.begin(), compiledHash.end(), compiledHash.begin(), ::tolower);
             if (!ec1 && !ec2 &&
@@ -1520,16 +1520,15 @@ bool InitSanityCheck(void)
                 r.verifiedHash = compiledHash;
                 verifiedRecords[spec.name] = r;
             }
-            fCacheDirty = true;
             ++nHashed;
         }
     }
 
-    // Persist the cache only when something was (re)hashed or the on-disk set
-    // differs from what we verified this run (also rewrites a stale/cold cache).
+    // Persist when this run's records differ from the primary file (cold, legacy or changed);
+    // an unchanged primary, which other nodes may share, is not rewritten.
     if (fUseParamCache &&
-        (fCacheDirty || verifiedRecords.size() != paramCache.size())) {
-        StoreVerifiedParamCache(GetDataDir(), verifiedRecords);
+        (paramCacheSource != PARAMCACHE_PRIMARY || verifiedRecords != paramCache)) {
+        StoreVerifiedParamCache(ZC_GetParamsDir(), verifiedRecords);
     }
     LogPrintf("param-cache: %d skipped, %d hashed (cache %s)\n",
               nSkipped, nHashed, fUseParamCache ? "on" : "off");

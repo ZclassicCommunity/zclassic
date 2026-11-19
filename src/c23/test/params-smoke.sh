@@ -8,12 +8,10 @@
 # scratch directory whose .zcash-params is built from the real parameter files
 # (symlinks; damaged files are private copies; the real files are only read).
 # Prints one line per case:  CASE <name> rc=<exit> started=<yes|no> msg=<first error line>
-# Run it once per binary (for example the Rust-backed baseline and the C23 build)
-# and diff the output.
+# Run it once per binary and diff the output.
 #
 # Cases
-#   intact               all four files present and correct (no sprout-proving.key:
-#                        PHGR13 proofs are verified, never created)
+#   intact               all four files present and correct (sprout-proving.key is never needed)
 #   legacy-proving-key   an old sprout-proving.key next to them is ignored
 #   missing-vk           sprout-verifying.key absent
 #   corrupt-vk           sprout-verifying.key, right size, one byte flipped (the
@@ -23,10 +21,10 @@
 #   truncated-output     sapling-output.params cut to half its size
 #   corrupt-output       sapling-output.params, right size, one byte flipped, no verified-params cache
 #   corrupt-spend        sapling-spend.params, same
-#   cached-corrupt-output  as corrupt-output, but the datadir holds a valid
-#                        params-verify.cache from an intact start and the damaged
-#                        file keeps the original size and mtime, so init.cpp's
-#                        SHA-256 gate is skipped and only the crypto library's
+#   cached-new-datadir   a fresh datadir reuses zclassic-params-verify.cache beside the params
+#   cached-corrupt-output  as corrupt-output, but the params directory holds a valid cache from
+#                        an intact start and the damaged file keeps the original size and mtime,
+#                        so init.cpp's SHA-256 gate is skipped and only the crypto library's
 #                        own check of the file stands between it and startup
 set -u
 bin=""; work=""; params="${HOME:-}/.zcash-params"; base=""; label=""
@@ -121,7 +119,9 @@ run_case corrupt-spend "$h" "$work/d-corrupt-spend"
 h=$work/h-cached; mkhome "$h"
 p=$h/.zcash-params/sapling-output.params; rm "$p"; cp -p "$params/sapling-output.params" "$p"
 run_case cached-intact-first-start "$h" "$work/d-cached"
-ls "$work/d-cached/regtest/params-verify.cache" >/dev/null 2>&1 || echo "# note: no params-verify.cache was written"
+ls "$h/.zcash-params/zclassic-params-verify.cache" >/dev/null 2>&1 || echo "# note: no zclassic-params-verify.cache was written"
+run_case cached-new-datadir "$h" "$work/d-cached-b"
+echo "# $(grep -a -m1 'param-cache: .* skipped' "$work/cached-new-datadir.log" | sed 's/^.*param-cache: /param-cache: /')"
 flip "$h" sapling-output.params; touch -r "$params/sapling-output.params" "$p"
 run_case cached-corrupt-output "$h" "$work/d-cached"
 exit 0
