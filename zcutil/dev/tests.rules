@@ -17,7 +17,7 @@ src/key_io.*|src/key.*|src/pubkey.*|src/base58.*	boost:key_tests boost:base58_te
 # ---- script, transactions, blocks
 src/script/*	boost:script_tests boost:script_P2SH_tests boost:scriptnum_tests boost:sigencoding_tests boost:sighash_tests boost:sighashtype_tests boost:sigopcount_tests boost:checkdatasig_tests boost:multisig_tests boost:transaction_tests
 src/primitives/*|src/consensus/*	boost:transaction_tests boost:CheckBlock_tests boost:main_tests gtest:CheckBlock gtest:checktransaction_tests gtest:Transaction gtest:Validation
-src/main.*|src/chain.*|src/parkedblockindex.h	boost:findmostwork_tests boost:parkedblockindex_tests boost:skiplist_tests boost:DoS_tests boost:main_tests boost:coins_tests
+src/main.*|src/chain.*|src/parkedblockindex.h	boost:findmostwork_tests boost:parkedblockindex_tests boost:skiplist_tests boost:DoS_tests boost:main_tests boost:coins_tests qa:qa/rpc-tests/chain_crash_sweep.sh
 src/coins.*|src/txdb.*|src/dbwrapper.*	boost:coins_tests boost:dbwrapper_tests
 src/merkleblock.*|src/bloom.*	boost:pmt_tests boost:bloom_tests
 
