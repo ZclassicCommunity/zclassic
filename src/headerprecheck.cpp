@@ -6,6 +6,8 @@
 
 #include "chain.h"
 #include "chainparams.h"
+#include "consensus/consensus.h"
+#include "consensus/params.h"
 #include "init.h"
 #include "main.h"
 #include "pow.h"
@@ -34,15 +36,30 @@ unsigned int PrecheckCores(const std::vector<CBlockHeader>& headers)
     return nCores;
 }
 
+/** Whether headers[i] passes the serial loop's continuity check: it follows
+ *  the header before it (the first header has nothing to follow). */
+bool FollowsPrevious(const std::vector<CBlockHeader>& headers, size_t i)
+{
+    return i == 0 || headers[i].hashPrevBlock == headers[i - 1].GetHash();
+}
+
 /** The index of the first header the serial loop would verify, or
  *  headers.size() when it would verify none. Takes a brief cs_main. */
 size_t FirstCandidate(const std::vector<CBlockHeader>& headers)
 {
     LOCK(cs_main);
     size_t nBegin = 0;
-    while (nBegin < headers.size() && mapBlockIndex.count(headers[nBegin].GetHash()))
-        nBegin++;
-    if (nBegin == headers.size())
+    for (; nBegin < headers.size(); nBegin++) {
+        BlockMap::const_iterator mi = mapBlockIndex.find(headers[nBegin].GetHash());
+        if (mi == mapBlockIndex.end())
+            break;
+        // The serial loop stops at a known header marked failed ("duplicate")
+        // and at one that does not follow the header before it, and verifies
+        // nothing after either.
+        if ((mi->second->nStatus & BLOCK_FAILED_MASK) || !FollowsPrevious(headers, nBegin))
+            return headers.size();
+    }
+    if (nBegin == headers.size() || !FollowsPrevious(headers, nBegin))
         return headers.size();
     // The serial loop stops after one verification when the first new
     // header does not connect (prev block not found or marked invalid).
@@ -52,11 +69,22 @@ size_t FirstCandidate(const std::vector<CBlockHeader>& headers)
     return nBegin;
 }
 
-/** One past the last header continuous with headers[nBegin]. */
+/** The checks CheckBlockHeader makes around the Equihash one, which cost a
+ *  hash and a compare: a header failing either is rejected by the serial
+ *  loop, which then verifies nothing after it. */
+bool PassesCheapHeaderChecks(const CBlockHeader& header, const Consensus::Params& consensus)
+{
+    return header.nVersion >= MIN_BLOCK_VERSION && CheckProofOfWork(header.GetHash(), header.nBits, consensus);
+}
+
+/** One past the last header continuous with headers[nBegin] that passes the
+ *  cheap checks, as are all before it (nBegin itself when it does not). */
 size_t CandidateEnd(const std::vector<CBlockHeader>& headers, size_t nBegin)
 {
-    size_t nEnd = nBegin + 1;
-    while (nEnd < headers.size() && headers[nEnd].hashPrevBlock == headers[nEnd - 1].GetHash())
+    const Consensus::Params& consensus = Params().GetConsensus();
+    size_t nEnd = nBegin;
+    while (nEnd < headers.size() && (nEnd == nBegin || FollowsPrevious(headers, nEnd)) &&
+           PassesCheapHeaderChecks(headers[nEnd], consensus))
         nEnd++;
     return nEnd;
 }

@@ -32,11 +32,15 @@ static const size_t MIN_HEADER_PRECHECK_CANDIDATES = 8;
  * Misbehaving path. Accept/reject results cannot change.
  *
  * DoS bound: only headers that the serial loop would itself verify are
- * candidates. Leading headers already in mapBlockIndex are skipped, the first
- * candidate's parent must be known and not marked failed, and collection stops
- * at the first break in hashPrevBlock continuity. Workers stop claiming new
+ * candidates. Leading headers already in mapBlockIndex are skipped, but none
+ * is a candidate when one of them is marked failed or breaks hashPrevBlock
+ * continuity (the serial loop stops there). The first candidate must follow
+ * the header before it and its parent must be known and not marked failed.
+ * Collection stops at the first break in continuity and at the first header
+ * that fails the cheap checks CheckBlockHeader makes around the Equihash one
+ * (nVersion >= MIN_BLOCK_VERSION, CheckProofOfWork). Workers stop claiming new
  * headers as soon as one fails, so a hostile message costs at most about one
- * extra verification per worker past its first bad header.
+ * extra verification per worker past its first bad solution.
  *
  * Returns the number of headers verified (for tests and benchmarks).
  */

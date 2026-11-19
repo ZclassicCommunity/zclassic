@@ -463,4 +463,77 @@ BOOST_AUTO_TEST_CASE(same_results_with_and_without_prepass)
     BOOST_CHECK_EQUAL(valid.nPreverified, Counted(40));
 }
 
+// The pre-pass does no Equihash work on headers the serial loop never
+// verifies: past a header failing the version or PoW check, after a known
+// header marked failed, or after a known header out of sequence. Results stay
+// the same with and without it.
+BOOST_AUTO_TEST_CASE(prepass_skips_what_the_serial_loop_never_reaches)
+{
+    const std::vector<CBlockHeader>& chain = ValidChain();
+    const uint256 genesis = Params().GenesisBlock().GetHash();
+
+    // PoW fails at 10: the serial loop verifies 0..10 and stops; the pre-pass
+    // verifies 0..9 (header 10 itself is left to the serial loop).
+    const std::vector<CBlockHeader> badPow = MineChain(genesis, 16, SpoilAt({10}, SPOIL_POW));
+    BOOST_CHECK_EQUAL(PreverifyHeadersEquihash(badPow), Counted(10));
+    BOOST_CHECK_EQUAL(CountMemoised(badPow, 0, 10), Counted(10));
+    BOOST_CHECK_EQUAL(CountMemoised(badPow, 10, 16), 0U);
+    BOOST_CHECK_EQUAL(CheckSameWithAndWithout("bad PoW at 10", badPow).nPreverified, Counted(10));
+    GetEquihashMemo().Clear();
+
+    // ... at 3: fewer than MIN_HEADER_PRECHECK_CANDIDATES before it
+    const std::vector<CBlockHeader> earlyPow = MineChain(genesis, 16, SpoilAt({3}, SPOIL_POW));
+    BOOST_CHECK_EQUAL(PreverifyHeadersEquihash(earlyPow), 0U);
+    BOOST_CHECK_EQUAL(CheckSameWithAndWithout("bad PoW at 3", earlyPow).nPreverified, 0U);
+
+    // nVersion 3 at 12: verified up to 11, nothing of 12..15
+    const std::vector<CBlockHeader> version = MineChain(genesis, 16, SpoilAt({12}, SPOIL_VERSION));
+    BOOST_CHECK_EQUAL(PreverifyHeadersEquihash(version), Counted(12));
+    BOOST_CHECK_EQUAL(CountMemoised(version, 12, 16), 0U);
+    BOOST_CHECK_EQUAL(CheckSameWithAndWithout("version 3 at 12", version).nPreverified, Counted(12));
+    GetEquihashMemo().Clear();
+
+    // a leading known header marked failed, followed by a known good one
+    std::function<void()> seedFailed = [&chain]() {
+        LOCK(cs_main);
+        CValidationState state;
+        CBlockIndex* p0 = NULL;
+        BOOST_REQUIRE(AcceptBlockHeader(chain[0], state, &p0));
+        BOOST_REQUIRE(AcceptBlockHeader(chain[1], state));
+        p0->nStatus |= BLOCK_FAILED_VALID;
+    };
+    const HeadersOutcome failed = CheckSameWithAndWithout("leading known failed header", chain, seedFailed);
+    BOOST_CHECK_EQUAL(failed.nPreverified, 0U);
+
+    // known headers 0..5; the message sends 0, then 5 (not 0's child), then 6..39
+    std::function<void()> seedSix = [&chain]() {
+        LOCK(cs_main);
+        for (size_t i = 0; i < 6; i++) {
+            CValidationState state;
+            BOOST_REQUIRE(AcceptBlockHeader(chain[i], state));
+        }
+    };
+    std::vector<CBlockHeader> outOfSequence;
+    outOfSequence.push_back(chain[0]);
+    outOfSequence.insert(outOfSequence.end(), chain.begin() + 5, chain.end());
+    const HeadersOutcome known = CheckSameWithAndWithout("known header out of sequence", outOfSequence, seedSix);
+    BOOST_CHECK_EQUAL(known.steps.back(), "non-continuous");
+    BOOST_CHECK_EQUAL(known.nPreverified, 0U);
+
+    // known headers 0..5; the message sends 0, then 6..39: 6's parent is known
+    // and good, but 6 does not follow 0
+    std::vector<CBlockHeader> skipped;
+    skipped.push_back(chain[0]);
+    skipped.insert(skipped.end(), chain.begin() + 6, chain.end());
+    const HeadersOutcome gap = CheckSameWithAndWithout("first new header out of sequence", skipped, seedSix);
+    BOOST_CHECK_EQUAL(gap.steps.size(), 2U);
+    BOOST_CHECK_EQUAL(gap.steps.back(), "non-continuous");
+    BOOST_CHECK_EQUAL(gap.nPreverified, 0U);
+
+    // and with the known prefix in sequence, the new headers are verified
+    std::vector<CBlockHeader> inSequence(chain.begin() + 4, chain.end());
+    BOOST_CHECK_EQUAL(CheckSameWithAndWithout("known prefix in sequence", inSequence, seedSix).nPreverified,
+                      Counted(34));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
