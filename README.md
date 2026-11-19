@@ -19,7 +19,7 @@ ZClassic is an Equihash-based proof-of-work implementation of the Zerocash proto
 
 This software is the ZClassic client. It downloads and validates the chain, with an optional compiled-checkpoint bootstrap for fresh nodes.
 
-**Security Warning:** ZClassic is experimental and a work-in-progress. Use at your own risk. For a security issue, please [open an issue](https://github.com/ZclassicCommunity/zclassic/issues); see also the [upstream Zcash security background](https://z.cash/support/security/).
+**Security Warning:** ZClassic is experimental and a work-in-progress. Use at your own risk. To report a security vulnerability, do not open a public issue: use [private vulnerability reporting](https://github.com/ZclassicCommunity/zclassic/security/advisories/new) as described in [SECURITY.md](SECURITY.md).
 
 **Deprecation Policy:** A release is considered deprecated approximately 70 weeks after its release; an automatic shutdown then halts the node at a block height past that point. Keep your node updated.
 
@@ -106,9 +106,9 @@ Release candidates are built and tested on the project's own machines with `zcut
 
 To produce macOS binaries, run the native build on macOS (Apple Silicon arm64 build support is included). Cross-building to macOS from another host is not provided by these scripts.
 
-### First Run: Fetch ZCash Parameters
+### First Run: Fetch the zk-SNARK Parameters
 
-Before running `zclassicd`, obtain the Zcash parameters (about 780 MB; the 910 MB `sprout-proving.key` is no longer needed):
+Before running `zclassicd`, obtain the zk-SNARK parameters (about 780 MB; the 910 MB `sprout-proving.key` is no longer needed):
 
 ```bash
 ./zcutil/fetch-params.sh

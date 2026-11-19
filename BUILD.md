@@ -97,7 +97,7 @@ make -j$(nproc)
 
 Before you first run `zclassicd`:
 
-1. **Fetch ZCash Parameters** (~0.8 GB): `./zcutil/fetch-params.sh`
+1. **Fetch the zk-SNARK Parameters** (~0.8 GB): `./zcutil/fetch-params.sh`
 2. **Create configuration**: add your `zclassic.conf` under the selected datadir
 
 For faster initial sync, install a bootstrap snapshot from a trusted synced node
