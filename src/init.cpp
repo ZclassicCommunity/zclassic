@@ -83,6 +83,7 @@
 #include "utilstrencodings.h"
 #include "startuptimer.h"
 #include "phasetimer.h"
+#include "paramcache.h"
 #include "shutdownmarker.h"
 #include "zslp/zslpservice.h"
 #include "znam/znamservice.h"
@@ -1072,160 +1073,6 @@ static bool check_file_hash(const std::string& path, const std::string& hash)
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Verified-params cache (params-verify.cache, 0600 in DATADIR)
-//
-// PURPOSE: turn the dominant cold-start cost -- re-hashing ~1.69 GB of zk-SNARK
-// params on EVERY launch (param-hash-loop ~= 5.1 s / 80.8% of AppInit2) -- into
-// ~stat-cost on the common, unchanged case, WITHOUT ever loading an unverified
-// param.
-//
-// SAFETY INVARIANT (load-bearing): a re-hash is SKIPPED for a param ONLY when
-// ALL of these hold, otherwise we run the FULL check_file_hash exactly as today:
-//   (a) file_size(path) == spec.nSize                 (the COMPILED size)
-//   (b) cache record exists with size==cur_size AND mtime==cur_mtime
-//   (c) record.verifiedHash == spec.sha256hex          (the LIVE COMPILED hash)
-//   (d) cache file's binary-epoch == this binary's compiled-table epoch
-//   (e) cache file is owner-only (st_uid==geteuid, no group/other write bits)
-// The cache NEVER supplies a hash to trust: (c) compares the cached hash to the
-// compiled constant (.rodata, not attacker-writable). The cache only answers
-// "did THIS (size,mtime) already hash to the value the binary already requires".
-// Forging a skip-and-load of malicious identical-size content requires a SHA-256
-// second preimage (infeasible). A different-uid planted cache is rejected by (e).
-//
-// KNOWN, ACCEPTED RESIDUAL: a bit-rot/torn write that preserves BOTH size AND
-// mtime is skipped and the corrupt param loads -- a regression of today's
-// every-launch hash. This is BOUNDED and NON-CONSENSUS: zk params are firewalled
-// from block/tx/PoW; a corrupt param makes a shielded proof FAIL/REJECT (never
-// forges one or forks the chain), fails LOUDLY at use, and self-heals via the
-// existing bootstrap re-fetch. Pass -noparamcache to force today's full hash.
-namespace {
-
-struct ParamCacheRecord {
-    uint64_t size;
-    int64_t  mtime;            // std::time_t, 1s granularity (boost last_write_time)
-    std::string verifiedHash;  // 64-hex lowercase
-};
-
-// Cheap epoch over the COMPILED spec table: name|hash|size per file. A binary
-// with any different compiled hash/size yields a different epoch, invalidating
-// the entire cache (Model 4: downgrade / multi-version).
-static std::string CompiledParamEpoch()
-{
-    std::string acc;
-    BOOST_FOREACH(const ZcashParamSpec& s, GetZcashParamSpecs()) {
-        acc += s.name;
-        acc += '|';
-        acc += s.sha256hex;
-        acc += '|';
-        acc += std::to_string((unsigned long long)s.nSize);
-        acc += '\n';
-    }
-    unsigned char digest[CSHA256::OUTPUT_SIZE];
-    CSHA256().Write(reinterpret_cast<const unsigned char*>(acc.data()), acc.size()).Finalize(digest);
-    return HexStr(digest, digest + sizeof(digest));
-}
-
-static boost::filesystem::path ParamVerifyCachePath()
-{
-    return GetDataDir() / "params-verify.cache";
-}
-
-// Returns true and fills `out` ONLY if the cache file is present, owner-only
-// (st_uid==geteuid, no group/other WRITE bits), strictly well-formed, and its
-// stored epoch equals the freshly-computed compiled epoch. ANY doubt => false
-// (caller treats as a cold cache and full-hashes every file).
-static bool LoadVerifiedParamCache(std::map<std::string, ParamCacheRecord>& out)
-{
-    out.clear();
-    const boost::filesystem::path p = ParamVerifyCachePath();
-#ifndef WIN32
-    // Mandatory on-READ ownership/mode gate: a cache writable by anyone other
-    // than us (group/other-writable, or owned by a different uid) is ignored.
-    // 0600-on-write is not enough; an attacker of a DIFFERENT uid must never be
-    // able to plant a honored cache in a misconfigured/shared DATADIR.
-    struct stat st;
-    if (::stat(p.string().c_str(), &st) != 0) return false;
-    if (!S_ISREG(st.st_mode)) return false;
-    if (st.st_uid != geteuid()) return false;
-    if (st.st_mode & (S_IWGRP | S_IWOTH)) return false;
-#endif
-    std::ifstream in(p.string().c_str());
-    if (!in.good()) return false;
-
-    std::string line;
-    bool epochOk = false;
-    const std::string wantEpoch = CompiledParamEpoch();
-    std::map<std::string, ParamCacheRecord> recs;
-    while (std::getline(in, line)) {
-        if (line.empty()) continue;
-        std::istringstream ls(line);
-        std::string key;
-        if (!(ls >> key)) return false;
-        if (key == "v") {
-            std::string v;
-            if (!(ls >> v) || v != "1") return false;  // unknown format => fail closed
-        } else if (key == "epoch") {
-            std::string e;
-            if (!(ls >> e) || e.size() != 64) return false;
-            epochOk = (e == wantEpoch);                 // mismatch => discard whole cache
-        } else if (key == "p") {
-            std::string name, hash;
-            unsigned long long sz; long long mt;
-            if (!(ls >> name >> sz >> mt >> hash)) return false;
-            if (hash.size() != 64) return false;
-            for (char c : hash)
-                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
-            if (recs.count(name)) return false;          // duplicate => malformed
-            ParamCacheRecord r;
-            r.size = (uint64_t)sz;
-            r.mtime = (int64_t)mt;
-            r.verifiedHash = hash;
-            recs[name] = r;
-        } else {
-            return false;                                // unknown key => fail closed
-        }
-    }
-    if (!epochOk) return false;                          // missing or wrong epoch line
-    out.swap(recs);
-    return true;
-}
-
-// Atomically rewrite the whole cache 0600 in DATADIR: tmp (O_CREAT|O_WRONLY|
-// O_TRUNC, 0600) -> FileCommit(fdatasync) -> RenameOver. A kill mid-write can
-// never leave a half-record a future parse misreads as a valid skip.
-static void StoreVerifiedParamCache(const std::map<std::string, ParamCacheRecord>& recs)
-{
-    const boost::filesystem::path finalPath = ParamVerifyCachePath();
-    const boost::filesystem::path tmpPath = finalPath.string() + ".tmp";
-#ifndef WIN32
-    int fd = ::open(tmpPath.string().c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0600);
-    if (fd < 0) return;
-    FILE* f = fdopen(fd, "wb");
-    if (!f) { ::close(fd); return; }
-#else
-    FILE* f = fopen(tmpPath.string().c_str(), "wb");
-    if (!f) return;
-#endif
-    fprintf(f, "v 1\n");
-    fprintf(f, "epoch %s\n", CompiledParamEpoch().c_str());
-    for (std::map<std::string, ParamCacheRecord>::const_iterator it = recs.begin();
-         it != recs.end(); ++it) {
-        fprintf(f, "p %s %llu %lld %s\n",
-                it->first.c_str(),
-                (unsigned long long)it->second.size,
-                (long long)it->second.mtime,
-                it->second.verifiedHash.c_str());
-    }
-    FileCommit(f);
-    fclose(f);
-    if (!RenameOver(tmpPath, finalPath)) {
-        boost::filesystem::remove(tmpPath);
-    }
-}
-
-} // anonymous namespace
-
 static bool VerifyImportedBootstrapAnchor(std::string& error)
 {
     if (chainActive.Tip() == NULL) {
@@ -1562,7 +1409,7 @@ bool InitSanityCheck(void)
     const std::vector<ZcashParamSpec>& zcash_param_specs = GetZcashParamSpecs();
     bool fParamRefetched = false;
 
-    // Verified-params cache (see helpers above check_file_hash). Load once; an
+    // Verified-params cache (paramcache.h). Load once; an
     // empty map (missing/garbage/foreign-owner/epoch-mismatch cache, or the
     // -noparamcache escape hatch) means every file is full-hashed exactly as
     // before. A SKIP is permitted ONLY when current size==compiled size AND a
@@ -1572,7 +1419,7 @@ bool InitSanityCheck(void)
     const bool fUseParamCache = GetBoolArg("-paramcache", true) && !GetBoolArg("-noparamcache", false);
     std::map<std::string, ParamCacheRecord> paramCache;
     if (fUseParamCache) {
-        (void)LoadVerifiedParamCache(paramCache); // empty on any doubt
+        (void)LoadVerifiedParamCache(GetDataDir(), paramCache); // empty on any doubt
     }
     std::map<std::string, ParamCacheRecord> verifiedRecords;
     bool fCacheDirty = false;
@@ -1666,7 +1513,7 @@ bool InitSanityCheck(void)
     // differs from what we verified this run (also rewrites a stale/cold cache).
     if (fUseParamCache &&
         (fCacheDirty || verifiedRecords.size() != paramCache.size())) {
-        StoreVerifiedParamCache(verifiedRecords);
+        StoreVerifiedParamCache(GetDataDir(), verifiedRecords);
     }
     LogPrintf("param-cache: %d skipped, %d hashed (cache %s)\n",
               nSkipped, nHashed, fUseParamCache ? "on" : "off");
