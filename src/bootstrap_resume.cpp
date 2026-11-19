@@ -474,6 +474,14 @@ void BootstrapPeerBoard::Detach(int s)
         const double r = StreamRate(st, st.lastByteMs, false);
         if (r > 0)
             peers[st.peer].lastPerStream = r;
+        // what the server delivered across all its running streams at this moment (what a stream taking over from
+        // a slower server can expect of it, however many streams it had)
+        double agg = 0;
+        for (size_t j = 0; j < streams.size(); ++j)
+            if (streams[j].connected && streams[j].peer == st.peer)
+                agg += std::max(0.0, StreamRate(streams[j], streams[j].lastByteMs, false));
+        if (agg > 0)
+            peers[st.peer].lastAggregate = agg;
     }
     st.peer = -1;
     st.connected = false;
@@ -496,6 +504,7 @@ void BootstrapPeerBoard::ConnectFailed(int peer, int64_t nowMs)
     PeerState& p = peers[peer];
     ++p.failures;
     p.lastPerStream = -1; // what it gave before it stopped answering says nothing about it now
+    p.lastAggregate = -1;
     const int shift = std::min(p.failures - 1, 16);
     p.cooldownUntilMs = nowMs + std::min<int64_t>(pol.failBackoffMaxMs, pol.failBackoffBaseMs << shift);
 }
@@ -744,6 +753,7 @@ std::vector<BootstrapMove> BootstrapPeerBoard::Rebalance(int64_t nowMs, const st
     // only by its most conservative one. A wrong move costs the stream's whole window in flight.
     const std::vector<uint8_t> unfinished = unfinishedFn ? unfinishedFn() : std::vector<uint8_t>();
     std::vector<double> generous(peers.size(), -1), conservative(peers.size(), -1);
+    std::vector<int> nLive(peers.size(), 0);
     for (size_t p = 0; p < peers.size(); ++p) {
         if (!Usable(peers[p]))
             continue;
@@ -764,6 +774,7 @@ std::vector<BootstrapMove> BootstrapPeerBoard::Rebalance(int64_t nowMs, const st
         if (n) {
             generous[p] = sumG / n;
             conservative[p] = sumC / n;
+            nLive[p] = n;
         }
     }
 
@@ -839,9 +850,16 @@ std::vector<BootstrapMove> BootstrapPeerBoard::Rebalance(int64_t nowMs, const st
                 continue;
             // Only another server can take the file over faster: the same server gives the idle stream no
             // more than the victim has, and the move would only throw away the victim's requests in flight.
+            // A server's rate per stream says little when it shares a cap among several streams, so a steal also
+            // needs the target to deliver clearly more IN ALL than the victim's server does: a stream is never taken
+            // from a fast server to a slow one because it happens to get a small share just now.
+            const double victimAgg = nLive[st.peer] > 0 ? conservative[st.peer] * nLive[st.peer] : 0;
             double bestRate = 0;
             for (size_t p = 0; p < peers.size(); ++p) {
                 if (!ComparableLocked((int)p, st, unfinished, nowMs))
+                    continue;
+                const double targetAgg = nLive[p] > 0 ? conservative[p] * nLive[p] : peers[p].lastAggregate;
+                if (targetAgg < pol.stealFactor * victimAgg)
                     continue;
                 // its live rate, else what it last gave a stream (its streams may have run out of files)
                 const double r = conservative[p] > 0 ? conservative[p] : peers[p].lastPerStream;

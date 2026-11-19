@@ -257,13 +257,13 @@ private:
     };
     struct PeerState {
         bool ignored, banned, partial; int strikes; int failures; int64_t cooldownUntilMs; int64_t penaltyUntilMs;
-        uint64_t bytes; double lastPerStream;
+        uint64_t bytes; double lastPerStream; double lastAggregate;
         bool answered;                      // it has sent its manifest (the primary's was validated by the caller)
         int liarStrikes;                    // times it was among the suppliers of a file that a single pinned server then got right
         std::vector<uint8_t> has;           // files it can serve (indexed by trusted manifest); empty = all
         std::deque<int64_t> connects;       // times of recent connection attempts
         PeerState() : ignored(false), banned(false), partial(false), strikes(0), failures(0), cooldownUntilMs(0),
-                      penaltyUntilMs(0), bytes(0), lastPerStream(-1), answered(false), liarStrikes(0) {}
+                      penaltyUntilMs(0), bytes(0), lastPerStream(-1), lastAggregate(-1), answered(false), liarStrikes(0) {}
     };
     static bool Usable(const PeerState& p) { return !p.ignored && !p.banned; }
     double StreamRate(const StreamState& st, int64_t nowMs, bool matureOnly) const; //!< bytes/s over the window; <0 if matureOnly and too young
