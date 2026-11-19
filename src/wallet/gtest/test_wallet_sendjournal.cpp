@@ -339,7 +339,8 @@ protected:
         bitdb.Reset();
         if (prevDataDir.empty()) mapArgs.erase("-datadir"); else mapArgs["-datadir"] = prevDataDir;
         ClearDatadirCache();
-        fs::remove_all(dataDir);
+        boost::system::error_code ec; // best effort: never fail a test on a leftover temp dir
+        fs::remove_all(dataDir, ec);
     }
 };
 

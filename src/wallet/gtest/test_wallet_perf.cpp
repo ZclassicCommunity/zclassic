@@ -495,7 +495,8 @@ TEST(WalletPerf, DISABLED_Bench)
     chain.Clear();
     bitdb.Flush(true);
     bitdb.Reset();
-    if (!getenv("WPERF_KEEP")) boost::filesystem::remove_all(dir);
+    boost::system::error_code ec;
+    if (!getenv("WPERF_KEEP")) boost::filesystem::remove_all(dir, ec);
     else printf("[wperf] kept datadir %s\n", dir.string().c_str());
     RegtestDeactivateSapling();
 }
