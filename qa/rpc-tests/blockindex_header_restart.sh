@@ -9,7 +9,7 @@
 # syncs the whole chain from the restarted node through getheaders.
 #
 # usage: blockindex_header_restart.sh --bin <dir> --work <dir> [--base port]
-# Exit status 0 when every check passed. Needs jq. Shell only, no Python.
+# Exit status 0 when every check passed. Shell only, no Python.
 BIN=""; WORK=""; PORT_BASE=""
 while [ $# -gt 0 ]; do
     case $1 in
@@ -17,7 +17,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ -x "$BIN/zclassicd" ] && [ -n "$WORK" ] || { echo "usage: $0 --bin DIR --work DIR [--base port]" >&2; exit 2; }
-command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
+. "$(dirname "$0")/jsonq_lib.sh"
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/wallet_matrix_lib.sh"
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
@@ -35,8 +35,8 @@ dump() {
     while [ $h -le $N ]; do
         hash=$(cli 0 getblockhash $h)
         printf '%s %s\n' "$h" "$(cli 0 getblockheader "$hash" false)" >>"$1"
-        printf '%s %s\n' "$h" "$(cli 0 getblockheader "$hash" | jq -r .solution)" >>"$1"
-        printf '%s %s\n' "$h" "$(cli 0 getblock "$hash" 1 | jq -r .solution)" >>"$1"
+        printf '%s %s\n' "$h" "$(cli 0 getblockheader "$hash" | jget solution)" >>"$1"
+        printf '%s %s\n' "$h" "$(cli 0 getblock "$hash" 1 | jget solution)" >>"$1"
         h=$((h + 1))
     done
 }
