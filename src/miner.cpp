@@ -539,8 +539,8 @@ void static BitcoinMiner(const CChainParams& chainparams)
 
     try {
         //throw an error if no script was provided
-        if (!coinbaseScript->reserveScript.size())
-            throw std::runtime_error("No coinbase script available (mining requires a wallet or -mineraddress)");
+        if (!coinbaseScript || !coinbaseScript->reserveScript.size())
+            throw std::runtime_error(NoCoinbaseScriptMessage());
 
         while (true) {
             if (chainparams.MiningRequiresPeers()) {
