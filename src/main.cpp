@@ -2895,6 +2895,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
                 return error("ConnectBlock(): FindUndoPos failed");
             if (!UndoWriteToDisk(blockundo, pos, pindex->pprev->GetBlockHash(), chainparams.MessageStart()))
                 return AbortNode(state, "Failed to write undo data");
+            TestCrashPoint("connect-after-undo-write");
 
             // update nUndoPos in block index
             pindex->nUndoPos = pos.nPos;
@@ -3020,6 +3021,7 @@ bool static FlushStateToDisk(CValidationState &state, FlushStateMode mode) {
             if (!pblocktree->WriteBatchSync(vFiles, nLastBlockFile, vBlocks)) {
                 return AbortNode(state, "Files to write to block index database");
             }
+            TestCrashPoint("flush-after-blockindex");
         }
         // Finally remove any pruned files
         if (fFlushForPrune)
@@ -5081,6 +5083,7 @@ bool AcceptBlock(CBlock& block, CValidationState& state, CBlockIndex** ppindex, 
         if (dbp == NULL)
             if (!WriteBlockToDisk(block, blockPos, chainparams.MessageStart()))
                 AbortNode(state, "Failed to write block");
+        TestCrashPoint("acceptblock-after-write"); // block bytes on disk, index entry not yet updated
         if (!ReceivedBlockTransactions(block, state, pindex, blockPos))
             return error("AcceptBlock(): ReceivedBlockTransactions failed");
     } catch (const std::runtime_error& e) {
