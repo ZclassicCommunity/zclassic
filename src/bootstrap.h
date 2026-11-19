@@ -193,7 +193,7 @@ std::vector<std::string> SelectBootstrapPeers(const std::vector<std::string>& cl
 bool BootstrapOnionOnlyActive();
 
 //! True when the arguments say that no connection may leave the node directly
-//! (-proxy, or an -onlynet list without ipv4/ipv6). The Zcash parameter fetch
+//! (-proxy, or an -onlynet list without ipv4/ipv6). The zk-SNARK parameter fetch
 //! of init runs before the proxies are set up and would dial the bootstrap
 //! peers directly, so it must be skipped then.
 bool ZcashParamFetchWouldBypassProxy();
@@ -276,8 +276,8 @@ boost::filesystem::path BootstrapServeBlockTipPath(const boost::filesystem::path
 //! retained yet, the source is a v2 self-snapshot, or the tip matches an anchor.
 bool BootstrapServeSnapshotMatchesCompiledAnchor(std::string& warning);
 
-// --- Zcash parameter (.params) distribution over the bootstrap protocol ---
-//! Compiled SHA-256 spec for one Zcash zk-SNARK parameter file. This is the
+// --- zk-SNARK parameter (.params) distribution over the bootstrap protocol ---
+//! Compiled SHA-256 spec for one zk-SNARK parameter file. This is the
 //! single source of truth used both by the bootstrap-snapshot protocol (which
 //! verifies downloaded chunks) and by InitSanityCheck (which validates the
 //! installed files at startup).
@@ -297,7 +297,7 @@ bool GetZcashParamManifest(CBootstrapSnapshotManifest& manifest, std::string& er
 bool ReadZcashParamChunk(const CBootstrapSnapshotChunkRequest& request,
                          CBootstrapSnapshotChunk& chunk,
                          std::string& error);
-//! Download any missing/invalid Zcash parameters from `peer` into the params
+//! Download any missing/invalid zk-SNARK parameters from `peer` into the params
 //! dir, verifying each against its compiled SHA-256 before installing. The peer
 //! is untrusted: only files matching a compiled hash are accepted.
 bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error);

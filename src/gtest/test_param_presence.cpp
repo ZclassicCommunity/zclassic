@@ -241,10 +241,10 @@ TEST(ParamPresence, ManifestOffersTheLegacyProvingKeyOnlyWhenHeld)
     bool anyHeld = legacyHeld;
     for (size_t i = 0; i < kParamCount; i++) anyHeld = anyHeld || held(kParams[i].name, kParams[i].size);
     if (!anyHeld) {
-        // The manifest refuses to build with nothing to offer ("no zcash parameters
+        // The manifest refuses to build with nothing to offer ("no zk-SNARK parameters
         // available to serve"); this host has no parameter files, so there is nothing
         // to check. This gtest predates GTEST_SKIP(): log and pass.
-        std::cerr << "[ SKIPPED ] ParamPresence.ManifestOffersTheLegacyProvingKeyOnlyWhenHeld: no Zcash parameter files in " << dir.string() << "\n";
+        std::cerr << "[ SKIPPED ] ParamPresence.ManifestOffersTheLegacyProvingKeyOnlyWhenHeld: no zk-SNARK parameter files in " << dir.string() << "\n";
         return;
     }
     mapArgs["-bootstrapserve"] = "1";
