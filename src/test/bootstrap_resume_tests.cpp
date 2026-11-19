@@ -462,7 +462,7 @@ BOOST_AUTO_TEST_CASE(peer_board_moves_a_stream_the_server_defers)
     }
     BOOST_CHECK(b.Rebalance(1500).empty()); // not yet stalled long enough
     const std::vector<BootstrapMove> mv = b.Rebalance(3000);
-    BOOST_REQUIRE_EQUAL(mv.size(), 2U);
+    BOOST_REQUIRE_EQUAL(mv.size(), 1U);
     for (size_t i = 0; i < mv.size(); ++i) {
         BOOST_CHECK(mv[i].stream == 1 || mv[i].stream == 3);
         BOOST_CHECK(mv[i].reason == BMR_STALLED);
@@ -470,6 +470,12 @@ BOOST_AUTO_TEST_CASE(peer_board_moves_a_stream_the_server_defers)
     BOOST_CHECK(b.Rebalance(3100).empty()); // a stream already asked to move is not asked again
     b.Detach(1);
     BOOST_CHECK_EQUAL(b.Assign(1, 3200), 0); // the server that deferred it is avoided for a while
+    // its other stream is the last one on the quiet server: it stays to see the server recover, so the server is
+    // never left with no stream to measure (and never compared away for good)
+    b.Attach(1, 0, 3200);
+    const std::vector<BootstrapMove> later = b.Rebalance(9000);
+    for (size_t i = 0; i < later.size(); ++i)
+        BOOST_CHECK(later[i].stream != 3);
     // with a single usable peer a quiet stream stays put (the receive timeout handles it)
     BootstrapPeerBoard solo(1, 1, pol);
     solo.Attach(0, solo.Assign(0, 0), 0);
@@ -2012,8 +2018,8 @@ BOOST_AUTO_TEST_CASE(peer_board_applies_each_move_under_its_own_lock_with_the_pe
     }
     std::vector<BootstrapMove> applied;
     const std::vector<BootstrapMove> mv = b.Rebalance(3000, [&applied](const BootstrapMove& m) { applied.push_back(m); });
-    BOOST_REQUIRE_EQUAL(mv.size(), 2U);
-    BOOST_REQUIRE_EQUAL(applied.size(), 2U);
+    BOOST_REQUIRE_EQUAL(mv.size(), 1U);
+    BOOST_REQUIRE_EQUAL(applied.size(), 1U);
     for (size_t i = 0; i < mv.size(); ++i) {
         BOOST_CHECK_EQUAL(applied[i].stream, mv[i].stream);
         BOOST_CHECK_EQUAL(mv[i].peer, 1); // the quiet server's streams, named while they were still attached to it
