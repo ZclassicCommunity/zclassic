@@ -824,6 +824,40 @@ BOOST_AUTO_TEST_CASE(outbound_candidate_skips_terrible)
     SetLimited(NET_IPV6, l6);
 }
 
+// Direct dials from the table, without an explicit -timeout: the first dial of an address
+// never dialled or reached waits FIRST_DIAL, later ones DIRECT_DIAL, never longer than
+// -timeout. A dial through a proxy (Tor), or with -timeout given, waits -timeout.
+BOOST_AUTO_TEST_CASE(outbound_connect_timeout)
+{
+    const int64_t now = GetTime();
+    const int D = DEFAULT_CONNECT_TIMEOUT;
+    BOOST_CHECK(FIRST_DIAL_CONNECT_TIMEOUT < DIRECT_DIAL_CONNECT_TIMEOUT);
+    BOOST_CHECK(DIRECT_DIAL_CONNECT_TIMEOUT < DEFAULT_CONNECT_TIMEOUT);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 0, 0, D), FIRST_DIAL_CONNECT_TIMEOUT);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 1, 0, D), DIRECT_DIAL_CONNECT_TIMEOUT);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 0, now - 3600, D), DIRECT_DIAL_CONNECT_TIMEOUT);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 0, 0, 1000), 1000);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, 3, now - 3600, 1500), 1500);
+    // proxied, or -timeout given: -timeout
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(false, false, 0, 0, D), D);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(false, false, 3, 0, D), D);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, true, 0, 0, 20000), 20000);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, true, 2, 0, 20000), 20000);
+
+    // a failed first dial counts as an attempt, so the next one waits the longer time
+    const CNetAddr source("93.184.216.1");
+    CAddress a = MakeV4("94.185.1.2", Params().GetDefaultPort(), 1, now - 3600);
+    CAddrMan man;
+    BOOST_REQUIRE(man.Add(a, source));
+    CAddrInfo info = man.Select();
+    BOOST_REQUIRE(info == a);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, info.GetAttempts(), info.GetLastSuccess(), D), FIRST_DIAL_CONNECT_TIMEOUT);
+    man.Attempt(a, now);
+    info = man.Select();
+    BOOST_REQUIRE(info == a);
+    BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, info.GetAttempts(), info.GetLastSuccess(), D), DIRECT_DIAL_CONNECT_TIMEOUT);
+}
+
 // Concurrent dialers: a group being dialled is held by one dialer, counts as connected
 // for the others (so the one-outbound-peer-per-group rule holds while dials overlap),
 // and is free again when the dial ends. The extra dialers run only below the target.

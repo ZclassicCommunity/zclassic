@@ -31,6 +31,7 @@
 #include <boost/foreach.hpp>
 #include <boost/signals2/signal.hpp>
 
+class CAddrInfo;
 class CAddrMan;
 class CBlockIndex;
 class CScheduler;
@@ -79,8 +80,18 @@ CNode* FindNode(const CNetAddr& ip);
 CNode* FindNode(const CSubNet& subNet);
 CNode* FindNode(const std::string& addrName);
 CNode* FindNode(const CService& ip);
-CNode* ConnectNode(CAddress addrConnect, const char *pszDest = NULL);
-bool OpenNetworkConnection(const CAddress& addrConnect, CSemaphoreGrant *grantOutbound = NULL, const char *strDest = NULL, bool fOneShot = false);
+/** nTimeout: connect timeout in milliseconds, 0 for -timeout (nConnectTimeout). */
+CNode* ConnectNode(CAddress addrConnect, const char *pszDest = NULL, int nTimeout = 0);
+bool OpenNetworkConnection(const CAddress& addrConnect, CSemaphoreGrant *grantOutbound = NULL, const char *strDest = NULL, bool fOneShot = false, int nTimeout = 0);
+/** Connect timeouts (ms) for a direct (not proxied) outbound dial from the address table,
+ *  when -timeout is not given: a live node completes the TCP handshake within a fraction
+ *  of a second (measured: under 0.1 s), a dead one never does. The first dial of an address
+ *  never dialled or reached gets FIRST_DIAL, any later one DIRECT_DIAL. */
+static const int FIRST_DIAL_CONNECT_TIMEOUT = 2000;
+static const int DIRECT_DIAL_CONNECT_TIMEOUT = 3000;
+/** The connect timeout for an outbound dial: the shorter ones above for a direct dial
+ *  without an explicit -timeout, otherwise nDefaultTimeout (-timeout). */
+int OutboundConnectTimeout(bool fDirect, bool fTimeoutSet, int nAttempts, int64_t nLastSuccess, int nDefaultTimeout);
 unsigned short GetListenPort();
 bool BindListenPort(const CService &bindAddr, std::string& strError, bool fWhitelisted = false, bool fOnion = false);
 void StartNode(boost::thread_group& threadGroup, CScheduler& scheduler);
@@ -185,7 +196,7 @@ CAddrMan& SelectDialTable(bool fOnionProxy, uint32_t nRand);
 /** The next outbound address to dial from man, or an invalid one: not on a network group in
  *  setConnected, not our own, not limited, not tried within the last minute, and a node on a
  *  port other than the default only after enough other draws (see ThreadOpenConnections). */
-CAddress SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow);
+CAddrInfo SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow);
 
 /** Outbound dialers (opencon threads) that run at once while the node holds fewer than
  *  PARALLEL_DIAL_OUTBOUND_TARGET outbound peers. A dead address costs a whole connect

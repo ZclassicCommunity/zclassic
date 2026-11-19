@@ -418,8 +418,22 @@ CNode* FindNode(const CService& addr)
     return NULL;
 }
 
-CNode* ConnectNode(CAddress addrConnect, const char *pszDest)
+int OutboundConnectTimeout(bool fDirect, bool fTimeoutSet, int nAttempts, int64_t nLastSuccess, int nDefaultTimeout)
 {
+    // through a proxy (Tor) the time goes to the proxy, not to the TCP handshake;
+    // and a -timeout the user chose is the user's
+    if (!fDirect || fTimeoutSet)
+        return nDefaultTimeout;
+    if (nAttempts == 0 && nLastSuccess == 0)
+        return std::min(nDefaultTimeout, FIRST_DIAL_CONNECT_TIMEOUT);
+    return std::min(nDefaultTimeout, DIRECT_DIAL_CONNECT_TIMEOUT);
+}
+
+CNode* ConnectNode(CAddress addrConnect, const char *pszDest, int nTimeout)
+{
+    if (nTimeout <= 0)
+        nTimeout = nConnectTimeout;
+
     if (pszDest == NULL) {
         if (IsLocal(addrConnect))
             return NULL;
@@ -441,8 +455,8 @@ CNode* ConnectNode(CAddress addrConnect, const char *pszDest)
     // Connect
     SOCKET hSocket;
     bool proxyConnectionFailed = false;
-    if (pszDest ? ConnectSocketByName(addrConnect, hSocket, pszDest, Params().GetDefaultPort(), nConnectTimeout, &proxyConnectionFailed) :
-                  ConnectSocket(addrConnect, hSocket, nConnectTimeout, &proxyConnectionFailed))
+    if (pszDest ? ConnectSocketByName(addrConnect, hSocket, pszDest, Params().GetDefaultPort(), nTimeout, &proxyConnectionFailed) :
+                  ConnectSocket(addrConnect, hSocket, nTimeout, &proxyConnectionFailed))
     {
         if (!IsSelectableSocket(hSocket)) {
             LogPrintf("Cannot create connection: non-selectable socket created (fd >= FD_SETSIZE ?)\n");
@@ -1441,7 +1455,7 @@ static const int64_t OUTBOUND_MIN_REDIAL_SECONDS = 60;
 /** Draws from the table in one selection round. */
 static const int OUTBOUND_MAX_DRAWS = 300;
 
-CAddress SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow)
+CAddrInfo SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow)
 {
     int nTries = 0;
     for (int nDraws = 0; nDraws < OUTBOUND_MAX_DRAWS; nDraws++)
@@ -1492,7 +1506,7 @@ CAddress SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsig
 
         return addr;
     }
-    return CAddress();
+    return CAddrInfo();
 }
 
 /** Network groups an outbound dial is in progress to (see CDialGroupReservation). */
@@ -1637,7 +1651,7 @@ static void OpenConnectionsLoop(int nDialer)
         proxyType proxyOnion;
         CAddrMan* pmanSelect = &SelectDialTable(GetProxy(NET_ONION, proxyOnion), GetRand(4));
 
-        CAddress addrPick = SelectOutboundCandidate(*pmanSelect, setConnected, nANow);
+        CAddrInfo addrPick = SelectOutboundCandidate(*pmanSelect, setConnected, nANow);
         if (addrPick.IsValid())
             addrConnect = addrPick;
 
@@ -1649,7 +1663,11 @@ static void OpenConnectionsLoop(int nDialer)
         CDialGroupReservation reservation(addrConnect.GetGroup());
         if (!reservation || OutboundGroupConnected(addrConnect.GetGroup()))
             continue;
-        OpenNetworkConnection(addrConnect, &grant);
+        proxyType proxyDial;
+        const bool fDirect = !addrConnect.IsTor() && !GetProxy(addrConnect.GetNetwork(), proxyDial);
+        OpenNetworkConnection(addrConnect, &grant, NULL, false,
+                              OutboundConnectTimeout(fDirect, mapArgs.count("-timeout") > 0, addrPick.GetAttempts(),
+                                                     addrPick.GetLastSuccess(), nConnectTimeout));
     }
 }
 
@@ -1725,7 +1743,7 @@ void ThreadOpenAddedConnections()
 }
 
 // if successful, this moves the passed grant to the constructed node
-bool OpenNetworkConnection(const CAddress& addrConnect, CSemaphoreGrant *grantOutbound, const char *pszDest, bool fOneShot)
+bool OpenNetworkConnection(const CAddress& addrConnect, CSemaphoreGrant *grantOutbound, const char *pszDest, bool fOneShot, int nTimeout)
 {
     //
     // Initiate outbound network connection
@@ -1739,7 +1757,7 @@ bool OpenNetworkConnection(const CAddress& addrConnect, CSemaphoreGrant *grantOu
     } else if (FindNode(std::string(pszDest)))
         return false;
 
-    CNode* pnode = ConnectNode(addrConnect, pszDest);
+    CNode* pnode = ConnectNode(addrConnect, pszDest, nTimeout);
     boost::this_thread::interruption_point();
 
     if (!pnode)
