@@ -35,13 +35,15 @@ Nothing about IBD, validation or relay changes; `getblockchaininfo` is untouched
 After the IBD latch has cleared, with `SLACK` = 2 blocks, fresh = 30 minutes:
 
 1. no connections: `waiting_for_peers`;
-2. best peer height above `blocks + SLACK`: `downloading_blocks`;
+2. headers above `blocks + SLACK`, or best peer height above `blocks + SLACK`: `downloading_blocks`;
 3. best peer height unknown: `downloading_headers`;
 4. tip age within the fresh window: `synced`;
 5. old tip, but every peer at our height and the longest peer connected for 60 s: `synced` (a quiet chain);
 6. otherwise `downloading_blocks`.
 
-The peer height is the starting height each peer announced when it connected, so it is a lower bound for a peer
+Per poll the index service-info calls each take cs_main briefly and do one LevelDB read, so the RPC is cheap but not free.
+
+The peer height is the second-highest starting height among handshaken outbound peers (one outlier cannot hold the node behind); a lone peer is bounded by headers plus SLACK. The starting height is each peer announced when it connected, so it is a lower bound for a peer
 that has been connected a long time; the tip-age rule covers that case.
 
 Tests: `src/test/test_bitcoin --run_test=syncphase_tests`, `qa/rpc-tests/nodestatus.sh --bin <dir> --work <dir>`

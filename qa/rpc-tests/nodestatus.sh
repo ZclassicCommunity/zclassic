@@ -48,12 +48,12 @@ if [ "$(printf %s "$first" | jget synced)" = false ]; then saw_false=1; fi
 while [ $n -lt 120 ]; do
     last=$(cli 0 getnodestatus)
     s=$(printf %s "$last" | jget synced); b=$(printf %s "$last" | jget blocks)
-    [ "$s" = true ] && [ "$b" -ne 20 ] && early_true=$((early_true + 1))
+    [ "$s" = true ] && [ "$b" -lt 18 ] && early_true=$((early_true + 1))
     [ "$s" = true ] && [ "$b" -eq 20 ] && break
     n=$((n + 1)); sleep 1
 done
 ck "B first answer is not synced" "$saw_false" 1
-ck "B never claims synced below 20 blocks" "$early_true" 0
+ck "B never claims synced more than the 2-block slack below 20" "$early_true" 0
 ck "B reaches 20 blocks" "$(cli 0 getblockcount)" 20
 ck "B reports synced" "$(printf %s "$last" | jget synced)" true
 ck "B state is ok" "$(printf %s "$last" | jget state)" ok

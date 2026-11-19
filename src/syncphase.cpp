@@ -4,6 +4,8 @@
 
 #include "syncphase.h"
 
+#include <algorithm>
+#include <functional>
 #include <string.h>
 
 namespace {
@@ -26,6 +28,7 @@ bool QuietChainIsSynced(const SyncInputs& in)
 const char* ClassifyAfterIbd(const SyncInputs& in)
 {
     if (in.nConnections <= 0) return "waiting_for_peers";
+    if (in.nHeaders > in.nBlocks + SYNC_PEER_SLACK_BLOCKS) return "downloading_blocks";
     if (in.nBestPeerHeight > in.nBlocks + SYNC_PEER_SLACK_BLOCKS) return "downloading_blocks";
     if (in.nBestPeerHeight < 0) return "downloading_headers";
     if (in.tipAgeSeconds <= SYNC_TIP_FRESH_SECONDS) return "synced";
@@ -46,4 +49,13 @@ const char* ClassifySyncPhaseV2(const SyncInputs& in)
 bool IsSyncedV2(const SyncInputs& in)
 {
     return strcmp(ClassifySyncPhaseV2(in), "synced") == 0;
+}
+
+int RobustPeerHeight(std::vector<int> heights, int nHeaders)
+{
+    if (heights.empty()) return -1;
+    std::sort(heights.begin(), heights.end(), std::greater<int>());
+    if (heights.size() >= 2) return heights[1];
+    // One peer is never trusted alone: bound its claim by the headers we hold.
+    return std::min(heights[0], std::max(nHeaders, 0) + SYNC_PEER_SLACK_BLOCKS);
 }

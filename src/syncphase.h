@@ -6,6 +6,7 @@
 #define BITCOIN_SYNCPHASE_H
 
 #include <stdint.h>
+#include <vector>
 
 /**
  * A stricter "is this node synced" classifier than ClassifySyncPhase (main.cpp). It is pure
@@ -39,5 +40,9 @@ const char* ClassifySyncPhaseV2(const SyncInputs& in);
 
 /** True when ClassifySyncPhaseV2 answers "synced". */
 bool IsSyncedV2(const SyncInputs& in);
+
+/** Peer height to compare against: the second-highest claim (one outlier cannot hold the node behind),
+ *  or, for a single peer, its claim bounded by nHeaders + slack. -1 when there are no heights. */
+int RobustPeerHeight(std::vector<int> heights, int nHeaders);
 
 #endif // BITCOIN_SYNCPHASE_H

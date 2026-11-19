@@ -23,6 +23,8 @@
 #include "zslp/zslpservice.h"
 
 #include <algorithm>
+#include <climits>
+#include <vector>
 #include <boost/filesystem.hpp>
 #include <string>
 
@@ -54,7 +56,8 @@ const char* NodeStatusState(const NodeStatusInputs& in, bool synced, int behind)
 
 int BlocksBehind(const SyncInputs& s)
 {
-    return std::max(0, std::max(s.nBestPeerHeight, s.nHeaders) - s.nBlocks);
+    const int64_t d = (int64_t)std::max(s.nBestPeerHeight, s.nHeaders) - s.nBlocks;
+    return (int)std::min<int64_t>(std::max<int64_t>(0, d), INT_MAX);
 }
 
 /** Reasons that come from the node being busy with something other than following the chain. */
@@ -150,6 +153,7 @@ void GatherPeerInputs(NodeStatusInputs& in)
 {
     int64_t oldest = 0;
     bool any = false;
+    std::vector<int> heights;
     LOCK(cs_vNodes);
     for (const CNode* pnode : vNodes) {
         if (pnode->fInbound) {
@@ -159,10 +163,11 @@ void GatherPeerInputs(NodeStatusInputs& in)
         in.nOutbound++;
         if (!pnode->fSuccessfullyConnected) continue;
         in.sync.nOutboundConnected++;
-        in.sync.nBestPeerHeight = std::max(in.sync.nBestPeerHeight, pnode->nStartingHeight);
+        heights.push_back(pnode->nStartingHeight);
         if (!any || pnode->nTimeConnected < oldest) oldest = pnode->nTimeConnected;
         any = true;
     }
+    in.sync.nBestPeerHeight = RobustPeerHeight(heights, in.sync.nHeaders);
     in.sync.nConnections = in.nInbound + in.nOutbound;
     in.sync.connectedForSeconds = any ? std::max<int64_t>(0, GetTime() - oldest) : 0;
 }

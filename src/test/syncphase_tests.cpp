@@ -8,6 +8,7 @@
 #include "test/test_bitcoin.h"
 #include "univalue.h"
 
+#include <climits>
 #include <string>
 
 #include <boost/test/unit_test.hpp>
@@ -71,6 +72,15 @@ BOOST_AUTO_TEST_CASE(after_ibd_table)
     BOOST_CHECK_EQUAL(Phase(After(1000, 2 * 3600, 8, 1000, 61)), "synced");
     BOOST_CHECK_EQUAL(Phase(After(1000, 2 * 3600, 8, 1000, 60)), "synced");
     BOOST_CHECK_EQUAL(Phase(After(1000, 2 * 3600, 8, 1000, 59)), "downloading_blocks");
+    // Headers ahead of the tip beyond the slack: not synced, fresh tip or old.
+    SyncInputs h = After(1000, 100, 8, 1000, 500);
+    h.nHeaders = 1010;
+    BOOST_CHECK_EQUAL(Phase(h), "downloading_blocks");
+    h.tipAgeSeconds = 5 * 3600;
+    BOOST_CHECK_EQUAL(Phase(h), "downloading_blocks");
+    h.nHeaders = 1002;
+    h.tipAgeSeconds = 100;
+    BOOST_CHECK_EQUAL(Phase(h), "synced");
     // No connections.
     BOOST_CHECK_EQUAL(Phase(After(1000, 100, 0, 1000, 500)), "waiting_for_peers");
     BOOST_CHECK(IsSyncedV2(After(1000, 100, 8, 1000, 500)));
@@ -99,6 +109,21 @@ BOOST_AUTO_TEST_CASE(precedence_matches_classic)
             BOOST_CHECK_EQUAL(Phase(s), classic);
         }
     }
+}
+
+BOOST_AUTO_TEST_CASE(robust_peer_height)
+{
+    BOOST_CHECK_EQUAL(RobustPeerHeight({}, 100), -1);
+    // One outlier among several peers is ignored.
+    BOOST_CHECK_EQUAL(RobustPeerHeight({1000, INT_MAX, 1001}, 1000), 1001);
+    BOOST_CHECK_EQUAL(Phase(After(1000, 100, 3, RobustPeerHeight({1000, INT_MAX, 1000}, 1000), 500)), "synced");
+    // A lone peer is bounded by headers plus slack.
+    BOOST_CHECK_EQUAL(RobustPeerHeight({INT_MAX}, 1000), 1000 + SYNC_PEER_SLACK_BLOCKS);
+    BOOST_CHECK_EQUAL(RobustPeerHeight({900}, 1000), 900);
+    // Empty chain and a huge claim: no signed overflow in blocks_behind.
+    SyncInputs e = After(-1, 100, 1, INT_MAX, 500);
+    e.nHeaders = -1;
+    BOOST_CHECK_EQUAL(find_value(BuildNodeStatus(Status(e, 0, 1)), "blocks_behind").get_int(), INT_MAX);
 }
 
 BOOST_AUTO_TEST_CASE(nodestatus_states_and_reasons)
