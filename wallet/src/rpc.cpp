@@ -1,6 +1,7 @@
 #include "daemonjob.h"
 #include "rpc.h"
 #include "syncstate.h"
+#include "wallethealth.h"
 #include "fastsync.h"
 #include "releaseversion.h"
 #include "repairlocation.h"
@@ -717,6 +718,8 @@ void RPC::fillTxJsonParams(json& params, Tx tx) {
 void RPC::noConnection(bool preserveBalances) {
     const bool starting = main->connectionStartupError.isEmpty() &&
         !main->connectionStartupProgress.isEmpty();
+    // Without a node there is no health to report (and the last report would be stale).
+    if (main->healthLabel) main->healthLabel->setVisible(false);
     QIcon i = QApplication::style()->standardIcon(QStyle::SP_MessageBoxCritical);
     if (starting) main->statusIcon->clear();
     else main->statusIcon->setPixmap(i.pixmap(16, 16));
@@ -1482,6 +1485,9 @@ void RPC::getInfoThenRefresh(bool force) {
             main->statusLabel->setToolTip(tooltip);
             main->statusIcon->setToolTip(tooltip);
 
+            // Wallet health (witness rebuild, checkpoint, stuck or expired sends): a line only if something needs attention.
+            refreshWalletHealth();
+
             // C3: poll faster while actively syncing so the banner/%/ETA stays
             // lively, and back off to the normal cadence once synced. QTimer::start()
             // restarts with the new interval; only call it when the interval actually
@@ -1868,6 +1874,24 @@ void RPC::refreshBalances() {
     }, fail);
 }
 
+// Confirmations as the node reports them. It reports -1 for a transaction that is in neither a block nor the mempool (an
+// expired send): that must not wrap around into a huge "confirmed" count.
+static unsigned long confirmationsOf(const json& j) {
+    if (!j.is_object()) return 0;
+    auto f = j.find("confirmations");
+    if (f == j.end()) return 0;
+    if (f->is_number_integer() && !f->is_number_unsigned() && f->get<json::number_integer_t>() < 0) return 0;
+    if (f->is_number_integer()) return (unsigned long)f->get<json::number_unsigned_t>();
+    return 0;
+}
+
+// The node's word on a wallet transaction (mined, pending, expiringsoon, expired, conflicted); empty from an older node.
+static QString statusOf(const json& j) {
+    if (!j.is_object()) return QString();
+    auto f = j.find("status");
+    return (f != j.end() && f->is_string()) ? QString::fromStdString(f->get<std::string>()) : QString();
+}
+
 void RPC::refreshTransactions() {    
     if  (conn == nullptr) 
         return noConnection();
@@ -1889,8 +1913,9 @@ void RPC::refreshTransactions() {
                 address,
                 QString::fromStdString(it["txid"]),
                 it["amount"].get<json::number_float_t>() + fee,
-                (unsigned long)it["confirmations"].get<json::number_unsigned_t>(),
+                confirmationsOf(it),
                 "", "" };
+            tx.status = statusOf(it);
 
             txdata.push_back(tx);
             if (!address.isEmpty())
@@ -1983,8 +2008,9 @@ void RPC::refreshSentZTrans() {
                     continue;
                 auto error = j["confirmations"].is_null();
                 if (!error) {
-                    auto confs = j["confirmations"].get<json::number_unsigned_t>();
+                    const unsigned long confs = confirmationsOf(j);
                     sentTx.confirmations = confs;
+                    sentTx.status = statusOf(j);
                     sentZConfCache[sentTx.txid] = (long)confs;   // remember; deep ones stop re-querying
                 }
             }
@@ -1993,6 +2019,38 @@ void RPC::refreshSentZTrans() {
             delete txidList;
         }
      );
+}
+
+// The wallet health line. getwalletinfo's "health" object is one read-only pass in the node; asked at most every
+// 30 s. An older node (no "health"), an error, or a healthy wallet leaves the status bar exactly as it was.
+void RPC::refreshWalletHealth(bool force) {
+    if (conn == nullptr || main->healthLabel == nullptr)
+        return;
+    if (!force && healthPolled.isValid() && healthPolled.elapsed() < 30 * 1000)
+        return;
+    healthPolled.start();
+
+    json payload = {
+        {"jsonrpc", "1.0"},
+        {"id", "someid"},
+        {"method", "getwalletinfo"}
+    };
+    const std::weak_ptr<bool> life = alive;
+    conn->doRPCIgnoreError(payload, [=](const json& reply) {
+        auto l = life.lock();
+        if (!l || !*l)
+            return;
+        const wallethealth::Report r = wallethealth::assess(reply, !Settings::getInstance()->isSyncing());
+        if (!r.any()) {
+            main->healthLabel->setVisible(false);
+            main->healthLabel->clear();
+            main->healthLabel->setToolTip(QString());
+            return;
+        }
+        main->healthLabel->setText(r.summary());
+        main->healthLabel->setToolTip(r.tooltip());
+        main->healthLabel->setVisible(true);
+    });
 }
 
 void RPC::addNewTxToWatch(const QString& newOpid, WatchedTx wtx) {

@@ -124,6 +124,7 @@ HEADERS += \
     src/tokenssend.h \
     src/pollguard.h \
     src/sendflow.h \
+    src/wallethealth.h \
     src/tokensview.h \
     src/namesmodel.h \
     src/namepaybox.h \

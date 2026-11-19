@@ -10,6 +10,7 @@
 #include "connection.h"
 #include "notifyserver.h"
 #include "sendflow.h"
+#include <QElapsedTimer>
 
 using json = nlohmann::json;
 
@@ -24,6 +25,10 @@ struct TransactionItem {
     unsigned long   confirmations;
     QString         fromAddr;
     QString         memo;
+    // The node's own word on the transaction (getwalletinfo-era nodes): mined, pending, expiringsoon, expired,
+    // conflicted. Empty from a node that does not report it. "expired" is a send that was never mined and never can
+    // be; its funds are back in the balance.
+    QString         status;
 };
 
 struct WatchedTx {
@@ -75,6 +80,10 @@ public:
     void sendZTransaction(json params, const std::function<void(json)>& cb, const std::function<void(QString)>& err);
     void watchTxStatus();
 
+    // Wallet health line in the status bar (getwalletinfo "health"): shown only when something needs attention.
+    // At most every 30 s unless force.
+    void refreshWalletHealth(bool force = false);
+
     const QMap<QString, WatchedTx> getWatchingTxns() { return watchingOps; }
     void addNewTxToWatch(const QString& newOpid, WatchedTx wtx); 
 
@@ -122,6 +131,8 @@ public:
     // Send-once timing (an unanswered z_sendmany is abandoned after timeoutMs, then repeated with growing pauses from baseMs).
     void testSetSendTiming(int timeoutMs, int baseMs) { sendTimeoutMs = timeoutMs; sendRetryBaseMs = baseMs; }
     int  testDaemonTakesSendKey() const { return daemonTakesSendKey; }
+    void testRefreshTransactions() { refreshTransactions(); }
+    void testRefreshSentZTrans()   { refreshSentZTrans(); }
     void testSetShuttingDown(bool b) { ezShuttingDown = b; }
     void testDropConnectingMessage() { dropConnectingMessage(); }
     bool testRefreshAuthFromCookie() { return refreshAuthFromCookie(); }
@@ -427,6 +438,7 @@ private:
     int                         sendRetryBaseMs             = 1000;
     // Cleared in ~RPC: timers and replies that outlive the object check it first.
     std::shared_ptr<bool>       alive                       = std::make_shared<bool>(true);
+    QElapsedTimer               healthPolled;
 
     TxTableModel*               transactionsTableModel      = nullptr;
     BalancesTableModel*         balancesTableModel          = nullptr;

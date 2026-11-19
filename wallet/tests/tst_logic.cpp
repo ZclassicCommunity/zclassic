@@ -49,6 +49,7 @@
 #include "privacybadgedelegate.h"   // PRIV-13/14: classify/labelFor/colorFor (real)
 #include "securerandom.h"      // CONF-1/NOTIFY-SRV: CSPRNG secret generation (real)
 #include "sendflow.h"          // send once: the pure rules (real)
+#include "wallethealth.h"      // the wallet health line: the pure rules (real)
 #include <QSet>
 #include <QRegularExpression>
 #include <QFileInfo>
@@ -972,6 +973,8 @@ private slots:
     void sendflow_theJournalIsOnlyAskedWhenItDecides();
     void sendflow_parseWhatTheNodeSays();
     void sendflow_ownWordingIsNotRewritten();
+    void health_aHealthyWalletSaysNothing();
+    void health_eachAttentionStateIsReported();
 
 private:
     QString sandboxAppData() const {
@@ -2408,6 +2411,67 @@ void TestLogic::sendflow_ownWordingIsNotRewritten() {
     // none of them invites the user to simply try again, except the ones where nothing was sent
     QVERIFY(!sendflow::unknownText().contains("try again", Qt::CaseInsensitive));
     QVERIFY(!sendflow::gaveUpText().contains("try again", Qt::CaseInsensitive));
+}
+
+
+// ---- wallet health line (src/wallethealth.h) ----
+
+namespace {
+nlohmann::json healthInfo(nlohmann::json patch = nlohmann::json::object()) {
+    nlohmann::json pool = {{"notes_unspent", 3}, {"notes_spent", 9}, {"witness_ready", 3}, {"witness_missing", 0}, {"witness_stale", 0},
+                           {"unconfirmed", 0}, {"unmined_dead", 0}, {"witnesses_held_unspent", 3}, {"witnesses_held_spent", 0}};
+    nlohmann::json h = {{"tip_height", 2000000}, {"checkpoint_height", 1999990}, {"witness_cache_size", 100},
+                        {"witness_rebuild_pending", false}, {"sapling", pool}, {"sprout", pool},
+                        {"pending_sends", {{"in_mempool", 0}, {"not_in_mempool", 0}, {"expiring_soon", 0}, {"expired", 0}, {"conflicted", 0}}}};
+    for (auto it = patch.begin(); it != patch.end(); ++it) {
+        if (it.key() == "pending_sends") for (auto p = it->begin(); p != it->end(); ++p) h["pending_sends"][p.key()] = p.value();
+        else if (it.key() == "sapling") for (auto p = it->begin(); p != it->end(); ++p) h["sapling"][p.key()] = p.value();
+        else h[it.key()] = it.value();
+    }
+    return {{"walletversion", 60000}, {"balance", 1.5}, {"health", h}};
+}
+}
+
+void TestLogic::health_aHealthyWalletSaysNothing() {
+    QVERIFY(!wallethealth::assess(healthInfo(), true).any());
+    QVERIFY(!wallethealth::assess(healthInfo(), false).any());
+    // a normal pending send (in the mempool) is not a concern
+    QVERIFY(!wallethealth::assess(healthInfo({{"pending_sends", {{"in_mempool", 2}}}}), true).any());
+    // a checkpoint that has not been written yet
+    QVERIFY(!wallethealth::assess(healthInfo({{"checkpoint_height", -1}}), true).any());
+    // an older node has no health object; garbage never throws
+    QVERIFY(!wallethealth::assess(nlohmann::json{{"balance", 1.0}}, true).any());
+    QVERIFY(!wallethealth::assess(nlohmann::json::array(), true).any());
+    QVERIFY(!wallethealth::assess(nlohmann::json(), true).any());
+    QVERIFY(!wallethealth::assess(nlohmann::json{{"health", "oops"}}, true).any());
+    QVERIFY(!wallethealth::assess(nlohmann::json{{"health", {{"sapling", 3}, {"pending_sends", "x"}, {"tip_height", "high"}}}}, true).any());
+}
+
+void TestLogic::health_eachAttentionStateIsReported() {
+    auto one = [](nlohmann::json patch, bool synced, const char* needle) {
+        const auto r = wallethealth::assess(healthInfo(patch), synced);
+        return r.lines.size() == 1 && r.lines[0].contains(needle);
+    };
+    QVERIFY(one({{"witness_rebuild_pending", true}}, true, "being rebuilt"));
+    QVERIFY(one({{"witness_rebuild_pending", true}}, false, "being rebuilt"));          // also while catching up
+    QVERIFY(one({{"sapling", {{"witness_missing", 2}}}}, true, "2 shielded note(s) cannot be spent yet"));
+    QVERIFY(one({{"checkpoint_height", 1998000}}, true, "2000 blocks ago"));
+    QVERIFY(one({{"pending_sends", {{"not_in_mempool", 1}}}}, true, "not in the node's mempool"));
+    QVERIFY(one({{"pending_sends", {{"expiring_soon", 3}}}}, true, "will expire within a few blocks"));
+    QVERIFY(one({{"pending_sends", {{"expired", 1}}}}, true, "funds are back in your balance") ||
+            one({{"pending_sends", {{"expired", 1}}}}, true, "back in your balance"));
+    QVERIFY(one({{"pending_sends", {{"conflicted", 4}}}}, true, "will never confirm"));
+    // the boundary: exactly the lag is fine, one block more is not
+    QVERIFY(!wallethealth::assess(healthInfo({{"checkpoint_height", 2000000 - wallethealth::kCheckpointLagBlocks}}), true).any());
+    QVERIFY(wallethealth::assess(healthInfo({{"checkpoint_height", 2000000 - wallethealth::kCheckpointLagBlocks - 1}}), true).any());
+    // while the node is still catching up the checkpoint and the proofs are legitimately behind: no noise
+    QVERIFY(!wallethealth::assess(healthInfo({{"checkpoint_height", 1000}}), false).any());
+    QVERIFY(!wallethealth::assess(healthInfo({{"sapling", {{"witness_missing", 7}}}}), false).any());
+    // several at once: one line each, one summary
+    const auto many = wallethealth::assess(healthInfo({{"witness_rebuild_pending", true}, {"pending_sends", {{"expired", 1}, {"conflicted", 1}}}}), true);
+    QCOMPARE(many.lines.size(), 3);
+    QVERIFY(many.summary().contains("3"));
+    QVERIFY(many.tooltip().contains("being rebuilt") && many.tooltip().contains("never confirm"));
 }
 
 QTEST_MAIN(TestLogic)

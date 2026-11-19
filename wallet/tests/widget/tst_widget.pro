@@ -90,6 +90,7 @@ HEADERS += \
     ../../src/tokensmodel.h \
     ../../src/pollguard.h \
     ../../src/sendflow.h \
+    ../../src/wallethealth.h \
     ../../src/tokensview.h \
     ../../src/tokenssend.h \
     ../../src/logger.h \
