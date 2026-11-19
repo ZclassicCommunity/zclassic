@@ -67,7 +67,8 @@ size_t zcl_znam_build(int command, const char *name, uint8_t target_type,
 }
 
 /* Z23 standard.c:97-113 (utxo_classify_script), the two forms with an address
- * hash. OP_DUP=0x76 OP_HASH160=0xa9 OP_EQUALVERIFY=0x88 OP_CHECKSIG=0xac
+ * hash. Returns 1 for P2PKH, 2 for P2SH (owner rule ZNAM-OWNER-2: the two forms
+ * are different owners), 0 for anything else. OP_DUP=0x76 OP_HASH160=0xa9 OP_EQUALVERIFY=0x88 OP_CHECKSIG=0xac
  * OP_EQUAL=0x87. */
 int zcl_znam_owner_hash(const uint8_t *script, size_t len, uint8_t hash20[20])
 {
@@ -80,7 +81,7 @@ int zcl_znam_owner_hash(const uint8_t *script, size_t len, uint8_t hash20[20])
     }
     if (len == 23 && script[0] == 0xa9 && script[1] == 20 && script[22] == 0x87) {
         memcpy(hash20, script + 2, 20);
-        return 1;
+        return 2;
     }
     return 0;
 }

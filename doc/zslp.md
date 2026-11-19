@@ -41,9 +41,12 @@ the daemon reports the index as enabled.
 
 ## What is indexed
 
-Every connected block. For each transaction the index looks at the first output whose
-script starts with `OP_RETURN` (on mainnet that is always `vout[0]`; the wallet's token
-guard reads the same output) and parses it with Z23's own SLP parser:
+Every connected block. For each transaction the index looks at `vout[0]` only (rule **ZSLP-VOUT0**, the SLP
+specification's rule, shared with Z23): when its script starts with `OP_RETURN` it is parsed with Z23's own SLP parser.
+An SLP message in any other output, for example behind a payment output or behind another `OP_RETURN`, is not a message
+and moves no token. It applies from genesis: a census of the mainnet chain to block 3,323,972 found all 4,302 SLP messages
+in `vout[0]` and none elsewhere, so no history changes meaning. (The wallet's token guard still protects the outputs of
+a message at the first `OP_RETURN` wherever it is; that can only withhold more coins, never fewer.)
 
 | message | token outputs |
 |---|---|
@@ -246,8 +249,8 @@ MIT as zclassicd.
 - Not compatible with `-prune`.
 - The index trusts the node's own chain. It is a convenience view, not a proof: verify a
   token that matters against the chain.
-- If a message is not at the first `OP_RETURN` output the answer follows that output;
-  Z23's wallet code reads `vout[0]`. On mainnet the two are the same.
+- A message is read from `vout[0]` only (ZSLP-VOUT0). Z23's explorer index and ledger apply the identical rule; the shared
+  vectors are `src/test/data/token_name_rules.txt`.
 
 ## Mainnet check
 

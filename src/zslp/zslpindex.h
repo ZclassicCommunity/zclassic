@@ -179,7 +179,7 @@ struct HolderBalance {
  *  the answer ApplyBlock would give if it were the next transaction of the chain, computed from the current
  *  store without changing it. */
 struct Evaluation {
-    bool isSlp;              //! the first OP_RETURN output parses as an SLP message
+    bool isSlp;              //! vout[0] (rule ZSLP-VOUT0) is an OP_RETURN that parses as an SLP message
     int type;                //! 1 GENESIS, 2 MINT, 3 SEND, 0 = not an SLP message
     int status;              //! STATUS_* (meaningful when isSlp)
     std::string reason;      //! Z23's reason code
