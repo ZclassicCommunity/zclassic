@@ -14,7 +14,8 @@
 //   addr           > 1000                          -> +20
 //   headers        > MAX_HEADERS_RESULTS (160)     -> +20
 //   filteradd data > MAX_SCRIPT_ELEMENT_SIZE (520) -> +100
-//   filteradd without filterload                   -> +100
+//   filteradd without filterload                   -> 0 (the else branch scoring +100
+//                                                     is unreachable, see filteradd_without_filterload)
 //   filterload failing IsWithinSizeConstraints     -> +100
 //
 
@@ -159,6 +160,15 @@ CDataStream FilterLoadPayload(size_t nBytes, uint32_t nHashFuncs)
     return ss;
 }
 
+/** The peer's current filter as it serializes (the filterload payload form). */
+std::string FilterBytes(CNode* node)
+{
+    LOCK(node->cs_filter);
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << *node->pfilter;
+    return std::string(ss.begin(), ss.end());
+}
+
 CDataStream FilterAddPayload(size_t nBytes)
 {
     CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
@@ -298,12 +308,18 @@ BOOST_AUTO_TEST_CASE(filteradd_without_filterload)
 
 BOOST_AUTO_TEST_CASE(filterload_size_constraints)
 {
-    // exactly at both limits: accepted, and the filter is replaced
+    // exactly at both limits: accepted, and the filter is replaced. Compared by
+    // content, not by pointer: the handler deletes the old filter before it
+    // allocates the new one, so the allocator may well hand back the same address.
     CNode* atCap = NewPeer(true);
-    
-    Send(atCap, "filterload", FilterLoadPayload(MAX_BLOOM_FILTER_SIZE, MAX_HASH_FUNCS));
+    BOOST_REQUIRE(atCap->pfilter != NULL);
+    const CDataStream loadAtCap = FilterLoadPayload(MAX_BLOOM_FILTER_SIZE, MAX_HASH_FUNCS);
+    const std::string loaded(loadAtCap.begin(), loadAtCap.end());
+    BOOST_REQUIRE(FilterBytes(atCap) != loaded);
+    Send(atCap, "filterload", loadAtCap);
     BOOST_CHECK_EQUAL(Score(atCap), 0);
-    BOOST_CHECK(atCap->pfilter != NULL);
+    BOOST_REQUIRE(atCap->pfilter != NULL);
+    BOOST_CHECK(FilterBytes(atCap) == loaded);
 
     // one byte too many: scored, and the peer's filter is left as it was
     CNode* big = NewPeer(true);
