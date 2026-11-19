@@ -14,6 +14,8 @@
 #include "streams.h"
 #include "util.h"
 
+#include <algorithm>
+
 #include <boost/filesystem.hpp>
 #include <boost/foreach.hpp>
 
@@ -22,6 +24,20 @@ static const uint32_t BANLIST_VERSION = 1;
 static const uint64_t BANLIST_MAX_ENTRIES = 100000;
 static const size_t BANLIST_MAX_BYTES = 16 * 1024 * 1024;
 static const size_t BANLIST_MIN_BYTES = 4 + 4 + 4 + 1 + sizeof(uint256);
+
+//! The entries to store: all of them, or the BANLIST_MAX_ENTRIES latest-expiring when there are more
+//! (Read refuses a larger count, so an oversized write would lose every ban at the next start).
+typedef std::pair<CSubNet, int64_t> BanEntry;
+
+static std::vector<BanEntry> BanEntriesToWrite(const banmap_t& banSet)
+{
+    std::vector<BanEntry> v(banSet.begin(), banSet.end());
+    if (v.size() > BANLIST_MAX_ENTRIES) {
+        std::sort(v.begin(), v.end(), [](const BanEntry& a, const BanEntry& b) { return a.second > b.second; });
+        v.resize(BANLIST_MAX_ENTRIES);
+    }
+    return v;
+}
 
 CBanDB::CBanDB()
 {
@@ -38,8 +54,9 @@ bool CBanDB::Write(const banmap_t& banSet)
     ss << FLATDATA(BANLIST_MAGIC);
     ss << BANLIST_VERSION;
     ss << FLATDATA(Params().MessageStart());
-    WriteCompactSize(ss, banSet.size());
-    BOOST_FOREACH(const banmap_t::value_type& entry, banSet) {
+    const std::vector<BanEntry> vEntries = BanEntriesToWrite(banSet);
+    WriteCompactSize(ss, vEntries.size());
+    BOOST_FOREACH(const BanEntry& entry, vEntries) {
         ss << entry.first.ToString();
         ss << (int64_t)entry.second;
     }

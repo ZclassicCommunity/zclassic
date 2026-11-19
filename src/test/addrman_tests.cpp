@@ -777,7 +777,15 @@ BOOST_AUTO_TEST_CASE(addrman_salvage_refuses_foreign_and_tiny_files)
     BOOST_CHECK(!adb.Read(loaded));
     dir.Spit(raw, 0);
     BOOST_CHECK(!adb.Read(loaded));
+
     BOOST_CHECK(!boost::filesystem::exists(dir.Corrupt()));
+
+    // magic only, bad checksum: the salvage path sees an empty body and must not index into it
+    std::vector<char> magicOnly(raw.begin(), raw.begin() + 4);
+    magicOnly.resize(4 + sizeof(uint256), 0);
+    dir.Spit(magicOnly);
+    BOOST_CHECK(!adb.Read(loaded));
+    BOOST_CHECK_EQUAL(loaded.size(), 0u);
 }
 
 BOOST_AUTO_TEST_CASE(addrman_salvage_hostile_header)

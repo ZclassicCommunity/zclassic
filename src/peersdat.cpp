@@ -41,7 +41,7 @@ static bool SalvagePeers(CAddrMan& addr, const boost::filesystem::path& pathAddr
     bool fMoved = RenameOver(pathAddr, pathCorrupt);
 
     // the whole file image after the magic; the record count bounds the read, so the tail is never parsed
-    CDataStream ss((const char*)&vchData[4], (const char*)&vchData[0] + vchData.size(), SER_DISK, CLIENT_VERSION);
+    CDataStream ss((const char*)vchData.data() + 4, (const char*)vchData.data() + vchData.size(), SER_DISK, CLIENT_VERSION);
     ss << hashIn;
     size_t nKept = 0, nDropped = 0;
     try {

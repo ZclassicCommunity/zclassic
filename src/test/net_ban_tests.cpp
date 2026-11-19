@@ -8,6 +8,8 @@
 #include "chainparams.h"
 #include "net.h"
 #include "random.h"
+#include "rpc/register.h"
+#include "rpc/server.h"
 #include "netbase.h"
 #include "test/test_bitcoin.h"
 #include "util.h"
@@ -186,6 +188,43 @@ BOOST_AUTO_TEST_CASE(unban_is_persisted)
     CBanDB db;
     BOOST_CHECK(db.Read(loaded));
     BOOST_CHECK(loaded.empty());
+}
+
+BOOST_AUTO_TEST_CASE(oversized_list_keeps_latest_expiring)
+{
+    const int64_t now = GetTime();
+    const uint32_t nExtra = 5;
+    banmap_t in;
+    for (uint32_t i = 0; i < 100000 + nExtra; i++) {
+        const uint32_t n = i + 0x01000000;
+        in[CSubNet(strprintf("%u.%u.%u.%u/32", n >> 24, (n >> 16) & 255, (n >> 8) & 255, n & 255))] = now + 1000 + i; // later i expires later
+    }
+    CBanDB db;
+    BOOST_CHECK(db.Write(in));
+    banmap_t out;
+    BOOST_CHECK(db.Read(out));
+    BOOST_CHECK_EQUAL(out.size(), 100000U);
+    BOOST_CHECK(!fs::exists(Bad()));
+    for (banmap_t::const_iterator it = out.begin(); it != out.end(); ++it)
+        BOOST_CHECK(it->second >= now + 1000 + nExtra);
+}
+
+BOOST_AUTO_TEST_CASE(setban_listbanned_survive_reload)
+{
+    CRPCTable rpcTable; // only the net commands; the setup here does not register any
+    RegisterNetRPCCommands(rpcTable);
+    UniValue params(UniValue::VARR);
+    params.push_back("192.0.2.1");
+    params.push_back("add");
+    params.push_back(86400);
+    rpcTable["setban"]->actor(params, false);
+    DumpBanlist();
+    CNode::ClearBanned(); // the restart
+    BOOST_CHECK_EQUAL(rpcTable["listbanned"]->actor(UniValue(UniValue::VARR), false).size(), 0U);
+    LoadBanlist();
+    UniValue listed = rpcTable["listbanned"]->actor(UniValue(UniValue::VARR), false);
+    BOOST_CHECK_EQUAL(listed.size(), 1U);
+    BOOST_CHECK(listed[0]["address"].get_str().find("192.0.2.1") == 0);
 }
 
 BOOST_AUTO_TEST_CASE(dirty_flag)
