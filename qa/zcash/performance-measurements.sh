@@ -146,9 +146,9 @@ EOF
     if [ $ARCHIVE_RESULT -ne 0 ]; then
         zcashd_stop
         echo
-        echo "Please generate it using qa/zcash/create_benchmark_archive.py"
+        echo "The benchmark archive (a mainnet block-107134 datadir slice) has no generator in this repository"
         echo "and place it in the base directory of the repository."
-        echo "Usage details are inside the Python script."
+        echo "(its former Python generator was removed with the rest of the Python tooling)"
         exit 1
     fi
     xzcat block-107134.tar.xz | tar x -C "$DATADIR/regtest"
