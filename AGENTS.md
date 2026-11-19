@@ -35,6 +35,7 @@ zcutil/bin/zcl-dev know <term>                              # closed FACTS table
 zcutil/bin/zcl-dev gen --check rpc-parity                   # also: gen --check flags, gen rpc-reference|args-reference|inventory
 zcutil/bin/zcl-lint all                                     # every lint rule and ratchet; zcl-lint kpi prints the tree-health floor
 zcutil/bin/zcl-dev verify --gates                           # the check-dev-tools gates after `make -C zcutil check`: zcl-lint all, check-tests (when built), know, rpc-parity, flags; stops at the first failure
+zcutil/bin/zcl-dev mutate run <file> --max N --build "<cmd>" -- <test argv>  # mutation score of the focused tests for one clean, tracked file (list <file> shows the sites; POSIX only)
 ```
 
 Run a single qa script by the form its usage line gives: most take `sh qa/rpc-tests/<script>.sh --bin <dir-with-zclassicd> --work <empty dir> [--base <port>]` (add `--peer-bin <previous release>` where its header asks for one); `token_name_rules`, `wallet_tokenguard`, `znam_index`, `zslp_*`, `startup_bad_home` and `zclassic_tx_util` take one positional `<dir>` holding the binaries. Ports are leased automatically (qa/lib/README.md), so no port needs choosing. Unit tests: `src/test/test_bitcoin --run_test=<suite>` after a `--enable-tests` build ([doc/unit-tests.md](doc/unit-tests.md)). Where the host has a build broker (for example `devbuild --wait`), run heavy commands behind it.
