@@ -2,12 +2,15 @@
 # Guard: Python and hosted CI must not come back (POSIX sh).
 #
 # Fails when the source tree contains
-#   - a *.py / *.pyw file,
-#   - any file whose first line is a python shebang,
+#   - a Python file by extension, case-insensitively: .py .pyw .pyc .pyi .pyx .ipynb,
+#   - a python shebang on any line of a text file (not only line 1),
+#   - python / pip / python3 invoked as a command in any tracked text file (word-boundary
+#     match; PROSE_OK lists the path prefixes whose prose may merely mention the word),
 #   - a pip/packaging file (requirements*.txt, constraints*.txt, setup.cfg, pyproject.toml,
 #     Pipfile, Pipfile.lock, poetry.lock, tox.ini),
-#   - hosted-CI configuration: .github/workflows, .github/dependabot.yml, .travis.yml,
-#     .gitlab-ci.yml, .circleci, .cirrus.yml, appveyor.yml, azure-pipelines.yml, Jenkinsfile.
+#   - hosted-CI configuration: .github/workflows, .github/actions, .github/dependabot.yml,
+#     .buildkite, .circleci, .woodpecker(.yml), .drone.yml, .travis.yml, .gitlab-ci.yml,
+#     .cirrus.yml, appveyor.yml, azure-pipelines.yml, bitbucket-pipelines.yml, Jenkinsfile.
 # Builds and tests run only on project machines (zcutil/local-ci.sh).
 #
 # In a git checkout it examines the tracked files; elsewhere (a make dist tree) every file.
@@ -18,6 +21,7 @@
 #        check-no-python.sh --self-test       proves each kind of offender is caught
 set -u
 EXCEPTIONS=""   # exact repository paths, space separated; keep empty
+PROSE_OK="doc/history/ zcutil/check-no-python.sh"   # path prefixes whose prose may mention python/pip (the scan for invocations skips them)
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 root=$(CDPATH= cd -- "$here/.." && pwd)
@@ -35,27 +39,32 @@ scan() {
     files=$(mktemp) || exit 2
     bad=$(mktemp) || exit 2
     list_files > "$files"
-    # 1. by name and location
+    # 1. by name and location (extensions case-insensitively)
     while IFS= read -r f; do
         base=${f##*/}
         case $f in
-            .github/workflows|.github/workflows/*|.github/dependabot.yml|.github/dependabot.yaml) echo "$f: GitHub CI configuration" ;;
-            .circleci|.circleci/*|*/.circleci/*|.travis.yml|*/.travis.yml|.gitlab-ci.yml|*/.gitlab-ci.yml|.cirrus.yml|*/.cirrus.yml) echo "$f: hosted CI configuration" ;;
+            .github/workflows|.github/workflows/*|.github/actions|.github/actions/*|.github/dependabot.yml|.github/dependabot.yaml) echo "$f: GitHub CI configuration" ;;
+            .circleci|.circleci/*|*/.circleci/*|.buildkite|.buildkite/*|*/.buildkite/*|.woodpecker|.woodpecker/*|*/.woodpecker/*) echo "$f: hosted CI configuration" ;;
             *) case $base in
-                   *.py|*.pyw) echo "$f: Python source" ;;
+                   *.[Pp][Yy]|*.[Pp][Yy][Ww]|*.[Pp][Yy][Cc]|*.[Pp][Yy][Ii]|*.[Pp][Yy][Xx]|*.[Ii][Pp][Yy][Nn][Bb]) echo "$f: Python source or bytecode" ;;
                    requirements*.txt|constraints*.txt|setup.cfg|pyproject.toml|Pipfile|Pipfile.lock|poetry.lock|tox.ini) echo "$f: Python packaging file" ;;
-                   appveyor.yml|.appveyor.yml|azure-pipelines.yml|Jenkinsfile) echo "$f: hosted CI configuration" ;;
+                   .travis.yml|.gitlab-ci.yml|.cirrus.yml|.drone.yml|.woodpecker.yml|.woodpecker.yaml|appveyor.yml|.appveyor.yml|azure-pipelines.yml|Jenkinsfile|bitbucket-pipelines.yml) echo "$f: hosted CI configuration" ;;
                esac ;;
         esac
     done < "$files" >> "$bad"
-    # 2. python shebangs (first line only); text files are enough, so skip links and non-files
-    while IFS= read -r f; do
-        [ -f "$root/$f" ] && [ ! -L "$root/$f" ] || continue
-        first=$(head -n 1 "$root/$f" 2>/dev/null | head -c 200 | tr -d '\000')
-        case $first in
-            '#!'*python*) echo "$f: Python shebang" >> "$bad" ;;
-        esac
-    done < "$files"
+    # 2. python shebangs on any line (a shebang is only honoured on line 1, but a copied or
+    #    generated script keeps working wherever it sits); text files only
+    ( cd "$root" && tr '\n' '\0' < "$files" | xargs -0 grep -HnIE '^#![[:space:]]*([^[:space:]]*/)?(env[[:space:]]+)?[^[:space:]]*python' 2>/dev/null ) |
+        sed 's/^\([^:]*\):\([0-9]*\):.*/\1: Python shebang on line \2/' >> "$bad"
+    # 3. python / pip invoked as a command in any tracked text file. Prose that merely names
+    #    the word (history of the project, release notes) is allowed by path prefix.
+    ( cd "$root" && tr '\n' '\0' < "$files" | xargs -0 grep -HnIE "(^|[[:space:];&|(\`\"'])(/usr/bin/env[[:space:]]+)?(python[0-9.]*|pip[0-9.]*)[[:space:]]+(-[a-zA-Z-]+|[^[:space:]]*\.py|install|download|list|freeze)([[:space:]]|\$)|[|;&\`(][[:space:]]*(python[0-9.]*|pip[0-9.]*)[[:space:]]*(\$|[|;&)\`])|env[[:space:]]+(python[0-9.]*|pip[0-9.]*)([[:space:]]|\$)" 2>/dev/null ) |
+        sed 's/^\([^:]*\):\([0-9]*\):.*/\1: python or pip invocation on line \2/' |
+        while IFS= read -r l; do
+            p=${l%%: *}; skip=0
+            for a in $PROSE_OK; do case $p in "$a"*) skip=1 ;; esac; done
+            [ "$skip" = 1 ] || printf '%s\n' "$l"
+        done >> "$bad"
     # exceptions (empty by policy)
     for e in $EXCEPTIONS; do grep -v "^$e: " "$bad" > "$bad.x"; mv "$bad.x" "$bad"; done
     n=$(wc -l < "$bad" | tr -d ' ')
@@ -98,6 +107,32 @@ self_test() {
     case_ ".gitlab-ci.yml" ".gitlab-ci.yml"
     case_ "a .circleci config" ".circleci/config.yml"
     case_ "appveyor.yml" "appveyor.yml"
+    case_ "a .PY file (upper case)" "tools/X.PY"
+    case_ "a mixed-case .Py file" "tools/y.Py"
+    case_ "a .pyc file" "tools/z.pyc"
+    case_ "a .pyi file" "tools/z.pyi"
+    case_ "a .pyx file" "tools/z.pyx"
+    case_ "a Jupyter notebook" "doc/n.ipynb"
+    case_ "a shebang that is not on line 1" "bin/late" "$(printf '# header
+#
+#!/usr/bin/env %s' python3)"
+    case_ "python3 invoked on a script" "build/gen.sh" 'python3 tools/gen.py --x'
+    case_ "python -c in a command" "build/c.sh" 'x=$(python -c "print(1)")'
+    case_ "pip install" "build/p.sh" 'pip install foo'
+    case_ "pip3 -m" "build/p3.sh" 'sudo pip3 --version'
+    case_ "python at the end of a pipe" "build/pipe.sh" 'echo {} | python3'
+    case_ "env python in a recipe" "Makefile.inc" '	/usr/bin/env python tool'
+    case_ ".github/actions" ".github/actions/setup/action.yml"
+    case_ ".buildkite" ".buildkite/pipeline.yml"
+    case_ ".drone.yml" ".drone.yml"
+    case_ ".woodpecker.yml" ".woodpecker.yml"
+    case_ ".woodpecker directory" ".woodpecker/build.yml"
+    case_ "a .travis.yml in the root" ".travis.yml"
+    # prose that merely names python is fine, in a normal file and in the allowed history tree
+    rm -rf "$t/tree"; mkdir -p "$t/tree/zcutil" "$t/tree/doc/history"; cp "$0" "$t/tree/zcutil/check-no-python.sh"
+    printf 'We removed python from the build; the python era is over.\n' > "$t/tree/README.md"
+    printf 'Need `ca-certificates` and `python` for LXC builds\n' > "$t/tree/doc/history/notes.md"
+    if sh "$t/tree/zcutil/check-no-python.sh" >/dev/null 2>&1; then echo "PASS prose that mentions python"; else echo "FAIL prose that mentions python" >&2; fails=$((fails + 1)); fi
     # shell and C files that merely mention python are fine
     rm -rf "$t/tree"; mkdir -p "$t/tree/zcutil"; cp "$0" "$t/tree/zcutil/check-no-python.sh"
     printf '#!/bin/sh\n# no python here\n' > "$t/tree/s.sh"
