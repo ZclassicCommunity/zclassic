@@ -964,6 +964,8 @@ private slots:
     // --- First-run trust: send-gate staleness predicate (pure) ---
     void sendgate_staleWhenPollStops();               // Settings::syncGateIsStale boundary
     void cookie_staleRequestIsRetriedNotHealed();
+    void cookie_retryIsBoundedAndNeverForConfCredentials();
+    void profilefailure_boxIsSkippedWhereItCouldAbortOrBlock();
     void profilefailure_headlessModesKeepStderrOnly();
     void profilefailure_messageSaysWhatAndWhatToDo();
     void profile_unsetKeepsDefaults();
@@ -2454,6 +2456,52 @@ void TestLogic::cookie_staleRequestIsRetriedNotHealed() {
     QVERIFY(!CookieStale::sentCredsAreStale("zcl-qt-wallet", "secret", QString()));
     // a cookie value containing ':' is compared whole
     QVERIFY(!CookieStale::sentCredsAreStale("__cookie__", "a:b", "__cookie__:a:b"));
+}
+
+// The retry is bounded and has memory, so it can never starve the heal (a leftover .cookie
+// from a killed node plus a node that keeps answering 401 must reach the heal, not spin).
+void TestLogic::cookie_retryIsBoundedAndNeverForConfCredentials() {
+    using CookieStale::shouldRetry;
+    CookieStale::RetryState st;
+    // conf rpcuser/rpcpassword (not from the cookie path) + a different cookie on disk:
+    // the first 401 falls through to the heal and nothing is remembered
+    QVERIFY(!shouldRetry(false, "zcl-qt-wallet", "confpass", "__cookie__:Leftover", st));
+    QCOMPARE(st.retries, 0);
+    // empty credentials (cookie not yet written when the request went out): retried once
+    QVERIFY(shouldRetry(false, "", "", "__cookie__:First", st));
+    QCOMPARE(st.retries, 1);
+    // the retry carried that cookie (cookie auth) and still got 401: unchanged cookie -> heal
+    QVERIFY(!shouldRetry(true, "__cookie__", "First", "__cookie__:First", st));
+    // the request carried an older cookie than the one on disk, but that very cookie was
+    // already retried against: heal, no loop
+    QVERIFY(!shouldRetry(true, "__cookie__", "Old", "__cookie__:First", st));
+    // a genuinely newer cookie (node restarted again) is retried once more...
+    QVERIFY(shouldRetry(true, "__cookie__", "First", "__cookie__:Second", st));
+    QCOMPARE(st.retries, 2);
+    // ...but the hard cap is two retries per loader
+    QVERIFY(!shouldRetry(true, "__cookie__", "Second", "__cookie__:Third", st));
+    QCOMPARE(st.retries, CookieStale::kMaxRetries);
+    // no cookie on disk: never a retry
+    CookieStale::RetryState fresh;
+    QVERIFY(!shouldRetry(false, "", "", QString(), fresh));
+    // the state keeps only a hash, never the cookie
+    QCOMPARE(st.lastHash.size(), 32);
+}
+
+// The profile-folder message box is skipped where it would abort or block forever.
+void TestLogic::profilefailure_boxIsSkippedWhereItCouldAbortOrBlock() {
+    using ProfileFailure::boxPossible;
+    QVERIFY(!boxPossible("offscreen", ":0", true, true));
+    QVERIFY(!boxPossible("offscreen:fontdir=/x", ":0", true, true));
+    QVERIFY(!boxPossible("minimal", ":0", true, true));
+    QVERIFY(!boxPossible("", ":99", false, true));        // DISPLAY set but no X socket: would abort (134)
+    QVERIFY(!boxPossible("", "", false, true));           // no DISPLAY
+    QVERIFY(!boxPossible("", "remote:0", true, true));    // not a local display: do not risk it
+    QVERIFY(boxPossible("", ":0", true, true));
+    QVERIFY(boxPossible("xcb", ":1.0", true, true));
+    QVERIFY(boxPossible("", QString(), true, false));     // macOS: no display check
+    QVERIFY(!ProfileFailure::x11SocketFor("remote:0"));
+    QVERIFY(!ProfileFailure::x11SocketFor(":notanumber"));
 }
 
 // A bad profile dir must be visible (Windows GUI has no console) but headless modes

@@ -12,6 +12,7 @@
 #include <QApplication>
 #include <QByteArray>
 #include <QDir>
+#include <QFileInfo>
 #include <QMessageBox>
 #include <QString>
 #include <cstdio>
@@ -69,8 +70,31 @@ inline QMessageBox* makeBox(const QString& dir) {
     return new QMessageBox(QMessageBox::Critical, dialogTitle(), dialogText(dir), QMessageBox::Ok);
 }
 
+// Can a Qt message box be shown without aborting or blocking forever? Not on a headless Qt
+// platform (offscreen would exec() forever), and, with `needX11` (Linux), only when DISPLAY
+// is a local ":N[.M]" whose X socket exists (an unreachable display makes QApplication
+// abort, exit 134 instead of 2). Prefer not showing over aborting; stderr still has the line.
+inline bool boxPossible(const QString& qpa, const QString& display, bool x11SocketExists, bool needX11) {
+    if (qpa.startsWith(QLatin1String("offscreen")) || qpa.startsWith(QLatin1String("minimal")))
+        return false;
+    if (!needX11) return true;
+    return display.startsWith(QLatin1Char(':')) && x11SocketExists;
+}
+
+// Local X socket for a DISPLAY of the form ":N[.M]".
+inline bool x11SocketFor(const QString& display) {
+    if (!display.startsWith(QLatin1Char(':'))) return false;
+    QString n = display.mid(1);
+    const int dot = n.indexOf(QLatin1Char('.'));
+    if (dot >= 0) n.truncate(dot);
+    bool ok = false;
+    n.toInt(&ok);
+    return ok && QFileInfo::exists(QStringLiteral("/tmp/.X11-unix/X") + n);
+}
+
 // Show the message and return. Windows uses the native box (no Qt objects are alive
-// yet); elsewhere a QMessageBox is shown only when a display is reachable.
+// yet); elsewhere a QMessageBox is shown only when boxPossible(); the exit code is the
+// caller's and is the same on every path.
 inline void showDialog(const QString& dir) {
 #ifdef Q_OS_WIN
     const std::wstring text = dialogText(dir).toStdWString();
@@ -78,10 +102,14 @@ inline void showDialog(const QString& dir) {
     MessageBoxW(nullptr, text.c_str(), title.c_str(), MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
 #else
 #ifdef Q_OS_LINUX
-    if (qEnvironmentVariableIsEmpty("DISPLAY") && qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY"))
-        return;   // no display: the stderr line is the message
-    if (!qEnvironmentVariableIsSet("QT_QPA_PLATFORM") && !qEnvironmentVariableIsEmpty("DISPLAY"))
+    const QString display = QString::fromLocal8Bit(qgetenv("DISPLAY"));
+    if (!boxPossible(QString::fromLocal8Bit(qgetenv("QT_QPA_PLATFORM")), display, x11SocketFor(display), true))
+        return;   // no usable display: the stderr line is the message
+    if (!qEnvironmentVariableIsSet("QT_QPA_PLATFORM"))
         qputenv("QT_QPA_PLATFORM", QByteArray("xcb"));
+#else
+    if (!boxPossible(QString::fromLocal8Bit(qgetenv("QT_QPA_PLATFORM")), QString(), true, false))
+        return;
 #endif
     static int argc = 1;
     static char name[] = "zclwallet";

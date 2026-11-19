@@ -2,6 +2,7 @@
 #define CONNECTION_H
 
 #include "mainwindow.h"
+#include "cookiestale.h"
 #include "ui_connection.h"
 #include "precompiled.h"
 #include <atomic>
@@ -308,6 +309,7 @@ private:
     // detect that the loader was destroyed (use_count drops to 1 / the bool is false)
     // and bail before touching any freed member. Reset/destroyed in the destructor.
     std::shared_ptr<bool> ezAlive = std::make_shared<bool>(true);
+    CookieStale::RetryState cookieRetry;   // bounded memory for retryWithCurrentCookie (cookiestale.h)
 
     // Optional getbootstrapinfo enrichment: tri-state cache so an old daemon is
     // probed at most once. -1 unknown, 0 absent, 1 present.
