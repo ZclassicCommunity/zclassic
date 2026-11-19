@@ -39,7 +39,7 @@ src/net.*|src/netoutbound.*|src/protocol.*|src/netbase.*|src/addrman.*|src/banli
 src/torcontrol.*|src/embeddedtor.*|src/torwatch.*|src/c23/tor/*	boost:torcontrol_tests boost:embeddedtor_tests boost:torwatch_tests boost:bootstrap_onion_tests boost:onion_v3_tests
 
 # ---- RPC and utilities
-src/rpc/*|src/httprpc.*|src/httpserver.*|src/asyncrpc*	boost:rpc_tests gtest:rpc gtest:HTTPRPC gtest:AsyncRPCOperationId
+src/syncphase.*|src/rpc/*|src/httprpc.*|src/httpserver.*|src/asyncrpc*	boost:rpc_tests gtest:rpc gtest:HTTPRPC gtest:AsyncRPCOperationId
 src/util.*|src/utilstrencodings.*|src/utiltime.*|src/utilmoneystr.*	boost:util_tests boost:getarg_tests boost:base32_tests boost:base64_tests boost:convertbits_tests
 src/init.cpp|src/paramcache.*	boost:paramcache_tests boost:shutdownmarker_tests qa:qa/rpc-tests/chain_clean_shutdown_marker.sh
 src/serialize.h|src/streams.h|src/prevector.h|src/uint256.*|src/arith_uint256.*	boost:serialize_tests boost:PrevectorTests boost:uint256_tests boost:arith_uint256_tests

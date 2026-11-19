@@ -106,6 +106,7 @@ BITCOIN_TESTS =\
   test/sighashtype_tests.cpp \
   test/sigopcount_tests.cpp \
   test/skiplist_tests.cpp \
+  test/syncphase_tests.cpp \
   test/test_bitcoin.cpp \
   test/test_bitcoin.h \
   test/timedata_tests.cpp \

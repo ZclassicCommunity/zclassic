@@ -201,6 +201,7 @@ BITCOIN_CORE_H = \
   rpc/protocol.h \
   rpc/rpcstats.h \
   rpc/server.h \
+  rpc/nodestatus.h \
   rpc/register.h \
   scheduler.h \
   script/sighashtype.h \
@@ -222,6 +223,7 @@ BITCOIN_CORE_H = \
   support/events.h \
   support/pagelocker.h \
   sync.h \
+  syncphase.h \
   threadsafety.h \
   timedata.h \
   tinyformat.h \
@@ -342,6 +344,7 @@ libbitcoin_server_a_SOURCES = \
   rpc/mining.cpp \
   rpc/misc.cpp \
   rpc/net.cpp \
+  rpc/nodestatus.cpp \
   rpc/rpcstats.cpp \
   rpc/rawtransaction.cpp \
   rpc/server.cpp \
@@ -354,6 +357,7 @@ libbitcoin_server_a_SOURCES = \
   znam/znamservice.cpp \
   script/sigcache.cpp \
   shieldedcache.cpp \
+  syncphase.cpp \
   timedata.cpp \
   torcontrol.cpp \
   torwatch.cpp \
