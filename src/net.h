@@ -217,6 +217,10 @@ std::set<CNetAddr> PeerReportedLocal(const std::vector<std::pair<CNetAddr, CNetA
 /** Whether the system has a global, non-Teredo IPv6 source address to route to the IPv6
  *  internet (asked of the OS without sending anything; cached for a minute). */
 bool HostHasIPv6Route();
+/** The hosts of the -addnode entries still in vAdded, from mapResolved (address -> the entry
+ *  it was resolved from): an entry removed with addnode remove no longer keeps its host out
+ *  of the outbound selection, even before the next -addnode round re-resolves the list. */
+std::set<CNetAddr> CurrentAddNodeHosts(const std::map<CNetAddr, std::string>& mapResolved, const std::vector<std::string>& vAdded);
 /** The fixed seeds go into the table while it holds fewer addresses than this. */
 static const size_t FIXED_SEEDS_THIN_TABLE = 16;
 bool FixedSeedsWanted(size_t nTableSize);

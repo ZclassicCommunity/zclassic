@@ -924,6 +924,39 @@ BOOST_AUTO_TEST_CASE(outbound_candidate_skip_hosts)
     SetLimited(NET_IPV6, l6);
 }
 
+// An -addnode host is kept out of the outbound selection only while its entry is in the
+// -addnode list: after addnode remove it is dialled again on its normal port.
+BOOST_AUTO_TEST_CASE(addnode_remove_frees_host)
+{
+    bool l4 = IsLimited(NET_IPV4);
+    SetLimited(NET_IPV4, false);
+    const unsigned short port = Params().GetDefaultPort();
+    const int64_t now = GetAdjustedTime();
+    std::map<CNetAddr, std::string> mapResolved;
+    mapResolved[CNetAddr("74.50.74.102")] = "74.50.74.102:8035";
+    mapResolved[CNetAddr("205.209.104.118")] = "205.209.104.118:8035";
+    std::vector<std::string> vAdded;
+    vAdded.push_back("74.50.74.102:8035");
+    vAdded.push_back("205.209.104.118:8035");
+    BOOST_CHECK_EQUAL(CurrentAddNodeHosts(mapResolved, vAdded).size(), 2U);
+
+    vAdded.erase(vAdded.begin());   // addnode 74.50.74.102:8035 remove
+    std::set<CNetAddr> setHosts = CurrentAddNodeHosts(mapResolved, vAdded);
+    BOOST_CHECK_EQUAL(setHosts.size(), 1U);
+    BOOST_CHECK(!setHosts.count(CNetAddr("74.50.74.102")));
+    BOOST_CHECK(setHosts.count(CNetAddr("205.209.104.118")));
+
+    CAddrMan man;
+    CAddress server = MakeV4("74.50.74.102", port, 1, now - 3600);
+    BOOST_REQUIRE(man.Add(server, CNetAddr("93.184.216.1")));
+    COutboundSkip skip;
+    skip.hosts = setHosts;
+    std::set<std::vector<unsigned char> > setConnected;
+    BOOST_CHECK(SelectOutboundCandidate(man, setConnected, now, skip) == server);
+    BOOST_CHECK(CurrentAddNodeHosts(mapResolved, std::vector<std::string>()).empty());
+    SetLimited(NET_IPV4, l4);
+}
+
 // The fixed seeds go into the table while it is thin (a fresh start), not only after a
 // minute with an empty table.
 BOOST_AUTO_TEST_CASE(fixed_seeds_thin_table)

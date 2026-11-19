@@ -89,8 +89,10 @@ limitedmap<CInv, int64_t> mapAlreadyAskedFor(MAX_INV_SZ);
 static deque<string> vOneShots;
 static CCriticalSection cs_vOneShots;
 
-static set<CNetAddr> setservAddNodeAddresses;
-static CCriticalSection cs_setservAddNodeAddresses;
+/** The addresses the -addnode entries resolved to, each with its entry, rebuilt by every
+ *  round of ThreadOpenAddedConnections. */
+static std::map<CNetAddr, std::string> mapAddNodeAddresses;
+static CCriticalSection cs_mapAddNodeAddresses;
 
 vector<std::string> vAddedNodes;
 CCriticalSection cs_vAddedNodes;
@@ -1646,6 +1648,16 @@ bool HostHasIPv6Route()
     return fRoute;
 }
 
+std::set<CNetAddr> CurrentAddNodeHosts(const std::map<CNetAddr, std::string>& mapResolved, const std::vector<std::string>& vAdded)
+{
+    const std::set<std::string> setAdded(vAdded.begin(), vAdded.end());
+    std::set<CNetAddr> setHosts;
+    for (const auto& entry : mapResolved)
+        if (setAdded.count(entry.second))
+            setHosts.insert(entry.first);
+    return setHosts;
+}
+
 static void OpenConnectionsLoop(int nDialer);
 
 void ThreadOpenConnections()
@@ -1742,10 +1754,18 @@ static void OpenConnectionsLoop(int nDialer)
         // an address), and the -addnode hosts (the bootstrap servers among them).
         COutboundSkip skip;
         skip.hosts = PeerReportedLocal(vReportedLocal);
+        std::vector<std::string> vAddedNow;
         {
-            LOCK(cs_setservAddNodeAddresses);
-            skip.hosts.insert(setservAddNodeAddresses.begin(), setservAddNodeAddresses.end());
+            LOCK(cs_vAddedNodes);
+            vAddedNow = vAddedNodes;
         }
+        std::map<CNetAddr, std::string> mapAddNodeNow;
+        {
+            LOCK(cs_mapAddNodeAddresses);
+            mapAddNodeNow = mapAddNodeAddresses;
+        }
+        std::set<CNetAddr> setAddNodeHosts = CurrentAddNodeHosts(mapAddNodeNow, vAddedNow);
+        skip.hosts.insert(setAddNodeHosts.begin(), setAddNodeHosts.end());
         proxyType proxyIPv6;
         skip.fNoIPv6Route = !IsLimited(NET_IPV6) && !GetProxy(NET_IPV6, proxyIPv6) && !HostHasIPv6Route();
 
@@ -1817,17 +1837,20 @@ void ThreadOpenAddedConnections()
         }
 
         list<vector<CService> > lservAddressesToAdd(0);
+        std::map<CNetAddr, std::string> mapResolved;
         BOOST_FOREACH(const std::string& strAddNode, lAddresses) {
             vector<CService> vservNode(0);
             if(Lookup(strAddNode.c_str(), vservNode, Params().GetDefaultPort(), fNameLookup, 0))
             {
                 lservAddressesToAdd.push_back(vservNode);
-                {
-                    LOCK(cs_setservAddNodeAddresses);
-                    BOOST_FOREACH(const CService& serv, vservNode)
-                        setservAddNodeAddresses.insert(serv);
-                }
+                BOOST_FOREACH(const CService& serv, vservNode)
+                    mapResolved[serv] = strAddNode;
             }
+        }
+        {
+            // rebuilt each round, so an entry removed with addnode remove stops counting
+            LOCK(cs_mapAddNodeAddresses);
+            mapAddNodeAddresses.swap(mapResolved);
         }
         // Attempt to connect to each IP for each addnode entry until at least one is successful per addnode entry
         // (keeping in mind that addnode entries can have many IPs if fNameLookup)
