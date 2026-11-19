@@ -62,7 +62,8 @@ scripts.
 
 ## What it reads
 
-- Bash: segments, quoting, `sh -c`, `eval`, `ssh` (also `ssh host -- command`), heredocs, `$( )`,
+- Bash: segments, quoting, `sh -c`, `eval`, `ssh` (also `ssh host -- command`; the remote command is
+  read with the sh rules and with the PowerShell rules, since the host may be Windows), heredocs, `$( )`,
   `NAME=value`, `cd`, `xargs` and `cmd /c`, `cmd //c`, `cmd.exe /k` (rescanned with the cmd/PowerShell
   rules).
 - Pipelines: the literal text of `echo`, `printf`, `cat <<EOF` or a here-string that feeds `sh`,
@@ -83,14 +84,29 @@ scripts.
   production node. `-regtest -datadir="$dd"` (a variable) and `-regtest` alone are test calls: the
   regtest node has its own port and wallet. `curl -d '{"method":"sendtoaddress"}'` is a test call
   when the URL names a numeric port other than 8023, 8232, 8233, 8332 or 8033-8035.
-- Datadir names: `.zclassic*` and `.zcash-params` count where the node keeps them (the home, `/home/u`,
-  `/Users/u`, `/root`, the Windows spellings, a bare relative name after a `cd`); the same name under
-  `/tmp`, `$TMPDIR`, `$(mktemp -d)` or an unknown variable (`$D/.zclassic`) is a scratch copy. A
-  `-datadir` held in a variable is a test directory when its name says so (`$work`, `$tmp`,
-  `$testdir`, `$dd`, `$scratch`).
-- `git push`: a named branch other than master is ordinary, `--force-with-lease` too. Refused: master,
-  `--force`, `-f`, `+ref`, `--delete`, `--all`, `--mirror`, and a push that names no branch (a bare
-  `git push`, `origin`, `HEAD`) only when the repository at the hook's `cwd` is on master.
+- Datadir names: only the exact default names count, `.zclassic` and `.zcash-params` (and
+  `%APPDATA%\Zclassic`, `%APPDATA%\ZcashParams`); `.zclassic-test`, `.zclassic-c23` and the like are
+  not the default datadir. They count where the node keeps them (the home, `/home/u`, `/Users/u`,
+  `/root`, the Windows spellings, a bare relative name after a `cd`); the same name under `/tmp`,
+  `$TMPDIR`, `$(mktemp -d)` or an unknown variable (`$D/.zclassic`) is a scratch copy. **An unknown
+  variable is never taken to be the default datadir, for deletes and for reindex alike**
+  (`rm -rf "$D/.zclassic"`, `zclassicd -reindex -datadir="$DATADIR"` are allowed). A `-datadir` held
+  in a variable is a test directory when its name says so (`$work`, `$tmp`, `$testdir`, `$dd`).
+- `zclassicd`: starting a node, also on the default datadir, is allowed (it is not on the never-do
+  list). `-reindex`, `-reindex-chainstate` and `-rescan` are refused only on the default datadir: with
+  no `-datadir` or `-conf` at all (also with `-testnet`), or with one that names `~/.zclassic` or
+  `%APPDATA%\Zclassic`; an explicit other `-datadir` is a copy (replay, benchmark) and is fine;
+  `-regtest` is always fine. A test program (`test_bitcoin`, `zcash-gtest`) on the default datadir is
+  refused. `Start-Process -FilePath zclassicd.exe -ArgumentList ...` is judged by the program's own
+  flags, like the positional form.
+- `git push`: refused are master and release refs (`release`, `release/*`), also by a force or a
+  delete, `--all`, `--mirror`, and a push that names no branch (a bare `git push`, `origin`, `HEAD`)
+  when the current branch is master. The current branch is the one a `git checkout -b X`, `git switch
+  -c X`, `git checkout X` or `git switch X` earlier in the same command put us on, else HEAD of the
+  repository found by walking up from the working directory (`git -C dir` and `cd dir` move it).
+  Allowed: any named feature branch, `--force-with-lease`, a delete of any other branch (`:feature`,
+  `--delete`), and a plain force of a branch other than master or release (`--force`, `-f`, `+ref`),
+  which also prints a note on stderr.
 - Git identity: the fleet commits as the owner with `git -c user.name=... -c user.email=... commit` on
   hosts that carry no identity, so an override is ordinary and allowed. Refused is authoring as the
   tool itself: `-c user.*`, `git config user.*`, `--author`, `GIT_AUTHOR_*`, `GIT_COMMITTER_*` and `EMAIL`
@@ -148,8 +164,9 @@ kept in the header of `rules.c`; the main ones:
 - Git: `gh api` is checked only for writes to `heads/master`; `gh pr merge` and other endpoints that
   land on master are not; `git push origin $(echo master)` is allowed; `git init x && git config
   user.name` in the real repository is allowed (the scratch-repository exemption is by the text);
-  `git push origin HEAD` is judged by the branch of the repository at `cwd`, and allowed when it
-  cannot be read; remote branch deletes and `--force` are refused even on a feature branch.
+  `git push origin HEAD` is judged as described above, and allowed when the branch cannot be read. `git checkout <file>` reads as a
+  branch switch, a `cd` into a variable or a subshell is not followed, and a `git -C` into a variable is
+  not read.
 - Bash and PowerShell writes to sealed consensus files (`sed -i`, `patch`, `git apply`) give no
   `guard.consensus_seal` warning; only Edit, Write and MultiEdit do. The sealed list is hard-coded (a
   selftest compares it with `zcutil/consensus.seal` when that file exists).

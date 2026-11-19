@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "rules.h"
+#include "rules_int.h"
 
 bool ag_rule_is_warning(const char *rule)
 {
@@ -49,4 +50,24 @@ const char *ag_rule_text(const char *rule)
     for (size_t i = 0; rule && i < sizeof table / sizeof table[0]; i++)
         if (strcmp(table[i].rule, rule) == 0) return table[i].why;
     return "refused";
+}
+
+/* The sealed consensus set (zcutil/consensus.seal): edits warn, they do not refuse. */
+bool ag_is_sealed_path(const char *w)
+{
+    static const char *const dirs[] = {"src/consensus", "src/primitives", "src/pow"};
+    static const char *const files[] = {
+        "src/pow.cpp", "src/pow.h", "src/script/interpreter.cpp", "src/script/interpreter.h",
+        "src/script/script.cpp", "src/script/script.h", "src/chainparams.cpp",
+        "src/zcash/JoinSplit.cpp", "src/zcash/JoinSplit.hpp", "src/zcash/Note.cpp",
+        "src/zcash/Note.hpp", "src/zcash/NoteEncryption.cpp", "src/zcash/NoteEncryption.hpp",
+        "src/zcash/Proof.cpp", "src/zcash/Proof.hpp", "src/zcash/Address.cpp",
+        "src/zcash/Address.hpp", "src/zcash/IncrementalMerkleTree.cpp",
+        "src/zcash/IncrementalMerkleTree.hpp"};
+    for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++)
+        if (ag_path_has(w, dirs[i], true))
+            return strcmp(dirs[i], "src/pow") != 0 || !ag_path_has(w, "src/pow/tromp", true);
+    for (size_t i = 0; i < sizeof files / sizeof files[0]; i++)
+        if (ag_path_has(w, files[i], false)) return true;
+    return false;
 }

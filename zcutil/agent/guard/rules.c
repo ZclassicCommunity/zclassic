@@ -630,38 +630,6 @@ static bool is_assign(const char *w)
     return *w == '=';
 }
 
-static bool is_identity_key(const char *k);
-
-/* True when s (any case) contains an identity config key: user.name, user.email, author.*,
- * committer.* (GIT_CONFIG_PARAMETERS carries "'user.name=x'" style text). */
-static bool mentions_identity_key(const char *s)
-{
-    static const char *const keys[] = {"user.name", "user.email", "author.", "committer."};
-    for (size_t k = 0; k < sizeof keys / sizeof keys[0]; k++) {
-        size_t m = strlen(keys[k]);
-        for (size_t i = 0; s[i]; i++)
-            if (strncasecmp(s + i, keys[k], m) == 0) return true;
-    }
-    return false;
-}
-
-static bool is_identity_env(const char *w)
-{
-    static const char *const names[] = {
-        "GIT_AUTHOR_NAME=", "GIT_AUTHOR_EMAIL=", "GIT_COMMITTER_NAME=",
-        "GIT_COMMITTER_EMAIL=", "EMAIL="};
-    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
-        if (strncmp(w, names[i], strlen(names[i])) == 0) return ag_agent_identity(w + strlen(names[i]));
-    if (strncmp(w, "GIT_CONFIG_PARAMETERS=", 22) == 0)
-        return mentions_identity_key(w + 22) && ag_agent_identity(w + 22);
-    if (strncmp(w, "GIT_CONFIG_KEY_", 15) == 0) {
-        const char *p = w + 15;
-        while (isdigit((unsigned char)*p)) p++;
-        return *p == '=' && p > w + 15 && is_identity_key(p + 1);
-    }
-    return false;
-}
-
 static bool in_list(const char *w, const char *const *list, size_t n)
 {
     for (size_t i = 0; i < n; i++)
@@ -765,7 +733,7 @@ static int find_cmd(char **w, int n, struct pinfo *pi)
     while (i < n) {
         int sk;
         if (is_assign(w[i])) {
-            if (is_identity_env(w[i])) pi->id_assign = true;
+            if (ag_is_identity_env(w[i])) pi->id_assign = true;
             i++;
         } else if (is_keyword(w[i])) {
             i++;
@@ -854,7 +822,7 @@ static void dd_gap(struct ddscan *d, const char *g, const char *end)
 /* .zclassic* or .zcash-params in a place where the node keeps them (see rules_home.c). */
 static bool dd_dotname(const struct ddscan *d, const char *p, size_t n)
 {
-    if (!comp_starts_ci(p, n, ".zclassic") && !comp_starts_ci(p, n, ".zcash-params")) return false;
+    if (!comp_is_ci(p, n, ".zclassic") && !comp_is_ci(p, n, ".zcash-params")) return false;
     return d->np > 16 || ag_dd_name_in_home(d->pre, d->prl, d->np);
 }
 
@@ -910,26 +878,6 @@ static bool is_vendor_path(const char *w)
 static bool is_workflow_path(const char *w)
 {
     return ag_path_has(w, ".github/workflows", true);
-}
-
-/* The sealed consensus set (zcutil/consensus.seal): edits warn, they do not refuse. */
-static bool is_sealed_path(const char *w)
-{
-    static const char *const dirs[] = {"src/consensus", "src/primitives", "src/pow"};
-    static const char *const files[] = {
-        "src/pow.cpp", "src/pow.h", "src/script/interpreter.cpp", "src/script/interpreter.h",
-        "src/script/script.cpp", "src/script/script.h", "src/chainparams.cpp",
-        "src/zcash/JoinSplit.cpp", "src/zcash/JoinSplit.hpp", "src/zcash/Note.cpp",
-        "src/zcash/Note.hpp", "src/zcash/NoteEncryption.cpp", "src/zcash/NoteEncryption.hpp",
-        "src/zcash/Proof.cpp", "src/zcash/Proof.hpp", "src/zcash/Address.cpp",
-        "src/zcash/Address.hpp", "src/zcash/IncrementalMerkleTree.cpp",
-        "src/zcash/IncrementalMerkleTree.hpp"};
-    for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++)
-        if (ag_path_has(w, dirs[i], true))
-            return strcmp(dirs[i], "src/pow") != 0 || !ag_path_has(w, "src/pow/tromp", true);
-    for (size_t i = 0; i < sizeof files / sizeof files[0]; i++)
-        if (ag_path_has(w, files[i], false)) return true;
-    return false;
 }
 
 /* ---- py names, guard files, globs, braces, folded paths ------------------ */
@@ -1390,18 +1338,6 @@ static const char *check_python(const struct cmdv *v)
     return NULL;
 }
 
-static bool is_identity_key(const char *k)
-{
-    char lower[24];
-    size_t n = strcspn(k, "=");
-    if (n == 0 || n >= sizeof lower) return false;
-    for (size_t i = 0; i < n; i++) lower[i] = (char)tolower((unsigned char)k[i]);
-    lower[n] = '\0';
-    if (k[n] == '=' && !ag_agent_identity(k + n + 1)) return false; /* an owner or person override */
-    return strcmp(lower, "user.name") == 0 || strcmp(lower, "user.email") == 0 ||
-           strncmp(lower, "author.", 7) == 0 || strncmp(lower, "committer.", 10) == 0;
-}
-
 /* Collect the positional words of a git config call. Returns false for a
  * read-only form (--get*, --list); *unset reports an unset-style option. */
 static bool config_positionals(char **a, int na, const char **pos, int *np,
@@ -1434,7 +1370,7 @@ static bool config_sets_identity(char **a, int na)
         unset = unset || strcmp(pos[0], "unset") == 0;
         k = 1;
     }
-    if (np <= k || !is_identity_key(pos[k])) return false;
+    if (np <= k || !ag_is_identity_key(pos[k])) return false;
     return unset || (np > k + 1 && ag_agent_identity(pos[k + 1]));
 }
 
@@ -1456,7 +1392,7 @@ static const char *config_sets_hazard(char **a, int na, int depth)
     for (size_t i = 0; i <= n; i++) key[i] = (char)tolower((unsigned char)pos[k][i]);
     if (strncmp(key, "remote.", 7) == 0 && (ends_ci(key, ".push") || ends_ci(key, ".mirror")))
         return R_PUSH;
-    if (strncmp(key, "alias.", 6) == 0 && mentions_identity_key(pos[k + 1])) return R_IDENT;
+    if (strncmp(key, "alias.", 6) == 0 && ag_mentions_identity_key(pos[k + 1])) return R_IDENT;
     if (strncmp(key, "alias.", 6) == 0 && pos[k + 1][0] == '!') /* a shell alias runs as a command */
         return eval_buf(pos[k + 1] + 1, strlen(pos[k + 1] + 1), depth + 1);
     return NULL;
@@ -1469,10 +1405,10 @@ static int git_subcommand(char **a, int na, bool *bad)
     int i = 0;
     while (i < na && a[i][0] == '-') {
         if (strncmp(a[i], "-c", 2) == 0 && a[i][2] != '\0') {
-            if (is_identity_key(a[i] + 2)) *bad = true;
+            if (ag_is_identity_key(a[i] + 2)) *bad = true;
             i++;
         } else if (strcmp(a[i], "-c") == 0 && i + 1 < na) {
-            if (is_identity_key(a[i + 1])) *bad = true;
+            if (ag_is_identity_key(a[i + 1])) *bad = true;
             i += 2;
         } else if (strcmp(a[i], "-C") == 0 || strcmp(a[i], "--git-dir") == 0 ||
                    strcmp(a[i], "--work-tree") == 0 || strcmp(a[i], "--namespace") == 0) {
@@ -1557,6 +1493,15 @@ static const char *git_alias_rule(const struct cmdv *v, int si)
     return NULL;
 }
 
+/* The value of the last `git -C <dir>` before the subcommand at si, or NULL. */
+static const char *git_dash_c(const struct cmdv *v, int si)
+{
+    const char *dir = NULL;
+    for (int i = 0; i + 1 < si; i++)
+        if (strcmp(v->a[i], "-C") == 0) dir = v->a[i + 1];
+    return dir;
+}
+
 static const char *check_git(const struct cmdv *v)
 {
     bool bad = false;
@@ -1570,7 +1515,8 @@ static const char *check_git(const struct cmdv *v)
     sub = v->a[si];
     if (strcmp(sub, "init") == 0) g_git_init = true;
     if (strcmp(sub, "push") == 0 || strcmp(sub, "send-pack") == 0)
-        return ag_push_rule(v->a + si + 1, v->na - si - 1, v->cwd[0] ? v->cwd : g_hook_cwd);
+        return ag_push_rule(v->a + si + 1, v->na - si - 1, git_dash_c(v, si));
+    ag_git_note_branch(sub, v->a + si + 1, v->na - si - 1);
     if (strcmp(sub, "config") == 0)
         return config_sets_hazard(v->a + si + 1, v->na - si - 1, v->depth);
     return git_worktree_writer(v, si);
@@ -1581,7 +1527,7 @@ static const char *check_export(const struct cmdv *v)
     static const char *const decl[] = {"export", "declare", "typeset", "readonly"};
     if (!IN_LIST(v->cmd, decl)) return NULL;
     for (int i = 0; i < v->na; i++)
-        if (is_identity_env(v->a[i])) return R_IDENT;
+        if (ag_is_identity_env(v->a[i])) return R_IDENT;
     return NULL;
 }
 
@@ -1891,30 +1837,36 @@ static bool is_reindex_arg(const char *a)
 static const char *const node_progs[] = {"zclassicd", "zcashd", "test_bitcoin", "zcash-gtest",
                                          "zclassic-qt", "zcl-qt-wallet"};
 
-/* guard.reindex: -reindex, -reindex-chainstate or -rescan outside regtest or a test datadir. */
-static const char *check_reindex_args(const struct cmdv *v)
+static bool has_reindex_arg(const struct cmdv *v)
 {
-    if (!IN_LIST(v->cmd, node_progs) || is_regtest(v)) return NULL;
-    if (opt_dir_state(v, "-datadir") == DD_TEST) return NULL;
     for (int i = 0; i < v->na; i++)
-        if (is_reindex_arg(v->a[i])) return R_REINDEX;
-    return NULL;
+        if (is_reindex_arg(v->a[i])) return true;
+    return false;
 }
 
-/* guard.datadir for programs: an explicit -datadir must be a test temp directory, and a daemon
- * with neither -datadir nor -regtest would open the default node datadir. */
+/* guard.reindex: -reindex, -reindex-chainstate or -rescan on the default datadir: with no -datadir
+ * or -conf at all (also -testnet), or with one that names ~/.zclassic or %APPDATA%Zclassic. An
+ * explicit other -datadir is a copy (replay, benchmark) and is fine. */
+static const char *check_reindex_args(const struct cmdv *v)
+{
+    bool has_dir;
+    if (!IN_LIST(v->cmd, node_progs) || is_regtest(v) || !has_reindex_arg(v)) return NULL;
+    has_dir = opt_dir_state(v, "-datadir") != DD_NONE || opt_dir_state(v, "-conf") != DD_NONE;
+    if (!has_dir) return R_REINDEX; /* the default datadir (also with -testnet) */
+    /* an explicit -datadir or -conf is a copy unless it names the default place; an unknown
+     * variable is not known to be one, as for deletes (rm -rf "$D/.zclassic") */
+    return opt_dir_real(v, "-datadir") || opt_dir_real(v, "-conf") ? R_REINDEX : NULL;
+}
+
+/* guard.datadir for programs: a test program (test_bitcoin, zcash-gtest) must not open the default
+ * datadir. */
 static const char *check_daemon_datadir(const struct cmdv *v)
 {
     static const char *const daemons[] = {"zclassicd", "zcashd"};
-    int dd;
-    if (!IN_LIST(v->cmd, node_progs)) return NULL;
-    dd = opt_dir_state(v, "-datadir");
-    if (dd == DD_TEST) return NULL;
-    if (dd == DD_UNRESOLVED) return is_regtest(v) ? NULL : R_DATADIR;
-    /* -regtest keeps its files in <datadir>/regtest: any datadir that is not a node place is fine */
-    if (dd == DD_REAL) return is_regtest(v) && !opt_dir_real(v, "-datadir") ? NULL : R_DATADIR;
-    if (IN_LIST(v->cmd, daemons) && !is_regtest(v) && !info_only(v)) return R_DATADIR;
-    return NULL;
+    /* starting a node (also on the default datadir) is not on the never-do list; a test program
+     * that opens node state on the default datadir is */
+    if (!IN_LIST(v->cmd, node_progs) || IN_LIST(v->cmd, daemons)) return NULL;
+    return opt_dir_real(v, "-datadir") ? R_DATADIR : NULL;
 }
 
 /* guard.hosted_ci: gh workflow run, gh run rerun, and API workflow dispatches. */
@@ -2573,6 +2525,17 @@ static const char *nested_cmdexe(const struct cmdv *v)
     return NULL;
 }
 
+/* The remote host may run PowerShell (Windows): the remote command is also scanned with the
+ * PowerShell rules, and only a refusal of a never-do item counts (a warning or a cap hit on text
+ * that is really sh does not). */
+static const char *ssh_powershell_rule(const struct cmdv *v, int i)
+{
+    bool saved = g_complex;
+    const char *r = eval_joined_as(v, i, true);
+    g_complex = saved;
+    return r && !ag_rule_is_warning(r) && strcmp(r, R_COMPLEX) != 0 ? r : NULL;
+}
+
 /* ssh: scan the remote command string. stdin is a script only when there is
  * no remote command (login shell) or the remote command is a shell. */
 static const char *nested_ssh(const struct cmdv *v, bool *script)
@@ -2580,6 +2543,7 @@ static const char *nested_ssh(const struct cmdv *v, bool *script)
     static const char *const ssh_opts =
         " -B -b -c -D -E -e -F -I -i -J -L -l -m -O -o -p -Q -R -S -W -w ";
     int i = 0;
+    const char *r;
     while (i < v->na && v->a[i][0] == '-')
         i += opt_takes_arg(ssh_opts, v->a[i]) ? 2 : 1;
     i++; /* the destination */
@@ -2589,7 +2553,8 @@ static const char *nested_ssh(const struct cmdv *v, bool *script)
     *script = i >= v->na;
     if (i >= v->na) return NULL;
     *script = is_shell_name(base_name(v->a[i]));
-    return eval_joined(v, i);
+    r = eval_joined(v, i);
+    return r ? r : ssh_powershell_rule(v, i);
 }
 
 /* sh/bash read their script from stdin when there is no -c and no script file operand, or with
@@ -2956,10 +2921,13 @@ static void track_cd(const struct cmdv *v, char *cwd)
 {
     int i;
     if (strcmp(v->cmd, "popd") == 0) {
+        char *dash[] = {(char *)"-"};
+        ag_git_note_cd(dash, 1);
         cwd[0] = '\0';
         return;
     }
     if (strcmp(v->cmd, "cd") != 0 && strcmp(v->cmd, "pushd") != 0) return;
+    ag_git_note_cd(v->a, v->na);
     i = first_word(v->a, v->na, 0);
     cd_to(cwd, i < 0 ? "~" : v->a[i]);
 }
@@ -3243,7 +3211,7 @@ static void note_xargs_repl(char **w, int from, int to)
  * A pattern that opens with a wildcard (*.dat) is too generic to count on its own. */
 static bool pattern_names_datadir(const char *p)
 {
-    static const char *const names[] = {"zclassic", ".zclassic", ".zclassic-c23", ".zcash-params",
+    static const char *const names[] = {"zclassic", ".zclassic", ".zcash-params",
                                         "zcashparams", "wallet.dat"};
     if (!p[0] || strchr("*?[", p[0])) return false;
     for (size_t k = 0; k < sizeof names / sizeof names[0]; k++)
@@ -3683,6 +3651,7 @@ static void reset_state(void)
     g_loopvar[0] = '\0';
     g_nvars = 0;
     g_git_init = false;
+    ag_git_state_reset(g_hook_cwd);
 }
 
 const char *ag_note(void)
@@ -3887,6 +3856,49 @@ static const char *ps_writer(const char *name, struct cmdv *v)
 }
 
 /* Start-Process <program> -ArgumentList ...: the program rules apply to the program started. */
+/* Start-Process parameters that take a value; the value is not an argument of the program. */
+static bool ps_sp_valued(const char *a)
+{
+    static const char *const names[] = {"-filepath", "-workingdirectory", "-redirectstandardoutput",
+                                        "-redirectstandarderror", "-redirectstandardinput",
+                                        "-credential", "-verb", "-windowstyle", "-environment"};
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (strcasecmp(a, names[i]) == 0) return true;
+    return false;
+}
+
+/* An -ArgumentList value is one string or a comma list: split it into the program's words. */
+static void ps_sp_split(struct xw *xs, const char *a)
+{
+    char *cp = strdup(a); // raw-alloc-ok:build-tool
+    if (!cp) {
+        g_complex = true;
+        return;
+    }
+    for (char *p = cp; *p; p++)
+        if (*p == ',') *p = ' ';
+    xw_split(xs, cp);
+    free(cp);
+}
+
+/* The program's own words out of the Start-Process words w[0..n): the -ArgumentList value (or the
+ * positional second argument). Switches (-PassThru, -Wait), -FilePath and the other valued
+ * parameters are Start-Process's, not the program's. */
+static void ps_sp_args(char **w, int n, struct xw *xs)
+{
+    bool take = false;
+    for (int i = 0; i < n; i++) {
+        if (ps_sp_valued(w[i])) {
+            i++;
+        } else if (strcasecmp(w[i], "-argumentlist") == 0 || strcasecmp(w[i], "-args") == 0) {
+            take = true;
+        } else if (w[i][0] != '-' || take) {
+            ps_sp_split(xs, w[i]);
+            take = false;
+        }
+    }
+}
+
 static const char *ps_start_process(const struct cmdv *v)
 {
     static const char *const fparams[] = {"-filepath"};
@@ -3916,28 +3928,9 @@ static const char *ps_start_process(const struct cmdv *v)
     sv.a = v->a + (k >= 0 ? k + 1 : 0);
     sv.na = v->na - (k >= 0 ? k + 1 : 0);
     {
-        /* -ArgumentList takes one string or a comma list: split it into the program's words */
         struct xw xs;
         memset(&xs, 0, sizeof xs);
-        for (int i = 0; i < sv.na; i++) {
-            const char *a = sv.a[i];
-            /* -ArgumentList is also the second positional: Start-Process prog 'args' */
-            if ((i > 0 && (strcasecmp(sv.a[i - 1], "-argumentlist") == 0 ||
-                           strcasecmp(sv.a[i - 1], "-args") == 0)) ||
-                (i == 0 && k >= 0 && a[0] != '-')) {
-                char *cp = strdup(a); // raw-alloc-ok:build-tool
-                if (!cp) {
-                    g_complex = true;
-                    break;
-                }
-                for (char *p = cp; *p; p++)
-                    if (*p == ',') *p = ' ';
-                xw_split(&xs, cp);
-                free(cp);
-            } else {
-                xw_push(&xs, (char *)a, false);
-            }
-        }
+        ps_sp_args(sv.a, sv.na, &xs);
         sv.a = xs.w;
         sv.na = xs.n;
         for (size_t i = 0; !r && i < sizeof checks / sizeof checks[0]; i++)
@@ -4230,7 +4223,7 @@ static bool ps_name_word(const char *w)
     bool hit = false;
     while (next_comp(&p, &n)) {
         if (comp_is_ci(p, n, "zclassic") || comp_is_ci(p, n, "zcashparams") ||
-            comp_starts_ci(p, n, ".zclassic") || comp_starts_ci(p, n, ".zcash-params") ||
+            comp_is_ci(p, n, ".zclassic") || comp_is_ci(p, n, ".zcash-params") ||
             (comp_starts_ci(p, n, "zclass~") && n == 8) || (comp_starts_ci(p, n, "zcashp~") && n == 8))
             hit = true;
         p += n;
@@ -4757,6 +4750,7 @@ const char *ag_eval_ps(const char *cmd)
     g_complex = false;
     g_nvars = 0;
     g_git_init = false;
+    ag_git_state_reset(g_hook_cwd);
     g_ps = NULL;
     g_xargs = false;
     g_xrepl[0] = '\0';
@@ -4806,10 +4800,15 @@ static const char *eval_path_abs(const char *tool, const char *path, const char 
             if (memcmp(content + i, "python", 6) == 0) return R_PYTHON;
     }
     if (warn) return warn;
-    return is_sealed_path(path) ? R_SEAL : NULL;
+    return ag_is_sealed_path(path) ? R_SEAL : NULL;
 }
 
 void ag_mark_complex(void)
 {
     g_complex = true;
+}
+
+void ag_note_text(const char *text)
+{
+    snprintf(g_note, sizeof g_note, "%s", text);
 }

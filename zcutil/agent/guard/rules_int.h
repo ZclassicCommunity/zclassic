@@ -21,9 +21,13 @@ bool ag_prod_port(long port);
 /* The word names this machine: 127.0.0.1, localhost, [::1], 0.0.0.0. */
 bool ag_local_host(const char *w);
 
-/* The arguments of `git push` (after the word push) and the working directory. Returns R_PUSH or
- * NULL. */
-const char *ag_push_rule(char **a, int na, const char *cwd);
+/* rules_push.c: the git state of one command (working directory as written, branch put on by a
+ * checkout or switch) and the `git push` rule. dash_c is the value of `git -C` or NULL; the result
+ * is R_PUSH or NULL. */
+void ag_git_state_reset(const char *hook_cwd);
+void ag_git_note_cd(char **a, int na);
+void ag_git_note_branch(const char *sub, char **a, int na);
+const char *ag_push_rule(char **a, int na, const char *dash_c);
 
 /* The components before a .zclassic* or .zcash-params* name put it where the node keeps its data. */
 bool ag_dd_name_in_home(const char *const *pre, const size_t *prl, int np);
@@ -48,10 +52,17 @@ void ag_mark_complex(void);
 
 /* rules_ident.c: the git identity value names the tool (Claude, a bot, an agent), not a person. */
 bool ag_agent_identity(const char *v);
+bool ag_is_sealed_path(const char *w);
+bool ag_is_identity_key(const char *k);
+bool ag_is_identity_env(const char *w);
+bool ag_mentions_identity_key(const char *s);
 
 /* rules_home.c: $TMPDIR, $env:TEMP, $work, $dd...: the variable names a scratch place. */
 bool ag_starts_tmpvar(const char *v);
 /* rules_rpc.c: a quoted string that is, or starts with, a spend or export method name. */
 bool ag_quoted_method(const char *q, size_t n);
+
+/* rules.c: leave a note on stderr for an allowed call (see ag_note). */
+void ag_note_text(const char *text);
 
 #endif

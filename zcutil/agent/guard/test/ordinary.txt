@@ -188,3 +188,25 @@ B cd ~/work/zc23-factory/guard2 && git add -A && git -c user.name=Owner -c user.
 # a call that asks only for the interpreter version runs no Python
 * python3 --version
 B command -v python3 && python3 --version >/dev/null 2>&1 && echo present
+# review round 2: Start-Process of the node with its own flags, push after a checkout, copies, feature
+# branch deletes and forces, remote PowerShell
+S Start-Process -FilePath zclassicd.exe -ArgumentList "-regtest"
+S Start-Process -FilePath zclassicd.exe -ArgumentList "-regtest","-datadir=$env:TEMP\n0" -PassThru
+S Start-Process -FilePath .\build\zclassicd.exe -ArgumentList '-regtest' -NoNewWindow
+S Start-Process -FilePath "$PWD\build\zclassicd.exe" -ArgumentList "-regtest" -PassThru
+S Start-Process zclassicd.exe -ArgumentList '-regtest'
+B git checkout -b factory/x && git commit -am y && git push -u origin HEAD
+B git switch -c x && git push origin HEAD
+B git checkout -b f; git push
+B git checkout feat && git push
+B zclassicd -reindex -datadir=/data/replay-copy
+B zclassicd -reindex-chainstate -datadir="$BENCH_DIR"
+B zclassicd -printtoconsole -datadir=$HOME/.zclassic-test
+B zclassicd -daemon
+B git push origin :feature
+B git push origin --delete factory/old
+B git push origin +factory/x
+B git push --force origin factory/x
+B ssh h 'Remove-Item -Recurse -Force build'
+B ssh h 'Get-ChildItem build | Remove-Item -Recurse'
+B ssh h '.\zclassic-cli.exe -regtest getinfo'

@@ -337,7 +337,7 @@ zcutil/agent/guard/rules.c	ps_fold_concat(1)	19
 zcutil/agent/guard/rules.c	ps_lister_hit(1)	33
 zcutil/agent/guard/rules.c	ps_seg_inner(1)	30
 zcutil/agent/guard/rules.c	ps_set_variable(1)	24
-zcutil/agent/guard/rules.c	ps_start_process(1)	27
+zcutil/agent/guard/rules.c	ps_start_process(1)	17
 zcutil/agent/guard/rules.c	ps_takes_stdin(1)	16
 zcutil/agent/guard/rules.c	ps_value(5)	21
 zcutil/agent/guard/rules.c	ps_wants_stdin(1)	17

@@ -29,13 +29,13 @@ $(BIN)/zcl-agent-guard$(EXEEXT): zcl-agent-guard.c $(RULES) $(HDRS) $(VSRC)
 	$(CC) $(STD) $(WARN) $(CFLAGS) $(VINC) -I. -o $@ zcl-agent-guard.c $(RULES) \
 	  $(VSRC)
 
-$(TEST_BIN): test/selftest.c $(RULES) $(HDRS)
+$(TEST_BIN): test/selftest.c test/rows2.c test/cases.h $(RULES) $(HDRS)
 	mkdir -p $(BIN)
-	$(CC) $(STD) $(WARN) $(CFLAGS) -I. -o $@ test/selftest.c $(RULES)
+	$(CC) $(STD) $(WARN) $(CFLAGS) -I. -o $@ test/selftest.c test/rows2.c $(RULES)
 
 # Every file must also compile as c2x (the Z23 baseline), with no warnings.
 c2x-compile:
-	@set -e; for f in zcl-agent-guard.c $(RULES) test/selftest.c; do \
+	@set -e; for f in zcl-agent-guard.c $(RULES) test/selftest.c test/rows2.c; do \
 	  $(CC) -std=c2x $(WARN) -D__USE_MINGW_ANSI_STDIO=1 $(VINC) -I. -fsyntax-only $$f; \
 	done; echo "c2x-compile: OK ($(CC))"
 
@@ -47,12 +47,12 @@ FX = $(BIN)/zcl-agent-guard-fixtures
 # allowed) and every tracked script of the repository written back through the Write path.
 check: $(BIN)/zcl-agent-guard$(EXEEXT) $(TEST_BIN) c2x-compile
 	git -C $(ROOT) ls-files -- '*.sh' '*.ps1' '*.cmd' '*.bat' > $(LIST) 2>/dev/null || : > $(LIST)
-	rm -rf $(FX) && mkdir -p $(FX)/m/.git $(FX)/f/.git $(FX)/w $(FX)/wgit
+	rm -rf $(FX) && mkdir -p $(FX)/m/.git $(FX)/m/sub/deep $(FX)/f/.git $(FX)/f/sub/deep $(FX)/w $(FX)/wgit
 	echo 'ref: refs/heads/master' > $(FX)/m/.git/HEAD
 	echo 'ref: refs/heads/factory/x' > $(FX)/f/.git/HEAD
 	echo 'gitdir: ../wgit' > $(FX)/w/.git
 	echo 'ref: refs/heads/master' > $(FX)/wgit/HEAD
-	$(TEST_BIN) --ordinary test/ordinary.txt --scripts $(LIST) --root $(ROOT) --fixtures $(FX)
+	$(TEST_BIN) --ordinary test/ordinary.txt --scripts $(LIST) --root $(ROOT) --fixtures $(abspath $(FX))
 	sh test/run.sh $(BIN)/zcl-agent-guard$(EXEEXT)
 
 clean:
