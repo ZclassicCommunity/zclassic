@@ -19,7 +19,7 @@ ZCL_TOOL("zcl_wiki", build_wiki,
          "Walk the docs tree one topic at a time; omit topic for the root.",
          "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\"},\"after\":{\"type\":\"integer\",\"minimum\":0}},\"additionalProperties\":false}")
 ZCL_TOOL("zcl_read", build_read,
-         "Read a tracked repository file in chunks of at most 16 KiB; key and wallet files are refused.",
+         "Read a repository file in chunks of at most 16 KiB; key and wallet files are refused.",
          "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"bytes\":{\"type\":\"integer\",\"minimum\":1}},\"required\":[\"path\"],\"additionalProperties\":false}")
 ZCL_TOOL("zcl_lessons", build_lessons,
          "Search the lessons, traps and facts documents (words are ANDed).",

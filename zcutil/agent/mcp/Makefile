@@ -37,6 +37,7 @@ check: all c2x tools-built
 	sh test/run.sh $(BIN)/zcl-mcp$(EXEEXT)
 
 tools-built:
+	$(MAKE) -C ../../lint all
 	$(MAKE) -C ../../tools all
 	$(MAKE) -C ../../dev all
 	$(MAKE) -C ../../dev/code all

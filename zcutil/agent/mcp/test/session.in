@@ -47,3 +47,8 @@
 {"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"zcl_know","arguments":{"term":"x"
 this frame is not json at all
 {"jsonrpc":"2.0","id":59,"method":"tools/call","params":{"name":"zcl_know","arguments":{"term":"ok"}}}
+{"jsonrpc":"2.0","id":60,"method":"tools/call","params":{"name":"zcl_lint","arguments":{"rule":"filesize"}}}
+{"jsonrpc":"2.0","id":61,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":"src/wallet/WALLET.DAT"}}}
+{"jsonrpc":"2.0","id":62,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":"src/wallet/Wallet.dat"}}}
+{"jsonrpc":"2.0","id":63,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":"src/wallet/wallet.dat."}}}
+{"jsonrpc":"2.0","id":64,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":"keys/node.PEM"}}}

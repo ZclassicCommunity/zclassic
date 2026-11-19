@@ -37,6 +37,8 @@ printf '# Agent docs\n\nLessons and traps.\n' >"$co/doc/agent/README.md"
 printf 'not a wallet\n' >"$co/src/wallet/wallet.dat"
 printf '{"step":"unit-a","ok":true}\n' >"$co/receipts.jsonl"
 cp "$dev/wiki/test/facts.good.tsv" "$co/doc/agent/FACTS.tsv"
+mkdir -p "$co/zcutil/lint"
+: >"$co/zcutil/lint/filesize.txt"
 git -C "$co" init -q
 git -C "$co" add -A
 git -C "$co" -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m fixture
@@ -88,6 +90,35 @@ if ps -eo args 2>/dev/null | grep -q '[s]leep 37'; then
     pkill -f 'sleep 37' 2>/dev/null || true
 fi
 
+
+# a tool that prints past the capture cap is killed and reported as output_too_large, not as a bare status
+cat >"$fb/zcl-dev" <<'EOF2'
+#!/bin/sh
+head -c 400000 /dev/zero | tr '\000' x
+EOF2
+call_wiki='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"zcl_wiki","arguments":{}}}'
+printf '%s\n' "$call_wiki" | "$bin" --checkout="$co" --bindir="$fb" 2>/dev/null >"$work/big.out" ||
+    fail "big-output session failed"
+grep -q output_too_large "$work/big.out" ||
+    fail "oversized output was not reported as output_too_large: $(head -c 300 "$work/big.out")"
+
+# stderr never joins a successful result
+cat >"$fb/zcl-dev" <<'EOF2'
+#!/bin/sh
+echo "a warning" >&2
+echo '{"ok":true}'
+EOF2
+printf '%s\n' "$call_wiki" | "$bin" --checkout="$co" --bindir="$fb" 2>/dev/null >"$work/warn.out" ||
+    fail "warning session failed"
+if grep -q "a warning" "$work/warn.out"; then fail "stderr leaked into a successful result"; fi
+grep -q 'ok' "$work/warn.out" || fail "the stdout result was lost: $(cat "$work/warn.out")"
+
+# the Codex snippet starts the same server as .mcp.json
+cx=$here/../codex.config.toml
+mcpjson=$here/../../../../.mcp.json
+cmd=$(sed -n 's/^command = "\(.*\)"/\1/p' "$cx")
+if [ -z "$cmd" ] || ! grep -q "\"command\":\"$cmd\"" "$mcpjson"; then fail "codex.config.toml and .mcp.json name different servers"; fi
+grep -q '^args = \["--checkout=' "$cx" || fail "codex.config.toml has no --checkout argument"
 # a missing tool is reported, not fatal
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"zcl_wiki","arguments":{}}}' |
     "$bin" --checkout="$co" --bindir="$work/nonexistent" 2>/dev/null >"$work/missing.out" || fail "missing-tool session failed"

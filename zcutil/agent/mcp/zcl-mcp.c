@@ -35,6 +35,10 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include <stdint.h>
+#endif
 #endif
 
 #include "mcp/mcp_rpc.h"
@@ -44,7 +48,7 @@
 #define DEFAULT_TIMEOUT_S 60
 #define MAX_FRAME (1u << 20)      /* one request line */
 #define MAX_CAPTURE (256u * 1024) /* child output kept */
-#define MAX_REPLY 32768u          /* one tools/call text, capped by mcp_reply_tool_text */
+#define MAX_REPLY 16384u          /* one tools/call text, capped by mcp_reply_tool_text */
 #define MAX_ARGV 48
 #define MAX_TOKEN 200
 #define MAX_PATHS 8
@@ -134,9 +138,33 @@ static bool path_ok(const char *s)
         const char *e = strchr(p, '/');
         size_t n = e ? (size_t)(e - p) : strlen(p);
         if (n == 0 || (n == 1 && p[0] == '.') || (n == 2 && p[0] == '.' && p[1] == '.')) return false;
+        if (p[n - 1] == '.') return false; /* Windows drops a trailing dot: "wallet.dat." opens wallet.dat */
         if (!e) return true;
         p = e + 1;
     }
+}
+
+static bool ci_prefix(const char *s, const char *pre)
+{
+    for (; *pre; s++, pre++)
+        if (tolower((unsigned char)*s) != *pre) return false;
+    return true;
+}
+
+static bool ci_suffix(const char *s, const char *suf)
+{
+    size_t n = strlen(s), m = strlen(suf);
+    return n >= m && ci_prefix(s + n - m, suf);
+}
+
+/* Key and wallet files by basename, case-insensitively: Windows and macOS volumes fold case, and
+ * zcl-dev read matches the names exactly. suffixes are lower case. */
+static bool secret_path(const char *s)
+{
+    const char *base = strrchr(s, '/');
+    base = base ? base + 1 : s;
+    return (ci_prefix(base, "wallet.dat") && !base[10]) || ci_prefix(base, ".env") || ci_suffix(base, ".pem") ||
+           ci_suffix(base, ".key") || ci_suffix(base, ".wallet");
 }
 
 static bool digits_ok(const char *s)
@@ -245,36 +273,46 @@ static const struct {
     {"refs", "N"}, {"cost", "P"},  {"recent", ""},  {"body", "PN"},
 };
 
+/* One element of the args array of zcl_code: a flag, or the next positional of the shape. */
+static bool code_arg(struct ctx *c, struct mcp_refusal *why, const char *sub, const char *shape, size_t *pos,
+                     const struct json_value *e)
+{
+    if (!e || e->type != JSON_STR || !e->val.s)
+        return refuse(c, why, "bad_argument", "every arg must be a string", "args");
+    const char *s = e->val.s;
+    if (s[0] == '-') {
+        if (!code_flag_ok(s))
+            return refuse(c, why, "bad_argument", "allowed flags: --tests --depth=N --since=Nd --after=N", s);
+    } else {
+        if (*pos >= strlen(shape)) return refuse(c, why, "bad_argument", "too many positional arguments", sub);
+        if (!(shape[*pos] == 'P' ? path_ok(s) : token_ok(s)))
+            return refuse(c, why, "bad_argument", "argument must be [A-Za-z0-9_./:=,-] only, and a path has no .. part", s);
+        (*pos)++;
+    }
+    return av_add(&c->av, s) ? true : OOM(c, why);
+}
+
+static const char *code_shape(const char *sub)
+{
+    for (size_t i = 0; i < sizeof code_subs / sizeof *code_subs; i++)
+        if (!strcmp(code_subs[i].sub, sub)) return code_subs[i].shape;
+    return NULL;
+}
+
 static bool build_code(struct ctx *c, const struct json_value *a, struct mcp_refusal *why)
 {
     const char *sub = NULL;
     if (arg_str(a, "sub", &sub) != 1) return refuse(c, why, "bad_argument", "sub is required", "sub");
-    const char *shape = NULL;
-    for (size_t i = 0; i < sizeof code_subs / sizeof *code_subs; i++)
-        if (!strcmp(code_subs[i].sub, sub)) shape = code_subs[i].shape;
+    const char *shape = code_shape(sub);
     if (!shape) return refuse(c, why, "bad_argument", "unknown sub", sub);
     const struct json_value *args = json_get(a, "args");
     if (args && (args->type != JSON_ARR || json_size(args) > 5))
         return refuse(c, why, "bad_argument", "args must be an array of at most 5 strings", "args");
     if (!dev_base(c, why, "code") || !av_add(&c->av, sub)) return false;
-    size_t pos = 0, want = strlen(shape);
-    for (size_t i = 0; args && i < json_size(args); i++) {
-        const struct json_value *e = json_at(args, i);
-        if (!e || e->type != JSON_STR || !e->val.s)
-            return refuse(c, why, "bad_argument", "every arg must be a string", "args");
-        const char *s = e->val.s;
-        if (s[0] == '-') {
-            if (!code_flag_ok(s))
-                return refuse(c, why, "bad_argument", "allowed flags: --tests --depth=N --since=Nd --after=N", s);
-        } else {
-            if (pos >= want) return refuse(c, why, "bad_argument", "too many positional arguments", sub);
-            if (!(shape[pos] == 'P' ? path_ok(s) : token_ok(s)))
-                return refuse(c, why, "bad_argument", "argument must be [A-Za-z0-9_./:=,-] only, and a path has no .. part", s);
-            pos++;
-        }
-        if (!av_add(&c->av, s)) return OOM(c, why);
-    }
-    if (pos != want) return refuse(c, why, "bad_argument", "missing positional argument", sub);
+    size_t pos = 0;
+    for (size_t i = 0; args && i < json_size(args); i++)
+        if (!code_arg(c, why, sub, shape, &pos, json_at(args, i))) return false;
+    if (pos != strlen(shape)) return refuse(c, why, "bad_argument", "missing positional argument", sub);
     return av_add(&c->av, "--json") ? true : OOM(c, why);
 }
 
@@ -299,6 +337,7 @@ static bool build_read(struct ctx *c, const struct json_value *a, struct mcp_ref
     int rp = arg_str(a, "path", &path), ro = arg_int(a, "offset", &off), rb = arg_int(a, "bytes", &bytes);
     if (rp != 1 || !path_ok(path))
         return refuse(c, why, "bad_argument", "path must be repository-relative, no .. part", "path");
+    if (secret_path(path)) return refuse(c, why, "bad_argument", "key and wallet files are refused", "path");
     if (ro < 0 || rb < 0 || (rb == 1 && bytes < 1))
         return refuse(c, why, "bad_argument", "offset must be >= 0 and bytes >= 1", "offset/bytes");
     if (!dev_base(c, why, "read") || !av_add(&c->av, path) || !av_add(&c->av, "--json")) return false;
@@ -390,89 +429,180 @@ static const builder_fn builders[] = {
 
 /* ---- bounded child execution -------------------------------------------------- */
 
+#define MAX_ERR (16u * 1024) /* stderr kept, on top of stdout */
+
 struct run_result {
     int code;       /* exit status, -1 when not started, -2 on timeout */
-    bool truncated; /* output capped at MAX_CAPTURE */
+    bool truncated; /* stdout passed MAX_CAPTURE: the child was killed */
 };
 
-static bool cap_append(struct mcp_buf *out, const char *p, size_t n, struct run_result *r)
+/* Append n bytes up to limit; sets *over and keeps the head when they do not fit. */
+static bool cap_append(struct mcp_buf *b, const char *p, size_t n, size_t limit, bool *over)
 {
-    if (out->len + n > MAX_CAPTURE) {
-        n = MAX_CAPTURE - out->len;
-        r->truncated = true;
+    if (b->len + n > limit) {
+        n = limit - b->len;
+        *over = true;
     }
-    mcp_buf_put(out, p, n);
-    return !r->truncated;
+    mcp_buf_put(b, p, n);
+    return !*over;
 }
 
 #ifdef _WIN32
-/* One command line; every token passed validation, so only spaces in bindir or checkout can need quotes. */
+/* Quote one argument for CreateProcess the way CommandLineToArgvW / the MSVCRT undo it. Copied from
+ * the vendored process_group_exec.c (zcl-run), which parses its own line the same way. */
+static void append_repeated(char *out, size_t cap, size_t *used, char ch, size_t count)
+{
+    for (size_t i = 0; i < count && *used + 1 < cap; i++) out[(*used)++] = ch;
+}
+
+static void quote_emit_escaped_quote(char *out, size_t cap, size_t *used, size_t slashes)
+{
+    append_repeated(out, cap, used, '\\', slashes * 2u + 1u);
+    append_repeated(out, cap, used, '"', 1);
+}
+
+static size_t quote_arg(char *out, size_t cap, const char *arg)
+{
+    size_t used = 0, slashes = 0;
+    bool quote = !arg[0] || strpbrk(arg, " \t\n\v\"") != NULL;
+    if (quote) append_repeated(out, cap, &used, '"', 1);
+    for (const char *p = arg;; p++) {
+        if (*p == '\\') {
+            slashes++;
+            continue;
+        }
+        if (*p == '"') {
+            quote_emit_escaped_quote(out, cap, &used, slashes);
+        } else {
+            if (*p == 0 && quote) slashes *= 2u;
+            append_repeated(out, cap, &used, '\\', slashes);
+            if (*p == 0) break;
+            append_repeated(out, cap, &used, *p, 1);
+        }
+        slashes = 0;
+    }
+    if (quote) append_repeated(out, cap, &used, '"', 1);
+    if (cap) out[used < cap ? used : cap - 1] = 0;
+    return used;
+}
+
 static bool win_cmdline(char *out, size_t cap, char *const *argv)
 {
     size_t used = 0;
     for (int i = 0; argv[i]; i++) {
-        bool q = !argv[i][0] || strpbrk(argv[i], " \t");
-        int w = snprintf(out + used, cap - used, "%s%s%s%s", i ? " " : "", q ? "\"" : "", argv[i],
-                         q ? "\"" : "");
-        if (w < 0 || (size_t)w >= cap - used) return false;
-        used += (size_t)w;
+        if (i) {
+            if (used + 1 >= cap) return false;
+            out[used++] = ' ';
+        }
+        size_t w = quote_arg(out + used, cap - used, argv[i]);
+        if (w + used + 1 >= cap) return false;
+        used += w;
     }
     return true;
 }
 
-static void run_child(char *const *argv, int timeout_s, struct mcp_buf *out, struct run_result *r)
+/* A pipe whose write end is inheritable and whose read end is not. */
+static bool win_pipe(HANDLE *rd, HANDLE *wr)
 {
-    char cmd[32768];
-    r->code = -1;
-    if (!win_cmdline(cmd, sizeof cmd, argv)) return;
     SECURITY_ATTRIBUTES sa = {sizeof sa, NULL, TRUE};
-    HANDLE rd = NULL, wr = NULL;
-    if (!CreatePipe(&rd, &wr, &sa, 0)) return;
-    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+    if (!CreatePipe(rd, wr, &sa, 0)) return false;
+    SetHandleInformation(*rd, HANDLE_FLAG_INHERIT, 0);
+    return true;
+}
+
+/* Start cmd with stdin on NUL, stdout and stderr on separate pipes; rd[] are the read ends. */
+static bool win_spawn(char *cmd, HANDLE rd[2], PROCESS_INFORMATION *pi)
+{
+    HANDLE wr[2];
+    if (!win_pipe(&rd[0], &wr[0])) return false;
+    if (!win_pipe(&rd[1], &wr[1])) {
+        CloseHandle(rd[0]);
+        CloseHandle(wr[0]);
+        return false;
+    }
+    SECURITY_ATTRIBUTES sa = {sizeof sa, NULL, TRUE};
     HANDLE nul = CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
     STARTUPINFOA si = {0};
     si.cb = sizeof si;
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = nul;
-    si.hStdOutput = wr;
-    si.hStdError = wr;
-    PROCESS_INFORMATION pi = {0};
-    BOOL ok = CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-    CloseHandle(wr);
+    si.hStdOutput = wr[0];
+    si.hStdError = wr[1];
+    BOOL ok = CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, pi);
+    CloseHandle(wr[0]);
+    CloseHandle(wr[1]);
     if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
     if (!ok) {
-        CloseHandle(rd);
-        return;
+        CloseHandle(rd[0]);
+        CloseHandle(rd[1]);
     }
+    return ok;
+}
+
+/* Move whatever one pipe holds into b. 1 bytes moved, 0 nothing waiting, -1 pipe closed. */
+static int win_take(HANDLE h, struct mcp_buf *b, size_t limit, bool *over)
+{
+    DWORD avail = 0, got = 0;
+    char buf[4096];
+    if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL)) return -1;
+    if (!avail) return 0;
+    if (!ReadFile(h, buf, sizeof buf < avail ? (DWORD)sizeof buf : avail, &got, NULL) || !got) return -1;
+    cap_append(b, buf, got, limit, over);
+    return 1;
+}
+
+/* One pass over both pipes; true when either yielded bytes. */
+static bool win_sweep(HANDLE rd[2], struct mcp_buf *out, struct mcp_buf *err, struct run_result *r)
+{
+    bool dummy = false;
+    int a = win_take(rd[0], out, MAX_CAPTURE, &r->truncated);
+    int b = win_take(rd[1], err, MAX_ERR, &dummy);
+    return a == 1 || b == 1;
+}
+
+/* Collect output until the child exits, the cap is hit or the deadline passes. zcl-run holds a
+ * kill-on-close job object, so ending it reaps the whole tree. */
+static void win_pump(HANDLE proc, HANDLE rd[2], int timeout_s, struct mcp_buf *out, struct mcp_buf *err,
+                     struct run_result *r)
+{
     ULONGLONG deadline = GetTickCount64() + (ULONGLONG)timeout_s * 1000u;
     for (;;) {
-        DWORD avail = 0;
-        char buf[4096];
-        if (PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL) && avail) {
-            DWORD got = 0;
-            if (ReadFile(rd, buf, sizeof buf < avail ? (DWORD)sizeof buf : avail, &got, NULL) && got &&
-                !cap_append(out, buf, got, r)) {
-                TerminateProcess(pi.hProcess, 1);
-                break;
-            }
-            continue;
+        if (win_sweep(rd, out, err, r)) {
+            if (!r->truncated) continue;
+            TerminateProcess(proc, 1);
+            return;
         }
-        if (WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0) break;
+        if (WaitForSingleObject(proc, 0) == WAIT_OBJECT_0) {
+            while (win_sweep(rd, out, err, r) && !r->truncated) { /* the last chunk can land after the exit */
+            }
+            return;
+        }
         if (GetTickCount64() >= deadline) {
-            /* zcl-run holds a kill-on-close job object: ending it reaps the whole tree */
-            TerminateProcess(pi.hProcess, 1);
+            TerminateProcess(proc, 1);
             r->code = -2;
-            break;
+            return;
         }
         Sleep(10);
     }
+}
+
+static void run_child(char *const *argv, int timeout_s, struct mcp_buf *out, struct mcp_buf *err,
+                      struct run_result *r)
+{
+    char cmd[32768];
+    HANDLE rd[2];
+    PROCESS_INFORMATION pi = {0};
+    r->code = -1;
+    if (!win_cmdline(cmd, sizeof cmd, argv) || !win_spawn(cmd, rd, &pi)) return;
+    win_pump(pi.hProcess, rd, timeout_s, out, err, r);
     DWORD ec = 1;
     WaitForSingleObject(pi.hProcess, 5000);
     GetExitCodeProcess(pi.hProcess, &ec);
     if (r->code != -2) r->code = (int)ec;
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
-    CloseHandle(rd);
+    CloseHandle(rd[0]);
+    CloseHandle(rd[1]);
 }
 #else
 static long long now_ms(void)
@@ -482,56 +612,92 @@ static long long now_ms(void)
     return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static void run_child(char *const *argv, int timeout_s, struct mcp_buf *out, struct run_result *r)
+static void child_exec(char *const *argv, const int o[2], const int e[2])
 {
-    int fd[2];
-    r->code = -1;
-    if (pipe(fd)) return;
+    int nul = open("/dev/null", O_RDONLY);
+    if (nul >= 0) dup2(nul, 0);
+    dup2(o[1], 1);
+    dup2(e[1], 2);
+    close(o[0]);
+    close(o[1]);
+    close(e[0]);
+    close(e[1]);
+    execv(argv[0], argv);
+    _exit(127);
+}
+
+/* Fork argv with stdout and stderr on separate pipes; rd[] are the read ends. -1 on failure. */
+static pid_t spawn_child(char *const *argv, int rd[2])
+{
+    int o[2], e[2];
+    if (pipe(o)) return -1;
+    if (pipe(e)) {
+        close(o[0]);
+        close(o[1]);
+        return -1;
+    }
     pid_t pid = fork();
+    if (pid == 0) child_exec(argv, o, e);
+    close(o[1]);
+    close(e[1]);
+    rd[0] = o[0];
+    rd[1] = e[0];
     if (pid < 0) {
-        close(fd[0]);
-        close(fd[1]);
+        close(rd[0]);
+        close(rd[1]);
+    }
+    return pid;
+}
+
+/* Read one chunk from *fd into b; closes *fd at EOF (every holder of the pipe has exited). */
+static void take_chunk(int *fd, struct mcp_buf *b, size_t limit, bool *over)
+{
+    char buf[4096];
+    ssize_t got = read(*fd, buf, sizeof buf);
+    if (got < 0 && errno == EINTR) return;
+    if (got <= 0) {
+        close(*fd);
+        *fd = -1;
         return;
     }
-    if (pid == 0) {
-        int nul = open("/dev/null", O_RDONLY);
-        if (nul >= 0) dup2(nul, 0);
-        dup2(fd[1], 1);
-        dup2(fd[1], 2);
-        close(fd[0]);
-        close(fd[1]);
-        execv(argv[0], argv);
-        _exit(127);
-    }
-    close(fd[1]);
+    cap_append(b, buf, (size_t)got, limit, over);
+}
+
+/* Collect both streams until EOF on each. True when the child must be killed (cap or deadline). */
+static bool pump_child(int fds[2], int timeout_s, struct mcp_buf *out, struct mcp_buf *err, struct run_result *r)
+{
     long long deadline = now_ms() + (long long)timeout_s * 1000;
-    bool killed = false;
-    for (;;) {
+    bool dummy = false;
+    while (fds[0] >= 0 || fds[1] >= 0) {
         long long left = deadline - now_ms();
         if (left <= 0) {
             r->code = -2;
-            killed = true;
-            break;
+            return true;
         }
-        struct pollfd p = {fd[0], POLLIN, 0};
-        int pr = poll(&p, 1, left > 1000 ? 1000 : (int)left);
-        if (pr < 0 && errno == EINTR) continue;
-        if (pr < 0) break;
-        if (pr == 0) continue;
-        char buf[4096];
-        ssize_t got = read(fd[0], buf, sizeof buf);
-        if (got < 0 && errno == EINTR) continue;
-        if (got <= 0) break; /* EOF: every holder of the pipe has exited */
-        if (!cap_append(out, buf, (size_t)got, r)) {
-            killed = true;
-            break;
-        }
+        struct pollfd p[2] = {{fds[0], POLLIN, 0}, {fds[1], POLLIN, 0}}; /* a closed slot is -1: ignored */
+        int pr = poll(p, 2, left > 1000 ? 1000 : (int)left);
+        if (pr < 0 && errno != EINTR) return false;
+        if (pr <= 0) continue;
+        if (p[0].revents) take_chunk(&fds[0], out, MAX_CAPTURE, &r->truncated);
+        if (p[1].revents) take_chunk(&fds[1], err, MAX_ERR, &dummy);
+        if (r->truncated) return true;
     }
-    if (killed) { /* zcl-run called setsid, so the group id is the child pid */
+    return false;
+}
+
+static void run_child(char *const *argv, int timeout_s, struct mcp_buf *out, struct mcp_buf *err,
+                      struct run_result *r)
+{
+    int fds[2];
+    r->code = -1;
+    pid_t pid = spawn_child(argv, fds);
+    if (pid < 0) return;
+    if (pump_child(fds, timeout_s, out, err, r)) { /* zcl-run called setsid, so the group id is the child pid */
         kill(-pid, SIGKILL);
         kill(pid, SIGKILL);
     }
-    close(fd[0]);
+    for (int i = 0; i < 2; i++)
+        if (fds[i] >= 0) close(fds[i]);
     int st = 0;
     while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {
     }
@@ -561,47 +727,66 @@ static bool authority(void *vctx, const struct mcp_tool *tool, const struct json
     return true;
 }
 
-static void put_failure(struct mcp_buf *text, const struct run_result *r, int timeout_s, const struct mcp_buf *out)
+/* detail is stdout then stderr: what the tool said before it failed. */
+static void put_failure(struct mcp_buf *text, const struct run_result *r, int timeout_s, const struct mcp_buf *out,
+                        const struct mcp_buf *err)
 {
+    const char *code = "tool_failed";
     char msg[96];
-    if (r->code == -2) snprintf(msg, sizeof msg, "the tool did not finish within %d s and was killed", timeout_s);
-    else if (r->code == -1) snprintf(msg, sizeof msg, "the tool could not be started");
-    else snprintf(msg, sizeof msg, "the tool exited with status %d", r->code);
+    snprintf(msg, sizeof msg, "the tool exited with status %d", r->code);
+    if (r->truncated) {
+        code = "output_too_large";
+        snprintf(msg, sizeof msg, "the tool printed more than %u bytes and was killed", MAX_CAPTURE);
+    } else if (r->code == -2) {
+        code = "timeout";
+        snprintf(msg, sizeof msg, "the tool did not finish within %d s and was killed", timeout_s);
+    } else if (r->code == -1) {
+        code = "not_started";
+        snprintf(msg, sizeof msg, "the tool could not be started");
+    }
     mcp_buf_str(text, "{\"ok\":false,\"error\":{\"code\":\"");
-    mcp_buf_str(text, r->code == -2 ? "timeout" : r->code == -1 ? "not_started" : "tool_failed");
+    mcp_buf_str(text, code);
     mcp_buf_str(text, "\",\"message\":");
     mcp_buf_json_str(text, msg);
     mcp_buf_str(text, ",\"detail\":");
-    mcp_buf_json_str_n(text, out->p ? out->p : "", out->len);
+    struct mcp_buf d;
+    mcp_buf_init(&d);
+    if (!r->truncated) { /* a capped stream is not worth echoing: the reply would cut it anyway */
+        mcp_buf_put(&d, out->p ? out->p : "", out->len);
+        mcp_buf_put(&d, err->p ? err->p : "", err->len);
+    }
+    mcp_buf_json_str_n(text, d.p ? d.p : "", d.len);
+    mcp_buf_free(&d);
     mcp_buf_str(text, "}}");
 }
 
+/* Exit 0 is a result; exit 1 is a finding and still a result when it printed one. Stdout alone is the
+ * result: stderr warnings must not corrupt a JSON document, and stand in only when stdout is empty. */
 static bool executor(void *vctx, const struct mcp_tool *tool, const struct json_value *args,
                      struct mcp_buf *text, bool *is_error)
 {
     struct ctx *c = vctx;
     (void)tool;
     (void)args;
-    struct mcp_buf out;
+    struct mcp_buf out, err;
     struct run_result r = {0, false};
     mcp_buf_init(&out);
+    mcp_buf_init(&err);
     if (!c->av.n) return false;
-    run_child(c->av.v, c->timeout_s, &out, &r);
+    run_child(c->av.v, c->timeout_s, &out, &err, &r);
     av_free(&c->av);
-    if (out.oom) {
-        mcp_buf_free(&out);
-        return false;
-    }
-    if (r.code == 0 || r.code == 1) { /* 1 is a finding, still a result */
-        mcp_buf_put(text, out.p ? out.p : "", out.len);
-        if (r.truncated) mcp_buf_str(text, "\n[output capped at 262144 bytes]");
-        *is_error = false;
-    } else {
-        put_failure(text, &r, c->timeout_s, &out);
+    bool oom = out.oom || err.oom;
+    if (!oom && !r.truncated && (r.code == 0 || (r.code == 1 && (out.len || err.len)))) {
+        const struct mcp_buf *res = out.len ? &out : &err;
+        mcp_buf_put(text, res->p ? res->p : "", res->len);
+        *is_error = r.code == 1 && !out.len; /* a bare diagnostic is a miss, not a finding */
+    } else if (!oom) {
+        put_failure(text, &r, c->timeout_s, &out, &err);
         *is_error = true;
     }
     mcp_buf_free(&out);
-    return !text->oom;
+    mcp_buf_free(&err);
+    return !oom && !text->oom;
 }
 
 /* ---- main --------------------------------------------------------------------- */
@@ -612,6 +797,9 @@ static void exe_dir(const char *argv0, char *out, size_t cap)
 #ifdef _WIN32
     DWORD n = GetModuleFileNameA(NULL, path, sizeof path);
     if (!n || n >= sizeof path) snprintf(path, sizeof path, "%s", argv0);
+#elif defined(__APPLE__)
+    uint32_t sz = sizeof path;
+    if (_NSGetExecutablePath(path, &sz) != 0) snprintf(path, sizeof path, "%s", argv0);
 #else
     ssize_t n = readlink("/proc/self/exe", path, sizeof path - 1);
     if (n > 0) path[n] = 0;
