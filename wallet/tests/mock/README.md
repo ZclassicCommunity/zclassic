@@ -1,6 +1,6 @@
 # tests/mock — localhost JSON-RPC stand-in for zclassicd
 
-A ~200-line `python3 http.server` that answers the wallet's JSON-RPC calls from
+A single-file C23 program (`mockrpc.c`, no dependencies, one request at a time) that answers the wallet's JSON-RPC calls from
 canned per-scenario fixtures, with **zero product-code changes**. It is the
 shared backend for the L1 widget tests (point the real `RPC` at it via
 `rpc->setConnection()`) and the L2 Xvfb E2E (`--no-embedded` bundle against it).
@@ -10,27 +10,33 @@ which POSTs HTTP/Basic-auth JSON-RPC 1.0 and reads `parsed["result"]` off the
 reply (`src/connection.cpp:2476`). The mock ignores Basic auth and wraps each
 fixture in `{"result": …, "error": null, "id": …}`.
 
-## Run
+## Build and run
 
 ```sh
+cc -std=c2x -O2 -Wall -Wextra -o tests/mock/mockrpc tests/mock/mockrpc.c
 MOCK_PORT=18232 MOCK_SCENARIO=funded-synced MOCK_LOG=/tmp/mockrpc.requests.log \
-  python3 tests/mock/mockrpc.py
+  tests/mock/mockrpc
 ```
 
-In the proot chroot (python3 is present there too):
+In the proot chroot build it the same way (gcc 9 accepts `-std=c2x`):
 
 ```sh
 /home/rhett/zclbuild/prun bash -c \
-  'MOCK_PORT=18232 MOCK_SCENARIO=funded-synced MOCK_LOG=/tmp/mockrpc.requests.log \
-   python3 /src/wallet/tests/mock/mockrpc.py'
+  'cd /src/wallet/tests/mock && cc -std=c2x -O2 -o /tmp/mockrpc mockrpc.c && \
+   MOCK_PORT=18232 MOCK_SCENARIO=funded-synced MOCK_FIXTURES=/src/wallet/tests/mock/fixtures \
+   MOCK_LOG=/tmp/mockrpc.requests.log /tmp/mockrpc'
 ```
+
+`sh tests/mock/test-mockrpc.sh` builds it and checks every behaviour below; the local CI
+(`zcutil/local-ci.sh test`) runs it.
 
 ### Env vars
 | var | default | meaning |
 |-----|---------|---------|
 | `MOCK_PORT` | `18232` | TCP port on `127.0.0.1` |
 | `MOCK_SCENARIO` | `funded-synced` | dir under `fixtures/` |
-| `MOCK_LOG` | `tests/mock/mockrpc.requests.log` | one request body per line |
+| `MOCK_LOG` | `mockrpc.requests.log` next to the binary | one compact request body per line |
+| `MOCK_FIXTURES` | `fixtures` next to the binary | directory holding the scenario dirs |
 
 ### Control / health (GET — the wallet never uses these)
 - `GET /` → `{ok, scenario, port, log}`
@@ -47,7 +53,7 @@ In the proot chroot (python3 is present there too):
 
 ## Per-method resolution (first hit wins)
 1. `fixtures/<scenario>/<method>.json` — the bare **result** value (not enveloped).
-2. a built-in default in `DEFAULTS` (`mockrpc.py`) — key dumps, imports,
+2. a built-in default in `DEFAULTS` (`mockrpc.c`) — key dumps, imports,
    `z_getnewaddress`/`getnewaddress`, `z_getoperationstatus`, `z_sendmany` opid,
    `stop`, `getnetworksolps`, empty `z_listreceivedbyaddress`.
 3. JSON-RPC `-32601 Method not found` — mirrors a real daemon.

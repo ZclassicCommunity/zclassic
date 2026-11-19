@@ -35,7 +35,6 @@ DAEMON="$(readlink -f "$DAEMON")"
 cd "$(dirname "$0")/.."          # repo root
 
 command -v qmake  >/dev/null 2>&1 || { echo "ERROR: qmake (Qt5) not on PATH" >&2; exit 1; }
-command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 not found" >&2; exit 1; }
 QV="$(qmake -query QT_VERSION 2>/dev/null || echo '?')"
 case "$QV" in 5.*) : ;; *) echo "WARNING: qmake reports Qt $QV; this app targets Qt 5.x" >&2 ;; esac
 
@@ -61,15 +60,7 @@ fi
 echo "== embed daemon -> single file (ZQWDMON1 footer) =="
 OUT="linux-zclwallet-allinone"
 cp ./zclwallet "$OUT"
-python3 - "$DAEMON" "$OUT" <<'PYEOF'
-import sys, hashlib, struct
-d = open(sys.argv[1], 'rb').read()
-with open(sys.argv[2], 'ab') as f:
-    f.write(d)                            # daemon bytes
-    f.write(hashlib.sha256(d).digest())   # sha256 (32)
-    f.write(struct.pack('<Q', len(d)))    # len    (8, little-endian)
-    f.write(b'ZQWDMON1')                  # magic  (8)
-PYEOF
+sh contrib/embed-footer.sh append "$OUT" "$DAEMON"
 chmod +x "$OUT"
 
 # verify it is still a valid ELF and the embedded daemon footer is internally
@@ -78,34 +69,7 @@ if ! readelf -h "$OUT" >/dev/null 2>&1; then
   echo "ERROR: '$OUT' is not a valid ELF" >&2
   exit 1
 fi
-if ! python3 - "$OUT" <<'PYEOF'
-import hashlib
-import os
-import struct
-import sys
-
-path = sys.argv[1]
-size = os.path.getsize(path)
-if size < 48:
-    raise SystemExit("file too small for daemon footer")
-
-with open(path, "rb") as f:
-    f.seek(-48, os.SEEK_END)
-    expected_hash = f.read(32)
-    daemon_len = struct.unpack("<Q", f.read(8))[0]
-    magic = f.read(8)
-
-    if magic != b"ZQWDMON1":
-        raise SystemExit("missing ZQWDMON1 footer")
-    if daemon_len == 0 or daemon_len > size - 48:
-        raise SystemExit("invalid embedded daemon length")
-
-    f.seek(size - 48 - daemon_len)
-    daemon = f.read(daemon_len)
-    if hashlib.sha256(daemon).digest() != expected_hash:
-        raise SystemExit("embedded daemon checksum mismatch")
-PYEOF
-then
+if ! sh contrib/embed-footer.sh verify "$OUT" >/dev/null; then
   echo "ERROR: '$OUT' has an invalid embedded daemon footer" >&2
   exit 1
 fi

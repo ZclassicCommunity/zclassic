@@ -18,7 +18,7 @@ drop-in for `zclassicd`**, reused by every layer.
 | **L1 — Integration / widget** | QtTest with `-platform offscreen`; links the full app **minus `main.cpp`**, points the **real** `RPC` at the localhost mock via the public `rpc->setConnection()` (`rpc.h:40`). Drives widgets in-process (`setChecked`/`click`/`keyClicks`). | Same `tests/` tree, second target. A `QTimer::singleShot(0)` modal-dismisser reads dialog state *before* closing and injects Yes/No. | **Every privacy dialog/caption/warning** — PUBLIC receive caption, de-shield warning, memo reply-to consent, Sprout-button-disabled, backup nag — because it needs neither a daemon nor any X input tool. |
 | **L2/L3 — E2E** | The **existing Xvfb harness** (`uxmatrix.sh`/`run.sh`/`shot.sh`) booting the **real unmodified bundle** with `--no-embedded` against the localhost mock. | Real Xvfb :99 + isolated datadir/ports. Asserts via log-grep + `xwininfo` + screenshot. | The real `ConnectionLoader` handshake, staged banners, splash, graceful quit, and on-disk effects (wallet.dat copy, file perms, no-secrets-in-log). |
 
-**The localhost mock** is one ~120-line `python3 http.server` (python3 is in the rootfs),
+**The localhost mock** is one single-file C23 program (`tests/mock/mockrpc.c`, built with `cc -std=c2x`),
 scenario-driven by an env var, one flat-JSON-per-method fixture dir per scenario, ignoring
 Basic auth. Same artifact for L1 and L2/L3 — build once, reuse everywhere. It records request
 bodies so tests can assert the `z_sendmany` change-routing payload.

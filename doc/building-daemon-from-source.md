@@ -65,11 +65,11 @@ cd /home/rhett/github/zclassic
 
 Ubuntu/Debian package set (`install-deps.sh:56-82`):
 `build-essential pkg-config libc6-dev m4 g++-multilib autoconf libtool automake
-libdb++-dev libsodium-dev git python3 wget curl zlib1g-dev libssl-dev
+libdb++-dev libsodium-dev git wget curl zlib1g-dev libssl-dev
 libevent-dev`.
 
 Arch set (`install-deps.sh:118-133`):
-`base-devel autoconf automake libtool pkgconf db libsodium curl git python
+`base-devel autoconf automake libtool pkgconf db libsodium curl git
 wget openssl libevent`.
 
 ### 1.3 The `depends/` system (what gets built, and what it pins)

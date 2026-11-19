@@ -38,6 +38,20 @@ distcheck-hook:
 distcleancheck:
 	@:
 
+# Source-tree gates that need no build: no Python or hosted-CI files, the KEY-1 wallet guard,
+# and the seed generator. They run with `make check` (after the unit tests).
+.PHONY: check-no-python check-key1-guard check-seeds
+check-no-python:
+	sh $(top_srcdir)/zcutil/check-no-python.sh --root $(top_srcdir)
+
+check-key1-guard:
+	sh $(top_srcdir)/qa/key1-guard.sh $(abs_top_srcdir)
+
+check-seeds:
+	sh $(top_srcdir)/contrib/seeds/test-generate-seeds.sh $(abs_top_srcdir)
+
+check-local: check-no-python check-key1-guard check-seeds
+
 $(if $(findstring src/,$(MAKECMDGOALS)),$(MAKECMDGOALS), none): FORCE
 	$(MAKE) -C src $(patsubst src/%,%,$@)
 
@@ -148,7 +162,9 @@ endif
 dist_bin_SCRIPTS = zcutil/fetch-params.sh
 dist_noinst_SCRIPTS = autogen.sh zcutil/build.sh
 
-EXTRA_DIST = THIRD-PARTY-LICENSES contrib/examples/zclassic.conf $(top_srcdir)/share/genbuild.sh qa/rpc-tests qa/zcash $(DIST_DOCS) zcutil/check-hardening.sh
+EXTRA_DIST = THIRD-PARTY-LICENSES contrib/examples/zclassic.conf $(top_srcdir)/share/genbuild.sh qa/rpc-tests qa/zcash $(DIST_DOCS) zcutil/check-hardening.sh \
+  zcutil/check-no-python.sh zcutil/embedded-tor-check.sh qa/key1-guard.c qa/key1-guard.sh qa/key1-walletdb-baseline.txt \
+  contrib/seeds/generate-seeds.c contrib/seeds/test-generate-seeds.sh contrib/seeds/nodes_main.txt contrib/seeds/nodes_test.txt
 
 install-exec-hook:
 	mv $(DESTDIR)$(bindir)/fetch-params.sh $(DESTDIR)$(bindir)/zcash-fetch-params

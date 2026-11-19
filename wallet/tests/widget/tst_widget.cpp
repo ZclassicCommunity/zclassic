@@ -3269,8 +3269,8 @@ private slots:
     //
     //   *** DEFERRED in this environment (the harness QSKIPs it). ***
     //   Measuring t0->t1 requires refresh() to actually run end-to-end, which needs a
-    //   live Connection to a daemon. A tests/mock/mockrpc.py subprocess on an isolated
-    //   loopback port (the helpers findPython/waitForMockHealth/installMockConnection/
+    //   live Connection to a daemon. A tests/mock/mockrpc subprocess (built from mockrpc.c) on an isolated
+    //   loopback port (the helpers waitForMockHealth/installMockConnection/
     //   shutdownMock below mirror tests/e2e/mocke2e.sh) DOES wire up cleanly and the
     //   first refresh fires ("Payment UI now ready!"), but under QT_QPA_PLATFORM=
     //   offscreen in proot the notify->debounce->refresh->paint cycle does not settle
@@ -3296,11 +3296,10 @@ private slots:
 
         // --- Reference implementation kept (compiled, but unreachable after QSKIP) so
         // the t0/t1 wiring is documented in code and trivially re-enabled. ---
-        const QString py = findPython();
-        if (py.isEmpty()) return;
-        const QString mockScript =
-            QDir(QCoreApplication::applicationDirPath()).filePath("../mock/mockrpc.py");
-        if (!QFile::exists(mockScript)) return;
+        // cc -std=c2x -o tests/mock/mockrpc tests/mock/mockrpc.c  (see tests/mock/README.md)
+        const QString mockBin =
+            QDir(QCoreApplication::applicationDirPath()).filePath("../mock/mockrpc");
+        if (!QFile::exists(mockBin)) return;
 
         const int port = 31900 + (QRandomGenerator::global()->bounded(500));
         QProcess mock;
@@ -3308,8 +3307,10 @@ private slots:
         env.insert("MOCK_PORT", QString::number(port));
         env.insert("MOCK_SCENARIO", "funded-synced");
         env.insert("MOCK_LOG", QDir::tempPath() + "/zqw_perf22_mock.log");
+        env.insert("MOCK_FIXTURES",
+                   QDir(QCoreApplication::applicationDirPath()).filePath("../mock/fixtures"));
         mock.setProcessEnvironment(env);
-        mock.start(py, { mockScript });
+        mock.start(mockBin, {});
         if (!mock.waitForStarted(3000)) return;
         if (!waitForMockHealth(port, 3000)) { shutdownMock(mock, port); return; }
 
@@ -3363,19 +3364,6 @@ private slots:
 private:
 #ifdef ZCL_WIDGET_TEST
     // ---- perf22 helpers (mock orchestration; mirror tests/e2e/mocke2e.sh) ----
-    // Locate a python3 interpreter on PATH (proot maps /usr/bin/python3).
-    QString findPython() {
-        for (const QString& cand : { "/usr/bin/python3", "/usr/local/bin/python3",
-                                     "python3" }) {
-            if (cand.startsWith('/')) {
-                if (QFile::exists(cand)) return cand;
-            } else {
-                return cand;   // rely on PATH lookup
-            }
-        }
-        return QString();
-    }
-
     // GET http://127.0.0.1:<port>/ and return true once it answers 200 within budget.
     bool waitForMockHealth(int port, int budgetMs) {
         QElapsedTimer budget; budget.start();

@@ -38,9 +38,8 @@ newer, which you will need to install if you are not using the depends
 system. Typically, it is packaged by distributions as something like
 *libzmq5-dev*. The C++ wrapper for ZeroMQ is *not* needed.
 
-In order to run the example Python client scripts in contrib/ one must
-also install *python-zmq*, though this is not necessary for daemon
-operation.
+The example subscriber in contrib/zmq/zmq_sub.c is a small C23 program that links libzmq (the depends
+prefix has it; build line in the file); it is not needed for daemon operation.
 
 ## Security WARNING
 
@@ -98,7 +97,7 @@ ZeroMQ endpoint specifiers for TCP (and others) are documented in the
 Client side, then, the ZeroMQ subscriber socket must have the
 ZMQ_SUBSCRIBE option set to one or either of these prefixes (for
 instance, just `hash`); without doing so will result in no messages
-arriving. Please see `contrib/zmq/zmq_sub.py` for a working example.
+arriving. Please see `contrib/zmq/zmq_sub.c` for a working example.
 
 ## Remarks
 
