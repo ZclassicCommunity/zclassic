@@ -928,6 +928,17 @@ bool ConnectionLoader::startEmbeddedZClassicd(const QStringList& extraArgs) {
     // right after this returns; do NOT restart it here or the warmup-window check and
     // the startup-timing log would measure from the wrong instant.
 
+    // An extracted daemon is verified immediately before launch, through a handle that is
+    // held (Windows: without write/delete sharing) until start() has created the process,
+    // so the file that was hashed is the file that runs. Fail closed.
+    {
+        EmbeddedDaemonPin pin(zclassicdProgram, ProfilePaths::cacheDir());
+        if (pin.status() == EmbeddedDaemonPin::Failed) {
+            main->logger->write("Embedded daemon NOT started: " + pin.error());
+            this->showError(QObject::tr("ZClassic's node program could not be verified, so it was not started.\n\n"
+                "%1\n\nPlease reinstall ZClassic. Your wallet and coins are safe.").arg(pin.error()));
+            return false;
+        }
 #ifdef Q_OS_LINUX
     DaemonJob::start(ezclassicd, zclassicdProgram, launchArgs);
 #elif defined(Q_OS_DARWIN)
@@ -940,6 +951,7 @@ bool ConnectionLoader::startEmbeddedZClassicd(const QStringList& extraArgs) {
     if (const auto jobErr = DaemonJob::start(ezclassicd, zclassicdProgram, launchArgs))
         main->logger->write(QString("daemon job backstop unavailable (win32 error %1)").arg(jobErr));
 #endif // Q_OS_LINUX
+    }
 
     // [gui-startup] We own this daemon and just spawned it. First-write-wins, so a
     // later repair-relaunch never overwrites the original cold-start spawn time.

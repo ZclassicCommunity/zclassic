@@ -1,4 +1,6 @@
 #include "daemonjob.h"
+#include "embeddeddaemon.h"
+#include "profilepaths.h"
 #include "rpc.h"
 #include "syncstate.h"
 #include "fastsync.h"
@@ -203,9 +205,18 @@ void RPC::restartEmbeddedZClassicd() {
             clean << a;
     ezExpectedShutdown = false;   // (F1) a fresh start is not a deliberate shutdown
     main->logger->write(QString("Restarting embedded zclassicd (attempt %1)").arg(ezRestartCount));
-    // Through DaemonJob so the restarted node is bound to a kill-on-close job again.
-    if (const auto jobErr = DaemonJob::start(ezclassicd, ezclassicd->program(), clean))
-        main->logger->write(QString("daemon job backstop unavailable (win32 error %1)").arg(jobErr));
+    // An extracted (cached) daemon is re-verified through a held handle right before the
+    // restart, exactly like the first start; on failure the node stays down.
+    {
+        EmbeddedDaemonPin pin(ezclassicd->program(), ProfilePaths::cacheDir());
+        if (pin.status() == EmbeddedDaemonPin::Failed) {
+            main->logger->write("Embedded daemon NOT restarted: " + pin.error());
+            return;
+        }
+        // Through DaemonJob so the restarted node is bound to a kill-on-close job again.
+        if (const auto jobErr = DaemonJob::start(ezclassicd, ezclassicd->program(), clean))
+            main->logger->write(QString("daemon job backstop unavailable (win32 error %1)").arg(jobErr));
+    }
     // A restarted node writes a NEW auth cookie. The connection still holds the old one, so
     // without this every poll is rejected with 401 and the wallet stays on "No Connection"
     // although the node is up. Follow the cookie until it changes (it is rewritten very early

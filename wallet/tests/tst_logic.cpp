@@ -881,6 +881,8 @@ private slots:
         QVERIFY(walletReleaseOrder("").isNull());
     }
     void embeddedDaemon_integrity();
+    void embeddedDaemon_footerLocation();
+    void embeddedDaemon_pinsLaunchedFile();
     void initTestCase();
     void cleanupTestCase();
 
@@ -1365,6 +1367,283 @@ void TestLogic::embeddedDaemon_integrity() {
     QVERIFY(write(source, "ZQWDMON1"));
     QVERIFY(extractEmbeddedDaemon(source, temp.path(), &error).isEmpty());
 }
+// ---------------------------------------------------------------------------
+// Embedded-daemon footer: synthetic unsigned/"signed" PE fixtures and malformed
+// variants. A "signed" file is [PE headers][daemon][footer][0..7 zero pad][table],
+// the table named by data directory 4 (a FILE OFFSET), as Authenticode lays it out.
+// ---------------------------------------------------------------------------
+namespace {
+QByteArray le(quint64 value, int bytes) {
+    QByteArray out;
+    for (int i = 0; i < bytes; ++i) out += char((value >> (8 * i)) & 255);
+    return out;
+}
+// Minimal PE32+: MZ header, PE signature, file header, 240-byte optional header,
+// no sections; SizeOfHeaders = 0x200 so the image ends at 0x200.
+QByteArray fixturePe(quint32 certOffset, quint32 certSize, quint32 dirCount = 16) {
+    QByteArray h(0x200, '\0');
+    h.replace(0, 2, "MZ");
+    h.replace(0x3c, 4, le(0x40, 4));
+    h.replace(0x40, 4, QByteArray("PE\0\0", 4));
+    h.replace(0x44, 2, le(0x8664, 2));             // machine
+    h.replace(0x46, 2, le(0, 2));                  // NumberOfSections
+    h.replace(0x54, 2, le(240, 2));                // SizeOfOptionalHeader
+    const int opt = 0x58;
+    h.replace(opt, 2, le(0x20b, 2));               // PE32+
+    h.replace(opt + 60, 4, le(0x200, 4));          // SizeOfHeaders
+    h.replace(opt + 108, 4, le(dirCount, 4));      // NumberOfRvaAndSizes
+    h.replace(opt + 112 + 4 * 8, 4, le(certOffset, 4));
+    h.replace(opt + 112 + 4 * 8 + 4, 4, le(certSize, 4));
+    return h;
+}
+// length < 0: the real length. rawLength: written verbatim when not empty.
+QByteArray fixtureFooter(const QByteArray& payload, qint64 length = -1,
+                         const QByteArray& hash = QByteArray(),
+                         const QByteArray& rawLength = QByteArray()) {
+    QByteArray f = hash.isEmpty() ? QCryptographicHash::hash(payload, QCryptographicHash::Sha256) : hash;
+    f += rawLength.isEmpty() ? le(quint64(length < 0 ? payload.size() : length), 8) : rawLength;
+    f += "ZQWDMON1";
+    return f;
+}
+// Signed layout. padOverride < 0: pad to 8-byte alignment like signtool.
+QByteArray fixtureSigned(const QByteArray& payload, int tableSize = 64, int padOverride = -1,
+                         const QByteArray& footer = QByteArray()) {
+    const QByteArray foot = footer.isEmpty() ? fixtureFooter(payload) : footer;
+    QByteArray body = payload + foot;
+    const int pad = padOverride >= 0 ? padOverride : int((8 - (0x200 + body.size()) % 8) % 8);
+    const quint32 tableOffset = quint32(0x200 + body.size() + pad);
+    body += QByteArray(pad, '\0');
+    return fixturePe(tableOffset, quint32(tableSize)) + body + QByteArray(tableSize, 'C');
+}
+bool fixtureWrite(const QString& path, const QByteArray& bytes) {
+    QFile f(path);
+    return f.open(QIODevice::WriteOnly) && f.write(bytes) == bytes.size();
+}
+// Extract `bundle` into a fresh cache; returns the extracted bytes (null on failure).
+QByteArray fixtureExtract(const QByteArray& bundle, QString* error) {
+    QTemporaryDir dir;
+    if (!dir.isValid() || !fixtureWrite(dir.filePath("bundle"), bundle)) {
+        *error = "fixture error";
+        return QByteArray();
+    }
+    const QString path = extractEmbeddedDaemon(dir.filePath("bundle"), dir.filePath("cache"), error);
+    if (path.isEmpty()) return QByteArray();
+    QFile f(path);
+    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+}
+} // namespace
+
+void TestLogic::embeddedDaemon_footerLocation() {
+    QByteArray payload;
+    for (int i = 0; i < 5000; ++i) payload += char((i * 31 + 7) & 255);
+    QString error;
+    // Unsigned PE: footer at EOF.
+    QVERIFY2(fixtureExtract(fixturePe(0, 0) + payload + fixtureFooter(payload), &error) == payload,
+             qPrintable(error));
+    // Signed: footer, zero pad to 8, then the certificate table. Try every alignment.
+    for (int extra = 0; extra < 9; ++extra) {
+        const QByteArray p = payload + QByteArray(extra, 'x');
+        QVERIFY2(fixtureExtract(fixtureSigned(p), &error) == p, qPrintable(error));
+    }
+    // Explicit pad lengths 0..7 and a large table.
+    for (int pad = 0; pad < 8; ++pad)
+        QVERIFY2(fixtureExtract(fixtureSigned(payload, 4096, pad), &error) == payload,
+                 qPrintable(error));
+    // Pad of 8 or more is not something a signer produces: reject.
+    QVERIFY(fixtureExtract(fixtureSigned(payload, 64, 8), &error).isEmpty());
+    // Non-zero bytes between footer and table: reject.
+    {
+        QByteArray f = fixtureSigned(payload, 64, 3);
+        f[0x200 + payload.size() + 48 + 1] = 'Z';
+        QVERIFY(fixtureExtract(f, &error).isEmpty());
+    }
+    // Signed file with no footer before the table: reject, even when the table itself
+    // ends in a complete footer (the footer must precede the table, not sit in it).
+    {
+        QByteArray table(56, 'T');
+        table += fixtureFooter(payload);
+        const quint32 off = quint32(0x200 + payload.size());
+        QVERIFY(fixtureExtract(fixturePe(off, quint32(table.size())) + payload + table, &error).isEmpty());
+        QVERIFY(error.contains("footer"));
+    }
+    // A PE with no certificate table but a footer that is not last: reject.
+    QVERIFY(fixtureExtract(fixturePe(0, 0) + payload + fixtureFooter(payload) + QByteArray(8, 'X'),
+                           &error).isEmpty());
+    // Fewer than five data directories: no certificate table is declared.
+    QVERIFY(fixtureExtract(fixturePe(0, 0, 4) + payload + fixtureFooter(payload), &error) == payload);
+    // Certificate table declared inconsistently: ends before EOF, runs past EOF,
+    // starts past EOF, zero size with a footer that is not last, starts inside the image.
+    {
+        const QByteArray ok = fixtureSigned(payload, 64, 0);
+        const quint32 off = quint32(0x200 + payload.size() + 48);
+        QVERIFY(fixtureExtract(fixturePe(off, 32) + ok.mid(0x200), &error).isEmpty());
+        QVERIFY(error.contains("certificate"));
+        QVERIFY(fixtureExtract(fixturePe(off, 128) + ok.mid(0x200), &error).isEmpty());
+        QVERIFY(fixtureExtract(fixturePe(off + 4096, 64) + ok.mid(0x200), &error).isEmpty());
+        QVERIFY(fixtureExtract(fixturePe(off, 0) + ok.mid(0x200), &error).isEmpty());
+        QVERIFY(fixtureExtract(fixturePe(0x100, quint32(ok.size() - 0x100)) + ok.mid(0x200), &error).isEmpty());
+    }
+    // Truncations: every cut inside the footer and the certificate table, both layouts.
+    {
+        const QByteArray unsignedBundle = fixturePe(0, 0) + payload + fixtureFooter(payload);
+        for (int cut = 1; cut <= 60; ++cut)
+            QVERIFY(fixtureExtract(unsignedBundle.left(unsignedBundle.size() - cut), &error).isEmpty());
+        const QByteArray signedBundle = fixtureSigned(payload);
+        for (int cut = 1; cut <= 70; ++cut)
+            QVERIFY(fixtureExtract(signedBundle.left(signedBundle.size() - cut), &error).isEmpty());
+        QVERIFY(fixtureExtract(QByteArray("MZ"), &error).isEmpty());
+        QVERIFY(fixtureExtract(fixturePe(0, 0).left(100), &error).isEmpty());
+        QVERIFY(fixtureExtract(QByteArray(), &error).isEmpty());
+    }
+    // Wrong hash, in both layouts.
+    {
+        const QByteArray wrong = QCryptographicHash::hash("other", QCryptographicHash::Sha256);
+        QVERIFY(fixtureExtract(fixturePe(0, 0) + payload + fixtureFooter(payload, -1, wrong), &error).isEmpty());
+        QVERIFY(error.contains("hash mismatch"));
+        QVERIFY(fixtureExtract(fixtureSigned(payload, 64, -1, fixtureFooter(payload, -1, wrong)), &error).isEmpty());
+        QVERIFY(error.contains("hash mismatch"));
+        QByteArray flipped = fixtureSigned(payload);
+        flipped[0x200 + 17] = char(flipped.at(0x200 + 17) ^ 1);
+        QVERIFY(fixtureExtract(flipped, &error).isEmpty());
+        QVERIFY(error.contains("hash mismatch"));
+    }
+    // Wrong lengths: zero, past the file, past the room after the image (would overlap
+    // the PE headers), 2^64-1, over the 512 MiB limit. A shorter one is a hash error.
+    {
+        const QByteArray head = fixturePe(0, 0);
+        const QList<QByteArray> bad = {
+            le(0, 8), le(quint64(payload.size() + 1), 8), le(quint64(payload.size() + 0x200), 8),
+            QByteArray(8, char(0xff)), le(quint64(1) << 30, 8)};
+        for (const QByteArray& raw : bad) {
+            const QByteArray foot = fixtureFooter(payload, -1, QByteArray(), raw);
+            QVERIFY(fixtureExtract(head + payload + foot, &error).isEmpty());
+            QVERIFY2(error.contains("length"), qPrintable(error));
+            QVERIFY(fixtureExtract(fixtureSigned(payload, 64, -1, foot), &error).isEmpty());
+            QVERIFY2(error.contains("length"), qPrintable(error));
+        }
+        QVERIFY(fixtureExtract(head + payload + fixtureFooter(payload, payload.size() - 1), &error).isEmpty());
+        QVERIFY(error.contains("hash mismatch"));
+        // A length that exactly fills the room up to the image end is legal.
+        QVERIFY2(fixtureExtract(head + payload + fixtureFooter(payload), &error) == payload,
+                 qPrintable(error));
+    }
+    // The footer magic inside the daemon bytes, even a complete decoy footer at the end
+    // of the daemon, must not confuse the locator: only the last footer counts.
+    {
+        const QByteArray tricky = payload.left(1000) + fixtureFooter("decoy") + payload.mid(1000) +
+                                  "ZQWDMON1" + fixtureFooter("other-decoy");
+        QVERIFY2(fixtureExtract(fixturePe(0, 0) + tricky + fixtureFooter(tricky), &error) == tricky,
+                 qPrintable(error));
+        QVERIFY2(fixtureExtract(fixtureSigned(tricky, 64, -1), &error) == tricky, qPrintable(error));
+        QVERIFY2(fixtureExtract(tricky + fixtureFooter(tricky), &error) == tricky, qPrintable(error));
+    }
+    // Non-PE inputs (ELF, Mach-O, plain data) keep the end-of-file rule only.
+    {
+        const QByteArray elf = QByteArray("\x7f" "ELF") + QByteArray(100, 'e');
+        QVERIFY(fixtureExtract(elf + payload + fixtureFooter(payload), &error) == payload);
+        QVERIFY(fixtureExtract(elf + payload + fixtureFooter(payload) + QByteArray(8, '\0'), &error).isEmpty());
+    }
+    // A length that reaches back before offset 0 on a non-PE file.
+    QVERIFY(fixtureExtract(fixtureFooter("abc", 10000), &error).isEmpty());
+}
+
+void TestLogic::embeddedDaemon_pinsLaunchedFile() {
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    // This very test executable is the "daemon": a real program that exits 0 for
+    // -help, so a pinned file must still be launchable.
+    QFile self(QCoreApplication::applicationFilePath());
+    QVERIFY(self.open(QIODevice::ReadOnly));
+    const QByteArray bytes = self.readAll();
+    self.close();
+    const QString hex = QString::fromLatin1(
+        QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+    const QString dir = QDir(temp.path()).filePath("zclassic-node/" + hex);
+    QVERIFY(QDir().mkpath(dir));
+#ifdef Q_OS_WIN
+    const QString program = QDir(dir).filePath("zqw-zclassicd.exe");
+#else
+    const QString program = QDir(dir).filePath("zqw-zclassicd");
+    const auto ownerOnly = QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner;
+    QVERIFY(QFile::setPermissions(QDir(temp.path()).filePath("zclassic-node"), ownerOnly));
+    QVERIFY(QFile::setPermissions(dir, ownerOnly));
+#endif
+    auto write = [](const QString& path, const QByteArray& data) {
+        QFile f(path);
+        return f.open(QIODevice::WriteOnly) && f.write(data) == data.size();
+    };
+    QVERIFY(write(program, bytes));
+#ifndef Q_OS_WIN
+    QVERIFY(QFile::setPermissions(program, ownerOnly));
+#endif
+    // Not in the cache: nothing to pin.
+    {
+        EmbeddedDaemonPin outside(QCoreApplication::applicationFilePath(), temp.path());
+        QCOMPARE(outside.status(), EmbeddedDaemonPin::NotCached);
+        EmbeddedDaemonPin empty(QString(), temp.path());
+        QCOMPARE(empty.status(), EmbeddedDaemonPin::NotCached);
+    }
+    // Verified and held: the same file can be launched while pinned.
+    {
+        EmbeddedDaemonPin pin(program, temp.path());
+        QVERIFY2(pin.status() == EmbeddedDaemonPin::Pinned, qPrintable(pin.error()));
+#ifdef Q_OS_WIN
+        // The check-to-launch window is closed: no write, delete or rename of the file
+        // or of the directory holding it while the pin is alive.
+        QFile writer(program);
+        QVERIFY(!writer.open(QIODevice::WriteOnly | QIODevice::Append));
+        QVERIFY(!QFile::remove(program));
+        QVERIFY(!QFile::rename(program, program + ".moved"));
+        QVERIFY(!QDir().rename(dir, dir + "-moved"));
+        QVERIFY(QFileInfo::exists(program));
+#endif
+        QProcess process;
+        process.start(program, {QStringLiteral("-help")});
+        QVERIFY(process.waitForStarted(15000));
+        QVERIFY(process.waitForFinished(30000));
+    }
+    // Released: the file can be replaced again, and a swapped file is refused.
+    QVERIFY(write(program, QByteArray(bytes.size(), 'x')));
+    {
+        EmbeddedDaemonPin pin(program, temp.path());
+        QCOMPARE(pin.status(), EmbeddedDaemonPin::Failed);
+        QVERIFY(pin.error().contains("hash mismatch"));
+    }
+    // Same size, one byte changed: refused.
+    {
+        QByteArray changed = bytes;
+        changed[changed.size() / 2] = char(changed.at(changed.size() / 2) ^ 1);
+        QVERIFY(write(program, changed));
+        QCOMPARE(EmbeddedDaemonPin(program, temp.path()).status(), EmbeddedDaemonPin::Failed);
+    }
+    // Missing file and a non-content-addressed directory: refused, never launched.
+    QVERIFY(QFile::remove(program));
+    {
+        QCOMPARE(EmbeddedDaemonPin(program, temp.path()).status(), EmbeddedDaemonPin::Failed);
+        const QString bad = QDir(temp.path()).filePath("zclassic-node/not-a-digest");
+        QVERIFY(QDir().mkpath(bad));
+        QVERIFY(write(QDir(bad).filePath("zqw-zclassicd"), bytes));
+        QCOMPARE(EmbeddedDaemonPin(QDir(bad).filePath("zqw-zclassicd"), temp.path()).status(),
+                 EmbeddedDaemonPin::Failed);
+    }
+#ifndef Q_OS_WIN
+    // POSIX: a group-writable program, a symbolic link or a group-writable directory
+    // is refused.
+    QVERIFY(write(program, bytes));
+    QVERIFY(QFile::setPermissions(program, ownerOnly | QFileDevice::WriteGroup));
+    QCOMPARE(EmbeddedDaemonPin(program, temp.path()).status(), EmbeddedDaemonPin::Failed);
+    QVERIFY(QFile::remove(program));
+    QVERIFY(write(QDir(temp.path()).filePath("real"), bytes));
+    QVERIFY(QFile::link(QDir(temp.path()).filePath("real"), program));
+    QCOMPARE(EmbeddedDaemonPin(program, temp.path()).status(), EmbeddedDaemonPin::Failed);
+    QVERIFY(QFile::remove(program));
+    QVERIFY(write(program, bytes));
+    QVERIFY(QFile::setPermissions(program, ownerOnly));
+    QVERIFY(QFile::setPermissions(dir, ownerOnly | QFileDevice::WriteGroup));
+    QCOMPARE(EmbeddedDaemonPin(program, temp.path()).status(), EmbeddedDaemonPin::Failed);
+#endif
+}
+
 void TestLogic::sentTxStore_invalidHistoryPreserved() {
     Settings::getInstance()->setTestnet(false);
     QSettings().setValue("options/savesenttx", true);

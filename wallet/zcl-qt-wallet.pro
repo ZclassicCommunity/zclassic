@@ -191,3 +191,20 @@ else:unix: PRE_TARGETDEPS += $$PWD/res/libsodium.a
 
 # Windows 7+ metadata APIs used for handle-based startup access checks.
 win32: DEFINES += _WIN32_WINNT=0x0601 WINVER=0x0601
+
+# Byte-reproducible Windows release exe: MinGW's linker stamps the link time into the
+# PE header, __FILE__ and debug info carry the source and build directories, and the
+# About box used __DATE__. Two builds of one commit in different directories must give
+# the same zclwallet.exe. SOURCE_DATE_EPOCH (seconds; exported by
+# contrib/release/build-windows.sh) replaces the compile date.
+win32-g++:CONFIG(release, debug|release) {
+    QMAKE_LFLAGS += -Wl,--no-insert-timestamp
+    # Sources are also reached by a path relative to the build directory (../wallet/...).
+    ZQW_REL = $$relative_path($$PWD, $$OUT_PWD)
+    ZQW_MAPS = -ffile-prefix-map=$$PWD=. -ffile-prefix-map=$$OUT_PWD=/build
+    !isEmpty(ZQW_REL):!equals(ZQW_REL, .): ZQW_MAPS += -ffile-prefix-map=$${ZQW_REL}=.
+    QMAKE_CFLAGS += $$ZQW_MAPS
+    QMAKE_CXXFLAGS += $$ZQW_MAPS
+    ZQW_SDE = $$(SOURCE_DATE_EPOCH)
+    !isEmpty(ZQW_SDE): DEFINES += ZQW_BUILD_EPOCH=$${ZQW_SDE}LL
+}
