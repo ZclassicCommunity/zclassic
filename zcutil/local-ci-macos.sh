@@ -7,14 +7,13 @@
 #
 # usage: sh local-ci-macos.sh --bundle <file.bundle> --commit <sha> --out <dir> [dev-tools|daemon|wallet-tests|wallet|all]
 #
-#   dev-tools  the check-dev-tools step of local-ci.sh (developer tool selftests, zcl-lint all, know, gen gates)
 #   daemon  static macOS daemon with embedded Tor, otool allowlist, --version,
 #           regtest smoke, bounded embedded-Tor check  -> <out>/daemon-macos-arm64
 #   wallet-tests  Homebrew Qt 5: build the GUI, the logic tests and the widget tests
 #           (qmake, offscreen platform) and run them; no daemon needed
 #   wallet  pinned static Qt 5.15.19 + the wallet bundle -> <out>/wallet-macos-candidate
 #           (needs <out>/daemon-macos-arm64 of the same commit; builds Qt once, ~1 h)
-#   all     daemon, wallet-tests, then wallet
+#   all     dev-tools (the check-dev-tools step of local-ci.sh), daemon, wallet-tests, then wallet
 #
 # Everything lives under $ZCL_CI_ROOT (default ~/work/zc23-localci): work/ (fresh clone per
 # run), cache/ (depends sources+built, Qt toolchain).  Other directories are never touched,
@@ -77,24 +76,6 @@ expected_version() {
 
 # Processes whose command line mentions one of OUR directories (never anyone else's).
 leftovers() { ps -axo pid=,command= | grep -F -e "$ROOT" -e "$out" | grep -v grep | grep -F zclassicd || true; }
-
-# The same commands as t_devtools in zcutil/local-ci.sh (keep the two in step).
-do_dev_tools() {
-    say "dev-tools: $commit"
-    checkout
-    cd "$SRC"
-    mkdir -p "$out/logs"
-    log=$out/logs/dev-tools-macos.log
-    { make -C zcutil -j"$JOBS" && make -C zcutil check &&
-      zcutil/bin/zcl-lint all &&
-      { [ ! -x zcutil/bin/zcl-dev-check-tests ] || zcutil/bin/zcl-dev check-tests; } &&
-      zcutil/bin/zcl-dev know --check &&
-      zcutil/bin/zcl-dev gen --check rpc-parity &&
-      zcutil/bin/zcl-dev gen --check flags; } >"$log" 2>&1 \
-        || { tail -40 "$log"; die "check-dev-tools failed (log $log)"; }
-    tail -3 "$log"
-    say "dev-tools OK"
-}
 
 do_daemon() {
     say "daemon: $commit"
@@ -204,6 +185,5 @@ case $what in
     daemon) do_daemon ;;
     wallet-tests) do_wallet_tests ;;
     wallet) do_wallet ;;
-    dev-tools) do_dev_tools ;;
-    all) do_dev_tools; do_daemon; do_wallet_tests; do_wallet ;;
+    dev-tools|all) say "dev-tools: $commit"; checkout; cd "$SRC"; mkdir -p "$out/logs"; { make -C zcutil -j"$JOBS" && MAKEFLAGS= make -C zcutil check && zcutil/bin/zcl-dev verify --gates; } >"$out/logs/dev-tools-macos.log" 2>&1 || { tail -40 "$out/logs/dev-tools-macos.log"; die "check-dev-tools failed (log $out/logs/dev-tools-macos.log)"; }; tail -3 "$out/logs/dev-tools-macos.log"; say "dev-tools OK"; [ "$what" = dev-tools ] || { do_daemon; do_wallet_tests; do_wallet; } ;;
 esac

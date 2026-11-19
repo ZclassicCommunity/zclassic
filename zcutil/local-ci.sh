@@ -19,8 +19,6 @@
 #     test          clean test build + every local test; one summary table
 #     test-changed  `test` restricted (as --only) to the steps `zcl-dev select` picks for
 #                   the commits between ZCL_CI_BASE (default origin/master) and --commit
-#     dev-tools     the check-dev-tools step alone, on the host in a clean clone (no root filesystem,
-#                   no daemon build); same step code and receipt as `--only check-dev-tools test`
 #     dry           three fake steps through the real step/receipt code, no root filesystem
 #     macos         run local-ci-macos.sh on the Mac named by ZCL_CI_MAC (ssh alias)
 #     all           daemon-linux daemon-win64 wallet-linux test (+ macos if ZCL_CI_MAC set)
@@ -316,18 +314,7 @@ step() {
 }
 
 # Each of these is a function so `step` can run it in a subshell with set -e off.
-# check-dev-tools: every developer tool's selftest, every lint rule and ratchet, and the generated-reference
-# and knowledge gates. Each gate that a unit did not ship is skipped by name, never faked: check-tests
-# runs only when its binary was built.
-t_devtools() {
-    MAKEFLAGS= make -C zcutil check || return 1   # serial: the selftests run tools that make is still linking
-    zcutil/bin/zcl-lint all || return 1
-    if [ -x zcutil/bin/zcl-dev-check-tests ]; then zcutil/bin/zcl-dev check-tests || return 1
-    else echo "check-dev-tools: zcl-dev check-tests is not built in this tree, skipped"; fi
-    zcutil/bin/zcl-dev know --check || return 1
-    zcutil/bin/zcl-dev gen --check rpc-parity || return 1
-    zcutil/bin/zcl-dev gen --check flags
-}
+t_devtools() { MAKEFLAGS= make -C zcutil check && zcutil/bin/zcl-dev verify --gates; }   # selftests serial (they run tools make still links), then the gates
 t_vendor()   { make -C src check-c23-vendor; }
 t_toolsvendor() { sh src/c23/tools/check-vendor.sh zcutil/tools/Z23_SOURCE.tsv; }
 t_jsonq()    { make -C zcutil/tools check; }   # builds zcutil/bin/jsonq (host cc) and runs its fixture test; the shell tests need it
@@ -448,8 +435,6 @@ if [ "${1:-}" = "__inner" ]; then
         test-run)     inner_test_run ;;
         test-tor)     inner_test_tor ;;
         t_dry_*) fn=$2; shift 2; "$fn" "$@"; exit $? ;;
-        # `dev-tools`: the check-dev-tools step on the host, in the clean clone named by ZCL_CI_HOSTSRC.
-        h_devtools) cd "${ZCL_CI_HOSTSRC:?}" && t_devtools; exit $? ;;
         t_*) fn=$2; shift 2; inner_common; HOST=$(./depends/config.guess); "$fn" "$@"; exit $? ;;
         *) die "unknown inner stage ${2:-}" ;;
     esac
@@ -596,20 +581,6 @@ do_dry() {
     say "dry results in $TD/results.tsv, receipts in $OUT/receipts.jsonl"
 }
 
-# do_devtools: the check-dev-tools step alone, on the host (no root filesystem, no daemon build), in a
-# clean clone of the commit. It uses the real step() and receipt() code, so receipts.jsonl records it
-# exactly as `--only check-dev-tools test` does. Needs only cc, make, sh and git.
-do_devtools() {
-    prepare_src dev-tools
-    ZCL_CI_HOSTSRC=$OUT/work/dev-tools/src; export ZCL_CI_HOSTSRC
-    TD=$OUT/dev-tools; FLAVOR=host; STEP_RUN="sh $SELF __inner"
-    mkdir -p "$TD/logs"; : >"$TD/results.tsv"
-    RCPT_OUT=$OUT; RCPT_COMMIT=$COMMIT; RCPT_TREE=$(git -C "$REPO" rev-parse "$COMMIT^{tree}"); RCPT_ENVFILE=
-    step check-dev-tools 600 h_devtools
-    say "dev-tools results in $TD/results.tsv, receipts in $OUT/receipts.jsonl"
-    grep -q "^check-dev-tools	PASS	" "$TD/results.tsv" || { tail -30 "$TD/logs/check-dev-tools.log"; return 1; }
-}
-
 # do_test_changed: `test` restricted to the steps zcl-dev select maps from the diff.
 do_test_changed() {
     zd=$REPO/zcutil/bin/zcl-dev
@@ -742,7 +713,6 @@ cmd_one() {
         test) do_test ;;
         test-changed) do_test_changed ;;
         dry) do_dry ;;
-        dev-tools) do_devtools ;;
         macos) do_macos ;;
         retry-step) need_env; [ -n "${RETRY_FN:-}" ] || die "usage: RETRY_FN=t_treeroot local-ci.sh retry-step"; stage test none "$RETRY_FN" keep ;;
         clean) rm -rf "${OUT:?}/work"; say "removed $OUT/work" ;;

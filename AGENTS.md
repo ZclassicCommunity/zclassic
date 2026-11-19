@@ -26,14 +26,14 @@ zcutil/local-ci.sh --commit <sha> test-changed <outdir>          # steps chosen 
 zcutil/local-ci.sh --commit <sha> all <outdir>              # full candidate; macOS: zcutil/local-ci-macos.sh
 make -C zcutil check                                        # every developer tool's selftest (zcutil/bin/zcl-dev help lists subcommands)
 zcutil/bin/zcl-dev doctor                                   # what this host lacks to build and test, with the fix for each gap
-zcutil/bin/zcl-dev verify [--base ref]                      # one trip for committed changes: select, focused tests when built (needs the zcl-dev-t-fast alias), zcl-lint all, test-changed hint; on Windows lint is UNAVAILABLE (exit 2), run it on a POSIX host
+zcutil/bin/zcl-dev verify [--base ref]                      # one trip for committed changes: select, focused tests when built (needs the zcl-dev-t-fast alias), zcl-lint all, test-changed hint (no `tests`, `t-fast --changed` or `hooks install` line yet: they land with their tools; zcl-lint has no `fast`, so verify runs `all`); on Windows lint is UNAVAILABLE (exit 2), run it on a POSIX host
 zcutil/bin/zcl-dev code map|owner|impact|file|sym|refs ...  # code intelligence: navigate before searching
 zcutil/bin/zcl-dev wiki [topic]                             # walk the docs and source trees one topic at a time
 zcutil/bin/zcl-dev lessons find <words>                     # search lessons, traps and facts (add: lessons add)
 zcutil/bin/zcl-dev know <term>                              # closed FACTS table answer, UNKNOWN when no row; know --check validates it
 zcutil/bin/zcl-dev gen --check rpc-parity                   # also: gen --check flags, gen rpc-reference|args-reference|inventory
 zcutil/bin/zcl-lint all                                     # every lint rule and ratchet; zcl-lint kpi prints the tree-health floor
-zcutil/local-ci.sh --commit <sha> dev-tools <outdir>        # the check-dev-tools step alone, with a receipt
+zcutil/bin/zcl-dev verify --gates                           # the check-dev-tools gates after `make -C zcutil check`: zcl-lint all, check-tests (when built), know, rpc-parity, flags; stops at the first failure
 ```
 
 Run a single qa script as `sh qa/rpc-tests/<script>.sh <dir-with-zclassicd>`. Unit tests: `src/test/test_bitcoin --run_test=<suite>` after a `--enable-tests` build ([doc/unit-tests.md](doc/unit-tests.md)). Where the host has a build broker (for example `devbuild --wait`), run heavy commands behind it.

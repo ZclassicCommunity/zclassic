@@ -42,11 +42,3 @@ yet been lowered shows as `better` here until `zcl-lint <rule> --update-baseline
 between `<!-- LINT-RULES-BEGIN -->` and `<!-- LINT-RULES-END -->` in `doc/local-ci.md`, and the rules this
 binary runs for `zcl-lint all`. A rule missing from the document, a documented name that is not a rule, a
 duplicate, an absent block or a stale binary fails.
-
-## Floor exceptions
-
-- shell_lines 20447 -> 20497 (+50): U16 wires the developer tools into `zcutil/local-ci.sh` (`dev-tools` command,
-  the `check-dev-tools` gates) and `zcutil/local-ci-macos.sh` (`dev-tools` mode). Both files are shell by design and
-  the wiring is required by the port plan; its stub-tool fixture was moved into C (`zcl-dev-verify --selftest`) to
-  keep the rise to this minimum. This is a recorded exception pending orchestrator confirmation, not a precedent:
-  the next unit that deletes shell should tighten the floor back.

@@ -3,6 +3,11 @@
  * compiler.
  *
  *   zcl-dev verify [--base REF] [--json] [--selftest] [--purpose]
+ *   zcl-dev verify --gates [--json]   the check-dev-tools gate sequence (CI and local CI run this after
+ *                                     'make -C zcutil check'): zcl-lint all, zcl-dev check-tests, know --check,
+ *                                     gen --check rpc-parity, gen --check flags; stops at the first failure.
+ *                                     check-tests is skipped by name only when zcl-dev-tests is not built; when
+ *                                     it is built but the zcl-dev-check-tests alias is missing the gate is BROKEN.
  *
  * It runs from the repository root (git rev-parse --show-toplevel) and, in order, stops at the first
  * failing step:
@@ -169,8 +174,37 @@ static int step_tfast(const char *base, struct result *r)
     fprintf(say, "== verify: t-fast --changed=%s\n", base);
     snprintf(changed, sizeof changed, "--changed=%s", base);
     int rc = run("zcl-dev-t-fast", (char *[]){"zcl-dev-t-fast", changed, NULL});
+    if (rc == 3) {   /* U2: test binary missing or stale; t-fast printed the make command */
+        fprintf(stderr, "zcl-dev verify: t-fast needs a build; run the make command it printed, then verify again\n");
+        *r = (struct result){"t-fast", "NEEDS-BUILD", 3};
+        return 2;
+    }
     *r = (struct result){"t-fast", verdict_of(rc), rc};
     return rc == 0 ? 0 : rc == 1 ? 1 : 2;
+}
+
+/* One gate: "zcl-dev <args>" or another tool, named for the summary. */
+static int step_gate(const char *name, const char *tool, char *const argv[], struct result *r)
+{
+    fprintf(say, "== verify: %s\n", name);
+    int rc = run(tool, argv);
+    *r = (struct result){name, verdict_of(rc), rc};
+    return rc == 0 ? 0 : rc == 1 ? 1 : 2;
+}
+
+static int step_checktests(struct result *r)
+{
+    if (!tool_exists("zcl-dev-tests") && !tool_exists("zcl-dev-check-tests")) {
+        fprintf(say, "== verify: check-tests SKIPPED (%s/zcl-dev-tests is not built in this tree)\n", bindir);
+        *r = (struct result){"check-tests", "SKIPPED", 0};
+        return 0;
+    }
+    if (!tool_exists("zcl-dev-check-tests")) {
+        fprintf(stderr, "zcl-dev verify: zcl-dev-tests is built but the zcl-dev-check-tests alias is missing; install it beside zcl-dev-tests\n");
+        *r = (struct result){"check-tests", "BROKEN", 2};
+        return 2;
+    }
+    return step_gate("check-tests", "zcl-dev", (char *[]){"zcl-dev", "check-tests", NULL}, r);
 }
 
 static int step_lint(struct result *r)
@@ -191,6 +225,33 @@ static int step_lint(struct result *r)
     return rc == 0 ? 0 : rc == 1 ? 1 : 2;
 }
 
+static void summary(const struct result *res, size_t n)
+{
+    fprintf(say, "== verify summary\n");
+    for (size_t i = 0; i < n; i++) fprintf(say, "  %-11s %s\n", res[i].name, res[i].verdict);
+}
+
+/* The check-dev-tools gates, in order, stopping at the first one that does not pass. */
+static int verify_gates(int json)
+{
+    struct result res[5];
+    size_t n = 0;
+    int code;
+    child_to_stderr = json;
+    if (!tool_exists("zcl-dev")) {
+        fprintf(stderr, "zcl-dev verify: %s/zcl-dev is missing; run make -C zcutil\n", bindir);
+        return 2;
+    }
+    code = step_lint(&res[n++]);
+    if (!code) code = step_checktests(&res[n++]);
+    if (!code) code = step_gate("know", "zcl-dev", (char *[]){"zcl-dev", "know", "--check", NULL}, &res[n++]);
+    if (!code) code = step_gate("rpc-parity", "zcl-dev", (char *[]){"zcl-dev", "gen", "--check", "rpc-parity", NULL}, &res[n++]);
+    if (!code) code = step_gate("flags", "zcl-dev", (char *[]){"zcl-dev", "gen", "--check", "flags", NULL}, &res[n++]);
+    summary(res, n);
+    if (json) print_json(res, n, code, "-");
+    return code;
+}
+
 static int verify(const char *base, int json)
 {
     struct result res[3];
@@ -203,11 +264,8 @@ static int verify(const char *base, int json)
     }
     code = step_select(base, &res[n++]);
     if (!code) code = step_tfast(base, &res[n++]);
-    if (!code) {
-        code = step_lint(&res[n++]);
-    }
-    fprintf(say, "== verify summary\n");
-    for (size_t i = 0; i < n; i++) fprintf(say, "  %-10s %s\n", res[i].name, res[i].verdict);
+    if (!code) code = step_lint(&res[n++]);
+    summary(res, n);
     if (code == 0)
         fprintf(say, "next: ZCL_CI_BASE=%s zcutil/local-ci.sh --commit HEAD test-changed <outdir>   (runs the CI steps select listed)\n", base);
     if (json) print_json(res, n, code, base);
@@ -216,10 +274,15 @@ static int verify(const char *base, int json)
 
 #ifndef _WIN32
 /* Fixture: stub tools in a temp bindir (its name holds a quote on purpose), checking call order, the base
- * argument, the skip of a missing t-fast, the stop on failure and the exit codes. */
+ * argument, the skip of missing optional tools, the BROKEN verdicts of missing aliases, the stop on failure,
+ * the exit codes and the one-line --json output. Stubs read the calls file name from the environment, so no
+ * character of TMPDIR can reach a shell string. */
 static char calls_path[1000];
 static char tmp_root[900];
 static char fix_bin[1000];
+static char out_path[1000];
+static char json_path[1000];
+static const char *const stub_names[] = {"zcl-dev", "zcl-dev-t-fast", "zcl-dev-tests", "zcl-dev-check-tests", "zcl-lint"};
 
 static int stub(const char *name, int code)
 {
@@ -227,81 +290,143 @@ static int stub(const char *name, int code)
     snprintf(p, sizeof p, "%s/%s", fix_bin, name);
     FILE *f = fopen(p, "w");
     if (!f) return -1;
-    fprintf(f, "#!/bin/sh\necho \"%s $*\" >>\"%s\"\nexit %d\n", name, calls_path, code);
+    fprintf(f, "#!/bin/sh\necho \"%s $*\" >>\"$ZCL_VERIFY_CALLS\"\nexit %d\n", name, code);
     fclose(f);
     return chmod(p, 0755);
 }
 
-static int calls_equal(const char *want)
+static void unstub(const char *name)
+{
+    char p[1300];
+    snprintf(p, sizeof p, "%s/%s", fix_bin, name);
+    remove(p);
+}
+
+static int slurp_equal(const char *path, const char *want)
 {
     char buf[1024] = "";
-    FILE *f = fopen(calls_path, "r");
+    FILE *f = fopen(path, "r");
     if (f) { size_t k = fread(buf, 1, sizeof buf - 1, f); buf[k] = 0; fclose(f); }
     return !strcmp(buf, want);
 }
 
-static int fixture_run(const char *base, int json, int want, const char *calls, const char *what)
+/* The --json file must hold exactly one line that starts with jhead and names every verdict in jhas. */
+static int json_ok(const char *jhead, const char *jhas)
 {
-    FILE *c = fopen(calls_path, "w");
-    if (c) fclose(c);
-    int rc = verify(base, json);
-    if (rc != want || (calls && !calls_equal(calls))) {
-        fprintf(stderr, "selftest: %s: exit %d (want %d) or call order differs\n", what, rc, want);
+    char buf[2048] = "";
+    FILE *f = fopen(json_path, "r");
+    if (f) { size_t k = fread(buf, 1, sizeof buf - 1, f); buf[k] = 0; fclose(f); }
+    char *nl = strchr(buf, '\n');
+    if (!nl || nl[1] || strncmp(buf, jhead, strlen(jhead))) return 0;
+    return strstr(buf, jhas) != NULL;
+}
+
+struct fcase { const char *base; int json, gates, want; const char *calls, *jhead, *jhas, *what; };
+
+static int fixture_run(const struct fcase *c)
+{
+    FILE *f = fopen(calls_path, "w");
+    if (f) fclose(f);
+    fflush(jout);
+    if (ftruncate(fileno(jout), 0) != 0) { perror("selftest: ftruncate"); return 1; }
+    rewind(jout);
+    int rc = c->gates ? verify_gates(c->json) : verify(c->base, c->json);
+    fflush(jout);
+    if (rc != c->want || (c->calls && !slurp_equal(calls_path, c->calls))) {
+        fprintf(stderr, "selftest: %s: exit %d (want %d) or call order differs\n", c->what, rc, c->want);
+        return 1;
+    }
+    if (c->json && !json_ok(c->jhead, c->jhas)) {
+        fprintf(stderr, "selftest: %s: --json is not one line with the expected verdicts\n", c->what);
         return 1;
     }
     return 0;
 }
 
-static int fixture(void)
+#define FX(...) (bad |= fixture_run(&(struct fcase){__VA_ARGS__}))
+
+static int fixture_cases(void)
 {
     int bad = 0;
-    char outp[1000], old_bin[1024];
+    FX("main", 0, 0, 2, NULL, NULL, NULL, "no zcl-dev");
+    bad |= stub("zcl-dev", 0) | stub("zcl-lint", 0);
+    FX("main", 0, 0, 0, "zcl-dev select main\nzcl-lint all\n", NULL, NULL, "no t-fast");
+    bad |= stub("zcl-dev-tests", 0);
+    FX("main", 0, 0, 2, "zcl-dev select main\n", NULL, NULL, "zcl-dev-tests without the t-fast alias is broken");
+    FX("main", 1, 0, 2, "zcl-dev select main\n", "{\"base\":\"main\",\"exit\":2,", "{\"step\":\"t-fast\",\"verdict\":\"BROKEN\",\"rc\":2}",
+       "zcl-dev-tests without the t-fast alias, json");
+    unstub("zcl-dev-tests");
+    bad |= stub("zcl-dev-t-fast", 0);
+    FX("origin/master", 1, 0, 0, "zcl-dev select origin/master\nzcl-dev-t-fast --changed=origin/master\nzcl-lint all\n",
+       "{\"base\":\"origin/master\",\"exit\":0,\"steps\":[{\"step\":\"select\",\"verdict\":\"PASS\",\"rc\":0},",
+       "{\"step\":\"t-fast\",\"verdict\":\"PASS\",\"rc\":0},{\"step\":\"zcl-lint\",\"verdict\":\"PASS\",\"rc\":0}]}", "with t-fast, json");
+    bad |= stub("zcl-dev-t-fast", 1);
+    FX("main", 0, 0, 1, "zcl-dev select main\nzcl-dev-t-fast --changed=main\n", NULL, NULL, "t-fast failure stops before lint");
+    bad |= stub("zcl-dev-t-fast", 3);
+    FX("main", 1, 0, 2, "zcl-dev select main\nzcl-dev-t-fast --changed=main\n", "{\"base\":\"main\",\"exit\":2,",
+       "{\"step\":\"t-fast\",\"verdict\":\"NEEDS-BUILD\",\"rc\":3}", "t-fast needing a build");
+    bad |= stub("zcl-dev-t-fast", 0) | stub("zcl-lint", 1);
+    FX("main", 0, 0, 1, NULL, NULL, NULL, "lint finding");
+    bad |= stub("zcl-lint", 2);
+    FX("main", 0, 0, 2, NULL, NULL, NULL, "lint broken");
+    bad |= stub("zcl-dev", 1) | stub("zcl-lint", 0);
+    FX("main", 0, 0, 2, "zcl-dev select main\n", NULL, NULL, "select failure stops everything");
+    bad |= stub("zcl-dev", 0);
+    unstub("zcl-lint");
+    FX("main", 0, 0, 2, NULL, NULL, NULL, "missing lint is broken");
+
+    /* --gates */
+    bad |= stub("zcl-lint", 0);
+    unstub("zcl-dev-t-fast");
+    FX("-", 0, 1, 0, "zcl-lint all\nzcl-dev know --check\nzcl-dev gen --check rpc-parity\nzcl-dev gen --check flags\n", NULL, NULL,
+       "gates, check-tests skipped by name");
+    bad |= stub("zcl-dev-tests", 0);
+    FX("-", 0, 1, 2, "zcl-lint all\n", NULL, NULL, "gates: zcl-dev-tests without the check-tests alias is broken");
+    bad |= stub("zcl-dev-check-tests", 0);
+    FX("-", 1, 1, 0, "zcl-lint all\nzcl-dev check-tests\nzcl-dev know --check\nzcl-dev gen --check rpc-parity\nzcl-dev gen --check flags\n",
+       "{\"base\":\"-\",\"exit\":0,\"steps\":[{\"step\":\"zcl-lint\",\"verdict\":\"PASS\",\"rc\":0},{\"step\":\"check-tests\",\"verdict\":\"PASS\",\"rc\":0},",
+       "{\"step\":\"flags\",\"verdict\":\"PASS\",\"rc\":0}]}", "gates with check-tests, json");
+    bad |= stub("zcl-lint", 1);
+    FX("-", 0, 1, 1, "zcl-lint all\n", NULL, NULL, "gates stop at the lint finding");
+    bad |= stub("zcl-lint", 0) | stub("zcl-dev", 1);
+    FX("-", 0, 1, 1, "zcl-lint all\nzcl-dev check-tests\n", NULL, NULL, "gates stop at the check-tests finding");
+    unstub("zcl-dev-tests");
+    unstub("zcl-dev-check-tests");
+    FX("-", 0, 1, 1, "zcl-lint all\nzcl-dev know --check\n", NULL, NULL, "gates stop at the know finding");
+    return bad;
+}
+
+static int fixture(void)
+{
+    int bad;
+    char old_bin[1024];
     const char *t = getenv("TMPDIR");
     snprintf(tmp_root, sizeof tmp_root, "%s/zcl-verify-st.XXXXXX", t && *t ? t : "/tmp");
     if (!mkdtemp(tmp_root)) { perror("selftest: mkdtemp"); return 1; }
     snprintf(fix_bin, sizeof fix_bin, "%s/b'in", tmp_root);
     snprintf(calls_path, sizeof calls_path, "%s/calls", tmp_root);
-    snprintf(outp, sizeof outp, "%s/out", tmp_root);
-    if (mkdir(fix_bin, 0755) != 0) { perror("selftest: mkdir"); return 1; }
+    snprintf(out_path, sizeof out_path, "%s/out", tmp_root);
+    snprintf(json_path, sizeof json_path, "%s/json", tmp_root);
     snprintf(old_bin, sizeof old_bin, "%s", bindir);
-    snprintf(bindir, sizeof bindir, "%s", fix_bin);
-    say = fopen(outp, "w");
-    jout = say;
-    if (!say) { perror("selftest: fopen"); return 1; }
-
-    bad |= fixture_run("main", 0, 2, NULL, "no zcl-dev");
-    bad |= stub("zcl-dev", 0) | stub("zcl-lint", 0);
-    bad |= fixture_run("main", 0, 0, "zcl-dev select main\nzcl-lint all\n", "no t-fast");
-    bad |= stub("zcl-dev-t-fast", 0);
-    bad |= fixture_run("origin/master", 1, 0,
-                       "zcl-dev select origin/master\nzcl-dev-t-fast --changed=origin/master\nzcl-lint all\n", "with t-fast");
-    bad |= stub("zcl-dev-t-fast", 1);
-    bad |= fixture_run("main", 0, 1, "zcl-dev select main\nzcl-dev-t-fast --changed=main\n", "t-fast failure stops before lint");
-    bad |= stub("zcl-dev-t-fast", 0) | stub("zcl-lint", 1);
-    bad |= fixture_run("main", 0, 1, NULL, "lint finding");
-    bad |= stub("zcl-lint", 2);
-    bad |= fixture_run("main", 0, 2, NULL, "lint broken");
-    bad |= stub("zcl-dev", 1) | stub("zcl-lint", 0);
-    bad |= fixture_run("main", 0, 2, "zcl-dev select main\n", "select failure stops everything");
-    bad |= stub("zcl-dev", 0);
-    {
-        char p[1300];
-        snprintf(p, sizeof p, "%s/zcl-lint", fix_bin);
-        remove(p);
+    setenv("ZCL_VERIFY_CALLS", calls_path, 1);
+    say = fopen(out_path, "w");
+    jout = fopen(json_path, "w");
+    if (mkdir(fix_bin, 0755) != 0 || !say || !jout) {
+        perror("selftest: fixture setup");
+        bad = 1;
+    } else {
+        snprintf(bindir, sizeof bindir, "%s", fix_bin);
+        bad = fixture_cases();
     }
-    bad |= fixture_run("main", 0, 2, NULL, "missing lint is broken");
-
-    const char *inbin[] = {"zcl-dev", "zcl-dev-t-fast", "zcl-lint"};
-    for (size_t i = 0; i < sizeof inbin / sizeof *inbin; i++) {
-        char p[1300];
-        snprintf(p, sizeof p, "%s/%s", fix_bin, inbin[i]);
-        remove(p);
-    }
-    fclose(say);
+    /* cleanup on every path */
+    if (say) fclose(say);
+    if (jout) fclose(jout);
     say = stdout;
     jout = stdout;
+    for (size_t i = 0; i < sizeof stub_names / sizeof *stub_names; i++) unstub(stub_names[i]);
     remove(calls_path);
-    remove(outp);
+    remove(out_path);
+    remove(json_path);
     rmdir(fix_bin);
     rmdir(tmp_root);
     snprintf(bindir, sizeof bindir, "%s", old_bin);
@@ -342,7 +467,7 @@ static void enter_toplevel(void)
 int main(int argc, char **argv)
 {
     const char *base = getenv("ZCL_CI_BASE");
-    int json = 0;
+    int json = 0, gates = 0;
     say = stdout;
     jout = stdout;
     if (!base || !*base) base = "origin/master";
@@ -351,11 +476,12 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "--purpose")) { puts("select, focused tests and lint for the committed changes in one trip"); return 0; }
         if (!strcmp(argv[i], "--selftest")) return selftest();
         if (!strcmp(argv[i], "--json")) json = 1;
+        else if (!strcmp(argv[i], "--gates")) gates = 1;
         else if (!strcmp(argv[i], "--base") && i + 1 < argc) base = argv[++i];
         else { fputs("usage: zcl-dev verify [--base REF] [--json] [--selftest]\n", stderr); return 2; }
     }
     if (!safe_ref(base)) { fprintf(stderr, "zcl-dev verify: unsafe base ref\n"); return 2; }
     if (json) say = stderr;
     enter_toplevel();
-    return verify(base, json);
+    return gates ? verify_gates(json) : verify(base, json);
 }
