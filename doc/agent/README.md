@@ -11,3 +11,4 @@ Commands: `zcl-dev guide <paths>`, `zcl-dev lessons find <query>`, `zcl-dev know
 - [THE_ZCLASSICD_WAY.md](THE_ZCLASSICD_WAY.md): the one development loop, from orienting to release, and what never happens.
 - [DEFENSIVE_CODING.md](DEFENSIVE_CODING.md): numbered rules for safe C++, C and shell here (peer input, amounts, locks, threads, durable writes, RPC errors, logging privacy, tests), each with an example and its enforcing lint or test.
 - [CONSENSUS_PARITY.md](CONSENSUS_PARITY.md): what counts as consensus, the evidence ladder for a validation-path change, and the quirks that must not be tidied.
+- [CODEBASE_MAP.md](CODEBASE_MAP.md): every top-level directory, every `src/` subdirectory and the major files, each with its purpose, test suites and owning `AGENTS.md`; claim markers keep the load-bearing paths checked.
