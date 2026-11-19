@@ -38,3 +38,10 @@ scope for the style rules.
 list, C/C++ and sh comment and string stripping, baseline read/write and the ratchet, and the hollow-scan floor.
 A rule that scans nothing fails: exit 2 and "hollow scan", never a pass. Exit codes: 0 clean, 1 findings, 2 usage, internal error
 or hollow scan. `make -C zcutil/lint check` runs the fixture selftest and `lintlib_test.c`.
+
+## Safety rules (secretlog, testiso, shellport, wallclock)
+
+`secretlog` (custody) flags log and print calls in `src/` and `wallet/src/` whose arguments name a secret (`CKey`, `strWalletPass`, `seed`, `mnemonic`, `HexStr(key`, ...); override a line with `log-ok: reason` in a comment. The baseline is expected to be empty, and every row is a finding to review, not to hide.
+`testiso` reads `qa/`, `src/test` and `src/gtest` for literal `/tmp/`, default datadirs without `-datadir=`, and fixed `-port=`/`-rpcport=` in `qa/rpc-tests/*.sh` (`iso-ok: reason` in a comment: `//`, `/* */` or `#`).
+`shellport` flags `sed -i`, `stat -c`, `nproc`, `ss`, `readlink -f`, `date -d`, `grep -P`, `timeout` and `| grep -q` under `set -o pipefail` (`# port-ok: reason`). `wallclock` flags assertions decided by elapsed real time (`real-clock: reason`).
+`testiso`, `shellport` and `wallclock` baselines use rows `<path>:<kind><TAB><count>` where a path has several kinds. `selftest-safety.sh` holds their fixtures.
