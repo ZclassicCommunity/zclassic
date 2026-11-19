@@ -23,7 +23,9 @@
  * pre-push refuses a push to refs/heads/master or refs/heads/release/<name> (and its deletion) unless
  * the update is a fast-forward and a local-ci receipt for the exact pushed commit shows every
  * required step passed. Required set = `zcl-dev select --json` over the pushed diff, using the
- * zcutil/dev/impact.rules of the pushed commit: its steps, plus its stages (daemon-linux,
+ * zcutil/dev/impact.rules of the pushed commit UNITED with those of the remote commit being
+ * replaced (a push may add steps, never remove them; a push that changes impact.rules or
+ * local-ci.sh requires ALL): its steps, plus its stages (daemon-linux,
  * daemon-win64, wallet-linux; local-ci records them as step=<stage>). ALL means every `step` of
  * zcutil/local-ci.sh at that commit except dry-* and tor-*, plus the three stages and the
  * build-tests and fetch-params receipts; tor-* receipts (local-ci.sh --tor) are not required. A step
@@ -401,7 +403,7 @@ static size_t declared_steps(const char *sha, char ***out)
     char cmd[256];
     snprintf(cmd, sizeof cmd, "git show %s:zcutil/local-ci.sh", sha);
     Buf b;
-    if (run(cmd, &b) != 0) die("cannot read zcutil/local-ci.sh at %s", sha);
+    if (run(cmd, &b) != 0) return (size_t)-1; /* missing at that commit: the caller reports it so ZCL_PUSH_OK still works */
     size_t n = 0, cap = 32;
     *out = xrealloc(NULL, cap * sizeof **out);
     for (char *l = b.p; l && *l;) {
@@ -513,10 +515,29 @@ static void drop_optional(Names *l)
  * them belong to ALL (local-ci `all` = the three stages plus `test`, which builds and fetches first). */
 static const char *const all_extra[] = {"daemon-linux", "daemon-win64", "wallet-linux", "build-tests", "fetch-params"};
 
-/* Required receipt steps for base..sha, evaluated with the impact rules of the pushed commit.
+/* Adds the ALL set (declared steps of local-ci.sh at `ref`, plus all_extra) to req. Returns 1 with msg
+ * set when strict and the file is missing or declares nothing; a non-strict (base) side adds what it has. */
+static int add_all(Names *req, const char *ref, int strict, char *msg, size_t cap)
+{
+    char **dv = NULL;
+    size_t nd = declared_steps(ref, &dv);
+    int bad = 0;
+    if (nd == (size_t)-1) {
+        if (strict) { snprintf(msg, cap, "cannot read zcutil/local-ci.sh at %.12s; cannot compute the required set", ref); bad = 1; }
+        nd = 0;
+    } else {
+        for (size_t i = 0; i < nd; i++) { names_add(req, dv[i]); free(dv[i]); }
+        free(dv);
+        if (nd == 0 && strict) { snprintf(msg, cap, "zcutil/local-ci.sh declares no steps; cannot compute the required set"); bad = 1; }
+    }
+    for (size_t i = 0; i < sizeof all_extra / sizeof *all_extra; i++) names_add(req, all_extra[i]);
+    return bad;
+}
+
+/* Required receipt steps for base..sha, evaluated with the impact rules and step list at `ref`.
  * Returns 1 with msg set when they cannot be computed or the selection cannot be verified.
  * *any_pass: nothing was selected because the diff is empty; some PASS receipt must still exist. */
-static int required_steps(const Repo *r, const char *base, const char *sha, Names *req, int *any_pass, int *all_mode, char *msg, size_t cap)
+static int required_at(const Repo *r, const char *base, const char *sha, const char *ref, int strict, Names *req, int *any_pass, int *all_mode, char *msg, size_t cap)
 {
     char cmd[4096], dir[1024], list[1200], tree[1200], d1[1300], d2[1400], rules[1600];
     *any_pass = 0;
@@ -537,7 +558,7 @@ static int required_steps(const Repo *r, const char *base, const char *sha, Name
     snprintf(d2, sizeof d2, "%s/dev", d1);
     snprintf(rules, sizeof rules, "%s/impact.rules", d2);
     int made = MKDIR1(tree) == 0 && MKDIR1(d1) == 0 && MKDIR1(d2) == 0;
-    snprintf(cmd, sizeof cmd, "git show %s:zcutil/dev/impact.rules > \"%s\"", sha, rules);
+    snprintf(cmd, sizeof cmd, "git show %s:zcutil/dev/impact.rules > \"%s\"", ref, rules);
     int have_rules = made && quotable(rules) && run(cmd, NULL) == 0;
     Buf sel = {NULL, 0};
     int rc = -1;
@@ -559,9 +580,9 @@ static int required_steps(const Repo *r, const char *base, const char *sha, Name
     RMDIR1(d1);
     RMDIR1(tree);
     if (!have_rules) {
-        snprintf(msg, cap, "cannot read zcutil/dev/impact.rules at %.12s", sha);
+        snprintf(msg, cap, "cannot read zcutil/dev/impact.rules at %.12s", ref);
         free(sel.p);
-        return 1;
+        return 2; /* distinct: the caller may tolerate it for the base */
     }
     trim_eol(&sel);
     Names stages = {0}, scripts = {0};
@@ -573,13 +594,7 @@ static int required_steps(const Repo *r, const char *base, const char *sha, Name
     } else if (strstr(sel.p, "\"all\":true")) {
         *all_mode = 1;
         drop_optional(req); /* select lists tor-* under ALL; they need local-ci --tor and are not required */
-        size_t nd = 0;
-        char **dv;
-        nd = declared_steps(sha, &dv);
-        for (size_t i = 0; i < nd; i++) { names_add(req, dv[i]); free(dv[i]); }
-        free(dv);
-        for (size_t i = 0; i < sizeof all_extra / sizeof *all_extra; i++) names_add(req, all_extra[i]);
-        if (nd == 0) { snprintf(msg, cap, "zcutil/local-ci.sh declares no steps; cannot compute the required set"); bad = 1; }
+        bad = add_all(req, ref, strict, msg, cap);
     } else {
         for (size_t i = 0; i < stages.n; i++) names_add(req, stages.v[i]);
         if (req->n == 0 && scripts.n) {
@@ -593,6 +608,37 @@ static int required_steps(const Repo *r, const char *base, const char *sha, Name
     names_free(&scripts);
     free(sel.p);
     return bad;
+}
+
+/* The required set for base..sha: the union of what the rules and step list of the pushed commit
+ * require and what those of the base (the remote ref being updated) require, so a push can add
+ * steps but never remove them. A push that changes the rules or local-ci.sh itself requires the
+ * full set (both sides). A new ref (EMPTY_TREE base) has no remote gate to compare with. */
+static int required_steps(const Repo *r, const char *base, const char *sha, Names *req, int *any_pass, int *all_mode, char *msg, size_t cap)
+{
+    if (required_at(r, base, sha, sha, 1, req, any_pass, all_mode, msg, cap)) return 1;
+    int has_base = strcmp(base, EMPTY_TREE) != 0;
+    if (has_base) {
+        Names breq = {0};
+        int bany = 0, ball = 0, rc;
+        char bmsg[512];
+        rc = required_at(r, base, sha, base, 0, &breq, &bany, &ball, bmsg, sizeof bmsg);
+        if (rc == 1) { snprintf(msg, cap, "base rules: %s", bmsg); names_free(&breq); return 1; }
+        if (rc == 0) {
+            for (size_t i = 0; i < breq.n; i++) names_add(req, breq.v[i]);
+            *all_mode |= ball;
+        }
+        names_free(&breq);
+    }
+    char cmd[512];
+    snprintf(cmd, sizeof cmd, "git diff --quiet %s %s -- zcutil/dev/impact.rules zcutil/local-ci.sh", base, sha);
+    if (has_base && run(cmd, NULL) != 0) { /* changed (1) or unreadable: the gate itself moved, so require everything */
+        *all_mode = 1;
+        if (add_all(req, sha, 1, msg, cap)) return 1;
+        add_all(req, base, 0, msg, cap);
+    }
+    if (req->n) *any_pass = 0;
+    return 0;
 }
 
 /* Fills msg with why the receipts do not cover base..sha; returns 0 when they do. */
@@ -646,9 +692,16 @@ static void record_override(const Repo *r, const char *ref, const char *old, con
     fprintf(stderr, "zcl-dev-hook: ZCL_PUSH_OK override for %s (%s); recorded in %s\n", ref, clean, path);
 }
 
+static int ieq_prefix(const char *s, const char *p)
+{
+    for (; *p; s++, p++) if (tolower((unsigned char)*s) != *p) return 0;
+    return 1;
+}
+
+/* Case-insensitive: a remote on a case-insensitive filesystem treats Master or Release/x as the same ref. */
 static int protected_ref(const char *ref)
 {
-    return !strcmp(ref, "refs/heads/master") || has_prefix(ref, "refs/heads/release/");
+    return ieq_prefix(ref, "refs/heads/master") && !ref[17] ? 1 : ieq_prefix(ref, "refs/heads/release/");
 }
 
 /* Why one update of a protected ref is not allowed; "" when it is. */

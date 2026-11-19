@@ -189,6 +189,31 @@ mkdir -p "$work/home/work/zc23-localci-out/$f1"
 printf '{"commit":"%s","tree":"t","stage":"test-run/release","step":"unit-a","verdict":"PASS","seconds":1}\n{"commit":"%s","tree":"t","stage":"test-run/release","step":"unit-b","verdict":"PASS","seconds":1}\n' "$f1" "$f1" >"$work/home/work/zc23-localci-out/$f1/receipts.jsonl"
 expect "default full-sha receipt directory" 0 "" env -u ZCL_CI_OUT git push -q origin master
 
+# the pushed commit cannot choose its own required set: the remote's rules and steps still apply
+git checkout -q -b nar
+printf 'src/*|zcutil/*|.gitignore\tunit-a\nweird/*\tALL\nstageonly/*\tdaemon-linux daemon-win64\nscriptonly/*\tqa/rpc-tests/x.sh\n' >zcutil/dev/impact.rules
+echo n >>src/a.c; git add -A; ci nar1; nar1=$(git rev-parse HEAD)
+rcpt "$nar1" unit-a PASS
+expect "a push that narrows impact.rules still needs the base-required steps" 1 "unit-b: no receipt" git push -q origin nar:master
+git checkout -q master; git branch -q -D nar
+git checkout -q -b nls
+grep -v 'unit-c' zcutil/local-ci.sh >"$work/ci.new"; cp "$work/ci.new" zcutil/local-ci.sh
+echo n >>src/a.c; git add -A; ci nls1; nls1=$(git rev-parse HEAD)
+rcpt "$nls1" unit-a PASS; rcpt "$nls1" unit-b PASS
+expect "a push that deletes a local-ci step requires the full set including it" 1 "unit-c: no receipt" git push -q origin nls:master
+git checkout -q master; git branch -q -D nls
+
+# local-ci.sh missing at the pushed commit under ALL: refused with a message, ZCL_PUSH_OK still works
+git checkout -q -b nolc
+git rm -q zcutil/local-ci.sh; mkdir -p weird; echo y >weird/y; git add -A; ci nolc1; nolc1=$(git rev-parse HEAD)
+expect "missing local-ci.sh under ALL is refused, not a die" 1 "cannot read zcutil/local-ci.sh" git push -q origin nolc:refs/heads/release/2.0
+expect "missing local-ci.sh can use the logged override" 0 "ZCL_PUSH_OK override" env ZCL_PUSH_OK="no local-ci yet" git push -q origin nolc:refs/heads/release/2.0
+git checkout -q master; git branch -q -D nolc
+
+# protected refs are matched case-insensitively
+expect "case variant of master is protected" 1 "no local-ci receipt" git push -q origin HEAD:refs/heads/Master
+expect "case variant of release/ is protected" 1 "no local-ci receipt" git push -q origin HEAD:refs/heads/Release/x
+
 # non-fast-forward and deletion
 git checkout -q -b div "$head"
 echo d >>src/a.c; git add src/a.c; git commit -q --no-verify -m diverge
