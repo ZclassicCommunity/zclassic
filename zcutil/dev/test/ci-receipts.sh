@@ -2,6 +2,8 @@
 # Receipts and --only through local-ci.sh's `dry` stage (three fake steps, no root filesystem).
 # usage: sh test/ci-receipts.sh <zcl-dev>
 set -eu
+# local-ci.sh --only exports ZCL_CI_ONLY; the nested dry runs below must not inherit it.
+unset ZCL_CI_ONLY ZCL_CI_JOBS ZCL_CI_FLAVOR ZCL_CI_TESTDIR
 bin=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 ci=$(cd "$(dirname "$0")/../.." && pwd)/local-ci.sh
 out=$(mktemp -d "${TMPDIR:-/tmp}/zcl-ci-receipts.XXXXXX")
