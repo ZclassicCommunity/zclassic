@@ -10,7 +10,7 @@ updated per block, not what is written or when).
 | State | Written to `wallet.dat` | Not written |
 | --- | --- | --- |
 | Wallet transactions without note data (transparent) | `AddToWallet`, at once (Berkeley DB auto-commit, log written, not fsynced) | |
-| Wallet transactions with Sprout or Sapling note data | `AddToWallet` at once, **with whatever note data is in memory at that moment** (a new note has no witness and no nullifier yet); and again, **all of them**, in every `SetBestChain` checkpoint | per block |
+| Wallet transactions with Sprout or Sapling note data | `AddToWallet` at once, **with whatever note data is in memory at that moment** (a new note has no witness and no nullifier yet); and again, in a `SetBestChain` checkpoint **when their note data changed since they were last written** (see "Retired notes and the dirty set") | per block |
 | Sapling nullifier, Sprout nullifier | inside the note-transaction record (above) | |
 | Witness cache and `witnessHeight` of every note | inside the note-transaction record (above); updated in memory for every connected block | per block |
 | `nWitnessCacheSize` | `SetBestChain` | |
@@ -113,3 +113,50 @@ stop with the rebuild pending leaves: chain state at the lowered tip, wallet che
 before the unwind.
 
 `rebuild-before-scan` and `rebuild-after-scan` are test crash points inside the rebuild.
+
+## Retired notes and the dirty set
+
+**Retired notes.** A note whose nullifier is spent by a wallet transaction buried deeper than
+`WITNESS_CACHE_SIZE` (100) blocks cannot be un-spent by any reorg the node accepts: it refuses
+to disconnect more than `MAX_REORG_LENGTH` (99) blocks (`ActivateBestChainStep`, `RewindBlockIndex`;
+a parked chain is only unparked when it has twice the work, and the reorg it then asks for is
+subject to the same limit, so the node shuts down instead of disconnecting). Such a note keeps no
+witness: `CWallet::RetireSpentNotes` clears its witness list and sets `witnessHeight` to -1 once,
+marks it retired in memory (`fRetired`, never serialized), and the per-block updates
+(`IncrementNoteWitnesses`, `DecrementNoteWitnesses`, the append path) skip it. A transaction whose
+notes are all retired leaves `setNoteTxIndex` for `setNoteTxRetired`, so the cost of a block follows
+the unspent notes. Retiring runs at start-up (`ReconcileNoteState`) and every
+`RETIRE_SWEEP_INTERVAL` (10) blocks from the block update; the nullifier stays in the record (it is
+what keeps the note spent) and `UpdateSaplingNullifierNoteMapWithTx` leaves a retired note alone.
+
+On disk a retired note is `witnesses = {}`, `witnessHeight = -1`, nullifier kept: the form every
+older binary accepts (it asserts `witnessHeight == -1 || witnessHeight == tip - 1` only when it
+copies a witness, and a note without witnesses is never copied). An older binary that runs on such a
+wallet moves the height of every note to the tip, retired or not (`UpdateWitnessHeights`);
+the next start of this build normalises that record again (witnesses empty, height -1) without a
+rescan. `ReconcileNoteState` exempts retired notes from the rule that a confirmed note without a
+witness needs a rescan; a note that the chain at start-up does not show as deeply spent is not
+retired, and then the same rule rescans from its block.
+
+An operator `invalidateblock`/`parkblock`/`finalizeblock` is not limited by `MAX_REORG_LENGTH`. When
+such an unwind disconnects the block of a spend that retired notes (`DecrementNoteWitnesses` calls
+`UnretireNotesSpentFrom`), those notes are live again, they have no witness, and
+`fNoteWitnessesLost` is armed: the rebuild above (rescan from genesis, one rescan for the whole
+unwind) restores their witnesses at the next tip or checkpoint, and until then a spend of them
+fails cleanly. A wallet transaction that leaves the wallet (`EraseFromWallet`) brings back the notes
+it retired in the same way.
+
+**The dirty set.** `SetBestChainINTERNAL` used to copy and write every note transaction at every
+checkpoint. It now writes, by reference and in txid order, only the transactions in
+`setNoteTxDirty`: the ones whose note data was touched since the last checkpoint that wrote them.
+`CWallet::MarkNoteTxDirty` is the one helper; the writers of a note record that call it are
+`IncrementNoteWitnesses` and `DecrementNoteWitnesses` (every live note transaction),
+`RetireSpentNotes` and `UnretireNotesSpentFrom`, `AddToWallet` (new and merged transactions),
+`UpdateSaplingNullifierNoteMapWithTx`, `ReconcileNoteState` (every record it repairs),
+`ClearNoteWitnessCache` (all), and `SyncMetaData`. What `LoadWallet` reads is clean. The set is
+cleared only after the database transaction commits, so a failed write or commit leaves the
+transactions marked; the cache size and the locator are written at every checkpoint, in the same
+single transaction and order as before, so every property above holds unchanged. If a writer ever
+missed a mark, the record would reach `wallet.dat` only through another rewrite, and the next start
+would find the stale witness exactly as it finds one after a crash (`ReconcileNoteState` checks
+every cache against the chain and rescans from where it ends).

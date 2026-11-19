@@ -617,7 +617,14 @@ void CWallet::ChainTip(const CBlockIndex *pindex,
             return;
         }
     }
+    const int64_t nTimeWitness0 = GetTimeMicros();
     WitnessChainTip(pindex, pblock, sproutTree, saplingTree, added);
+    if (LogAcceptCategory("bench")) {
+        const int64_t nTimeWitness = GetTimeMicros() - nTimeWitness0;
+        LOCK(cs_wallet);
+        LogPrint("bench", "  - Wallet witness update: %.2fms (%u transactions with live notes, %u retired)\n",
+                 0.001 * nTimeWitness, (unsigned)setNoteTxIndex.size(), (unsigned)setNoteTxRetired.size());
+    }
     UpdateSaplingNullifierNoteMapForBlock(pblock);
     // A disconnect that set fNoteWitnessesLost is not repaired here: in a deep
     // reorg more disconnects follow, and rescanning after each would cost one
@@ -793,7 +800,11 @@ void CWallet::SetBestChain(const CBlockLocator& loc)
         RebuildNoteWitnesses();
     }
     CWalletDB walletdb(strWalletFile);
+    const int64_t nTimeCheckpoint0 = GetTimeMicros();
+    const size_t nDirty = setNoteTxDirty.size();
     SetBestChainINTERNAL(walletdb, loc);
+    LogPrint("bench", "  - Wallet checkpoint: %.2fms (%u note transactions marked, %u still marked after)\n",
+             0.001 * (GetTimeMicros() - nTimeCheckpoint0), (unsigned)nDirty, (unsigned)setNoteTxDirty.size());
 }
 
 std::set<std::pair<libzcash::PaymentAddress, uint256>> CWallet::GetNullifiersForAddresses(
