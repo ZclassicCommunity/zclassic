@@ -47,7 +47,6 @@
 #include <boost/filesystem.hpp>
 
 #include <cstdio>
-#include <sys/resource.h>
 #include <cstdlib>
 #include <deque>
 #include <map>
@@ -55,9 +54,35 @@
 #include <string>
 #include <vector>
 
+#ifdef WIN32
+#include <windows.h>
+#include <psapi.h>
+#else
+#include <sys/resource.h>
+#endif
+
 extern ZCJoinSplit* params;
 
 namespace {
+
+// Peak resident set size of this process in MiB. getrusage reports KiB on
+// Linux but bytes on macOS; Windows uses the process working-set peak.
+double PeakRssMiB()
+{
+#ifdef WIN32
+    PROCESS_MEMORY_COUNTERS pmc;
+    if (!K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) return 0.0;
+    return pmc.PeakWorkingSetSize / 1048576.0;
+#else
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return 0.0;
+#ifdef __APPLE__
+    return ru.ru_maxrss / 1048576.0;
+#else
+    return ru.ru_maxrss / 1024.0;
+#endif
+#endif
+}
 
 int EnvInt(const char* name, int def)
 {
