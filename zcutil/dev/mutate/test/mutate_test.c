@@ -1,13 +1,16 @@
 /* Fixture tests for zcl-dev mutate (C, so the shell_lines KPI floor does not rise). POSIX only.
  *
  *   mutate_test <zcl-dev-mutate> <testdir>    every test below; UPDATE=1 rewrites test/golden/
- *   mutate_test --role check|slow|hang|build  the test and build commands the runs use (cwd = fixture repo)
+ *   mutate_test --role <name>                 check|slow|hang|build|slowbuild|hangbuild: the test and
+ *                                             build commands the runs use (cwd = fixture repo)
  *
  * Golden `list` output for a C and a C++ fixture (no site on a NOSITE line or on std::vector<int>),
  * the --class/--lines filter and --json, then `run` in a throwaway git repository: exactly the two
  * known survivors of calc.c, a build failure counted UNCOMPILABLE and not scored, a timeout that
- * kills the sleeping test's whole process group, SIGTERM mid-run (file byte-identical, no .orig,
- * exit 130), `restore`, and the refusals: stale .orig, unstaged, staged, untracked, vendored.
+ * kills the sleeping test's whole process group, a build timeout (named, unscored; on the baseline,
+ * reported as a timeout), SIGTERM mid-run (file byte-identical, no .orig, exit 130), `restore`, `list`
+ * under ZCL_DEV_PREFIX, and the refusals: stale .orig (also on a dirty file, where it must win over the
+ * unstaged-change refusal), unstaged, staged, untracked, vendored.
  */
 #define _XOPEN_SOURCE 700
 #define _DEFAULT_SOURCE 1
@@ -156,6 +159,12 @@ static int role(const char *name)
         sleep(30);
         return 0;
     }
+    if (!strcmp(name, "slowbuild") || !strcmp(name, "hangbuild")) {
+        char *cc[] = {"cc", "-o", "calc", "calc.c", NULL};
+        if (name[0] == 's' && same_file("calc.c", "pristine.c")) return run(NULL, cc, NULL, NULL);
+        sleep(30);
+        return 0;
+    }
     if (!strcmp(name, "build")) {
         char *text = slurp("calc.c"), *cc[] = {"cc", "-o", "calc", "calc.c", NULL};
         bool poisoned = !text || strstr(text, "if (v >= hi)");
@@ -235,6 +244,18 @@ static void test_list(void)
     char *bad[] = {tool, "list", fx, "--class", "arith", NULL}, *norun[] = {tool, "run", fx, NULL};
     if (run(NULL, bad, NULL, NULL) != 2) FAIL("an unknown class does not exit 2");
     if (run(NULL, norun, NULL, NULL) != 2) FAIL("run without a test command does not exit 2");
+}
+
+/* `list` resolves its file against ZCL_DEV_PREFIX like `run` does (zcl-dev runs it from the root). */
+static void test_list_prefix(void)
+{
+    char prefix[PATH_MAX + 32], out[PATH_MAX + 64], want[PATH_MAX + 64];
+    snprintf(prefix, sizeof prefix, "ZCL_DEV_PREFIX=%s", tdir + 1);
+    path_in(out, sizeof out, work, "prefix.out");
+    path_in(want, sizeof want, tdir, "golden/list-c.out");
+    char *argv[] = {"env", prefix, tool, "list", "list_fixture.c", NULL};
+    int rc = run("/", argv, out, NULL);
+    if (rc != 0 || !same_file(out, want)) FAIL("list under ZCL_DEV_PREFIX: exit %d or output differs from golden/list-c.out", rc);
 }
 
 /* ---- run ----------------------------------------------------------------------------------- */
@@ -348,6 +369,34 @@ static void test_timeout(void)
     clean_after("timeout");
 }
 
+/* A mutant build that hits --timeout is named, counted uncompilable and not scored; a baseline build
+ * that hits it says it timed out instead of "does not build". */
+static void test_build_timeout(void)
+{
+    char build[PATH_MAX + 32], err[PATH_MAX + 64];
+    snprintf(build, sizeof build, "%s --role slowbuild", self);
+    char *args[] = {"run", "calc.c", "--max", "1", "--timeout", "1", "--build", build, "--", self, "--role", "check", NULL};
+    char *out = mutate("build-timeout", args, 0);
+    if (!out || !strstr(out, " survived 0 uncompilable 1 timeouts 0 score=n/a\n"))
+        FAIL("a mutant build timeout is not counted uncompilable and unscored: %s", out ? out : "");
+    free(out);
+    path_in(err, sizeof err, work, "build-timeout.err");
+    char *e = slurp(err);
+    if (!e || !strstr(e, "UNCOMPILABLE(build timeout)") || !strstr(e, "hit --timeout 1"))
+        FAIL("no build-timeout outcome or warning on stderr: %s", e ? e : "");
+    free(e);
+    clean_after("build-timeout");
+    snprintf(build, sizeof build, "%s --role hangbuild", self);
+    args[7] = build;
+    free(mutate("baseline-build-timeout", args, 2));
+    path_in(err, sizeof err, work, "baseline-build-timeout.err");
+    e = slurp(err);
+    if (!e || !strstr(e, "build of the unmutated file timed out after 1 seconds"))
+        FAIL("a baseline build timeout is not reported as one: %s", e ? e : "");
+    free(e);
+    clean_after("baseline-build-timeout");
+}
+
 static void test_sigterm(void)
 {
     char out[PATH_MAX + 64], started[PATH_MAX + 64];
@@ -398,6 +447,8 @@ static void test_refusals(void)
     spit(b, text ? text : "");
     refused("stale-orig", "calc.c", "run `zcl-dev mutate restore calc.c`");
     append("calc.c", "/* edit */\n");
+    /* After a SIGKILL the file holds a mutant and the .orig stays: the advice must be restore, not stash. */
+    refused("stale-orig-dirty", "calc.c", "run `zcl-dev mutate restore calc.c`");
     char *rs[] = {"restore", "calc.c", NULL};
     free(mutate("restore", rs, 0));
     clean_after("restore");
@@ -441,11 +492,13 @@ int main(int argc, char **argv)
     if (argc != 3) { fputs("usage: mutate_test <zcl-dev-mutate> <testdir> | --role <name>\n", stderr); return 2; }
     if (!setup(argv[1], argv[2], argv[0])) { perror("mutate_test: setup"); return 2; }
     test_list();
+    test_list_prefix();
     if (!make_repo()) FAIL("cannot create the fixture repository");
     else {
         test_survivors();
         test_uncompilable();
         test_timeout();
+        test_build_timeout();
         test_sigterm();
         test_refusals();
     }

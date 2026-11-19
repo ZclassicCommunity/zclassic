@@ -56,6 +56,24 @@ char *mut_read_file(const char *path, size_t *len)
     return buf;
 }
 
+static bool is_absolute(const char *file)
+{
+#if defined(_WIN32)
+    if (file[0] == '\\' || (file[0] && file[1] == ':')) return true;
+#endif
+    return file[0] == '/';
+}
+
+/* zcl-dev runs subcommands from the repository root and passes the caller's subdirectory in
+ * ZCL_DEV_PREFIX; a relative file is relative to that. False when the joined path does not fit. */
+bool mut_join_prefix(const char *file, char *joined, size_t cap)
+{
+    const char *prefix = getenv("ZCL_DEV_PREFIX");
+    bool pre = prefix && prefix[0] && strcmp(prefix, ".") != 0 && !is_absolute(file);
+    int n = snprintf(joined, cap, "%s%s%s", pre ? prefix : "", pre ? "/" : "", file);
+    return n > 0 && (size_t)n < cap;
+}
+
 void mut_filter(struct mut_sites *s, const struct mut_opts *o)
 {
     size_t k = 0;
@@ -184,8 +202,10 @@ static int cmd_list(int argc, char **argv)
     struct mut_opts o;
     if (parse_opts(argc, argv, false, &o)) return 2;
     size_t len = 0;
-    char *text = mut_read_file(o.file, &len);
-    if (!text) { fprintf(stderr, "zcl-dev mutate: cannot read %s: %s\n", o.file, strerror(errno)); return 2; }
+    char path[4096];
+    if (!mut_join_prefix(o.file, path, sizeof path)) { fprintf(stderr, "zcl-dev mutate: path too long: %s\n", o.file); return 2; }
+    char *text = mut_read_file(path, &len);
+    if (!text) { fprintf(stderr, "zcl-dev mutate: cannot read %s: %s\n", path, strerror(errno)); return 2; }
     struct mut_sites s = {0};
     if (!mut_enumerate(text, len, &s)) { free(text); fputs("zcl-dev mutate: out of memory\n", stderr); return 2; }
     mut_filter(&s, &o);

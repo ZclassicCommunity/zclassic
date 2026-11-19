@@ -37,7 +37,10 @@ in file order.
 - The file must be tracked, with no unstaged or staged change, outside the vendored and third-party trees
   (`src/c23/vendor`, `src/c23/services/vendor`, `zcutil/tools/vendor`, `src/leveldb`, `src/secp256k1`,
   `src/univalue`, `depends`, `wallet/src/3rdparty`, `src/pow/tromp`), and `<file>.zcl-mutate.orig` must
-  not exist. Each refusal exits 2.
+  not exist. Each refusal exits 2. The `.orig` is checked first: after a SIGKILL the file still holds a
+  mutant, so the answer is `restore <file>`, never commit or stash.
+- `<file>` is relative to the directory you run from (`list` and `run` alike), but the `--build` command
+  and the test argv always run from the repository root, so relative paths in them are root-relative.
 - `--build` is split on single spaces into an argv. There is no quoting and no shell: a word cannot
   contain a space, and `&&`, `;`, `>` or `$VAR` are passed literally. Wrap anything more in a script.
 - The unmutated file is built and tested first; if that fails, the run stops (exit 2), because no mutant
@@ -45,8 +48,10 @@ in file order.
 - The original bytes are kept in memory and in `<file>.zcl-mutate.orig` (created with `O_EXCL`). For each
   site the file is rewritten in place, the build runs (a nonzero exit is UNCOMPILABLE and is not scored),
   then the test runs: exit 0 is SURVIVED, nonzero is KILLED, a timeout (`--timeout`, default 600 seconds,
-  for the build and for the test each) is KILLED(timeout). The original is then written back and checked
-  by re-reading it.
+  for the build and for the test each) is KILLED(timeout). A build that hits the timeout is
+  UNCOMPILABLE(build timeout): unscored and counted in the uncompilable column, but named in the
+  receipt, in `build_timeouts` of the JSON and in a warning, so raise `--timeout` to score those mutants.
+  The original is then written back and checked by re-reading it.
 - Build and test run in their own process group, with stdin from `/dev/null` and output to a log file
   under `zcutil/gen/mutate/`; the whole group is killed on timeout, on interrupt and when the command ends.
 - SIGINT, SIGTERM and SIGHUP restore the file and exit 130; an exit handler restores too. An
@@ -78,6 +83,6 @@ races, memory safety, consensus parity or the code paths the chosen test does no
 `zcl-dev-mutate.c` (commands, options, selftest), `mutate_ops.{c,h}` (the code mask and the operators,
 pure), `mutate_run.c` (run and restore). `test/mutate_test.c` is the fixture driver, in C so that the
 shell-lines floor does not rise; it also plays the test and build commands of its fixture runs
-(`--role check|slow|hang|build`). Its inputs are `test/list_fixture.c`, `test/list_fixture.cpp`,
+(`--role check|slow|hang|build|slowbuild|hangbuild`). Its inputs are `test/list_fixture.c`, `test/list_fixture.cpp`,
 `test/calc.c` and `test/golden/`; `make -C zcutil/dev/mutate check UPDATE=1` rewrites the goldens.
 C, libc only, gnu17 that also compiles as c2x; cross builds with `x86_64-w64-mingw32-gcc`.

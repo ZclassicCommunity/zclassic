@@ -303,19 +303,11 @@ static int refuse(const char *rel, const char *why)
 
 /* Resolves `file` (relative to ZCL_DEV_PREFIX when zcl-dev dispatched us) to a path relative to the
  * repository root, and moves into the root. */
-static bool join_prefix(const char *file, char *joined, size_t cap)
-{
-    const char *prefix = getenv("ZCL_DEV_PREFIX");
-    bool pre = prefix && prefix[0] && strcmp(prefix, ".") != 0 && file[0] != '/';
-    int n = snprintf(joined, cap, "%s%s%s", pre ? prefix : "", pre ? "/" : "", file);
-    return n > 0 && (size_t)n < cap;
-}
-
 static int resolve(const char *file, char *rel, size_t cap)
 {
     char joined[PATH_MAX], full[PATH_MAX], top[PATH_MAX], realtop[PATH_MAX];
     struct stat st;
-    if (!join_prefix(file, joined, sizeof joined)) return refuse(file, "path too long");
+    if (!mut_join_prefix(file, joined, sizeof joined)) return refuse(file, "path too long");
     if (lstat(joined, &st) != 0 || !S_ISREG(st.st_mode)) return refuse(file, "not a regular file");
     if (!realpath(joined, full)) return refuse(file, strerror(errno));
     if (!git_line(top, sizeof top, "rev-parse", "--show-toplevel", NULL) || !realpath(top, realtop))
@@ -328,19 +320,21 @@ static int resolve(const char *file, char *rel, size_t cap)
     return 0;
 }
 
+/* The .orig check comes first: after a SIGKILL the file still holds a mutant, so the diff checks would
+ * fail too, and their advice (commit or stash) would preserve the mutant instead of restoring it. */
 static int preconditions(const char *rel)
 {
     struct stat st;
+    if (lstat(g.orig_path, &st) == 0) {
+        fprintf(stderr, "zcl-dev mutate: refused: %s exists from an interrupted run; the file may still hold a "
+                "mutant: run `zcl-dev mutate restore %s` (do not commit or stash it)\n", g.orig_path, rel);
+        return 2;
+    }
     for (const char *const *v = vendored; *v; v++)
         if (strncmp(rel, *v, strlen(*v)) == 0) return refuse(rel, "vendored or third-party tree; mutate the code we own");
     if (git("ls-files", "--error-unmatch", NULL, rel) != 0) return refuse(rel, "not tracked by git");
     if (git("diff", "--quiet", NULL, rel) != 0) return refuse(rel, "has unstaged changes; commit or stash them first");
     if (git("diff", "--cached", "--quiet", rel) != 0) return refuse(rel, "has staged changes; commit them first");
-    if (lstat(g.orig_path, &st) == 0) {
-        fprintf(stderr, "zcl-dev mutate: refused: %s exists from an interrupted run; run `zcl-dev mutate restore %s`\n",
-                g.orig_path, rel);
-        return 2;
-    }
     return 0;
 }
 
@@ -362,8 +356,11 @@ static void warn_if_sealed(const char *rel)
 }
 
 /* ---- the campaign -------------------------------------------------------------------------- */
-enum outcome { O_KILLED, O_TIMEOUT, O_SURVIVED, O_UNCOMPILABLE, O_STOPPED, O_BROKEN };
-static const char *const outcome_names[] = {"KILLED", "KILLED(timeout)", "SURVIVED", "UNCOMPILABLE", "STOPPED", "BROKEN"};
+/* A build that hits --timeout is O_BUILD_TIMEOUT: unscored like UNCOMPILABLE (and counted in that
+ * column), but named in the receipt, the JSON and a warning, so a slow rebuild is never silent. */
+enum outcome { O_KILLED, O_TIMEOUT, O_SURVIVED, O_UNCOMPILABLE, O_BUILD_TIMEOUT, O_STOPPED, O_BROKEN };
+static const char *const outcome_names[] = {"KILLED", "KILLED(timeout)", "SURVIVED", "UNCOMPILABLE",
+                                            "UNCOMPILABLE(build timeout)", "STOPPED", "BROKEN"};
 
 struct campaign {
     const struct mut_opts *o;
@@ -372,6 +369,7 @@ struct campaign {
     char *build_argv[64];
     char *build_buf;
     int log_fd;
+    int build_rc; /* the last build's status: 128+N when a signal ended it */
     struct mut_sites sites;
     size_t tried;
     enum outcome *res;
@@ -401,9 +399,10 @@ static void log_header(const struct campaign *c, const char *what)
 static enum outcome test_once(struct campaign *c)
 {
     if (c->build_argv[0]) {
-        int b = run_supervised(c->build_argv, c->o->timeout, c->log_fd);
+        int b = c->build_rc = run_supervised(c->build_argv, c->o->timeout, c->log_fd);
         if (b == ST_STOPPED) return O_STOPPED;
         if (b == -1) return O_BROKEN;
+        if (b == ST_TIMEOUT) return O_BUILD_TIMEOUT;
         if (b != 0) return O_UNCOMPILABLE;
     }
     int t = run_supervised(c->o->test, c->o->timeout, c->log_fd);
@@ -436,9 +435,22 @@ static int baseline(struct campaign *c)
     enum outcome r = test_once(c);
     if (r == O_SURVIVED) return 0;
     if (r == O_STOPPED) return 130;
-    fprintf(stderr, "zcl-dev mutate: the unmutated file does not %s (%s); see the log in zcutil/gen/mutate/\n",
-            r == O_UNCOMPILABLE ? "build" : "pass its test", outcome_names[r]);
+    if (r == O_BUILD_TIMEOUT)
+        fprintf(stderr, "zcl-dev mutate: the build of the unmutated file timed out after %ld seconds; raise --timeout\n",
+                c->o->timeout);
+    else if (r == O_UNCOMPILABLE && c->build_rc > 128)
+        fprintf(stderr, "zcl-dev mutate: the build of the unmutated file was killed by signal %d\n", c->build_rc - 128);
+    else
+        fprintf(stderr, "zcl-dev mutate: the unmutated file does not %s (%s)\n",
+                r == O_UNCOMPILABLE ? "build" : "pass its test", outcome_names[r]);
+    fputs("zcl-dev mutate: see the log in zcutil/gen/mutate/\n", stderr);
     return 2;
+}
+
+/* Unscored either way; the column counts both kinds. */
+static size_t uncompilable(const struct campaign *c)
+{
+    return c->count[O_UNCOMPILABLE] + c->count[O_BUILD_TIMEOUT];
 }
 
 static int loop(struct campaign *c)
@@ -477,7 +489,7 @@ static void summary(const struct campaign *c, FILE *f)
     char score[64];
     score_text(c, score, sizeof score);
     fprintf(f, "sites %zu tried %zu killed %zu survived %zu uncompilable %zu timeouts %zu score=%s\n", c->sites.n,
-            c->tried, c->count[O_KILLED] + c->count[O_TIMEOUT], c->count[O_SURVIVED], c->count[O_UNCOMPILABLE],
+            c->tried, c->count[O_KILLED] + c->count[O_TIMEOUT], c->count[O_SURVIVED], uncompilable(c),
             c->count[O_TIMEOUT], score);
 }
 
@@ -504,9 +516,9 @@ static void report_json(const struct campaign *c, const char *receipt)
     fputs("{\"file\":", stdout);
     mut_json_str(stdout, c->rel);
     printf(",\"head\":\"%s\",\"sites\":%zu,\"tried\":%zu,\"killed\":%zu,\"survived\":%zu,\"uncompilable\":%zu,"
-           "\"timeouts\":%zu,\"score\":\"%s\",\"receipt\":", c->head, c->sites.n, c->tried,
-           c->count[O_KILLED] + c->count[O_TIMEOUT], c->count[O_SURVIVED], c->count[O_UNCOMPILABLE],
-           c->count[O_TIMEOUT], score);
+           "\"build_timeouts\":%zu,\"timeouts\":%zu,\"score\":\"%s\",\"receipt\":", c->head, c->sites.n, c->tried,
+           c->count[O_KILLED] + c->count[O_TIMEOUT], c->count[O_SURVIVED], uncompilable(c),
+           c->count[O_BUILD_TIMEOUT], c->count[O_TIMEOUT], score);
     mut_json_str(stdout, receipt);
     fputs(",\"survivors\":[", stdout);
     bool first = true;
@@ -544,6 +556,9 @@ static int finish(struct campaign *c)
     char receipt[PATH_MAX + 64];
     if (!write_receipt(c, receipt, sizeof receipt)) fprintf(stderr, "zcl-dev mutate: warning: cannot write %s\n", receipt);
     report(c, receipt);
+    if (c->count[O_BUILD_TIMEOUT])
+        fprintf(stderr, "zcl-dev mutate: warning: %zu mutant build(s) hit --timeout %ld; they are counted uncompilable "
+                "and not scored; raise --timeout to score them\n", c->count[O_BUILD_TIMEOUT], c->o->timeout);
     return c->count[O_SURVIVED] ? 1 : 0;
 }
 

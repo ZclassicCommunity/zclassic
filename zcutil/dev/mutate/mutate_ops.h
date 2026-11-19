@@ -75,6 +75,8 @@ struct mut_opts {
 };
 
 char *mut_read_file(const char *path, size_t *len);
+/* Joins a relative file to ZCL_DEV_PREFIX (the caller's cwd under zcl-dev); false when too long. */
+bool mut_join_prefix(const char *file, char *joined, size_t cap);
 /* Keeps only the sites inside --lines and --class. */
 void mut_filter(struct mut_sites *s, const struct mut_opts *o);
 void mut_print_site(FILE *f, const struct mut_site *s);
