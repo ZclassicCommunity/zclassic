@@ -1529,6 +1529,8 @@ static bool VerifyBootstrapDownloadedFile(const boost::filesystem::path& path, c
 // high-latency links. It must not exceed the server's per-peer queue limit
 // (MAX_BOOTSTRAP_CHUNK_REQUESTS_PER_PEER in net.cpp).
 static const size_t BOOTSTRAP_PIPELINE_DEPTH = 16;
+// Requests the window starts with; see DownloadBootstrapFileSubset.
+static const size_t BOOTSTRAP_PIPELINE_START = 2;
 
 // Parallel download streams (connections) the client opens to the bootstrap
 // peer. A single TCP flow is loss-limited: its congestion window collapses on
@@ -2127,7 +2129,11 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
 
     std::deque<CBootstrapSnapshotChunkRequest> inflight;
     bool ok = true;
-    for (size_t i = 0; i < BOOTSTRAP_PIPELINE_DEPTH; ++i) {
+    // The window opens slowly: BOOTSTRAP_PIPELINE_START requests first, one more for every chunk that arrives
+    // until it holds BOOTSTRAP_PIPELINE_DEPTH. A full window is what hides latency on a long path, and it is
+    // reached within a few round trips; but a connection that is cut right after it started (a killed client, a
+    // stream moved to another server) no longer throws away a whole window the server had queued for it.
+    for (size_t i = 0; i < BOOTSTRAP_PIPELINE_START; ++i) {
         CBootstrapSnapshotChunkRequest request;
         if (!nextRequest(request)) {
             break;
@@ -2362,14 +2368,19 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
         }
 
         // Refill the pipeline window.
-        CBootstrapSnapshotChunkRequest refill;
-        if (nextRequest(refill)) {
+        const size_t refills = inflight.size() + 1 < BOOTSTRAP_PIPELINE_DEPTH ? 2 : 1; // 2 while the window is still opening
+        for (size_t r = 0; r < refills && ok; ++r) {
+            CBootstrapSnapshotChunkRequest refill;
+            if (!nextRequest(refill))
+                break;
             if (!SendBootstrapChunkRequest(socket, refill, timeout_ms, error)) {
                 ok = false;
                 break;
             }
             inflight.push_back(refill);
         }
+        if (!ok)
+            break;
     }
 
     if (fp) {
