@@ -20,7 +20,12 @@
 #   4 deepunwind  operator invalidateblock 117 blocks deep: the retired notes are unspent again
 #                 (a running wallet; then a restarted one, on a new branch that spends them again)
 #   5 downgrade   the wallet.dat of scenario 1 opened by the previous release and by the parent
-#                 commit's build, blocks mined on them, then opened again by this build
+#                 commit's build: blocks mined, importprivkey and z_importkey with rescan, a restart, a
+#                 spend of an unrelated note, balances and note counts equal the -rescan reference; then
+#                 opened again by this build (equal to a -rescan of the same wallet.dat)
+#
+#   6 stalechain  kill -9 between the wallet checkpoint and the coins flush: the chain restarts below the
+#                 checkpoint; retired notes need no rescan
 #
 # usage: wallet_witness_retire.sh --bin <dir> --work <dir> [--peer-bin <dir>] [--old-bin <dir>]
 #            [--parent-bin <dir>] [--only 1,2,..] [--reuse-template] [--base port]
@@ -288,7 +293,9 @@ scn_downgrade() {
         rm -rf "$SD/node3" "$SD/node5"; mkdir -p "$SD"
         cp -a "$WORK/final0" "$SD/node3"; rm -f "$SD/node3/regtest/.lock"
         cp -a "$WORK/final0" "$SD/node5"; rm -f "$SD/node5/regtest/.lock"
-        start 3 "$BIN" -connect=0 -rescan -disablesafemode || return; REF=$(snap 3); stop 3
+        start 3 "$BIN" -connect=0 -rescan -disablesafemode || return; REF=$(snap 3)
+        K=$(cli 3 dumpprivkey "$(cli 3 getnewaddress)"); ZK=$(cli 3 z_exportkey "$(cli 3 z_getnewaddress)")
+        ZSU=$(tail -1 "$TPL/zaddrs"); ZSB=$(zbal 3 "$ZSU"); stop 3
         M=$(wc -l <"$SD/node5/regtest/debug.log")
         start 5 "$bd" -connect=0 -disablesafemode
         if ! alive_n 5 || ! cli 5 getblockcount >/dev/null 2>&1; then
@@ -302,16 +309,64 @@ scn_downgrade() {
         ck "downgrade $label: shielded balance and notes unchanged after the blocks" "$(snap 5 | zn)" "$(printf '%s' "$REF" | zn)"
         ck "downgrade $label: no assertion in the logs" "$(cat "$SD/node5/stdout.log" "$SD/node5/regtest/debug.log" | grep -ci 'assertion\|Aborted')" 0
         obs "$label: its own log lines about a rescan, repair or retire" "$(tail -n +$((M + 1)) "$SD/node5/regtest/debug.log" | grep -ci 'Rescanning last\|note state\|retire')"
+        # imports that rescan from below the notes, on the older binary: it must not lose track of the
+        # spent notes (it used to erase the nullifier of a note without a witness and count it unspent)
+        cli 5 importprivkey "$K" "" true >/dev/null 2>&1
+        ck "downgrade $label: importprivkey with rescan: balances and notes as the -rescan reference" "$(snap 5 | zn)" "$(printf '%s' "$REF" | zn)"
+        cli 5 z_importkey "$ZK" yes >/dev/null 2>&1
+        ck "downgrade $label: z_importkey with rescan: balances and notes as the -rescan reference" "$(snap 5 | zn)" "$(printf '%s' "$REF" | zn)"
+        cli 5 generate 1 >/dev/null 2>&1
+        ck "downgrade $label: one more block: balances and notes unchanged" "$(snap 5 | zn)" "$(printf '%s' "$REF" | zn)"
+        ck "downgrade $label: a spent address keeps only its change note" "$(zbal 5 "$(sed -n 1p "$TPL/zaddrs")")" 0.09990000
+        stop 5
+        start 5 "$bd" -connect=0 -disablesafemode || return
+        ck "downgrade $label: restart: balances and notes as the -rescan reference" "$(snap 5 | zn)" "$(printf '%s' "$REF" | zn)"
+        # an unrelated unspent note is still spendable on it
+        ck "downgrade $label: the unrelated address holds its 5 notes" "$(zbal 5 "$ZSU")" "$ZSB"
+        ta=$(cli 5 getnewaddress); r=$(zsend 5 "$ZSU" "[{\"address\":\"$ta\",\"amount\":0.1}]" 1 "$FEE")
+        ck "downgrade $label: a spend of an unrelated unspent note is accepted" "${r%% *}" success
+        cli 5 generate 1 >/dev/null 2>&1
+        ck "downgrade $label: that spend is mined, exact balance" "$(zbal 5 "$ZSU")" "$(add "$ZSB" -0.1 -$FEE)"
+        S5=$(snap 5 | zn)
         stop 5
         # this build reads what the older binary wrote
         M=$(wc -l <"$SD/node5/regtest/debug.log")
         start 5 "$BIN" -connect=0 -disablesafemode -debug=wallet || return
         s2=$(snap 5)
-        ck "downgrade $label: this build reads it back, shielded balance and notes unchanged" "$(printf '%s' "$s2" | zn)" "$(printf '%s' "$REF" | zn)"
+        ck "downgrade $label: this build reads it back, shielded balance and notes unchanged" "$(printf '%s' "$s2" | zn)" "$S5"
         obs "$label: this build's start-up note state lines" "$(tail -n +$((M + 1)) "$SD/node5/regtest/debug.log" | grep 'Wallet note state' | cut -c21-260 | tr '\n' '|')"
         obs "$label: this build's rescan lines" "$(tail -n +$((M + 1)) "$SD/node5/regtest/debug.log" | grep -c 'Rescanning last')"
         stop 5
+        rm -rf "$SD/node6"; cp -a "$SD/node5" "$SD/node6"; rm -f "$SD/node6/regtest/.lock" "$SD/node6/pid"
+        start 6 "$BIN" -connect=0 -rescan -disablesafemode || return
+        ck "downgrade $label: this build, opened again, equals a -rescan of the same wallet.dat" "$(snap 6 | zn)" "$S5"
+        stop 6
     done
+}
+
+# a hard kill between the wallet checkpoint and the flush of the coins: the chain restarts below the
+# checkpoint, so the spends that retired the notes are only 96 deep again. A retired note spent by a
+# mined wallet transaction needs no rescan from its own height.
+scn_staleckpt() {
+    from_template -testsetchaininterval=0 -debug=wallet || return
+    first=$(head -1 "$SD/spends")
+    mine 20
+    ck "stale checkpoint: the spends are 116 deep and retired while running" "$(confirmations "$first")" "$((BURIED + 20))"
+    ck "stale checkpoint: notes were retired by the running wallet" "$([ "$(grep -c 'note records changed' "$SD/node0/regtest/debug.log")" -ge 1 ] && echo yes)" yes
+    kill9 0; kill9 1
+    start 1 "$PEER_BIN" -connect=0 || return
+    refsnap "-connect=0" || return
+    M=$(wc -l <"$SD/node0/regtest/debug.log")
+    start 0 "$BIN" -connect=0 -disablesafemode -debug=wallet || return
+    ck "stale checkpoint: the chain restarted below the checkpoint (spends 96 deep)" "$(confirmations "$first")" "$BURIED"
+    ck "stale checkpoint: restart without -rescan equals the -rescan reference" "$(snap 0)" "$REF"
+    ck "stale checkpoint: same tip as the reference" "$(cli 0 getbestblockhash)" "$REFTIP"
+    n=$(tail -n +$((M + 1)) "$SD/node0/regtest/debug.log" | grep 'Rescanning last' | tail -1 | sed 's/.*Rescanning last \([0-9]*\) blocks.*/\1/')
+    obs "blocks rescanned at the restart" "${n:-0}"
+    ck "stale checkpoint: no rescan from the heights of retired notes (the lag is 20 blocks)" "$([ "${n:-0}" -le 25 ] && echo yes)" yes
+    ck "stale checkpoint: no confirmed note without a witness" "$(tail -n +$((M + 1)) "$SD/node0/regtest/debug.log" | grep -c '[1-9][0-9]* confirmed notes without witness')" 0
+    stop 0
+    stop 1
 }
 
 run_scn() {
@@ -343,5 +398,6 @@ run_scn 2 "crash at each step of the checkpoint" scn_crash
 run_scn 3 "reorg of 50 blocks over a recent spend" scn_reorg50
 run_scn 4 "operator invalidateblock deeper than the witness cache" scn_deepunwind
 run_scn 5 "wallet.dat opened by older binaries" scn_downgrade
+run_scn 6 "kill between the wallet checkpoint and the coins flush" scn_staleckpt
 say; say "id|scenario|result|checks"; cat "$RESULTS"
 ! grep -q '|FAIL|' "$RESULTS"
