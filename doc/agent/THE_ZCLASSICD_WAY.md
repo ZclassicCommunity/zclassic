@@ -53,7 +53,7 @@ zcutil/bin/zcl-dev check-docs   # agent documents point at tracked paths
 zcutil/bin/zcl-dev verify       # one trip: select, focused tests, lint
 ```
 
-`zcl-dev verify --gates` runs the gates after the selftests and stops at the first failure. On Windows the lint step reports `UNAVAILABLE` (exit 2): run it on a POSIX host (`zcutil/dev/verify/zcl-verify.c`). Documentation claims are live: `zcl-lint doc-claims` evaluates every `<!-- claim: ... -->` marker in tracked Markdown, and `doc-paths` resolves every backticked path. <!-- claim: symbol-present UNAVAILABLE zcutil/dev/verify/zcl-verify.c --> <!-- claim: symbol-present lint_rule_doc_claims zcutil/lint/rules.def -->
+`zcl-dev verify --gates` runs the gates after the selftests and stops at the first failure. On Windows the lint step runs `zcl-lint.exe` from the same bindir (Git Bash supplies `sh`; `zcutil/dev/verify/zcl-verify.c`). Documentation claims are live: `zcl-lint doc-claims` evaluates every `<!-- claim: ... -->` marker in tracked Markdown, and `doc-paths` resolves every backticked path. <!-- claim: symbol-present zcl-lint.exe zcutil/dev/verify/zcl-verify.c --> <!-- claim: symbol-present lint_rule_doc_claims zcutil/lint/rules.def -->
 
 ## 6. Review
 

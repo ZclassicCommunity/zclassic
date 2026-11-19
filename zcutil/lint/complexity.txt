@@ -98,7 +98,7 @@ src/crypto/equihash.cpp	Equihash<N,K>::OptimisedSolve(3)	50
 src/gtest/test_equihash_c23.cpp	TEST_F(EquihashC23,DISABLED_FullHistoryReplay)	18
 src/gtest/test_mainnet_blocks.cpp	TEST(MainnetBlocks,ShieldedConsensusChecksAcceptRealBlocks)	28
 src/gtest/test_sapling_scan_batch.cpp	TEST(SaplingScanBatch,MainnetOutputsAgreeAndTiming)	25
-src/init.cpp	AppInit2(2)	424
+src/init.cpp	AppInit2(2)	428
 src/init.cpp	InitSanityCheck(0)	43
 src/key.cpp	ec_privkey_import_der(4)	19
 src/main.cpp	AcceptBlock(5)	23

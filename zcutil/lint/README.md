@@ -277,3 +277,18 @@ Not baselined, fixed instead:
   `qa/rpc-tests/jsonq_lib.sh` helpers; no `no-new-jq`, `testiso` or `shellport` row was added. `install-kill-test.sh` and
   `multi-server-test.sh` are named in `zcutil/dev/impact.rules`; `mainnet-e2e.sh` is a manual script (about 10 GiB from the public
   servers): `resume-test.sh` prints the command line to run it by hand, as `wallet_witness_retire.sh` does for its perf script.
+
+## Integration re-seed 2026-11-19 (wave 2)
+
+Twelve reviewed wave-2 units (branches `wave2/*`, based on `8ee9727e7`) were merged onto the release commit `eac4cb227`, which had
+re-seeded the ratchets after that base. Rows below are the only ones whose merged measurement is higher than the release commit;
+every other baseline row moved with its code or fell (file sizes and complexity rows follow the splits: `src/init.cpp` 3865,
+`src/main.cpp` 8174, `src/net.cpp` 2793 lines; the `PreverifyHeadersEquihash` complexity row is deleted by the split in
+`wave2/overcap-splits`; `AppInit2` stays at the release commit's 428, the unit's own 424 predates the release's help-text growth).
+
+| metric | old | new |
+|---|---|---|
+| `shell_lines` | 23945 | 24078 |
+
+The 133 lines are the new qa script `qa/rpc-tests/chain_crash_sweep.sh` (134 lines, `wave2/p2p-serve-guards`) less 1 line saved
+elsewhere by the other units. It is debt, to be paid by porting the sweep to C23 or by shell removed elsewhere; nothing else was baselined.

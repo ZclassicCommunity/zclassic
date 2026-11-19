@@ -96,7 +96,7 @@ zcutil/bin/zcl-dev select [base-ref]               # steps for `git diff base...
 zcutil/bin/zcl-dev check-rules                     # every source file has a rule, every rule matches a file
 zcutil/local-ci.sh --commit <sha> --only wallet_matrix-1-9,zslp_index test <outdir>
 ZCL_CI_BASE=<base-ref> zcutil/local-ci.sh --commit <sha> test-changed <outdir>
-zcutil/bin/zcl-dev verify [--base ref]             # one trip for committed changes: select, t-fast (when built), zcl-lint all, then the test-changed hint; on Windows zcl-lint is not built and the step is UNAVAILABLE (exit 2), run verify on a POSIX host
+zcutil/bin/zcl-dev verify [--base ref]             # one trip for committed changes: select, t-fast (when built), zcl-lint all, then the test-changed hint; on Windows the lint step runs zcl-lint.exe from the same bindir (mingw cross build)
 zcutil/bin/zcl-dev verify --gates                  # the check-dev-tools gates after make -C zcutil check: zcl-lint all, check-tests (when built; BROKEN if zcl-dev-tests is built without the zcl-dev-check-tests alias), know, rpc-parity, flags
 ```
 
