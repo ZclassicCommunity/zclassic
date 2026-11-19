@@ -1,0 +1,7 @@
+timings: read 1 of 1 outdirs
+unavailable: fixture/nested/receipts.jsonl: corrupt line 2
+STEP                                RUNS  PASS%  SKIP    MIN(s) MEDIAN(s)    MAX(s)
+unit-a                                 1   100%     0      10.0      10.0      10.0
+limits: wall-clock seconds under whatever load the host had; PASS and FAIL runs both count, SKIP has no time;
+  outdirs listed as unavailable are absent from every figure, not zero; outdirs are read oldest first.
+exit 0

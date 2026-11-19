@@ -1,0 +1,4 @@
+{"commit":"c0ffee","tree":"t1","stage":"test-build/debug","step":"build-tests","verdict":"PASS","seconds":200,"started":"2026-11-19T00:00:00Z","env_names":["CC"],"log_sha256":"11"}
+{"commit":"c0ffee","tree":"t1","stage":"test-run/debug","step":"unit-a","verdict":"PASS","seconds":10,"started":"2026-11-19T00:00:00Z","env_names":["CC"],"log_sha256":"11"}
+{"commit":"c0ffee","tree":"t1","stage":"test-build/release","step":"build-tests","verdict":"FAIL","seconds":300,"started":"2026-11-19T00:00:00Z","env_names":["CC"],"log_sha256":"11"}
+{"commit":"c0ffee","tree":"t1","stage":"test-run/release","step":"unit-a","verdict":"PASS","seconds":12,"started":"2026-11-19T00:00:00Z","env_names":["CC"],"log_sha256":"11"}

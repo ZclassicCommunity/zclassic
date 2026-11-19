@@ -92,6 +92,8 @@ int main(int argc, char **argv)
     check_case("empty-results-falls-back", 0, (const char *[]){"fixture/emptytsv", NULL});
     check_case("empty-results-only", 2, (const char *[]){"fixture/emptyonly", NULL});
     check_case("flavors-not-mismatch", 0, (const char *[]){"fixture/flavors", NULL});
+    check_case("build-tests-flavors", 0, (const char *[]){"fixture/buildflavors", NULL});
+    check_case("nested-receipts-corrupt", 0, (const char *[]){"fixture/nested", NULL});
     check_case("no-args", 2, (const char *[]){NULL});
     if (failures) { printf("zcl-dev-timings tests: %d failure(s)\n", failures); return 1; }
     puts("zcl-dev-timings tests: ok");

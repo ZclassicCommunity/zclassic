@@ -12,7 +12,7 @@ zcutil/bin/zcl-dev timings ~/work/zc23-localci-out/*/        # read-only; never 
 Each `<outdir>` is a `zcutil/local-ci.sh` output directory ([doc/local-ci.md](../../../doc/local-ci.md)):
 
 - `results.tsv`: `<step> TAB <PASS|FAIL|SKIP> TAB <seconds>`. local-ci writes it to `<outdir>/test/results.tsv` (debug flavor) and `<outdir>/test-release/results.tsv` (release flavor); `<outdir>/results.tsv` is read too. Every one that exists is read.
-- `receipts.jsonl`: one flat JSON object per line, in finishing order; only `step`, `verdict` and `seconds` are used (a strict flat-field scan: a line that is not one `{...}` object with those three fields is corrupt).
+- `receipts.jsonl`: one flat JSON object per line, in finishing order; only `step`, `verdict` and `seconds` are used (a strict flat-field scan: a line that is not one flat `{...}` object (no nested object, keys read only outside strings) with those three fields is corrupt).
 
 ## Output
 
@@ -38,4 +38,4 @@ Exit codes: 0 data read, 1 a MISMATCH, 2 nothing readable (hollow) or bad argume
 ## Empty files and flavors
 
 - A `results.tsv` with no step rows (local-ci creates it empty before the build stage, so an early failure leaves exactly that) is listed as `unavailable: <path>: empty (no step rows)`, not read as a zero-step success; the outdir then falls back to `receipts.jsonl`, or counts as unreadable when there is none.
-- Debug (`test/`) and release (`test-release/`) rows are kept apart. Receipts carry the flavor in their stage (`test-run/<flavor>`). A step that has rows for both flavors is printed once per flavor as `name [debug]` and `name [release]` (JSON adds a `flavor` field), SLOWER compares only within a flavor, and MISMATCH compares a `results.tsv` row only with receipts of the same flavor. A root `results.tsv` or a receipt with another stage has no flavor: it matches any flavor, and joins the first row of its step (so with both flavors present its row is attributed to whichever came first).
+- Debug (`test/`) and release (`test-release/`) rows are kept apart. Receipts carry the flavor in their stage (`test-run/<flavor>` and `test-build/<flavor>`). A step that has rows for both flavors is printed once per flavor as `name [debug]` and `name [release]` (JSON adds a `flavor` field), SLOWER compares only within a flavor, and MISMATCH compares a `results.tsv` row only with receipts of the same flavor. A root `results.tsv` or a receipt with another stage has no flavor: it matches any flavor, and joins the first row of its step (so with both flavors present its row is attributed to whichever came first).

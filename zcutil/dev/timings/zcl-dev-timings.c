@@ -151,6 +151,29 @@ static int parse_tsv_line(char *line, struct rec *r)
     return fill_rec(r, line, t1 + 1, t2 + 1);
 }
 
+/* number of unescaped quotes before p; odd means p is inside a string */
+static int quotes_before(const char *line, const char *p)
+{
+    int q = 0;
+    for (const char *s = line; s < p; s++) {
+        if (*s == '\\' && s + 1 < p) s++;
+        else if (*s == '"') q++;
+    }
+    return q;
+}
+
+/* a flat object holds no { outside strings after the opening brace, and its strings are closed */
+static int is_flat(const char *line)
+{
+    int in = 0;
+    for (const char *s = line + 1; *s; s++) {
+        if (in && *s == '\\' && s[1]) s++;
+        else if (*s == '"') in = !in;
+        else if (!in && *s == '{') return 0;
+    }
+    return !in;
+}
+
 /* value start after `"key":` when the key is a top-level field of a flat object, else NULL */
 static const char *find_key(const char *line, const char *key)
 {
@@ -158,7 +181,7 @@ static const char *find_key(const char *line, const char *key)
     const char *p = line;
     snprintf(pat, sizeof pat, "\"%s\":", key);
     while ((p = strstr(p, pat))) {
-        if (p == line + 1 || p[-1] == ',') return p + strlen(pat);
+        if ((p == line + 1 || p[-1] == ',') && !(quotes_before(line, p) & 1)) return p + strlen(pat);
         p++;
     }
     return NULL;
@@ -190,9 +213,10 @@ static int get_num(const char *line, const char *key, char *dst, size_t cap)
 /* flavor named by a receipt stage such as test-run/debug; F_NONE for any other stage */
 static int receipt_flavor(const char *stage)
 {
-    if (strncmp(stage, "test-run/", 9)) return F_NONE;
+    const char *slash = strchr(stage, '/');
+    if (!slash || (strncmp(stage, "test-run/", 9) && strncmp(stage, "test-build/", 11))) return F_NONE;
     for (int f = F_DEBUG; f <= F_RELEASE; f++)
-        if (!strcmp(stage + 9, fname[f])) return f;
+        if (!strcmp(slash + 1, fname[f])) return f;
     return F_NONE;
 }
 
@@ -202,7 +226,7 @@ static int parse_receipt_line(char *line, struct rec *r)
     char verdict[16], secs[32], name[NAME_MAX_LEN], stage[64];
     size_t n = strlen(line);
     if (n && line[n - 1] == '\r') line[--n] = 0;
-    if (n < 2 || line[0] != '{' || line[n - 1] != '}') return -1;
+    if (n < 2 || line[0] != '{' || line[n - 1] != '}' || !is_flat(line)) return -1;
     if (get_str(line, "step", name, sizeof name) || get_str(line, "verdict", verdict, sizeof verdict)) return -1;
     if (get_num(line, "seconds", secs, sizeof secs)) return -1;
     if (fill_rec(r, name, verdict, secs)) return -1;
