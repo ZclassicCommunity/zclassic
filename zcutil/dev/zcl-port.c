@@ -296,6 +296,21 @@ static void default_dir(void)
 #endif
 }
 
+/* Platform start-up: owner pid default and the random seed. */
+static void init_platform(int have_owner)
+{
+#ifdef _WIN32
+    { WSADATA w; WSAStartup(MAKEWORD(2, 2), &w); }
+    if (!have_owner) owner_pid = (long)GetCurrentProcessId();
+    rng ^= (unsigned long long)GetCurrentProcessId() * 2654435761ULL ^ ((unsigned long long)time(NULL) << 20) ^ (unsigned long long)GetTickCount();
+#else
+    if (!have_owner) owner_pid = (long)getppid();
+    { struct stat nst; if (stat("/proc/self/ns/pid", &nst) == 0) my_ns = (long)nst.st_ino; }
+    { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+      rng ^= ((unsigned long long)getpid() * 2654435761ULL) ^ ((unsigned long long)ts.tv_nsec << 20) ^ (unsigned long long)ts.tv_sec; }
+#endif
+}
+
 int main(int argc, char **argv)
 {
     const char *cmd, *r;
@@ -315,16 +330,7 @@ int main(int argc, char **argv)
         else goto usage;
     }
     if (range_lo < 1024 || range_hi > 65535 || range_lo > range_hi) { fprintf(stderr, "zcl-port: bad range\n"); return 2; }
-#ifdef _WIN32
-    { WSADATA w; WSAStartup(MAKEWORD(2, 2), &w); }
-    if (!have_owner) owner_pid = (long)GetCurrentProcessId();
-    rng ^= (unsigned long long)GetCurrentProcessId() * 2654435761ULL ^ ((unsigned long long)time(NULL) << 20) ^ (unsigned long long)GetTickCount();
-#else
-    if (!have_owner) owner_pid = (long)getppid();
-    { struct stat nst; if (stat("/proc/self/ns/pid", &nst) == 0) my_ns = (long)nst.st_ino; }
-    { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
-      rng ^= ((unsigned long long)getpid() * 2654435761ULL) ^ ((unsigned long long)ts.tv_nsec << 20) ^ (unsigned long long)ts.tv_sec; }
-#endif
+    init_platform(have_owner);
     for (int i = 0; i < 8; i++) next_rand();
     ensure_dir(dir);
     if (!strcmp(cmd, "lease") && npos == 1) return cmd_lease(atol(pos[0]), block);
