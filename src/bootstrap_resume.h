@@ -244,6 +244,7 @@ private:
     double StreamRate(const StreamState& st, int64_t nowMs, bool matureOnly) const; //!< bytes/s over the window; <0 if matureOnly and too young
     double PeerPerStreamRate(int peer, int64_t nowMs) const;        //!< mean over mature streams, <0 if none
     int AttachedLocked(int peer) const;                              //!< streams on `peer` not asked to move
+    bool PeerQuietLocked(int peer, int64_t nowMs) const;             //!< no stream of `peer` got a byte for stallMs
 
     mutable std::mutex mtx;
     BootstrapPeerPolicy pol;

@@ -244,6 +244,16 @@ int BootstrapPeerBoard::AttachedLocked(int peer) const
     return n;
 }
 
+bool BootstrapPeerBoard::PeerQuietLocked(int peer, int64_t nowMs) const
+{
+    for (size_t i = 0; i < streams.size(); ++i) {
+        const StreamState& st = streams[i];
+        if (st.peer == peer && st.connected && nowMs - std::max(st.attachedMs, st.lastByteMs) <= pol.stallMs)
+            return false;
+    }
+    return true;
+}
+
 double BootstrapPeerBoard::StreamRate(const StreamState& st, int64_t nowMs, bool matureOnly) const
 {
     const int64_t age = nowMs - st.attachedMs;
@@ -536,7 +546,10 @@ std::vector<BootstrapMove> BootstrapPeerBoard::Rebalance(int64_t nowMs)
         mv.stream = (int)i;
         if (!Usable(peers[st.peer])) {
             mv.reason = BMR_UNUSABLE;
-        } else if (!st.idle && usable >= 2 && nowMs - std::max(st.attachedMs, st.lastByteMs) > pol.stallMs) {
+        } else if (!st.idle && usable >= 2 && nowMs - std::max(st.attachedMs, st.lastByteMs) > pol.stallMs &&
+                   PeerQuietLocked(st.peer, nowMs)) {
+            // Only when the whole server is quiet: a server that feeds its other streams is merely
+            // sharing a cap unevenly, and moving this stream costs its in-flight window for nothing.
             mv.reason = BMR_STALLED;
             peers[st.peer].penaltyUntilMs = nowMs + pol.penaltyMs;
         } else {
@@ -579,15 +592,18 @@ std::vector<BootstrapMove> BootstrapPeerBoard::Rebalance(int64_t nowMs)
         if (streams[i].idle && !streams[i].connected)
             haveIdle = true;
     if (haveIdle) {
-        double bestRate = 0;
-        for (size_t p = 0; p < peers.size(); ++p)
-            bestRate = std::max(bestRate, per[p]);
         int victim = -1;
         double victimSeconds = 0;
         for (size_t i = 0; i < streams.size(); ++i) {
             StreamState& st = streams[i];
             if (!st.connected || st.move || st.idle || st.peer < 0)
                 continue;
+            // Only another server can take the file over faster: the same server gives the idle stream no
+            // more than the victim has, and the move would only throw away the victim's requests in flight.
+            double bestRate = 0;
+            for (size_t p = 0; p < peers.size(); ++p)
+                if ((int)p != st.peer && Usable(peers[p]))
+                    bestRate = std::max(bestRate, per[p]);
             uint64_t left = 0;
             for (std::map<uint32_t, uint64_t>::const_iterator f = st.remaining.begin(); f != st.remaining.end(); ++f)
                 left += f->second;
