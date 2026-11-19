@@ -3,5 +3,4 @@
 # Regenerate with: zcl-lint wallclock --update-baseline (refused while anything rose).
 src/test/addrman_tests.cpp	1
 src/test/addrv2_tests.cpp	1
-src/test/bootstrap_resume_tests.cpp	3
 src/test/embeddedtor_tests.cpp	1

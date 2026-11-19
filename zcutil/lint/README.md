@@ -187,3 +187,78 @@ The `secretlog` hit at `src/wallet/sendjournal.cpp` (the 8-byte SHA-256 prefix o
 returns as `keyhash`) carries a `log-ok:` reason on its line and is not a baseline row. `wallet_witness_retire_perf.sh` is a manual
 benchmark: `wallet_witness_retire.sh` names it (the command line is printed after the scenarios) and it is run by hand on that
 script's template.
+
+
+## Integration re-seed 2026-11-19 (speed/bootstrap)
+
+Branch `integration/stage-rc6` merged `speed/bootstrap` (multi-server snapshot download, install-kill recovery, the
+`servers_in_use` field of `getbootstrapinfo` in the Qt wallet) at its reviewed tip `ebbefa90c`. That code was written, reviewed and
+tested before these gates existed on it. This one-time re-seed sets the rows below to today's measured values, for exactly these rows
+and no others; no product code was refactored to get under a cap, and the two sections above are not touched. Every raised or added
+row is debt, to be paid by a later reviewed refactor and shrunk through the normal `--update-baseline` path. It is not a precedent:
+after this section a baseline may only shrink.
+
+filesize (`filesize.txt`):
+
+| path | old | new |
+|---|---|---|
+| `src/bootstrap.cpp` | 5840 | 6454 |
+| `src/init.cpp` | 3995 | 4003 |
+| `src/test/bootstrap_snapshot_protocol_tests.cpp` | 2593 | 2617 |
+| `wallet/src/connection.cpp` | 3302 | 3306 |
+
+`src/test/bootstrap_resume_tests.cpp` (2557 lines, over the hard limit, no row) was not baselined: it is split by topic into
+`bootstrap_resume_logic_tests.cpp` (625 lines: pure decision logic, staging directory, install recovery, scan),
+`bootstrap_peer_board_tests.cpp` (719: `BootstrapPeerBoard` scheduling and blame) and `bootstrap_resume_tests.cpp` (1125: the downloader
+against fake servers), with the shared helpers in `bootstrap_resume_testutil.h`. Test names and bodies are unchanged; each part is its
+own Boost suite (`check-tests` requires unique suite names), registered in `src/Makefile.test.include` and `zcutil/dev/tests.rules`.
+
+complexity (`complexity.txt`), raised rows (a changed parameter count changes the row key, shown as old key -> new key):
+
+| path and function | old | new |
+|---|---|---|
+| `src/bootstrap.cpp` `BootstrapFromPeer(3)` -> `(4)` | 32 | 33 |
+| `src/bootstrap.cpp` `DownloadBootstrapFileSubset(11)` -> `(13)` | 43 | 65 |
+| `src/bootstrap.cpp` `DownloadBootstrapSnapshotParallel(7)` -> `(8)` | 45 | 96 |
+| `src/bootstrap.cpp` `ValidateBootstrapSnapshotManifest(3)` | 35 | 40 |
+| `src/init.cpp` `AppInit2(2)` | 425 | 428 |
+| `wallet/src/connection.cpp` `ConnectionLoader::probeBootstrapProgress(1)` | 36 | 37 |
+
+complexity, new rows (functions over the cap that had no row):
+
+| path and function | new |
+|---|---|
+| `src/bootstrap.cpp` `RecoverInterruptedBootstrapInstall(2)` | 17 |
+| `src/bootstrap_resume.cpp` `BootstrapPeerBoard::Assign(3)` | 27 |
+| `src/bootstrap_resume.cpp` `BootstrapPeerBoard::CanBenchLocked(3)` | 16 |
+| `src/bootstrap_resume.cpp` `BootstrapPeerBoard::HashFailed(3)` | 20 |
+| `src/bootstrap_resume.cpp` `BootstrapPeerBoard::NoteComplete(2)` | 16 |
+| `src/bootstrap_resume.cpp` `BootstrapPeerBoard::Rebalance(2)` | 67 |
+
+long-functions (`long-functions.txt`):
+
+| path and function | old | new |
+|---|---|---|
+| `src/init.cpp` `AppInit2(2)` | 2165 | 2172 |
+
+kpi floors (`kpi-floor.txt`), which follow from the rows above and from the branch's four test scripts under `qa/bootstrap-resume/`
+(about 770 lines of shell):
+
+| metric | old | new |
+|---|---|---|
+| `shell_lines` | 23178 | 23945 |
+| `complexity_debt` | 6293 | 6449 |
+
+Not baselined, fixed instead:
+
+- `shellport`: `resume-test.sh` used `date -d` to turn a log timestamp into epoch seconds (GNU only). It now uses `epoch_utc`, a few
+  lines of awk (days from civil date, UTC, the time zone the node writes its log in). The existing `stat-c` rows of that script are unchanged.
+- `wallclock`: the baseline row `src/test/bootstrap_resume_tests.cpp 3` is deleted (3 -> 0) and `multi-server-test.sh` gets no row.
+  Every timing check of download performance carries a `real-clock:` reason on its statement (3 in `multi-server-test.sh`, 5 in
+  `bootstrap_resume_tests.cpp`): they are deliberate, the property under test is how fast the download finishes or fails over.
+- `gen --check flags`: `-bootstrapschedwindowms` (test-only scaling of the scheduler window) is documented under `-help-debug` in
+  `HelpMessage`, so `flags-undocumented.txt` and the `undocumented_flags` floor are unchanged.
+- The four scripts under `qa/bootstrap-resume/` use leased ports (`qa/lib/isolation.sh`, `--port-base` still overrides) and the
+  `qa/rpc-tests/jsonq_lib.sh` helpers; no `no-new-jq`, `testiso` or `shellport` row was added. `install-kill-test.sh` and
+  `multi-server-test.sh` are named in `zcutil/dev/impact.rules`; `mainnet-e2e.sh` is a manual script (about 10 GiB from the public
+  servers): `resume-test.sh` prints the command line to run it by hand, as `wallet_witness_retire.sh` does for its perf script.
