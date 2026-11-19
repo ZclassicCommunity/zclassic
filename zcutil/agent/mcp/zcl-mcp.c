@@ -135,16 +135,20 @@ static bool ci_prefix(const char *s, const char *pre);
 /* A repository-relative path: a token, no colon (drive letters), no leading slash, no dot or dot-dot part,
  * no git directory in any case. */
 
+/* One path component: not empty, not "." or "..", not the git directory in any case (NTFS and APFS
+ * fold it), no trailing dot (Windows drops it: "wallet.dat." opens wallet.dat). */
+static bool part_ok(const char *p, size_t n)
+{
+    if (n == 0 || p[n - 1] == '.') return false;
+    return !(n == 4 && ci_prefix(p, ".git"));
+}
+
 static bool path_ok(const char *s)
 {
     if (!token_ok(s) || s[0] == '/' || strchr(s, ':')) return false;
-    const char *p = s;
-    for (;;) {
+    for (const char *p = s;;) {
         const char *e = strchr(p, '/');
-        size_t n = e ? (size_t)(e - p) : strlen(p);
-        if (n == 0 || (n == 1 && p[0] == '.') || (n == 2 && p[0] == '.' && p[1] == '.')) return false;
-        if (n == 4 && ci_prefix(p, ".git")) return false; /* the git directory in any case: NTFS and APFS fold it */
-        if (p[n - 1] == '.') return false; /* Windows drops a trailing dot: "wallet.dat." opens wallet.dat */
+        if (!part_ok(p, e ? (size_t)(e - p) : strlen(p))) return false;
         if (!e) return true;
         p = e + 1;
     }
