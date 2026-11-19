@@ -8,6 +8,7 @@
  *   zcl-review-fixtures --hook <bindir> <githooks-dir>     real git pushes through zcl-dev-hook (review gate)
  */
 #define _POSIX_C_SOURCE 200809L
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under POSIX-only masks; ignored elsewhere */
 #include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>

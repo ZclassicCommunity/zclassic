@@ -1,6 +1,7 @@
 /* review-core.c: see review-core.h. */
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L /* fork, pipe, waitpid under a strict -std=c2x */
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under POSIX-only masks; ignored elsewhere */
 #endif
 #if defined(__MINGW32__) && !defined(__USE_MINGW_ANSI_STDIO)
 #define __USE_MINGW_ANSI_STDIO 1

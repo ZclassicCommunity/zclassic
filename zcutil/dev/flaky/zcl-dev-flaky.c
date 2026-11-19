@@ -9,6 +9,7 @@
  * Libc and POSIX only; Windows prints UNAVAILABLE. Written for zclassicd (idea from Z23 tools/process_group_exec.c).
  */
 #define _POSIX_C_SOURCE 200809L
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under POSIX-only masks; ignored elsewhere */
 #define _DEFAULT_SOURCE 1
 #include <errno.h>
 #include <stdio.h>

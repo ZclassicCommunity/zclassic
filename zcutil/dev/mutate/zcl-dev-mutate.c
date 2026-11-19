@@ -12,6 +12,7 @@
  * 1 survivors, 2 broken or refused. C, libc only; gnu17 that also compiles as c2x.
  */
 #define _POSIX_C_SOURCE 200809L
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under POSIX-only masks; ignored elsewhere */
 #include "mutate_ops.h"
 
 #include <errno.h>

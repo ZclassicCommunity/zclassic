@@ -13,6 +13,7 @@
  * unstaged-change refusal), unstaged, staged, untracked, vendored.
  */
 #define _XOPEN_SOURCE 700
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under POSIX-only masks; ignored elsewhere */
 #define _DEFAULT_SOURCE 1
 #include <errno.h>
 #include <fcntl.h>

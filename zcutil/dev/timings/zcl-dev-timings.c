@@ -14,6 +14,7 @@
  * Libc only. Written for zclassicd; the idea (report existing artifacts, state coverage limits) is Z23's tools/dev/timings.c.
  */
 #define _POSIX_C_SOURCE 200809L
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under POSIX-only masks; ignored elsewhere */
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -14,6 +14,7 @@
  * Environment: ZCL_COMPDB_MAKE names the make program (default "make").
  */
 #define _POSIX_C_SOURCE 200809L
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under POSIX-only masks; ignored elsewhere */
 #define _DEFAULT_SOURCE 1
 #include <ctype.h>
 #include <errno.h>

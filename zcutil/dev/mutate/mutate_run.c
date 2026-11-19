@@ -13,6 +13,7 @@
  */
 #if !defined(_WIN32)
 #define _XOPEN_SOURCE 700
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under POSIX-only masks; ignored elsewhere */
 #define _DEFAULT_SOURCE 1
 #endif
 #include "mutate_ops.h"

@@ -4,6 +4,7 @@
  * usage: flaky_test <path to zcl-dev-flaky>      (POSIX only)
  */
 #define _POSIX_C_SOURCE 200809L
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under POSIX-only masks; ignored elsewhere */
 #define _XOPEN_SOURCE 700
 #include <ftw.h>
 #include <signal.h>
