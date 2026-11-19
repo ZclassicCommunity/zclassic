@@ -4,6 +4,11 @@
 
 // Parallel Equihash pre-pass for "headers" messages (headerprecheck.h). It may
 // only warm the positive-only memo; every reject stays a fresh evaluation.
+//
+// The suite runs on a regtest block index (genesis only) with the regtest PoW
+// limit relaxed to 7fff..., so headers that pass every AcceptBlockHeader check
+// are cheap to mine: the (48,5) solution is the regtest one, and about one
+// solved nonce in two meets the target.
 
 #include "arith_uint256.h"
 #include "chainparams.h"
@@ -15,10 +20,15 @@
 #include "pow.h"
 #include "streams.h"
 #include "test/test_bitcoin.h"
+#include "tinyformat.h"
 #include "util.h"
 
 #include <functional>
+#include <map>
 #include <set>
+#include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -41,9 +51,46 @@ struct PrecheckSettingsGuard {
     }
 };
 
-/** Find an Equihash (48,5) solution for header (the regtest parameter set;
- *  CheckEquihashSolution derives (n,k) from the solution size, so these
- *  headers verify under any network's parameters and are cheap to mine). */
+const uint256 RELAXED_POW_LIMIT = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+
+/** Empty the block index and put the regtest genesis header back as its only entry. */
+CBlockIndex* ResetRegtestIndex()
+{
+    UnloadBlockIndex();
+    LOCK(cs_main);
+    CValidationState state;
+    CBlockIndex* pindex = NULL;
+    BOOST_REQUIRE(AcceptBlockHeader(Params().GenesisBlock().GetBlockHeader(), state, &pindex));
+    BOOST_REQUIRE(pindex != NULL);
+    chainActive.SetTip(pindex);
+    return pindex;
+}
+
+/** Regtest parameters with a relaxed PoW limit and a block index holding only
+ *  the regtest genesis, for the life of one test case. */
+struct RegtestHeaderIndex {
+    uint256 savedPowLimit;
+    RegtestHeaderIndex() : savedPowLimit(Params(CBaseChainParams::REGTEST).GetConsensus().powLimit)
+    {
+        SelectParams(CBaseChainParams::REGTEST);
+        UpdateRegtestPow(0, 0, RELAXED_POW_LIMIT);
+        ResetRegtestIndex();
+    }
+    ~RegtestHeaderIndex()
+    {
+        UnloadBlockIndex();
+        UpdateRegtestPow(0, 0, savedPowLimit);
+        SelectParams(CBaseChainParams::MAIN);
+    }
+};
+
+struct HeaderPrecheckSetup : public TestingSetup {
+    RegtestHeaderIndex regtest;
+    PrecheckSettingsGuard settings;
+};
+
+/** Find the next nonce with an Equihash (48,5) solution for header.
+ *  CheckEquihashSolution derives (n,k) from the solution size. */
 void SolveHeader(CBlockHeader& header)
 {
     const unsigned int n = 48, k = 5;
@@ -67,30 +114,67 @@ void SolveHeader(CBlockHeader& header)
     }
 }
 
-/** A continuous chain of nCount headers on top of prev. Headers at the
- *  indices in bad get one flipped solution byte after solving (so their
- *  successors are mined on top of the mutated hash and stay continuous). */
-std::vector<CBlockHeader> MineChain(const uint256& prev, size_t nCount, const std::set<size_t>& bad = {})
+bool MeetsTarget(const CBlockHeader& h)
+{
+    return CheckProofOfWork(h.GetHash(), h.nBits, Params().GetConsensus());
+}
+
+/** How a mined header is spoiled (its successors are mined on top of the
+ *  spoiled hash, so the chain stays continuous). */
+enum Spoil {
+    SPOIL_NONE,
+    SPOIL_SOLUTION, // one solution byte flipped: Equihash fails, PoW passes
+    SPOIL_POW,      // a valid solution whose hash misses the target
+    SPOIL_VERSION,  // nVersion 3, valid solution and PoW
+    SPOIL_JUNK      // a (48,5)-sized solution of junk bytes, PoW passes
+};
+
+CBlockHeader MineHeader(const uint256& prev, size_t i, Spoil spoil)
+{
+    CBlockHeader h;
+    h.nVersion = spoil == SPOIL_VERSION ? 3 : 4;
+    h.hashPrevBlock = prev;
+    h.hashMerkleRoot = GetRandHash();
+    // 2000 s apart: past 12 target spacings, so GetNextWorkRequired gives the
+    // limit at every height (the upgrade-window and min-difficulty rules)
+    h.nTime = 1600000000 + i * 2000;
+    h.nBits = UintToArith256(Params().GetConsensus().powLimit).GetCompact();
+    for (;;) {
+        SolveHeader(h);
+        BOOST_REQUIRE(CheckEquihashSolution(&h, Params()));
+        CBlockHeader out = h;
+        if (spoil == SPOIL_SOLUTION)
+            out.nSolution[out.nSolution.size() / 2] ^= 0x10;
+        if (spoil == SPOIL_JUNK)
+            for (size_t j = 0; j < out.nSolution.size(); j++)
+                out.nSolution[j] = (unsigned char)(j * 37 + 11);
+        if (MeetsTarget(out) == (spoil == SPOIL_POW))
+            continue;
+        if (spoil == SPOIL_SOLUTION || spoil == SPOIL_JUNK)
+            BOOST_REQUIRE(!CheckEquihashSolution(&out, Params()));
+        return out;
+    }
+}
+
+/** A continuous chain of nCount headers on top of prev, spoiled where spoils says. */
+std::vector<CBlockHeader> MineChain(const uint256& prev, size_t nCount, const std::map<size_t, Spoil>& spoils = {})
 {
     std::vector<CBlockHeader> v;
     uint256 hashPrev = prev;
     for (size_t i = 0; i < nCount; i++) {
-        CBlockHeader h;
-        h.nVersion = 4;
-        h.hashPrevBlock = hashPrev;
-        h.hashMerkleRoot = GetRandHash();
-        h.nTime = 1600000000 + i * 150;
-        h.nBits = 0x200f0f0f;
-        SolveHeader(h);
-        BOOST_REQUIRE(CheckEquihashSolution(&h, Params()));
-        if (bad.count(i)) {
-            h.nSolution[h.nSolution.size() / 2] ^= 0x10;
-            BOOST_REQUIRE(!CheckEquihashSolution(&h, Params()));
-        }
-        hashPrev = h.GetHash();
-        v.push_back(h);
+        std::map<size_t, Spoil>::const_iterator it = spoils.find(i);
+        v.push_back(MineHeader(hashPrev, i, it == spoils.end() ? SPOIL_NONE : it->second));
+        hashPrev = v.back().GetHash();
     }
     return v;
+}
+
+std::map<size_t, Spoil> SpoilAt(const std::set<size_t>& at, Spoil spoil)
+{
+    std::map<size_t, Spoil> m;
+    for (size_t i : at)
+        m[i] = spoil;
+    return m;
 }
 
 const std::vector<CBlockHeader>& ValidChain()
@@ -109,13 +193,90 @@ size_t CountMemoised(const std::vector<CBlockHeader>& v, size_t nBegin, size_t n
     return n;
 }
 
+/** Everything a "headers" message leaves behind that the pre-pass must not change. */
+struct HeadersOutcome {
+    std::vector<std::string> steps;                            // one per header the loop handled
+    int nMisbehavior = 0;                                      // what Misbehaving() would add
+    std::map<uint256, std::pair<int, unsigned int> > index;    // hash -> (height, nStatus)
+    uint256 bestHeader;
+    size_t nPreverified = 0;
+};
+
+/** Reset the index, let seed add known headers, then handle headers as
+ *  ProcessMessage("headers") in main.cpp does: the pre-pass, then the serial
+ *  AcceptBlockHeader loop with its continuity check and DoS scoring. */
+HeadersOutcome RunHeadersMessage(const std::vector<CBlockHeader>& headers, bool fPrecheck,
+                                 const std::function<void()>& seed)
+{
+    ResetRegtestIndex();
+    seed();
+    GetEquihashMemo().Clear();
+    mapArgs["-headerprecheck"] = fPrecheck ? "1" : "0";
+    HeadersOutcome out;
+    out.nPreverified = PreverifyHeadersEquihash(headers);
+    mapArgs.erase("-headerprecheck");
+
+    LOCK(cs_main);
+    CBlockIndex* pindexLast = NULL;
+    for (const CBlockHeader& header : headers) {
+        if (pindexLast != NULL && header.hashPrevBlock != pindexLast->GetBlockHash()) {
+            out.steps.push_back("non-continuous");
+            out.nMisbehavior += 20;
+            break;
+        }
+        CValidationState state;
+        if (AcceptBlockHeader(header, state, &pindexLast)) {
+            out.steps.push_back("accept");
+            continue;
+        }
+        int nDoS = 0;
+        if (state.IsInvalid(nDoS)) {
+            out.steps.push_back(strprintf("reject %s %d", state.GetRejectReason(), nDoS));
+            out.nMisbehavior += nDoS > 0 ? nDoS : 0;
+            break;
+        }
+        out.steps.push_back("error " + state.GetRejectReason());
+    }
+    for (const BlockMap::value_type& entry : mapBlockIndex)
+        out.index[entry.first] = std::make_pair(entry.second->nHeight, (unsigned int)entry.second->nStatus);
+    if (pindexBestHeader)
+        out.bestHeader = pindexBestHeader->GetBlockHash();
+    return out;
+}
+
+void SeedNothing() {}
+
+/** Run headers with the pre-pass off and on and require identical results. */
+HeadersOutcome CheckSameWithAndWithout(const std::string& name, const std::vector<CBlockHeader>& headers,
+                                       const std::function<void()>& seed = SeedNothing)
+{
+    const HeadersOutcome off = RunHeadersMessage(headers, false, seed);
+    const HeadersOutcome on = RunHeadersMessage(headers, true, seed);
+    BOOST_TEST_MESSAGE(name << ": " << off.steps.size() << " headers handled, last \""
+                            << (off.steps.empty() ? std::string() : off.steps.back()) << "\", pre-pass verified "
+                            << on.nPreverified);
+    BOOST_CHECK_EQUAL(off.nPreverified, 0U);
+    BOOST_CHECK_MESSAGE(off.steps == on.steps, name << ": per-header results differ");
+    BOOST_CHECK_EQUAL(off.nMisbehavior, on.nMisbehavior);
+    BOOST_CHECK_MESSAGE(off.index == on.index, name << ": final block index differs");
+    BOOST_CHECK(off.bestHeader == on.bestHeader);
+    return on;
+}
+
+bool MultiCore()
+{
+    if (std::thread::hardware_concurrency() > 1)
+        return true;
+    BOOST_TEST_MESSAGE("single core: the pre-pass never runs, count expectations skipped");
+    return false;
+}
+
 } // namespace
 
-BOOST_FIXTURE_TEST_SUITE(headerprecheck_tests, TestingSetup)
+BOOST_FIXTURE_TEST_SUITE(headerprecheck_tests, HeaderPrecheckSetup)
 
 BOOST_AUTO_TEST_CASE(prepass_memoises_every_valid_header)
 {
-    PrecheckSettingsGuard guard;
     const std::vector<CBlockHeader>& chain = ValidChain();
     BOOST_REQUIRE_EQUAL(chain.size(), 40U);
     BOOST_REQUIRE(mapBlockIndex.count(Params().GenesisBlock().GetHash()));
@@ -134,9 +295,8 @@ BOOST_AUTO_TEST_CASE(prepass_memoises_every_valid_header)
 
 BOOST_AUTO_TEST_CASE(invalid_solutions_are_not_memoised)
 {
-    PrecheckSettingsGuard guard;
     const std::set<size_t> bad = {10, 20, 30};
-    const std::vector<CBlockHeader> chain = MineChain(Params().GenesisBlock().GetHash(), 40, bad);
+    const std::vector<CBlockHeader> chain = MineChain(Params().GenesisBlock().GetHash(), 40, SpoilAt(bad, SPOIL_SOLUTION));
 
     const size_t nVerified = PreverifyHeadersEquihash(chain);
     // Every header before the first bad one was claimed before it, so it was
@@ -164,7 +324,6 @@ BOOST_AUTO_TEST_CASE(invalid_solutions_are_not_memoised)
 
 BOOST_AUTO_TEST_CASE(stops_at_continuity_break)
 {
-    PrecheckSettingsGuard guard;
     const std::vector<CBlockHeader>& chain = ValidChain();
     // Drop header 20: header 21 no longer connects to header 19.
     std::vector<CBlockHeader> v(chain.begin(), chain.begin() + 20);
@@ -178,7 +337,6 @@ BOOST_AUTO_TEST_CASE(stops_at_continuity_break)
 
 BOOST_AUTO_TEST_CASE(skips_known_and_unconnected)
 {
-    PrecheckSettingsGuard guard;
     const std::vector<CBlockHeader>& chain = ValidChain();
 
     // A leading header already in mapBlockIndex (genesis) is skipped.
@@ -197,11 +355,21 @@ BOOST_AUTO_TEST_CASE(skips_known_and_unconnected)
     // All headers known: nothing to do.
     std::vector<CBlockHeader> onlyGenesis(MIN_HEADER_PRECHECK_CANDIDATES, Params().GenesisBlock().GetBlockHeader());
     BOOST_CHECK_EQUAL(PreverifyHeadersEquihash(onlyGenesis), 0U);
+
+    // The first new header's parent is known but marked failed: nothing to do.
+    {
+        LOCK(cs_main);
+        CValidationState state;
+        CBlockIndex* pindex = NULL;
+        BOOST_REQUIRE(AcceptBlockHeader(chain[0], state, &pindex));
+        pindex->nStatus |= BLOCK_FAILED_VALID;
+    }
+    std::vector<CBlockHeader> afterFailed(chain.begin() + 1, chain.end());
+    BOOST_CHECK_EQUAL(PreverifyHeadersEquihash(afterFailed), 0U);
 }
 
 BOOST_AUTO_TEST_CASE(small_or_disabled_is_noop)
 {
-    PrecheckSettingsGuard guard;
     const std::vector<CBlockHeader>& chain = ValidChain();
 
     std::vector<CBlockHeader> seven(chain.begin(), chain.begin() + 7);
@@ -212,6 +380,12 @@ BOOST_AUTO_TEST_CASE(small_or_disabled_is_noop)
     BOOST_CHECK_EQUAL(PreverifyHeadersEquihash(eight), 8U);
     GetEquihashMemo().Clear();
 
+    // Eight headers of which only seven are new: below the candidate floor.
+    std::vector<CBlockHeader> sevenNew;
+    sevenNew.push_back(Params().GenesisBlock().GetBlockHeader());
+    sevenNew.insert(sevenNew.end(), chain.begin(), chain.begin() + 7);
+    BOOST_CHECK_EQUAL(PreverifyHeadersEquihash(sevenNew), 0U);
+
     mapArgs["-headerprecheck"] = "0";
     BOOST_CHECK_EQUAL(PreverifyHeadersEquihash(chain), 0U);
     BOOST_CHECK_EQUAL(CountMemoised(chain, 0, chain.size()), 0U);
@@ -219,6 +393,66 @@ BOOST_AUTO_TEST_CASE(small_or_disabled_is_noop)
 
     SetEquihashMemoEnabled(false);
     BOOST_CHECK_EQUAL(PreverifyHeadersEquihash(chain), 0U);
+}
+
+// The pre-pass on or off, a "headers" message gives the same per-header
+// results, DoS score and final block index.
+BOOST_AUTO_TEST_CASE(same_results_with_and_without_prepass)
+{
+    const std::vector<CBlockHeader>& chain = ValidChain();
+    const uint256 genesis = Params().GenesisBlock().GetHash();
+
+    const HeadersOutcome valid = CheckSameWithAndWithout("valid chain", chain);
+    BOOST_CHECK_EQUAL(valid.steps.size(), 40U);
+    BOOST_CHECK_EQUAL(valid.steps.back(), "accept");
+    BOOST_CHECK_EQUAL(valid.nMisbehavior, 0);
+    BOOST_CHECK_EQUAL(valid.index.size(), 41U);
+    BOOST_CHECK(valid.bestHeader == chain.back().GetHash());
+
+    const std::vector<CBlockHeader> badPow = MineChain(genesis, 16, SpoilAt({10}, SPOIL_POW));
+    const HeadersOutcome pow = CheckSameWithAndWithout("bad PoW at 10", badPow);
+    BOOST_CHECK_EQUAL(pow.steps.size(), 11U);
+    BOOST_CHECK_EQUAL(pow.steps.back(), "reject high-hash 50");
+    BOOST_CHECK_EQUAL(pow.index.size(), 11U);
+
+    // chain[0] known but marked failed, chain[1] known and not failed: the
+    // serial loop stops at chain[0] with no score.
+    std::function<void()> seedFailed = [&chain]() {
+        LOCK(cs_main);
+        CValidationState state;
+        CBlockIndex* p0 = NULL;
+        CBlockIndex* p1 = NULL;
+        BOOST_REQUIRE(AcceptBlockHeader(chain[0], state, &p0));
+        BOOST_REQUIRE(AcceptBlockHeader(chain[1], state, &p1));
+        p0->nStatus |= BLOCK_FAILED_VALID;
+    };
+    const HeadersOutcome failed = CheckSameWithAndWithout("leading known failed header", chain, seedFailed);
+    BOOST_CHECK_EQUAL(failed.steps.size(), 1U);
+    BOOST_CHECK_EQUAL(failed.steps.back(), "reject duplicate 0");
+    BOOST_CHECK_EQUAL(failed.nMisbehavior, 0);
+    BOOST_CHECK_EQUAL(failed.index.size(), 3U);
+
+    const std::vector<CBlockHeader> junk = MineChain(genesis, 16, SpoilAt({5}, SPOIL_JUNK));
+    const HeadersOutcome junked = CheckSameWithAndWithout("junk (48,5) solution at 5", junk);
+    BOOST_CHECK_EQUAL(junked.steps.size(), 6U);
+    BOOST_CHECK_EQUAL(junked.steps.back(), "reject invalid-solution 100");
+
+    const std::vector<CBlockHeader> version = MineChain(genesis, 16, SpoilAt({3}, SPOIL_VERSION));
+    const HeadersOutcome old = CheckSameWithAndWithout("version 3 at 3", version);
+    BOOST_CHECK_EQUAL(old.steps.size(), 4U);
+    BOOST_CHECK_EQUAL(old.steps.back(), "reject version-too-low 100");
+
+    // Bad solutions spread through the message, and a non-continuous one.
+    const std::vector<CBlockHeader> spread = MineChain(genesis, 24, SpoilAt({12, 18}, SPOIL_SOLUTION));
+    CheckSameWithAndWithout("bad solutions at 12 and 18", spread);
+    std::vector<CBlockHeader> gap(chain.begin(), chain.begin() + 20);
+    gap.insert(gap.end(), chain.begin() + 21, chain.end());
+    const HeadersOutcome broken = CheckSameWithAndWithout("continuity break at 20", gap);
+    BOOST_CHECK_EQUAL(broken.steps.back(), "non-continuous");
+    BOOST_CHECK_EQUAL(broken.nMisbehavior, 20);
+
+    if (MultiCore())
+        BOOST_CHECK_EQUAL(valid.nPreverified, 40U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
