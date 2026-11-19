@@ -2349,6 +2349,8 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
     UniValue health(UniValue::VOBJ);
     health.push_back(Pair("tip_height", h.nTipHeight));
     health.push_back(Pair("checkpoint_height", h.nCheckpointHeight));
+    health.push_back(Pair("checkpoint_failed", h.fCheckpointFailed));
+    health.push_back(Pair("checkpoint_failures", h.nCheckpointFailures));
     health.push_back(Pair("witness_cache_size", h.nWitnessCacheSize));
     health.push_back(Pair("witness_rebuild_pending", h.fWitnessRebuildPending));
     health.push_back(Pair("sapling", poolJSON(h.sapling)));

@@ -383,6 +383,7 @@ libbitcoin_wallet_a_SOURCES = \
   wallet/zslpsend.cpp \
   zslp/zslpbuild.cpp \
   wallet/wallet.cpp \
+  wallet/walletcheckpoint.cpp \
   wallet/wallet_ismine.cpp \
   wallet/walletdb.cpp \
   $(BITCOIN_CORE_H) \

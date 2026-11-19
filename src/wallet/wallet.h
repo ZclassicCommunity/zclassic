@@ -1379,6 +1379,12 @@ public:
     bool IsSaplingSpent(const uint256& nullifier) const;
     //! Height of the last best-block locator written to wallet.dat (-1: none yet). Memory only.
     std::atomic<int> nCheckpointHeight{-1};
+    //! Failed checkpoint writes since start, whether the latest failed, time of the last catch-up attempt. Memory only.
+    std::atomic<int> nCheckpointFailures{0};
+    std::atomic<bool> fCheckpointFailed{false};
+    std::atomic<int64_t> nTimeCatchupCheckpoint{0};
+    void NoteCheckpointResult(bool fWritten);
+    void CheckpointIfLagging(const CBlockIndex* pindex); //! checkpoint once caught up if the stored one lags
 
     //! Per-pool note and witness counts (see CWallet::GetHealth).
     struct PoolHealth {
@@ -1397,6 +1403,8 @@ public:
         int64_t nWitnessCacheSize = 0;
         bool fWitnessRebuildPending = false;
         int nCheckpointHeight = -1;
+        int nCheckpointFailures = 0;
+        bool fCheckpointFailed = false;
         int nTipHeight = -1;
         size_t nPendingInMempool = 0;   //!< unmined sends in the mempool
         size_t nPendingNotInMempool = 0;//!< unmined sends in neither chain nor mempool, not conflicted

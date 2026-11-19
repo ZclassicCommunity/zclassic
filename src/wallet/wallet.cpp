@@ -564,6 +564,7 @@ bool CWallet::ChangeWalletPassphrase(const SecureString& strOldWalletPassphrase,
 
 void CWallet::UpdatedBlockTip(const CBlockIndex* pindex)
 {
+    CheckpointIfLagging(pindex);
     // The mempool holds the wallet transactions the chain allows now, as after a
     // restart. A disconnect re-offers its transactions before the unwind is over
     // (their anchors are gone for the moment), and a tx that builds on another one
@@ -803,7 +804,9 @@ void CWallet::SetBestChain(const CBlockLocator& loc)
     CWalletDB walletdb(strWalletFile);
     const int64_t nTimeCheckpoint0 = GetTimeMicros();
     const size_t nDirty = setNoteTxDirty.size();
-    if (SetBestChainINTERNAL(walletdb, loc) && !loc.vHave.empty()) {
+    const bool fWritten = SetBestChainINTERNAL(walletdb, loc);
+    NoteCheckpointResult(fWritten);
+    if (fWritten && !loc.vHave.empty()) {
         BlockMap::const_iterator mi = mapBlockIndex.find(loc.vHave[0]);
         if (mi != mapBlockIndex.end() && mi->second) nCheckpointHeight = mi->second->nHeight;
     }
@@ -1180,6 +1183,8 @@ void CWallet::GetHealth(Health& h) const
     h.nWitnessCacheSize = nWitnessCacheSize;
     h.fWitnessRebuildPending = fNoteWitnessesLost;
     h.nCheckpointHeight = nCheckpointHeight;
+    h.nCheckpointFailures = nCheckpointFailures;
+    h.fCheckpointFailed = fCheckpointFailed;
     for (const std::pair<const uint256, CWalletTx>& item : mapWallet) {
         const CWalletTx& wtx = item.second;
         const bool fHasNotes = !(wtx.mapSproutNoteData.empty() && wtx.mapSaplingNoteData.empty());

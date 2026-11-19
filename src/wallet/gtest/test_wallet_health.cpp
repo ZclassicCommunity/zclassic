@@ -111,6 +111,33 @@ TEST(WalletHealth, EmptyWalletAndFlags) {
     EXPECT_FALSE(h.fWitnessRebuildPending);
 }
 
+TEST(WalletHealth, FailedCheckpointIsReported) {
+    HealthWallet wallet;
+    CWallet::Health h;
+    {
+        LOCK2(cs_main, wallet.cs_wallet);
+        wallet.GetHealth(h);
+    }
+    EXPECT_FALSE(h.fCheckpointFailed);
+    EXPECT_EQ(0, h.nCheckpointFailures);
+    wallet.NoteCheckpointResult(false);
+    wallet.NoteCheckpointResult(false);
+    {
+        LOCK2(cs_main, wallet.cs_wallet);
+        wallet.GetHealth(h);
+    }
+    EXPECT_TRUE(h.fCheckpointFailed);
+    EXPECT_EQ(2, h.nCheckpointFailures);
+    // A later success clears the flag; the count of failures since start stays.
+    wallet.NoteCheckpointResult(true);
+    {
+        LOCK2(cs_main, wallet.cs_wallet);
+        wallet.GetHealth(h);
+    }
+    EXPECT_FALSE(h.fCheckpointFailed);
+    EXPECT_EQ(2, h.nCheckpointFailures);
+}
+
 TEST(WalletHealth, SaplingNoteStates) {
     RegtestActivateSapling();
     {
