@@ -883,6 +883,7 @@ private slots:
     void embeddedDaemon_integrity();
     void embeddedDaemon_footerLocation();
     void embeddedDaemon_pinsLaunchedFile();
+    void embeddedDaemon_malformedPe();
     void initTestCase();
     void cleanupTestCase();
 
@@ -1415,6 +1416,11 @@ QByteArray fixtureSigned(const QByteArray& payload, int tableSize = 64, int padO
     body += QByteArray(pad, '\0');
     return fixturePe(tableOffset, quint32(tableSize)) + body + QByteArray(tableSize, 'C');
 }
+quint32 le32(const QByteArray& b, int o) {
+    quint32 v = 0;
+    for (int i = 3; i >= 0; --i) v = (v << 8) | quint32(uchar(b.at(o + i)));
+    return v;
+}
 bool fixtureWrite(const QString& path, const QByteArray& bytes) {
     QFile f(path);
     return f.open(QIODevice::WriteOnly) && f.write(bytes) == bytes.size();
@@ -1642,6 +1648,93 @@ void TestLogic::embeddedDaemon_pinsLaunchedFile() {
     QVERIFY(QFile::setPermissions(dir, ownerOnly | QFileDevice::WriteGroup));
     QCOMPARE(EmbeddedDaemonPin(program, temp.path()).status(), EmbeddedDaemonPin::Failed);
 #endif
+}
+
+// Malformed or hostile PE headers in the bundle: every damaged header is refused with
+// an error (never read out of bounds, never treated as "no certificate"), section
+// sizes cannot overflow, the daemon may not overlap the PE image, and the PE32
+// optional-header layout is located like PE32+.
+void TestLogic::embeddedDaemon_malformedPe() {
+    QByteArray payload;
+    for (int i = 0; i < 3000; ++i) payload += char((i * 13 + 5) & 255);
+    const QByteArray foot = fixtureFooter(payload);
+    QString error;
+    auto patched = [](QByteArray h, int offset, quint64 value, int bytes) {
+        h.replace(offset, bytes, le(value, bytes));
+        return h;
+    };
+    const int opt = 0x58, sect = 0x58 + 240;
+    // Unknown optional-header magic, optional header too small, PE32+ magic with a
+    // header too small for its data directories, too many sections.
+    for (const QByteArray& h : {patched(fixturePe(0, 0), opt, 0x10c, 2),
+                                patched(fixturePe(0, 0), 0x54, 64, 2),
+                                patched(fixturePe(0, 0), 0x54, 100, 2),
+                                patched(fixturePe(0, 0), 0x46, 97, 2)}) {
+        QVERIFY(fixtureExtract(h + payload + foot, &error).isEmpty());
+        QVERIFY2(error.contains("Malformed PE"), qPrintable(error));
+    }
+    // Section table runs past the end of the file.
+    QVERIFY(fixtureExtract(patched(fixturePe(0, 0), 0x46, 96, 2), &error).isEmpty());
+    QVERIFY2(error.contains("Malformed PE"), qPrintable(error));
+    // A section whose raw data covers the daemon: the daemon would overlap the image.
+    {
+        QByteArray h = patched(fixturePe(0, 0), 0x46, 1, 2);
+        h = patched(h, sect + 20, 0x200, 4);                       // PointerToRawData
+        h = patched(h, sect + 16, quint64(payload.size()), 4);     // SizeOfRawData
+        QVERIFY(fixtureExtract(h + payload + foot, &error).isEmpty());
+        QVERIFY2(error.contains("length"), qPrintable(error));
+        // The same section ending exactly where the daemon starts is fine.
+        h = patched(h, sect + 16, 0, 4);
+        QVERIFY2(fixtureExtract(h + payload + foot, &error) == payload, qPrintable(error));
+    }
+    // Pointer + size that would overflow 32 bits: no wrap-around, refused.
+    {
+        QByteArray h = patched(fixturePe(0, 0), 0x46, 1, 2);
+        h = patched(h, sect + 20, 0xffffffffu, 4);
+        h = patched(h, sect + 16, 0xffffffffu, 4);
+        QVERIFY(fixtureExtract(h + payload + foot, &error).isEmpty());
+        QVERIFY2(error.contains("length"), qPrintable(error));
+        const QByteArray ok = fixtureSigned(payload);
+        QByteArray s = patched(ok.left(0x200), 0x46, 1, 2);
+        s = patched(s, sect + 20, 0xffffffffu, 4);
+        s = patched(s, sect + 16, 0xffffffffu, 4);
+        QVERIFY(fixtureExtract(s + ok.mid(0x200), &error).isEmpty());
+        QVERIFY2(error.contains("certificate"), qPrintable(error));
+    }
+    // A certificate table that starts inside a section is inconsistent.
+    {
+        const QByteArray ok = fixtureSigned(payload, 64);
+        const quint32 tableOffset = quint32(le32(ok, opt + 112 + 32));
+        QByteArray h = patched(ok.left(0x200), 0x46, 1, 2);
+        h = patched(h, sect + 20, 0x200, 4);
+        h = patched(h, sect + 16, tableOffset - 0x200 + 8, 4);
+        QVERIFY(fixtureExtract(h + ok.mid(0x200), &error).isEmpty());
+        QVERIFY2(error.contains("certificate"), qPrintable(error));
+    }
+    // A security directory beyond NumberOfRvaAndSizes is ignored: the end-of-file rule
+    // applies, so a signed layout is refused and an unsigned one accepted.
+    {
+        const QByteArray ok = fixtureSigned(payload, 64);
+        QVERIFY(fixtureExtract(patched(ok.left(0x200), opt + 108, 4, 4) + ok.mid(0x200), &error).isEmpty());
+        QVERIFY(fixtureExtract(fixturePe(0x400, 64, 4) + payload + foot, &error) == payload);
+    }
+    // e_lfanew far past the end of the file: not a PE, end-of-file rule, no crash.
+    QVERIFY(fixtureExtract(patched(fixturePe(0, 0), 0x3c, 0xfffffff0u, 4) + payload + foot, &error) == payload);
+    // PE32 (magic 0x10b): data directories start at 96, the count at 92.
+    {
+        const QByteArray ok = fixtureSigned(payload, 64);
+        const quint64 tableOffset = le32(ok, opt + 112 + 32), tableSize = le32(ok, opt + 112 + 36);
+        QByteArray h(0x200, 0);
+        h.replace(0, opt, ok.left(opt));
+        h = patched(h, 0x54, 224, 2);
+        h = patched(h, opt, 0x10b, 2);
+        h = patched(h, opt + 60, 0x200, 4);
+        h = patched(h, opt + 92, 16, 4);
+        h = patched(h, opt + 96 + 32, tableOffset, 4);
+        h = patched(h, opt + 96 + 36, tableSize, 4);
+        QVERIFY2(fixtureExtract(h + ok.mid(0x200), &error) == payload, qPrintable(error));
+        QVERIFY(fixtureExtract(patched(h, opt + 96 + 36, tableSize + 8, 4) + ok.mid(0x200), &error).isEmpty());
+    }
 }
 
 void TestLogic::sentTxStore_invalidHistoryPreserved() {
