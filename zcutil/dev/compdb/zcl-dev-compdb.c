@@ -612,15 +612,19 @@ static char *next_line(const char **pp)
     return buf_take(&b);
 }
 
-/* "make[1]: Entering directory '/x'" style message; returns the quoted text or NULL. */
+/*
+ * "make[1]: Entering directory '/x'" style message; returns the quoted text or NULL. The program name is
+ * whatever make called itself (make, gmake, mingw32-make), and GNU make 3.81 (macOS) quotes as `/x'.
+ */
 static const char *make_msg(const char *line, const char *what, size_t *len)
 {
-    if (strncmp(line, "make", 4) && strncmp(line, "gmake", 5)) return NULL;
     const char *m = strstr(line, what);
     if (!m) return NULL;
-    const char *a = strchr(m, '\'');
+    for (const char *q = line; q < m; q++)
+        if (*q == ' ' || *q == '\'' || *q == '`') return NULL;
+    const char *a = m + strcspn(m, "'`");
     const char *z = strrchr(m, '\'');
-    if (!a || z <= a) return NULL;
+    if (!*a || !z || z <= a) return NULL;
     *len = (size_t)(z - a - 1);
     return a + 1;
 }
@@ -1090,9 +1094,38 @@ static int st_parse(void)
     return 0;
 }
 
+/* GNU make 3.81 quotes directories as `dir' and a renamed make prints its own name. */
+static int st_msg_forms(void)
+{
+    static const char *const forms[] = {
+        "make[1]: Entering directory `/r/sub'",
+        "make[1]: Entering directory '/r/sub'",
+        "mingw32-make[2]: Entering directory '/r/sub'",
+        "gmake: Entering directory `/r/sub'",
+    };
+    for (size_t i = 0; i < sizeof forms / sizeof *forms; i++) {
+        size_t len = 0;
+        const char *d = make_msg(forms[i], ": Entering directory", &len);
+        CHECK(d && len == 6 && !strncmp(d, "/r/sub", len));
+    }
+    size_t len = 0;
+    CHECK(!make_msg("g++ -DX=\": Entering directory 'x'\" -c a.cc", ": Entering directory", &len));
+    Db db = {NULL, 0, 0, 0, 0};
+    parse_make("make: Entering directory `/r/src'\n"
+               "mingw32-make[1]: Entering directory `/r/src/sub'\n"
+               "g++ -c leaf.cc\n"
+               "mingw32-make[1]: Leaving directory `/r/src/sub'\n"
+               "g++ -c top.cc\n",
+               "/r/src", &db);
+    db_finish(&db);
+    CHECK(db.n == 2 && !strcmp(db.v[0].file, "/r/src/sub/leaf.cc") && !strcmp(db.v[1].file, "/r/src/top.cc"));
+    db_free(&db);
+    return 0;
+}
+
 static int selftest(void)
 {
-    if (st_tokens() || st_split() || st_paths() || st_parse()) return 1;
+    if (st_tokens() || st_split() || st_paths() || st_parse() || st_msg_forms()) return 1;
     puts("zcl-dev-compdb selftest ok");
     return 0;
 }

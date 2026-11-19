@@ -9,12 +9,15 @@
 #define main compdb_main
 #include "../zcl-dev-compdb.c"
 #undef main
+#include <fcntl.h>
 
 #ifdef _WIN32
 #define MKDIR(p) _mkdir(p)
+#define NULL_DEV "NUL"
 #define SETENV_MAKE(v) _putenv("ZCL_COMPDB_MAKE=" v)
 #else
 #define MKDIR(p) mkdir((p), 0777)
+#define NULL_DEV "/dev/null"
 #define SETENV_MAKE(v) setenv("ZCL_COMPDB_MAKE", (v), 1)
 #endif
 
@@ -147,7 +150,16 @@ static int check_flow(const Fx *fx)
 static int failure_flow(const Fx *fx)
 {
     Buf log = {NULL, 0, 0};
-    FX_CHECK(run_with(fx, "nowhere", "nowhere.json", 0, &log) == 2);
+    /* make complains about the missing directory on stderr; keep that out of the test log */
+    fflush(NULL);
+    int save = dup(2), nul = open(NULL_DEV, O_WRONLY);
+    FX_CHECK(save >= 0 && nul >= 0 && dup2(nul, 2) >= 0);
+    int nrc = run_with(fx, "nowhere", "nowhere.json", 0, &log);
+    fflush(NULL);
+    dup2(save, 2);
+    close(save);
+    close(nul);
+    FX_CHECK(nrc == 2);
     FX_CHECK(!file_exists(fx, "nowhere.json"));
     free(log.s);
     log.s = NULL;
@@ -180,7 +192,10 @@ static int run_all(Fx *fx)
 {
     char tmp[4200];
     int bad = 0;
-    snprintf(tmp, sizeof tmp, "%s/.out-%ld", fx->root, (long)getpid());
+    const char *base = getenv("TMPDIR");
+    if (!base || !*base) base = getenv("TEMP");
+    if (!base || !*base) base = "/tmp";
+    snprintf(tmp, sizeof tmp, "%s/zcl-compdb-test-%ld", base, (long)getpid());
     fx->tmp = tmp;
     if (MKDIR(tmp) != 0) {
         fprintf(stderr, "compdb-test: cannot create %s: %s\n", tmp, strerror(errno));

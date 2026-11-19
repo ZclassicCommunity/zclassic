@@ -42,3 +42,8 @@ Exit: 0 written or fresh, 1 `--check` found the file stale or missing, 2 broken 
 Every run, including --check, passes -B to make, which remakes the makefiles and re-runs
 config.status --recheck: about 1.5 minutes on a fresh tree. Do not call --check in a loop;
 regenerate once after configure or after adding or removing sources.
+
+## Known gaps
+
+- Make 3.81 (macOS `/usr/bin/make`) quotes directories as `` `dir' ``, and a renamed make prints its own name (`mingw32-make[1]:`); both are understood.
+- leveldb is missing from an out-of-tree database. `src/Makefile.am` builds it with `$(MAKE) -C $(@D)`, an in-place non-automake sub-build whose directory does not exist in a separate build tree, so that sub-make fails (`make[2]: *** leveldb: No such file or directory`). `-k` carries on, the other sources are complete, and the tool prints `warning: make exited 2`. That warning is expected for an out-of-tree zclassicd build; an in-tree build has the leveldb entries.
