@@ -238,7 +238,7 @@ restart_args() { # a node killed after its install was verified (blocks/ and cha
 test_kills() {
     say "== kill -9 at $kills random instants, restart each time =="
     fresh_client; start_server || return 1
-    from=$(log_lines); cyc=$from
+    from=$(log_lines); cyc=$from; prevb=0
     n=0; finished=0
     while [ $n -lt "$kills" ]; do
         ra=$(restart_args); [ -z "$ra" ] || say "the previous run had finished its bootstrap; restarting it without -bootstrap"
@@ -250,7 +250,19 @@ test_kills() {
         if [ "$h" = "$fx_height" ]; then say "client finished the import after $n kills (kill window too long); stopping the kill loop"; finished=1; break; fi
         kill_client
         n=$((n + 1))
-        say "kill $n at +${t} ms: staging $(staging_state)" "(this run: server queued $(served_bytes "$cyc") bytes)"; cyc=$(log_lines)
+        sq=$(served_bytes "$cyc"); cyc=$(log_lines)
+        ss=$(staging_state); nb=${ss##*bytes=}
+        # What the run lost: bytes the server queued for it that did not end up in the staging directory. A
+        # killed run loses what was in flight, at most one full window of every stream (4 streams x 16 chunks
+        # of 1 MiB) plus the last partial chunk of each .part file it resumed.
+        lost=$((sq - (nb - prevb)))
+        say "kill $n at +${t} ms: staging $ss (this run: server queued $sq bytes, staged $((nb - prevb)), lost $lost)"
+        if [ "$nb" -gt 0 ]; then
+            if [ "$lost" -gt $((4 * 16 * 1048576 + 4 * 1048576)) ]; then fail "kills: run $n lost $lost bytes, more than one full request window"; fi
+            prevb=$nb
+        else
+            prevb=0
+        fi
     done
     if [ $finished -eq 0 ]; then
         start_client $(restart_args)
@@ -262,8 +274,9 @@ test_kills() {
     served=$(served_bytes "$from")
     ratio=$(awk -v a="$served" -v b="$snapshot_bytes" 'BEGIN {printf "%.3f", a / b}')
     say "server served $served bytes in total for $n kills; snapshot is $snapshot_bytes bytes (ratio $ratio)"
-    # one copy plus the chunks lost to torn tails and the unfinished chunks in flight at each kill
-    limit=$(awk -v b="$snapshot_bytes" -v n="$n" 'BEGIN {printf "%d", b * 1.35 + n * 20 * 1048576}')
+    # one copy plus, per kill, at most one full request window in flight (4 streams x 16 chunks of 1 MiB) and the
+    # last chunk of each resumed .part; each run is also checked on its own above
+    limit=$(awk -v b="$snapshot_bytes" -v n="$n" 'BEGIN {printf "%d", b * 1.02 + n * 68 * 1048576}')
     if [ "$served" -le "$limit" ]; then pass "kills: total bytes served stayed within bound ($served <= $limit)"; else fail "kills: served $served > bound $limit"; fi
     if grep -aq 'hash mismatch' "$client_log"; then say "note: a staged file failed verification during the kill loop (expected after a torn write):"; grep -a 'hash mismatch\|corrupt or the wrong size' "$client_log" | head -5; fi
     if ls -d "$cdir"/regtest/bootstrap-peer-staging-* >/dev/null 2>&1; then fail "kills: staging directory still present after a successful import"; else pass "kills: staging directory removed after the import"; fi
