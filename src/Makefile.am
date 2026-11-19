@@ -183,6 +183,7 @@ BITCOIN_CORE_H = \
   policy/fees.h \
   pow.h \
   equihashmemo.h \
+  headerprecheck.h \
   prevector.h \
   primitives/block.h \
   primitives/transaction.h \
@@ -201,6 +202,7 @@ BITCOIN_CORE_H = \
   script/script_error.h \
   script/sigcache.h \
   script/sign.h \
+  shieldedcache.h \
   script/standard.h \
   script/script_flags.h \
   script/sigencoding.cpp \
@@ -305,6 +307,7 @@ libbitcoin_server_a_SOURCES = \
   deprecation.cpp \
   embeddedtor.cpp \
   equihashmemo.cpp \
+  headerprecheck.cpp \
   httprpc.cpp \
   httpserver.cpp \
   init.cpp \
@@ -334,6 +337,7 @@ libbitcoin_server_a_SOURCES = \
   znam/znamresolve.cpp \
   znam/znamservice.cpp \
   script/sigcache.cpp \
+  shieldedcache.cpp \
   timedata.cpp \
   torcontrol.cpp \
   txdb.cpp \

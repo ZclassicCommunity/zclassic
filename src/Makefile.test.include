@@ -60,6 +60,7 @@ BITCOIN_TESTS =\
   test/equihashmemo_tests.cpp \
   test/getarg_tests.cpp \
   test/hash_tests.cpp \
+  test/headerprecheck_tests.cpp \
   test/key_tests.cpp \
   test/dbwrapper_tests.cpp \
   test/main_tests.cpp \
@@ -86,6 +87,7 @@ BITCOIN_TESTS =\
   test/script_tests.cpp \
   test/scriptnum_tests.cpp \
   test/serialize_tests.cpp \
+  test/shieldedcache_tests.cpp \
   test/sigencoding_tests.cpp \
   test/sighash_tests.cpp \
   test/sighashtype_tests.cpp \
