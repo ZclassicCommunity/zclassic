@@ -37,6 +37,19 @@ stub g++ 'echo "g++ stub 13.0"'
 stub cc 'case "$*" in *-std=c23*) exit 1;; esac; echo "cc stub 9.0"'
 run build-c23-fallback --nogolden --group=build
 grep -q '^\[advisory\] c23-std' "$work/build-c23-fallback.out" || fail "c23 fallback not advisory"
+# parameter files: the doctor looks where the node does (util.cpp ZC_GetBaseParamsDir)
+case $(uname -s) in
+Darwin) pd="$work/home/Library/Application Support/ZcashParams" ;;
+MINGW* | MSYS* | CYGWIN*) pd="$work/appdata/ZcashParams" ;;
+*) pd="$work/home/.zcash-params" ;;
+esac
+hostrun() { rc=0; env -i PATH="$work/bin" HOME="$work/home" APPDATA="$work/appdata" TMPDIR="$work" "$doc" --root="$work/root" --group=host >"$work/host.out" 2>&1 || rc=$?; }
+hostrun
+grep -F "5 parameter files missing in $pd" "$work/host.out" >/dev/null || fail "params: missing files not reported against $pd"
+mkdir -p "$pd"
+for f in sprout-proving.key sprout-verifying.key sapling-spend.params sapling-output.params sprout-groth16.params; do : >"$pd/$f"; done
+hostrun
+grep -F "all 5 Zcash parameter files in $pd" "$work/host.out" >/dev/null || fail "params: present files not found in $pd"
 # JSON keys, paging, exit codes
 rc=0; env -i PATH="$work/bin" HOME="$work/home" TMPDIR="$work" "$doc" --root="$work/root" --group=tools --json >"$work/j.out" || rc=$?
 [ "$rc" = 0 ] || fail "json exit $rc"

@@ -595,11 +595,27 @@ static void home_path(char *out, size_t cap, const char *rel)
     snprintf(out, cap, "%s/%s", h && *h ? h : ".", rel);
 }
 
+/* The directory the node reads the zk parameters from (src/util.cpp ZC_GetBaseParamsDir). */
+static void params_dir(char *out, size_t cap)
+{
+#ifdef _WIN32
+    const char *a = getenv("APPDATA"); /* CSIDL_APPDATA, e.g. C:\Users\me\AppData\Roaming */
+    if (a && *a)
+        snprintf(out, cap, "%s/ZcashParams", a);
+    else
+        home_path(out, cap, "AppData/Roaming/ZcashParams");
+#elif defined(__APPLE__)
+    home_path(out, cap, "Library/Application Support/ZcashParams");
+#else
+    home_path(out, cap, ".zcash-params");
+#endif
+}
+
 static void group_host(void)
 {
     char dir[1100], f[1300], fix[240], missing[200] = "";
     int nmiss = 0;
-    home_path(dir, sizeof dir, ".zcash-params");
+    params_dir(dir, sizeof dir);
     for (int i = 0; params_files[i]; i++) {
         snprintf(f, sizeof f, "%s/%s", dir, params_files[i]);
         if (!is_regular(f)) {
@@ -611,9 +627,9 @@ static void group_host(void)
         }
     }
     if (!nmiss)
-        add("host", "params", ST_OK, 0, "all 5 Zcash parameter files in ~/.zcash-params");
+        add("host", "params", ST_OK, 0, "all 5 Zcash parameter files in %s", dir);
     else
-        add("host", "params", ST_FAIL, "sh zcutil/fetch-params.sh", "%d of 5 parameter files missing in ~/.zcash-params: %s", nmiss, missing);
+        add("host", "params", ST_FAIL, "sh zcutil/fetch-params.sh", "%d of 5 parameter files missing in %s: %s", nmiss, dir, missing);
 
     char cc[1100];
     if (find_prog("ccache", cc, sizeof cc))
