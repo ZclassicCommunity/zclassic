@@ -165,7 +165,6 @@ src/script/script.cpp	GetOpName(1)	115
 src/script/script_error.cpp	ScriptErrorString(1)	34
 src/script/sigencoding.cpp	IsValidSignatureEncoding(1)	19
 src/script/standard.cpp	Solver(3)	33
-src/shutdownmarker.cpp	ParseBinding(2)	16
 src/sync.cpp	potential_deadlock_detected(3)	19
 src/test/addrv2_tests.cpp	BOOST_AUTO_TEST_CASE(addrv2_adversarial_inputs)	23
 src/test/bootstrap_resume_tests.cpp	FakeBootstrapServer::Handle(2)	36
