@@ -22,7 +22,7 @@ BOOST_FIXTURE_TEST_SUITE(bootstrap_onion_tests, BasicTestingSetup)
 BOOST_AUTO_TEST_CASE(onion_bootstrap_peers_parse_as_v3)
 {
     const CChainParams& main = Params(CBaseChainParams::MAIN);
-    BOOST_REQUIRE_EQUAL(main.OnionBootstrapPeers().size(), 2u);
+    BOOST_REQUIRE_EQUAL(main.OnionBootstrapPeers().size(), 4u);
     // One onion service per clearnet bootstrap node.
     BOOST_CHECK_EQUAL(main.OnionBootstrapPeers().size(), main.BootstrapPeers().size());
     for (const std::string& peer : main.OnionBootstrapPeers()) {
@@ -35,8 +35,10 @@ BOOST_AUTO_TEST_CASE(onion_bootstrap_peers_parse_as_v3)
         // 56 base32 characters + ".onion" = a v3 address.
         BOOST_CHECK_EQUAL(peer.find(".onion:8035"), 56u);
     }
-    // Distinct services.
-    BOOST_CHECK(main.OnionBootstrapPeers()[0] != main.OnionBootstrapPeers()[1]);
+    // Distinct services (pairwise).
+    for (size_t i = 0; i < main.OnionBootstrapPeers().size(); ++i)
+        for (size_t j = i + 1; j < main.OnionBootstrapPeers().size(); ++j)
+            BOOST_CHECK(main.OnionBootstrapPeers()[i] != main.OnionBootstrapPeers()[j]);
 }
 
 BOOST_AUTO_TEST_CASE(onion_bootstrap_peers_empty_off_mainnet)
