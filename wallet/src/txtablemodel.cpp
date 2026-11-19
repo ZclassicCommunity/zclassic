@@ -27,7 +27,8 @@ QByteArray TxTableModel::fingerprint(const QList<TransactionItem>& data) {
         buf.append(QByteArray::number(t.amount, 'f', 8));        buf.append('\x1f');
         buf.append(QByteArray::number((qulonglong)t.confirmations)); buf.append('\x1f');
         buf.append(t.fromAddr.toUtf8());                          buf.append('\x1f');
-        buf.append(t.memo.toUtf8());                              buf.append('\x1e');
+        buf.append(t.memo.toUtf8());                              buf.append('\x1f');
+        buf.append(t.status.toUtf8());                            buf.append('\x1e');
     }
     return QCryptographicHash::hash(buf, QCryptographicHash::Sha1);
 }
@@ -170,7 +171,9 @@ void TxTableModel::updateAllData() {
         // Pending (0-conf): amber = not-yet-final, matching the PUBLIC/amber token.
         // Confirmed: normal dark-theme text. NEVER Qt::black here — it is invisible
         // on the dark Type/Date columns (the default-delegate columns honor this).
-        if (modeldata->at(index.row()).confirmations == 0)
+        if (modeldata->at(index.row()).status == QLatin1String("expired"))
+            b.setColor(QColor("#9aa0a6"));      // never mined, never will be: dimmed, not "pending" amber
+        else if (modeldata->at(index.row()).confirmations == 0)
             b.setColor(QColor("#d9822b"));
         else
             b.setColor(QColor("#e6e6e6"));
@@ -185,6 +188,8 @@ void TxTableModel::updateAllData() {
                     // RPC category ("send"/"receive"). DisplayRole only — getType() and the
                     // ToolTipRole below still return the raw string so the privacy-badge
                     // delegate's category classification is unaffected.
+                    // A send the node reports as expired was never mined and never can be: say so, in words.
+                    if (dat.status == QLatin1String("expired")) return tr("Expired");
                     const QString t = dat.type.toLower();
                     if (t.contains("send") || t.contains("sent"))  return tr("Sent");
                     if (t.contains("receive"))                     return tr("Received");
@@ -209,7 +214,9 @@ void TxTableModel::updateAllData() {
 
     if (role == Qt::ToolTipRole) {
         switch (index.column()) {
-        case 0: return modeldata->at(index.row()).type + 
+        case 0: if (dat.status == QLatin1String("expired"))
+                    return tr("Expired: this payment was never mined and can no longer be, so it was not sent. The funds returned to your balance.");
+                return modeldata->at(index.row()).type + 
                     (dat.memo.isEmpty() ? "" : " tx memo: \"" + dat.memo + "\"");
         case 1: { 
                     auto addr = modeldata->at(index.row()).address;

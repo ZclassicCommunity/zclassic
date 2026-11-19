@@ -333,7 +333,7 @@ void Turnstile::executeMigrationStep() {
         auto sendAmt = bal - Settings::getMinerFee();
 
         if (sendAmt < 0) {
-            qDebug() << "Not enough balance!." << bal << ":" << sendAmt;
+            qDebug() << "Not enough balance for the final migration send";
             nextStep->status = TurnstileMigrationItemStatus::NotEnoughBalance;
             writeMigrationPlan(plan);
             return;
@@ -368,6 +368,7 @@ void Turnstile::doSendTx(Tx tx, std::function<void(void)> cb) {
                 errStr = QObject::tr("The transaction with id ") % opid % QObject::tr(" failed. The error was") + ":\n\n" + errStr; 
 
             QMessageBox::critical(mainwindow, QObject::tr("Transaction Error"), errStr, QMessageBox::Ok);            
-        });
+        },
+        [=] (QString, QString text) { mainwindow->ui->statusBar->showMessage(text); });
     
 }

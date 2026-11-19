@@ -37,6 +37,7 @@
 #include <boost/filesystem.hpp>
 
 #include <deque>
+#include "zcash/JoinSplit.hpp"
 #include <random>
 #include <string>
 #include <vector>
@@ -85,6 +86,13 @@ public:
     explicit StateWallet(const std::string& file) : CWallet(file) { }
     template <typename DB>
     void Checkpoint(DB& db, const CBlockLocator& loc) { SetBestChainINTERNAL(db, loc); }
+    void CallUnretire(int nHeight) { LOCK(cs_wallet); UnretireNotesSpentFrom(nHeight); }
+    void CallSaplingNullifierUpdate(CWalletTx& wtx) { UpdateSaplingNullifierNoteMapWithTx(wtx); }
+    bool WitnessesLost() const { return fNoteWitnessesLost; }
+    size_t LiveNoteTxs() const { return setNoteTxIndex.size(); }
+    size_t RetiredNoteTxs() const { return setNoteTxRetired.size(); }
+    void CollectLive(std::vector<CWalletTx*>& out) { CollectNoteTxs(out); }
+    void CollectAll(std::vector<CWalletTx*>& out) { CollectNoteTxs(out, true); }
 };
 
 /** Records the order of database operations; can fail the n-th write. */
@@ -100,9 +108,11 @@ struct RecordingDB {
         return writes++ != failAt;
     }
     bool TxnBegin() { inTxn = true; ops.push_back("begin"); return true; }
-    bool TxnCommit() { inTxn = false; committed = true; ops.push_back("commit"); return true; }
+    bool TxnCommit() { inTxn = false; ops.push_back("commit"); if (failCommit) return false; committed = true; return true; }
     bool TxnAbort() { inTxn = false; aborted = true; ops.push_back("abort"); return true; }
-    bool WriteTx(uint256, const CWalletTx&) { return WriteStep("tx"); }
+    std::vector<uint256> written;
+    bool failCommit = false;
+    bool WriteTx(uint256 h, const CWalletTx&) { written.push_back(h); return WriteStep("tx"); }
     bool WriteWitnessCacheSize(int64_t) { return WriteStep("cachesize"); }
     bool WriteBestBlock(const CBlockLocator&) { return WriteStep("locator"); }
 };
@@ -141,9 +151,33 @@ struct SimChain {
         }
         for (const CTransaction& tx : block.vtx) {
             for (const OutputDescription& od : tx.vShieldedOutput) sapling.append(od.cm);
+            for (const JSDescription& jsdesc : tx.vjoinsplit) {
+                for (const uint256& cm : jsdesc.commitments) sprout.append(cm);
+            }
         }
         bi.hashFinalSaplingRoot = sapling.root();
         bi.hashFinalSproutRoot = sprout.root();
+    }
+
+    /** Disconnect the tip the way DisconnectTip does (the block index stays known). */
+    void Disconnect(StateWallet& wallet) {
+        LOCK2(cs_main, wallet.cs_wallet);
+        CBlockIndex* pindex = chainActive.Tip();
+        ASSERT_TRUE(pindex != nullptr);
+        const CBlock& block = blocks[pindex->nHeight];
+        chainActive.SetTip(pindex->pprev);
+        for (const CTransaction& tx : block.vtx) wallet.SyncTransaction(tx, nullptr);
+        wallet.ChainTip(pindex, &block, sprout, sapling, false);
+    }
+
+    /** Disconnect the tip and drop its block, so a different block can be connected at that height. */
+    void DisconnectAndForget(StateWallet& wallet) {
+        Disconnect(wallet);
+        LOCK(cs_main);
+        mapBlockIndex.erase(hashes.back());
+        hashes.pop_back();
+        blocks.pop_back();
+        index.pop_back();
     }
 
     void Clear() {
@@ -196,6 +230,19 @@ struct StateFixture : public ::testing::Test {
             block.vtx.push_back(CTransaction(mtx));
             txid = block.vtx.back().GetHash();
         }
+        chain.Connect(*wallet, block);
+        return txid;
+    }
+    // one block: a stand-in coinbase and a transaction that spends the Sapling note of tx t
+    uint256 MineSpendOf(const uint256& t) {
+        CBlock block;
+        block.vtx.push_back(CTransaction(BaseTx(rng)));
+        CMutableTransaction mtx = BaseTx(rng);
+        SpendDescription sd;
+        sd.nullifier = *wallet->mapWallet.at(t).mapSaplingNoteData.begin()->second.nullifier;
+        mtx.vShieldedSpend.push_back(sd);
+        block.vtx.push_back(CTransaction(mtx));
+        uint256 txid = block.vtx.back().GetHash();
         chain.Connect(*wallet, block);
         return txid;
     }
@@ -417,3 +464,804 @@ TEST_F(StateFixture, ReconcileResetsAnUnconfirmedNoteWhoseHeightLagsTheChain)
     EXPECT_EQ(-1, Note(tx.GetHash()).witnessHeight);
     EXPECT_EQ(chainActive.Tip(), pindexRescan);
 }
+
+// ---- retiring the notes of buried spends -----------------------------------------------------
+
+extern ZCJoinSplit* params;
+extern ZCJoinSplit* pzcashParams;
+
+namespace {
+
+struct RetireFixture : public StateFixture {
+    void MineN(int n) { for (int i = 0; i < n; i++) Mine(0); }
+    int Depth(const uint256& txid) {
+        LOCK2(cs_main, wallet->cs_wallet);
+        return Tx(txid).GetDepthInMainChain();
+    }
+    // mine until the spending block has the given depth
+    void MineToDepth(const uint256& spender, int depth) {
+        while (Depth(spender) < depth) Mine(0);
+        ASSERT_EQ(depth, Depth(spender));
+    }
+    int TipHeight() { LOCK(cs_main); return chainActive.Height(); }
+    /** What LoadWallet does with a record read back from wallet.dat. */
+    void Reload(const uint256& txid, int nWitnessHeightOnDisk = -2) {
+        LOCK2(cs_main, wallet->cs_wallet);
+        CDataStream ss(SER_DISK, CLIENT_VERSION);
+        ss << Tx(txid);
+        CWalletTx copy;
+        ss >> copy;
+        if (nWitnessHeightOnDisk != -2) {
+            for (auto& item : copy.mapSaplingNoteData) item.second.witnessHeight = nWitnessHeightOnDisk;
+        }
+        wallet->AddToWallet(copy, true, nullptr);
+    }
+};
+
+} // namespace
+
+TEST_F(RetireFixture, ASpendBuriedDeeperThanTheWitnessCacheRetiresTheNote)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    uint256 nf = *Note(a).nullifier;
+    uint256 sp = MineSpendOf(a);
+
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE); // exactly 100: not yet
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        EXPECT_EQ(0u, wallet->RetireSpentNotes());
+        EXPECT_FALSE(Note(a).fRetired);
+        EXPECT_FALSE(Note(a).witnesses.empty());
+        EXPECT_TRUE(wallet->IsSaplingSpent(nf));
+        EXPECT_EQ(0u, wallet->CountRetiredNotes());
+    }
+    Mine(0); // depth 101
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        ASSERT_EQ((int)WITNESS_CACHE_SIZE + 1, Tx(sp).GetDepthInMainChain());
+        wallet->RetireSpentNotes();
+        EXPECT_TRUE(Note(a).fRetired);
+        EXPECT_EQ(RETIRED_WITNESSES_KEPT, Note(a).witnesses.size()) << "the frozen witnesses stay, for the released binaries";
+        EXPECT_EQ(-1, Note(a).witnessHeight);
+        ASSERT_TRUE(Note(a).nullifier) << "the nullifier is what keeps the note spent";
+        EXPECT_EQ(nf, *Note(a).nullifier);
+        EXPECT_TRUE(wallet->IsSaplingSpent(nf));
+        EXPECT_EQ(1u, wallet->CountRetiredNotes());
+        EXPECT_EQ(1u, wallet->RetiredNoteTxs());
+        EXPECT_EQ(1u, wallet->LiveNoteTxs());
+        // the unspent note is untouched
+        EXPECT_FALSE(Note(b).fRetired);
+        EXPECT_EQ(chainActive.Height(), Note(b).witnessHeight);
+        EXPECT_FALSE(Note(b).witnesses.empty());
+    }
+    // later blocks leave the retired record alone and keep witnessing the other note
+    MineN(5);
+    LOCK2(cs_main, wallet->cs_wallet);
+    EXPECT_EQ(RETIRED_WITNESSES_KEPT, Note(a).witnesses.size());
+    EXPECT_EQ(-1, Note(a).witnessHeight);
+    EXPECT_EQ(chainActive.Height(), Note(b).witnessHeight);
+    EXPECT_EQ(chainActive.Tip()->hashFinalSaplingRoot, Note(b).witnesses.front().root());
+    std::vector<CWalletTx*> live, all;
+    wallet->CollectLive(live);
+    wallet->CollectAll(all);
+    EXPECT_EQ(1u, live.size()) << "the block updates only see the transaction with a live note";
+    EXPECT_EQ(2u, all.size());
+}
+
+TEST_F(RetireFixture, TheBlockUpdatesRetireByThemselves)
+{
+    uint256 a = Mine(1000); Mine(0);
+    uint256 sp = MineSpendOf(a);
+    // no explicit call: the periodic sweep of the block updates finds it
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1 + (int)RETIRE_SWEEP_INTERVAL);
+    LOCK2(cs_main, wallet->cs_wallet);
+    EXPECT_TRUE(Note(a).fRetired);
+    EXPECT_EQ(RETIRED_WITNESSES_KEPT, Note(a).witnesses.size());
+    EXPECT_EQ(-1, Note(a).witnessHeight);
+}
+
+TEST_F(RetireFixture, AnUnspentOrRecentlySpentNoteIsNeverRetired)
+{
+    uint256 a = Mine(1000), b = Mine(2000);
+    MineSpendOf(a);
+    MineN(60);
+    LOCK2(cs_main, wallet->cs_wallet);
+    wallet->RetireSpentNotes();
+    EXPECT_FALSE(Note(a).fRetired); // spent 61 deep
+    EXPECT_FALSE(Note(b).fRetired); // never spent
+    EXPECT_FALSE(Note(a).witnesses.empty());
+    EXPECT_FALSE(Note(b).witnesses.empty());
+}
+
+TEST_F(RetireFixture, ReconcileDoesNotAskForARescanForARetiredNote)
+{
+    uint256 a = Mine(1000); Mine(0);
+    uint256 sp = MineSpendOf(a);
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1);
+    LOCK2(cs_main, wallet->cs_wallet);
+    wallet->RetireSpentNotes();
+    ASSERT_EQ(RETIRED_WITNESSES_KEPT, Note(a).witnesses.size());
+    CBlockIndex* pindexRescan = chainActive.Tip();
+    EXPECT_FALSE(wallet->ReconcileNoteState(pindexRescan)) << "a retired note has no witness on purpose";
+    EXPECT_EQ(chainActive.Tip(), pindexRescan);
+    EXPECT_EQ(-1, Note(a).witnessHeight);
+}
+
+TEST_F(RetireFixture, ALoadedRetiredRecordIsRetiredAgainWithoutARescan)
+{
+    uint256 a = Mine(1000); uint256 b = Mine(2000);
+    uint256 sp = MineSpendOf(a);
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1);
+    { LOCK2(cs_main, wallet->cs_wallet); wallet->RetireSpentNotes(); }
+    Reload(a); // wallet.dat holds witnesses={} height -1, the memory-only flag is gone
+    LOCK2(cs_main, wallet->cs_wallet);
+    ASSERT_FALSE(Note(a).fRetired);
+    CBlockIndex* pindexRescan = chainActive.Tip();
+    EXPECT_FALSE(wallet->ReconcileNoteState(pindexRescan)) << "the stored record was already in the retired form";
+    EXPECT_TRUE(Note(a).fRetired);
+    EXPECT_EQ(chainActive.Tip(), pindexRescan);
+    EXPECT_FALSE(Note(b).fRetired);
+}
+
+TEST_F(RetireFixture, ARetiredRecordAnOlderBinaryRewroteIsPutBack)
+{
+    uint256 a = Mine(1000); Mine(0);
+    uint256 sp = MineSpendOf(a);
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1);
+    { LOCK2(cs_main, wallet->cs_wallet); wallet->RetireSpentNotes(); }
+    int nTip = TipHeight();
+    // the previous release moves the height of every note forward, witness or not
+    Reload(a, nTip);
+    LOCK2(cs_main, wallet->cs_wallet);
+    ASSERT_EQ(nTip, Note(a).witnessHeight);
+    CBlockIndex* pindexRescan = chainActive.Tip();
+    EXPECT_TRUE(wallet->ReconcileNoteState(pindexRescan)) << "the record changes, so it is written back";
+    EXPECT_TRUE(Note(a).fRetired);
+    EXPECT_EQ(-1, Note(a).witnessHeight);
+    EXPECT_EQ(chainActive.Tip(), pindexRescan) << "no rescan";
+}
+
+TEST_F(RetireFixture, ARetiredRecordPassesTheInvariantOfThePreviousRelease)
+{
+    uint256 a = Mine(1000); Mine(0);
+    uint256 sp = MineSpendOf(a);
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1);
+    { LOCK2(cs_main, wallet->cs_wallet); wallet->RetireSpentNotes(); }
+    // the record as wallet.dat holds it
+    CDataStream ss(SER_DISK, CLIENT_VERSION);
+    { LOCK2(cs_main, wallet->cs_wallet); ss << Tx(a); }
+    CWalletTx back;
+    ss >> back;
+    ASSERT_EQ(1u, back.mapSaplingNoteData.size());
+    SaplingNoteData rec = back.mapSaplingNoteData.begin()->second;
+    EXPECT_EQ(RETIRED_WITNESSES_KEPT, rec.witnesses.size()) << "the frozen witnesses";
+    EXPECT_EQ(-1, rec.witnessHeight);
+    EXPECT_TRUE(rec.nullifier);
+    EXPECT_FALSE(rec.fRetired) << "the flag is memory only";
+
+    // The previous release's per-block logic (CopyPreviousWitnesses, UpdateWitnessHeights and
+    // DecrementNoteWitnesses, unchanged from before this change), with its asserts as expectations.
+    const uint64_t pos0 = rec.witnesses.front().position();
+    int nHeight = TipHeight();
+    for (int i = 1; i <= 5; i++) {
+        const int indexHeight = nHeight + i;
+        if (rec.witnessHeight < indexHeight) {
+            EXPECT_TRUE(rec.witnessHeight == -1 || rec.witnessHeight == indexHeight - 1) << "assert in CopyPreviousWitnesses";
+            if (rec.witnesses.size() > 0) rec.witnesses.push_front(rec.witnesses.front());
+        }
+        if (rec.witnessHeight < indexHeight) rec.witnessHeight = indexHeight; // UpdateWitnessHeights
+    }
+    for (int i = 5; i >= 1; i--) {
+        const int indexHeight = nHeight + i;
+        bool fLost = false;
+        if (rec.witnessHeight <= indexHeight) {
+            const bool fHad = !rec.witnesses.empty();
+            if (fHad && rec.witnessHeight != -1 && rec.witnessHeight != indexHeight) fLost = true;
+            else if (fHad) rec.witnesses.pop_front();
+            rec.witnessHeight = indexHeight - 1;
+        }
+        EXPECT_FALSE(fLost);
+    }
+    ASSERT_EQ(RETIRED_WITNESSES_KEPT, rec.witnesses.size());
+    EXPECT_EQ(pos0, rec.witnesses.front().position()) << "the nullifier is derived from this position";
+    EXPECT_EQ(nHeight, rec.witnessHeight);
+}
+
+TEST_F(RetireFixture, AnUnwindThatReachesTheSpendBringsTheNoteBack)
+{
+    uint256 a = Mine(1000); Mine(0); // the only note: its witness is the one the unwind has to bring back
+    uint256 nf = *Note(a).nullifier;
+    uint256 sp = MineSpendOf(a);
+    const int nSpendHeight = TipHeight();
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1 + (int)RETIRE_SWEEP_INTERVAL);
+    { LOCK2(cs_main, wallet->cs_wallet); ASSERT_TRUE(Note(a).fRetired); }
+
+    // an operator invalidateblock/parkblock goes as deep as it likes: unwind to just above the spend
+    while (TipHeight() >= nSpendHeight) {
+        chain.Disconnect(*wallet);
+        LOCK2(cs_main, wallet->cs_wallet);
+        if (chainActive.Height() >= nSpendHeight) {
+            EXPECT_TRUE(Note(a).fRetired) << "at height " << chainActive.Height();
+            EXPECT_FALSE(wallet->WitnessesLost());
+            EXPECT_TRUE(wallet->IsSaplingSpent(nf));
+        }
+    }
+    // the last block the loop disconnected was the one with the spend
+    LOCK2(cs_main, wallet->cs_wallet);
+    EXPECT_FALSE(Note(a).fRetired);
+    EXPECT_TRUE(wallet->WitnessesLost()) << "the rebuild that restores the witness is armed";
+    EXPECT_FALSE(wallet->IsSaplingSpent(nf)) << "the spend is gone: the note is unspent again";
+    ASSERT_TRUE(Note(a).nullifier);
+    EXPECT_EQ(nf, *Note(a).nullifier);
+    EXPECT_EQ(1u, wallet->LiveNoteTxs());
+    EXPECT_EQ(0u, wallet->RetiredNoteTxs());
+    EXPECT_EQ(0u, wallet->CountRetiredNotes());
+}
+
+TEST_F(RetireFixture, AReorgOfTwentyFiveBlocksStillUnspendsARecentSpend)
+{
+    uint256 a = Mine(1000); Mine(0);
+    uint256 nf = *Note(a).nullifier;
+    MineN(30);
+    uint256 sp = MineSpendOf(a);
+    MineN(20);
+    ASSERT_EQ(21, Depth(sp));
+    for (int i = 0; i < 25; i++) chain.Disconnect(*wallet); // 20 blocks above the spend, the spend, 4 below
+    LOCK2(cs_main, wallet->cs_wallet);
+    EXPECT_FALSE(wallet->IsSaplingSpent(nf));
+    EXPECT_FALSE(Note(a).fRetired);
+    EXPECT_FALSE(wallet->WitnessesLost()) << "a witness cache of 100 rolls back 25 blocks";
+    ASSERT_FALSE(Note(a).witnesses.empty());
+    EXPECT_EQ(chainActive.Height(), Note(a).witnessHeight);
+    EXPECT_EQ(chainActive.Tip()->hashFinalSaplingRoot, Note(a).witnesses.front().root());
+}
+
+TEST_F(RetireFixture, ASproutNoteIsRetiredToo)
+{
+    auto sk = libzcash::SproutSpendingKey::random();
+    {
+        LOCK(wallet->cs_wallet);
+        ASSERT_TRUE(wallet->AddSproutSpendingKey(sk));
+    }
+    CWalletTx recv = GetValidSproutReceive(*params, sk, 10, true);
+    CWalletTx other = GetValidSproutReceive(*params, sk, 20, true);
+    uint256 rh = recv.GetHash(), oh = other.GetHash();
+    for (const CWalletTx* w : {&recv, &other}) {
+        CBlock block;
+        block.vtx.push_back(CTransaction(BaseTx(rng)));
+        block.vtx.push_back(CTransaction(*w));
+        chain.Connect(*wallet, block);
+    }
+    Mine(0);
+    JSOutPoint op {rh, 0, 1};
+    uint256 nf;
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        ASSERT_EQ(1u, wallet->mapWallet.at(rh).mapSproutNoteData.count(op));
+        SproutNoteData& nd = wallet->mapWallet.at(rh).mapSproutNoteData.at(op);
+        ASSERT_TRUE(nd.nullifier);
+        ASSERT_FALSE(nd.witnesses.empty());
+        nf = *nd.nullifier;
+    }
+    auto note = GetSproutNote(*params, sk, recv, 0, 1);
+    CWalletTx spend = GetValidSproutSpend(*params, sk, note, 5);
+    uint256 sp = spend.GetHash();
+    {
+        CBlock block;
+        block.vtx.push_back(CTransaction(BaseTx(rng)));
+        block.vtx.push_back(CTransaction(spend));
+        chain.Connect(*wallet, block);
+    }
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1 + (int)RETIRE_SWEEP_INTERVAL);
+    LOCK2(cs_main, wallet->cs_wallet);
+    SproutNoteData& nd = wallet->mapWallet.at(rh).mapSproutNoteData.at(op);
+    EXPECT_TRUE(nd.fRetired);
+    EXPECT_TRUE(nd.witnesses.empty());
+    EXPECT_EQ(-1, nd.witnessHeight);
+    EXPECT_TRUE(wallet->IsSproutSpent(nf));
+    // the other Sprout note keeps its witness
+    SproutNoteData& od = wallet->mapWallet.at(oh).mapSproutNoteData.begin()->second;
+    EXPECT_FALSE(od.fRetired);
+    EXPECT_FALSE(od.witnesses.empty());
+    EXPECT_EQ(chainActive.Height(), od.witnessHeight);
+}
+
+TEST_F(RetireFixture, ChainedReorgsThatEachStayWithinTheLimitStillUnretireTheNote)
+{
+    // The node refuses more than MAX_REORG_LENGTH disconnects in one reorganisation step, but two
+    // steps in a row go further than the notes were buried: nothing but the un-retire on every
+    // disconnect that reaches a recorded spend height keeps the note correct.
+    uint256 a = Mine(1000);
+    MineN(70);
+    uint256 nf = *Note(a).nullifier;
+    uint256 sp = MineSpendOf(a);
+    const int nSpendHeight = TipHeight();
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1 + (int)RETIRE_SWEEP_INTERVAL);
+    { LOCK2(cs_main, wallet->cs_wallet); ASSERT_TRUE(Note(a).fRetired); }
+
+    // step 1: the longest reorganisation the node accepts, then a branch of 50 new blocks
+    for (int i = 0; i < (int)MAX_REORG_LENGTH; i++) chain.DisconnectAndForget(*wallet);
+    ASSERT_GE(TipHeight(), nSpendHeight);
+    MineN(50);
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        EXPECT_TRUE(Note(a).fRetired) << "no disconnect reached the spend yet";
+        EXPECT_TRUE(wallet->IsSaplingSpent(nf));
+        EXPECT_FALSE(wallet->WitnessesLost());
+    }
+    // step 2: again the longest reorganisation the node accepts; this one reaches the spend
+    ASSERT_LT(TipHeight() - (int)MAX_REORG_LENGTH, nSpendHeight);
+    for (int i = 0; i < (int)MAX_REORG_LENGTH; i++) chain.DisconnectAndForget(*wallet);
+    LOCK2(cs_main, wallet->cs_wallet);
+    EXPECT_FALSE(Note(a).fRetired);
+    EXPECT_TRUE(wallet->WitnessesLost()) << "the rebuild is armed";
+    EXPECT_FALSE(wallet->IsSaplingSpent(nf)) << "the spend was unwound: the note is unspent";
+    EXPECT_TRUE(Note(a).witnesses.empty()) << "the frozen witness is dropped with the retired state";
+    EXPECT_EQ(0u, wallet->CountRetiredNotes());
+}
+
+TEST_F(RetireFixture, ANoteStoredInTheRetiredFormStaysRetiredWhenTheChainStartsBelowTheCheckpoint)
+{
+    // After a crash the chain can begin below the last wallet checkpoint (the checkpoint is
+    // written without a full flush of the coins): the spend that retired the note is then
+    // only some blocks deep. The record is in the retired form and the spend is mined: the
+    // note needs no witness and no rescan.
+    uint256 a = Mine(1000), b = Mine(2000); MineN(5);
+    uint256 nf = *Note(a).nullifier;
+    uint256 sp = MineSpendOf(a);
+    const int nSpendHeight = TipHeight();
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1 + (int)RETIRE_SWEEP_INTERVAL);
+    { LOCK2(cs_main, wallet->cs_wallet); ASSERT_TRUE(Note(a).fRetired); }
+    Reload(a); // as wallet.dat holds it: the frozen witnesses, height -1, no flag
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        ASSERT_FALSE(Note(a).fRetired);
+        ASSERT_EQ(RETIRED_WITNESSES_KEPT, Note(a).witnesses.size());
+        ASSERT_EQ(-1, Note(a).witnessHeight);
+        const int nTip = chainActive.Height();
+        chainActive.SetTip(&chain.index[nTip - 40]);
+        ASSERT_LT(Tx(sp).GetDepthInMainChain(), (int)WITNESS_CACHE_SIZE + 1);
+        ASSERT_GT(Tx(sp).GetDepthInMainChain(), 0);
+        CBlockIndex* pindexRescan = chainActive.Tip();
+        wallet->ReconcileNoteState(pindexRescan);
+        EXPECT_TRUE(Note(a).fRetired);
+        EXPECT_EQ(chainActive.Tip(), pindexRescan) << "no rescan from the height of a retired note";
+        EXPECT_TRUE(wallet->IsSaplingSpent(nf));
+        EXPECT_FALSE(Note(b).fRetired);
+        // the chain goes back up to where it was: the spend is deep again, nothing changed
+        chainActive.SetTip(&chain.index[nTip]);
+    }
+    // an unwind that reaches that spend later brings the note back all the same
+    while (TipHeight() >= nSpendHeight) chain.Disconnect(*wallet);
+    LOCK2(cs_main, wallet->cs_wallet);
+    EXPECT_FALSE(Note(a).fRetired);
+    EXPECT_TRUE(wallet->WitnessesLost());
+    EXPECT_FALSE(wallet->IsSaplingSpent(nf));
+}
+
+TEST_F(RetireFixture, AllStoredFormsOfARetiredNoteAreRecognisedAtLoad)
+{
+    // four frozen witnesses (this build), one (the earlier build) and none (the test builds)
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    uint256 sp = MineSpendOf(a);
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1 + (int)RETIRE_SWEEP_INTERVAL);
+    CDataStream snapshot(SER_DISK, CLIENT_VERSION);
+    { LOCK2(cs_main, wallet->cs_wallet); snapshot << Tx(a); } // four witnesses, as stored
+    const size_t want[3] = {RETIRED_WITNESSES_KEPT, 1u, 0u};
+    for (int form = 0; form < 3; form++) {
+        {
+            CDataStream copySs(snapshot);
+            CWalletTx copy;
+            copySs >> copy;
+            LOCK2(cs_main, wallet->cs_wallet);
+            wallet->AddToWallet(copy, true, nullptr);
+        }
+        LOCK2(cs_main, wallet->cs_wallet);
+        ASSERT_EQ(RETIRED_WITNESSES_KEPT, Note(a).witnesses.size());
+        while (Note(a).witnesses.size() > want[form]) Note(a).witnesses.pop_back();
+        ASSERT_FALSE(Note(a).fRetired);
+        CBlockIndex* pindexRescan = chainActive.Tip();
+        wallet->ReconcileNoteState(pindexRescan);
+        EXPECT_TRUE(Note(a).fRetired) << "form " << form;
+        EXPECT_EQ(chainActive.Tip(), pindexRescan) << "no rescan, form " << form;
+        EXPECT_EQ(-1, Note(a).witnessHeight);
+        EXPECT_EQ(want[form], Note(a).witnesses.size()) << "a stored form is kept as it is";
+        EXPECT_FALSE(Note(b).fRetired);
+        // the health report counts a retired note as spent, not as a note that lost its witness
+        CWallet::Health h;
+        wallet->GetHealth(h);
+        EXPECT_EQ(1u, h.sapling.nSpent);
+        EXPECT_EQ(1u, h.sapling.nUnspent);
+        EXPECT_EQ(0u, h.sapling.nMissing);
+        EXPECT_EQ(want[form], h.sapling.nSpentWitnessEntries);
+    }
+}
+
+TEST_F(RetireFixture, ARetiredRecordSurvivesThreeDisconnectsOnThePreviousRelease)
+{
+    // The previous release disconnects blocks before it connects any: it pops one witness per block
+    // (DecrementNoteWitnesses, asserts included). The nullifier is derived from a witness, so the
+    // record has to still hold one after the third disconnect; the fourth empties it.
+    uint256 a = Mine(1000); Mine(0);
+    uint256 sp = MineSpendOf(a);
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1 + (int)RETIRE_SWEEP_INTERVAL);
+    { LOCK2(cs_main, wallet->cs_wallet); ASSERT_TRUE(Note(a).fRetired); }
+    CDataStream ss(SER_DISK, CLIENT_VERSION);
+    { LOCK2(cs_main, wallet->cs_wallet); ss << Tx(a); }
+    CWalletTx back;
+    ss >> back;
+    SaplingNoteData rec = back.mapSaplingNoteData.begin()->second;
+    int64_t nWitnessCacheSize;
+    { LOCK2(cs_main, wallet->cs_wallet); nWitnessCacheSize = WITNESS_CACHE_SIZE; }
+    ASSERT_EQ(RETIRED_WITNESSES_KEPT, rec.witnesses.size());
+    ASSERT_LE((int64_t)rec.witnesses.size(), nWitnessCacheSize);
+    const int nTip = TipHeight();
+    for (int k = 1; k <= 4; k++) {
+        const int indexHeight = nTip - k + 1;           // the block being removed
+        if (rec.witnessHeight <= indexHeight) {
+            EXPECT_TRUE(rec.witnessHeight == -1 || rec.witnessHeight == indexHeight) << "assert in DecrementNoteWitnesses";
+            EXPECT_GE(nWitnessCacheSize, (int64_t)rec.witnesses.size()) << "assert on the cache size";
+            if (!rec.witnesses.empty()) rec.witnesses.pop_front();
+            rec.witnessHeight = indexHeight - 1;
+        }
+        EXPECT_GE(nWitnessCacheSize - 1, (int64_t)rec.witnesses.size()) << "assert after the decrement, disconnect " << k;
+        nWitnessCacheSize--;
+        if (k < 4) EXPECT_FALSE(rec.witnesses.empty()) << "after " << k << " disconnects";
+        else EXPECT_TRUE(rec.witnesses.empty()) << "four disconnects empty the record: the stated limit";
+    }
+}
+
+TEST_F(RetireFixture, ClearingTheWitnessCacheBringsEveryRetiredNoteBack)
+{
+    // -rescan and the rebuild clear the cache: a note that stayed retired would be skipped by the
+    // rebuild and be stored without any witness (the form released binaries lose track of)
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    uint256 sp = MineSpendOf(a);
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1 + (int)RETIRE_SWEEP_INTERVAL);
+    LOCK2(cs_main, wallet->cs_wallet);
+    ASSERT_TRUE(Note(a).fRetired);
+    wallet->ClearNoteWitnessCache();
+    EXPECT_FALSE(Note(a).fRetired);
+    EXPECT_TRUE(Note(a).witnesses.empty());
+    EXPECT_EQ(-1, Note(a).witnessHeight);
+    EXPECT_EQ(0u, wallet->CountRetiredNotes());
+    EXPECT_EQ(0u, wallet->RetiredNoteTxs());
+    EXPECT_EQ(2u, wallet->LiveNoteTxs());
+    // a sweep before the rebuild reaches the note must not retire it: it has no witness to freeze
+    wallet->RetireSpentNotesLocked();
+    EXPECT_FALSE(Note(a).fRetired);
+    EXPECT_EQ(0u, wallet->CountRetiredNotes());
+}
+
+// ---- the checkpoint writes only the note transactions that changed ----------------------------
+
+namespace {
+
+struct CheckpointFixture : public RetireFixture {
+    CBlockLocator Loc() { LOCK(cs_main); return chainActive.GetLocator(); }
+    /** One checkpoint into a recording database; returns what it wrote. */
+    std::vector<uint256> Checkpoint(RecordingDB& db) {
+        LOCK2(cs_main, wallet->cs_wallet);
+        wallet->Checkpoint(db, chainActive.GetLocator());
+        return db.written;
+    }
+    std::vector<uint256> Checkpoint() { RecordingDB db; return Checkpoint(db); }
+    static std::vector<uint256> Sorted(std::vector<uint256> v) { std::sort(v.begin(), v.end()); return v; }
+};
+
+} // namespace
+
+TEST_F(CheckpointFixture, AnUnchangedWalletWritesNoTransaction)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint())) << "the first checkpoint writes what the blocks changed";
+    RecordingDB db;
+    EXPECT_TRUE(Checkpoint(db).empty()) << "nothing changed since";
+    // the cache size and the locator still go in one database transaction
+    std::vector<std::string> want = {"begin", "cachesize", "locator", "commit"};
+    EXPECT_EQ(want, db.ops);
+    EXPECT_TRUE(db.committed);
+    {
+        LOCK(wallet->cs_wallet);
+        EXPECT_EQ(0u, wallet->CountDirtyNoteTxs());
+    }
+}
+
+TEST_F(CheckpointFixture, ABlockMarksEveryLiveNoteTransaction)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    Checkpoint();
+    Mine(0);
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint())) << "every witness moved";
+    EXPECT_TRUE(Checkpoint().empty());
+}
+
+TEST_F(CheckpointFixture, ADisconnectMarksEveryLiveNoteTransaction)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0); Mine(0);
+    Checkpoint();
+    chain.Disconnect(*wallet);
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint()));
+    EXPECT_TRUE(Checkpoint().empty());
+}
+
+TEST_F(CheckpointFixture, ARetiredNoteIsWrittenOnceAndThenLeftOut)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    uint256 sp = MineSpendOf(a);
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE);
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint())) << "spent but not yet deep: both are live";
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1 + (int)RETIRE_SWEEP_INTERVAL);
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        ASSERT_TRUE(Note(a).fRetired);
+    }
+    // the retiring block changed both: a (emptied) and b (moved)
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint()));
+    Mine(0);
+    EXPECT_EQ(std::vector<uint256>({b}), Checkpoint()) << "only the unspent note moves";
+    Mine(0); Mine(0);
+    EXPECT_EQ(std::vector<uint256>({b}), Checkpoint());
+}
+
+TEST_F(CheckpointFixture, AFailedCheckpointLeavesTheRecordsMarked)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    {
+        RecordingDB db;
+        db.failAt = 1; // the second transaction
+        Checkpoint(db);
+        EXPECT_TRUE(db.aborted);
+        EXPECT_FALSE(db.committed);
+    }
+    {
+        RecordingDB db;
+        db.failAt = 2; // the cache size
+        Checkpoint(db);
+        EXPECT_TRUE(db.aborted);
+    }
+    {
+        RecordingDB db;
+        db.failCommit = true;
+        EXPECT_EQ(2u, Checkpoint(db).size());
+        EXPECT_FALSE(db.committed);
+    }
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint())) << "still written once a checkpoint goes through";
+    EXPECT_TRUE(Checkpoint().empty());
+}
+
+TEST_F(CheckpointFixture, ReconcileMarksTheRecordsItRepairs)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    Checkpoint();
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        Note(a).nullifier = boost::none; // what an older build could leave in wallet.dat
+        CBlockIndex* pindexRescan = chainActive.Tip();
+        ASSERT_TRUE(wallet->ReconcileNoteState(pindexRescan));
+    }
+    EXPECT_EQ(std::vector<uint256>({a}), Checkpoint()) << "only the repaired record";
+    {
+        // a cache that is ahead of the chain is cut back: only that note
+        LOCK2(cs_main, wallet->cs_wallet);
+        int nTip = chainActive.Height();
+        chainActive.SetTip(&chain.index[nTip - 1]);
+        CBlockIndex* pindexRescan = chainActive.Tip();
+        ASSERT_TRUE(wallet->ReconcileNoteState(pindexRescan));
+    }
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint()));
+}
+
+TEST_F(CheckpointFixture, ClearingTheWitnessCacheMarksEveryNoteTransaction)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    Checkpoint();
+    { LOCK(wallet->cs_wallet); wallet->ClearNoteWitnessCache(); }
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint()));
+}
+
+TEST_F(CheckpointFixture, ANewNoteTransactionAndAMergedOneAreMarked)
+{
+    uint256 a = Mine(1000); Mine(0);
+    Checkpoint();
+    // a note that arrives unconfirmed (AddToWallet inserts it)
+    CMutableTransaction mtx = BaseTx(rng);
+    mtx.vShieldedOutput.push_back(SaplingOutputTo(rng, addr, 5000));
+    CTransaction tx(mtx);
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        wallet->SyncTransaction(tx, nullptr);
+    }
+    EXPECT_EQ(std::vector<uint256>({tx.GetHash()}), Checkpoint());
+    // and the block that confirms it (merge: hashBlock, merkle branch, witness)
+    CBlock block;
+    block.vtx.push_back(CTransaction(BaseTx(rng)));
+    block.vtx.push_back(tx);
+    chain.Connect(*wallet, block);
+    EXPECT_EQ(Sorted({a, tx.GetHash()}), Sorted(Checkpoint()));
+}
+
+TEST_F(CheckpointFixture, ATransactionThatLeavesTheWalletIsNotWritten)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        wallet->MarkNoteTxDirty(GetRandHash()); // a hash the wallet does not hold
+    }
+    EXPECT_EQ(Sorted({a, b}), Sorted(Checkpoint()));
+    EXPECT_TRUE(Checkpoint().empty());
+    LOCK(wallet->cs_wallet);
+    EXPECT_EQ(0u, wallet->CountDirtyNoteTxs());
+}
+
+TEST_F(CheckpointFixture, RetiringARecordThatStillCarriesWitnessesIsWrittenAtStartUp)
+{
+    // An upgrade: wallet.dat holds the full witness cache of a note whose spend is by now deeper
+    // than the cache. The start-up retires it in memory and the checkpoint must write the shorter
+    // record, otherwise the record keeps its full size until something else rewrites it.
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    uint256 sp = MineSpendOf(a);
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE);
+    CDataStream snapshot(SER_DISK, CLIENT_VERSION);
+    { LOCK2(cs_main, wallet->cs_wallet); snapshot << Tx(a); }
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1 + (int)RETIRE_SWEEP_INTERVAL);
+    { LOCK2(cs_main, wallet->cs_wallet); ASSERT_TRUE(Note(a).fRetired); }
+    Checkpoint();
+    Mine(0);
+    EXPECT_EQ(std::vector<uint256>({b}), Checkpoint());
+    {
+        CWalletTx old;
+        snapshot >> old;
+        ASSERT_GT(old.mapSaplingNoteData.begin()->second.witnesses.size(), 1u);
+        LOCK2(cs_main, wallet->cs_wallet);
+        wallet->AddToWallet(old, true, nullptr);
+        ASSERT_GT(Note(a).witnesses.size(), 1u);
+        ASSERT_FALSE(Note(a).fRetired);
+    }
+    Checkpoint(); // what loading marks is out of the way; the point is what the start-up adds
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        ASSERT_EQ(0u, wallet->CountDirtyNoteTxs());
+        CBlockIndex* pindexRescan = chainActive.Tip();
+        ASSERT_TRUE(wallet->ReconcileNoteState(pindexRescan));
+        EXPECT_TRUE(Note(a).fRetired);
+        EXPECT_EQ(RETIRED_WITNESSES_KEPT, Note(a).witnesses.size());
+        EXPECT_EQ(-1, Note(a).witnessHeight);
+    }
+    std::vector<uint256> written = Checkpoint();
+    EXPECT_NE(written.end(), std::find(written.begin(), written.end(), a)) << "the retired record is written";
+    EXPECT_TRUE(Checkpoint().empty());
+}
+
+TEST_F(CheckpointFixture, UnretiringANoteMarksItsRecord)
+{
+    uint256 a = Mine(1000); MineN(3);
+    uint256 sp = MineSpendOf(a);
+    const int nSpendHeight = TipHeight();
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1 + (int)RETIRE_SWEEP_INTERVAL);
+    { LOCK2(cs_main, wallet->cs_wallet); ASSERT_TRUE(Note(a).fRetired); }
+    Checkpoint(); Mine(0);
+    EXPECT_TRUE(Checkpoint().empty()) << "a retired note is left out";
+    wallet->CallUnretire(nSpendHeight);
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        EXPECT_FALSE(Note(a).fRetired);
+    }
+    EXPECT_EQ(std::vector<uint256>({a}), Checkpoint()) << "the record lost its witness: written";
+}
+
+TEST_F(CheckpointFixture, ADerivedSaplingNullifierMarksItsRecord)
+{
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    Checkpoint();
+    EXPECT_TRUE(Checkpoint().empty());
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        wallet->CallSaplingNullifierUpdate(Tx(a));
+    }
+    EXPECT_EQ(std::vector<uint256>({a}), Checkpoint());
+}
+
+TEST_F(CheckpointFixture, SyncingTheMetadataOfConflictingTransactionsMarksTheNoteTransaction)
+{
+    uint256 a = Mine(1000); Mine(0);
+    uint256 nf = *Note(a).nullifier;
+    MineSpendOf(a); // the oldest transaction that spends the nullifier
+    // a note transaction that spends the same nullifier (a conflict) and pays the wallet
+    CMutableTransaction m2 = BaseTx(rng);
+    SpendDescription sd;
+    sd.nullifier = nf;
+    m2.vShieldedSpend.push_back(sd);
+    m2.vShieldedOutput.push_back(SaplingOutputTo(rng, addr, 3000));
+    CTransaction tx2(m2);
+    { LOCK2(cs_main, wallet->cs_wallet); wallet->SyncTransaction(tx2, nullptr); }
+    ASSERT_EQ(1u, wallet->mapWallet.count(tx2.GetHash()));
+    ASSERT_FALSE(wallet->mapWallet.at(tx2.GetHash()).mapSaplingNoteData.empty());
+    Checkpoint();
+    EXPECT_TRUE(Checkpoint().empty());
+    // a third one: the metadata of tx2 is copied from the oldest
+    CMutableTransaction m3 = BaseTx(rng);
+    m3.vShieldedSpend.push_back(sd);
+    CTransaction tx3(m3);
+    { LOCK2(cs_main, wallet->cs_wallet); wallet->SyncTransaction(tx3, nullptr); }
+    ASSERT_EQ(1u, wallet->mapWallet.count(tx3.GetHash()));
+    EXPECT_EQ(std::vector<uint256>({tx2.GetHash()}), Checkpoint());
+}
+
+TEST_F(CheckpointFixture, ABackfilledSproutNullifierMarksItsRecord)
+{
+    auto sk = libzcash::SproutSpendingKey::random();
+    {
+        LOCK(wallet->cs_wallet);
+        ASSERT_TRUE(wallet->AddSproutSpendingKey(sk));
+    }
+    CWalletTx recv = GetValidSproutReceive(*params, sk, 10, true);
+    uint256 rh = recv.GetHash();
+    {
+        CBlock block;
+        block.vtx.push_back(CTransaction(BaseTx(rng)));
+        block.vtx.push_back(CTransaction(recv));
+        chain.Connect(*wallet, block);
+    }
+    Mine(0);
+    ZCJoinSplit* savedParams = pzcashParams;
+    pzcashParams = params;
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        for (auto& item : wallet->mapWallet.at(rh).mapSproutNoteData) item.second.nullifier = boost::none;
+    }
+    Checkpoint();
+    EXPECT_TRUE(Checkpoint().empty());
+    EXPECT_TRUE(wallet->UpdateNullifierNoteMap());
+    pzcashParams = savedParams;
+    EXPECT_EQ(std::vector<uint256>({rh}), Checkpoint());
+}
+TEST_F(CheckpointFixture, ADeepUnwindThatReachesNoRetiredSpendKeepsEveryWitnessCountBelowTheCacheSize)
+{
+    // The previous release asserts nWitnessCacheSize >= witnesses.size() for every note, retired ones
+    // included, at every block. Every disconnect lowers the cache size by one, so the frozen witnesses
+    // of a retired note must be cut with it.
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    uint256 nf = *Note(a).nullifier;
+    uint256 sp = MineSpendOf(a);
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1 + (int)RETIRE_SWEEP_INTERVAL);
+    { LOCK2(cs_main, wallet->cs_wallet); ASSERT_TRUE(Note(a).fRetired); ASSERT_EQ(RETIRED_WITNESSES_KEPT, Note(a).witnesses.size()); }
+    Checkpoint();
+    auto invariant = [&](const char* when) {
+        LOCK2(cs_main, wallet->cs_wallet);
+        CWallet::Health h;
+        wallet->GetHealth(h);
+        std::vector<CWalletTx*> all;
+        wallet->CollectAll(all);
+        for (CWalletTx* pwtx : all) {
+            for (const auto& item : pwtx->mapSaplingNoteData) {
+                EXPECT_LE((int64_t)item.second.witnesses.size(), h.nWitnessCacheSize) << when;
+            }
+        }
+    };
+    invariant("before");
+    for (int i = 0; i < 97; i++) {
+        chain.DisconnectAndForget(*wallet);
+        invariant("during the unwind");
+    }
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        CWallet::Health h;
+        wallet->GetHealth(h);
+        EXPECT_EQ(3, h.nWitnessCacheSize);
+        EXPECT_TRUE(Note(a).fRetired) << "no disconnect reached the spend";
+        EXPECT_EQ(3u, Note(a).witnesses.size());
+        EXPECT_TRUE(wallet->IsSaplingSpent(nf));
+    }
+    std::vector<uint256> written = Checkpoint();
+    EXPECT_NE(written.end(), std::find(written.begin(), written.end(), a)) << "the trimmed retired record is written";
+    // the chain comes back: the note is still retired, still spent, still within the cache size
+    MineN(97);
+    invariant("after the reconnect");
+    LOCK2(cs_main, wallet->cs_wallet);
+    EXPECT_TRUE(Note(a).fRetired);
+    EXPECT_TRUE(wallet->IsSaplingSpent(nf));
+    EXPECT_LE(Note(a).witnesses.size(), RETIRED_WITNESSES_KEPT);
+    EXPECT_FALSE(Note(b).fRetired);
+}
+

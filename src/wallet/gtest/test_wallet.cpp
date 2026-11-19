@@ -45,7 +45,7 @@ public:
 // init.cpp; StartShutdown() sets it, and nothing else in the tests clears it.
 extern std::atomic<bool> fRequestShutdown;
 
-template void CWallet::SetBestChainINTERNAL<MockWalletDB>(
+template bool CWallet::SetBestChainINTERNAL<MockWalletDB>(
         MockWalletDB& walletdb, const CBlockLocator& loc);
 
 class TestWallet : public CWallet {
@@ -2160,6 +2160,8 @@ TEST(WalletTests, WriteWitnessCache) {
     noteData[jsoutpt] = nd;
     wtx.SetSproutNoteData(noteData);
     wallet.AddToWallet(wtx, true, NULL);
+    // AddToWallet(wtx, true) is the load path (clean); this one changed since the last checkpoint
+    wallet.MarkNoteTxDirty(wtx.GetHash());
 
     // TxnBegin fails
     EXPECT_CALL(walletdb, TxnBegin())
@@ -2250,12 +2252,14 @@ TEST(WalletTests, SetBestChainIgnoresTxsWithoutShieldedData) {
     t.vout[0].scriptPubKey = scriptPubKey;
     CWalletTx wtxTransparent {nullptr, t};
     wallet.AddToWallet(wtxTransparent, true, nullptr);
+    wallet.MarkNoteTxDirty(wtxTransparent.GetHash()); // changed since the last checkpoint (the load path is clean); only note transactions are written
 
     // Generate a Sprout transaction that is ours
     auto wtxSprout = GetValidSproutReceive(sk, 10, true);
     auto noteMap = wallet.FindMySproutNotes(wtxSprout);
     wtxSprout.SetSproutNoteData(noteMap);
     wallet.AddToWallet(wtxSprout, true, nullptr);
+    wallet.MarkNoteTxDirty(wtxSprout.GetHash()); // changed since the last checkpoint (the load path is clean); only note transactions are written
 
     // Generate a Sprout transaction that only involves our transparent address
     auto sk2 = libzcash::SproutSpendingKey::random();
@@ -2266,6 +2270,7 @@ TEST(WalletTests, SetBestChainIgnoresTxsWithoutShieldedData) {
     mtx.vout[0].scriptPubKey = scriptPubKey;
     CWalletTx wtxSproutTransparent {nullptr, mtx};
     wallet.AddToWallet(wtxSproutTransparent, true, nullptr);
+    wallet.MarkNoteTxDirty(wtxSproutTransparent.GetHash()); // changed since the last checkpoint (the load path is clean); only note transactions are written
 
     // Generate a fake Sapling transaction
     CMutableTransaction mtxSapling;
@@ -2277,6 +2282,7 @@ TEST(WalletTests, SetBestChainIgnoresTxsWithoutShieldedData) {
     CWalletTx wtxSapling {nullptr, mtxSapling};
     SetSaplingNoteData(wtxSapling);
     wallet.AddToWallet(wtxSapling, true, nullptr);
+    wallet.MarkNoteTxDirty(wtxSapling.GetHash()); // changed since the last checkpoint (the load path is clean); only note transactions are written
 
     // Generate a fake Sapling transaction that would only involve our transparent addresses
     CMutableTransaction mtxSaplingTransparent;
@@ -2287,6 +2293,7 @@ TEST(WalletTests, SetBestChainIgnoresTxsWithoutShieldedData) {
     mtxSaplingTransparent.vShieldedOutput[0].cv = libzcash::random_uint256();
     CWalletTx wtxSaplingTransparent {nullptr, mtxSaplingTransparent};
     wallet.AddToWallet(wtxSaplingTransparent, true, nullptr);
+    wallet.MarkNoteTxDirty(wtxSaplingTransparent.GetHash()); // changed since the last checkpoint (the load path is clean); only note transactions are written
 
     EXPECT_CALL(walletdb, TxnBegin())
         .WillOnce(Return(true));
@@ -2307,6 +2314,77 @@ TEST(WalletTests, SetBestChainIgnoresTxsWithoutShieldedData) {
     EXPECT_CALL(walletdb, TxnCommit())
         .WillOnce(Return(true));
     wallet.SetBestChain(walletdb, loc);
+}
+
+TEST(WalletTests, SetBestChainWritesOnlyTheNoteTransactionsThatChanged) {
+    SelectParams(CBaseChainParams::REGTEST);
+
+    TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
+    MockWalletDB walletdb;
+    CBlockLocator loc;
+
+    auto sk = libzcash::SproutSpendingKey::random();
+    wallet.AddSproutSpendingKey(sk);
+    auto wtx1 = GetValidSproutReceive(sk, 10, true);
+    auto noteMap1 = wallet.FindMySproutNotes(wtx1);
+    wtx1.SetSproutNoteData(noteMap1);
+    wallet.AddToWallet(wtx1, true, nullptr);
+    auto wtx2 = GetValidSproutReceive(sk, 20, true);
+    auto noteMap2 = wallet.FindMySproutNotes(wtx2);
+    wtx2.SetSproutNoteData(noteMap2);
+    wallet.AddToWallet(wtx2, true, nullptr);
+    // AddToWallet(wtx, true) is the load path (what wallet.dat holds is clean): they are new since the last checkpoint
+    wallet.MarkNoteTxDirty(wtx1.GetHash());
+    wallet.MarkNoteTxDirty(wtx2.GetHash());
+
+    EXPECT_CALL(walletdb, TxnBegin()).WillRepeatedly(Return(true));
+    EXPECT_CALL(walletdb, WriteWitnessCacheSize(0)).WillRepeatedly(Return(true));
+    EXPECT_CALL(walletdb, WriteBestBlock(loc)).WillRepeatedly(Return(true));
+    EXPECT_CALL(walletdb, TxnCommit()).WillRepeatedly(Return(true));
+
+    // the first checkpoint writes both transactions, once each
+    EXPECT_CALL(walletdb, WriteTx(wtx1.GetHash(), wtx1)).Times(1).WillOnce(Return(true));
+    EXPECT_CALL(walletdb, WriteTx(wtx2.GetHash(), wtx2)).Times(1).WillOnce(Return(true));
+    wallet.SetBestChain(walletdb, loc);
+    ::testing::Mock::VerifyAndClearExpectations(&walletdb);
+    EXPECT_EQ(0u, wallet.CountDirtyNoteTxs());
+
+    EXPECT_CALL(walletdb, TxnBegin()).WillRepeatedly(Return(true));
+    EXPECT_CALL(walletdb, WriteWitnessCacheSize(0)).WillRepeatedly(Return(true));
+    EXPECT_CALL(walletdb, WriteBestBlock(loc)).WillRepeatedly(Return(true));
+    EXPECT_CALL(walletdb, TxnCommit()).WillRepeatedly(Return(true));
+
+    // nothing changed: no transaction is written, the cache size and the locator are
+    EXPECT_CALL(walletdb, WriteTx(wtx1.GetHash(), wtx1)).Times(0);
+    EXPECT_CALL(walletdb, WriteTx(wtx2.GetHash(), wtx2)).Times(0);
+    wallet.SetBestChain(walletdb, loc);
+    ::testing::Mock::VerifyAndClearExpectations(&walletdb);
+
+    EXPECT_CALL(walletdb, TxnBegin()).WillRepeatedly(Return(true));
+    EXPECT_CALL(walletdb, WriteWitnessCacheSize(0)).WillRepeatedly(Return(true));
+    EXPECT_CALL(walletdb, WriteBestBlock(loc)).WillRepeatedly(Return(true));
+    EXPECT_CALL(walletdb, TxnCommit()).WillRepeatedly(Return(true));
+
+    // one changed: exactly that one
+    wallet.MarkNoteTxDirty(wtx2.GetHash());
+    EXPECT_CALL(walletdb, WriteTx(wtx1.GetHash(), wtx1)).Times(0);
+    EXPECT_CALL(walletdb, WriteTx(wtx2.GetHash(), wtx2)).Times(1).WillOnce(Return(true));
+    wallet.SetBestChain(walletdb, loc);
+    ::testing::Mock::VerifyAndClearExpectations(&walletdb);
+
+    // a write that fails leaves it marked for the next checkpoint
+    EXPECT_CALL(walletdb, TxnBegin()).WillRepeatedly(Return(true));
+    EXPECT_CALL(walletdb, WriteWitnessCacheSize(0)).WillRepeatedly(Return(true));
+    EXPECT_CALL(walletdb, WriteBestBlock(loc)).WillRepeatedly(Return(true));
+    EXPECT_CALL(walletdb, TxnCommit()).WillRepeatedly(Return(true));
+    wallet.MarkNoteTxDirty(wtx1.GetHash());
+    EXPECT_CALL(walletdb, TxnAbort()).Times(1);
+    EXPECT_CALL(walletdb, WriteTx(wtx1.GetHash(), wtx1)).Times(2)
+        .WillOnce(Return(false)).WillOnce(Return(true));
+    wallet.SetBestChain(walletdb, loc);
+    wallet.SetBestChain(walletdb, loc);
+    EXPECT_EQ(0u, wallet.CountDirtyNoteTxs());
 }
 
 TEST(WalletTests, UpdateSproutNullifierNoteMap) {

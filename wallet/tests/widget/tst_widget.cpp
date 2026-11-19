@@ -86,6 +86,7 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "rpc.h"
+#include "senttxstore.h"
 #include "settings.h"
 #include "connection.h"
 #include "namepaybox.h"
@@ -98,6 +99,216 @@
 #include "startupaccess.h"
 #include "chainbackup.h"
 #include <QStorageInfo>
+
+// ---- send-once / health tests: a scripted zclassicd on a loopback port (in process, C++ only) ----------------------
+//
+// The wallet's one network primitive is Connection::doRPC (HTTP POST, JSON-RPC 1.0). FakeNode answers it from the
+// test's own thread: every request is logged, and SendNode models the part of the node these tests are about (the
+// idempotency key of z_sendmany, the operation queue, the send journal) closely enough that a repeated call with
+// the same key builds nothing twice, like the real thing (src/wallet/sendjournal.cpp).
+#include <QTcpServer>
+#include <QTcpSocket>
+#include <QTemporaryFile>
+#include <QRegularExpression>
+#include <cstdio>
+#ifdef Q_OS_WIN
+#include <io.h>
+#define ZQ_DUP _dup
+#define ZQ_DUP2 _dup2
+#define ZQ_FILENO _fileno
+#define ZQ_CLOSE _close
+#else
+#include <unistd.h>
+#define ZQ_DUP dup
+#define ZQ_DUP2 dup2
+#define ZQ_FILENO fileno
+#define ZQ_CLOSE close
+#endif
+
+// Everything written to stdout and stderr while it lives (the descriptors, so std::cout, printf and qDebug all count).
+class StdCapture {
+public:
+    StdCapture() {
+        fflush(stdout); fflush(stderr); std::cout.flush();
+        tmp.open();
+        out = ZQ_DUP(ZQ_FILENO(stdout));
+        err = ZQ_DUP(ZQ_FILENO(stderr));
+        ZQ_DUP2(tmp.handle(), ZQ_FILENO(stdout));
+        ZQ_DUP2(tmp.handle(), ZQ_FILENO(stderr));
+    }
+    QByteArray stop() {
+        if (out < 0) return QByteArray();
+        fflush(stdout); fflush(stderr); std::cout.flush();
+        ZQ_DUP2(out, ZQ_FILENO(stdout));
+        ZQ_DUP2(err, ZQ_FILENO(stderr));
+        ZQ_CLOSE(out); ZQ_CLOSE(err);
+        out = err = -1;
+        QFile f(tmp.fileName());
+        f.open(QIODevice::ReadOnly);
+        return f.readAll();
+    }
+    ~StdCapture() { stop(); }
+private:
+    QTemporaryFile tmp;
+    int out = -1, err = -1;
+};
+
+class FakeNode {
+public:
+    struct Req { QString method; nlohmann::json params; };
+    QList<Req> log;
+
+    FakeNode() {
+        if (!server.listen(QHostAddress::LocalHost, 0)) qFatal("fake node: cannot listen on loopback");
+        QObject::connect(&server, &QTcpServer::newConnection, [this]() {
+            while (QTcpSocket* s = server.nextPendingConnection()) {
+                QObject::connect(s, &QTcpSocket::readyRead, [this, s]() { onData(s); });
+                QObject::connect(s, &QTcpSocket::disconnected, [this, s]() { buf.remove(s); s->deleteLater(); });
+            }
+        });
+    }
+    virtual ~FakeNode() {
+        // the sockets are children of the server and their slots use buf: drop them while buf still exists
+        server.close();
+        for (QTcpSocket* s : server.findChildren<QTcpSocket*>()) { s->disconnect(); delete s; }
+    }
+    int port() const { return server.serverPort(); }
+
+    int count(const QString& method) const {
+        int n = 0;
+        for (const Req& r : log) if (r.method == method) n++;
+        return n;
+    }
+    QList<Req> of(const QString& method) const {
+        QList<Req> v;
+        for (const Req& r : log) if (r.method == method) v.append(r);
+        return v;
+    }
+
+protected:
+    // Answer one request. The default knows nothing: every method is "not found".
+    virtual void handle(const Req& r, QTcpSocket* s) { rpcError(s, -32601, "Method not found: " + r.method); }
+
+    void result(QTcpSocket* s, const nlohmann::json& v) {
+        nlohmann::json body = {{"result", v}, {"error", nullptr}, {"id", "someid"}};
+        write(s, 200, "OK", body.dump());
+    }
+    void rpcError(QTcpSocket* s, int code, const QString& msg) {
+        nlohmann::json body = {{"result", nullptr}, {"error", {{"code", code}, {"message", msg.toStdString()}}}, {"id", "someid"}};
+        write(s, 500, "Internal Server Error", body.dump());
+    }
+    void hang(QTcpSocket*) {}                         // never answered
+    void drop(QTcpSocket* s) { s->abort(); }          // the connection dies without an answer
+
+private:
+    QTcpServer server;
+    QMap<QTcpSocket*, QByteArray> buf;
+
+    void write(QTcpSocket* s, int status, const char* text, const std::string& body) {
+        QByteArray h = QByteArray("HTTP/1.1 ") + QByteArray::number(status) + " " + text +
+                       "\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number((int)body.size()) +
+                       "\r\nConnection: keep-alive\r\n\r\n";
+        s->write(h);
+        s->write(body.data(), (qint64)body.size());
+        s->flush();
+    }
+    void onData(QTcpSocket* s) {
+        QByteArray& b = buf[s];
+        b += s->readAll();
+        for (;;) {
+            const int he = b.indexOf("\r\n\r\n");
+            if (he < 0) return;
+            const QByteArray head = b.left(he).toLower();
+            int len = 0;
+            const int i = head.indexOf("content-length:");
+            if (i >= 0) {
+                int e = head.indexOf("\r\n", i);
+                if (e < 0) e = head.size();
+                len = head.mid(i + 15, e - (i + 15)).trimmed().toInt();
+            }
+            if (b.size() < he + 4 + len) return;
+            const QByteArray body = b.mid(he + 4, len);
+            b.remove(0, he + 4 + len);
+            nlohmann::json j = nlohmann::json::parse(body.toStdString(), nullptr, false);
+            Req r;
+            if (!j.is_discarded() && j.is_object()) {
+                r.method = QString::fromStdString(j.value("method", std::string()));
+                auto pi = j.find("params");
+                r.params = (pi != j.end()) ? *pi : nlohmann::json::array();
+            }
+            log.append(r);
+            handle(r, s);
+            if (!buf.contains(s)) return;
+        }
+    }
+};
+
+// z_sendmany with an idempotency key, the operation queue and the journal, as scripted by the test.
+class SendNode : public FakeNode {
+public:
+    enum Fail { None, Hang, Drop };
+    bool    takesKey      = true;       // false: an older node (rejects a 5th parameter with its usage text)
+    int     failFirst     = 0;          // the first N z_sendmany are processed, then not answered (Fail mode)
+    Fail    failMode      = Hang;
+    int     built         = 0;          // transactions the node built (a key never builds a second one)
+    QMap<QString, QString> keyToOpid;
+    int     unkeyed       = 0;
+    // z_getoperationstatus: the entry for an id (null: the node's queue does not have it)
+    std::function<nlohmann::json(const QString& opid)> queueEntry;
+    // z_listsendjournal: the array (null: an older node without the call)
+    nlohmann::json journal = nlohmann::json();
+    QString lastOpid;
+
+    static QString txid() { return QString(64, 'a'); }
+
+protected:
+    void handle(const Req& r, QTcpSocket* s) override {
+        if (r.method == "z_sendmany") {
+            const auto& p = r.params;
+            if (!takesKey && p.size() > 4) {
+                rpcError(s, -1, "z_sendmany \"fromaddress\" [{\"address\":... ,\"amount\":...},...] ( minconf ) ( fee )\n\nSend multiple times.");
+                return;
+            }
+            QString opid;
+            if (p.size() > 4 && p[4].is_string()) {
+                const QString key = QString::fromStdString(p[4].get<std::string>());
+                if (!keyToOpid.contains(key)) {
+                    keyToOpid[key] = QString("opid-%1").arg(++built);
+                }
+                opid = keyToOpid[key];
+            } else {
+                opid = QString("opid-%1").arg(++built);
+                unkeyed++;
+            }
+            lastOpid = opid;
+            if (failFirst > 0) {
+                failFirst--;
+                if (failMode == Hang) hang(s); else drop(s);
+                return;
+            }
+            result(s, opid.toStdString());
+            return;
+        }
+        if (r.method == "z_getoperationstatus") {
+            nlohmann::json out = nlohmann::json::array();
+            if (r.params.is_array() && !r.params.empty() && r.params[0].is_array() && queueEntry) {
+                for (const auto& id : r.params[0]) {
+                    nlohmann::json e = queueEntry(QString::fromStdString(id.get<std::string>()));
+                    if (!e.is_null()) out.push_back(e);
+                }
+            }
+            result(s, out);
+            return;
+        }
+        if (r.method == "z_listsendjournal") {
+            if (journal.is_null()) rpcError(s, -32601, "Method not found");
+            else result(s, journal);
+            return;
+        }
+        FakeNode::handle(r, s);
+    }
+};
+
 
 // Kept alive for the whole process so QStandardPaths/QSettings stay isolated.
 static QTemporaryDir* g_homeDir = nullptr;
@@ -3747,6 +3958,565 @@ private slots:
         settleAndDelete(w);
     }
 #endif
+
+    // ======================================================================================================
+    // Send once: a payment is never made twice, and the user is told the truth about what is known
+    // (see src/sendflow.h). The node is a scripted loopback server (FakeNode / SendNode above).
+    // ======================================================================================================
+private:
+    struct SendRec {
+        QStringList submitted, progress, errors;
+        QStringList completedTxids;
+    };
+
+    // A real Connection to the fake node, without setConnection()'s cascade of polls.
+    void attachNode(MainWindow* w, FakeNode& node) {
+        auto cfg = std::make_shared<ConnectionConfig>();
+        cfg->host = "127.0.0.1";
+        cfg->port = QString::number(node.port());
+        cfg->rpcuser = "test";
+        cfg->rpcpassword = "test";
+        cfg->zclassicDir = QDir::tempPath();
+        auto* nam = new QNetworkAccessManager(w);
+        auto* req = new QNetworkRequest();
+        req->setUrl(QUrl(QString("http://127.0.0.1:%1/").arg(node.port())));
+        req->setRawHeader("Authorization", "Basic " + QString("test:test").toUtf8().toBase64());
+        req->setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+        w->getRPC()->testSetConnection(new Connection(w, nam, req, cfg));
+    }
+
+    static Tx sendTx(const QString& memoHex = QString()) {
+        Tx tx;
+        tx.fromAddr = "zs1senderaddressthatisnotprintedanywhere0000000000000000000000000000";
+        tx.toAddrs = { ToFields{ "zs1recipientaddressthatisnotprintedanywhere000000000000000000000000", 0.12345678, "hello", memoHex } };
+        tx.fee = 0.0001;
+        return tx;
+    }
+
+    void runSend(MainWindow* w, const Tx& tx, SendRec& rec) {
+        w->getRPC()->executeTransaction(tx,
+            [&rec](QString opid) { rec.submitted << opid; },
+            [&rec](QString, QString txid) { rec.completedTxids << txid; },
+            [&rec](QString, QString err) { rec.errors << err; },
+            [&rec](QString, QString text) { rec.progress << text; });
+    }
+
+    // Poll the node the way the 5 s timer does, until `done` or the budget ends.
+    template <class F> bool pollUntil(MainWindow* w, F done, int budgetMs = 8000) {
+        QElapsedTimer t; t.start();
+        while (!done()) {
+            if (t.elapsed() > budgetMs) return false;
+            w->getRPC()->watchTxStatus();
+            QTest::qWait(40);
+        }
+        return true;
+    }
+
+    static nlohmann::json successEntry(const QString& opid, const QString& txid) {
+        return { {"id", opid.toStdString()}, {"status", "success"}, {"result", {{"txid", txid.toStdString()}}} };
+    }
+    static nlohmann::json failedEntry(const QString& opid, const QString& msg) {
+        return { {"id", opid.toStdString()}, {"status", "failed"}, {"error", {{"code", -4}, {"message", msg.toStdString()}}} };
+    }
+    static nlohmann::json journalRow(const QString& opid, const QString& state, const QString& txid = QString()) {
+        nlohmann::json j = { {"opid", opid.toStdString()}, {"state", state.toStdString()} };
+        if (!txid.isEmpty()) j["txid"] = txid.toStdString();
+        return j;
+    }
+
+private slots:
+    // The answer to z_sendmany is lost (no reply at all, or the connection dies): the call goes out again with the
+    // SAME key and the node builds one transaction. The user sees "outcome unknown", never an error and never a
+    // second chance to pay.
+    void sendOnce_lostAnswerIsRepeatedWithTheSameKey_data() {
+        QTest::addColumn<int>("mode");
+        QTest::newRow("no answer (timeout)") << (int)SendNode::Hang;
+        QTest::newRow("connection dropped")  << (int)SendNode::Drop;
+    }
+    void sendOnce_lostAnswerIsRepeatedWithTheSameKey() {
+        QFETCH(int, mode);
+        SendNode node;
+        node.failFirst = 2;                      // two answers are lost, the third arrives
+        node.failMode = (SendNode::Fail)mode;
+        node.queueEntry = [](const QString& id) { return successEntry(id, SendNode::txid()); };
+
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        w->getRPC()->testSetSendTiming(200, 20);
+        SendRec rec;
+        runSend(w, sendTx(), rec);
+
+        QTRY_VERIFY_WITH_TIMEOUT(!rec.completedTxids.isEmpty() || !rec.errors.isEmpty(), 15000);
+        QVERIFY2(rec.errors.isEmpty(), qPrintable(rec.errors.join("|")));
+        QCOMPARE(rec.completedTxids, QStringList() << SendNode::txid());
+        QCOMPARE(rec.submitted.size(), 1);
+
+        const auto sends = node.of("z_sendmany");
+        QVERIFY2(sends.size() >= 3, "two lost answers, then the third");   // the network stack may add its own resend of a dropped request
+        QString key;
+        for (const auto& s : sends) {
+            QCOMPARE((int)s.params.size(), 5);
+            QVERIFY(s.params[4].is_string());
+            const QString k = QString::fromStdString(s.params[4].get<std::string>());
+            QVERIFY2(QRegularExpression("^[A-Za-z0-9._:-]{1,128}$").match(k).hasMatch(), qPrintable(k));
+            if (key.isEmpty()) key = k;
+            QCOMPARE(k, key);                    // the SAME key every time
+            QVERIFY(s.params[0] == sends.first().params[0]);
+            QVERIFY(s.params[1] == sends.first().params[1]);
+        }
+        QCOMPARE(node.built, 1);                 // one transaction, whatever was lost on the way
+        QVERIFY(rec.progress.contains(QObject::tr("Outcome unknown: the wallet will not send again; checking")));
+        settleAndDelete(w);
+    }
+
+    // Each confirmation has its own key: two payments are two payments.
+    void sendOnce_everyConfirmationHasItsOwnKey() {
+        SendNode node;
+        node.queueEntry = [](const QString& id) { return successEntry(id, SendNode::txid()); };
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        SendRec a, b;
+        runSend(w, sendTx(), a);
+        runSend(w, sendTx(), b);
+        QTRY_VERIFY_WITH_TIMEOUT(node.count("z_sendmany") == 2, 5000);
+        const auto sends = node.of("z_sendmany");
+        QVERIFY(sends[0].params[4] != sends[1].params[4]);
+        QCOMPARE(node.built, 2);
+        settleAndDelete(w);
+    }
+
+    // The answer to the first call is lost (the node got it), then the node restarts. A repeat that meets the starting
+    // node (-28) is asked again with the same key; a repeat the node refuses is never reported as "not sent", because
+    // the first attempt may have been queued.
+    void sendOnce_aRepeatIsNeverReportedAsNotSent_data() {
+        QTest::addColumn<bool>("refuseRepeat");
+        QTest::newRow("warmup, then the stored operation") << false;
+        QTest::newRow("warmup, then a refusal")             << true;
+    }
+    void sendOnce_aRepeatIsNeverReportedAsNotSent() {
+        QFETCH(bool, refuseRepeat);
+        class Restarting : public SendNode {
+        public:
+            int  calls = 0;
+            bool refuse = false;
+        protected:
+            void handle(const Req& r, QTcpSocket* s) override {
+                if (r.method == "z_sendmany") {
+                    calls++;
+                    if (calls == 1) { built++; hang(s); return; }                   // queued; the answer is lost
+                    if (calls == 2) { rpcError(s, -28, "Loading block index..."); return; }
+                    if (refuse) { rpcError(s, -13, "Error: Please enter the wallet passphrase with walletpassphrase first."); return; }
+                    result(s, std::string("opid-1"));
+                    return;
+                }
+                SendNode::handle(r, s);
+            }
+        } node;
+        node.refuse = refuseRepeat;
+        node.queueEntry = [](const QString& id) { return successEntry(id, SendNode::txid()); };
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        w->getRPC()->testSetSendTiming(200, 20);
+        SendRec rec;
+        runSend(w, sendTx(), rec);
+        QTRY_VERIFY_WITH_TIMEOUT(!rec.completedTxids.isEmpty() || !rec.errors.isEmpty(), 15000);
+        QVERIFY(node.calls >= 3);                                               // the warmup answer did not end it
+        const auto sends = node.of("z_sendmany");
+        for (const auto& s : sends) QVERIFY(s.params[4] == sends.first().params[4]);
+        QCOMPARE(node.built, 1);
+        if (!refuseRepeat) {
+            QVERIFY2(rec.errors.isEmpty(), qPrintable(rec.errors.join("|")));
+            QCOMPARE(rec.completedTxids, QStringList() << SendNode::txid());
+        } else {
+            QCOMPARE(rec.errors.size(), 1);
+            QVERIFY2(rec.errors[0].startsWith(sendflow::retryRefusedPrefix()), qPrintable(rec.errors[0]));
+            QVERIFY(rec.errors[0].contains("walletpassphrase"));                 // the node's reason is still shown
+            QCOMPARE(w->testHumaneSendError(rec.errors[0]), rec.errors[0]);      // not turned into "nothing was sent"
+            QVERIFY(!rec.errors[0].contains("try again", Qt::CaseInsensitive));
+            QVERIFY(!rec.errors[0].contains("Nothing was sent", Qt::CaseInsensitive));
+        }
+        settleAndDelete(w);
+    }
+
+    // A JSON-RPC answer is final: reported once, nothing repeated.
+    void sendOnce_aRefusalIsReportedOnceAndNotRepeated() {
+        class Refusing : public SendNode {
+        protected:
+            void handle(const Req& r, QTcpSocket* s) override {
+                if (r.method == "z_sendmany") { rpcError(s, -6, "Insufficient funds: have 0.5, need 1.0"); return; }
+                SendNode::handle(r, s);
+            }
+        } node;
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        w->getRPC()->testSetSendTiming(300, 20);
+        SendRec rec;
+        runSend(w, sendTx(), rec);
+        QTRY_VERIFY_WITH_TIMEOUT(!rec.errors.isEmpty(), 5000);
+        QTest::qWait(300);
+        QCOMPARE(rec.errors.size(), 1);
+        QVERIFY(rec.errors[0].contains("Insufficient funds"));
+        QCOMPARE(node.count("z_sendmany"), 1);
+        QVERIFY(rec.submitted.isEmpty() && rec.completedTxids.isEmpty());
+        settleAndDelete(w);
+    }
+
+    // The transaction was built, then the broadcast failed. The queue says "failed", the journal still holds the
+    // send: the user is told the outcome is unknown (not "failed"), and it resolves from the journal.
+    void sendOnce_failureAfterBuiltIsUnknownThenResolves_data() {
+        QTest::addColumn<QString>("finalState");
+        QTest::newRow("committed") << "committed";
+        QTest::newRow("expired")   << "expired";
+    }
+    void sendOnce_failureAfterBuiltIsUnknownThenResolves() {
+        QFETCH(QString, finalState);
+        SendNode node;
+        node.queueEntry = [](const QString& id) { return failedEntry(id, "mempool refused the transaction (bad-txns)"); };
+        node.journal = nlohmann::json::array({ journalRow("opid-1", "outcome_unknown", SendNode::txid()) });   // the node's first operation id
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        SendRec rec;
+        runSend(w, sendTx(), rec);
+        QTRY_VERIFY_WITH_TIMEOUT(!rec.submitted.isEmpty(), 5000);
+        const QString opid = rec.submitted[0];
+
+        QVERIFY(pollUntil(w, [&]() { return !rec.progress.isEmpty(); }));
+        QVERIFY(rec.progress.contains(QObject::tr("Outcome unknown: the wallet will not send again; checking")));
+        QVERIFY2(rec.errors.isEmpty(), "a built send must never be reported as failed while its outcome is unknown");
+        QVERIFY(rec.completedTxids.isEmpty());
+        QCOMPARE((int)w->getRPC()->getWatchingTxns().size(), 1);        // still watched
+
+        // it does not change while the journal says so, and nothing is sent again
+        for (int i = 0; i < 3; ++i) { w->getRPC()->watchTxStatus(); QTest::qWait(60); }
+        QVERIFY(rec.errors.isEmpty() && rec.completedTxids.isEmpty());
+        QCOMPARE(node.count("z_sendmany"), 1);
+
+        node.journal = nlohmann::json::array({ journalRow(opid, finalState, finalState == "committed" ? SendNode::txid() : QString()) });
+        if (finalState == "committed") {
+            QVERIFY(pollUntil(w, [&]() { return !rec.completedTxids.isEmpty(); }));
+            QCOMPARE(rec.completedTxids, QStringList() << SendNode::txid());
+            QVERIFY(rec.errors.isEmpty());
+        } else {
+            QVERIFY(pollUntil(w, [&]() { return !rec.errors.isEmpty(); }));
+            QVERIFY(rec.errors[0].contains("expired"));
+            QVERIFY(rec.errors[0].contains("Funds are available again"));
+            QVERIFY(rec.completedTxids.isEmpty());
+        }
+        QCOMPARE((int)w->getRPC()->getWatchingTxns().size(), 0);
+        QCOMPARE(node.count("z_sendmany"), 1);
+        settleAndDelete(w);
+    }
+
+    // The operation id is gone from the queue (the node restarted, or the result was taken): the stored result of
+    // the journal decides; the spinner does not stay.
+    void sendOnce_lostOperationResolvesFromTheStoredResult_data() {
+        QTest::addColumn<QString>("how");
+        QTest::newRow("the node answers for the id from its journal") << "statusAnswer";
+        QTest::newRow("queue empty, journal says committed")           << "journalCommitted";
+        QTest::newRow("queue empty, journal says expired")             << "journalExpired";
+        QTest::newRow("queue empty, no record: nothing was built")     << "noRecord";
+    }
+    void sendOnce_lostOperationResolvesFromTheStoredResult() {
+        QFETCH(QString, how);
+        SendNode node;
+        node.journal = nlohmann::json::array();
+        // what the node holds when the answer to the first poll comes (its first operation id is opid-1)
+        if (how == "statusAnswer")
+            node.queueEntry = [](const QString& id) { return successEntry(id, SendNode::txid()); };
+        else if (how == "journalCommitted")
+            node.journal = nlohmann::json::array({ journalRow("opid-1", "committed", SendNode::txid()) });
+        else if (how == "journalExpired")
+            node.journal = nlohmann::json::array({ journalRow("opid-1", "expired") });
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        SendRec rec;
+        runSend(w, sendTx(), rec);
+
+        QVERIFY(pollUntil(w, [&]() { return !rec.completedTxids.isEmpty() || !rec.errors.isEmpty(); }));
+        QCOMPARE((int)w->getRPC()->getWatchingTxns().size(), 0);   // not spinning any more
+        if (how == "statusAnswer" || how == "journalCommitted") {
+            QCOMPARE(rec.completedTxids, QStringList() << SendNode::txid());
+            QVERIFY(rec.errors.isEmpty());
+        } else if (how == "journalExpired") {
+            QVERIFY(rec.errors[0].contains("Funds are available again"));
+        } else {
+            QVERIFY(rec.errors[0].contains("Nothing was sent"));
+        }
+        QCOMPARE(node.count("z_sendmany"), 1);
+        settleAndDelete(w);
+    }
+
+    // An older node (the GUI may attach to an external one) rejects the 5th parameter: the call is made again in the
+    // old form, once; the node is remembered. A lost answer from such a node is NOT repeated (that could pay twice).
+    void sendOnce_olderNodeFallsBackToTheOldCall() {
+        SendNode node;
+        node.takesKey = false;
+        node.queueEntry = [](const QString& id) { return successEntry(id, SendNode::txid()); };
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        w->getRPC()->testSetSendTiming(200, 20);
+
+        SendRec rec;
+        runSend(w, sendTx(), rec);
+        QTRY_VERIFY_WITH_TIMEOUT(!rec.completedTxids.isEmpty() || !rec.errors.isEmpty(), 8000);
+        QVERIFY2(rec.errors.isEmpty(), qPrintable(rec.errors.join("|")));
+        QCOMPARE(rec.completedTxids, QStringList() << SendNode::txid());
+        auto sends = node.of("z_sendmany");
+        QCOMPARE(sends.size(), 2);
+        QCOMPARE((int)sends[0].params.size(), 5);       // tried with the key
+        QCOMPARE((int)sends[1].params.size(), 2);       // from, recipients: exactly the call as it was before
+        QCOMPARE(node.unkeyed, 1);
+        QCOMPARE(w->getRPC()->testDaemonTakesSendKey(), 0);
+
+        // the next send does not try the key again
+        SendRec rec2;
+        runSend(w, sendTx(), rec2);
+        QTRY_VERIFY_WITH_TIMEOUT(!rec2.completedTxids.isEmpty(), 8000);
+        QCOMPARE(node.count("z_sendmany"), 3);
+        QCOMPARE((int)node.of("z_sendmany")[2].params.size(), 2);
+
+        // a lost answer from this node: told, not repeated
+        node.failFirst = 1;
+        node.failMode = SendNode::Hang;
+        SendRec rec3;
+        runSend(w, sendTx(), rec3);
+        QTRY_VERIFY_WITH_TIMEOUT(!rec3.errors.isEmpty(), 5000);
+        QTest::qWait(300);
+        QCOMPARE(node.count("z_sendmany"), 4);
+        QCOMPARE(rec3.errors.size(), 1);
+        QVERIFY(rec3.errors[0].contains("Check your transactions before sending again"));
+        settleAndDelete(w);
+    }
+
+    // The 5th parameter is positional: when the user chose no fee the node's own defaults go before the key.
+    void sendOnce_theKeyFollowsMinconfAndFee() {
+        SendNode node;
+        node.queueEntry = [](const QString& id) { return successEntry(id, SendNode::txid()); };
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        SendRec rec;
+        runSend(w, sendTx(), rec);
+        QTRY_VERIFY_WITH_TIMEOUT(node.count("z_sendmany") == 1, 5000);
+        const auto p = node.of("z_sendmany")[0].params;
+        QCOMPARE((int)p.size(), 5);
+        QCOMPARE(p[2].get<int>(), 1);                 // minconf: the node's default
+        QCOMPARE(p[3].get<double>(), 0.0001);         // fee: the node's default
+        settleAndDelete(w);
+    }
+
+    // The old parameter dump: recipients, amounts and memo hex must not reach stdout or stderr, on any path of a send.
+    void sendOnce_nothingAboutThePaymentIsPrinted() {
+        SendNode node;
+        node.failFirst = 1;
+        node.failMode = SendNode::Drop;
+        node.queueEntry = [](const QString& id) { return failedEntry(id, "refused"); };
+        node.journal = nlohmann::json::array();
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        w->getRPC()->testSetSendTiming(200, 20);
+        const QString memoHex = "6d656d6f2d68657820706c61696e7465787420646f206e6f74207072696e74";
+        const Tx tx = sendTx(memoHex);
+
+        QByteArray printed;
+        {
+            StdCapture cap;
+            std::cout << "capture-control-stdout" << std::endl;      // the capture sees std::cout, printf and qDebug alike
+            fprintf(stderr, "capture-control-stderr\n");
+            qDebug() << "capture-control-qdebug";
+            SendRec rec;
+            runSend(w, tx, rec);
+            QTRY_VERIFY_WITH_TIMEOUT(!rec.errors.isEmpty(), 8000);
+            printed = cap.stop();
+        }
+        QVERIFY2(printed.contains("capture-control-stdout") && printed.contains("capture-control-stderr") && printed.contains("capture-control-qdebug"),
+                 "the capture must see what is printed, or the check below proves nothing");
+        for (const QString& secret : { tx.fromAddr, tx.toAddrs[0].addr, memoHex, QString("0.12345678"), QString("12345678"), QString("hello") })
+            QVERIFY2(!printed.contains(secret.toUtf8()), qPrintable("printed: " + secret));
+        settleAndDelete(w);
+    }
+
+    // ======================================================================================================
+    // Wallet health in the status bar, and the "Expired" label in the transactions table (src/wallethealth.h)
+    // ======================================================================================================
+private:
+    // A node that answers getwalletinfo / listtransactions / gettransaction from what the test sets.
+    class HealthNode : public FakeNode {
+    public:
+        nlohmann::json walletinfo = nlohmann::json::object();
+        nlohmann::json listtransactions = nlohmann::json::array();
+        nlohmann::json gettransaction = nlohmann::json::object();
+        bool infoFails = false;
+    protected:
+        void handle(const Req& r, QTcpSocket* s) override {
+            if (r.method == "getwalletinfo") {
+                if (infoFails) rpcError(s, -32601, "Method not found"); else result(s, walletinfo);
+            } else if (r.method == "listtransactions") {
+                result(s, listtransactions);
+            } else if (r.method == "gettransaction") {
+                result(s, gettransaction);
+            } else {
+                FakeNode::handle(r, s);
+            }
+        }
+    };
+
+    static nlohmann::json walletInfoWith(const char* path, nlohmann::json value) {
+        nlohmann::json pool = {{"notes_unspent", 3}, {"notes_spent", 9}, {"witness_ready", 3}, {"witness_missing", 0}, {"witness_stale", 0},
+                               {"unconfirmed", 0}, {"unmined_dead", 0}, {"witnesses_held_unspent", 3}, {"witnesses_held_spent", 0}};
+        nlohmann::json h = {{"tip_height", 2000000}, {"checkpoint_height", 1999990}, {"witness_cache_size", 100},
+                            {"witness_rebuild_pending", false}, {"sapling", pool}, {"sprout", pool},
+                            {"pending_sends", {{"in_mempool", 0}, {"not_in_mempool", 0}, {"expiring_soon", 0}, {"expired", 0}, {"conflicted", 0}}}};
+        const std::string p(path);
+        if (!p.empty()) {
+            const auto dot = p.find('.');
+            if (dot == std::string::npos) h[p] = value;
+            else h[p.substr(0, dot)][p.substr(dot + 1)] = value;
+        }
+        return {{"walletversion", 60000}, {"balance", 1.5}, {"health", h}};
+    }
+
+    // Ask the node and wait until the answer has been applied.
+    void pollHealth(MainWindow* w, HealthNode& node) {
+        const int before = node.count("getwalletinfo");
+        w->getRPC()->refreshWalletHealth(true);
+        QTRY_VERIFY_WITH_TIMEOUT(node.count("getwalletinfo") > before, 5000);
+        QTest::qWait(80);                      // the answer is applied on the next turn of the event loop
+    }
+
+private slots:
+    void health_lineAppearsOnlyWhenSomethingNeedsAttention_data() {
+        QTest::addColumn<QString>("path");
+        QTest::addColumn<QString>("value");     // json text
+        QTest::addColumn<bool>("shown");
+        QTest::addColumn<QString>("needle");
+        QTest::newRow("healthy")                    << ""                                   << "null" << false << "";
+        QTest::newRow("witness rebuild pending")    << "witness_rebuild_pending"            << "true" << true  << "being rebuilt";
+        QTest::newRow("notes without a proof")      << "sapling.witness_missing"            << "4"    << true  << "4 shielded note(s)";
+        QTest::newRow("checkpoint far behind")      << "checkpoint_height"                  << "1990000" << true << "10000 blocks ago";
+        QTest::newRow("send not in the mempool")    << "pending_sends.not_in_mempool"       << "1"    << true  << "not in the node's mempool";
+        QTest::newRow("send expiring soon")         << "pending_sends.expiring_soon"        << "2"    << true  << "will expire within a few blocks";
+        QTest::newRow("send expired")               << "pending_sends.expired"              << "1"    << true  << "expired without being mined";
+        QTest::newRow("send conflicted")            << "pending_sends.conflicted"           << "1"    << true  << "will never confirm";
+        QTest::newRow("send in the mempool is fine") << "pending_sends.in_mempool"          << "5"    << false << "";
+    }
+    void health_lineAppearsOnlyWhenSomethingNeedsAttention() {
+        QFETCH(QString, path); QFETCH(QString, value); QFETCH(bool, shown); QFETCH(QString, needle);
+        HealthNode node;
+        node.walletinfo = walletInfoWith(path.toUtf8().constData(), nlohmann::json::parse(value.toStdString()));
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        Settings::getInstance()->setSyncing(false);
+        pollHealth(w, node);
+        QVERIFY(w->healthLabel != nullptr);
+        QCOMPARE(w->healthLabel->isVisibleTo(w), shown);
+        if (shown) {
+            QVERIFY2(w->healthLabel->text().contains("Wallet needs attention"), qPrintable(w->healthLabel->text()));
+            QVERIFY2(w->healthLabel->toolTip().contains(needle), qPrintable(w->healthLabel->toolTip()));
+        } else {
+            QVERIFY(w->healthLabel->text().isEmpty());
+        }
+        settleAndDelete(w);
+    }
+
+    // Attention appears, then clears when the node reports it healthy again; an older node (no health) shows nothing.
+    void health_lineClearsAgainAndOlderNodesShowNothing() {
+        HealthNode node;
+        node.walletinfo = walletInfoWith("pending_sends.expired", 1);
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        Settings::getInstance()->setSyncing(false);
+        pollHealth(w, node);
+        QVERIFY(w->healthLabel->isVisibleTo(w));
+
+        node.walletinfo = walletInfoWith("", nullptr);
+        pollHealth(w, node);
+        QVERIFY(!w->healthLabel->isVisibleTo(w));
+
+        node.walletinfo = walletInfoWith("pending_sends.expired", 1);
+        pollHealth(w, node);
+        QVERIFY(w->healthLabel->isVisibleTo(w));
+        node.walletinfo = nlohmann::json{{"walletversion", 60000}, {"balance", 1.5}};      // an older node: no "health"
+        pollHealth(w, node);
+        QVERIFY(!w->healthLabel->isVisibleTo(w));
+
+        // no node: nothing to report, and the old line is not left behind
+        node.walletinfo = walletInfoWith("pending_sends.expired", 1);
+        pollHealth(w, node);
+        QVERIFY(w->healthLabel->isVisibleTo(w));
+        w->getRPC()->noConnection();
+        QVERIFY(!w->healthLabel->isVisibleTo(w));
+        settleAndDelete(w);
+    }
+
+    // While the node is still catching up, a stale checkpoint and missing proofs are normal and stay quiet.
+    void health_quietWhileSyncing() {
+        HealthNode node;
+        node.walletinfo = walletInfoWith("checkpoint_height", 1000);
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        Settings::getInstance()->setSyncing(true);
+        pollHealth(w, node);
+        QVERIFY(!w->healthLabel->isVisibleTo(w));
+        Settings::getInstance()->setSyncing(false);
+        settleAndDelete(w);
+    }
+
+    // The table: a send the node calls expired reads "Expired" with its funds explained, with no wrapped confirmation
+    // count (the node reports -1 for a transaction in neither a block nor the mempool).
+    void tx_expiredSendIsLabelledExpired() {
+        HealthNode node;
+        node.listtransactions = nlohmann::json::array({
+            { {"category", "send"}, {"time", 1700000300}, {"address", "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi"},
+              {"txid", std::string(64, 'e')}, {"amount", -1.0}, {"fee", -0.0001}, {"confirmations", -1}, {"status", "expired"} },
+            { {"category", "send"}, {"time", 1700000200}, {"address", "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi"},
+              {"txid", std::string(64, 'f')}, {"amount", -2.0}, {"fee", -0.0001}, {"confirmations", 0}, {"status", "pending"} },
+            { {"category", "send"}, {"time", 1700000100}, {"address", "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi"},
+              {"txid", std::string(64, 'd')}, {"amount", -3.0}, {"fee", -0.0001}, {"confirmations", 12}, {"status", "mined"} },
+            { {"category", "send"}, {"time", 1700000000}, {"address", "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi"},
+              {"txid", std::string(64, 'c')}, {"amount", -4.0}, {"fee", -0.0001}, {"confirmations", 7} }   // an older node: no status
+        });
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        w->getRPC()->testRefreshTransactions();
+        auto* model = const_cast<TxTableModel*>(w->getRPC()->getTransactionsModel());
+        QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(QModelIndex()), 4, 5000);
+
+        auto text = [&](int row, int role, int col = 0) { return model->data(model->index(row, col), role).toString(); };
+        QCOMPARE(text(0, Qt::DisplayRole), QString("Expired"));
+        QVERIFY(text(0, Qt::ToolTipRole).contains("funds returned to your balance") ||
+                text(0, Qt::ToolTipRole).contains("returned to your balance"));
+        QCOMPARE((long)model->getConfirmations(0), 0L);                  // not a wrapped -1
+        QCOMPARE(text(1, Qt::DisplayRole), QString("Sent"));            // pending is still a plain send
+        QCOMPARE(text(2, Qt::DisplayRole), QString("Sent"));
+        QCOMPARE(text(3, Qt::DisplayRole), QString("Sent"));            // no status from an older node: unchanged
+        QVERIFY(model->data(model->index(0, 0), Qt::ForegroundRole).value<QBrush>().color() != QColor("#d9822b"));   // not "pending" amber
+        settleAndDelete(w);
+    }
+
+    // The same for a shielded send, which the wallet knows from its own history and asks about by txid.
+    void tx_expiredShieldedSendIsLabelledExpired() {
+        HealthNode node;
+        const QString txid(64, 'b');
+        node.gettransaction = { {"txid", txid.toStdString()}, {"confirmations", -1}, {"status", "expired"} };
+        SentTxStore::deleteHistory();
+        SentTxStore::addToSentTx(sendTx(), txid);
+        MainWindow* w = makeWindow();
+        attachNode(w, node);
+        w->getRPC()->testRefreshSentZTrans();
+        auto* model = const_cast<TxTableModel*>(w->getRPC()->getTransactionsModel());
+        QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(QModelIndex()), 1, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(model->data(model->index(0, 0), Qt::DisplayRole).toString(), QString("Expired"), 5000);
+        QCOMPARE((long)model->getConfirmations(0), 0L);
+        SentTxStore::deleteHistory();
+
+        // and once it is mined it is a plain send again
+        node.gettransaction = { {"txid", txid.toStdString()}, {"confirmations", 3}, {"status", "mined"} };
+        SentTxStore::addToSentTx(sendTx(), txid);
+        w->getRPC()->testRefreshSentZTrans();
+        QTRY_COMPARE_WITH_TIMEOUT(model->data(model->index(0, 0), Qt::DisplayRole).toString(), QString("Sent"), 5000);
+        SentTxStore::deleteHistory();
+        settleAndDelete(w);
+    }
 };
 
 int main(int argc, char* argv[]) {

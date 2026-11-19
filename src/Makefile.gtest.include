@@ -59,6 +59,8 @@ zcash_gtest_SOURCES += \
 	wallet/gtest/test_wallet.cpp \
 	wallet/gtest/test_wallet_oversize.cpp \
 	wallet/gtest/test_wallet_note_state.cpp \
+	wallet/gtest/test_wallet_health.cpp \
+	wallet/gtest/test_wallet_sendjournal.cpp \
 	wallet/gtest/test_wallet_perf.cpp \
 	wallet/gtest/test_wallet_witness_index.cpp
 endif
