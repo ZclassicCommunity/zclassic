@@ -61,6 +61,7 @@ static bool secret_token(const char *s, size_t n)
 {
     for (size_t i = 0; i < sizeof exact_names / sizeof exact_names[0]; i++)
         if (strlen(exact_names[i]) == n && !memcmp(s, exact_names[i], n)) return true;
+    if (n > 11 && !memcmp(s + n - 11, "SpendingKey", 11)) return true;   /* SaplingExtendedSpendingKey, SproutSpendingKey */
     for (size_t i = 0; i < sizeof word_names / sizeof word_names[0]; i++)
         if (has_word(s, n, word_names[i])) return true;
     return false;
@@ -101,12 +102,12 @@ static bool call_at(const char *s, size_t i, size_t *namelen, bool *is_cout)
 {
     *is_cout = false;
     if (i && (lint_idc((unsigned char)s[i - 1]) || s[i - 1] == '.' || s[i - 1] == '>')) return false;
-    if (i && s[i - 1] == ':') {
-        /* qualified: allow std::cout only */
-        if (strncmp(s + i, "cout", 4) || i < 5 || strncmp(s + i - 5, "std::", 5)) return false;
-        return false; /* handled at the "std" start */
+    if (i && s[i - 1] == ':') return false;   /* qualified names are handled at the "std" start */
+    if (!strncmp(s + i, "std::cout", 9) || !strncmp(s + i, "std::cerr", 9)) { *namelen = 9; *is_cout = true; return true; }
+    /* bare cout/cerr after `using namespace std` */
+    if ((!strncmp(s + i, "cout", 4) || !strncmp(s + i, "cerr", 4)) && !lint_idc((unsigned char)s[i + 4])) {
+        *namelen = 4; *is_cout = true; return true;
     }
-    if (!strncmp(s + i, "std::cout", 9)) { *namelen = 9; *is_cout = true; return true; }
     for (size_t c = 0; c < sizeof call_names / sizeof call_names[0]; c++) {
         size_t k = strlen(call_names[c]);
         if (!strncmp(s + i, call_names[c], k) && !lint_idc((unsigned char)s[i + k])) {

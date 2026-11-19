@@ -60,7 +60,10 @@ static bool sh_compare(const char *l)
 static bool sh_test_line(const char *l)
 {
     while (*l == ' ' || *l == '\t') l++;
-    return *l != '#' && sh_time_word(l) && sh_compare(l);
+    if (*l == '#') return false;
+    if ((!strncmp(l, "echo", 4) && (l[4] == ' ' || l[4] == '\t' || !l[4])) || !strncmp(l, "printf ", 7)) return false;   /* a report, not an assertion */
+    if (!strstr(l, "[") && !strstr(l, "test ") && !strstr(l, "((")) return false;   /* needs a test command */
+    return sh_time_word(l) && sh_compare(l);
 }
 
 static bool c_assert_head(const char *s, size_t n)
@@ -112,12 +115,28 @@ static long scan_c(const char *raw, const char *scrub)
         else if (c == ')' && depth > 0) depth--;
         if (i == len || (depth == 0 && (c == ';' || c == '{' || c == '}'))) {
             size_t n = i - st;
-            size_t rn = n; /* the raw text runs to the end of the line, so a trailing override comment counts */
-            while (raw[st + rn] && raw[st + rn] != '\n') rn++;
+            /* The override window starts at the statement's first code character (comments are blanked in scrub),
+             * so the previous statement's trailing comment cannot excuse this one; it runs to the end of the
+             * last line so a trailing override comment counts. */
+            size_t ws = st;
+            while (ws < i && isspace((unsigned char)scrub[ws])) ws++;
+            size_t rn = i - ws;
+            while (raw[ws + rn] && raw[ws + rn] != '\n') rn++;
             char *chunk = malloc(n + 1), *rc = malloc(rn + 1);
             if (!chunk || !rc) { fprintf(stderr, "zcl-lint: wallclock: out of memory\n"); exit(2); }
             memcpy(chunk, scrub + st, n); chunk[n] = '\0';
-            memcpy(rc, raw + st, rn); rc[rn] = '\0';
+            memcpy(rc, raw + ws, rn); rc[rn] = '\0';
+            /* A *_MESSAGE macro's message argument is not the condition: only the first argument is judged. */
+            char *mm = strstr(chunk, "_MESSAGE");
+            if (mm) {
+                char *p = strchr(mm, '(');
+                int d = 0;
+                for (; p && *p; p++) {
+                    if (*p == '(') d++;
+                    else if (*p == ')') d--;
+                    else if (*p == ',' && d == 1) { *p = '\0'; break; }
+                }
+            }
             if (c_assert_head(chunk, n) && c_clock(chunk) && c_compare(chunk) && !strstr(rc, "real-clock:")) hits++;
             free(chunk); free(rc);
             st = i + 1;

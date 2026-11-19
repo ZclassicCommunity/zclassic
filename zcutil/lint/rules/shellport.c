@@ -97,6 +97,72 @@ static bool sets_pipefail(const char *s)
     return set && set < p;
 }
 
+/* Shell scrubber that keeps command substitutions: literal text of quotes and comments is blanked, but the code
+ * inside $(...) and backticks within double quotes survives (blanking it hid `make -j"$(nproc)"`). A `$(` or
+ * backtick inside double quotes becomes ';' so its first word sits at command position. The mode stack carries
+ * across lines like the quote state of lint_scrub_sh_line. */
+#define SCRUB_DEPTH 16
+struct scrub { char mode[SCRUB_DEPTH]; int paren[SCRUB_DEPTH]; int top; };   /* mode: c code, s ', d ", b backtick */
+
+static void scrub_push(struct scrub *st, char m)
+{
+    if (st->top + 1 < SCRUB_DEPTH) { st->top++; st->mode[st->top] = m; st->paren[st->top] = 0; }
+}
+
+static void sh_scrub(char *s, struct scrub *st)
+{
+    for (size_t i = 0; s[i]; i++) {
+        char m = st->mode[st->top];
+        if (m == 's') {
+            if (s[i] == '\'') st->top--;
+            s[i] = ' ';
+        } else if (m == 'd') {
+            if (s[i] == '\\' && s[i + 1]) { s[i] = ' '; i++; s[i] = ' '; continue; }
+            if (s[i] == '"') { st->top--; s[i] = ' '; }
+            else if (s[i] == '$' && s[i + 1] == '(' && s[i + 2] != '(') { s[i] = ' '; i++; s[i] = ';'; scrub_push(st, 'c'); }
+            else if (s[i] == '`') { s[i] = ';'; scrub_push(st, 'b'); }
+            else s[i] = ' ';
+        } else {
+            if (s[i] == '\\' && s[i + 1]) { i++; continue; }
+            if (s[i] == '\'') { s[i] = ' '; scrub_push(st, 's'); }
+            else if (s[i] == '"') { s[i] = ' '; scrub_push(st, 'd'); }
+            else if (m == 'b' && s[i] == '`') { s[i] = ';'; st->top--; }
+            else if (st->top > 0 && m == 'c' && s[i] == '(') st->paren[st->top]++;
+            else if (st->top > 0 && m == 'c' && s[i] == ')') {
+                if (st->paren[st->top] > 0) st->paren[st->top]--; else { s[i] = ';'; st->top--; }
+            } else if (s[i] == '#' && (i == 0 || isspace((unsigned char)s[i - 1]) || strchr(";&|(", s[i - 1]))) {
+                memset(s + i, ' ', strlen(s + i));
+                return;
+            }
+        }
+    }
+}
+
+/* Heredoc delimiters opened on this raw line; scrubbed line s marks which '<' are real code. */
+#define MAX_HD 4
+static int heredocs(const char *raw, const char *s, char dl[MAX_HD][128], bool strip[MAX_HD])
+{
+    int n = 0;
+    if (strstr(s, "((")) return 0;   /* arithmetic shift, not a heredoc */
+    for (size_t i = 0; raw[i] && raw[i + 1] && n < MAX_HD; i++) {
+        if (raw[i] != '<' || raw[i + 1] != '<' || s[i] != '<') continue;
+        size_t j = i + 2;
+        if (raw[j] == '<') { i = j; continue; }   /* here-string */
+        bool st = raw[j] == '-';
+        if (st) j++;
+        while (raw[j] == ' ' || raw[j] == '\t') j++;
+        char q = 0;
+        if (raw[j] == '\'' || raw[j] == '"') q = raw[j++]; else if (raw[j] == '\\') j++;
+        size_t k = 0;
+        while (raw[j] && k < 127 && (q ? raw[j] != q : (isalnum((unsigned char)raw[j]) || raw[j] == '_'))) dl[n][k++] = raw[j++];
+        dl[n][k] = '\0';
+        i = j;
+        if (!k || (!q && !isalpha((unsigned char)dl[n][0]) && dl[n][0] != '_')) continue;
+        strip[n++] = st;
+    }
+    return n;
+}
+
 static void scan_line(char *scrub, bool pipefail, long *cnt)
 {
     char *seg = scrub;
@@ -126,16 +192,33 @@ int lint_rule_shellport(bool update)
         scanned++;
         long cnt[K_COUNT] = { 0 };
         bool pipefail = false;
-        char quote = 0;
+        struct scrub st;
+        memset(&st, 0, sizeof st);
+        st.mode[0] = 'c';
+        char hd[MAX_HD][128];
+        bool hd_strip[MAX_HD];
+        int nhd = 0, hd_at = 0;   /* pending heredoc bodies: skip lines (data, not commands) up to each delimiter */
         for (char *s = txt; *s;) {
             char *e = strchr(s, '\n');
             if (e) *e = '\0';
+            if (nhd > 0) {
+                const char *l = s;
+                if (hd_strip[hd_at]) while (*l == '\t') l++;
+                size_t len = strlen(l);
+                if (len && l[len - 1] == '\r') len--;
+                if (strlen(hd[hd_at]) == len && !strncmp(l, hd[hd_at], len) && ++hd_at == nhd) nhd = hd_at = 0;
+                if (!e) break;
+                s = e + 1;
+                continue;
+            }
             char *raw = lint_xstrdup(s);
-            lint_scrub_sh_line(s, &quote);
+            sh_scrub(s, &st);
+            int found = st.top == 0 ? heredocs(raw, s, hd, hd_strip) : 0;
             if (!strstr(raw, "port-ok:")) {
                 if (sets_pipefail(s)) pipefail = true;
                 scan_line(s, pipefail, cnt);
             }
+            nhd = found; hd_at = 0;
             free(raw);
             if (!e) break;
             s = e + 1;

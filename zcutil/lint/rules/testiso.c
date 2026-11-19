@@ -27,10 +27,12 @@ static bool in_scope(const char *p)
     return lint_is_shell_file(p) || lint_is_c_source(p);
 }
 
-static bool comment_line(const char *l)
+static bool comment_line(const char *l, bool c_src)
 {
     while (*l == ' ' || *l == '\t') l++;
-    return *l == '#' || (l[0] == '/' && (l[1] == '/' || l[1] == '*')) || (l[0] == '*' && l[1] != '\0');
+    /* a leading star is a block-comment line only in C sources; in shell it is a case arm */
+    return *l == '#' || (l[0] == '/' && (l[1] == '/' || l[1] == '*')) ||
+           (c_src && l[0] == '*' && (l[1] == ' ' || l[1] == '/' || l[1] == '\0'));
 }
 
 /* ci: case-insensitive */
@@ -90,10 +92,10 @@ int lint_rule_testiso(bool update)
             s = e + 1;
         }
         long tmp = 0, dd = 0, port = 0;
-        bool rpc = is_rpc_test_sh(path);
+        bool rpc = is_rpc_test_sh(path), csrc = lint_is_c_source(path);
         for (size_t i = 0; i < n; i++) {
             const char *l = ln[i];
-            if (comment_line(l) || strstr(l, "iso-ok:")) continue;
+            if (comment_line(l, csrc) || strstr(l, "iso-ok:")) continue;
             if (strstr(l, "/tmp/") && !strstr(l, "mktemp")) tmp++;
             if (has_default_datadir(l)) {
                 size_t a = i, b = i;

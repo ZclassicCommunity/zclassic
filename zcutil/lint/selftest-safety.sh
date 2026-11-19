@@ -53,11 +53,15 @@ void c(const std::string &mnemonic, int walletSeed, const CKey &key) {
     LogPrintf("%s\n", GetPrivKey());
     qDebug() << "x"; LogPrintf("ok %s\n", mnemonic.c_str()); // log-ok: test of the override
 }
+void d(const std::string &strWalletPass, int x) {
+    cerr << strWalletPass;
+    std::cerr << SproutSpendingKey(x);
+}
 EOF
 track
-run 1 'wallet/src/leak.cpp: 6 new' secretlog
+run 1 'wallet/src/leak.cpp: 8 new' secretlog
 out=$("$bin" --root . secretlog 2>&1)
-for l in 2 5 7 10 11 12; do
+for l in 2 5 7 10 11 12 16 17; do
     ok; printf '%s\n' "$out" | grep -q "wallet/src/leak.cpp:$l: secret" || bad "secretlog: leak.cpp:$l not reported: $out"
 done
 ok; printf '%s\n' "$out" | grep -q 'leak.cpp:13' && bad "secretlog: log-ok line was flagged"
@@ -94,13 +98,16 @@ echo y > ~/.zclassic/zclassic.conf
 zclassicd -datadir=$d
 zclassicd -listen=0 \
     -conf=$HOME/.zclassic/zclassic.conf
+case $x in
+*) cp f /tmp/x ;;
+esac
 EOF
 printf 'void t() { fopen("/tmp/x.dat", "w"); const char *d = "%%APPDATA%%/Zclassic"; }
 ' > src/test/bad.cpp
 track
 run 1 'qa/rpc-tests/bad.sh:datadir: 2 new' testiso
 run 1 'qa/rpc-tests/bad.sh:port: 1 new' testiso
-run 1 'qa/rpc-tests/bad.sh:tmp: 1 new' testiso
+run 1 'qa/rpc-tests/bad.sh:tmp: 2 new' testiso
 run 1 'src/test/bad.cpp:datadir: 1 new' testiso
 run 1 'src/test/bad.cpp:tmp: 1 new' testiso
 run 1 'NOT updated' testiso --update-baseline
@@ -135,6 +142,23 @@ ps | grep -q foo
 grep -q foo f || true
 cat f | grep -q bar
 x=ss; echo $x
+make -j"$(nproc)"
+x="$(readlink -f $0)"
+[ -n "$(ss -ltn)" ] && echo "literal ss nproc"
+cat <<'DATA'
+sed -i evil f
+DATA
+cat <<\ESC
+stat -c %s f
+ESC
+sed -i s/q/r/ g
+EOF
+cat > c.sh <<'EOF'
+#!/bin/sh
+cat <<'X'
+set -o pipefail
+X
+ps | grep -q foo
 EOF
 cat > b.sh <<'EOF'
 #!/bin/sh
@@ -151,11 +175,11 @@ grep -v '^#' zcutil/lint/shellport.txt | sort > got.txt
 cat > want.txt <<'EOF'
 a.sh:date-d	1
 a.sh:grep-P	1
-a.sh:nproc	2
+a.sh:nproc	3
 a.sh:pipefail-grep-q	2
-a.sh:readlink-f	1
-a.sh:sed-i	2
-a.sh:ss	1
+a.sh:readlink-f	2
+a.sh:sed-i	3
+a.sh:ss	2
 a.sh:stat-c	1
 a.sh:timeout	1
 EOF
@@ -175,6 +199,7 @@ while [ $i -lt 10 ]; do i=$((i + 1)); done
 [ "$took" -gt 3 ] && exit 1
 [ $((SECONDS - start)) -ge 9 ]  # real-clock: bounded wait
 echo "elapsed $elapsed"
+echo "took $(( $(date +%s) - t0 ))s z->z"
 EOF
 cat > src/test/t.cpp <<'EOF'
 TEST(a, b) {
@@ -184,15 +209,18 @@ TEST(a, b) {
         std::chrono::steady_clock::now() - t0 < s);
     EXPECT_EQ(x, 1);
     BOOST_CHECK(GetTime() - start < 10); // real-clock: mocked
+    BOOST_CHECK(GetTime() - n < 1); // real-clock: x
+    BOOST_CHECK(GetTime() - n < 2);
+    BOOST_CHECK_MESSAGE(nTime <= GetAdjustedTime(), "now " << GetTime());
     // EXPECT_LT(elapsed, 3);
     auto elapsed = now() - t0;
     SetMockTime(100);
 }
 EOF
 track
-run 0 'created (2 paths, 5)' wallclock --update-baseline
+run 0 'created (2 paths, 6)' wallclock --update-baseline
 printf 'EXPECT_GT(elapsed, 1);\n' >> src/test/t.cpp; track
-run 1 'src/test/t.cpp: 4, baseline 3 (rose)' wallclock
+run 1 'src/test/t.cpp: 5, baseline 4 (rose)' wallclock
 run 1 'NOT updated' wallclock --update-baseline
 
 newrepo clockhollow
