@@ -19,6 +19,7 @@ src/script/*	boost:script_tests boost:script_P2SH_tests boost:scriptnum_tests bo
 src/primitives/*|src/consensus/*	boost:transaction_tests boost:CheckBlock_tests boost:main_tests gtest:CheckBlock gtest:checktransaction_tests gtest:Transaction gtest:Validation
 src/main.*|src/chain.*|src/parkedblockindex.h	boost:findmostwork_tests boost:parkedblockindex_tests boost:skiplist_tests boost:DoS_tests boost:main_tests boost:coins_tests qa:qa/rpc-tests/chain_crash_sweep.sh
 src/coins.*|src/txdb.*|src/dbwrapper.*	boost:coins_tests boost:dbwrapper_tests
+src/chain.*|src/txdb.*|src/rpc/blockchain.cpp	boost:blockindex_solution_tests qa:qa/rpc-tests/blockindex_header_restart.sh
 src/merkleblock.*|src/bloom.*	boost:pmt_tests boost:bloom_tests
 
 # ---- mempool and policy

@@ -119,7 +119,10 @@ UniValue blockheaderToJSON(const CBlockIndex* blockindex)
     result.push_back(Pair("finalsaplingroot", blockindex->hashFinalSaplingRoot.GetHex()));
     result.push_back(Pair("time", (int64_t)blockindex->nTime));
     result.push_back(Pair("nonce", blockindex->nNonce.GetHex()));
-    result.push_back(Pair("solution", HexStr(blockindex->nSolution)));
+    std::vector<unsigned char> solution;
+    if (!blockindex->GetSolution(solution))
+        throw JSONRPCError(RPC_DATABASE_ERROR, "Block index solution unavailable for " + blockindex->GetBlockHash().GetHex());
+    result.push_back(Pair("solution", HexStr(solution)));
     result.push_back(Pair("bits", strprintf("%08x", blockindex->nBits)));
     result.push_back(Pair("difficulty", GetDifficulty(blockindex)));
     result.push_back(Pair("chainwork", blockindex->nChainWork.GetHex()));

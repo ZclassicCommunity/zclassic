@@ -249,6 +249,10 @@ public:
     uint256 nNonce;
     std::vector<unsigned char> nSolution;
 
+    //! (memory only) true for an entry loaded from the block tree: nSolution is then
+    //! left empty and GetSolution() reads the solution from disk by block hash.
+    bool fSolutionOnDisk = false;
+
     //! (memory only) Sequential id assigned to distinguish order in which blocks are received.
     uint32_t nSequenceId;
 
@@ -285,6 +289,7 @@ public:
         nBits          = 0;
         nNonce         = uint256();
         nSolution.clear();
+        fSolutionOnDisk = false;
     }
 
     CBlockIndex()
@@ -328,20 +333,13 @@ public:
         return ret;
     }
 
-    CBlockHeader GetBlockHeader() const
-    {
-        CBlockHeader block;
-        block.nVersion       = nVersion;
-        if (pprev)
-            block.hashPrevBlock = pprev->GetBlockHash();
-        block.hashMerkleRoot = hashMerkleRoot;
-        block.hashFinalSaplingRoot   = hashFinalSaplingRoot;
-        block.nTime          = nTime;
-        block.nBits          = nBits;
-        block.nNonce         = nNonce;
-        block.nSolution      = nSolution;
-        return block;
-    }
+    //! The Equihash solution: nSolution, or the stored one when fSolutionOnDisk.
+    //! Returns false (and logs) when the stored solution cannot be read.
+    bool GetSolution(std::vector<unsigned char>& out) const;
+
+    //! Throws std::runtime_error when the solution cannot be read: a header with
+    //! an empty solution is never returned.
+    CBlockHeader GetBlockHeader() const;
 
     uint256 GetBlockHash() const
     {
