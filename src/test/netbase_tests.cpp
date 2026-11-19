@@ -129,6 +129,45 @@ BOOST_AUTO_TEST_CASE(onion_v3_test)
     BOOST_CHECK(svc.GetPort() == 8333);
 }
 
+// While the embedded Tor restarts, its proxies point at the fence: every
+// connection through them fails closed before a socket is opened, so no local
+// listener (on any port the OS lets it bind) can stand in for Tor.
+BOOST_AUTO_TEST_CASE(proxy_fence_refuses_before_connecting)
+{
+    const proxyType fence(ProxyFenceAddress(), true);
+    BOOST_CHECK(fence.IsValid()); // SetProxy() would silently ignore an invalid one
+    BOOST_CHECK(IsProxyFence(fence));
+    BOOST_CHECK_EQUAL(ProxyFenceAddress().GetPort(), 0);
+    BOOST_CHECK(!IsProxyFence(proxyType(CService("127.0.0.1", 1))));
+    BOOST_CHECK(!IsProxyFence(proxyType(CService("127.0.0.1", 9050))));
+
+    BOOST_CHECK(SetProxy(NET_ONION, fence));
+    BOOST_CHECK(SetProxy(NET_IPV4, fence));
+    BOOST_CHECK(SetNameProxy(fence));
+    proxyType got;
+    BOOST_CHECK(GetProxy(NET_ONION, got) && IsProxyFence(got));
+
+    CService onion(CNetAddr("pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion"), 8033);
+    CService clear(CNetAddr("1.2.3.4"), 8033);
+    const CService* dests[] = {&onion, &clear};
+    for (const CService* dest : dests) {
+        SOCKET s = INVALID_SOCKET;
+        bool proxyFailed = false;
+        BOOST_CHECK(!ConnectSocket(*dest, s, 5000, &proxyFailed));
+        BOOST_CHECK(proxyFailed);
+        BOOST_CHECK(s == INVALID_SOCKET);
+    }
+
+    CService resolved;
+    SOCKET s = INVALID_SOCKET;
+    bool proxyFailed = false;
+    BOOST_CHECK(!ConnectSocketByName(resolved, s, "seed.example.invalid", 8033, 5000, &proxyFailed));
+    BOOST_CHECK(proxyFailed);
+    BOOST_CHECK(s == INVALID_SOCKET);
+
+    ClearProxies();
+}
+
 BOOST_AUTO_TEST_CASE(subnet_test)
 {
     BOOST_CHECK(CSubNet("1.2.3.0/24") == CSubNet("1.2.3.0/255.255.255.0"));

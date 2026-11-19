@@ -36,7 +36,7 @@ src/crypto/*|src/hash.*	boost:crypto_tests boost:hash_tests gtest:Sha256Differen
 src/bootstrap*	boost:bootstrap_snapshot_protocol_tests boost:bootstrap_resume_tests boost:bootstrap_resume_logic_tests boost:bootstrap_peer_board_tests boost:bootstrap_onion_tests boost:p2p_sync_tests
 src/p2pserve.*	boost:p2p_message_limits_tests boost:DoS_tests boost:p2p_sync_tests
 src/net.*|src/netoutbound.*|src/protocol.*|src/netbase.*|src/addrman.*|src/banlist.*|src/peersdat.*|src/addrv2.h	boost:netoutbound_tests boost:p2p_sync_tests boost:netbase_tests boost:addrv2_tests boost:onion_v3_tests boost:addrman_tests boost:net_ban_tests boost:DoS_tests
-src/torcontrol.*|src/embeddedtor.*|src/c23/tor/*	boost:torcontrol_tests boost:embeddedtor_tests boost:bootstrap_onion_tests boost:onion_v3_tests
+src/torcontrol.*|src/embeddedtor.*|src/torwatch.*|src/c23/tor/*	boost:torcontrol_tests boost:embeddedtor_tests boost:torwatch_tests boost:bootstrap_onion_tests boost:onion_v3_tests
 
 # ---- RPC and utilities
 src/rpc/*|src/httprpc.*|src/httpserver.*|src/asyncrpc*	boost:rpc_tests gtest:rpc gtest:HTTPRPC gtest:AsyncRPCOperationId

@@ -1346,15 +1346,6 @@ static void InterruptBootstrapServeFreeze()
  *  Ensure that Bitcoin is running in a usable environment with all
  *  necessary library support.
  */
-/** Scheduled every few seconds while -embeddedtor is on (see Step 6). */
-static void EmbeddedTorWatchdog()
-{
-    if (ShutdownRequested() || !EmbeddedTorRunning() || EmbeddedTorAlive())
-        return;
-    LogPrintf("tor: the embedded Tor has exited; shutting down (-embeddedtor never continues without Tor)\n");
-    StartShutdown();
-}
-
 bool InitSanityCheck(void)
 {
     boost::filesystem::path sapling_output = ZC_GetParamsDir() / "sapling-output.params";
@@ -2418,7 +2409,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             SetProxy(NET_ONION, addrEmbedded);
             SetLimited(NET_ONION, false);
         }
-        if (IsLimited(NET_IPV4) && IsLimited(NET_IPV6) && !HaveNameProxy()) {
+        const bool fTorClearnetProxies = IsLimited(NET_IPV4) && IsLimited(NET_IPV6) && !HaveNameProxy();
+        if (fTorClearnetProxies) {
             // Onion-only node (-onlynet=onion) without -proxy: host names
             // (DNS seeds, -addnode, -seednode, -connect) must never reach the
             // system resolver. Hand them to Tor instead.
@@ -2446,10 +2438,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 LogPrintf("tor: onion-only node without -bind, listening on 127.0.0.1 only\n");
             }
         }
-        // A node that asked for Tor never continues without it: if Tor exits
-        // on its own, shut down instead of leaving its loopback ports free
-        // for another local process to take over.
-        scheduler.scheduleEvery(&EmbeddedTorWatchdog, 5);
+        // A Tor that exits is restarted in place and the node keeps running;
+        // meanwhile the proxies above fail closed (src/embeddedtor.cpp).
+        EmbeddedTorWatchStart(threadGroup, scheduler, strTorDataDir, embeddedTorMode, onionArg == "", fTorClearnetProxies, proxyRandomize);
     }
 
     // see Step 2: parameter interactions for more information about these

@@ -623,8 +623,8 @@ bool IsProxy(const CNetAddr &addr) {
 static bool ConnectThroughProxy(const proxyType &proxy, const std::string& strDest, int port, SOCKET& hSocketRet, int nTimeout, bool *outProxyConnectionFailed)
 {
     SOCKET hSocket = INVALID_SOCKET;
-    // first connect to proxy server
-    if (!ConnectSocketDirectly(proxy.proxy, hSocket, nTimeout)) {
+    // first connect to proxy server; a fenced proxy fails closed before any socket is opened
+    if (IsProxyFence(proxy) || !ConnectSocketDirectly(proxy.proxy, hSocket, nTimeout)) {
         if (outProxyConnectionFailed)
             *outProxyConnectionFailed = true;
         return false;
