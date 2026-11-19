@@ -24,11 +24,11 @@ check: $(TOOL)
 	$(CC) -std=c2x $(WARN) -fsyntax-only zcl-dev-flaky.c
 	$(TOOL) --selftest
 ifeq ($(EXEEXT),)
-	$(CC) $(STD) $(WARN) $(CFLAGS) -o $(BIN)/zcl-dev-flaky-test test/flaky_test.c
-	$(BIN)/zcl-dev-flaky-test $(TOOL)
+	$(CC) $(STD) $(WARN) $(CFLAGS) -o $(BIN)/flaky_test test/flaky_test.c
+	$(BIN)/flaky_test $(TOOL)
 endif
 
 clean:
-	rm -f $(BIN)/zcl-dev-flaky $(BIN)/zcl-dev-flaky.exe $(BIN)/zcl-dev-flaky-test
+	rm -f $(BIN)/zcl-dev-flaky $(BIN)/zcl-dev-flaky.exe $(BIN)/flaky_test
 
 .PHONY: all check clean

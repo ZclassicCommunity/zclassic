@@ -33,4 +33,4 @@ Exit codes: 0 data read, 1 a MISMATCH, 2 nothing readable (hollow) or bad argume
 - Only what local-ci recorded is here: no per-test timings inside a step, no log parsing.
 - `--json` prints the same data as one object (`outdirs_total`, `outdirs_read`, `unavailable`, `mismatch`, `steps`).
 
-`make -C zcutil/dev/timings check` runs `--selftest` and compares golden outputs over `test/fixture` (three good outdirs, one without receipts, one corrupt line, a MISMATCH, all unreadable). The driver is `test/timings_test.c` (C, for the same shell-lines reason as flaky); `UPDATE=1 zcutil/bin/zcl-dev-timings-test zcutil/bin/zcl-dev-timings zcutil/dev/timings/test` rewrites the goldens.
+`make -C zcutil/dev/timings check` runs `--selftest` and compares golden outputs over `test/fixture` (three good outdirs, one without receipts, one corrupt line, a MISMATCH, all unreadable). The driver is `test/timings_test.c` (C, for the same shell-lines reason as flaky); `UPDATE=1 zcutil/bin/timings_test zcutil/bin/zcl-dev-timings zcutil/dev/timings/test` rewrites the goldens.
