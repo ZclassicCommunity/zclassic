@@ -111,6 +111,7 @@
 #include <QTemporaryFile>
 #include <QRegularExpression>
 #include <cstdio>
+#include <fcntl.h>
 #ifdef Q_OS_WIN
 #include <io.h>
 #define ZQ_DUP _dup
@@ -125,32 +126,58 @@
 #define ZQ_CLOSE close
 #endif
 
+// Open a file for appending as a C runtime descriptor. QTemporaryFile::handle() is not one on Windows (it can be
+// the native HANDLE, which _dup2 rejects), so the capture opens its own descriptor on the file's name.
+static int zqOpenAppend(const QString& path) {
+#ifdef Q_OS_WIN
+    return _wopen(reinterpret_cast<const wchar_t*>(path.utf16()), _O_WRONLY | _O_APPEND | _O_BINARY);
+#else
+    return open(QFile::encodeName(path).constData(), O_WRONLY | O_APPEND);
+#endif
+}
+
+// qDebug reaches stderr only when Qt thinks there is a console: a Windows process without one (a GUI subsystem
+// binary, a redirected or detached run) sends it to OutputDebugString instead. While capturing, route every Qt
+// message to stderr ourselves so the capture sees the same text on every platform.
+static void zqCaptureMessage(QtMsgType type, const QMessageLogContext&, const QString& msg) {
+    fprintf(stderr, "%s
+", msg.toLocal8Bit().constData());
+    fflush(stderr);
+    if (type == QtFatalMsg) abort();
+}
+
 // Everything written to stdout and stderr while it lives (the descriptors, so std::cout, printf and qDebug all count).
 class StdCapture {
 public:
     StdCapture() {
         fflush(stdout); fflush(stderr); std::cout.flush();
         tmp.open();
+        tmp.flush();
+        cap = zqOpenAppend(tmp.fileName());
+        if (cap < 0) qFatal("StdCapture: cannot open the capture file");
         out = ZQ_DUP(ZQ_FILENO(stdout));
         err = ZQ_DUP(ZQ_FILENO(stderr));
-        ZQ_DUP2(tmp.handle(), ZQ_FILENO(stdout));
-        ZQ_DUP2(tmp.handle(), ZQ_FILENO(stderr));
+        ZQ_DUP2(cap, ZQ_FILENO(stdout));
+        ZQ_DUP2(cap, ZQ_FILENO(stderr));
+        prevHandler = qInstallMessageHandler(zqCaptureMessage);
     }
     QByteArray stop() {
         if (out < 0) return QByteArray();
+        qInstallMessageHandler(prevHandler);
         fflush(stdout); fflush(stderr); std::cout.flush();
         ZQ_DUP2(out, ZQ_FILENO(stdout));
         ZQ_DUP2(err, ZQ_FILENO(stderr));
-        ZQ_CLOSE(out); ZQ_CLOSE(err);
-        out = err = -1;
+        ZQ_CLOSE(out); ZQ_CLOSE(err); ZQ_CLOSE(cap);
+        out = err = cap = -1;
         QFile f(tmp.fileName());
-        f.open(QIODevice::ReadOnly);
+        if (!f.open(QIODevice::ReadOnly)) return QByteArray();
         return f.readAll();
     }
     ~StdCapture() { stop(); }
 private:
     QTemporaryFile tmp;
-    int out = -1, err = -1;
+    int out = -1, err = -1, cap = -1;
+    QtMessageHandler prevHandler = nullptr;
 };
 
 class FakeNode {
@@ -3521,7 +3548,7 @@ private slots:
         env.insert("MOCK_FIXTURES",
                    QDir(QCoreApplication::applicationDirPath()).filePath("../mock/fixtures"));
         mock.setProcessEnvironment(env);
-        mock.start(mockBin, {});
+        mock.start(mockBin, QStringList());
         if (!mock.waitForStarted(3000)) return;
         if (!waitForMockHealth(port, 3000)) { shutdownMock(mock, port); return; }
 
