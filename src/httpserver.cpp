@@ -453,7 +453,6 @@ bool InitHTTPServer()
     if (!ValidateRpcTuning(GetArg("-rpcthreads", DEFAULT_HTTP_THREADS),
                            GetArg("-rpcworkqueue", DEFAULT_HTTP_WORKQUEUE),
                            GetArg("-rpcservertimeout", DEFAULT_HTTP_SERVER_TIMEOUT), tuningErr)) {
-        LogPrintf("%s\n", tuningErr);
         uiInterface.ThreadSafeMessageBox(tuningErr, "", CClientUIInterface::MSG_ERROR);
         return false;
     }
