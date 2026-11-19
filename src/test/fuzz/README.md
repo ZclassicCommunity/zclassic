@@ -36,7 +36,21 @@ libraries are linked as built. The include and library flags are read from the
 configured `src/Makefile` (`BITCOIN_INCLUDES`, `BOOST_LIBS`, `BDB_LIBS`, ...),
 and the archive list copies the `test_bitcoin` `LDADD` in
 `src/Makefile.test.include`. If a toolchain change breaks the link, compare
-that list first; the replay mode needs only a C++ compiler and Boost.
+that list first; the replay mode needs only a C++ compiler and Boost. The
+dialect (`-std=`) is the last one the configured `CXX` and `CXXFLAGS` name.
+
+The script is run on Linux (GNU ld or lld, which take the archives in a
+`--start-group` ... `--end-group` group); on macOS it leaves the group out,
+since the system linker resolves across archives without one. Windows is not
+supported. All commands in this file are run from the repository root.
+
+## Known findings
+
+* `CInv::ToString` throws `std::out_of_range` for an inv type it does not
+  know (`CInv::GetCommand` throws it), and that is not
+  `std::ios_base::failure`. The harness only calls `IsKnownType` on decoded
+  invs, so it does not reach it; the fix belongs in `protocol.cpp` (tracked
+  with the wave-1 follow-ups), after which `ToString` can be fuzzed too.
 
 ## Local nightly use
 
@@ -79,12 +93,13 @@ accepted and every invalid one rejected exactly as before.
   locally made seeds with this harness's selector byte in front.
 * `corpus/tx`: `empty.bin` plus eight transactions taken from
   `src/test/data/tx_valid.json`, one per distinct hex length (smallest eight),
-  generated with:
+  generated from the repository root with the snippet below (it needs `xxd`,
+  which ships with vim):
 
   ```sh
   grep -o '^"[0-9a-f]\{40,\}",' src/test/data/tx_valid.json | tr -d '",' \
     | awk '{print length($0), $0}' | sort -n -s -k1,1 | awk '!s[$1]++ {print $2}' | head -8 \
-    | while read h; do i=$((i+1)); printf %s "$h" | xxd -r -p > corpus/tx/tx_valid_$i.bin; done
+    | while read h; do i=$((i+1)); printf %s "$h" | xxd -r -p > src/test/fuzz/corpus/tx/tx_valid_$i.bin; done
   ```
 
 Provenance of the Z23 seeds (Z23 path, git blob sha):

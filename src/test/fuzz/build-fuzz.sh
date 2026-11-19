@@ -5,7 +5,8 @@
 #
 # usage: build-fuzz.sh <builddir-with-configured-tree> <outdir> [cxx]
 #   builddir  the configured and built tree (the directory holding src/Makefile
-#             and src/libbitcoin_server.a); an in-tree build is the supported layout
+#             and src/libbitcoin_server.a); in-tree and out-of-tree builds both work (it is read through
+#             that src/Makefile)
 #   outdir    receives fuzz_block, fuzz_tx, fuzz_p2p_payload
 #   cxx       C++ compiler, default g++. A clang++ links libFuzzer
 #             (-fsanitize=fuzzer); any other compiler links replay_main.cpp,
@@ -62,6 +63,9 @@ for a in libbitcoin_wallet.a libbitcoin_server.a libzcl_tokenguard.a libzcl_tor.
 done
 # libbitcoin_consensus.a exists only in some configurations.
 [ -f "$SRC/libbitcoin_consensus.a" ] && ARCHIVES="$ARCHIVES $SRC/libbitcoin_consensus.a"
+# With ZMQ enabled, init.o needs CZMQNotificationInterface from libbitcoin_zmq.a
+# whenever the harness link pulls init.o in; the test_bitcoin LDADD does not list it.
+[ -f "$SRC/libbitcoin_zmq.a" ] && ARCHIVES="$ARCHIVES $SRC/libbitcoin_zmq.a"
 
 SAN="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 case $CXX in
@@ -69,10 +73,18 @@ case $CXX in
     *)       MODE=replay;    DRIVER="$HERE/replay_main.cpp"; COMPILE_SAN="$SAN" ;;
 esac
 
-# -std=gnu++17 is only needed if the tree was configured with it; follow the
-# tree's own CXX setting for the dialect when it names one.
-STD=$(mkv CXX | sed -n 's/.*\(-std=[a-z+0-9]*\).*/\1/p')
+# Follow the tree's own dialect: configure may name -std= in CXX and again in
+# CXXFLAGS, and the compiler obeys the last one, so take the last of the two.
+STD=$(echo "$(mkv CXX) $(mkv CXXFLAGS)" | sed -n 's/.*\(-std=[a-z+0-9]*\).*/\1/p')
 [ -n "$STD" ] || STD=-std=c++11
+
+# GNU ld and lld need the archives in a group (they depend on each other in
+# a cycle); the macOS linker resolves across archives on its own and has no
+# --start-group.
+case $(uname -s) in
+    Darwin) GROUP_BEGIN= ; GROUP_END= ;;
+    *)      GROUP_BEGIN=-Wl,--start-group; GROUP_END=-Wl,--end-group ;;
+esac
 
 # The include flags are relative to src/ (-I.), so compile from there.
 cd "$SRC"
@@ -82,8 +94,8 @@ for t in fuzz_block fuzz_tx fuzz_p2p_payload; do
     $CXX $STD -g -O1 $COMPILE_SAN -DHAVE_CONFIG_H $DEFS $DEFAULT_INCLUDES $CPPFLAGS $AM_CPPFLAGS $INCLUDES \
         -fwrapv -fno-strict-aliasing -pthread \
         "$HERE/$t.cpp" $DRIVER $LDFLAGS \
-        -Wl,--start-group $ARCHIVES $TOR_LIBS $BOOST_LIBS $BDB_LIBS $SSL_LIBS $CRYPTO_LIBS \
-        $EVENT_PT_LIBS $EVENT_LIBS $ZCASH_LIBS $TOR_SYS_LIBS $ZMQ_LIBS -lpthread -ldl -lm -Wl,--end-group \
+        $GROUP_BEGIN $ARCHIVES $TOR_LIBS $BOOST_LIBS $BDB_LIBS $SSL_LIBS $CRYPTO_LIBS \
+        $EVENT_PT_LIBS $EVENT_LIBS $ZCASH_LIBS $TOR_SYS_LIBS $ZMQ_LIBS -lpthread -ldl -lm $GROUP_END \
         -o "$OUT/$t"
 done
 echo "build-fuzz.sh: built $OUT/fuzz_block $OUT/fuzz_tx $OUT/fuzz_p2p_payload ($MODE)"
