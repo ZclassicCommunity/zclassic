@@ -799,6 +799,7 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-testblockindexinterval=<n>", "Test only: write the block index at most every <n> seconds while running (default: 3600, 300 during initial block download)");
         strUsage += HelpMessageOpt("-testprunetarget=<bytes>", "Test only (regtest): prune block files down to this many bytes, below the 550 MiB minimum of -prune");
         strUsage += HelpMessageOpt("-testmaxblockfilesize=<bytes>", "Test only (regtest): start a new block file after this many bytes (at least 4096; default: 134217728)");
+        strUsage += HelpMessageOpt("-bootstrapschedwindowms=<ms>", "Test only: scale the multi-server bootstrap download scheduler to this measuring window in milliseconds, so a small snapshot exercises it (default: off, the scheduler uses its 10 s window)");
         strUsage += HelpMessageOpt("-testcrashpoint=<name>[:<n>]", "Test only: _exit(77) the <n>th time the named wallet or chain-state write point is reached; the name any matches every point (default: off)");
         strUsage += HelpMessageOpt("-stopafterblockimport", strprintf("Stop running after importing blocks from disk (default: %u)", 0));
         strUsage += HelpMessageOpt("-nuparams=hexBranchId:activationHeight", "Use given activation height for specified network upgrade (regtest-only)");
