@@ -144,7 +144,7 @@ static bool isLongWarmupPhase(const QString& status) {
     static const char* kPhases[] = {
         "Verifying blocks", "Activating best chain", "Rewinding",
         "Loading block index", "Pruning blockstore", "Rescanning",
-        "Zapping", "Upgrading",
+        "Zapping", "Upgrading", "Reindexing",
     };
     for (const char* p : kPhases)
         if (status.contains(QLatin1String(p), Qt::CaseInsensitive)) return true;
@@ -1436,6 +1436,7 @@ void TestLogic::longWarmupPhase_data() {
     QTest::newRow("loading index")   << QString("Loading block index...") << true;
     QTest::newRow("rescanning")      << QString("Rescanning... 42%")      << true;
     QTest::newRow("upgrading")       << QString("Upgrading database")     << true;
+    QTest::newRow("reindexing")      << QString("Reindexing the block database: the block index is empty...") << true;
     QTest::newRow("case insens")     << QString("REWINDING blocks")       << true;
 }
 

@@ -157,6 +157,8 @@ extern CConditionVariable cvBlockChange;
 extern bool fExperimentalMode;
 extern bool fImporting;
 extern bool fReindex;
+/** Why this run reindexes (set once during start-up, before the RPC server answers; empty when it does not). */
+extern std::string strReindexReason;
 /** The block index about to be loaded came with an imported chain snapshot (a bootstrap install
  *  that is not verified yet, or -bootstrapdatadir in this run). Its failure marks are another
  *  node's: LoadBlockIndexDB does not keep them over RewindBlockIndex, as before 95499ca26.

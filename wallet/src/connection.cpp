@@ -1665,6 +1665,7 @@ bool ConnectionLoader::isLongWarmupPhase(const QString& status) {
         "Rescanning",
         "Zapping",
         "Upgrading",
+        "Reindexing",
     };
     for (const char* p : kPhases) {
         if (status.contains(QLatin1String(p), Qt::CaseInsensitive))

@@ -472,6 +472,21 @@ bool static InitWarning(const std::string &str)
     return true;
 }
 
+/**
+ * Tell the operator that a reindex is about to run without them having asked for it in this start
+ * (the block index was found empty next to block files, or an earlier -reindex was cut short): the
+ * debug log is off by default, so a node that silently spent hours rebuilding looked hung.
+ * The text goes to the RPC warmup status (what the Qt wallet's start-up screen shows), to stderr as a
+ * warning, and into getblockchaininfo ("reindexing", "reindexreason") once the RPC server answers.
+ */
+static void AnnounceAutomaticReindex(const std::string& reason)
+{
+    strReindexReason = reason;
+    const std::string msg = strprintf(_("Reindexing the block database: %s. This rebuilds the block index and chain state from the block files already on disk and can take several hours; the node is not stuck. It is safe to stop and restart the node at any time: an interrupted reindex resumes by itself."), reason);
+    uiInterface.InitMessage(msg);
+    InitWarning(msg);
+}
+
 bool static Bind(const CService &addr, unsigned int flags) {
     if (!(flags & BF_EXPLICIT) && IsLimited(addr))
         return false;
@@ -3041,6 +3056,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 // (flag found) run it again from the start with a wiped chainstate: the half-built
                 // one may be torn and no longer matches the index that is not loaded.
                 if (fReindex) {
+                    if (strReindexReason.empty())
+                        strReindexReason = "requested with -reindex (or by the start-up repair path)";
                     pblocktree->WriteReindexing(true);
                 } else {
                     bool fWasReindexing = false;
@@ -3059,9 +3076,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                         boost::filesystem::file_size(pathFirstBlockFile, ecFirstBlockFile) > 0 && !ecFirstBlockFile;
                     if (fWasReindexing) {
                         LogPrintf("An earlier -reindex did not finish: starting it again\n");
+                        AnnounceAutomaticReindex(_("an earlier -reindex did not finish, so it starts again from the beginning"));
                         fReindex = true;
                     } else if (!pblocktree->ReadLastBlockFile(nLastBlockFileRecorded) && fFirstBlockFileHoldsData) {
                         LogPrintf("The block index is empty but the block files hold blocks (an interrupted -reindex, or a removed index): reindexing them\n");
+                        AnnounceAutomaticReindex(_("the block index is empty but the block files hold blocks (an interrupted -reindex, or a removed index)"));
                         pblocktree->WriteReindexing(true);
                         fReindex = true;
                     }

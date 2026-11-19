@@ -759,6 +759,8 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
             "  \"headers\": xxxxxx,        (numeric) the current number of headers we have validated\n"
             "  \"initialblockdownload\": true|false, (boolean) whether the node considers itself in initial block download\n"
             "  \"syncphase\": \"xxxx\",  (string) synced|waiting_for_peers|downloading_headers|downloading_blocks|reindexing|importing\n"
+            "  \"reindexing\": true|false,  (boolean) the block index and chain state are being rebuilt from the block files\n"
+            "  \"reindexreason\": \"...\",  (string) why, when reindexing\n"
             "  \"connections\": n,        (numeric) number of peer connections\n"
             "  \"bestblockhash\": \"...\", (string) the hash of the currently best block\n"
             "  \"mediantime\" : ttt,       (numeric) The median block time of the current best block\n"
@@ -851,6 +853,8 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
         obj.push_back(Pair("syncphase", std::string(ClassifySyncPhase(fIBD, fReindex, fImporting, nConnections,
                                                                        (int)chainActive.Height(), nEstimatedHeight))));
         obj.push_back(Pair("connections", nConnections));
+        obj.push_back(Pair("reindexing", fReindex));
+        obj.push_back(Pair("reindexreason", fReindex ? strReindexReason : std::string()));
     }
     obj.push_back(Pair("bestblockhash",         chainActive.Tip()->GetBlockHash().GetHex()));
     obj.push_back(Pair("mediantime",            (int64_t)chainActive.Tip()->GetMedianTimePast()));

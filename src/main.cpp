@@ -71,6 +71,7 @@ int nScriptCheckThreads = 0;
 bool fExperimentalMode = false;
 bool fImporting = false;
 bool fReindex = false;
+std::string strReindexReason;
 bool fReindexChainState = false;
 bool fBlockIndexFromSnapshot = false;
 bool fTxIndex = false;
