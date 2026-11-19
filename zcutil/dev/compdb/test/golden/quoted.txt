@@ -1,0 +1,6 @@
+[
+{"directory": "@W@/quoted/src", "file": "@W@/quoted/src/q.cc", "arguments": ["g++", "-DPACKAGE_STRING=\"x y\"", "-DQ=a b", "-DE=a b", "-c", "-o", "q.o", "q.cc"]}
+]
+--- log
+entries 1, skipped 0, duplicates 0
+exit=0

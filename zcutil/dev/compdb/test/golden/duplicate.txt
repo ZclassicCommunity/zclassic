@@ -1,0 +1,6 @@
+[
+{"directory": "@W@/duplicate/src", "file": "@W@/duplicate/src/a.cc", "arguments": ["g++", "-DFIRST", "-c", "-o", "a1.o", "a.cc"]}
+]
+--- log
+entries 1, skipped 0, duplicates 1
+exit=0

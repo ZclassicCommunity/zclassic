@@ -1,0 +1,8 @@
+[
+{"directory": "@W@/recursive/src", "file": "@W@/recursive/src/after.cc", "arguments": ["g++", "-c", "-o", "after.o", "after.cc"]},
+{"directory": "@W@/recursive/src/sub", "file": "@W@/recursive/src/sub/leaf.cc", "arguments": ["g++", "-DLEAF", "-c", "-o", "leaf.o", "leaf.cc"]},
+{"directory": "@W@/recursive/src", "file": "@W@/recursive/src/top.cc", "arguments": ["g++", "-c", "-o", "top.o", "top.cc"]}
+]
+--- log
+entries 3, skipped 0, duplicates 0
+exit=0

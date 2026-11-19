@@ -1,0 +1,6 @@
+[
+{"directory": "@W@/ccache/src", "file": "@W@/ccache/src/a.cc", "arguments": ["g++", "-DCC=1", "-c", "-o", "a.o", "a.cc"]}
+]
+--- log
+entries 1, skipped 0, duplicates 0
+exit=0
