@@ -4,7 +4,7 @@
  * Derived from Z23 tools/lint/lintc gates (see NOTICE); modified, not a verbatim copy.
  *
  * usage: zcl-lint [--root DIR] <rule>|all [--update-baseline]
- *   rules: see rules.def (no-new-jq no-new-bash banned-str md-links vendor no-python)
+ *   rules: see rules.def (no-new-jq no-new-bash banned-str md-links vendor no-python doc-claims doc-paths version-facts victory)
  * This file is only the driver. The rules live in rules/<rule>.c, the shared helpers in lintlib.{c,h}, and
  * the rule table in rules.def.
  * Baselines: <root>/zcutil/lint/<rule>.txt, rows "<path><TAB><count>", sorted by path (bytewise).
