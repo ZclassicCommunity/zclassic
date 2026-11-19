@@ -7,10 +7,11 @@
 //    node's own wait dialog only appears after a delay, and nothing is shown while the node
 //    is still starting). It says "stopping the ZClassic node safely" only when the wallet
 //    owns a running node; otherwise a neutral "Closing...".
-//    It is painted with show() + repaint(), NOT by running the event loop: until
-//    RPC::shutdownZClassicd has set its expected-shutdown flag, a delivered poll error or
-//    process-finished event would be handled as an unexpected failure (error box, crash
-//    handler, restart), so no queued event may run between the close click and that flag.
+//    It needs one pass of the event loop to really be on screen (show()+repaint() alone
+//    paints nothing under xcb). So RPC::noteExpectedShutdown() is called FIRST: it sets the
+//    same expected-shutdown flag shutdownZClassicd sets, and the handlers that could run
+//    during that pass (the "Connection Error" box, handleEZClassicdCrash, the restart it
+//    queues) already stay quiet once it is set. User input is excluded from that pass.
 // 2. `stop` is re-sent every second until the node accepts it or is clearly exiting (see
 //    stopretry.h), driven by a timer inside the nested wait loop of shutdownZClassicd. It adds
 //    no timeout and never ends a wait earlier: the existing wait is untouched.
@@ -45,7 +46,8 @@ inline bool ownsRunningNode(RPC* rpc) {
     return rpc && rpc->isEmbedded() && p && p->state() != QProcess::NotRunning;
 }
 
-// Modeless notice, painted before this returns without delivering any queued event.
+// Modeless notice, really painted before this returns (one event-loop pass, no user input).
+// The caller must already have called RPC::noteExpectedShutdown().
 inline QDialog* showNotice(QWidget* owner, bool ownedNode) {
     auto* d = new QDialog(owner);
     d->setObjectName(QStringLiteral("closingNotice"));
@@ -62,7 +64,7 @@ inline QDialog* showNotice(QWidget* owner, bool ownedNode) {
     d->setMinimumWidth(420);
     d->show();
     d->raise();
-    d->repaint();           // synchronous paint of this widget only; no event loop
+    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
     return d;
 }
 
@@ -71,6 +73,7 @@ inline QDialog* showNotice(QWidget* owner, bool ownedNode) {
 class Assist {
 public:
     Assist(QWidget* owner, RPC* r) : rpc(r), conn(r ? r->getConnection() : nullptr), stopper(conn, 1000) {
+        if (r) r->noteExpectedShutdown();   // before anything can run: see the header comment
         const bool owned = ownsRunningNode(r);
         if (!Settings::getInstance()->isHeadless())
             notice = showNotice(owner, owned);

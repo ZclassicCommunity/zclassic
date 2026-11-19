@@ -193,6 +193,9 @@ public:
     // funded wallet. Default false keeps every existing caller's full-teardown behavior.
     void noConnection(bool preserveBalances = false);
     bool isEmbedded() { return ezclassicd != nullptr; }
+    // The close path calls this first (CloseFlow::Assist) so no handler treats the node exiting as a failure
+    // while the closing notice is painted; shutdownZClassicd() sets the same flag first thing.
+    void noteExpectedShutdown() { ezExpectedShutdown = true; }
     // True while shutdownZClassicd() is waiting for the node to flush and exit. A second quit request in that window
     // must not call qApp->quit(): that ends the wait loop early and the node is killed mid-flush.
     bool isShuttingDown() const { return ezShuttingDown; }

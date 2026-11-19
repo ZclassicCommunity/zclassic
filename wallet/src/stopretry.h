@@ -13,10 +13,12 @@
 //
 // It stops as soon as more requests would be pointless:
 //   * the node answered 200 (stop accepted);
-//   * the node answers 503 (its HTTP server is shutting down), or refuses / drops the
-//     connection after having been reachable (it is exiting).
-// A refused port BEFORE the node was ever reachable keeps retrying: that is the start-up
-// case this exists for.
+//   * the node answers 503 that is NOT the JSON "RPC server busy" reply (that is
+//     http_reject_request_cb, src/httpserver.cpp:351: the HTTP server is shutting down);
+//   * a connection is REFUSED after the node had been reachable (it has closed its port).
+// A 503 busy reply (work queue full, src/httpserver.cpp:343), a reset or a timeout keep
+// retrying: a busy node is still running and has not taken the stop. A refused port BEFORE the
+// node was ever reachable keeps retrying too: that is the start-up case this exists for.
 //
 // Requests are posted straight on the Connection's network manager: Connection::doRPC
 // refuses everything once Connection::shutdown() has been called, which the close path
@@ -57,7 +59,9 @@ public:
             if (!s->alive) return;
             s->inFlight = false;
             const int http = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-            switch (classify(reply->error(), http, s->reachable)) {
+            const bool busy = http == 503 && isBusyReply(reply->header(QNetworkRequest::ContentTypeHeader).toString(),
+                                                         reply->readAll());
+            switch (classify(reply->error(), http, s->reachable, busy)) {
                 case Delivered: s->delivered = true; break;
                 case GiveUp:    s->gaveUp = true; break;
                 case Retry:     break;
@@ -75,11 +79,18 @@ public:
     int attempts() const { return attempts_; }
 
     // Pure decisions (pinned by tests). `http` is 0 when there was no HTTP answer at all.
-    static Outcome classify(QNetworkReply::NetworkError e, int http, bool reachableBefore) {
+    // The node busy reply: 503 with a JSON body naming the full work queue.
+    static bool isBusyReply(const QString& contentType, const QByteArray& body) {
+        return contentType.contains(QLatin1String("application/json"), Qt::CaseInsensitive) &&
+               body.contains("RPC server busy");
+    }
+    static Outcome classify(QNetworkReply::NetworkError e, int http, bool reachableBefore, bool busy503 = false) {
         if (e == QNetworkReply::NoError) return Delivered;
-        if (http == 503) return GiveUp;                    // HTTP server is shutting down
+        if (http == 503) return busy503 ? Retry : GiveUp;  // busy: still running; else: HTTP server shutting down
         if (http > 0) return Retry;                        // 500/-28, 401...: listening, not accepted yet
-        return reachableBefore ? GiveUp : Retry;           // refused/dropped: exiting, or not up yet
+        // no answer: only a refused connection after being reachable means the port is closed;
+        // a reset or a timeout may be a busy node, keep going
+        return (reachableBefore && e == QNetworkReply::ConnectionRefusedError) ? GiveUp : Retry;
     }
     static bool isDelivered(QNetworkReply::NetworkError e) { return e == QNetworkReply::NoError; }
     static bool shouldSend(bool done, bool inFlight, int attempts, qint64 lastMs, qint64 nowMs, int intervalMs) {
