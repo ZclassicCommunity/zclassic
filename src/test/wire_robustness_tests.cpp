@@ -133,58 +133,79 @@ std::string Outcome(Kind k, const Bytes& b, bool* pDecoded = NULL)
     return "";
 }
 
+// The six mutation kinds. Each draws from rng in the same order the single
+// switch did, so a PRNG seed still names the same cases.
+
+void MutateBitFlip(Rng& rng, Bytes& r)
+{
+    if (!r.empty())
+        r[rng.Below(r.size())] ^= (unsigned char)(1u << rng.Below(8));
+}
+
+void MutateByteSet(Rng& rng, Bytes& r)
+{
+    if (!r.empty()) {
+        static const unsigned char interesting[] = {0x00, 0x01, 0x7f, 0x80, 0xfc, 0xfd, 0xfe, 0xff};
+        r[rng.Below(r.size())] = (rng.Below(2) ? interesting[rng.Below(sizeof(interesting))]
+                                                : (unsigned char)rng.Next());
+    }
+}
+
+void MutateTruncate(Rng& rng, Bytes& r)
+{
+    r.resize(rng.Below(r.size() + 1));
+}
+
+void MutateInsert(Rng& rng, Bytes& r)
+{
+    // insert 1..8 random bytes
+    size_t pos = rng.Below(r.size() + 1);
+    size_t n = 1 + rng.Below(8);
+    Bytes ins(n);
+    for (size_t i = 0; i < n; i++)
+        ins[i] = (unsigned char)rng.Next();
+    r.insert(r.begin() + pos, ins.begin(), ins.end());
+}
+
+void MutateSplice(Rng& rng, Bytes& r, const std::vector<Seed>& seeds)
+{
+    // splice a prefix of this seed onto a suffix of another
+    const Bytes& o = seeds[rng.Below(seeds.size())].bytes;
+    size_t cut1 = rng.Below(r.size() + 1);
+    size_t cut2 = rng.Below(o.size() + 1);
+    r.resize(cut1);
+    r.insert(r.end(), o.begin() + cut2, o.end());
+}
+
+void MutateCompactSize(Rng& rng, Bytes& r)
+{
+    // inject a 0xFD/0xFE/0xFF compact size, overwriting or inserting
+    static const unsigned char marks[] = {0xfd, 0xfe, 0xff};
+    unsigned char m = marks[rng.Below(3)];
+    size_t n = m == 0xfd ? 2 : (m == 0xfe ? 4 : 8);
+    Bytes inj(1, m);
+    for (size_t i = 0; i < n; i++) {
+        // favour huge claimed lengths
+        inj.push_back(rng.Below(3) ? (unsigned char)0xff : (unsigned char)rng.Next());
+    }
+    size_t pos = rng.Below(r.size() + 1);
+    if (rng.Below(2) && pos + inj.size() <= r.size())
+        std::copy(inj.begin(), inj.end(), r.begin() + pos);
+    else
+        r.insert(r.begin() + pos, inj.begin(), inj.end());
+}
+
 Bytes Mutate(Rng& rng, const Bytes& a, const std::vector<Seed>& seeds, int& mode)
 {
     Bytes r = a;
     mode = (int)rng.Below(6);
     switch (mode) {
-    case 0: // bit flip
-        if (!r.empty())
-            r[rng.Below(r.size())] ^= (unsigned char)(1u << rng.Below(8));
-        break;
-    case 1: // byte set
-        if (!r.empty()) {
-            static const unsigned char interesting[] = {0x00, 0x01, 0x7f, 0x80, 0xfc, 0xfd, 0xfe, 0xff};
-            r[rng.Below(r.size())] = (rng.Below(2) ? interesting[rng.Below(sizeof(interesting))]
-                                                    : (unsigned char)rng.Next());
-        }
-        break;
-    case 2: // truncate
-        r.resize(rng.Below(r.size() + 1));
-        break;
-    case 3: { // insert 1..8 random bytes
-        size_t pos = rng.Below(r.size() + 1);
-        size_t n = 1 + rng.Below(8);
-        Bytes ins(n);
-        for (size_t i = 0; i < n; i++)
-            ins[i] = (unsigned char)rng.Next();
-        r.insert(r.begin() + pos, ins.begin(), ins.end());
-        break;
-    }
-    case 4: { // splice a prefix of this seed onto a suffix of another
-        const Bytes& o = seeds[rng.Below(seeds.size())].bytes;
-        size_t cut1 = rng.Below(r.size() + 1);
-        size_t cut2 = rng.Below(o.size() + 1);
-        r.resize(cut1);
-        r.insert(r.end(), o.begin() + cut2, o.end());
-        break;
-    }
-    case 5: { // inject a 0xFD/0xFE/0xFF compact size, overwriting or inserting
-        static const unsigned char marks[] = {0xfd, 0xfe, 0xff};
-        unsigned char m = marks[rng.Below(3)];
-        size_t n = m == 0xfd ? 2 : (m == 0xfe ? 4 : 8);
-        Bytes inj(1, m);
-        for (size_t i = 0; i < n; i++) {
-            // favour huge claimed lengths
-            inj.push_back(rng.Below(3) ? (unsigned char)0xff : (unsigned char)rng.Next());
-        }
-        size_t pos = rng.Below(r.size() + 1);
-        if (rng.Below(2) && pos + inj.size() <= r.size())
-            std::copy(inj.begin(), inj.end(), r.begin() + pos);
-        else
-            r.insert(r.begin() + pos, inj.begin(), inj.end());
-        break;
-    }
+    case 0: MutateBitFlip(rng, r); break;
+    case 1: MutateByteSet(rng, r); break;
+    case 2: MutateTruncate(rng, r); break;
+    case 3: MutateInsert(rng, r); break;
+    case 4: MutateSplice(rng, r, seeds); break;
+    case 5: MutateCompactSize(rng, r); break;
     }
     return r;
 }

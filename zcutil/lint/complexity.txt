@@ -189,7 +189,6 @@ src/test/rust_oracle/golden_replay.c	main(2)	16
 src/test/rust_oracle/golden_replay.c	replay_file(4)	24
 src/test/rust_oracle/golden_replay.c	replay_pbundle(1)	35
 src/test/sighash_tests.cpp	RandomTransaction(3)	17
-src/test/wire_robustness_tests.cpp	Mutate(4)	17
 src/test/znam_tests.cpp	BOOST_AUTO_TEST_CASE(random_chains_match_the_model_and_reorgs_equal_a_rebuild)	28
 src/test/znam_tests.cpp	Model::Apply(9)	23
 src/test/zslp_tests.cpp	BOOST_AUTO_TEST_CASE(mainnet_fixtures)	16
