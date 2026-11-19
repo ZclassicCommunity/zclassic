@@ -23,10 +23,32 @@ missing, `--without-embedded-tor` leaves it out). It is off unless asked for:
 - With `-onlynet=onion` and no `-proxy`, host names (DNS seeds, `-addnode`,
   `-seednode`, `-connect`) are handed to Tor and never to the system resolver.
 - `-embeddedtormode=child` (default on Linux) runs Tor as a separate process, so a
-  Tor bug cannot touch the process that holds the wallet and a Tor crash becomes a
-  clean shutdown; `-embeddedtormode=inprocess` (default elsewhere, where the
+  Tor bug cannot touch the process that holds the wallet and a Tor crash costs only
+  the onion side; `-embeddedtormode=inprocess` (default elsewhere, where the
   binary cannot re-launch itself) runs Tor on a thread of zclassicd.
 - If Tor cannot be started the node refuses to start.
+- Fail-soft restart: if Tor exits later (crash, OOM kill of the child, a port
+  clash) the node keeps running, validating and serving its clearnet peers.
+  Tor is stopped and started again in place after 5 s, 15 s, 45 s, 135 s,
+  then every 300 s; a run of 30 s resets the delay to 5 s. The log gets one
+  line, `tor: embedded Tor stopped (fault=<token>); restarting in <n>s, node
+  keeps running`, with a fixed token read from the tail of Tor's log
+  (`exited`, `port_in_use`, `config_invalid`, `datadir`). In inprocess mode
+  Tor shares libevent and OpenSSL state with the node, so it is restarted at
+  most 3 times per process, then given up (`failed:start_limit`) until the
+  node is restarted; child mode has no limit.
+- While Tor is down the proxies it served (onion, and on an onion-only node
+  also IPv4, IPv6 and host names) point at 127.0.0.1:1, a privileged port no
+  unprivileged process can take: those connections fail closed, nothing goes
+  out in clear and no local process can stand in for the old SOCKS port. An
+  onion-only node therefore has no peers until Tor is back. The control
+  client waits for the embedded Tor and never falls back to another Tor on
+  the default control port. After a restart the proxies move to the new
+  SOCKS port, the control client reconnects to the new control port at once
+  and re-creates the onion service from `<datadir>/onion_v3_private_key`, so
+  the onion address is unchanged.
+- `getnetworkinfo` has a `torstatus` field when `-embeddedtor` is on:
+  `running`, `restarting`, or `failed:<token>`.
 
 Details: `src/c23/tor/WIRING.md`, `src/c23/tor/README.md`,
 `doc/tor-provenance.md`.
@@ -134,11 +156,10 @@ is never sent A's onion; beta 12 loads the resulting peers.dat),
 Not done (follow-ups for an onion service on by default)
 --------------------------------------------------------
 
-- Tor stays off unless `-embeddedtor=1` is given; the watchdog is unchanged.
-- Fail-soft restart: today the node shuts down when the embedded Tor exits.
-  An onion service that restarts Tor in place, re-creates the service from
-  the cached key and re-advertises (the self-advertisement already retries
-  on every pass until the service is up) is still to do.
+- Tor stays off unless `-embeddedtor=1` is given. Fail-soft restart (see
+  above, tests `src/test/torwatch_tests.cpp`, `qa/rpc-tests/tor_restart.sh`)
+  was the prerequisite for turning it on by default; that decision is still
+  open.
 - Platform defaults: which of `inprocess` and `child` Windows and macOS use,
   the datadir `tor/` layout on a read-only or shared datadir, and the first-run
   prompt in the GUI.
