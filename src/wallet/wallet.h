@@ -978,12 +978,12 @@ protected:
     bool LatestOrderedSmartTime(const CWalletTx* pwtxSkip, int64_t nLatestTolerated, int64_t& nSmartTimeRet);
 
     template <typename WalletDB>
-    void SetBestChainINTERNAL(WalletDB& walletdb, const CBlockLocator& loc) {
+    bool SetBestChainINTERNAL(WalletDB& walletdb, const CBlockLocator& loc) {
         TestCrashPoint("setbestchain-begin");
         if (!walletdb.TxnBegin()) {
             // This needs to be done atomically, so don't do it at all
             LogPrintf("SetBestChain(): Couldn't start atomic write\n");
-            return;
+            return false;
         }
         try {
             for (std::pair<const uint256, CWalletTx>& wtxItem : mapWallet) {
@@ -996,7 +996,7 @@ protected:
                     if (!walletdb.WriteTx(wtxItem.first, wtx)) {
                         LogPrintf("SetBestChain(): Failed to write CWalletTx, aborting atomic write\n");
                         walletdb.TxnAbort();
-                        return;
+                        return false;
                     }
                 }
             }
@@ -1004,12 +1004,12 @@ protected:
             if (!walletdb.WriteWitnessCacheSize(nWitnessCacheSize)) {
                 LogPrintf("SetBestChain(): Failed to write nWitnessCacheSize, aborting atomic write\n");
                 walletdb.TxnAbort();
-                return;
+                return false;
             }
             if (!walletdb.WriteBestBlock(loc)) {
                 LogPrintf("SetBestChain(): Failed to write best block, aborting atomic write\n");
                 walletdb.TxnAbort();
-                return;
+                return false;
             }
             TestCrashPoint("setbestchain-after-locator");
         } catch (const std::exception &exc) {
@@ -1017,14 +1017,15 @@ protected:
             LogPrintf("SetBestChain(): Unexpected error during atomic write:\n");
             LogPrintf("%s\n", exc.what());
             walletdb.TxnAbort();
-            return;
+            return false;
         }
         if (!walletdb.TxnCommit()) {
             // Couldn't commit all to db, but in-memory state is fine
             LogPrintf("SetBestChain(): Couldn't commit atomic write\n");
-            return;
+            return false;
         }
         TestCrashPoint("setbestchain-after-commit");
+        return true;
     }
 
 private:
@@ -1234,6 +1235,37 @@ public:
     bool IsSpent(const uint256& hash, unsigned int n) const;
     bool IsSproutSpent(const uint256& nullifier) const;
     bool IsSaplingSpent(const uint256& nullifier) const;
+    //! Height of the last best-block locator written to wallet.dat (-1: none yet). Memory only.
+    std::atomic<int> nCheckpointHeight{-1};
+
+    //! Per-pool note and witness counts (see CWallet::GetHealth).
+    struct PoolHealth {
+        size_t nUnspent = 0;       //!< notes no active transaction spends
+        size_t nSpent = 0;         //!< notes a non-conflicted transaction spends
+        size_t nReady = 0;         //!< unspent, confirmed, witness cache present and at the chain tip
+        size_t nMissing = 0;       //!< unspent, confirmed, no witness cache
+        size_t nStale = 0;         //!< unspent, confirmed, witness cache not at the chain tip
+        size_t nUnconfirmed = 0;   //!< unspent, not in a block (no witness is due yet)
+        size_t nDead = 0;          //!< notes of a transaction in neither the chain nor the mempool (not counted above)
+        size_t nWitnessEntries = 0;//!< witnesses held by unspent notes (sum of cache lengths)
+        size_t nSpentWitnessEntries = 0; //!< witnesses still held by spent notes
+    };
+    struct Health {
+        PoolHealth sapling, sprout;
+        int64_t nWitnessCacheSize = 0;
+        bool fWitnessRebuildPending = false;
+        int nCheckpointHeight = -1;
+        int nTipHeight = -1;
+        size_t nPendingInMempool = 0;   //!< unmined sends in the mempool
+        size_t nPendingNotInMempool = 0;//!< unmined sends in neither chain nor mempool, not conflicted
+        size_t nExpiringSoon = 0;       //!< unmined sends (in the mempool or not) that expire within TX_EXPIRING_SOON_THRESHOLD blocks
+        size_t nExpired = 0;            //!< unmined sends that can no longer be mined
+        size_t nConflicted = 0;         //!< unmined sends a mined transaction conflicts with
+    };
+    //! One pass over mapWallet; cs_main and cs_wallet must be held. Never decrypts, never writes.
+    void GetHealth(Health& h) const;
+    //! "mined", "pending", "expiringsoon", "expired" or "conflicted" (cs_main held)
+    const char* TxStatus(const CWalletTx& wtx) const;
 
     bool IsLockedCoin(uint256 hash, unsigned int n) const;
     void LockCoin(COutPoint& output);

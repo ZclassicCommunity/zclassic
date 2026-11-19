@@ -3514,9 +3514,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         {
             CWalletDB walletdb(strWalletFile);
             CBlockLocator locator;
-            if (walletdb.ReadBestBlock(locator))
+            if (walletdb.ReadBestBlock(locator)) {
                 pindexRescan = FindForkInGlobalIndex(chainActive, locator);
-            else
+                if (pindexRescan) pwalletMain->nCheckpointHeight = pindexRescan->nHeight;
+            } else
                 pindexRescan = chainActive.Genesis();
         }
         // The note state that was read back (witness caches, nullifiers) is checked against the

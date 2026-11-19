@@ -3,6 +3,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <string.h>
 #include "wallet/wallet.h"
 #include <type_traits>
 
@@ -727,7 +728,10 @@ void CWallet::SetBestChain(const CBlockLocator& loc)
         RebuildNoteWitnesses();
     }
     CWalletDB walletdb(strWalletFile);
-    SetBestChainINTERNAL(walletdb, loc);
+    if (SetBestChainINTERNAL(walletdb, loc) && !loc.vHave.empty()) {
+        BlockMap::const_iterator mi = mapBlockIndex.find(loc.vHave[0]);
+        if (mi != mapBlockIndex.end() && mi->second) nCheckpointHeight = mi->second->nHeight;
+    }
 }
 
 std::set<std::pair<libzcash::PaymentAddress, uint256>> CWallet::GetNullifiersForAddresses(
@@ -1046,6 +1050,80 @@ bool CWallet::IsSaplingSpent(const uint256& nullifier) const {
     return false;
 }
 
+
+const char* CWallet::TxStatus(const CWalletTx& wtx) const
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs_wallet);
+    if (wtx.IsInMainChain()) return "mined";
+    for (const uint256& conflict : wtx.GetConflicts()) {
+        std::map<uint256, CWalletTx>::const_iterator mit = mapWallet.find(conflict);
+        if (mit != mapWallet.end() && mit->second.IsInMainChain()) return "conflicted";
+    }
+    const int nNext = chainActive.Height() + 1;
+    if (IsExpiredTx(wtx, nNext)) return "expired";
+    if (IsExpiringSoonTx(wtx, nNext)) return "expiringsoon";
+    return "pending";
+}
+
+namespace {
+template <typename NoteDataMap, typename SpentFn>
+void CountPoolHealth(const NoteDataMap& notes, bool fInChain, bool fDead, int nTipHeight, SpentFn isSpent, CWallet::PoolHealth& p)
+{
+    for (const auto& item : notes) {
+        const auto& nd = item.second;
+        if (fDead) { p.nDead++; continue; }
+        if (nd.nullifier && isSpent(*nd.nullifier)) {
+            p.nSpent++;
+            p.nSpentWitnessEntries += nd.witnesses.size();
+            continue;
+        }
+        p.nUnspent++;
+        p.nWitnessEntries += nd.witnesses.size();
+        if (!fInChain) {
+            p.nUnconfirmed++;
+        } else if (nd.witnesses.empty()) {
+            p.nMissing++;
+        } else if (nd.witnessHeight == nTipHeight) {
+            p.nReady++;
+        } else {
+            p.nStale++;
+        }
+    }
+}
+} // namespace
+
+void CWallet::GetHealth(Health& h) const
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs_wallet);
+    h = Health();
+    h.nTipHeight = chainActive.Height();
+    h.nWitnessCacheSize = nWitnessCacheSize;
+    h.fWitnessRebuildPending = fNoteWitnessesLost;
+    h.nCheckpointHeight = nCheckpointHeight;
+    for (const std::pair<const uint256, CWalletTx>& item : mapWallet) {
+        const CWalletTx& wtx = item.second;
+        const bool fHasNotes = !(wtx.mapSproutNoteData.empty() && wtx.mapSaplingNoteData.empty());
+        if (!fHasNotes && wtx.IsCoinBase()) continue;
+        const bool fMined = wtx.IsInMainChain();
+        const bool fDead = fHasNotes && !fMined && !mempool.exists(wtx.GetHash());
+        if (fHasNotes) {
+            CountPoolHealth(wtx.mapSaplingNoteData, fMined, fDead, h.nTipHeight, [this](const uint256& nf) { return IsSaplingSpent(nf); }, h.sapling);
+            CountPoolHealth(wtx.mapSproutNoteData, fMined, fDead, h.nTipHeight, [this](const uint256& nf) { return IsSproutSpent(nf); }, h.sprout);
+        }
+        if (fMined || wtx.IsCoinBase()) continue;
+        // Unmined: only the wallet's own sends are counted
+        if (!(wtx.fFromMe || IsFromMe(wtx))) continue;
+        const char* status = TxStatus(wtx);
+        if (strcmp(status, "conflicted") == 0) { h.nConflicted++; continue; }
+        if (strcmp(status, "expired") == 0) h.nExpired++;
+        if (strcmp(status, "expiringsoon") == 0) h.nExpiringSoon++;
+        if (strcmp(status, "pending") == 0 || strcmp(status, "expiringsoon") == 0) {
+            if (mempool.exists(wtx.GetHash())) h.nPendingInMempool++; else h.nPendingNotInMempool++;
+        }
+    }
+}
 void CWallet::AddToTransparentSpends(const COutPoint& outpoint, const uint256& wtxid)
 {
     mapTxSpends.insert(make_pair(outpoint, wtxid));

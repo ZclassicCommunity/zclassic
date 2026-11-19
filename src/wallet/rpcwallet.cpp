@@ -96,6 +96,8 @@ void WalletTxToJSON(const CWalletTx& wtx, UniValue& entry)
     }
     uint256 hash = wtx.GetHash();
     entry.push_back(Pair("txid", hash.GetHex()));
+    if (pwalletMain)
+        entry.push_back(Pair("status", pwalletMain->TxStatus(wtx)));
     UniValue conflicts(UniValue::VARR);
     BOOST_FOREACH(const uint256& conflict, wtx.GetConflicts())
         conflicts.push_back(conflict.GetHex());
@@ -2291,6 +2293,20 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
             "  \"unlocked_until\": ttt,      (numeric) the timestamp in seconds since epoch (midnight Jan 1 1970 GMT) that the wallet is unlocked for transfers, or 0 if the wallet is locked\n"
             "  \"paytxfee\": x.xxxx,         (numeric) the transaction fee configuration, set in " + CURRENCY_UNIT + "/kB\n"
             "  \"seedfp\": \"uint256\",        (string) the BLAKE2b-256 hash of the HD seed\n"
+            "  \"health\": {                 (object) wallet health report, taken in one pass under cs_main and cs_wallet\n"
+            "    \"tip_height\": n,           (numeric) height of the active chain tip\n"
+            "    \"checkpoint_height\": n,    (numeric) height of the best-block locator last written to (or read from) wallet.dat; -1 if none yet\n"
+            "    \"witness_cache_size\": n,   (numeric) the wallet's note witness cache size (at most " + strprintf("%u", WITNESS_CACHE_SIZE) + ")\n"
+            "    \"witness_rebuild_pending\": b, (boolean) a reorg dropped note witnesses and the rescan that rebuilds them has not run yet\n"
+            "    \"sapling\": {\"notes_unspent\": n, \"notes_spent\": n, \"witness_ready\": n, \"witness_missing\": n, \"witness_stale\": n, \"unconfirmed\": n, \"unmined_dead\": n, \"witnesses_held_unspent\": n, \"witnesses_held_spent\": n},\n"
+            "    \"sprout\": {same fields as \"sapling\"},\n"
+            "        (witness_ready: confirmed unspent notes whose witness is at the tip; witness_missing: no witness; witness_stale: a witness that is not at the tip;\n"
+            "         unconfirmed: unspent notes in the mempool, not yet in a block; unmined_dead: notes of a wallet transaction that is in neither chain nor mempool (expired or dropped; not counted as spent or unspent); witnesses_held_*: witnesses stored for unspent / spent notes)\n"
+            "    \"pending_sends\": {\"in_mempool\": n, \"not_in_mempool\": n, \"expiring_soon\": n, \"expired\": n, \"conflicted\": n}\n"
+            "        (the wallet's own unmined sends. not_in_mempool: in neither chain nor mempool, not conflicted; expiring_soon: still minable but\n"
+            "         expires within " + strprintf("%u", TX_EXPIRING_SOON_THRESHOLD) + " blocks (also counted in in_mempool or not_in_mempool); expired: can no longer be mined;\n"
+            "         conflicted: a mined transaction spends the same input)\n"
+            "  }\n"
             "}\n"
             "\nExamples:\n"
             + HelpExampleCli("getwalletinfo", "")
@@ -2313,6 +2329,37 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
     uint256 seedFp = pwalletMain->GetHDChain().seedFp;
     if (!seedFp.IsNull())
          obj.push_back(Pair("seedfp", seedFp.GetHex()));
+
+    CWallet::Health h;
+    pwalletMain->GetHealth(h);
+    auto poolJSON = [](const CWallet::PoolHealth& p) {
+        UniValue o(UniValue::VOBJ);
+        o.push_back(Pair("notes_unspent", (int64_t)p.nUnspent));
+        o.push_back(Pair("notes_spent", (int64_t)p.nSpent));
+        o.push_back(Pair("witness_ready", (int64_t)p.nReady));
+        o.push_back(Pair("witness_missing", (int64_t)p.nMissing));
+        o.push_back(Pair("witness_stale", (int64_t)p.nStale));
+        o.push_back(Pair("unconfirmed", (int64_t)p.nUnconfirmed));
+        o.push_back(Pair("unmined_dead", (int64_t)p.nDead));
+        o.push_back(Pair("witnesses_held_unspent", (int64_t)p.nWitnessEntries));
+        o.push_back(Pair("witnesses_held_spent", (int64_t)p.nSpentWitnessEntries));
+        return o;
+    };
+    UniValue health(UniValue::VOBJ);
+    health.push_back(Pair("tip_height", h.nTipHeight));
+    health.push_back(Pair("checkpoint_height", h.nCheckpointHeight));
+    health.push_back(Pair("witness_cache_size", h.nWitnessCacheSize));
+    health.push_back(Pair("witness_rebuild_pending", h.fWitnessRebuildPending));
+    health.push_back(Pair("sapling", poolJSON(h.sapling)));
+    health.push_back(Pair("sprout", poolJSON(h.sprout)));
+    UniValue sends(UniValue::VOBJ);
+    sends.push_back(Pair("in_mempool", (int64_t)h.nPendingInMempool));
+    sends.push_back(Pair("not_in_mempool", (int64_t)h.nPendingNotInMempool));
+    sends.push_back(Pair("expiring_soon", (int64_t)h.nExpiringSoon));
+    sends.push_back(Pair("expired", (int64_t)h.nExpired));
+    sends.push_back(Pair("conflicted", (int64_t)h.nConflicted));
+    health.push_back(Pair("pending_sends", sends));
+    obj.push_back(Pair("health", health));
     return obj;
 }
 
