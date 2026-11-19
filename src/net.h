@@ -196,7 +196,22 @@ CAddrMan& SelectDialTable(bool fOnionProxy, uint32_t nRand);
 /** The next outbound address to dial from man, or an invalid one: not on a network group in
  *  setConnected, not our own, not limited, not tried within the last minute, and a node on a
  *  port other than the default only after enough other draws (see ThreadOpenConnections). */
-CAddrInfo SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow);
+struct COutboundSkip
+{
+    /** Hosts (any port) not to dial: our own address as peers see it, the -addnode hosts. */
+    std::set<CNetAddr> hosts;
+    /** This host has no usable IPv6 route (see HostHasIPv6Route). */
+    bool fNoIPv6Route = false;
+};
+CAddrInfo SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow,
+                                  const COutboundSkip& skip = COutboundSkip());
+/** Our public address(es) as our peers report it: vReports holds (peer address, the address
+ *  that peer says it sees us at). An address counts only when peers on two network groups
+ *  report it, so one peer cannot make us avoid dialling some host. */
+std::set<CNetAddr> PeerReportedLocal(const std::vector<std::pair<CNetAddr, CNetAddr> >& vReports);
+/** Whether the system has a global, non-Teredo IPv6 source address to route to the IPv6
+ *  internet (asked of the OS without sending anything; cached for a minute). */
+bool HostHasIPv6Route();
 
 /** Outbound dialers (opencon threads) that run at once while the node holds fewer than
  *  PARALLEL_DIAL_OUTBOUND_TARGET outbound peers. A dead address costs a whole connect

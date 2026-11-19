@@ -858,6 +858,59 @@ BOOST_AUTO_TEST_CASE(outbound_connect_timeout)
     BOOST_CHECK_EQUAL(OutboundConnectTimeout(true, false, info.GetAttempts(), info.GetLastSuccess(), D), DIRECT_DIAL_CONNECT_TIMEOUT);
 }
 
+// Hosts not to dial: our own address once peers on two groups report it, the -addnode
+// hosts on any port, IPv6 when the host has no IPv6 route. None of them uses up the round.
+BOOST_AUTO_TEST_CASE(outbound_candidate_skip_hosts)
+{
+    bool l4 = IsLimited(NET_IPV4), l6 = IsLimited(NET_IPV6);
+    SetLimited(NET_IPV4, false);
+    SetLimited(NET_IPV6, false);
+    const unsigned short port = Params().GetDefaultPort();
+    const int64_t now = GetAdjustedTime();
+    const CNetAddr source("93.184.216.1");
+    CAddress self = MakeV4("209.91.235.157", port + 1, 1, now - 3600);
+    CAddress server = MakeV4("74.50.74.102", port, 1, now - 3600);
+    CAddress other = MakeV4("95.186.3.4", port, 1, now - 3600);
+    CAddress v6(CService(CNetAddr("2a0d:e487:217f:782::1"), port), 1);
+    v6.nTime = now - 3600;
+
+    // PeerReportedLocal: two peers on different groups must agree
+    std::vector<std::pair<CNetAddr, CNetAddr> > vReports;
+    vReports.push_back(std::make_pair(CNetAddr("1.2.3.4"), CNetAddr("209.91.235.157")));
+    BOOST_CHECK(PeerReportedLocal(vReports).empty());
+    vReports.push_back(std::make_pair(CNetAddr("1.2.9.9"), CNetAddr("209.91.235.157")));   // same /16
+    BOOST_CHECK(PeerReportedLocal(vReports).empty());
+    vReports.push_back(std::make_pair(CNetAddr("5.6.7.8"), CNetAddr("209.91.235.157")));
+    vReports.push_back(std::make_pair(CNetAddr("9.9.9.9"), CNetAddr("0.0.0.0")));          // not routable
+    vReports.push_back(std::make_pair(CNetAddr("8.8.4.4"), CNetAddr("0.0.0.0")));
+    std::set<CNetAddr> setLocal = PeerReportedLocal(vReports);
+    BOOST_CHECK_EQUAL(setLocal.size(), 1U);
+    BOOST_CHECK(setLocal.count(CNetAddr("209.91.235.157")));
+
+    CAddrMan man;
+    BOOST_REQUIRE(man.Add(self, source));
+    BOOST_REQUIRE(man.Add(server, source));
+    BOOST_REQUIRE(man.Add(other, source));
+    BOOST_REQUIRE(man.Add(v6, source));
+    COutboundSkip skip;
+    skip.hosts = setLocal;
+    skip.hosts.insert(CNetAddr("74.50.74.102"));    // an -addnode host, dialled there on another port
+    skip.fNoIPv6Route = true;
+    std::set<std::vector<unsigned char> > setConnected;
+    for (int i = 0; i < 40; i++)
+        BOOST_CHECK(SelectOutboundCandidate(man, setConnected, now, skip) == other);
+
+    // without the skips the server and the IPv6 address are dialled (self is on another
+    // port, so it waits behind the default-port ones)
+    std::set<CNetAddr> setPicked;
+    for (int i = 0; i < 400; i++)
+        setPicked.insert(CNetAddr(SelectOutboundCandidate(man, setConnected, now)));
+    BOOST_CHECK(setPicked.count(CNetAddr(server)));
+    BOOST_CHECK(setPicked.count(CNetAddr(v6)));
+    SetLimited(NET_IPV4, l4);
+    SetLimited(NET_IPV6, l6);
+}
+
 // Concurrent dialers: a group being dialled is held by one dialer, counts as connected
 // for the others (so the one-outbound-peer-per-group rule holds while dials overlap),
 // and is free again when the dial ends. The extra dialers run only below the target.

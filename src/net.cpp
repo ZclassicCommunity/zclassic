@@ -1455,7 +1455,8 @@ static const int64_t OUTBOUND_MIN_REDIAL_SECONDS = 60;
 /** Draws from the table in one selection round. */
 static const int OUTBOUND_MAX_DRAWS = 300;
 
-CAddrInfo SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow)
+CAddrInfo SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow,
+                                  const COutboundSkip& skip)
 {
     int nTries = 0;
     for (int nDraws = 0; nDraws < OUTBOUND_MAX_DRAWS; nDraws++)
@@ -1471,6 +1472,13 @@ CAddrInfo SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsi
         // (a fresh node knows a handful of addresses) one such draw would otherwise
         // end the round before the port and recency rules could let anything through.
         if (setConnected.count(addr.GetGroup()) || IsLocal(addr))
+            continue;
+
+        // Nor is a host in skip.hosts (our own address as our peers see it, or an
+        // -addnode host, which the addcon thread keeps connected on its own port),
+        // or an IPv6 address when this host has no IPv6 route: each would cost a
+        // connect timeout (or a second slot for one server) and could not help.
+        if (skip.hosts.count(CNetAddr(addr)) || (skip.fNoIPv6Route && addr.GetNetwork() == NET_IPV6))
             continue;
 
         // If we didn't find an appropriate destination after trying 100 addresses fetched from addrman,
@@ -1555,6 +1563,65 @@ bool ParallelDialWanted(int nOutbound)
     return nOutbound < PARALLEL_DIAL_OUTBOUND_TARGET;
 }
 
+std::set<CNetAddr> PeerReportedLocal(const std::vector<std::pair<CNetAddr, CNetAddr> >& vReports)
+{
+    std::map<CNetAddr, std::set<std::vector<unsigned char> > > mapGroups;
+    for (const std::pair<CNetAddr, CNetAddr>& report : vReports)
+        if (report.second.IsRoutable())
+            mapGroups[report.second].insert(report.first.GetGroup());
+    std::set<CNetAddr> setLocal;
+    for (const auto& entry : mapGroups)
+        if (entry.second.size() >= 2)
+            setLocal.insert(entry.first);
+    return setLocal;
+}
+
+// Whether the operating system has a usable IPv6 route: a global source address that
+// is not a Teredo tunnel. connect() on a UDP socket sends nothing; it only makes the
+// system choose a route and a source address, which getsockname() then reads. The
+// destination is any global IPv6 address (here a public DNS resolver's).
+static bool ProbeIPv6Route()
+{
+    static const unsigned char pchProbe[16] = {0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x88};
+    struct sockaddr_in6 dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin6_family = AF_INET6;
+    dst.sin6_port = htons(53);
+    memcpy(&dst.sin6_addr, pchProbe, 16);
+    SOCKET s = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET)
+        return false;
+    bool fRoute = false;
+    if (connect(s, (struct sockaddr*)&dst, sizeof(dst)) != SOCKET_ERROR) {
+        struct sockaddr_in6 src;
+        memset(&src, 0, sizeof(src));
+        socklen_t len = sizeof(src);
+        if (getsockname(s, (struct sockaddr*)&src, &len) != SOCKET_ERROR && src.sin6_family == AF_INET6) {
+            CNetAddr addrSource(src.sin6_addr);
+            fRoute = addrSource.IsRoutable() && !addrSource.IsRFC4380();
+        }
+    }
+    CloseSocket(s);
+    return fRoute;
+}
+
+bool HostHasIPv6Route()
+{
+    static CCriticalSection cs_route;
+    static int64_t nChecked = 0;
+    static bool fRoute = true;
+    LOCK(cs_route);
+    const int64_t nNow = GetTime();
+    if (nChecked != 0 && nNow - nChecked < 60)
+        return fRoute;
+    const bool fWas = fRoute;
+    fRoute = ProbeIPv6Route();
+    if (nChecked == 0 || fRoute != fWas)
+        LogPrint("net", "IPv6 route %s: IPv6 addresses %s dialled\n", fRoute ? "found" : "not found", fRoute ? "are" : "are not");
+    nChecked = nNow;
+    return fRoute;
+}
+
 static void OpenConnectionsLoop(int nDialer);
 
 void ThreadOpenConnections()
@@ -1629,14 +1696,28 @@ static void OpenConnectionsLoop(int nDialer)
         // a group is always seen in one of the two.
         // Do this here so we don't have to critsect vNodes inside mapAddresses critsect.
         set<vector<unsigned char> > setConnected = DialingGroups();
+        std::vector<std::pair<CNetAddr, CNetAddr> > vReportedLocal;
         {
             LOCK(cs_vNodes);
             BOOST_FOREACH(CNode* pnode, vNodes) {
                 if (!pnode->fInbound) {
                     setConnected.insert(pnode->addr.GetGroup());
+                    vReportedLocal.push_back(std::make_pair(CNetAddr(pnode->addr), CNetAddr(pnode->addrLocal)));
                 }
             }
         }
+
+        // Hosts not to dial: our own public address once two outbound peers on
+        // different network groups report it (one peer alone cannot make us avoid
+        // an address), and the -addnode hosts (the bootstrap servers among them).
+        COutboundSkip skip;
+        skip.hosts = PeerReportedLocal(vReportedLocal);
+        {
+            LOCK(cs_setservAddNodeAddresses);
+            skip.hosts.insert(setservAddNodeAddresses.begin(), setservAddNodeAddresses.end());
+        }
+        proxyType proxyIPv6;
+        skip.fNoIPv6Route = !IsLimited(NET_IPV6) && !GetProxy(NET_IPV6, proxyIPv6) && !HostHasIPv6Route();
 
         int64_t nANow = GetAdjustedTime();
 
@@ -1651,7 +1732,7 @@ static void OpenConnectionsLoop(int nDialer)
         proxyType proxyOnion;
         CAddrMan* pmanSelect = &SelectDialTable(GetProxy(NET_ONION, proxyOnion), GetRand(4));
 
-        CAddrInfo addrPick = SelectOutboundCandidate(*pmanSelect, setConnected, nANow);
+        CAddrInfo addrPick = SelectOutboundCandidate(*pmanSelect, setConnected, nANow, skip);
         if (addrPick.IsValid())
             addrConnect = addrPick;
 
