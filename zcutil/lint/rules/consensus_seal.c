@@ -6,7 +6,7 @@
  *
  * zcutil/consensus.seal holds one row per sealed file, "<path>TAB<40 lowercase hex blob>", sorted bytewise,
  * after '#' comment lines. A sealed tracked file whose index blob differs from its row, a sealed file with no
- * row, or a row whose file is no longer sealed is a finding (exit 1) that points at doc/agent/UNSEAL.md.
+ * row, a sealed file edited or untracked on disk, or a row whose file is no longer sealed is a finding (exit 1) that points at doc/agent/UNSEAL.md.
  * Exit: 0 ok, 1 finding, 2 broken (missing or malformed seal, hollow scan, refused --reseal).
  *
  * --reseal --reason "<text>" (driver flags, lintlib.h) rewrites the seal from the index and appends one line
@@ -98,16 +98,25 @@ static bool is_lower_hex(const char *s, size_t n)
 
 static void die_git(void)
 {
-    fprintf(stderr, "zcl-lint: unexpected git ls-files -s output in %s\n", lint_root);
+    fprintf(stderr, "zcl-lint: unexpected git output in %s\n", lint_root);
     exit(2);
 }
 
-/* Sealed tracked files with their index blob ids, from `git ls-files -s -z`. Stage 0 keeps its blob; any other
- * stage is recorded as "unmerged", which can never equal a seal row. */
-static void load_index_sealed(struct ents *out)
+/* lint_root is spliced into a single-quoted shell command: refuse a root that would break the quoting or
+ * overflow the command buffer. */
+static void check_root(void)
+{
+    if (strchr(lint_root, '\'') || strlen(lint_root) > 400) {
+        fprintf(stderr, "zcl-lint: --root must be at most 400 bytes with no single quote\n");
+        exit(2);
+    }
+}
+
+/* Runs `git -C root <args>` and returns its whole stdout (NUL-terminated, length in *len); exits 2 on failure. */
+static char *git_out(const char *args, size_t *len)
 {
     char cmd[1200];
-    snprintf(cmd, sizeof cmd, "git -C '%s' ls-files -s -z", lint_root);
+    snprintf(cmd, sizeof cmd, "git -C '%s' %s", lint_root, args);
     FILE *p = popen(cmd, "r");
     if (!p) { fprintf(stderr, "zcl-lint: cannot run git\n"); exit(2); }
     size_t cap = 4096, n = 0, r;
@@ -116,10 +125,19 @@ static void load_index_sealed(struct ents *out)
         n += r;
         if (n == cap) { cap *= 2; buf = lint_xrealloc(buf, cap); }
     }
-    if (pclose(p) != 0) { fprintf(stderr, "zcl-lint: git ls-files -s failed in %s\n", lint_root); exit(2); }
+    if (pclose(p) != 0) { fprintf(stderr, "zcl-lint: git %s failed in %s\n", args, lint_root); exit(2); }
     buf = lint_xrealloc(buf, n + 1);
     buf[n] = '\0';
-    size_t i = 0;
+    *len = n;
+    return buf;
+}
+
+/* Sealed tracked files with their index blob ids, from `git ls-files -s -z`. Stage 0 keeps its blob; an
+ * unmerged path (stages 1 to 3) is recorded once as "unmerged", which can never equal a seal row. */
+static void load_index_sealed(struct ents *out)
+{
+    size_t n, i = 0;
+    char *buf = git_out("ls-files -s -z", &n);
     while (i < n) {
         char *ent = buf + i; /* "<mode> <sha> <stage>\t<path>", NUL-terminated by -z */
         i += strlen(ent) + 1;
@@ -133,10 +151,34 @@ static void load_index_sealed(struct ents *out)
         if (!stage) die_git();
         *stage++ = '\0';
         if (!consensus_sealed(tab + 1)) continue;
+        if (stage[0] != '0' && out->n && !strcmp(out->v[out->n - 1].path, tab + 1)) continue; /* ls-files sorts by path */
         ents_add(out, tab + 1, stage[0] == '0' ? sha : "unmerged");
     }
     free(buf);
     qsort(out->v, out->n, sizeof *out->v, cmp_ent);
+}
+
+/* Sealed paths that differ on disk from the index (edited, deleted) or are untracked, sorted and unique. */
+static void load_worktree_dirty(struct ents *out)
+{
+    static const char *const cmds[] = {"diff --name-only -z", "ls-files --others --exclude-standard -z"};
+    for (size_t c = 0; c < 2; c++) {
+        size_t n, i = 0;
+        char *buf = git_out(cmds[c], &n);
+        while (i < n) {
+            char *path = buf + i;
+            i += strlen(path) + 1;
+            if (consensus_sealed(path)) ents_add(out, path, "");
+        }
+        free(buf);
+    }
+    qsort(out->v, out->n, sizeof *out->v, cmp_ent);
+    size_t w = 0;
+    for (size_t r = 0; r < out->n; r++) {
+        if (w && !strcmp(out->v[w - 1].path, out->v[r].path)) { free(out->v[r].path); continue; }
+        out->v[w++] = out->v[r];
+    }
+    out->n = w;
 }
 
 /* Parses zcutil/consensus.seal. *exists is false when the file is absent (allowed only for the first reseal).
@@ -207,8 +249,45 @@ static int write_seal(const struct ents *now)
     return rc;
 }
 
+/* The git blob id of the seal file as it is on disk. */
+static void seal_blob(char out[BLOB_HEX + 1])
+{
+    size_t n;
+    char *b = git_out("hash-object -- " SEAL_REL, &n);
+    if (n < BLOB_HEX || !is_lower_hex(b, BLOB_HEX)) die_git();
+    memcpy(out, b, BLOB_HEX);
+    out[BLOB_HEX] = '\0';
+    free(b);
+}
+
+/* The seal blob recorded on the last SEAL_LOG line ("- <time> <head> seal=<blob> ..."). False when the log
+ * is absent or its last line carries none. */
+static bool log_last_seal(char out[BLOB_HEX + 1])
+{
+    char *p = lint_rootpath(SEAL_LOG_REL);
+    FILE *f = fopen(p, "rb");
+    free(p);
+    if (!f) return false;
+    char line[8192], last[8192] = "";
+    bool cut = false;
+    while (fgets(line, sizeof line, f)) {
+        size_t len = strlen(line);
+        bool partial = len == sizeof line - 1 && line[len - 1] != '\n';
+        if (!cut && !strncmp(line, "- ", 2)) snprintf(last, sizeof last, "%s", line);
+        cut = partial; /* the rest of an overlong line is not a new entry */
+    }
+    fclose(f);
+    const char *s = strstr(last, " seal=");
+    if (!s || strlen(s + 6) < BLOB_HEX || !is_lower_hex(s + 6, BLOB_HEX)) return false;
+    memcpy(out, s + 6, BLOB_HEX);
+    out[BLOB_HEX] = '\0';
+    return true;
+}
+
 static int append_log(const char *reason, const char *changes, size_t files)
 {
+    char blob[BLOB_HEX + 1];
+    seal_blob(blob);
     char *p = lint_rootpath(SEAL_LOG_REL);
     FILE *f = fopen(p, "ab");
     if (!f) { printf("FAIL consensus-seal: cannot append %s\n", SEAL_LOG_REL); free(p); return 2; }
@@ -216,7 +295,7 @@ static int append_log(const char *reason, const char *changes, size_t files)
     time_t t = time(NULL);
     strftime(date, sizeof date, "%Y-%m-%dT%H:%M:%SZ", gmtime(&t));
     git_head(head, sizeof head);
-    fprintf(f, "- %s %s %zu sealed files; changed: %s; reason: %s\n", date, head, files,
+    fprintf(f, "- %s %s seal=%s %zu sealed files; changed: %s; reason: %s\n", date, head, blob, files,
             changes[0] ? changes : "(none)", reason);
     int rc = fclose(f) == 0 ? 0 : 2;
     if (rc) printf("FAIL consensus-seal: cannot append %s\n", SEAL_LOG_REL);
@@ -227,6 +306,7 @@ static int append_log(const char *reason, const char *changes, size_t files)
 int lint_rule_consensus_seal(bool update)
 {
     (void)update; /* no baseline; the driver refuses --update-baseline for this rule */
+    check_root();
     if (lint_reseal && (!lint_reason || !*lint_reason)) {
         printf("FAIL consensus-seal: --reseal needs --reason \"<why this consensus change is needed>\"; nothing written\n");
         return 2;
@@ -235,7 +315,7 @@ int lint_rule_consensus_seal(bool update)
         printf("FAIL consensus-seal: --reason must be one line; nothing written\n");
         return 2;
     }
-    struct ents now = {0}, seal = {0};
+    struct ents now = {0}, seal = {0}, dirty = {0};
     bool exists = false;
     load_index_sealed(&now);
     if (!now.n) {
@@ -249,6 +329,22 @@ int lint_rule_consensus_seal(bool update)
         ents_free(&seal);
         return 2;
     }
+    load_worktree_dirty(&dirty);
+
+    if (lint_reseal) { /* the seal must pin a state that is merged, staged and equal to the files on disk */
+        for (size_t i = 0; i < now.n; i++)
+            if (!strcmp(now.v[i].blob, "unmerged")) {
+                printf("FAIL consensus-seal: %s is unmerged; resolve the conflict first; nothing written\n", now.v[i].path);
+                ents_free(&now); ents_free(&seal); ents_free(&dirty);
+                return 2;
+            }
+        if (dirty.n) {
+            printf("FAIL consensus-seal: %s is modified in the working tree (not staged), or untracked; "
+                   "git add it first; nothing written\n", dirty.v[0].path);
+            ents_free(&now); ents_free(&seal); ents_free(&dirty);
+            return 2;
+        }
+    }
 
     /* Walk both sorted lists together: each path is unchanged, changed, newly sealed, or no longer sealed. */
     struct sbuf changes = {0};
@@ -259,7 +355,8 @@ int lint_rule_consensus_seal(bool update)
         const char *path = NULL, *what = NULL;
         if (c < 0) {
             path = now.v[a].path;
-            what = "is consensus-sealed but has no row in the seal (a new sealed file needs the ritual)";
+            what = !strcmp(now.v[a].blob, "unmerged") ? "is unmerged (resolve the conflict first)"
+                 : "is consensus-sealed but has no row in the seal (a new sealed file needs the ritual)";
             a++;
         } else if (c > 0) {
             path = seal.v[b].path;
@@ -267,7 +364,9 @@ int lint_rule_consensus_seal(bool update)
             b++;
         } else {
             path = now.v[a].path;
-            if (strcmp(now.v[a].blob, seal.v[b].blob))
+            if (!strcmp(now.v[a].blob, "unmerged"))
+                what = "is unmerged (resolve the conflict first)";
+            else if (strcmp(now.v[a].blob, seal.v[b].blob))
                 what = "changed (its git blob differs from the seal)";
             a++;
             b++;
@@ -277,18 +376,29 @@ int lint_rule_consensus_seal(bool update)
         if (!lint_reseal) printf("FAIL consensus-seal: %s %s\n", path, what);
         sbuf_add(&changes, path);
     }
+    if (!lint_reseal)
+        for (size_t i = 0; i < dirty.n; i++)
+            printf("FAIL consensus-seal: %s is modified in the working tree (not staged), or untracked; "
+                   "git add it, then follow the ritual in doc/agent/UNSEAL.md\n", dirty.v[i].path);
+
+    /* The seal must be the one the last SEAL_LOG line wrote: a hand-edited seal has no matching log line. */
+    char want[BLOB_HEX + 1], have[BLOB_HEX + 1];
+    bool bound = exists && log_last_seal(want) && (seal_blob(have), !strcmp(want, have));
 
     int rc = 0;
     if (lint_reseal) {
-        if (!drift && exists) {
+        if (!drift && exists && bound) {
             printf("consensus-seal: seal already matches the index (%zu files); nothing resealed\n", now.n);
         } else if (write_seal(&now) || append_log(lint_reason, changes.s, now.n)) {
             rc = 2;
         } else {
             printf("consensus-seal: resealed %zu files (%zu changed); logged in %s\n", now.n, drift, SEAL_LOG_REL);
         }
-    } else if (drift) {
-        printf("consensus-seal: %zu sealed change(s); %s\n", drift, RITUAL);
+    } else if (drift || dirty.n || !bound) {
+        if (!bound)
+            printf("FAIL consensus-seal: %s does not match the last %s line (hand-edited seal, or no seal= entry)\n",
+                   SEAL_REL, SEAL_LOG_REL);
+        printf("consensus-seal: %zu sealed change(s); %s\n", drift + dirty.n + (bound ? 0 : 1), RITUAL);
         rc = 1;
     } else {
         printf("consensus-seal: ok (%zu files sealed)\n", now.n);
@@ -296,5 +406,6 @@ int lint_rule_consensus_seal(bool update)
     free(changes.s);
     ents_free(&now);
     ents_free(&seal);
+    ents_free(&dirty);
     return rc;
 }

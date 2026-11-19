@@ -159,6 +159,37 @@ run 1 'src/zcash/Note.cpp has a seal row' consensus-seal
 run 0 'resealed 6 files (1 changed)' consensus-seal --reseal --reason "fixture: Note removed"
 run 0 'ok (6 files sealed)' consensus-seal
 ok; [ "$(grep -c '^- ' doc/agent/SEAL_LOG.md)" = 3 ] || bad "SEAL_LOG.md lacks the three reseal entries"
+# unstaged edit and untracked file under a sealed prefix: a finding, and the reseal refuses
+track; seal_before=$(cat zcutil/consensus.seal); log_before=$(cat doc/agent/SEAL_LOG.md)
+git commit -qm base; base=$(git rev-parse HEAD)
+printf 'int edited;\n' >> src/pow.cpp
+run 1 'src/pow.cpp is modified in the working tree' consensus-seal
+run 2 'not staged' consensus-seal --reseal --reason "unstaged"
+git checkout -q -- src/pow.cpp
+printf 'int fresh;\n' > src/consensus/fresh.cpp
+run 1 'src/consensus/fresh.cpp is modified in the working tree' consensus-seal
+run 2 'not staged' consensus-seal --reseal --reason "untracked"
+rm src/consensus/fresh.cpp
+run 0 'ok (6 files sealed)' consensus-seal
+ok; [ "$seal_before" = "$(cat zcutil/consensus.seal)" ] && [ "$log_before" = "$(cat doc/agent/SEAL_LOG.md)" ] || bad "a refused reseal wrote the seal or log"
+# a hand-edited seal (new blob, no log line) fails
+printf 'int powh = 1;\n' > src/pow.h
+nb=$(git hash-object src/pow.h); ob=$(grep "^src/pow.h$(printf '\t')" zcutil/consensus.seal | cut -f2)
+sed "s/$ob/$nb/" zcutil/consensus.seal > "$tmp/seal.new"; cp "$tmp/seal.new" zcutil/consensus.seal; track
+run 1 'does not match the last doc/agent/SEAL_LOG.md line' consensus-seal
+git reset -q --hard "$base"
+# an unmerged sealed path is reported once, not as "no row", and the reseal refuses and writes nothing
+git checkout -q -b side; printf 'int a;\n' >> src/pow.cpp; git commit -qam side; git checkout -q -
+printf 'int b;\n' >> src/pow.cpp; git commit -qam main2; git merge side >/dev/null 2>&1
+seal_before=$(cat zcutil/consensus.seal); log_before=$(cat doc/agent/SEAL_LOG.md)
+ok; out=$("$bin" --root . consensus-seal 2>&1); [ "$(printf '%s\n' "$out" | grep -c 'src/pow.cpp is unmerged')" = 1 ] || bad "unmerged path not reported once: $out"
+ok; printf '%s\n' "$out" | grep -q 'has no row' && bad "unmerged path reported as no row: $out"
+run 2 'is unmerged' consensus-seal --reseal --reason "conflict"
+ok; [ "$seal_before" = "$(cat zcutil/consensus.seal)" ] && [ "$log_before" = "$(cat doc/agent/SEAL_LOG.md)" ] || bad "a refused unmerged reseal wrote the seal or log"
+git merge --abort; git reset -q --hard "$base"
+# driver flags: --reason takes a value, not a flag, and only with --reseal
+run 2 '' consensus-seal --reseal --reason --update-baseline
+run 2 'only valid together with --reseal' consensus-seal --reason "x"
 printf 'bad line\n' > zcutil/consensus.seal
 run 2 'is malformed' consensus-seal
 printf 'src/pow.cpp\t%s\nsrc/pow.cpp\t%s\n' 0123456789012345678901234567890123456789 0123456789012345678901234567890123456789 > zcutil/consensus.seal

@@ -50,7 +50,7 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "--root") && i + 1 < argc) lint_root = argv[++i];
         else if (!strcmp(argv[i], "--update-baseline")) update = true;
         else if (!strcmp(argv[i], "--reseal")) lint_reseal = true;
-        else if (!strcmp(argv[i], "--reason") && i + 1 < argc) lint_reason = argv[++i];
+        else if (!strcmp(argv[i], "--reason") && i + 1 < argc && argv[i + 1][0] != '-') lint_reason = argv[++i];
         else if (!want && argv[i][0] != '-') want = argv[i];
         else { want = NULL; break; }
     }
@@ -59,6 +59,10 @@ int main(int argc, char **argv)
     if (all && update) { fprintf(stderr, "zcl-lint: --update-baseline needs one rule, not all\n"); return 2; }
     if ((lint_reseal || lint_reason) && strcmp(want, "consensus-seal")) {
         fprintf(stderr, "zcl-lint: --reseal and --reason belong to consensus-seal only\n");
+        return 2;
+    }
+    if (lint_reason && !lint_reseal) {
+        fprintf(stderr, "zcl-lint: --reason is only valid together with --reseal\n");
         return 2;
     }
     int rc = 0, ran = 0;

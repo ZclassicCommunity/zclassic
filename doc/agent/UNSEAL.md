@@ -39,7 +39,13 @@ both trees. No change to a sealed file is a routine edit, including a fix that l
 
 ## Limits and rules for agents
 
-- The check reads the git index, so run it after `git add`. The commit is what the seal guards.
+- The check compares the index with the seal, and also reports a sealed path that is edited but not
+  staged, deleted on disk, or untracked (a new file under a sealed prefix), so the usual edit-then-lint
+  loop sees it. `--reseal` refuses (exit 2, nothing written) while a sealed path is unmerged, unstaged
+  or untracked.
+- Each `SEAL_LOG.md` line records `seal=<git blob of zcutil/consensus.seal>`. The check requires the
+  current seal to equal the blob on the last line, so a hand-edited seal fails unless a log line is also
+  forged.
 - An agent never runs `--reseal` on its own, and never edits `zcutil/consensus.seal` by hand.
   A change to a sealed file is escalated to the owner, with the differential result attached.
 - The seal log is append-only. Do not edit past lines.
