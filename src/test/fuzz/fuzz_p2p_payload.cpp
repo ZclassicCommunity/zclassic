@@ -42,70 +42,100 @@ struct FuzzInit {
 const FuzzInit g_fuzz_init;
 } // namespace
 
+namespace {
+// One decoder per message, each reading vRecv with the types the matching
+// ProcessMessage handler uses. Only std::ios_base::failure may escape.
+
+void DecodeInvOrGetdata(CDataStream& vRecv)
+{
+    std::vector<CInv> v;
+    vRecv >> v;
+    for (const CInv& inv : v) (void)inv.IsKnownType();
+}
+
+void DecodeAddr(CDataStream& vRecv)
+{
+    std::vector<CAddress> v;
+    vRecv >> v;
+    for (const CAddress& a : v) (void)a.ToString();
+}
+
+void DecodeHeaders(CDataStream& vRecv)
+{
+    // ReadCompactSize loop as in main.cpp
+    std::vector<CBlockHeader> headers;
+    unsigned int nCount = ReadCompactSize(vRecv);
+    if (nCount > MAX_HEADERS_RESULTS) return;
+    headers.resize(nCount);
+    for (unsigned int n = 0; n < nCount; n++) {
+        vRecv >> headers[n];
+        ReadCompactSize(vRecv); // tx count, ignored by the handler
+    }
+}
+
+void DecodeGetblocks(CDataStream& vRecv)
+{
+    // locator + stop hash
+    CBlockLocator locator;
+    uint256 hashStop;
+    vRecv >> locator >> hashStop;
+}
+
+void DecodeFilterload(CDataStream& vRecv)
+{
+    CBloomFilter filter;
+    vRecv >> filter;
+    (void)filter.IsWithinSizeConstraints();
+}
+
+void DecodeFilteradd(CDataStream& vRecv)
+{
+    std::vector<unsigned char> vData;
+    vRecv >> vData;
+}
+
+void DecodeMerkleblock(CDataStream& vRecv)
+{
+    CMerkleBlock mb;
+    vRecv >> mb;
+}
+
+void DecodeTx(CDataStream& vRecv)
+{
+    CTransaction tx;
+    vRecv >> tx;
+}
+
+void DecodeBlock(CDataStream& vRecv)
+{
+    CBlock block;
+    vRecv >> block;
+}
+
+typedef void (*PayloadDecoder)(CDataStream& vRecv);
+
+/** Indexed by the selector (first input byte mod 10). */
+const PayloadDecoder DECODERS[10] = {
+    DecodeInvOrGetdata, // 0 inv
+    DecodeInvOrGetdata, // 1 getdata
+    DecodeAddr,         // 2 addr
+    DecodeHeaders,      // 3 headers
+    DecodeGetblocks,    // 4 getblocks
+    DecodeFilterload,   // 5 filterload
+    DecodeFilteradd,    // 6 filteradd
+    DecodeMerkleblock,  // 7 merkleblock
+    DecodeTx,           // 8 tx
+    DecodeBlock,        // 9 block
+};
+} // namespace
+
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
 {
     if (size < 1 || size > MAX_FUZZ_INPUT) return 0;
     const uint8_t selector = data[0] % 10;
     CDataStream vRecv((const char*)data + 1, (const char*)data + size, SER_NETWORK, PROTOCOL_VERSION);
     try {
-        switch (selector) {
-        case 0: // inv
-        case 1: { // getdata
-            std::vector<CInv> v;
-            vRecv >> v;
-            for (const CInv& inv : v) (void)inv.IsKnownType();
-            break;
-        }
-        case 2: { // addr
-            std::vector<CAddress> v;
-            vRecv >> v;
-            for (const CAddress& a : v) (void)a.ToString();
-            break;
-        }
-        case 3: { // headers: ReadCompactSize loop as in main.cpp
-            std::vector<CBlockHeader> headers;
-            unsigned int nCount = ReadCompactSize(vRecv);
-            if (nCount > MAX_HEADERS_RESULTS) break;
-            headers.resize(nCount);
-            for (unsigned int n = 0; n < nCount; n++) {
-                vRecv >> headers[n];
-                ReadCompactSize(vRecv); // tx count, ignored by the handler
-            }
-            break;
-        }
-        case 4: { // getblocks: locator + stop hash
-            CBlockLocator locator;
-            uint256 hashStop;
-            vRecv >> locator >> hashStop;
-            break;
-        }
-        case 5: { // filterload
-            CBloomFilter filter;
-            vRecv >> filter;
-            (void)filter.IsWithinSizeConstraints();
-            break;
-        }
-        case 6: { // filteradd
-            std::vector<unsigned char> vData;
-            vRecv >> vData;
-            break;
-        }
-        case 7: { // merkleblock
-            CMerkleBlock mb;
-            vRecv >> mb;
-            break;
-        }
-        case 8: { // tx
-            CTransaction tx;
-            vRecv >> tx;
-            break;
-        }
-        case 9: { // block
-            CBlock block;
-            vRecv >> block;
-            break;
-        }
-        }
+        DECODERS[selector](vRecv);
     } catch (const std::ios_base::failure&) {
         // Malformed payload rejected by the decoder: expected.
     }
