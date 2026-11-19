@@ -1,0 +1,3 @@
+@base..@r1	<id>	claude opus 5.5,claude sonnet 5.5,human:pat human	strict rev	REJECT	<date>	needs work
+git commit -m "review: record @base..@r1" -- doc/agent/REVIEWS.tsv
+exit=0

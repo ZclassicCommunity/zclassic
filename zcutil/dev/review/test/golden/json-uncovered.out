@@ -1,0 +1,2 @@
+{"ok":false,"commits":2,"exempt":0,"uncovered":2,"after":0,"items":[{"sha":"@c1","subject":"feat: one","reason":"no row"},{"sha":"@c2","subject":"fix: two","reason":"no row"}],"next":null}
+exit=1

@@ -1,0 +1,7 @@
+exit=1
+lines=2
+under 16 KiB
+review: 80 of 80 commits in @c2..@many_tip have no accepte
+record: zcl-dev review record --reviewer <name> --verdict AC
+review: 80 of 80 commits in @c2..@many_tip have no accepte
+record: zcl-dev review record --reviewer <name> --verdict AC

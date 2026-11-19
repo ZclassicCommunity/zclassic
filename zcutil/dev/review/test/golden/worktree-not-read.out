@@ -1,0 +1,5 @@
+review: 2 of 2 commits in @base..@c2 have no accepted review:
+  @c1 feat: one (no row)
+  @c2 fix: two (no row)
+record: zcl-dev review record --reviewer <name> --verdict ACCEPT @base..@c2
+exit=1

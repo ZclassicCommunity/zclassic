@@ -1,0 +1,2 @@
+zcl-dev review: reviewer 'claude-opus-5-5' is an author of the range (claude opus 5.5); a reviewer must not have written the commits
+exit=1
