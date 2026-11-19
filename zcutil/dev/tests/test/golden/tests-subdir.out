@@ -1,0 +1,4 @@
+boost:foo_tests
+gtest:FooFixture
+gtest:FooParam
+gtest:FooSuite

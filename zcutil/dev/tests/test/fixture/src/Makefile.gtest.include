@@ -1,0 +1,3 @@
+zcash_gtest_SOURCES = \
+	gtest/main.cpp \
+	gtest/test_foo.cpp

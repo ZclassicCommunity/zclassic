@@ -1,0 +1,5 @@
+# impact rules for the fixture
+src/core/*|src/narrow.cpp|src/Makefile.test.include|src/Makefile.gtest.include	ALL
+src/foo.*|src/test/*|src/gtest/*	unit-a
+qa/rpc-tests/x.sh	unit-a qa/rpc-tests/x.sh
+qa/*|zcutil/*|doc/*	-

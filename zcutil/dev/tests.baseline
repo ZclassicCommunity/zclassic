@@ -1,0 +1,18 @@
+# qa scripts that no local-ci step, impact.rules token, tests.rules qa: token or reachable script runs.
+# Seeded from the tree at U2; it may only shrink (zcl-dev check-tests --update-baseline drops fixed rows).
+qa/rpc-tests/backupwallet_default_dir.sh
+qa/rpc-tests/generate_nowallet.sh
+qa/rpc-tests/prover_memory_bench.sh
+qa/rpc-tests/replay_blocknotify.sh
+qa/rpc-tests/token_name_rules.sh
+qa/rpc-tests/wallet_deep_unwind.sh
+qa/rpc-tests/wallet_encrypt_crossversion.sh
+qa/rpc-tests/wallet_reaccept_bound.sh
+qa/rpc-tests/wallet_reindex_interrupt.sh
+qa/rpc-tests/wallet_reindex_unconfirmed.sh
+qa/rpc-tests/wallet_startup_reaccept.sh
+qa/rpc-tests/wallet_witness_reorg.sh
+qa/rpc-tests/wallet_zap_interrupt.sh
+qa/rpc-tests/zslp_send.sh
+qa/rpc-tests/zslp_send_adversarial.sh
+qa/rpc-tests/zslp_stale_tip.sh

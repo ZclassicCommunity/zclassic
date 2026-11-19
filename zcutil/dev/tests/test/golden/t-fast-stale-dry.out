@@ -1,0 +1,4 @@
+note: build needed before running: make -C src -j$(nproc) test/test_bitcoin
+note: build needed before running: make -C src -j$(nproc) zcash-gtest
+exec: src/test/test_bitcoin --run_test=foo_tests --log_level=test_suite
+exec: src/zcash-gtest --gtest_filter=FooFixture.*:FooParam.*:FooSuite.*

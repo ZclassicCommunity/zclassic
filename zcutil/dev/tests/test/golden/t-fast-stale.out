@@ -1,0 +1,3 @@
+t-fast: a test binary is missing or older than a changed source; build it first (never built implicitly):
+  make -C src -j$(nproc) test/test_bitcoin
+  make -C src -j$(nproc) zcash-gtest

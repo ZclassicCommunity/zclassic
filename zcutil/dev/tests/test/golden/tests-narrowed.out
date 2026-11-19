@@ -1,0 +1,2 @@
+boost:foo_tests
+note: impact.rules marks ALL (broad rule: src/narrow.cpp) but tests.rules narrows it to the focused set; run zcutil/local-ci.sh test-changed before landing

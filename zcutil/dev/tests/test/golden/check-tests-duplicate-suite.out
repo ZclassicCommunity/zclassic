@@ -1,0 +1,1 @@
+FAIL duplicate-suite: Boost suite foo_tests is declared in src/test/dup_tests.cpp and src/test/foo_tests.cpp

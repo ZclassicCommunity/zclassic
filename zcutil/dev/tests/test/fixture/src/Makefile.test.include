@@ -1,0 +1,10 @@
+JSON_TEST_FILES = test/data/x.json
+
+BITCOIN_TESTS =\
+  test/foo_tests.cpp \
+  test/bignum.h
+
+BITCOIN_TESTS += \
+  test/bar_tests.cpp
+
+test_test_bitcoin_SOURCES = $(BITCOIN_TESTS)
