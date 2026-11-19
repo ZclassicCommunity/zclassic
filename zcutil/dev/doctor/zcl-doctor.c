@@ -17,6 +17,8 @@
 #define _DEFAULT_SOURCE 1
 #include <ctype.h>
 #include <errno.h>
+#include <ctype.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -84,7 +86,14 @@ static int run_cmd(const char *cmd, char *out, size_t cap)
 {
     size_t n = 0;
     if (out && cap) out[0] = 0;
+#ifdef _WIN32
+    /* cmd.exe strips the outer quotes of a command that starts and ends with one and holds more; wrap it once. */
+    char wrapped[2600];
+    snprintf(wrapped, sizeof wrapped, "\"%s\"", cmd);
+    FILE *p = POPEN(wrapped, "r");
+#else
     FILE *p = POPEN(cmd, "r");
+#endif
     if (!p) return -1;
     char buf[512];
     size_t r;
@@ -189,9 +198,34 @@ static const char *cmd_prefix(void)
     return "sudo apt-get install -y";
 }
 
+/* Package name for a logical (apt) name under the active package manager. */
+static const char *pkg_name(const char *logical)
+{
+    (void)cmd_prefix(); /* resolves pkgmgr */
+    static const struct {
+        const char *mgr, *logical, *name;
+    } map[] = {
+        {"dnf", "g++", "gcc-c++"},
+        {"dnf", "pkg-config", "pkgconf-pkg-config"},
+        {"dnf", "qtbase5-dev", "qt5-qtbase-devel"},
+        {"pacman", "g++", "gcc"},
+        {"pacman", "pkg-config", "pkgconf"},
+        {"pacman", "qtbase5-dev", "qt5-base"},
+        {"pacman-msys", "g++", "gcc"},
+        {"pacman-msys", "gcc", "gcc"},
+        {"pacman-msys", "pkg-config", "pkgconf"},
+        {"pacman-msys", "qtbase5-dev", "mingw-w64-x86_64-qt5-base"},
+        {"brew", "g++", "gcc"},
+        {"brew", "qtbase5-dev", "qt@5"},
+    };
+    for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
+        if (!strcmp(map[i].mgr, pkgmgr) && !strcmp(map[i].logical, logical)) return map[i].name;
+    return logical;
+}
+
 static void install_fix(char *out, size_t cap, const char *pkgs)
 {
-    snprintf(out, cap, "%s %s", cmd_prefix(), pkgs);
+    snprintf(out, cap, "%s %s", cmd_prefix(), pkg_name(pkgs));
 }
 
 static int write_file(const char *path, const char *text)
@@ -212,15 +246,46 @@ static const char *tmp_dir(void)
     return tmpdir_buf;
 }
 
+/* Paths reach sh command lines inside double quotes; accept only a conservative character set. */
+static int safe_path(const char *s)
+{
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (isalnum(c) || strchr("._/+:@%~ -", c)) continue;
+#ifdef _WIN32
+        if (c == '\\') continue;
+#endif
+        return 0;
+    }
+    return 1;
+}
+
+/* Create a private (mode 0700, unpredictable) directory under TMPDIR; no symlink can be pre-planted. */
+static int make_private_dir(char *out, size_t cap, const char *prefix)
+{
+#ifdef _WIN32
+    static int seq;
+    snprintf(out, cap, "%s/%s-%ld-%d", tmp_dir(), prefix, (long)getpid(), ++seq);
+    return mkdir(out) == 0;
+#else
+    snprintf(out, cap, "%s/%s-XXXXXX", tmp_dir(), prefix);
+    return mkdtemp(out) != 0;
+#endif
+}
+
 /* Does `compiler flags` accept the source text? Writes a probe file under TMPDIR. */
 static int probe_compile(const char *compiler, const char *flags, const char *ext, const char *src)
 {
-    char file[600], cmd[1400], out[512];
-    snprintf(file, sizeof file, "%s/zcl-doctor-%ld%s", tmp_dir(), (long)getpid(), ext);
-    if (!write_file(file, src)) return 0;
-    snprintf(cmd, sizeof cmd, "\"%s\" %s -fsyntax-only \"%s\" 2>&1", compiler, flags, file);
-    int rc = run_cmd(cmd, out, sizeof out);
+    char dir[700], file[800], cmd[1700], out[512];
+    if (!make_private_dir(dir, sizeof dir, "zcl-doctor-probe")) return 0;
+    snprintf(file, sizeof file, "%s/probe%s", dir, ext);
+    int rc = -1;
+    if (write_file(file, src)) {
+        snprintf(cmd, sizeof cmd, "\"%s\" %s -fsyntax-only \"%s\" 2>&1", compiler, flags, file);
+        rc = run_cmd(cmd, out, sizeof out);
+    }
     remove(file);
+    rmdir(dir);
     return rc == 0;
 }
 
@@ -535,7 +600,7 @@ static void group_host(void)
 
 static void group_repo(void)
 {
-    static const char *const bins[] = {"zcl-dev", "zcl-port", "jsonq", "zcl-lint", 0};
+    static const char *const bins[] = {"zcl-dev", "jsonq", "zcl-lint", 0};
     char f[1300], missing[160] = "";
     int nmiss = 0;
     for (int i = 0; bins[i]; i++) {
@@ -549,7 +614,7 @@ static void group_repo(void)
         }
     }
     if (!nmiss)
-        add("repo", "zcutil-bin", ST_OK, 0, "zcl-dev, zcl-port, jsonq, zcl-lint built in zcutil/bin");
+        add("repo", "zcutil-bin", ST_OK, 0, "zcl-dev, jsonq, zcl-lint built in zcutil/bin");
     else
         add("repo", "zcutil-bin", ST_ADVISORY, "make -C zcutil", "not built in zcutil/bin: %s", missing);
 
@@ -613,6 +678,14 @@ static void tally(int *nok, int *nadv, int *nfail)
     }
 }
 
+/* Output budget; ZCL_DOCTOR_OUT_CAP lowers it so tests can force a cut. */
+static int out_cap(void)
+{
+    const char *e = getenv("ZCL_DOCTOR_OUT_CAP");
+    long v = e ? strtol(e, 0, 10) : 0;
+    return v > 0 && v < OUT_CAP ? (int)v : OUT_CAP;
+}
+
 static int line_len_json(const struct check *c)
 {
     return (int)(strlen(c->id) + strlen(c->group) + (strlen(c->detail) + strlen(c->fix)) * 6 + 100);
@@ -629,7 +702,7 @@ static void report(int json, int after)
         int first = 1;
         for (i = after; i < nchecks; i++) {
             int l = line_len_json(&checks[i]);
-            if (used + l > OUT_CAP) {
+            if (used + l > out_cap()) {
                 next = i;
                 break;
             }
@@ -654,7 +727,7 @@ static void report(int json, int after)
     for (i = after; i < nchecks; i++) {
         const struct check *c = &checks[i];
         int l = (int)(strlen(c->id) + strlen(c->detail) + strlen(c->fix) + 40);
-        if (used + l > OUT_CAP) {
+        if (used + l > out_cap()) {
             next = i;
             break;
         }
@@ -684,6 +757,10 @@ static int find_root(const char *explicit_root)
             return 1;
         }
         char *slash = strrchr(cwd, '/');
+#ifdef _WIN32
+        char *bslash = strrchr(cwd, '\\');
+        if (bslash && (!slash || bslash > slash)) slash = bslash;
+#endif
         if (!slash || slash == cwd) break;
         *slash = 0;
     }
@@ -740,14 +817,7 @@ static int selftest(void)
     static char pathenv[800], restore[8200];
     const char *old = getenv("PATH");
     snprintf(restore, sizeof restore, "PATH=%s", old ? old : "");
-    snprintf(dir, sizeof dir, "%s/zcl-doctor-selftest-%ld", tmp_dir(), (long)getpid());
-    snprintf(p, sizeof p, "rm -rf \"%s\"", dir);
-    run_cmd(p, 0, 0);
-#ifdef _WIN32
-    if (mkdir(dir) != 0) {
-#else
-    if (mkdir(dir, 0755) != 0) {
-#endif
+    if (!make_private_dir(dir, sizeof dir, "zcl-doctor-selftest")) {
         fprintf(stderr, "selftest: cannot mkdir %s\n", dir);
         return 2;
     }
@@ -833,7 +903,16 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--purpose")) {
             puts("what this host lacks to build and test zclassicd, with the fix for each gap");
             return 0;
-        } else if (!strncmp(a, "--after=", 8)) after = atoi(a + 8);
+        } else if (!strncmp(a, "--after=", 8)) {
+            char *end;
+            errno = 0;
+            long v = strtol(a + 8, &end, 10);
+            if (a[8] == 0 || *end != 0 || errno != 0 || v < 0 || v > MAX_CHECKS) {
+                fprintf(stderr, "zcl-doctor: --after wants an integer between 0 and the number of checks, got '%s'\n", a + 8);
+                return 2;
+            }
+            after = (int)v;
+        }
         else if (!strncmp(a, "--group=", 8)) group = a + 8;
         else if (!strncmp(a, "--root=", 7)) explicit_root = a + 7;
         else if (!strcmp(a, "--help") || !strcmp(a, "-h")) {
@@ -845,6 +924,10 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    if (!safe_path(tmp_dir())) {
+        fprintf(stderr, "zcl-doctor: TMPDIR/TEMP holds characters outside [A-Za-z0-9._/+:@%%~ -]; refusing\n");
+        return 2;
+    }
     if (want_self) return selftest();
     if (group && strcmp(group, "tools") && strcmp(group, "build") && strcmp(group, "host") && strcmp(group, "repo")) {
         fprintf(stderr, "zcl-doctor: unknown group '%s' (tools, build, host, repo)\n", group);
@@ -852,6 +935,10 @@ int main(int argc, char **argv)
     }
     if (!find_root(explicit_root)) {
         fprintf(stderr, "zcl-doctor: cannot determine the repository root\n");
+        return 2;
+    }
+    if (!safe_path(root)) {
+        fprintf(stderr, "zcl-doctor: root holds characters outside [A-Za-z0-9._/+:@%%~ -]; refusing (paths reach sh command lines)\n");
         return 2;
     }
     /* tools always runs: build needs its compiler paths; rows of other groups are filtered out below. */
@@ -867,6 +954,10 @@ int main(int argc, char **argv)
     }
     if (nchecks == 0) {
         fprintf(stderr, "zcl-doctor: no checks ran (empty scan is a failure)\n");
+        return 2;
+    }
+    if (after > nchecks) {
+        fprintf(stderr, "zcl-doctor: --after=%d is past the %d checks\n", after, nchecks);
         return 2;
     }
     report(json, after);

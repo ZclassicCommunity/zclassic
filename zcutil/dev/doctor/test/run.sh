@@ -48,7 +48,31 @@ rc=0; "$doc" --group=bogus >/dev/null 2>&1 || rc=$?
 [ "$rc" = 2 ] || fail "bad group exit $rc, want 2"
 rc=0; "$doc" --nonsense >/dev/null 2>&1 || rc=$?
 [ "$rc" = 2 ] || fail "bad flag exit $rc, want 2"
-rc=0; env -i PATH="$work/bin" HOME="$work/home" "$doc" --root="$work/root" --group=tools --after=999 >"$work/p.out" || rc=$?
-[ "$rc" = 0 ] || fail "--after past the end exit $rc"
+rc=0; env -i PATH="$work/bin" HOME="$work/home" "$doc" --root="$work/root" --group=tools --after=999 >"$work/p.out" 2>"$work/p.err" || rc=$?
+[ "$rc" = 2 ] || fail "--after past the end exit $rc, want 2"
+for bad in -1 -100000 abc "" 1x; do
+    rc=0; env -i PATH="$work/bin" HOME="$work/home" "$doc" --root="$work/root" --group=tools --after="$bad" >"$work/p.out" 2>"$work/p.err" || rc=$?
+    [ "$rc" = 2 ] || fail "--after=$bad exit $rc, want 2"
+    [ ! -s "$work/p.out" ] || fail "--after=$bad printed a report"
+done
+n=$(grep -c "^\[" "$work/tools-ok.out")
+rc=0; env -i PATH="$work/bin" HOME="$work/home" "$doc" --root="$work/root" --group=tools --after="$n" >"$work/p.out" || rc=$?
+[ "$rc" = 0 ] || fail "--after=<count> exit $rc"
+# a hostile root must be refused before any sh command line is built
+rc=0; env -i PATH="$work/bin" HOME="$work/home" "$doc" "--root=$work/x\$(touch $work/pwn)" --group=repo >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "hostile root exit $rc, want 2"
+[ ! -e "$work/pwn" ] || fail "hostile root ran a command"
+rc=0; env -i PATH="$work/bin" HOME="$work/home" "$doc" "--root=$work/x\`touch $work/pwn\`" --group=repo >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] && [ ! -e "$work/pwn" ] || fail "backtick root not refused"
+rc=0; env -i PATH="$work/bin" HOME="$work/home" TMPDIR="$work/t\$(touch $work/pwn)" "$doc" --root="$work/root" --group=tools >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] && [ ! -e "$work/pwn" ] || fail "hostile TMPDIR not refused"
+# output cut: a small budget stops the report early and next_after continues it to the end
+rc=0; env -i PATH="$work/bin" HOME="$work/home" ZCL_DOCTOR_OUT_CAP=500 "$doc" --root="$work/root" --group=tools --json >"$work/cut.out" || rc=$?
+grep -q "\"next_after\":[0-9]" "$work/cut.out" || fail "no next_after when output is cut"
+na=$(sed "s/.*\"next_after\":\([0-9]*\).*/\1/" "$work/cut.out" | tail -1)
+rc=0; env -i PATH="$work/bin" HOME="$work/home" ZCL_DOCTOR_OUT_CAP=500 "$doc" --root="$work/root" --group=tools --json --after="$na" >"$work/cut2.out" || rc=$?
+grep -q "\"id\":\"" "$work/cut2.out" || fail "continuation after a cut is empty"
+rc=0; env -i PATH="$work/bin" HOME="$work/home" ZCL_DOCTOR_OUT_CAP=500 "$doc" --root="$work/root" --group=tools >"$work/cut3.out" || rc=$?
+grep -q "output cut; continue with --after=" "$work/cut3.out" || fail "text report not cut with a hint"
 "$doc" --selftest >/dev/null || fail "--selftest"
 echo "doctor: ok"
