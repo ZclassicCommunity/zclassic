@@ -111,3 +111,79 @@ long-functions (`long-functions.txt`):
 | `src/main.cpp` `ProcessMessage(4)` | 1043 | 1048 |
 
 The tooling rows `zcutil/dev/zcl-port.c` `main(2)` (28 -> 26 after extracting `init_platform`) and `qa/rpc-tests/rpc_busy.sh` (`ss`) were fixed in code, not re-seeded.
+
+
+## Integration re-seed 2026-11-19 (wallet/next)
+
+Branch `integration/stage-rc6` merged the wallet/next branch (witness retire, durable send journal, wallet health, the Qt wallet's send flow
+and health panel) at `ca3692842`. That code was written, reviewed and tested before these gates existed on it. This one-time
+re-seed sets the rows below to today's measured values, for exactly these rows and no others; no code was refactored to get under a
+cap, and the 2026-11-19 re-seed above is not touched. Every raised or added row is debt, to be paid by a later reviewed refactor
+and shrunk through the normal `--update-baseline` path. It is not a precedent: after this section a baseline may only shrink.
+The values include the one follow-up fix of the same integration (`CWallet::DecrementNoteWitnesses`, +8 lines in
+`src/wallet/wallet.cpp`).
+
+filesize (`filesize.txt`):
+
+| path | old | new |
+|---|---|---|
+| `src/init.cpp` | 3989 | 3995 |
+| `src/wallet/gtest/test_wallet.cpp` | 3284 | 3362 |
+| `src/wallet/rpcwallet.cpp` | 4844 | 5009 |
+| `src/wallet/wallet.cpp` | 5957 | 6465 |
+| `src/wallet/wallet.h` | 1805 | 1979 |
+| `wallet/src/connection.cpp` | 3300 | 3302 |
+| `wallet/src/mainwindow.cpp` | 4054 | 4061 |
+| `wallet/src/rpc.cpp` | 2570 | 2846 |
+| `wallet/src/sendtab.cpp` | 1873 | 1881 |
+
+complexity (`complexity.txt`), raised rows:
+
+| path and function | old | new |
+|---|---|---|
+| `src/init.cpp` `AppInit2(2)` | 424 | 425 |
+| `src/wallet/asyncrpcoperation_sendmany.cpp` `AsyncRPCOperation_sendmany::main_impl(0)` | 106 | 107 |
+| `src/wallet/rpcwallet.cpp` `z_sendmany(2)` | 54 | 60 |
+| `src/wallet/wallet.cpp` `CWallet::AddToWallet(3)` | 26 | 28 |
+| `src/wallet/wallet.cpp` `CWallet::ReconcileNoteState(1)` | 20 | 22 |
+| `src/wallet/wallet.cpp` `ReconcileNoteWitnesses(7)` | 21 | 22 |
+| `src/wallet/walletdb.cpp` `ReadKeyValue(6)` | 66 | 67 |
+| `wallet/src/sendtab.cpp` `MainWindow::humaneSendError(1)` | 24 | 25 |
+| `wallet/src/txtablemodel.cpp` `TxTableModel::data(2)` | 30 | 33 |
+
+complexity, new rows (functions over the cap that had no row):
+
+| path and function | new |
+|---|---|
+| `src/wallet/asyncrpcoperation_sendmany.cpp` `AsyncRPCOperation_sendmany::main(0)` | 17 |
+| `src/wallet/gtest/test_wallet_perf.cpp` `TEST(WalletPerf,DISABLED_Bench)` | 34 |
+| `src/wallet/rpcwallet.cpp` `z_getoperationstatus_IMPL(2)` | 21 |
+| `src/wallet/wallet.cpp` `CWallet::GetHealth(1)` | 18 |
+| `src/wallet/wallet.h` `CWallet::SetBestChainINTERNAL(2)` | 16 |
+| `wallet/src/rpc.cpp` `RPC::applyVerdicts(3)` | 17 |
+| `wallet/src/rpc.cpp` `RPC::sendAttempt(1)` | 35 |
+| `wallet/src/rpc.cpp` `RPC::watchTxStatus(0)` | 24 |
+| `wallet/src/sendflow.h` `sendflow::resolve(4)` | 19 |
+| `wallet/src/wallethealth.h` `wallethealth::assess(2)` | 17 |
+
+long-functions (`long-functions.txt`):
+
+| path and function | old | new |
+|---|---|---|
+| `src/init.cpp` `AppInit2(2)` | 2160 | 2165 |
+| `src/wallet/asyncrpcoperation_sendmany.cpp` `AsyncRPCOperation_sendmany::main_impl(0)` | 726 | 728 |
+| `wallet/src/rpc.cpp` `RPC::getInfoThenRefresh(1)` | 528 | 531 |
+
+kpi floors (`kpi-floor.txt`), which follow from the rows above and from the five new wallet test scripts (`wallet_health.sh`,
+`wallet_send_once.sh`, `wallet_send_once_kill9.sh`, `wallet_witness_retire.sh`, `wallet_witness_retire_perf.sh`, about 1,300 lines of shell):
+
+| metric | old | new |
+|---|---|---|
+| `shell_lines` | 21792 | 23178 |
+| `complexity_debt` | 6209 | 6293 |
+
+The five scripts were not baselined for `no-new-jq`, `testiso` or `shellport`: they use `qa/rpc-tests/jsonq_lib.sh` and leased ports.
+The `secretlog` hit at `src/wallet/sendjournal.cpp` (the 8-byte SHA-256 prefix of the idempotency key, the value `z_listsendjournal`
+returns as `keyhash`) carries a `log-ok:` reason on its line and is not a baseline row. `wallet_witness_retire_perf.sh` is a manual
+benchmark: `wallet_witness_retire.sh` names it (the command line is printed after the scenarios) and it is run by hand on that
+script's template.
