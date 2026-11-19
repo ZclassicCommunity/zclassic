@@ -409,6 +409,43 @@ static void paging(void)
     page("paging-json", (char *const[]){tool, "check", "--json", spec, NULL});
 }
 
+/* A commit by a named human author, without a Co-Authored-By trailer. */
+static void mk_by(const char *subject, const char *author)
+{
+    char name[32];
+    snprintf(name, sizeof name, "f%d", ++counter);
+    write_file(name, "x\n", "w");
+    free(git("add", name, NULL));
+    free(git("commit", "-q", "--author", author, "-m", subject, NULL));
+}
+
+/* A commit after a reviewed range is unreviewed ("no row"), not stale; records that cannot be written or
+ * could not be told apart from an author are refused; a range of many authors makes a long row that parses. */
+static void later_and_wide(void)
+{
+    char author[80], subject[40];
+    branch("later", L("r1"));
+    mk("feat: after the review", OPUS);
+    lab("later_tip", "HEAD");
+    GOLDEN("new-commit-no-row", 1, "check", range("base", "later_tip"));
+    GOLDEN("reviewer-no-alnum", 1, "record", "--reviewer", "---", "--verdict", "ACCEPT", range("base", "c2"));
+    branch("tabbed", L("base"));
+    mk("feat: tabbed author", "Tab\tName <t@example.org>");
+    lab("tabbed_tip", "HEAD");
+    GOLDEN("author-control-char", 1, "record", "--reviewer", "Fine Rev", "--verdict", "ACCEPT", range("base", "tabbed_tip"));
+    branch("wide", L("base"));
+    for (int i = 1; i <= 45; i++) {
+        snprintf(author, sizeof author, "Backport Contributor %02d <c%02d@example.org>", i, i);
+        snprintf(subject, sizeof subject, "backport %d", i);
+        mk_by(subject, author);
+    }
+    lab("wide_tip", "HEAD");
+    GOLDEN("wide-record", 0, "record", "--reviewer", "Wide Rev", "--verdict", "ACCEPT", range("base", "wide_tip"));
+    commit_rows();
+    lab("wide_rows", "HEAD");
+    GOLDEN("wide-check", 0, "check", range("base", "wide_rows"));
+}
+
 /* ---- the pre-push review gate (zcl-dev-hook with real git pushes) -------------------------------- */
 
 static char rc_dir[700], remote[700];
@@ -525,7 +562,7 @@ static void hook_cases(void)
     edit_commit("feat: second slice\n");
     lab("rv3", "HEAD");
     receipts(L("rv3"));
-    push("an earlier row does not cover a later commit", 1, "feat: second slice (stale row)", "master");
+    push("an earlier row does not cover a later commit", 1, "feat: second slice (no row)", "master");
     commit_record("review: record second", "rv1r", "rv3");
     push_ok("ZCL_PUSH_OK=1 with a row and no receipts is admitted through the override", 0, NULL, "master");
     edit_commit("feat: unreviewed release\n");
@@ -600,5 +637,6 @@ int main(int argc, char **argv)
     reject_and_human();
     malformed_rows();
     paging();
+    later_and_wide();
     return finish();
 }

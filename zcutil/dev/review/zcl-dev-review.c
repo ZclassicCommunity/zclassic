@@ -318,6 +318,9 @@ static int record_refusal(const RecordArgs *a, const RvRange *rg)
 {
     if (!rv_verdict_ok(a->verdict)) return fail_msg(1, "verdict '%s' is not ACCEPT, ACCEPT-WITH-FIXES or REJECT", a->verdict);
     if (!a->reviewer[0] || !printable_field(a->reviewer, 100)) return fail_msg(1, "reviewer must be 1-100 printable characters without tab or newline");
+    char rn[300];
+    rv_norm(a->reviewer, rn, sizeof rn);
+    if (!rn[0]) return fail_msg(1, "reviewer '%s' has no letters or digits, so it cannot be told apart from an author", a->reviewer);
     if (!printable_field(a->evidence, 200)) return fail_msg(1, "evidence must be at most 200 printable characters without tab or newline");
     if (!rg->n) return fail_msg(1, "the range %.7s..%.7s has no commits to review", rg->base, rg->tip);
     const char *clash = author_clash(rg, a->reviewer);
@@ -335,20 +338,32 @@ static char *lowered(const char *s)
     return d;
 }
 
+/* The row in a buffer sized for it: a range of many authors makes a long row, and a truncated row would be malformed. */
+static char *format_row(const RecordArgs *a, const RvRange *rg, const char *tree, const char *authors, const char *rev, const char *date)
+{
+    const char *fmt = "%s..%s\t%s\t%s\t%s\t%s\t%s\t%s";
+    int n = snprintf(NULL, 0, fmt, rg->base, rg->tip, tree, authors, rev, a->verdict, date, a->evidence);
+    char *row = n < 0 ? NULL : malloc((size_t)n + 1);
+    if (row) snprintf(row, (size_t)n + 1, fmt, rg->base, rg->tip, tree, authors, rev, a->verdict, date, a->evidence);
+    return row;
+}
+
 static int write_row(const RecordArgs *a, const RvRange *rg, const char *tree)
 {
-    char path[1100], date[32], row[1024];
+    char path[1100], date[32], *row = NULL;
     char *authors = join_authors(rg), *rev = lowered(a->reviewer);
     int rc = 2;
     if (!authors || !rev) {
         fail_msg(2, "out of memory");
+    } else if (!printable_field(authors, (size_t)-1)) {
+        rc = fail_msg(1, "an author name of the range contains a control character; it cannot be written to " RV_ROWS_PATH);
     } else if (rows_file_path(path, sizeof path) != 0) {
         fail_msg(2, "not inside a work tree");
     } else {
         utc_now(date, sizeof date);
-        snprintf(row, sizeof row, "%s..%s\t%s\t%s\t%s\t%s\t%s\t%s", rg->base, rg->tip, tree, authors, rev, a->verdict, date, a->evidence);
-        rc = append_row(path, row);
-        if (rc == 0) {
+        row = format_row(a, rg, tree, authors, rev, date);
+        rc = row ? append_row(path, row) : fail_msg(2, "out of memory");
+        if (row && rc == 0) {
             if (a->json) {
                 fputs("{\"ok\":true,\"row\":", stdout);
                 jstr(stdout, row);
@@ -358,6 +373,7 @@ static int write_row(const RecordArgs *a, const RvRange *rg, const char *tree)
             }
         }
     }
+    free(row);
     free(authors);
     free(rev);
     return rc;

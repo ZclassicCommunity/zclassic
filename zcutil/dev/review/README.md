@@ -18,8 +18,11 @@ the non-merge commits, `human:<git author>` for a commit without one.
 
 `check` reads the rows from the tip commit (or `--rows-from`), never from the working tree. A commit C is covered
 when a row has its base as an ancestor of C and C an ancestor-or-equal of the row tip, the row tip is present with
-the tree recorded in `tip_tree` (a rewritten history makes the row stale), the verdict is an accept, and the reviewer
+the tree recorded in `tip_tree`, the verdict is an accept, and the reviewer
 is not an author of C. A later `REJECT` row containing C overrides earlier accepts; a later accept restores it.
+A commit that no row reaches is reported `no row`; `stale row` is reserved for a row whose base precedes the commit
+but whose tip is no longer an ancestor of the checked tip (history was rewritten or amended) or whose tree differs. The `tip_tree`
+binding is a consistency check: a commit id already fixes its tree, so the ancestry test is what detects rewriting.
 Exit 0 all covered, 1 uncovered commits listed as `<sha7> <subject> (<reason>)` with the reason `no row`, `stale row`,
 `reviewer is author` or `rejected`, 2 broken (bad range, unreadable or malformed file with the line named).
 Output stays under 16 KiB a page; `--after=N` continues a long list.

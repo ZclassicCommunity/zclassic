@@ -795,15 +795,18 @@ static void judge(const Repo *r, const char *remote, const char *rref, const cha
  * frees; NULL when none is known. */
 static char *review_base(const char *remote, const char *rref, const char *lsha, const char *rsha)
 {
-    char cmd[512];
     if (is_zero(rsha)) return ieq_prefix(rref, "refs/heads/master") ? NULL : trusted_master(remote);
-    snprintf(cmd, sizeof cmd, "git merge-base --is-ancestor %s %s", rsha, lsha);
-    if (run(cmd, NULL) == 0) return xstrdup(rsha);
-    snprintf(cmd, sizeof cmd, "git merge-base %s %s", rsha, lsha);
-    char *mb = git_line(cmd, NULL);
-    if (mb && is_sha(mb)) return mb;
-    free(mb);
-    return NULL;
+    const char *anc[] = {"git", "merge-base", "--is-ancestor", rsha, lsha, NULL}; /* argv, no shell */
+    if (rv_git(anc, NULL) == 0) return xstrdup(rsha);
+    const char *mbv[] = {"git", "merge-base", rsha, lsha, NULL};
+    RvBuf b;
+    char *mb = NULL;
+    if (rv_git(mbv, &b) == 0) {
+        b.p[strcspn(b.p, "\r\n")] = 0;
+        if (is_sha(b.p)) mb = xstrdup(b.p);
+    }
+    rv_buf_free(&b);
+    return mb;
 }
 
 /* Review gate for one admitted update of a protected ref: 1 and a message when it must be refused. ZCL_PUSH_OK

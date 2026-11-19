@@ -504,7 +504,7 @@ int rv_rows_exist(const char *rev)
 
 enum { ROW_UNUSABLE, ROW_STALE, ROW_LIVE };
 
-typedef struct { int state; unsigned char *hit; } RowSet;
+typedef struct { int state, rewritten; unsigned char *hit; } RowSet;
 
 static int row_state(const RvRow *row)
 {
@@ -572,7 +572,9 @@ static void apply_row(Verdict *v, const RvCommit *c, const RvRow *row, int state
     }
 }
 
-/* A row whose base precedes the commit but which does not cover it is stale for that commit. */
+/* A row whose base precedes the commit, and whose tip is no longer in the history being checked, is stale for
+ * that commit: it was written for history that has since been rewritten. A row for an older, intact range that
+ * simply does not reach the commit is not stale; the commit has no row. */
 static int base_precedes(const RvRow *row, const char *sha)
 {
     const char *av[] = {"git", "merge-base", "--is-ancestor", row->base, sha, NULL};
@@ -596,7 +598,7 @@ static const char *judge_commit(const RvRange *rg, size_t ci, const RvRows *rows
     const char *why = reason_of(&v);
     if (why && !strcmp(why, "no row"))
         for (size_t r = 0; r < rows->n; r++)
-            if (strcmp(rows->v[r].verdict, "REJECT") && base_precedes(&rows->v[r], rg->v[ci].sha)) return "stale row";
+            if (sets[r].rewritten && strcmp(rows->v[r].verdict, "REJECT") && base_precedes(&rows->v[r], rg->v[ci].sha)) return "stale row";
     return why;
 }
 
@@ -609,6 +611,13 @@ static void miss_add(RvResult *res, const RvCommit *c, const char *why)
     res->v[res->n++] = (RvMiss){xstrdup(c->sha), xstrdup(c->subject), why};
 }
 
+/* The row tip is the checked tip or one of its ancestors. */
+static int tip_in_history(const RvRow *row, const char *checked_tip)
+{
+    const char *av[] = {"git", "merge-base", "--is-ancestor", row->tip, checked_tip, NULL};
+    return rv_git(av, NULL) == 0;
+}
+
 static void check_commits(const RvRange *rg, const RvRows *rows, RvResult *res)
 {
     RowSet *sets = xrealloc(NULL, (rows->n + 1) * sizeof *sets);
@@ -616,6 +625,7 @@ static void check_commits(const RvRange *rg, const RvRows *rows, RvResult *res)
         sets[r].hit = xrealloc(NULL, rg->n + 1);
         memset(sets[r].hit, 0, rg->n + 1);
         sets[r].state = row_state(&rows->v[r]);
+        sets[r].rewritten = sets[r].state != ROW_LIVE || !tip_in_history(&rows->v[r], rg->tip);
         if (sets[r].state != ROW_UNUSABLE) row_hits(rg, &rows->v[r], &sets[r]);
     }
     for (size_t i = 0; i < rg->n; i++) {
