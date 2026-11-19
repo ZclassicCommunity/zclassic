@@ -57,12 +57,12 @@ Files: depends/sources/zlib-*.tar.gz
 Copyright: 1995-2024, Jean-loup Gailly and Mark Adler
 License: Zlib
 
-Files: src/c23/vendor/*, src/c23/services/vendor/*
+Files: src/c23/vendor/*, src/c23/services/vendor/*, zcutil/tools/vendor/*
 Copyright: The Z23 authors, see src/c23/LICENSE.z23
 License: Apache-2.0
 Comment: Vendored verbatim from Z23 at the commits in src/c23/Z23_SOURCE.tsv and
- src/c23/services/Z23_SOURCE.tsv; the licence text is src/c23/LICENSE.z23 and
- src/c23/services/LICENSE.z23.
+ src/c23/services/Z23_SOURCE.tsv and zcutil/tools/Z23_SOURCE.tsv; the licence text is src/c23/LICENSE.z23,
+ src/c23/services/LICENSE.z23 and zcutil/tools/LICENSE.z23.
 
 Files: depends/sources/zeromq-*.tar.gz
 Copyright:

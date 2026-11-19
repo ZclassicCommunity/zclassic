@@ -1,0 +1,2 @@
+FAIL: zcutil/dev/impact.rules:3: step no-such-step is not a step of zcutil/local-ci.sh
+check-rules: FAILED (1 problems)

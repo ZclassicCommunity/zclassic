@@ -1,0 +1,5 @@
+base: (stdin)  files: 2
+scope: ALL (unmapped source path: configure.ac)
+steps: unit-a wallet-gui
+stages: 
+scripts: qa/x.sh

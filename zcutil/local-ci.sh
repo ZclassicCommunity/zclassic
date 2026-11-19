@@ -17,6 +17,8 @@
 #     wallet-linux  Linux wallet bundle         -> <outdir>/wallet-linux-candidate
 #                   (consumes <outdir>/daemon-linux-x86_64 of the SAME commit)
 #     test          clean test build + every local test; one summary table
+#     test-changed  `test` restricted (as --only) to the steps `zcl-dev select` picks for
+#                   the commits between ZCL_CI_BASE (default origin/master) and --commit
 #     macos         run local-ci-macos.sh on the Mac named by ZCL_CI_MAC (ssh alias)
 #     all           daemon-linux daemon-win64 wallet-linux test (+ macos if ZCL_CI_MAC set)
 #     shell         interactive shell in the focal environment (for debugging)
@@ -27,6 +29,8 @@
 #     --tor         also run the Tor two/three-node and addrv2 tests (needs network)
 #     --flavor F    test build flavor: debug (checked libstdc++, lock-order checks, as ci.yml),
 #                   release (the configuration that ships; unit suites and smoke only) or both (default)
+#     --only LIST   comma list of `test` step names to run (see zcl-dev select); the build
+#                   always runs; other steps are neither run nor recorded
 #     --pick REV    cherry-pick REV on top of the commit in the TEST builds only (repeatable)
 #     --jobs N      make parallelism (default min(8, nproc))
 #
@@ -228,6 +232,9 @@ noaslr() {
 #   ZCL_CI_LOG_CAP         most bytes kept of a step log (default 268435456 = 256 MiB)
 step() {
     name=$1; dflt=$2; shift 2
+    if [ -n "${ZCL_CI_ONLY:-}" ]; then
+        case ",$ZCL_CI_ONLY," in *",$name,"*) ;; *) return 0 ;; esac
+    fi
     key=$(printf '%s' "$name" | tr 'a-z.-' 'A-Z__')
     eval "limit=\${ZCL_CI_TIMEOUT_$key:-\${ZCL_CI_STEP_TIMEOUT:-$dflt}}"
     cap=${ZCL_CI_LOG_CAP:-268435456}
@@ -254,6 +261,7 @@ step() {
 }
 
 # Each of these is a function so `step` can run it in a subshell with set -e off.
+t_devtools() { make -C zcutil/dev check; }
 t_vendor()   { make -C src check-c23-vendor; }
 t_norust()   { make -C src check-c23-no-rust; }
 t_torsyms()  { make -C src check-c23-tor-symbols TOR_LIBDIR="/w/src/depends/$HOST/lib"; }
@@ -311,6 +319,7 @@ inner_test_run() {
     inner_common
     HOST=$(./depends/config.guess)
     mkdir -p $TD/logs
+    step check-dev-tools 600 t_devtools
     step check-c23-vendor 1800 t_vendor
     step check-c23-no-rust 1800 t_norust
     step check-c23-tor-symbols 1800 t_torsyms
@@ -362,14 +371,15 @@ while [ $# -gt 0 ]; do
         --commit) COMMIT_REV=$2; shift 2 ;;
         --tor) TOR=1; shift ;;
         --flavor) FLAVOR=$2; shift 2 ;;
+        --only) case $2 in ""|*[!A-Za-z0-9_.,-]*) die "--only takes a comma list of step names" ;; esac; ZCL_CI_ONLY=$2; export ZCL_CI_ONLY; shift 2 ;;
         --pick) PICKS="$PICKS $2"; shift 2 ;;
         --jobs) JOBS=$2; shift 2 ;;
-        -h|--help) sed -n '2,49p' "$SELF"; exit 0 ;;
+        -h|--help) sed -n '2,/^set -eu/p' "$SELF" | sed '$d'; exit 0 ;;
         -*) die "unknown option $1" ;;
         *) break ;;
     esac
 done
-CMD=${1:-}; [ -n "$CMD" ] || { sed -n '2,49p' "$SELF"; exit 2; }
+CMD=${1:-}; [ -n "$CMD" ] || { sed -n '2,/^set -eu/p' "$SELF" | sed '$d'; exit 2; }
 ENVDIR=${ZCL_CI_ENV:-$HOME/work/zc23-localci-env}
 CACHE=${ZCL_CI_CACHE:-$HOME/work/zc23-localci-cache}
 if [ -z "$JOBS" ]; then JOBS=$(getconf _NPROCESSORS_ONLN); [ "$JOBS" -le 8 ] || JOBS=8; fi
@@ -422,6 +432,7 @@ enter() {
         $passenv \
         --setenv ZCL_CI_TESTDIR "$TESTDIR" --setenv ZCL_CI_FLAVOR "$FLAVOR_CUR" \
         --setenv ZCL_CI_JOBS "$JOBS" --setenv ZCL_CI_EXPECT_VERSION "${ZCL_CI_EXPECT_VERSION:-}" \
+        --setenv ZCL_CI_ONLY "${ZCL_CI_ONLY:-}" \
         --chdir /w "$@"
 }
 
@@ -466,6 +477,24 @@ stage() {
     } 9>"$CACHE/.lock" || st_rc=$?
     echo "== local-ci: $inner finished in $(( $(date +%s) - t0 ))s (rc $st_rc)"
     return $st_rc
+}
+
+# do_test_changed: `test` restricted to the steps zcl-dev select maps from the diff.
+do_test_changed() {
+    zd=$REPO/zcutil/dev/zcl-dev
+    [ -x "$zd" ] || make -C "$REPO/zcutil/dev" >/dev/null || die "cannot build zcutil/dev/zcl-dev"
+    base=${ZCL_CI_BASE:-origin/master}
+    names=$(git -C "$REPO" diff --name-only "$base...$COMMIT") || die "git diff $base...$COMMIT failed"
+    sel=$(printf '%s\n' "$names" | "$zd" -C "$REPO" select --steps --stdin) || die "zcl-dev select failed"
+    say "zcl-dev select ($base...$SHORT): $sel"
+    stages=$(printf '%s\n' "$names" | "$zd" -C "$REPO" select --stdin | sed -n 's/^stages: //p')
+    [ -z "$stages" ] || say "also needed, run separately: $stages"
+    case $sel in
+        NONE) say "no test step selected"; return 0 ;;
+        ALL) ZCL_CI_ONLY=; export ZCL_CI_ONLY ;;
+        *) ZCL_CI_ONLY=$sel; export ZCL_CI_ONLY ;;
+    esac
+    do_test
 }
 
 do_env_setup() {
@@ -580,6 +609,7 @@ cmd_one() {
             EXTRA_BINDS="--bind $CACHE/wallet-linux-toolchain/qt-static /w/src/wallet/artifacts/linux-build/qt-static --bind $CACHE/wallet-linux-toolchain/openssl /w/src/wallet/artifacts/linux-build/openssl"
             stage wallet-linux host wallet-linux keep ;;
         test) do_test ;;
+        test-changed) do_test_changed ;;
         macos) do_macos ;;
         retry-step) need_env; [ -n "${RETRY_FN:-}" ] || die "usage: RETRY_FN=t_treeroot local-ci.sh retry-step"; stage test none "$RETRY_FN" keep ;;
         clean) rm -rf "${OUT:?}/work"; say "removed $OUT/work" ;;

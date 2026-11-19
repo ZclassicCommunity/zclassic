@@ -1,0 +1,4 @@
+# rules
+src/*.c	unit-a qa/x.sh
+wallet/src/*	wallet-gui daemon-linux
+qa/*|zcutil/*	-
