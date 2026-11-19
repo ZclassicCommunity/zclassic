@@ -183,7 +183,8 @@ crash_variant() { # <point> <hit>
     from_template -testsetchaininterval=0 "-testcrashpoint=$p:$k" -debug=wallet || return
     i=0
     while alive_n 0 && [ $i -lt 40 ]; do cli 1 generate 1 >/dev/null 2>&1; i=$((i + 1)); sleep 0.5; done
-    sleep 1
+    # a loaded host applies the blocks slowly: wait for the node to reach the hook (up to 10 minutes)
+    w=0; while alive_n 0 && [ $w -lt 600 ]; do w=$((w + 1)); sleep 1; done
     if alive_n 0; then bad "$p: the crash hook did not fire after $i blocks"; kill9 0; return; fi
     pass "$p: node died at the hook after $i blocks"
     rm -f "$SD/node0/regtest/.lock"
