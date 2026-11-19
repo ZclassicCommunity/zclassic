@@ -3,7 +3,7 @@
 The Claude Code PreToolUse hook that refuses the never-do actions of `AGENTS.md`: touching a real
 datadir or wallet, reindexing a node, spending or exporting keys, Python, git identity and push
 rules, hosted CI, vendored code. It also warns (asks) for sealed consensus files and for edits of
-the guard itself. Derived from Z23's `tools/agent_guard_rules.c`; see `zcutil/tools/NOTICE`.
+the guard itself. Derived from Z23's `tools/agent_guard_rules.c`; see `zcutil/tools/NOTICE`. <!-- doc-path-ok -->
 
 ```
 make -C zcutil/agent/guard                                         # zcutil/bin/zcl-agent-guard

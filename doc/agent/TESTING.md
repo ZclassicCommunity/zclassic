@@ -25,7 +25,7 @@ Output stays under 16 KiB. A long list ends with `-- more: rerun with --after=N`
 The sets are unioned:
 
 1. `zcutil/dev/tests.rules` lines `glob<TAB>boost:<suite> gtest:<Suite> qa:<script> narrow` (globs as in `impact.rules`, `*` crosses `/`).
-2. Name heuristic: `src/foo.cpp` or `src/x/foo.h` maps to `src/test/foo_tests.cpp` and `src/gtest/test_foo.cpp`, and to the same names beside the source (`src/wallet/test`, `src/wallet/gtest`), ignoring case.
+2. Name heuristic: `src/foo.cpp` or `src/x/foo.h` maps to `src/test/foo_tests.cpp` and `src/gtest/test_foo.cpp`, and to the same names beside the source (`src/wallet/test`, `src/wallet/gtest`), ignoring case. <!-- doc-path-ok -->
 3. A test file maps to its own suites. A `qa/rpc-tests/*.sh` script maps to itself.
 
 Suites are read from the sources: `BOOST_AUTO_TEST_SUITE(` and `BOOST_FIXTURE_TEST_SUITE(` in `src/test` and `src/wallet/test`; `TEST(`, `TEST_F(` and `TEST_P(` in `src/gtest` and `src/wallet/gtest`.
@@ -38,7 +38,7 @@ Suites are read from the sources: `BOOST_AUTO_TEST_SUITE(` and `BOOST_FIXTURE_TE
 broad: run zcutil/local-ci.sh test-changed (broad rule: src/main.cpp)
 ```
 
-and `t-fast` then runs the full `test_bitcoin` and `zcash-gtest`. `--narrow` runs only the focused set and keeps the `broad:` note. A `tests.rules` line may carry the token `narrow` to take one path out of `ALL` on purpose (today only `src/bech32.*`, address encoding); `check-tests` rejects `narrow` on every path that `impact.rules` marks `ALL` (or maps nowhere) unless it is on the allowlist in `zcl-dev-tests.c` (today `src/bech32.`), so new consensus and chain-state paths stay protected. `tests` prints a note for such a path, and `local-ci.sh test-changed` stays the gate before landing.
+and `t-fast` then runs the full `test_bitcoin` and `zcash-gtest`. `--narrow` runs only the focused set and keeps the `broad:` note. A `tests.rules` line may carry the token `narrow` to take one path out of `ALL` on purpose (today only `src/bech32.*`, address encoding); `check-tests` rejects `narrow` on every path that `impact.rules` marks `ALL` (or maps nowhere) unless it is on the allowlist in `zcl-dev-tests.c` (today `src/bech32.`), so new consensus and chain-state paths stay protected. `tests` prints a note for such a path, and `local-ci.sh test-changed` stays the gate before landing. <!-- doc-path-ok -->
 
 Qt wallet changes (`wallet/src/*`) add an informational line naming the `wallet/tests/*.pro` targets; qmake builds are out of scope.
 

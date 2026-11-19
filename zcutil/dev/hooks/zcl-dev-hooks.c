@@ -100,7 +100,7 @@ static void *xrealloc(void *p, size_t n)
     return p;
 }
 
-static char *xstrdup(const char *s) { return strcpy(xrealloc(NULL, strlen(s) + 1), s); }
+static char *xstrdup(const char *s) { size_t n = strlen(s) + 1; return memcpy(xrealloc(NULL, n), s, n); }
 
 static int exit_code(int status)
 {
