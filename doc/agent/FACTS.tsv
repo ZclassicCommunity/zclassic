@@ -17,43 +17,46 @@
 #!terms banned-string-calls binary-hardening bootstrap-background-validation bootstrapstreams-option chainstate-flush-cadence
 #!terms ci-receipts clean-shutdown-marker cleanshutdownmarker-option code-intelligence compiled-param-epoch
 #!terms consensus-seal dbmaxopenfiles-option depends/patches/tor/0002-dynhost-set-enabled.patch directory-commit doc/bootstrap-snapshot-resume.md
-#!terms doc/bootstrap-snapshots.md doc-claims doc-path-existence doc/tor-provenance.md doc/wallet-crash-consistency.md
-#!terms embedded-tor-mode embedded-tor-never-without-tor fee-estimation file-commit-durability fixed-seeds-thin-table
-#!terms focused-test-selection full-validation-path getrpcinfo git-hooks-install glibc-floor
-#!terms glibc-symbol-floor header-precheck header-precheck-bounds header-precheck-failed-leading-header headers-per-message
+#!terms doc/bootstrap-snapshots.md doc-claims doc-path-existence doc/release-notes.md doc/tor-provenance.md
+#!terms doc/wallet-crash-consistency.md embedded-tor-mode embedded-tor-never-without-tor fee-estimation file-commit-durability
+#!terms filterload-weak-assertion fixed-seeds-thin-table focused-test-selection full-validation-path fuzz-corpus-snippet
+#!terms fuzz-dialect-detection getrpcinfo git-hooks-install glibc-floor glibc-symbol-floor
+#!terms header-precheck header-precheck-bounds header-precheck-failed-leading-header headerprecheck-test-scheduling headers-per-message
 #!terms headers-precheck-before-cs-main hollow-scan-fails host-readiness-check http-503-overload index-atomic-block-batch
 #!terms index-refuses-prune index-rpc-disabled-answer invalidate-persists inv-tostring-throws leveldb-budget-assumes-two-databases
-#!terms leveldb-budget-range-test leveldb-fd-budget libfuzzer-opt-in listenonion-option lock-order-debug
-#!terms marker-binds-metadata-only marker-lost-on-any-warning marker-single-use marker-write-conditions maxshieldedcachesize-option
-#!terms memory-cleanse mingw-gcc-9 node-bootstrap-service-bit no-new-bash no-victory-claims
-#!terms no-wallclock-assertions one-dial-per-group onion-key-owner-only only-names-are-steps orphaned-test-daemons
-#!terms outbound-draw-bounds owner-only-secret-files p2p-message-caps param-cache-same-mtime-residual param-cache-skip-rule
-#!terms params-verify-cache pinned-consensus-vectors positive-only-memo prune-keep-window qa/lib/isolation.sh
-#!terms qa/lib/iso-reaper.sh qa/rpc-tests/chain_flush_interval_kill.sh qa/rpc-tests/getrpcinfo.sh qa/rpc-tests/prune_invalidate_reconsider.sh qa/rpc-tests/reindex_stale_header.sh
-#!terms qa/rpc-tests/rpc_busy.sh qa/rpc-tests/startup_conf_staging.sh qa/rpc-tests/token_name_rules.sh qa/rpc-tests/wallet_crash_consistency.sh qa/rpc-tests/wallet_deep_unwind.sh
-#!terms ratchet-baselines-shrink reconcile-drops-only-witnesses reindex-contiguous-records rpc-convert-params-row rpc-end-without-slot
-#!terms rpc-inflight-tracking rpc-net-lock-narrowing rpc-queue-defaults rpc-registration rpcslowlog-option
-#!terms rpc-stats-lock-isolation rpc-stats-no-parameters rpc-tuning-error-three-times rpc-tuning-validation scratch-view-connect
-#!terms secret-log-calls shared-token-vectors shell-portability shielded-verdict-cache shielded-verdict-skip
-#!terms shutdown-defers-witness-rebuild signature-cache-size snapshot-resume-decisions snapshot-wire-protocol sprout-vk-always-hashed
-#!terms src/bootstrap_resume.h src/bootstrapvalidation.cpp src/c23/tools/revendor.sh src/c23/tor/keyfile.c src/c23/tor/privacy_check.sh
-#!terms src/c23/tor/threenode.sh src/c23/Z23_SOURCE.tsv src/compat/glibc_compat.cpp src/dbwrapper.cpp src/embeddedtor.cpp
-#!terms src/equihashmemo.h src/gtest/main.cpp src/gtest/test_mainnet_blocks.cpp src/headerprecheck.cpp src/httpserver.cpp
-#!terms src/httpserver.h src/main.h src/net.cpp src/net.h src/policy/fees.h
-#!terms src/protocol.h src/rpc/client.cpp src/rpc/net.cpp src/rpc/register.h src/rpc/rpcstats.cpp
-#!terms src/rpc/rpcstats.h src/rpc/server.cpp src/rpc/zslp.cpp src/script/sigcache.h src/shieldedcache.h
-#!terms src/shutdownmarker.cpp src/support/cleanse.h src/sync.h src/test/dbwrapper_tests.cpp src/test/fuzz/README.md
+#!terms leveldb-budget-range-test leveldb-fd-budget libfuzzer-opt-in lint-readme-wallet-sections listenonion-option
+#!terms lock-order-debug marker-binds-metadata-only marker-lost-on-any-warning marker-single-use marker-write-conditions
+#!terms maxshieldedcachesize-option memory-cleanse mingw-gcc-9 node-bootstrap-service-bit no-new-bash
+#!terms no-victory-claims no-wallclock-assertions one-dial-per-group onion-key-owner-only only-names-are-steps
+#!terms orphaned-test-daemons outbound-draw-bounds owner-only-secret-files p2p-message-caps param-cache-same-mtime-residual
+#!terms param-cache-skip-rule params-verify-cache pinned-consensus-vectors positive-only-memo prune-keep-window
+#!terms qa/lib/isolation.sh qa/lib/iso-reaper.sh qa/lib/README.md qa/rpc-tests/chain_flush_interval_kill.sh qa/rpc-tests/getrpcinfo.sh
+#!terms qa/rpc-tests/prune_invalidate_reconsider.sh qa/rpc-tests/reindex_stale_header.sh qa/rpc-tests/rpc_busy.sh qa/rpc-tests/startup_conf_staging.sh qa/rpc-tests/token_name_rules.sh
+#!terms qa/rpc-tests/wallet_crash_consistency.sh qa/rpc-tests/wallet_deep_unwind.sh ratchet-baselines-shrink reconcile-drops-only-witnesses reindex-contiguous-records
+#!terms reseeded-baselines rpc-convert-params-row rpc-end-without-slot rpc-inflight-tracking rpc-net-lock-narrowing
+#!terms rpc-queue-defaults rpc-registration rpcslowlog-option rpc-stats-lock-isolation rpc-stats-no-parameters
+#!terms rpc-tuning-error-three-times rpc-tuning-validation scratch-view-connect secret-log-calls shared-token-vectors
+#!terms shell-portability shielded-verdict-cache shielded-verdict-skip shutdown-defers-witness-rebuild signature-cache-size
+#!terms snapshot-resume-decisions snapshot-wire-protocol sprout-vk-always-hashed src/bootstrap_resume.h src/bootstrapvalidation.cpp
+#!terms src/c23/tools/revendor.sh src/c23/tor/keyfile.c src/c23/tor/privacy_check.sh src/c23/tor/threenode.sh src/c23/Z23_SOURCE.tsv
+#!terms src/compat/glibc_compat.cpp src/dbwrapper.cpp src/embeddedtor.cpp src/equihashmemo.h src/gtest/main.cpp
+#!terms src/gtest/test_mainnet_blocks.cpp src/headerprecheck.cpp src/httpserver.cpp src/httpserver.h src/main.h
+#!terms src/net.cpp src/net.h src/policy/fees.h src/protocol.h src/rpc/client.cpp
+#!terms src/rpc/net.cpp src/rpc/register.h src/rpc/rpcstats.cpp src/rpc/rpcstats.h src/rpc/server.cpp
+#!terms src/rpc/zslp.cpp src/script/sigcache.h src/shieldedcache.h src/shutdownmarker.cpp src/support/cleanse.h
+#!terms src/sync.h src/test/dbwrapper_tests.cpp src/test/fuzz/build-fuzz.sh src/test/fuzz/README.md src/test/headerprecheck_tests.cpp
 #!terms src/test/p2p_message_limits_tests.cpp src/test/test_bitcoin.cpp src/test/wire_robustness_tests.cpp src/torcontrol.cpp src/util.cpp
 #!terms src/wallet/tokenguard.cpp src/zmq/zmqnotificationinterface.h src/znam/znamindex.cpp src/zslp/zslpindex.cpp src/zslp/zslpservice.cpp
-#!terms staging-removed-without-bootstrap step-timeout-and-log-cap testcrashpoint-hook test-datadir-isolation test-isolation
-#!terms token-dust-outputs tor-dynhost-off tor-network-tests tor-only-egress tor-safecookie-auth
-#!terms tor-source-pin unmapped-path-selects-everything verifydb-short-check wallet-crash-recovery wallet-write-timing
-#!terms wire-decoder-mutation z23-source-pin zcl-dev-wiki zcutil/check-hardening.sh zcutil/dev/code/code.c
-#!terms zcutil/dev/doctor/zcl-doctor.c zcutil/dev/hooks/zcl-dev-hooks.c zcutil/dev/impact.rules zcutil/dev/tests/zcl-dev-tests.c zcutil/dev/wiki/facts.c
-#!terms zcutil/dev/wiki/wiki.c zcutil/dev/zcl-port.c zcutil/lint/lintlib.c zcutil/lint/README.md zcutil/lint/rules/banned_str.c
-#!terms zcutil/lint/rules/consensus_seal.c zcutil/lint/rules/docclaims.c zcutil/lint/rules/docpaths.c zcutil/lint/rules/no_new_bash.c zcutil/lint/rules/secretlog.c
-#!terms zcutil/lint/rules/shellport.c zcutil/lint/rules/testiso.c zcutil/lint/rules/victory.c zcutil/lint/rules/wallclock.c zcutil/tools/Z23_SOURCE.tsv
-#!terms zk-params-present zmq-notifications znam-undo-data zslp-mainnet-start-height
+#!terms staging-removed-without-bootstrap stale-lease-range-doc step-timeout-and-log-cap testcrashpoint-hook test-datadir-isolation
+#!terms test-isolation token-dust-outputs tor-dynhost-off tor-network-tests tor-only-egress
+#!terms tor-safecookie-auth tor-source-pin tuning-validation-unannounced unmapped-path-selects-everything verifydb-comment-overstates
+#!terms verifydb-short-check wallet-crash-recovery wallet-write-timing wire-decoder-mutation z23-source-pin
+#!terms zcl-dev-wiki zcutil/check-hardening.sh zcutil/dev/code/code.c zcutil/dev/doctor/zcl-doctor.c zcutil/dev/hooks/zcl-dev-hooks.c
+#!terms zcutil/dev/impact.rules zcutil/dev/tests/zcl-dev-tests.c zcutil/dev/wiki/facts.c zcutil/dev/wiki/wiki.c zcutil/dev/zcl-port.c
+#!terms zcutil/lint/filesize.txt zcutil/lint/lintlib.c zcutil/lint/README.md zcutil/lint/rules/banned_str.c zcutil/lint/rules/consensus_seal.c
+#!terms zcutil/lint/rules/docclaims.c zcutil/lint/rules/docpaths.c zcutil/lint/rules/no_new_bash.c zcutil/lint/rules/secretlog.c zcutil/lint/rules/shellport.c
+#!terms zcutil/lint/rules/testiso.c zcutil/lint/rules/victory.c zcutil/lint/rules/wallclock.c zcutil/tools/Z23_SOURCE.tsv zk-params-present
+#!terms zmq-notifications znam-undo-data zslp-mainnet-start-height
 src/main.cpp	selects	ALL	ci	DOCTRINE	zcutil/dev/impact.rules maps src/main.cpp to every local-ci test step, so a change there never skips consensus or wallet tests
 wallet_matrix	needs	leased-ports	qa	DOCTRINE	qa scripts take an explicit leased port base and fail fast on a bound port
 consensus	decided-by	zclassicd	consensus	DOCTRINE	zclassicd is the reference; Z23 matches it bug for bug and a divergence is fixed to match
@@ -202,3 +205,12 @@ src/compat/glibc_compat.cpp	guards	glibc-symbol-floor	build	DOCTRINE	aliases mem
 src/support/cleanse.h	guards	memory-cleanse	wallet	DOCTRINE	memory_cleanse wipes key material in a way the optimizer cannot remove
 src/zmq/zmqnotificationinterface.h	implements	zmq-notifications	rpc	DOCTRINE	CZMQNotificationInterface is a CValidationInterface that publishes block and transaction notifications over ZeroMQ when built with ENABLE_ZMQ
 src/policy/fees.h	implements	fee-estimation	node	DOCTRINE	CBlockPolicyEstimator buckets mempool transactions by fee and priority and tracks how long each bucket takes to confirm
+src/init.cpp	trap-of	verifydb-comment-overstates	node	OBSERVED	the comment above the short VerifyDB says the full depth re-checks blocks checked at the previous start; after several clean restarts in a row blocks now 7 to 288 deep are never re-read at depth (wave-1 review)
+src/test/headerprecheck_tests.cpp	trap-of	headerprecheck-test-scheduling	qa	OBSERVED	BOOST_CHECK(nVerified < 40) depends on thread scheduling and the expected counts fail on a single-core host where the pre-pass returns 0 (wave-1 review)
+doc/release-notes.md	trap-of	tuning-validation-unannounced	rpc	OBSERVED	no release-notes entry says that out-of-range -rpcthreads, -rpcworkqueue and -rpcservertimeout now stop start-up instead of being clamped (wave-1 review)
+src/test/p2p_message_limits_tests.cpp	trap-of	filterload-weak-assertion	qa	OBSERVED	the at-cap filterload case checks only pfilter != NULL although the CNode constructor always allocates the filter, so it cannot show a replacement (wave-1 review)
+src/test/fuzz/build-fuzz.sh	trap-of	fuzz-dialect-detection	build	OBSERVED	the dialect is read only from the Makefile CXX variable with a c++11 fallback, so a tree that sets -std=c++17 in CXXFLAGS is built as c++11 (wave-1 review)
+src/test/fuzz/README.md	trap-of	fuzz-corpus-snippet	qa	OBSERVED	the corpus snippet reads a repository-root path but writes a path under src/test/fuzz and needs xxd, so run literally it fails (wave-1 review)
+qa/lib/README.md	trap-of	stale-lease-range-doc	qa	OBSERVED	the README gives the lease range as 20000-32000 while zcl-port defaults to 12000-17900
+zcutil/lint/README.md	trap-of	lint-readme-wallet-sections	tooling	OBSERVED	the sections Isolated profile and Abnormal exit are wallet testing text copied from wallet/docs/TESTING.md and do not describe zcl-lint
+zcutil/lint/filesize.txt	trap-of	reseeded-baselines	tooling	OBSERVED	the 2026-11-19 integration re-seed raised filesize rows for src/init.cpp, src/main.cpp and src/net.cpp and added complexity and long-function rows; each is debt that only a reviewed refactor may shrink

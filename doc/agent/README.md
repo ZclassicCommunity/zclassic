@@ -8,3 +8,4 @@ Commands: `zcl-dev guide <paths>`, `zcl-dev lessons find <query>`, `zcl-dev know
 - [TRAPS.md](TRAPS.md): what not to do, why, and where, grouped by the paths that trigger each section.
 - [FACTS.tsv](FACTS.tsv): subject, relation, object, context, confidence and why, over a closed vocabulary. `zcl-dev know <term>` answers from it, or says `UNKNOWN`.
 - [WIKI.md](WIKI.md): how `zcl-dev wiki`, `zcl-dev read`, `zcl-dev lessons` and `zcl-dev know` behave.
+- [CODEBASE_MAP.md](CODEBASE_MAP.md): every top-level directory, every `src/` subdirectory and the major files, each with its purpose, test suites and owning `AGENTS.md`; claim markers keep the load-bearing paths checked.
