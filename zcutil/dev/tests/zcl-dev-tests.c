@@ -3,10 +3,8 @@
  * x86_64-w64-mingw32-gcc and macOS clang. The glob matcher is Z23's platform/glob_match.h, vendored
  * verbatim under zcutil/tools/vendor. The behaviour follows Z23's `t-fast`, `code tests` and the
  * test registration gate (gate_test_registration.c); the code is new.
- *
  * One binary serves four commands, chosen by its own file name (zcl-dev dispatches to
  * zcl-dev-<cmd>, and the Makefile installs one copy per name):
- *
  *   zcl-dev tests [--json] <path>...                       the focused test set
  *   zcl-dev t-fast [--changed[=base]] [--dry-run] [--narrow] [--no-qa] [--json]
  *                  [--bin=src] [<path>...]                 run it
@@ -17,11 +15,8 @@
  * Exit codes: 0 ok, 1 finding or failed test, 2 broken input or empty scan, 3 binary missing/stale.
  */
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
-#define _POSIX_C_SOURCE 200809L
-#define _XOPEN_SOURCE 700 /* realpath under a strict -std=c2x */
-#ifdef __APPLE__
-#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under a POSIX-only mask */
-#endif
+#define _XOPEN_SOURCE 700 /* implies POSIX 2008; realpath under a strict -std=c2x */
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under POSIX-only masks; ignored elsewhere */
 #endif
 #if defined(__MINGW32__) && !defined(__USE_MINGW_ANSI_STDIO)
 #define __USE_MINGW_ANSI_STDIO 1
@@ -49,7 +44,6 @@
 #include <unistd.h>
 #define EXE_SUFFIX ""
 #endif
-
 #include "platform/modules/platform/include/platform/glob_match.h"
 
 #define IMPACT_FILE "zcutil/dev/impact.rules"
@@ -59,7 +53,6 @@
 #define GTEST_INC "src/Makefile.gtest.include"
 #define PAGE_BYTES 15000 /* output stays under 16 KiB per page */
 #define WORK_DIR "zcutil/gen/t-fast-work"
-
 typedef struct { char **v; size_t n, cap; } List;
 
 static void die(const char *fmt, ...)
@@ -328,60 +321,17 @@ static void enter_repo(const char *dir)
     if (chdir(l.v[0])) die("cannot chdir to %s", l.v[0]);
 }
 
+#include "pathresolve.h" /* real_path, resolve_abs */
 /* Repo-relative, canonical form of a path argument: `\` becomes `/`, an absolute path inside the work tree
  * is made relative, and `.`, empty and `..` segments are collapsed. A path that climbs out of the tree is
  * refused, so a prefix test (narrow_allowed) and a glob (impact.rules) see the same file. */
-/* Physical form of an existing path: symlinks resolved (realpath), `\` turned into `/`. Windows has no
- * realpath; _fullpath only normalizes there, which is all that platform needs here. */
-static int real_path(const char *path, char *out, size_t cap)
-{
-    struct stat st;
-    if (stat(path, &st)) return 0;
-#ifdef _WIN32
-    if (!_fullpath(out, path, cap)) return 0;
-#else
-    char *rp = realpath(path, NULL);
-    if (!rp) return 0;
-    int fits = strlen(rp) < cap;
-    if (fits) memcpy(out, rp, strlen(rp) + 1);
-    free(rp);
-    if (!fits) return 0;
-#endif
-    for (char *c = out; *c; c++) if (*c == '\\') *c = '/';
-    return 1;
-}
-
-/* An absolute path with its longest existing leading part made physical, so $TMPDIR=/var/x and a cwd of
- * /private/var/x (macOS), or any symlinked root, compare equal. The unresolved tail (a file that may not
- * exist, `..` segments) is kept as text and collapsed, and policed, by norm_path. */
-static char *resolve_abs(const char *abs)
-{
-    char *tmp = xstrdup(abs), real[4096];
-    size_t len = strlen(tmp), floor = (tmp[0] && tmp[1] == ':') ? 2 : 0;
-    while (len > floor + 1) {
-        if (real_path(tmp, real, sizeof real)) {
-            char *res = xfmt("%s%s", real, abs + len);
-            free(tmp);
-            return res;
-        }
-        while (len > floor + 1 && tmp[len - 1] != '/') len--;
-        if (len > floor + 1) len--; /* drop the '/' */
-        tmp[len] = 0;
-    }
-    free(tmp);
-    return xstrdup(abs);
-}
-
 static char *norm_path(const char *arg)
 {
     char *p = xstrdup(arg), *r, cwd[4096];
     for (r = p; *r; r++) if (*r == '\\') *r = '/';
     r = p;
     if (r[0] == '/' || (r[0] && r[1] == ':' && r[2] == '/')) {
-        if (!getcwd(cwd, sizeof cwd)) die("cannot read the current directory");
-        char rcwd[4096];
-        if (!real_path(cwd, rcwd, sizeof rcwd)) die("cannot resolve the current directory");
-        memcpy(cwd, rcwd, strlen(rcwd) + 1);
+        if (!getcwd(cwd, sizeof cwd) || !real_path(cwd, cwd, sizeof cwd)) die("cannot read the current directory");
         char *abs = resolve_abs(r);
         free(p);
         p = r = abs;

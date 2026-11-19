@@ -13,9 +13,7 @@
  * Rule-baseline metrics sum the baseline file (a ceiling), so editing a baseline upward trips this floor too.
  */
 #define _POSIX_C_SOURCE 200809L
-#ifdef __APPLE__
-#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under a POSIX-only mask */
-#endif
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under POSIX-only masks; ignored elsewhere */
 #include "../lintlib.h"
 
 #include <stdio.h>

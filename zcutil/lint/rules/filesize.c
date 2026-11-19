@@ -9,9 +9,7 @@
  * Scope: src/ (not vendored trees), wallet/src/, qa/ and zcutil/ (not vendor/).
  */
 #define _POSIX_C_SOURCE 200809L
-#ifdef __APPLE__
-#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under a POSIX-only mask */
-#endif
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under POSIX-only masks; ignored elsewhere */
 #include "../lintlib.h"
 
 #include <stdio.h>

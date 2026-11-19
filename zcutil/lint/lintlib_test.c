@@ -1,8 +1,6 @@
 /* Unit test of the lintlib comment and string stripping. Copyright 2026 Rhett Creighton - MIT. */
 #define _POSIX_C_SOURCE 200809L
-#ifdef __APPLE__
-#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under a POSIX-only mask */
-#endif
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under POSIX-only masks; ignored elsewhere */
 #include "lintlib.h"
 
 #include <stdio.h>

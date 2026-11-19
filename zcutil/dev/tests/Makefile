@@ -20,7 +20,7 @@ endif
 
 all: $(OUTS)
 
-$(BIN)/zcl-dev-tests$(EXEEXT): zcl-dev-tests.c $(HDR)
+$(BIN)/zcl-dev-tests$(EXEEXT): zcl-dev-tests.c pathresolve.h $(HDR)
 	mkdir -p $(BIN)
 	$(CC) $(STD) $(WARN) $(CFLAGS) $(INC) -o $@ zcl-dev-tests.c
 

@@ -4,7 +4,6 @@
  * tools/gen_api_reference.c, tools/gen_capability_inventory.c and the
  * route/command parity lint gates; the implementation is new and targets the
  * C++ sources of zclassicd.
- *
  *   zcl-dev gen rpc-reference   [--out=F]   zcutil/gen/RPC_REFERENCE.md
  *   zcl-dev gen args-reference  [--out=F]   zcutil/gen/ARGS_REFERENCE.md
  *   zcl-dev gen inventory       [--out=F] [--no-tools]   zcutil/gen/CAPABILITY_INVENTORY.jsonl
@@ -15,9 +14,7 @@
  */
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
-#ifdef __APPLE__
-#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under a POSIX-only mask */
-#endif
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under POSIX-only masks; ignored elsewhere */
 #endif
 #if defined(__MINGW32__) && !defined(__USE_MINGW_ANSI_STDIO)
 #define __USE_MINGW_ANSI_STDIO 1
