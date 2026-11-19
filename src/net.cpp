@@ -1488,6 +1488,54 @@ CAddress SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsig
     return CAddress();
 }
 
+/** Network groups an outbound dial is in progress to (see CDialGroupReservation). */
+static std::set<std::vector<unsigned char> > setDialingGroups;
+static CCriticalSection cs_setDialingGroups;
+
+bool ReserveDialGroup(const std::vector<unsigned char>& group)
+{
+    LOCK(cs_setDialingGroups);
+    return setDialingGroups.insert(group).second;
+}
+
+void ReleaseDialGroup(const std::vector<unsigned char>& group)
+{
+    LOCK(cs_setDialingGroups);
+    setDialingGroups.erase(group);
+}
+
+std::set<std::vector<unsigned char> > DialingGroups()
+{
+    LOCK(cs_setDialingGroups);
+    return setDialingGroups;
+}
+
+bool OutboundGroupConnected(const std::vector<unsigned char>& group)
+{
+    LOCK(cs_vNodes);
+    BOOST_FOREACH(CNode* pnode, vNodes)
+        if (!pnode->fInbound && pnode->addr.GetGroup() == group)
+            return true;
+    return false;
+}
+
+int CountOutboundPeers()
+{
+    int nOutbound = 0;
+    LOCK(cs_vNodes);
+    BOOST_FOREACH(CNode* pnode, vNodes)
+        if (!pnode->fInbound)
+            nOutbound++;
+    return nOutbound;
+}
+
+bool ParallelDialWanted(int nOutbound)
+{
+    return nOutbound < PARALLEL_DIAL_OUTBOUND_TARGET;
+}
+
+static void OpenConnectionsLoop(int nDialer);
+
 void ThreadOpenConnections()
 {
     // Connect to specific addresses
@@ -1509,19 +1557,38 @@ void ThreadOpenConnections()
         }
     }
 
+    OpenConnectionsLoop(0);
+}
+
+static void ThreadOpenConnectionsDialer(int nDialer)
+{
+    // the -connect list is dialled by ThreadOpenConnections alone
+    if (mapArgs.count("-connect") && mapMultiArgs["-connect"].size() > 0)
+        return;
+    OpenConnectionsLoop(nDialer);
+}
+
+static void OpenConnectionsLoop(int nDialer)
+{
     // Initiate network connections
     int64_t nStart = GetTime();
     while (true)
     {
-        ProcessOneShot();
+        if (nDialer == 0)
+            ProcessOneShot();
 
         MilliSleep(500);
+
+        // The extra dialers only run while the node holds few outbound peers, and
+        // do not take an outbound slot while they wait.
+        if (nDialer > 0 && !ParallelDialWanted(CountOutboundPeers()))
+            continue;
 
         CSemaphoreGrant grant(*semOutbound);
         boost::this_thread::interruption_point();
 
         // Add seed nodes if DNS seeds are all down (an infrastructure attack?).
-        if (addrman.size() == 0 && (GetTime() - nStart > 60)) {
+        if (nDialer == 0 && addrman.size() == 0 && (GetTime() - nStart > 60)) {
             static bool done = false;
             if (!done) {
                 LogPrintf("Adding fixed seed nodes as DNS doesn't seem to be available.\n");
@@ -1535,16 +1602,17 @@ void ThreadOpenConnections()
         //
         CAddress addrConnect;
 
-        // Only connect out to one peer per network group (/16 for IPv4).
+        // Only connect out to one peer per network group (/16 for IPv4), counting
+        // the groups other dialers are connecting to. Those are read first: a dial
+        // that finishes adds its node to vNodes before it releases its group, so
+        // a group is always seen in one of the two.
         // Do this here so we don't have to critsect vNodes inside mapAddresses critsect.
-        int nOutbound = 0;
-        set<vector<unsigned char> > setConnected;
+        set<vector<unsigned char> > setConnected = DialingGroups();
         {
             LOCK(cs_vNodes);
             BOOST_FOREACH(CNode* pnode, vNodes) {
                 if (!pnode->fInbound) {
                     setConnected.insert(pnode->addr.GetGroup());
-                    nOutbound++;
                 }
             }
         }
@@ -1566,8 +1634,15 @@ void ThreadOpenConnections()
         if (addrPick.IsValid())
             addrConnect = addrPick;
 
-        if (addrConnect.IsValid())
-            OpenNetworkConnection(addrConnect, &grant);
+        if (!addrConnect.IsValid())
+            continue;
+
+        // Hold the group while dialling. Another dialer may have taken it, or
+        // connected to it, since setConnected was read: then this round is over.
+        CDialGroupReservation reservation(addrConnect.GetGroup());
+        if (!reservation || OutboundGroupConnected(addrConnect.GetGroup()))
+            continue;
+        OpenNetworkConnection(addrConnect, &grant);
     }
 }
 
@@ -1946,6 +2021,14 @@ void StartNode(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     // Initiate outbound connections
     threadGroup.create_thread(boost::bind(&TraceThread<void (*)()>, "opencon", &ThreadOpenConnections));
+
+    // Further dialers while the node holds few outbound peers: a dead address costs
+    // a whole connect timeout, so one dialer alone spends most of a fresh start waiting.
+    static const char* const pszDialerNames[] = {"opencon1", "opencon2", "opencon3", "opencon4", "opencon5", "opencon6", "opencon7"};
+    static_assert(MAX_PARALLEL_DIALS - 1 <= (int)(sizeof(pszDialerNames) / sizeof(pszDialerNames[0])), "a name for every dialer");
+    for (int i = 1; i < MAX_PARALLEL_DIALS; i++)
+        threadGroup.create_thread(boost::bind(&TraceThread<boost::function<void()> >, pszDialerNames[i - 1],
+                                              boost::function<void()>(boost::bind(&ThreadOpenConnectionsDialer, i))));
 
     // Process messages
     threadGroup.create_thread(boost::bind(&TraceThread<void (*)()>, "msghand", &ThreadMessageHandler));

@@ -186,6 +186,36 @@ CAddrMan& SelectDialTable(bool fOnionProxy, uint32_t nRand);
  *  setConnected, not our own, not limited, not tried within the last minute, and a node on a
  *  port other than the default only after enough other draws (see ThreadOpenConnections). */
 CAddress SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow);
+
+/** Outbound dialers (opencon threads) that run at once while the node holds fewer than
+ *  PARALLEL_DIAL_OUTBOUND_TARGET outbound peers. A dead address costs a whole connect
+ *  timeout and on a small network most of the table is dead, so a single dialer spent
+ *  most of a fresh start waiting. Above the target only the first dialer runs. */
+static const int MAX_PARALLEL_DIALS = 8;
+static const int PARALLEL_DIAL_OUTBOUND_TARGET = 8;
+/** Whether the extra dialers run, given the number of outbound peers. */
+bool ParallelDialWanted(int nOutbound);
+int CountOutboundPeers();
+/** Whether an outbound peer on this network group is connected. */
+bool OutboundGroupConnected(const std::vector<unsigned char>& group);
+/** The network groups outbound dials are in progress to. A dialer counts them as
+ *  connected, so concurrent dials keep one outbound peer per group. */
+std::set<std::vector<unsigned char> > DialingGroups();
+/** Take a group for one dial; false when another dial holds it. */
+bool ReserveDialGroup(const std::vector<unsigned char>& group);
+void ReleaseDialGroup(const std::vector<unsigned char>& group);
+/** A group held for the length of one dial. */
+class CDialGroupReservation
+{
+    std::vector<unsigned char> group;
+    bool fHeld;
+public:
+    explicit CDialGroupReservation(const std::vector<unsigned char>& groupIn) : group(groupIn), fHeld(ReserveDialGroup(groupIn)) {}
+    ~CDialGroupReservation() { if (fHeld) ReleaseDialGroup(group); }
+    CDialGroupReservation(const CDialGroupReservation&) = delete;
+    CDialGroupReservation& operator=(const CDialGroupReservation&) = delete;
+    explicit operator bool() const { return fHeld; }
+};
 /** The table an address belongs to: Tor v3 in the onion store, the rest in addrman. */
 inline CAddrMan& AddrManFor(const CNetAddr& addr) { return addr.IsTorV3() ? addrmanOnion : addrman; }
 /** Maximum number of connections to simultaneously allow (aka connection slots) */

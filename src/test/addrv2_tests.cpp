@@ -787,6 +787,61 @@ BOOST_AUTO_TEST_CASE(outbound_candidate_small_table)
     SetLimited(NET_IPV6, l6);
 }
 
+// Concurrent dialers: a group being dialled is held by one dialer, counts as connected
+// for the others (so the one-outbound-peer-per-group rule holds while dials overlap),
+// and is free again when the dial ends. The extra dialers run only below the target.
+BOOST_AUTO_TEST_CASE(parallel_dial_groups)
+{
+    bool l4 = IsLimited(NET_IPV4), l6 = IsLimited(NET_IPV6);
+    SetLimited(NET_IPV4, false);
+    SetLimited(NET_IPV6, false);
+    const unsigned short port = Params().GetDefaultPort();
+    const int64_t now = GetAdjustedTime();
+    const CNetAddr source("93.184.216.1");
+    CAddress a = MakeV4("94.185.1.2", port, 1, now - 3600);
+    CAddress aSameGroup = MakeV4("94.185.7.9", port, 1, now - 3600);
+    CAddress b = MakeV4("95.186.3.4", port, 1, now - 3600);
+    BOOST_REQUIRE(a.GetGroup() == aSameGroup.GetGroup());
+
+    BOOST_CHECK(DialingGroups().empty());
+    BOOST_CHECK(!OutboundGroupConnected(a.GetGroup()));
+    {
+        CDialGroupReservation first(a.GetGroup());
+        BOOST_CHECK(first);
+        {
+            // a second dialer cannot take the group, whichever address it drew
+            CDialGroupReservation second(aSameGroup.GetGroup());
+            BOOST_CHECK(!second);
+        }
+        // the failed reservation did not release the held one
+        BOOST_CHECK_EQUAL(DialingGroups().count(a.GetGroup()), 1U);
+
+        // a dialer that counts the held group as connected only picks the other one
+        CAddrMan man;
+        BOOST_REQUIRE(man.Add(a, source));
+        BOOST_REQUIRE(man.Add(aSameGroup, source));
+        BOOST_REQUIRE(man.Add(b, source));
+        std::set<std::vector<unsigned char> > setConnected = DialingGroups();
+        for (int i = 0; i < 20; i++) {
+            CAddress pick = SelectOutboundCandidate(man, setConnected, now);
+            BOOST_CHECK(pick == b);
+        }
+    }
+    BOOST_CHECK(DialingGroups().empty());
+    {
+        CDialGroupReservation again(aSameGroup.GetGroup());
+        BOOST_CHECK(again);
+    }
+    BOOST_CHECK(DialingGroups().empty());
+
+    BOOST_CHECK(MAX_PARALLEL_DIALS > 1);
+    BOOST_CHECK(ParallelDialWanted(0));
+    BOOST_CHECK(ParallelDialWanted(PARALLEL_DIAL_OUTBOUND_TARGET - 1));
+    BOOST_CHECK(!ParallelDialWanted(PARALLEL_DIAL_OUTBOUND_TARGET));
+    SetLimited(NET_IPV4, l4);
+    SetLimited(NET_IPV6, l6);
+}
+
 namespace {
 // A v3 address that differs for every n (MakeV3 has only 256 distinct keys).
 CAddress MakeV3N(uint32_t n)
