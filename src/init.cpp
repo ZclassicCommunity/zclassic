@@ -706,7 +706,6 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-regtest", "Enter regression test mode, which uses a special chain in which blocks can be solved instantly. "
             "This is intended for regression testing tools and app development.");
     }
-    // strUsage += HelpMessageOpt("-shrinkdebugfile", _("Shrink debug.log file on client startup (default: 1 when no -debug)"));
     strUsage += HelpMessageOpt("-testnet", _("Use the test network"));
 
     strUsage += HelpMessageGroup(_("Node relay options:"));
@@ -751,8 +750,6 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-rpcservertimeout=<n>", strprintf("Timeout during HTTP requests (default: %d)", DEFAULT_HTTP_SERVER_TIMEOUT));
     }
 
-    // Disabled until we can lock notes
-    //strUsage += HelpMessageOpt("-rpcasyncthreads=<n>", strprintf(_("Set the number of threads to service Async RPC calls (default: %d)"), 1));
 
     if (mode == HMM_BITCOIND) {
         strUsage += HelpMessageGroup(_("Metrics Options (only if -daemon and -printtoconsole are not set):"));
@@ -784,7 +781,6 @@ struct CImportingNow
         fImporting = false;
     }
 };
-
 
 // If we're using -prune with -reindex, then delete block files that will be ignored by the
 // reindex.  Since reindexing works by starting at block file 0 and looping until a blockfile
@@ -1355,8 +1351,6 @@ static void InterruptBootstrapServeFreeze()
     g_serveFreezeInProgress.store(false);
 }
 
-
-
 /** Sanity checks
  *  Ensure that Bitcoin is running in a usable environment with all
  *  necessary library support.
@@ -1422,7 +1416,6 @@ bool InitSanityCheck(void)
             ZC_GetParamsDir().string()));
         return false;
     }
-
 
     // Validate every required Zcash parameter file against the single
     // compiled SHA-256 table in bootstrap.cpp. Keeping one source of truth
@@ -1594,7 +1587,6 @@ bool InitSanityCheck(void)
     return true;
 }
 
-
 static void ZC_LoadParams(
     const CChainParams& chainparams
 )
@@ -1643,7 +1635,6 @@ static void ZC_LoadParams(
      LogPrintf("Loading Sapling (Spend) parameters from %s\n", sapling_spend.string().c_str());
      LogPrintf("Loading Sapling (Output) parameters from %s\n", sapling_output.string().c_str());
      LogPrintf("Loading Sapling (Sprout Groth16) parameters from %s\n", sprout_groth16.string().c_str());
-
 
     gettimeofday(&tv_start, 0);
 
@@ -2246,8 +2237,6 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     const auto repairJournal = GetDataDir() / "chain-repair-pending.json";
     if (boost::filesystem::exists(repairJournal) || boost::filesystem::is_symlink(repairJournal))
         return InitError(_("An interrupted blockchain repair needs recovery. Open the ZClassic wallet to restore the previous chain before starting the node. Do not delete the repair journal or blockchain backups."));
-    // if (GetBoolArg("-shrinkdebugfile", !fDebug))
-    //     ShrinkDebugFile();
 
     if (fPrintToDebugLog)
         OpenDebugLog();
@@ -2285,13 +2274,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         threadGroup.create_thread(&ThreadShowMetricsScreen);
     }
 
-
     g_startupTimer.mark("datadir-lock+threads");
     // Initialize Zclassic circuit parameters
     ZcParamsLoader zcParamsLoader;
     zcParamsLoader.Start(chainparams);
     g_startupTimer.mark("zk-snark params (started)");
-
 
     /* Start the RPC server already.  It will be started in "warmup" mode
      * and not really process calls already (but it will signify connections
@@ -3450,7 +3437,6 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         mempool.ReadFeeEstimates(est_filein);
     fFeeEstimatesInitialized = true;
     g_startupTimer.mark("fee estimates");
-
 
     // ********************************************************* Step 8: load wallet
 #ifdef ENABLE_WALLET
