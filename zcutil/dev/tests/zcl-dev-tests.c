@@ -18,6 +18,7 @@
  */
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700 /* realpath under a strict -std=c2x */
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under a POSIX-only mask */
 #endif
@@ -330,6 +331,47 @@ static void enter_repo(const char *dir)
 /* Repo-relative, canonical form of a path argument: `\` becomes `/`, an absolute path inside the work tree
  * is made relative, and `.`, empty and `..` segments are collapsed. A path that climbs out of the tree is
  * refused, so a prefix test (narrow_allowed) and a glob (impact.rules) see the same file. */
+/* Physical form of an existing path: symlinks resolved (realpath), `\` turned into `/`. Windows has no
+ * realpath; _fullpath only normalizes there, which is all that platform needs here. */
+static int real_path(const char *path, char *out, size_t cap)
+{
+    struct stat st;
+    if (stat(path, &st)) return 0;
+#ifdef _WIN32
+    if (!_fullpath(out, path, cap)) return 0;
+#else
+    char *rp = realpath(path, NULL);
+    if (!rp) return 0;
+    int fits = strlen(rp) < cap;
+    if (fits) memcpy(out, rp, strlen(rp) + 1);
+    free(rp);
+    if (!fits) return 0;
+#endif
+    for (char *c = out; *c; c++) if (*c == '\\') *c = '/';
+    return 1;
+}
+
+/* An absolute path with its longest existing leading part made physical, so $TMPDIR=/var/x and a cwd of
+ * /private/var/x (macOS), or any symlinked root, compare equal. The unresolved tail (a file that may not
+ * exist, `..` segments) is kept as text and collapsed, and policed, by norm_path. */
+static char *resolve_abs(const char *abs)
+{
+    char *tmp = xstrdup(abs), real[4096];
+    size_t len = strlen(tmp), floor = (tmp[0] && tmp[1] == ':') ? 2 : 0;
+    while (len > floor + 1) {
+        if (real_path(tmp, real, sizeof real)) {
+            char *res = xfmt("%s%s", real, abs + len);
+            free(tmp);
+            return res;
+        }
+        while (len > floor + 1 && tmp[len - 1] != '/') len--;
+        if (len > floor + 1) len--; /* drop the '/' */
+        tmp[len] = 0;
+    }
+    free(tmp);
+    return xstrdup(abs);
+}
+
 static char *norm_path(const char *arg)
 {
     char *p = xstrdup(arg), *r, cwd[4096];
@@ -337,7 +379,12 @@ static char *norm_path(const char *arg)
     r = p;
     if (r[0] == '/' || (r[0] && r[1] == ':' && r[2] == '/')) {
         if (!getcwd(cwd, sizeof cwd)) die("cannot read the current directory");
-        for (char *c = cwd; *c; c++) if (*c == '\\') *c = '/';
+        char rcwd[4096];
+        if (!real_path(cwd, rcwd, sizeof rcwd)) die("cannot resolve the current directory");
+        memcpy(cwd, rcwd, strlen(rcwd) + 1);
+        char *abs = resolve_abs(r);
+        free(p);
+        p = r = abs;
         size_t n = strlen(cwd);
         if (strncmp(r, cwd, n) || r[n] != '/') return p; /* outside the tree: unmapped, so broad */
         r += n + 1;
