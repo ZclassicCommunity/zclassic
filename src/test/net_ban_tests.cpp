@@ -4,6 +4,7 @@
 
 // banlist.dat: round trip, expiry, and fail-open handling of damaged files.
 
+#include "banlist.h"
 #include "chainparams.h"
 #include "net.h"
 #include "random.h"
