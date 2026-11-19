@@ -25,7 +25,7 @@
 # Never point this at a real datadir; it creates and deletes its own under --work.
 set -u
 
-bin=""; work=""; base=36100; modes="all"; files=16; filemib=16; kbps=65536; window=2000; basebin=""
+bin=""; work=""; base=""; modes="all"; files=16; filemib=16; kbps=65536; window=2000; basebin=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --bin) bin=$2; shift 2 ;;
@@ -46,6 +46,11 @@ mkdir -p "$work" || exit 2
 work=$(cd "$work" && pwd)
 [ -z "$(ls -A "$work")" ] || { echo "multi-server-test: $work is not empty" >&2; exit 2; }
 
+# Leased, bind-tested port block (qa/lib/isolation.sh; --port-base overrides) and the JSON helpers of the other shell tests.
+. "$(dirname "$0")/../lib/isolation.sh"
+. "$(dirname "$0")/../rpc-tests/jsonq_lib.sh"
+iso_base base "$base" 8
+
 sp1=$base; sr1=$((base + 1)); sp2=$((base + 2)); sr2=$((base + 3)); cp=$((base + 4)); cr=$((base + 5)); gp=$((base + 6)); gr=$((base + 7))
 common="-regtest -dnsseed=0 -upnp=0 -listenonion=0 -discover=0 -bind=127.0.0.1 -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -debuglogfile=1 -printtoconsole=0 -showmetrics=0 -disablewallet"
 failures=0
@@ -59,7 +64,6 @@ cli() { b=$1; d=$2; shift 2; "$b/zclassic-cli" -regtest -datadir="$d" "$@"; }
 wait_rpc() { i=0; lim=${3:-120}; while [ $i -lt $lim ]; do cli "$1" "$2" getblockcount >/dev/null 2>&1 && return 0; sleep 1; i=$((i + 1)); done; return 1; }
 stop_node() { cli "$1" "$2" stop >/dev/null 2>&1; i=0; while [ $i -lt 90 ] && [ -f "$2/regtest/zclassicd.pid" ]; do sleep 1; i=$((i + 1)); done; }
 now_ms() { date +%s%3N; }
-json_num() { sed -n "s/.*\"$1\": *\\([0-9.]*\\).*/\\1/p" | head -1; }
 
 srcdir=$work/src; serve1=$work/serve1; serve2=$work/serve2; serve_diff=$work/serve_diff; serve_share=$work/serve_share; sdir1=$work/server1; sdir2=$work/server2; cdir=$work/client
 make_fixture() {
@@ -71,9 +75,9 @@ make_fixture() {
     wait_rpc "$bin" "$srcdir" || return 1
     cli "$bin" "$srcdir" generate 220 >/dev/null || return 1
     info=$(cli "$bin" "$srcdir" gettxoutsetinfo) || return 1
-    fx_height=$(echo "$info" | sed -n 's/.*"height": *\([0-9]*\).*/\1/p' | head -1)
-    fx_best=$(echo "$info" | sed -n 's/.*"bestblock": *"\([0-9a-f]*\)".*/\1/p' | head -1)
-    fx_commit=$(echo "$info" | sed -n 's/.*"hash_chainstate_full": *"\([0-9a-f]*\)".*/\1/p' | head -1)
+    fx_height=$(echo "$info" | jgetd height "")
+    fx_best=$(echo "$info" | jgetd bestblock "")
+    fx_commit=$(echo "$info" | jgetd hash_chainstate_full "")
     [ -n "$fx_height" ] && [ -n "$fx_best" ] && [ -n "$fx_commit" ] || { echo "no txoutsetinfo: $info"; return 1; }
     stop_node "$bin" "$srcdir"
     mkdir -p "$serve1"
@@ -94,9 +98,9 @@ make_fixture() {
     wait_rpc "$bin" "$srcdir" || return 1
     cli "$bin" "$srcdir" generate 3 >/dev/null || return 1
     info=$(cli "$bin" "$srcdir" gettxoutsetinfo) || return 1
-    d_height=$(echo "$info" | sed -n 's/.*"height": *\([0-9]*\).*/\1/p' | head -1)
-    d_best=$(echo "$info" | sed -n 's/.*"bestblock": *"\([0-9a-f]*\)".*/\1/p' | head -1)
-    d_commit=$(echo "$info" | sed -n 's/.*"hash_chainstate_full": *"\([0-9a-f]*\)".*/\1/p' | head -1)
+    d_height=$(echo "$info" | jgetd height "")
+    d_best=$(echo "$info" | jgetd bestblock "")
+    d_commit=$(echo "$info" | jgetd hash_chainstate_full "")
     [ -n "$d_height" ] && [ -n "$d_best" ] && [ -n "$d_commit" ] || { echo "no txoutsetinfo for the other tip: $info"; return 1; }
     echo "$d_height $d_best $d_commit" >"$work/serve_diff.meta"; echo "$d_height $d_best $d_commit" >"$work/serve_share.meta"
     stop_node "$bin" "$srcdir"
@@ -157,7 +161,7 @@ wait_imported() { # waits for the fixture height; prints nothing
 check_imported() { # <label>
     h=$(cli "$client_bin" "$cdir" getblockcount 2>/dev/null)
     b=$(cli "$client_bin" "$cdir" getbestblockhash 2>/dev/null)
-    c=$(cli "$client_bin" "$cdir" gettxoutsetinfo 2>/dev/null | sed -n 's/.*"hash_chainstate_full": *"\([0-9a-f]*\)".*/\1/p' | head -1)
+    c=$(cli "$client_bin" "$cdir" gettxoutsetinfo 2>/dev/null | jgetd hash_chainstate_full "")
     if [ "$h" = "$fx_height" ] && [ "$b" = "$fx_best" ] && [ "$c" = "$fx_commit" ]; then
         pass "$1: imported height $h, best block and UTXO-set commitment equal the servers'"
         return 0
@@ -245,8 +249,8 @@ test_both() {
     i=0
     while [ $i -lt "${WAIT_ITER:-400}" ]; do
         j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null)
-        n=$(echo "$j" | json_num servers_in_use)
-        if [ "${n:-0}" = 2 ]; then seen=1; sn=$(echo "$j" | grep -c '"state": *"ok"'); echo "$j" | tr -d '\n ' | sed 's/.*"servers"/"servers"/' | cut -c1-300; break; fi
+        n=$(echo "$j" | jgetd servers_in_use "")
+        if [ "${n:-0}" = 2 ]; then seen=1; sn=$(echo "$j" | jraw servers | jpick state | grep -c '^ok$'); printf '"servers":%s\n' "$(echo "$j" | jraw servers)" | cut -c1-300; break; fi
         kill -0 "$CPID" 2>/dev/null || break
         sleep 0.25; i=$((i + 1))
     done
@@ -277,7 +281,7 @@ test_skew() {
     check_imported "skew"
     [ "$b2" -gt $((b1 * 2)) ] && pass "skew: the fast server served most bytes" || fail "skew: fast server $b2 vs slow $b1"
     # two servers must never be slower than the best one alone by more than noise (30%: sequential runs vary that much on a loaded host)
-    [ $((DL_MS * 100)) -le $((alone_ms * 130)) ] && pass "skew: both servers ($DL_MS ms) are not slower than the fast one alone ($alone_ms ms)" || fail "skew: both servers took $DL_MS ms, the fast one alone $alone_ms ms"
+    [ $((DL_MS * 100)) -le $((alone_ms * 130)) ] && pass "skew: both servers ($DL_MS ms) are not slower than the fast one alone ($alone_ms ms)" || fail "skew: both servers took $DL_MS ms, the fast one alone $alone_ms ms" # real-clock: the check is the download-speed property under test (a secondary holding few files must not slow the download); the 1.3x margin absorbs host noise
     grep -a 'moves off' "$client_log" | head -5
     end_client; stop_server 1; stop_server 2
 }
@@ -304,7 +308,7 @@ test_kill() {
     pct=0
     while [ "$pct" -lt 35 ]; do
         j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null)
-        pct=$(echo "$j" | json_num percent); pct=${pct:-0}
+        pct=$(echo "$j" | jgetd percent ""); pct=${pct:-0}
         kill -0 "$CPID" 2>/dev/null || { fail "kill: client exited early"; stop_server 1; stop_server 2; return 1; }
         sleep 0.2
     done
@@ -316,7 +320,7 @@ test_kill() {
         say "RESULT kill: $((kms / 1000)).$((kms % 1000 / 100)) s with server 2 killed at ${pct}% (single server $((SINGLE_MS / 1000)).$((SINGLE_MS % 1000 / 100)) s)"
         # two servers for the first third, one for the rest: well under the single-server time; a client that keeps
         # sending streams to the dead server takes far longer
-        [ $kms -le $((SINGLE_MS * 130 / 100 + 5000)) ] && pass "kill: finished in $kms ms, within 1.3x the single-server time ($SINGLE_MS ms) plus 5 s" || fail "kill: took $kms ms, the single-server time is $SINGLE_MS ms"
+        [ $kms -le $((SINGLE_MS * 130 / 100 + 5000)) ] && pass "kill: finished in $kms ms, within 1.3x the single-server time ($SINGLE_MS ms) plus 5 s" || fail "kill: took $kms ms, the single-server time is $SINGLE_MS ms" # real-clock: the check is the download-speed property under test (losing a server mid-download costs little time); compared with a single-server run on the same host plus fixed slack
     else fail "kill: client did not finish from the other server"; tail -15 "$client_log"; fi
     grep -a 'failed on\|stream .* moves' "$client_log" | tail -4
     end_client; stop_server 1
@@ -337,7 +341,7 @@ other_tip() { # <label> <serve dir of server 2> <log message expected>
     say "RESULT $lbl: $((DL_MS / 1000)).$((DL_MS % 1000 / 100)) s (single server $((SINGLE_MS / 1000)).$((SINGLE_MS % 1000 / 100)) s); server 1 served $b1 bytes, server 2 (other tip) served $b2 bytes, snapshot $snapshot_bytes"
     # share must beat the single server; diff (the other server gives nothing) is the single-server time plus noise
     tfac=115; [ "$lbl" = diff ] && tfac=130
-    [ $DL_MS -le $((SINGLE_MS * tfac / 100 + 2000)) ] && pass "$lbl: finished in $DL_MS ms, within ${tfac}% of the single-server time ($SINGLE_MS ms) plus 2 s" || fail "$lbl: took $DL_MS ms, the single-server time is $SINGLE_MS ms"
+    [ $DL_MS -le $((SINGLE_MS * tfac / 100 + 2000)) ] && pass "$lbl: finished in $DL_MS ms, within ${tfac}% of the single-server time ($SINGLE_MS ms) plus 2 s" || fail "$lbl: took $DL_MS ms, the single-server time is $SINGLE_MS ms" # real-clock: the check is the download-speed property under test (resume and corruption recovery must not cost more than a bounded multiple of an undisturbed single-server run on the same host)
     OT_B1=$b1; OT_B2=$b2
     end_client; stop_server 1; stop_server 2
     serve2=$saved2
@@ -362,7 +366,7 @@ test_resume() {
     pct=0
     while [ "$pct" -lt 40 ]; do
         j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null)
-        pct=$(echo "$j" | json_num percent); pct=${pct:-0}
+        pct=$(echo "$j" | jgetd percent ""); pct=${pct:-0}
         kill -0 "$CPID" 2>/dev/null || { fail "resume: client exited early"; stop_server 1; stop_server 2; return 1; }
         sleep 0.2
     done

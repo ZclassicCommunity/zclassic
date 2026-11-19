@@ -30,12 +30,12 @@ work=$(cd "$work" && pwd)
 dd=$work/dd
 mkdir -p "$dd"
 . "$(dirname "$0")/../lib/isolation.sh"
+. "$(dirname "$0")/../rpc-tests/jsonq_lib.sh"
 iso_base base "$base" 16
 printf 'rpcuser=e2e\nrpcpassword=e2e%s\nrpcport=%s\n' "$$" "$((base + 1))" >"$dd/zclassic.conf"
 cli() { "$bin/zclassic-cli" -datadir="$dd" "$@"; }
 say() { echo "mainnet-e2e: $(date +%H:%M:%S) $*"; }
 now_s() { date +%s; }
-jnum() { sed -n "s/.*\"$1\": *\\([0-9.]*\\).*/\\1/p" | head -1; }
 start() {
     $ZCL_RUN "$bin/zclassicd" -datadir="$dd" -port=$base -listen=0 -disablewallet -showmetrics=0 -printtoconsole=0 -debuglogfile=1 \
         -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 "$@" >/dev/null 2>&1 &
@@ -48,8 +48,8 @@ sample_until() { # <condition-fn> <label> ; appends "elapsed pct streams bytes m
     while :; do
         j=$(cli getbootstrapinfo 2>/dev/null)
         if [ -n "$j" ]; then
-            phase=$(echo "$j" | sed -n 's/.*"phase": *"\([a-z_]*\)".*/\1/p' | head -1)
-            pct=$(echo "$j" | jnum percent); st=$(echo "$j" | jnum streams); by=$(echo "$j" | jnum bytes_received); mb=$(echo "$j" | jnum mbps)
+            phase=$(echo "$j" | jgetd phase "")
+            pct=$(echo "$j" | jgetd percent ""); st=$(echo "$j" | jgetd streams ""); by=$(echo "$j" | jgetd bytes_received ""); mb=$(echo "$j" | jgetd mbps "")
             echo "$(($(now_s) - t0)) $1 phase=${phase:-?} pct=${pct:-} streams=${st:-} bytes=${by:-} mibps=${mb:-}" >>"$samples"
             "$2" && return 0
         fi
@@ -81,8 +81,8 @@ while :; do
     kill -0 "$PID" 2>/dev/null || { say "FAIL node exited during run 2"; tail -30 "$dd/debug.log"; exit 1; }
     j=$(cli getbootstrapinfo 2>/dev/null)
     if [ -n "$j" ]; then
-        phase=$(echo "$j" | sed -n 's/.*"phase": *"\([a-z_]*\)".*/\1/p' | head -1)
-        pct=$(echo "$j" | jnum percent); st2=$(echo "$j" | jnum streams); by=$(echo "$j" | jnum bytes_received); mb=$(echo "$j" | jnum mbps)
+        phase=$(echo "$j" | jgetd phase "")
+        pct=$(echo "$j" | jgetd percent ""); st2=$(echo "$j" | jgetd streams ""); by=$(echo "$j" | jgetd bytes_received ""); mb=$(echo "$j" | jgetd mbps "")
         echo "$(($(now_s) - t0)) run2 phase=${phase:-?} pct=${pct:-} streams=${st2:-} bytes=${by:-} mibps=${mb:-}" >>"$samples"
         [ "$phase" != "active" ] && [ "$phase" != "idle" ] && break
     fi
@@ -99,18 +99,18 @@ say "waiting for RPC and the imported chain"
 i=0
 while [ $i -lt 600 ]; do cli getblockcount >/dev/null 2>&1 && break; sleep 2; i=$((i + 1)); done
 info=$(cli getblockchaininfo 2>/dev/null)
-say "right after the import: blocks=$(echo "$info" | jnum blocks) headers=$(echo "$info" | jnum headers) verificationprogress=$(echo "$info" | jnum verificationprogress) syncphase=$(echo "$info" | sed -n 's/.*"syncphase": *"\([a-z_]*\)".*/\1/p' | head -1)"
+say "right after the import: blocks=$(echo "$info" | jgetd blocks "") headers=$(echo "$info" | jgetd headers "") verificationprogress=$(echo "$info" | jgetd verificationprogress "") syncphase=$(echo "$info" | jgetd syncphase "")"
 
 say "following the network to the tip (up to 120 minutes)"
 t_sync0=$(now_s)
 deadline=$(($(now_s) + 7200))
 while :; do
     info=$(cli getblockchaininfo 2>/dev/null)
-    blocks=$(echo "$info" | jnum blocks); headers=$(echo "$info" | jnum headers)
-    ibd=$(echo "$info" | sed -n 's/.*"initialblockdownload": *\(true\|false\).*/\1/p' | head -1)
-    say "blocks=${blocks:-?} headers=${headers:-?} ibd=${ibd:-?} connections=$(echo "$info" | jnum connections) verificationprogress=$(echo "$info" | jnum verificationprogress)"
-    conns=$(echo "$info" | jnum connections)
-    maxpeer=$(cli getpeerinfo 2>/dev/null | sed -n 's/.*"startingheight": *\([0-9]*\).*/\1/p' | sort -n | tail -1)
+    blocks=$(echo "$info" | jgetd blocks ""); headers=$(echo "$info" | jgetd headers "")
+    ibd=$(echo "$info" | jgetd initialblockdownload "")
+    say "blocks=${blocks:-?} headers=${headers:-?} ibd=${ibd:-?} connections=$(echo "$info" | jgetd connections "") verificationprogress=$(echo "$info" | jgetd verificationprogress "")"
+    conns=$(echo "$info" | jgetd connections "")
+    maxpeer=$(cli getpeerinfo 2>/dev/null | jpick startingheight | grep -E '^[0-9]+$' | sort -n | tail -1)
     # at the tip: connected to several peers and within a few blocks of the highest height any of them reported
     [ -n "$blocks" ] && [ -n "$maxpeer" ] && [ "${conns:-0}" -ge 3 ] && [ "$blocks" -ge $((maxpeer - 3)) ] && break
     [ "$(now_s)" -gt "$deadline" ] && { say "FAIL did not reach the tip in 2 h"; break; }
@@ -122,7 +122,11 @@ best=$(cli getbestblockhash)
 say "best block $best at height $(cli getblockcount)"
 say "chain tips: $(cli getchaintips | tr -d '\n ' | cut -c1-300)"
 say "peers (synced_blocks is the last block in common with that peer; it equals our height when they follow the same chain):"
-cli getpeerinfo | sed -n 's/.*"\(addr\|synced_blocks\|synced_headers\|startingheight\|subver\)": *"\?\([^",]*\).*/\1=\2/p' | paste -sd' ' | sed 's/addr=/\naddr=/g' | head -14
+peers_json=$(cli getpeerinfo 2>/dev/null); np=$(printf '%s' "$peers_json" | jlen); i=0
+while [ "${np:-0}" -gt "$i" ] && [ "$i" -lt 14 ]; do
+    for k in addr synced_blocks synced_headers startingheight subver; do printf '%s=%s ' "$k" "$(printf '%s' "$peers_json" | jgetd "[$i].$k" "?")"; done; echo
+    i=$((i + 1))
+done
 say "staying connected ${stay} min to watch new blocks arrive from the peers"
 end=$(($(now_s) + stay * 60)); last=$(cli getblockcount)
 while [ "$(now_s)" -lt "$end" ]; do

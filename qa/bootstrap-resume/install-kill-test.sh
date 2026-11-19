@@ -32,7 +32,7 @@
 # Never point this at a real datadir; it creates and deletes its own under --work.
 set -u
 
-bin=""; work=""; base=27100; cases="all"; nrandom=20; files=4; filemib=4
+bin=""; work=""; base=""; cases="all"; nrandom=20; files=4; filemib=4
 while [ $# -gt 0 ]; do
     case "$1" in
         --bin) bin=$2; shift 2 ;;
@@ -50,6 +50,11 @@ done
 mkdir -p "$work" || exit 2
 work=$(cd "$work" && pwd)
 [ -z "$(ls -A "$work")" ] || { echo "install-kill-test: $work is not empty" >&2; exit 2; }
+
+# Leased, bind-tested port block (qa/lib/isolation.sh; --port-base overrides) and the JSON helpers of the other shell tests.
+. "$(dirname "$0")/../lib/isolation.sh"
+. "$(dirname "$0")/../rpc-tests/jsonq_lib.sh"
+iso_base base "$base" 6
 
 sp=$base; sr=$((base + 1)); cp=$((base + 2)); cr=$((base + 3)); gp=$((base + 4)); gr=$((base + 5))
 common="-regtest -dnsseed=0 -upnp=0 -listenonion=0 -discover=0 -bind=127.0.0.1 -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -debuglogfile=1 -printtoconsole=0 -showmetrics=0 -disablewallet"
@@ -80,9 +85,9 @@ make_fixture() {
     wait_rpc "$bin" "$srcdir" || return 1
     cli "$bin" "$srcdir" generate 220 >/dev/null || return 1
     info=$(cli "$bin" "$srcdir" gettxoutsetinfo) || return 1
-    fx_height=$(echo "$info" | sed -n 's/.*"height": *\([0-9]*\).*/\1/p' | head -1)
-    fx_best=$(echo "$info" | sed -n 's/.*"bestblock": *"\([0-9a-f]*\)".*/\1/p' | head -1)
-    fx_commit=$(echo "$info" | sed -n 's/.*"hash_chainstate_full": *"\([0-9a-f]*\)".*/\1/p' | head -1)
+    fx_height=$(echo "$info" | jgetd height "")
+    fx_best=$(echo "$info" | jgetd bestblock "")
+    fx_commit=$(echo "$info" | jgetd hash_chainstate_full "")
     [ -n "$fx_height" ] && [ -n "$fx_best" ] && [ -n "$fx_commit" ] || { echo "no txoutsetinfo: $info"; return 1; }
     stop_node "$bin" "$srcdir"
     mkdir -p "$serve"
@@ -144,9 +149,9 @@ state() { # one line: which of blocks/ chainstate/ marker exist, and the staging
 # the same tip and UTXO-set hash as an uninterrupted bootstrap (fx_*, confirmed by the reference run)
 check_same() { # <label>
     j=$(cli "$bin" "$cdir" gettxoutsetinfo 2>/dev/null)
-    h=$(echo "$j" | sed -n 's/.*"height": *\([0-9]*\).*/\1/p' | head -1)
-    b=$(echo "$j" | sed -n 's/.*"bestblock": *"\([0-9a-f]*\)".*/\1/p' | head -1)
-    c=$(echo "$j" | sed -n 's/.*"hash_chainstate_full": *"\([0-9a-f]*\)".*/\1/p' | head -1)
+    h=$(echo "$j" | jgetd height "")
+    b=$(echo "$j" | jgetd bestblock "")
+    c=$(echo "$j" | jgetd hash_chainstate_full "")
     left=""
     [ -e "$cd_/bootstrap-trustless-pending" ] && left="$left marker"
     ls -d "$cd_"/bootstrap-peer-staging-* >/dev/null 2>&1 && left="$left staging"
@@ -182,9 +187,9 @@ test_reference() {
     fresh_client; start_client
     wait_imported || { fail "reference: bootstrap did not complete"; tail -10 "$cd_/debug.log"; kill_client; return 1; }
     j=$(cli "$bin" "$cdir" gettxoutsetinfo)
-    ref_height=$(echo "$j" | sed -n 's/.*"height": *\([0-9]*\).*/\1/p' | head -1)
-    ref_best=$(echo "$j" | sed -n 's/.*"bestblock": *"\([0-9a-f]*\)".*/\1/p' | head -1)
-    ref_commit=$(echo "$j" | sed -n 's/.*"hash_chainstate_full": *"\([0-9a-f]*\)".*/\1/p' | head -1)
+    ref_height=$(echo "$j" | jgetd height "")
+    ref_best=$(echo "$j" | jgetd bestblock "")
+    ref_commit=$(echo "$j" | jgetd hash_chainstate_full "")
     if [ "$ref_height" = "$fx_height" ] && [ "$ref_best" = "$fx_best" ] && [ "$ref_commit" = "$fx_commit" ]; then
         pass "reference: height $ref_height tip $ref_best utxo hash $ref_commit equal the server's"
     else
