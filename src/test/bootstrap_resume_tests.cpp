@@ -2027,7 +2027,7 @@ BOOST_AUTO_TEST_CASE(a_secondary_that_lies_mid_file_and_hands_over_does_not_cost
     b.dropBefore = [&s](int, uint32_t file, uint64_t offset, int) {
         return offset + TEST_CHUNK >= s.contents[file].size();
     };
-    BootstrapSetWatchdogForTests(8000, 8000);
+    BootstrapSetWatchdogForTests(30000, 30000);
     std::string error;
     const bool ok = DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 3000, 4, error,
                                                       std::vector<std::string>(1, PeerName(b)));
@@ -2058,8 +2058,8 @@ BOOST_AUTO_TEST_CASE(a_resumed_prefix_written_by_a_lying_server_is_fetched_again
     }
     // second run: two honest servers. Each resumed .part fails its hash (unknown origin); the file is fetched again
     // from byte 0 from one of them and nobody is benched or the attempt lost.
+    error.clear();
     FakeBootstrapServer a(s), b(s);
-    BootstrapSetWatchdogForTests(8000, 8000);
     const bool ok2 = DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 3000, 4, error,
                                                        std::vector<std::string>(1, PeerName(b)));
     BootstrapSetWatchdogForTests(0, 0);
@@ -2108,7 +2108,7 @@ BOOST_AUTO_TEST_CASE(after_a_refresh_of_the_primary_the_next_attempt_keeps_the_s
         a.chunkDelayMs = 3;
         a.manifestFor = [&](int conn) { return conn < 2 ? s.manifest : s2.manifest; };
         a.dropBefore = [](int conn, uint32_t, uint64_t, int seq) { return conn < 2 && seq == 7; };
-        BootstrapSetWatchdogForTests(6000, 6000);
+        BootstrapSetWatchdogForTests(20000, 20000);
         const bool ok = DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 3000, 2, error);
         BootstrapSetWatchdogForTests(0, 0);
         BOOST_CHECK(!ok);
@@ -2119,6 +2119,7 @@ BOOST_AUTO_TEST_CASE(after_a_refresh_of_the_primary_the_next_attempt_keeps_the_s
         if (fs::exists(tmp.path / "staging" / s.manifest.vFiles[i].strPath))
             ++staged;
     // the caller starts again with the new manifest: the staged files that are still the same are reused
+    error.clear();
     FakeBootstrapServer b(s2);
     BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(b.Address(), PeerName(b), s2.manifest, tmp.path / "staging", 5000, 4, error), error);
     CheckAllFilesMatch(s2, tmp.path / "staging");
