@@ -254,6 +254,16 @@ double BootstrapPeerBoard::StreamLifeRate(const StreamState& st, int64_t nowMs) 
     return st.bytes * 1000.0 / age;
 }
 
+bool BootstrapPeerBoard::OtherPeerFeedingLocked(int peer, int64_t nowMs) const
+{
+    for (size_t i = 0; i < streams.size(); ++i) {
+        const StreamState& st = streams[i];
+        if (st.connected && st.peer >= 0 && st.peer != peer && nowMs - std::max(st.attachedMs, st.lastByteMs) <= pol.stallMs)
+            return true;
+    }
+    return false;
+}
+
 bool BootstrapPeerBoard::PeerQuietLocked(int peer, int64_t nowMs) const
 {
     for (size_t i = 0; i < streams.size(); ++i) {
@@ -789,9 +799,12 @@ std::vector<BootstrapMove> BootstrapPeerBoard::Rebalance(int64_t nowMs, const st
             mv.reason = BMR_UNUSABLE;
         } else if (!st.idle && usable >= 2 && nowMs - std::max(st.attachedMs, st.lastByteMs) > pol.stallMs &&
                    PeerQuietLocked(st.peer, nowMs) &&
+                   OtherPeerFeedingLocked(st.peer, nowMs) &&
                    AttachedLocked(st.peer) >= 2) {
             // Only when the whole server is quiet: a server that feeds its other streams is merely
             // sharing a cap unevenly, and moving this stream costs its in-flight window for nothing.
+            // And only while another server IS delivering: when every server goes quiet at once, it is this side (a
+            // starved host) and moving streams only throws their requests in flight away.
             // And never its last stream: that one stays to see the server recover (its live rate is what lets the
             // others come back; a server that lost all its streams to a hiccup would never be compared again).
             mv.reason = BMR_STALLED;
