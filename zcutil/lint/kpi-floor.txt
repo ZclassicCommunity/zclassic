@@ -1,0 +1,17 @@
+# zcl-lint kpi floor: the worst value each tree-health metric may have. Shrink-only: a floor is lowered
+# (zcl-lint kpi --tighten) when a metric improves, never raised. See doc/agent/KPI.md.
+python_files	0
+hosted_ci_files	0
+shell_lines	20308
+bash_lines	113
+jq_uses	264
+banned_str	13
+files_over_1500	18
+complexity_debt	5799
+undocumented_flags	29
+broken_md_links	0
+doc_path_debt	58
+secret_log_sites	2
+unregistered_tests	0
+unmapped_paths	0
+tracked_lessons_open	1

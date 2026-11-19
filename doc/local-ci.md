@@ -194,6 +194,35 @@ own loopback, so they cannot collide with a running node. One summary table is
 printed and the exit status is non-zero on any failure. The tests in `qa/rpc-tests` are
 shell scripts.
 
+### The zcl-lint rules
+
+`zcl-lint all` runs these rules in this order. The list must match `zcutil/lint/rules.def`, and the
+`wiring` rule fails when it does not.
+
+<!-- LINT-RULES-BEGIN -->
+- `no-new-jq`: lines that use jq in shell scripts
+- `no-new-bash`: bash shebangs and bashisms
+- `banned-str`: strcpy, strcat, sprintf, vsprintf, gets
+- `md-links`: broken relative Markdown links
+- `vendor`: vendored files stay verbatim
+- `no-python`: no Python files or invocations
+- `filesize`: files over 1500 lines
+- `complexity`: functions above cyclomatic complexity 15
+- `long-functions`: functions above 500 lines
+- `warnsupp`: warning suppressions
+- `doc-claims`: machine-checked statements in Markdown
+- `doc-paths`: backticked repository paths that do not exist
+- `version-facts`: version numbers in documents
+- `victory`: unproven completion claims in documents
+- `secretlog`: secret-bearing names in log calls
+- `testiso`: tests that touch a shared tmp, datadir or port
+- `shellport`: host-specific commands in shell scripts
+- `wallclock`: assertions decided by elapsed real time
+- `consensus-seal`: the consensus seal
+- `kpi`: the tree-health floor, see `doc/agent/KPI.md`
+- `wiring`: this list, `rules.def` and `zcl-lint all` agree
+<!-- LINT-RULES-END -->
+
 ## Runaway steps: timeouts, log cap, ASLR
 
 Every `test` step runs under `timeout` and writes its log through `head -c`, so a hang or
