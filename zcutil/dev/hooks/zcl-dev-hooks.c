@@ -602,6 +602,8 @@ static int cmd_status(int json)
         if (!installed) puts("fix: zcl-dev hooks install");
     }
     free(hp);
+    free(r.gitdir);
+    free(r.top);
     return ok ? 0 : 1;
 }
 
@@ -625,6 +627,8 @@ static int cmd_install(int force, int json)
     if (json) puts("{\"installed\":true,\"hooks_path\":\"" HOOKS_PATH "\"}");
     else puts("core.hooksPath = " HOOKS_PATH);
     if (!binary_present(&r)) fputs("note: zcutil/bin/zcl-dev-hook is not built here; run make -C zcutil\n", stderr);
+    free(r.gitdir);
+    free(r.top);
     return 0;
 }
 
