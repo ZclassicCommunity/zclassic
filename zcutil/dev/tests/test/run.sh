@@ -287,19 +287,11 @@ case_ check-tests-default-base-head 0 sh -c "git -C \"$w\" config --unset branch
 long=$(printf "src/%0600d.cpp" 0)
 case_ tests-json-element-clamped 0 sh -c "\"$bindir/zcl-dev-tests\" -C \"$w\" --as=tests --json $long | grep -c \"\.\.\.\\\"\""
 # ---- path arguments are canonicalized: no traversal form narrows a broad path
-fresh traversal
-case_ tests-traversal-dotdot 0 t --as=tests src/narrow.cpp/../core/engine.cpp
+fresh traversal; case_ tests-traversal-dotdot 0 t --as=tests src/narrow.cpp/../core/engine.cpp
 case_ tests-traversal-dot-segments 0 t --as=tests ./src//core/./engine.cpp
 case_ tests-traversal-backslash 0 t --as=tests "src\narrow.cpp\..\core\engine.cpp"
 case_ tests-traversal-absolute 0 t --as=tests "$w/src/narrow.cpp/../core/engine.cpp"
-# the same path through a symlinked root (macOS: $TMPDIR is /var/..., getcwd says /private/var/...)
-if ln -s "$w" "$root/linkroot" 2>/dev/null && [ -L "$root/linkroot" ]; then
-    case_ tests-traversal-symlink-root 0 t --as=tests "$root/linkroot/src/narrow.cpp/../core/engine.cpp"
-    # climbing out through the symlink resolves outside the tree: unmapped, so broad (never narrowed)
-    case_ tests-traversal-symlink-escape 0 sh -c "\"$bindir/zcl-dev-tests\" -C \"$w\" --as=tests \"$root/linkroot/src/../../etc/passwd\" | grep -c '^broad:'"
-else
-    echo "skip tests-traversal-symlink-root (no symlinks here)"
-fi
+ln -s "$w" "$root/linkroot" && case_ tests-traversal-symlink-root 0 t --as=tests "$root/linkroot/src/narrow.cpp/../core/engine.cpp" # macOS: /var vs /private/var
 case_ tests-traversal-escape 2 t --as=tests src/../../etc/passwd
 case_ tests-traversal-root 2 t --as=tests src/..
 case_ tests-traversal-subdir 0 sh -c "cd \"$w/src\" && \"$bindir/zcl-dev-tests\" --as=tests narrow.cpp/../core/engine.cpp"

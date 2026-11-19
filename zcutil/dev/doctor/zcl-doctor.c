@@ -991,6 +991,29 @@ static int selftest(void)
     EXPECT(c && c->st == ST_OK, "posix thread model must be ok");
 
 #ifndef _WIN32
+    /* parameter files: looked for where the node reads them (Linux ~/.zcash-params, macOS Application Support) */
+    static char homeenv[800];
+    snprintf(homeenv, sizeof homeenv, "HOME=%s", dir);
+    putenv(homeenv);
+    char pd[1100], pf[1300], mk[1200];
+    params_dir(pd, sizeof pd);
+#ifdef __APPLE__
+    EXPECT(strstr(pd, "/Library/Application Support/ZcashParams"), "macOS params dir was '%s'", pd);
+#else
+    EXPECT(strstr(pd, "/.zcash-params"), "params dir was '%s'", pd);
+#endif
+    nchecks = 0;
+    group_host();
+    EXPECT(find_check("params") && find_check("params")->st == ST_FAIL, "no parameter files must fail");
+    snprintf(mk, sizeof mk, "mkdir -p \"%s\"", pd);
+    run_cmd(mk, 0, 0);
+    for (int i = 0; params_files[i]; i++) {
+        snprintf(pf, sizeof pf, "%s/%s", pd, params_files[i]);
+        write_file(pf, "x");
+    }
+    nchecks = 0;
+    group_host();
+    EXPECT(find_check("params") && find_check("params")->st == ST_OK, "parameter files in %s must be found", pd);
     selftest_argv_data();
 #endif
     putenv(restore);
