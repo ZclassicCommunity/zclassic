@@ -23,6 +23,7 @@
 #define __USE_MINGW_ANSI_STDIO 1
 #endif
 #include <ctype.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,7 +33,11 @@
 #include <windows.h>
 #else
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
 #endif
+#endif
+#include <stdint.h>
 
 #include "../lib/automake.h"
 #include "../lib/cxxscan.h"
@@ -43,6 +48,7 @@
 #define ROOTS_FILE "zcutil/dev/code/source_roots.def"
 #define RULES_FILE "zcutil/dev/impact.rules"
 #define PAGE_BYTES 15000
+#define ROW_MAX 2000 /* a row is cut here; JSON escaping at most sextuples it */
 
 /* ---- output with paging ------------------------------------------------------------------- */
 
@@ -88,6 +94,17 @@ static void out_kvn(Out *o, const char *k, long v)
     out_kv(o, k, b, 1);
 }
 
+/* Drops an incomplete UTF-8 sequence at the end of s (a cut must not leave invalid JSON). */
+static void utf8_trim(char *s)
+{
+    size_t n = strlen(s), i = n;
+    while (i > 0 && ((unsigned char)s[i - 1] & 0xC0) == 0x80) i--; /* continuation bytes */
+    if (i == 0) return;
+    unsigned char lead = (unsigned char)s[i - 1];
+    size_t need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+    if (lead >= 0x80 && n - (i - 1) < need) s[i - 1] = 0;
+}
+
 /* One row; the fields are NULL terminated const char * (tabs and newlines become spaces). */
 static void out_row(Out *o, ...)
 {
@@ -107,6 +124,11 @@ static void out_row(Out *o, ...)
     }
     va_end(ap);
     row[len] = 0;
+    if (len > ROW_MAX) { /* bound every row so a page stays under PAGE_BYTES */
+        row[ROW_MAX - 3] = 0;
+        utf8_trim(row);
+        strcat(row, "...");
+    }
     if (o->nrows == o->caprows) {
         o->caprows = o->caprows ? o->caprows * 2 : 64;
         o->rows = zd_xrealloc(o->rows, o->caprows * sizeof *o->rows);
@@ -173,6 +195,7 @@ static char *row_render(const Out *o, const char *row)
                 b[len++] = *p;
             }
         }
+        while (len && b[len - 1] == ' ') len--; /* an empty last column */
         b[len] = 0;
         return b;
     }
@@ -182,7 +205,9 @@ static char *row_render(const Out *o, const char *row)
         const char *e = c + 1 < nc ? strchr(p, '\t') : NULL; /* the last column takes the rest */
         size_t l = e ? (size_t)(e - p) : strlen(p);
         len += (size_t)sprintf(b + len, "%s\"%s\":", c ? "," : "", names[c]);
-        if (isint[c]) {
+        if (isint[c] && l == 0) {
+            len += (size_t)sprintf(b + len, "null");
+        } else if (isint[c]) {
             len += (size_t)sprintf(b + len, "%ld", strtol(p, NULL, 10));
         } else {
             b[len++] = '"';
@@ -211,6 +236,7 @@ static int out_emit(Out *o)
     size_t total = o->nrows;
     size_t first = opt.after < total ? opt.after : total;
     size_t used = 0, next = first;
+    for (size_t i = 0; i < o->nkv; i++) used += strlen(o->kv[i].k) + 6 * strlen(o->kv[i].v) + 8;
     char **lines = zd_xrealloc(NULL, (total + 1) * sizeof *lines);
     size_t nl = 0;
     while (next < total) {
@@ -516,6 +542,44 @@ static char *tests_line(const char *agents)
 #define EXE_SUFFIX ""
 #endif
 
+/* Appends arg to cmd as one shell word. POSIX: single quotes, with ' written as '\''. Windows
+ * (cmd.exe): double quotes; the characters cmd still interprets inside them are refused.
+ * Returns 0, or -1 when arg is unusable or cmd is full. */
+static int cmd_append_arg(char *cmd, size_t cap, const char *arg)
+{
+#ifdef _WIN32
+    const char q = '"';
+#else
+    const char q = '\'';
+#endif
+    size_t len = strlen(cmd);
+    if (len + 3 >= cap) return -1;
+    cmd[len++] = ' ';
+    cmd[len++] = q;
+    for (const char *p = arg; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x20 || c == 0x7f) return -1;
+#ifdef _WIN32
+        if (strchr("\"%^&|<>!", c)) return -1;
+        if (len + 3 >= cap) return -1;
+        cmd[len++] = (char)c;
+#else
+        if (c == '\'') {
+            if (len + 6 >= cap) return -1;
+            memcpy(cmd + len, "'\''", 4);
+            len += 4;
+        } else {
+            if (len + 3 >= cap) return -1;
+            cmd[len++] = (char)c;
+        }
+#endif
+    }
+    cmd[len++] = q;
+    cmd[len] = 0;
+    return 0;
+}
+
+/* The directory of the running executable, or "" when it cannot be found. */
 static void exe_dir(char *out, size_t cap, const char *argv0)
 {
     char buf[1024];
@@ -525,12 +589,31 @@ static void exe_dir(char *out, size_t cap, const char *argv0)
     if (n == 0 || n >= sizeof buf) return;
     (void)argv0;
 #else
-    ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
-    if (n <= 0) {
-        if (!argv0 || !strchr(argv0, '/') || strlen(argv0) >= sizeof buf) return;
-        snprintf(buf, sizeof buf, "%s", argv0);
-        n = (ssize_t)strlen(buf);
+    ssize_t n = -1;
+#ifdef __APPLE__
+    uint32_t sz = sizeof buf;
+    if (_NSGetExecutablePath(buf, &sz) == 0) n = (ssize_t)strlen(buf);
+#else
+    n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+#endif
+    if (n <= 0 && argv0 && argv0[0] && strlen(argv0) < sizeof buf) {
+        if (strchr(argv0, '/')) {
+            snprintf(buf, sizeof buf, "%s", argv0);
+            n = (ssize_t)strlen(buf);
+        } else {
+            const char *pe = getenv("PATH");
+            while (pe && *pe && n <= 0) { /* bare name: look it up on PATH */
+                const char *colon = strchr(pe, ':');
+                size_t dl = colon ? (size_t)(colon - pe) : strlen(pe);
+                if (dl && dl + strlen(argv0) + 2 < sizeof buf) {
+                    snprintf(buf, sizeof buf, "%.*s/%s", (int)dl, pe, argv0);
+                    if (access(buf, X_OK) == 0) n = (ssize_t)strlen(buf);
+                }
+                pe = colon ? colon + 1 : NULL;
+            }
+        }
     }
+    if (n <= 0) return;
 #endif
     buf[n] = 0;
     for (char *r = buf; *r; r++)
@@ -613,6 +696,8 @@ static int cmd_owner(Out *o, const char *arg)
                 if (ig_is_tu(p)) am_targets_for(&am, p, &t);
             }
             for (size_t i = 0; i < t.n; i++) out_row(o, "compiled-via-includes-by", t.v[i], NULL);
+            for (size_t i = 0; i < t.n; i++) am_relinks(&am, t.v[i], &rel);
+            for (size_t i = 0; i < rel.n; i++) out_row(o, "relinks-via-includes-by", rel.v[i], NULL);
             free(ord);
             free(dist);
             ig_free(&g);
@@ -620,17 +705,28 @@ static int cmd_owner(Out *o, const char *arg)
     }
     /* the rest of `zcl-dev guide`: lessons and traps for this path */
     {
-        char dir[1024], cmd[1400];
+        char dir[1024], cmd[4400];
         exe_dir(dir, sizeof dir, self_argv0);
         char ex[1100];
         snprintf(ex, sizeof ex, "%s/zcl-dev%s", dir[0] ? dir : "zcutil/bin", EXE_SUFFIX);
         FILE *ef = fopen(ex, "rb");
         if (ef) fclose(ef);
-        snprintf(cmd, sizeof cmd, "\"%s\" guide \"%s\"", ex, path);
+        /* cmd.exe drops the outer quotes of a line that starts with one, so wrap the whole line */
+#ifdef _WIN32
+        snprintf(cmd, sizeof cmd, "\"");
+#else
+        cmd[0] = 0;
+#endif
+        int built = !cmd_append_arg(cmd, sizeof cmd, ex) && !cmd_append_arg(cmd, sizeof cmd, "guide") &&
+                    !cmd_append_arg(cmd, sizeof cmd, path);
+#ifdef _WIN32
+        if (built && strlen(cmd) + 2 < sizeof cmd) strcat(cmd, "\"");
+        else built = 0;
+#endif
         ZList g = {0};
         int got = 0;
         int inrules = 0;
-        if (ef && !zd_cmd_lines(cmd, &g)) {
+        if (ef && built && !zd_cmd_lines(cmd, &g)) {
             for (size_t i = 0; i < g.n; i++) {
                 if (!strncmp(g.v[i], "== ", 3)) continue;
                 if (!strncmp(g.v[i], "rules (", 7)) { /* the AGENTS.md bullets: owner names the file already */
@@ -663,6 +759,20 @@ static int cmd_owner(Out *o, const char *arg)
 /* ---- impact and cost ---------------------------------------------------------------------- */
 
 typedef struct { int idx; int fanin; } Rank;
+
+/* "target <name> <n>": n is how many TUs of the closure (plus the path itself) the target compiles. */
+static void target_row(Out *o, const Automake *am, const char *name, const char *path, const int *ord, size_t n,
+                       const ZList *files)
+{
+    long c = 0;
+    char nb[24];
+    const AmTarget *t = am_find(am, name);
+    for (size_t k = 0; t && k < n; k++)
+        if (ig_is_tu(files->v[ord[k]]) && zlist_has(&t->sources, files->v[ord[k]])) c++;
+    if (t && ig_is_tu(path) && zlist_has(&t->sources, path)) c++;
+    snprintf(nb, sizeof nb, "%ld", c);
+    out_row(o, "target", name, nb, NULL);
+}
 
 static int rank_cmp(const void *a, const void *b)
 {
@@ -729,10 +839,10 @@ static int cmd_impact(Out *o, const char *arg, int with_tests, int depth, int co
     if (!cost_only) {
         out_kvn(o, "direct", direct);
         out_kvn(o, "transitive", (long)n);
-        out_kvn(o, "tus", tus);
+        out_kvn(o, "tus-in-closure", tus);
         out_kvn(o, "headers", headers);
     } else {
-        out_kvn(o, "recompile-tus", built);
+        out_kvn(o, "built-tus", built); /* the closure's TUs that some *_SOURCES lists */
         out_kvn(o, "headers-in-closure", headers);
         out_kvn(o, "relink-targets", (long)relinks.n);
     }
@@ -740,8 +850,8 @@ static int cmd_impact(Out *o, const char *arg, int with_tests, int depth, int co
     o->cols = "kind,path,n:i";
     char nb[24];
     if (cost_only) {
-        for (size_t i = 0; i < targets.n; i++) out_row(o, "target", targets.v[i], "0", NULL);
-        for (size_t i = 0; i < relinks.n; i++) out_row(o, "relink", relinks.v[i], "0", NULL);
+        for (size_t i = 0; i < targets.n; i++) target_row(o, &am, targets.v[i], path, ord, n, &files);
+        for (size_t i = 0; i < relinks.n; i++) out_row(o, "relink", relinks.v[i], "", NULL);
     } else {
         /* the top 20 by direct fan-in among the includers */
         Rank *rk = zd_xrealloc(NULL, (n + 1) * sizeof *rk);
@@ -755,20 +865,12 @@ static int cmd_impact(Out *o, const char *arg, int with_tests, int depth, int co
             out_row(o, "top-fan-in", files.v[rk[k].idx], nb, NULL);
         }
         free(rk);
-        for (size_t i = 0; i < targets.n; i++) {
-            long c = 0;
-            const AmTarget *t = am_find(&am, targets.v[i]);
-            for (size_t k = 0; t && k < n; k++)
-                if (ig_is_tu(files.v[ord[k]]) && zlist_has(&t->sources, files.v[ord[k]])) c++;
-            if (t && ig_is_tu(path) && zlist_has(&t->sources, path)) c++;
-            snprintf(nb, sizeof nb, "%ld", c);
-            out_row(o, "target", targets.v[i], nb, NULL);
-        }
-        for (size_t i = 0; i < relinks.n; i++) out_row(o, "relink", relinks.v[i], "0", NULL);
+        for (size_t i = 0; i < targets.n; i++) target_row(o, &am, targets.v[i], path, ord, n, &files);
+        for (size_t i = 0; i < relinks.n; i++) out_row(o, "relink", relinks.v[i], "", NULL);
         if (with_tests)
-            for (size_t i = 0; i < tests.n; i++) out_row(o, "test-tu", tests.v[i], "0", NULL);
+            for (size_t i = 0; i < tests.n; i++) out_row(o, "test-tu", tests.v[i], "", NULL);
         /* direct includers, then the rest are not listed row by row: the count is in the header */
-        for (int k = 0; k < g.nrev[start]; k++) out_row(o, "direct", files.v[g.rev[start][k]], "0", NULL);
+        for (int k = 0; k < g.nrev[start]; k++) out_row(o, "direct", files.v[g.rev[start][k]], "", NULL);
     }
     free(ord);
     free(dist);
@@ -970,6 +1072,7 @@ static int cmd_refs(Out *o, const char *name)
         const char *t = c2 + 1;
         while (*t == ' ' || *t == '\t') t++;
         snprintf(text, sizeof text, "%s", t);
+        utf8_trim(text);
         out_row(o, loc, text, NULL);
         shown++;
     }
@@ -1077,8 +1180,18 @@ int main(int argc, char **argv)
         const char *a = argv[i];
         if (!strcmp(a, "--json")) opt.json = 1;
         else if (!strcmp(a, "--tests")) tests = 1;
-        else if (!strncmp(a, "--after=", 8)) opt.after = (size_t)strtoul(a + 8, NULL, 10);
-        else if (!strncmp(a, "--depth=", 8)) depth = atoi(a + 8);
+        else if (!strncmp(a, "--after=", 8) || !strncmp(a, "--depth=", 8)) {
+            const char *v = a + 8;
+            char *end = NULL;
+            errno = 0;
+            unsigned long n = strtoul(v, &end, 10);
+            if (!isdigit((unsigned char)*v) || *end || errno || n > 1000000000UL) {
+                fprintf(stderr, "zcl-dev code: %.7s takes a non-negative integer, got '%s'\n", a, v);
+                return 2;
+            }
+            if (a[2] == 'a') opt.after = (size_t)n;
+            else depth = (int)n;
+        }
         else if (!strncmp(a, "--since=", 8)) since = a + 8;
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) {
             usage();

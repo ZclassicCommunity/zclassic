@@ -86,6 +86,22 @@ case_ recent 0 z recent --since=1d
 case_ recent-bad 2 z recent --since=soon
 case_ usage 2 z
 case_ unknown-command 2 z nosuch
+case_ depth-not-a-number 2 z impact src/a.h --depth=abc
+case_ depth-negative 2 z impact src/a.h --depth=-1
+case_ after-negative 2 z map --after=-5
+case_ after-empty 2 z map --after=
+check "cost json: relink has a null n" sh -c "cd '$work' && '$tb/zcl-dev-code' cost src/common.h --json | grep -q '\"kind\":\"relink\",\"path\":\"[^\"]*\",\"n\":null'"
+
+# A tracked filename with shell metacharacters must reach the guide as plain data, never run.
+meta='src/x$(touch PWNED).cpp'
+printf 'int x;\n' >"$work/$meta"
+git -C "$work" add -A
+case_ owner-metachar 0 z owner "$meta"
+if [ -e "$work/PWNED" ]; then echo "FAIL owner executed a filename"; fails=$((fails + 1)); else echo "ok   filename not executed"; fi
+quote="src/it's.cpp"
+printf 'int y;\n' >"$work/$quote"
+git -C "$work" add -A
+case_ owner-quote 0 z owner "$quote"
 
 # The raw string, the string literals and the digit separator must not derail the matcher.
 check "no fake raw-string function" sh -c "cd '$work' && ! '$tb/zcl-dev-code' file src/core.cpp | grep -q fake"

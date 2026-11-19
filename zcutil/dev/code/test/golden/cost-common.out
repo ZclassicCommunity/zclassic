@@ -1,11 +1,11 @@
 path: src/common.h
-recompile-tus: 6
+built-tus: 6
 headers-in-closure: 3
 relink-targets: 2
 unresolved-quoted-includes: 1
-target  libfx_core.a  0
-target  fxd  0
-target  test/test_fx  0
-target  libfx_wallet.a  0
-relink  fxd  0
-relink  test/test_fx  0
+target  libfx_core.a  2
+target  fxd  1
+target  test/test_fx  2
+target  libfx_wallet.a  1
+relink  fxd
+relink  test/test_fx

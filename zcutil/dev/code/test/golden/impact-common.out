@@ -1,7 +1,7 @@
 path: src/common.h
 direct: 3
 transitive: 9
-tus: 6
+tus-in-closure: 6
 headers: 3
 unresolved-quoted-includes: 1
 top-fan-in  src/a.h  5
@@ -11,8 +11,8 @@ target  libfx_core.a  2
 target  fxd  1
 target  test/test_fx  2
 target  libfx_wallet.a  1
-relink  fxd  0
-relink  test/test_fx  0
-direct  src/b.h  0
-direct  src/core.cpp  0
-direct  src/wallet/wallet.h  0
+relink  fxd
+relink  test/test_fx
+direct  src/b.h
+direct  src/core.cpp
+direct  src/wallet/wallet.h

@@ -7,6 +7,8 @@ compiled-via-includes-by  libfx_core.a
 compiled-via-includes-by  fxd
 compiled-via-includes-by  test/test_fx
 compiled-via-includes-by  libfx_wallet.a
+relinks-via-includes-by  fxd
+relinks-via-includes-by  test/test_fx
 guide  ci steps (ALL, broad rule: src/common.h): unit-a
 guide  lessons (doc/agent/LESSONS.md):
 guide    DONE src/core.cpp - keep raw strings out of the brace matcher.
