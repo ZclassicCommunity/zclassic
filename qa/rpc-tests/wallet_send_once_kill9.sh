@@ -71,9 +71,21 @@ cycle() {
     echo "   after restart: journal [$(cli 0 z_listsendjournal | jq -r --arg h "$(key "$i")" '[.[]|.state]|join(",")')]" >>"$KLOG"
 }
 
+# A kill between the BUILT record and the wallet write leaves a record whose transaction is nowhere
+# (the journal cannot tell that from one broadcast and lost with the wallet write): by design the key is
+# held, outcome_unknown, until the tip is more than SENDONCE_EXPIRY_MARGIN (100) blocks past the expiry
+# height, then released. Mine to that point, which is the recovery path the journal documents.
+release_unknown() {
+    local i=$1 op=$2 eh h need
+    eh=$(cli 0 z_listsendjournal | jq -r --arg o "$op" "[.[]|select(.opid==\$o)|.expiryheight][0] // 0")
+    h=$(cli 0 getblockcount); need=$((eh + 101 - h))
+    echo "key $i: outcome_unknown (BUILT, expiry $eh, tip $h): mining $need blocks past expiry + margin" >>"$KLOG"
+    [ "$need" -gt 0 ] && mine "$need"
+}
+
 # send key $1 to completion with retries (no kills): prints the txid
 settle() {
-    local i=$1 n=0 op s t txid
+    local i=$1 n=0 op s t txid stuck=0
     while [ $n -lt 30 ]; do
         n=$((n + 1))
         op=$(cli 0 z_sendmany "$ZS" "$(rec "$i")" 1 "$FEE" "$(key "$i")" 2>&1)
@@ -88,7 +100,7 @@ settle() {
             case $s in
                 committed) txid=$(cli 0 z_listsendjournal | jq -r --arg o "$op" '[.[]|select(.opid==$o)|.txid][0]'); echo "$txid"; return 0 ;;
                 none|released|expired) break ;;     # nothing was sent under this operation: call again
-                outcome_unknown) cli 0 resendwallettransactions >/dev/null 2>&1; break ;;
+                outcome_unknown) cli 0 resendwallettransactions >/dev/null 2>&1; stuck=$((stuck + 1)); [ $stuck -ge 2 ] && release_unknown "$i" "$op"; break ;;
             esac
             t=$((t + 1)); sleep 1
         done
@@ -106,7 +118,7 @@ i=1
 while [ $i -le "$KEYS" ]; do
     k=1
     while [ $k -le "$KPK" ]; do cycle "$i" || break; k=$((k + 1)); done
-    txid=$(settle "$i") || { i=$((i + 1)); continue; }
+    txid=$(settle "$i") || { bad "key $i: settle failed"; i=$((i + 1)); continue; }
     cli 0 resendwallettransactions >/dev/null 2>&1
     wait_mempool 1 "$txid"
     mine 1
