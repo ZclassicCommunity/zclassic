@@ -21,6 +21,7 @@ $(OUT): $(SRC) $(HDR)
 check: $(OUT)
 	sh selftest.sh $(OUT)
 	sh selftest_shape.sh $(OUT)
+	sh selftest-docs.sh $(OUT)
 	$(CC) -std=c2x -Wall -Wextra -Werror -fsyntax-only zcl-lint.c lintlib.c $(RULES)
 	$(CC) -std=gnu17 -Wall -Wextra -Werror -o ../bin/lintlib-test lintlib_test.c lintlib.c && ../bin/lintlib-test
 

@@ -106,6 +106,18 @@ cp "$cv" src/c23/tools/check-vendor.sh
 # something for every rule to scan (an empty scan set is a failure)
 printf '# t\n' > notes.md; printf 'int top;\n' > top.c; printf '#!/bin/sh\n:\n' > top.sh
 mkdir -p src; printf 'int top2(void) { return 1; }\n' > src/top2.c
+# fixture facts for the documentation rules (doc-claims needs 3 documents, version-facts a version, victory a HANDOFF page)
+mkdir -p doc/agent wallet/src
+printf "# a
+" > doc/a.md; printf "# handoff
+" > doc/agent/HANDOFF.md
+printf "define(_CLIENT_VERSION_MAJOR, 2)
+define(_CLIENT_VERSION_MINOR, 1)
+define(_CLIENT_VERSION_REVISION, 2)
+define(_CLIENT_VERSION_BUILD, 12)
+" > configure.ac
+printf "#define APP_VERSION \"2.1.2-beta13\"
+" > wallet/src/version.h
 printf 'int answer(void) { return 42; }\n' > zcutil/tools/vendor/x/a.c
 blob=$(git hash-object zcutil/tools/vendor/x/a.c)
 pin=0123456789012345678901234567890123456789
@@ -119,7 +131,7 @@ printf 'int answer(void) { return 42; }\n' > zcutil/tools/vendor/x/a.c; printf '
 run 1 'does not match its vendored tree' vendor
 rm zcutil/tools/vendor/x/extra.c; track
 # `all`, and the python hook: hollow (exit 2) when zcutil/check-no-python.sh is absent, run (and fatal) when present
-for r in no-new-jq no-new-bash banned-str md-links filesize complexity long-functions warnsupp; do "$bin" --root . $r --update-baseline >/dev/null 2>&1; done
+for r in no-new-jq no-new-bash banned-str md-links doc-paths filesize complexity long-functions warnsupp; do "$bin" --root . $r --update-baseline >/dev/null 2>&1; done
 run 2 "nothing scanned" no-python
 printf 'exit 7\n' > zcutil/check-no-python.sh; track
 run 1 '' all

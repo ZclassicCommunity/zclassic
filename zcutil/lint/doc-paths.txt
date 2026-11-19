@@ -1,0 +1,27 @@
+# zcl-lint doc-paths baseline: backticked repository paths that do not resolve to a tracked file per path.
+# Shrink-only: lower a count or delete a row when it falls; never raise one or add a path.
+# Regenerate with: zcl-lint doc-paths --update-baseline (refused while anything rose).
+doc/backend-tree-root-performance.md	1
+doc/building-daemon-from-source.md	3
+doc/c23-build.md	1
+doc/c23-phgr13.md	2
+doc/history/zcash-release-notes/release-notes-1.0.14-rc1.md	1
+doc/history/zcash-release-notes/release-notes-1.0.14.md	1
+doc/history/zcash-release-notes/release-notes-1.0.9.md	1
+doc/oversize-grandfather.md	5
+doc/tor-provenance.md	14
+doc/znam.md	4
+doc/zslp.md	3
+src/c23/AGENTS.md	1
+src/c23/compat/WIRING.md	1
+src/c23/equihash/WIRING.md	1
+src/c23/glue/WIRING.md	1
+src/c23/test/WIRING.md	1
+src/c23/test/phgr13-gate/README.md	1
+src/c23/tor/README.md	4
+src/test/rust_oracle/README.md	4
+wallet/docs/BETA6_DAEMON_HANDOFF.md	3
+wallet/docs/BUILDING.md	1
+wallet/docs/TESTING.md	1
+wallet/tests/README.md	1
+zcutil/tools/README.md	2

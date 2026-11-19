@@ -17,6 +17,10 @@ zcutil/bin/zcl-lint <rule>|all [--update-baseline]
 | `banned-str` | calls to `strcpy`, `strcat`, `sprintf`, `vsprintf`, `gets` in non-vendored C/C++ (comments and strings ignored; `lint-ok:` on the line exempts it) | `banned-str.txt` |
 | `md-links` | relative links in tracked `*.md` that do not resolve to a tracked file, and same-file `#anchors` with no heading | `md-links.txt` |
 | `vendor` | every `Z23_SOURCE.tsv` manifest must match its vendored tree (delegates to `check-vendor.sh`) | none: hard check |
+| `doc-claims` | false or malformed `<!-- claim: PREDICATE args -->` comments in tracked `*.md` (predicates: file-present, file-absent, symbol-present, symbol-absent, rule-passes, step-exists); fewer than 3 documents is a hollow scan | none: hard check |
+| `doc-paths` | backticked repository paths in tracked `*.md` that resolve to no tracked file (`<!-- doc-path-ok -->` exempts a line) | `doc-paths.txt` |
+| `version-facts` | version strings in `wallet/src/version.h` and the release scripts that disagree with `configure.ac` | none: hard check |
+| `victory` | paragraphs of `doc/agent/HANDOFF.md` that say fixed/cured/fully synced/at tip/green with no commit id, receipt path, local-ci results path or `<!-- victory-ok: reason -->` | none: hard check |
 
 A baseline row is `<path><TAB><count>`. The gate fails when a count rises or a path appears that is not listed.
 When a count falls it passes and says so: run `zcl-lint <rule> --update-baseline` to lower the baseline
