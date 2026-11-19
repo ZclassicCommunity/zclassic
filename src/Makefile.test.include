@@ -80,6 +80,7 @@ BITCOIN_TESTS =\
   test/raii_event_tests.cpp \
   test/reverselock_tests.cpp \
   test/rpc_tests.cpp \
+  test/rpcstats_tests.cpp \
   test/sanity_tests.cpp \
   test/scheduler_tests.cpp \
   test/script_P2SH_tests.cpp \
