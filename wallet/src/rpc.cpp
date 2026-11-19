@@ -2008,7 +2008,6 @@ void RPC::executeTransaction(Tx tx,
     // First, create the json params
     json params = json::array();
     fillTxJsonParams(params, tx);
-    std::cout << std::setw(2) << params << std::endl;
 
     sendZTransaction(params, [=](const json& reply) {
         QString opid = QString::fromStdString(reply.get<json::string_t>());

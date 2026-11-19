@@ -465,7 +465,7 @@ public:
                 auto parsed = json::parse(all.toStdString(), nullptr, false);
 
                 if (reply->error() != QNetworkReply::NoError) {
-                    qDebug() << QString::fromStdString(parsed.dump());
+                    // never dump the body: an error reply can echo addresses from the request
                     qDebug() << reply->errorString();
 
                     (*responses)[item] = json::object();    // Empty object

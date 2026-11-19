@@ -333,7 +333,7 @@ void Turnstile::executeMigrationStep() {
         auto sendAmt = bal - Settings::getMinerFee();
 
         if (sendAmt < 0) {
-            qDebug() << "Not enough balance!." << bal << ":" << sendAmt;
+            qDebug() << "Not enough balance for the final migration send";
             nextStep->status = TurnstileMigrationItemStatus::NotEnoughBalance;
             writeMigrationPlan(plan);
             return;

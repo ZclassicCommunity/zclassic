@@ -2567,7 +2567,7 @@ void MainWindow::payZClassicURI(QString uri) {
     }
 
     // Extract the address
-    qDebug() << "Recieved URI " << uri;
+    qDebug() << "Received a payment URI";   // never log it: it carries the address, amount and memo
     uri = uri.right(uri.length() - QString("zclassic:").length());
 
     QRegExp re("([a-zA-Z0-9]+)");
