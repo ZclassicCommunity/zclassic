@@ -312,3 +312,15 @@ ports, `jsonq_lib.sh` helpers, no `jq`).
 Merging the wallet save-point fix onto the wave 2 base adds both sides new test scripts:
 
 - kpi-floor `shell_lines`: 24078 -> 24178 (the 100-line `qa/rpc-tests/wallet_checkpoint_after_catchup.sh`).
+
+## Integration re-seed 2026-11-19 (wave 3)
+
+Merging the eight wave 3 units (`own/zcl-unit-and-security`, `w3-crc32c-arm`, `w3-secp256k1-endomorphism`, `w3-lazy-proving-params`,
+`w3-peer-state-files`, `w3-tor-failsoft`, `w3-syncphase-nodestatus`, `w3-blockindex-solution-lazy`) onto the rc8 base:
+
+- kpi-floor `shell_lines`: 24178 -> 24451, exactly the three new qa scripts: `qa/rpc-tests/tor_restart.sh` (103 lines),
+  `qa/rpc-tests/nodestatus.sh` (97 lines) and `qa/rpc-tests/blockindex_header_restart.sh` (73 lines). It is debt, to be paid by porting them to C23.
+- kpi-floor `complexity_debt`: 6449 -> 6388 (measured; the lazy-parameter unit lowered the complexity rows of `librustzcash_compat.c`). Shrink-only, so a lowered floor.
+- filesize `src/c23/compat/librustzcash_compat.c`: 1895 -> 1887 (measured; the row follows the lazy-parameter rewrite of that file).
+
+Nothing else was baselined: the new options, RPC and files carry their help text, registration, conversion and `impact.rules` rows.
