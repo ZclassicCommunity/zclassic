@@ -126,6 +126,8 @@ public:
     bool HasPendingAllowed(const std::vector<uint8_t>& allowed) const;
     //! Per file (0..nFiles-1): 1 if it is pending or claimed, i.e. not yet verified and in place.
     std::vector<uint8_t> UnfinishedMask(size_t nFiles) const;
+    //! Per file: 1 if it is pending (not claimed by any stream): what a stream that connects now could be given.
+    std::vector<uint8_t> PendingMask(size_t nFiles) const;
     //! Hand a claimed, unfinished file back (it is retried before untouched files).
     void Release(uint32_t idx);
     void Complete(uint32_t idx);
@@ -209,6 +211,8 @@ public:
     int Assign(int s, int64_t nowMs, bool* anyUseful = NULL);
     //! Where the board learns which files are not yet in place (a mask indexed by the trusted manifest).
     void SetUnfinishedSource(const std::function<std::vector<uint8_t>()>& fn);
+    //! The same for the files nobody has claimed (what a new connection can be given); Assign looks at these.
+    void SetPendingSource(const std::function<std::vector<uint8_t>()>& fn);
     void Attach(int s, int peer, int64_t nowMs);
     //! The stream's connection ended (any reason). The caller Releases its claimed files.
     void Detach(int s);
@@ -290,6 +294,7 @@ private:
     std::map<uint32_t, int> pinned;                  //!< file -> the one peer that fetches it again from byte 0 after a shared-blame failure
     std::map<uint32_t, std::set<int> > suspects;    //!< file -> the other suppliers of the attempt that failed, until the pinned fetch verifies
     std::function<std::vector<uint8_t>()> unfinishedFn;
+    std::function<std::vector<uint8_t>()> pendingFn;
 };
 
 //! "host:port 2 streams 41.0 MiB/s 3.20 GiB, host2:port ..." for the log and getbootstrapinfo.

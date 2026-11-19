@@ -2654,6 +2654,7 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
     BootstrapWorkQueue queue(files);
     BootstrapPeerBoard board((size_t)nPeers, nStreams, g_bootstrapPeerPolicy);
     board.SetUnfinishedSource([&queue, &manifest]() { return queue.UnfinishedMask(manifest.vFiles.size()); });
+    board.SetPendingSource([&queue, &manifest]() { return queue.PendingMask(manifest.vFiles.size()); });
     std::atomic<uint64_t> progressBytes(completed);
     std::atomic<bool> abortFlag(false);
     std::atomic<int> activeStreams(0);
