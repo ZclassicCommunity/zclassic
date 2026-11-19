@@ -32,7 +32,7 @@ mkdir -p "$repo/zcutil/dev" "$repo/zcutil/tools/vendor" "$repo/zcutil/bin" "$rep
 cp -R "$src/githooks" "$repo/zcutil/githooks"
 cp "$bindir"/zcl-dev "$bindir"/zcl-dev-hook "$bindir"/zcl-dev-hooks "$repo/zcutil/bin/"
 printf 'zcutil/bin/\n' >"$repo/.gitignore"
-printf 'src/*|zcutil/*|.gitignore|doc/*	unit-a unit-b
+printf 'src/*|zcutil/*|.gitignore	unit-a unit-b
 weird/*	ALL tor-x
 stageonly/*	daemon-linux daemon-win64
 scriptonly/*	qa/rpc-tests/x.sh
@@ -54,7 +54,6 @@ git -C "$repo" commit -q --no-verify -m init
 ci() { git -C "$repo" commit -q --no-verify --allow-empty -m "$1"; }
 hooked() { git -C "$repo" commit -q -m "$1"; }
 zd() { "$bindir/zcl-dev-hooks" "$@"; }
-
 # ---- install and status
 cd "$repo"
 expect "status before install is not ready" 1 "NOT ready" zd status
@@ -66,7 +65,6 @@ expect "install refuses a foreign hooksPath" 1 "already 'other'" zd install
 expect "install --force" 0 "zcutil/githooks" zd install --force
 expect "dispatch through zcl-dev" 0 "hooks: installed" "$bindir/zcl-dev" -C "$repo" hooks status
 [ "$(git config core.hooksPath)" = zcutil/githooks ] || bad "hooksPath value"
-
 # ---- pre-commit: primary checkout guard
 echo 1 >>src/a.c; git add src/a.c
 expect "master commit in primary" 0 "" hooked c1
@@ -242,47 +240,7 @@ expect "ZCL_PUSH_OK overrides, loudly" 0 "ZCL_PUSH_OK override" env ZCL_PUSH_OK=
 grep -q "ref=refs/heads/master .*new=$d reason=test reason" "$repo/.git/zcl-push-overrides.log" && ok "override recorded in .git/zcl-push-overrides.log" || bad "override log"
 expect "deleting master refused" 1 "deleting refs/heads/master" git push -q origin :master
 [ "$(git -C "$remote" rev-parse master)" = "$d" ] || bad "remote master moved unexpectedly"
-
-# ---- review gate: a push to master or release/* also needs doc/agent/REVIEWS.tsv rows for its commits
-# (the record is in force once it exists at the remote tip or the pushed commit; the legacy cases above predate it)
-rcpts() { rcpt "$1" unit-a PASS; rcpt "$1" unit-b PASS; rcpt "$1" check-dev-tools PASS; } # doc/agent selects the docs step too
-remote_tip=$(git -C "$remote" rev-parse master)
-git checkout -q -b rv "$remote_tip"
-mkdir -p doc/agent
-printf '# review record\n' >doc/agent/REVIEWS.tsv
-git add doc/agent/REVIEWS.tsv
-ci "review: add the record"; r0=$(git rev-parse HEAD)
-rcpts "$r0"
-expect "a commit that only adds the record needs no review row" 0 "" git push -q origin rv:master
-echo rv1 >>src/a.c; git add src/a.c; ci "feat: reviewed code"; rv1=$(git rev-parse HEAD)
-rcpts "$rv1"
-expect "master push with receipts and no review row is refused" 1 "no accepted review" git push -q origin rv:master
-expect "ZCL_PUSH_OK=1 does not waive review" 1 "ZCL_PUSH_OK does not waive review" env ZCL_PUSH_OK=1 git push -q origin rv:master
-grep -q "feat: reviewed code (no row)" "$work/out" && ok "the refusal lists the commit and its reason" || bad "refusal lists the commit"
-grep -q "zcl-dev review record" "$work/out" && ok "the refusal names the record command" || bad "refusal names the command"
-echo rv2 >>src/a.c; git add src/a.c; ci "feat: no receipt, no row"
-expect "an override of the receipts still leaves review in force" 1 "no accepted review" env ZCL_PUSH_OK=nolocalci git push -q origin rv:master
-git reset -q --hard "$rv1"
-(cd "$repo" && "$bindir/zcl-dev-review" record --reviewer "Rev One" --verdict ACCEPT "$r0..$rv1" >/dev/null)
-git commit -q --no-verify -m "review: record" -- doc/agent/REVIEWS.tsv
-rv1r=$(git rev-parse HEAD)
-rcpts "$rv1r"
-expect "master push with a review row is admitted" 0 "" git push -q origin rv:master
-[ "$(git -C "$remote" rev-parse master)" = "$rv1r" ] || bad "remote master did not advance to the reviewed tip"
-echo rv3 >>src/a.c; git add src/a.c; ci "feat: second slice"; rv3=$(git rev-parse HEAD)
-rcpts "$rv3"
-expect "an earlier row does not cover a later commit" 1 "feat: second slice (stale row)" git push -q origin rv:master
-(cd "$repo" && "$bindir/zcl-dev-review" record --reviewer "Rev One" --verdict ACCEPT "$rv1r..$rv3" >/dev/null)
-git commit -q --no-verify -m "review: record second" -- doc/agent/REVIEWS.tsv
-rv3r=$(git rev-parse HEAD)
-expect "ZCL_PUSH_OK=1 with a row and no receipts is admitted through the override" 0 "ZCL_PUSH_OK override" env ZCL_PUSH_OK=1 git push -q origin rv:master
-rcpts "$rv3r"
-echo rv4 >>src/a.c; git add src/a.c; ci "feat: unreviewed release"; rv4=$(git rev-parse HEAD)
-rcpts "$rv4"
-expect "a new release/* ref is held to review from the remote master" 1 "no accepted review" git push -q origin rv:refs/heads/release/9
-expect "deleting a protected ref keeps its own refusal" 1 "deleting refs/heads/master" git push -q origin :master
-expect "git push --no-verify is the explicit bypass" 0 "" git push -q --no-verify origin rv:refs/heads/release/9
-
+"$bindir"/zcl-review-fixtures --hook "$bindir" "$src/githooks" || fails=$((fails + 1)) # review gate cases: real pushes, in C
 [ "$fails" = 0 ] && { echo "hooks: all tests passed"; exit 0; }
 echo "hooks: $fails FAILED" >&2
 exit 1

@@ -24,9 +24,11 @@ $(BIN)/zcl-dev-hooks$(EXEEXT): zcl-dev-hooks.c $(REVIEW)/review-core.c $(REVIEW)
 $(BIN)/zcl-dev-hook$(EXEEXT): $(BIN)/zcl-dev-hooks$(EXEEXT)
 	cp $< $@
 
-# The pre-push test drives the real zcl-dev select, so build the dev tools first.
+# The pre-push test drives the real zcl-dev select, so build the dev tools first; the review gate cases are
+# in ../review/test/fixtures.c (--hook), built here.
 check: all
 	$(MAKE) -C .. all EXEEXT=$(EXEEXT)
+	$(MAKE) -C $(REVIEW) $(BIN)/zcl-review-fixtures
 	sh test/run.sh $(BIN)
 
 clean:

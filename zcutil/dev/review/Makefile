@@ -3,7 +3,7 @@
 # macOS clang. Outputs go to ../../bin (git-ignored).
 #   make -C zcutil/dev/review                                        host compiler
 #   make -C zcutil/dev/review CC=x86_64-w64-mingw32-gcc EXEEXT=.exe  cross build
-#   make -C zcutil/dev/review check                                  selftest and fixture-repo tests
+#   make -C zcutil/dev/review check                                  selftest and fixture-repo tests (test/fixtures.c, host cc, POSIX only)
 CC ?= cc
 EXEEXT ?=
 CFLAGS ?= -O2 -g
@@ -22,13 +22,16 @@ $(BIN)/zcl-dev-review$(EXEEXT): $(SRCS) $(HDRS)
 	mkdir -p $(BIN)
 	$(CC) $(STD) $(WARN) $(CFLAGS) -o $@ $(SRCS)
 
-check: all
+$(BIN)/zcl-review-fixtures: test/fixtures.c
+	$(CC) -std=gnu17 $(WARN) $(CFLAGS) -o $@ test/fixtures.c
+
+check: all $(BIN)/zcl-review-fixtures
 	$(CC) -std=c2x $(WARN) -fsyntax-only zcl-dev-review.c
 	$(CC) -std=c2x $(WARN) -fsyntax-only review-core.c
 	$(BIN)/zcl-dev-review$(EXEEXT) --selftest
 	sh test/run.sh $(BIN)/zcl-dev-review$(EXEEXT)
 
 clean:
-	rm -f $(BIN)/zcl-dev-review $(BIN)/zcl-dev-review.exe
+	rm -f $(BIN)/zcl-dev-review $(BIN)/zcl-dev-review.exe $(BIN)/zcl-review-fixtures
 
 .PHONY: all check clean

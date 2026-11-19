@@ -208,14 +208,15 @@ static char *join_authors(const RvRange *rg)
     size_t len = 1;
     for (size_t i = 0; i < all.n; i++) len += strlen(all.v[i]) + 1;
     char *out = malloc(len);
-    if (out) {
-        out[0] = 0;
-        for (size_t i = 0; i < all.n; i++)
-            if (i == 0 || strcmp(all.v[i], all.v[i - 1])) {
-                if (out[0]) strcat(out, ",");
-                strcat(out, all.v[i]);
-            }
+    size_t o = 0;
+    for (size_t i = 0; out && i < all.n; i++) {
+        if (i && !strcmp(all.v[i], all.v[i - 1])) continue;
+        size_t l = strlen(all.v[i]);
+        if (o) out[o++] = ',';
+        memcpy(out + o, all.v[i], l);
+        o += l;
     }
+    if (out) out[o] = 0;
     free(all.v);
     return out;
 }
