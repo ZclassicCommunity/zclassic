@@ -184,6 +184,7 @@ test_speed() {
     if [ -n "$basebin" ]; then client_bin=$basebin; fi
     download "1" || { stop_server 1; client_bin=$bin; return 1; }
     client_bin=$bin
+    SINGLE_MS=$DL_MS
     one_ms=$DL_MS; one_b=$(served_bytes 1 $l1); one_cpu=$DL_CPU
     check_imported "speed (one server)"; end_client; stop_server 1
     fresh_client; start_server 1 $kbps && start_server 2 $kbps || return 1
@@ -281,9 +282,24 @@ test_skew() {
     end_client; stop_server 1; stop_server 2
 }
 
+# The single-server time on this fixture (measured once, or taken from the speed mode): what a download that loses or
+# only partly uses a second server is compared with.
+SINGLE_MS=""
+need_single() {
+    [ -n "$SINGLE_MS" ] && return 0
+    say "(measuring the single-server time first)"
+    fresh_client; start_server 1 $kbps || return 1
+    download "1" || { stop_server 1; return 1; }
+    SINGLE_MS=$DL_MS
+    end_client; stop_server 1
+    say "single server: $((SINGLE_MS / 1000)).$((SINGLE_MS % 1000 / 100)) s"
+}
+
 test_kill() {
     say "== kill server 2 at ~35% =="
+    need_single || return 1
     fresh_client; start_server 1 $kbps && start_server 2 $kbps || return 1
+    kt0=$(now_ms)
     start_client "1 2"
     pct=0
     while [ "$pct" -lt 35 ]; do
@@ -294,7 +310,14 @@ test_kill() {
     done
     kill_server 2
     say "killed server 2 at ${pct}%"
-    if wait_imported; then check_imported "kill"; else fail "kill: client did not finish from the other server"; tail -15 "$client_log"; fi
+    if wait_imported; then
+        check_imported "kill"
+        kms=$(($(now_ms) - kt0))
+        say "RESULT kill: $((kms / 1000)).$((kms % 1000 / 100)) s with server 2 killed at ${pct}% (single server $((SINGLE_MS / 1000)).$((SINGLE_MS % 1000 / 100)) s)"
+        # two servers for the first third, one for the rest: well under the single-server time; a client that keeps
+        # sending streams to the dead server takes far longer
+        [ $kms -le $((SINGLE_MS * 130 / 100 + 5000)) ] && pass "kill: finished in $kms ms, within 1.3x the single-server time ($SINGLE_MS ms) plus 5 s" || fail "kill: took $kms ms, the single-server time is $SINGLE_MS ms"
+    else fail "kill: client did not finish from the other server"; tail -15 "$client_log"; fi
     grep -a 'failed on\|stream .* moves' "$client_log" | tail -4
     end_client; stop_server 1
 }
@@ -304,13 +327,15 @@ test_kill() {
 # SHA-256 equal server 1's manifest entries, and the result must equal server 1's chain.
 other_tip() { # <label> <serve dir of server 2> <log message expected>
     lbl=$1; saved2=$serve2; serve2=$2; want_msg=$3
+    need_single || return 1
     fresh_client; start_server 1 $kbps && start_server 2 $kbps || { serve2=$saved2; return 1; }
     l1=$(log_lines 1); l2=$(log_lines 2)
     download "1 2" || { serve2=$saved2; stop_server 1; stop_server 2; return 1; }
     check_imported "$lbl"
     b1=$(served_bytes 1 $l1); b2=$(served_bytes 2 $l2)
     grep -aq "$want_msg" "$client_log" && pass "$lbl: the client logged '$want_msg'" || fail "$lbl: no '$want_msg' message"
-    say "RESULT $lbl: server 1 served $b1 bytes, server 2 (other tip) served $b2 bytes, snapshot $snapshot_bytes"
+    say "RESULT $lbl: $((DL_MS / 1000)).$((DL_MS % 1000 / 100)) s (single server $((SINGLE_MS / 1000)).$((SINGLE_MS % 1000 / 100)) s); server 1 served $b1 bytes, server 2 (other tip) served $b2 bytes, snapshot $snapshot_bytes"
+    [ $DL_MS -le $((SINGLE_MS * 115 / 100 + 2000)) ] && pass "$lbl: finished in $DL_MS ms, within 1.15x the single-server time ($SINGLE_MS ms) plus 2 s" || fail "$lbl: took $DL_MS ms, the single-server time is $SINGLE_MS ms"
     OT_B1=$b1; OT_B2=$b2
     end_client; stop_server 1; stop_server 2
     serve2=$saved2

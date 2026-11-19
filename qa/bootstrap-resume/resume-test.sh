@@ -256,9 +256,9 @@ test_kills() {
         sq=$(served_bytes "$cyc"); cyc=$(log_lines)
         ss=$(staging_state); nb=${ss##*bytes=}
         # What a killed run loses is what was in flight at the kill (requests the server had queued that the client
-        # never stored; the client's status line says how many were in flight, and is repeated when that moves by 4)
+        # never stored; the LAST status line before the kill says how many were in flight; lines repeat when that moves by 4)
         # plus the last chunk of every partial file it resumed (always requested again).
-        infl=$(tail -n +$((cl + 1)) "$client_log" | sed -n 's/.*, \([0-9][0-9]*\) requests in flight.*/\1/p' | sort -n | tail -1)
+        infl=$(tail -n +$((cl + 1)) "$client_log" | sed -n 's/.*, \([0-9][0-9]*\) requests in flight.*/\1/p' | tail -1)
         resumed=$(tail -n +$((cl + 1)) "$client_log" | sed -n 's/.*staging scan: .*, \([0-9][0-9]*\) partial files continue.*/\1/p' | tail -1)
         allow=$(( (${infl:-0} + 4 + ${resumed:-0}) * chunk ))
         lost=$((sq - (nb - prevb)))
