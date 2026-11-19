@@ -222,8 +222,10 @@ bool FixedSeedsWanted(size_t nTableSize);
  *  most of a fresh start waiting. Above the target only the first dialer runs. */
 static const int MAX_PARALLEL_DIALS = 8;
 static const int PARALLEL_DIAL_OUTBOUND_TARGET = 8;
-/** Whether the extra dialers run, given the number of outbound peers. */
-bool ParallelDialWanted(int nOutbound);
+/** Whether the extra dialers run, given the number of outbound peers and of outbound
+ *  slots: below PARALLEL_DIAL_OUTBOUND_TARGET, or below the slot count if that is smaller
+ *  (a small -maxconnections). */
+bool ParallelDialWanted(int nOutbound, int nMaxOutboundSlots);
 int CountOutboundPeers();
 /** Whether an outbound peer on this network group is connected. */
 bool OutboundGroupConnected(const std::vector<unsigned char>& group);

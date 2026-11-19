@@ -99,6 +99,9 @@ NodeId nLastNodeId = 0;
 CCriticalSection cs_nLastNodeId;
 
 static CSemaphore *semOutbound = NULL;
+/** Outbound slots (semOutbound's count): MAX_OUTBOUND_CONNECTIONS, or fewer with a small
+ *  -maxconnections. Set in StartNode before the threads start. */
+static int nMaxOutbound = MAX_OUTBOUND_CONNECTIONS;
 static boost::condition_variable messageHandlerCondition;
 
 // Signals for message handling
@@ -1565,9 +1568,9 @@ int CountOutboundPeers()
     return nOutbound;
 }
 
-bool ParallelDialWanted(int nOutbound)
+bool ParallelDialWanted(int nOutbound, int nMaxOutboundSlots)
 {
-    return nOutbound < PARALLEL_DIAL_OUTBOUND_TARGET;
+    return nOutbound < std::min(PARALLEL_DIAL_OUTBOUND_TARGET, nMaxOutboundSlots);
 }
 
 std::set<CNetAddr> PeerReportedLocal(const std::vector<std::pair<CNetAddr, CNetAddr> >& vReports)
@@ -1675,10 +1678,15 @@ static void OpenConnectionsLoop(int nDialer)
 
         // The extra dialers only run while the node holds few outbound peers, and
         // do not take an outbound slot while they wait.
-        if (nDialer > 0 && !ParallelDialWanted(CountOutboundPeers()))
+        if (nDialer > 0 && !ParallelDialWanted(CountOutboundPeers(), nMaxOutbound))
             continue;
 
-        CSemaphoreGrant grant(*semOutbound);
+        // The first dialer waits for a free outbound slot. The others only take one
+        // that is free now, so they never queue in front of the -addnode thread; a
+        // dialer that finds none tries again next round.
+        CSemaphoreGrant grant(*semOutbound, nDialer > 0);
+        if (!grant)
+            continue;
         boost::this_thread::interruption_point();
 
         // Add the fixed seed nodes while the table is thin: on a fresh start (the DNS
@@ -2109,7 +2117,7 @@ void StartNode(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     if (semOutbound == NULL) {
         // initialize semaphore
-        int nMaxOutbound = min(MAX_OUTBOUND_CONNECTIONS, nMaxConnections);
+        nMaxOutbound = min(MAX_OUTBOUND_CONNECTIONS, nMaxConnections);
         semOutbound = new CSemaphore(nMaxOutbound);
     }
 

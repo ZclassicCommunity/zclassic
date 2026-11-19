@@ -942,7 +942,7 @@ BOOST_AUTO_TEST_CASE(parallel_dial_groups)
     BOOST_CHECK(!OutboundGroupConnected(a.GetGroup()));
     {
         CDialGroupReservation first(a.GetGroup());
-        BOOST_CHECK(first);
+        BOOST_CHECK(bool(first));
         {
             // a second dialer cannot take the group, whichever address it drew
             CDialGroupReservation second(aSameGroup.GetGroup());
@@ -965,14 +965,31 @@ BOOST_AUTO_TEST_CASE(parallel_dial_groups)
     BOOST_CHECK(DialingGroups().empty());
     {
         CDialGroupReservation again(aSameGroup.GetGroup());
-        BOOST_CHECK(again);
+        BOOST_CHECK(bool(again));
     }
     BOOST_CHECK(DialingGroups().empty());
 
     BOOST_CHECK(MAX_PARALLEL_DIALS > 1);
-    BOOST_CHECK(ParallelDialWanted(0));
-    BOOST_CHECK(ParallelDialWanted(PARALLEL_DIAL_OUTBOUND_TARGET - 1));
-    BOOST_CHECK(!ParallelDialWanted(PARALLEL_DIAL_OUTBOUND_TARGET));
+    BOOST_CHECK(ParallelDialWanted(0, 16));
+    BOOST_CHECK(ParallelDialWanted(PARALLEL_DIAL_OUTBOUND_TARGET - 1, 16));
+    BOOST_CHECK(!ParallelDialWanted(PARALLEL_DIAL_OUTBOUND_TARGET, 16));
+    // a small -maxconnections: the extra dialers stop at the slot count
+    BOOST_CHECK(ParallelDialWanted(2, 3));
+    BOOST_CHECK(!ParallelDialWanted(3, 3));
+    BOOST_CHECK(!ParallelDialWanted(1, 1));
+    BOOST_CHECK(!ParallelDialWanted(0, 0));
+
+    // an extra dialer takes a slot only if one is free now, never waiting for it
+    {
+        CSemaphore sem(1);
+        CSemaphoreGrant first(sem, true);
+        BOOST_CHECK(bool(first));
+        CSemaphoreGrant extra(sem, true);
+        BOOST_CHECK(!bool(extra));
+        first.Release();
+        CSemaphoreGrant again(sem, true);
+        BOOST_CHECK(bool(again));
+    }
     SetLimited(NET_IPV4, l4);
     SetLimited(NET_IPV6, l6);
 }
