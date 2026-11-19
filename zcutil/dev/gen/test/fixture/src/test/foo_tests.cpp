@@ -1,0 +1,6 @@
+BOOST_FIXTURE_TEST_SUITE(foo_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(one) { }
+BOOST_AUTO_TEST_CASE(two) { }
+
+BOOST_AUTO_TEST_SUITE_END()
