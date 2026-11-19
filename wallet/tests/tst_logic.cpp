@@ -31,6 +31,7 @@
 #include "repairlocation.h"
 #include "profilepaths.h"
 #include "profilefailure.h"
+#include "cookiestale.h"
 #include "daemonjob.h"
 #include <QTemporaryDir>
 #include "walletbackup.h"
@@ -962,6 +963,7 @@ private slots:
 
     // --- First-run trust: send-gate staleness predicate (pure) ---
     void sendgate_staleWhenPollStops();               // Settings::syncGateIsStale boundary
+    void cookie_staleRequestIsRetriedNotHealed();
     void profilefailure_headlessModesKeepStderrOnly();
     void profilefailure_messageSaysWhatAndWhatToDo();
     void profile_unsetKeepsDefaults();
@@ -2436,6 +2438,23 @@ void TestLogic::sendgate_staleWhenPollStops() {
     QVERIFY(Settings::syncGateIsStale(now, now - 10 * W));
 }
 
+// First launch: the node binds its RPC port before it writes the auth cookie, so a first
+// request can carry no/older credentials and get a 401 that is NOT a real desync. Only
+// that case is retried; a 401 that carried the current cookie keeps the heal path.
+void TestLogic::cookie_staleRequestIsRetriedNotHealed() {
+    const QString cookie = "__cookie__:AbCd1234";
+    // fresh profile: request went out with empty creds, cookie now exists -> retry
+    QVERIFY(CookieStale::sentCredsAreStale("", "", cookie));
+    // request carried an older cookie, node has since written a new one -> retry
+    QVERIFY(CookieStale::sentCredsAreStale("__cookie__", "OldOld", cookie));
+    // request carried exactly the current cookie: genuine mismatch -> heal path
+    QVERIFY(!CookieStale::sentCredsAreStale("__cookie__", "AbCd1234", cookie));
+    // no cookie on disk: nothing newer to retry with -> heal path as before
+    QVERIFY(!CookieStale::sentCredsAreStale("", "", QString()));
+    QVERIFY(!CookieStale::sentCredsAreStale("zcl-qt-wallet", "secret", QString()));
+    // a cookie value containing ':' is compared whole
+    QVERIFY(!CookieStale::sentCredsAreStale("__cookie__", "a:b", "__cookie__:a:b"));
+}
 
 // A bad profile dir must be visible (Windows GUI has no console) but headless modes
 // keep stderr + exit code only; the message names the folder and the remedy, and the

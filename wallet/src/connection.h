@@ -134,6 +134,11 @@ private:
     // node. Returns true if a heal was started/handled (caller must not fall through to
     // any showError); false to let the caller take the external-node path.
     bool handleEmbeddedAuthFailure();
+    // First-launch race (cookiestale.h): a 401 whose request predates the cookie now on disk
+    // is retried with the current cookie (no restart); otherwise the heal above runs.
+    // Defined in connection_cookie.cpp.
+    bool retryWithCurrentCookie(const std::shared_ptr<ConnectionConfig>& sent);
+    bool retryOrHealAuth(const std::shared_ptr<ConnectionConfig>& sent);
 
     Connection* makeConnection(std::shared_ptr<ConnectionConfig> config);
 
