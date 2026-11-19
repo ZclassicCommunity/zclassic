@@ -911,6 +911,17 @@ BOOST_AUTO_TEST_CASE(outbound_candidate_skip_hosts)
     SetLimited(NET_IPV6, l6);
 }
 
+// The fixed seeds go into the table while it is thin (a fresh start), not only after a
+// minute with an empty table.
+BOOST_AUTO_TEST_CASE(fixed_seeds_thin_table)
+{
+    BOOST_CHECK(FixedSeedsWanted(0));
+    BOOST_CHECK(FixedSeedsWanted(3));
+    BOOST_CHECK(FixedSeedsWanted(FIXED_SEEDS_THIN_TABLE - 1));
+    BOOST_CHECK(!FixedSeedsWanted(FIXED_SEEDS_THIN_TABLE));
+    BOOST_CHECK(!Params(CBaseChainParams::MAIN).FixedSeeds().empty());
+}
+
 // Concurrent dialers: a group being dialled is held by one dialer, counts as connected
 // for the others (so the one-outbound-peer-per-group rule holds while dials overlap),
 // and is free again when the dial ends. The extra dialers run only below the target.

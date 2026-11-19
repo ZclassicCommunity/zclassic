@@ -429,6 +429,11 @@ int OutboundConnectTimeout(bool fDirect, bool fTimeoutSet, int nAttempts, int64_
     return std::min(nDefaultTimeout, DIRECT_DIAL_CONNECT_TIMEOUT);
 }
 
+bool FixedSeedsWanted(size_t nTableSize)
+{
+    return nTableSize < FIXED_SEEDS_THIN_TABLE;
+}
+
 CNode* ConnectNode(CAddress addrConnect, const char *pszDest, int nTimeout)
 {
     if (nTimeout <= 0)
@@ -1659,7 +1664,6 @@ static void ThreadOpenConnectionsDialer(int nDialer)
 static void OpenConnectionsLoop(int nDialer)
 {
     // Initiate network connections
-    int64_t nStart = GetTime();
     while (true)
     {
         if (nDialer == 0)
@@ -1675,11 +1679,13 @@ static void OpenConnectionsLoop(int nDialer)
         CSemaphoreGrant grant(*semOutbound);
         boost::this_thread::interruption_point();
 
-        // Add seed nodes if DNS seeds are all down (an infrastructure attack?).
-        if (nDialer == 0 && addrman.size() == 0 && (GetTime() - nStart > 60)) {
+        // Add the fixed seed nodes while the table is thin: on a fresh start (the DNS
+        // seeds give a handful of addresses at best, often none), or if DNS seeds are
+        // all down (an infrastructure attack?). They go through the same selection.
+        if (nDialer == 0 && FixedSeedsWanted(addrman.size())) {
             static bool done = false;
             if (!done) {
-                LogPrintf("Adding fixed seed nodes as DNS doesn't seem to be available.\n");
+                LogPrintf("Adding fixed seed nodes: the address table holds %d addresses.\n", addrman.size());
                 addrman.Add(convertSeed6(Params().FixedSeeds()), CNetAddr("127.0.0.1"));
                 done = true;
             }

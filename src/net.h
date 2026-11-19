@@ -212,6 +212,9 @@ std::set<CNetAddr> PeerReportedLocal(const std::vector<std::pair<CNetAddr, CNetA
 /** Whether the system has a global, non-Teredo IPv6 source address to route to the IPv6
  *  internet (asked of the OS without sending anything; cached for a minute). */
 bool HostHasIPv6Route();
+/** The fixed seeds go into the table while it holds fewer addresses than this. */
+static const size_t FIXED_SEEDS_THIN_TABLE = 16;
+bool FixedSeedsWanted(size_t nTableSize);
 
 /** Outbound dialers (opencon threads) that run at once while the node holds fewer than
  *  PARALLEL_DIAL_OUTBOUND_TARGET outbound peers. A dead address costs a whole connect
