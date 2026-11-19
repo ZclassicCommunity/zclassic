@@ -22,8 +22,9 @@ namespace wallethealth {
 
 using json = nlohmann::json;
 
-// The node writes its wallet checkpoint about hourly (about 48 blocks). A checkpoint this far behind the tip, on a
-// wallet that is up to date, means it has stopped doing so, and a restart would have a long rescan to do.
+// The node writes its wallet checkpoint about hourly (about 48 blocks), and as soon as it has caught up with the
+// network after a long sync (CWallet::CheckpointIfLagging). A checkpoint this far behind the tip on a node that is
+// up to date means the node could not write it, and a restart would have a long rescan to do.
 constexpr qint64 kCheckpointLagBlocks = 1000;
 
 struct Report {
@@ -48,6 +49,17 @@ inline bool flag(const json& o, const char* k) {
     return f != o.end() && f->is_boolean() && f->get<bool>();
 }
 
+// The checkpoint line: a failed write, else a lag that persisted.
+inline void checkpointLine(const json& h, Report& r) {
+    const qint64 tip = num(h, "tip_height"), cp = num(h, "checkpoint_height");
+    if (flag(h, "checkpoint_failed"))
+        r.lines << QObject::tr("The wallet file could not be saved. Your funds are safe, but if the node stops unexpectedly it "
+                               "will have to rescan the blockchain at the next start. Check the free disk space.");
+    else if (cp >= 0 && tip - cp > kCheckpointLagBlocks)
+        r.lines << QObject::tr("The wallet file was last saved %1 blocks ago. If the node stops unexpectedly it will "
+                               "have to rescan from there.").arg(tip - cp);
+}
+
 // info: the reply of getwalletinfo. synced: the node is up to date with the network (while it catches up the
 // checkpoint and the note proofs are legitimately behind, and saying so would only be noise).
 inline Report assess(const json& info, bool synced) {
@@ -70,10 +82,7 @@ inline Report assess(const json& info, bool synced) {
         if (missing > 0)
             r.lines << QObject::tr("%1 shielded note(s) cannot be spent yet: the wallet is still rebuilding their proofs.").arg(missing);
 
-        const qint64 tip = num(h, "tip_height"), cp = num(h, "checkpoint_height");
-        if (cp >= 0 && tip - cp > kCheckpointLagBlocks)
-            r.lines << QObject::tr("The wallet file was last checkpointed %1 blocks ago. If the node stops unexpectedly it will "
-                                   "have to rescan from there.").arg(tip - cp);
+        checkpointLine(h, r);
     }
 
     auto ps = h.find("pending_sends");
