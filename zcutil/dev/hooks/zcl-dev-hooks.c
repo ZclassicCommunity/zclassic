@@ -26,9 +26,11 @@
  * zcutil/dev/impact.rules of the pushed commit: its steps, plus its stages (daemon-linux,
  * daemon-win64, wallet-linux; local-ci records them as step=<stage>). ALL means every `step` of
  * zcutil/local-ci.sh at that commit except dry-* and tor-*, plus the three stages and the
- * build-tests and fetch-params receipts. A step whose only receipts are SKIP counts for every
- * step (it declined itself, rc 77). A diff that selects only qa scripts is refused (no receipt
- * covers a script); an empty diff needs at least one PASS receipt for the sha.
+ * build-tests and fetch-params receipts; tor-* receipts (local-ci.sh --tor) are not required. A step
+ * whose latest receipt is SKIP (rc 77: it did not run) does NOT pass, whether or not it was named
+ * explicitly; only wallet-qt-logic-widget (needs Qt) may pass on SKIP, and only under ALL. A host
+ * that cannot run a step uses the logged ZCL_PUSH_OK. A diff that selects only qa scripts is
+ * refused (no receipt covers a script); an empty diff needs at least one PASS receipt for the sha.
  * Receipts are $ZCL_CI_OUT/receipts.jsonl, else $HOME/work/zc23-localci-out/<9-char sha>/
  * (run local-ci with that exact directory name, e.g. the first 9 characters of the sha).
  * Override ZCL_PUSH_OK=<reason>: printed and appended to <common git dir>/zcl-push-overrides.log.
@@ -319,7 +321,10 @@ static char *receipts_path(const char *sha)
 {
     const char *out = getenv("ZCL_CI_OUT");
     char path[2048];
-    if (out && *out) snprintf(path, sizeof path, "%s/receipts.jsonl", out);
+    if (out && *out) {
+        snprintf(path, sizeof path, "%s/receipts.jsonl", out);
+        fprintf(stderr, "zcl-dev-hooks: receipts read from ZCL_CI_OUT=%s (self-attested)%c", out, 10);
+    }
     else {
         const char *home = getenv("HOME");
         if (!home || !*home) home = getenv("USERPROFILE");
@@ -369,22 +374,24 @@ static size_t load_receipts(const char *path, const char *sha, Rcpt **out)
 }
 
 /* "" when step `s` is satisfied, else a reason. */
-static const char *step_state(const Rcpt *rc, size_t n, const char *s)
+static const char *step_state(const Rcpt *rc, size_t n, const char *s, int skip_ok)
 {
-    int pass = 0, skip = 0, any = 0, failed = 0;
+    int pass = 0, skip = 0, any = 0, failed = 0, last_skip = 0;
     for (size_t i = 0; i < n; i++) {
         if (strcmp(rc[i].step, s)) continue;
         any = 1;
         if (!strcmp(rc[i].verdict, "PASS")) pass = 1;
         if (!strcmp(rc[i].verdict, "SKIP")) skip = 1;
+        last_skip = !strcmp(rc[i].verdict, "SKIP");
         /* the latest receipt of each (stage, step) decides a failure */
         int later = 0;
         for (size_t j = i + 1; j < n; j++) if (!strcmp(rc[j].step, s) && !strcmp(rc[j].stage, rc[i].stage)) later = 1;
         if (!later && !strcmp(rc[i].verdict, "FAIL")) failed = 1;
     }
     if (failed) return "failed";
-    if (pass) return "";
-    if (skip) return ""; /* a step that declined itself (rc 77) counts, for every step */
+    if (pass && !last_skip) return "";
+    if (pass) return skip_ok ? "" : "skipped";
+    if (skip) return skip_ok ? "" : "skipped"; /* rc 77: the step did not run; only the ALL allowlist may pass it */
     return any ? "not passed" : "no receipt";
 }
 
@@ -487,6 +494,21 @@ static void env_set(const char *k, const char *v)
 #endif
 }
 
+/* The one step ALL lets pass on SKIP: it needs Qt, which a build host may lack. Nothing else may
+ * pass on SKIP (c23-run-linked skips without the golden corpus); use the logged ZCL_PUSH_OK. */
+static const char *const skip_ok_step = "wallet-qt-logic-widget";
+
+/* Drop dry-* and tor-* from req (ALL does not require them). */
+static void drop_optional(Names *l)
+{
+    size_t k = 0;
+    for (size_t i = 0; i < l->n; i++) {
+        if (!strncmp(l->v[i], "dry-", 4) || !strncmp(l->v[i], "tor-", 4)) free(l->v[i]);
+        else l->v[k++] = l->v[i];
+    }
+    l->n = k;
+}
+
 /* Stages that local-ci.sh records as step=<stage> receipts, and the test-build receipts; all of
  * them belong to ALL (local-ci `all` = the three stages plus `test`, which builds and fetches first). */
 static const char *const all_extra[] = {"daemon-linux", "daemon-win64", "wallet-linux", "build-tests", "fetch-params"};
@@ -494,10 +516,11 @@ static const char *const all_extra[] = {"daemon-linux", "daemon-win64", "wallet-
 /* Required receipt steps for base..sha, evaluated with the impact rules of the pushed commit.
  * Returns 1 with msg set when they cannot be computed or the selection cannot be verified.
  * *any_pass: nothing was selected because the diff is empty; some PASS receipt must still exist. */
-static int required_steps(const Repo *r, const char *base, const char *sha, Names *req, int *any_pass, char *msg, size_t cap)
+static int required_steps(const Repo *r, const char *base, const char *sha, Names *req, int *any_pass, int *all_mode, char *msg, size_t cap)
 {
     char cmd[4096], dir[1024], list[1200], tree[1200], d1[1300], d2[1400], rules[1600];
     *any_pass = 0;
+    *all_mode = 0;
     snprintf(list, sizeof list, "%s/zcl-hook-files.%ld", r->common, (long)getpid());
     snprintf(cmd, sizeof cmd, "git -c core.quotepath=off diff --no-renames --name-only %s %s > \"%s\"", base, sha, list);
     if (!quotable(list) || run(cmd, NULL) != 0) { snprintf(msg, cap, "cannot list the files changed by the push"); return 1; }
@@ -548,6 +571,8 @@ static int required_steps(const Repo *r, const char *base, const char *sha, Name
     if (bad) {
         snprintf(msg, cap, "zcl-dev select failed or printed something unreadable (build zcutil/bin/zcl-dev: make -C zcutil)");
     } else if (strstr(sel.p, "\"all\":true")) {
+        *all_mode = 1;
+        drop_optional(req); /* select lists tor-* under ALL; they need local-ci --tor and are not required */
         size_t nd = 0;
         char **dv;
         nd = declared_steps(sha, &dv);
@@ -574,9 +599,9 @@ static int required_steps(const Repo *r, const char *base, const char *sha, Name
 static int check_receipts(const Repo *r, const char *base, const char *sha, char *msg, size_t cap)
 {
     Names req = {0};
-    int any_pass;
+    int any_pass, all_mode;
     msg[0] = 0;
-    if (required_steps(r, base, sha, &req, &any_pass, msg, cap)) { names_free(&req); return 1; }
+    if (required_steps(r, base, sha, &req, &any_pass, &all_mode, msg, cap)) { names_free(&req); return 1; }
     char *path = receipts_path(sha);
     Rcpt *rcs;
     size_t nr = load_receipts(path, sha, &rcs);
@@ -587,7 +612,7 @@ static int check_receipts(const Repo *r, const char *base, const char *sha, char
         bad = 1;
     } else {
         for (size_t i = 0; i < req.n; i++) {
-            const char *st = step_state(rcs, nr, req.v[i]);
+            const char *st = step_state(rcs, nr, req.v[i], all_mode && !strcmp(req.v[i], skip_ok_step));
             if (!*st || used + 128 >= cap) continue;
             used += (size_t)snprintf(msg + used, cap - used, "%s%s: %s", used ? "; " : "required steps not passing: ", req.v[i], st);
             bad = 1;

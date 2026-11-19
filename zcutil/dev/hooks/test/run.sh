@@ -33,7 +33,7 @@ cp -R "$src/githooks" "$repo/zcutil/githooks"
 cp "$bindir"/zcl-dev "$bindir"/zcl-dev-hook "$bindir"/zcl-dev-hooks "$repo/zcutil/bin/"
 printf 'zcutil/bin/\n' >"$repo/.gitignore"
 printf 'src/*|zcutil/*|.gitignore	unit-a unit-b
-weird/*	ALL
+weird/*	ALL tor-x
 stageonly/*	daemon-linux daemon-win64
 scriptonly/*	qa/rpc-tests/x.sh
 ' >"$repo/zcutil/dev/impact.rules"
@@ -44,6 +44,7 @@ step() { :; }
     step unit-c 10 t_c
     step tor-x 10 t_tor
     step dry-pass 10 t_dry
+    step wallet-qt-logic-widget 10 t_qt
 EOF2
 printf '# header\n' >"$repo/zcutil/tools/Z23_SOURCE.tsv"
 printf 'one\n' >"$repo/zcutil/tools/vendor/v.c"
@@ -122,17 +123,20 @@ m3=$(git rev-parse HEAD)
 rcpt "$m3" unit-a PASS; rcpt "$m3" unit-b PASS
 expect "ALL requires every declared step" 1 "unit-c: no receipt" git push -q origin master
 rcpt "$m3" unit-c SKIP
+expect "ALL refuses a SKIP-only step" 1 "unit-c: skipped" git push -q origin master
+rcpt "$m3" unit-c PASS
 expect "ALL requires the stages and the test-build receipts" 1 "daemon-win64: no receipt" git push -q origin master
 rcpt "$m3" daemon-linux PASS; rcpt "$m3" daemon-win64 PASS; rcpt "$m3" wallet-linux PASS
 expect "ALL still requires build-tests" 1 "build-tests: no receipt" git push -q origin master
 rcpt "$m3" build-tests PASS; rcpt "$m3" fetch-params PASS
-expect "ALL accepts a self-skipped step, ignores tor-* and dry-*" 0 "" git push -q origin master
+rcpt "$m3" wallet-qt-logic-widget SKIP
+expect "ALL accepts only the Qt step skipped, ignores tor-* (even when a rule names it) and dry-*" 0 "" git push -q origin master
 
 # release/* is protected too
 echo m4 >>src/a.c; git add src/a.c; ci m4; m4=$(git rev-parse HEAD)
 expect "release branch needs a receipt" 1 "release/1.0" git push -q origin "$m4:refs/heads/release/1.0"
 rcpt "$m4" unit-a PASS; rcpt "$m4" unit-b PASS; rcpt "$m4" unit-c PASS
-for s in daemon-linux daemon-win64 wallet-linux build-tests fetch-params; do rcpt "$m4" $s PASS; done # the first release push carries weird/ (ALL)
+for s in daemon-linux daemon-win64 wallet-linux build-tests fetch-params wallet-qt-logic-widget; do rcpt "$m4" $s PASS; done # the first release push carries weird/ (ALL)
 expect "release branch with receipt" 0 "" git push -q origin "$m4:refs/heads/release/1.0"
 
 # a rule that selects only stages must still require their receipts
@@ -146,10 +150,14 @@ expect "a failed stage blocks" 1 "daemon-win64: failed" git push -q origin maste
 rcpt "$s1" daemon-win64 PASS
 expect "stage-only diff with both stage receipts" 0 "" git push -q origin master
 
-# SKIP counts for an explicitly selected step too
+# SKIP never counts for an explicitly selected step, even after a FAIL
 echo k >>src/a.c; git add src/a.c; ci k1; k1=$(git rev-parse HEAD)
 rcpt "$k1" unit-a PASS; rcpt "$k1" unit-b SKIP
-expect "explicit step with only a SKIP receipt" 0 "" git push -q origin master
+expect "explicit step with only a SKIP receipt is refused" 1 "unit-b: skipped" git push -q origin master
+rcpt "$k1" unit-b FAIL; rcpt "$k1" unit-b SKIP
+expect "a SKIP after a FAIL does not clear it" 1 "unit-b: skipped" git push -q origin master
+rcpt "$k1" unit-b PASS
+expect "a later PASS admits it" 0 "" git push -q origin master
 
 # empty diff: some PASS receipt for the sha is still required
 ci e1; e1=$(git rev-parse HEAD)
