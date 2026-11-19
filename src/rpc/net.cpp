@@ -34,7 +34,7 @@ UniValue getconnectioncount(const UniValue& params, bool fHelp)
             + HelpExampleRpc("getconnectioncount", "")
         );
 
-    LOCK2(cs_main, cs_vNodes);
+    LOCK(cs_vNodes);
 
     return (int)vNodes.size();
 }
@@ -115,10 +115,12 @@ UniValue getpeerinfo(const UniValue& params, bool fHelp)
             + HelpExampleRpc("getpeerinfo", "")
         );
 
-    LOCK(cs_main);
-
     vector<CNodeStats> vstats;
     CopyNodeStats(vstats);
+
+    // cs_vNodes was released inside CopyNodeStats; take cs_main only for the
+    // per-peer state lookups below.
+    LOCK(cs_main);
 
     UniValue ret(UniValue::VARR);
 
