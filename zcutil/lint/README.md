@@ -22,7 +22,15 @@ A baseline row is `<path><TAB><count>`. The gate fails when a count rises or a p
 When a count falls it passes and says so: run `zcl-lint <rule> --update-baseline` to lower the baseline
 (it refuses while anything rose, and only creates a file that does not exist). Baselines can only shrink.
 
-`all` also runs `zcutil/check-no-python.sh` when that script exists (the no-python gate lives elsewhere).
+`no-python` runs `zcutil/check-no-python.sh` (skipped when absent) and `all` runs every rule in `rules.def` order.
 Vendored and third-party trees (`src/c23/vendor`, `src/c23/services/vendor`, `zcutil/tools/vendor`,
 `src/secp256k1`, `src/leveldb`, `src/univalue`, `depends`, `wallet/src/3rdparty`, `src/pow/tromp`) are out of
 scope for the style rules.
+
+## Source layout and adding a rule
+
+`zcl-lint.c` is only the driver. Each rule is one file under `rules/` plus one `LINT_RULE(name, fn, has_baseline)` row in
+`rules.def`; `lintlib.{c,h}` hold what rules share: tracked-file iteration (`git ls-files -z`), the single vendored-tree exclusion
+list, C/C++ and sh comment and string stripping, baseline read/write and the ratchet, and the hollow-scan floor.
+A rule that scans nothing fails: exit 2 and "hollow scan", never a pass. Exit codes: 0 clean, 1 findings, 2 usage, internal error
+or hollow scan. `make -C zcutil/lint check` runs the fixture selftest and `lintlib_test.c`.

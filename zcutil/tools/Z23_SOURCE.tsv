@@ -1,14 +1,23 @@
 # Z23 provenance manifest. Verified by src/c23/tools/check-vendor.sh. Do not edit by hand.
-# z23_commit=1f5d0f69448c4811884b2c918ae0723ab24830da
+# z23_commit=9a191ef7b1184e14d9116362dff7def64cd300e3
 # requires_ancestor=55245e2bd
 # columns: zclassicd_path<TAB>z23_path<TAB>git_blob_sha1<TAB>z23_commit<TAB>manifest_sha3_256_or_unsealed
-zcutil/tools/vendor/platform/modules/platform/include/platform/glob_match.h	platform/modules/platform/include/platform/glob_match.h	5a025e2163c730b4a8f72a40acf3174dcbee6693	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
-zcutil/tools/vendor/tools/process_group_exec.c	tools/process_group_exec.c	91f089c6a2bdfcf36d0cd8cedbfabcf81d1b9796	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
-zcutil/tools/vendor/contexts/commons/packages/zjsonp/include/zjsonp/zjsonp.h	contexts/commons/packages/zjsonp/include/zjsonp/zjsonp.h	fb8e9f1f5d9fa8bdcf6b95a4e79d9941233d0822	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
-zcutil/tools/vendor/contexts/commons/packages/zjsonp/src/zjsonp.c	contexts/commons/packages/zjsonp/src/zjsonp.c	f4cb0cd9825de116fa8249db23a5b864c948fdd7	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
-zcutil/tools/vendor/contexts/commons/packages/zutf8/include/zutf8/zutf8.h	contexts/commons/packages/zutf8/include/zutf8/zutf8.h	65b360766b3d822f581cf52765660e8cc72982cf	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
-zcutil/tools/vendor/contexts/commons/packages/zutf8/src/zutf8.c	contexts/commons/packages/zutf8/src/zutf8.c	4fc2055c15f3d6a86665a9c6d1456dd4ed61e61c	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
-zcutil/tools/vendor/tools/jsonq.c	tools/jsonq.c	0bbd3a687c1130220e5ecf2dc2fa7db3135a69d5	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
-zcutil/tools/vendor/tools/jsonq_standalone.c	tools/jsonq_standalone.c	e5b8f1e10838d1f6541c07deab2725b7728c9dcd	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
-zcutil/tools/vendor/tools/multicall.h	tools/multicall.h	60b8f7e22b000eb0abbbd6eff39b896964c113ab	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
-zcutil/tools/LICENSE.z23	LICENSE	d645695673349e3947e8e5ae42332d0ac3164cd7	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
+zcutil/tools/vendor/platform/modules/platform/include/platform/glob_match.h	platform/modules/platform/include/platform/glob_match.h	5a025e2163c730b4a8f72a40acf3174dcbee6693	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/vendor/tools/process_group_exec.c	tools/process_group_exec.c	91f089c6a2bdfcf36d0cd8cedbfabcf81d1b9796	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/vendor/contexts/commons/packages/zjsonp/include/zjsonp/zjsonp.h	contexts/commons/packages/zjsonp/include/zjsonp/zjsonp.h	fb8e9f1f5d9fa8bdcf6b95a4e79d9941233d0822	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/vendor/contexts/commons/packages/zjsonp/src/zjsonp.c	contexts/commons/packages/zjsonp/src/zjsonp.c	f4cb0cd9825de116fa8249db23a5b864c948fdd7	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/vendor/contexts/commons/packages/zutf8/include/zutf8/zutf8.h	contexts/commons/packages/zutf8/include/zutf8/zutf8.h	65b360766b3d822f581cf52765660e8cc72982cf	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/vendor/contexts/commons/packages/zutf8/src/zutf8.c	contexts/commons/packages/zutf8/src/zutf8.c	4fc2055c15f3d6a86665a9c6d1456dd4ed61e61c	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/vendor/tools/jsonq.c	tools/jsonq.c	0bbd3a687c1130220e5ecf2dc2fa7db3135a69d5	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/vendor/tools/jsonq_standalone.c	tools/jsonq_standalone.c	e5b8f1e10838d1f6541c07deab2725b7728c9dcd	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/vendor/tools/multicall.h	tools/multicall.h	60b8f7e22b000eb0abbbd6eff39b896964c113ab	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/vendor/platform/modules/json/include/json/json.h	platform/modules/json/include/json/json.h	f15a9cbc86e64d7bbddc52d3f97fe477b404ab4d	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/vendor/platform/modules/json/src/json.c	platform/modules/json/src/json.c	a36add2b1f400f15804334735c65a222452b3e89	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/vendor/platform/modules/base/include/base/safe_alloc.h	platform/modules/base/include/base/safe_alloc.h	0d6a9b2edaf16af365461e033273535ad30b96f6	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/vendor/platform/modules/base/include/base/cleanse.h	platform/modules/base/include/base/cleanse.h	64f149f1f11dc256e9b8cf37c70283f87ea32316	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/vendor/platform/modules/base/include/base/hex.h	platform/modules/base/include/base/hex.h	8b3e82f295d86dc34add739f204347c1fc595515	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/vendor/platform/modules/base/src/safe_alloc.c	platform/modules/base/src/safe_alloc.c	e6264151ee72525718f6a6ff850e1b9b37d573f9	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/vendor/platform/modules/base/src/cleanse.c	platform/modules/base/src/cleanse.c	0f342a6fa4bedd909e79d28a59578752820dc01e	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/vendor/tools/mcp/mcp_rpc.h	tools/mcp/mcp_rpc.h	2c683857dfb7ae861b5135b096700e0753e7e654	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/vendor/tools/mcp/mcp_rpc.c	tools/mcp/mcp_rpc.c	5ad52fb4e8f919c28f90b0ba7ea43ee24db24955	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed
+zcutil/tools/LICENSE.z23	LICENSE	d645695673349e3947e8e5ae42332d0ac3164cd7	9a191ef7b1184e14d9116362dff7def64cd300e3	unsealed

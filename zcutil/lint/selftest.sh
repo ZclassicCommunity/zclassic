@@ -103,6 +103,8 @@ newrepo vendor
 mkdir -p src/c23/tools zcutil/tools/vendor/x
 cp "$cv" src/c23/tools/check-vendor.sh
 : > configure.ac
+# something for every rule to scan (an empty scan set is a failure)
+printf '# t\n' > notes.md; printf 'int top;\n' > top.c; printf '#!/bin/sh\n:\n' > top.sh
 printf 'int answer(void) { return 42; }\n' > zcutil/tools/vendor/x/a.c
 blob=$(git hash-object zcutil/tools/vendor/x/a.c)
 pin=0123456789012345678901234567890123456789
@@ -123,6 +125,16 @@ run 1 '' all
 printf 'exit 0\n' > zcutil/check-no-python.sh; track
 run 0 'vendor: ok' all
 run 2 "unknown rule" bogus-rule
+
+# ---- hollow scans: a tree with nothing to scan fails (rc 2), it never passes ----
+newrepo hollow
+printf 'plain text, no scripts, no C, no markdown\n' > notes.txt
+track
+for r in no-new-jq no-new-bash banned-str md-links; do
+    run 2 'hollow scan' $r
+    run 2 'hollow scan' $r --update-baseline
+done
+run 2 "has no baseline" vendor --update-baseline
 
 echo "selftest: $((n - fails))/$n checks passed"
 [ "$fails" = 0 ]

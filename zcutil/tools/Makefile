@@ -19,10 +19,21 @@ $(OUT): $(SRC) $(V)/tools/multicall.h
 	mkdir -p ../bin
 	$(CC) -std=gnu17 -Wall -Wextra $(CFLAGS) $(INC) -o $@ $(SRC)
 
-check: $(OUT)
+check: $(OUT) vendor-compile
 	sh test-jsonq.sh $(OUT)
+
+
+# Every vendored C file that later tools link must stay clean under -Werror, as gnu17 and as c2x.
+VINC = -I$(V)/platform/modules/json/include -I$(V)/platform/modules/base/include -I$(V)/tools/mcp
+VSRC = $(V)/platform/modules/json/src/json.c $(V)/platform/modules/base/src/safe_alloc.c \
+       $(V)/platform/modules/base/src/cleanse.c $(V)/tools/mcp/mcp_rpc.c
+
+vendor-compile:
+	@set -e; for std in gnu17 c2x; do for f in $(VSRC); do \
+	  $(CC) -std=$$std -Wall -Wextra -Werror -D__USE_MINGW_ANSI_STDIO=1 $(VINC) -fsyntax-only $$f; \
+	done; done; echo "vendor-compile: OK ($(CC))"
 
 clean:
 	rm -f ../bin/jsonq ../bin/jsonq.exe
 
-.PHONY: all check clean
+.PHONY: all check clean vendor-compile

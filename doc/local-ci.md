@@ -86,13 +86,13 @@ ccache serves unchanged objects. Two runs never write the caches at once (flock)
 
 ## Running only what changed
 
-`zcutil/dev/zcl-dev` (a small C tool, `make -C zcutil/dev`) maps a diff to the steps that
+`zcutil/bin/zcl-dev` (a small C tool, built by `make -C zcutil` into `zcutil/bin/`) maps a diff to the steps that
 need to run, using the rules in `zcutil/dev/impact.rules`:
 
 ```sh
-zcutil/dev/zcl-dev guide src/wallet/wallet.cpp     # rules, steps, scripts, lessons, traps, first commands
-zcutil/dev/zcl-dev select [base-ref]               # steps for `git diff base...HEAD` (default origin/master)
-zcutil/dev/zcl-dev check-rules                     # every source file has a rule, every rule matches a file
+zcutil/bin/zcl-dev guide src/wallet/wallet.cpp     # rules, steps, scripts, lessons, traps, first commands
+zcutil/bin/zcl-dev select [base-ref]               # steps for `git diff base...HEAD` (default origin/master)
+zcutil/bin/zcl-dev check-rules                     # every source file has a rule, every rule matches a file
 zcutil/local-ci.sh --commit <sha> --only wallet_matrix-1-9,zslp_index test <outdir>
 ZCL_CI_BASE=<base-ref> zcutil/local-ci.sh --commit <sha> test-changed <outdir>
 ```
@@ -128,7 +128,7 @@ digest covers what the CI passes in, not the host's shell. A receipt says what r
 what it printed; it does not make the result true: read the log it hashes.
 
 ```sh
-zcutil/dev/zcl-dev receipt wallet_tokenguard <outdir>     # the latest receipt of one step
+zcutil/bin/zcl-dev receipt wallet_tokenguard <outdir>     # the latest receipt of one step
 grep '"verdict":"FAIL"' <outdir>/receipts.jsonl           # every failure of a run
 sha256sum <outdir>/test/logs/wallet_tokenguard.log        # must equal its log_sha256
 ```

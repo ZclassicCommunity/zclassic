@@ -20,4 +20,4 @@ traps (doc/agent/TRAPS.md):
 first commands:
   $ zcutil/local-ci.sh --commit HEAD --only unit-a test <outdir>
   $ sh qa/x.sh <dir-with-zclassicd>
-  $ zcutil/dev/zcl-dev select
+  $ zcutil/bin/zcl-dev select

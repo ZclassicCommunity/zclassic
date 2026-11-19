@@ -20,5 +20,21 @@ printf '%s' "$json" | zcutil/bin/jsonq count result              # elements or k
 The shell tests use it through `qa/rpc-tests/jsonq_lib.sh` (`jget`, `jgetd`, `jlen`, `jraw`, `jhas`), which builds
 it on first use. Filters that need select, sort_by, arithmetic or string interpolation still use jq.
 
-To move to a newer Z23 commit: copy the seven files from the new commit, update the rows of `Z23_SOURCE.tsv`
-(path, Z23 path, git blob sha1, commit, `unsealed`) and the `# z23_commit=` header, then run the checker.
+To move to a newer Z23 commit run `sh zcutil/tools/revendor.sh <z23-repo> <commit>` (fails unless the commit contains `55245e2bd`; rewrites `vendor/`, `LICENSE.z23` and `Z23_SOURCE.tsv` from `vendor-files.txt`),
+then run the checker and `make -C zcutil check`. Add a file to `vendor-files.txt` and re-run `revendor.sh` to vendor another Z23 file; `make -C zcutil/tools vendor-compile` proves every vendored C file builds under `-Werror` as gnu17 and c2x.
+
+## Vendored for later tools (pin `9a191ef7b`)
+
+Besides jsonq: `platform/modules/json/{json.h,json.c}` (the JSON reader/writer), `platform/modules/base/{safe_alloc,cleanse,hex}`
+and `tools/mcp/{mcp_rpc.h,mcp_rpc.c}` (the MCP JSON-RPC server core). They are not linked by anything yet; the agent guard,
+the MCP server and the other `zcl-dev-<cmd>` tools build against them, never against edited copies.
+
+## Layout of `zcutil/`
+
+`make -C zcutil` builds every tool into `zcutil/bin/` (git-ignored); `make -C zcutil check` runs every tool's selftest;
+generated documents go to `zcutil/gen/` (git-ignored). `make -C zcutil CC=x86_64-w64-mingw32-gcc EXEEXT=.exe` cross builds
+`zcl-dev`, `zcl-port` and `jsonq` (`zcl-lint` is POSIX-only). A tool lives in `zcutil/dev/<module>/` (a `zcl-dev-<cmd>` subcommand),
+`zcutil/lint/` (a gate rule in `rules/`), `zcutil/agent/` or `zcutil/githooks/`, and adds one directory name to `SUBDIRS` in `zcutil/Makefile`.
+`zcl-dev <cmd>` runs `zcl-dev-<cmd>` from the directory of `zcl-dev` (or `zcutil/bin`), starting in the repository root with
+`ZCL_DEV_PREFIX` set to the caller's directory relative to the root; `zcl-dev help` lists built-in and discovered subcommands
+using each binary's `--purpose` line.

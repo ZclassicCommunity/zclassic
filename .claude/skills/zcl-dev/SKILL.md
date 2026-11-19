@@ -7,7 +7,7 @@ description: Use when changing zclassicd (daemon, C23 core, qa scripts, local CI
 
 Start with the contract: `AGENTS.md` (hard rules: no consensus change, verbatim vendored code, no Python/Rust/GitHub CI, custody, gnu17 portability, review).
 
-1. Brief for your files: `make -C zcutil/dev && zcutil/dev/zcl-dev guide <paths>`.
+1. Brief for your files: `make -C zcutil && zcutil/bin/zcl-dev guide <paths>`.
 2. Pick the area document:
    - wallet or GUI: `wallet/AGENTS.md`, `wallet/docs/TESTING.md`
    - `src/c23/**`, vendoring, golden corpus: `src/c23/AGENTS.md`, `src/c23/README.md`

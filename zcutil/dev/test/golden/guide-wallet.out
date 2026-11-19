@@ -16,4 +16,4 @@ traps (doc/agent/TRAPS.md):
 first commands:
   $ zcutil/local-ci.sh --commit HEAD --only wallet-gui test <outdir>
   $ zcutil/local-ci.sh --commit HEAD daemon-linux <outdir>
-  $ zcutil/dev/zcl-dev select
+  $ zcutil/bin/zcl-dev select

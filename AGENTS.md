@@ -19,17 +19,17 @@ zclassicd is the ZClassic full node (C++, a Zcash-derived fork), its command-lin
 ```sh
 ./zcutil/build.sh -j"$(getconf _NPROCESSORS_ONLN)"         # dev build into src/ (HOST is an env var, never an argument)
 ./zcutil/build-release.sh linux|win64 -j"$(getconf _NPROCESSORS_ONLN)"
-make -C zcutil/dev && zcutil/dev/zcl-dev guide <paths>      # brief for the files you will touch
-zcutil/dev/zcl-dev select [base-ref]                        # which CI steps your diff needs
+make -C zcutil && zcutil/bin/zcl-dev guide <paths>      # brief for the files you will touch
+zcutil/bin/zcl-dev select [base-ref]                        # which CI steps your diff needs
 zcutil/local-ci.sh --commit <sha> --only <steps> test <outdir>   # own-machine CI, focused
 zcutil/local-ci.sh --commit <sha> test-changed <outdir>          # steps chosen by zcl-dev select
 zcutil/local-ci.sh --commit <sha> all <outdir>              # full candidate; macOS: zcutil/local-ci-macos.sh
-make -C zcutil/dev check                                    # tests of the developer tool
+make -C zcutil check                                        # every developer tool's selftest (zcutil/bin/zcl-dev help lists subcommands)
 ```
 
 Run a single qa script as `sh qa/rpc-tests/<script>.sh <dir-with-zclassicd>`. Unit tests: `src/test/test_bitcoin --run_test=<suite>` after a `--enable-tests` build ([doc/unit-tests.md](doc/unit-tests.md)). Where the host has a build broker (for example `devbuild --wait`), run heavy commands behind it.
 
-Before editing, run `zcutil/dev/zcl-dev guide <paths>`: nearest rules, CI steps, lessons and traps in one brief.
+Before editing, run `zcutil/bin/zcl-dev guide <paths>`: nearest rules, CI steps, lessons and traps in one brief.
 
 ## Hard rules
 

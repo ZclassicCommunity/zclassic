@@ -50,7 +50,7 @@
 #     ZCL_CI_NOASLR    0 = do not run the sanitizer step under `setarch -R`
 #
 # Output: logs under <outdir>/logs and <outdir>/test*/logs, and one JSON receipt per step in
-# <outdir>/receipts.jsonl (doc/local-ci.md); `zcutil/dev/zcl-dev receipt <step> <outdir>` prints one.
+# <outdir>/receipts.jsonl (doc/local-ci.md); `zcutil/bin/zcl-dev receipt <step> <outdir>` prints one.
 #
 # Exit status: 0 only when every requested command and check passed.
 # Heavy commands belong behind the host broker, for example:
@@ -583,8 +583,8 @@ do_dry() {
 
 # do_test_changed: `test` restricted to the steps zcl-dev select maps from the diff.
 do_test_changed() {
-    zd=$REPO/zcutil/dev/zcl-dev
-    [ -x "$zd" ] || make -C "$REPO/zcutil/dev" >/dev/null || die "cannot build zcutil/dev/zcl-dev"
+    zd=$REPO/zcutil/bin/zcl-dev
+    [ -x "$zd" ] || make -C "$REPO/zcutil/dev" >/dev/null || die "cannot build zcutil/bin/zcl-dev"
     base=${ZCL_CI_BASE:-origin/master}
     names=$(git -C "$REPO" diff --name-only "$base...$COMMIT") || die "git diff $base...$COMMIT failed"
     sel=$(printf '%s\n' "$names" | "$zd" -C "$REPO" select --steps --stdin) || die "zcl-dev select failed"
