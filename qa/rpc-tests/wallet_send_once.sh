@@ -209,8 +209,8 @@ scn_expire() {
     ck "unmined: nothing reached ZB" "$(zb_count)" 0
     r=$(jsend 1 "$KEY")
     ck "unmined: the retry is a new operation" "$([ "$r" != "$op" ] && echo "$r" | grep -c '^opid-')" 1
-    ck "unmined: and it sends" "$(wait_op 0 "$r" | cut -d' ' -f1)" success
-    mine 1
+    res=$(wait_op 0 "$r"); ck "unmined: and it sends" "$(echo "$res" | cut -d' ' -f1)" success
+    wait_mempool 1 "${res#success }"; mine 1   # the miner may not have the transaction yet: it is relayed with a delay
     final_checks "after the retry"
     ck "unmined: one record, committed" "$(jstates)" committed
 }
