@@ -1,0 +1,7 @@
+# A small facts table for the fixture repository.
+#!relations needs selects
+#!contexts build qa
+#!terms src/core/a.c src/core/b.c widgets gadgets
+src/core/a.c	needs	widgets	build	DOCTRINE	a needs widgets to parse
+widgets	selects	gadgets	qa	OBSERVED	widgets select gadgets in the matrix
+src/core/b.c	needs	gadgets	build	DOCTRINE	b needs gadgets

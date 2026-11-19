@@ -1,0 +1,2 @@
+FAIL: bad/dup-declaration.tsv:2: relation declared twice: needs
+know --check: FAILED (1 problems)

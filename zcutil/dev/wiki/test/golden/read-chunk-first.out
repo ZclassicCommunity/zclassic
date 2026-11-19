@@ -1,0 +1,6 @@
+# zcl-dev read src/big.txt offset=0 bytes=100 of 108000
+line 00000 of the big file
+line 00001 of the big file
+line 00002 of the big file
+line 00003 of the b
+# next: zcl-dev read src/big.txt --offset=100

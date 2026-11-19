@@ -1,0 +1,1 @@
+BAD_PATH: the path has characters a tracked path does not need (src/core/b.c; rm -rf x)

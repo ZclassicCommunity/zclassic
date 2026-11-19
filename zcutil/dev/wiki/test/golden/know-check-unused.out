@@ -1,0 +1,2 @@
+FAIL: bad/unused.tsv:4: term spare is declared but no row uses it
+know --check: FAILED (1 problems)

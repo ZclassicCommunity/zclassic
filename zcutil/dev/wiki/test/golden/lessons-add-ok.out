@@ -1,0 +1,1 @@
+added doc/agent/LESSONS.md:5: OPEN src/core/b.c — a measured failure: the table lost an entry; the invariant is stable order

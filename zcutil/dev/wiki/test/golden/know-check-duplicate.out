@@ -1,0 +1,2 @@
+FAIL: bad/duplicate.tsv:7: duplicate row: widgets
+know --check: FAILED (1 problems)
