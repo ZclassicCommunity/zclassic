@@ -1,8 +1,10 @@
 /* zcl-dev-hook and zcl-dev-hooks: git hooks for the zclassicd tree. MIT, like the rest of zclassicd.
  * Plain C, libc only; compiles as gnu17 and C2x, with the host cc, mingw-w64 and macOS clang.
- * Behaviour ported from Z23 (primary-checkout guard in tools/githooks/pre-commit, pre-push main
- * guard in tools/dev/z23_git_hook.c, hooks_status.c, tools/scripts/install_git_hooks.sh);
- * the code is new.
+ * The pre-commit primary-checkout guard follows Z23 tools/githooks/pre-commit at 9a191ef7b (same
+ * three conditions, same ZCL_LANE_COMMIT_OK valve, any non-empty value). The pre-push admission
+ * is NOT a port of tools/dev/z23_git_hook.c: Z23 admits only its land queue with signed proof
+ * receipts; here the gate is the local-ci receipts of zcutil/local-ci.sh. Install/status follow
+ * hooks_status.c in spirit. The code is new.
  *
  *   zcl-dev-hook pre-commit                  run by zcutil/githooks/pre-commit
  *   zcl-dev-hook pre-push <remote> <url>     run by zcutil/githooks/pre-push (ref lines on stdin)
@@ -15,13 +17,20 @@
  * non-master branch while other worktrees exist (override ZCL_LANE_COMMIT_OK=1), (2) any staged
  * *.py, (3) a staged file under zcutil/tools/vendor/ whose row in zcutil/tools/Z23_SOURCE.tsv
  * does not change in the same commit. A detached HEAD is not a named branch and is allowed.
+ * Inherent gaps: git runs no pre-commit for merge or cherry-pick, so those can skip all three
+ * guards; only the *.py suffix is checked (extensionless Python is left to check-no-python).
  *
  * pre-push refuses a push to refs/heads/master or refs/heads/release/<name> (and its deletion) unless
  * the update is a fast-forward and a local-ci receipt for the exact pushed commit shows every
- * required step passed. Required steps are `zcl-dev select --steps` over the pushed diff; ALL
- * means every `step` of zcutil/local-ci.sh at that commit except tor-* (opt-in); in that
- * expansion a step whose only receipts are SKIP also counts (it declined itself, rc 77).
- * Receipts are $ZCL_CI_OUT/receipts.jsonl, else $HOME/work/zc23-localci-out/<9-char sha>/.
+ * required step passed. Required set = `zcl-dev select --json` over the pushed diff, using the
+ * zcutil/dev/impact.rules of the pushed commit: its steps, plus its stages (daemon-linux,
+ * daemon-win64, wallet-linux; local-ci records them as step=<stage>). ALL means every `step` of
+ * zcutil/local-ci.sh at that commit except dry-* and tor-*, plus the three stages and the
+ * build-tests and fetch-params receipts. A step whose only receipts are SKIP counts for every
+ * step (it declined itself, rc 77). A diff that selects only qa scripts is refused (no receipt
+ * covers a script); an empty diff needs at least one PASS receipt for the sha.
+ * Receipts are $ZCL_CI_OUT/receipts.jsonl, else $HOME/work/zc23-localci-out/<9-char sha>/
+ * (run local-ci with that exact directory name, e.g. the first 9 characters of the sha).
  * Override ZCL_PUSH_OK=<reason>: printed and appended to <common git dir>/zcl-push-overrides.log.
  * Exit codes: 0 allowed, 1 refused, 2 broken (cannot run git, bad arguments).
  */
@@ -38,6 +47,7 @@
 #include <string.h>
 #include <time.h>
 #ifdef _WIN32
+#include <direct.h>
 #include <process.h>
 #include <windows.h>
 #define popen _popen
@@ -240,7 +250,7 @@ static int pre_commit(void)
     if (is_primary(&r)) {
         char *br = git_line("git symbolic-ref --short -q HEAD", NULL); /* fails when detached */
         const char *ok = getenv("ZCL_LANE_COMMIT_OK");
-        if (br && strcmp(br, "master") && !(ok && !strcmp(ok, "1")) && worktree_count() > 1) {
+        if (br && strcmp(br, "master") && !(ok && *ok) && worktree_count() > 1) {
             fprintf(stderr,
                     "zcl-dev-hook: refusing to commit on branch '%s' in the primary checkout.\n"
                     "  The primary checkout stays on master while other worktrees exist; work on a\n"
@@ -313,7 +323,11 @@ static char *receipts_path(const char *sha)
     else {
         const char *home = getenv("HOME");
         if (!home || !*home) home = getenv("USERPROFILE");
-        snprintf(path, sizeof path, "%s/work/zc23-localci-out/%.9s/receipts.jsonl", home ? home : ".", sha);
+        /* the full-sha directory (doc/local-ci.md runs `--commit <sha> all .../<sha>`) wins over the 9-char one */
+        snprintf(path, sizeof path, "%s/work/zc23-localci-out/%s/receipts.jsonl", home ? home : ".", sha);
+        FILE *f = fopen(path, "rb");
+        if (f) fclose(f);
+        else snprintf(path, sizeof path, "%s/work/zc23-localci-out/%.9s/receipts.jsonl", home ? home : ".", sha);
     }
     return xstrdup(path);
 }
@@ -355,7 +369,7 @@ static size_t load_receipts(const char *path, const char *sha, Rcpt **out)
 }
 
 /* "" when step `s` is satisfied, else a reason. */
-static const char *step_state(const Rcpt *rc, size_t n, const char *s, int skip_ok)
+static const char *step_state(const Rcpt *rc, size_t n, const char *s)
 {
     int pass = 0, skip = 0, any = 0, failed = 0;
     for (size_t i = 0; i < n; i++) {
@@ -370,7 +384,7 @@ static const char *step_state(const Rcpt *rc, size_t n, const char *s, int skip_
     }
     if (failed) return "failed";
     if (pass) return "";
-    if (skip && skip_ok) return "";
+    if (skip) return ""; /* a step that declined itself (rc 77) counts, for every step */
     return any ? "not passed" : "no receipt";
 }
 
@@ -399,6 +413,8 @@ static size_t declared_steps(const char *sha, char ***out)
     return n;
 }
 
+static const char *g_argv0 = "";
+
 static void self_dir(char *out, size_t cap)
 {
     out[0] = 0;
@@ -406,77 +422,186 @@ static void self_dir(char *out, size_t cap)
     DWORD n = GetModuleFileNameA(NULL, out, (DWORD)cap);
     if (n == 0 || n >= cap) { out[0] = 0; return; }
 #else
-    ssize_t n = readlink("/proc/self/exe", out, cap - 1);
-    if (n <= 0) { out[0] = 0; return; }
-    out[n] = 0;
+    ssize_t n = readlink("/proc/self/exe", out, cap - 1); /* Linux; fails on macOS and the BSDs */
+    if (n > 0) out[n] = 0;
+    else if (g_argv0[0] == '/' && strlen(g_argv0) < cap) snprintf(out, cap, "%s", g_argv0); /* the shims exec an absolute path */
+    else { out[0] = 0; return; }
 #endif
     for (char *r = out; *r; r++) if (*r == '\\') *r = '/';
     char *s = strrchr(out, '/');
     if (s) *s = 0; else out[0] = 0;
 }
 
-/* Required steps for base..sha through `zcl-dev select`: returns count, *all set for ALL. */
-static int required_steps(const Repo *r, const char *base, const char *sha, char ***steps, size_t *ns, int *all, char *msg, size_t cap)
+typedef struct { char **v; size_t n, cap; } Names;
+
+static void names_add(Names *l, const char *s)
 {
-    char cmd[4096], dir[1024], list[1200];
+    for (size_t i = 0; i < l->n; i++) if (!strcmp(l->v[i], s)) return;
+    if (l->n == l->cap) l->v = xrealloc(l->v, (l->cap = l->cap ? l->cap * 2 : 16) * sizeof *l->v);
+    l->v[l->n++] = xstrdup(s);
+}
+
+static void names_free(Names *l)
+{
+    for (size_t i = 0; i < l->n; i++) free(l->v[i]);
+    free(l->v);
+    *l = (Names){0};
+}
+
+/* Strings of "key":[...] in zcl-dev's flat select JSON into *out; 0 when the key is present. */
+static int jarray(const char *json, const char *key, Names *out)
+{
+    char pat[64];
+    snprintf(pat, sizeof pat, "\"%s\":[", key);
+    const char *p = strstr(json, pat);
+    if (!p) return 1;
+    for (p += strlen(pat); *p && *p != ']';) {
+        if (*p != '"') { p++; continue; }
+        const char *e = ++p;
+        while (*e && *e != '"') e += (*e == '\\' && e[1]) ? 2 : 1;
+        if (!*e) return 1;
+        char *t = xrealloc(NULL, (size_t)(e - p) + 1);
+        memcpy(t, p, (size_t)(e - p));
+        t[e - p] = 0;
+        names_add(out, t);
+        free(t);
+        p = e + 1;
+    }
+    return 0;
+}
+
+#ifdef _WIN32
+#define MKDIR1(p) _mkdir(p)
+#define RMDIR1(p) _rmdir(p)
+#else
+#define MKDIR1(p) mkdir((p), 0700)
+#define RMDIR1(p) rmdir(p)
+#endif
+
+static void env_set(const char *k, const char *v)
+{
+#ifdef _WIN32
+    _putenv_s(k, v ? v : "");
+#else
+    if (v) setenv(k, v, 1); else unsetenv(k);
+#endif
+}
+
+/* Stages that local-ci.sh records as step=<stage> receipts, and the test-build receipts; all of
+ * them belong to ALL (local-ci `all` = the three stages plus `test`, which builds and fetches first). */
+static const char *const all_extra[] = {"daemon-linux", "daemon-win64", "wallet-linux", "build-tests", "fetch-params"};
+
+/* Required receipt steps for base..sha, evaluated with the impact rules of the pushed commit.
+ * Returns 1 with msg set when they cannot be computed or the selection cannot be verified.
+ * *any_pass: nothing was selected because the diff is empty; some PASS receipt must still exist. */
+static int required_steps(const Repo *r, const char *base, const char *sha, Names *req, int *any_pass, char *msg, size_t cap)
+{
+    char cmd[4096], dir[1024], list[1200], tree[1200], d1[1300], d2[1400], rules[1600];
+    *any_pass = 0;
     snprintf(list, sizeof list, "%s/zcl-hook-files.%ld", r->common, (long)getpid());
     snprintf(cmd, sizeof cmd, "git -c core.quotepath=off diff --no-renames --name-only %s %s > \"%s\"", base, sha, list);
     if (!quotable(list) || run(cmd, NULL) != 0) { snprintf(msg, cap, "cannot list the files changed by the push"); return 1; }
     self_dir(dir, sizeof dir);
-    if (!dir[0] || !quotable(dir) || !quotable(r->top)) { snprintf(msg, cap, "cannot locate zcl-dev"); remove(list); return 1; }
-    snprintf(cmd, sizeof cmd, "\"%s/zcl-dev%s\" -C \"%s\" select --steps --stdin < \"%s\"", dir, EXE_SUFFIX, r->top, list);
-    Buf sel;
-    int rc = run(cmd, &sel);
+    if (!dir[0] || !quotable(dir) || !quotable(r->top) || !quotable(r->common)) {
+        snprintf(msg, cap, "cannot locate zcl-dev");
+        remove(list);
+        return 1;
+    }
+    /* A scratch work tree holding only the rules of the pushed commit, so the mapping is the one
+     * being pushed and not whatever this checkout has (dirty edits, another branch). */
+    snprintf(tree, sizeof tree, "%s/zcl-hook-rules.%ld", r->common, (long)getpid());
+    snprintf(d1, sizeof d1, "%s/zcutil", tree);
+    snprintf(d2, sizeof d2, "%s/dev", d1);
+    snprintf(rules, sizeof rules, "%s/impact.rules", d2);
+    int made = MKDIR1(tree) == 0 && MKDIR1(d1) == 0 && MKDIR1(d2) == 0;
+    snprintf(cmd, sizeof cmd, "git show %s:zcutil/dev/impact.rules > \"%s\"", sha, rules);
+    int have_rules = made && quotable(rules) && run(cmd, NULL) == 0;
+    Buf sel = {NULL, 0};
+    int rc = -1;
+    if (have_rules) {
+        char *old_dir = getenv("GIT_DIR") ? xstrdup(getenv("GIT_DIR")) : NULL;
+        char *old_wt = getenv("GIT_WORK_TREE") ? xstrdup(getenv("GIT_WORK_TREE")) : NULL;
+        env_set("GIT_DIR", r->common);
+        env_set("GIT_WORK_TREE", tree);
+        snprintf(cmd, sizeof cmd, "\"%s/zcl-dev%s\" -C \"%s\" select --json --stdin < \"%s\"", dir, EXE_SUFFIX, tree, list);
+        rc = run(cmd, &sel);
+        env_set("GIT_DIR", old_dir);
+        env_set("GIT_WORK_TREE", old_wt);
+        free(old_dir);
+        free(old_wt);
+    }
     remove(list);
-    trim_eol(&sel);
-    if (rc != 0 || !sel.p[0]) {
-        snprintf(msg, cap, "zcl-dev select failed (build zcutil/bin/zcl-dev: make -C zcutil)");
+    remove(rules);
+    RMDIR1(d2);
+    RMDIR1(d1);
+    RMDIR1(tree);
+    if (!have_rules) {
+        snprintf(msg, cap, "cannot read zcutil/dev/impact.rules at %.12s", sha);
         free(sel.p);
         return 1;
     }
-    *ns = 0;
-    *steps = NULL;
-    *all = !strcmp(sel.p, "ALL");
-    if (*all) {
-        *ns = declared_steps(sha, steps);
-        if (*ns == 0) snprintf(msg, cap, "zcutil/local-ci.sh declares no steps; cannot compute the required set");
-    } else if (strcmp(sel.p, "NONE")) {
-        *steps = xrealloc(NULL, 64 * sizeof **steps);
-        for (char *t = strtok(sel.p, ","); t && *ns < 64; t = strtok(NULL, ",")) (*steps)[(*ns)++] = xstrdup(t);
+    trim_eol(&sel);
+    Names stages = {0}, scripts = {0};
+    const char *fp = sel.p ? strstr(sel.p, "\"files\":") : NULL;
+    int bad = rc != 0 || !sel.p || !fp || !strstr(sel.p, "\"all\":") || jarray(sel.p, "steps", req) ||
+              jarray(sel.p, "stages", &stages) || jarray(sel.p, "scripts", &scripts);
+    if (bad) {
+        snprintf(msg, cap, "zcl-dev select failed or printed something unreadable (build zcutil/bin/zcl-dev: make -C zcutil)");
+    } else if (strstr(sel.p, "\"all\":true")) {
+        size_t nd = 0;
+        char **dv;
+        nd = declared_steps(sha, &dv);
+        for (size_t i = 0; i < nd; i++) { names_add(req, dv[i]); free(dv[i]); }
+        free(dv);
+        for (size_t i = 0; i < sizeof all_extra / sizeof *all_extra; i++) names_add(req, all_extra[i]);
+        if (nd == 0) { snprintf(msg, cap, "zcutil/local-ci.sh declares no steps; cannot compute the required set"); bad = 1; }
+    } else {
+        for (size_t i = 0; i < stages.n; i++) names_add(req, stages.v[i]);
+        if (req->n == 0 && scripts.n) {
+            snprintf(msg, cap, "the diff selects only qa scripts (%s), which no local-ci receipt covers", scripts.v[0]);
+            bad = 1;
+        } else if (req->n == 0 && atol(fp + 8) == 0) {
+            *any_pass = 1;
+        }
     }
+    names_free(&stages);
+    names_free(&scripts);
     free(sel.p);
-    return *all && *ns == 0;
+    return bad;
 }
 
 /* Fills msg with why the receipts do not cover base..sha; returns 0 when they do. */
 static int check_receipts(const Repo *r, const char *base, const char *sha, char *msg, size_t cap)
 {
-    char **steps;
-    size_t ns;
-    int all;
+    Names req = {0};
+    int any_pass;
     msg[0] = 0;
-    if (required_steps(r, base, sha, &steps, &ns, &all, msg, cap)) return 1;
+    if (required_steps(r, base, sha, &req, &any_pass, msg, cap)) { names_free(&req); return 1; }
     char *path = receipts_path(sha);
     Rcpt *rcs;
     size_t nr = load_receipts(path, sha, &rcs);
     size_t used = 0;
     int bad = 0;
-    if (nr == 0 && ns > 0) {
+    if (nr == 0 && (req.n > 0 || any_pass)) {
         snprintf(msg, cap, "no local-ci receipt for %s in %s", sha, path);
         bad = 1;
     } else {
-        for (size_t i = 0; i < ns; i++) {
-            const char *st = step_state(rcs, nr, steps[i], all);
+        for (size_t i = 0; i < req.n; i++) {
+            const char *st = step_state(rcs, nr, req.v[i]);
             if (!*st || used + 128 >= cap) continue;
-            used += (size_t)snprintf(msg + used, cap - used, "%s%s: %s", used ? "; " : "required steps not passing: ", steps[i], st);
+            used += (size_t)snprintf(msg + used, cap - used, "%s%s: %s", used ? "; " : "required steps not passing: ", req.v[i], st);
             bad = 1;
+        }
+        if (any_pass) {
+            int pass = 0;
+            for (size_t i = 0; i < nr; i++) if (!strcmp(rcs[i].verdict, "PASS")) pass = 1;
+            if (!pass) { snprintf(msg, cap, "the push changes no files and %s has no passing local-ci receipt", sha); bad = 1; }
         }
     }
     for (size_t i = 0; i < nr; i++) { free(rcs[i].step); free(rcs[i].stage); free(rcs[i].verdict); }
     free(rcs);
     free(path);
-    for (size_t i = 0; i < ns; i++) free(steps[i]);
-    free(steps);
+    names_free(&req);
     return bad;
 }
 
@@ -634,6 +759,7 @@ static int cmd_install(int force, int json)
 
 int main(int argc, char **argv)
 {
+    g_argv0 = argc >= 1 ? argv[0] : "";
     const char *cmd = argc >= 2 ? argv[1] : "";
     if (!strcmp(cmd, "--purpose")) { puts("install and inspect the git hooks (install | status)"); return 0; }
     if (!strcmp(cmd, "pre-commit")) return pre_commit();

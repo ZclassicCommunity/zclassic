@@ -32,7 +32,11 @@ mkdir -p "$repo/zcutil/dev" "$repo/zcutil/tools/vendor" "$repo/zcutil/bin" "$rep
 cp -R "$src/githooks" "$repo/zcutil/githooks"
 cp "$bindir"/zcl-dev "$bindir"/zcl-dev-hook "$bindir"/zcl-dev-hooks "$repo/zcutil/bin/"
 printf 'zcutil/bin/\n' >"$repo/.gitignore"
-printf '*\tunit-a unit-b\nweird/*\tALL\n' >"$repo/zcutil/dev/impact.rules"
+printf 'src/*|zcutil/*|.gitignore	unit-a unit-b
+weird/*	ALL
+stageonly/*	daemon-linux daemon-win64
+scriptonly/*	qa/rpc-tests/x.sh
+' >"$repo/zcutil/dev/impact.rules"
 cat >"$repo/zcutil/local-ci.sh" <<'EOF2'
 step() { :; }
     step unit-a 10 t_a
@@ -118,13 +122,64 @@ m3=$(git rev-parse HEAD)
 rcpt "$m3" unit-a PASS; rcpt "$m3" unit-b PASS
 expect "ALL requires every declared step" 1 "unit-c: no receipt" git push -q origin master
 rcpt "$m3" unit-c SKIP
+expect "ALL requires the stages and the test-build receipts" 1 "daemon-win64: no receipt" git push -q origin master
+rcpt "$m3" daemon-linux PASS; rcpt "$m3" daemon-win64 PASS; rcpt "$m3" wallet-linux PASS
+expect "ALL still requires build-tests" 1 "build-tests: no receipt" git push -q origin master
+rcpt "$m3" build-tests PASS; rcpt "$m3" fetch-params PASS
 expect "ALL accepts a self-skipped step, ignores tor-* and dry-*" 0 "" git push -q origin master
 
 # release/* is protected too
 echo m4 >>src/a.c; git add src/a.c; ci m4; m4=$(git rev-parse HEAD)
 expect "release branch needs a receipt" 1 "release/1.0" git push -q origin "$m4:refs/heads/release/1.0"
 rcpt "$m4" unit-a PASS; rcpt "$m4" unit-b PASS; rcpt "$m4" unit-c PASS
+for s in daemon-linux daemon-win64 wallet-linux build-tests fetch-params; do rcpt "$m4" $s PASS; done # the first release push carries weird/ (ALL)
 expect "release branch with receipt" 0 "" git push -q origin "$m4:refs/heads/release/1.0"
+
+# a rule that selects only stages must still require their receipts
+mkdir stageonly; echo s >stageonly/s; git add stageonly/s; ci s1; s1=$(git rev-parse HEAD)
+rcpt "$s1" unit-a PASS; rcpt "$s1" unit-b PASS
+expect "stage-only diff requires the stage receipts" 1 "daemon-linux: no receipt" git push -q origin master
+rcpt "$s1" daemon-linux PASS
+expect "stage-only diff still needs the second stage" 1 "daemon-win64: no receipt" git push -q origin master
+rcpt "$s1" daemon-win64 FAIL
+expect "a failed stage blocks" 1 "daemon-win64: failed" git push -q origin master
+rcpt "$s1" daemon-win64 PASS
+expect "stage-only diff with both stage receipts" 0 "" git push -q origin master
+
+# SKIP counts for an explicitly selected step too
+echo k >>src/a.c; git add src/a.c; ci k1; k1=$(git rev-parse HEAD)
+rcpt "$k1" unit-a PASS; rcpt "$k1" unit-b SKIP
+expect "explicit step with only a SKIP receipt" 0 "" git push -q origin master
+
+# empty diff: some PASS receipt for the sha is still required
+ci e1; e1=$(git rev-parse HEAD)
+expect "empty diff without any receipt" 1 "no local-ci receipt" git push -q origin master
+rcpt "$e1" unit-a SKIP
+expect "empty diff with only SKIP receipts" 1 "changes no files" git push -q origin master
+rcpt "$e1" unit-a PASS
+expect "empty diff with a PASS receipt" 0 "" git push -q origin master
+
+# a diff that selects only qa scripts has nothing a receipt can cover
+git checkout -q -b so; mkdir scriptonly; echo q >scriptonly/q; git add scriptonly/q; ci so1; so1=$(git rev-parse HEAD)
+rcpt "$so1" unit-a PASS; rcpt "$so1" unit-b PASS
+expect "script-only selection is refused" 1 "only qa scripts" git push -q origin so:master
+git checkout -q master; git branch -q -D so
+
+# the rules come from the pushed commit, not from the dirty work tree
+printf 'src/*\t-\nweird/*\tALL\nstageonly/*\tdaemon-linux daemon-win64\nscriptonly/*\tqa/rpc-tests/x.sh\n' >zcutil/dev/impact.rules
+echo r >>src/a.c; git add src/a.c; ci r1
+expect "dirty rules do not weaken the push" 1 "no local-ci receipt" git push -q origin master
+git checkout -q zcutil/dev/impact.rules
+
+# default receipt directory (no ZCL_CI_OUT): 9-character and full-sha directories both work
+r1=$(git rev-parse HEAD)
+mkdir -p "$work/home/work/zc23-localci-out/$(printf %.9s "$r1")"
+printf '{"commit":"%s","tree":"t","stage":"test-run/release","step":"unit-a","verdict":"PASS","seconds":1}\n{"commit":"%s","tree":"t","stage":"test-run/release","step":"unit-b","verdict":"PASS","seconds":1}\n' "$r1" "$r1" >"$work/home/work/zc23-localci-out/$(printf %.9s "$r1")/receipts.jsonl"
+expect "default 9-character receipt directory" 0 "" env -u ZCL_CI_OUT git push -q origin master
+echo f >>src/a.c; git add src/a.c; ci f1; f1=$(git rev-parse HEAD)
+mkdir -p "$work/home/work/zc23-localci-out/$f1"
+printf '{"commit":"%s","tree":"t","stage":"test-run/release","step":"unit-a","verdict":"PASS","seconds":1}\n{"commit":"%s","tree":"t","stage":"test-run/release","step":"unit-b","verdict":"PASS","seconds":1}\n' "$f1" "$f1" >"$work/home/work/zc23-localci-out/$f1/receipts.jsonl"
+expect "default full-sha receipt directory" 0 "" env -u ZCL_CI_OUT git push -q origin master
 
 # non-fast-forward and deletion
 git checkout -q -b div "$head"
