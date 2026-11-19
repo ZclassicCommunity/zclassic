@@ -183,6 +183,7 @@ BITCOIN_CORE_H = \
   policy/fees.h \
   pow.h \
   equihashmemo.h \
+  headerprecheck.h \
   prevector.h \
   primitives/block.h \
   primitives/transaction.h \
@@ -306,6 +307,7 @@ libbitcoin_server_a_SOURCES = \
   deprecation.cpp \
   embeddedtor.cpp \
   equihashmemo.cpp \
+  headerprecheck.cpp \
   httprpc.cpp \
   httpserver.cpp \
   init.cpp \

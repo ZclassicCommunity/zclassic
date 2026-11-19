@@ -19,6 +19,7 @@
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
 #include "deprecation.h"
+#include "headerprecheck.h"
 #include "init.h"
 #include "merkleblock.h"
 #include "metrics.h"
@@ -7428,6 +7429,11 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
             vRecv >> headers[n];
             ReadCompactSize(vRecv); // ignore tx count; assume it is 0.
         }
+
+        // Warm the positive-only Equihash memo on worker threads, outside
+        // cs_main; the loop below still checks every header (headerprecheck.h).
+        if (nCount > 0)
+            PreverifyHeadersEquihash(headers);
 
         LOCK(cs_main);
 
