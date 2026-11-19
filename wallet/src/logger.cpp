@@ -24,7 +24,8 @@ void Logger::write(const QString &value) {
     text = QDateTime::currentDateTime().toString("dd.MM.yyyy hh:mm:ss ") + text;
     QTextStream out(file);
     out.setCodec("UTF-8");
-    out << text << Qt::endl;
+    out << text << '\n';
+    out.flush(); // what Qt::endl did; Qt::endl needs Qt 5.14, the CI root has 5.12
 }
 
 Logger::~Logger() {
