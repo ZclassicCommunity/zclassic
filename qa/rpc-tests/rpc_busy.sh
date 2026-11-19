@@ -22,18 +22,10 @@ mkdir -p "$work" || exit 2
 work=$(cd "$work" && pwd)
 [ -z "$(ls -A "$work")" ] || { echo "rpc-busy-test: $work is not empty" >&2; exit 2; }
 
-port_free() { ! ss -ltn 2>/dev/null | awk '{print $4}' | grep -q "[:.]$1\$"; }
-if [ -z "$base" ]; then
-    base=$((20000 + $$ % 20000))
-    n=0
-    while [ $n -lt 200 ]; do
-        ok=1; p=$base
-        while [ $p -lt $((base + 2)) ]; do port_free $p || ok=0; p=$((p + 1)); done
-        [ $ok = 1 ] && break
-        base=$((base + 7)); n=$((n + 1))
-    done
-fi
-pp=$base; rp=$((base + 1))
+# Leased, bind-tested port block (qa/lib/isolation.sh); no ss/netstat, so it runs on macOS and Git Bash too.
+. "$(dirname "$0")/../lib/isolation.sh"
+iso_base base "$base" 3
+pp=$base; rp=$((base + 1)); xp=$((base + 2))
 
 da=$work/a; mkdir -p "$da"
 user=busy; pass=busy$$
@@ -102,7 +94,7 @@ while [ $i -lt 60 ] && [ -f "$da/regtest/zclassicd.pid" ]; do sleep 1; i=$((i + 
 # Scenario 2: -rpcthreads=0 is refused at start-up, with the option named
 db=$work/b; mkdir -p "$db"
 cp "$da/zclassic.conf" "$db/zclassic.conf"
-"$bin/zclassicd" $flags -datadir="$db" -port=$((pp + 100)) -rpcthreads=0 -printtoconsole=1 >"$work/b.out" 2>&1 &
+"$bin/zclassicd" $flags -datadir="$db" -port=$xp -rpcthreads=0 -printtoconsole=1 >"$work/b.out" 2>&1 &
 bpid=$!
 i=0
 while [ $i -lt 60 ] && kill -0 "$bpid" 2>/dev/null; do sleep 1; i=$((i + 1)); done
