@@ -53,6 +53,7 @@ contains(CONFIG, zqw_portable) {
 SOURCES += \
     src/embeddeddaemon.cpp \
     src/startupaccess.cpp \
+    src/launchprobe.cpp \
     src/main.cpp \
     src/mainwindow.cpp \
     src/rpc.cpp \
@@ -103,6 +104,7 @@ HEADERS += \
     src/walletbackup.h \
     src/repairlocation.h \
     src/startupaccess.h \
+    src/launchprobe.h \
     src/mainwindow.h \
     src/precompiled.h \
     src/rpc.h \

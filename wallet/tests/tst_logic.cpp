@@ -36,6 +36,7 @@
 #include <QTemporaryDir>
 #include "walletbackup.h"
 #include "embeddeddaemon.h"
+#include "launchprobe.h"       // launch path: first-probe skip, warmup poll interval (real)
 #include "releaseversion.h"
 #include "fastsync.h"
 #include "syncstate.h"
@@ -884,6 +885,9 @@ private slots:
         QVERIFY(walletReleaseOrder("2.1.2-beta999999999999").isNull());
         QVERIFY(walletReleaseOrder("").isNull());
     }
+    void launchProbe_skipInitialProbe();
+    void launchProbe_loopbackPortFree();
+    void launchProbe_warmupPollMs();
     void embeddedDaemon_integrity();
     void embeddedDaemon_footerLocation();
     void embeddedDaemon_pinsLaunchedFile();
@@ -2972,6 +2976,54 @@ void TestLogic::health_eachAttentionStateIsReported() {
     QCOMPARE(many.lines.size(), 3);
     QVERIFY(many.summary().contains("3"));
     QVERIFY(many.tooltip().contains("being rebuilt") && many.tooltip().contains("never confirm"));
+}
+
+// The first getinfo of a launch is skipped only when its refusal is certain.
+static int g_portFreeCalls = 0;
+static bool fakePortFree(quint16) { ++g_portFreeCalls; return true; }
+static bool fakePortBusy(quint16) { ++g_portFreeCalls; return false; }
+
+void TestLogic::launchProbe_skipInitialProbe() {
+    const QString lo = QStringLiteral("127.0.0.1");
+    QVERIFY(LaunchProbe::skipInitialProbe(true, false, false, lo, "8023", fakePortFree));
+    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, false, lo, "8023", fakePortBusy));
+    // Every other condition keeps the probe, and does not even bind the port.
+    g_portFreeCalls = 0;
+    QVERIFY(!LaunchProbe::skipInitialProbe(false, false, false, lo, "8023", fakePortFree)); // external node mode
+    QVERIFY(!LaunchProbe::skipInitialProbe(true, true, false, lo, "8023", fakePortFree));   // conf names a daemon
+    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, true, lo, "8023", fakePortFree));   // node already spawned
+    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, false, "localhost", "8023", fakePortFree));
+    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, false, "192.168.1.5", "8023", fakePortFree));
+    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, false, lo, "", fakePortFree));
+    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, false, lo, "0", fakePortFree));
+    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, false, lo, "65536", fakePortFree));
+    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, false, lo, "80x", fakePortFree));
+    QCOMPARE(g_portFreeCalls, 0);
+}
+
+void TestLogic::launchProbe_loopbackPortFree() {
+    // A listening server on 127.0.0.1 makes the port busy; once it closes the port is free.
+    QTcpServer server;
+    QVERIFY(server.listen(QHostAddress(QHostAddress::LocalHost), 0));
+    const quint16 port = server.serverPort();
+    QVERIFY(port != 0);
+    QVERIFY(!LaunchProbe::loopbackPortFree(port));
+    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, false, "127.0.0.1", QString::number(port)));
+    server.close();
+    QVERIFY(LaunchProbe::loopbackPortFree(port));
+    QVERIFY(LaunchProbe::skipInitialProbe(true, false, false, "127.0.0.1", QString::number(port)));
+    QVERIFY(LaunchProbe::loopbackPortFree(port)); // the probe released the port again
+    QVERIFY(!LaunchProbe::loopbackPortFree(0));
+}
+
+void TestLogic::launchProbe_warmupPollMs() {
+    QCOMPARE(LaunchProbe::warmupPollMs(0), 100);
+    QCOMPARE(LaunchProbe::warmupPollMs(1999), 100);
+    QCOMPARE(LaunchProbe::warmupPollMs(2000), 250);
+    QCOMPARE(LaunchProbe::warmupPollMs(29999), 250);
+    QCOMPARE(LaunchProbe::warmupPollMs(30000), 1000);
+    QCOMPARE(LaunchProbe::warmupPollMs(600000), 1000);
+    QCOMPARE(LaunchProbe::warmupPollMs(-1), 1000);   // unknown spawn time: the long interval
 }
 
 QTEST_MAIN(TestLogic)

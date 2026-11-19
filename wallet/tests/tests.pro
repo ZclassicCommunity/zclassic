@@ -59,6 +59,7 @@ HEADERS += ../src/privacybadgedelegate.h
 # but linking the whole TU keeps the tested logic byte-identical to production.
 SOURCES += \
     ../src/embeddeddaemon.cpp \
+    ../src/launchprobe.cpp \
     ../src/settings.cpp \
     ../src/senttxstore.cpp \
     ../src/addresscombo.cpp \

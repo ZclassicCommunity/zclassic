@@ -49,6 +49,7 @@ DEPENDPATH  += $$PWD/../../res
 SOURCES += \
     ../../src/embeddeddaemon.cpp \
     ../../src/startupaccess.cpp \
+    ../../src/launchprobe.cpp \
     ../../src/mainwindow.cpp \
     ../../src/rpc.cpp \
     ../../src/balancestablemodel.cpp \

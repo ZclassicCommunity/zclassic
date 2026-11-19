@@ -21,6 +21,7 @@
 #include "ui_createzclassicconfdialog.h"
 #include "rpc.h"
 #include "guistartup.h"     // [gui-startup] daemon-spawned / getinfo milestones
+#include "launchprobe.h"    // skip the doomed first probe; warmup poll interval
 
 #include "precompiled.h"
 
@@ -179,6 +180,7 @@ void ConnectionLoader::checkAccess(const QStringList& roots, bool repair) {
     main->cancelStartupAccess = [cancel]() { cancel->store(true); };
     const auto count = std::make_shared<std::atomic<int>>(0);
     const auto result = std::make_shared<StartupAccessResult>();
+    const auto spentMs = std::make_shared<qint64>(0);   // logged: the walk's cost per launch
     const auto alive = ezAlive;
     main->connectionStartupError = QObject::tr("Checking access to your wallet files…");
     main->setSyncStatusConnecting();
@@ -195,11 +197,13 @@ void ConnectionLoader::checkAccess(const QStringList& roots, bool repair) {
         main->setSyncStatusConnecting();
     });
     progress->start(200);
-    auto* worker = QThread::create([roots, repair, cancel, count, result]() {
+    auto* worker = QThread::create([roots, repair, cancel, count, result, spentMs]() {
+        QElapsedTimer walk; walk.start();
         *result = checkStartupAccess(roots, repair, [cancel, count](int checked, int) {
             count->store(checked);
             return !cancel->load();
         });
+        *spentMs = walk.elapsed();
     });
     QObject::connect(main, &QObject::destroyed, worker, [cancel]() {
         cancel->store(true);
@@ -208,6 +212,7 @@ void ConnectionLoader::checkAccess(const QStringList& roots, bool repair) {
         progress->stop();
         progress->deleteLater();
         if (!alive || !*alive) return;
+        main->logger->write(QString("Access check: %1 items in %2 ms").arg(result->checked).arg(*spentMs));
         accessCheckRunning = false;
         if (accessAttempt != main->startupAttempt) return;
         main->cancelStartupAccess = {};
@@ -317,7 +322,7 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
         // wallet.dat if the node dies before the RPC connection comes up.
         rememberRepairLocation(config);
 
-        refreshZClassicdState(connection, [=] () {
+        const std::function<void(void)> onRefused = [=] () {
             // Connection refused: the embedded node either has not started yet, or
             // it is alive but still warming up -- binding its RPC port can take ~1
             // minute while it loads the block index. Be patient and reassuring;
@@ -354,8 +359,7 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
                     return;
                 }
                 ezWarmupTimer.start();
-                int probeMs = (ezWarmupTimer.isValid() && ezWarmupTimer.elapsed() < 4000) ? 250 : 1000;
-                QTimer::singleShot(probeMs, [=]() { doAutoConnect(); });
+                QTimer::singleShot(LaunchProbe::warmupPollMs(0), [=]() { doAutoConnect(); });
                 return;
             }
 
@@ -414,7 +418,13 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
             // partway block/chainstate database has a safe, staged repair path.
             main->logger->write("Embedded zclassicd exited and did not come online");
             this->handleStartupFailure();
-        });
+        };
+        // Nothing listens on our RPC port: skip the doomed probe (2-4 s on Windows; launchprobe.h).
+        if (LaunchProbe::skipInitialProbe(Settings::getInstance()->useEmbedded(), config->zclassicDaemon,
+                                          ezclassicd != nullptr, config->host, config->port))
+            onRefused();
+        else
+            refreshZClassicdState(connection, onRefused);
     } else {
         if (Settings::getInstance()->useEmbedded()) {
             // zclassic.conf was not found, so create one
@@ -854,12 +864,8 @@ bool ConnectionLoader::startEmbeddedZClassicd(const QStringList& extraArgs) {
     // Leave -dbcache to the daemon and zclassic.conf: forcing 450 MiB here
     // disabled its 64-bit 1024 MiB default (2048 MiB during a rebuild) and
     // overrode the user's cache setting, causing unnecessary disk flushes.
-    // -checkblocks is added only on a NORMAL launch (gated below): the default
-    // 288-block startup re-verification (~12h of 2.5-min blocks, re-read every launch)
-    // is the bulk of the visible warmup; the chain was already validated when first
-    // connected and the corruption failsafe (handleStartupFailure) covers a damaged db
-    // separately, so capping it is safe -- but during a repair relaunch the caller's
-    // -reindex must run full validation, so we skip -checkblocks then.
+    // No -checkblocks: the node checks the newest 6 blocks after a verified clean stop and
+    // its default 288 after a crash (40 ms on mainnet); any -checkblocks disabled that.
     QStringList launchArgs;
     // COOKIE-AUTH (MANDATORY): force an ABSOLUTE -rpccookiefile so the daemon writes
     // its auth cookie to the EXACT path the GUI will read (GetAuthCookieFile honors an
@@ -903,11 +909,6 @@ bool ConnectionLoader::startEmbeddedZClassicd(const QStringList& extraArgs) {
                                           // verification (startup verify + IBD;
                                           // daemon default is single-threaded)
                << "-maxsigcachesize=128"; // fewer redundant signature re-verifies
-    // -checkblocks=12 ONLY on a normal launch. During a repair relaunch the caller
-    // passes -reindex / -reindex-chainstate in extraArgs, where capping startup
-    // verification would defeat the point of a full re-validation.
-    if (extraArgs.isEmpty())
-        launchArgs << "-checkblocks=12";
     // Opt-in "Help the network: open my port automatically" (default OFF). When the
     // user has enabled it, ask the embedded daemon to forward our own P2P listen
     // port via NAT-PMP/PCP (no UPnP) so NAT/firewalled users become reachable for
@@ -2248,9 +2249,8 @@ void ConnectionLoader::refreshZClassicdState(Connection* connection, std::functi
                     this->probeBootstrapProgress(connection);
                 }
                 main->logger->write("Waiting for zclassicd to come online.");
-                // Refresh quickly during the first few seconds of warmup, then every second.
-                int probeMs = (ezWarmupTimer.isValid() && ezWarmupTimer.elapsed() < 4000) ? 250 : 1000;
-                QTimer::singleShot(probeMs, [=]() { this->refreshZClassicdState(connection, refused); });
+                const qint64 sinceSpawn = ezWarmupTimer.isValid() ? ezWarmupTimer.elapsed() : -1;
+                QTimer::singleShot(LaunchProbe::warmupPollMs(sinceSpawn), [=]() { this->refreshZClassicdState(connection, refused); });
             } else {
                 // CATCH-ALL (edit #2 / blocker #2). Any remaining QNetworkReply error not
                 // handled above — including an InternalServerError whose body did NOT parse
