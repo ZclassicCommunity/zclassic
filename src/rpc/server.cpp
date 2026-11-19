@@ -8,6 +8,7 @@
 #include "init.h"
 #include "key_io.h"
 #include "random.h"
+#include "rpc/rpcstats.h"
 #include "sync.h"
 #include "ui_interface.h"
 #include "util.h"
@@ -268,6 +269,32 @@ static UniValue uptime(const UniValue& params, bool fHelp)
     return GetTime() - GetStartupTime();
 }
 
+static UniValue getrpcinfo(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 0) {
+        throw std::runtime_error(
+            "getrpcinfo\n"
+            "\nReturns the RPC calls in flight and per-method statistics.\n"
+            "Only method names and durations are recorded, never parameters.\n"
+            "Calls slower than -rpcslowlog=<ms> (default 1000, 0 disables) are\n"
+            "logged as a WARN line with the method name.\n"
+            "\nResult:\n"
+            "{\n"
+            "  \"active_commands\" : [   (array) calls running now\n"
+            "    { \"method\" : \"xxx\", \"duration_us\" : n }\n"
+            "  ],\n"
+            "  \"methods\" : {          (object) finished calls by method\n"
+            "    \"xxx\" : { \"count\" : n, \"total_us\" : n, \"max_us\" : n, \"errors\" : n }\n"
+            "  }\n"
+            "}\n"
+            "\nExamples:\n" +
+            HelpExampleCli("getrpcinfo", "") +
+            HelpExampleRpc("getrpcinfo", ""));
+    }
+
+    return RpcStatsToJSON();
+}
+
 /**
  * Call Table
  */
@@ -278,6 +305,7 @@ static const CRPCCommand vRPCCommands[] =
     { "control",            "help",                   &help,                   true  },
     { "control",            "stop",                   &stop,                   true  },
     { "control",            "uptime",                 uptime,                  true  },
+    { "control",            "getrpcinfo",             getrpcinfo,              true  },
 };
 
 CRPCTable::CRPCTable()
@@ -467,10 +495,14 @@ UniValue CRPCTable::execute(const std::string &strMethod, const UniValue &params
 
     g_rpcSignals.PreCommand(*pcmd);
 
+    RpcCallScope scope(strMethod);
+
     try
     {
         // Execute
-        return pcmd->actor(params, false);
+        UniValue result = pcmd->actor(params, false);
+        scope.ok = true;
+        return result;
     }
     catch (const std::exception& e)
     {
