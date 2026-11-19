@@ -89,6 +89,7 @@ BITCOIN_TESTS =\
   test/serialize_tests.cpp \
   test/shieldedcache_tests.cpp \
   test/sigencoding_tests.cpp \
+  test/shutdownmarker_tests.cpp \
   test/sighash_tests.cpp \
   test/sighashtype_tests.cpp \
   test/sigopcount_tests.cpp \
