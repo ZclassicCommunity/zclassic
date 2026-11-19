@@ -88,6 +88,7 @@ HEADERS += \
     src/embeddeddaemon.h \
     src/daemonjob.h \
     src/profilepaths.h \
+    src/profilefailure.h \
     src/notifyserver.h \
     src/securerandom.h \
     src/privatefile.h \

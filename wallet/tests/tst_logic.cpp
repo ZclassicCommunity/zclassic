@@ -30,6 +30,7 @@
 #include <QTcpServer>
 #include "repairlocation.h"
 #include "profilepaths.h"
+#include "profilefailure.h"
 #include "daemonjob.h"
 #include <QTemporaryDir>
 #include "walletbackup.h"
@@ -961,6 +962,8 @@ private slots:
 
     // --- First-run trust: send-gate staleness predicate (pure) ---
     void sendgate_staleWhenPollStops();               // Settings::syncGateIsStale boundary
+    void profilefailure_headlessModesKeepStderrOnly();
+    void profilefailure_messageSaysWhatAndWhatToDo();
     void profile_unsetKeepsDefaults();
     void profile_setRedirectsEveryPath();
     void profile_settingsAreIniInsideProfile();
@@ -2431,6 +2434,51 @@ void TestLogic::sendgate_staleWhenPollStops() {
     // Past the window: stale.
     QVERIFY(Settings::syncGateIsStale(now, now - (W + 1)));
     QVERIFY(Settings::syncGateIsStale(now, now - 10 * W));
+}
+
+
+// A bad profile dir must be visible (Windows GUI has no console) but headless modes
+// keep stderr + exit code only; the message names the folder and the remedy, and the
+// helper never creates the directory.
+void TestLogic::profilefailure_headlessModesKeepStderrOnly() {
+    auto headless = [](std::initializer_list<const char*> a) {
+        QList<QByteArray> store; store << "zclwallet";
+        for (const char* s : a) store << s;
+        QVector<char*> v; for (QByteArray& b : store) v << b.data();
+        return ProfileFailure::isHeadlessInvocation(v.size(), v.data());
+    };
+    QVERIFY(!headless({}));
+    QVERIFY(!headless({"--profile-dir", "C:/nope"}));
+    QVERIFY(!headless({"zclassic:t1abc"}));
+    QVERIFY(headless({"--print-profile-paths"}));
+    QVERIFY(headless({"--profile-dir", "x", "--notify", "id"}));
+    QVERIFY(headless({"--headless"}));
+    QVERIFY(headless({"--help"}));
+}
+
+void TestLogic::profilefailure_messageSaysWhatAndWhatToDo() {
+    QTemporaryDir tmp; QVERIFY(tmp.isValid());
+    const QString missing = tmp.filePath("typo-profile");
+    const QString t = ProfileFailure::dialogText(missing);
+    QVERIFY(t.contains(QDir::toNativeSeparators(missing)));
+    QVERIFY(t.contains("does not exist"));
+    QVERIFY(t.contains("Create that folder"));
+    QVERIFY(t.contains("remove"));
+    QVERIFY(ProfileFailure::stderrLine(missing).contains("must name an existing directory"));
+    // set-but-empty is equally visible and says so
+    const QString e = ProfileFailure::dialogText(QString());
+    QVERIFY(e.contains("empty"));
+    QVERIFY(e.contains("existing folder"));
+    // the Qt box carries the text and is an error box
+    std::unique_ptr<QMessageBox> box(ProfileFailure::makeBox(missing));
+    QCOMPARE(box->text(), t);
+    QCOMPARE(box->icon(), QMessageBox::Critical);
+    // nothing was created
+    QVERIFY(!QFileInfo::exists(missing));
+    qputenv("ZCLWALLET_PROFILE_DIR", missing.toLocal8Bit());
+    QVERIFY(!ProfilePaths::valid());
+    QVERIFY(!QFileInfo::exists(missing));
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
 }
 
 // ---- Profile override (ZCLWALLET_PROFILE_DIR) -------------------------------------
