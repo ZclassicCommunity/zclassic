@@ -228,7 +228,7 @@ static const struct tcase cases[] = {
     P("Edit", "src/primitives/block.cpp", R_SEAL),
     P("Edit", "src/chainparams.cpp", R_SEAL),
     P("Edit", "src/zcash/IncrementalMerkleTree.cpp", R_SEAL),
-    P("Edit", "src/zcash/NoteEncryption.h", R_SEAL),
+    P("Edit", "src/zcash/NoteEncryption.hpp", R_SEAL),
     P("Edit", "src/pow/equihash.cpp", R_SEAL),
     P("Edit", "C:\\work\\zcl\\src\\pow.cpp", R_SEAL),
     P("Edit", "src/pow/tromp/equi_miner.h", NULL),

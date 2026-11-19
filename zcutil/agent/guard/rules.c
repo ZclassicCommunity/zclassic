@@ -933,11 +933,11 @@ static bool is_sealed_path(const char *w)
     static const char *const files[] = {
         "src/pow.cpp", "src/pow.h", "src/script/interpreter.cpp", "src/script/interpreter.h",
         "src/script/script.cpp", "src/script/script.h", "src/chainparams.cpp",
-        "src/zcash/JoinSplit.cpp", "src/zcash/JoinSplit.h", "src/zcash/Note.cpp",
-        "src/zcash/Note.h", "src/zcash/NoteEncryption.cpp", "src/zcash/NoteEncryption.h",
-        "src/zcash/Proof.cpp", "src/zcash/Proof.h", "src/zcash/Address.cpp",
-        "src/zcash/Address.h", "src/zcash/IncrementalMerkleTree.cpp",
-        "src/zcash/IncrementalMerkleTree.h"};
+        "src/zcash/JoinSplit.cpp", "src/zcash/JoinSplit.hpp", "src/zcash/Note.cpp",
+        "src/zcash/Note.hpp", "src/zcash/NoteEncryption.cpp", "src/zcash/NoteEncryption.hpp",
+        "src/zcash/Proof.cpp", "src/zcash/Proof.hpp", "src/zcash/Address.cpp",
+        "src/zcash/Address.hpp", "src/zcash/IncrementalMerkleTree.cpp",
+        "src/zcash/IncrementalMerkleTree.hpp"};
     for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++)
         if (path_has(w, dirs[i], true))
             return strcmp(dirs[i], "src/pow") != 0 || !path_has(w, "src/pow/tromp", true);
