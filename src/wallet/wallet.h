@@ -269,10 +269,11 @@ public:
 
     /**
      * The note was spent by a wallet transaction buried deeper than WITNESS_CACHE_SIZE
-     * blocks (see CWallet::RetireSpentNotes). Its witness list is empty and witnessHeight is -1,
-     * and no block update touches it. MEMORY-ONLY, like 'value': never serialized, so
-     * wallet.dat keeps the same layout (a retired note is stored as witnesses={},
-     * witnessHeight=-1, nullifier kept) and is rebuilt from the chain at load.
+     * blocks (see CWallet::RetireSpentNotes). Its witnessHeight is -1, its witness list holds at
+     * most one frozen witness (Sapling; none for Sprout and for test-build wallets), and no block
+     * update touches it. MEMORY-ONLY, like 'value': never serialized, so wallet.dat keeps the
+     * same layout (a retired note is stored as one witness or none, witnessHeight=-1, nullifier
+     * kept) and the flag is rebuilt from the chain at load.
      */
     bool fRetired {false};
 
@@ -894,18 +895,24 @@ public:
 
     /**
      * Retire the notes whose nullifier is spent by a wallet transaction that is more than
-     * WITNESS_CACHE_SIZE blocks deep in the active chain. No reorg the node accepts (it refuses
-     * more than MAX_REORG_LENGTH = WITNESS_CACHE_SIZE - 1 blocks) can un-spend such a note, so it
-     * never needs a witness again: its witness list is cleared and witnessHeight set to -1 (the
-     * only state older binaries accept for a note without a witness), once, and the block updates
-     * skip it from then on. Sprout and Sapling. Returns the number of stored note records this call
-     * changed (a note already stored as witnesses={}, height -1 is retired in memory but counts none).
-     * Safe to call at any time (idempotent); it also normalises a retired note an older binary
-     * rewrote with a witness height. Takes cs_main and cs_wallet.
+     * WITNESS_CACHE_SIZE blocks deep in the active chain. One reorganisation step cannot undo such
+     * a spend (the node refuses more than MAX_REORG_LENGTH = WITNESS_CACHE_SIZE - 1 disconnects
+     * per step), so the note needs no witness and no block update. The limit is per step, not
+     * per spend: chained reorgs, an operator invalidateblock and a chain rewound at start-up can
+     * go further, and safety rests on UnretireNotesSpentFrom, which every disconnect that reaches
+     * a recorded spend height calls (the note comes back unspent, the witness rebuild is armed).
+     *
+     * Stored form (what an older binary sees): witnessHeight -1 and, for a Sapling note, ONE frozen
+     * witness (the newest) so that released binaries keep deriving its nullifier; a Sprout note, and
+     * a note of a test build, keep none. Both are recognised. Returns the number of stored note
+     * records this call changed. Idempotent; it also normalises a retired note an older binary
+     * rewrote with a witness height. fStoredForm (start-up): a note already in the stored form
+     * and spent by a mined wallet transaction is retired at any depth, for a chain that starts
+     * below the last checkpoint. Takes cs_main and cs_wallet.
      */
-    size_t RetireSpentNotes();
+    size_t RetireSpentNotes(bool fStoredForm = false);
     /** RetireSpentNotes for a caller that holds cs_main and cs_wallet. */
-    size_t RetireSpentNotesLocked();
+    size_t RetireSpentNotesLocked(bool fStoredForm = false);
 
     /** Number of notes currently retired (memory only; rebuilt by RetireSpentNotes). */
     size_t CountRetiredNotes() const;
@@ -1009,8 +1016,8 @@ protected:
     std::set<uint256> setNoteTxDirty;
     /**
      * (height of the block, txid) of the wallet transactions whose spend retired a note, so a
-     * disconnect that reaches that height (an operator invalidateblock/parkblock deeper than
-     * the reorg limit) can bring those notes back (UnretireNotesSpentFrom).
+     * disconnect that reaches that height (chained reorgs, an operator invalidateblock/parkblock,
+     * a chain rewound at start-up: the node's reorg limit is per step) brings those notes back (UnretireNotesSpentFrom).
      */
     std::set<std::pair<int, uint256>> setRetiredSpends;
     /** Tip height of the last RetireSpentNotes sweep made from a block update. */
