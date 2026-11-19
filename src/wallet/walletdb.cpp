@@ -243,6 +243,18 @@ bool CWalletDB::WriteWitnessCacheSize(int64_t nWitnessCacheSize)
     return Write(std::string("witnesscachesize"), nWitnessCacheSize);
 }
 
+bool CWalletDB::WriteSendOnce(const uint256& keyHash, const CSendOnceRecord& rec)
+{
+    nWalletDBUpdated++;
+    return Write(std::make_pair(std::string("sendonce"), keyHash), rec);
+}
+
+bool CWalletDB::EraseSendOnce(const uint256& keyHash)
+{
+    nWalletDBUpdated++;
+    return Erase(std::make_pair(std::string("sendonce"), keyHash));
+}
+
 bool CWalletDB::ReadPool(int64_t nPool, CKeyPool& keypool)
 {
     return Read(std::make_pair(std::string("pool"), nPool), keypool);
@@ -852,6 +864,14 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
                 return false;
             }
             wss.fIsEncrypted = true;
+        }
+        else if (strType == "sendonce")
+        {
+            uint256 keyHash;
+            CSendOnceRecord rec;
+            ssKey >> keyHash;
+            ssValue >> rec;
+            pwallet->LoadSendOnce(keyHash, rec);
         }
         else if (strType == "hdchain")
         {

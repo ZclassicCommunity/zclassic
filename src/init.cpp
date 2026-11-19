@@ -43,6 +43,7 @@
 #include "validationinterface.h"
 #include "transaction_builder.h"
 #ifdef ENABLE_WALLET
+#include "wallet/sendjournal.h"
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
 #endif
@@ -3771,6 +3772,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     if (pwalletMain) {
         // Add wallet transactions that aren't already in a block to mapTransactions
         pwalletMain->ReacceptWalletTransactions();
+
+        // Send journal: resolve what the last run left (a lost operation releases its key, a built
+        // transaction that is in the mempool or a block is committed), prune old records
+        SendOnceResolveAtStart(pwalletMain);
 
         // Run a thread to flush wallet periodically
         threadGroup.create_thread(boost::bind(&ThreadFlushWalletDB, boost::ref(pwalletMain->strWalletFile)));

@@ -4,6 +4,7 @@
 
 #include "asyncrpcoperation_sendmany.h"
 #include "asyncrpcqueue.h"
+#include "wallet/sendjournal.h"
 #include "amount.h"
 #include "consensus/upgrades.h"
 #include "core_io.h"
@@ -130,9 +131,30 @@ AsyncRPCOperation_sendmany::AsyncRPCOperation_sendmany(
 AsyncRPCOperation_sendmany::~AsyncRPCOperation_sendmany() {
 }
 
+void AsyncRPCOperation_sendmany::sendonce_before_broadcast(const std::string& signedtxn)
+{
+    if (!hasSendOnce_) return;
+    CDataStream stream(ParseHex(signedtxn), SER_NETWORK, PROTOCOL_VERSION);
+    CTransaction tx;
+    stream >> tx;
+    // BUILT is on disk (and the transaction is in the wallet) before anything leaves the node
+    if (!SendOnceBuilt(pwalletMain, sendOnceKey_, tx))
+        throw JSONRPCError(RPC_WALLET_ERROR, "Error: the send journal could not be written; the transaction was not sent");
+}
+
+void AsyncRPCOperation_sendmany::sendonce_after_broadcast()
+{
+    if (!hasSendOnce_) return;
+    TestCrashPoint("sendonce-after-broadcast");
+    SendOnceCommitted(pwalletMain, sendOnceKey_);
+}
+
 void AsyncRPCOperation_sendmany::main() {
-    if (isCancelled())
+    if (isCancelled()) {
+        if (hasSendOnce_)
+            SendOnceFailed(pwalletMain, sendOnceKey_, -1, "cancelled");
         return;
+    }
 
     set_state(OperationStatus::EXECUTING);
     start_execution_clock();
@@ -169,6 +191,11 @@ void AsyncRPCOperation_sendmany::main() {
 #endif
 
     stop_execution_clock();
+
+    // Send journal: a failure before the transaction was built releases the key; a failure after
+    // BUILT keeps it (the outcome is then resolved against the wallet, mempool and chain).
+    if (hasSendOnce_ && !success)
+        SendOnceFailed(pwalletMain, sendOnceKey_, getErrorCode(), getErrorMessage());
 
     if (success) {
         set_state(OperationStatus::SUCCESS);
@@ -479,6 +506,7 @@ bool AsyncRPCOperation_sendmany::main_impl() {
         // Send the transaction
         // TODO: Use CWallet::CommitTransaction instead of sendrawtransaction
         auto signedtxn = EncodeHexTx(tx_);
+        if (!testmode) sendonce_before_broadcast(signedtxn);
         if (!testmode) {
             UniValue params = UniValue(UniValue::VARR);
             params.push_back(signedtxn);
@@ -488,6 +516,7 @@ bool AsyncRPCOperation_sendmany::main_impl() {
             }
 
             auto txid = sendResultValue.get_str();
+            sendonce_after_broadcast();
 
             UniValue o(UniValue::VOBJ);
             o.push_back(Pair("txid", txid));
@@ -964,6 +993,7 @@ void AsyncRPCOperation_sendmany::sign_send_raw_transaction(UniValue obj)
 
     // Send the signed transaction
     if (!testmode) {
+        sendonce_before_broadcast(signedtxn);
         params.clear();
         params.setArray();
         params.push_back(signedtxn);
@@ -973,6 +1003,7 @@ void AsyncRPCOperation_sendmany::sign_send_raw_transaction(UniValue obj)
         }
 
         std::string txid = sendResultValue.get_str();
+        sendonce_after_broadcast();
 
         UniValue o(UniValue::VOBJ);
         o.push_back(Pair("txid", txid));

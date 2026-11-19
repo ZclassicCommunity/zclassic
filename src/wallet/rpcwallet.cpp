@@ -30,6 +30,7 @@
 #include "wallet/asyncrpcoperation_mergetoaddress.h"
 #include "wallet/asyncrpcoperation_sendmany.h"
 #include "wallet/asyncrpcoperation_shieldcoinbase.h"
+#include "wallet/sendjournal.h"
 
 #include "sodium.h"
 
@@ -3773,6 +3774,25 @@ UniValue z_getoperationstatus_IMPL(const UniValue& params, bool fRemoveFinishedO
         }
     }
 
+    // An operation that is no longer in the queue (a restart, or removed by z_getoperationresult)
+    // is answered from the send journal if it was a z_sendmany with an idempotency_key.
+    if (useFilter) {
+        std::set<AsyncRPCOperationId> answered;
+        for (const UniValue& v : ret.getValues())
+            answered.insert(find_value(v.get_obj(), "id").get_str());
+        for (const AsyncRPCOperationId& id : filter) {
+            if (answered.count(id))
+                continue;
+            UniValue stored = SendOnceOperationStatus(pwalletMain, id);
+            if (stored.isNull())
+                continue;
+            const std::string s = find_value(stored.get_obj(), "status").get_str();
+            if (fRemoveFinishedOperations && s != "success" && s != "failed")
+                continue;
+            ret.push_back(stored);
+        }
+    }
+
     std::vector<UniValue> arrTmp = ret.getValues();
 
     // sort results chronologically by creation_time
@@ -3807,9 +3827,9 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
     if (!EnsureWalletIsAvailable(fHelp))
         return NullUniValue;
 
-    if (fHelp || params.size() < 2 || params.size() > 4)
+    if (fHelp || params.size() < 2 || params.size() > 5)
         throw runtime_error(
-            "z_sendmany \"fromaddress\" [{\"address\":... ,\"amount\":...},...] ( minconf ) ( fee )\n"
+            "z_sendmany \"fromaddress\" [{\"address\":... ,\"amount\":...},...] ( minconf ) ( fee ) ( \"idempotency_key\" )\n"
             "\nSend multiple times. Amounts are decimal numbers with at most 8 digits of precision."
             "\nChange generated from a taddr flows to a new taddr address, while change generated from a zaddr returns to itself."
             "\nWhen sending coinbase UTXOs to a zaddr, change is not allowed. The entire value of the UTXO(s) must be consumed."
@@ -3826,6 +3846,13 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
             "3. minconf               (numeric, optional, default=1) Only use funds confirmed at least this many times.\n"
             "4. fee                   (numeric, optional, default="
             + strprintf("%s", FormatMoney(ASYNC_RPC_OPERATION_DEFAULT_MINERS_FEE)) + ") The fee amount to attach to this transaction.\n"
+            "5. \"idempotency_key\"     (string, optional) 1 to 128 characters of [A-Za-z0-9._:-]. Send once: with a key, a repeated call with the same\n"
+            "                         key and the same request (from address, recipients in order with amounts and memos, minconf, fee) returns the same\n"
+            "                         operationid and never builds a second transaction, also after a restart of the node; the same key with a different\n"
+            "                         request is an error (\"idempotency key reused with different parameters\"). The key is stored as a hash only. The key\n"
+            "                         is released if the call fails before the transaction is built, if the operation is lost in a restart before that, or\n"
+            "                         if the built transaction expired unmined (see z_listsendjournal). Pass minconf and fee to use it from the CLI.\n"
+            "                         Without a key z_sendmany behaves as before.\n"
             "\nResult:\n"
             "\"operationid\"          (string) An operationid to pass to z_getoperationstatus to get the result of the operation.\n"
             "\nExamples:\n"
@@ -3834,6 +3861,17 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
         );
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
+
+    // Send journal key (optional 5th parameter); validated before anything else is looked at
+    bool fSendOnce = false;
+    std::string sendOnceKey;
+    if (params.size() > 4) {
+        sendOnceKey = params[4].get_str();
+        if (!IsValidSendOnceKey(sendOnceKey))
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, idempotency_key must be 1 to 128 characters of [A-Za-z0-9._:-]");
+        fSendOnce = true;
+    }
+    std::vector<SendOnceRecipient> sendOnceRecipients;
 
     // Check that the from address is valid.
     auto fromaddress = params[0].get_str();
@@ -3944,6 +3982,13 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
         CAmount nAmount = AmountFromValue( av );
         if (nAmount < 0)
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, amount must be positive");
+        {
+            SendOnceRecipient sr;
+            sr.address = address;
+            sr.amount = nAmount;
+            sr.memoHex = memo;
+            sendOnceRecipients.push_back(sr);
+        }
 
         if (isZaddr) {
             zaddrRecipients.push_back( SendManyRecipient(address, nAmount, memo) );
@@ -4069,11 +4114,34 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
     // Spending (signing, or decrypting shielded keys) needs the wallet keys: fail now, not in the async operation.
     EnsureWalletIsUnlocked();
 
+    // Send journal: a key that already has a stored outcome answers with it, before anything is built
+    uint256 sendOnceKeyHash, sendOnceDigest;
+    if (fSendOnce) {
+        sendOnceKeyHash = SendOnceKeyHash(sendOnceKey);
+        sendOnceDigest = SendOnceRequestDigest(fromaddress, sendOnceRecipients, nMinDepth, nFee);
+        std::string storedOpid;
+        if (SendOnceBegin(pwalletMain, sendOnceKeyHash, sendOnceDigest, storedOpid) == SendOnceBeginResult::STORED)
+            return storedOpid;
+    }
+
     // Create operation and add to global queue
     std::shared_ptr<AsyncRPCQueue> q = getAsyncRPCQueue();
-    std::shared_ptr<AsyncRPCOperation> operation( new AsyncRPCOperation_sendmany(builder, contextualTx, fromaddress, taddrRecipients, zaddrRecipients, nMinDepth, nFee, contextInfo) );
-    q->addOperation(operation);
+    std::shared_ptr<AsyncRPCOperation_sendmany> sendmany( new AsyncRPCOperation_sendmany(builder, contextualTx, fromaddress, taddrRecipients, zaddrRecipients, nMinDepth, nFee, contextInfo) );
+    std::shared_ptr<AsyncRPCOperation> operation(sendmany);
     AsyncRPCOperationId operationId = operation->getId();
+    if (fSendOnce) {
+        // STARTED is on disk before the operation can run
+        sendmany->SetSendOnceKey(sendOnceKeyHash);
+        SendOnceStart(pwalletMain, sendOnceKeyHash, sendOnceDigest, operationId);
+        try {
+            q->addOperation(operation);
+        } catch (...) {
+            SendOnceRelease(pwalletMain, sendOnceKeyHash);
+            throw;
+        }
+    } else {
+        q->addOperation(operation);
+    }
     return operationId;
 }
 
@@ -4788,6 +4856,43 @@ UniValue z_listoperationids(const UniValue& params, bool fHelp)
     return ret;
 }
 
+UniValue z_listsendjournal(const UniValue& params, bool fHelp)
+{
+    if (!EnsureWalletIsAvailable(fHelp))
+        return NullUniValue;
+
+    if (fHelp || params.size() != 0)
+        throw runtime_error(
+            "z_listsendjournal\n"
+            "\nReturns the send journal: one entry per z_sendmany that was given an idempotency_key (read-only).\n"
+            "The journal holds hashes, states, the operation id, the txid and times; never the key, an address, an amount or a memo.\n"
+            "Finished entries older than 90 days, and finished entries beyond the newest 10000, are pruned.\n"
+            "\nResult:\n"
+            "[\n"
+            "  {\n"
+            "    \"keyhash\": \"hex\",          (string) the first 8 bytes of the SHA-256 of the key\n"
+            "    \"state\": \"started|committed|outcome_unknown|expired|released\",\n"
+            "                              (string) where the send stands now: started (the operation is running), committed (the transaction is in the mempool\n"
+            "                              or a block), outcome_unknown (built, but neither in the mempool nor in a block: a retry with the same key offers it\n"
+            "                              again and builds nothing new), expired (the tip passed its expiry height by 20 blocks and the transaction is in no block and not in the mempool: the key is released),\n"
+            "                              released (the operation was lost before anything was built: the key is released)\n"
+            "    \"stored_state\": \"started|built|committed|expired\",   (string) the state in wallet.dat\n"
+            "    \"opid\": \"id\",              (string) the operation id z_sendmany returned\n"
+            "    \"txid\": \"hex\",             (string, once built) the transaction id\n"
+            "    \"expiryheight\": n,         (numeric) the built transaction's expiry height, 0 if none\n"
+            "    \"started\": n, \"built\": n, \"updated\": n,  (numeric) times, seconds since the epoch (0: not yet)\n"
+            "    \"error_code\": n, \"error\": \"msg\"   (only if the broadcast failed after the transaction was built)\n"
+            "  }, ...\n"
+            "]\n"
+            "\nExamples:\n"
+            + HelpExampleCli("z_listsendjournal", "")
+            + HelpExampleRpc("z_listsendjournal", "")
+        );
+
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    return SendOnceList(pwalletMain);
+}
+
 extern UniValue dumpprivkey(const UniValue& params, bool fHelp); // in rpcdump.cpp
 extern UniValue importprivkey(const UniValue& params, bool fHelp);
 extern UniValue importaddress(const UniValue& params, bool fHelp);
@@ -4867,6 +4972,7 @@ static const CRPCCommand commands[] =
     { "wallet",             "z_getoperationstatus",     &z_getoperationstatus,     true  },
     { "wallet",             "z_getoperationresult",     &z_getoperationresult,     true  },
     { "wallet",             "z_listoperationids",       &z_listoperationids,       true  },
+    { "wallet",             "z_listsendjournal",        &z_listsendjournal,        true  },
     { "wallet",             "z_getnewaddress",          &z_getnewaddress,          true  },
     { "wallet",             "z_listaddresses",          &z_listaddresses,          true  },
     { "wallet",             "z_exportkey",              &z_exportkey,              true  },

@@ -69,6 +69,8 @@ public:
     bool Open(const boost::filesystem::path& path);
     void Close();
     void Flush(bool fShutdown);
+    //! Forces the transaction log to disk (the environment commits with DB_TXN_WRITE_NOSYNC). False on failure.
+    bool FlushLog();
     void CheckpointLSN(const std::string& strFile);
 
     void CloseDb(const std::string& strFile);

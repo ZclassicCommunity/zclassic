@@ -421,6 +421,14 @@ bool CDB::Rewrite(const string& strFile, const char* pszSkip)
 }
 
 
+bool CDBEnv::FlushLog()
+{
+    LOCK(cs_db);
+    if (!fDbEnvInit)
+        return false;
+    return dbenv->log_flush(NULL) == 0;
+}
+
 void CDBEnv::Flush(bool fShutdown)
 {
     int64_t nStart = GetTimeMillis();

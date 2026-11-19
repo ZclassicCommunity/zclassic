@@ -19,6 +19,7 @@
 #include "util.h"
 #include "utilstrencodings.h"
 #include "validationinterface.h"
+#include "wallet/sendjournal.h"
 #include "wallet/crypter.h"
 #include "wallet/tokenguard.h"
 #include "wallet/wallet_ismine.h"
@@ -1210,6 +1211,10 @@ public:
     std::map<uint256, SaplingOutPoint> mapSaplingNullifiersToNotes;
 
     std::map<uint256, CWalletTx> mapWallet;
+
+    //! Send journal records ("sendonce" in wallet.dat) by SHA-256 of the idempotency key; guarded by cs_wallet
+    std::map<uint256, CSendOnceRecord> mapSendOnce;
+    bool LoadSendOnce(const uint256& keyHash, const CSendOnceRecord& rec) { mapSendOnce[keyHash] = rec; return true; }
 
     int64_t nOrderPosNext;
     std::map<uint256, int> mapRequestCount;
