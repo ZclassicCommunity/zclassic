@@ -217,6 +217,24 @@ test_one() {
     end_client; stop_server 1; client_bin=$bin
 }
 
+# The same two servers, one of them throttled, for an old and a new client (--base-bin: the old one), each
+# with the throttled server listed first and last. Not part of "all". An old client uses one server only.
+test_cmp() {
+    low=$((kbps / 8))
+    say "== comparison: server 1 capped at $low kbit/s, server 2 at $kbps; old = ${basebin:-none}, new = $bin =="
+    for order in "1 2" "2 1"; do
+        for who in old new; do
+            if [ $who = old ]; then [ -n "$basebin" ] || continue; client_bin=$basebin; else client_bin=$bin; fi
+            fresh_client; start_server 1 $low && start_server 2 $kbps || { client_bin=$bin; return 1; }
+            download "$order" || { stop_server 1; stop_server 2; client_bin=$bin; return 1; }
+            check_imported "cmp $who ($order)"
+            say "RESULT cmp: $who client, peers listed \"$order\": $((DL_MS / 1000)).$((DL_MS % 1000 / 100)) s, $(awk -v b=$snapshot_bytes -v ms=$DL_MS 'BEGIN {printf "%.1f", b / 1048576 / (ms / 1000)}') MiB/s (server 1 is the throttled one)"
+            end_client; stop_server 1; stop_server 2
+            client_bin=$bin
+        done
+    done
+}
+
 test_both() {
     say "== both servers get streams, getbootstrapinfo shows them =="
     fresh_client; start_server 1 $kbps && start_server 2 $kbps || return 1
@@ -339,6 +357,7 @@ test_single() {
 
 make_fixture || { echo "multi-server-test: could not build the fixture"; exit 1; }
 case ",$modes," in *,one,*) test_one ;; esac
+case ",$modes," in *,cmp,*) test_cmp ;; esac
 want speed && test_speed
 want both && test_both
 want skew && test_skew
