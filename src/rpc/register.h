@@ -20,6 +20,9 @@ void RegisterMiningRPCCommands(CRPCTable &tableRPC);
 /** Register raw transaction RPC commands */
 void RegisterRawTransactionRPCCommands(CRPCTable &tableRPC);
 
+/** Register the getnodestatus RPC command */
+void RegisterNodeStatusRPCCommands(CRPCTable &tableRPC);
+
 /** Register the ZSLP token index RPC commands (they answer "disabled" unless -zslpindex=1) */
 void RegisterZslpRPCCommands(CRPCTable &tableRPC);
 
@@ -33,6 +36,7 @@ static inline void RegisterAllCoreRPCCommands(CRPCTable &tableRPC)
     RegisterMiscRPCCommands(tableRPC);
     RegisterMiningRPCCommands(tableRPC);
     RegisterRawTransactionRPCCommands(tableRPC);
+    RegisterNodeStatusRPCCommands(tableRPC);
     RegisterZslpRPCCommands(tableRPC);
     RegisterZnamRPCCommands(tableRPC);
 }

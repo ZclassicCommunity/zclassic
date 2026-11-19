@@ -72,7 +72,7 @@ qa/lib/*|qa/rpc-tests/jsonq_lib.sh	ALL
 
 # ---- units ported from Z23 (validation caches, clean-shutdown marker, RPC observability, HTTP overload)
 src/headerprecheck.*|src/shieldedcache.*|src/shutdownmarker.*|src/phasetimer.h	ALL qa/rpc-tests/chain_clean_shutdown_marker.sh qa/rpc-tests/datadir_lock_message.sh
-qa/rpc-tests/datadir_lock_message.sh|qa/rpc-tests/getrpcinfo.sh|qa/rpc-tests/rpc_busy.sh	regtest-smoke
-src/rpc/*|src/httpserver.*|src/httprpc.*	qa/rpc-tests/getrpcinfo.sh qa/rpc-tests/rpc_busy.sh
+qa/rpc-tests/datadir_lock_message.sh|qa/rpc-tests/getrpcinfo.sh|qa/rpc-tests/nodestatus.sh|qa/rpc-tests/rpc_busy.sh	regtest-smoke
+src/rpc/*|src/syncphase.*|src/httpserver.*|src/httprpc.*	qa/rpc-tests/getrpcinfo.sh qa/rpc-tests/rpc_busy.sh qa/rpc-tests/nodestatus.sh
 # ---- agent entry points and skills (documents; the docs and wiring checks)
 .claude/*	check-dev-tools

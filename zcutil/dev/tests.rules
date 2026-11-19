@@ -37,7 +37,7 @@ src/bootstrap*	boost:bootstrap_snapshot_protocol_tests boost:bootstrap_resume_te
 src/torcontrol.*|src/embeddedtor.*|src/c23/tor/*	boost:torcontrol_tests boost:embeddedtor_tests boost:bootstrap_onion_tests boost:onion_v3_tests
 
 # ---- RPC and utilities
-src/rpc/*|src/httprpc.*|src/httpserver.*|src/asyncrpc*	boost:rpc_tests gtest:rpc gtest:HTTPRPC gtest:AsyncRPCOperationId
+src/syncphase.*|src/rpc/*|src/httprpc.*|src/httpserver.*|src/asyncrpc*	boost:rpc_tests gtest:rpc gtest:HTTPRPC gtest:AsyncRPCOperationId
 src/util.*|src/utilstrencodings.*|src/utiltime.*|src/utilmoneystr.*	boost:util_tests boost:getarg_tests boost:base32_tests boost:base64_tests boost:convertbits_tests
 src/serialize.h|src/streams.h|src/prevector.h|src/uint256.*|src/arith_uint256.*	boost:serialize_tests boost:PrevectorTests boost:uint256_tests boost:arith_uint256_tests
 
