@@ -1049,10 +1049,16 @@ static int cmd_refs(Out *o, const char *name)
         fputs("zcl-dev code: refs takes an identifier\n", stderr);
         return 2;
     }
-    char cmd[400];
-    snprintf(cmd, sizeof cmd, "git grep -nwF -e %s", name);
+    char cmd[400] = "git grep -nwF -e";
+    if (cmd_append_arg(cmd, sizeof cmd, name)) {
+        fputs("zcl-dev code: refs: name cannot be passed to git\n", stderr);
+        return 2;
+    }
     ZList lines = {0};
-    (void)zd_cmd_lines(cmd, &lines); /* exit 1 means no match */
+    if (zd_cmd_lines(cmd, &lines) && zd_cmd_exit != 1) { /* exit 1 means no match */
+        fputs("zcl-dev code: refs: git grep failed\n", stderr);
+        return 2;
+    }
     long total = 0, shown = 0;
     o->cols = "location,text";
     for (size_t i = 0; i < lines.n; i++) {

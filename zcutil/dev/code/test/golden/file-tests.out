@@ -1,7 +1,9 @@
 path: src/test/foo_tests.cpp
-lines: 8
+lines: 16
 includes: 2
-definitions: 1
+definitions: 3
 include  "a.h"  1
 include  <boost/test/unit_test.hpp>  2
 func  BOOST_AUTO_TEST_CASE(a_is_one)  4-7
+func  TEST(Suite, first_case)  9-12
+func  TEST_F(Fix, second_case)  13-16

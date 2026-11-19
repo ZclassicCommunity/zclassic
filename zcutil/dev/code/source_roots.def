@@ -47,6 +47,9 @@ include	src/leveldb/include
 include	src/leveldb/helpers/memenv
 include	src/c23
 include	wallet/src
+# src/c23/services/tools build with -iquote src/c23/services/glue; other per-target -iquote
+# directories are not modelled.
+include	src/c23/services/glue
 
 # ---- autotools makefiles, one namespace, sources relative to the first file's directory
 automake	src/Makefile.am

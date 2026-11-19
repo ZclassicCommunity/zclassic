@@ -66,8 +66,11 @@ void zlist_free(ZList *l)
     l->n = l->cap = 0;
 }
 
+int zd_cmd_exit;
+
 int zd_cmd_lines(const char *cmd, ZList *out)
 {
+    zd_cmd_exit = 0;
     FILE *p = popen(cmd, "r");
     if (!p) return -1;
     char *line = NULL;
@@ -89,14 +92,20 @@ int zd_cmd_lines(const char *cmd, ZList *out)
         line[len++] = (char)ch;
     }
     free(line);
-    return pclose(p) == 0 ? 0 : -1;
+    int st = pclose(p);
+#ifdef WIFEXITED
+    zd_cmd_exit = st == -1 ? -1 : WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+#else
+    zd_cmd_exit = st;
+#endif
+    return st == 0 ? 0 : -1;
 }
 
 static int str_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
 int zd_git_ls(ZList *out)
 {
-    if (zd_cmd_lines("git ls-files", out)) return -1;
+    if (zd_cmd_lines("git -c core.quotepath=off ls-files", out)) return -1;
     qsort(out->v, out->n, sizeof *out->v, str_cmp);
     return 0;
 }
@@ -135,6 +144,17 @@ char *zd_read_file(const char *path, size_t *n)
 void zd_enter_repo(void)
 {
     ZList l = {0};
+    if (!getenv("ZCL_DEV_PREFIX")) { /* run directly from a subdirectory: remember where we were */
+        ZList pf = {0};
+        if (!zd_cmd_lines("git rev-parse --show-prefix", &pf) && pf.n && pf.v[0][0]) {
+#ifdef _WIN32
+            _putenv_s("ZCL_DEV_PREFIX", pf.v[0]);
+#else
+            setenv("ZCL_DEV_PREFIX", pf.v[0], 1);
+#endif
+        }
+        zlist_free(&pf);
+    }
     if (zd_cmd_lines("git rev-parse --show-toplevel", &l) || !l.n) zd_die("not inside a git repository");
     if (chdir(l.v[0])) zd_die("cannot chdir to %s", l.v[0]);
     zlist_free(&l);

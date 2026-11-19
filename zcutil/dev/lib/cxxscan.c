@@ -301,6 +301,28 @@ static void copy_clean(char *dst, size_t cap, const char *s, size_t len)
     dst[o] = 0;
 }
 
+/* Drop template arguments that precede "::" (base_blob<BITS>::SetHex -> base_blob::SetHex). */
+static void strip_targs(char *nm)
+{
+    char *w = nm;
+    for (char *r = nm; *r;) {
+        if (*r == '<' && r > nm && is_id(r[-1])) {
+            int d = 0;
+            char *q = r;
+            for (; *q; q++) {
+                if (*q == '<') d++;
+                else if (*q == '>' && --d == 0) break;
+            }
+            if (*q == '>' && q[1] == ':' && q[2] == ':') {
+                r = q + 1;
+                continue;
+            }
+        }
+        *w++ = *r++;
+    }
+    *w = 0;
+}
+
 static void push_def(CxxDefs *d, const CxxDef *e)
 {
     if (d->n == d->cap) {
@@ -326,7 +348,24 @@ static size_t func_name(const char *h, size_t open, size_t *name_start)
     size_t e = open;
     while (e > 0 && isspace((unsigned char)h[e - 1])) e--;
     size_t s = e;
-    while (s > 0 && (is_id(h[s - 1]) || h[s - 1] == ':' || h[s - 1] == '~')) s--;
+    for (;;) {
+        while (s > 0 && (is_id(h[s - 1]) || h[s - 1] == ':' || h[s - 1] == '~')) s--;
+        /* C<A,B>::m: skip the balanced <...> before "::" and keep scanning the class name */
+        if (s > 0 && s < e && h[s - 1] == '>' && h[s] == ':') {
+            size_t q = s - 1;
+            int depth = 0;
+            while (q > 0) {
+                if (h[q] == '>') depth++;
+                else if (h[q] == '<' && --depth == 0) break;
+                q--;
+            }
+            if (depth == 0 && h[q] == '<' && q > 0 && is_id(h[q - 1])) {
+                s = q;
+                continue;
+            }
+        }
+        break;
+    }
     /* operator overloads: operator==, operator(), operator new */
     {
         size_t from = e > 40 ? e - 40 : 0;
@@ -552,6 +591,7 @@ void cxx_defs(const char *src, size_t n, CxxDefs *out)
                         df.kind = CXX_FUNC;
                         char nm[192];
                         copy_clean(nm, sizeof nm, h + ns, nl);
+                        strip_targs(nm);
                         char pre[192] = "";
                         if (!strchr(nm, ':') || 1) {
                             for (size_t k = 0; k < sp; k++)
@@ -566,6 +606,17 @@ void cxx_defs(const char *src, size_t n, CxxDefs *out)
                             while (ae < e && h[ae] != ',' && h[ae] != ')') ae++;
                             copy_clean(df.alias, sizeof df.alias, h + a, ae - a);
                             snprintf(df.name, sizeof df.name, "%s(%s)", nm, df.alias);
+                            if (!strcmp(nm, "TEST") || !strcmp(nm, "TEST_F") || !strcmp(nm, "TEST_P") || !strcmp(nm, "TYPED_TEST")) {
+                                /* gtest: TEST(suite, name); the test name selects it */
+                                char tn[56];
+                                size_t be = ae + 1;
+                                while (be < e && h[be] != ',' && h[be] != ')') be++;
+                                if (ae < e && h[ae] == ',' && be > ae + 1) {
+                                    copy_clean(tn, sizeof tn, h + ae + 1, be - ae - 1);
+                                    snprintf(df.name, sizeof df.name, "%s(%s, %s)", nm, df.alias, tn);
+                                    snprintf(df.alias, sizeof df.alias, "%s", tn);
+                                }
+                            }
                         } else {
                             snprintf(df.name, sizeof df.name, "%s%s", pre, nm);
                         }

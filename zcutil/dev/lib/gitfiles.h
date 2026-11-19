@@ -14,6 +14,7 @@ int zlist_has(const ZList *l, const char *s);
 void zlist_free(ZList *l);
 /* Runs a shell command and collects its stdout lines. Returns 0 when the command ran and
  * exited 0, -1 otherwise. Callers pass only arguments made of [A-Za-z0-9_./:=,-]. */
+extern int zd_cmd_exit; /* exit status of the last zd_cmd_lines command, -1 if not a normal exit */
 int zd_cmd_lines(const char *cmd, ZList *out);
 /* git ls-files, sorted bytewise. Returns 0 on success. */
 int zd_git_ls(ZList *out);

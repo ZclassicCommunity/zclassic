@@ -28,10 +28,14 @@ $(BIN)/zcl-dev-code$(EXEEXT): code.c $(LIBSRC) $(LIBHDR) $(HDR)
 c2x:
 	for f in code.c $(LIBSRC); do $(CC) -std=c2x $(WARN) $(CFLAGS) $(INC) -c -o /dev/null $$f || exit 1; done
 
-check: $(BIN)/zcl-dev-code$(EXEEXT) c2x
+check: tools-built $(BIN)/zcl-dev-code$(EXEEXT) c2x
 	sh test/run.sh $(BIN)/zcl-dev-code$(EXEEXT)
 
 clean:
 	rm -f $(BIN)/zcl-dev-code $(BIN)/zcl-dev-code.exe
 
-.PHONY: all check clean c2x
+# the fixture tests need jsonq; the aggregate builds it first, this keeps check standalone
+tools-built:
+	$(MAKE) -C ../../tools all
+
+.PHONY: all check clean c2x tools-built

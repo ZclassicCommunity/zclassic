@@ -79,6 +79,9 @@ case_ body-json 0 z body src/core.cpp Max --json
 case_ sym-max 0 z sym Max
 case_ sym-a-value 0 z sym a_value
 case_ sym-missing 1 z sym NoSuchSymbol
+case_ sym-template-method 0 z sym Blob::Set
+case_ body-template-method 0 z body src/core.cpp Blob::Get
+case_ body-gtest-name 0 z body src/test/foo_tests.cpp second_case
 case_ sym-bad-name 2 z sym 'a b'
 case_ refs-a-value 0 z refs a_value
 case_ refs-missing 1 z refs NoSuchSymbolAnywhere
@@ -91,6 +94,8 @@ case_ depth-negative 2 z impact src/a.h --depth=-1
 case_ after-negative 2 z map --after=-5
 case_ after-empty 2 z map --after=
 check "cost json: relink has a null n" sh -c "cd '$work' && '$tb/zcl-dev-code' cost src/common.h --json | grep -q '\"kind\":\"relink\",\"path\":\"[^\"]*\",\"n\":null'"
+check "owner works run directly from a subdirectory" sh -c "cd '$work/src' && env -u ZCL_DEV_PREFIX '$tb/zcl-dev-code' owner wallet/wallet.cpp"
+check "refs ~name is quoted, not tilde-expanded" sh -c "cd '$work' && ! '$tb/zcl-dev-code' refs ~root | grep -q ^location"
 
 # A tracked filename with shell metacharacters must reach the guide as plain data, never run.
 meta='src/x$(touch PWNED).cpp'

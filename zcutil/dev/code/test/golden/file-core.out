@@ -1,7 +1,7 @@
 path: src/core.cpp
-lines: 75
+lines: 87
 includes: 3
-definitions: 16
+definitions: 19
 include  "a.h"  2
 include  "common.h"  3
 include  <vector>  4
@@ -21,3 +21,6 @@ func  c_entry  66-66
 func  a_value  69-69
 func  b_value  70-70
 func  c_one_liner  72-75
+class  Blob  77-77
+func  Blob::Set  78-82
+func  Blob::Get  83-87

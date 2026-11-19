@@ -73,3 +73,15 @@ extern "C" int c_one_liner(int x)
 {
     return x + 1;
 }
+
+template <typename T, int N> struct Blob { void Set(int v); int Get() const; };
+template <typename T, int N>
+void Blob<T, N>::Set(int v)
+{
+    (void)v;
+}
+template <typename T, int N>
+int Blob<T, N>::Get() const
+{
+    return N;
+}
