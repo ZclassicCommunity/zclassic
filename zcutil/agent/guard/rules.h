@@ -17,6 +17,7 @@
 #define R_CI "guard.hosted_ci"
 #define R_VENDOR "guard.vendor_edit"
 #define R_SEAL "guard.consensus_seal" /* a warning, never a refusal */
+#define R_SELF "guard.self_protect"   /* a warning: an edit of the guard or its hook entry */
 #define R_COMPLEX "guard.too_complex" /* a cap was hit: the call cannot be checked */
 
 /* Each returns the rule id the call breaks, or NULL when the call is allowed. */

@@ -107,9 +107,9 @@ static const struct tcase cases[] = {
     B("ssh node1 'zclassic-cli z_sendmany a b'", R_SPEND),
     B("curl --user u:p --data-binary '{\"method\":\"z_sendmany\",\"params\":[]}' http://127.0.0.1:8232/", R_SPEND),
     B("curl -d '{\"jsonrpc\":\"1.0\",\"method\": \"dumpprivkey\"}' localhost:8232", R_SPEND),
-    B("zclassic-cli -regtest sendtoaddress t1abc 1", NULL),
-    B("zclassic-cli -regtest=1 z_sendmany a b", NULL),
-    B("zclassic-cli -regtest dumpprivkey t1abc", NULL),
+    B("zclassic-cli -regtest -datadir=/tmp/x sendtoaddress t1abc 1", NULL),
+    B("zclassic-cli -regtest=1 -datadir=/tmp/x z_sendmany a b", NULL),
+    B("zclassic-cli -regtest -datadir=/tmp/x dumpprivkey t1abc", NULL),
     B("C=\"zclassic-cli -regtest -datadir=/tmp/x\"; $C z_sendmany a b", NULL),
     B("C=zclassic-cli; $C z_sendmany a b", R_SPEND),
     B("zclassic-cli getinfo", NULL),
@@ -237,8 +237,263 @@ static const struct tcase cases[] = {
     P("Edit", "src/main.cpp", NULL),
     P("Edit", "src/zcash/Zcash.h", NULL),
     P("Edit", "src/c23/consensus/x.c", NULL),
-    P("Write", "zcutil/agent/guard/rules.c", NULL),
+    P("Write", "zcutil/agent/guard/rules.c", R_SELF),
     B("sed -n 1,20p src/pow.cpp", NULL),
+
+    /* an ancestor of a datadir: deleting, moving or recursively changing it reaches the datadir */
+    B("rm -rf ~", R_DATADIR),
+    B("rm -rf ~/", R_DATADIR),
+    B("rm -rf ~/*", R_DATADIR),
+    B("rm -rf ~/.*", R_DATADIR),
+    B("rm -rf /home/rhett", R_DATADIR),
+    B("rm -rf /home", R_DATADIR),
+    B("rm -rf /", R_DATADIR),
+    B("rm -rf /*", R_DATADIR),
+    B("rm -rf /home/*", R_DATADIR),
+    B("rm -rf $HOME", R_DATADIR),
+    B("rm -rf ${HOME}/", R_DATADIR),
+    B("rm -rf ~root", R_DATADIR),
+    B("rm -rf /root", R_DATADIR),
+    B("rm -rf /Users/john", R_DATADIR),
+    B("rm -rf /Users", R_DATADIR),
+    B("rm -rf C:/Users/John", R_DATADIR),
+    B("rm -rf /c/Users/John", R_DATADIR),
+    B("rm -rf /mnt/c/Users/John", R_DATADIR),
+    B("rm -rf ~/AppData", R_DATADIR),
+    B("rm -rf ~/AppData/Roaming", R_DATADIR),
+    B("rm -rf ~/Library", R_DATADIR),
+    B("rm -rf ~/Library/Application\\ Support", R_DATADIR),
+    B("rm -rf '%APPDATA%'", R_DATADIR),
+    B("rm -rf $APPDATA", R_DATADIR),
+    B("rm -rf ~/..", R_DATADIR),
+    B("rm -rf ~/x/../..", R_DATADIR),
+    B("rmdir ~", R_DATADIR),
+    B("mv ~ /tmp/x", R_DATADIR),
+    B("mv /home/rhett /tmp/x", R_DATADIR),
+    B("mv -t /tmp ~", R_DATADIR),
+    B("chmod -R 000 ~", R_DATADIR),
+    B("chown -R root /home/rhett", R_DATADIR),
+    B("find ~ -delete", R_DATADIR),
+    B("find ~ -name '*.log' -delete", R_DATADIR),
+    B("find / -name wallet.dat -exec rm {} +", R_DATADIR),
+    B("find /home -type f -exec mv {} /tmp \\;", R_DATADIR),
+    B("cd /home && rm -rf rhett", R_DATADIR),
+    B("cd ~ && rm -rf .zclassic", R_DATADIR),
+    B("cd ~ && rm -rf .zcl*", R_DATADIR),
+    B("cd && rm -rf .*", R_DATADIR),
+    B("cd / && rm -rf home", R_DATADIR),
+    B("cd ~/.. && rm -rf rhett", R_DATADIR),
+    B("rm -rf ~/.zcl*", R_DATADIR),
+    B("rm -rf ~/.zclassi?", R_DATADIR),
+    B("rm -rf ~/.z[c]lassic", R_DATADIR),
+    B("rm -rf ~/.{zclassic,foo}", R_DATADIR),
+    B("rm -rf ~/.{foo,zclassic}/blocks", R_DATADIR),
+    B("rm -rf ~/.z*", R_DATADIR),
+    B("rm -rf /home/*/.zclassic", R_DATADIR),
+    B("rm -rf /home/rhett/.zcash-par*", R_DATADIR),
+    B("rm -rf ~/.zclassic*", R_DATADIR),
+    B("sh -c 'rm -rf ~'", R_DATADIR),
+    B("rm -rf ${HOME:?}/*", R_DATADIR),
+    B("rm -rf \"$HOME\"/*", R_DATADIR),
+    B("rm -rf ${HOME:?}/build", NULL),
+    B("rm -rf ~/build", NULL),
+    B("rm ~/notes.txt", NULL),
+    B("rm -rf ~/.cache/x", NULL),
+    B("rm ~/*.log", NULL),
+    B("rm -rf ~/foo*", NULL),
+    B("rm -rf ~/.zsh_history", NULL),
+    B("mv a ~/", NULL),
+    B("mv a ~", NULL),
+    B("mv ~/a ~/b", NULL),
+    B("rm -rf /tmp/x", NULL),
+    B("rm -rf /tmp/*", NULL),
+    B("rm -rf /home/rhett/projects/old", NULL),
+    B("rm -rf /usr/local/zc", NULL),
+    B("rm -rf build/*", NULL),
+    B("find . -name '*.o' -delete", NULL),
+    B("find /tmp -name '*.o' -delete", NULL),
+    B("find ~ -name x", NULL),
+    B("find ~ -name '*.c' -exec grep -l x {} +", NULL),
+    B("chmod 600 ~/key", NULL),
+    B("chmod -R u+rw build", NULL),
+    B("cd /tmp && rm -rf work", NULL),
+    S("Remove-Item -Recurse ~", R_DATADIR),
+    S("Remove-Item -Recurse -Force $env:USERPROFILE", R_DATADIR),
+    S("Remove-Item -Recurse $env:APPDATA", R_DATADIR),
+    S("Remove-Item -Recurse -Path:~", R_DATADIR),
+    S("rm -r -fo C:\\Users\\John", R_DATADIR),
+    S("Set-Location $env:APPDATA; Remove-Item -Recurse Zclassic", R_DATADIR),
+    S("cd ~; ri -r .zcl*", R_DATADIR),
+    S("Move-Item ~ C:\\old", R_DATADIR),
+    S("Remove-Item -Recurse $env:APPDATA\\Zcl*", R_DATADIR),
+    S("Remove-Item -Recurse ~\\build", NULL),
+    S("Move-Item a ~", NULL),
+    S("Remove-Item -Recurse C:\\Windows\\Temp\\x", NULL),
+
+    /* zclassicd parses argv until the first non-dash word, the last value wins */
+    B("zclassic-cli sendtoaddress t1 1 -regtest", R_SPEND),
+    B("zclassic-cli -datadir=/tmp/x z_sendmany x \"[]\" -regtest", R_SPEND),
+    B("zclassic-cli -regtest -regtest=0 -datadir=/tmp/x sendtoaddress t1 1", R_SPEND),
+    B("zclassic-cli -regtest -noregtest -datadir=/tmp/x sendtoaddress t1 1", NULL),
+    B("zclassic-cli -noregtest -datadir=/tmp/x sendtoaddress t1 1", R_SPEND),
+    B("zclassic-cli -regtest=abc -datadir=/tmp/x sendtoaddress t1 1", R_SPEND),
+    B("zclassic-cli --regtest -datadir=/tmp/x sendtoaddress t1 1", NULL),
+    B("zclassic-cli -regtest -datadir /tmp/x sendtoaddress t1 1", R_SPEND),
+    B("zclassicd -reindex foo -regtest", R_REINDEX),
+    B("zclassicd -reindex -datadir=/tmp/x -datadir=/home/rhett/.zclassic", R_REINDEX),
+    B("zclassicd -reindex -datadir=/home/rhett/.zclassic -datadir=/tmp/x", R_REINDEX),
+    B("zclassicd -reindex -datadir /tmp/x", R_REINDEX),
+    B("zclassicd -reindex -datadir= ", R_REINDEX),
+    B("zclassicd -reindex -datadir", R_REINDEX),
+    B("zclassicd -regtest -regtest=0 -reindex", R_REINDEX),
+    B("zclassicd -regtest=false -reindex", R_REINDEX),
+    B("zclassicd -reindex -datadir=/tmp/x -datadir=/tmp/y", NULL),
+    B("zclassicd -reindex --datadir=/tmp/x", NULL),
+    B("zclassicd -datadir=/tmp/x -datadir=/home/rhett/.zclassic -regtest", R_DATADIR),
+    B("zclassicd -datadir /tmp/x -regtest", R_DATADIR),
+    B("zclassicd -regtest -regtest=0 -datadir=/tmp/x", NULL),
+    B("zclassicd -regtest -noregtest -datadir=/tmp/x", NULL),
+
+    /* an RPC client in -regtest still goes where -rpcport, -rpcconnect or -conf point it */
+    B("zclassic-cli -regtest -rpcport=8023 -datadir=/tmp/x sendtoaddress t1 1", R_SPEND),
+    B("zclassic-cli -regtest -rpcport=8023 sendtoaddress t1 1", R_SPEND),
+    B("zclassic-cli -regtest -rpcport=8023 dumpprivkey t1", R_SPEND),
+    B("zclassic-cli -regtest -datadir=/tmp/x -rpcport=8232 dumpprivkey t1", R_SPEND),
+    B("zclassic-cli -regtest -datadir=/tmp/x -rpcconnect=10.0.0.5 dumpprivkey t1", R_SPEND),
+    B("zclassic-cli -regtest -conf=/home/rhett/.zclassic/zclassic.conf sendtoaddress t1 1", R_SPEND),
+    B("zclassic-cli -regtest -datadir=/tmp/x -conf=/home/rhett/zclassic.conf dumpprivkey t1", R_SPEND),
+    B("zclassic-cli -regtest sendtoaddress t1 1", R_SPEND),
+    B("zclassic-cli -regtest -datadir=/tmp/x -rpcport=18232 sendtoaddress t1 1", NULL),
+    B("zclassic-cli -regtest -datadir=/tmp/x -rpcconnect=127.0.0.1 sendtoaddress t1 1", NULL),
+    B("zclassic-cli -regtest -conf=/tmp/x/zclassic.conf sendtoaddress t1 1", NULL),
+
+    /* variables set earlier in the same command */
+    B("D=$HOME/.zclassic; zclassicd -datadir=$D -reindex", R_REINDEX),
+    B("D=$HOME/.zclassic; zclassicd -datadir=\"$D\" -reindex", R_REINDEX),
+    B("D=${HOME}/.zclassic && zclassicd -reindex -datadir=${D}", R_REINDEX),
+    B("zclassicd -datadir=$D -reindex", R_REINDEX),
+    B("zclassicd -datadir=$(echo ~/.zclassic) -reindex", R_REINDEX),
+    B("D=~/.zclassic; rm -rf $D", R_DATADIR),
+    B("x=.zclassic; rm -rf ~/$x", R_DATADIR),
+    B("export D=~/.zclassic && rm -rf $D/blocks", R_DATADIR),
+    B("declare D=~/.zclassic; mv $D /tmp/x", R_DATADIR),
+    B("A=~; B=$A/.zclassic; rm -rf $B", R_DATADIR),
+    B("D=~/.zclassic; echo x > $D/zclassic.conf", R_DATADIR),
+    B("D=~; rm -rf $D", R_DATADIR),
+    B("sh -c 'D=~/.zclassic; rm -rf $D'", R_DATADIR),
+    B("D=$(mktemp -d); zclassicd -datadir=$D -reindex", NULL),
+    B("D=/tmp/zt; zclassicd -datadir=$D -reindex", NULL),
+    B("D=/tmp/zt; rm -rf $D", NULL),
+    B("D=~/.zclassic; D=/tmp/zt; rm -rf $D", NULL),
+    B("zclassicd -datadir=$D -regtest", NULL),
+    B("zclassicd -datadir=${TMPDIR}/n1 -reindex", NULL),
+    B("C=zclassic-cli; $C -regtest -datadir=/tmp/x sendtoaddress t 1", NULL),
+    B("C=zclassic-cli; $C sendtoaddress t 1", R_SPEND),
+
+    /* a datadir piped, substituted or fed into a deleter */
+    B("echo ~/.zclassic | xargs rm -rf", R_DATADIR),
+    B("ls -d ~/.zclassic | xargs rm -rf", R_DATADIR),
+    B("find ~/.zclassic -name '*.dat' | xargs rm", R_DATADIR),
+    B("printf '%s\\n' ~/.zclassic/blocks | xargs -I{} mv {} /tmp", R_DATADIR),
+    B("xargs rm -rf <<< ~/.zclassic", R_DATADIR),
+    B("rm -rf $(echo ~/.zclassic)", R_DATADIR),
+    B("rm -rf `echo ~/.zclassic`", R_DATADIR),
+    B("rm -rf \"$(echo ~/.zclassic)\"", R_DATADIR),
+    B("mv $(ls -d ~/.zclassic) /tmp/x", R_DATADIR),
+    B("echo ~/.zclassic | wc -c", NULL),
+    B("ls ~/.zclassic | xargs echo", NULL),
+    B("cat ~/.zclassic/debug.log | grep x | xargs ls", NULL),
+    B("echo ~/.zclassic; echo x | xargs rm", NULL),
+    B("echo x | xargs rm -rf", NULL),
+    B("rm -rf $(mktemp -d)", NULL),
+    B("echo $(ls ~/.zclassic) > /tmp/list", NULL),
+    S("Get-ChildItem $env:APPDATA\\Zclassic | Remove-Item", R_DATADIR),
+    S("gci $env:APPDATA\\Zclassic -Recurse | ri", R_DATADIR),
+    S("Get-ChildItem $env:APPDATA\\Zclassic | Remove-Item -Recurse -Force", R_DATADIR),
+    S("Get-ChildItem $env:APPDATA\\Zclassic | ForEach-Object { Remove-Item $_ }", R_DATADIR),
+    S("Get-ChildItem $env:APPDATA\\Zclassic | Move-Item -Destination C:\\x", R_DATADIR),
+    S("Remove-Item -Recurse (Get-Item $env:APPDATA\\Zclassic)", R_DATADIR),
+    S("Remove-Item $(Get-Item $env:APPDATA\\Zclassic)", R_DATADIR),
+    S("Get-ChildItem $env:APPDATA\\Zclassic | Select-Object -First 1", NULL),
+    S("Get-ChildItem $env:APPDATA\\Zclassic; Remove-Item build", NULL),
+    S("Get-ChildItem $env:APPDATA\\Zclassic | Measure-Object", NULL),
+    S("Get-ChildItem build | Remove-Item", NULL),
+    S("Get-ChildItem $env:APPDATA\\Zclassic | Out-File build\\list.txt", NULL),
+
+    /* a cd target is a path prefix of relative write targets */
+    B("cd .github && echo x > workflows/ci.yml", R_CI),
+    B("cd .github/workflows && echo x > ci.yml", R_CI),
+    B("cd .github && cd workflows && touch ci.yml", R_CI),
+    B("cd zcutil/tools && echo > vendor/x.c", R_VENDOR),
+    B("cd zcutil/tools; cp a vendor/b.c", R_VENDOR),
+    B("cd zcutil && cd tools && sed -i s/a/b/ vendor/x.c", R_VENDOR),
+    B("cd .github && echo x > CODEOWNERS", NULL),
+    B("cd zcutil && echo x > tools/a.c", NULL),
+    B("cd /tmp && echo x > a", NULL),
+    B("cd .github && cd .. && echo x > workflows/ci.yml", NULL),
+    S("Set-Location .github; Set-Content workflows\\ci.yml x", R_CI),
+
+    /* more Python forms */
+    B("py -3 x", R_PYTHON),
+    B("py.exe -m pip install x", R_PYTHON),
+    B("pythonw x", R_PYTHON),
+    B("mv a b.py", R_PYTHON),
+    B("tee a.py < /dev/null", R_PYTHON),
+    B("echo x | tee gen.pyw", R_PYTHON),
+    B("cp a gen.pyi", R_PYTHON),
+    B("echo x > a.pyw", R_PYTHON),
+    P("Write", "tools/x.pyw", R_PYTHON),
+    P("Edit", "tools/x.pyi", R_PYTHON),
+    B("mv a.py b.txt", NULL),
+    B("git mv a.c b.c", NULL),
+    S("py -3 x", R_PYTHON),
+    S("Start-Process python -ArgumentList x", R_PYTHON),
+    S("Start-Process -FilePath python.exe", R_PYTHON),
+    S("start py", R_PYTHON),
+    S("Start-Process notepad", NULL),
+    S("Start-Process git -ArgumentList push,origin,master", R_PUSH),
+    S("Move-Item a b.py", R_PYTHON),
+
+    /* more git forms */
+    B("git push origin foo --delete", R_PUSH),
+    B("git push --delete origin foo", R_PUSH),
+    B("git push -d origin foo", R_PUSH),
+    B("git push origin 'refs/heads/*:refs/heads/*'", R_PUSH),
+    B("git push origin '+refs/heads/*:refs/heads/*'", R_PUSH),
+    B("git send-pack origin master", R_PUSH),
+    B("git config remote.origin.push +refs/heads/*:refs/heads/*", R_PUSH),
+    B("git config remote.origin.mirror true", R_PUSH),
+    B("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=x git commit -m m", R_IDENT),
+    B("GIT_CONFIG_PARAMETERS=\"'user.name=x'\" git commit -m m", R_IDENT),
+    B("EMAIL=x git commit -m m", R_IDENT),
+    B("export EMAIL=x@y.z", R_IDENT),
+    B("git config alias.x \"!git config user.name x\"", R_IDENT),
+    S("$env:EMAIL = 'x@y.z'", R_IDENT),
+    B("git config alias.st status", NULL),
+    B("git config remote.origin.url git@host:r.git", NULL),
+    B("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/x git status", NULL),
+    B("git push --set-upstream origin factory/u12", NULL),
+    B("git push origin factory/u12 --force-if-includes", R_PUSH),
+
+    /* the guard protects itself: a warning (ask), and a refusal still wins over it */
+    B("rm zcutil/bin/zcl-agent-guard", R_SELF),
+    B("rm zcutil/bin/zcl-agent-guard.exe", R_SELF),
+    B("mv zcutil/bin/zcl-agent-guard /tmp/x", R_SELF),
+    B("rm -rf zcutil/agent/guard", R_SELF),
+    B("echo x > .claude/settings.local.json", R_SELF),
+    B("sed -i s/a/b/ .claude/settings.json", R_SELF),
+    B("rm zcutil/bin/zcl-agent-guard; rm -rf ~/.zclassic", R_DATADIR),
+    B("rm zcutil/bin/zcl-agent-guard && python3 x", R_PYTHON),
+    P("Edit", ".claude/settings.json", R_SELF),
+    P("Write", ".claude/settings.local.json", R_SELF),
+    P("Edit", "zcutil/agent/guard/zcl-agent-guard.c", R_SELF),
+    P("Write", "zcutil/agent/guard/gen.py", R_PYTHON),
+    P("Edit", "zcutil/bin/zcl-agent-guard", R_SELF),
+    P("Edit", ".claude/skills/x/SKILL.md", NULL),
+    B("cat .claude/settings.json", NULL),
+    B("ls zcutil/agent/guard", NULL),
+    B("make -C zcutil/agent/guard check", NULL),
+    S("Remove-Item zcutil\\bin\\zcl-agent-guard.exe", R_SELF),
 
     /* ordinary work stays allowed */
     B("make -C zcutil", NULL),
@@ -310,7 +565,7 @@ static const struct tcase cases[] = {
     /* the -regtest hint counts only a -regtest word, not a comment or a path */
     B("C=zclassic-cli; $C dumpwallet /tmp/w # -regtest", R_SPEND),
     B("C=zclassic-cli; ls /tmp/-regtest; $C sendtoaddress t 1", R_SPEND),
-    B("C=\"zclassic-cli -regtest\"; $C sendtoaddress t 1", NULL),
+    B("C=\"zclassic-cli -regtest -datadir=/tmp/x\"; $C sendtoaddress t 1", NULL),
     /* gh api endpoints that dispatch or rerun a workflow */
     B("gh api repos/a/b/actions/runs/1/rerun -X POST", R_CI),
     B("gh api repos/a/b/actions/runs/1/rerun-failed-jobs -X POST", R_CI),
@@ -327,7 +582,7 @@ static const struct tcase cases[] = {
     S("gh workflow run ci.yml", R_CI),
     S("zclassic-cli sendtoaddress t 1", R_SPEND),
     S("& 'C:\\bin\\zclassic-cli.exe' dumpwallet w", R_SPEND),
-    S("zclassic-cli -regtest sendtoaddress t 1", NULL),
+    S("zclassic-cli -regtest -datadir=/tmp/x sendtoaddress t 1", NULL),
     S("zclassicd -reindex", R_REINDEX),
     S("zclassicd", R_DATADIR),
     S("Remove-Item -Recurse $env:APPDATA\\ZClassic", R_DATADIR),
@@ -415,9 +670,45 @@ static int cap_cases(void)
     return bad;
 }
 
+/* The guard's sealed list is its own copy of zcutil/consensus.seal (U15). When the seal file is
+ * present, every path it lists must warn, so the two cannot drift apart unnoticed. The seal
+ * lines are "path<TAB>blob-sha1". Skipped (and said so) when the file is absent. */
+static int seal_drift(void)
+{
+    static const char *const where[] = {"../../consensus.seal", "zcutil/consensus.seal"};
+    FILE *f = NULL;
+    char line[1024];
+    int bad = 0;
+    long n = 0;
+    for (size_t i = 0; !f && i < sizeof where / sizeof where[0]; i++) f = fopen(where[i], "r");
+    if (!f) {
+        printf("agent-guard selftest: no consensus.seal here, seal drift check skipped\n");
+        return 0;
+    }
+    while (fgets(line, sizeof line, f)) {
+        char *tab = strchr(line, '\t');
+        const char *got;
+        if (line[0] == '#' || !tab) continue;
+        *tab = '\0';
+        n++;
+        got = ag_eval_path("Edit", line, NULL);
+        if (!got || strcmp(got, R_SEAL) != 0) {
+            printf("FAIL seal drift: %s is sealed but the guard gives %s\n", line,
+                   got ? got : "ALLOW");
+            bad++;
+        }
+    }
+    fclose(f);
+    if (n == 0) {
+        printf("FAIL seal drift: consensus.seal lists no paths\n");
+        bad++;
+    }
+    return bad;
+}
+
 int main(void)
 {
-    int bad = cap_cases();
+    int bad = cap_cases() + seal_drift();
     size_t n = sizeof cases / sizeof cases[0];
     size_t allow = 0, refuse = 0, warn = 0;
     for (size_t i = 0; i < n; i++) {

@@ -11,35 +11,44 @@
  * Precision matters as much as coverage, because a false refusal stalls the worker and a guard
  * that blocks everyday commands gets switched off.
  *
- * Shell scanning: the command is split into segments at ; && || | & and newlines (also $( ) ( )
- * and backticks outside quotes). Quoted text is data, except the argument of ssh, eval and
- * sh/bash/dash/zsh -c, the contents of $( ) and backticks inside double quotes, and a heredoc
- * body that feeds a shell or ssh, which are scanned again as commands.
+ * Shell scanning: the command is split into segments at ; && || | & and newlines (also ( ) outside
+ * quotes). Quoted text is data, except the argument of ssh, eval and sh/bash/dash/zsh -c, the
+ * contents of $( ) and backticks (quoted or not), and a heredoc body that feeds a shell or ssh,
+ * which are scanned again as commands. A $( ) or backtick stays in its word too, so an operand
+ * that substitutes a datadir is a datadir operand.
  *
  * Writes: only the written operand counts (cp/rsync/scp/install/ln: the destination; sed -i: the
  * files, not the script; dd: of=; sqlq/sqlite3: only with a SQL write verb; curl/wget: the
- * output file). A cd into a datadir is tracked along the command chain. Spend and key-export
- * names count only in the method position (first word after the RPC client, or a JSON-RPC
- * "method" value in a request body).
+ * output file). A deleter, a mover (its sources), a recursive chmod/chown and find with -delete or
+ * -exec <deleter> also refuse an ancestor of a datadir (/, ~, $HOME, /home, /home/<u>, %APPDATA%,
+ * C:\Users\<u> ...) and a glob or brace that could reach one. A cd is tracked as a path prefix
+ * along the command chain, and a NAME=value assignment earlier in the command is expanded when
+ * the name is used. A datadir piped into xargs <writer> (or a PowerShell deleter with no path of
+ * its own) is a datadir write. Spend and key-export names count only in the method position
+ * (first word after the RPC client, or a JSON-RPC "method" value in a request body).
+ *
+ * Options of zclassicd and zclassic-cli are read the way ParseParameters reads them: up to the
+ * first word that is not an option, the last value wins, -noX is X=0 (see parse_opts).
  *
  * Known limits (not closed, one per line):
  *   alias g=git; g push                  aliases and shell functions are not expanded
- *   D=~/.zclassic; rm $D/x               variable values are not tracked
- *   -datadir=$D                          a variable datadir is assumed to be a test directory
- *   $C sendmany (C=zclassic-cli ...)     a variable client counts as regtest when a -regtest word appears
- *                                        anywhere in the command
+ *   rm -r "$(echo ~)"                    a substitution that computes an ancestor is not run
+ *   NAME=$(...) other than mktemp        the substitution's value is not known; -datadir=$NAME with
+ *                                        -reindex refuses, with -regtest it is allowed
  *   xargs / find -exec git push          only xargs as a wrapper; find -exec only for writers
  *   sh script.sh / bash x.sh             the script file's content is not read
  *   rsync --remove-source-files <dd> x   a datadir source deleted by rsync is a read
+ *   rsync --delete src/ <ancestor>/      the destination of an rsync is not an ancestor check
  *   tar czf <dd>/x.tgz ...               tar create into a datadir is not checked (extract is)
  *   curl -d @file with a spend method    request bodies in files are not read
  *   sqlq db < file.sql                   SQL read from a file is not checked for write verbs
- *   python via a symlink or a renamed    only the command word and .py names are recognised
- *     binary
+ *   python via a symlink or a renamed    only the command word and .py/.pyw/.pyi names are
+ *     binary                             recognised
  *   git commit --reset-author            not a refused identity form
  *   zclassicd -regtest (no -datadir)     allowed: the node's own regtest default is not parsed
- *   git push remote <branch-alias>       only the literal name master is recognised
- *   backslash paths inside Bash          Git Bash consumes the backslash before the guard sees it */
+ *   git push remote <branch-alias>       only the literal name master (or a wildcard) is recognised
+ *   backslash paths inside Bash          Git Bash consumes the backslash before the guard sees it
+ *   PowerShell variables ($d = ...)      not tracked (Bash NAME=value is) */
 
 #include <ctype.h>
 #include <stdbool.h>
@@ -66,10 +75,24 @@ static bool g_complex;
 /* Name of the variable of a `for VAR in <datadir>` loop seen earlier in the command, else "". */
 static char g_loopvar[48];
 
+/* `NAME=value` assignments seen earlier in the same command (Bash tool calls share no shell
+ * state, so a variable can only come from the command itself). Values are stored expanded. */
+#define MAX_VARS 64
+#define VAR_VAL 512
+static struct {
+    char name[40];
+    char val[VAR_VAL];
+} g_vars[MAX_VARS];
+static int g_nvars;
+
+#define MAX_HS 8
+#define CWD_CAP 512
+
 struct gseg {
     int w0, nw;
     size_t hd_off, hd_len;
     bool hd_has;
+    bool pipe_in; /* this segment reads the pipe of the one before it */
 };
 
 struct gctx {
@@ -81,6 +104,9 @@ struct gctx {
     char *redir[MAX_REDIR];
     int redir_seg[MAX_REDIR];
     int nredir;
+    char *hstr[MAX_HS]; /* here-string words (<<< word) */
+    int hstr_seg[MAX_HS];
+    int nhs;
     struct gseg segs[MAX_SEGS];
     int nsegs;
     struct {
@@ -89,14 +115,14 @@ struct gctx {
     int nsubs;
 };
 
-enum { P_NONE, P_OUT, P_IN, P_HEREDOC };
+enum { P_NONE, P_OUT, P_IN, P_HEREDOC, P_HSTR };
 
 struct tok {
     struct gctx *c;
     const char *s;
     size_t len, i, wstart;
-    bool in_word, digits;
-    int pend, cw0, cr0, nhd;
+    bool in_word, digits, pipe_pending;
+    int pend, cw0, cr0, ch0, nhd;
     struct {
         int seg;
         char delim[64];
@@ -241,6 +267,13 @@ static void tk_route_word(struct tok *t, char *wd)
         } else {
             g_complex = true;
         }
+    } else if (t->pend == P_HSTR) {
+        if (c->nhs < MAX_HS) {
+            c->hstr_seg[c->nhs] = c->nsegs;
+            c->hstr[c->nhs++] = wd;
+        } else {
+            g_complex = true;
+        }
     } else if (t->pend == P_HEREDOC) {
         if (t->nhd < MAX_HD) {
             t->hd[t->nhd].seg = c->nsegs;
@@ -266,14 +299,17 @@ static void tk_end_seg(struct tok *t)
     struct gctx *c = t->c;
     tk_end_word(t);
     t->pend = P_NONE;
-    if ((c->nwords > t->cw0 || c->nredir > t->cr0) && c->nsegs >= MAX_SEGS) {
+    if ((c->nwords > t->cw0 || c->nredir > t->cr0 || c->nhs > t->ch0) && c->nsegs >= MAX_SEGS) {
         g_complex = true;
-    } else if (c->nwords > t->cw0 || c->nredir > t->cr0) {
+    } else if (c->nwords > t->cw0 || c->nredir > t->cr0 || c->nhs > t->ch0) {
         struct gseg *g = &c->segs[c->nsegs++];
         memset(g, 0, sizeof *g);
         g->w0 = t->cw0;
         g->nw = c->nwords - t->cw0;
+        g->pipe_in = t->pipe_pending;
+        t->pipe_pending = false;
     }
+    t->ch0 = c->nhs;
     t->cw0 = c->nwords;
     t->cr0 = c->nredir;
 }
@@ -430,7 +466,7 @@ static size_t tk_redir_tail(const char *s, size_t len, size_t j, char ch,
         j++;
         if (j < len && s[j] == '<') {
             j++;
-            *kind = P_IN;
+            *kind = P_HSTR;
         } else {
             if (j < len && s[j] == '-') j++;
             *kind = P_HEREDOC;
@@ -462,10 +498,21 @@ static bool tk_step_redir(struct tok *t)
     return true;
 }
 
+/* An unquoted $( ) or backtick substitution: its text stays in the word (so a datadir it names
+ * is seen by the operand checks) and its body is scanned as a command line. */
+static bool tk_step_subst(struct tok *t)
+{
+    size_t i = t->i;
+    if (!tk_dq_subst(t, &i)) return false;
+    t->i = i;
+    return true;
+}
+
 static bool tk_step_sep(struct tok *t)
 {
     char ch = t->s[t->i];
     char nx = t->i + 1 < t->len ? t->s[t->i + 1] : '\0';
+    if ((ch == '`' || (ch == '$' && nx == '(')) && tk_step_subst(t)) return true;
     switch (ch) {
     case '\n':
         tk_newline(t);
@@ -476,6 +523,7 @@ static bool tk_step_sep(struct tok *t)
         return true;
     case '|': case '&':
         tk_end_seg(t);
+        t->pipe_pending = ch == '|' && nx != '|';
         t->i += (nx == ch || (ch == '|' && nx == '&')) ? 2u : 1u;
         return true;
     case '$':
@@ -520,13 +568,34 @@ static bool is_assign(const char *w)
     return *w == '=';
 }
 
+static bool is_identity_key(const char *k);
+
+/* True when s (any case) contains an identity config key: user.name, user.email, author.*,
+ * committer.* (GIT_CONFIG_PARAMETERS carries "'user.name=x'" style text). */
+static bool mentions_identity_key(const char *s)
+{
+    static const char *const keys[] = {"user.name", "user.email", "author.", "committer."};
+    for (size_t k = 0; k < sizeof keys / sizeof keys[0]; k++) {
+        size_t m = strlen(keys[k]);
+        for (size_t i = 0; s[i]; i++)
+            if (strncasecmp(s + i, keys[k], m) == 0) return true;
+    }
+    return false;
+}
+
 static bool is_identity_env(const char *w)
 {
     static const char *const names[] = {
         "GIT_AUTHOR_NAME=", "GIT_AUTHOR_EMAIL=", "GIT_COMMITTER_NAME=",
-        "GIT_COMMITTER_EMAIL="};
+        "GIT_COMMITTER_EMAIL=", "EMAIL="};
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
         if (strncmp(w, names[i], strlen(names[i])) == 0) return true;
+    if (strncmp(w, "GIT_CONFIG_PARAMETERS=", 22) == 0) return mentions_identity_key(w + 22);
+    if (strncmp(w, "GIT_CONFIG_KEY_", 15) == 0) {
+        const char *p = w + 15;
+        while (isdigit((unsigned char)*p)) p++;
+        return *p == '=' && p > w + 15 && is_identity_key(p + 1);
+    }
     return false;
 }
 
@@ -649,7 +718,7 @@ static int find_cmd(char **w, int n, struct pinfo *pi)
 
 /* ---- path predicates --------------------------------------------- */
 
-#define PATH_SEPS "/\\=:, \t\n\"'"
+#define PATH_SEPS "/\\=:, \t\n\"'()`;|&<>"
 
 static bool is_psep(char ch)
 {
@@ -811,15 +880,408 @@ static bool is_sealed_path(const char *w)
     return false;
 }
 
+/* ---- py names, guard files, globs, braces, folded paths ------------------ */
+
+static bool ends_ci(const char *s, const char *suffix)
+{
+    size_t n = strlen(s), m = strlen(suffix);
+    return n >= m && strcasecmp(s + n - m, suffix) == 0;
+}
+
+/* A Python source name: .py, .pyw (windowed scripts) or .pyi (stubs). */
+static bool is_py_name(const char *w)
+{
+    return ends_ci(w, ".py") || ends_ci(w, ".pyw") || ends_ci(w, ".pyi");
+}
+
+/* The guard's own files: the hook settings, the hook entry and binaries, and its sources. A
+ * change there can switch the guard off without a notice, so it asks first. */
+static bool is_guard_path(const char *w)
+{
+    static const char *const files[] = {
+        ".claude/settings.json", ".claude/settings.local.json", "zcutil/bin/zcl-agent-guard",
+        "zcutil/bin/zcl-agent-guard.exe", "zcutil/bin/zcl-agent-guard-selftest",
+        "zcutil/bin/zcl-agent-guard-selftest.exe"};
+    if (path_has(w, "zcutil/agent/guard", true)) return true;
+    for (size_t i = 0; i < sizeof files / sizeof files[0]; i++)
+        if (path_has(w, files[i], false)) return true;
+    return false;
+}
+
+static bool has_glob(const char *s)
+{
+    return strpbrk(s, "*?[") != NULL;
+}
+
+static int lc(int ch)
+{
+    return tolower((unsigned char)ch);
+}
+
+/* Shell glob match of pattern p against s, case-insensitive. '*' also matches a leading dot
+ * (dotglob and zsh both exist), so the match errs toward refusing. A very long pattern matches. */
+static bool glob_match_r(const char *p, const char *s)
+{
+    if (!*p) return !*s;
+    if (*p == '*') {
+        while (*p == '*') p++;
+        if (!*p) return true;
+        for (;; s++) {
+            if (glob_match_r(p, s)) return true;
+            if (!*s) return false;
+        }
+    }
+    if (!*s) return false;
+    if (*p == '?') return glob_match_r(p + 1, s + 1);
+    if (*p == '[') {
+        const char *q = p + 1;
+        bool neg = false, ok = false, first = true;
+        if (*q == '!' || *q == '^') {
+            neg = true;
+            q++;
+        }
+        while (*q && (*q != ']' || first)) {
+            first = false;
+            if (q[1] == '-' && q[2] && q[2] != ']') {
+                if (lc(*s) >= lc(q[0]) && lc(*s) <= lc(q[2])) ok = true;
+                q += 3;
+            } else {
+                if (lc(*s) == lc(*q)) ok = true;
+                q++;
+            }
+        }
+        if (!*q) return lc(*s) == '[' && glob_match_r(p + 1, s + 1); /* unclosed: literal */
+        return ok != neg && glob_match_r(q + 1, s + 1);
+    }
+    return lc(*p) == lc(*s) && glob_match_r(p + 1, s + 1);
+}
+
+static bool glob_match(const char *p, const char *s)
+{
+    return strlen(p) > 64 || glob_match_r(p, s);
+}
+
+#define MAX_ALTS 64
+
+struct alts {
+    char *v[MAX_ALTS];
+    int n;
+};
+
+static void alts_free(struct alts *a)
+{
+    for (int i = 0; i < a->n; i++) free(a->v[i]);
+    a->n = 0;
+}
+
+static void alts_add(struct alts *a, const char *s)
+{
+    char *d;
+    if (a->n >= MAX_ALTS) {
+        g_complex = true;
+        return;
+    }
+    d = strdup(s); // raw-alloc-ok:build-tool
+    if (!d) {
+        g_complex = true;
+        return;
+    }
+    a->v[a->n++] = d;
+}
+
+/* Brace expansion of w into out: a {a,b} list gives each alternative, a {1..3} sequence becomes
+ * a '*'. A ${...} is not a brace expansion. At most MAX_ALTS results, beyond that too complex. */
+static void brace_one(const char *w, const char *open, const char *close, struct alts *out,
+                      int depth);
+
+static void brace_expand(const char *w, struct alts *out, int depth)
+{
+    const char *open = NULL, *close = NULL;
+    int d = 0;
+    for (const char *p = w; *p; p++)
+        if (*p == '{' && (p == w || p[-1] != '$')) {
+            open = p;
+            break;
+        }
+    if (open && depth < 6) {
+        for (const char *p = open; *p; p++) {
+            if (*p == '{') d++;
+            else if (*p == '}' && --d == 0) {
+                close = p;
+                break;
+            }
+        }
+    }
+    if (open && close) brace_one(w, open, close, out, depth);
+    else alts_add(out, w);
+}
+
+static void brace_one(const char *w, const char *open, const char *close, struct alts *out,
+                      int depth)
+{
+    const char *seg = open + 1, *p;
+    bool listed = false;
+    int nest = 0;
+    size_t pre = (size_t)(open - w), post = strlen(close + 1);
+    for (p = seg; p < close; p++) {
+        if (*p == '{') nest++;
+        else if (*p == '}') nest--;
+        else if (*p == ',' && nest == 0) listed = true;
+    }
+    nest = 0;
+    for (p = seg;; p++) {
+        if (p == close || (*p == ',' && nest == 0 && listed)) {
+            size_t mid = listed ? (size_t)(p - seg) : 1;
+            char *t = malloc(pre + mid + post + 1); // raw-alloc-ok:build-tool
+            if (!t) {
+                g_complex = true;
+                return;
+            }
+            memcpy(t, w, pre);
+            if (listed) memcpy(t + pre, seg, mid);
+            else t[pre] = '*';
+            memcpy(t + pre + mid, close + 1, post + 1);
+            brace_expand(t, out, depth + 1);
+            free(t);
+            if (p == close) return;
+            seg = p + 1;
+        } else if (*p == '{') {
+            nest++;
+        } else if (*p == '}') {
+            nest--;
+        }
+    }
+}
+
+/* A path folded to components: backslashes as '/', lower case, '.' dropped, '..' applied. The
+ * root is '/', a drive (dropped), or '~' for the home directory in any spelling ($HOME,
+ * %USERPROFILE%, $env:USERPROFILE, ~user); the APPDATA forms fold to ~/appdata/roaming. '@up'
+ * is the unknown directory above a home. */
+#define MAX_COMPS 48
+
+struct fpath {
+    char *buf;
+    const char *c[MAX_COMPS];
+    int n;
+    bool rooted;
+};
+
+static bool tok_in(const char *c, const char *const *list, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        if (strcmp(c, list[i]) == 0) return true;
+    return false;
+}
+#define TOK_IN(c, arr) tok_in((c), (arr), sizeof(arr) / sizeof((arr)[0]))
+
+static bool fp_push(struct fpath *f, const char *c)
+{
+    if (f->n >= MAX_COMPS) {
+        g_complex = true;
+        return false;
+    }
+    f->c[f->n++] = c;
+    return true;
+}
+
+static void fp_pop(struct fpath *f)
+{
+    if (f->n > 0 && strcmp(f->c[f->n - 1], "..") != 0) {
+        if (f->n == 1 && strcmp(f->c[0], "~") == 0) f->c[0] = "@up";
+        else f->n--;
+    } else if (!f->rooted) {
+        fp_push(f, "..");
+    }
+}
+
+static bool fp_first(struct fpath *f, const char *c0)
+{
+    static const char *const homes[] = {"$home", "${home}", "$userprofile", "${userprofile}",
+        "%userprofile%", "$env:userprofile", "${env:userprofile}", "$env:home", "${env:home}",
+        "$homepath", "%homepath%"};
+    static const char *const apps[] = {"$appdata", "${appdata}", "%appdata%", "$env:appdata",
+        "${env:appdata}"};
+    static const char *const locals[] = {"$localappdata", "${localappdata}", "%localappdata%",
+        "$env:localappdata", "${env:localappdata}"};
+    char norm[48];
+    const char *c = c0;
+    if (c0[0] == '$' && c0[1] == '{') { /* ${HOME:?}, ${HOME:-x}, ${HOME%/}: the variable itself */
+        size_t k = 2, o = 2;
+        norm[0] = '$';
+        norm[1] = '{';
+        while (c0[k] && o + 2 < sizeof norm && !strchr("-+=?#%/}", c0[k]) &&
+               !(c0[k] == ':' && c0[k + 1] && strchr("-+=?", c0[k + 1])))
+            norm[o++] = c0[k++];
+        norm[o++] = '}';
+        norm[o] = '\0';
+        c = norm;
+    }
+    if (c0[0] == '~' || TOK_IN(c, homes)) {
+        f->rooted = true;
+        return fp_push(f, "~");
+    }
+    if (TOK_IN(c, apps) || TOK_IN(c, locals)) {
+        f->rooted = true;
+        return fp_push(f, "~") && fp_push(f, "appdata") &&
+               fp_push(f, TOK_IN(c, apps) ? "roaming" : "local");
+    }
+    if (isalpha((unsigned char)c0[0]) && c0[1] == ':' && !c0[2]) { /* a drive */
+        f->rooted = true;
+        return true;
+    }
+    return fp_push(f, c0);
+}
+
+static void fp_shift(struct fpath *f, int k)
+{
+    memmove(f->c, f->c + k, (size_t)(f->n - k) * sizeof f->c[0]);
+    f->n -= k;
+}
+
+static bool fold_path(const char *w, struct fpath *f)
+{
+    size_t n = strlen(w);
+    char *p;
+    bool first = true;
+    memset(f, 0, sizeof *f);
+    f->buf = malloc(n + 1); // raw-alloc-ok:build-tool
+    if (!f->buf) {
+        g_complex = true;
+        return false;
+    }
+    for (size_t i = 0; i <= n; i++) f->buf[i] = w[i] == '\\' ? '/' : (char)lc(w[i]);
+    p = f->buf;
+    f->rooted = *p == '/';
+    while (*p) {
+        char *e;
+        while (*p == '/') p++;
+        if (!*p) break;
+        e = p;
+        while (*e && *e != '/') e++;
+        if (*e) *e++ = '\0';
+        if (strcmp(p, ".") == 0) {
+            /* dropped */
+        } else if (strcmp(p, "..") == 0) {
+            fp_pop(f);
+        } else if (first) {
+            if (!fp_first(f, p)) return false;
+        } else if (!fp_push(f, p)) {
+            return false;
+        }
+        first = false;
+        p = e;
+    }
+    /* WSL /mnt/c/Users/x and Git Bash /c/Users/x name the same place as C:/Users/x. */
+    if (f->rooted && f->n >= 2 && strcmp(f->c[0], "mnt") == 0 && strlen(f->c[1]) == 1)
+        fp_shift(f, 2);
+    else if (f->rooted && f->n >= 2 && strlen(f->c[0]) == 1 && strcmp(f->c[1], "users") == 0)
+        fp_shift(f, 1);
+    return true;
+}
+
+static void fold_free(struct fpath *f)
+{
+    free(f->buf);
+    f->buf = NULL;
+}
+
+/* Render a folded path back to text (for the tracked working directory); false when too long. */
+static bool fold_render(const struct fpath *f, char *out, size_t cap)
+{
+    size_t o = 0;
+    if (f->rooted && !(f->n > 0 && strcmp(f->c[0], "~") == 0)) out[o++] = '/';
+    for (int i = 0; i < f->n; i++) {
+        size_t m = strlen(f->c[i]);
+        if (o + m + 2 > cap) {
+            g_complex = true;
+            out[0] = '\0';
+            return false;
+        }
+        if (i > 0) out[o++] = '/';
+        memcpy(out + o, f->c[i], m);
+        o += m;
+    }
+    if (o == 0) out[o++] = f->rooted ? '/' : '.';
+    out[o] = '\0';
+    return true;
+}
+
+/* The node-datadir places, as component templates: <root> + <tail>. A root is ~, /home/<user>,
+ * /Users/<user> or /root; "@u" is any one component. A path whose components match a prefix of
+ * one of these is an ancestor of a datadir (or a glob that could name one), and a path that
+ * matches the whole template and goes on is inside it. */
+static const char *const dd_roots[4][3] = {
+    {"~"}, {"home", "@u"}, {"users", "@u"}, {"root"}};
+static const char *const dd_tails[6][3] = {
+    {".zclassic"}, {".zcash-params"}, {"appdata", "roaming", "zclassic"},
+    {"appdata", "roaming", "zcashparams"}, {"library", "application support", "zclassic"},
+    {"library", "application support", "zcashparams"}};
+
+static int arr_len(const char *const *a)
+{
+    int n = 0;
+    while (n < 3 && a[n]) n++;
+    return n;
+}
+
+static bool pm_comp(const char *pc, const char *tc, int pos)
+{
+    if (strcmp(tc, "@u") == 0) return true;
+    if (strcmp(pc, "@up") == 0)
+        return pos == 0 && (strcmp(tc, "home") == 0 || strcmp(tc, "users") == 0 ||
+                            strcmp(tc, "root") == 0);
+    return has_glob(pc) ? glob_match(pc, tc) : strcmp(pc, tc) == 0;
+}
+
+/* anc: also count a path that stops short of a datadir (an ancestor, or a glob that could
+ * match the way to one). Otherwise only a path at or inside a datadir place counts. */
+static bool path_hits(const struct fpath *f, bool anc)
+{
+    if (!f->rooted) return false;
+    for (int r = 0; r < 4; r++)
+        for (int t = 0; t < 6; t++) {
+            int rl = arr_len(dd_roots[r]), tl = arr_len(dd_tails[t]), total = rl + tl, m;
+            bool ok = true;
+            if (f->n < total && !anc) continue;
+            m = f->n < total ? f->n : total;
+            for (int i = 0; ok && i < m; i++)
+                ok = pm_comp(f->c[i], i < rl ? dd_roots[r][i] : dd_tails[t][i - rl], i);
+            if (ok) return true;
+        }
+    return false;
+}
+
+/* A value that still starts with a variable or substitution: its value is not known. */
+static bool is_unresolved(const char *v)
+{
+    return v[0] == '$' || v[0] == '`';
+}
+
+/* $TMPDIR, ${TMP}, $TEMP...: the variable names a temp location. */
+static bool starts_tmpvar(const char *v)
+{
+    static const char *const vars[] = {"TMPDIR", "TMP", "TEMP", "TEMPDIR", "RUNNER_TEMP"};
+    const char *p = v + 1;
+    if (v[0] != '$') return false;
+    if (*p == '{') p++;
+    for (size_t i = 0; i < sizeof vars / sizeof vars[0]; i++) {
+        size_t n = strlen(vars[i]);
+        if (strncasecmp(p, vars[i], n) == 0 && !isalnum((unsigned char)p[n]) && p[n] != '_')
+            return true;
+    }
+    return false;
+}
+
 /* A -datadir value that is a throwaway test directory: under a temp location, a test*, tmp*
- * or mktemp name, or a shell expansion (its value is not tracked). Never a node datadir. */
+ * or mktemp name. An unresolved variable is not one (it may hold a node datadir), and neither
+ * is an empty value. Never a node datadir. */
 static bool is_test_dir(const char *v)
 {
     const char *p = v;
     size_t n = 0;
-    if (mentions_datadir(v)) return false;
-    if (!v[0]) return true; /* -datadir=$(mktemp -d): the tokenizer split the substitution off */
-    if (v[0] == '$' || v[0] == '`') return true;
+    if (mentions_datadir(v) || !v[0]) return false;
+    if (starts_tmpvar(v) || strncmp(v, "$(mktemp", 8) == 0 || strncmp(v, "`mktemp", 7) == 0)
+        return true;
     while (next_comp(&p, &n)) {
         if (comp_starts_ci(p, n, "tmp") || comp_starts_ci(p, n, "temp") ||
             (comp_starts_ci(p, n, "test") && !comp_starts_ci(p, n, "testnet")) ||
@@ -835,6 +1297,7 @@ static const char *path_rule(const char *w)
     if (mentions_datadir(w)) return R_DATADIR;
     if (is_workflow_path(w)) return R_CI;
     if (is_vendor_path(w)) return R_VENDOR;
+    if (is_guard_path(w)) return R_SELF;
     return NULL;
 }
 
@@ -849,29 +1312,26 @@ struct cmdv {
     char **w;
     int nw;
     int depth;
-    bool in_dd; /* an earlier cd in this chain entered a datadir */
+    bool in_dd;      /* the tracked working directory is inside a datadir */
+    const char *cwd; /* the tracked working directory, "" when unknown */
 };
 
 static bool is_python_cmd(const char *cmd)
 {
     const char *rest = NULL;
-    if (strcmp(cmd, "pipx") == 0) return true;
+    if (strcmp(cmd, "pipx") == 0 || strcmp(cmd, "py") == 0 || strcmp(cmd, "pyw") == 0)
+        return true; /* py: the Windows launcher */
     if (strncmp(cmd, "python", 6) == 0) rest = cmd + 6;
     else if (strncmp(cmd, "pip", 3) == 0) rest = cmd + 3;
     if (!rest) return false;
+    if (strcmp(rest, "w") == 0) return true; /* pythonw */
     return strspn(rest, "0123456789.") == strlen(rest);
-}
-
-static bool ends_with(const char *s, const char *suffix)
-{
-    size_t n = strlen(s), m = strlen(suffix);
-    return n > m && strcmp(s + n - m, suffix) == 0;
 }
 
 /* python, pipx, pip, uv run/pip/tool, and an executed *.py file. */
 static const char *check_python(const struct cmdv *v)
 {
-    if (is_python_cmd(v->cmd) || ends_with(v->cmd, ".py")) return R_PYTHON;
+    if (is_python_cmd(v->cmd) || is_py_name(v->cmd)) return R_PYTHON;
     if (strcmp(v->cmd, "uvx") == 0) return R_PYTHON;
     if (strcmp(v->cmd, "uv") == 0 && v->na > 0 &&
         (strcmp(v->a[0], "run") == 0 || strcmp(v->a[0], "pip") == 0 ||
@@ -927,6 +1387,28 @@ static bool config_sets_identity(char **a, int na)
     return unset || np > k + 1;
 }
 
+/* git config that writes a key with a side effect on identity or pushes: remote.<n>.push and
+ * remote.<n>.mirror set the refspec a bare push uses, and an alias whose text sets an identity
+ * key runs it later. Returns the rule id or NULL. */
+static const char *config_sets_hazard(char **a, int na)
+{
+    const char *pos[3];
+    int np = 0, k = 0;
+    bool unset = false;
+    char key[64];
+    size_t n;
+    if (!config_positionals(a, na, pos, &np, &unset) || np == 0) return NULL;
+    if (strcmp(pos[0], "set") == 0) k = 1;
+    if (np <= k + 1) return NULL; /* no value: a read or an unset */
+    n = strlen(pos[k]);
+    if (n >= sizeof key) return NULL;
+    for (size_t i = 0; i <= n; i++) key[i] = (char)tolower((unsigned char)pos[k][i]);
+    if (strncmp(key, "remote.", 7) == 0 && (ends_ci(key, ".push") || ends_ci(key, ".mirror")))
+        return R_PUSH;
+    if (strncmp(key, "alias.", 6) == 0 && mentions_identity_key(pos[k + 1])) return R_IDENT;
+    return NULL;
+}
+
 /* Index of the git subcommand after global options; -1 on a refusal-worthy
  * -c identity override (caller checks *bad). */
 static int git_subcommand(char **a, int na, bool *bad)
@@ -962,7 +1444,7 @@ static bool refspec_names_master(const char *r)
     dst = dst ? dst + 1 : r;
     if (dst[0] == '+') dst++;
     if (strncmp(dst, "refs/heads/", 11) == 0) dst += 11;
-    return strcmp(dst, "master") == 0;
+    return strcmp(dst, "master") == 0 || has_glob(dst); /* a wildcard refspec may name master */
 }
 
 static bool push_opt_takes_arg(const char *a)
@@ -981,7 +1463,9 @@ static const char *push_rule(char **a, int na)
     for (int i = 0; i < na; i++) {
         if (a[i][0] == '-' && a[i][1]) {
             if (opt_is(a[i], "--help", "-h") || opt_is(a[i], "--dry-run", "-n")) return NULL;
-            if (strncmp(a[i], "--force", 7) == 0 || short_group_has(a[i], 'f')) force = true;
+            if (strncmp(a[i], "--force", 7) == 0 || short_group_has(a[i], 'f') ||
+                strcmp(a[i], "--delete") == 0 || short_group_has(a[i], 'd'))
+                force = true; /* a force, or a branch delete */
             else if (strcmp(a[i], "--all") == 0 || strcmp(a[i], "--mirror") == 0) master = true;
             else if (strcmp(a[i], "--tags") == 0) tags = true;
             else if (push_opt_takes_arg(a[i]) && i + 1 < na) i++;
@@ -1022,9 +1506,12 @@ static const char *check_git(const struct cmdv *v)
     if (bad) return R_IDENT;
     if (si < 0) return NULL;
     sub = v->a[si];
-    if (strcmp(sub, "push") == 0) return push_rule(v->a + si + 1, v->na - si - 1);
-    if (strcmp(sub, "config") == 0)
-        return config_sets_identity(v->a + si + 1, v->na - si - 1) ? R_IDENT : NULL;
+    if (strcmp(sub, "push") == 0 || strcmp(sub, "send-pack") == 0)
+        return push_rule(v->a + si + 1, v->na - si - 1);
+    if (strcmp(sub, "config") == 0) {
+        if (config_sets_identity(v->a + si + 1, v->na - si - 1)) return R_IDENT;
+        return config_sets_hazard(v->a + si + 1, v->na - si - 1);
+    }
     if (strcmp(sub, "commit") == 0)
         for (int i = si + 1; i < v->na; i++)
             if (strcmp(v->a[i], "--author") == 0 || strncmp(v->a[i], "--author=", 9) == 0)
@@ -1130,14 +1617,158 @@ static int first_word(char **a, int na, int from)
 }
 
 /* Index of the RPC method word of an invocation, or -1 when v is no client. */
-static int method_index(const struct cmdv *v)
+static int method_index(const struct cmdv *v, bool lax)
 {
     static const char *const clients[] = {"zclassic-cli", "zcash-cli"};
-    if (v->cmd[0] == '$' || IN_LIST(v->cmd, clients)) return first_word(v->a, v->na, 0);
-    return -1;
+    int i;
+    if (v->cmd[0] != '$' && !IN_LIST(v->cmd, clients)) return -1;
+    i = first_word(v->a, v->na, 0);
+    /* On Windows a '/x' word is an option too, so the method is the first word past those. */
+    while (lax && i >= 0 && v->a[i][0] == '/') i = first_word(v->a, v->na, i + 1);
+    return i;
+}
+/* ---- option parsing the way zclassicd does it ---------------------------------------------
+ * ParseParameters (src/util.cpp) reads argv left to right, stops at the first word that does not
+ * start with '-', turns --x into -x, splits at '=', lets the last occurrence of an option win,
+ * and reads -noX as -X=0 when -X is not set. On Windows it also lower-cases the name and takes
+ * '/x' as '-x'. A word after the first non-dash word is not an option (for zclassic-cli it is an
+ * RPC parameter, for the node it is ignored). The guard parses both ways ("lax" is the Windows
+ * way) and a check that exempts a call needs both to agree. */
+
+#define MAX_POPTS 128
+
+struct popt {
+    char name[40];
+    const char *val;
+    bool eq; /* written -name=value (an empty value is still a value); false: bare -name */
+};
+
+struct popts {
+    struct popt o[MAX_POPTS];
+    int n;
+};
+
+static void parse_opts(const struct cmdv *v, bool lax, struct popts *p)
+{
+    p->n = 0;
+    for (int i = 0; i < v->na; i++) {
+        const char *a = v->a[i], *eq;
+        struct popt *o;
+        size_t len, k = 0;
+        char first = a[0];
+        if (lax && first == '/') first = '-';
+        if (first != '-') break;
+        if (p->n >= MAX_POPTS) {
+            g_complex = true;
+            return;
+        }
+        eq = strchr(a, '=');
+        len = eq ? (size_t)(eq - a) : strlen(a);
+        o = &p->o[p->n++];
+        o->name[k++] = '-';
+        for (size_t j = 1; j < len && k + 1 < sizeof o->name; j++)
+            o->name[k++] = lax ? (char)lc(a[j]) : a[j];
+        o->name[k] = '\0';
+        if (o->name[1] == '-' && o->name[2]) memmove(o->name + 1, o->name + 2, k - 1);
+        o->val = eq ? eq + 1 : "";
+        o->eq = eq != NULL;
+    }
 }
 
-static bool is_regtest(const struct cmdv *v);
+static bool interpret_bool(const char *s)
+{
+    return !s[0] || atoi(s) != 0; /* InterpretBool: empty is true, else atoi(value) != 0 */
+}
+
+/* GetBoolArg(name, def) over the parsed options; name is "-regtest" style. */
+static bool popts_bool(const struct popts *p, const char *name, bool def)
+{
+    const struct popt *last = NULL, *lastno = NULL;
+    char no[44];
+    snprintf(no, sizeof no, "-no%s", name + 1);
+    for (int i = 0; i < p->n; i++) {
+        if (strcmp(p->o[i].name, name) == 0) last = &p->o[i];
+        if (strcmp(p->o[i].name, no) == 0) lastno = &p->o[i];
+    }
+    if (last) return interpret_bool(last->val);
+    if (lastno) return !interpret_bool(lastno->val);
+    return def;
+}
+
+
+/* -regtest is in effect under both parses. */
+static bool is_regtest(const struct cmdv *v)
+{
+    struct popts strict, lax;
+    parse_opts(v, false, &strict);
+    parse_opts(v, true, &lax);
+    return popts_bool(&strict, "-regtest", false) && popts_bool(&lax, "-regtest", false);
+}
+
+enum { DD_NONE, DD_TEST, DD_UNRESOLVED, DD_REAL };
+
+/* What -datadir (or -conf, the name given) points at, over every occurrence in both parses: the
+ * worst one wins. A bare -datadir (zclassicd has no space form) and an empty value are not a
+ * test directory; a value still holding a variable is unresolved. */
+static int opt_dir_state(const struct cmdv *v, const char *name)
+{
+    int st = DD_NONE;
+    for (int pass = 0; pass < 2; pass++) {
+        struct popts p;
+        parse_opts(v, pass == 1, &p);
+        for (int i = 0; i < p.n; i++) {
+            int s;
+            if (strcmp(p.o[i].name, name) != 0) continue;
+            if (p.o[i].eq && is_test_dir(p.o[i].val)) s = DD_TEST;
+            else if (p.o[i].eq && is_unresolved(p.o[i].val) && !mentions_datadir(p.o[i].val))
+                s = DD_UNRESOLVED;
+            else s = DD_REAL;
+            if (s > st || st == DD_NONE) st = s;
+        }
+    }
+    return st;
+}
+
+/* A flag that only prints help or the version: the node never touches a datadir. */
+static bool info_only(const struct cmdv *v)
+{
+    static const char *const flags[] = {"-help", "--help", "-h", "-?", "-version", "--version",
+                                        "-help-debug"};
+    for (int i = 0; i < v->na; i++)
+        if (IN_LIST(v->a[i], flags)) return true;
+    return false;
+}
+
+/* The RPC client reaches a test node only when -regtest is in effect (it picks the regtest port
+ * by default, bitcoin-cli.cpp), an explicit test -datadir or -conf names where its settings come
+ * from (the default conf may carry an rpcport of the real node), no -conf or -datadir is anything
+ * else, and no -rpcport or -rpcconnect points back at a production node. */
+static bool rpc_is_test_client(const struct cmdv *v)
+{
+    int dd = opt_dir_state(v, "-datadir"), conf = opt_dir_state(v, "-conf");
+    if (!is_regtest(v)) return false;
+    if (dd != DD_NONE && dd != DD_TEST) return false;
+    if (conf != DD_NONE && conf != DD_TEST) return false;
+    if (dd == DD_NONE && conf == DD_NONE) return false;
+    for (int pass = 0; pass < 2; pass++) {
+        struct popts p;
+        parse_opts(v, pass == 1, &p);
+        for (int i = 0; i < p.n; i++) {
+            if (strcmp(p.o[i].name, "-rpcport") == 0) {
+                long port = atol(p.o[i].val);
+                if (port == 8023 || port == 8232 || port == 8233 || (port >= 8033 && port <= 8035))
+                    return false;
+            } else if (strcmp(p.o[i].name, "-rpcconnect") == 0) {
+                const char *h = p.o[i].val;
+                if (strcmp(h, "127.0.0.1") != 0 && strcmp(h, "localhost") != 0 &&
+                    strcmp(h, "::1") != 0)
+                    return false;
+            }
+        }
+    }
+    return true;
+}
+
 
 /* The command line carries a -regtest word (not in a comment, not inside a longer path): a
  * client held in a variable (C="zclassic-cli -regtest ..."; $C z_sendmany) is then a regtest
@@ -1170,52 +1801,15 @@ static bool regtest_word_in(const char *s)
 /* guard.spend_or_key_export: a spend or key-export method outside -regtest. */
 static const char *check_rpc(const struct cmdv *v)
 {
-    int i;
+    int i, j;
     if (strcmp(v->cmd, "curl") == 0 || strcmp(v->cmd, "wget") == 0) return check_http(v);
-    i = method_index(v);
-    if (i < 0 || !is_method(v->a[i], strlen(v->a[i]))) return NULL;
+    i = method_index(v, false);
+    j = method_index(v, true);
+    if ((i < 0 || !is_method(v->a[i], strlen(v->a[i]))) &&
+        (j < 0 || !is_method(v->a[j], strlen(v->a[j]))))
+        return NULL;
     if (v->cmd[0] == '$' && g_regtest_hint) return NULL;
-    return is_regtest(v) ? NULL : R_SPEND;
-}
-
-static bool has_flag(const struct cmdv *v, const char *flag, bool value_ok)
-{
-    size_t n = strlen(flag);
-    for (int i = 0; i < v->na; i++) {
-        const char *a = v->a[i];
-        if (strcmp(a, flag) == 0) return true;
-        if (a[0] == '-' && a[1] == '-' && strcmp(a + 1, flag) == 0) return true;
-        if (value_ok && strncmp(a, flag, n) == 0 && a[n] == '=')
-            return strcmp(a + n + 1, "0") != 0 && strcmp(a + n + 1, "false") != 0;
-    }
-    return false;
-}
-
-static bool is_regtest(const struct cmdv *v)
-{
-    return has_flag(v, "-regtest", true);
-}
-
-/* The value of -datadir (=VALUE, or the next word), or NULL when absent. */
-static const char *datadir_value(const struct cmdv *v)
-{
-    for (int i = 0; i < v->na; i++) {
-        const char *a = v->a[i];
-        if (strncmp(a, "--", 2) == 0) a++;
-        if (strncmp(a, "-datadir=", 9) == 0) return a + 9;
-        if (strcmp(a, "-datadir") == 0 && i + 1 < v->na) return v->a[i + 1];
-    }
-    return NULL;
-}
-
-/* A flag that only prints help or the version: the node never touches a datadir. */
-static bool info_only(const struct cmdv *v)
-{
-    static const char *const flags[] = {"-help", "--help", "-h", "-?", "-version", "--version",
-                                        "-help-debug"};
-    for (int i = 0; i < v->na; i++)
-        if (IN_LIST(v->a[i], flags)) return true;
-    return false;
+    return rpc_is_test_client(v) ? NULL : R_SPEND;
 }
 
 static bool is_reindex_arg(const char *a)
@@ -1240,10 +1834,8 @@ static const char *const node_progs[] = {"zclassicd", "zcashd", "test_bitcoin", 
 /* guard.reindex: -reindex, -reindex-chainstate or -rescan outside regtest or a test datadir. */
 static const char *check_reindex_args(const struct cmdv *v)
 {
-    const char *dd;
     if (!IN_LIST(v->cmd, node_progs) || is_regtest(v)) return NULL;
-    dd = datadir_value(v);
-    if (dd && is_test_dir(dd)) return NULL;
+    if (opt_dir_state(v, "-datadir") == DD_TEST) return NULL;
     for (int i = 0; i < v->na; i++)
         if (is_reindex_arg(v->a[i])) return R_REINDEX;
     return NULL;
@@ -1254,18 +1846,14 @@ static const char *check_reindex_args(const struct cmdv *v)
 static const char *check_daemon_datadir(const struct cmdv *v)
 {
     static const char *const daemons[] = {"zclassicd", "zcashd"};
-    const char *dd;
+    int dd;
     if (!IN_LIST(v->cmd, node_progs)) return NULL;
-    dd = datadir_value(v);
-    if (dd) return is_test_dir(dd) ? NULL : R_DATADIR;
+    dd = opt_dir_state(v, "-datadir");
+    if (dd == DD_TEST) return NULL;
+    if (dd == DD_UNRESOLVED) return is_regtest(v) ? NULL : R_DATADIR;
+    if (dd == DD_REAL) return R_DATADIR;
     if (IN_LIST(v->cmd, daemons) && !is_regtest(v) && !info_only(v)) return R_DATADIR;
     return NULL;
-}
-
-static bool ends_ci(const char *s, const char *suffix)
-{
-    size_t n = strlen(s), m = strlen(suffix);
-    return n >= m && strcasecmp(s + n - m, suffix) == 0;
 }
 
 /* guard.hosted_ci: gh workflow run, gh run rerun, and API workflow dispatches. */
@@ -1293,7 +1881,7 @@ static bool is_all_writer(const char *cmd)
 {
     static const char *const names[] = {
         "rm", "rmdir", "mv", "truncate", "dd", "shred", "chmod", "chown", "touch",
-        "tee", "vi", "vim", "nano", "emacs", "ed", "sudoedit", "unlink", "mkdir"};
+        "tee", "vi", "vim", "nano", "emacs", "ed", "sudoedit", "unlink", "mkdir", "chgrp"};
     return IN_LIST(cmd, names);
 }
 
@@ -1365,23 +1953,164 @@ static bool uses_loopvar(const char *t)
     return false;
 }
 
-static const char *target_rule(const struct cmdv *v, const char *t)
+/* cwd/t as a new string (the relative operand t resolved against the tracked directory). */
+static char *join_cwd(const char *cwd, const char *t)
+{
+    size_t a = strlen(cwd), b = strlen(t);
+    char *s = malloc(a + b + 2); // raw-alloc-ok:build-tool
+    if (!s) {
+        g_complex = true;
+        return NULL;
+    }
+    memcpy(s, cwd, a);
+    s[a] = '/';
+    memcpy(s + a + 1, t, b + 1);
+    return s;
+}
+
+/* One path operand (braces already expanded). anc: the operand is deleted or moved, so a path
+ * that is an ancestor of a datadir (or a glob that could reach one) counts too. */
+static const char *tgt_one(const struct cmdv *v, const char *t, bool anc)
 {
     const char *r = path_rule(t);
+    char *joined = NULL;
+    struct fpath f;
+    if (r) return r;
+    if (v->cwd[0] && relative_word(t)) {
+        joined = join_cwd(v->cwd, t);
+        if (joined) r = path_rule(joined);
+    }
+    if (!r) {
+        if (fold_path(joined ? joined : t, &f) && path_hits(&f, anc)) r = R_DATADIR;
+        fold_free(&f);
+    }
+    free(joined);
     if (r) return r;
     if (uses_loopvar(t)) return R_DATADIR;
     return v->in_dd && relative_word(t) ? R_DATADIR : NULL;
 }
 
+static const char *tgt(const struct cmdv *v, const char *t, bool anc)
+{
+    struct alts al = {{NULL}, 0};
+    const char *r = NULL;
+    brace_expand(t, &al, 0);
+    for (int i = 0; !r && i < al.n; i++) r = tgt_one(v, al.v[i], anc);
+    alts_free(&al);
+    return r;
+}
+
+static const char *target_rule(const struct cmdv *v, const char *t)
+{
+    return tgt(v, t, false);
+}
+
+static bool is_deleter(const char *cmd)
+{
+    static const char *const names[] = {"rm", "rmdir", "unlink", "shred"};
+    return IN_LIST(cmd, names);
+}
+
+static bool is_recursive(const struct cmdv *v)
+{
+    for (int i = 0; i < v->na; i++)
+        if (strcmp(v->a[i], "--recursive") == 0 || short_group_has(v->a[i], 'R') ||
+            short_group_has(v->a[i], 'r'))
+            return true;
+    return false;
+}
+
+/* The operands of mv, minus the destination (the last one, or the -t DIR argument). */
+static const char *mv_sources(const struct cmdv *v)
+{
+    const char *ops[64];
+    int n = 0, cnt;
+    bool tdir = false;
+    for (int i = 0; i < v->na; i++) {
+        const char *a = v->a[i];
+        if (short_group_has(a, 't') || strcmp(a, "--target-directory") == 0) {
+            tdir = true;
+            i++;
+        } else if (strncmp(a, "--target-directory=", 19) == 0) {
+            tdir = true;
+        } else if (a[0] != '-' || !a[1]) {
+            if (n < 64) ops[n++] = a;
+            else g_complex = true;
+        }
+    }
+    cnt = tdir ? n : n - 1;
+    for (int k = 0; k < cnt; k++) {
+        const char *r = tgt(v, ops[k], true);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+/* The path operands of find: the words before the first expression. */
+static const char *find_roots(const struct cmdv *v)
+{
+    int i = 0;
+    while (i < v->na && (strcmp(v->a[i], "-H") == 0 || strcmp(v->a[i], "-L") == 0 ||
+                         strcmp(v->a[i], "-P") == 0))
+        i++;
+    for (; i < v->na && v->a[i][0] != '-' && v->a[i][0] != '(' && v->a[i][0] != '!'; i++) {
+        const char *r = tgt(v, v->a[i], true);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+/* find that deletes or rewrites what it walks: -delete, or -exec of a deleter or mover. */
+static bool find_destroys(const struct cmdv *v)
+{
+    static const char *const execs[] = {"-exec", "-execdir", "-ok", "-okdir"};
+    static const char *const bad[] = {"rm", "rmdir", "unlink", "shred", "mv", "chmod", "chown",
+                                      "chgrp"};
+    for (int i = 0; i < v->na; i++) {
+        if (strcmp(v->a[i], "-delete") == 0) return true;
+        if (IN_LIST(v->a[i], execs) && i + 1 < v->na && IN_LIST(base_name(v->a[i + 1]), bad))
+            return true;
+    }
+    return false;
+}
+
+/* The last non-option operand of v, or NULL. */
+static const char *last_operand(const struct cmdv *v)
+{
+    for (int i = v->na - 1; i >= 0; i--)
+        if (v->a[i][0] != '-' || !v->a[i][1]) return v->a[i];
+    return NULL;
+}
+
 static const char *wr_all(const struct cmdv *v)
 {
     bool dd = strcmp(v->cmd, "dd") == 0;
+    const char *r = NULL, *last;
     for (int i = 0; i < v->na; i++) {
-        const char *r;
         if (dd && strncmp(v->a[i], "of=", 3) != 0) continue; /* dd: only of= is written */
         r = target_rule(v, v->a[i]);
         if (r) return r;
     }
+    if (is_deleter(v->cmd) || (strcmp(v->cmd, "find") == 0 && find_destroys(v)) ||
+        ((strcmp(v->cmd, "chmod") == 0 || strcmp(v->cmd, "chown") == 0 ||
+          strcmp(v->cmd, "chgrp") == 0) && is_recursive(v))) {
+        if (strcmp(v->cmd, "find") == 0) {
+            r = find_roots(v);
+        } else {
+            for (int i = 0; !r && i < v->na; i++)
+                if (v->a[i][0] != '-' || !v->a[i][1]) r = tgt(v, v->a[i], true);
+        }
+        if (r) return r;
+    }
+    if (strcmp(v->cmd, "mv") == 0) {
+        r = mv_sources(v);
+        if (r) return r;
+        last = last_operand(v);
+        if (last && is_py_name(last)) return R_PYTHON;
+    }
+    if (strcmp(v->cmd, "tee") == 0)
+        for (int i = 0; i < v->na; i++)
+            if (v->a[i][0] != '-' && is_py_name(v->a[i])) return R_PYTHON;
     return NULL;
 }
 
@@ -1397,7 +2126,7 @@ static const char *wr_dest(const struct cmdv *v)
         if (tdir && strncmp(a, "--target-directory=", 19) == 0) return target_rule(v, a + 19);
         if (a[0] != '-') dest = a;
     }
-    if (dest && ends_ci(dest, ".py")) return R_PYTHON;
+    if (dest && is_py_name(dest)) return R_PYTHON;
     return dest ? target_rule(v, dest) : NULL;
 }
 
@@ -1642,14 +2371,271 @@ static const check_fn checks[] = {
     check_reindex_args, check_daemon_datadir, check_writer_paths, check_nested,
 };
 
-/* Track a cd into a datadir along the command chain. */
-static void track_cd(const struct cmdv *v, bool *in_dd)
+/* A refusal is returned; a warning is remembered in *warn and dropped, so a warning never hides
+ * a refusal later in the same command. */
+static const char *pick(const char *r, const char **warn)
+{
+    if (r && ag_rule_is_warning(r)) {
+        if (!*warn) *warn = r;
+        return NULL;
+    }
+    return r;
+}
+
+/* ---- the working directory and variables of one command chain ---------------------------- */
+
+/* State carried along a ; && || | chain: where a cd put us ("" unknown) and whether an earlier
+ * segment of the pipeline being read names a datadir. */
+struct chain {
+    char cwd[CWD_CAP];
+    bool pipe_dd;
+};
+
+/* A path that starts at a root, so a cd to it replaces the tracked directory. */
+static bool rooted_word(const char *t)
+{
+    return strchr("/~$%\\", t[0]) != NULL || (isalpha((unsigned char)t[0]) && t[1] == ':');
+}
+
+/* cd to t: the tracked directory becomes t, or t below it, folded ('..' applied). */
+static void cd_to(char *cwd, const char *t)
+{
+    char *joined = NULL;
+    struct fpath f;
+    if (strcmp(t, "-") == 0 || !t[0]) {
+        cwd[0] = '\0';
+        return;
+    }
+    if (cwd[0] && !rooted_word(t)) joined = join_cwd(cwd, t);
+    if (!fold_path(joined ? joined : t, &f) || !fold_render(&f, cwd, CWD_CAP)) cwd[0] = '\0';
+    fold_free(&f);
+    free(joined);
+}
+
+/* Track a cd into a directory along the command chain (also pushd, popd, Set-Location). */
+static void track_cd(const struct cmdv *v, char *cwd)
 {
     int i;
-    if (strcmp(v->cmd, "popd") == 0) *in_dd = false;
+    if (strcmp(v->cmd, "popd") == 0) {
+        cwd[0] = '\0';
+        return;
+    }
     if (strcmp(v->cmd, "cd") != 0 && strcmp(v->cmd, "pushd") != 0) return;
     i = first_word(v->a, v->na, 0);
-    *in_dd = i >= 0 && mentions_datadir(v->a[i]);
+    cd_to(cwd, i < 0 ? "~" : v->a[i]);
+}
+
+/* A redirect or other plain path word: the datadir, workflow and vendor rules, also for a
+ * relative word resolved against the tracked directory. */
+static const char *path_rule_cwd(const char *cwd, const char *w)
+{
+    const char *r = path_rule(w);
+    char *j;
+    if (r) return r;
+    if (cwd[0] && relative_word(w)) {
+        j = join_cwd(cwd, w);
+        r = j ? path_rule(j) : NULL;
+        free(j);
+        if (r) return r;
+        if (mentions_datadir(cwd)) return R_DATADIR;
+    }
+    return NULL;
+}
+
+static void var_set(const char *name, size_t nl, const char *val)
+{
+    int k;
+    if (nl == 0 || nl >= sizeof g_vars[0].name) return;
+    for (k = 0; k < g_nvars; k++)
+        if (strlen(g_vars[k].name) == nl && memcmp(g_vars[k].name, name, nl) == 0) break;
+    if (k == g_nvars) {
+        if (g_nvars >= MAX_VARS) {
+            g_complex = true;
+            return;
+        }
+        g_nvars++;
+        memcpy(g_vars[k].name, name, nl);
+        g_vars[k].name[nl] = '\0';
+    }
+    if (strlen(val) >= VAR_VAL) /* too long to keep: keep what matters */
+        snprintf(g_vars[k].val, VAR_VAL, "%s", mentions_datadir(val) ? "~/.zclassic" : "/opaque");
+    else
+        memcpy(g_vars[k].val, val, strlen(val) + 1);
+}
+
+static const char *var_get(const char *name, size_t nl)
+{
+    for (int k = 0; k < g_nvars; k++)
+        if (strlen(g_vars[k].name) == nl && memcmp(g_vars[k].name, name, nl) == 0)
+            return g_vars[k].val;
+    return NULL;
+}
+
+struct sbuf {
+    char *p;
+    size_t n, cap;
+};
+
+static void sb_add(struct sbuf *b, const char *s, size_t n)
+{
+    if (!b->p && b->cap == (size_t)-1) return; /* failed earlier */
+    if (b->n + n + 1 > b->cap) {
+        size_t nc = b->cap ? b->cap * 2 : 64;
+        char *np;
+        while (nc < b->n + n + 1) nc *= 2;
+        np = realloc(b->p, nc); // raw-alloc-ok:build-tool
+        if (!np) {
+            free(b->p);
+            b->p = NULL;
+            b->cap = (size_t)-1;
+            g_complex = true;
+            return;
+        }
+        b->p = np;
+        b->cap = nc;
+    }
+    memcpy(b->p + b->n, s, n);
+    b->n += n;
+    b->p[b->n] = '\0';
+}
+
+/* Name at s (after '$' or '${'): its length, or 0 when s does not start a variable name. */
+static size_t var_name_len(const char *s)
+{
+    size_t n = 0;
+    if (!isalpha((unsigned char)*s) && *s != '_') return 0;
+    while (is_word_char(s[n])) n++;
+    return n;
+}
+
+/* w with the $NAME and ${NAME} of recorded variables replaced; NULL when nothing changed. */
+static char *expand_vars(const char *w)
+{
+    struct sbuf b = {NULL, 0, 0};
+    bool changed = false;
+    if (g_nvars == 0 || !strchr(w, '$')) return NULL;
+    for (const char *p = w; *p;) {
+        if (*p == '$') {
+            bool brace = p[1] == '{';
+            const char *s = p + 1 + (brace ? 1 : 0);
+            size_t nl = var_name_len(s);
+            const char *val = nl && (!brace || s[nl] == '}') ? var_get(s, nl) : NULL;
+            if (val) {
+                sb_add(&b, val, strlen(val));
+                p = s + nl + (brace ? 1 : 0);
+                changed = true;
+                continue;
+            }
+        }
+        sb_add(&b, p++, 1);
+    }
+    if (!changed || !b.p || b.cap == (size_t)-1) {
+        if (b.cap != (size_t)-1) free(b.p);
+        return NULL;
+    }
+    return b.p;
+}
+
+/* NAME=value (value expanded with what is known): record it. */
+static void record_assign(const char *w)
+{
+    const char *eq = strchr(w, '=');
+    char *x = expand_vars(eq + 1);
+    var_set(w, (size_t)(eq - w), x ? x : eq + 1);
+    free(x);
+}
+
+/* The words of one segment after variable expansion. A word that is exactly one variable
+ * holding several words splits into them (C="zclassic-cli -regtest"; $C getinfo). */
+struct xw {
+    char **w;
+    int n, cap;
+    char **own;
+    int nown, capown;
+};
+
+static bool xw_grow(char ***arr, int *cap, int n)
+{
+    if (n < *cap) return true;
+    int nc = *cap ? *cap * 2 : 16;
+    char **na = realloc(*arr, (size_t)nc * sizeof **arr); // raw-alloc-ok:build-tool
+    if (!na) {
+        g_complex = true;
+        return false;
+    }
+    *arr = na;
+    *cap = nc;
+    return true;
+}
+
+static bool xw_push(struct xw *x, char *s, bool owned)
+{
+    if (x->n >= MAX_WORDS) {
+        g_complex = true;
+        if (owned) free(s);
+        return false;
+    }
+    if ((owned && !xw_grow(&x->own, &x->capown, x->nown)) || !xw_grow(&x->w, &x->cap, x->n)) {
+        if (owned) free(s);
+        return false;
+    }
+    if (owned) x->own[x->nown++] = s;
+    x->w[x->n++] = s;
+    return true;
+}
+
+static void xw_free(struct xw *x)
+{
+    for (int i = 0; i < x->nown; i++) free(x->own[i]);
+    free(x->own);
+    free(x->w);
+}
+
+/* Split text on blanks into owned words. */
+static void xw_split(struct xw *x, const char *val)
+{
+    for (const char *p = val; *p;) {
+        size_t n;
+        char *d;
+        while (*p == ' ' || *p == '\t') p++;
+        n = strcspn(p, " \t");
+        if (!n) break;
+        d = malloc(n + 1); // raw-alloc-ok:build-tool
+        if (!d) {
+            g_complex = true;
+            return;
+        }
+        memcpy(d, p, n);
+        d[n] = '\0';
+        if (!xw_push(x, d, true)) return;
+        p += n;
+    }
+}
+
+static bool xw_build(const struct gctx *c, const struct gseg *sg, struct xw *x)
+{
+    memset(x, 0, sizeof *x);
+    for (int i = 0; i < sg->nw; i++) {
+        char *w = c->words[sg->w0 + i], *e = expand_vars(w);
+        const char *name = w[0] == '$' ? w + 1 + (w[1] == '{' ? 1 : 0) : NULL;
+        size_t nl = name ? var_name_len(name) : 0;
+        bool whole = nl && (w[1] != '{' ? name[nl] == '\0' : (name[nl] == '}' && !name[nl + 1]));
+        if (e && whole && strpbrk(e, " \t")) {
+            xw_split(x, e);
+            free(e);
+        } else if (e) {
+            xw_push(x, e, true);
+        } else {
+            xw_push(x, w, false);
+        }
+    }
+    return true;
+}
+
+static bool is_decl_cmd(const char *cmd)
+{
+    static const char *const decl[] = {"export", "declare", "typeset", "readonly", "local"};
+    return IN_LIST(cmd, decl);
 }
 
 /* `for VAR in <list>`: when the list names a datadir, the body's $VAR operands do too. */
@@ -1670,38 +2656,78 @@ static void strip_exe(char *word)
     if (n > 4 && strcasecmp(word + n - 4, ".exe") == 0) word[n - 4] = '\0';
 }
 
-static const char *seg_check(const struct gctx *c, int si, int depth, bool *in_dd)
+/* Does any word of the segment (or a here-string it reads) name a datadir? */
+static bool seg_names_datadir(const struct gctx *c, int si, const struct xw *x, bool *hs_dd)
 {
-    const struct gseg *sg = &c->segs[si];
-    char **w = (char **)c->words + sg->w0;
-    struct pinfo pi = {false};
-    int ci = find_cmd(w, sg->nw, &pi);
-    struct cmdv v;
-    if (pi.id_assign) return R_IDENT;
-    if (ci < 0) return NULL;
-    strip_exe(w[ci]);
-    v = (struct cmdv){c, sg, base_name(w[ci]), w + ci + 1, sg->nw - ci - 1, w, sg->nw, depth,
-                      *in_dd};
-    track_cd(&v, in_dd);
-    note_for_loop(&v);
-    for (size_t k = 0; k < sizeof checks / sizeof checks[0]; k++) {
-        const char *r = checks[k](&v);
-        if (r) return r;
-    }
-    return NULL;
+    bool any = false;
+    *hs_dd = false;
+    for (int k = 0; k < c->nhs; k++)
+        if (c->hstr_seg[k] == si && mentions_datadir(c->hstr[k])) *hs_dd = true;
+    for (int k = 0; k < x->n; k++)
+        if (mentions_datadir(x->w[k])) any = true;
+    return any || *hs_dd;
 }
 
-/* Redirect targets of segment si; after a cd into a datadir a relative
- * target is a datadir file. */
-static const char *redir_check(const struct gctx *c, int si, bool in_dd)
+static const char *seg_run(const struct gctx *c, int si, int depth, struct chain *ch,
+                           struct xw *x, bool hs_dd)
+{
+    const struct gseg *sg = &c->segs[si];
+    struct pinfo pi = {false};
+    const char *r = NULL, *warn = NULL;
+    struct cmdv v;
+    bool xargs = false;
+    int ci = find_cmd(x->w, x->n, &pi);
+    if (pi.id_assign) return R_IDENT;
+    if (ci < 0) return NULL;
+    strip_exe(x->w[ci]);
+    for (int j = 0; j < ci; j++)
+        if (strcmp(base_name(x->w[j]), "xargs") == 0) xargs = true;
+    v = (struct cmdv){c, sg, base_name(x->w[ci]), x->w + ci + 1, x->n - ci - 1, x->w, x->n,
+                      depth, false, ch->cwd};
+    track_cd(&v, ch->cwd);
+    v.in_dd = ch->cwd[0] && mentions_datadir(ch->cwd);
+    if (is_decl_cmd(v.cmd))
+        for (int k = 0; k < v.na; k++)
+            if (is_assign(v.a[k])) record_assign(v.a[k]);
+    note_for_loop(&v);
+    /* xargs <writer> takes its targets from stdin: a datadir named upstream is a datadir write */
+    if (xargs && (ch->pipe_dd || hs_dd) && writer_kind(&v) != W_NONE) return R_DATADIR;
+    for (size_t k = 0; !r && k < sizeof checks / sizeof checks[0]; k++)
+        r = pick(checks[k](&v), &warn);
+    return r ? r : warn;
+}
+
+static const char *seg_check(const struct gctx *c, int si, int depth, struct chain *ch)
+{
+    const struct gseg *sg = &c->segs[si];
+    struct xw x;
+    const char *r;
+    bool hs_dd, dd;
+    for (int j = 0; j < sg->nw && is_assign(c->words[sg->w0 + j]); j++)
+        record_assign(c->words[sg->w0 + j]);
+    if (!xw_build(c, sg, &x)) return NULL;
+    if (!sg->pipe_in) ch->pipe_dd = false;
+    dd = seg_names_datadir(c, si, &x, &hs_dd);
+    r = seg_run(c, si, depth, ch, &x, hs_dd);
+    if (dd) ch->pipe_dd = true;
+    xw_free(&x);
+    return r;
+}
+
+/* Redirect targets of segment si (variables expanded; a relative target resolves against the
+ * tracked directory). */
+static const char *redir_check(const struct gctx *c, int si, const struct chain *ch)
 {
     for (int i = 0; i < c->nredir; i++) {
-        const char *r;
+        char *x;
+        const char *w, *r;
         if (c->redir_seg[i] != si) continue;
-        r = path_rule(c->redir[i]);
+        x = expand_vars(c->redir[i]);
+        w = x ? x : c->redir[i];
+        r = path_rule_cwd(ch->cwd, w);
+        if (!r && is_py_name(w)) r = R_PYTHON;
+        free(x);
         if (r) return r;
-        if (ends_ci(c->redir[i], ".py")) return R_PYTHON;
-        if (in_dd && relative_word(c->redir[i])) return R_DATADIR;
     }
     return NULL;
 }
@@ -1709,8 +2735,8 @@ static const char *redir_check(const struct gctx *c, int si, bool in_dd)
 static const char *eval_buf(const char *s, size_t len, int depth)
 {
     struct gctx *c;
-    const char *r = NULL;
-    bool in_dd = false;
+    struct chain ch;
+    const char *r = NULL, *warn = NULL;
     if (depth > MAX_NEST) {
         g_complex = true;
         return NULL;
@@ -1726,28 +2752,36 @@ static const char *eval_buf(const char *s, size_t len, int depth)
         free(c);
         return NULL;
     }
+    memset(&ch, 0, sizeof ch);
     c->src = s;
     tokenize(c, s, len);
     for (int i = 0; !r && i < c->nsegs; i++) {
-        r = redir_check(c, i, in_dd);
-        if (!r) r = seg_check(c, i, depth, &in_dd);
+        r = pick(redir_check(c, i, &ch), &warn);
+        if (!r) r = pick(seg_check(c, i, depth, &ch), &warn);
     }
     for (int i = 0; !r && i < c->nsubs; i++)
-        r = eval_buf(s + c->subs[i].off, c->subs[i].len, depth + 1);
+        r = pick(eval_buf(s + c->subs[i].off, c->subs[i].len, depth + 1), &warn);
     free(c->arena);
     free(c);
-    return r;
+    return r ? r : warn;
 }
 
+/* A cap hit beats a warning (the unchecked part may hold a refusal), never a refusal. */
 static const char *finish(const char *r)
 {
-    return !r && g_complex ? R_COMPLEX : r;
+    return g_complex && (!r || ag_rule_is_warning(r)) ? R_COMPLEX : r;
+}
+
+static void reset_state(void)
+{
+    g_complex = false;
+    g_loopvar[0] = '\0';
+    g_nvars = 0;
 }
 
 const char *ag_eval_bash(const char *cmd)
 {
-    g_complex = false;
-    g_loopvar[0] = '\0';
+    reset_state();
     g_regtest_hint = regtest_word_in(cmd);
     return finish(eval_buf(cmd, strlen(cmd), 0));
 }
@@ -1758,18 +2792,34 @@ const char *ag_eval_bash(const char *cmd)
  * commands), the escape is the backtick, and backslashes stay in the word (they are paths). The
  * program rules are the Bash ones (python, git, gh, zclassic-cli, zclassicd), run on the
  * lower-cased command name; the PowerShell deleters and writers add the datadir, vendor and
- * workflow path checks. Known limits: variables, functions and aliases are not tracked, a
- * pipeline into Set-Content (Get-Content a | Set-Content b) checks b only, and Start-Process
- * is not unwrapped. */
+ * workflow path checks, and the destroyers (Remove-Item, Move-Item) also refuse an ancestor of a
+ * datadir. A pipeline or parenthesised segment that names a datadir into a deleter with no path of
+ * its own is refused, and Start-Process unwraps to the program it starts. Known limits: variables,
+ * functions and aliases are not tracked, and a pipeline into Set-Content (Get-Content a |
+ * Set-Content b) checks b only. */
 
 struct psseg {
     char **w;
     int n, cap;
     bool pend_redir;
-    const char *r; /* first refusal found in this scan */
-    bool in_dd;
+    const char *r;    /* first refusal found in this scan */
+    const char *warn; /* first warning, reported only when there is no refusal */
+    char cwd[CWD_CAP];
     int depth;
+    bool pipe_dd;  /* a segment of this statement names a datadir */
+    bool saw_pipe; /* a | came earlier in this statement */
+    bool open_writer; /* a deleter or writer with no path operand: a later segment feeds it */
 };
+
+static void ps_note(struct psseg *s, const char *r)
+{
+    if (!r) return;
+    if (ag_rule_is_warning(r)) {
+        if (!s->warn) s->warn = r;
+    } else if (!s->r) {
+        s->r = r;
+    }
+}
 
 static bool ps_push(struct psseg *s, char *wd)
 {
@@ -1812,28 +2862,80 @@ static const char *ps_param(char **a, int na, const char *const *names, size_t n
     return NULL;
 }
 
+/* True when the command names no path of its own (no operand, or only $_ / $PSItem), so it acts
+ * on what the pipeline hands it. A parameter that takes a value (-Include x) is not an operand. */
+static bool ps_takes_stdin(const struct cmdv *v)
+{
+    static const char *const valued[] = {"-include", "-exclude", "-filter", "-stream", "-encoding",
+                                         "-credential", "-value", "-name", "-itemtype", "-destination",
+                                         "-destinationpath"};
+    bool any = false, skip = false;
+    for (int i = 0; i < v->na; i++) {
+        const char *a = v->a[i];
+        if (a[0] == '-' && a[1]) {
+            char low[24];
+            size_t n = strcspn(a, ":");
+            skip = false;
+            if (n >= sizeof low) continue;
+            for (size_t k = 0; k < n; k++) low[k] = (char)tolower((unsigned char)a[k]);
+            low[n] = '\0';
+            if (a[n] != ':' && PS_IN(low, valued)) skip = true;
+            if (a[n] == ':' && strcmp(low, "-path") != 0 && strcmp(low, "-literalpath") != 0)
+                continue;
+            if (a[n] == ':' && a[n + 1]) any = true;
+            continue;
+        }
+        if (strncasecmp(a, "$_", 2) == 0 || strncasecmp(a, "$psitem", 7) == 0) return true;
+        if (!skip) any = true;
+        skip = false;
+    }
+    return !any;
+}
+
+static const char *const ps_del[] = {"remove-item", "ri", "del", "erase", "rd", "rmdir", "rm",
+                                     "clear-content", "clc", "unlink", "shred"};
+static const char *const ps_wr[] = {"set-content", "sc", "add-content", "ac", "out-file",
+                                    "tee-object", "tee", "new-item", "ni", "mkdir", "md",
+                                    "move-item", "mi", "move", "mv", "rename-item", "rni",
+                                    "ren", "set-itemproperty", "touch", "truncate"};
+static const char *const ps_mv[] = {"move-item", "mi", "move", "mv", "rename-item", "rni", "ren"};
+
+/* Remove-Item and Move-Item style commands: the sources count with the ancestor rule, so
+ * deleting or moving a folder that holds a datadir (~, %APPDATA%, C:\Users\x) is refused. */
+static const char *ps_destroy(const char *name, const struct cmdv *v)
+{
+    static const char *const pparams[] = {"-path", "-literalpath"};
+    static const char *const dparams[] = {"-destination", "-destinationpath"};
+    bool is_del = PS_IN(name, ps_del), is_mv = PS_IN(name, ps_mv);
+    int last = -1;
+    const char *p, *r;
+    if (!is_del && !is_mv) return NULL;
+    if ((p = ps_param(v->a, v->na, pparams, 2)) != NULL && (r = tgt(v, p, true)) != NULL)
+        return r;
+    if (is_mv && !ps_param(v->a, v->na, dparams, 2)) /* the last operand is the destination */
+        for (int i = 0; i < v->na; i++)
+            if (v->a[i][0] != '-') last = i;
+    for (int i = 0; i < v->na; i++)
+        if (v->a[i][0] != '-' && i != last && (r = tgt(v, v->a[i], true)) != NULL) return r;
+    return NULL;
+}
+
 static const char *ps_writer(const char *name, struct cmdv *v)
 {
-    static const char *const del[] = {"remove-item", "ri", "del", "erase", "rd", "rmdir", "rm",
-                                      "clear-content", "clc", "unlink", "shred"};
-    static const char *const wr[] = {"set-content", "sc", "add-content", "ac", "out-file",
-                                     "tee-object", "tee", "new-item", "ni", "mkdir", "md",
-                                     "move-item", "mi", "move", "mv", "rename-item", "rni",
-                                     "ren", "set-itemproperty", "touch", "truncate"};
     static const char *const cp[] = {"copy-item", "copy", "cp", "cpi", "xcopy", "robocopy"};
     static const char *const dparams[] = {"-destination", "-destinationpath"};
     static const char *const oparams[] = {"-outfile", "-o"};
     static const char *const web[] = {"invoke-webrequest", "iwr", "invoke-restmethod", "irm",
                                       "curl", "wget"};
-    bool is_del = PS_IN(name, del), is_wr = PS_IN(name, wr);
+    bool is_del = PS_IN(name, ps_del), is_wr = PS_IN(name, ps_wr);
     const char *r;
     if (is_del || is_wr) {
         for (int i = 0; i < v->na; i++) {
             if (v->a[i][0] == '-' && !strchr(v->a[i], ':')) continue;
             if ((r = target_rule(v, v->a[i])) != NULL) return r;
-            if (is_wr && ends_ci(v->a[i], ".py")) return R_PYTHON;
+            if (is_wr && is_py_name(v->a[i])) return R_PYTHON;
         }
-        return NULL;
+        return ps_destroy(name, v);
     }
     if (PS_IN(name, cp)) {
         const char *dest = ps_param(v->a, v->na, dparams, 2);
@@ -1841,7 +2943,7 @@ static const char *ps_writer(const char *name, struct cmdv *v)
             if (v->a[v->na - 1 - i][0] != '-' && v->a[v->na - 1 - i][0] != '/')
                 dest = v->a[v->na - 1 - i];
         if (!dest) return NULL;
-        if (ends_ci(dest, ".py")) return R_PYTHON;
+        if (is_py_name(dest)) return R_PYTHON;
         return target_rule(v, dest);
     }
     if (PS_IN(name, web)) {
@@ -1855,22 +2957,83 @@ static const char *ps_writer(const char *name, struct cmdv *v)
     return NULL;
 }
 
+/* Start-Process <program> -ArgumentList ...: the program rules apply to the program started. */
+static const char *ps_start_process(const struct cmdv *v)
+{
+    static const char *const fparams[] = {"-filepath"};
+    const char *prog = ps_param(v->a, v->na, fparams, 1), *warn = NULL, *r = NULL;
+    int k = -1;
+    char *pl;
+    struct cmdv sv;
+    size_t n;
+    if (!prog)
+        for (int i = 0; k < 0 && i < v->na; i++)
+            if (v->a[i][0] != '-') k = i;
+    if (!prog && k >= 0) prog = v->a[k];
+    if (!prog) return NULL;
+    prog = base_name(prog);
+    for (const char *p = prog; *p; p++)
+        if (*p == '\\') prog = p + 1;
+    n = strlen(prog);
+    pl = malloc(n + 1); // raw-alloc-ok:build-tool
+    if (!pl) {
+        g_complex = true;
+        return NULL;
+    }
+    for (size_t i = 0; i <= n; i++) pl[i] = (char)tolower((unsigned char)prog[i]);
+    strip_exe(pl);
+    sv = *v;
+    sv.cmd = pl;
+    sv.a = v->a + (k >= 0 ? k + 1 : 0);
+    sv.na = v->na - (k >= 0 ? k + 1 : 0);
+    {
+        /* -ArgumentList takes one string or a comma list: split it into the program's words */
+        struct xw xs;
+        memset(&xs, 0, sizeof xs);
+        for (int i = 0; i < sv.na; i++) {
+            const char *a = sv.a[i];
+            if (i > 0 && (strcasecmp(sv.a[i - 1], "-argumentlist") == 0 ||
+                          strcasecmp(sv.a[i - 1], "-args") == 0)) {
+                char *cp = strdup(a); // raw-alloc-ok:build-tool
+                if (!cp) {
+                    g_complex = true;
+                    break;
+                }
+                for (char *p = cp; *p; p++)
+                    if (*p == ',') *p = ' ';
+                xw_split(&xs, cp);
+                free(cp);
+            } else {
+                xw_push(&xs, (char *)a, false);
+            }
+        }
+        sv.a = xs.w;
+        sv.na = xs.n;
+        for (size_t i = 0; !r && i < sizeof checks / sizeof checks[0]; i++)
+            r = pick(checks[i](&sv), &warn);
+        xw_free(&xs);
+    }
+    free(pl);
+    return r ? r : warn;
+}
+
 static const char *ps_seg(struct psseg *s)
 {
     static const char *const checks_ps[] = {"cd", "sl", "set-location", "chdir", "pushd",
                                             "push-location", "popd", "pop-location"};
+    static const char *const starts[] = {"start-process", "start", "saps"};
     char *lc;
     struct cmdv v;
     struct gseg zero;
     int ci = 0;
-    const char *name, *r = NULL;
+    const char *name, *r = NULL, *warn = NULL;
     size_t n;
     if (s->n == 0) return NULL;
-    if (strncasecmp(s->w[0], "$env:git_", 9) == 0 && s->n > 1 && strcmp(s->w[1], "=") == 0) {
-        static const char *const ids[] = {"author_name", "author_email", "committer_name",
-                                          "committer_email"};
+    if (strncasecmp(s->w[0], "$env:", 5) == 0 && s->n > 1 && strcmp(s->w[1], "=") == 0) {
+        static const char *const ids[] = {"git_author_name", "git_author_email",
+                                          "git_committer_name", "git_committer_email", "email"};
         for (size_t k = 0; k < sizeof ids / sizeof ids[0]; k++)
-            if (strcasecmp(s->w[0] + 9, ids[k]) == 0) return R_IDENT;
+            if (strcasecmp(s->w[0] + 5, ids[k]) == 0) return R_IDENT;
     }
     while (ci < s->n && strcmp(s->w[ci], ".") == 0) ci++;
     if (ci >= s->n) return NULL;
@@ -1887,25 +3050,39 @@ static const char *ps_seg(struct psseg *s)
     strip_exe(lc);
     memset(&zero, 0, sizeof zero);
     v = (struct cmdv){NULL, &zero, lc, s->w + ci + 1, s->n - ci - 1, s->w + ci, s->n - ci,
-                      s->depth, s->in_dd};
+                      s->depth, s->cwd[0] && mentions_datadir(s->cwd), s->cwd};
     if (PS_IN(lc, checks_ps)) {
         struct cmdv cdv = v;
         cdv.cmd = lc[0] == 'p' && lc[1] == 'o' ? "popd" : "cd";
-        track_cd(&cdv, &s->in_dd);
+        track_cd(&cdv, s->cwd);
     } else if (strcmp(lc, "iex") == 0 || strcmp(lc, "invoke-expression") == 0) {
         r = eval_joined_as(&v, 0, true);
+    } else if (PS_IN(lc, starts)) {
+        r = ps_start_process(&v);
+    } else if ((PS_IN(lc, ps_del) || PS_IN(lc, ps_wr)) && ps_takes_stdin(&v)) {
+        /* no path of its own: the pipeline (Get-ChildItem <datadir> | Remove-Item) or a later
+         * parenthesised segment (Remove-Item (Get-Item <datadir>)) carries the target */
+        s->open_writer = true;
+        if (s->pipe_dd && s->saw_pipe) r = R_DATADIR;
     } else {
         r = ps_writer(lc, &v);
     }
-    for (size_t k = 0; !r && k < sizeof checks / sizeof checks[0]; k++) r = checks[k](&v);
+    r = pick(r, &warn);
+    for (size_t k = 0; !r && k < sizeof checks / sizeof checks[0]; k++)
+        r = pick(checks[k](&v), &warn);
     free(lc);
-    return r;
+    return r ? r : warn;
 }
 
 /* End the current segment: scan its words, then drop them. */
 static void ps_end_seg(struct psseg *s)
 {
-    if (!s->r) s->r = ps_seg(s);
+    bool names = false, fed = s->open_writer;
+    for (int i = 0; i < s->n; i++)
+        if (mentions_datadir(s->w[i])) names = true;
+    if (!s->r) ps_note(s, ps_seg(s));
+    if (names && fed) ps_note(s, R_DATADIR);
+    if (names) s->pipe_dd = true;
     for (int i = 0; i < s->n; i++) free(s->w[i]);
     s->n = 0;
     s->pend_redir = false;
@@ -1926,9 +3103,9 @@ static void ps_end_word(struct psseg *s, char *buf, size_t *n, bool *quoted)
     }
     if (s->pend_redir) {
         if (!s->r) {
-            s->r = path_rule(wd);
-            if (!s->r && ends_ci(wd, ".py")) s->r = R_PYTHON;
-            if (!s->r && s->in_dd && relative_word(wd)) s->r = R_DATADIR;
+            const char *r = path_rule_cwd(s->cwd, wd);
+            if (!r && is_py_name(wd)) r = R_PYTHON;
+            ps_note(s, r);
         }
         s->pend_redir = false;
         free(wd);
@@ -1948,7 +3125,8 @@ static size_t ps_subexpr(struct psseg *st, const char *s, size_t len, size_t i)
         else if (s[j] == ')') depth--;
         j++;
     }
-    if (!st->r) st->r = ps_eval(s + i + 2, (j > i + 2 ? j - 1 : j) - (i + 2), st->depth + 1);
+    if (!st->r)
+        ps_note(st, ps_eval(s + i + 2, (j > i + 2 ? j - 1 : j) - (i + 2), st->depth + 1));
     return j;
 }
 
@@ -2002,6 +3180,9 @@ static const char *ps_eval(const char *s, size_t len, int depth)
             buf[n++] = s[i + 1];
             quoted = true;
             i += 2;
+        } else if (ch == '$' && i + 1 < len && s[i + 1] == '(') { /* $( ) stays in the word */
+            size_t e = ps_subexpr(&st, s, len, i);
+            while (i < e && i < len) buf[n++] = s[i++];
         } else if (ch == '$' && i + 1 < len && s[i + 1] == '{') {
             while (i < len && s[i] != '}') buf[n++] = s[i++];
             if (i < len) buf[n++] = s[i++];
@@ -2017,7 +3198,17 @@ static const char *ps_eval(const char *s, size_t len, int depth)
             }
         } else if (strchr(";|&\n(){}", ch)) {
             ps_end_word(&st, buf, &n, &quoted);
-            if (!(ch == '&' && st.n == 0)) ps_end_seg(&st); /* a leading & is the call operator */
+            if (!(ch == '&' && st.n == 0)) { /* a leading & is the call operator */
+                ps_end_seg(&st);
+                if (ch == '|' && i + 1 < len && s[i + 1] == '|') {
+                    i++; /* || chains, no pipe */
+                    st.pipe_dd = st.saw_pipe = st.open_writer = false;
+                } else if (ch == '|') {
+                    st.saw_pipe = true;
+                }
+                else if (ch != '(' && ch != ')' && ch != '{' && ch != '}')
+                    st.pipe_dd = st.saw_pipe = st.open_writer = false; /* ; \n & end the statement */
+            }
             i++;
         } else {
             buf[n++] = ch;
@@ -2028,7 +3219,7 @@ static const char *ps_eval(const char *s, size_t len, int depth)
     ps_end_seg(&st);
     free(st.w);
     free(buf);
-    return st.r;
+    return st.r ? st.r : st.warn;
 }
 
 const char *ag_eval_ps(const char *cmd)
@@ -2041,22 +3232,24 @@ const char *ag_eval_ps(const char *cmd)
 
 const char *ag_eval_path(const char *tool, const char *path, const char *content)
 {
-    const char *r;
+    const char *r, *warn = NULL;
     if (!path) return NULL;
     r = path_rule(path);
-    if (r) return r;
-    if (ends_ci(path, ".py")) return R_PYTHON;
+    if (r && !ag_rule_is_warning(r)) return r;
+    warn = r; /* a warning must not hide a refusal below */
+    if (is_py_name(path)) return R_PYTHON;
     if (content && strcmp(tool, "Write") == 0 && strncmp(content, "#!", 2) == 0) {
         size_t eol = strcspn(content, "\n");
         for (size_t i = 0; i + 6 <= eol; i++)
             if (memcmp(content + i, "python", 6) == 0) return R_PYTHON;
     }
+    if (warn) return warn;
     return is_sealed_path(path) ? R_SEAL : NULL;
 }
 
 bool ag_rule_is_warning(const char *rule)
 {
-    return rule && strcmp(rule, R_SEAL) == 0;
+    return rule && (strcmp(rule, R_SEAL) == 0 || strcmp(rule, R_SELF) == 0);
 }
 
 /* The rule text, quoted or condensed from AGENTS.md. */
@@ -2083,6 +3276,8 @@ const char *ag_rule_text(const char *rule)
                "machines with zcutil/local-ci.sh (AGENTS.md Hard rules)"},
         {R_VENDOR, "Vendored code is verbatim: change it only through the matching "
                    "revendor.sh, never by hand (AGENTS.md Hard rules)"},
+        {R_SELF, "This is the agent guard or its hook entry: editing or deleting it can switch the "
+                 "guard off without a notice, so confirm the change is intended"},
         {R_COMPLEX, "The command is too large, too deeply nested or encoded to check, and an "
                     "unchecked tail could hide a refused action: split it into smaller "
                     "commands"},
