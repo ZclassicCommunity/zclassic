@@ -24,10 +24,11 @@ check: $(TOOL)
 	$(CC) -std=c2x $(WARN) -fsyntax-only zcl-dev-timings.c
 	$(TOOL) --selftest
 ifeq ($(EXEEXT),)
-	sh test/run.sh $(TOOL)
+	$(CC) $(STD) $(WARN) $(CFLAGS) -o $(BIN)/zcl-dev-timings-test test/timings_test.c
+	$(BIN)/zcl-dev-timings-test $(TOOL) test
 endif
 
 clean:
-	rm -f $(BIN)/zcl-dev-timings $(BIN)/zcl-dev-timings.exe
+	rm -f $(BIN)/zcl-dev-timings $(BIN)/zcl-dev-timings.exe $(BIN)/zcl-dev-timings-test
 
 .PHONY: all check clean

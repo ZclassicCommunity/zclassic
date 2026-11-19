@@ -2,7 +2,7 @@
 # POSIX implementation, the mingw build prints UNAVAILABLE. Outputs go to ../../bin (git-ignored).
 #   make -C zcutil/dev/flaky                                        host compiler
 #   make -C zcutil/dev/flaky CC=x86_64-w64-mingw32-gcc EXEEXT=.exe  cross build
-#   make -C zcutil/dev/flaky check                                  --selftest and fixture-command tests
+#   make -C zcutil/dev/flaky check                                  --selftest and fixture-command tests (test/flaky_test.c)
 CC ?= cc
 EXEEXT ?=
 CFLAGS ?= -O2 -g
@@ -24,10 +24,11 @@ check: $(TOOL)
 	$(CC) -std=c2x $(WARN) -fsyntax-only zcl-dev-flaky.c
 	$(TOOL) --selftest
 ifeq ($(EXEEXT),)
-	sh test/run.sh $(TOOL)
+	$(CC) $(STD) $(WARN) $(CFLAGS) -o $(BIN)/zcl-dev-flaky-test test/flaky_test.c
+	$(BIN)/zcl-dev-flaky-test $(TOOL)
 endif
 
 clean:
-	rm -f $(BIN)/zcl-dev-flaky $(BIN)/zcl-dev-flaky.exe
+	rm -f $(BIN)/zcl-dev-flaky $(BIN)/zcl-dev-flaky.exe $(BIN)/zcl-dev-flaky-test
 
 .PHONY: all check clean

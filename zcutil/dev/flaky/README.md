@@ -24,4 +24,4 @@ This tool never chooses a port and never derives one from a PID. qa scripts leas
 - The timeout is wall-clock seconds on the host as loaded; a loaded host can turn a slow pass into a timeout failure. Read the log before blaming the test.
 - A verdict from N runs is evidence, not proof: PASS after 3 runs does not make a 1-in-50 flake go away.
 
-`make -C zcutil/dev/flaky check` runs `--selftest` (argument parsing, substitution, median, verdict) and `test/run.sh` (always-pass, always-fail, fails on runs 2 and 5, missing binary, timeout kill, `@WORK@`, `--jobs 3`).
+`make -C zcutil/dev/flaky check` runs `--selftest` (argument parsing, substitution, median, verdict) and `test/flaky_test.c` (a C driver, because the shell-lines ratchet leaves no room for a test script; always-pass, always-fail, fails on runs 2 and 5, missing binary, timeout kill, `@WORK@`, `--jobs 3`).
