@@ -9,7 +9,7 @@
 #            [--peer-bin <dir>] [--blocks N] [--base port]
 #   --template  <work>/template of an earlier wallet_witness_retire.sh run (node0, node1)
 # Output: <work>/perf.txt, one line per measurement and binary, and the table on stdout.
-# Needs jq and the Zcash parameters in ~/.zcash-params. Shell only, no Python.
+# Needs the Zcash parameters in ~/.zcash-params. Shell only, no Python.
 TPL=""; WORK=""; BEFORE=""; AFTER=""; PEER_BIN=""; BLOCKS=40; PORT_BASE=""
 while [ $# -gt 0 ]; do
     case $1 in
@@ -18,13 +18,12 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ -d "$TPL/node0" ] && [ -x "$BEFORE/zclassicd" ] && [ -x "$AFTER/zclassicd" ] && [ -n "$WORK" ] || { echo "usage: $0 --template DIR --work DIR --before BIN --after BIN" >&2; exit 2; }
-command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
 PEER_BIN=${PEER_BIN:-$AFTER}
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/wallet_matrix_lib.sh"
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd); TPL=$(cd "$TPL" && pwd)
 PERF=$WORK/perf.txt; : >"$PERF"
-BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 SCN_LOG=$WORK/perf.log; SCN_ID=perf; OBS_LOG=$WORK/perf.obs; : >"$SCN_LOG"; : >"$OBS_LOG"
 trap 'stop_all' EXIT
 
@@ -87,9 +86,9 @@ run_one() { # <label> <bindir>
     stop 1
 }
 
-BASE0=$BASE
+
 run_one before "$BEFORE" || say "before failed"
-stop_all; BASE=$((BASE0 + 11))
+stop_all; iso_rebase BASE 112 11
 run_one after "$AFTER" || say "after failed"
 stop_all
 say; say "| measurement | before | after |"; say "|---|---|---|"

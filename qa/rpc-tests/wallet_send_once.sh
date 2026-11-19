@@ -21,7 +21,7 @@
 # usage: wallet_send_once.sh --bin <dir> --work <dir> [--peer-bin <dir>] [--ref-bin <dir>] [--old-bin <dir>]
 #                            [--only 1,2,...] [--base port]
 # Output: <work>/results.txt. Exit status 0 when every check passed.
-# Needs jq and the Zcash parameters in ~/.zcash-params. Shell only, no Python.
+# Needs the Zcash parameters in ~/.zcash-params. Shell only, no Python.
 BIN=""; WORK=""; PEER_BIN=""; REF_BIN=""; OLD_BIN=""; ONLY=""; PORT_BASE=""
 while [ $# -gt 0 ]; do
     case $1 in
@@ -31,13 +31,12 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ -x "$BIN/zclassicd" ] && [ -n "$WORK" ] || { echo "usage: $0 --bin DIR --work DIR [--peer-bin DIR] [--ref-bin DIR] [--old-bin DIR] [--only N,N] [--base port]" >&2; exit 2; }
-command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
 PEER_BIN=${PEER_BIN:-$BIN}
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/wallet_matrix_lib.sh"
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 RESULTS=$WORK/results.txt; OBS_LOG=$WORK/obs.txt; : >"$RESULTS"; : >"$OBS_LOG"
-BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 trap 'stop_all' EXIT
 R1="-connect=127.0.0.1:$((BASE + 1))"
 KEY="send-once.test:key-1"
@@ -50,10 +49,12 @@ rec() { printf '[{"address":"%s","amount":%s}]' "$ZB" "$1"; }
 # jsend <amount> <key>: z_sendmany from node 0 with a key; prints the operation id or the error
 jsend() { cli 0 z_sendmany "$ZS" "$(rec "$1")" 1 "$FEE" "$2" 2>&1; }
 jlist() { cli 0 z_listsendjournal; }
-jstates() { jlist | jq -r '[.[]|.state]|join(",")'; }
-jlen() { jlist | jq 'length'; }
-zb_count() { cli 1 z_listreceivedbyaddress "$ZB" 1 | jq 'length'; }
-zb_total() { cli 1 z_listreceivedbyaddress "$ZB" 1 | jq '[.[]|.amount]|add // 0' | awk '{ printf "%.8f", $1 }'; }
+jstates() { jlist | jjoin state; }
+jcount() { jlist | jlen; }
+# jfinal: the shape of a z_getoperationresult answer: [keys of the entry, keys of its result, status]
+jfinal() { local d; d=$(cat); printf '[%s,%s,%s]\n' "$(printf '%s' "$d" | jkeys '[0]')" "$(printf '%s' "$d" | jkeys '[0].result')" "$(printf '%s' "$d" | jraw '[0].status')"; }
+zb_count() { cli 1 z_listreceivedbyaddress "$ZB" 1 | jlen; }
+zb_total() { cli 1 z_listreceivedbyaddress "$ZB" 1 | jsatlist | awk '{ if ($1 !~ /^-?[0-9]+$/) bad = 1; s += $1 } END { if (bad) print "NaN"; else printf "%.8f", s / 100000000 }'; }
 wait_dead() {
     local pid t=0; pid=$(cat "$SD/node$1/pid")
     while kill -0 "$pid" 2>/dev/null; do t=$((t + 1)); [ $t -lt 120 ] || return 1; sleep 0.5; done
@@ -81,18 +82,18 @@ scn_basic() {
     case $r1 in success*) tx1=${r1#success } ;; *) bad "first send: $r1"; return ;; esac
     op2=$(jsend 1 "$KEY")
     ck "same key, same request: same operation id" "$op2" "$op1"
-    ck "the operation answers with the same txid" "$(cli 0 z_getoperationstatus "[\"$op2\"]" | jq -r '.[0].result.txid')" "$tx1"
-    ck "one operation in the queue" "$(cli 0 z_listoperationids | jq 'length')" 1
+    ck "the operation answers with the same txid" "$(cli 0 z_getoperationstatus "[\"$op2\"]" | jget '[0].result.txid')" "$tx1"
+    ck "one operation in the queue" "$(cli 0 z_listoperationids | jlen)" 1
     wait_mempool 1 "$tx1"; mine 1
     op3=$(jsend 1 "$KEY")
     ck "after the block: still the same operation id" "$op3" "$op1"
     mine 1
     final_checks "one send"
     ck "journal: one record, committed" "$(jstates)" committed
-    ck "journal entry: txid" "$(jlist | jq -r '.[0].txid')" "$tx1"
-    ck "journal entry: opid" "$(jlist | jq -r '.[0].opid')" "$op1"
+    ck "journal entry: txid" "$(jlist | jget '[0].txid')" "$tx1"
+    ck "journal entry: opid" "$(jlist | jget '[0].opid')" "$op1"
     ck "journal listing does not contain the key" "$(jlist | grep -c "$KEY")" 0
-    ck "journal listing: key hash is 16 hex characters" "$(jlist | jq -r '.[0].keyhash' | grep -Ec '^[0-9a-f]{16}$')" 1
+    ck "journal listing: key hash is 16 hex characters" "$(jlist | jget '[0].keyhash' | grep -Ec '^[0-9a-f]{16}$')" 1
 
     # 2: a different request under the same key
     ckerr "same key, different amount" "idempotency key reused with different parameters" 0 z_sendmany "$ZS" "$(rec 2)" 1 "$FEE" "$KEY"
@@ -106,17 +107,17 @@ scn_basic() {
     ckerr "six parameters" "z_sendmany" 0 z_sendmany "$ZS" "$(rec 1)" 1 "$FEE" "$KEY" extra
     mine 1
     final_checks "after the refused calls"
-    ck "journal still one record" "$(jlen)" 1
+    ck "journal still one record" "$(jcount)" 1
 
     # 3: restart between the calls
     stop 0; start 0 "$BIN" $R1 $EXTRA || return; sync_to 0
-    ck "restart: queue is empty" "$(cli 0 z_listoperationids | jq 'length')" 0
+    ck "restart: queue is empty" "$(cli 0 z_listoperationids | jlen)" 0
     ck "restart: the same operation id" "$(jsend 1 "$KEY")" "$op1"
-    ck "restart: z_getoperationstatus answers from the journal" "$(cli 0 z_getoperationstatus "[\"$op1\"]" | jq -c '[.[0].status,.[0].result.txid]')" "[\"success\",\"$tx1\"]"
-    ck "restart: z_getoperationresult answers from the journal" "$(cli 0 z_getoperationresult "[\"$op1\"]" | jq -c '[.[0].status,.[0].result.txid]')" "[\"success\",\"$tx1\"]"
-    ck "restart: and again (results are not consumed)" "$(cli 0 z_getoperationresult "[\"$op1\"]" | jq -r '.[0].result.txid')" "$tx1"
+    ck "restart: z_getoperationstatus answers from the journal" "$(cli 0 z_getoperationstatus "[\"$op1\"]" | jarr '[0].status' '[0].result.txid')" "[\"success\",\"$tx1\"]"
+    ck "restart: z_getoperationresult answers from the journal" "$(cli 0 z_getoperationresult "[\"$op1\"]" | jarr '[0].status' '[0].result.txid')" "[\"success\",\"$tx1\"]"
+    ck "restart: and again (results are not consumed)" "$(cli 0 z_getoperationresult "[\"$op1\"]" | jget '[0].result.txid')" "$tx1"
     ckerr "restart: different request still refused" "idempotency key reused with different parameters" 0 z_sendmany "$ZS" "$(rec 3)" 1 "$FEE" "$KEY"
-    ck "restart: an unknown operation id is not invented" "$(cli 0 z_getoperationstatus '["opid-unknown"]' | jq 'length')" 0
+    ck "restart: an unknown operation id is not invented" "$(cli 0 z_getoperationstatus '["opid-unknown"]' | jlen)" 0
     mine 1
     final_checks "after restart"
     stop 0
@@ -139,20 +140,20 @@ crash_case() {
     start 0 "$BIN" $R1 $EXTRA || return; sync_to 0
     case $mode in
     started)
-        ck "$l: STARTED without an operation is released at start" "$(jlen)" 0
-        ck "$l: nothing was sent" "$(cli 1 getrawmempool | jq length) $(zbal 0 "$ZS")" "0 4.00000000"
+        ck "$l: STARTED without an operation is released at start" "$(jcount)" 0
+        ck "$l: nothing was sent" "$(cli 1 getrawmempool | jlen) $(zbal 0 "$ZS")" "0 4.00000000"
         r=$(jsend 1 "$KEY"); ck "$l: retry returns an operation id" "$(echo "$r" | grep -c '^opid-')" 1
         res=$(wait_op 0 "$r"); ck "$l: retry sends" "$(echo "$res" | cut -d" " -f1)" success
         wait_mempool 1 "${res#success }"
         mine 1 ;;
     builtrecord)
         ck "$l: BUILT record on disk, outcome unknown" "$(jstates)" outcome_unknown
-        txid=$(jlist | jq -r '.[0].txid'); expiry=$(jlist | jq -r '.[0].expiryheight')
+        txid=$(jlist | jget '[0].txid'); expiry=$(jlist | jget '[0].expiryheight')
         ck "$l: the transaction was never sent" "$(cli 0 getrawmempool | grep -c "$txid") $(cli 1 getrawmempool | grep -c "$txid")" "0 0"
         r=$(jsend 1 "$KEY")
         ck "$l: retry while unknown returns the stored operation id" "$r" "$op"
-        ck "$l: no second transaction was built" "$(cli 0 getrawmempool | jq length) $(jlen)" "0 1"
-        ck "$l: the stored operation is undecided" "$(cli 0 z_getoperationstatus "[\"$op\"]" | jq -r '.[0].status + " " + .[0].journal')" "executing outcome_unknown"
+        ck "$l: no second transaction was built" "$(cli 0 getrawmempool | jlen) $(jcount)" "0 1"
+        ck "$l: the stored operation is undecided" "$(cli 0 z_getoperationstatus "[\"$op\"]" | jcat '[0].status' '[0].journal')" "executing outcome_unknown"
         mine 3
         ck "$l: still unknown 3 blocks on" "$(jstates)" outcome_unknown
         ck "$l: balance untouched" "$(zbal 0 "$ZS")" 4.00000000
@@ -168,19 +169,19 @@ crash_case() {
         wait_mempool 1 "${res#success }"
         mine 1 ;;
     built|broadcast)
-        txid=$(jlist | jq -r '.[0].txid')
-        ck "$l: the transaction is in the wallet" "$(cli 0 gettransaction "$txid" | jq -r .txid)" "$txid"
+        txid=$(jlist | jget '[0].txid')
+        ck "$l: the transaction is in the wallet" "$(cli 0 gettransaction "$txid" | jget txid)" "$txid"
         ck "$l: after the start the journal says committed (the transaction is in the mempool)" "$(jstates)" committed
         ck "$l: in the node's mempool" "$(cli 0 getrawmempool | grep -c "$txid")" 1
         cli 0 resendwallettransactions >/dev/null
         wait_mempool 1 "$txid"
         r=$(jsend 1 "$KEY")
         ck "$l: retry returns the stored operation id" "$r" "$op"
-        ck "$l: the stored operation is a success with the txid" "$(cli 0 z_getoperationstatus "[\"$op\"]" | jq -r '.[0].status + " " + .[0].result.txid')" "success $txid"
+        ck "$l: the stored operation is a success with the txid" "$(cli 0 z_getoperationstatus "[\"$op\"]" | jcat '[0].status' '[0].result.txid')" "success $txid"
         mine 1 ;;
     esac
     final_checks "$l"
-    ck "$l: one journal record" "$(jlen)" 1
+    ck "$l: one journal record" "$(jcount)" 1
     mine 1
     ck "$l: one more call after the block: stored" "$(jsend 1 "$KEY" | grep -c '^opid-')" 1
     final_checks "$l (final)"
@@ -196,14 +197,14 @@ scn_expire() {
     op=$(jsend 1 "$KEY"); r=$(wait_op 0 "$op")
     case $r in success*) tx=${r#success } ;; *) bad "send: $r"; return ;; esac
     ck "unmined: committed, in node 0's mempool only" "$(jstates) $(cli 0 getrawmempool | grep -c "$tx") $(cli 1 getrawmempool | grep -c "$tx")" "committed 1 0"
-    exp=$(jlist | jq -r '.[0].expiryheight')
+    exp=$(jlist | jget '[0].expiryheight')
     cli 1 generate $((exp + MARGIN + 2 - $(cli 1 getblockcount))) >/dev/null
     rejoin; sync_to 0
     ck "unmined: dropped from the mempool at expiry" "$(cli 0 getrawmempool | grep -c "$tx")" 0
     ck "unmined: the journal released the key (expired)" "$(jstates)" expired
-    ck "unmined: the in-memory operation still says success (the queue does not know the tx expired)" "$(cli 0 z_getoperationstatus "[\"$op\"]" | jq -r ".[0].status")" success
+    ck "unmined: the in-memory operation still says success (the queue does not know the tx expired)" "$(cli 0 z_getoperationstatus "[\"$op\"]" | jget '[0].status')" success
     stop 0; start 0 "$BIN" $R1 $EXTRA || return; sync_to 0
-    ck "unmined: after a restart the journal answers: failed, key released" "$(cli 0 z_getoperationstatus "[\"$op\"]" | jq -r ".[0].status") $(jstates)" "failed expired"
+    ck "unmined: after a restart the journal answers: failed, key released" "$(cli 0 z_getoperationstatus "[\"$op\"]" | jget '[0].status') $(jstates)" "failed expired"
     ck "unmined: balance is back" "$(zbal 0 "$ZS")" 4.00000000
     ck "unmined: nothing reached ZB" "$(zb_count)" 0
     r=$(jsend 1 "$KEY")
@@ -220,24 +221,24 @@ nokey() {
     ZS=$(cli 0 z_getnewaddress sapling); give_z 0 "$ZS" 4
     ZB=$(cli 1 z_getnewaddress sapling)
     op=$(cli 0 z_sendmany "$ZS" "$(rec 1)" 1 "$FEE")
-    st=$(cli 0 z_getoperationstatus "[\"$op\"]" | jq -c '.[0]|keys')
+    st=$(cli 0 z_getoperationstatus "[\"$op\"]" | jkeys '[0]')
     r=$(wait_op 0 "$op")
     wait_mempool 1 "${r#success }"; mine 1
-    fin=$(cli 0 z_getoperationresult "[\"$op\"]" | jq -c '.[0]|[keys,(.result|keys),.status]')
+    fin=$(cli 0 z_getoperationresult "[\"$op\"]" | jfinal)
     ck "keyless: opid shape" "$(echo "$op" | grep -Ec '^opid-[0-9a-f-]{36}$')" 1
     {
         echo "status-keys $st"
         echo "result $fin"
         echo "balance $(zbal 0 "$ZS")"
         echo "zb $(zb_total)"
-        echo "listoperationids-after-result $(cli 0 z_listoperationids | jq length)"
+        echo "listoperationids-after-result $(cli 0 z_listoperationids | jlen)"
         echo "empty-amounts $(errtxt 0 z_sendmany "$ZS" "[]")"
         echo "bad-address $(errtxt 0 z_sendmany "$ZS" "[{\"address\":\"nonsense\",\"amount\":1}]")"
     } >"$WORK/nokey.$1"
 }
 scn_nokey_new() {
     nokey new || return
-    ck "keyless: nothing journaled" "$(jlen)" 0
+    ck "keyless: nothing journaled" "$(jcount)" 0
     ck "keyless: balance exactly as before the journal" "$(zbal 0 "$ZS")" "$(add 4 -1 -$FEE)"
 }
 scn_nokey_ref() {
@@ -263,24 +264,24 @@ scn_old() {
     wait_dead 0 || { bad "node 0 did not die at the second crash point"; return; }
     start 0 "$BIN" $R1 $EXTRA || return; sync_to 0
     states=$(jstates); ck "journal holds a committed and an unresolved record" "$states" "committed,outcome_unknown"
-    zt=$(cli 0 z_gettotalbalance 1 | jq -c '[.transparent,.private]'); hold=$(cli 0 getblockcount)
-    keys=$(jlist | jq -c '[.[]|.keyhash]')
+    zt=$(cli 0 z_gettotalbalance 1 | jarr transparent private); hold=$(cli 0 getblockcount)
+    keys=$(jlist | jpluck keyhash)
     stop 0; stop 1
     for b in ${OLD_BIN:+"old:$OLD_BIN"} ${REF_BIN:+"ref:$REF_BIN"}; do
         tag=${b%%:*}; dir=${b#*:}
         rm -rf "$SD/node0.keep" "$SD/node0.$tag"; cp -a "$SD/node0" "$SD/node0.keep"
         start 0 "$dir" -connect=0 $EXTRA || { bad "$tag: the older binary does not start on a wallet.dat with journal records"; continue; }
         ck "$tag: opens the wallet, same height" "$(cli 0 getblockcount)" "$hold"
-        ck "$tag: same balances" "$(cli 0 z_gettotalbalance 1 | jq -c '[.transparent,.private]')" "$zt"
-        ck "$tag: getwalletinfo works" "$(cli 0 getwalletinfo | jq -r 'has("balance")')" true
+        ck "$tag: same balances" "$(cli 0 z_gettotalbalance 1 | jarr transparent private)" "$zt"
+        ck "$tag: getwalletinfo works" "$(cli 0 getwalletinfo | jhas balance)" true
         ck "$tag: does not know z_listsendjournal" "$(errtxt 0 z_listsendjournal | grep -ci 'method not found')" 1
         ck "$tag: no complaint about the wallet in its log" "$(grep -ci 'error reading wallet\|wallet.dat corrupt\|noncritical\|Error loading' "$SD/node0/regtest/debug.log")" 0
         stop 0
         # the current binary on the wallet.dat the older one has just written
         start 0 "$BIN" -connect=0 $EXTRA || { bad "$tag: the current binary does not start after the older one"; continue; }
-        ck "$tag: current binary still reads the journal" "$(jlist | jq -c '[.[]|.keyhash]')" "$keys"
+        ck "$tag: current binary still reads the journal" "$(jlist | jpluck keyhash)" "$keys"
         ck "$tag: ... with the same states" "$(jstates)" "$states"
-        ck "$tag: ... and the same balances" "$(cli 0 z_gettotalbalance 1 | jq -c '[.transparent,.private]')" "$zt"
+        ck "$tag: ... and the same balances" "$(cli 0 z_gettotalbalance 1 | jarr transparent private)" "$zt"
         stop 0
         rm -rf "$SD/node0"; mv "$SD/node0.keep" "$SD/node0"
     done
@@ -294,21 +295,21 @@ scn_refused() {
     fund -minrelaytxfee=0.00000001 || return
     op=$(cli 0 z_sendmany "$ZS" "$(rec 1)" 1 0.001 "$KEY" 2>&1)
     case $op in opid-*) ;; *) bad "refused: z_sendmany said [$op]"; return ;; esac
-    t=0; until [ "$(jlist | jq -r '.[0].error_code // empty')" != "" ]; do t=$((t + 1)); [ $t -lt 600 ] || { bad "refused: no stored broadcast error"; return; }; sleep 1; done
-    txid=$(jlist | jq -r '.[0].txid')
-    ck "refused: the broadcast error is stored, the record stays built" "$(jlist | jq -r '.[0].stored_state + " " + .[0].state')" "built outcome_unknown"
-    ck "refused: the error is the absurd fee" "$(jlist | jq -r '.[0].error' | grep -ci 'absurd')" 1
-    s=$(cli 0 z_getoperationstatus "[\"$op\"]" | jq -r '.[0].status + " " + .[0].journal + " " + (.[0].last_error.message|tostring)')
+    t=0; until [ "$(jlist | jgetd '[0].error_code' "")" != "" ]; do t=$((t + 1)); [ $t -lt 600 ] || { bad "refused: no stored broadcast error"; return; }; sleep 1; done
+    txid=$(jlist | jget '[0].txid')
+    ck "refused: the broadcast error is stored, the record stays built" "$(jlist | jcat '[0].stored_state' '[0].state')" "built outcome_unknown"
+    ck "refused: the error is the absurd fee" "$(jlist | jget '[0].error' | grep -ci 'absurd')" 1
+    s=$(cli 0 z_getoperationstatus "[\"$op\"]" | jcat '[0].status' '[0].journal' '[0].last_error.message')
     ck "refused: the live operation is not reported as failed" "$(echo "$s" | cut -d' ' -f1,2)" "executing outcome_unknown"
-    ck "refused: z_getoperationresult does not hand out a failure" "$(cli 0 z_getoperationresult "[\"$op\"]" | jq 'length')" 0
-    ck "refused: the operation is still in the queue" "$(cli 0 z_listoperationids | jq 'length')" 1
-    ck "refused: the built transaction is in the wallet, in no mempool" "$(cli 0 gettransaction "$txid" | jq -r .txid) $(cli 0 getrawmempool | grep -c "$txid")" "$txid 0"
+    ck "refused: z_getoperationresult does not hand out a failure" "$(cli 0 z_getoperationresult "[\"$op\"]" | jlen)" 0
+    ck "refused: the operation is still in the queue" "$(cli 0 z_listoperationids | jlen)" 1
+    ck "refused: the built transaction is in the wallet, in no mempool" "$(cli 0 gettransaction "$txid" | jget txid) $(cli 0 getrawmempool | grep -c "$txid")" "$txid 0"
     ck "refused: retry returns the stored operation id" "$(cli 0 z_sendmany "$ZS" "$(rec 1)" 1 0.001 "$KEY" 2>&1)" "$op"
-    ck "refused: nothing new was built" "$(jlen) $(cli 0 getrawmempool | jq length)" "1 0"
+    ck "refused: nothing new was built" "$(jcount) $(cli 0 getrawmempool | jlen)" "1 0"
     ck "refused: balance untouched" "$(zbal 0 "$ZS")" 4.00000000
     stop 0; start 0 "$BIN" $R1 $EXTRA || return; sync_to 0
     ck "refused: after a restart with the normal relay fee the wallet offers it again: committed" "$(jstates) $(cli 0 getrawmempool | grep -c "$txid")" "committed 1"
-    ck "refused: the operation now answers success with the txid" "$(cli 0 z_getoperationstatus "[\"$op\"]" | jq -r '.[0].status + " " + .[0].result.txid')" "success $txid"
+    ck "refused: the operation now answers success with the txid" "$(cli 0 z_getoperationstatus "[\"$op\"]" | jcat '[0].status' '[0].result.txid')" "success $txid"
     cli 0 resendwallettransactions >/dev/null; wait_mempool 1 "$txid"; mine 1
     ck "refused: ZS debited exactly once" "$(zbal 0 "$ZS")" "$(add 4 -1 -0.001)"
     ck "refused: ZB received exactly one note of 1" "$(zb_count) $(zb_total)" "1 1.00000000"
@@ -323,14 +324,14 @@ scn_locked() {
     wait_dead 0 || { bad "locked: encryptwallet did not stop the node"; return; }
     start 0 "$BIN" $R1 $EXTRA || return; sync_to 0
     ckerr "locked: a keyed send needs the passphrase" "assphrase" 0 z_sendmany "$ZS" "$(rec 1)" 1 "$FEE" "$KEY"
-    ck "locked: the refused call left no record" "$(jlen)" 0
+    ck "locked: the refused call left no record" "$(jcount)" 0
     cli 0 walletpassphrase pw1 600 >/dev/null
     op=$(jsend 1 "$KEY"); r=$(wait_op 0 "$op")
     case $r in success*) ;; *) bad "locked: send: $r"; return ;; esac
     cli 0 walletlock >/dev/null
     ck "locked: retry with the same key returns the stored operation id" "$(jsend 1 "$KEY")" "$op"
     ckerr "locked: a new key still needs the passphrase" "assphrase" 0 z_sendmany "$ZS" "$(rec 1)" 1 "$FEE" "another-key"
-    ck "locked: one record" "$(jlen)" 1
+    ck "locked: one record" "$(jcount)" 1
     stop 0; start 0 "$BIN" $R1 $EXTRA || return; sync_to 0
     ck "locked: after a restart, still locked, the same operation id" "$(jsend 1 "$KEY")" "$op"
     mine 1

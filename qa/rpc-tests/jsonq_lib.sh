@@ -55,3 +55,44 @@ jhas() {
     "$JSONQ" has "$1"; _js_r=$?
     case $_js_r in 0) echo true ;; 1) echo false ;; *) return "$_js_r" ;; esac
 }
+
+# Composite helpers for the tests that compared several values at once. Each reads one JSON document on
+# stdin, takes the same paths as jget, and prints what the old one-line expression printed.
+#   jarr PATH...   [raw,raw,...] compact JSON of the values (a missing path is null) (what a one-line array expression of two fields printed)
+#   jcat PATH...   the values (jget) joined by single spaces
+#   jpick [FIELD]  one value per array element (its FIELD, or the element itself), one per line
+#                  (fails, printing nothing, when the document is not an array)
+#   jjoin FIELD    jpick, comma-joined
+#   jpluck FIELD   [raw,raw,...] compact JSON of the FIELD of every element
+#   jsatlist       the .amount of every element of an array in satoshi (integer), one per line; NaN for a non-number
+#   jkeys [PATH]   the sorted keys of an object as a compact JSON array
+jarr() {
+    _ja_d=$(cat); _ja_o=; _ja_s=
+    for _ja_p in "$@"; do _ja_o="$_ja_o$_ja_s$(printf '%s' "$_ja_d" | jraw "$_ja_p")"; _ja_s=,; done
+    printf '[%s]\n' "$_ja_o"
+}
+jcat() {
+    _jc_d=$(cat); _jc_o=; _jc_s=
+    for _jc_p in "$@"; do _jc_o="$_jc_o$_jc_s$(printf '%s' "$_jc_d" | jget "$_jc_p")"; _jc_s=' '; done
+    printf '%s\n' "$_jc_o"
+}
+jpick() {
+    _jp_d=$(cat); _jp_n=$(printf '%s' "$_jp_d" | jlen) || return 1; _jp_i=0
+    while [ "$_jp_i" -lt "$_jp_n" ]; do
+        printf '%s' "$_jp_d" | jget "[$_jp_i]${1:+.$1}"; _jp_i=$((_jp_i + 1))
+    done
+}
+jjoin() { jpick "$1" | tr '\n' ',' | sed 's/,$//'; echo; }
+jsatlist() { jpick amount | awk '{ if ($1 ~ /^-?[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$/) printf "%d\n", $1 * 100000000 + 0.5; else print "NaN" }'; }
+jkeys() {
+    _jk_o=$("$JSONQ" keys "${1:-.}") || return $?
+    [ -n "$_jk_o" ] || { echo '[]'; return 0; }
+    printf '%s\n' "$_jk_o" | LC_ALL=C sort | awk 'BEGIN { printf "[" } { printf "%s\"%s\"", (NR > 1 ? "," : ""), $0 } END { print "]" }'
+}
+jpluck() {
+    _jl_d=$(cat); _jl_n=$(printf '%s' "$_jl_d" | jlen) || return 1; _jl_i=0; _jl_o=; _jl_s=
+    while [ "$_jl_i" -lt "$_jl_n" ]; do
+        _jl_o="$_jl_o$_jl_s$(printf '%s' "$_jl_d" | jraw "[$_jl_i].$1")"; _jl_s=,; _jl_i=$((_jl_i + 1))
+    done
+    printf '[%s]\n' "$_jl_o"
+}

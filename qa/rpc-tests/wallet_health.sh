@@ -19,7 +19,7 @@
 #
 # usage: wallet_health.sh --bin <dir> --work <dir> [--peer-bin <dir>] [--only 1,2,...] [--base port]
 # Output: <work>/results.txt. Exit status 0 when every check passed.
-# Needs jq and the Zcash parameters in ~/.zcash-params. Shell only, no Python.
+# Needs the Zcash parameters in ~/.zcash-params. Shell only, no Python.
 BIN=""; WORK=""; PEER_BIN=""; ONLY=""; PORT_BASE=""
 while [ $# -gt 0 ]; do
     case $1 in
@@ -28,28 +28,69 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ -x "$BIN/zclassicd" ] && [ -n "$WORK" ] || { echo "usage: $0 --bin DIR --work DIR [--peer-bin DIR] [--only N,N] [--base port]" >&2; exit 2; }
-command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
 PEER_BIN=${PEER_BIN:-$BIN}
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/wallet_matrix_lib.sh"
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 RESULTS=$WORK/results.txt; OBS_LOG=$WORK/obs.txt; : >"$RESULTS"; : >"$OBS_LOG"
-BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 trap 'stop_all' EXIT
 R1="-connect=127.0.0.1:$((BASE + 1))"
 
-# hv <jq path under .health>: one value of the report on node 0
-hv() { case $1 in "["*) cli 0 getwalletinfo | jq -r ".health|$1" ;; *) cli 0 getwalletinfo | jq -r ".health.$1" ;; esac; }
+# hv <path under .health>: one value of the report on node 0
+hv() { cli 0 getwalletinfo | jget "health.$1"; }
+# hcsv <pool or ""> <field>...: the fields of health.<pool> (or of health, with ""), comma-joined, from one getwalletinfo
+hcsv() {
+    local d p=$1 f o="" s=""; shift
+    d=$(cli 0 getwalletinfo)
+    for f in "$@"; do o="$o$s$(printf '%s' "$d" | jget "health.${p:+$p.}$f")"; s=,; done
+    printf '%s\n' "$o"
+}
+# hadd <pool> <field> <field>: the sum of two integer fields; hge <pool> <a> <b>: true when a >= b.
+# Both print "nonnumeric" when a field is missing or not an integer, so a check cannot pass on an absent field.
+hadd() {
+    local d a b; d=$(cli 0 getwalletinfo)
+    a=$(printf '%s' "$d" | jget "health.$1.$2"); b=$(printf '%s' "$d" | jget "health.$1.$3")
+    case $a$b in *[!0-9]*|'') echo nonnumeric; return ;; esac
+    echo $((a + b))
+}
+hge() {
+    local d a b; d=$(cli 0 getwalletinfo)
+    a=$(printf '%s' "$d" | jget "health.$1.$2"); b=$(printf '%s' "$d" | jget "health.$1.$3")
+    case $a$b in *[!0-9]*|'') echo nonnumeric; return ;; esac
+    [ "$a" -ge "$b" ] && echo true || echo false
+}
+# ucount <z_listunspent json> <field> <any|zero|pos>: the notes that have <field> (sapling "outindex", sprout "jsindex"),
+# all of them, those with 0 confirmations, or those with more; "nonnumeric" when a confirmation count is not an integer
+ucount() {
+    local n i c=0 conf; n=$(printf '%s' "$1" | jlen) || return 1; i=0
+    while [ "$i" -lt "$n" ]; do
+        if [ "$(printf '%s' "$1" | jhas "[$i].$2")" = true ]; then
+            case $3 in
+            any) c=$((c + 1)) ;;
+            *) conf=$(printf '%s' "$1" | jget "[$i].confirmations")
+               case $conf in ''|*[!0-9]*) echo nonnumeric; return 1 ;; esac
+               if [ "$3" = zero ] && [ "$conf" -eq 0 ]; then c=$((c + 1)); fi
+               if [ "$3" = pos ] && [ "$conf" -gt 0 ]; then c=$((c + 1)); fi ;;
+            esac
+        fi
+        i=$((i + 1))
+    done
+    echo "$c"
+}
 # txst <txid>: the status of a wallet transaction
-txst() { local t=0 s; while :; do s=$(cli 0 gettransaction "$1" 2>/dev/null | jq -r .status 2>/dev/null); [ -n "$s" ] && { echo "$s"; return; }; t=$((t + 1)); [ $t -lt 30 ] || { echo none; return; }; sleep 1; done; }
-# wait_for <jq path> <want> [secs]: poll a health value
+txst() { local t=0 s; while :; do s=$(cli 0 gettransaction "$1" 2>/dev/null | jget status 2>/dev/null); [ -n "$s" ] && { echo "$s"; return; }; t=$((t + 1)); [ $t -lt 30 ] || { echo none; return; }; sleep 1; done; }
+# wait_h <path under .health> <want> [secs]: poll a health value
 wait_h() { local t=0; until [ "$(hv "$1")" = "$2" ]; do t=$((t + 1)); [ $t -lt "${3:-30}" ] || return 1; sleep 1; done; }
 isolate() { stop 1; start 1 "$PEER_BIN" -connect=0 -listen=0 || return 1; local t=0; while [ "$(cli 0 getconnectioncount)" -gt 0 ] && [ $t -lt 30 ]; do t=$((t + 1)); sleep 1; done; ck "isolated from the miner" "$(cli 0 getconnectioncount)" 0; }
 rejoin() { stop 1; start 1 "$PEER_BIN" -connect=127.0.0.1:$((BASE + 0)) || return 1; local t=0; until [ "$(cli 0 getconnectioncount)" -ge 1 ]; do t=$((t + 1)); [ $t -lt 60 ] || break; sleep 1; done; }
 
 oldfields() {
-    ck "$1: pre-existing getwalletinfo fields unchanged" \
-        "$(cli 0 getwalletinfo | jq -r '[has("walletversion"),has("balance"),has("unconfirmed_balance"),has("immature_balance"),has("txcount"),has("keypoololdest"),has("keypoolsize"),has("paytxfee"),has("health")]|all')" true
+    local d k all=true; d=$(cli 0 getwalletinfo)
+    for k in walletversion balance unconfirmed_balance immature_balance txcount keypoololdest keypoolsize paytxfee health; do
+        [ "$(printf '%s' "$d" | jhas "$k")" = true ] || all=false
+    done
+    ck "$1: pre-existing getwalletinfo fields unchanged" "$all" true
 }
 
 fund() {
@@ -62,16 +103,16 @@ scn_fund() {
     fund || return
     oldfields funded
     ck "funded: tip_height" "$(hv tip_height)" "$(cli 0 getblockcount)"
-    ck "funded: sapling unspent/spent" "$(hv 'sapling|[.notes_unspent,.notes_spent]|@csv')" "1,0"
-    ck "funded: sapling witness ready/missing/stale" "$(hv 'sapling|[.witness_ready,.witness_missing,.witness_stale]|@csv')" "1,0,0"
-    ck "funded: sprout unspent/spent" "$(hv 'sprout|[.notes_unspent,.notes_spent]|@csv')" "1,0"
-    ck "funded: sprout witness ready/missing/stale" "$(hv 'sprout|[.witness_ready,.witness_missing,.witness_stale]|@csv')" "1,0,0"
-    ck "funded: no pending sends" "$(hv 'pending_sends|[.in_mempool,.not_in_mempool,.expiring_soon,.expired,.conflicted]|@csv')" "0,0,0,0,0"
+    ck "funded: sapling unspent/spent" "$(hcsv sapling notes_unspent notes_spent)" "1,0"
+    ck "funded: sapling witness ready/missing/stale" "$(hcsv sapling witness_ready witness_missing witness_stale)" "1,0,0"
+    ck "funded: sprout unspent/spent" "$(hcsv sprout notes_unspent notes_spent)" "1,0"
+    ck "funded: sprout witness ready/missing/stale" "$(hcsv sprout witness_ready witness_missing witness_stale)" "1,0,0"
+    ck "funded: no pending sends" "$(hcsv pending_sends in_mempool not_in_mempool expiring_soon expired conflicted)" "0,0,0,0,0"
     ck "funded: no rebuild pending" "$(hv witness_rebuild_pending)" false
     c=$(hv witness_cache_size)
     ck "funded: witness cache size in 1..100" "$([ "$c" -ge 1 ] && [ "$c" -le 100 ] && echo yes)" yes
     ck "funded: checkpoint_height is -1 or at most the tip" "$([ "$(hv checkpoint_height)" -le "$(hv tip_height)" ] && echo yes)" yes
-    ck "funded: a received note's transaction is mined" "$(txst "$(cli 0 z_listunspent 1 | jq -r '.[0].txid')")" mined
+    ck "funded: a received note's transaction is mined" "$(txst "$(cli 0 z_listunspent 1 | jget '[0].txid')")" mined
 }
 
 scn_pending() {
@@ -81,12 +122,12 @@ scn_pending() {
     case $r in success*) tx=${r#success } ;; *) bad "send: $r"; return ;; esac
     wait_mempool 1 "$tx"; txst "$tx" >/dev/null
     ck "pending: status" "$(txst "$tx")" pending
-    ck "pending: in_mempool" "$(hv 'pending_sends|[.in_mempool,.not_in_mempool,.expired,.conflicted]|@csv')" "1,0,0,0"
-    ck "pending: sapling spent 1, unspent 1 (unconfirmed change)" "$(hv 'sapling|[.notes_spent,.notes_unspent,.unconfirmed]|@csv')" "1,1,1"
+    ck "pending: in_mempool" "$(hcsv pending_sends in_mempool not_in_mempool expired conflicted)" "1,0,0,0"
+    ck "pending: sapling spent 1, unspent 1 (unconfirmed change)" "$(hcsv sapling notes_spent notes_unspent unconfirmed)" "1,1,1"
     mine 1
     ck "mined: status" "$(txst "$tx")" mined
-    ck "mined: nothing pending" "$(hv 'pending_sends|[.in_mempool,.not_in_mempool,.expiring_soon,.expired,.conflicted]|@csv')" "0,0,0,0,0"
-    ck "mined: sapling spent 1, unspent 1 ready" "$(hv 'sapling|[.notes_spent,.notes_unspent,.witness_ready,.unconfirmed]|@csv')" "1,1,1,0"
+    ck "mined: nothing pending" "$(hcsv pending_sends in_mempool not_in_mempool expiring_soon expired conflicted)" "0,0,0,0,0"
+    ck "mined: sapling spent 1, unspent 1 ready" "$(hcsv sapling notes_spent notes_unspent witness_ready unconfirmed)" "1,1,1,0"
     ck "mined: balance" "$(zbal 0 "$ZS")" "$(add 4 -1 -$FEE)"
 }
 
@@ -100,14 +141,14 @@ scn_expire() {
     ck "expire: status pending, in node 0 mempool" "$(txst "$tx") $(cli 0 getrawmempool | grep -c "$tx")" "pending 1"
     cli 1 generate 3 >/dev/null; rejoin; sync_to 0
     ck "expire: three blocks on, still in the mempool, status expiringsoon" "$(txst "$tx") $(cli 0 getrawmempool | grep -c "$tx")" "expiringsoon 1"
-    ck "expire: expiring_soon counted" "$(hv 'pending_sends|[.in_mempool,.expiring_soon,.expired]|@csv')" "1,1,0"
+    ck "expire: expiring_soon counted" "$(hcsv pending_sends in_mempool expiring_soon expired)" "1,1,0"
     isolate; sleep 2
     cli 1 generate 5 >/dev/null; rejoin; sync_to 0
     ck "expire: the miner never saw it" "$(cli 1 getrawmempool | grep -c "$tx")" 0
     ck "expire: status expired" "$(txst "$tx")" expired
-    ck "expire: counted as expired, not in the mempool" "$(hv 'pending_sends|[.in_mempool,.not_in_mempool,.expired,.conflicted]|@csv')" "0,0,1,0"
+    ck "expire: counted as expired, not in the mempool" "$(hcsv pending_sends in_mempool not_in_mempool expired conflicted)" "0,0,1,0"
     ck "expire: inputs spendable again (balance as before the send)" "$(zbal 0 "$ZS")" "$b0"
-    ck "expire: the original note is unspent again, the expired send's change note is dead" "$(hv 'sapling|[.notes_unspent,.unmined_dead,.notes_spent]|@csv')" "1,1,0"
+    ck "expire: the original note is unspent again, the expired send's change note is dead" "$(hcsv sapling notes_unspent unmined_dead notes_spent)" "1,1,0"
 }
 
 scn_deep() {
@@ -115,16 +156,16 @@ scn_deep() {
     ZS=$(cli 0 z_getnewaddress sapling); give_z 0 "$ZS" 4
     cli 1 generate 110 >/dev/null; sync_to 0
     ck "deep: cache is full before the unwind" "$(hv witness_cache_size)" 100
-    ck "deep: note ready" "$(hv 'sapling|[.witness_ready,.witness_stale,.witness_missing]|@csv')" "1,0,0"
+    ck "deep: note ready" "$(hcsv sapling witness_ready witness_stale witness_missing)" "1,0,0"
     first=$(cli 0 getblockhash $(($(cli 0 getblockcount) - 104)))
     cli 0 invalidateblock "$first" >/dev/null 2>&1
     low=$(cli 0 getblockcount)
     ck "deep: tip_height is the lowered tip" "$(hv tip_height)" "$low"
     ck "deep: rebuild no longer pending" "$(hv witness_rebuild_pending)" false
-    ck "deep: note has a witness at the lowered tip" "$(hv 'sapling|[.witness_ready,.witness_stale,.witness_missing]|@csv')" "1,0,0"
+    ck "deep: note has a witness at the lowered tip" "$(hcsv sapling witness_ready witness_stale witness_missing)" "1,0,0"
     ck "deep: balance intact" "$(zbal 0 "$ZS")" 4.00000000
     cli 0 reconsiderblock "$first" >/dev/null 2>&1; sync_to 0
-    ck "deep: after reconsiderblock the note is ready at the tip" "$(hv 'sapling|[.witness_ready,.witness_stale,.witness_missing]|@csv') $(hv tip_height)" "1,0,0 $(cli 1 getblockcount)"
+    ck "deep: after reconsiderblock the note is ready at the tip" "$(hcsv sapling witness_ready witness_stale witness_missing) $(hv tip_height)" "1,0,0 $(cli 1 getblockcount)"
 }
 
 scn_restart() {
@@ -132,11 +173,11 @@ scn_restart() {
     mine 2
     stop 0; start 0 "$BIN" $R1 -disablesafemode || return; sync_to 0
     ck "restart: checkpoint_height equals the tip after a clean stop" "$(hv checkpoint_height)" "$(cli 0 getblockcount)"
-    ck "restart: counts" "$(hv '[.sapling.witness_ready,.sapling.notes_unspent,.sprout.witness_ready,.sprout.notes_unspent]|@csv')" "1,1,1,1"
-    ck "restart: no rebuild pending, nothing pending" "$(hv witness_rebuild_pending) $(hv 'pending_sends|[.in_mempool,.not_in_mempool,.expired]|@csv')" "false 0,0,0"
+    ck "restart: counts" "$(hcsv "" sapling.witness_ready sapling.notes_unspent sprout.witness_ready sprout.notes_unspent)" "1,1,1,1"
+    ck "restart: no rebuild pending, nothing pending" "$(hv witness_rebuild_pending) $(hcsv pending_sends in_mempool not_in_mempool expired)" "false 0,0,0"
     oldfields restart
     mine 1
-    ck "restart: new block, witness ready at the new tip" "$(hv 'sapling|.witness_ready') $(hv tip_height)" "1 $(cli 1 getblockcount)"
+    ck "restart: new block, witness ready at the new tip" "$(hv sapling.witness_ready) $(hv tip_height)" "1 $(cli 1 getblockcount)"
 }
 
 # recount <label>: every note count of the report against what z_listunspent, z_listreceivedbyaddress and the
@@ -145,23 +186,23 @@ recount() {
     local l=$1 u rcv_s rcv_p a mp mine_mp t
     u=$(cli 0 z_listunspent 0 9999999)
     rcv_s=0; rcv_p=0
-    for a in $(cli 0 z_listaddresses | jq -r '.[]'); do
-        case $a in zs*|zregtestsapling*|ztestsapling*) rcv_s=$((rcv_s + $(cli 0 z_listreceivedbyaddress "$a" 0 | jq length))) ;;
-                   *) rcv_p=$((rcv_p + $(cli 0 z_listreceivedbyaddress "$a" 0 | jq length))) ;; esac
+    for a in $(cli 0 z_listaddresses | jpick); do
+        case $a in zs*|zregtestsapling*|ztestsapling*) rcv_s=$((rcv_s + $(cli 0 z_listreceivedbyaddress "$a" 0 | jlen))) ;;
+                   *) rcv_p=$((rcv_p + $(cli 0 z_listreceivedbyaddress "$a" 0 | jlen))) ;; esac
     done
     for pool in sapling:outindex sprout:jsindex; do
         p=${pool%%:*}; f=${pool#*:}
-        ck "$l: $p notes_unspent = z_listunspent 0" "$(hv "$p.notes_unspent")" "$(echo "$u" | jq --arg f "$f" '[.[]|select(has($f))]|length')"
-        ck "$l: $p unconfirmed = z_listunspent at depth 0" "$(hv "$p.unconfirmed")" "$(echo "$u" | jq --arg f "$f" '[.[]|select(has($f) and .confirmations == 0)]|length')"
-        ck "$l: $p witness_ready = confirmed unspent notes (all witnesses at the tip)" "$(hv "$p.witness_ready")" "$(echo "$u" | jq --arg f "$f" '[.[]|select(has($f) and .confirmations > 0)]|length')"
-        ck "$l: $p witness_missing + witness_stale = 0" "$(hv "$p|.witness_missing + .witness_stale")" 0
+        ck "$l: $p notes_unspent = z_listunspent 0" "$(hv "$p.notes_unspent")" "$(ucount "$u" "$f" any)"
+        ck "$l: $p unconfirmed = z_listunspent at depth 0" "$(hv "$p.unconfirmed")" "$(ucount "$u" "$f" zero)"
+        ck "$l: $p witness_ready = confirmed unspent notes (all witnesses at the tip)" "$(hv "$p.witness_ready")" "$(ucount "$u" "$f" pos)"
+        ck "$l: $p witness_missing + witness_stale = 0" "$(hadd "$p" witness_missing witness_stale)" 0
         [ "$p" = sapling ] && t=$rcv_s || t=$rcv_p
-        ck "$l: $p notes_spent + notes_unspent = every note received (z_listreceivedbyaddress 0 skips dead transactions)" "$(hv "$p|.notes_spent + .notes_unspent")" "$t"
+        ck "$l: $p notes_spent + notes_unspent = every note received (z_listreceivedbyaddress 0 skips dead transactions)" "$(hadd "$p" notes_spent notes_unspent)" "$t"
         ck "$l: $p unmined_dead = 0 (no dead transaction in this scenario)" "$(hv "$p.unmined_dead")" 0
-        ck "$l: $p witnesses_held_unspent >= witness_ready" "$(hv "$p|.witnesses_held_unspent >= .witness_ready")" true
+        ck "$l: $p witnesses_held_unspent >= witness_ready" "$(hge "$p" witnesses_held_unspent witness_ready)" true
     done
     mine_mp=0
-    for t in $(cli 0 getrawmempool | jq -r '.[]'); do cli 0 gettransaction "$t" >/dev/null 2>&1 && mine_mp=$((mine_mp + 1)); done
+    for t in $(cli 0 getrawmempool | jpick); do cli 0 gettransaction "$t" >/dev/null 2>&1 && mine_mp=$((mine_mp + 1)); done
     ck "$l: pending_sends.in_mempool = wallet transactions in the mempool" "$(hv pending_sends.in_mempool)" "$mine_mp"
     ck "$l: tip_height = getblockcount" "$(hv tip_height)" "$(cli 0 getblockcount)"
 }

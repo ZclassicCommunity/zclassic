@@ -39,7 +39,7 @@
 #   --reuse-template  use the template datadirs of an earlier run in --work (the proofs of the
 #                 300 notes take most of the time)
 # Output: <work>/results.txt. Exit status 0 when every scenario passed.
-# Needs jq and the Zcash parameters in ~/.zcash-params. Shell only, no Python.
+# Needs the Zcash parameters in ~/.zcash-params. Shell only, no Python.
 BIN=""; WORK=""; PEER_BIN=""; OLD_BIN=""; PARENT_BIN=""; ONLY=""; PORT_BASE=""; NA=60; NPA=5; NSA=48; REUSE=0
 while [ $# -gt 0 ]; do
     case $1 in
@@ -51,13 +51,12 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ -x "$BIN/zclassicd" ] && [ -n "$WORK" ] || { echo "usage: $0 --bin DIR --work DIR [--peer-bin DIR] [--old-bin DIR] [--parent-bin DIR] [--only N,N]" >&2; exit 2; }
-command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
 PEER_BIN=${PEER_BIN:-$BIN}
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/wallet_matrix_lib.sh"
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 RESULTS=$WORK/results.txt; OBS_LOG=$WORK/obs.txt; : >"$RESULTS"; : >"$OBS_LOG"
-BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 TPL=$WORK/template
 trap 'stop_all' EXIT
 R1="-connect=127.0.0.1:$((BASE + 1))"
@@ -66,13 +65,21 @@ BURIED=96                 # depth of the spends in the template (the cache holds
 
 # snap <n>: totals, notes and unspent outputs, exact
 snap() {
-    printf 'z=%s t=%s notes=%s utxo=%s' "$(cli "$1" z_gettotalbalance 1 | jq -c '[.transparent,.private]')" "$(bal "$1" '*' 1)" \
-        "$(cli "$1" z_listunspent 1 | jq -c '[.[]|(.amount*100000000|round)]|sort')" \
-        "$(cli "$1" listunspent 1 | jq -c '[.[]|.txid[0:8]+":"+(.vout|tostring)]|sort')"
+    printf 'z=%s t=%s notes=%s utxo=%s' "$(cli "$1" z_gettotalbalance 1 | jarr transparent private)" "$(bal "$1" '*' 1)" \
+        "$(cli "$1" z_listunspent 1 | jsatlist | LC_ALL=C sort -n | awk 'BEGIN { printf "[" } { printf "%s%s", (NR > 1 ? "," : ""), $0 } END { print "]" }')" \
+        "$(cli "$1" listunspent 1 | utxolist)"
 }
-nnotes() { cli "$1" z_listunspent 1 | jq length; }
-ztot() { n8 "$(cli "$1" z_gettotalbalance 1 | jq -r .private)"; }
-confirmations() { cli 0 gettransaction "$1" | jq -r .confirmations; }
+# utxolist: the outputs of a listunspent answer as ["<first 8 of the txid>:<vout>",...], sorted
+utxolist() {
+    local d n i; d=$(cat); n=$(printf '%s' "$d" | jlen) || return 1; i=0
+    while [ "$i" -lt "$n" ]; do
+        printf '%s:%s\n' "$(printf '%s' "$d" | jget "[$i].txid" | cut -c1-8)" "$(printf '%s' "$d" | jget "[$i].vout")"
+        i=$((i + 1))
+    done | LC_ALL=C sort | awk 'BEGIN { printf "[" } { printf "%s\"%s\"", (NR > 1 ? "," : ""), $0 } END { print "]" }'
+}
+nnotes() { cli "$1" z_listunspent 1 | jlen; }
+ztot() { n8 "$(cli "$1" z_gettotalbalance 1 | jget private)"; }
+confirmations() { cli 0 gettransaction "$1" | jget confirmations; }
 # refsnap <connect arg> [extra args]: node 0 is stopped; a copy of its datadir restarted with -rescan on node 3
 refsnap() {
     local c=$1; shift
@@ -100,7 +107,7 @@ build_template() {
     setup2 -disablesafemode || return 1
     : >"$SD/zaddrs"; i=1
     while [ $i -le $NA ]; do cli 0 z_getnewaddress >>"$SD/zaddrs"; i=$((i + 1)); done
-    rec=$(jq -R -s -c --argjson v $NOTEV 'split("\n")|map(select(length>0))|map({address:.,amount:$v})' "$SD/zaddrs")
+    rec=$(awk -v v=$NOTEV 'BEGIN { printf "[" } NF { printf "%s{\"address\":\"%s\",\"amount\":%s}", (n++ ? "," : ""), $1, v } END { print "]" }' "$SD/zaddrs")
     i=1; t0=$(now)
     while [ $i -le $NPA ]; do
         ta=$(cli 1 getnewaddress)
@@ -214,7 +221,7 @@ scn_crash() {
     local pt
     for pt in setbestchain-begin setbestchain-after-txs setbestchain-after-locator setbestchain-after-commit; do
         stop_all; SD=$WORK/s2$pt; rm -rf "$SD"; mkdir -p "$SD"
-        BASE=$((BASE + 7)); R1="-connect=127.0.0.1:$((BASE + 1))"
+        iso_rebase BASE 112 7; R1="-connect=127.0.0.1:$((BASE + 1))"
         crash_variant "$pt" 14
     done
     stop_all
@@ -251,8 +258,8 @@ scn_deepunwind() {
     mine 20
     ck "deepunwind: spend depth" "$(confirmations "$first")" "$((BURIED + 20))"
     A=$(snap 0)
-    fb=$(cli 0 gettransaction "$first" | jq -r .blockhash)
-    h=$(cli 0 getblockcount); fh=$(cli 0 getblockheader "$fb" | jq -r .height)
+    fb=$(cli 0 gettransaction "$first" | jget blockhash)
+    h=$(cli 0 getblockcount); fh=$(cli 0 getblockheader "$fb" | jget height)
     obs "blocks unwound" "$((h - fh + 1))"
     # a: the running wallet is unwound (the spends return to the mempool, so they still count as
     # spending), then everything is reconsidered: no restart in between
@@ -283,7 +290,7 @@ scn_deepunwind() {
     old=$(sed -n 1p "$SD/zaddrs"); ta=$(cli 0 getnewaddress)
     r=$(zsend 0 "$old" "[{\"address\":\"$ta\",\"amount\":0.25}]" 1 "$FEE")
     ck "deepunwind: a retired note is spent again at the lowered tip (witness rebuilt)" "${r%% *}" success
-    case $r in success*) ck "deepunwind: the spend is in the node's mempool" "$(cli 0 getrawmempool | jq -r --arg t "${r#success }" 'index($t) != null')" true ;; esac
+    case $r in success*) ck "deepunwind: the spend is in the node's mempool" "$(cli 0 getrawmempool | grep -c "\"${r#success }\"")" 1 ;; esac
 }
 
 zn() { sed 's/ t=[^ ]*//; s/ utxo=.*//'; }
@@ -427,7 +434,7 @@ run_scn() {
     st=PASS; [ "$nf" = 0 ] && [ "$np" -gt 0 ] || st=FAIL
     echo "$id|$name|$st|$np pass $nf fail" >>"$RESULTS"
     say "   -> $st ($np pass, $nf fail)"
-    BASE=$((BASE + 11)); [ $BASE -lt 60000 ] || BASE=20000
+    iso_rebase BASE 112 11
     R1="-connect=127.0.0.1:$((BASE + 1))"
 }
 
@@ -438,7 +445,7 @@ else
     ( build_template ) 2>&1 | tee "$WORK/template.out" >/dev/null
     SD=$TPL; stop_all
     nf=$(grep -c '^FAIL' "$WORK/template.log"); [ "$nf" = 0 ] || { echo "template failed"; cat "$WORK/template.log"; exit 1; }
-    BASE=$((BASE + 11)); R1="-connect=127.0.0.1:$((BASE + 1))"
+    iso_rebase BASE 112 11; R1="-connect=127.0.0.1:$((BASE + 1))"
 fi
 run_scn 1 "buried spends: restart, rescan" scn_buried
 run_scn 2 "crash at each step of the checkpoint" scn_crash
@@ -446,5 +453,6 @@ run_scn 3 "reorg of 50 blocks over a recent spend" scn_reorg50
 run_scn 4 "operator invalidateblock deeper than the witness cache" scn_deepunwind
 run_scn 5 "wallet.dat opened by older binaries" scn_downgrade
 run_scn 6 "kill between the wallet checkpoint and the coins flush" scn_staleckpt
+say "cost benchmark (run by hand on this template): sh $HERE/wallet_witness_retire_perf.sh --template $TPL --work DIR --before BINDIR --after BINDIR"
 say; say "id|scenario|result|checks"; cat "$RESULTS"
 ! grep -q '|FAIL|' "$RESULTS"
