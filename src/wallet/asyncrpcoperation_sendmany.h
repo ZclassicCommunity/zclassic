@@ -77,6 +77,9 @@ public:
 
     bool paymentDisclosureMode = false; // Set to true to save esk for encrypted notes in payment disclosure database.
 
+    //! Send journal (z_sendmany idempotency_key): the record this operation follows. Set before the operation is queued.
+    void SetSendOnceKey(const uint256& keyHash) { sendOnceKey_ = keyHash; hasSendOnce_ = true; }
+
 private:
     friend class TEST_FRIEND_AsyncRPCOperation_sendmany;    // class for unit testing
 
@@ -130,6 +133,13 @@ private:
         uint256 anchor);
 
     void sign_send_raw_transaction(UniValue obj);     // throws exception if there was an error
+
+    // Send journal hooks around sendrawtransaction (no-ops without a key): BUILT is written durably,
+    // and the transaction is stored in the wallet, before the broadcast; COMMITTED after it.
+    void sendonce_before_broadcast(const std::string& signedtxn);
+    void sendonce_after_broadcast();
+    bool hasSendOnce_ = false;
+    uint256 sendOnceKey_;
 
     // payment disclosure!
     std::vector<PaymentDisclosureKeyInfo> paymentDisclosureData_;

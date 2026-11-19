@@ -5,7 +5,7 @@
 // header carrying ONLY the TransactionItem struct it needs — NO RPC class, NO
 // balancestablemodel/txtablemodel/ui_mainwindow/connection pulls.
 //
-// TransactionItem layout copied EXACTLY from src/rpc.h:16-25. senttxstore.cpp:42
+// TransactionItem layout copied from src/rpc.h (the trailing status field has a default and is not initialised here). senttxstore.cpp:42
 // aggregate-initializes all 8 fields in this exact order/type, so a mere forward
 // declaration would NOT compile — the full definition is mandatory:
 //   { "send", (qint64)datetime, address, txid, amount, 0, from, "" }
@@ -28,6 +28,7 @@ struct TransactionItem {
     unsigned long   confirmations;
     QString         fromAddr;
     QString         memo;
+    QString         status;
 };
 
 #endif // RPCCLIENT_H

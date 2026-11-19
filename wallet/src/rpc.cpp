@@ -3,6 +3,7 @@
 #include "profilepaths.h"
 #include "rpc.h"
 #include "syncstate.h"
+#include "wallethealth.h"
 #include "fastsync.h"
 #include "releaseversion.h"
 #include "repairlocation.h"
@@ -115,6 +116,7 @@ RPC::RPC(MainWindow* main) {
 }
 
 RPC::~RPC() {
+    *alive = false;
     delete timer;
     delete txTimer;
     delete notifyDebounce;
@@ -347,6 +349,7 @@ void RPC::setConnection(Connection* c) {
 
     delete conn;
     this->conn = c;
+    daemonTakesSendKey = -1;   // another node may be attached (external): learn again whether it takes the send key
 
     // ADVANCED-TAB-FIX: the node-stats ("zclassicd") page is held aside at startup
     // (MainWindow ctor: widget(4) + removeTab(4)) and must be re-added once we are
@@ -726,6 +729,8 @@ void RPC::fillTxJsonParams(json& params, Tx tx) {
 void RPC::noConnection(bool preserveBalances) {
     const bool starting = main->connectionStartupError.isEmpty() &&
         !main->connectionStartupProgress.isEmpty();
+    // Without a node there is no health to report (and the last report would be stale).
+    if (main->healthLabel) main->healthLabel->setVisible(false);
     QIcon i = QApplication::style()->standardIcon(QStyle::SP_MessageBoxCritical);
     if (starting) main->statusIcon->clear();
     else main->statusIcon->setPixmap(i.pixmap(16, 16));
@@ -1491,6 +1496,9 @@ void RPC::getInfoThenRefresh(bool force) {
             main->statusLabel->setToolTip(tooltip);
             main->statusIcon->setToolTip(tooltip);
 
+            // Wallet health (witness rebuild, checkpoint, stuck or expired sends): a line only if something needs attention.
+            refreshWalletHealth();
+
             // C3: poll faster while actively syncing so the banner/%/ETA stays
             // lively, and back off to the normal cadence once synced. QTimer::start()
             // restarts with the new interval; only call it when the interval actually
@@ -1877,6 +1885,24 @@ void RPC::refreshBalances() {
     }, fail);
 }
 
+// Confirmations as the node reports them. It reports -1 for a transaction that is in neither a block nor the mempool (an
+// expired send): that must not wrap around into a huge "confirmed" count.
+static unsigned long confirmationsOf(const json& j) {
+    if (!j.is_object()) return 0;
+    auto f = j.find("confirmations");
+    if (f == j.end()) return 0;
+    if (f->is_number_integer() && !f->is_number_unsigned() && f->get<json::number_integer_t>() < 0) return 0;
+    if (f->is_number_integer()) return (unsigned long)f->get<json::number_unsigned_t>();
+    return 0;
+}
+
+// The node's word on a wallet transaction (mined, pending, expiringsoon, expired, conflicted); empty from an older node.
+static QString statusOf(const json& j) {
+    if (!j.is_object()) return QString();
+    auto f = j.find("status");
+    return (f != j.end() && f->is_string()) ? QString::fromStdString(f->get<std::string>()) : QString();
+}
+
 void RPC::refreshTransactions() {    
     if  (conn == nullptr) 
         return noConnection();
@@ -1898,8 +1924,9 @@ void RPC::refreshTransactions() {
                 address,
                 QString::fromStdString(it["txid"]),
                 it["amount"].get<json::number_float_t>() + fee,
-                (unsigned long)it["confirmations"].get<json::number_unsigned_t>(),
+                confirmationsOf(it),
                 "", "" };
+            tx.status = statusOf(it);
 
             txdata.push_back(tx);
             if (!address.isEmpty())
@@ -1992,8 +2019,9 @@ void RPC::refreshSentZTrans() {
                     continue;
                 auto error = j["confirmations"].is_null();
                 if (!error) {
-                    auto confs = j["confirmations"].get<json::number_unsigned_t>();
+                    const unsigned long confs = confirmationsOf(j);
                     sentTx.confirmations = confs;
+                    sentTx.status = statusOf(j);
                     sentZConfCache[sentTx.txid] = (long)confs;   // remember; deep ones stop re-querying
                 }
             }
@@ -2004,93 +2032,341 @@ void RPC::refreshSentZTrans() {
      );
 }
 
-void RPC::addNewTxToWatch(const QString& newOpid, WatchedTx wtx) {    
+// The wallet health line. getwalletinfo's "health" object is one read-only pass in the node; asked at most every
+// 30 s. An older node (no "health"), an error, or a healthy wallet leaves the status bar exactly as it was.
+void RPC::refreshWalletHealth(bool force) {
+    if (conn == nullptr || main->healthLabel == nullptr)
+        return;
+    if (!force && healthPolled.isValid() && healthPolled.elapsed() < 30 * 1000)
+        return;
+    healthPolled.start();
+
+    json payload = {
+        {"jsonrpc", "1.0"},
+        {"id", "someid"},
+        {"method", "getwalletinfo"}
+    };
+    const std::weak_ptr<bool> life = alive;
+    conn->doRPCIgnoreError(payload, [=](const json& reply) {
+        auto l = life.lock();
+        if (!l || !*l)
+            return;
+        const wallethealth::Report r = wallethealth::assess(reply, !Settings::getInstance()->isSyncing());
+        if (!r.any()) {
+            main->healthLabel->setVisible(false);
+            main->healthLabel->clear();
+            main->healthLabel->setToolTip(QString());
+            return;
+        }
+        main->healthLabel->setText(r.summary());
+        main->healthLabel->setToolTip(r.tooltip());
+        main->healthLabel->setVisible(true);
+    });
+}
+
+void RPC::addNewTxToWatch(const QString& newOpid, WatchedTx wtx) {
     watchingOps.insert(newOpid, wtx);
 
     watchTxStatus();
 }
 
+// What one user confirmation carries from the first z_sendmany to its answer.
+struct RPC::SendAttempt {
+    Tx                                    tx;
+    json                                  params;            // z_sendmany parameters before the key
+    QString                               key;               // one per confirmation, never reused for another send
+    bool                                  useKey   = true;   // false once the node turned out not to take the key
+    bool                                  done     = false;  // the send has been handed over or has failed for good
+    int                                   attempts = 0;
+    int                                   token    = 0;      // identifies the request in flight; answers to others are stale
+    std::function<void(QString)>          submitted;
+    std::function<void(QString, QString)> computed;
+    std::function<void(QString, QString)> error;
+    std::function<void(QString, QString)> progress;
+};
 
 // Execute a transaction!
-void RPC::executeTransaction(Tx tx, 
+//
+// Every call is one user confirmation and carries its own idempotency key. If the answer to z_sendmany never
+// arrives (timeout, dropped connection, a node restart in between) the SAME call is repeated with the SAME key:
+// the node returns the operation it already has and never builds a second transaction. Only a JSON-RPC answer
+// from the node (or a refusal of the credentials) ends the attempts as a failure; everything else is "outcome
+// unknown", which the user is told, and which is never turned into a second payment.
+void RPC::executeTransaction(Tx tx,
         const std::function<void(QString opid)> submitted,
         const std::function<void(QString opid, QString txid)> computed,
-        const std::function<void(QString opid, QString errStr)> error) {
-    // First, create the json params
-    json params = json::array();
-    fillTxJsonParams(params, tx);
-    std::cout << std::setw(2) << params << std::endl;
+        const std::function<void(QString opid, QString errStr)> error,
+        const std::function<void(QString opid, QString text)> progress) {
+    auto at = std::make_shared<SendAttempt>();
+    at->tx = tx;
+    at->params = json::array();
+    fillTxJsonParams(at->params, tx);
+    at->key = sendflow::newKey();
+    at->useKey = (daemonTakesSendKey != 0);
+    at->submitted = submitted;
+    at->computed = computed;
+    at->error = error;
+    at->progress = progress;
+    sendAttempt(at);
+}
 
-    sendZTransaction(params, [=](const json& reply) {
-        QString opid = QString::fromStdString(reply.get<json::string_t>());
+void RPC::sendAttempt(const std::shared_ptr<SendAttempt>& at) {
+    if (at->done)
+        return;
 
-        // And then start monitoring the transaction
-        addNewTxToWatch( opid, WatchedTx { opid, tx, computed, error} );
-        submitted(opid);
-    },
-    [=](QString errStr) {
-        error("", errStr);
+    const std::weak_ptr<bool> life = alive;
+    auto retryLater = [this, at, life]() {
+        if (at->done)
+            return;
+        if (!at->useKey) {
+            // Without a key a repeat could pay twice. Say so instead.
+            at->done = true;
+            at->error("", sendflow::oldNodeAmbiguousText());
+            return;
+        }
+        if (at->attempts >= sendflow::kMaxSendAttempts) {
+            at->done = true;
+            at->error("", sendflow::gaveUpText());
+            return;
+        }
+        if (at->progress)
+            at->progress("", sendflow::unknownText());
+        QTimer::singleShot(sendflow::retryDelayMs(at->attempts, sendRetryBaseMs), main, [this, at, life]() {
+            auto l = life.lock();
+            if (l && *l)
+                sendAttempt(at);
+        });
+    };
+
+    if (conn == nullptr) {
+        if (at->attempts == 0) {
+            at->done = true;
+            at->error("", QObject::tr("There is no connection to the node."));
+            return;
+        }
+        retryLater();   // the connection is being replaced (a node restart): the same key goes out again
+        return;
+    }
+
+    // The key is the 5th positional parameter: minconf and fee come first. Pass the node's own defaults when the user
+    // did not choose any (fee 0.0001, minconf 1), so the request means the same as before.
+    json p = at->params;
+    if (at->useKey) {
+        if (p.size() < 4) {
+            p.push_back(1);
+            p.push_back(Settings::getMinerFee());
+        }
+        p.push_back(at->key.toStdString());
+    }
+    json payload = {
+        {"jsonrpc", "1.0"},
+        {"id", "someid"},
+        {"method", "z_sendmany"},
+        {"params", p}
+    };
+
+    const int token = ++at->token;
+    at->attempts++;
+    QPointer<QNetworkReply> inflight = conn->doRPC(payload,
+        [=](json reply) {
+            auto l = life.lock();
+            if (!l || !*l || at->done || at->token != token)
+                return;
+            if (!reply.is_string()) {
+                at->done = true;
+                at->error("", QObject::tr("The node's answer to the send was not understood."));
+                return;
+            }
+            at->done = true;
+            if (at->useKey)
+                daemonTakesSendKey = 1;
+            QString opid = QString::fromStdString(reply.get<json::string_t>());
+
+            // And then start monitoring the transaction
+            WatchedTx w;
+            w.opid = opid;
+            w.tx = at->tx;
+            w.completed = at->computed;
+            w.error = at->error;
+            w.progress = at->progress;
+            w.keyed = at->useKey;
+            addNewTxToWatch(opid, w);
+            at->submitted(opid);
+        },
+        [=](QNetworkReply* r, const json& parsed) {
+            auto l = life.lock();
+            if (!l || !*l || at->done || at->token != token)
+                return;
+            QString msg;
+            const int http = r ? r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() : 0;
+            switch (sendflow::classifyCall(parsed, http, at->useKey, &msg)) {
+            case sendflow::CallClass::Definitive: {
+                at->done = true;
+                const QString reason = msg.isEmpty() && r ? r->errorString() : msg;
+                // A refusal of a repeat says nothing about the earlier attempt whose answer was lost: it may have been
+                // queued. Only the first call of a confirmation can be reported as "not sent".
+                at->error("", at->useKey && at->attempts > 1 ? sendflow::retryRefusedText(reason) : reason);
+                break;
+            }
+            case sendflow::CallClass::KeyUnsupported:
+                // An older node (the GUI may attach to an external one) refused the 5th parameter before doing anything.
+                daemonTakesSendKey = 0;
+                at->useKey = false;
+                sendAttempt(at);
+                break;
+            case sendflow::CallClass::Ambiguous:
+                at->token++;           // whatever still arrives for this request is stale
+                retryLater();
+                break;
+            }
+        });
+
+    // A request that is never answered is abandoned after a while and repeated. This does not depend on the reply
+    // object surviving: a node restart replaces the connection and its pending replies.
+    QTimer::singleShot(sendTimeoutMs, main, [=]() {
+        auto l = life.lock();
+        if (!l || !*l || at->done || at->token != token)
+            return;
+        at->token++;
+        if (inflight)
+            inflight->abort();
+        retryLater();
     });
 }
 
 
 void RPC::watchTxStatus() {
-    if  (conn == nullptr) 
+    if  (conn == nullptr)
         return noConnection();
 
-    // Make an RPC to load pending operation statues
+    if (watchingOps.isEmpty()) {
+        main->loadingLabel->setVisible(false);
+        return;
+    }
+
+    // Ask for the operations we are watching by id: a node that kept a send in its journal answers for an id its
+    // queue no longer has (it was restarted), and the listing does not grow with finished operations of other days.
+    json ids = json::array();
+    for (const QString& id : watchingOps.keys())
+        ids.push_back(id.toStdString());
     json payload = {
         {"jsonrpc", "1.0"},
         {"id", "someid"},
         {"method", "z_getoperationstatus"},
+        {"params", json::array({ids})}
     };
 
+    const std::weak_ptr<bool> life = alive;
     conn->doRPCIgnoreError(payload, [=] (const json& reply) {
-        // There's an array for each item in the status
-        for (auto& it : reply.get<json::array_t>()) {  
-            // If we were watching this Tx and its status became "success", then we'll show a status bar alert
-            QString id = QString::fromStdString(it["id"]);
-            if (watchingOps.contains(id)) {
-                // And if it ended up successful
-                QString status = QString::fromStdString(it["status"]);
-                main->loadingLabel->setVisible(false);
-
-                if (status == "success") {
-                    auto txid = QString::fromStdString(it["result"]["txid"]);
-                    
-                    SentTxStore::addToSentTx(watchingOps[id].tx, txid);
-
-                    auto wtx = watchingOps[id];
-                    watchingOps.remove(id);
-                    wtx.completed(id, txid);
-
-                    // Refresh balances to show unconfirmed balances                    
-                    refresh(true);
-                } else if (status == "failed") {
-                    // If it failed, then we'll actually show a warning. 
-                    auto errorMsg = QString::fromStdString(it["error"]["message"]);
-
-                    auto wtx = watchingOps[id];
-                    watchingOps.remove(id);
-                    wtx.error(id, errorMsg);
-                } 
+        auto l = life.lock();
+        if (!l || !*l)
+            return;
+        QMap<QString, sendflow::QueueEntry> queue;
+        if (reply.is_array()) {
+            for (auto& it : reply) {
+                if (!it.is_object() || it.find("id") == it.end() || !it["id"].is_string())
+                    continue;
+                queue.insert(QString::fromStdString(it["id"].get<std::string>()), sendflow::parseQueueEntry(it));
             }
+        }
 
-            if (watchingOps.isEmpty()) {
-                txTimer->start(Settings::updateSpeed);
+        bool needJournal = false;
+        for (auto w = watchingOps.constBegin(); w != watchingOps.constEnd(); ++w) {
+            if (sendflow::needsJournal(w->keyed, queue.value(w.key()), w->unknown))
+                needJournal = true;
+        }
+        if (!needJournal || conn == nullptr) {
+            applyVerdicts(queue, false, QMap<QString, sendflow::JournalEntry>());
+            return;
+        }
+
+        // Keyed sends whose queue entry failed or vanished (or that are of unknown outcome) are decided by the journal.
+        json jp = {
+            {"jsonrpc", "1.0"},
+            {"id", "someid"},
+            {"method", "z_listsendjournal"}
+        };
+        conn->doRPC(jp, [=](json jr) {
+            auto l2 = life.lock();
+            if (!l2 || !*l2)
+                return;
+            QMap<QString, sendflow::JournalEntry> journal;
+            if (jr.is_array()) {
+                for (auto& e : jr) {
+                    if (e.is_object() && e.find("opid") != e.end() && e["opid"].is_string())
+                        journal.insert(QString::fromStdString(e["opid"].get<std::string>()), sendflow::parseJournalEntry(e));
+                }
+                applyVerdicts(queue, true, journal);
             } else {
-                txTimer->start(Settings::quickUpdateSpeed);
+                applyVerdicts(queue, false, journal);
             }
+        }, [=](QNetworkReply*, const json&) {
+            auto l2 = life.lock();
+            if (l2 && *l2)
+                applyVerdicts(queue, false, QMap<QString, sendflow::JournalEntry>());
+        });
+    });
+}
+
+// Act on what the node said about every send being watched. journalKnown is false when the journal was not asked for
+// or could not be read; a keyed send that needs it is then left as it is until the next poll.
+void RPC::applyVerdicts(const QMap<QString, sendflow::QueueEntry>& queue, bool journalKnown,
+                        const QMap<QString, sendflow::JournalEntry>& journal) {
+    for (const QString& id : watchingOps.keys()) {
+        if (!watchingOps.contains(id))
+            continue;
+        const sendflow::QueueEntry q = queue.value(id);
+        WatchedTx& w = watchingOps[id];
+        if (!journalKnown && sendflow::needsJournal(w.keyed, q, w.unknown))
+            continue;
+
+        // An older node that no longer lists the operation: wait for two polls in a row before saying it is gone
+        if (q.present) {
+            w.missed = 0;
+        } else if (!w.keyed && ++w.missed < 2) {
+            continue;
         }
 
-        // If there is some op that we are watching, then show the loading bar, otherwise hide it
-        if (watchingOps.empty()) {
-            main->loadingLabel->setVisible(false);
-        } else {
-            main->loadingLabel->setVisible(true);
-            main->loadingLabel->setToolTip(QString::number(watchingOps.size()) + QObject::tr(" tx computing. This can take several minutes."));
+        const sendflow::Verdict v = sendflow::resolve(w.keyed, q, journalKnown, journal.value(id));
+        switch (v.state) {
+        case sendflow::State::Sending:
+        case sendflow::State::Unknown:
+            w.unknown = (v.state == sendflow::State::Unknown);
+            if (w.progress && w.lastProgress != v.text) {
+                w.lastProgress = v.text;
+                w.progress(id, v.text);
+            }
+            break;
+        case sendflow::State::Sent: {
+            SentTxStore::addToSentTx(w.tx, v.txid);
+            WatchedTx done = w;
+            watchingOps.remove(id);
+            done.completed(id, v.txid);
+
+            // Refresh balances to show unconfirmed balances
+            refresh(true);
+            break;
         }
-    });
+        case sendflow::State::Expired:
+        case sendflow::State::Failed:
+        case sendflow::State::Lost: {
+            WatchedTx done = w;
+            watchingOps.remove(id);
+            done.error(id, v.text);
+            break;
+        }
+        }
+    }
+
+    // If there is some op that we are watching, then show the loading bar and poll fast, otherwise hide it
+    if (watchingOps.isEmpty()) {
+        main->loadingLabel->setVisible(false);
+        txTimer->start(Settings::updateSpeed);
+    } else {
+        main->loadingLabel->setVisible(true);
+        main->loadingLabel->setToolTip(QString::number(watchingOps.size()) + QObject::tr(" tx computing. This can take several minutes."));
+        txTimer->start(Settings::quickUpdateSpeed);
+    }
 }
 
 void RPC::checkForUpdate(bool silent) {

@@ -45,7 +45,7 @@ public:
 // init.cpp; StartShutdown() sets it, and nothing else in the tests clears it.
 extern std::atomic<bool> fRequestShutdown;
 
-template void CWallet::SetBestChainINTERNAL<MockWalletDB>(
+template bool CWallet::SetBestChainINTERNAL<MockWalletDB>(
         MockWalletDB& walletdb, const CBlockLocator& loc);
 
 class TestWallet : public CWallet {

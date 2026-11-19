@@ -746,6 +746,13 @@ void MainWindow::setupStatusBar() {
     statusLabel = new QLabel();
     ui->statusBar->addPermanentWidget(statusLabel);
 
+    // Wallet health: only visible when getwalletinfo reports something that needs attention (RPC::refreshWalletHealth).
+    healthLabel = new QLabel();
+    healthLabel->setObjectName("healthLabel");
+    healthLabel->setStyleSheet("QLabel { color: #d9822b; }");
+    ui->statusBar->addPermanentWidget(healthLabel);
+    healthLabel->setVisible(false);
+
     statusIcon = new QLabel();
     ui->statusBar->addPermanentWidget(statusIcon);
 }
@@ -2573,7 +2580,7 @@ void MainWindow::payZClassicURI(QString uri) {
     }
 
     // Extract the address
-    qDebug() << "Recieved URI " << uri;
+    qDebug() << "Received a payment URI";   // never log it: it carries the address, amount and memo
     uri = uri.right(uri.length() - QString("zclassic:").length());
 
     QRegExp re("([a-zA-Z0-9]+)");

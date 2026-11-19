@@ -8,6 +8,7 @@
 
 #include "amount.h"
 #include "wallet/db.h"
+#include "wallet/sendjournal.h"
 #include "key.h"
 #include "keystore.h"
 #include "zcash/Address.hpp"
@@ -151,6 +152,10 @@ public:
     bool WriteDefaultKey(const CPubKey& vchPubKey);
 
     bool WriteWitnessCacheSize(int64_t nWitnessCacheSize);
+
+    //! Send journal ("sendonce" records, see wallet/sendjournal.h). Old binaries skip these records.
+    bool WriteSendOnce(const uint256& keyHash, const CSendOnceRecord& rec);
+    bool EraseSendOnce(const uint256& keyHash);
 
     bool ReadPool(int64_t nPool, CKeyPool& keypool);
     bool WritePool(int64_t nPool, const CKeyPool& keypool);
