@@ -89,6 +89,7 @@ public:
     void CallUnretire(int nHeight) { LOCK(cs_wallet); UnretireNotesSpentFrom(nHeight); }
     void CallSaplingNullifierUpdate(CWalletTx& wtx) { UpdateSaplingNullifierNoteMapWithTx(wtx); }
     bool WitnessesLost() const { return fNoteWitnessesLost; }
+    void ClearLostFlag() { fNoteWitnessesLost = false; }
     size_t LiveNoteTxs() const { return setNoteTxIndex.size(); }
     size_t RetiredNoteTxs() const { return setNoteTxRetired.size(); }
     void CollectLive(std::vector<CWalletTx*>& out) { CollectNoteTxs(out); }
@@ -1265,3 +1266,87 @@ TEST_F(CheckpointFixture, ADeepUnwindThatReachesNoRetiredSpendKeepsEveryWitnessC
     EXPECT_FALSE(Note(b).fRetired);
 }
 
+
+TEST_F(CheckpointFixture, AnUnwindThatEmptiesTheFrozenWitnessesOfEveryNoteArmsTheRebuild)
+{
+    // A wallet whose only notes are retired and spent. An unwind of WITNESS_CACHE_SIZE blocks that stops above
+    // both spends takes the cache size to zero and trims every frozen list to nothing. No live note exists whose
+    // cache could run out, so nothing else would trigger a rebuild, and the empty records would be written: the
+    // form that loses the nullifier on a released binary after an import with rescan. The trim itself must
+    // arm the rebuild (fNoteWitnessesLost).
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    uint256 nfa = *Note(a).nullifier, nfb = *Note(b).nullifier;
+    MineSpendOf(a);
+    uint256 spb = MineSpendOf(b);
+    MineToDepth(spb, (int)WITNESS_CACHE_SIZE + 1 + (int)RETIRE_SWEEP_INTERVAL);
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        ASSERT_TRUE(Note(a).fRetired);
+        ASSERT_TRUE(Note(b).fRetired);
+        ASSERT_EQ(RETIRED_WITNESSES_KEPT, Note(a).witnesses.size());
+        ASSERT_EQ(RETIRED_WITNESSES_KEPT, Note(b).witnesses.size());
+        ASSERT_EQ(0u, wallet->LiveNoteTxs()) << "every note of the wallet is retired";
+        ASSERT_FALSE(wallet->WitnessesLost());
+    }
+    Checkpoint();
+    // the cache size reaches 1 after 99 disconnects: the frozen lists are cut to one witness, nothing is lost yet
+    for (unsigned int i = 0; i + 1 < WITNESS_CACHE_SIZE; i++) chain.DisconnectAndForget(*wallet);
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        EXPECT_FALSE(wallet->WitnessesLost());
+        EXPECT_EQ(1u, Note(a).witnesses.size());
+        EXPECT_EQ(1u, Note(b).witnesses.size());
+    }
+    // the last one takes the lists to zero
+    chain.DisconnectAndForget(*wallet);
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        CWallet::Health h;
+        wallet->GetHealth(h);
+        EXPECT_EQ(0, h.nWitnessCacheSize);
+        EXPECT_TRUE(Note(a).fRetired) << "no disconnect reached the spend";
+        EXPECT_TRUE(Note(b).fRetired);
+        EXPECT_TRUE(Note(a).witnesses.empty());
+        EXPECT_TRUE(Note(b).witnesses.empty());
+        EXPECT_TRUE(wallet->IsSaplingSpent(nfa));
+        EXPECT_TRUE(wallet->IsSaplingSpent(nfb));
+        EXPECT_TRUE(wallet->WitnessesLost()) << "emptying a frozen list arms the rebuild";
+        EXPECT_TRUE(h.fWitnessRebuildPending);
+    }
+    // The rebuild (RebuildNoteWitnesses, a rescan of the active chain from genesis: ScanForWalletTransactions) cannot
+    // run on a chain without block files; this replays what it does with the same wallet calls, from the lowered tip.
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        wallet->ClearLostFlag();
+        wallet->ClearNoteWitnessCache();
+        SproutMerkleTree sprout;
+        SaplingMerkleTree sapling;
+        for (size_t i = 0; i < chain.blocks.size(); i++) {
+            CBlock& block = chain.blocks[i];
+            for (const CTransaction& tx : block.vtx) wallet->AddToWalletIfInvolvingMe(tx, &block, true);
+            wallet->ChainTip(&chain.index[i], &block, sprout, sapling, true);
+            for (const CTransaction& tx : block.vtx) {
+                for (const OutputDescription& od : tx.vShieldedOutput) sapling.append(od.cm);
+                for (const JSDescription& jsdesc : tx.vjoinsplit) {
+                    for (const uint256& cm : jsdesc.commitments) sprout.append(cm);
+                }
+            }
+        }
+        EXPECT_FALSE(wallet->WitnessesLost());
+        EXPECT_FALSE(Note(a).witnesses.empty()) << "the rebuild gave the note its witnesses back";
+        EXPECT_FALSE(Note(b).witnesses.empty());
+        EXPECT_TRUE(wallet->IsSaplingSpent(nfa));
+        EXPECT_TRUE(wallet->IsSaplingSpent(nfb));
+    }
+    // the chain comes back to where the spends are deep again: the notes are retired once more, with their
+    // frozen witnesses, and are still counted spent
+    MineToDepth(spb, (int)WITNESS_CACHE_SIZE + 1 + (int)RETIRE_SWEEP_INTERVAL);
+    LOCK2(cs_main, wallet->cs_wallet);
+    EXPECT_TRUE(Note(a).fRetired);
+    EXPECT_TRUE(Note(b).fRetired);
+    EXPECT_EQ(RETIRED_WITNESSES_KEPT, Note(a).witnesses.size());
+    EXPECT_EQ(RETIRED_WITNESSES_KEPT, Note(b).witnesses.size());
+    EXPECT_TRUE(wallet->IsSaplingSpent(nfa));
+    EXPECT_TRUE(wallet->IsSaplingSpent(nfb));
+    EXPECT_FALSE(wallet->WitnessesLost());
+}

@@ -201,9 +201,15 @@ disconnects that reach no retired spend (an operator `invalidateblock` 97 deep) 
 checkpoint stored a cache size of 3 next to four-witness records, and beta12 aborted with
 `Assertion 'nWitnessCacheSize >= nd->witnesses.size()'` at its first block and at every restart (only
 `-rescan` on the old binary recovered). Consequence for the stated limit: after such a deep unwind the
-frozen list is shorter than four (3 after 97 disconnects, empty after 100, which un-retires every
-note anyway), so an older binary then survives fewer disconnects-first than three; the notes are
-restored to four only when they are retired again. `wallet_witness_retire.sh` scenario 5 runs the
+frozen list is shorter than four (3 after 97 disconnects), so an older binary then survives fewer
+disconnects-first than three; the notes are restored to four only when they are retired again. A
+100-block unwind that reaches no retired spend does not bring the notes back: they stay retired and
+spent, with the cache size at zero and the frozen lists trimmed to nothing. An empty record is the form
+that loses the nullifier on a released binary after an import with rescan, and with no live note whose
+cache could run out nothing else would trigger a rebuild, so the trim that empties a frozen list sets
+`fNoteWitnessesLost` itself: the rebuild (above) runs before the next write and gives every such note
+its witnesses back (the sweep freezes the spent ones again). The gtest `AnUnwindThatEmptiesTheFrozenWitnessesOfEveryNoteArmsTheRebuild`
+covers it. `wallet_witness_retire.sh` scenario 5 runs the
 97-block unwind with this build and then starts the previous release and the parent build on the
 result: they start, mine blocks, restart, and balances and notes stay equal.
 

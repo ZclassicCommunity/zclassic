@@ -2031,17 +2031,25 @@ void CWallet::DecrementNoteWitnesses(const CBlockIndex* pindex)
     // note holds more witnesses than nWitnessCacheSize. The live notes were cut above; a retired
     // note is skipped there and keeps its frozen witnesses, so with the cache size below
     // RETIRED_WITNESSES_KEPT (97 or more disconnects that reach no retired spend) they are cut here,
-    // newest first kept, and the record is written at the next checkpoint. (At zero the notes are
-    // empty: that takes a 100-block unwind, which brings every retired note back anyway.)
+    // newest first kept, and the record is written at the next checkpoint. At zero the note is left
+    // with no witness at all (a 100-block unwind that reaches no retired spend does not bring the
+    // note back: it stays retired and spent). That is the form a released binary loses the nullifier
+    // of after an import with rescan, and no live note need run out of cache to trigger a rebuild,
+    // so the trim arms the rebuild itself (fNoteWitnessesLost, as for a live note whose cache ran
+    // out): it gives the note fresh frozen witnesses before the empty record is written.
     if (nSizeAfter < RETIRED_WITNESSES_KEPT) {
         std::vector<CWalletTx*> allNoteTxs;
         CollectNoteTxs(allNoteTxs, true);
         for (CWalletTx* pwtx : allNoteTxs) {
             bool fTrimmed = false;
             for (auto& item : pwtx->mapSaplingNoteData) {
+                bool fItemTrimmed = false;
                 while (item.second.fRetired && (int64_t)item.second.witnesses.size() > nSizeAfter) {
                     item.second.witnesses.pop_back();
-                    fTrimmed = true;
+                    fTrimmed = fItemTrimmed = true;
+                }
+                if (fItemTrimmed && item.second.witnesses.empty()) {
+                    fNoteWitnessesLost = true;
                 }
             }
             if (fTrimmed) MarkNoteTxDirty(pwtx->GetHash());
