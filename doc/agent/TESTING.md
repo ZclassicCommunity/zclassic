@@ -16,7 +16,7 @@ zcutil/bin/zcl-dev t-fast src/test/bech32_tests.cpp
 | `zcl-dev tests [--json] <path>...` | Prints the focused set: `boost:<suite>`, `gtest:<Suite>`, `qa:<script>` lines, then `broad:` and `note:` lines. |
 | `zcl-dev t-fast [--changed[=base]] [--dry-run] [--narrow] [--no-qa] [--json] [--bin=src] [<path>...]` | Runs that set. `--changed` takes the committed diff against `base` (default `origin/master`). `--dry-run` prints the exact argv, one `exec:` line per command. |
 | `zcl-dev t-list [--json] [--after=N] [boost\|gtest\|qa\|ci]` | Every Boost suite, gtest suite, qa script and local-ci step. |
-| `zcl-dev check-tests [--json] [--after=N] [--base=ref] [--update-baseline]` | The registration gate (below). |
+| `zcl-dev check-tests [--json] [--after=N] [--base=ref] [--update-baseline]` | The registration gate (below). | It reads tracked files only: `git add` a new test file before running it. `--json` lists are capped, with `<key>_omitted` counts.
 
 Output stays under 16 KiB. A long list ends with `-- more: rerun with --after=N`; JSON carries `total`, `after` and `next`. Exit codes: 0 ok, 1 finding or failed test, 2 broken input or an empty scan (no paths, no changed files, a hollow `check-tests`), 3 test binary missing or stale.
 
@@ -38,7 +38,7 @@ Suites are read from the sources: `BOOST_AUTO_TEST_SUITE(` and `BOOST_FIXTURE_TE
 broad: run zcutil/local-ci.sh test-changed (broad rule: src/main.cpp)
 ```
 
-and `t-fast` then runs the full `test_bitcoin` and `zcash-gtest`. `--narrow` runs only the focused set and keeps the `broad:` note. A `tests.rules` line may carry the token `narrow` to take one path out of `ALL` on purpose (today only `src/bech32.*`, address encoding); `check-tests` rejects `narrow` on consensus, chain, wallet, proof-of-work, shielded-crypto and mempool paths. `tests` prints a note for such a path, and `local-ci.sh test-changed` stays the gate before landing.
+and `t-fast` then runs the full `test_bitcoin` and `zcash-gtest`. `--narrow` runs only the focused set and keeps the `broad:` note. A `tests.rules` line may carry the token `narrow` to take one path out of `ALL` on purpose (today only `src/bech32.*`, address encoding); `check-tests` rejects `narrow` on every path that `impact.rules` marks `ALL` (or maps nowhere) unless it is on the allowlist in `zcl-dev-tests.c` (today `src/bech32.`), so new consensus and chain-state paths stay protected. `tests` prints a note for such a path, and `local-ci.sh test-changed` stays the gate before landing.
 
 Qt wallet changes (`wallet/src/*`) add an informational line naming the `wallet/tests/*.pro` targets; qmake builds are out of scope.
 
@@ -66,7 +66,7 @@ Prefix those with `devbuild --wait` on a maintainer host.
 * a Boost suite name is declared in two files;
 * a `tests.rules` glob matches no file, or a token names an unknown suite, script or keyword;
 * a `qa/rpc-tests/*.sh` script (not `*_lib.sh`, not a `_scn<N>.sh` fragment) is not named by `impact.rules`, `tests.rules` or a non-comment line of `local-ci.sh` (whole-name match, so `send.sh` is not reached by `zslp_send.sh`), and is not called by a script that is;
-* `zcutil/dev/tests.baseline` gained a row relative to `--base=<ref>` (default `origin/master`; skipped when the ref has no baseline).
+* `zcutil/dev/tests.baseline` gained a row relative to `--base=<ref>` (default `origin/master`; an unsafe or unresolvable ref exits 2, so pass `--base=` where that branch does not exist; skipped only when the ref resolves and has no baseline).
 
 It exits 2 on a hollow scan (no Boost files, no gtest files or no suites found).
 

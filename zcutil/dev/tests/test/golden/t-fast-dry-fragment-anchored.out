@@ -1,0 +1,4 @@
+note: no focused tests for 1 path(s): sub/qa/rpc-tests/w_scn1.sh
+note: broad: run zcutil/local-ci.sh test-changed (unmapped source path: sub/qa/rpc-tests/w_scn1.sh); running the full test_bitcoin and zcash-gtest
+exec: src/test/test_bitcoin --log_level=test_suite
+exec: src/zcash-gtest

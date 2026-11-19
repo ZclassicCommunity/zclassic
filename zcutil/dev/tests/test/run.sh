@@ -19,6 +19,7 @@ fresh() {
     git -C "$w" init -q
     git -C "$w" add -A
     git -C "$w" -c user.name=t -c user.email=t@t commit -q -m fixture
+    git -C "$w" update-ref refs/heads/nobase "$(git -C "$w" -c user.name=t -c user.email=t@t commit-tree "$(git -C "$w" hash-object -t tree -w /dev/null)" -m empty)"
     fakes
 }
 fakes() {
@@ -78,9 +79,18 @@ case_() {
     if diff -u "$here/golden/$name.out" "$root/out"; then echo "ok   $name"; else echo "FAIL $name"; fails=$((fails + 1)); fi
 }
 t() { "$bindir/zcl-dev-tests" -C "$w" "$@"; }
+# jsoncap: a many-path --json answer is capped under 16 KiB and says what it left out
+jsoncap() {
+    out=$(t --as=tests --json $many)
+    [ "${#out}" -lt 16384 ] && echo "under 16 KiB" || echo "over 16 KiB: ${#out}"
+    printf '%s\n' "$out" | grep -o "\"paths_omitted\":[0-9]*"
+}
 tf() { "$bindir/zcl-dev-t-fast" -C "$w" "$@"; }
 tl() { "$bindir/zcl-dev-t-list" -C "$w" "$@"; }
-ct() { "$bindir/zcl-dev-check-tests" -C "$w" "$@"; }
+# check-tests reads tracked files and a base ref: ct stages everything first and compares with `nobase`, an
+# empty commit made by fresh (a base that resolves and has no baseline); ctn stages nothing.
+ct() { git -C "$w" add -A; "$bindir/zcl-dev-check-tests" -C "$w" --base=nobase "$@"; }
+ctn() { "$bindir/zcl-dev-check-tests" -C "$w" --base=nobase "$@"; }
 mkdir -p "$here/golden"
 
 fresh base
@@ -133,6 +143,14 @@ case_ t-fast-run-gtest-broad-zero 1 env FAKE_ZERO=1 "$bindir/zcl-dev-t-fast" -C 
 case_ t-fast-dry-qa-forms 0 tf --dry-run qa/rpc-tests/x.sh qa/rpc-tests/p.sh qa/rpc-tests/y.sh qa/rpc-tests/w_scn1.sh
 case_ t-fast-dry-qa-bindir 0 tf --dry-run --bin=build/out qa/rpc-tests/x.sh qa/rpc-tests/p.sh
 case_ tests-qa-fragment 0 t --as=tests qa/rpc-tests/w_scn1.sh
+mkdir -p "$w/sub/qa/rpc-tests"
+printf "#!/bin/sh
+" >"$w/sub/qa/rpc-tests/w_scn1.sh"
+case_ t-fast-dry-fragment-anchored 0 tf --dry-run sub/qa/rpc-tests/w_scn1.sh
+many=""
+for i in $(seq 1 400); do many="$many src/long_directory_name/file_$i.cpp"; done
+mkdir -p "$w/src/long_directory_name"
+case_ tests-json-capped 0 jsoncap
 # changed against a base commit
 printf 'int foo(void) { return 2; }\n' >"$w/src/foo.cpp"
 git -C "$w" -c user.name=t -c user.email=t@t commit -q -am change
@@ -179,6 +197,13 @@ case_ check-tests-update-refused 1 ct --update-baseline
 fresh narrowbad
 printf "src/main.*\tnarrow\n" >>"$w/zcutil/dev/tests.rules"
 case_ check-tests-narrow-forbidden 1 ct
+fresh narrowall
+printf 'src/core/*\tboost:foo_tests narrow\n' >>"$w/zcutil/dev/tests.rules"
+case_ check-tests-narrow-all-not-denylisted 1 ct
+fresh untracked
+printf 'src/ghost.cpp\tboost:foo_tests\n' >>"$w/zcutil/dev/tests.rules"
+printf 'int g;\n' >"$w/src/ghost.cpp"
+case_ check-tests-untracked-dead-rule 1 ctn
 fresh comment
 printf "#!/bin/sh\n" >"$w/qa/rpc-tests/send.sh"
 printf "#!/bin/sh\n" >"$w/qa/rpc-tests/orphan2.sh"
@@ -188,12 +213,16 @@ fresh grown
 git -C "$w" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
 printf "#!/bin/sh\n" >"$w/qa/rpc-tests/late.sh"
 printf "qa/rpc-tests/late.sh\n" >>"$w/zcutil/dev/tests.baseline"
-case_ check-tests-baseline-no-ref 0 ct
+case_ check-tests-baseline-default-base 2 sh -c "git -C '$w' add -A; '$bindir/zcl-dev-check-tests' -C '$w'"
+case_ check-tests-baseline-unknown-ref 2 ct --base=nonexistent
+case_ check-tests-baseline-unsafe-ref 2 ct --base='a;b'
+case_ check-tests-baseline-base-without-baseline 0 ct
 case_ check-tests-baseline-grew 1 ct --base=HEAD
 fresh page
 for i in 1 2 3 4 5; do printf '#!/bin/sh\n' >"$w/qa/rpc-tests/orph$i.sh"; done
-case_ check-tests-page 1 env ZCL_DEV_PAGE_BYTES=200 "$bindir/zcl-dev-check-tests" -C "$w"
-case_ check-tests-page-next 1 env ZCL_DEV_PAGE_BYTES=200 "$bindir/zcl-dev-check-tests" -C "$w" --after=2
+git -C "$w" add -A
+case_ check-tests-page 1 env ZCL_DEV_PAGE_BYTES=200 "$bindir/zcl-dev-check-tests" -C "$w" --base=nobase
+case_ check-tests-page-next 1 env ZCL_DEV_PAGE_BYTES=200 "$bindir/zcl-dev-check-tests" -C "$w" --base=nobase --after=2
 fresh hollow
 git -C "$w" rm -q -r --cached src/test src/gtest
 rm -rf "$w/src/test" "$w/src/gtest"

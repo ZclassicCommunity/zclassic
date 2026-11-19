@@ -235,17 +235,26 @@ static void jstr(const char *s)
     putchar('"');
 }
 
-static void jlist(const char *key, const List *l, int comma)
+/* Print the list as a JSON array, stopping once `budget` bytes are used (0: no cap); a cut list is
+ * followed by "<key>_omitted":N so a reader knows to narrow the request. */
+static void jlist_cap(const char *key, const List *l, int comma, size_t budget)
 {
+    size_t used = 0, i;
     jstr(key);
     fputs(":[", stdout);
-    for (size_t i = 0; i < l->n; i++) {
+    for (i = 0; i < l->n; i++) {
+        size_t len = strlen(l->v[i]) + 3;
+        if (budget && i && used + len > budget) break;
         if (i) putchar(',');
         jstr(l->v[i]);
+        used += len;
     }
     putchar(']');
+    if (i < l->n) { putchar(','); printf("\"%s_omitted\":%zu", key, l->n - i); }
     if (comma) putchar(',');
 }
+
+static void jlist(const char *key, const List *l, int comma) { jlist_cap(key, l, comma, 0); }
 
 /* Print items[after..] while the page stays under PAGE_BYTES; say how to continue. */
 static void emit_page(const List *items, int json, size_t after)
@@ -312,12 +321,13 @@ static int exists(const char *path)
     return !stat(path, &st);
 }
 
-/* Tracked plus untracked-not-ignored files that exist: an unregistered new test file counts. */
+/* Tracked files that exist, plus untracked-not-ignored ones unless tracked_only (check-tests: an untracked
+ * file must not satisfy a rule glob or the reachability scan). */
 static List files;
-static void load_files(void)
+static void load_files(int tracked_only)
 {
     List raw = {0};
-    if (cmd_lines("git ls-files --cached --others --exclude-standard", &raw)) die("git ls-files failed");
+    if (cmd_lines(tracked_only ? "git ls-files --cached" : "git ls-files --cached --others --exclude-standard", &raw)) die("git ls-files failed");
     for (size_t i = 0; i < raw.n; i++)
         if (exists(raw.v[i])) list_add(&files, raw.v[i]);
     if (!files.n) die("git ls-files returned no files: empty scan");
@@ -485,8 +495,9 @@ static int is_cxx_path(const char *p)
 /* A sourced fragment such as wallet_matrix_scn2.sh: it only defines functions for its owner script. */
 static int is_qa_fragment(const char *p)
 {
-    const char *b = strrchr(p, '/'), *s;
-    if (!b || !has_suffix(p, ".sh")) return 0;
+    const char *b, *s;
+    if (!has_prefix(p, "qa/rpc-tests/") || strchr(p + 13, '/') || !has_suffix(p, ".sh")) return 0; /* anchored like is_qa_script */
+    b = p + 12;
     s = strstr(b, "_scn");
     if (!s) return 0;
     s += 4;
@@ -661,14 +672,14 @@ static void print_sel(const Sel *s, const List *paths, int json)
 {
     if (json) {
         printf("{");
-        jlist("paths", paths, 1);
+        jlist_cap("paths", paths, 1, 3000); /* five capped lists keep one object under 16 KiB */
         printf("\"broad\":%s,\"why\":", s->broad ? "true" : "false");
         jstr(s->why ? s->why : "");
         printf(",\"narrowed\":%s,", s->narrowed ? "true" : "false");
-        jlist("boost", &s->boost, 1);
-        jlist("gtest", &s->gtest, 1);
-        jlist("qa", &s->qa, 1);
-        jlist("notes", &s->notes, 0);
+        jlist_cap("boost", &s->boost, 1, 3000);
+        jlist_cap("gtest", &s->gtest, 1, 3000);
+        jlist_cap("qa", &s->qa, 1, 2000);
+        jlist_cap("notes", &s->notes, 0, 2000);
         puts("}");
         return;
     }
@@ -689,7 +700,7 @@ static int cmd_tests(int argc, char **argv)
         else list_add(&paths, (argv[i] = norm_path(argv[i])));
     }
     if (!paths.n) die("usage: zcl-dev tests [--json] <path>...");
-    load_files();
+    load_files(0);
     build_index();
     Sel s = select_all(&paths);
     print_sel(&s, &paths, json);
@@ -728,7 +739,7 @@ static int cmd_t_list(int argc, char **argv)
         else if (!strcmp(argv[i], "boost") || !strcmp(argv[i], "gtest") || !strcmp(argv[i], "qa") || !strcmp(argv[i], "ci")) kind = argv[i];
         else die("usage: zcl-dev t-list [--json] [--after=N] [boost|gtest|qa|ci]");
     }
-    load_files();
+    load_files(0);
     build_index();
     List items = {0}, tmp = {0};
     for (int pass = 0; pass < 2; pass++) { /* Boost then gtest, each sorted by suite */
@@ -825,19 +836,19 @@ static void check_unique(List *f)
     }
 }
 
-/* Paths whose focused set must never replace the full run: consensus, chain state, the daemon wallet,
- * proof of work, shielded crypto and the mempool. `narrow` is for leaf encodings such as src/bech32.*. */
-static int narrow_forbidden(const char *path)
+/* `narrow` may replace the full run only on leaf encodings listed here (src/bech32.*; src/narrow.cpp is
+ * the fixture's). Every other path that impact.rules marks ALL, or maps nowhere, must stay broad: an
+ * allowlist, so a new consensus or chain-state path is protected without anyone updating a denylist. */
+static int narrow_allowed(const char *path)
 {
-    static const char *const pre[] = {"src/consensus/", "src/main.", "src/chain.", "src/chainparams", "src/coins.", "src/txdb.", "src/wallet/",
-                                      "src/script/", "src/primitives/", "src/pow", "src/zcash/", "src/crypto/", "src/hash.", "src/txmempool.",
-                                      "src/policy/", "src/checkpoints.", "src/dbwrapper.", "src/leveldb/", "src/secp256k1/", "src/miner.", NULL};
-    for (const char *const *p = pre; *p; p++) if (has_prefix(path, *p)) return 1;
+    static const char *const ok[] = {"src/bech32.", "src/narrow.cpp", NULL};
+    for (const char *const *p = ok; *p; p++) if (has_prefix(path, *p)) return 1;
     return 0;
 }
 
 static void check_rules_tokens(List *f, const Rules *rules)
 {
+    Rules impact = load_rules(IMPACT_FILE);
     for (size_t i = 0; i < rules->n; i++) {
         const Rule *r = &rules->v[i];
         int hit = 0;
@@ -850,8 +861,10 @@ static void check_rules_tokens(List *f, const Rules *rules)
             else if (has_prefix(tk, "qa:")) { if (!list_has(&files, tk + 3)) finding(f, "FAIL token: %s:%zu names missing qa script %s", RULES_FILE, r->line, tk + 3); }
             else if (!strcmp(tk, "narrow")) {
                 for (size_t j = 0; j < files.n; j++) {
-                    if (!rule_match(r, files.v[j]) || !narrow_forbidden(files.v[j])) continue;
-                    finding(f, "FAIL narrow: %s:%zu narrows %s, a consensus, chain or wallet path that must stay broad", RULES_FILE, r->line, files.v[j]);
+                    char *why = NULL;
+                    if (!rule_match(r, files.v[j]) || narrow_allowed(files.v[j]) || !impact_broad(&impact, files.v[j], &why)) continue;
+                    free(why);
+                    finding(f, "FAIL narrow: %s:%zu narrows %s, which impact.rules marks ALL (or maps nowhere) and is not on the narrow allowlist", RULES_FILE, r->line, files.v[j]);
                     break;
                 }
             } else finding(f, "FAIL token: %s:%zu has unknown token %s", RULES_FILE, r->line, tk);
@@ -927,6 +940,28 @@ static void qa_unreachable(const Rules *rules, List *out)
     for (size_t q = 0; q < qa.n; q++) if (!list_has(&reach, qa.v[q])) list_push(out, qa.v[q]);
 }
 
+/* The ratchet compares against a base ref; a ref that is unsafe or does not name a commit must fail,
+ * or the growth check would silently not run. Returns 0 when usable, else prints why. */
+static int base_ref_ok(const char *ref)
+{
+    char cmd[512];
+    List out = {0};
+    if (!safe_ref(ref)) {
+        fprintf(stderr, "zcl-dev-tests: check-tests: unsafe base ref '%s'; pass --base=<ref> naming the branch to compare %s with\n", ref, BASELINE_FILE);
+        return 1;
+    }
+#ifdef _WIN32
+    snprintf(cmd, sizeof cmd, "git rev-parse --verify --quiet %s^^{commit}", ref); /* cmd.exe eats one caret */
+#else
+    snprintf(cmd, sizeof cmd, "git rev-parse --verify --quiet %s^{commit}", ref);
+#endif
+    if (cmd_lines(cmd, &out) || !out.n) {
+        fprintf(stderr, "zcl-dev-tests: check-tests: base ref '%s' does not resolve to a commit; pass --base=<ref> (for example --base=origin/main) so %s growth can be checked\n", ref, BASELINE_FILE);
+        return 1;
+    }
+    return 0;
+}
+
 /* The ratchet: BASELINE_FILE lists qa scripts allowed to be unreachable today. It may only shrink:
  * a new unreachable script fails, and so does a baseline entry that is reachable or gone. */
 static void check_qa_reachable(List *f, const Rules *rules, List *stale_out, const char *base_ref)
@@ -937,11 +972,11 @@ static void check_qa_reachable(List *f, const Rules *rules, List *stale_out, con
         for (size_t i = 0; i < lines.n; i++)
             if (lines.v[i][0] && lines.v[i][0] != '#') list_add(&base, lines.v[i]);
     /* Nothing else compares the file with an earlier one: a row added by hand would hide a script. */
-    if (safe_ref(base_ref)) {
+    /* base_ref was checked by base_ref_ok(): it resolves. Only a base without a baseline skips this. */
+    {
         char cmd[512];
-        List old = {0};
+        List old = {0}, probe = {0};
         snprintf(cmd, sizeof cmd, "git rev-parse --verify --quiet %s:%s", base_ref, BASELINE_FILE);
-        List probe = {0};
         if (!cmd_lines(cmd, &probe)) {
             snprintf(cmd, sizeof cmd, "git show %s:%s", base_ref, BASELINE_FILE);
             if (!cmd_lines(cmd, &old))
@@ -984,7 +1019,8 @@ static int cmd_check_tests(int argc, char **argv)
         else if (has_prefix(argv[i], "--base=")) base_ref = argv[i] + 7;
         else die("usage: zcl-dev check-tests [--json] [--after=N] [--base=ref] [--update-baseline]");
     }
-    load_files();
+    if (base_ref_ok(base_ref)) return 2;
+    load_files(1);
     build_index();
     size_t nb = 0, ng = 0, nsuite = 0;
     for (size_t i = 0; i < ntfiles; i++) { if (tfiles[i].gtest) ng++; else nb++; nsuite += tfiles[i].suites.n; }
@@ -1093,6 +1129,10 @@ static char *popen_line(const List *a)
 {
 #ifdef _WIN32
     List w = {0};
+    /* popen() goes through cmd.exe, which reads & | ^ % < > even where quote_arg's CRT quoting does not
+     * protect them (% and ^ act inside double quotes too): refuse such an argument outright. */
+    for (size_t i = 0; i < a->n; i++)
+        if (strpbrk(a->v[i], "&|^%<>")) die("refusing argument with a cmd.exe metacharacter (& | ^ %% < >): %s", a->v[i]);
     for (size_t i = 0; i < a->n; i++) list_push_free(&w, i ? quote_arg(a->v[i]) : xfmt("\"%s\"", a->v[i]));
     char *j = join(&w, " "), *r = xfmt("\"%s 2>&1\"", j);
     free(j);
@@ -1300,7 +1340,7 @@ static int cmd_t_fast(int argc, char **argv)
         for (size_t i = 0; i < diff.n; i++) if (diff.v[i][0]) list_add(&paths, diff.v[i]);
     }
     if (!paths.n) die("usage: zcl-dev t-fast [--changed[=base]] [--dry-run] [--narrow] [--no-qa] [--json] [--bin=src] <path>...");
-    load_files();
+    load_files(0);
     build_index();
     Sel s = select_all(&paths);
     int full = s.broad && !narrow;
