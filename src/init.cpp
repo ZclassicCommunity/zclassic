@@ -2825,7 +2825,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                                                  peerIndex, nBootstrapPeers,
                                                  attempt, nBootstrapAttempts,
                                                  fTrustlessMode ? "trustless" : "anchor", 0);
-                        if (BootstrapFromPeer(peer, GetDataDir(), bootstrap_error)) {
+                        if (BootstrapFromPeer(peer, GetDataDir(), bootstrap_error, BootstrapAlternatesFor(bootstrapPeers, peer))) {
                             bootstrap_snapshot_ran = true;
                             break;
                         }

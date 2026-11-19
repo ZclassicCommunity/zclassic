@@ -119,6 +119,10 @@ class BootstrapWorkQueue
 public:
     explicit BootstrapWorkQueue(const std::vector<uint32_t>& pending);
     bool Claim(uint32_t& idx);
+    //! Claim the first pending file `allowed` marks (indexed by file); false if none.
+    bool ClaimAllowed(const std::vector<uint8_t>& allowed, uint32_t& idx);
+    //! True if a pending file is marked in `allowed`.
+    bool HasPendingAllowed(const std::vector<uint8_t>& allowed) const;
     //! Hand a claimed, unfinished file back (it is retried before untouched files).
     void Release(uint32_t idx);
     void Complete(uint32_t idx);
@@ -150,6 +154,105 @@ int64_t BootstrapReconnectDelayMs(int consecutiveFailures, unsigned int jitterSe
 std::string BootstrapFormatGiB(uint64_t bytes);
 //! The progress line parsed by the GUI ("Bootstrap snapshot: NN%  X.XX / Y.YY GiB  Z.Z MiB/s  (N streams)").
 //! streams <= 0 omits the stream suffix.
-std::string BootstrapFormatProgressLine(int percent, uint64_t received, uint64_t total, double mibPerSec, int streams);
+std::string BootstrapFormatProgressLine(int percent, uint64_t received, uint64_t total, double mibPerSec, int streams, int servers = 0);
+
+
+//! Multi-peer scheduling for the parallel snapshot download. Pure decision logic
+//! (no sockets, no files; time is passed in) so it is unit-testable. Streams are
+//! numbered 0..n-1; peers are indices into the caller's peer list (0 = the peer
+//! whose manifest was validated). The board never decides what is TRUSTED: every
+//! byte still has to hash to the validated manifest; it only decides who asks whom.
+struct BootstrapPeerPolicy {
+    int64_t windowMs;         //!< rate measuring window
+    int64_t stallMs;          //!< no bytes for this long and another peer is usable => move the stream
+    double slowFraction;      //!< a peer slower than this share of the best per-stream rate loses a stream
+    int64_t moveCooldownMs;   //!< a moved stream is not moved again for this long
+    int64_t penaltyMs;        //!< a peer a stream was moved off is avoided for new assignments this long
+    int64_t stealMinSeconds;  //!< steal a file range only if its holder needs longer than this to finish it
+    double stealFactor;       //!< ... and the idle stream's peer is at least this much faster than the holder's
+    int64_t failBackoffBaseMs;
+    int64_t failBackoffMaxMs;
+    BootstrapPeerPolicy()
+        : windowMs(10000), stallMs(20000), slowFraction(0.5), moveCooldownMs(30000), penaltyMs(30000),
+          stealMinSeconds(15), stealFactor(2.0), failBackoffBaseMs(2000), failBackoffMaxMs(60000) {}
+};
+
+struct BootstrapPeerSnapshot {
+    int streams;           //!< streams currently attached
+    uint64_t bytes;        //!< payload bytes received from this peer this attempt
+    double mibps;          //!< aggregate rate (MiB/s) over the window
+    bool ignored;          //!< served a different snapshot: never used
+    bool partial;          //!< serves only the files it shares with the trusted manifest
+    bool banned;           //!< served bytes that failed verification: not used again this attempt
+    BootstrapPeerSnapshot() : streams(0), bytes(0), mibps(0), ignored(false), partial(false), banned(false) {}
+};
+
+enum BootstrapMoveReason { BMR_STALLED, BMR_SLOW, BMR_STEAL, BMR_UNUSABLE };
+struct BootstrapMove {
+    int stream;
+    BootstrapMoveReason reason;
+};
+
+class BootstrapPeerBoard
+{
+public:
+    BootstrapPeerBoard(size_t nPeers, int nStreams, const BootstrapPeerPolicy& policy = BootstrapPeerPolicy());
+    //! Peer for stream `s` to (re)connect to, or -1 if no peer is usable (all ignored or banned).
+    int Assign(int s, int64_t nowMs);
+    void Attach(int s, int peer, int64_t nowMs);
+    //! The stream's connection ended (any reason). The caller Releases its claimed files.
+    void Detach(int s);
+    //! The stream has nothing to do (queue empty) and could take over work.
+    void SetIdle(int s, bool idle);
+    void ConnectFailed(int peer, int64_t nowMs);
+    void ConnectOk(int peer);
+    void ManifestMismatch(int peer);
+    //! The peer serves a different manifest but shares some files with the trusted one (it serves only those).
+    void SetPartial(int peer, bool partial);
+    //! Avoid assigning streams to `peer` until `untilMs` (it had nothing to give them).
+    void Defer(int peer, int64_t untilMs);
+    //! Payload bytes of `file` arrived on stream `s`.
+    void NoteChunk(int s, uint32_t file, uint64_t bytes, int64_t nowMs);
+    //! Stream `s` claimed `file` with `remaining` bytes to go; `resumed` = it continues bytes of unknown origin.
+    void NoteClaim(int s, uint32_t file, uint64_t remaining, bool resumed);
+    void NoteRelease(int s, uint32_t file);
+    void NoteComplete(int s, uint32_t file);
+    //! `file` failed verification while stream `s` fetched it: blame the peers that supplied its bytes.
+    //! Returns true if another usable peer remains (the failure then costs a retry, not the attempt).
+    bool HashFailed(int s, uint32_t file);
+    //! Streams to move off their peer now (stalled, slow, or robbed by an idle stream). Marks them moved.
+    std::vector<BootstrapMove> Rebalance(int64_t nowMs);
+    BootstrapPeerSnapshot Peer(int peer, int64_t nowMs) const;
+    size_t UsablePeers() const;
+    int StreamPeer(int s) const; //!< attached peer or -1
+
+private:
+    struct Sample { int64_t t; uint64_t bytes; };
+    struct StreamState {
+        int peer; bool connected; bool idle; bool move; int64_t attachedMs; int64_t lastByteMs; int64_t lastMoveMs;
+        uint64_t bytes; std::deque<Sample> samples; std::map<uint32_t, uint64_t> remaining;
+        StreamState() : peer(-1), connected(false), idle(false), move(false), attachedMs(0), lastByteMs(0),
+                        lastMoveMs(-((int64_t)1 << 40)), bytes(0) {}
+    };
+    struct PeerState {
+        bool ignored, banned, partial; int strikes; int failures; int64_t cooldownUntilMs; int64_t penaltyUntilMs;
+        uint64_t bytes; double lastPerStream;
+        PeerState() : ignored(false), banned(false), partial(false), strikes(0), failures(0), cooldownUntilMs(0),
+                      penaltyUntilMs(0), bytes(0), lastPerStream(-1) {}
+    };
+    static bool Usable(const PeerState& p) { return !p.ignored && !p.banned; }
+    double StreamRate(const StreamState& st, int64_t nowMs, bool matureOnly) const; //!< bytes/s over the window; <0 if matureOnly and too young
+    double PeerPerStreamRate(int peer, int64_t nowMs) const;        //!< mean over mature streams, <0 if none
+    int AttachedLocked(int peer) const;                              //!< streams on `peer` not asked to move
+
+    mutable std::mutex mtx;
+    BootstrapPeerPolicy pol;
+    std::vector<PeerState> peers;
+    std::vector<StreamState> streams;
+    std::map<uint32_t, std::set<int> > contributors; //!< file -> peers that supplied its bytes (-1 = unknown origin)
+};
+
+//! "host:port 2 streams 41.0 MiB/s 3.20 GiB, host2:port ..." for the log and getbootstrapinfo.
+std::string BootstrapPeerSummary(const std::vector<std::string>& names, const std::vector<BootstrapPeerSnapshot>& snap);
 
 #endif // BITCOIN_BOOTSTRAP_RESUME_H
