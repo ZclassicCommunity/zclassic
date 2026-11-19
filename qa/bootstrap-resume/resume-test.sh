@@ -238,7 +238,7 @@ restart_args() { # a node killed after its install was verified (blocks/ and cha
 test_kills() {
     say "== kill -9 at $kills random instants, restart each time =="
     fresh_client; start_server || return 1
-    from=$(log_lines)
+    from=$(log_lines); cyc=$from
     n=0; finished=0
     while [ $n -lt "$kills" ]; do
         ra=$(restart_args); [ -z "$ra" ] || say "the previous run had finished its bootstrap; restarting it without -bootstrap"
@@ -250,7 +250,7 @@ test_kills() {
         if [ "$h" = "$fx_height" ]; then say "client finished the import after $n kills (kill window too long); stopping the kill loop"; finished=1; break; fi
         kill_client
         n=$((n + 1))
-        say "kill $n at +${t} ms: staging $(staging_state)"
+        say "kill $n at +${t} ms: staging $(staging_state)" "(this run: server queued $(served_bytes "$cyc") bytes)"; cyc=$(log_lines)
     done
     if [ $finished -eq 0 ]; then
         start_client $(restart_args)
@@ -414,7 +414,14 @@ test_stream() {
     last=$(act_streams | tail -1)
     rec=$(act_streams | tail -n +3 | sort -n | tail -1)
     done_early=$(tail -1 "$work/stream-samples.txt" | grep -c 'active=0$' || true)
-    peers=$(cli "$server_bin" "$sdir" getpeerinfo | grep -c '"addr": *"127.0.0.1')
+    # A stream the cut just sent back to reconnect is counted by the client a moment before the server sees its
+    # connection: look again for a few seconds before judging the server-side count.
+    peers=0; k=0
+    while [ $k -lt 12 ]; do
+        peers=$(cli "$server_bin" "$sdir" getpeerinfo | grep -c '"addr": *"127.0.0.1')
+        [ "${peers:-0}" -ge 4 ] && break
+        sleep 0.5; k=$((k + 1))
+    done
     # The server-side count is only comparable while the client still runs all four
     # streams: near the end of a download fewer files than streams are left and the
     # streams close one by one, so the download can end (or taper) between the last
