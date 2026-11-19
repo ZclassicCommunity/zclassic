@@ -183,6 +183,7 @@ BITCOIN_CORE_H = \
   addrv2.h \
   netbase.h \
   noui.h \
+  p2pserve.h \
   policy/fees.h \
   pow.h \
   equihashmemo.h \
@@ -327,6 +328,7 @@ libbitcoin_server_a_SOURCES = \
   miner.cpp \
   net.cpp \
   noui.cpp \
+  p2pserve.cpp \
   policy/fees.cpp \
   pow.cpp \
   rest.cpp \

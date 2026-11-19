@@ -4,7 +4,7 @@
 src/bootstrap.cpp	6454
 src/c23/compat/librustzcash_compat.c	1895
 src/init.cpp	3865
-src/main.cpp	8246
+src/main.cpp	8174
 src/net.cpp	2794
 src/netbase.cpp	1625
 src/test/bootstrap_snapshot_protocol_tests.cpp	2617

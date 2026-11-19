@@ -123,7 +123,7 @@ src/main.cpp	LoadBlockIndexDB(0)	46
 src/main.cpp	LoadExternalBlockFile(2)	24
 src/main.cpp	ProcessAddrList(2)	22
 src/main.cpp	ProcessGetData(1)	30
-src/main.cpp	ProcessMessage(4)	196
+src/main.cpp	ProcessMessage(4)	171
 src/main.cpp	ProcessMessages(1)	18
 src/main.cpp	ReceivedBlockTransactions(4)	16
 src/main.cpp	RewindBlockIndex(2)	35

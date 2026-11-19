@@ -17,7 +17,7 @@ src/key_io.*|src/key.*|src/pubkey.*|src/base58.*	boost:key_tests boost:base58_te
 # ---- script, transactions, blocks
 src/script/*	boost:script_tests boost:script_P2SH_tests boost:scriptnum_tests boost:sigencoding_tests boost:sighash_tests boost:sighashtype_tests boost:sigopcount_tests boost:checkdatasig_tests boost:multisig_tests boost:transaction_tests
 src/primitives/*|src/consensus/*	boost:transaction_tests boost:CheckBlock_tests boost:main_tests gtest:CheckBlock gtest:checktransaction_tests gtest:Transaction gtest:Validation
-src/main.*|src/chain.*|src/parkedblockindex.h	boost:findmostwork_tests boost:parkedblockindex_tests boost:skiplist_tests boost:DoS_tests boost:main_tests boost:coins_tests
+src/main.*|src/chain.*|src/parkedblockindex.h	boost:findmostwork_tests boost:parkedblockindex_tests boost:skiplist_tests boost:DoS_tests boost:main_tests boost:coins_tests qa:qa/rpc-tests/chain_crash_sweep.sh
 src/coins.*|src/txdb.*|src/dbwrapper.*	boost:coins_tests boost:dbwrapper_tests
 src/merkleblock.*|src/bloom.*	boost:pmt_tests boost:bloom_tests
 
@@ -34,6 +34,7 @@ src/crypto/*|src/hash.*	boost:crypto_tests boost:hash_tests gtest:Sha256Differen
 # ---- network, bootstrap, Tor
 src/net.*|src/protocol.*|src/netbase.*|src/addrman.*|src/addrv2.h	boost:p2p_sync_tests boost:netbase_tests boost:addrv2_tests boost:onion_v3_tests boost:addrman_tests boost:DoS_tests
 src/bootstrap*	boost:bootstrap_snapshot_protocol_tests boost:bootstrap_resume_tests boost:bootstrap_resume_logic_tests boost:bootstrap_peer_board_tests boost:bootstrap_onion_tests boost:p2p_sync_tests
+src/p2pserve.*	boost:p2p_message_limits_tests boost:DoS_tests boost:p2p_sync_tests
 src/torcontrol.*|src/embeddedtor.*|src/c23/tor/*	boost:torcontrol_tests boost:embeddedtor_tests boost:bootstrap_onion_tests boost:onion_v3_tests
 
 # ---- RPC and utilities

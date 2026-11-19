@@ -24,6 +24,7 @@
 #include "merkleblock.h"
 #include "metrics.h"
 #include "net.h"
+#include "p2pserve.h"
 #include "pow.h"
 #include "parkedblockindex.h"
 #include "rpc/server.h"
@@ -326,6 +327,8 @@ struct CNodeState {
     //! Whether this is an inbound connection (we did not dial it). Used by the
     //! peer-aware finalization gate to weight independent OUTBOUND corroboration.
     bool fInbound;
+    //! When (GetTime() seconds) we last answered this peer's mempool request, or 0.
+    int64_t nLastMempoolServed;
 
     CNodeState() {
         fCurrentlyConnected = false;
@@ -342,6 +345,7 @@ struct CNodeState {
         nBlocksInFlightValidHeaders = 0;
         fPreferredDownload = false;
         fInbound = false;
+        nLastMempoolServed = 0;
     }
 };
 
@@ -2891,6 +2895,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
                 return error("ConnectBlock(): FindUndoPos failed");
             if (!UndoWriteToDisk(blockundo, pos, pindex->pprev->GetBlockHash(), chainparams.MessageStart()))
                 return AbortNode(state, "Failed to write undo data");
+            TestCrashPoint("connect-after-undo-write");
 
             // update nUndoPos in block index
             pindex->nUndoPos = pos.nPos;
@@ -3016,6 +3021,7 @@ bool static FlushStateToDisk(CValidationState &state, FlushStateMode mode) {
             if (!pblocktree->WriteBatchSync(vFiles, nLastBlockFile, vBlocks)) {
                 return AbortNode(state, "Files to write to block index database");
             }
+            TestCrashPoint("flush-after-blockindex");
         }
         // Finally remove any pruned files
         if (fFlushForPrune)
@@ -5077,6 +5083,7 @@ bool AcceptBlock(CBlock& block, CValidationState& state, CBlockIndex** ppindex, 
         if (dbp == NULL)
             if (!WriteBlockToDisk(block, blockPos, chainparams.MessageStart()))
                 AbortNode(state, "Failed to write block");
+        TestCrashPoint("acceptblock-after-write"); // block bytes on disk, index entry not yet updated
         if (!ReceivedBlockTransactions(block, state, pindex, blockPos))
             return error("AcceptBlock(): ReceivedBlockTransactions failed");
     } catch (const std::runtime_error& e) {
@@ -6713,6 +6720,33 @@ static void ProcessAddrList(CNode* pfrom, vector<CAddress>& vAddr)
         pfrom->fGetAddr = false;
 }
 
+/** A mempool request inside the peer's cooldown is ignored: no reply, no ban score. Requires cs_main. */
+static bool MempoolRequestThrottled(CNode* pfrom)
+{
+    AssertLockHeld(cs_main);
+    CNodeState* state = State(pfrom->GetId());
+    if (state == NULL || pfrom->fWhitelisted)
+        return false;
+    int64_t nNow = GetTime();
+    if (MempoolRequestInCooldown(state->nLastMempoolServed, nNow)) {
+        LogPrint("net", "mempool request ignored, last served %ds ago (cooldown %ds) peer=%d\n",
+                 nNow - state->nLastMempoolServed, MEMPOOL_REQUEST_COOLDOWN, pfrom->id);
+        return true;
+    }
+    state->nLastMempoolServed = nNow;
+    return false;
+}
+
+static void ProcessMempoolMessage(CNode* pfrom)
+{
+    int currentHeight = GetHeight();
+
+    LOCK2(cs_main, pfrom->cs_filter);
+    if (MempoolRequestThrottled(pfrom))
+        return;
+    ServeMempool(pfrom, currentHeight);
+}
+
 bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t nTimeReceived)
 {
     const CChainParams& chainparams = Params();
@@ -7189,89 +7223,11 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
 
 
     else if (strCommand == "getblocks")
-    {
-        CBlockLocator locator;
-        uint256 hashStop;
-        vRecv >> locator >> hashStop;
-
-        LOCK(cs_main);
-
-        // Find the last block the caller has in the main chain
-        const CBlockIndex* pindex = FindForkInGlobalIndex(chainActive, locator);
-
-        // Send the rest of the chain
-        if (pindex)
-            pindex = chainActive.Next(pindex);
-        int nLimit = 500;
-        LogPrint("net", "getblocks %d to %s limit %d from peer=%d\n", (pindex ? pindex->nHeight : -1), hashStop.IsNull() ? "end" : hashStop.ToString(), nLimit, pfrom->id);
-        for (; pindex; pindex = chainActive.Next(pindex))
-        {
-            if (pindex->GetBlockHash() == hashStop)
-            {
-                LogPrint("net", "  getblocks stopping at %d %s\n", pindex->nHeight, pindex->GetBlockHash().ToString());
-                break;
-            }
-            // If pruning, don't inv blocks unless we have on disk and are likely to still have
-            // for some reasonable time window (1 hour) that block relay might require.
-            const int nPrunedBlocksLikelyToHave = MIN_BLOCKS_TO_KEEP - 3600 / chainparams.GetConsensus().PoWTargetSpacing(pindex->nHeight);
-            if (fPruneMode && (!(pindex->nStatus & BLOCK_HAVE_DATA) || pindex->nHeight <= chainActive.Tip()->nHeight - nPrunedBlocksLikelyToHave))
-            {
-                LogPrint("net", " getblocks stopping, pruned or too old block at %d %s\n", pindex->nHeight, pindex->GetBlockHash().ToString());
-                break;
-            }
-            pfrom->PushInventory(CInv(MSG_BLOCK, pindex->GetBlockHash()));
-            if (--nLimit <= 0)
-            {
-                // When this block is requested, we'll send an inv that'll
-                // trigger the peer to getblocks the next batch of inventory.
-                LogPrint("net", "  getblocks stopping at limit %d %s\n", pindex->nHeight, pindex->GetBlockHash().ToString());
-                pfrom->hashContinue = pindex->GetBlockHash();
-                break;
-            }
-        }
-    }
+        ServeGetBlocks(pfrom, vRecv, chainparams);
 
 
     else if (strCommand == "getheaders")
-    {
-        CBlockLocator locator;
-        uint256 hashStop;
-        vRecv >> locator >> hashStop;
-
-        LOCK(cs_main);
-
-        if (IsInitialBlockDownload())
-            return true;
-
-        const CBlockIndex* pindex = NULL;
-        if (locator.IsNull())
-        {
-            // If locator is null, return the hashStop block
-            BlockMap::iterator mi = mapBlockIndex.find(hashStop);
-            if (mi == mapBlockIndex.end())
-                return true;
-            pindex = (*mi).second;
-        }
-        else
-        {
-            // Find the last block the caller has in the main chain
-            pindex = FindForkInGlobalIndex(chainActive, locator);
-            if (pindex)
-                pindex = chainActive.Next(pindex);
-        }
-
-        // we must use CBlocks, as CBlockHeaders won't include the 0x00 nTx count at the end
-        vector<CBlock> vHeaders;
-        int nLimit = MAX_HEADERS_RESULTS;
-        LogPrint("net", "getheaders %d to %s from peer=%d\n", (pindex ? pindex->nHeight : -1), hashStop.ToString(), pfrom->id);
-        for (; pindex; pindex = chainActive.Next(pindex))
-        {
-            vHeaders.push_back(pindex->GetBlockHeader());
-            if (--nLimit <= 0 || pindex->GetBlockHash() == hashStop)
-                break;
-        }
-        pfrom->PushMessage("headers", vHeaders);
-    }
+        ServeGetHeaders(pfrom, vRecv);
 
 
     else if (strCommand == "tx")
@@ -7548,35 +7504,7 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
 
 
     else if (strCommand == "mempool")
-    {
-        int currentHeight = GetHeight();
-
-        LOCK2(cs_main, pfrom->cs_filter);
-
-        std::vector<uint256> vtxid;
-        mempool.queryHashes(vtxid);
-        vector<CInv> vInv;
-        BOOST_FOREACH(uint256& hash, vtxid) {
-            CTransaction tx;
-            bool fInMemPool = mempool.lookup(hash, tx);
-            if (fInMemPool && IsExpiringSoonTx(tx, currentHeight + 1)) {
-                continue;
-            }
-
-            CInv inv(MSG_TX, hash);
-            if (pfrom->pfilter) {
-                if (!fInMemPool) continue; // another thread removed since queryHashes, maybe...
-                if (!pfrom->pfilter->IsRelevantAndUpdate(tx)) continue;
-            }
-            vInv.push_back(inv);
-            if (vInv.size() == MAX_INV_SZ) {
-                pfrom->PushMessage("inv", vInv);
-                vInv.clear();
-            }
-        }
-        if (vInv.size() > 0)
-            pfrom->PushMessage("inv", vInv);
-    }
+        ProcessMempoolMessage(pfrom);
 
 
     else if (strCommand == "ping")

@@ -131,3 +131,14 @@ Startup
   on its first start. The old `params-verify.cache` in the datadir is read only while the
   new file is absent and is never written again. A read-only params directory only costs
   the re-hash; `-noparamcache` still hashes every file.
+
+
+Limits on two peer requests
+---------------------------
+
+- A `getblocks` or `getheaders` request whose block locator has more than 101 entries is
+  no longer served: the peer is disconnected, without a ban score (an honest locator has
+  under 40 entries even at height 5,000,000). A peer's second
+  `mempool` request within 60 seconds is ignored, without a reply or a ban score;
+  whitelisted peers are exempt. Neither changes consensus or which blocks and
+  transactions are accepted.
