@@ -1,0 +1,12 @@
+path: src/core.cpp
+function: Twice
+matches: 1
+lines: 32-39
+int Counter::Twice(int x)
+{
+    auto l = [&](int y) { return y * 2; };
+    if (x > 0) {
+        return l(x);
+    }
+    return helper(x);
+}

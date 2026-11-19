@@ -1,0 +1,4 @@
+== sh qa/rpc-tests/x.sh --bin src --work zcutil/gen/t-fast-work/x
+x.sh ran with --bin src --work zcutil/gen/t-fast-work/x
+== exit 0
+t-fast: 1 command(s), 0 failed

@@ -648,7 +648,7 @@ committed so this guide is fully reproducible without tribal knowledge:
 | `/home/rhett/build-qtbase-win.sh` | cross-builds static qtbase 5.15.x for win32-g++ | `contrib/cross/build-qtbase-win.sh` |
 | `/home/rhett/build-gui-win.sh` | cross-builds `release/zclwallet.exe` (does NOT embed) | `contrib/cross/build-gui-win.sh` |
 | *(missing)* codesign step in `mkmacdmg.sh` | `codesign --force --deep -s - zclwallet.app` AFTER `macdeployqt`, BEFORE `create-dmg` | edit `src/scripts/mkmacdmg.sh` after line 85 (macdeployqt), before line 91 (create-dmg) |
-| `/home/rhett/zclbuild/*` (proot builder: `prun`, `focal/build/{02-openssl-qt.sh,03-daemon.sh,04-gui-bundle.sh,05-static-helpers.sh,build.sh}`) | the only way to produce the portable glibc-2.31 static-Qt Linux single file + `.deb` | a dedicated build-env repo, or `contrib/portable-builder/` |
+| `/home/rhett/zclbuild/*` (proot builder: `prun`, `focal/build/{02-openssl-qt.sh,03-daemon.sh,04-gui-bundle.sh,05-static-helpers.sh,build.sh}`) | the only way to produce the portable glibc-2.31 static-Qt Linux single file + `.deb` | a dedicated build-env repo, or a new `contrib/portable-builder/` (does not exist yet) | <!-- doc-path-ok -->
 
 In-repo and already tracked (reference, do **not** re-commit): `src/scripts/mkrelease.sh`,
 `contrib/make-allinone.sh`, `res/libsodium/buildlibsodium.sh`, `src/scripts/dotranslations.sh`,

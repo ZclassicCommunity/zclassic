@@ -1,0 +1,4 @@
+# zcl-lint testiso baseline: test isolation breaks (tmp, datadir, port) per path and kind per path.
+# Shrink-only: lower a count or delete a row when it falls; never raise one or add a path.
+# Regenerate with: zcl-lint testiso --update-baseline (refused while anything rose).
+src/test/rpc_wallet_tests.cpp:tmp	2

@@ -1,0 +1,2 @@
+exec: sh qa/rpc-tests/x.sh --bin src --work zcutil/gen/t-fast-work/x
+exec: sh qa/rpc-tests/y.sh

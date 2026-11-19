@@ -21,7 +21,7 @@
 #        check-no-python.sh --self-test       proves each kind of offender is caught
 set -u
 EXCEPTIONS=""   # exact repository paths, space separated; keep empty
-PROSE_OK="doc/history/ zcutil/check-no-python.sh"   # path prefixes whose prose may mention python/pip (the scan for invocations skips them)
+PROSE_OK="doc/history/ zcutil/check-no-python.sh zcutil/agent/guard/"   # path prefixes whose text may mention python/pip: prose, this guard, and the agent guard whose rule table lists the invocations it refuses
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 root=$(CDPATH= cd -- "$here/.." && pwd)

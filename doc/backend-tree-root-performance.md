@@ -6,7 +6,7 @@ blocks without new shielded commitments. Each full Sapling calculation traverses
 or script-verification threads do not remove this repeated serial work.
 
 `src/zcash/tree_root.c` adapts the full-root fold and memoization from Z23's
-`core/modules/sapling/src/incremental_merkle_tree.c`, function
+`core/modules/sapling/src/incremental_merkle_tree.c` (in the Z23 source tree, not this repository), function <!-- doc-path-ok -->
 `incremental_tree_root`, source baseline
 `cf51aaa573b1b7d2457ba85f180684da829cf84c`. Attribution and Apache-2.0 license are
 retained. This is C23-compatible C, also compiled in C11 mode for existing Windows

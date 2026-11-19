@@ -2,15 +2,15 @@
 
 `gen_golden.cpp` links the Rust `librustzcash.a` from a built `depends` prefix
 and records its behaviour for the 31 `librustzcash_*` functions zclassicd calls.
-The output is `src/test/data/c23_golden/*.golden`, described in
-`src/test/data/c23_golden/FORMAT.md`. It exists so the C23 replacement can be
+The output (a generated corpus, not tracked in this repository) is `src/test/data/c23_golden/*.golden`, described in
+`src/test/data/c23_golden/FORMAT.md`. It exists so the C23 replacement can be <!-- doc-path-ok -->
 checked against the real Rust after Rust is deleted from `depends`.
 
 ## Regenerate
 
 Requirements: x86_64 Linux, g++ with C++17, a `depends` prefix that still
 contains `lib/librustzcash.a`, `lib/libsodium.a`, `lib/libgmp.a`,
-`lib/libgmpxx.a` and `include/librustzcash.h` (any tree before the Rust removal,
+`lib/libgmpxx.a` and `include/librustzcash.h` (in the depends prefix, not tracked) (any tree before the Rust removal, <!-- doc-path-ok -->
 built with `make -C depends`), and the Zcash parameter files
 (`zcutil/fetch-params.sh`). No configure step is needed.
 
@@ -51,8 +51,8 @@ Rust.
   requires Rust to accept every proof and signature in them.
 - `inputs/mainnet_sprout_txs.txt`: copied from Z23 `origin/main`
   `aa9eed8322b686cf9ee5443adfe9bb6063d985e7`,
-  `tests/harness/src/test_sprout_groth16_kat.c` and
-  `tests/harness/src/fixture_tx_oversize_478544.c`.
+  Z23 `tests/harness/src/test_sprout_groth16_kat.c` and <!-- doc-path-ok -->
+  Z23 `tests/harness/src/fixture_tx_oversize_478544.c`. <!-- doc-path-ok -->
 
 ## Not covered
 

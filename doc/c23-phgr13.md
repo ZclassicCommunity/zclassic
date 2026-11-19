@@ -81,11 +81,11 @@ the same field elements (`test_bn254_engine_parity` in Z23).
 
 ## What was removed
 
-* `src/snark/` (libsnark), its Makefile rules, `LIBSNARK`, `-DUSE_ASM`, `-DMONTGOMERY_OUTPUT`,
+* `src/snark/` (libsnark; removed, no longer in this tree), its Makefile rules, `LIBSNARK`, `-DUSE_ASM`, `-DMONTGOMERY_OUTPUT`, <!-- doc-path-ok -->
   `-DBINARY_OUTPUT`, `-DCURVE_ALT_BN128`, `-DSTATIC`, `-DMULTICORE`.
 * `src/zcash/circuit/*.tcc`: the R1CS gadgets that existed only to prove and to test the
   PHGR13 circuit.
-* libgmp and OpenMP: `configure.ac` checks, `depends/packages/libgmp.mk`, `-lgmp -lgmpxx`,
+* libgmp and OpenMP: `configure.ac` checks, `depends/packages/libgmp.mk` (removed), `-lgmp -lgmpxx`, <!-- doc-path-ok -->
   `ax_openmp.m4`, and the static-libgomp handling (`ZQW_STATIC_GOMP`) in
   `zcutil/build-release.sh` and the daemon release workflow. The variable is still accepted
   and ignored, because the GUI's build scripts export it. Nothing else in zclassicd used

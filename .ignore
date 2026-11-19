@@ -1,0 +1,44 @@
+# Read by ripgrep (and tools that follow it) in addition to .gitignore: third-party,
+# vendored, generated and build output that agents should not search by default.
+# Open these by path when you need them. Syntax is gitignore's.
+
+# depends: sources, build products and per-host prefixes
+/depends/sources
+/depends/work
+/depends/built
+/depends/SDKs
+/depends/x86_64*
+/depends/i686*
+/depends/mips*
+/depends/arm*
+/depends/aarch64*
+
+# developer tool outputs and state
+/zcutil/bin
+/zcutil/gen
+/.zcl-dev
+
+# third-party and verbatim vendored code (never edited here)
+/src/leveldb
+/src/secp256k1
+/src/univalue
+/src/c23/vendor
+/src/c23/services/vendor
+/src/pow/tromp
+/wallet/src/3rdparty
+/zcutil/tools/vendor
+
+# build outputs
+*.o
+*.a
+*.la
+*.lo
+*.obj
+*.exe
+.deps
+.libs
+autom4te.cache
+config.log
+config.status
+/release
+/build

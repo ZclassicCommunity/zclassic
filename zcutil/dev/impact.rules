@@ -15,8 +15,9 @@ Makefile.am|configure.ac|autogen.sh|build-aux/*|depends/*|src/Makefile.am|src/Ma
 src/.clang-format|zcutil/check-hardening.sh|zcutil/fetch-params.sh|zcutil/zsync.sh|zcutil/cleanup-tags.sh|src/*.rc|src/windows-utf8.manifest|src/obj/*	daemon-linux daemon-win64
 
 # ---- local CI and the developer tool
-zcutil/local-ci.sh|zcutil/local-ci-macos.sh|zcutil/dev/*|zcutil/tools/Z23_SOURCE.tsv|zcutil/tools/LICENSE.z23|zcutil/tools/NOTICE|zcutil/tools/revendor.sh|zcutil/tools/vendor-files.txt|zcutil/tools/vendor/*	check-dev-tools
+zcutil/Makefile|zcutil/local-ci.sh|zcutil/local-ci-macos.sh|zcutil/dev/*|zcutil/agent/*|zcutil/tools/Z23_SOURCE.tsv|zcutil/tools/LICENSE.z23|zcutil/tools/NOTICE|zcutil/tools/revendor.sh|zcutil/tools/vendor-files.txt|zcutil/tools/vendor/*	check-dev-tools
 zcutil/local-ci-smoke.sh	check-dev-tools regtest-smoke
+zcutil/githooks/*	check-dev-tools
 
 # ---- C23 core
 src/c23/vendor/*|src/c23/services/vendor/*|src/c23/Z23_SOURCE.tsv|src/c23/services/Z23_SOURCE.tsv|src/c23/LICENSE.z23|src/c23/NOTICE|src/c23/services/LICENSE.z23|src/c23/services/NOTICE|src/c23/tools/*|src/c23/services/tools/*	check-c23-vendor check-c23-no-rust c23-run-linked test_bitcoin-full
@@ -64,6 +65,7 @@ wallet/contrib/*	wallet-linux
 qa/key1-guard.c|qa/key1-guard.sh|qa/key1-walletdb-baseline.txt	key1-guard check-dev-tools
 zcutil/check-no-python.sh	check-no-python check-dev-tools
 zcutil/embedded-tor-check.sh	check-dev-tools
+zcutil/consensus.seal	zcl-lint check-dev-tools
 zcutil/lint/*	zcl-lint check-dev-tools
 zcutil/tools/Makefile|zcutil/tools/.gitignore|zcutil/tools/test-jsonq.sh	build-jsonq check-dev-tools
 qa/lib/*|qa/rpc-tests/jsonq_lib.sh	ALL
@@ -71,3 +73,6 @@ qa/lib/*|qa/rpc-tests/jsonq_lib.sh	ALL
 # ---- units ported from Z23 (validation caches, clean-shutdown marker, RPC observability, HTTP overload)
 src/headerprecheck.*|src/shieldedcache.*|src/shutdownmarker.*|src/phasetimer.h	ALL qa/rpc-tests/chain_clean_shutdown_marker.sh qa/rpc-tests/datadir_lock_message.sh
 qa/rpc-tests/datadir_lock_message.sh|qa/rpc-tests/getrpcinfo.sh|qa/rpc-tests/rpc_busy.sh	regtest-smoke
+src/rpc/*|src/httpserver.*|src/httprpc.*	qa/rpc-tests/getrpcinfo.sh qa/rpc-tests/rpc_busy.sh
+# ---- agent entry points and skills (documents; the docs and wiring checks)
+.claude/*	check-dev-tools

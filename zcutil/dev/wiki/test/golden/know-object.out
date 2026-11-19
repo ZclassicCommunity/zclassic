@@ -1,0 +1,2 @@
+src/core/a.c needs widgets  [build, DOCTRINE]  a needs widgets to parse
+widgets selects gadgets  [qa, OBSERVED]  widgets select gadgets in the matrix

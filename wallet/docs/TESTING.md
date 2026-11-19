@@ -49,7 +49,7 @@ daemon. On Windows the daemon is also bound to a kill-on-close job object
 disarmed as soon as an orderly `stop` has been sent so it can never cut a shutdown short.
 
 ## Prioritized build plan
-0. **Phase 0 (S) — 3 mechanical, behavior-preserving seams** (unblocks exhaustive L0): (A) delete the unused `#include "mainwindow.h"` at `settings.cpp:1`; (B) extract `isPublicTx()` + the change-to-shielded decision into header-only `src/txclassify.h` and swap the call sites in `sendtab.cpp`; (C) extract the backup-nag gate into a free `bool shouldPromptBackup(alreadyShownSession, isSyncing, balTotal, alreadyBackedUp)` called at `rpc.cpp:1124`.
+0. **Phase 0 (S) — 3 mechanical, behavior-preserving seams** (unblocks exhaustive L0): (A) delete the unused `#include "mainwindow.h"` at `settings.cpp:1`; (B) extract `isPublicTx()` + the change-to-shielded decision into a new header-only `src/txclassify.h` (planned, does not exist yet) and swap the call sites in `sendtab.cpp`; (C) extract the backup-nag gate into a free `bool shouldPromptBackup(alreadyShownSession, isSyncing, balTotal, alreadyBackedUp)` called at `rpc.cpp:1124`. <!-- doc-path-ok -->
 1. **Phase 1 (M) — L0 `tst_logic`** with 4 shims (sodium-free `precompiled.h`; full `ToFields`/`Tx`; full 8-field `TransactionItem`; `AddressBook` stub). Covers ~18 checklist items, zero flakiness.
 2. **Phase 2 (S) — the localhost JSON-RPC mock + fixtures** (the reusable asset for L1 + E2E).
 3. **Phase 3 (L) — L1 `tst_widget`** (full app minus `main.cpp` + `libsodium.a` + `qoffscreen` plugin import + the modal-dismisser). The privacy-dialog core.

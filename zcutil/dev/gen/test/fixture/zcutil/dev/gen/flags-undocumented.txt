@@ -1,0 +1,2 @@
+# fixture baseline
+-hidden	fixture: read only to exercise the gate

@@ -1,0 +1,23 @@
+{"record":"rpc","name":"help","category":"control","actor":"help","safe_mode":true,"file":"src/rpc/server.cpp","line":8,"has_help":true,"usage":"help ( \"command\" )"}
+{"record":"rpc","name":"stop","category":"control","actor":"stop","safe_mode":true,"file":"src/rpc/server.cpp","line":9,"has_help":true,"usage":"stop"}
+{"record":"rpc","name":"addnode","category":"network","actor":"addnode","safe_mode":true,"file":"src/rpc/net.cpp","line":34,"has_help":true,"usage":"addnode \"node\" \"add|remove|onetry\""}
+{"record":"rpc","name":"getconnectioncount","category":"network","actor":"getconnectioncount","safe_mode":true,"file":"src/rpc/net.cpp","line":32,"has_help":true,"usage":"getconnectioncount"}
+{"record":"rpc","name":"getbalance","category":"wallet","actor":"getbalance","safe_mode":false,"file":"src/wallet/rpcwallet.cpp","line":6,"has_help":true,"usage":"getbalance ( minconf )"}
+{"record":"arg","name":"-?","form":"-?","documented":true,"group":"Options:","file":"src/init.cpp","line":5,"reads":0}
+{"record":"arg","name":"-foo","form":"-foo=<n>","documented":true,"group":"Options:","file":"src/init.cpp","line":6,"reads":1}
+{"record":"arg","name":"-debug","form":"-debug=<category>","documented":true,"group":"Options:","file":"src/init.cpp","line":7,"reads":0}
+{"record":"arg","name":"-bar","form":"-bar","documented":true,"group":"Wallet options:","file":"src/init.cpp","line":10,"reads":1}
+{"record":"arg","name":"-hidden","documented":false,"file":"src/util.cpp","line":7,"reads":1}
+{"record":"gtest_suite","name":"XSuite","file":"src/gtest/x_tests.cpp","line":1,"tests":2}
+{"record":"gtest_suite","name":"YFixture","file":"src/gtest/x_tests.cpp","line":3,"tests":1}
+{"record":"boost_suite","name":"foo_tests","file":"src/test/foo_tests.cpp","line":1,"cases":2}
+{"record":"qa_script","path":"qa/a.sh","purpose":"Fixture qa script: checks the thing."}
+{"record":"ci_step","name":"check-dev-tools","timeout_s":600,"function":"t_devtools","file":"zcutil/local-ci.sh","line":3}
+{"record":"ci_step","name":"build-fixture","timeout_s":300,"function":"t_fixture","file":"zcutil/local-ci.sh","line":4}
+{"record":"autotools_target","kind":"library","name":"libfoo.a","file":"src/Makefile.am","line":2}
+{"record":"autotools_target","kind":"library","name":"libbar.a","file":"src/Makefile.am","line":2}
+{"record":"autotools_target","kind":"program","name":"fixd","file":"src/Makefile.am","line":7}
+{"record":"area","path":"src/","description":"the daemon and its tests."}
+{"record":"area","path":"qa/","description":"shell regression tests."}
+{"record":"lesson","status":"OPEN","path":"qa/a.sh","text":"a lesson about the script, kept open.","line":3}
+{"record":"lesson","status":"DONE","path":"src/util.cpp","text":"a closed lesson.","line":4}

@@ -13,7 +13,7 @@ Release candidates are built and tested on the owner's own machines.
 | Script | Where it runs | What it does |
 | --- | --- | --- |
 | `zcutil/local-ci.sh` | Linux build host | `env-setup`, `daemon-linux`, `daemon-win64`, `wallet-linux`, `test`, `test-changed`, `dry`, `macos`, `all`, `shell`, `clean` (options `--only`, `--tor`, `--flavor`, `--pick`) |
-| `zcutil/local-ci-macos.sh` | the Mac | macOS daemon candidate, wallet GUI and tests (Homebrew Qt 5), macOS wallet bundle |
+| `zcutil/local-ci-macos.sh` | the Mac | the check-dev-tools step (`dev-tools`), macOS daemon candidate, wallet GUI and tests (Homebrew Qt 5), macOS wallet bundle |
 | `zcutil/embedded-tor-check.sh` | anywhere | bounded embedded-Tor check of a daemon candidate (run by the macOS stage) |
 | `zcutil/local-ci-smoke.sh` | anywhere (Linux, macOS, Windows under Git Bash/MSYS2) | headless Sapling regtest smoke with exact balances |
 
@@ -66,6 +66,7 @@ Mac, from the Linux host (copies the bundle and script, runs, copies artifacts b
 ZCL_CI_MAC=mac zcutil/local-ci.sh --commit <sha> macos <outdir>      # daemon
 ZCL_CI_MAC=mac ZCL_CI_MAC_ARGS=wallet-tests zcutil/local-ci.sh --commit <sha> macos <outdir>   # wallet GUI + tests (Homebrew qt@5)
 ZCL_CI_MAC=mac ZCL_CI_MAC_ARGS=all zcutil/local-ci.sh --commit <sha> macos <outdir>   # + wallet bundle
+ZCL_CI_MAC=mac ZCL_CI_MAC_ARGS=dev-tools zcutil/local-ci.sh --commit <sha> macos <outdir>   # check-dev-tools only (the same step as on Linux)
 ```
 
 or directly on the Mac:
@@ -86,15 +87,17 @@ ccache serves unchanged objects. Two runs never write the caches at once (flock)
 
 ## Running only what changed
 
-`zcutil/dev/zcl-dev` (a small C tool, `make -C zcutil/dev`) maps a diff to the steps that
+`zcutil/bin/zcl-dev` (a small C tool, built by `make -C zcutil` into `zcutil/bin/`) maps a diff to the steps that
 need to run, using the rules in `zcutil/dev/impact.rules`:
 
 ```sh
-zcutil/dev/zcl-dev guide src/wallet/wallet.cpp     # rules, steps, scripts, lessons, traps, first commands
-zcutil/dev/zcl-dev select [base-ref]               # steps for `git diff base...HEAD` (default origin/master)
-zcutil/dev/zcl-dev check-rules                     # every source file has a rule, every rule matches a file
+zcutil/bin/zcl-dev guide src/wallet/wallet.cpp     # rules, steps, scripts, lessons, traps, first commands
+zcutil/bin/zcl-dev select [base-ref]               # steps for `git diff base...HEAD` (default origin/master)
+zcutil/bin/zcl-dev check-rules                     # every source file has a rule, every rule matches a file
 zcutil/local-ci.sh --commit <sha> --only wallet_matrix-1-9,zslp_index test <outdir>
 ZCL_CI_BASE=<base-ref> zcutil/local-ci.sh --commit <sha> test-changed <outdir>
+zcutil/bin/zcl-dev verify [--base ref]             # one trip for committed changes: select, t-fast (when built), zcl-lint all, then the test-changed hint; on Windows zcl-lint is not built and the step is UNAVAILABLE (exit 2), run verify on a POSIX host
+zcutil/bin/zcl-dev verify --gates                  # the check-dev-tools gates after make -C zcutil check: zcl-lint all, check-tests (when built; BROKEN if zcl-dev-tests is built without the zcl-dev-check-tests alias), know, rpc-parity, flags
 ```
 
 `--only` takes a comma list of `test` step names (the names in the results table; a name
@@ -128,7 +131,7 @@ digest covers what the CI passes in, not the host's shell. A receipt says what r
 what it printed; it does not make the result true: read the log it hashes.
 
 ```sh
-zcutil/dev/zcl-dev receipt wallet_tokenguard <outdir>     # the latest receipt of one step
+zcutil/bin/zcl-dev receipt wallet_tokenguard <outdir>     # the latest receipt of one step
 grep '"verdict":"FAIL"' <outdir>/receipts.jsonl           # every failure of a run
 sha256sum <outdir>/test/logs/wallet_tokenguard.log        # must equal its log_sha256
 ```
@@ -180,7 +183,7 @@ branch) onto the test builds only; the picks are recorded in `test*/PICKS.txt`.
 Results are in `test/` (debug) and `test-release/`.
 
 The debug stage runs:
-`check-dev-tools` (the `zcl-dev` fixture tests, `check-rules`, `check-docs`), `check-c23-vendor`, `check-tools-vendor`, `build-jsonq` (builds and tests `zcutil/bin/jsonq`, which the shell tests use), `zcl-lint` (zcutil/lint ratchets),
+`check-dev-tools` (`make -C zcutil check`: every developer tool's selftest, `zcl-dev check-rules` and `check-docs`; then `zcl-dev verify --gates`: `zcl-lint all`, `zcl-dev check-tests` (skipped by name only when `zcl-dev-tests` is not built; BROKEN when it is built without the `zcl-dev-check-tests` alias), `zcl-dev know --check`, `zcl-dev gen --check rpc-parity` and `flags`; it stops at the first failure), `check-c23-vendor`, `check-tools-vendor`, `build-jsonq` (builds and tests `zcutil/bin/jsonq`, which the shell tests use), `zcl-lint` (zcutil/lint ratchets),
 `check-c23-no-rust`, `check-c23-tor-symbols`, `check-no-python` (with its self-test), `key1-guard`
 (KEY-1 wallet secrecy guard, with poisoned-copy cases), `seed-generator` (byte-for-byte `chainparamsseeds.h`),
 `zmq-sub-example`, `wallet-embed-footer` and `wallet-mockrpc` (the C23/sh tools that replaced the
@@ -193,6 +196,35 @@ need real Tor network access). The tests run in a network-less namespace with th
 own loopback, so they cannot collide with a running node. One summary table is
 printed and the exit status is non-zero on any failure. The tests in `qa/rpc-tests` are
 shell scripts.
+
+### The zcl-lint rules
+
+`zcl-lint all` runs these rules in this order. The list must match `zcutil/lint/rules.def`, and the
+`wiring` rule fails when it does not.
+
+<!-- LINT-RULES-BEGIN -->
+- `no-new-jq`: lines that use jq in shell scripts
+- `no-new-bash`: bash shebangs and bashisms
+- `banned-str`: strcpy, strcat, sprintf, vsprintf, gets
+- `md-links`: broken relative Markdown links
+- `vendor`: vendored files stay verbatim
+- `no-python`: no Python files or invocations
+- `filesize`: files over 1500 lines
+- `complexity`: functions above cyclomatic complexity 15
+- `long-functions`: functions above 500 lines
+- `warnsupp`: warning suppressions
+- `doc-claims`: machine-checked statements in Markdown
+- `doc-paths`: backticked repository paths that do not exist
+- `version-facts`: version numbers in documents
+- `victory`: unproven completion claims in documents
+- `secretlog`: secret-bearing names in log calls
+- `testiso`: tests that touch a shared tmp, datadir or port
+- `shellport`: host-specific commands in shell scripts
+- `wallclock`: assertions decided by elapsed real time
+- `consensus-seal`: the consensus seal
+- `kpi`: the tree-health floor, see `doc/agent/KPI.md`
+- `wiring`: this list, `rules.def` and `zcl-lint all` agree
+<!-- LINT-RULES-END -->
 
 ## Runaway steps: timeouts, log cap, ASLR
 

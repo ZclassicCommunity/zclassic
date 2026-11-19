@@ -50,7 +50,7 @@ The version is `CLIENT_VERSION_*` in `src/clientversion.h` (build N reports as b
 ```sh
 zcutil/local-ci.sh --commit <sha> all <outdir>      # builds, hardening and glibc gates, full tests
 cat <outdir>/receipts.jsonl                         # one JSON receipt per step
-zcutil/dev/zcl-dev receipt test_bitcoin-full <outdir>
+zcutil/bin/zcl-dev receipt test_bitcoin-full <outdir>
 ```
 
 Publishing release assets is a separate, reviewed act; compare `sha256sum` of what you upload with the candidate's `SHA256SUMS.txt`.

@@ -1,0 +1,11 @@
+== src/zcash-gtest --gtest_filter=FooFixture.*:FooParam.*:*/FooParam.*:FooSuite.*
+fake zcash-gtest --gtest_filter=FooFixture.*:FooParam.*:*/FooParam.*:FooSuite.*
+[==========] Running 2 tests from suites.
+[ RUN      ] FooFixture.t
+[       OK ] FooFixture.t (0 ms)
+[ RUN      ] Inst/FooParam.c/0
+[       OK ] Inst/FooParam.c/0 (0 ms)
+[  PASSED  ] 2 tests.
+t-fast: FAIL gtest suite FooSuite ran no test (wrong suite name, or a TEST_P suite filtered without */FooSuite.*)
+== exit 1
+t-fast: 1 command(s), 1 failed

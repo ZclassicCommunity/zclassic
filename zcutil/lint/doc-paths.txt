@@ -1,0 +1,3 @@
+# zcl-lint doc-paths baseline: backticked repository paths that do not resolve to a tracked file per path.
+# Shrink-only: lower a count or delete a row when it falls; never raise one or add a path.
+# Regenerate with: zcl-lint doc-paths --update-baseline (refused while anything rose).

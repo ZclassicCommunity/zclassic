@@ -107,7 +107,7 @@ sh wallet/tests/run-windows.sh C:/Qt/5.15.2/mingw81_64 C:/Qt/Tools/mingw810_64 \
 
 Everything runs with `QT_QPA_PLATFORM=offscreen` and `APPDATA`, `LOCALAPPDATA`,
 `USERPROFILE` redirected into the work dir (`OUT`, default
-`wallet/tests/build-windows`, git-ignored); no window opens, the kit is only
+`wallet/tests/build-windows` (created by the run), git-ignored); no window opens, the kit is only <!-- doc-path-ok -->
 read, and `JOBS` (default 8) limits build parallelism.
 
 Without `PATCHED_QT_DIR` the 15 functions listed in `KNOWN_CRASH` (inside the

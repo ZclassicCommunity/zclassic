@@ -24,9 +24,15 @@
 #include <string.h>
 #ifdef _WIN32
 #include <direct.h>
+#include <dirent.h>
+#include <process.h>
+#include <windows.h>
 #define chdir _chdir
 #else
+#include <dirent.h>
 #include <unistd.h>
+#include <signal.h>
+#include <sys/wait.h>
 #endif
 
 #include "platform/modules/platform/include/platform/glob_match.h"
@@ -616,7 +622,7 @@ static int cmd_guide(int argc, char **argv)
         snprintf(c, sizeof c, "sh %s <dir-with-zclassicd>", im.scripts.v[i]);
         list_push(&cmds, c);
     }
-    list_push(&cmds, "zcutil/dev/zcl-dev select");
+    list_push(&cmds, "zcutil/bin/zcl-dev select");
 
     if (json) {
         printf("{");
@@ -715,28 +721,257 @@ static int cmd_receipt(int argc, char **argv)
     return 1;
 }
 
+/* ---- git-style dispatch ---------------------------------------------------
+ * An unknown `zcl-dev <cmd> args...` runs `zcl-dev-<cmd>[.exe] args...`, found
+ * beside this executable or in <repo>/zcutil/bin. The child starts in the repo
+ * root (after -C) with ZCL_DEV_PREFIX set to the original cwd relative to the
+ * root, and its exit status is ours. Each unit ships its own binary, so units
+ * never share a source file. `zcl-dev-<cmd> --purpose` prints one line for help.
+ */
+#ifdef _WIN32
+#define EXE_SUFFIX ".exe"
+#else
+#define EXE_SUFFIX ""
+#endif
+
+typedef struct { const char *name, *purpose; } Builtin;
+static const Builtin builtins[] = {
+    {"guide", "brief for the files you will touch: rules, CI steps, lessons, traps"},
+    {"select", "which local-ci steps a diff needs"},
+    {"check-rules", "every source file has an impact rule, every rule matches a file"},
+    {"check-docs", "agent documents point at tracked paths and known steps"},
+    {"receipt", "print the latest local-ci receipt of one step"},
+    {"help", "this table: built-in and discovered subcommands"},
+    {NULL, NULL}};
+
+static char exe_dir[1024];
+
+/* Directory of the running executable, or "" when it cannot be found. */
+static void find_exe_dir(const char *argv0)
+{
+    char buf[1024];
+    exe_dir[0] = 0;
+    (void)argv0; /* unused on Windows */
+#ifdef _WIN32
+    DWORD n = GetModuleFileNameA(NULL, buf, sizeof buf);
+    if (n == 0 || n >= sizeof buf) return;
+#else
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+    if (n <= 0) {
+        if (!argv0 || !strchr(argv0, '/') || strlen(argv0) >= sizeof buf) return;
+        snprintf(buf, sizeof buf, "%s", argv0);
+        n = (ssize_t)strlen(buf);
+    }
+#endif
+    buf[n] = 0;
+    for (char *r = buf; *r; r++) if (*r == '\\') *r = '/';
+    char *slash = strrchr(buf, '/');
+    if (!slash) return;
+    *slash = 0;
+    snprintf(exe_dir, sizeof exe_dir, "%s", buf);
+}
+
+static int valid_cmd_name(const char *s)
+{
+    if (!*s || strlen(s) > 64) return 0;
+    for (; *s; s++)
+        if (!((*s >= 'a' && *s <= 'z') || (*s >= '0' && *s <= '9') || *s == '-')) return 0;
+    return 1;
+}
+
+static int is_builtin(const char *cmd)
+{
+    for (const Builtin *b = builtins; b->name; b++) if (!strcmp(b->name, cmd)) return 1;
+    return 0;
+}
+
+/* Path of zcl-dev-<cmd> in exe_dir or ./zcutil/bin (cwd is the repo root), or 0. */
+static int find_sub(const char *cmd, char *out, size_t cap)
+{
+    const char *dirs[2] = {exe_dir[0] ? exe_dir : NULL, "zcutil/bin"};
+    for (int i = 0; i < 2; i++) {
+        if (!dirs[i]) continue;
+        snprintf(out, cap, "%s/zcl-dev-%s%s", dirs[i], cmd, EXE_SUFFIX);
+        FILE *f = fopen(out, "rb");
+        if (f) { fclose(f); return 1; }
+    }
+    return 0;
+}
+
+/* Quote one argument by the CommandLineToArgvW rules (MSVCRT re-parses the joined command line).
+ * Returns a malloc()ed string. Compiled everywhere so `zcl-dev __quote` can test it off Windows. */
+static char *quote_arg(const char *a)
+{
+    size_t n = strlen(a), cap = 2 * n + 3, o = 0;
+    char *q = xrealloc(NULL, cap);
+    if (*a && !strpbrk(a, " \t\n\v\"")) { memcpy(q, a, n + 1); return q; }
+    q[o++] = '"';
+    for (size_t i = 0;; i++) {
+        size_t bs = 0;
+        while (a[i] == '\\') { bs++; i++; }
+        if (!a[i]) { for (size_t k = 0; k < 2 * bs; k++) q[o++] = '\\'; break; }
+        if (a[i] == '"') { for (size_t k = 0; k < 2 * bs + 1; k++) q[o++] = '\\'; }
+        else for (size_t k = 0; k < bs; k++) q[o++] = '\\';
+        q[o++] = a[i];
+    }
+    q[o++] = '"';
+    q[o] = 0;
+    return q;
+}
+
+#ifndef _WIN32
+/* Run `path --purpose` without a shell, with a 5 s alarm; returns a stream of its stdout. */
+static pid_t purpose_pid;
+static FILE *purpose_pipe(const char *path)
+{
+    int fd[2];
+    if (pipe(fd)) return NULL;
+    pid_t pid = fork();
+    if (pid < 0) { close(fd[0]); close(fd[1]); return NULL; }
+    if (!pid) {
+        alarm(5);
+        dup2(fd[1], 1);
+        close(fd[0]); close(fd[1]);
+        execl(path, path, "--purpose", (char *)NULL);
+        _exit(127);
+    }
+    close(fd[1]);
+    purpose_pid = pid;
+    return fdopen(fd[0], "r");
+}
+#endif
+
+static int run_sub(const char *path, char **args)
+{
+#ifdef _WIN32
+    size_t na = 0;
+    while (args[na]) na++;
+    char **qa = xrealloc(NULL, (na + 1) * sizeof *qa);
+    for (size_t i = 0; i < na; i++) qa[i] = quote_arg(args[i]);
+    qa[na] = NULL;
+    intptr_t rc = _spawnv(_P_WAIT, path, (const char *const *)qa);
+    if (rc == -1) die("cannot run %s", path);
+    return (int)rc;
+#else
+    execv(path, args);
+    die("cannot run %s", path);
+    return 2;
+#endif
+}
+
+static int dispatch(const char *cmd, int argc, char **argv, const char *dir)
+{
+    char path[1400];
+    if (!valid_cmd_name(cmd)) { fprintf(stderr, "zcl-dev: unknown command; see zcl-dev help\n"); return 2; }
+    enter_repo(dir);
+    if (!find_sub(cmd, path, sizeof path)) {
+        fprintf(stderr, "zcl-dev: unknown command; see zcl-dev help\n");
+        return 2;
+    }
+#ifdef _WIN32
+    _putenv_s("ZCL_DEV_PREFIX", prefix);
+#else
+    setenv("ZCL_DEV_PREFIX", prefix, 1);
+#endif
+    char **args = xrealloc(NULL, ((size_t)argc + 2) * sizeof *args);
+    args[0] = path;
+    for (int i = 0; i < argc; i++) args[i + 1] = argv[i];
+    args[argc + 1] = NULL;
+    return run_sub(path, args);
+}
+
+static int name_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+static int cmd_help(void)
+{
+    puts("usage: zcl-dev [-C dir] <command> [args]\n\nbuilt in:");
+    for (const Builtin *b = builtins; b->name; b++) printf("  %-14s %s\n", b->name, b->purpose);
+    List names = {0};
+    const char *dirs[2] = {exe_dir[0] ? exe_dir : NULL, "zcutil/bin"};
+    for (int i = 0; i < 2; i++) {
+        if (!dirs[i]) continue;
+        DIR *d = opendir(dirs[i]);
+        if (!d) continue;
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (strncmp(e->d_name, "zcl-dev-", 8)) continue;
+            char name[80];
+            snprintf(name, sizeof name, "%s", e->d_name + 8);
+            size_t n = strlen(name);
+            if (n > 4 && !strcmp(name + n - 4, ".exe")) name[n - 4] = 0;
+            if (!valid_cmd_name(name) || is_builtin(name) || list_has(&names, name)) continue;
+            list_push(&names, name);
+        }
+        closedir(d);
+    }
+    qsort(names.v, names.n, sizeof *names.v, name_cmp);
+    if (names.n) puts("\ndiscovered (zcl-dev-<cmd> --purpose):");
+    for (size_t i = 0; i < names.n; i++) {
+        char path[1400], line[256] = "";
+        if (find_sub(names.v[i], path, sizeof path)) {
+#ifdef _WIN32
+            char cmd[1500];
+            snprintf(cmd, sizeof cmd, "\"%s\" --purpose", path);
+            FILE *p = popen(cmd, "r");
+#else
+            FILE *p = purpose_pipe(path);
+#endif
+            if (p) {
+                if (!fgets(line, sizeof line, p)) line[0] = 0;
+#ifdef _WIN32
+                pclose(p);
+#else
+                fclose(p);
+                kill(purpose_pid, SIGKILL);
+                waitpid(purpose_pid, NULL, 0);
+#endif
+                line[strcspn(line, "\r\n")] = 0;
+            }
+        }
+        printf("  %-14s %s\n", names.v[i], line[0] ? line : "(no --purpose output)");
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     int a = 1;
     const char *dir = NULL;
+    find_exe_dir(argv[0]);
     if (a + 1 < argc && !strcmp(argv[a], "-C")) { dir = argv[a + 1]; a += 2; }
     if (a >= argc || !strcmp(argv[a], "-h") || !strcmp(argv[a], "--help")) {
         fputs("usage: zcl-dev [-C dir] guide [--json] <path>...\n"
               "       zcl-dev [-C dir] select [--json|--steps] [--stdin] [base-ref]\n"
               "       zcl-dev [-C dir] check-rules | check-docs\n"
-              "       zcl-dev receipt <step> [dir]\n", stderr);
+              "       zcl-dev receipt <step> [dir]\n"
+              "       zcl-dev help                 built-in and discovered subcommands\n"
+              "       zcl-dev [-C dir] <cmd> ...   runs zcl-dev-<cmd> (see help)\n", stderr);
         return 2;
     }
     const char *cmd = argv[a++];
+    if (!strcmp(cmd, "__quote")) { /* test hook: one quoted argument per line */
+        for (; a < argc; a++) { char *q = quote_arg(argv[a]); puts(q); free(q); }
+        return 0;
+    }
+    if (!strcmp(cmd, "help")) {
+        if (dir && chdir(dir)) die("cannot chdir to %s", dir);
+        { /* find the repo root when there is one, so zcutil/bin is listed from a subdirectory */
+            List l = {0};
+            if (!cmd_lines("git rev-parse --show-toplevel", &l) && l.n && chdir(l.v[0]))
+                die("cannot chdir to %s", l.v[0]);
+        }
+        return cmd_help();
+    }
     if (!strcmp(cmd, "receipt")) {
         if (dir && chdir(dir)) die("cannot chdir to %s", dir);
         return cmd_receipt(argc - a, argv + a);
     }
+    if (!is_builtin(cmd)) return dispatch(cmd, argc - a, argv + a, dir);
     enter_repo(dir);
     if (!strcmp(cmd, "guide")) return cmd_guide(argc - a, argv + a);
     if (!strcmp(cmd, "select")) return cmd_select(argc - a, argv + a);
     if (!strcmp(cmd, "check-rules")) return cmd_check_rules();
     if (!strcmp(cmd, "check-docs")) return cmd_check_docs();
-    die("unknown command %s", cmd);
+    die("unknown command; see zcl-dev help");
     return 2;
 }

@@ -1,0 +1,5 @@
+path: src/core.cpp
+function: Default
+matches: 1
+lines: 55-55
+int Default(int a = 3, int b = 4) { return a + b; }

@@ -1,0 +1,4 @@
+note: ignored a `narrow` row in zcutil/dev/tests.rules for src/main.cpp: not on the narrow allowlist, so the full run stays
+note: broad: run zcutil/local-ci.sh test-changed (unmapped source path: src/main.cpp); running the full test_bitcoin and zcash-gtest
+exec: src/test/test_bitcoin --log_level=test_suite
+exec: src/zcash-gtest

@@ -1,0 +1,5 @@
+FAIL token: zcutil/dev/tests.rules:4 names unknown Boost suite nosuch
+FAIL token: zcutil/dev/tests.rules:4 names unknown gtest suite Nope
+FAIL token: zcutil/dev/tests.rules:4 names missing qa script qa/rpc-tests/none.sh
+FAIL token: zcutil/dev/tests.rules:4 has unknown token bogus
+FAIL dead-rule: zcutil/dev/tests.rules:5 matches no file

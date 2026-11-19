@@ -6,7 +6,7 @@ set -o pipefail
 
 #KNOBS########
 PKG="zclassicd"
-VER="v2.1.1-5"
+VER="v2.1.1-5"  # legacy label only (directory and archive name), not the node version; see doc/building-daemon-from-source.md
 ##############
 
 mkdir -p depends/${PKG}-${VER}/bin

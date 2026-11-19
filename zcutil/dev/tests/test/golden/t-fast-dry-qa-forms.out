@@ -1,0 +1,4 @@
+exec: sh qa/rpc-tests/p.sh src
+exec: sh qa/rpc-tests/w.sh --bin src --work zcutil/gen/t-fast-work/w --only 1,2
+exec: sh qa/rpc-tests/x.sh --bin src --work zcutil/gen/t-fast-work/x
+exec: sh qa/rpc-tests/y.sh

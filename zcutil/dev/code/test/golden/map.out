@@ -1,0 +1,6 @@
+files: 10
+loc: 138
+group  core  6  112  0  3  3  0
+group  tests  2  18  0  2  0  0
+group  wallet  2  8  0  1  1  0
+vendored  src/vendor/  1  0  0  0  0  0

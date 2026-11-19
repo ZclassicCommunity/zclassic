@@ -26,6 +26,6 @@ Every internal global in `libzcl_c23.a` is prefixed `zc23_` through the force-in
 ## Golden corpus and known-answer tests
 
 - `sh src/c23/test/run.sh --out <dir> [--linked <libzcl_c23.a> --deps <prefix>] [--golden <dir>]` builds and runs the replay, mutation, thread and scan suites against the C23 core; `--linked` tests the archive the daemon links. CI step `c23-run-linked`.
-- The golden corpus (default `src/test/data/c23_golden`, or `ZCL_CI_GOLDEN`) is generated evidence: never hand-edit it, never regenerate it to make a failing test pass.
+- The golden corpus (default `src/test/data/c23_golden`, or `ZCL_CI_GOLDEN`; generated evidence kept outside this repository) is generated evidence: never hand-edit it, never regenerate it to make a failing test pass. <!-- doc-path-ok -->
 - Sprout/Sapling/Groth16 behaviour equals zclassicd's (accept and reject identically). A change that alters any verifier outcome is a consensus change and is out of scope.
 - Other proofs: `src/c23/test/regtest-smoke.sh`, `src/c23/tools/tree-shim-diff.sh`, `make -C src check-c23-vendor check-c23-no-rust`.

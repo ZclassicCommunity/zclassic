@@ -1,0 +1,13 @@
+path: src/wallet/wallet.cpp
+agents: src/wallet/AGENTS.md
+tests: Tests: wallet_tests.
+rule  src/wallet/* -> ALL daemon-linux
+rule  src/* -> unit-a
+compiled-by  libfx_wallet.a
+relinks  fxd
+relinks  test/test_fx
+guide  ci steps (ALL, broad rule: src/wallet/wallet.cpp): unit-a
+guide  lessons (doc/agent/LESSONS.md):
+guide    DONE src/core.cpp - keep raw strings out of the brace matcher.
+guide  traps (doc/agent/TRAPS.md):
+guide    (1) Core

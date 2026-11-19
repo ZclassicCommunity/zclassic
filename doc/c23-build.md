@@ -50,7 +50,7 @@ archive of the daemon defines one. `make check-c23-vendor` verifies both vendore
 - **Optimisation.** The C23 objects always end with `-O3`, whatever `CFLAGS`
   says. Release `CFLAGS`/`CXXFLAGS` from `depends` are `-O3` on Linux, Windows
   and macOS. A prefix built before
-  this change has `-O2` in `share/config.site`; rebuild `depends` or the
+  this change has `-O2` in `share/config.site` of the depends prefix (from `depends/config.site.in`); rebuild `depends` or the <!-- doc-path-ok -->
   daemon's C++ stays at `-O2`.
 - **No `-march`.** Nothing in the release flags selects an instruction set.
   The core picks ADX/BMI2, AVX2, AVX-512 and SHA-NI code at run time

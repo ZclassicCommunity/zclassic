@@ -1,0 +1,1 @@
+FAIL narrow: zcutil/dev/tests.rules:4 narrows src/main.cpp, which impact.rules marks ALL (or maps nowhere) and is not on the narrow allowlist

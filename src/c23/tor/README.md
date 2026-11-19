@@ -8,11 +8,11 @@ clearnet behaviour.
 
 | File | Role |
 |---|---|
-| `zcl_tor_embed.h/.c` | public API: start, wait for bootstrap, stop, control client, torrc |
-| `zcl_tor_inproc.h/.c` | in-process mode: `tor_run_main` on a thread, owner channel, join |
+| `zcl_tor_embed.h`, `zcl_tor_embed.c` | public API: start, wait for bootstrap, stop, control client, torrc |
+| `zcl_tor_inproc.h`, `zcl_tor_inproc.c` | in-process mode: `tor_run_main` on a thread, owner channel, join |
 | `zcl_tor_dispatch.c` | the Tor child entry point (`tor_run_main`) for child mode |
 | `zcl_tor_proc.h`, `zcl_tor_proc_posix.c`, `zcl_tor_proc_win.c` | child process layer: `posix_spawn` and socketpair; `CreateProcessW` and a kill-on-close job object |
-| `keyfile.h/.c` | owner-only secret files: atomic write, tighten, read, private directory. Always built into `zclassicd` (onion key file) |
+| `keyfile.h`, `keyfile.c` | owner-only secret files: atomic write, tighten, read, private directory. Always built into `zclassicd` (onion key file) |
 | `zcl_tor_selftest.c`, `build_selftest.sh` | proof program (Linux) |
 | `zcl_tor_selftest_win.c`, `build_selftest_win.sh`, `zcl_tor_win.rc`, `zcl_tor_win.manifest` | proof program (Windows, mingw-w64 cross-build; child mode) |
 | `twonode.sh`, `privacy_check.sh` | two `zclassicd` regtest nodes over an onion service; strace check that only Tor reaches the network |
@@ -24,7 +24,7 @@ Only `zcl_tor_dispatch.c` and `zcl_tor_inproc.c` include `tor_api.h`.
 ## Attribution
 
 The design follows the Z23 node's embedded Tor, (c) 2026 Rhett Creighton,
-Apache License 2.0 (Z23 `core/modules/net/src/tor_config_log.c`,
+Apache License 2.0 (Z23 `core/modules/net/src/tor_config_log.c` (Z23 tree), <!-- doc-path-ok -->
 `tor_integration.c`):
 
 - The torrc body (loopback `SocksPort`, `DataDirectory`, notice log to a file,

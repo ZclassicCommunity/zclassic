@@ -7,3 +7,12 @@ contexts/commons/packages/zutf8/src/zutf8.c
 tools/jsonq.c
 tools/jsonq_standalone.c
 tools/multicall.h
+platform/modules/json/include/json/json.h
+platform/modules/json/src/json.c
+platform/modules/base/include/base/safe_alloc.h
+platform/modules/base/include/base/cleanse.h
+platform/modules/base/include/base/hex.h
+platform/modules/base/src/safe_alloc.c
+platform/modules/base/src/cleanse.c
+tools/mcp/mcp_rpc.h
+tools/mcp/mcp_rpc.c

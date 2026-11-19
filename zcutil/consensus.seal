@@ -1,0 +1,36 @@
+# zcutil/consensus.seal: consensus tripwire. One row per sealed file: <path>TAB<git blob sha1>.
+# Written by zcl-lint consensus-seal --reseal --reason. Do not hand-edit. Ritual: doc/agent/UNSEAL.md
+src/chainparams.cpp	f086876a524e2b9be11caddfb8e595a134ca56c2
+src/consensus/AGENTS.md	dde0e972df0dc72c605afd149f8d4a27ecfecdbe
+src/consensus/CLAUDE.md	43c994c2d3617f947bcb5adf1933e21dabe46bb5
+src/consensus/consensus.h	2955cb8636e9c6706eabb35154d9ed1ded77a41c
+src/consensus/oversize_grandfather.cpp	63cc0e38a11d7f139be3540e71954e7928d88780
+src/consensus/oversize_grandfather.h	49da3150226636f0c1378d5307f429fbc1682d11
+src/consensus/params.cpp	9d137c2177abcb8233691584b7ac08892932a5c0
+src/consensus/params.h	065d1f2d3ccfdc0ddf61bec801cfbaebebc1b7c5
+src/consensus/upgrades.cpp	c46f19355b77b8db232a4fa3fa6fd6449f824414
+src/consensus/upgrades.h	5c16fb66e66fdf8b0dc39b27e4830c09fb4935e6
+src/consensus/validation.h	f350a7c651f1b40738e42208ae1357eccb7669f6
+src/consensus/z23/oversize_grandfather_table.inc	1deee007953f53931b5736498c13b1436d64fde3
+src/pow.cpp	2f6e3fc913032e43826965329a5d0827b2deef88
+src/pow.h	312400e6df61efb9284b1efa80f017a57b6d08a1
+src/primitives/block.cpp	430ac8721866df4299160a4ea9e371416f2b0fd1
+src/primitives/block.h	489d54711ef5e1cffed03f11669f0f84b3828486
+src/primitives/transaction.cpp	79adf290eef567d4054c95c8096e2d4dc2fbecc5
+src/primitives/transaction.h	6ce15a94bd5b413cde6b54b71d49853d431e1da5
+src/script/interpreter.cpp	e1c42eefc148826f651f4750fb51baa57bbde18e
+src/script/interpreter.h	bfa1fdaf51b2a279e364079e50e8fe4ca527bd5c
+src/script/script.cpp	2c71b4c6a9e85078c7c88e54f39379f270c87558
+src/script/script.h	fcc94169a8542252ac35ba609f6aa1623d205ff0
+src/zcash/Address.cpp	dd436ad6d1c43defc5e0e2fe12f75a81c79f6d71
+src/zcash/Address.hpp	dd2a75cffbccc541909ae494e75652a098cb1692
+src/zcash/IncrementalMerkleTree.cpp	70aa6e87d2c53b452dff3867866422ebf442c3d2
+src/zcash/IncrementalMerkleTree.hpp	f232bf38ee34f4baca9eea699e12730cfff3a1aa
+src/zcash/JoinSplit.cpp	7fda00a1a5647ddd9a164cdf0888a7121cd1340a
+src/zcash/JoinSplit.hpp	f5fce6246a497491bcda0795690a54b3d3f25912
+src/zcash/Note.cpp	0edaa27bc3453484e0e86a2b5b6ba3def5e10c29
+src/zcash/Note.hpp	6859432d7046c8794a8eaf5e6d65c1b59fb69d7f
+src/zcash/NoteEncryption.cpp	18b01587e5860804a26e8eabe706ce5e3e1fa05f
+src/zcash/NoteEncryption.hpp	4746299110600cd5ef099ca359ba287484c0b784
+src/zcash/Proof.cpp	02d0df33ca975b1233bf1bdb469eaf9525b179fe
+src/zcash/Proof.hpp	038558afac849c682b0bfce231a5749e537af5d8

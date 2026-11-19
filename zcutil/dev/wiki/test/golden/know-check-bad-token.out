@@ -1,0 +1,3 @@
+FAIL: bad/bad-token.tsv:4: term Bad!Term is not a plain token (letters, digits, . _ -)
+FAIL: bad/bad-token.tsv:4: term Bad!Term is declared but no row uses it
+know --check: FAILED (2 problems)

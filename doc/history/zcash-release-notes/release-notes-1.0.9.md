@@ -47,7 +47,7 @@ Nathan Wilcox (39):
       Implement the IS_RELEASE rule for betas.
       Generalize buildnum patching for both `clientversion.h` and `configure.ac`.
       Modify the `APPROX_RELEASE_HEIGHT`.
-      Remove portions of `./doc/release-process.md` now implemented in `make-release.py`.
+      Remove portions of `./doc/release-process.md` now implemented in `make-release.py`. <!-- doc-path-ok -->
       Switch from `sh_out_logged` to `sh_log`.
       Shorten the arg log line.
       Commit the version changes and build.

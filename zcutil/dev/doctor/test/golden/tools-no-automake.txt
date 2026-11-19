@@ -1,0 +1,14 @@
+[ok      ] cxx            g++: g++ stub 13.0
+[ok      ] cc             cc: cc stub 14.0
+[ok      ] make           make: stub 1.0
+[ok      ] autoconf       autoconf: stub 1.0
+[FAIL    ] automake       not on PATH (autogen.sh runs it)
+           fix: sudo apt-get install -y automake
+[ok      ] libtool        libtoolize: stub 1.0
+[ok      ] pkg-config     pkg-config: stub 1.0
+[ok      ] m4             m4: stub 1.0
+[ok      ] git            git: stub 1.0
+[ok      ] curl-or-wget   curl: stub 1.0
+[ok      ] patch          patch: stub 1.0
+10 ok, 0 advisory, 1 fail
+exit=1

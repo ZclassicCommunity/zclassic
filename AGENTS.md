@@ -19,17 +19,26 @@ zclassicd is the ZClassic full node (C++, a Zcash-derived fork), its command-lin
 ```sh
 ./zcutil/build.sh -j"$(getconf _NPROCESSORS_ONLN)"         # dev build into src/ (HOST is an env var, never an argument)
 ./zcutil/build-release.sh linux|win64 -j"$(getconf _NPROCESSORS_ONLN)"
-make -C zcutil/dev && zcutil/dev/zcl-dev guide <paths>      # brief for the files you will touch
-zcutil/dev/zcl-dev select [base-ref]                        # which CI steps your diff needs
+make -C zcutil && zcutil/bin/zcl-dev guide <paths>      # brief for the files you will touch
+zcutil/bin/zcl-dev select [base-ref]                        # which CI steps your diff needs
 zcutil/local-ci.sh --commit <sha> --only <steps> test <outdir>   # own-machine CI, focused
 zcutil/local-ci.sh --commit <sha> test-changed <outdir>          # steps chosen by zcl-dev select
 zcutil/local-ci.sh --commit <sha> all <outdir>              # full candidate; macOS: zcutil/local-ci-macos.sh
-make -C zcutil/dev check                                    # tests of the developer tool
+make -C zcutil check                                        # every developer tool's selftest (zcutil/bin/zcl-dev help lists subcommands)
+zcutil/bin/zcl-dev doctor                                   # what this host lacks to build and test, with the fix for each gap
+zcutil/bin/zcl-dev verify [--base ref]                      # one trip for committed changes: select, focused tests when built (needs the zcl-dev-t-fast alias), zcl-lint all, test-changed hint (no `tests`, `t-fast --changed` or `hooks install` line yet: they land with their tools; zcl-lint has no `fast`, so verify runs `all`); on Windows lint is UNAVAILABLE (exit 2), run it on a POSIX host
+zcutil/bin/zcl-dev code map|owner|impact|file|sym|refs ...  # code intelligence: navigate before searching
+zcutil/bin/zcl-dev wiki [topic]                             # walk the docs and source trees one topic at a time
+zcutil/bin/zcl-dev lessons find <words>                     # search lessons, traps and facts (add: lessons add)
+zcutil/bin/zcl-dev know <term>                              # closed FACTS table answer, UNKNOWN when no row; know --check validates it
+zcutil/bin/zcl-dev gen --check rpc-parity                   # also: gen --check flags, gen rpc-reference|args-reference|inventory
+zcutil/bin/zcl-lint all                                     # every lint rule and ratchet; zcl-lint kpi prints the tree-health floor
+zcutil/bin/zcl-dev verify --gates                           # the check-dev-tools gates after `make -C zcutil check`: zcl-lint all, check-tests (when built), know, rpc-parity, flags; stops at the first failure
 ```
 
 Run a single qa script by the form its usage line gives: most take `sh qa/rpc-tests/<script>.sh --bin <dir-with-zclassicd> --work <empty dir> [--base <port>]` (add `--peer-bin <previous release>` where its header asks for one); `token_name_rules`, `wallet_tokenguard`, `znam_index`, `zslp_*`, `startup_bad_home` and `zclassic_tx_util` take one positional `<dir>` holding the binaries. Ports are leased automatically (qa/lib/README.md), so no port needs choosing. Unit tests: `src/test/test_bitcoin --run_test=<suite>` after a `--enable-tests` build ([doc/unit-tests.md](doc/unit-tests.md)). Where the host has a build broker (for example `devbuild --wait`), run heavy commands behind it.
 
-Before editing, run `zcutil/dev/zcl-dev guide <paths>`: nearest rules, CI steps, lessons and traps in one brief.
+Before editing, run `zcutil/bin/zcl-dev guide <paths>`: nearest rules, CI steps, lessons and traps in one brief.
 
 ## Hard rules
 
@@ -50,6 +59,7 @@ Run the test and read the log: an exit status behind a pipe, a hash, a green sum
 
 - Build, release, platforms: [doc/building-quickstart.md](doc/building-quickstart.md), [doc/building-daemon-from-source.md](doc/building-daemon-from-source.md), [wallet/docs/BUILDING.md](wallet/docs/BUILDING.md).
 - Local CI, step names, receipts: [doc/local-ci.md](doc/local-ci.md).
+- Agent documents: [doc/agent/README.md](doc/agent/README.md) (index), [doc/agent/WIKI.md](doc/agent/WIKI.md) (walking the docs), [doc/agent/KPI.md](doc/agent/KPI.md) (tree-health floor), [zcutil/lint/README.md](zcutil/lint/README.md) (lint rules and ratchets). The MCP server for agents is `zcutil/agent/mcp/` (`zcutil/bin/zcl-mcp`).
 - C23 core and vendoring: [src/c23/README.md](src/c23/README.md), [doc/c23-build.md](doc/c23-build.md).
 - Wallet durability: [doc/wallet-crash-consistency.md](doc/wallet-crash-consistency.md). Wallet tests: [wallet/docs/TESTING.md](wallet/docs/TESTING.md).
 - Tests: [doc/unit-tests.md](doc/unit-tests.md), [qa/rpc-tests/README.md](qa/rpc-tests/README.md).

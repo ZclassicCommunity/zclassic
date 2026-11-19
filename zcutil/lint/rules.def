@@ -1,0 +1,26 @@
+/* zcl-lint rule table: one row per rule, in the order `all` runs them.
+ *   LINT_RULE(name, function, baseline)
+ * function is `int fn(bool update)` defined in rules/<file>.c and declared by this table;
+ * baseline says the rule has a shrink-only zcutil/lint/<name>.txt (so --update-baseline applies).
+ * Adding a rule is one new file under rules/ plus one row here (the Makefile picks up every file under rules/ by wildcard). */
+LINT_RULE("no-new-jq", lint_rule_no_new_jq, true)
+LINT_RULE("no-new-bash", lint_rule_no_new_bash, true)
+LINT_RULE("banned-str", lint_rule_banned_str, true)
+LINT_RULE("md-links", lint_rule_md_links, true)
+LINT_RULE("vendor", lint_rule_vendor, false)
+LINT_RULE("no-python", lint_rule_no_python, false)
+LINT_RULE("filesize", lint_rule_filesize, true)
+LINT_RULE("complexity", lint_rule_complexity, true)
+LINT_RULE("long-functions", lint_rule_long_functions, true)
+LINT_RULE("warnsupp", lint_rule_warnsupp, true)
+LINT_RULE("doc-claims", lint_rule_doc_claims, false)
+LINT_RULE("doc-paths", lint_rule_doc_paths, true)
+LINT_RULE("version-facts", lint_rule_version_facts, false)
+LINT_RULE("victory", lint_rule_victory, false)
+LINT_RULE("secretlog", lint_rule_secretlog, true)
+LINT_RULE("testiso", lint_rule_testiso, true)
+LINT_RULE("shellport", lint_rule_shellport, true)
+LINT_RULE("wallclock", lint_rule_wallclock, true)
+LINT_RULE("consensus-seal", lint_rule_consensus_seal, false)
+LINT_RULE("kpi", lint_rule_kpi, true)
+LINT_RULE("wiring", lint_rule_wiring, false)

@@ -231,7 +231,7 @@ every existing link line carries it in the right order.
   glue choice; a `getauxval(AT_HWCAP)` probe belongs in Z23 and arrives by re-vendoring.
 - **Private symbol names.** `glue/zcl_c23_hash_names.h` (included first in both glue C
   files) renames the vendored externals to `zcl_c23h_sha256_*` and the two log entry points
-  to `zcl_c23h_log_*`. This was forced by a real clash: zclassicd's `src/sha256.cpp` (the
+  to `zcl_c23h_log_*`. This was forced by a real clash: zclassicd's `src/crypto/sha256.cpp` (the
   helper behind `SHA256::hashString`) defines `sha256_init` and `sha256_finalize` as
   `extern "C"` with other signatures, and the first zclassicd link failed with "multiple
   definition". The "Symbol-collision audit" section above assumed the zclassicd names are
