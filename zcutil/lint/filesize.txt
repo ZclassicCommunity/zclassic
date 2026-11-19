@@ -18,3 +18,4 @@ wallet/src/connection.cpp	3300
 wallet/src/mainwindow.cpp	4054
 wallet/src/rpc.cpp	2570
 wallet/src/sendtab.cpp	1873
+zcutil/dev/gen/gen.c	1887
