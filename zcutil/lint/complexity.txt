@@ -33,8 +33,8 @@ src/bootstrap_resume.cpp	BootstrapPeerBoard::HashFailed(3)	20
 src/bootstrap_resume.cpp	BootstrapPeerBoard::NoteComplete(2)	16
 src/bootstrap_resume.cpp	BootstrapPeerBoard::Rebalance(2)	67
 src/bootstrapvalidation.cpp	ThreadBootstrapUtxoValidation(0)	42
-src/c23/compat/librustzcash_compat.c	librustzcash_init_zksnark_params(9)	21
-src/c23/compat/librustzcash_compat.c	librustzcash_sapling_spend_proof(12)	24
+src/c23/compat/librustzcash_compat.c	librustzcash_init_zksnark_params(9)	17
+src/c23/compat/librustzcash_compat.c	librustzcash_sapling_spend_proof(12)	23
 src/c23/compat/librustzcash_compat.c	utf8_valid(1)	18
 src/c23/compat/test/compat_smoke.c	test_end_to_end(0)	27
 src/c23/compat/test/compat_smoke.c	test_key_components(0)	18

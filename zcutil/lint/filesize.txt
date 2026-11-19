@@ -2,7 +2,7 @@
 # Shrink-only: lower a count or delete a row when it falls; never raise one or add a path.
 # Regenerate with: zcl-lint filesize --update-baseline (refused while anything rose).
 src/bootstrap.cpp	6454
-src/c23/compat/librustzcash_compat.c	1895
+src/c23/compat/librustzcash_compat.c	1887
 src/init.cpp	3865
 src/main.cpp	8174
 src/net.cpp	2793

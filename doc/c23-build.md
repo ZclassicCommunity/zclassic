@@ -76,10 +76,39 @@ ZCL_MAINNET_BLK_FILES=<copy of blkNNNNN.dat>[:...] ZCL_MAINNET_BLK_THREADS=8 \
 ## Parameters at startup
 
 `init.cpp` is unchanged: its SHA-256 gate runs first, then
-`librustzcash_init_zksnark_params` (now the shim) reads the three Groth16
-parameter files through BLAKE2b-512 against the same digests as before and
-aborts with librustzcash's wording, prefixed `librustzcash (C23):` instead of
-Rust's `thread '<unnamed>' panicked at`.
+`librustzcash_init_zksnark_params` (now the shim) checks the three Groth16
+parameter files against the same BLAKE2b-512 digests as before and aborts with
+librustzcash's wording, prefixed `librustzcash (C23):` instead of Rust's
+`thread '<unnamed>' panicked at`.
+
+The verifying keys are compiled in, so the files matter only for proving, and
+how much init reads depends on the environment variable `ZCL_PARAMS_VERIFY`
+(`src/c23/compat/zcl_params_lazy.h`):
+
+- unset or anything but `boot` (lazy, the default): init hashes the Sapling
+  spend and output files (51.6 MB) and keeps none of their bytes, and checks
+  only that `sprout-groth16.params` opens and has its canonical size. A missing,
+  unreadable or wrong Sapling file and a missing or wrong-size Sprout file still
+  abort at start-up. The log says
+  `zc23: zk params: verify mode lazy (Sprout and Sapling proving bytes are verified at first proof)`.
+  The first Sapling proof of a send reads both Sapling files again, requires the
+  init-time digest, parses them and frees the raw bytes; the parsed keys are
+  shared by the send and released with its last proving context. A file that
+  changed since start-up refuses the proof (the send fails with "Spend proof
+  failed" or "Output proof failed", logged once as "Sapling proving parameters
+  changed on disk since start-up; refusing to prove"). Before the first Sprout
+  proof `zcl_c23_sprout_params_ready` hashes `sprout-groth16.params` once (again
+  only if its device, inode, size or times change). The Sprout prover has no
+  failure value, so a wrong file aborts the node there with the same advice as
+  the boot-time check (`src/zcash/JoinSplit.cpp` is consensus-sealed, so turning
+  this into an RPC error is left for a sealed change or a wallet-side caller).
+- `boot`: exactly the old behaviour: all three files hashed at init (the 692 MiB
+  Sprout file on a second thread), any mismatch aborts, and the raw Sapling
+  bytes stay resident for the life of the process. The mutation step of
+  `src/c23/test/run.sh` runs in this mode, because its expected output is Rust's,
+  which hashes every file at init.
+
+Measurements are in [perf/prover-memory.md](perf/prover-memory.md).
 
 ## LTO: measured, not enabled
 

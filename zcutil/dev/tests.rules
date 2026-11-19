@@ -29,6 +29,7 @@ src/pow.*|src/pow/*|src/equihashmemo.*|src/c23/equihash/*	boost:equihash_tests b
 
 # ---- shielded and crypto
 src/zcash/*	gtest:joinsplit gtest:noteencryption gtest:merkletree gtest:SaplingNote gtest:PedersenHash gtest:ZIP32 gtest:phgr13 gtest:libzcash_utils
+src/c23/compat/zcl_params_lazy.*|src/c23/compat/librustzcash_compat.c	gtest:C23ParamsResidency gtest:TransactionBuilder gtest:joinsplit
 src/crypto/*|src/hash.*	boost:crypto_tests boost:hash_tests gtest:Sha256Differential gtest:Sha256Backend
 
 # ---- network, bootstrap, Tor

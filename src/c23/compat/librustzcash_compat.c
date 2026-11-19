@@ -19,8 +19,13 @@
  *   D14  output_proof: esk/rcm/pk_d checks, bvk accumulation
  *   D15  binding_sig: valueBalance consistency check, INT64_MIN reject,
  *        zero-description signing
- *   D6   init: Rust path ABI, full-file BLAKE2b-512 check of all three files,
- *        failure policy (abort), proving keys resident from init
+ *   D6   init: Rust path ABI, failure policy (abort). ZCL_PARAMS_VERIFY=boot:
+ *        full-file BLAKE2b-512 check of all three files, proving keys
+ *        resident from init. Default (lazy): the Sapling pair is hashed at
+ *        init and re-verified when a proof loads it, the Sprout file is
+ *        size-checked at init and hashed before the first Sprout proof
+ *        (zcl_params_lazy.h); a Sapling mismatch then refuses the proof, a
+ *        Sprout mismatch aborts it (that ABI has no failure value).
  *   --   calls made before init: false or abort exactly where Rust unwraps
  *   D7   merkle_hash depth >= 63 aborts
  *   D12/D17 contexts are never NULL
@@ -82,6 +87,7 @@ extern size_t malloc_zone_pressure_relief(void *zone, size_t goal);
 
 #include "witness_codec.h"
 #include "zcl_c23_sapling_scan.h"
+#include "zcl_params_lazy.h"
 #include "zip32_codec.h"
 
 #include "base/log_level.h"
@@ -250,7 +256,8 @@ static atomic_bool g_init;
  * (groth16_pk_read). Published once by init with release order; a second
  * init (Rust: "Caller is responsible for calling this function once")
  * replaces the set and deliberately leaks the old one, because a proof on
- * another thread may still be reading it. */
+ * another thread may still be reading it. Boot mode only (ZCL_PARAMS_VERIFY=boot);
+ * lazy mode keeps no raw bytes (pks_acquire). */
 struct zcl_pk_set {
     uint8_t *spend;
     size_t spend_len;
@@ -660,13 +667,6 @@ static void check_hash_arg(const char *h)
         zcl_panic("hash should be a valid string");
 }
 
-#if defined(_WIN32)
-typedef wchar_t zcl_pchar;
-#define ZCL_PSEP_IS(c) ((c) == L'\\' || (c) == L'/')
-#else
-typedef char zcl_pchar;
-#define ZCL_PSEP_IS(c) ((c) == '/')
-#endif
 _Static_assert(sizeof(zcl_pchar) == sizeof(codeunit),
                "codeunit must match the platform path character");
 
@@ -691,151 +691,92 @@ static zcl_pchar *path_copy(const codeunit *p, size_t len, const char *open_msg)
     return out;
 }
 
-/* An open parameter file. */
-#if defined(_WIN32)
-typedef HANDLE zcl_fh;
-#else
-typedef int zcl_fh;
-#endif
+/* File opening, reading and hashing (rustzcash.rs:218-250, hashreader.rs)
+ * live in zcl_params_lazy.c. */
+typedef struct zcl_c23_hash_job hash_job;
 
-/* rustzcash.rs:218-220 File::open(..).expect(..). Rust's std::fs::File::open
- * opens with read access only; on Windows it shares read, write and delete
- * and passes FILE_FLAG_BACKUP_SEMANTICS, so a directory opens there and the
- * read that follows fails (as it does on POSIX). */
-static zcl_fh open_or_panic(const zcl_pchar *path, const char *open_msg)
+/* Lazy mode stands in for the Sprout hash: the file must have the canonical
+ * size (else hex stays empty and init panics with the "not correct" message),
+ * and the caller's digest is copied so the checks below compare it with the
+ * canonical one exactly as before. zcl_c23_sprout_params_ready hashes the
+ * file before the first Sprout proof. */
+static void sprout_size_only(hash_job *j, const char *sprout_hash)
 {
-#if defined(_WIN32)
-    HANDLE h = CreateFileW(path, GENERIC_READ,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-    if (h == INVALID_HANDLE_VALUE)
-        zcl_panic(open_msg);
-    return h;
-#else
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        zcl_panic(open_msg);
-    return fd;
-#endif
-}
-
-/* The file is only read; a failing close cannot change bytes already hashed,
- * and Rust's drop of a File ignores the close result as well. */
-static void fh_close(zcl_fh h)
-{
-#if defined(_WIN32)
-    (void)CloseHandle(h);
-#else
-    (void)close(h);
-#endif
-}
-
-/* One read: > 0 bytes read, 0 at end of file, -1 on an error. EINTR is
- * retried, as Rust's BufReader and io::copy do. */
-static long long fh_read(zcl_fh h, uint8_t *buf, size_t cap)
-{
-#if defined(_WIN32)
-    DWORD want = cap > (size_t)(1u << 30) ? (DWORD)(1u << 30) : (DWORD)cap;
-    DWORD got = 0;
-    if (!ReadFile(h, buf, want, &got, NULL))
-        return -1;
-    return (long long)got;
-#else
-    for (;;) {
-        ssize_t n = read(h, buf, cap);
-        if (n >= 0)
-            return (long long)n;
-        if (errno != EINTR)
-            return -1;
-    }
-#endif
-}
-
-#define ZCL_READ_CHUNK ((size_t)1 << 20) /* Rust: BufReader::with_capacity(1 MiB) */
-
-/* rustzcash.rs:222-250 plus hashreader.rs: every byte of the file goes
- * through BLAKE2b-512 (Blake2b::new(64), unkeyed), and into_hash renders the
- * digest as lowercase hex ("{:02x}"). keep_cap > 0 also keeps the first
- * keep_cap bytes in memory: for a file whose digest is the canonical one,
- * that is the whole file, and it becomes the proving key. */
-struct hash_job {
-    zcl_fh fh;
-    size_t keep_cap;
-    uint8_t *kept; /* out: malloc'd, keep_cap bytes, NULL when keep_cap == 0 */
-    uint64_t len;  /* out: bytes read */
-    char hex[129]; /* out: lowercase hex digest */
-    bool io_ok;    /* out: read to end of file without an I/O error */
-};
-
-static void *hash_job_run(void *arg)
-{
-    static const char HEX[] = "0123456789abcdef";
-    struct hash_job *j = arg;
-    struct blake2b_ctx b;
-    uint8_t d[64];
-    j->io_ok = false;
-    j->len = 0;
+    struct zcl_c23_file_stamp st;
+    j->io_ok = zcl_c23_params_stamp(j->fh, &st);
+    j->len = st.size;
     j->hex[0] = 0;
-    if (blake2b_init(&b, sizeof(d)) != 0)
-        zcl_panic("internal: BLAKE2b-512 initialisation failed");
-    if (j->keep_cap) {
-        j->kept = malloc(j->keep_cap);
-        if (!j->kept)
-            zcl_panic("out of memory reading a Sapling parameter file");
-    }
-    uint8_t *scratch = malloc(ZCL_READ_CHUNK);
-    if (!scratch)
-        zcl_panic("out of memory reading a parameter file");
-    for (;;) {
-        uint8_t *dst = scratch;
-        size_t cap = ZCL_READ_CHUNK;
-        if (j->len < j->keep_cap) {
-            dst = j->kept + j->len;
-            cap = j->keep_cap - (size_t)j->len;
-            if (cap > ZCL_READ_CHUNK)
-                cap = ZCL_READ_CHUNK;
-        }
-        long long n = fh_read(j->fh, dst, cap);
-        if (n < 0)
-            goto out;
-        if (n == 0)
-            break;
-        if (blake2b_update(&b, dst, (size_t)n) != 0)
-            zcl_panic("internal: BLAKE2b-512 update failed");
-        j->len += (uint64_t)n;
-    }
-    if (blake2b_final(&b, d, sizeof(d)) != 0)
-        zcl_panic("internal: BLAKE2b-512 finalisation failed");
-    for (size_t i = 0; i < sizeof(d); i++) {
-        j->hex[2 * i] = HEX[d[i] >> 4];
-        j->hex[2 * i + 1] = HEX[d[i] & 15];
-    }
-    j->hex[128] = 0;
-    j->io_ok = true;
-out:
-    free(scratch);
-    return NULL;
+    if (j->io_ok && st.size == SPROUT_GROTH16_SIZE && strlen(sprout_hash) < sizeof(j->hex))
+        memcpy(j->hex, sprout_hash, strlen(sprout_hash) + 1);
 }
 
-/* UTF-16 -> UTF-8; NULL when the input is not valid UTF-16 (lone surrogate). */
-#if defined(_WIN32)
-static char *wide_to_utf8(const wchar_t *w)
+/* rustzcash.rs:222-250 read every byte of the three files through
+ * BLAKE2b-512. Rust reads them one after another; the digests do not depend
+ * on the order, so in boot mode the 692 MiB Sprout file is hashed on a second
+ * thread while this one reads the Sapling pair. Lazy mode hashes the pair
+ * and only sizes the Sprout file. */
+static void hash_param_files(hash_job jobs[3], bool lazy, const char *sprout_hash)
 {
-    int n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w, -1, NULL, 0,
-                                NULL, NULL);
-    if (n <= 0)
-        return NULL;
-    char *out = malloc((size_t)n);
-    if (!out)
-        zcl_panic("out of memory converting a parameter path");
-    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w, -1, out, n, NULL,
-                            NULL) != n) {
-        free(out);
-        return NULL;
-    }
-    return out;
+    pthread_t sprout_thread;
+    bool threaded = !lazy &&
+        pthread_create(&sprout_thread, NULL, zcl_c23_params_hash_run, &jobs[2]) == 0;
+    zcl_c23_params_hash_run(&jobs[0]);
+    zcl_c23_params_hash_run(&jobs[1]);
+    if (lazy)
+        sprout_size_only(&jobs[2], sprout_hash);
+    else if (!threaded)
+        zcl_c23_params_hash_run(&jobs[2]);
+    else if (pthread_join(sprout_thread, NULL) != 0)
+        zcl_panic("pthread_join failed while hashing the Sprout parameters");
+    for (int i = 0; i < 3; i++)
+        zcl_c23_params_close(jobs[i].fh);
 }
+
+/* rustzcash.rs:274 SPROUT_GROTH16_PARAMS_PATH = Some(sprout_path). */
+static void hand_sprout_path(const zcl_pchar *gp, const char *open_msg)
+{
+#if defined(_WIN32)
+    char *sprout_utf8 = zcl_c23_params_wide_to_utf8(gp);
+    if (!sprout_utf8)
+        zcl_panic(open_msg);
+#else
+    char *sprout_utf8 = dup_cstr(gp);
+    if (!sprout_utf8)
+        zcl_panic("out of memory copying a parameter path");
 #endif
+    if (!zc23_sprout_prover_set_params_path(sprout_utf8))
+        zcl_panic(open_msg);
+    free(sprout_utf8);
+}
+
+/* rustzcash.rs:272-273 SAPLING_SPEND_PARAMS / SAPLING_OUTPUT_PARAMS. Boot
+ * mode publishes the raw bytes init kept; lazy mode kept none and records the
+ * paths so a proof can reload and re-verify them. */
+static void publish_proving_keys(hash_job jobs[3], zcl_pchar *const paths[3],
+                                 bool lazy)
+{
+    static const char *const HEX[3] = {SAPLING_SPEND_B2, SAPLING_OUTPUT_B2,
+                                       SPROUT_GROTH16_B2};
+    struct zcl_c23_param_file files[3];
+    for (int i = 0; i < 3; i++) {
+        files[i].path = paths[i];
+        files[i].hex = HEX[i];
+        files[i].size = jobs[i].len;
+    }
+    if (!lazy) {
+        struct zcl_pk_set *set = malloc(sizeof(*set));
+        if (!set)
+            zcl_panic("out of memory publishing the Sapling proving keys");
+        set->spend = jobs[0].kept;
+        set->spend_len = (size_t)jobs[0].len;
+        set->output = jobs[1].kept;
+        set->output_len = (size_t)jobs[1].len;
+        zcl_c23_params_resident_add((int64_t)(jobs[0].len + jobs[1].len));
+        /* A previous set (second init) is leaked on purpose, see g_pks. */
+        atomic_store_explicit(&g_pks, set, memory_order_release);
+    }
+    zcl_c23_params_register(files, lazy);
+}
 
 void librustzcash_init_zksnark_params(
     const codeunit *spend_path, size_t spend_path_len, const char *spend_hash,
@@ -873,34 +814,21 @@ void librustzcash_init_zksnark_params(
     /* rustzcash.rs:141-149 (Unix bytes) / :174-179 (Windows UTF-16) paths;
      * rustzcash.rs:218-220 File::open(..).expect(..), all three, in this
      * order, before anything is read. Any file name and any directories. */
-    zcl_pchar *sp = path_copy(spend_path, spend_path_len, SPEND_OPEN);
-    zcl_pchar *op = path_copy(output_path, output_path_len, OUTPUT_OPEN);
-    zcl_pchar *gp = path_copy(sprout_path, sprout_path_len, SPROUT_OPEN);
-    struct hash_job jobs[3];
+    zcl_pchar *paths[3];
+    paths[0] = path_copy(spend_path, spend_path_len, SPEND_OPEN);
+    paths[1] = path_copy(output_path, output_path_len, OUTPUT_OPEN);
+    paths[2] = path_copy(sprout_path, sprout_path_len, SPROUT_OPEN);
+    /* ZCL_PARAMS_VERIFY=boot: all three hashed now, Sapling bytes resident. */
+    const bool lazy = zcl_c23_params_lazy_requested();
+    hash_job jobs[3];
     memset(jobs, 0, sizeof(jobs));
-    jobs[0].fh = open_or_panic(sp, SPEND_OPEN);
-    jobs[1].fh = open_or_panic(op, OUTPUT_OPEN);
-    jobs[2].fh = open_or_panic(gp, SPROUT_OPEN);
-    jobs[0].keep_cap = (size_t)SAPLING_SPEND_SIZE;
-    jobs[1].keep_cap = (size_t)SAPLING_OUTPUT_SIZE;
+    jobs[0].fh = zcl_c23_params_open(paths[0], SPEND_OPEN);
+    jobs[1].fh = zcl_c23_params_open(paths[1], OUTPUT_OPEN);
+    jobs[2].fh = zcl_c23_params_open(paths[2], SPROUT_OPEN);
+    jobs[0].keep_cap = lazy ? 0 : (size_t)SAPLING_SPEND_SIZE;
+    jobs[1].keep_cap = lazy ? 0 : (size_t)SAPLING_OUTPUT_SIZE;
     jobs[2].keep_cap = 0; /* :234-238 only the Sprout VK is kept; proving reopens the path */
-
-    /* rustzcash.rs:222-250 read every byte of the three files through
-     * BLAKE2b-512. Rust reads them one after another; the digests do not
-     * depend on the order, so the 692 MiB Sprout file is hashed on a second
-     * thread while this one reads the Sapling pair. */
-    pthread_t sprout_thread;
-    bool threaded = pthread_create(&sprout_thread, NULL, hash_job_run, &jobs[2]) == 0;
-    hash_job_run(&jobs[0]);
-    hash_job_run(&jobs[1]);
-    if (threaded) {
-        if (pthread_join(sprout_thread, NULL) != 0)
-            zcl_panic("pthread_join failed while hashing the Sprout parameters");
-    } else {
-        hash_job_run(&jobs[2]);
-    }
-    for (int i = 0; i < 3; i++)
-        fh_close(jobs[i].fh);
+    hash_param_files(jobs, lazy, sprout_hash);
 
     /* rustzcash.rs:229-250: a read error panics, spend first. (A truncated
      * or otherwise malformed file makes Rust's Parameters::read panic with
@@ -946,58 +874,11 @@ void librustzcash_init_zksnark_params(
         zcl_panic("compiled-in Sapling/Sprout verifying keys failed their "
                   "integrity check");
 
-    char *sprout_utf8 = NULL;
-#if defined(_WIN32)
-    sprout_utf8 = wide_to_utf8(gp);
-    if (!sprout_utf8)
-        zcl_panic(SPROUT_OPEN);
-#else
-    sprout_utf8 = dup_cstr(gp);
-    if (!sprout_utf8)
-        zcl_panic("out of memory copying a parameter path");
-#endif
-    /* rustzcash.rs:274 SPROUT_GROTH16_PARAMS_PATH = Some(sprout_path). */
-    if (!zc23_sprout_prover_set_params_path(sprout_utf8))
-        zcl_panic(SPROUT_OPEN);
-
-    /* rustzcash.rs:272-273 SAPLING_SPEND_PARAMS / SAPLING_OUTPUT_PARAMS. */
-    struct zcl_pk_set *set = malloc(sizeof(*set));
-    if (!set)
-        zcl_panic("out of memory publishing the Sapling proving keys");
-    set->spend = jobs[0].kept;
-    set->spend_len = (size_t)jobs[0].len;
-    set->output = jobs[1].kept;
-    set->output_len = (size_t)jobs[1].len;
-    /* A previous set (second init) is leaked on purpose, see g_pks. */
-    atomic_store_explicit(&g_pks, set, memory_order_release);
-
-    free(sprout_utf8);
-    free(sp);
-    free(op);
-    free(gp);
+    hand_sprout_path(paths[2], SPROUT_OPEN);
+    publish_proving_keys(jobs, paths, lazy);
+    for (int i = 0; i < 3; i++)
+        free(paths[i]);
     atomic_store_explicit(&g_init, true, memory_order_release);
-}
-
-/* Diagnostics kept for ABI stability: "none" before init, "resident" after
- * (the proving keys are held from init, as in Rust). Nothing is refused at
- * proof time any more, so the last refusal is always NULL. */
-const char *zcl_c23_proving_status(void)
-{
-    return atomic_load_explicit(&g_pks, memory_order_acquire) ? "resident" : "none";
-}
-
-const char *zcl_c23_proving_last_refusal(void)
-{
-    return NULL;
-}
-
-static const struct zcl_pk_set *pks_get(void)
-{
-    const struct zcl_pk_set *s = atomic_load_explicit(&g_pks, memory_order_acquire);
-    if (!s || !s->spend || !s->output)
-        zcl_panic("parameters should have been initialized "
-                  "(Sapling proving keys absent)");
-    return s;
 }
 
 
@@ -1324,13 +1205,20 @@ static void release_heap_memory(void)
 #endif
 }
 
+/* Parses raw into *slot unless it is already resident. Under g_pk_mu. */
+static bool parse_locked(struct groth16_pk *slot, bool *ok, const uint8_t *raw,
+                         size_t len)
+{
+    if (!*ok && raw && g_pctx_live > 0 && groth16_pk_read(slot, raw, len))
+        *ok = true;
+    return *ok;
+}
+
 static const struct groth16_pk *parsed_key(struct groth16_pk *slot, bool *ok,
                                            const uint8_t *raw, size_t len)
 {
     pthread_mutex_lock(&g_pk_mu);
-    if (!*ok && g_pctx_live > 0 && groth16_pk_read(slot, raw, len))
-        *ok = true;
-    const struct groth16_pk *key = *ok ? slot : NULL;
+    const struct groth16_pk *key = parse_locked(slot, ok, raw, len) ? slot : NULL;
     pthread_mutex_unlock(&g_pk_mu);
     return key;
 }
@@ -1343,6 +1231,82 @@ bool zcl_c23_proving_keys_parsed(void)
     bool resident = g_pk_spend_ok || g_pk_output_ok;
     pthread_mutex_unlock(&g_pk_mu);
     return resident;
+}
+
+/* Lazy mode (zcl_params_lazy.h): no raw bytes are held, so the key set handed
+ * to the proof functions is empty and the parsed keys are the only source. */
+static const struct zcl_pk_set g_lazy_pks;
+static unsigned g_pk_loads; /* lazy loads that parsed both keys; g_pk_mu */
+
+/* Under g_pk_mu: makes both parsed keys resident for the live proving
+ * contexts. If they are not, both files are read again and must still have
+ * their init-time digests; the raw bytes are freed as soon as they are
+ * parsed. False when a file changed (logged once) or no context is alive. */
+static bool lazy_keys_locked(void)
+{
+    if (g_pk_spend_ok && g_pk_output_ok)
+        return true;
+    uint8_t *spend = NULL, *output = NULL;
+    size_t spend_len = 0, output_len = 0;
+    if (g_pctx_live == 0 ||
+        !zcl_c23_params_load_sapling(&spend, &spend_len, &output, &output_len))
+        return false;
+    bool ok = parse_locked(&g_pk_spend, &g_pk_spend_ok, spend, spend_len) &&
+              parse_locked(&g_pk_output, &g_pk_output_ok, output, output_len);
+    free(spend);
+    free(output);
+    zcl_c23_params_resident_add(-(int64_t)(spend_len + output_len));
+    g_pk_loads += ok ? 1u : 0u;
+    return ok;
+}
+
+static bool lazy_keys_acquire(void)
+{
+    pthread_mutex_lock(&g_pk_mu);
+    bool ok = lazy_keys_locked();
+    pthread_mutex_unlock(&g_pk_mu);
+    return ok;
+}
+
+unsigned zcl_c23_proving_keys_loads(void)
+{
+    pthread_mutex_lock(&g_pk_mu);
+    unsigned n = g_pk_loads;
+    pthread_mutex_unlock(&g_pk_mu);
+    return n;
+}
+
+/* rustzcash.rs:1545 / :1224 SAPLING_*_PARAMS.as_ref().unwrap(), after
+ * require_init(). Boot mode: the raw bytes init kept, for the process. Lazy
+ * mode: the empty set once the parsed keys are resident (loaded and
+ * re-verified here if no live context holds them), or NULL when the files on
+ * disk no longer match: the caller then returns false, so no proof is ever
+ * made from bytes that were not verified. Racing first proofs load once. */
+static const struct zcl_pk_set *pks_acquire(void)
+{
+    if (zcl_c23_params_mode() == 2)
+        return lazy_keys_acquire() ? &g_lazy_pks : NULL;
+    const struct zcl_pk_set *s = atomic_load_explicit(&g_pks, memory_order_acquire);
+    if (!s || !s->spend || !s->output)
+        zcl_panic("parameters should have been initialized "
+                  "(Sapling proving keys absent)");
+    return s;
+}
+
+/* "none" before init; boot mode "resident" (held from init, as in Rust);
+ * lazy mode "resident" while the parsed keys are held, else "registered".
+ * Refusals are logged by zcl_params_lazy.c; the last refusal stays NULL. */
+const char *zcl_c23_proving_status(void)
+{
+    int mode = zcl_c23_params_mode();
+    if (mode != 2)
+        return mode == 1 ? "resident" : "none";
+    return zcl_c23_proving_keys_parsed() ? "resident" : "registered";
+}
+
+const char *zcl_c23_proving_last_refusal(void)
+{
+    return NULL;
 }
 
 static void pctx_live_add(void)
@@ -1371,9 +1335,15 @@ static void pctx_live_drop(void)
 
 /* Parses both keys now if a proving context is alive. The transaction builder
  * calls it (through zcl_c23_prover_budget_enter) before its workers start, so
- * the parse has the whole thread budget and no worker waits on it. */
+ * the parse has the whole thread budget and no worker waits on it. In lazy
+ * mode this is also where the files are reloaded; a failure here is reported
+ * again by the proofs, which then return false. */
 static void prime_parsed_keys(void)
 {
+    if (zcl_c23_params_mode() == 2) {
+        (void)lazy_keys_acquire();
+        return;
+    }
     const struct zcl_pk_set *pks = atomic_load_explicit(&g_pks, memory_order_acquire);
     if (!pks || !pks->spend || !pks->output)
         return;
@@ -1381,6 +1351,8 @@ static void prime_parsed_keys(void)
     (void)parsed_key(&g_pk_output, &g_pk_output_ok, pks->output, pks->output_len);
 }
 
+/* A key that is not resident is parsed per proof from the raw bytes; lazy
+ * mode has none, and pks_acquire made the keys resident for this context. */
 static bool spend_proof_make(const struct zcl_pk_set *pks,
                              const struct sapling_spend_witness *wit,
                              const struct sapling_spend_inputs *pub,
@@ -1388,9 +1360,10 @@ static bool spend_proof_make(const struct zcl_pk_set *pks,
 {
     const struct groth16_pk *key =
         parsed_key(&g_pk_spend, &g_pk_spend_ok, pks->spend, pks->spend_len);
-    return key ? sapling_create_spend_proof_parsed(key, wit, pub, out)
-               : sapling_create_spend_proof(pks->spend, pks->spend_len, wit,
-                                            pub, out);
+    if (key)
+        return sapling_create_spend_proof_parsed(key, wit, pub, out);
+    return pks->spend && sapling_create_spend_proof(pks->spend, pks->spend_len,
+                                                    wit, pub, out);
 }
 
 static bool output_proof_make(const struct zcl_pk_set *pks,
@@ -1400,16 +1373,18 @@ static bool output_proof_make(const struct zcl_pk_set *pks,
 {
     const struct groth16_pk *key =
         parsed_key(&g_pk_output, &g_pk_output_ok, pks->output, pks->output_len);
-    return key ? sapling_create_output_proof_parsed(key, wit, pub, out)
-               : sapling_create_output_proof(pks->output, pks->output_len, wit,
-                                             pub, out);
+    if (key)
+        return sapling_create_output_proof_parsed(key, wit, pub, out);
+    return pks->output && sapling_create_output_proof(pks->output,
+                                                      pks->output_len, wit,
+                                                      pub, out);
 }
 
 #define PCTX_MAGIC UINT64_C(0x7a63323370637478) /* "zc23pctx" */
 
 /* rustzcash.rs:1140-1143 SaplingProvingContext { bsk: Fs, bvk: Point }. The
- * proving keys are not per context: init holds them for the process, as Rust
- * does (see g_pks). */
+ * proving keys are not per context: shared by every context (boot mode: held
+ * from init, as in Rust; see g_pks and pks_acquire). */
 struct zcl_pctx {
     uint64_t magic;
     struct fs bsk;
@@ -1488,6 +1463,20 @@ static bool spend_self_verify(const uint8_t proof[GROTH_PROOF_SIZE],
     return sapling_spend_groth16_one(&gp, (const uint64_t (*)[4])pub);
 }
 
+/* rustzcash.rs:1531-1547 create_random_proof(..).expect("proving should not
+ * fail"). Rust's Spend circuit calls ak.assert_not_small_order (sapling-crypto
+ * circuit/sapling/mod.rs, ecc.rs:95-122), whose assert_nonzero
+ * (num.rs:318-345) returns SynthesisError::DivisionByZero for the identity,
+ * the only prime-order point of small order; the expect then panics. */
+static void ak_not_identity_or_panic(const uint8_t ak_c[32])
+{
+    struct jub_point ak_pt;
+    if (!jub_from_bytes(&ak_pt, ak_c))
+        zcl_panic("internal: canonical ak failed to decode");
+    if (jub_is_identity(&ak_pt))
+        zcl_panic("proving should not fail (ak is the identity)");
+}
+
 bool librustzcash_sapling_spend_proof(void *ctx, const unsigned char *ak,
                                       const unsigned char *nsk,
                                       const unsigned char *diversifier,
@@ -1506,7 +1495,7 @@ bool librustzcash_sapling_spend_proof(void *ctx, const unsigned char *ak,
     uint8_t compact[ZCL_C23_WITNESS_COMPACT_LEN];
     uint8_t proof[GROTH_PROOF_SIZE];
     struct fs rcv_fs;
-    struct jub_point g_d, rk_pt, ak_pt;
+    struct jub_point g_d, rk_pt;
     struct sapling_spend_witness wit;
     struct sapling_spend_inputs pub;
     memset(&wit, 0, sizeof(wit));
@@ -1561,18 +1550,11 @@ bool librustzcash_sapling_spend_proof(void *ctx, const unsigned char *ak,
      * an argument of create_random_proof, so before synthesis: every check
      * above returns false before init, everything below panics. */
     require_init();
-    const struct zcl_pk_set *pks = pks_get();
-
-    /* rustzcash.rs:1531-1547 create_random_proof(..).expect("proving should
-     * not fail"). Rust's Spend circuit calls ak.assert_not_small_order
-     * (sapling-crypto circuit/sapling/mod.rs, ecc.rs:95-122), whose
-     * assert_nonzero (num.rs:318-345) returns SynthesisError::DivisionByZero
-     * for the identity, the only prime-order point of small order; the
-     * expect then panics. */
-    if (!jub_from_bytes(&ak_pt, ak_c))
-        zcl_panic("internal: canonical ak failed to decode");
-    if (jub_is_identity(&ak_pt))
-        zcl_panic("proving should not fail (ak is the identity)");
+    /* Lazy mode: NULL when the files changed on disk since init -> false. */
+    const struct zcl_pk_set *pks = pks_acquire();
+    if (!pks)
+        goto out;
+    ak_not_identity_or_panic(ak_c);
 
     memcpy(wit.ak, ak_c, 32);
     memcpy(wit.nsk, nsk, 32);
@@ -1674,7 +1656,11 @@ bool librustzcash_sapling_output_proof(void *ctx, const unsigned char *esk,
      * an argument of create_random_proof, after the bsk update and before
      * synthesis (which is where an invalid diversifier panics). */
     require_init();
-    const struct zcl_pk_set *pks = pks_get();
+    /* Lazy mode: NULL when the files changed on disk since init -> false
+     * (the caller abandons this context; bsk is not used again). */
+    const struct zcl_pk_set *pks = pks_acquire();
+    if (!pks)
+        goto out;
 
     /* rustzcash.rs:1223-1227 create_random_proof(..).expect: the Output
      * circuit witnesses g_d through payment_address.g_d(), None for an
@@ -1803,6 +1789,12 @@ void librustzcash_sprout_prove(
     /* rustzcash.rs:1068-1072 SPROUT_GROTH16_PARAMS_PATH.expect(..) */
     require_init();
     warm();
+    /* Lazy mode sized the Sprout file at init; it must have its canonical
+     * digest before a proof is made from it. This ABI has no failure value,
+     * so a wrong file aborts here, as boot mode aborts at init. */
+    char err[256];
+    if (!zcl_c23_sprout_params_ready(err, sizeof(err)))
+        zcl_panic(err);
     /* rustzcash.rs:943-1089: the C23 Sprout prover (c23/sprout_prover) takes
      * the identical argument list and maps Rust's asserts/expects to abort. */
     zc23_sprout_prove(proof_out, phi, rt, h_sig, in_sk1, in_value1, in_rho1,

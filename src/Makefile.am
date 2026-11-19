@@ -694,6 +694,8 @@ libzcl_c23_a_SOURCES = \
   c23/compat/witness_codec.c \
   c23/compat/zcl_c23_phgr13.c \
   c23/compat/zip32_codec.c \
+  c23/compat/zcl_params_lazy.c \
+  c23/compat/zcl_params_lazy.h \
   c23/sprout_prover/sprout_circuit.c \
   c23/sprout_prover/sprout_par.c \
   c23/sprout_prover/sprout_prove.c \
