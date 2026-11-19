@@ -34,6 +34,6 @@ lint: $(OUT)
 	$(OUT) --root ../.. all
 
 clean:
-	rm -f ../bin/zcl-lint ../bin/zcl-lint.exe
+	rm -f ../bin/zcl-lint ../bin/zcl-lint.exe ../bin/lintlib-test
 
 .PHONY: all check lint clean
