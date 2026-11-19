@@ -36,3 +36,9 @@ Exit: 0 written or fresh, 1 `--check` found the file stale or missing, 2 broken 
 
 `make -C zcutil/dev/compdb check` runs `--selftest` (word splitting, command splitting, paths, a canned make transcript) and `test/compdb_test.c`, which runs the tool in-process over the fixture Makefiles in `test/fixtures/` (a fake `g++` that `make -n` never runs) and compares each result with `test/golden/<case>.txt`: in-directory compile, recursive make, libtool, ccache, quoted defines, continuation line, duplicate, `$(...)` leftover, empty project (exit 2), then `--check` fresh and stale, a missing build directory and a missing make (UNAVAILABLE). `zcl-compdb-test test/fixtures --update` rewrites the goldens.
 
+
+## Cost of --check
+
+Every run, including --check, passes -B to make, which remakes the makefiles and re-runs
+config.status --recheck: about 1.5 minutes on a fresh tree. Do not call --check in a loop;
+regenerate once after configure or after adding or removing sources.

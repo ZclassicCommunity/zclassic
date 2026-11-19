@@ -1,6 +1,0 @@
-[
-{"directory": "@W@/libtool/src", "file": "@W@/libtool/src/a.cc", "arguments": ["g++", "-DHAVE_CONFIG_H", "-c", "-o", "a.lo", "a.cc"]}
-]
---- log
-entries 1, skipped 0, duplicates 0
-exit=0

@@ -504,7 +504,13 @@ static void consider(Db *db, Words *a, const char *dir)
     size_t src = 0;
     resolve_vpath(a, dir);
     int candidate = a->n > 1 && (is_compiler(a->v[0].s) || a->v[0].subst);
-    if (!candidate || !has_dash_c(a) || count_sources(a, &src) != 1) {
+    int nsrc = candidate && has_dash_c(a) ? count_sources(a, &src) : -1;
+    if (nsrc == 0 && any_subst(a)) {
+        db->skipped++; /* the source word itself did not resolve */
+        words_free(a);
+        return;
+    }
+    if (nsrc != 1) {
         words_free(a);
         return;
     }
@@ -695,6 +701,49 @@ static void json_db(Buf *b, const Db *db)
 
 /* ---------- running make ---------- */
 
+#ifdef _WIN32
+/* _spawnvp does not quote: wrap an argument for the MSVCRT command-line parser. */
+static char *win_quote(const char *s)
+{
+    size_t n = strlen(s), j = 0, bs = 0;
+    char *q = malloc(2 * n + 3);
+    if (!q) return NULL;
+    q[j++] = 34;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == 92) {
+            bs++;
+        } else {
+            if (s[i] == 34) {
+                for (; bs; bs--) q[j++] = 92;
+                q[j++] = 92;
+            }
+            bs = 0;
+        }
+        q[j++] = s[i];
+    }
+    for (; bs; bs--) q[j++] = 92;
+    q[j++] = 34;
+    q[j] = 0;
+    return q;
+}
+
+static char **win_argv(char *const *argv)
+{
+    size_t n = 0;
+    while (argv[n]) n++;
+    char **v = calloc(n + 1, sizeof *v);
+    for (size_t i = 0; v && i < n; i++) {
+        v[i] = win_quote(argv[i]);
+        if (!v[i]) {
+            for (size_t k = 0; k < i; k++) free(v[k]);
+            free(v);
+            return NULL;
+        }
+    }
+    return v;
+}
+#endif
+
 /* Run argv with stdout sent to fd. Returns the exit status, or -1 when it cannot start. */
 static int run_to_fd(char *const *argv, int fd)
 {
@@ -706,7 +755,15 @@ static int run_to_fd(char *const *argv, int fd)
     fflush(NULL);
     int save = _dup(1);
     if (save < 0 || _dup2(fd, 1) < 0) return -1;
-    intptr_t r = _spawnvp(_P_WAIT, argv[0], (const char *const *)argv);
+    char **qv = win_argv(argv);
+    if (!qv) {
+        _dup2(save, 1);
+        _close(save);
+        return -1;
+    }
+    intptr_t r = _spawnvp(_P_WAIT, argv[0], (const char *const *)qv);
+    for (size_t i = 0; qv[i]; i++) free(qv[i]);
+    free(qv);
     _dup2(save, 1);
     _close(save);
     return r == -1 ? -1 : (int)r;
