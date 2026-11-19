@@ -86,9 +86,11 @@ size_t zcl_znam_build(int command, const char *name, uint8_t target_type,
 /* Owner of a name-changing transaction: Z23 looks at the output its FIRST
  * input spends. Only an exact P2PKH (25 byte) or P2SH (23 byte) script has an
  * address hash; anything else (bare P2PK, multisig, non-standard) has none and
- * the message is ignored. Returns 1 and fills hash20 for those two forms.
- * Z23 then renders BOTH forms as a P2PKH address (standard.c:91-113,
- * explorer_index_overlays.c:55-84): the caller must do the same. */
+ * the message is ignored. Fills hash20 and returns 1 for P2PKH, 2 for P2SH,
+ * 0 for the rest. Rule ZNAM-OWNER-2 (shared with Z23, token-name-rules vectors):
+ * the owner text is the P2PKH address for 1 and the P2SH address for 2, so a
+ * script hash and a key hash with the same 20 bytes are two different owners.
+ * (Before the rule Z23 rendered BOTH as a P2PKH address.) */
 int zcl_znam_owner_hash(const uint8_t *script, size_t len, uint8_t hash20[20]);
 
 /* The state the rules read and write for one name. */

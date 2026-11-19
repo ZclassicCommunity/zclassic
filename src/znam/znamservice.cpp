@@ -117,11 +117,7 @@ public:
         if (!loaded || txIndex - 1 >= undo.vtxundo.size() || undo.vtxundo[txIndex - 1].vprevout.empty())
             return -1;
         const CScript& s = undo.vtxundo[txIndex - 1].vprevout[0].txout.scriptPubKey;
-        unsigned char h[20];
-        if (!zcl_znam_owner_hash(s.empty() ? NULL : &s[0], s.size(), h))
-            return 0;
-        owner = OwnerFromHash160(h);
-        return 1;
+        return OwnerFromScript(s.empty() ? NULL : &s[0], s.size(), owner);
     }
 
 private:
