@@ -78,6 +78,7 @@
 #include <sys/prctl.h>
 #endif
 
+#include <atomic>
 #include <boost/algorithm/string/case_conv.hpp> // for to_lower()
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/predicate.hpp> // for startswith() and endswith()
@@ -123,16 +124,11 @@ bool fLogIPs = DEFAULT_LOGIPS;
 std::atomic<bool> fReopenDebugLog(false);
 CTranslationInterface translationInterface;
 
-/** Init OpenSSL library multithreading support */
-static CCriticalSection** ppmutexOpenSSL;
-void locking_callback(int mode, int i, const char* file, int line) NO_THREAD_SAFETY_ANALYSIS
-{
-    if (mode & CRYPTO_LOCK) {
-        ENTER_CRITICAL_SECTION(*ppmutexOpenSSL[i]);
-    } else {
-        LEAVE_CRITICAL_SECTION(*ppmutexOpenSSL[i]);
-    }
-}
+// OpenSSL 1.1.0 and later locks internally and ignores a locking callback, so
+// none is installed. An older library would need one: refuse to build against it.
+#if defined(OPENSSL_VERSION_NUMBER) && !defined(LIBRESSL_VERSION_NUMBER) && OPENSSL_VERSION_NUMBER < 0x10100000L
+#error "OpenSSL 1.1.0 or newer is required (older releases need an application locking callback)"
+#endif
 
 // Init
 static class CInit
@@ -140,26 +136,12 @@ static class CInit
 public:
     CInit()
     {
-        // Init OpenSSL library multithreading support
-        ppmutexOpenSSL = (CCriticalSection**)OPENSSL_malloc(CRYPTO_num_locks() * sizeof(CCriticalSection*));
-        for (int i = 0; i < CRYPTO_num_locks(); i++)
-            ppmutexOpenSSL[i] = new CCriticalSection();
-        CRYPTO_set_locking_callback(locking_callback);
-
         // OpenSSL can optionally load a config file which lists optional loadable modules and engines.
         // We don't use them so we don't require the config. However some of our libs may call functions
         // which attempt to load the config file, possibly resulting in an exit() or crash if it is missing
         // or corrupt. Explicitly tell OpenSSL not to try to load the file. The result for our libs will be
         // that the config appears to have been loaded and there are no modules/engines available.
         OPENSSL_no_config();
-    }
-    ~CInit()
-    {
-        // Shutdown OpenSSL library multithreading support
-        CRYPTO_set_locking_callback(NULL);
-        for (int i = 0; i < CRYPTO_num_locks(); i++)
-            delete ppmutexOpenSSL[i];
-        OPENSSL_free(ppmutexOpenSSL);
     }
 }
 instance_of_cinit;
@@ -486,7 +468,10 @@ boost::filesystem::path GetDefaultDataDir()
 #ifdef MAC_OSX
     // Mac
     pathRet /= "Library/Application Support";
-    TryCreateDirectory(pathRet);
+    // A HOME without Library/ (fresh or service account) leaves create_directory() without a parent;
+    // create the whole chain. A failure is reported by the caller when it creates the data directory.
+    boost::system::error_code ec;
+    fs::create_directories(pathRet, ec);
     return pathRet / "ZClassic";
 #else
     // Unix
@@ -522,7 +507,9 @@ static boost::filesystem::path ZC_GetBaseParamsDir()
 #ifdef MAC_OSX
     // Mac
     pathRet /= "Library/Application Support";
-    TryCreateDirectory(pathRet);
+    // See GetDefaultDataDir(): create the whole chain; a failure is reported when the params directory is created.
+    boost::system::error_code ec;
+    fs::create_directories(pathRet, ec);
     return pathRet / "ZcashParams";
 #else
     // Unix
@@ -549,21 +536,27 @@ const boost::filesystem::path &ZC_GetParamsDir()
     return path;
 }
 
-// Return the user specified export directory.  Create directory if it doesn't exist.
-// If user did not set option, return an empty path.
+// Return the export directory used by backupwallet/dumpwallet/z_exportwallet: the
+// -exportdir option when set, otherwise "backups" inside the (network-specific) data
+// directory. Create the directory if it doesn't exist; never returns an empty path.
 // If there is a filesystem problem, throw an exception.
 const boost::filesystem::path GetExportDir()
 {
     namespace fs = boost::filesystem;
     fs::path path;
+    std::string what;
     if (mapArgs.count("-exportdir")) {
         path = fs::system_complete(mapArgs["-exportdir"]);
-        if (fs::exists(path) && !fs::is_directory(path)) {
-            throw std::runtime_error(strprintf("The -exportdir '%s' already exists and is not a directory", path.string()));
-        }
-        if (!fs::exists(path) && !fs::create_directories(path)) {
-            throw std::runtime_error(strprintf("Failed to create directory at -exportdir '%s'", path.string()));
-        }
+        what = "-exportdir";
+    } else {
+        path = GetDataDir() / "backups";
+        what = "default export directory";
+    }
+    if (fs::exists(path) && !fs::is_directory(path)) {
+        throw std::runtime_error(strprintf("The %s '%s' already exists and is not a directory", what, path.string()));
+    }
+    if (!fs::exists(path) && !fs::create_directories(path)) {
+        throw std::runtime_error(strprintf("Failed to create directory at %s '%s'", what, path.string()));
     }
     return path;
 }
@@ -670,6 +663,33 @@ bool RenameOver(boost::filesystem::path src, boost::filesystem::path dest)
 #endif /* WIN32 */
 }
 
+std::string RandomSuffix(size_t n)
+{
+    static const char hexdigits[] = "0123456789abcdef";
+    std::vector<unsigned char> raw((n + 1) / 2);
+    if (!raw.empty())
+        GetRandBytes(raw.data(), raw.size());
+    std::string out;
+    out.reserve(n);
+    for (size_t i = 0; i < n; i++) {
+        unsigned char b = raw[i / 2];
+        out.push_back(hexdigits[(i % 2 == 0) ? (b >> 4) : (b & 0x0F)]);
+    }
+    return out;
+}
+
+boost::filesystem::path UniquePath(const std::string& model)
+{
+    const size_t nPercent = std::count(model.begin(), model.end(), '%');
+    const std::string rnd = RandomSuffix(nPercent);
+    std::string name(model);
+    size_t k = 0;
+    for (size_t i = 0; i < name.size(); i++)
+        if (name[i] == '%')
+            name[i] = rnd[k++];
+    return boost::filesystem::path(name);
+}
+
 /**
  * Ignores exceptions thrown by Boost's create_directory if the requested directory exists.
  * Specifically handles case where path p exists, but it wasn't possible for the user to
@@ -761,6 +781,21 @@ void FileCommit(FILE *fileout)
     #else
     fsync(fileno(fileout));
     #endif
+#endif
+}
+
+/** fsync a directory so a rename into it is durable. Nothing to do on Windows. */
+bool DirectoryCommit(const boost::filesystem::path& dir)
+{
+#ifdef WIN32
+    return true;
+#else
+    int fd = open(dir.empty() ? "." : dir.string().c_str(), O_RDONLY);
+    if (fd < 0)
+        return false;
+    bool ok = fsync(fd) == 0;
+    close(fd);
+    return ok;
 #endif
 }
 
@@ -1052,4 +1087,41 @@ int GetNumCores()
 // Obtain the application startup time (used for uptime calculation)
 int64_t GetStartupTime() {
     return nStartupTime;
+}
+
+/**
+ * Test-only crash hook. Inert unless -testcrashpoint=<name>[:<n>] is given, in
+ * which case the process leaves immediately with _exit(77) (no destructors, no
+ * flushes, like a kill -9 that lands at exactly this point) the <n>th time
+ * (default 1) execution passes the call site registered under <name>. The
+ * name "any" matches every call site, so "any:<n>" kills at the <n>th hook of
+ * any kind. Used by qa/rpc-tests/wallet_crash_consistency.sh.
+ */
+void TestCrashPoint(const char* name)
+{
+    struct Spec {
+        std::string name;
+        long n = 1;
+        bool armed = false;
+        Spec() {
+            std::string s = GetArg("-testcrashpoint", "");
+            if (s.empty()) return;
+            size_t colon = s.rfind(':');
+            if (colon != std::string::npos) {
+                n = atol(s.substr(colon + 1).c_str());
+                if (n < 1) n = 1;
+                s = s.substr(0, colon);
+            }
+            name = s;
+            armed = !name.empty();
+        }
+    };
+    static const Spec spec;
+    if (!spec.armed) return;
+    if (spec.name != "any" && spec.name != name) return;
+    static std::atomic<long> hits(0);
+    if (++hits < spec.n) return;
+    fprintf(stderr, "testcrashpoint: exiting at %s (hit %ld)\n", name, (long)hits);
+    LogPrintf("testcrashpoint: exiting at %s (hit %ld)\n", name, (long)hits);
+    _exit(77);
 }

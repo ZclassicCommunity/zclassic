@@ -39,7 +39,7 @@ bash -c 'tr -dc a-zA-Z0-9 < /dev/urandom | head -c32 && echo'
 
 
 For an example configuration file that describes the configuration settings,
-see contrib/debian/examples/bitcoin.conf.
+see contrib/examples/zclassic.conf.
 
 3. Paths
 ---------------------------------

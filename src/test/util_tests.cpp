@@ -12,6 +12,7 @@
 #include "utilmoneystr.h"
 #include "test/test_bitcoin.h"
 
+#include <set>
 #include <stdint.h>
 #include <vector>
 
@@ -485,6 +486,37 @@ BOOST_AUTO_TEST_CASE(test_ParseFixedPoint)
     BOOST_CHECK(!ParseFixedPoint("1.1e", 8, &amount));
     BOOST_CHECK(!ParseFixedPoint("1.1e-", 8, &amount));
     BOOST_CHECK(!ParseFixedPoint("1.", 8, &amount));
+}
+
+BOOST_AUTO_TEST_CASE(random_suffix_and_unique_path)
+{
+    BOOST_CHECK_EQUAL(RandomSuffix(0), "");
+    for (size_t n : {1u, 2u, 7u, 16u, 33u}) {
+        const std::string s = RandomSuffix(n);
+        BOOST_CHECK_EQUAL(s.size(), n);
+        BOOST_CHECK(s.find_first_not_of("0123456789abcdef") == std::string::npos);
+    }
+    // 64 draws of 16 hex digits (64 bits) are all distinct and use both nibbles of every byte
+    std::set<std::string> seen;
+    std::string all;
+    for (int i = 0; i < 64; i++) {
+        const std::string s = RandomSuffix(16);
+        BOOST_CHECK(seen.insert(s).second);
+        all += s;
+    }
+    BOOST_CHECK(all.find_first_not_of(all[0]) != std::string::npos);
+
+    // UniquePath keeps the literal text and replaces only the '%' placeholders
+    const boost::filesystem::path p = UniquePath("zcl-test-%%%%-%%%%.dat");
+    const std::string name = p.string();
+    BOOST_CHECK_EQUAL(name.size(), std::string("zcl-test-xxxx-xxxx.dat").size());
+    BOOST_CHECK_EQUAL(name.substr(0, 9), "zcl-test-");
+    BOOST_CHECK_EQUAL(name.substr(13, 1), "-");
+    BOOST_CHECK_EQUAL(name.substr(18), ".dat");
+    BOOST_CHECK(name.find('%') == std::string::npos);
+    BOOST_CHECK(UniquePath("zcl-test-%%%%-%%%%.dat") != p);
+    BOOST_CHECK_EQUAL(UniquePath().string().size(), std::string("xxxx-xxxx-xxxx-xxxx").size());
+    BOOST_CHECK_EQUAL(UniquePath("no-placeholders").string(), "no-placeholders");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

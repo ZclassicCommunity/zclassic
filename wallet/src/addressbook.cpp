@@ -1,3 +1,4 @@
+#include "profilepaths.h"
 #include "addressbook.h"
 #include "ui_addressbook.h"
 #include "ui_mainwindow.h"
@@ -268,7 +269,7 @@ void AddressBook::writeToStorage() {
 QString AddressBook::writeableFile() {
     auto filename = QStringLiteral("addresslabels.dat");
 
-    auto dir = QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
+    auto dir = QDir(ProfilePaths::appDataDir());
     if (!dir.exists())
         QDir().mkpath(dir.absolutePath());
 

@@ -242,10 +242,20 @@ void CAddrMan::Good_(const CService& addr, int64_t nTime)
     MakeTried(info, nId);
 }
 
-bool CAddrMan::Add_(const CAddress& addr, const CNetAddr& source, int64_t nTimePenalty)
+bool CAddrMan::Add_(const CAddress& addr, const CNetAddr& sourceIn, int64_t nTimePenalty)
 {
     if (!addr.IsRoutable())
         return false;
+    // peers.dat holds 16-byte addresses; a v3 onion address does not fit and
+    // would be read back as "::" or as one address for all of them. The
+    // peers.dat table therefore stores neither the address nor a v3 source (an
+    // onion peer that told us about an IPv4/IPv6 address); such a source counts
+    // as the unspecified "::", which is what the file held for it before.
+    // The onion store is the mirror image: only v3 addresses, and any source
+    // (a v3 peer, or a clearnet peer that sent us addrv2).
+    if (addr.IsTorV3() != fOnionStore)
+        return false;
+    const CNetAddr source = (!fOnionStore && sourceIn.IsTorV3()) ? CNetAddr() : sourceIn;
 
     bool fNew = false;
     int nId;
@@ -334,54 +344,41 @@ CAddrInfo CAddrMan::Select_(bool newOnly)
     if (size() == 0)
         return CAddrInfo();
 
-    // Track number of attempts to find a table entry, before giving up to avoid infinite loop
-    const int kMaxRetries = 200000;         // magic number so unit tests can pass
-    const int kRetriesBetweenSleep = 1000;
-    const int kRetrySleepInterval = 100;    // milliseconds
-
     if (newOnly && nNew == 0)
         return CAddrInfo();
 
-    // Use a 50% chance for choosing between tried and new table entries.
-    if (!newOnly &&
-       (nTried > 0 && (nNew == 0 || RandomInt(2) == 0))) { 
-        // use a tried node
-        double fChanceFactor = 1.0;
-        while (1) {
-            int i = 0;
-            int nKBucket = RandomInt(ADDRMAN_TRIED_BUCKET_COUNT);
-            int nKBucketPos = RandomInt(ADDRMAN_BUCKET_SIZE);
-            while (vvTried[nKBucket][nKBucketPos] == -1) {
-                nKBucket = (nKBucket + insecure_rand()) % ADDRMAN_TRIED_BUCKET_COUNT;
-                nKBucketPos = (nKBucketPos + insecure_rand()) % ADDRMAN_BUCKET_SIZE;
-                if (i++ > kMaxRetries)
-                    return CAddrInfo();
-                if (i % kRetriesBetweenSleep == 0 && !nKey.IsNull())
-                    MilliSleep(kRetrySleepInterval);
+    // The onion store is small and sparse (a few hundred v3 addresses spread
+    // over the 1024 x 64 slots): probing random slots until one is occupied
+    // would take tens of thousands of tries (and sleeps) per selection. List
+    // the occupied buckets instead and choose a bucket, then an entry in it,
+    // with the same 50% tried/new split and the same chance weighting. Choosing
+    // the bucket first keeps the weight the buckets give: a source group is
+    // confined to a few buckets, so however many addresses it stores it cannot
+    // outweigh the other groups by its entry count.
+    if (fOnionStore) {
+        const bool fTried = !newOnly && nTried > 0 && (nNew == 0 || RandomInt(2) == 0);
+        const int nBuckets = fTried ? ADDRMAN_TRIED_BUCKET_COUNT : ADDRMAN_NEW_BUCKET_COUNT;
+        std::vector<int> vOccupied;
+        for (int b = 0; b < nBuckets; b++) {
+            for (int pos = 0; pos < ADDRMAN_BUCKET_SIZE; pos++) {
+                if ((fTried ? vvTried[b][pos] : vvNew[b][pos]) != -1) {
+                    vOccupied.push_back(b);
+                    break;
+                }
             }
-            int nId = vvTried[nKBucket][nKBucketPos];
-            assert(mapInfo.count(nId) == 1);
-            CAddrInfo& info = mapInfo[nId];
-            if (RandomInt(1 << 30) < fChanceFactor * info.GetChance() * (1 << 30))
-                return info;
-            fChanceFactor *= 1.2;
         }
-    } else {
-        // use a new node
+        if (vOccupied.empty())
+            return CAddrInfo();
         double fChanceFactor = 1.0;
         while (1) {
-            int i = 0;
-            int nUBucket = RandomInt(ADDRMAN_NEW_BUCKET_COUNT);
-            int nUBucketPos = RandomInt(ADDRMAN_BUCKET_SIZE);
-            while (vvNew[nUBucket][nUBucketPos] == -1) {
-                nUBucket = (nUBucket + insecure_rand()) % ADDRMAN_NEW_BUCKET_COUNT;
-                nUBucketPos = (nUBucketPos + insecure_rand()) % ADDRMAN_BUCKET_SIZE;
-                if (i++ > kMaxRetries)
-                    return CAddrInfo();
-                if (i % kRetriesBetweenSleep == 0 && !nKey.IsNull())
-                    MilliSleep(kRetrySleepInterval);
+            const int nBucket = vOccupied[RandomInt(vOccupied.size())];
+            std::vector<int> vIds;
+            for (int pos = 0; pos < ADDRMAN_BUCKET_SIZE; pos++) {
+                const int nId = fTried ? vvTried[nBucket][pos] : vvNew[nBucket][pos];
+                if (nId != -1)
+                    vIds.push_back(nId);
             }
-            int nId = vvNew[nUBucket][nUBucketPos];
+            const int nId = vIds[RandomInt(vIds.size())];
             assert(mapInfo.count(nId) == 1);
             CAddrInfo& info = mapInfo[nId];
             if (RandomInt(1 << 30) < fChanceFactor * info.GetChance() * (1 << 30))
@@ -389,8 +386,37 @@ CAddrInfo CAddrMan::Select_(bool newOnly)
             fChanceFactor *= 1.2;
         }
     }
-    
-    return CAddrInfo();
+
+    // Choose between the tried and the new table with a 50% chance, then an
+    // occupied slot of that table uniformly, then apply the chance weighting.
+    // Listing the occupied slots (at most 65536 ints to scan) replaces the old
+    // random probing, which on a sparse table (a fresh node that knows a few
+    // addresses) needed up to 200000 probes with a 100 ms sleep every 1000,
+    // all under the addrman lock, and then gave up with an empty result about
+    // one time in twenty when a single slot was occupied. A slot is one entry
+    // of one bucket, so an address listed in several new buckets keeps the
+    // weight those references gave it under probing.
+    const bool fTried = !newOnly && nTried > 0 && (nNew == 0 || RandomInt(2) == 0);
+    const int nBuckets = fTried ? ADDRMAN_TRIED_BUCKET_COUNT : ADDRMAN_NEW_BUCKET_COUNT;
+    std::vector<int> vSlotIds;
+    for (int b = 0; b < nBuckets; b++) {
+        for (int pos = 0; pos < ADDRMAN_BUCKET_SIZE; pos++) {
+            const int nId = fTried ? vvTried[b][pos] : vvNew[b][pos];
+            if (nId != -1)
+                vSlotIds.push_back(nId);
+        }
+    }
+    if (vSlotIds.empty())
+        return CAddrInfo();
+    double fChanceFactor = 1.0;
+    while (1) {
+        const int nId = vSlotIds[RandomInt(vSlotIds.size())];
+        assert(mapInfo.count(nId) == 1);
+        CAddrInfo& info = mapInfo[nId];
+        if (RandomInt(1 << 30) < fChanceFactor * info.GetChance() * (1 << 30))
+            return info;
+        fChanceFactor *= 1.2;
+    }
 }
 
 #ifdef DEBUG_ADDRMAN
@@ -474,6 +500,11 @@ int CAddrMan::Check_()
 void CAddrMan::GetAddr_(std::vector<CAddress>& vAddr)
 {
     unsigned int nNodes = ADDRMAN_GETADDR_MAX_PCT * vRandom.size() / 100;
+    // The onion store is small, and 23% of a handful of entries is none of
+    // them: a node that knows two onion peers would answer getaddr with
+    // nothing. Share up to 64 of them at least.
+    if (fOnionStore && nNodes < 64)
+        nNodes = std::min<unsigned int>(64, vRandom.size());
     if (nNodes > ADDRMAN_GETADDR_MAX)
         nNodes = ADDRMAN_GETADDR_MAX;
 

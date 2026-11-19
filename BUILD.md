@@ -43,7 +43,7 @@ sudo apt-get update
 sudo apt-get install -y \
     build-essential pkg-config libc6-dev m4 g++-multilib \
     autoconf libtool automake \
-    libgmp-dev libdb++-dev libsodium-dev \
+    libdb++-dev libsodium-dev \
     git python3 wget curl \
     zlib1g-dev libssl-dev libevent-dev
 ```
@@ -53,7 +53,7 @@ sudo apt-get install -y \
 ```bash
 sudo pacman -S --needed \
     base-devel autoconf automake libtool pkgconf \
-    gmp db libsodium curl \
+    db libsodium curl \
     git python wget openssl libevent
 ```
 
@@ -61,7 +61,6 @@ sudo pacman -S --needed \
 
 Install equivalent packages for your distribution. The key dependencies are:
 - Standard build tools (gcc, g++, make, autoconf, libtool, automake)
-- **libgmp-dev** - GNU Multiple Precision library
 - **libdb++-dev** - Berkeley DB (for wallet support)
 - **libsodium-dev** - Cryptography library
 
@@ -78,7 +77,7 @@ cd zclassic
 
 The build script will:
 1. Download and build required dependencies (Boost, etc.)
-2. Download Rust libraries for zero-knowledge proofs
+2. Build the zero-knowledge crypto from C23 sources (src/c23, no Rust toolchain)
 3. Configure the build system
 4. Compile all components
 
@@ -98,7 +97,7 @@ make -j$(nproc)
 
 Before you first run `zclassicd`:
 
-1. **Fetch ZCash Parameters** (~1.6 GB): `./zcutil/fetch-params.sh`
+1. **Fetch ZCash Parameters** (~0.8 GB): `./zcutil/fetch-params.sh`
 2. **Create configuration**: add your `zclassic.conf` under the selected datadir
 
 For faster initial sync, install a bootstrap snapshot from a trusted synced node
@@ -136,7 +135,7 @@ at daemon startup with `-bootstrapdatadir=<dir>`. See
 
 ### Build Hangs or is Very Slow
 
-The snark (zero-knowledge proof library) compilation is CPU-intensive. You can:
+The C++ compilation is CPU-intensive. You can:
 - Reduce parallel jobs: use `-j4` instead of `-j$(nproc)`
 - Build on a machine with more CPU cores
 - Be patient - this step can take 15-30 minutes
@@ -156,7 +155,7 @@ If bootstrap snapshot installation fails:
 
 ```bash
 # Build only the dependencies
-make -C depends -j$(nproc) NO_PROTON=1
+make -C depends -j$(nproc)
 
 # Then configure with the dependencies
 ./autogen.sh

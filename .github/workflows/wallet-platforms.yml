@@ -1,8 +1,6 @@
 name: Wallet platform validation
+# Manual only: no automatic GitHub Actions runs.
 on:
-  push:
-    branches: [master, 'release/**', 'fix/**']
-  pull_request:
   workflow_dispatch:
 permissions:
   contents: read

@@ -20,6 +20,7 @@
 #include "utilstrencodings.h"
 #include "validationinterface.h"
 #include "wallet/crypter.h"
+#include "wallet/tokenguard.h"
 #include "wallet/wallet_ismine.h"
 #include "wallet/walletdb.h"
 #include "wallet/rpcwallet.h"
@@ -28,6 +29,7 @@
 #include "base58.h"
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -46,6 +48,8 @@ extern CAmount maxTxFee;
 extern unsigned int nTxConfirmTarget;
 extern bool bSpendZeroConfChange;
 extern bool fSendFreeTransactions;
+//! Wallet token guard switch (-tokenguard, default on). Off: ordinary spend paths treat token-bearing outputs as plain coins.
+extern bool fTokenGuard;
 extern bool fPayAtLeastCustomFee;
 
 //! -paytxfee default
@@ -64,6 +68,12 @@ static const unsigned int MAX_FREE_TRANSACTION_CREATE_SIZE = 1000;
 //  Should be large enough that we can expect not to reorg beyond our cache
 //  unless there is some exceptional network disruption.
 static const unsigned int WITNESS_CACHE_SIZE = MAX_REORG_LENGTH + 1;
+//! Most new tips at which the wallet re-offers its transactions after a disconnect (CWallet::UpdatedBlockTip)
+static const int REACCEPT_TIPS_AFTER_UNWIND = 20;
+//! nReacceptTipsLeft after a start-up (import, rescan) offer that refused some: the
+//! REACCEPT_TIPS_AFTER_UNWIND retries begin once the tip has reached the best known header,
+//! so a node that starts behind the network does not spend them on tips far behind
+static const int REACCEPT_WHEN_CAUGHT_UP = -1;
 
 //! Size of HD seed in bytes
 static const size_t HD_WALLET_SEED_LENGTH = 32;
@@ -317,6 +327,15 @@ public:
      * format change. (Sprout's cache is memory-only for the same reason.)
      */
     boost::optional<CAmount> value;
+    /**
+     * The payment address the note was received at (ivk + the decrypted
+     * diversifier). Recovering it costs a full note decryption plus two
+     * Jubjub scalar multiplications, which made every address-filtered balance
+     * or note listing O(all wallet notes) decryptions. A payment address is
+     * public data, not key material. MEMORY-ONLY exactly like 'value': never
+     * serialized, boost::none until the note is first decrypted.
+     */
+    boost::optional<libzcash::SaplingPaymentAddress> address;
 
     ADD_SERIALIZE_METHODS;
 
@@ -330,7 +349,7 @@ public:
         READWRITE(nullifier);
         READWRITE(witnesses);
         READWRITE(witnessHeight);
-        // 'value' is deliberately NOT serialized (memory-only cache) — keeps the
+        // 'value' and 'address' are deliberately NOT serialized (memory-only cache) — keeps the
         // on-disk layout identical to pre-cache wallets.
     }
 
@@ -482,6 +501,14 @@ public:
     mutable CAmount nAvailableWatchCreditCached;
     mutable CAmount nChangeCached;
 
+    // memory only: wallet token guard (see wallet/tokenguard.h). Never
+    // serialized; recomputed from the transaction itself after a restart, a
+    // rescan or a restore from backup. Keyed by txid so a CWalletTx whose
+    // transaction is replaced in place cannot serve a stale answer.
+    mutable bool fTokenRolesCached;
+    mutable uint256 hashTokenRolesCached;
+    mutable std::vector<unsigned char> vTokenRolesCached;
+
     CWalletTx()
     {
         Init(NULL);
@@ -533,6 +560,9 @@ public:
         nImmatureWatchCreditCached = 0;
         nChangeCached = 0;
         nOrderPos = -1;
+        fTokenRolesCached = false;
+        hashTokenRolesCached.SetNull();
+        vTokenRolesCached.clear();
     }
 
     ADD_SERIALIZE_METHODS;
@@ -627,6 +657,17 @@ public:
     }
 
     bool IsTrusted() const;
+
+    /**
+     * Wallet token guard: TOKEN_ROLE_* of output n (wallet/tokenguard.h).
+     * Parses at most once per transaction, and only when the transaction has
+     * an OP_RETURN output. Call with cs_wallet held, like the other caches.
+     */
+    unsigned char GetTokenOutputRole(unsigned int n) const;
+    //! True if spending output n as ordinary funds would burn ZSLP tokens or a mint baton.
+    bool IsTokenBearingOutput(unsigned int n) const { return GetTokenOutputRole(n) != 0; }
+    //! True if the wallet token guard keeps output n out of ordinary spends: token-bearing, and -tokenguard not 0.
+    bool IsTokenGuarded(unsigned int n) const { return fTokenGuard && IsTokenBearingOutput(n); }
 
     bool WriteToDisk(CWalletDB *pwalletdb);
 
@@ -777,7 +818,7 @@ private:
 class CWallet : public CCryptoKeyStore, public CValidationInterface
 {
 private:
-    bool SelectCoins(const CAmount& nTargetValue, std::set<std::pair<const CWalletTx*,unsigned int> >& setCoinsRet, CAmount& nValueRet, bool& fOnlyCoinbaseCoinsRet, bool& fNeedCoinbaseCoinsRet, const CCoinControl *coinControl = NULL) const;
+    bool SelectCoins(const CAmount& nTargetValue, std::set<std::pair<const CWalletTx*,unsigned int> >& setCoinsRet, CAmount& nValueRet, bool& fOnlyCoinbaseCoinsRet, bool& fNeedCoinbaseCoinsRet, const CCoinControl *coinControl = NULL, CTokenGuardReport *pTokenGuardReport = NULL) const;
 
     CWalletDB *pwalletdbEncryption;
 
@@ -823,6 +864,19 @@ public:
 
     void ClearNoteWitnessCache();
 
+    /**
+     * Startup self-check of the note state read from wallet.dat against the active chain.
+     *
+     * pindexRescan is the block the startup rescan would begin at (the fork of the stored
+     * best-block locator). Witness caches that are ahead of the chain tip are cut back to it,
+     * caches that do not match what the chain committed to are dropped, a Sapling nullifier
+     * that is missing next to its witness is derived again, and pindexRescan is lowered to the
+     * first block the rescan has to include so every cache can be brought to the tip.
+     * Nothing is deleted from the wallet but cached witness data, which a rescan rebuilds.
+     * Returns true if the in-memory state changed and should be written back.
+     */
+    bool ReconcileNoteState(CBlockIndex*& pindexRescan);
+
 protected:
     /**
      * pindex is the new tip being connected.
@@ -835,9 +889,97 @@ protected:
      * pindex is the old tip being disconnected.
      */
     void DecrementNoteWitnesses(const CBlockIndex* pindex);
+    /**
+     * Set when a disconnect left a note without a witness the cache could not
+     * roll back. The rebuild (clear every witness, rescan the active chain,
+     * see ScanForWalletTransactions) is deferred so a deep reorg pays for one
+     * rescan, not one per WITNESS_CACHE_SIZE blocks: it runs at the next
+     * connected tip, or before the witnesses are written (SetBestChain, which
+     * invalidateblock/parkblock/finalizeblock also signal when they finish).
+     * Memory only (no wallet.dat change). Written under cs_main and
+     * cs_wallet; atomic so it can be tested before taking them.
+     */
+    std::atomic<bool> fNoteWitnessesLost;
+    /**
+     * Tips left at which the wallet offers its transactions to the mempool again
+     * after a disconnect. The mempool re-admission of a disconnected block runs
+     * while the rest of the unwind is still pending, so a wallet send whose anchor
+     * is valid at the final tip can be refused then and be neither in the chain nor
+     * in the mempool: its notes would count as unspent until the next restart.
+     * ChainTip sets it to REACCEPT_TIPS_AFTER_UNWIND on a disconnect, and
+     * ReacceptWalletTransactions (startup, import, rescan) when it refused some
+     * (to REACCEPT_WHEN_CAUGHT_UP unless a retry is already running);
+     * UpdatedBlockTip retries at each new tip until no refused transaction could
+     * still be admitted later (an expired one never can) or the count runs out, so
+     * a permanently refused one (double spent, or without an expiry height) does
+     * not cost a full pass under cs_main at every block until the next restart.
+     * Memory only.
+     */
+    std::atomic<int> nReacceptTipsLeft;
+    void RebuildNoteWitnesses();
+    /**
+     * The witness half of ChainTip. When no wallet transaction carries
+     * Sprout or Sapling note data, a connected block only advances
+     * nWitnessCacheSize: there is nothing to copy, append, witness or
+     * re-height, so the commitment tree appends (which only feed witnesses)
+     * are skipped. The trees are borrowed; a copy is made only when they are appended to.
+     */
+    void WitnessChainTip(const CBlockIndex* pindex,
+                         const CBlock* pblock,
+                         const SproutMerkleTree& sproutTree,
+                         const SaplingMerkleTree& saplingTree,
+                         bool added);
+
+    /**
+     * Index of wallet transactions that may carry note data.
+     *
+     * Invariant (requires cs_wallet): every mapWallet entry whose
+     * mapSproutNoteData or mapSaplingNoteData is non-empty has its txid in
+     * setNoteTxIndex. The set may be a superset; a txid with empty maps is
+     * harmless because the witness loops do nothing for empty maps.
+     *
+     * Maintained by AddToWallet (load and live paths, insert and merge)
+     * and EraseFromWallet. nNoteTxIndexWalletSize tracks mapWallet.size()
+     * through those same paths; if anything else inserts into or erases from
+     * mapWallet the sizes diverge and the index is rebuilt by a full walk
+     * before the next witness update (CollectNoteTxs).
+     */
+    std::set<uint256> setNoteTxIndex;
+    size_t nNoteTxIndexWalletSize = 0;
+    void NoteTxIndexAdd(const uint256& hash, const CWalletTx& wtx);
+    /**
+     * Fill out with the mapWallet entries that currently carry note data,
+     * in txid order (the same relative order as a full mapWallet walk).
+     * Requires cs_wallet. The pointers stay valid until mapWallet is next
+     * inserted into or erased from.
+     */
+    void CollectNoteTxs(std::vector<CWalletTx*>& out);
+
+    /**
+     * Wallet transactions as (nOrderPos, txid), which is the order
+     * OrderedTxItems() lists them in. It lets AddToWallet find the latest
+     * entries without sorting the whole wallet for every new transaction.
+     *
+     * Requires cs_wallet. Built by a full walk when first needed.
+     * AddToWallet then adds each new transaction; loading or erasing a
+     * transaction marks the index stale, and a stale index is rebuilt on
+     * the next use, as is one whose size differs from mapWallet. Nothing
+     * else changes the nOrderPos of a wallet entry except the reorder pass
+     * of LoadWallet, which runs straight after loading.
+     */
+    std::set<std::pair<int64_t, uint256>> setTxOrder;
+    bool fTxOrderValid = false;
+    /**
+     * Walks wallet transactions and accounting entries from the end of the
+     * OrderedTxItems() order, skipping pwtxSkip, and gives the smart time
+     * of the first one that is not later than nLatestTolerated. Returns
+     * false if there is none.
+     */
+    bool LatestOrderedSmartTime(const CWalletTx* pwtxSkip, int64_t nLatestTolerated, int64_t& nSmartTimeRet);
 
     template <typename WalletDB>
     void SetBestChainINTERNAL(WalletDB& walletdb, const CBlockLocator& loc) {
+        TestCrashPoint("setbestchain-begin");
         if (!walletdb.TxnBegin()) {
             // This needs to be done atomically, so don't do it at all
             LogPrintf("SetBestChain(): Couldn't start atomic write\n");
@@ -858,6 +1000,7 @@ protected:
                     }
                 }
             }
+            TestCrashPoint("setbestchain-after-txs");
             if (!walletdb.WriteWitnessCacheSize(nWitnessCacheSize)) {
                 LogPrintf("SetBestChain(): Failed to write nWitnessCacheSize, aborting atomic write\n");
                 walletdb.TxnAbort();
@@ -868,6 +1011,7 @@ protected:
                 walletdb.TxnAbort();
                 return;
             }
+            TestCrashPoint("setbestchain-after-locator");
         } catch (const std::exception &exc) {
             // Unexpected failure
             LogPrintf("SetBestChain(): Unexpected error during atomic write:\n");
@@ -880,6 +1024,7 @@ protected:
             LogPrintf("SetBestChain(): Couldn't commit atomic write\n");
             return;
         }
+        TestCrashPoint("setbestchain-after-commit");
     }
 
 private:
@@ -932,7 +1077,8 @@ protected:
     void BuildSaplingScanBatch(
         const std::vector<std::pair<CBlockIndex*, CBlock>>& window,
         int nWorkers,
-        std::map<SaplingOutPoint, SaplingOutputMatch>& out) const;
+        std::map<SaplingOutPoint, SaplingOutputMatch>& out,
+        bool skipKnownTransactions = false) const;
 
     /**
      * Transient rescan state, set ONLY by ScanForWalletTransactions while
@@ -1004,6 +1150,10 @@ public:
         nTimeFirstKey = 0;
         fBroadcastTransactions = false;
         nWitnessCacheSize = 0;
+        fNoteWitnessesLost = false;
+        nReacceptTipsLeft = 0;
+        setNoteTxIndex.clear();
+        nNoteTxIndexWalletSize = 0;
     }
 
     /**
@@ -1229,7 +1379,17 @@ public:
          std::vector<boost::optional<SproutWitness>>& witnesses,
          uint256 &final_anchor);
     int ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate = false);
-    void ReacceptWalletTransactions();
+    /**
+     * Offers the wallet transactions neither in the chain nor in the mempool to the
+     * mempool; when some were refused that a later tip could still admit, arms the
+     * retry at the next tips (nReacceptTipsLeft), as after a disconnect: a send that
+     * builds on another one of the wallet's only becomes valid once that one is in a
+     * block. Returns how many were refused that a later tip could still admit
+     * (expired or expiring ones are not counted: the mempool never takes them).
+     */
+    size_t ReacceptWalletTransactions();
+    /** The offer itself, without arming the retry (UpdatedBlockTip); pnPassedToMempool, when given, receives how many transactions were handed to the mempool (the others lacked their inputs or anchors at this tip). */
+    size_t OfferWalletTransactionsToMempool(size_t* pnPassedToMempool = NULL);
     void ResendWalletTransactions(int64_t nBestBlockTime);
     std::vector<uint256> ResendWalletTransactionsBefore(int64_t nTime);
     CAmount GetBalance() const;
@@ -1238,10 +1398,18 @@ public:
     CAmount GetWatchOnlyBalance() const;
     CAmount GetUnconfirmedWatchOnlyBalance() const;
     CAmount GetImmatureWatchOnlyBalance() const;
-    bool FundTransaction(CMutableTransaction& tx, CAmount& nFeeRet, int& nChangePosRet, std::string& strFailReason);
+    /**
+     * fAllowTokenInputs is the wallet token guard override for the inputs the
+     * caller already put in tx. Inputs this function adds are never
+     * token-bearing, whatever the flag says. With the flag set the change
+     * output is appended last, so the outputs of a token transaction (named by
+     * position) never move.
+     */
+    bool FundTransaction(CMutableTransaction& tx, CAmount& nFeeRet, int& nChangePosRet, std::string& strFailReason, bool fAllowTokenInputs = false);
     bool CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletTx& wtxNew, CReserveKey& reservekey, CAmount& nFeeRet, int& nChangePosRet,
                            std::string& strFailReason, const CCoinControl *coinControl = NULL, bool sign = true);
-    bool CommitTransaction(CWalletTx& wtxNew, CReserveKey& reservekey);
+    /** On failure pstrError (if given) receives the reason when one is known, e.g. "mempool full". */
+    bool CommitTransaction(CWalletTx& wtxNew, CReserveKey& reservekey, std::string* pstrError = nullptr);
 
     static CFeeRate minTxFee;
     static CAmount GetMinimumFee(unsigned int nTxBytes, unsigned int nConfirmTarget, const CTxMemPool& pool);
@@ -1277,11 +1445,14 @@ public:
     bool IsSproutNullifierFromMe(const uint256& nullifier) const;
     bool IsSaplingNullifierFromMe(const uint256& nullifier) const;
 
-    void GetSproutNoteWitnesses(
+    // Both return false (and clear every witness) when the selected notes
+    // carry witnesses with different roots: the wallet note data is out of
+    // step and the caller must refuse the spend (no assert, no abort).
+    bool GetSproutNoteWitnesses(
          std::vector<JSOutPoint> notes,
          std::vector<boost::optional<SproutWitness>>& witnesses,
          uint256 &final_anchor);
-    void GetSaplingNoteWitnesses(
+    bool GetSaplingNoteWitnesses(
          std::vector<SaplingOutPoint> notes,
          std::vector<boost::optional<SaplingWitness>>& witnesses,
          uint256 &final_anchor);
@@ -1298,7 +1469,9 @@ public:
     CAmount GetDebit(const CTransaction& tx, const isminefilter& filter) const;
     CAmount GetCredit(const CTransaction& tx, const isminefilter& filter) const;
     CAmount GetChange(const CTransaction& tx) const;
-    void ChainTip(const CBlockIndex *pindex, const CBlock *pblock, SproutMerkleTree sproutTree, SaplingMerkleTree saplingTree, bool added);
+    void ChainTip(const CBlockIndex *pindex, const CBlock *pblock, const SproutMerkleTree& sproutTree, const SaplingMerkleTree& saplingTree, bool added);
+    /** After an unwind: re-offers the wallet transactions the chain no longer holds to the mempool. */
+    void UpdatedBlockTip(const CBlockIndex *pindex);
     /** Saves witness caches and best block locator to disk. */
     void SetBestChain(const CBlockLocator& loc);
     std::set<std::pair<libzcash::PaymentAddress, uint256>> GetNullifiersForAddresses(const std::set<libzcash::PaymentAddress> & addresses);
@@ -1383,6 +1556,8 @@ public:
     bool GetBroadcastTransactions() const { return fBroadcastTransactions; }
     /** Set whether this wallet broadcasts transactions. */
     void SetBroadcastTransactions(bool broadcast) { fBroadcastTransactions = broadcast; }
+    //! Drop the cached transaction-order index (rebuilt on next use); call after changing any nOrderPos. Requires cs_wallet.
+    void InvalidateTxOrderIndex() { fTxOrderValid = false; }
 
     /* Returns true if HD is enabled for all address types, false if only for Sapling */
     bool IsHDFullyEnabled() const;
@@ -1423,6 +1598,19 @@ public:
                           bool ignoreSpent=true,
                           bool requireSpendingKey=true,
                           bool ignoreLocked=true);
+
+    /**
+     * Sum of the Sapling note values GetFilteredNotes would return for the same
+     * arguments (maxDepth = INT_MAX, ignoreSpent = true), without constructing
+     * the plaintext entries: it reads the memory-only SaplingNoteData::value and
+     * ::address caches, decrypting a note only on a cache miss (and then filling
+     * both). Only non-invertible amounts and public payment addresses are cached;
+     * no note randomness, memo or key material.
+     */
+    CAmount GetSaplingBalanceFiltered(const std::set<libzcash::PaymentAddress>& filterAddresses,
+                                      int minDepth = 1,
+                                      bool requireSpendingKey = true,
+                                      bool ignoreLocked = true);
 
     /**
      * Sum of the wallet's spendable Sapling note values, using the MEMORY-ONLY
@@ -1592,5 +1780,26 @@ public:
     SpendingKeyAddResult operator()(const libzcash::InvalidEncoding& no) const;    
 };
 
+
+
+/**
+ * Pre-proving gate for a spend of wallet notes. Returns false and sets
+ * strError (an RPC-ready message) when the witnesses of the selected notes
+ * did not share one root (consistent == false), a selected note has no
+ * witness, or the anchor is not one the chain knows (the same
+ * GetXxxAnchorAt test mempool admission makes), so no proving time is spent
+ * on a transaction that would be rejected. Does not require the anchor to be
+ * the tip root. Caller holds cs_main.
+ */
+bool CheckSaplingSpendWitnesses(bool consistent,
+                                const std::vector<boost::optional<SaplingWitness>>& witnesses,
+                                const uint256& anchor,
+                                const CCoinsViewCache& view,
+                                std::string& strError);
+bool CheckSproutSpendWitnesses(bool consistent,
+                               const std::vector<boost::optional<SproutWitness>>& witnesses,
+                               const uint256& anchor,
+                               const CCoinsViewCache& view,
+                               std::string& strError);
 
 #endif // BITCOIN_WALLET_WALLET_H

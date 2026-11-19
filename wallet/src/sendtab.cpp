@@ -7,6 +7,13 @@
 #include "settings.h"
 #include "rpc.h"
 #include "recurring.h"
+#include "connection.h"
+#include "namepaybox.h"
+#include "namesmodel.h"
+#include <QPointer>
+#include <QScreen>
+#include <QScrollArea>
+#include <QBoxLayout>
 
 using json = nlohmann::json;
 
@@ -50,6 +57,9 @@ void MainWindow::setupSendTab() {
     QObject::connect(ui->Address1, &QLineEdit::textChanged, [=] (auto text) {
         this->addressChanged(1, text);
     });
+
+    // The first recipient's name box (the other recipients get theirs in addAddressSection)
+    ui->sendAddressLayout->insertWidget(1, makeNameBox(1, ui->verticalGroupBox));
 
     // The first Memo button
     QObject::connect(ui->MemoBtn1, &QPushButton::clicked, [=] () {
@@ -237,6 +247,11 @@ void MainWindow::inputComboTextChanged(int index) {
         balFmt = balFmt % " (+" % Settings::getZCLDisplayFormat(pending) % tr(" confirming") % ")";
 
     ui->sendAddressBalance->setText(balFmt);
+    // The field is a read-only line edit sized for a short number; once "(+X confirming)"
+    // is appended the text overflowed and the figure was clipped from the left (the user
+    // saw ".25 ZCL confirming)"). Grow it to fit what it holds.
+    ui->sendAddressBalance->setMinimumWidth(
+        ui->sendAddressBalance->fontMetrics().horizontalAdvance(balFmt) + 28);
     ui->sendAddressBalanceUSD->setText(Settings::getUSDFormat(spendable));
     recomputeMaxIfChecked();   // from-address changed -> its balance drives the "Send max" amount
     updateSendPrivacyBadge();  // from-address private/public-ness feeds the verdict
@@ -244,6 +259,25 @@ void MainWindow::inputComboTextChanged(int index) {
 }
 
     
+// The box under a Pay-to field that looks up a "@name" (see src/namepaybox.h). One per recipient.
+NamePayBox* MainWindow::makeNameBox(int itemNumber, QWidget* parent) {
+    auto nameBox = new NamePayBox([this] (const QString& name, const NamePayBox::Reply& done) {
+        RPC* rpc = this->getRPC();
+        Connection* conn = rpc ? rpc->getConnection() : nullptr;
+        if (!conn) {
+            done(false, json());
+            return;
+        }
+        json payload = {{"jsonrpc", "1.0"}, {"id", "znam"}, {"method", "znam_resolve"},
+                        {"params", json::array({name.toStdString(), "pay"})}};
+        conn->doRPC(payload, [done] (json result) { done(true, result); },
+                    [done] (QNetworkReply*, const json& err) { done(false, err); });
+    }, parent);
+    nameBox->setObjectName(QString("NameBox") % QString::number(itemNumber));
+    QObject::connect(nameBox, &NamePayBox::changed, this, [this, itemNumber] () { this->refreshAddressField(itemNumber); });
+    return nameBox;
+}
+
 void MainWindow::addAddressSection() {
     int itemNumber = ui->sendToWidgets->children().size() - 1;
 
@@ -280,6 +314,10 @@ void MainWindow::addAddressSection() {
     horizontalLayout_12->addWidget(addressBook1);
 
     sendAddressLayout->addLayout(horizontalLayout_12);
+
+    // Pay to a name: "@alice" in the field above is looked up through the daemon and shown here as an ADDRESS to be
+    // confirmed. The box is hidden, and the field is exactly what it was, for anything that does not start with '@'.
+    sendAddressLayout->addWidget(makeNameBox(itemNumber, verticalGroupBox));
 
     auto horizontalLayout_13 = new QHBoxLayout();
     horizontalLayout_13->setSpacing(6);
@@ -345,8 +383,27 @@ void MainWindow::addAddressSection() {
     QTimer::singleShot(10, this, [this] () {ui->sendToScrollArea->ensureWidgetVisible(ui->addAddressButton);});
 }
 
+NamePayBox* MainWindow::nameBoxFor(int itemNumber) const {
+    return ui->sendToWidgets->findChild<NamePayBox*>(QString("NameBox") + QString::number(itemNumber));
+}
+
 void MainWindow::addressChanged(int itemNumber, const QString& text) {
+    // A name ("@alice") is looked up by the box under the field; for anything else this does nothing.
+    if (auto* nb = nameBoxFor(itemNumber))
+        nb->setFieldText(text);
+    refreshAddressField(itemNumber);
+}
+
+void MainWindow::refreshAddressField(int itemNumber) {
+    auto* field = ui->sendToWidgets->findChild<QLineEdit*>(QString("Address") + QString::number(itemNumber));
+    if (!field)
+        return;
+    const QString text = field->text();
     auto addr = AddressBook::addressFromAddressLabel(text);
+    // A name that the user has confirmed stands for its (checked) address; any other entry is itself.
+    auto* nb = nameBoxFor(itemNumber);
+    if (nb)
+        addr = nb->effectiveAddress(addr);
     setMemoEnabled(itemNumber, addr.startsWith("z"));
 
     // Live validation affordance: green border the instant a typed/resolved address
@@ -356,7 +413,11 @@ void MainWindow::addressChanged(int itemNumber, const QString& text) {
     // of the field's "validation" property; the qss border rules do the rest.
     auto* fld = ui->sendToWidgets->findChild<QLineEdit*>(QString("Address") + QString::number(itemNumber));
     if (fld) {
-        const char* state = text.trimmed().isEmpty() ? "empty"
+        // A name that is still being looked up, or whose address waits for the user's confirmation, is neither
+        // valid nor wrong yet: neutral, not red.
+        const bool pendingName = nb && (nb->state() == NamePayBox::State::Waiting || nb->state() == NamePayBox::State::Resolving ||
+                                        (nb->state() == NamePayBox::State::Resolved && nb->usable() && !nb->confirmed()));
+        const char* state = (text.trimmed().isEmpty() || pendingName) ? "empty"
                           : (Settings::isValidAddress(addr) ? "valid" : "invalid");
         if (fld->property("validation").toString() != QString(state)) {
             fld->setProperty("validation", state);
@@ -411,7 +472,10 @@ void MainWindow::setMemoEnabled(int number, bool enabled) {
 void MainWindow::memoButtonClicked(int number, bool includeReplyTo) {
     // Memos can only be used with zAddrs. So check that first
     auto addr = ui->sendToWidgets->findChild<QLineEdit*>(QString("Address") + QString::number(number));
-    if (!AddressBook::addressFromAddressLabel(addr->text()).startsWith("z")) {
+    QString memoTarget = AddressBook::addressFromAddressLabel(addr->text());
+    if (auto* nb = nameBoxFor(number))   // a confirmed "@name" stands for its address
+        memoTarget = nb->effectiveAddress(memoTarget);
+    if (!memoTarget.startsWith("z")) {
         QMessageBox msg(QMessageBox::Critical, tr("Memos can only be used with z-addresses"),
         tr("The memo field can only be used with a z-address.\n") + addr->text() + tr("\ndoesn't look like a z-address"),
         QMessageBox::Ok, this);
@@ -632,6 +696,10 @@ Tx MainWindow::createTxFromSendPage() {
         QString addr = ui->sendToWidgets->findChild<QLineEdit*>(QString("Address") % QString::number(i+1))->text().trimmed();
         // Remove label if it exists
         addr = AddressBook::addressFromAddressLabel(addr);
+        // A name ("@alice") the user has confirmed stands for the ADDRESS that was shown and confirmed: that address,
+        // and nothing about the name, is what z_sendmany receives. Any other entry is used exactly as typed.
+        if (auto* nb = nameBoxFor(i + 1))
+            addr = nb->effectiveAddress(addr);
 
         // If address is sprout, then we can't send change to sapling, because of turnstile.
         if (Settings::getInstance()->isSproutAddress(addr))
@@ -733,7 +801,7 @@ Tx MainWindow::createTxFromSendPage() {
             QMessageBox::warning(this, tr("Shield your mined funds first"),
                 tr("Part of this address's balance is newly mined (coinbase) coins, which "
                    "can only be moved by shielding the whole balance to a private address "
-                   "first.\n\nUse \"Shield my public funds\" to move them privately, then "
+                   "first.\n\nUse \"Shield my funds\" on the Home page to move them privately, then "
                    "send again."),
                 QMessageBox::Ok);
             return Tx();   // invalid: empty fromAddr -> sendButton aborts the send
@@ -813,7 +881,7 @@ Tx MainWindow::createTxFromSendPage() {
 }
 
 // Sum, in integer zatoshis, the CONFIRMED (confirmations > 0), spendable UTXOs the GUI
-// holds for `addr`. z_sendmany spends only confirmed notes, so this -- not the
+// holds for `addr`, minus token-bearing outputs (the daemon token guard never spends those). z_sendmany spends only confirmed notes, so this -- not the
 // unconfirmed-inclusive getAllBalances() total -- is the correct basis for the auto-shield
 // change. With includeCoinbase=false the result also excludes coinbase UTXOs, matching the
 // daemon's input set for a has-change (multi-output) send; includeCoinbase=true gives the
@@ -824,7 +892,7 @@ qint64 MainWindow::confirmedSpendableZat(const QString& addr, bool includeCoinba
         return 0;
     qint64 sum = 0;
     for (const UnspentOutput& u : *rpc->getUTXOs()) {
-        if (u.address == addr && u.confirmations > 0 && u.spendable
+        if (u.address == addr && u.confirmations > 0 && u.spendable && !u.tokenBearing
                 && (includeCoinbase || !u.coinbase))
             sum += toZat(u.amount.toDouble());
     }
@@ -938,7 +1006,7 @@ bool MainWindow::verifyAutoShieldUnchanged(const Tx& tx) {
         QMessageBox::warning(this, tr("Shield your mined funds first"),
             tr("Part of this address's balance is newly mined (coinbase) coins, which can "
                "only be moved by shielding the whole balance to a private address first. For "
-               "your privacy the transaction was NOT sent.\n\nUse \"Shield my public funds\" "
+               "your privacy the transaction was NOT sent.\n\nUse \"Shield my funds\" on the Home page "
                "to move them privately, then send again."),
             QMessageBox::Ok);
         return false;
@@ -1023,6 +1091,58 @@ QString MainWindow::createSaplingAddressSync() {
             return QString();
     }
     return created;
+}
+
+// Size a dialog to the real height of its (word-wrapped) content so no row is clipped.
+// Shared by the confirm dialog; the height is capped to 90% of the screen so a send with
+// many recipients (or a large font on a small screen) stays on screen rather than growing
+// off it. When the content does not fit under that cap, `scrollable` (the recipients
+// group) moves into a scroll area, so the layout squeezes the scroll area's viewport
+// instead of cutting the wrapped address rows to a fraction of their height. Rows can
+// then be out of view, so the vertical scroll bar is always shown and `scrollNotice`
+// (the row count and total) is added below the scroll area, next to the buttons, so the
+// user is never asked to confirm rows they cannot see without being told.
+static void fitConfirmDialogToContent(QDialog* d, QWidget* scrollable,
+                                      const QString& scrollNotice = QString()) {
+    QLayout* lay = d->layout();
+    if (!lay)
+        return;
+    lay->activate();
+    const int w = qMax(d->sizeHint().width(), 520);
+    auto contentHeight = [&]() {
+        int h = lay->hasHeightForWidth() ? lay->totalHeightForWidth(w) : d->sizeHint().height();
+        return qMax(h, lay->totalMinimumSize().height());
+    };
+    int h = contentHeight();
+    int cap = h;
+    if (QScreen* sc = QGuiApplication::primaryScreen())
+        cap = int(sc->availableGeometry().height() * 0.9);
+    auto* box = qobject_cast<QBoxLayout*>(lay);
+    if (h > cap && scrollable && box && box->indexOf(scrollable) >= 0) {
+        auto* area = new QScrollArea(d);
+        area->setFrameShape(QFrame::NoFrame);
+        area->setWidgetResizable(true);
+        area->setObjectName(QStringLiteral("confirmScrollArea"));
+        area->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        area->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+        area->setMinimumHeight(scrollable->fontMetrics().lineSpacing() * 4);
+        const int slot = box->indexOf(scrollable);
+        box->insertWidget(slot, area);                        // the group's own slot
+        area->setWidget(scrollable);                          // reparents; the layout drops it
+        if (!scrollNotice.isEmpty()) {
+            auto* notice = new QLabel(scrollNotice, d);
+            notice->setObjectName(QStringLiteral("confirmScrollNotice"));
+            notice->setWordWrap(true);
+            notice->setStyleSheet(QStringLiteral("font-weight: 600;"));
+            box->insertWidget(slot + 1, notice);
+        }
+        lay->activate();
+        h = contentHeight();
+    }
+    h = qMin(h, cap);
+    d->setMinimumSize(w, h);
+    d->resize(w, h);
+    lay->activate();
 }
 
 bool MainWindow::confirmTx(Tx tx) {
@@ -1176,7 +1296,9 @@ bool MainWindow::confirmTx(Tx tx) {
     confirm.syncingWarning->setVisible(Settings::getInstance()->isSyncing());
 
     // No peers warning
-    confirm.nopeersWarning->setVisible(Settings::getInstance()->getPeers() == 0);
+    // A private test chain has no peers by nature; the status bar already says so.
+    confirm.nopeersWarning->setVisible(Settings::getInstance()->getPeers() == 0 &&
+                                       !Settings::getInstance()->isLocalNetwork());
 
     // PRIV-11 / UX-12 — drive the confirm dialog wording + a privacy badge from the
     // four-way category. Tokens mirror dark.qss / PrivacyBadgeDelegate:
@@ -1256,6 +1378,17 @@ bool MainWindow::confirmTx(Tx tx) {
         Settings::getZCLUSDDisplayFormat(rpc->getAllBalances()->value(tx.fromAddr) - totalSpending);
     confirm.sendFrom->setToolTip(tooltip);
 
+    // UX: the rows (recipient, change, fee) and the stacked warning labels are added
+    // after setupUi(), and word-wrapped labels report a height that depends on the
+    // width. Without this the dialog opened at the .ui's 429x371 design size and the
+    // layout squeezed the amount/fee rows to half height, so the user could not read
+    // what they were about to confirm. Size the dialog to its real content first.
+    fitConfirmDialogToContent(&d, confirm.sendToAddrs,
+        tr("Scroll to review all %1 rows above (recipients and the miner fee). "
+           "Total of all rows including the fee: %2")
+            .arg(tx.toAddrs.size() + 1)
+            .arg(Settings::getZCLDisplayFormat(totalSpending)));
+
     // Show the dialog and submit it if the user confirms
     if (d.exec() == QDialog::Accepted) {
         // PRIV-12 — a z->t DE-SHIELD send requires an explicit, non-default-accept
@@ -1288,7 +1421,60 @@ bool MainWindow::confirmTx(Tx tx) {
 }
 
 // Send button clicked
+bool MainWindow::checkNameRecipients() {
+    if (nameRecheckPassed_)
+        return true;
+    QVector<NamePayBox*> checking;
+    const int totalItems = ui->sendToWidgets->children().size() - 2;   // the last one is a spacer
+    for (int i = 0; i < totalItems; i++) {
+        auto* fld = ui->sendToWidgets->findChild<QLineEdit*>(QString("Address") + QString::number(i + 1));
+        auto* nb = nameBoxFor(i + 1);
+        if (!fld || !nb)
+            continue;
+        const QString text = fld->text();
+        if (names::parsePayTo(text).kind != names::InputKind::Name)
+            continue;
+        QString why;
+        if (nb->blocksSending(text, &why)) {
+            QMessageBox::warning(this, tr("Confirm the address first"), why);
+            return false;
+        }
+        if (nb->confirmed())
+            checking.push_back(nb);
+    }
+    if (checking.isEmpty())
+        return true;   // no name recipient (or one that did not resolve: its text is then an invalid address, as ever)
+
+    // Ask the node again, now: the owner may have changed the address since it was shown. Sending continues only if
+    // every answer is unchanged; otherwise the box says what happened and nothing is sent.
+    auto remaining = QSharedPointer<int>::create(checking.size());
+    auto allSame = QSharedPointer<bool>::create(true);
+    QPointer<MainWindow> self(this);
+    for (NamePayBox* nb : checking) {
+        nb->recheck([self, remaining, allSame] (bool same) {
+            if (!self)
+                return;
+            if (!same)
+                *allSame = false;
+            if (--*remaining > 0)
+                return;
+            if (*allSame) {
+                self->nameRecheckPassed_ = true;
+                self->sendButton();
+                self->nameRecheckPassed_ = false;
+            } else {
+                QMessageBox::warning(self, tr("The address of a name changed"),
+                    tr("The address a name stands for changed (or could not be checked again) while you were reviewing it, "
+                       "so nothing was sent. The name's box shows what it says now: review the address and confirm it again."));
+            }
+        });
+    }
+    return false;
+}
+
 void MainWindow::sendButton() {
+    if (!checkNameRecipients())
+        return;
     Tx tx = createTxFromSendPage();
 
     // MAJOR-1/MAJOR-2 fail-closed abort: createTxFromSendPage() returns an INVALID
@@ -1296,8 +1482,33 @@ void MainWindow::sendButton() {
     // change could not be shielded (privacy fail-closed), or there are not enough
     // confirmed funds. Bail silently here so we don't stack a second, vaguer
     // "From Address is Invalid" error on top of the precise one already shown.
-    if (tx.fromAddr.isEmpty())
+    if (tx.fromAddr.isEmpty()) {
+        // ...except when NO message was shown because there is simply no "Pay from"
+        // address to send from (the node is still starting, or the wallet has no
+        // addresses loaded yet). That used to leave "Review and send" doing nothing at
+        // all. createTxFromSendPage() only aborts with a message of its own when the
+        // combo had an address, so an empty combo is the one silent case.
+        if (ui->inputsCombo->currentText().trimmed().isEmpty()) {
+            QMessageBox::information(this, tr("Nothing to send from yet"),
+                tr("There is no \"Pay from\" address available yet. ZClassic is still "
+                   "starting or loading your wallet. Wait until the status bar shows "
+                   "that the wallet is connected and your balance has appeared, then "
+                   "try again."));
+        }
         return;
+    }
+
+    // Report a bad address / amount BEFORE asking about sync state, so the user is
+    // never asked "Send anyway?" for a send that could not have gone out regardless.
+    {
+        const QString firstError = doSendTxValidations(tx);
+        if (!firstError.isEmpty()) {
+            QMessageBox msg(QMessageBox::Critical, tr("Transaction Error"), firstError,
+                            QMessageBox::Ok, this);
+            msg.exec();
+            return;
+        }
+    }
 
     // Still-syncing acknowledgement gate: during sync the balance/UTXO set is
     // incomplete, so a send can silently fail. Make the user explicitly accept
@@ -1317,6 +1528,10 @@ void MainWindow::sendButton() {
             title = tr("Still importing your keys");
             body  = tr("Your wallet is still importing and rescanning, so your balance "
                        "may be incomplete and this transaction could fail.\n\nSend anyway?");
+        } else if (Settings::getInstance()->getPeers() == 0 && !Settings::getInstance()->isLocalNetwork()) {
+            // Not catching up, just alone: say what is true.
+            body  = tr("Your wallet is not connected to any peers yet, so it cannot tell whether "
+                       "its balance is current and this transaction could fail.\n\nSend anyway?");
         } else if (stale) {
             body  = tr("Your wallet hasn't reported sync progress recently. Your balance "
                        "may be up to date, or syncing may have paused.\n\nSend anyway?");
@@ -1356,7 +1571,7 @@ void MainWindow::sendButton() {
         // And send the Tx
         rpc->executeTransaction(tx,
             [=] (QString opid) {
-                ui->statusBar->showMessage(tr("Computing Tx: ") % opid);
+                ui->statusBar->showMessage(tr("Sending... your wallet is building the transaction (private sends can take up to a minute)."));
             },
             [=] (QString, QString txid) {
                 // Keep the long-standing status-bar line so the right-click
@@ -1389,7 +1604,9 @@ QString MainWindow::doSendTxValidations(Tx tx) {
     for (auto toAddr : tx.toAddrs) {
         if (!Settings::isValidAddress(toAddr.addr)) {
             QString addr = (toAddr.addr.length() > 100 ? toAddr.addr.left(100) + "..." : toAddr.addr);
-            return QString(tr("Recipient Address ")) % addr % tr(" is Invalid");
+            // An empty recipient used to read "Recipient Address  is Invalid" (double space).
+            return addr.isEmpty() ? tr("Recipient Address is Invalid")
+                                  : tr("Recipient Address %1 is Invalid").arg(addr);
         }
 
         // This technically shouldn't be possible, but issue #62 seems to have discovered a bug
@@ -1492,6 +1709,8 @@ void MainWindow::updateSendPrivacyBadge() {
     QRegExp re("Address[0-9]+", Qt::CaseInsensitive);
     for (auto* fld : ui->sendToWidgets->findChildren<QLineEdit*>(re)) {
         QString a = AddressBook::addressFromAddressLabel(fld->text().trimmed());
+        if (auto* nb = nameBoxFor(fld->objectName().mid(7).toInt()))   // a confirmed "@name" stands for its address
+            a = nb->effectiveAddress(a);
         if (a.isEmpty()) continue;
         anyRecipient = true;
         ToFields t; t.addr = a; t.amount = 0; tx.toAddrs.push_back(t);
@@ -1541,7 +1760,7 @@ void MainWindow::updateSendTotals() {
     double fee = ui->minerFeeAmt->text().trimmed().toDouble();
     double total = sum + fee;
     QString usd = Settings::getUSDFormat(total);
-    QString msg = tr("You'll send %1 + %2 fee = %3 ZCL")
+    QString msg = tr("You'll send %1 + %2 fee = %3")
                     .arg(Settings::getZCLDisplayFormat(sum))
                     .arg(Settings::getZCLDisplayFormat(fee))
                     .arg(Settings::getZCLDisplayFormat(total));
@@ -1558,10 +1777,26 @@ void MainWindow::showSendSuccess(QString txid) {
     box->setAttribute(Qt::WA_DeleteOnClose);
     box->setWindowModality(Qt::NonModal);
     box->setIcon(QMessageBox::Information);
-    box->setWindowTitle(tr("Sent! Your ZCL is on its way"));
-    box->setText(tr("Sent! Your ZCL is on its way"));
-    box->setInformativeText(tr("Your transaction was accepted by the network. "
-                               "It will appear in your transactions in a few minutes."));
+    // Say only what is true. Your own node accepting the transaction is not the same as
+    // the network having it: with no peers connected it has not been broadcast yet.
+    if (Settings::getInstance()->isLocalNetwork()) {
+        box->setWindowTitle(tr("Transaction created"));
+        box->setText(tr("Transaction created on the local test network"));
+        box->setInformativeText(tr("It will confirm when a block is mined."));
+    } else if (Settings::getInstance()->getPeers() == 0) {
+        box->setWindowTitle(tr("Transaction created"));
+        box->setText(tr("Transaction created, but not sent to the network yet"));
+        box->setInformativeText(tr("Your node accepted the transaction, but it is not "
+                                   "connected to any peers right now, so nobody else has "
+                                   "seen it. It will be broadcast when the node reconnects "
+                                   "(keep ZClassic open). Your funds are not lost."));
+    } else {
+        box->setWindowTitle(tr("Sent! Your ZCL is on its way"));
+        box->setText(tr("Sent! Your ZCL is on its way"));
+        box->setInformativeText(tr("Your node accepted the transaction and is sharing it "
+                                   "with the network. It will show as confirmed in your "
+                                   "Activity list in a few minutes."));
+    }
     box->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
 
     // One-click Copy txid (clipboard idiom matches addressbook.cpp / mainwindow.cpp),
@@ -1592,6 +1827,15 @@ QString MainWindow::humaneSendError(const QString& raw) {
     const QString e = raw.toLower();
 
     // Order matters: check the most specific causes before the generic ones.
+    // Token guard: the daemon refuses to spend ZSLP token or mint-baton outputs as ordinary
+    // coins and says so in the error (it can accompany "no UTXOs"/"insufficient funds").
+    // Name that cause first; "wait for confirmations" or "not enough ZCL" would mislead.
+    if (e.contains("token-bearing") || e.contains("zslp") || e.contains("mint baton"))
+        return tr("Some of the coins in this wallet carry ZSLP tokens (or a token mint baton). "
+                  "They are protected and were not spent, because paying with them would "
+                  "destroy the tokens. Use other coins, or send the tokens with a "
+                  "token-aware wallet.");
+
     if (e.contains("coinbase") || e.contains("must be sent to a single z") ||
         e.contains("to a zaddr") || e.contains("shielding coinbase"))
         return tr("Mined (coinbase) ZCL must be sent to exactly one shielded (z) "
@@ -1614,7 +1858,10 @@ QString MainWindow::humaneSendError(const QString& raw) {
                   "syncing, then try sending again.");
 
     if (e.contains("wallet is locked") || e.contains("walletpassphrase"))
-        return tr("Your wallet is locked. Unlock it, then try sending again.");
+        return tr("Your wallet is locked (it is encrypted with a passphrase), and this wallet "
+                  "app has no unlock button. Nothing was sent and no funds moved. To send, "
+                  "unlock the node with its walletpassphrase command (for example "
+                  "zclassic-cli walletpassphrase <passphrase> 120), then try sending again.");
 
     if (e.contains("amount out of range") || e.contains("invalid amount") ||
         e.contains("too small") || e.contains("dust"))

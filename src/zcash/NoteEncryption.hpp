@@ -11,6 +11,9 @@ https://github.com/zcash/zips/blob/master/protocol/protocol.pdf
 
 #include "zcash/Zcash.h"
 #include "zcash/Address.hpp"
+// Opaque C23 batch context (c23/compat/zcl_c23_sapling_scan.h); declared here
+// at global scope so this widely included header needs no c23 include path.
+struct zcl_c23_sapling_scan_ctx;
 
 #include <array>
 
@@ -72,6 +75,36 @@ boost::optional<SaplingEncPlaintext> AttemptSaplingEncDecryption(
     const uint256 &ivk,
     const uint256 &epk
 );
+
+// The KDF + AEAD half of AttemptSaplingEncDecryption, given the Diffie-Hellman
+// secret [ivk]([8]epk) already computed by the caller. Identical output to
+// AttemptSaplingEncDecryption for the same (ciphertext, dhsecret, epk).
+boost::optional<SaplingEncPlaintext> AttemptSaplingEncDecryptionFromDH(
+    const SaplingEncCiphertext &ciphertext,
+    const uint256 &dhsecret,
+    const uint256 &epk
+);
+
+// Key agreement of ONE ephemeral key against many incoming viewing keys, with
+// the per-output work (epk decompression, cofactor multiplication, window
+// tables) done once and the per-key inversions shared. agree() reports, for
+// each ivk, exactly what librustzcash_sapling_ka_agree(epk, ivk) would:
+// ok[i] == 0 where it returns false, otherwise dh[i] equal to its output.
+// Falls back to that one-at-a-time call if the batched core is unavailable.
+class SaplingIvkBatchAgreement {
+public:
+    SaplingIvkBatchAgreement(const uint256 &epk, size_t expectedIvks);
+    ~SaplingIvkBatchAgreement();
+    SaplingIvkBatchAgreement(const SaplingIvkBatchAgreement&) = delete;
+    SaplingIvkBatchAgreement& operator=(const SaplingIvkBatchAgreement&) = delete;
+
+    // ivks: n * 32 bytes. dh: n * 32 bytes. ok: n bytes.
+    void agree(const unsigned char *ivks, size_t n, unsigned char *dh, unsigned char *ok) const;
+
+private:
+    uint256 epk_;
+    zcl_c23_sapling_scan_ctx *ctx_;
+};
 
 // Attempts to decrypt a Sapling note using outgoing plaintext.
 // This will not check that the contents of the ciphertext are correct.

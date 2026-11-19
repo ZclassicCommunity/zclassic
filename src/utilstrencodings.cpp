@@ -50,6 +50,66 @@ string SanitizeFilename(const string& str)
     return strResult;
 }
 
+static bool IsExportFilenameChar(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+           c == '.' || c == '-' || c == '_';
+}
+
+// Windows treats CON, PRN, AUX, NUL, COM1-9 and LPT1-9 (with any extension) as devices.
+static bool IsWindowsReservedStem(const std::string& name)
+{
+    std::string stem = name.substr(0, name.find('.'));
+    for (std::string::size_type i = 0; i < stem.size(); i++) {
+        if (stem[i] >= 'a' && stem[i] <= 'z')
+            stem[i] = stem[i] - 'a' + 'A';
+    }
+    if (stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL")
+        return true;
+    return stem.size() == 4 && (stem.compare(0, 3, "COM") == 0 || stem.compare(0, 3, "LPT") == 0) &&
+           stem[3] >= '1' && stem[3] <= '9';
+}
+
+bool IsValidExportFilename(const std::string& name)
+{
+    if (name.empty() || name.size() > MAX_EXPORT_FILENAME_LENGTH)
+        return false;
+    for (std::string::size_type i = 0; i < name.size(); i++) {
+        if (!IsExportFilenameChar(name[i]))
+            return false;
+    }
+    // No hidden files, "." or "..", and nothing starting with an option-like '-'.
+    if (name[0] == '.' || name[0] == '-')
+        return false;
+    return !IsWindowsReservedStem(name);
+}
+
+std::string SanitizeExportFilename(const std::string& name)
+{
+    std::string result;
+    for (std::string::size_type i = 0; i < name.size() && result.size() < MAX_EXPORT_FILENAME_LENGTH; i++) {
+        if (!IsExportFilenameChar(name[i]))
+            continue;
+        if (result.empty() && (name[i] == '.' || name[i] == '-'))
+            continue;
+        result.push_back(name[i]);
+    }
+    if (!result.empty() && IsWindowsReservedStem(result))
+        result.insert(result.begin(), '_');
+    return result;
+}
+
+std::string ExportFilenameErrorText(const std::string& name)
+{
+    const std::string suggestion = SanitizeExportFilename(name);
+    std::string text = strprintf("Filename is invalid: use only letters, digits, '.', '-' and '_' (at most %u characters, "
+                                 "no path separators, not starting with '.' or '-').",
+                                 (unsigned int)MAX_EXPORT_FILENAME_LENGTH);
+    if (!suggestion.empty() && IsValidExportFilename(suggestion))
+        text += strprintf("  Try '%s' instead.", suggestion);
+    return text;
+}
+
 std::string HexInt(uint32_t val)
 {
     std::stringstream ss;

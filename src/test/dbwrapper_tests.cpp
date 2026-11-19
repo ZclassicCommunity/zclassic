@@ -6,6 +6,9 @@
 #include "dbwrapper.h"
 #include "uint256.h"
 #include "random.h"
+#include "util.h"
+#include <boost/filesystem/fstream.hpp>
+#include "utiltime.h"
 #include "test/test_bitcoin.h"
 
 #include <boost/assign/std/vector.hpp> // for 'operator+=()'
@@ -31,7 +34,7 @@ BOOST_FIXTURE_TEST_SUITE(dbwrapper_tests, BasicTestingSetup)
 BOOST_AUTO_TEST_CASE(dbwrapper)
 {
     {
-        path ph = temp_directory_path() / unique_path();
+        path ph = temp_directory_path() / UniquePath();
         CDBWrapper dbw(ph, (1 << 20), true, false);
         char key = 'k';
         uint256 in = GetRandHash();
@@ -47,7 +50,7 @@ BOOST_AUTO_TEST_CASE(dbwrapper)
 BOOST_AUTO_TEST_CASE(dbwrapper_batch)
 {
     {
-        path ph = temp_directory_path() / unique_path();
+        path ph = temp_directory_path() / UniquePath();
         CDBWrapper dbw(ph, (1 << 20), true, false);
 
         char key = 'i';
@@ -82,7 +85,7 @@ BOOST_AUTO_TEST_CASE(dbwrapper_batch)
 BOOST_AUTO_TEST_CASE(dbwrapper_iterator)
 {
     {
-        path ph = temp_directory_path() / unique_path();
+        path ph = temp_directory_path() / UniquePath();
         CDBWrapper dbw(ph, (1 << 20), true, false);
 
         // The two keys are intentionally chosen for ordering
@@ -120,7 +123,7 @@ BOOST_AUTO_TEST_CASE(dbwrapper_iterator)
 
 BOOST_AUTO_TEST_CASE(iterator_ordering)
 {
-    path ph = temp_directory_path() / unique_path();
+    path ph = temp_directory_path() / UniquePath();
     CDBWrapper dbw(ph, (1 << 20), true, false);
     for (int x=0x00; x<256; ++x) {
         uint8_t key = x;
@@ -186,7 +189,7 @@ BOOST_AUTO_TEST_CASE(iterator_string_ordering)
 {
     char buf[10];
 
-    path ph = temp_directory_path() / unique_path();
+    path ph = temp_directory_path() / UniquePath();
     CDBWrapper dbw(ph, (1 << 20), true, false);
     for (int x=0x00; x<10; ++x) {
         for (int y = 0; y < 10; y++) {
@@ -230,5 +233,36 @@ BOOST_AUTO_TEST_CASE(iterator_string_ordering)
 }
 
 
+
+BOOST_AUTO_TEST_CASE(dbwrapper_environmental_errors)
+{
+    // Reasons a reindex cannot repair are classified as environmental; corruption and missing files are not.
+    BOOST_CHECK(dbwrapper_private::IsEnvironmentalIOError("IO error: /x/blocks/index/LOCK: Permission denied"));
+    BOOST_CHECK(dbwrapper_private::IsEnvironmentalIOError("IO error: /x/blocks/index/000003.log: No space left on device"));
+    BOOST_CHECK(dbwrapper_private::IsEnvironmentalIOError("IO error: /x/blocks/index/LOCK: Read-only file system"));
+    BOOST_CHECK(dbwrapper_private::IsEnvironmentalIOError("IO error: lock /x/blocks/index/LOCK: Resource temporarily unavailable"));
+    BOOST_CHECK(dbwrapper_private::IsEnvironmentalIOError("IO error: C:/x/blocks/index/LOCK: Access is denied."));
+    BOOST_CHECK(!dbwrapper_private::IsEnvironmentalIOError("Corruption: bad record length"));
+    BOOST_CHECK(!dbwrapper_private::IsEnvironmentalIOError("IO error: /x/blocks/index/000005.ldb: No such file or directory"));
+
+    // A database that cannot be created below a regular file: the error text is passed through and flagged.
+    path dir = GetTempPath() / strprintf("test_bitcoin_dbenv_%lu_%i", (unsigned long)GetTime(), (int)(GetRand(100000)));
+    create_directories(dir);
+    path file = dir / "afile";
+    {
+        boost::filesystem::ofstream f(file);
+        f << "x";
+    }
+    bool thrown = false;
+    try {
+        CDBWrapper db(file / "db", (1 << 20), false, false);
+    } catch (const dbwrapper_error& e) {
+        thrown = true;
+        BOOST_CHECK(e.IsEnvironmental());
+        BOOST_CHECK(std::string(e.what()).find("Database I/O error: ") == 0);
+    }
+    BOOST_CHECK(thrown);
+    remove_all(dir);
+}
 
 BOOST_AUTO_TEST_SUITE_END()

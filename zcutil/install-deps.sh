@@ -65,7 +65,6 @@ install_ubuntu_debian() {
         automake
 
         # Required libraries
-        libgmp-dev          # GNU Multiple Precision library
         libdb++-dev         # Berkeley DB (for wallet support)
         libsodium-dev       # Cryptography library
 
@@ -121,7 +120,6 @@ install_arch() {
         automake
         libtool
         pkgconf
-        gmp
         db
         libsodium
         curl
@@ -155,7 +153,7 @@ case "$OS" in
         echo ""
         echo "Required packages:"
         echo "  - build-essential, autoconf, libtool, automake"
-        echo "  - libgmp-dev, libdb++-dev, libsodium-dev"
+        echo "  - libdb++-dev, libsodium-dev"
         echo "  - (Win64 cross) g++-mingw-w64-x86-64-posix, mingw-w64-x86-64-dev"
         echo ""
         echo "Please install these manually for your distribution."

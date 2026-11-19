@@ -404,8 +404,12 @@ static void SendMoney(const CTxDestination &address, CAmount nValue, bool fSubtr
             strError = strprintf("Error: This transaction requires a transaction fee of at least %s because of its amount, complexity, or use of recently received funds!", FormatMoney(nFeeRequired));
         throw JSONRPCError(RPC_WALLET_ERROR, strError);
     }
-    if (!pwalletMain->CommitTransaction(wtxNew, reservekey))
+    std::string strCommitError;
+    if (!pwalletMain->CommitTransaction(wtxNew, reservekey, &strCommitError)) {
+        if (!strCommitError.empty())
+            throw JSONRPCError(RPC_WALLET_ERROR, "Error: " + strCommitError);
         throw JSONRPCError(RPC_WALLET_ERROR, "Error: The transaction was rejected! This might happen if some of the coins in your wallet were already spent, such as if you used a copy of wallet.dat and coins were spent in the copy but not marked as spent here.");
+    }
 }
 
 UniValue sendtoaddress(const UniValue& params, bool fHelp)
@@ -1059,8 +1063,9 @@ UniValue sendmany(const UniValue& params, bool fHelp)
     bool fCreated = pwalletMain->CreateTransaction(vecSend, wtx, keyChange, nFeeRequired, nChangePosRet, strFailReason);
     if (!fCreated)
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, strFailReason);
-    if (!pwalletMain->CommitTransaction(wtx, keyChange))
-        throw JSONRPCError(RPC_WALLET_ERROR, "Transaction commit failed");
+    std::string strCommitError;
+    if (!pwalletMain->CommitTransaction(wtx, keyChange, &strCommitError))
+        throw JSONRPCError(RPC_WALLET_ERROR, strCommitError.empty() ? std::string("Transaction commit failed") : "Transaction commit failed: " + strCommitError);
 
     return wtx.GetHash().GetHex();
 }
@@ -1806,9 +1811,11 @@ UniValue backupwallet(const UniValue& params, bool fHelp)
     if (fHelp || params.size() != 1)
         throw runtime_error(
             "backupwallet \"destination\"\n"
-            "\nSafely copies wallet.dat to destination filename\n"
+            "\nSafely copies wallet.dat to destination filename; an existing file is never overwritten\n"
             "\nArguments:\n"
-            "1. \"destination\"   (string, required) The destination filename, saved in the directory set by -exportdir option.\n"
+            "1. \"destination\"   (string, required) The destination file name, saved in the directory set by the -exportdir option\n"
+            "                    (default: the \"backups\" directory inside the data directory, created on first use).\n"
+            "                    Letters, digits, '.', '-' and '_' are allowed, e.g. \"wallet-backup.dat\"; no path separators.\n"
             "\nResult:\n"
             "\"path\"             (string) The full path of the destination file\n"
             "\nExamples:\n"
@@ -1824,15 +1831,17 @@ UniValue backupwallet(const UniValue& params, bool fHelp)
     } catch (const std::runtime_error& e) {
         throw JSONRPCError(RPC_INTERNAL_ERROR, e.what());
     }
-    if (exportdir.empty()) {
-        throw JSONRPCError(RPC_WALLET_ERROR, "Cannot backup wallet until the -exportdir option has been set");
+    const std::string filename = params[0].get_str();
+    if (!IsValidExportFilename(filename)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, ExportFilenameErrorText(filename));
     }
-    std::string unclean = params[0].get_str();
-    std::string clean = SanitizeFilename(unclean);
-    if (clean.compare(unclean) != 0) {
-        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Filename is invalid as only alphanumeric characters are allowed.  Try '%s' instead.", clean));
+    boost::filesystem::path exportfilepath = exportdir / filename;
+
+    // Like dumpwallet: never replace a file. -exportdir may be the data
+    // directory, where an overwrite would destroy wallet.dat or another node file.
+    if (boost::filesystem::exists(exportfilepath)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Cannot overwrite existing file " + exportfilepath.string());
     }
-    boost::filesystem::path exportfilepath = exportdir / clean;
 
     if (!BackupWallet(*pwalletMain, exportfilepath.string()))
         throw JSONRPCError(RPC_WALLET_ERROR, "Error: Wallet backup failed!");
@@ -2366,6 +2375,8 @@ UniValue listunspent(const UniValue& params, bool fHelp)
             "    \"confirmations\" : n,      (numeric) The number of confirmations\n"
             "    \"redeemScript\" : n        (string) The redeemScript if scriptPubKey is P2SH\n"
             "    \"spendable\" : xxx         (bool) Whether we have the private keys to spend this output\n"
+            "    \"tokenbearing\" : xxx      (bool) Whether this output carries ZSLP tokens or a mint baton. Such an output is never\n"
+            "                              chosen automatically as funds, because spending it as ordinary coin burns them.\n"
             "  }\n"
             "  ,...\n"
             "]\n"
@@ -2440,6 +2451,10 @@ UniValue listunspent(const UniValue& params, bool fHelp)
         entry.push_back(Pair("amount", ValueFromAmount(out.tx->vout[out.i].nValue)));
         entry.push_back(Pair("confirmations", out.nDepth));
         entry.push_back(Pair("spendable", out.fSpendable));
+        // Additive field. The output is still listed and still counted in
+        // every balance; this only tells a caller that the wallet will not
+        // pick it as ordinary funds (see wallet/tokenguard.h).
+        entry.push_back(Pair("tokenbearing", out.tx->IsTokenBearingOutput(out.i)));
         results.push_back(entry);
     }
 
@@ -2620,15 +2635,21 @@ UniValue fundrawtransaction(const UniValue& params, bool fHelp)
     if (!EnsureWalletIsAvailable(fHelp))
         return NullUniValue;
 
-    if (fHelp || params.size() != 1)
+    if (fHelp || params.size() < 1 || params.size() > 2)
         throw runtime_error(
-                            "fundrawtransaction \"hexstring\"\n"
+                            "fundrawtransaction \"hexstring\" ( allowtokeninputs )\n"
                             "\nAdd inputs to a transaction until it has enough in value to meet its out value.\n"
                             "This will not modify existing inputs, and will add one change output to the outputs.\n"
                             "Note that inputs which were signed may need to be resigned after completion since in/outputs have been added.\n"
                             "The inputs added will not be signed, use signrawtransaction for that.\n"
+                            "The inputs added never carry ZSLP tokens or a mint baton.\n"
                             "\nArguments:\n"
-                            "1. \"hexstring\"    (string, required) The hex string of the raw transaction\n"
+                            "1. \"hexstring\"        (string, required) The hex string of the raw transaction\n"
+                            "2. allowtokeninputs   (boolean, optional, default=false) The transaction may already contain inputs that carry\n"
+                            "                      ZSLP tokens or a mint baton (see \"tokenbearing\" in listunspent). By default that is an\n"
+                            "                      error, because unless the outputs form a matching token transfer the tokens are burned.\n"
+                            "                      Set to true only when the transaction is a token transfer you built on purpose;\n"
+                            "                      the change output is then always added last, so no output moves.\n"
                             "\nResult:\n"
                             "{\n"
                             "  \"hex\":       \"value\", (string)  The resulting raw transaction (hex-encoded string)\n"
@@ -2647,18 +2668,22 @@ UniValue fundrawtransaction(const UniValue& params, bool fHelp)
                             + HelpExampleCli("sendrawtransaction", "\"signedtransactionhex\"")
                             );
 
-    RPCTypeCheck(params, boost::assign::list_of(UniValue::VSTR));
+    RPCTypeCheck(params, boost::assign::list_of(UniValue::VSTR)(UniValue::VBOOL));
 
     // parse hex string from parameter
     CTransaction origTx;
     if (!DecodeHexTx(origTx, params[0].get_str()))
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
 
+    bool fAllowTokenInputs = false;
+    if (params.size() > 1)
+        fAllowTokenInputs = params[1].get_bool();
+
     CMutableTransaction tx(origTx);
     CAmount nFee;
     string strFailReason;
     int nChangePos = -1;
-    if(!pwalletMain->FundTransaction(tx, nFee, nChangePos, strFailReason))
+    if(!pwalletMain->FundTransaction(tx, nFee, nChangePos, strFailReason, fAllowTokenInputs))
         throw JSONRPCError(RPC_INTERNAL_ERROR, strFailReason);
 
     UniValue result(UniValue::VOBJ);
@@ -3294,6 +3319,19 @@ CAmount getBalanceZaddr(std::string address, int minDepth = 1, bool ignoreUnspen
     std::vector<CSproutNotePlaintextEntry> sproutEntries;
     std::vector<SaplingNoteEntry> saplingEntries;
     LOCK2(cs_main, pwalletMain->cs_wallet);
+    // Amounts only: the Sapling total comes from the wallet's memory-only
+    // value/address caches instead of decrypting every note in the wallet.
+    if (address.length() == 0) {
+        std::set<libzcash::PaymentAddress> none;
+        return pwalletMain->GetSproutBalanceCached(minDepth, ignoreUnspendable) +
+               pwalletMain->GetSaplingBalanceFiltered(none, minDepth, ignoreUnspendable);
+    }
+    auto decoded = DecodePaymentAddress(address);
+    if (boost::get<libzcash::SaplingPaymentAddress>(&decoded) != nullptr) {
+        std::set<libzcash::PaymentAddress> only;
+        only.insert(decoded);
+        return pwalletMain->GetSaplingBalanceFiltered(only, minDepth, ignoreUnspendable);
+    }
     pwalletMain->GetFilteredNotes(sproutEntries, saplingEntries, address, minDepth, true, ignoreUnspendable);
     for (auto & entry : sproutEntries) {
         balance += CAmount(entry.plaintext.value());
@@ -3981,6 +4019,9 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
         contextualTx.nVersion = 2; // Tx format should support vjoinsplits
     }
 
+    // Spending (signing, or decrypting shielded keys) needs the wallet keys: fail now, not in the async operation.
+    EnsureWalletIsUnlocked();
+
     // Create operation and add to global queue
     std::shared_ptr<AsyncRPCQueue> q = getAsyncRPCQueue();
     std::shared_ptr<AsyncRPCOperation> operation( new AsyncRPCOperation_sendmany(builder, contextualTx, fromaddress, taddrRecipients, zaddrRecipients, nMinDepth, nFee, contextInfo) );
@@ -4042,6 +4083,9 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
         );
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
+
+    // Spending needs the wallet keys (signing, or decrypting shielded keys): fail now, not in the async operation.
+    EnsureWalletIsUnlocked();
 
     // Validate the from address
     auto fromaddress = params[0].get_str();
@@ -4115,8 +4159,20 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
     pwalletMain->AvailableCoins(vecOutputs, true, NULL, false, true);
 
     // Find unspent coinbase utxos and update estimated size
+    CTokenGuardReport tokenGuardReport;
     BOOST_FOREACH(const COutput& out, vecOutputs) {
         if (!out.fSpendable) {
+            continue;
+        }
+
+        // Wallet token guard: a coinbase transaction can carry an SLP message
+        // like any other, and shielding its token-bearing output burns the tokens.
+        if (out.tx->IsCoinBase() && out.tx->IsTokenGuarded(out.i)) {
+            CTxDestination tokenAddress;
+            if (ExtractDestination(out.tx->vout[out.i].scriptPubKey, tokenAddress) &&
+                (destinations.size() == 0 || destinations.count(tokenAddress))) {
+                tokenGuardReport.Exclude(out.tx->vout[out.i].nValue);
+            }
             continue;
         }
 
@@ -4159,13 +4215,13 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
     size_t numUtxos = inputs.size();
 
     if (numUtxos == 0) {
-        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any coinbase funds to shield.");
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any coinbase funds to shield." + TokenGuardExcludedNote(tokenGuardReport));
     }
 
     if (shieldedValue < nFee) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
             strprintf("Insufficient coinbase funds, have %s, which is less than miners fee %s",
-            FormatMoney(shieldedValue), FormatMoney(nFee)));
+            FormatMoney(shieldedValue), FormatMoney(nFee)) + TokenGuardExcludedNote(tokenGuardReport));
     }
 
     // Check that the user specified fee is sane (if too high, it can result in error -25 absurd fee)
@@ -4286,6 +4342,9 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
     }
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
+
+    // Spending needs the wallet keys (signing, or decrypting shielded keys): fail now, not in the async operation.
+    EnsureWalletIsUnlocked();
 
     bool useAnyUTXO = false;
     bool useAnySprout = false;
@@ -4431,6 +4490,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
         estimatedTxSize += OUTPUTDESCRIPTION_SIZE;
     }
 
+    CTokenGuardReport tokenGuardReport;
     if (useAnyUTXO || taddrs.size() > 0) {
         // Get available utxos
         vector<COutput> vecOutputs;
@@ -4450,6 +4510,13 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
             }
             // If taddr is not wildcard "*", filter utxos
             if (taddrs.size() > 0 && !taddrs.count(address)) {
+                continue;
+            }
+
+            // Wallet token guard: merging a token-bearing output into an
+            // ordinary payment burns the tokens or the mint baton it carries.
+            if (out.tx->IsTokenGuarded(out.i)) {
+                tokenGuardReport.Exclude(out.tx->vout[out.i].nValue);
                 continue;
             }
 
@@ -4516,7 +4583,10 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
                     estimatedTxSize += increase;
                     auto zaddr = entry.address;
                     SproutSpendingKey zkey;
-                    pwalletMain->GetSproutSpendingKey(zaddr, zkey);
+                    if (!pwalletMain->GetSproutSpendingKey(zaddr, zkey)) {
+                        EnsureWalletIsUnlocked();
+                        throw JSONRPCError(RPC_INVALID_PARAMETER, "Could not find spending key for payment address.");
+                    }
                     sproutNoteInputs.emplace_back(entry.jsop, entry.plaintext.note(zaddr), nValue, zkey);
                     mergedNoteValue += nValue;
                 }
@@ -4540,6 +4610,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
                     estimatedTxSize += increase;
                     libzcash::SaplingExtendedSpendingKey extsk;
                     if (!pwalletMain->GetSaplingExtendedSpendingKey(entry.address, extsk)) {
+                        EnsureWalletIsUnlocked();
                         throw JSONRPCError(RPC_INVALID_PARAMETER, "Could not find spending key for payment address.");
                     }
                     saplingNoteInputs.emplace_back(entry.op, entry.note, nValue, extsk.expsk);
@@ -4557,7 +4628,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
     size_t numNotes = sproutNoteInputs.size() + saplingNoteInputs.size();
 
     if (numUtxos == 0 && numNotes == 0) {
-        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any funds to merge.");
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any funds to merge." + TokenGuardExcludedNote(tokenGuardReport));
     }
 
     // Sanity check: Don't do anything if:
@@ -4572,7 +4643,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
     if (mergedValue < nFee) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
             strprintf("Insufficient funds, have %s, which is less than miners fee %s",
-            FormatMoney(mergedValue), FormatMoney(nFee)));
+            FormatMoney(mergedValue), FormatMoney(nFee)) + TokenGuardExcludedNote(tokenGuardReport));
     }
 
     // Check that the user specified fee is sane (if too high, it can result in error -25 absurd fee)
@@ -4684,6 +4755,10 @@ extern UniValue z_importwallet(const UniValue& params, bool fHelp);
 
 extern UniValue z_getpaymentdisclosure(const UniValue& params, bool fHelp); // in rpcdisclosure.cpp
 extern UniValue z_validatepaymentdisclosure(const UniValue &params, bool fHelp);
+extern UniValue zslp_send(const UniValue& params, bool fHelp); // in rpczslp.cpp
+extern UniValue zslp_genesis(const UniValue& params, bool fHelp);
+extern UniValue zslp_mint(const UniValue& params, bool fHelp);
+extern UniValue zslp_burn(const UniValue& params, bool fHelp);
 
 static const CRPCCommand commands[] =
 { //  category              name                        actor (function)           okSafeMode
@@ -4755,7 +4830,11 @@ static const CRPCCommand commands[] =
     { "wallet",             "z_importwallet",           &z_importwallet,           true  },
     // TODO: rearrange into another category
     { "disclosure",         "z_getpaymentdisclosure",   &z_getpaymentdisclosure,   true  },
-    { "disclosure",         "z_validatepaymentdisclosure", &z_validatepaymentdisclosure, true }
+    { "disclosure",         "z_validatepaymentdisclosure", &z_validatepaymentdisclosure, true },
+    { "zslp",               "zslp_send",                &zslp_send,                false },
+    { "zslp",               "zslp_genesis",             &zslp_genesis,             false },
+    { "zslp",               "zslp_mint",                &zslp_mint,                false },
+    { "zslp",               "zslp_burn",                &zslp_burn,                false }
 };
 
 void RegisterWalletRPCCommands(CRPCTable &tableRPC)

@@ -48,6 +48,10 @@ static const int TIMEOUT_INTERVAL = 20 * 60;
 static const unsigned int MAX_INV_SZ = 50000;
 /** The maximum number of new addresses to accumulate before announcing. */
 static const unsigned int MAX_ADDR_TO_SEND = 1000;
+/** Tor v3 addresses a peer may add to the onion store unasked: refill rate per second, burst, start. */
+static const double ONION_ADDR_TOKENS_PER_SEC = 0.1;
+static const double ONION_ADDR_TOKENS_MAX = 1000;
+static const double ONION_ADDR_TOKENS_INITIAL = 100;
 /** Maximum length of incoming protocol messages (no message over 2 MiB is currently acceptable). */
 static const unsigned int MAX_PROTOCOL_MESSAGE_LENGTH = 2 * 1024 * 1024;
 /** Maximum length of strSubVer in `version` message */
@@ -67,6 +71,9 @@ unsigned int ReceiveFloodSize();
 unsigned int SendBufferSize();
 
 void AddOneShot(const std::string& strDest);
+//! False when DNS seed host names must not be queued as one-shot connections
+//! because the node is onion-only behind the embedded Tor (see ThreadDNSAddressSeed).
+bool DnsSeedOneShotsAllowed();
 void AddressCurrentlyConnected(const CService& addr);
 CNode* FindNode(const CNetAddr& ip);
 CNode* FindNode(const CSubNet& subNet);
@@ -75,7 +82,7 @@ CNode* FindNode(const CService& ip);
 CNode* ConnectNode(CAddress addrConnect, const char *pszDest = NULL);
 bool OpenNetworkConnection(const CAddress& addrConnect, CSemaphoreGrant *grantOutbound = NULL, const char *strDest = NULL, bool fOneShot = false);
 unsigned short GetListenPort();
-bool BindListenPort(const CService &bindAddr, std::string& strError, bool fWhitelisted = false);
+bool BindListenPort(const CService &bindAddr, std::string& strError, bool fWhitelisted = false, bool fOnion = false);
 void StartNode(boost::thread_group& threadGroup, CScheduler& scheduler);
 bool StopNode();
 void SocketSendData(CNode *pnode);
@@ -124,6 +131,17 @@ enum
 
 bool IsPeerAddrLocalGood(CNode *pnode);
 void AdvertizeLocal(CNode *pnode);
+/** Queue our own Tor v3 address for an addrv2 peer that is on the onion side (see doc/tor.md).
+ *  False when there is nothing to send yet (no peer addrv2, not an onion peer, service not up). */
+bool AdvertizeLocalOnion(CNode *pnode);
+/**
+ * The loopback address ADD_ONION points the onion service at. Connections
+ * accepted there came in through the onion service (inbound onion peers);
+ * every other listener is clearnet. Unset when the service targets the main
+ * listen port (then inbound onion peers cannot be told from local ones).
+ */
+void SetOnionServiceTarget(const CService& addr);
+bool GetOnionServiceTarget(CService& addrOut);
 void SetLimited(enum Network net, bool fLimited = true);
 bool IsLimited(enum Network net);
 bool IsLimited(const CNetAddr& addr);
@@ -132,10 +150,15 @@ bool AddLocal(const CNetAddr& addr, int nScore = LOCAL_NONE);
 bool RemoveLocal(const CService& addr);
 bool SeenLocal(const CService& addr);
 bool IsLocal(const CService& addr);
-bool GetLocal(CService &addr, const CNetAddr *paddrPeer = NULL);
+/**
+ * Best local address for a peer. Privacy rule: an onion peer (fPeerOnion, or a
+ * paddrPeer that is a Tor address) is only ever offered our Tor address, and a
+ * clearnet peer is never offered it.
+ */
+bool GetLocal(CService &addr, const CNetAddr *paddrPeer = NULL, bool fPeerOnion = false);
 bool IsReachable(enum Network net);
 bool IsReachable(const CNetAddr &addr);
-CAddress GetLocalAddress(const CNetAddr *paddrPeer = NULL);
+CAddress GetLocalAddress(const CNetAddr *paddrPeer = NULL, bool fPeerOnion = false);
 
 
 extern bool fDiscover;
@@ -147,6 +170,24 @@ extern bool fListen;
 extern std::atomic<uint64_t> nLocalServices;
 extern uint64_t nLocalHostNonce;
 extern CAddrMan addrman;
+/** Tor v3 addresses learned by addrv2 gossip. Separate from addrman so peers.dat
+ *  keeps its legacy 16-byte format (a downgrade never sees these); persisted in
+ *  onion_peers.dat. */
+extern CAddrMan addrmanOnion;
+/**
+ * The table ThreadOpenConnections picks its next candidate from. The onion
+ * store only when the onion network is reachable (fOnionProxy: a Tor proxy is
+ * set for it, and it is not limited) and it holds something: always for an
+ * onion-only node (IPv4 and IPv6 limited), otherwise when the clearnet table is
+ * empty or nRand == 0 (one time in four, nRand is GetRand(4)).
+ */
+CAddrMan& SelectDialTable(bool fOnionProxy, uint32_t nRand);
+/** The next outbound address to dial from man, or an invalid one: not on a network group in
+ *  setConnected, not our own, not limited, not tried within the last minute, and a node on a
+ *  port other than the default only after enough other draws (see ThreadOpenConnections). */
+CAddress SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow);
+/** The table an address belongs to: Tor v3 in the onion store, the rest in addrman. */
+inline CAddrMan& AddrManFor(const CNetAddr& addr) { return addr.IsTorV3() ? addrmanOnion : addrman; }
 /** Maximum number of connections to simultaneously allow (aka connection slots) */
 extern int nMaxConnections;
 
@@ -287,6 +328,19 @@ public:
     //    until it has initialized its bloom filter.
     bool fRelayTxes;
     bool fSentAddr;
+    // BIP155: the peer sent "sendaddrv2" before its verack, so we may send it
+    // "addrv2" (and Tor v3 addresses). Unset for every older peer.
+    bool fSendAddrV2;
+    // Accepted on the listener that ADD_ONION targets: the peer reached us
+    // through our onion service (its address is the Tor exit side, 127.0.0.1).
+    bool fInboundOnion;
+    // our Tor address has been queued for this peer
+    bool fOnionAdvertised;
+    // The peer is on the onion side of the node: we reached it over Tor (its
+    // address is a .onion) or it reached us through the onion service.
+    bool IsOnionPeer() const { return fInboundOnion || addr.IsTor(); }
+    // The peer's verack arrived; a later "sendaddrv2" no longer counts.
+    bool fVerackRecvd;
     CSemaphoreGrant grantOutbound;
     CCriticalSection cs_filter;
     CBloomFilter* pfilter;
@@ -315,6 +369,10 @@ public:
     std::vector<CAddress> vAddrToSend;
     CRollingBloomFilter addrKnown;
     bool fGetAddr;
+    // Token bucket for the Tor v3 addresses this peer may add to the onion store
+    // without having been asked for them (see ProcessAddrList).
+    double dOnionAddrTokens;
+    int64_t nOnionAddrTokensTime;
 
     // inventory based relay
     mruset<CInv> setInventoryKnown;
@@ -425,7 +483,11 @@ public:
         // Known checking here is only to save space from duplicates.
         // SendMessages will filter it again for knowns that were added
         // after addresses were pushed.
-        if (addr.IsValid() && !addrKnown.contains(addr.GetKey())) {
+        // A v3 onion address cannot be sent in the 16-byte addr field (it
+        // would arrive as a placeholder or as "::"), so it is only queued for
+        // a peer that negotiated addrv2 (BIP155); every other peer keeps
+        // getting exactly the legacy addr stream.
+        if (addr.IsValid() && (!addr.IsTorV3() || fSendAddrV2) && !addrKnown.contains(addr.GetKey())) {
             if (vAddrToSend.size() >= MAX_ADDR_TO_SEND) {
                 vAddrToSend[insecure_rand() % vAddrToSend.size()] = addr;
             } else {
@@ -675,6 +737,25 @@ private:
     boost::filesystem::path pathAddr;
 public:
     CAddrDB();
+    bool Write(const CAddrMan& addr);
+    bool Read(CAddrMan& addr);
+};
+
+/**
+ * Persistence of the onion store (onion_peers.dat in the datadir). Its own file
+ * and format, because peers.dat entries hold 16 address bytes:
+ *   magic(4) | version(1) = 1 | count (compact size) |
+ *   count x { addr (addrv2 entry) | source (addrv2 entry) | nLastSuccess (int64) | nAttempts (int32) | tried (uint8) } |
+ *   hash256 of everything before
+ * A node older than this file never opens it.
+ */
+class COnionAddrDB
+{
+private:
+    boost::filesystem::path pathOnion;
+public:
+    COnionAddrDB();
+    bool Exists() const;
     bool Write(const CAddrMan& addr);
     bool Read(CAddrMan& addr);
 };

@@ -58,7 +58,7 @@ BOOST_FIXTURE_TEST_SUITE(rpc_wallet_tests, TestingSetup)
 
 BOOST_AUTO_TEST_CASE(rpc_addmultisig)
 {
-    LOCK(pwalletMain->cs_wallet);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
 
     rpcfn_type addmultisig = tableRPC["addmultisigaddress"]->actor;
 
@@ -309,7 +309,7 @@ BOOST_AUTO_TEST_CASE(rpc_wallet_getbalance)
 {
     SelectParams(CBaseChainParams::TESTNET);
 
-    LOCK(pwalletMain->cs_wallet);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
 
 
     BOOST_CHECK_THROW(CallRPC("z_getbalance too many args"), runtime_error);
@@ -418,11 +418,14 @@ BOOST_AUTO_TEST_CASE(rpc_wallet_z_exportwallet)
 
     // Set up paths
     boost::filesystem::path tmppath = boost::filesystem::temp_directory_path();
-    boost::filesystem::path tmpfilename = boost::filesystem::unique_path("%%%%%%%%");
+    boost::filesystem::path tmpfilename = UniquePath("%%%%%%%%");
     boost::filesystem::path exportfilepath = tmppath / tmpfilename;
 
-    // export will fail since exportdir is not set
-    BOOST_CHECK_THROW(CallRPC(string("z_exportwallet ") + tmpfilename.string()), runtime_error);
+    // without -exportdir the export no longer fails: it goes to <datadir>/backups
+    mapArgs.erase("-exportdir");
+    BOOST_CHECK_NO_THROW(CallRPC(string("z_exportwallet ") + tmpfilename.string()));
+    BOOST_CHECK(boost::filesystem::exists(GetDataDir() / "backups" / tmpfilename));
+    BOOST_CHECK(!boost::filesystem::exists(exportfilepath));
 
     // set exportdir
     mapArgs["-exportdir"] = tmppath.string();
@@ -504,7 +507,7 @@ BOOST_AUTO_TEST_CASE(rpc_wallet_z_importwallet)
 
     // write test data to file
     boost::filesystem::path temp = boost::filesystem::temp_directory_path() /
-            boost::filesystem::unique_path();
+            UniquePath();
     const std::string path = temp.string();
     std::ofstream file(path);
     file << testWalletDump;
@@ -909,7 +912,7 @@ BOOST_AUTO_TEST_CASE(rpc_z_sendmany_parameters)
 {
     SelectParams(CBaseChainParams::TESTNET);
 
-    LOCK(pwalletMain->cs_wallet);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
 
     BOOST_CHECK_THROW(CallRPC("z_sendmany"), runtime_error);
     BOOST_CHECK_THROW(CallRPC("z_sendmany toofewargs"), runtime_error);
@@ -1022,7 +1025,7 @@ BOOST_AUTO_TEST_CASE(rpc_z_sendmany_internals)
 {
     SelectParams(CBaseChainParams::TESTNET);
 
-    LOCK(pwalletMain->cs_wallet);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
 
     UniValue retValue;
 
@@ -1258,7 +1261,7 @@ BOOST_AUTO_TEST_CASE(rpc_z_sendmany_taddr_to_sapling)
 {
     RegtestActivateSapling();
 
-    LOCK(pwalletMain->cs_wallet);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
 
     if (!pwalletMain->HaveHDSeed()) {
         pwalletMain->GenerateNewSeed();
@@ -1478,7 +1481,7 @@ BOOST_AUTO_TEST_CASE(rpc_z_listunspent_parameters)
 {
     SelectParams(CBaseChainParams::TESTNET);
 
-    LOCK(pwalletMain->cs_wallet);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
 
     UniValue retValue;
 
@@ -1527,7 +1530,7 @@ BOOST_AUTO_TEST_CASE(rpc_z_shieldcoinbase_parameters)
 {
     SelectParams(CBaseChainParams::TESTNET);
 
-    LOCK(pwalletMain->cs_wallet);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
 
     BOOST_CHECK_THROW(CallRPC("z_shieldcoinbase"), runtime_error);
     BOOST_CHECK_THROW(CallRPC("z_shieldcoinbase toofewargs"), runtime_error);
@@ -1606,7 +1609,7 @@ BOOST_AUTO_TEST_CASE(rpc_z_shieldcoinbase_internals)
 {
     SelectParams(CBaseChainParams::TESTNET);
 
-    LOCK(pwalletMain->cs_wallet);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
 
     // Mutable tx containing contextual information we need to build tx
     UniValue retValue = CallRPC("getblockcount");
@@ -1689,7 +1692,7 @@ BOOST_AUTO_TEST_CASE(rpc_z_mergetoaddress_parameters)
 {
     SelectParams(CBaseChainParams::TESTNET);
 
-    LOCK(pwalletMain->cs_wallet);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
 
     CheckRPCThrows("z_mergetoaddress 1 2",
         "Error: z_mergetoaddress is disabled. Run './zclassic-cli help z_mergetoaddress' for instructions on how to enable this feature.");
@@ -1847,7 +1850,7 @@ BOOST_AUTO_TEST_CASE(rpc_z_mergetoaddress_internals)
 {
     SelectParams(CBaseChainParams::TESTNET);
 
-    LOCK(pwalletMain->cs_wallet);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
 
     // Mutable tx containing contextual information we need to build tx
     UniValue retValue = CallRPC("getblockcount");
@@ -2024,5 +2027,125 @@ BOOST_AUTO_TEST_CASE(rpc_z_mergetoaddress_internals)
     }
 }
 
+
+/*
+ * Which file names the wallet export/backup RPCs accept: letters, digits, '.', '-'
+ * and '_' (so "wallet-backup.dat" works), never a path separator, "." / "..", a
+ * hidden file or a Windows device name.
+ */
+BOOST_AUTO_TEST_CASE(export_filename_rules)
+{
+    BOOST_CHECK(IsValidExportFilename("wallet-backup.dat"));
+    BOOST_CHECK(IsValidExportFilename("backup_2026-11-17.txt"));
+    BOOST_CHECK(IsValidExportFilename("a"));
+    BOOST_CHECK(IsValidExportFilename("_x"));
+    BOOST_CHECK(IsValidExportFilename("walletBACKUP9"));
+    BOOST_CHECK(IsValidExportFilename(std::string(MAX_EXPORT_FILENAME_LENGTH, 'a')));
+    BOOST_CHECK(IsValidExportFilename("console.txt")); // only the exact device stems are reserved
+
+    BOOST_CHECK(!IsValidExportFilename(""));
+    BOOST_CHECK(!IsValidExportFilename("."));
+    BOOST_CHECK(!IsValidExportFilename(".."));
+    BOOST_CHECK(!IsValidExportFilename(".hidden"));
+    BOOST_CHECK(!IsValidExportFilename("-rf"));
+    BOOST_CHECK(!IsValidExportFilename("../x"));
+    BOOST_CHECK(!IsValidExportFilename("a/b"));
+    BOOST_CHECK(!IsValidExportFilename("a\\b"));
+    BOOST_CHECK(!IsValidExportFilename("/etc/passwd"));
+    BOOST_CHECK(!IsValidExportFilename("C:x"));
+    BOOST_CHECK(!IsValidExportFilename("x y"));
+    BOOST_CHECK(!IsValidExportFilename("wallet!"));
+    BOOST_CHECK(!IsValidExportFilename("a\xc3\xa9"));
+    BOOST_CHECK(!IsValidExportFilename(std::string("a\0b", 3)));
+    BOOST_CHECK(!IsValidExportFilename(std::string(MAX_EXPORT_FILENAME_LENGTH + 1, 'a')));
+    BOOST_CHECK(!IsValidExportFilename("CON"));
+    BOOST_CHECK(!IsValidExportFilename("nul.txt"));
+    BOOST_CHECK(!IsValidExportFilename("Com1.dat"));
+    BOOST_CHECK(!IsValidExportFilename("lpt9"));
+
+    BOOST_CHECK_EQUAL(SanitizeExportFilename("wallet backup/../x.dat"), "walletbackup..x.dat");
+    BOOST_CHECK_EQUAL(SanitizeExportFilename("..hidden"), "hidden");
+    BOOST_CHECK_EQUAL(SanitizeExportFilename("---a-b"), "a-b");
+    BOOST_CHECK_EQUAL(SanitizeExportFilename("nul"), "_nul");
+    BOOST_CHECK(IsValidExportFilename(SanitizeExportFilename("nul")));
+    BOOST_CHECK_EQUAL(SanitizeExportFilename("///"), "");
+    BOOST_CHECK(ExportFilenameErrorText("a/b").find("Try 'ab' instead") != std::string::npos);
+    BOOST_CHECK(ExportFilenameErrorText("///").find("Try") == std::string::npos);
+}
+
+/*
+ * backupwallet / dumpwallet / z_exportwallet default to <datadir>/backups when
+ * -exportdir is not set, accept '.', '-' and '_' in the name, and still refuse
+ * anything that could leave the export directory.
+ */
+BOOST_AUTO_TEST_CASE(rpc_wallet_export_default_directory)
+{
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    namespace fs = boost::filesystem;
+
+    const bool hadExportDir = mapArgs.count("-exportdir") != 0;
+    const std::string oldExportDir = hadExportDir ? mapArgs["-exportdir"] : std::string();
+    mapArgs.erase("-exportdir");
+    const fs::path backups = GetDataDir() / "backups";
+    fs::remove_all(backups);
+    BOOST_CHECK(GetExportDir() == backups);
+    BOOST_CHECK(fs::is_directory(backups)); // created on first use
+
+    // dumpwallet: new name rules, default directory, still no overwrite
+    BOOST_CHECK_NO_THROW(CallRPC("dumpwallet wallet-dump_1.txt"));
+    BOOST_CHECK(fs::exists(backups / "wallet-dump_1.txt"));
+    BOOST_CHECK_THROW(CallRPC("dumpwallet wallet-dump_1.txt"), runtime_error);
+    BOOST_CHECK_NO_THROW(CallRPC("z_exportwallet wallet-z_export.txt"));
+    BOOST_CHECK(fs::exists(backups / "wallet-z_export.txt"));
+
+    // nothing that can escape the export directory (or hides) is accepted
+    const char* bad[] = {"../escape.txt", "sub/dir.txt", ".hidden", "..", "a b"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+        BOOST_CHECK_THROW(CallRPC(std::string("dumpwallet ") + bad[i]), runtime_error);
+        BOOST_CHECK_THROW(CallRPC(std::string("backupwallet ") + bad[i]), runtime_error);
+    }
+    BOOST_CHECK(!fs::exists(GetDataDir() / "escape.txt"));
+    BOOST_CHECK(!fs::exists(GetDataDir() / "dir.txt"));
+    try {
+        CallRPC("dumpwallet ../escape.txt");
+        BOOST_ERROR("expected a rejected file name");
+    } catch (const runtime_error& e) {
+        BOOST_CHECK(std::string(e.what()).find("Try 'escape.txt' instead") != std::string::npos);
+    }
+
+    // backupwallet: this fixture's wallet lives in a mock Berkeley DB environment with no
+    // wallet.dat on disk to copy, so the copy itself reports a backup failure here (the
+    // real copy is covered by qa/rpc-tests/backupwallet_default_dir.sh against a daemon).
+    // What this test pins down is that the name '.' '-' '_' is ACCEPTED, the export
+    // directory is the default one, and a rejected name is reported as such.
+    std::string backupError;
+    try {
+        CallRPC("backupwallet wallet-backup.dat");
+    } catch (const runtime_error& e) {
+        backupError = e.what();
+    }
+    BOOST_CHECK_MESSAGE(backupError.find("Filename is invalid") == std::string::npos, backupError);
+    BOOST_CHECK_MESSAGE(backupError.empty() || backupError.find("Wallet backup failed") != std::string::npos, backupError);
+    try {
+        CallRPC("backupwallet bad/name");
+        BOOST_ERROR("expected the name to be rejected");
+    } catch (const runtime_error& e) {
+        BOOST_CHECK(std::string(e.what()).find("Filename is invalid") != std::string::npos);
+    }
+
+    // an explicit -exportdir still wins (the directory is created on use)
+    const fs::path other = GetDataDir() / "elsewhere";
+    mapArgs["-exportdir"] = other.string();
+    BOOST_CHECK(GetExportDir() == other);
+    BOOST_CHECK(fs::is_directory(other));
+    BOOST_CHECK_NO_THROW(CallRPC("dumpwallet wallet-dump_2.txt"));
+    BOOST_CHECK(fs::exists(other / "wallet-dump_2.txt"));
+    BOOST_CHECK(!fs::exists(backups / "wallet-dump_2.txt"));
+
+    if (hadExportDir)
+        mapArgs["-exportdir"] = oldExportDir;
+    else
+        mapArgs.erase("-exportdir");
+}
 
 BOOST_AUTO_TEST_SUITE_END()

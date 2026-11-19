@@ -29,17 +29,12 @@
 #include "zcash/IncrementalMerkleTree.hpp"
 #include "zcash/util.h"
 
-#include <libsnark/common/default_types/r1cs_ppzksnark_pp.hpp>
-#include <libsnark/zk_proof_systems/ppzksnark/r1cs_ppzksnark/r1cs_ppzksnark.hpp>
-#include <libsnark/gadgetlib1/gadgets/hashes/sha256/sha256_gadget.hpp>
-#include <libsnark/gadgetlib1/gadgets/merkle_tree/merkle_tree_check_read_gadget.hpp>
 
 #include <boost/foreach.hpp>
 
 #include "json_test_vectors.h"
 
 using namespace std;
-using namespace libsnark;
 
 template<typename Tree>
 void CheckCachedRoots() {
@@ -113,8 +108,7 @@ void test_tree(
     UniValue root_tests,
     UniValue ser_tests,
     UniValue witness_ser_tests,
-    UniValue path_tests,
-    bool libsnark_test
+    UniValue path_tests
 )
 {
     size_t witness_ser_i = 0;
@@ -171,54 +165,6 @@ void test_tree(
                 auto path = wit.path();
                 expect_test_vector(path_tests[path_i++], path);
 
-                if (libsnark_test) {
-                    typedef Fr<default_r1cs_ppzksnark_pp> FieldT;
-
-                    protoboard<FieldT> pb;
-                    pb_variable_array<FieldT> positions;
-                    digest_variable<FieldT> commitment(pb, 256, "commitment");
-                    digest_variable<FieldT> root(pb, 256, "root");
-                    positions.allocate(pb, INCREMENTAL_MERKLE_TREE_DEPTH_TESTING, "pos");
-                    merkle_authentication_path_variable<FieldT, sha256_two_to_one_hash_gadget<FieldT>> authvars(pb, INCREMENTAL_MERKLE_TREE_DEPTH_TESTING, "auth");
-                    merkle_tree_check_read_gadget<FieldT, sha256_two_to_one_hash_gadget<FieldT>> auth(
-                        pb, INCREMENTAL_MERKLE_TREE_DEPTH_TESTING, positions, commitment, root, authvars, ONE, "path"
-                    );
-                    commitment.generate_r1cs_constraints();
-                    root.generate_r1cs_constraints();
-                    authvars.generate_r1cs_constraints();
-                    auth.generate_r1cs_constraints();
-
-                    std::vector<bool> commitment_bv;
-                    {
-                        uint256 witnessed_commitment = wit.element();
-                        std::vector<unsigned char> commitment_v(witnessed_commitment.begin(), witnessed_commitment.end());
-                        commitment_bv = convertBytesVectorToVector(commitment_v);
-                    }
-
-                    size_t path_index = convertVectorToInt(path.index);
-
-                    commitment.bits.fill_with_bits(pb, bit_vector(commitment_bv));
-                    positions.fill_with_bits_of_uint64(pb, path_index);
-
-                    authvars.generate_r1cs_witness(path_index, path.authentication_path);
-                    auth.generate_r1cs_witness();
-
-                    std::vector<bool> root_bv;
-                    {
-                        uint256 witroot = wit.root();
-                        std::vector<unsigned char> root_v(witroot.begin(), witroot.end());
-                        root_bv = convertBytesVectorToVector(root_v);
-                    }
-
-                    root.bits.fill_with_bits(pb, bit_vector(root_bv));
-
-                    ASSERT_TRUE(pb.is_satisfied());
-
-                    root_bv[0] = !root_bv[0];
-                    root.bits.fill_with_bits(pb, bit_vector(root_bv));
-
-                    ASSERT_TRUE(!pb.is_satisfied());
-                }
             }
 
             // Check witness serialization
@@ -255,8 +201,7 @@ TEST(merkletree, vectors) {
         root_tests,
         ser_tests,
         witness_ser_tests,
-        path_tests,
-        true
+        path_tests
     );
 }
 
@@ -272,8 +217,7 @@ TEST(merkletree, SaplingVectors) {
         root_tests,
         ser_tests,
         witness_ser_tests,
-        path_tests,
-        false
+        path_tests
     );
 }
 
@@ -395,5 +339,78 @@ TEST(merkletree, testZeroElements) {
         }
 
         ASSERT_TRUE(newTree.root() == oldroot);
+    }
+}
+
+namespace {
+template<typename T>
+std::string SerializedBytes(const T& obj) {
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << obj;
+    return std::string(ss.begin(), ss.end());
+}
+
+// Deterministic 32-byte values with the top byte clear.
+uint256 MemoTestLeaf(uint64_t n) {
+    uint256 h;
+    for (int k = 0; k < 31; k++) {
+        n = n * 6364136223846793005ULL + 1442695040888963407ULL;
+        *(h.begin() + k) = (unsigned char)(n >> 56);
+    }
+    return h;
+}
+} // namespace
+
+// PedersenHashMemo must not change any hash, witness or root: the same
+// appends are made with no memo, under one memo, and under nested memos.
+TEST(merkletree, PedersenHashMemoParity) {
+    using libzcash::PedersenHash;
+    using libzcash::PedersenHashMemo;
+
+    for (uint64_t i = 0; i < 40; i++) {
+        PedersenHash a(MemoTestLeaf(2 * i)), b(MemoTestLeaf(2 * i + 1));
+        size_t depth = i % 32;
+        PedersenHash plain = PedersenHash::combine(a, b, depth);
+        PedersenHashMemo memo;
+        EXPECT_EQ(plain, PedersenHash::combine(a, b, depth));
+        EXPECT_EQ(plain, PedersenHash::combine(a, b, depth));
+        // Argument order and depth are part of the key.
+        EXPECT_EQ(PedersenHash::combine(b, a, depth), PedersenHash::combine(b, a, depth));
+        EXPECT_NE(plain, PedersenHash::combine(b, a, depth));
+        EXPECT_NE(plain, PedersenHash::combine(a, b, (depth + 1) % 32));
+        {
+            PedersenHashMemo inner;
+            EXPECT_EQ(plain, PedersenHash::combine(a, b, depth));
+        }
+        EXPECT_EQ(plain, PedersenHash::combine(a, b, depth));
+    }
+
+    // Witnesses taken at different positions, then extended by the same
+    // commitments, as the wallet does for every note on each block.
+    SaplingMerkleTree treePlain, treeMemo;
+    std::vector<SaplingWitness> plain, memoized;
+    for (uint64_t i = 0; i < 300; i++) {
+        uint256 cm = MemoTestLeaf(1000 + i);
+        treePlain.append(cm);
+        for (SaplingWitness& w : plain) w.append(cm);
+        {
+            PedersenHashMemo memo;
+            treeMemo.append(cm);
+            for (SaplingWitness& w : memoized) w.append(cm);
+        }
+        if (i % 7 == 0 || i == 64 || i == 127) {
+            plain.push_back(treePlain.witness());
+            memoized.push_back(treeMemo.witness());
+        }
+        if (i % 50 == 49) {
+            ASSERT_EQ(SerializedBytes(treePlain), SerializedBytes(treeMemo));
+            ASSERT_EQ(plain.size(), memoized.size());
+            for (size_t k = 0; k < plain.size(); k++) {
+                ASSERT_EQ(SerializedBytes(plain[k]), SerializedBytes(memoized[k])) << "witness " << k << " after " << i;
+                PedersenHashMemo memo;
+                ASSERT_EQ(plain[k].root(), memoized[k].root());
+                ASSERT_EQ(treePlain.root(), memoized[k].root());
+            }
+        }
     }
 }

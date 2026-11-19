@@ -12,6 +12,12 @@
 #include <boost/variant.hpp>
 #include <librustzcash.h>
 
+#include <algorithm>
+#include <atomic>
+#include <system_error>
+#include <thread>
+#include <vector>
+
 SpendDescriptionInfo::SpendDescriptionInfo(
     libzcash::SaplingExpandedSpendingKey expsk,
     libzcash::SaplingNote note,
@@ -57,7 +63,7 @@ TransactionBuilder::TransactionBuilder(
 void TransactionBuilder::SetExpiryHeight(uint32_t nExpiryHeight)
 {
     if (nExpiryHeight < nHeight || nExpiryHeight <= 0 || nExpiryHeight >= TX_EXPIRY_HEIGHT_THRESHOLD) {
-        throw new std::runtime_error("TransactionBuilder::SetExpiryHeight: invalid expiry height");
+        throw std::runtime_error("TransactionBuilder::SetExpiryHeight: invalid expiry height");
     }
     mtx.nExpiryHeight = nExpiryHeight;
 }
@@ -140,6 +146,195 @@ void TransactionBuilder::SendChangeTo(CTxDestination& changeAddr)
     zChangeAddr = boost::none;
 }
 
+// Measured peak RSS of the daemon over z_sendmany of 20 notes at -proverthreads
+// 2, 4, 8 and 16 (1, 2, 4 and 8 proofs in flight, regtest, x86-64 Linux, the
+// vendored Z23 with exact-size constraint storage and keys parsed once): 202,
+// 266, 381 and 612 MB, so each further proof in flight costs 58 to 63 MB (the
+// same sweep before the re-vendor: 266, 391, 631 and 1110 MB, 120 MB each).
+// The parsed proving keys a whole send shares are 72 MB (spend) + 5 MB (output),
+// plus slack. The raw parameter files the process holds are not counted: they
+// are there idle too. The ceiling keeps a default send near 400 MB for the whole
+// daemon. See doc/perf/prover-memory.md.
+static const uint64_t kProverSharedBytes = UINT64_C(90) << 20;
+static const uint64_t kProverWorkerBytes = UINT64_C(60) << 20;
+static const uint64_t kProverCeilingBytes = UINT64_C(340) << 20;
+
+static std::atomic<size_t> g_proverWorkerCap(0);
+
+size_t ProverWorkerLimit(uint64_t physicalBytes)
+{
+    // The rest of the machine is the node, the wallet and whatever else the
+    // person is running.
+    uint64_t allowance = kProverCeilingBytes;
+    if (physicalBytes != 0 && physicalBytes / 8 < allowance) {
+        allowance = physicalBytes / 8;
+    }
+    const uint64_t workers = allowance > kProverSharedBytes ? (allowance - kProverSharedBytes) / kProverWorkerBytes : 0;
+    return workers > 0 ? static_cast<size_t>(workers) : 1;
+}
+
+void SetProverWorkerCap(size_t workers)
+{
+    g_proverWorkerCap.store(workers);
+}
+
+namespace {
+
+// A proof job is not yet made, made, or failed. A worker that stops early after
+// another proof failed leaves its jobs kNotProved, so the reported failure is
+// always one that really happened.
+enum { kNotProved = 0, kProved = 1, kProofFailed = 2 };
+
+struct SpendProofJob {
+    const SpendDescriptionInfo* info = nullptr;
+    std::vector<unsigned char> witness;
+    SpendDescription sdesc;
+    int state = kNotProved;
+};
+
+struct OutputProofJob {
+    const OutputDescriptionInfo* info = nullptr;
+    boost::optional<libzcash::SaplingNotePlaintextEncryptionResult> enc;
+    OutputDescription odesc;
+    int state = kNotProved;
+};
+
+bool ProveSpend(void* ctx, SpendProofJob& job)
+{
+    const SpendDescriptionInfo& spend = *job.info;
+    return librustzcash_sapling_spend_proof(
+        ctx,
+        spend.expsk.full_viewing_key().ak.begin(),
+        spend.expsk.nsk.begin(),
+        spend.note.d.data(),
+        spend.note.r.begin(),
+        spend.alpha.begin(),
+        spend.note.value(),
+        spend.anchor.begin(),
+        job.witness.data(),
+        job.sdesc.cv.begin(),
+        job.sdesc.rk.begin(),
+        job.sdesc.zkproof.data());
+}
+
+bool ProveOutput(void* ctx, OutputProofJob& job)
+{
+    const OutputDescriptionInfo& output = *job.info;
+    auto& encryptor = job.enc.get().second;
+    return librustzcash_sapling_output_proof(
+        ctx,
+        encryptor.get_esk().begin(),
+        output.note.d.data(),
+        output.note.pk_d.begin(),
+        output.note.r.begin(),
+        output.note.value(),
+        job.odesc.cv.begin(),
+        job.odesc.zkproof.begin());
+}
+
+/**
+ * Makes every spend and output proof, setting each job's `ok`, and folds the
+ * value-commitment accumulators of all of them into `ctx`.
+ *
+ * The proofs run on a few workers at once. The prover thread budget is divided
+ * among the workers for the duration, so the total thread count stays what
+ * -proverthreads asked for. Measured on 8 threads: one proof alone scales to
+ * only about 4.5x (its circuit synthesis is single threaded), and the best
+ * split is about two threads per proof (budget / 2 workers), whether the
+ * transaction has 20 spends or 50 outputs. The spend proof (about 7 outputs
+ * long) is the critical path, so one spend with a couple of outputs stays on
+ * this thread with the whole budget, and a lone spend with many outputs gets
+ * one worker for the spend and one for the outputs. A budget below four, or a
+ * transaction with nothing to overlap, is made on this thread on `ctx` itself.
+ * The workers are also capped (SetProverWorkerCap) so the memory of the proofs
+ * in flight stays bounded; the budget is then shared among fewer of them, each
+ * on more threads.
+ */
+size_t ProofWorkers(size_t nSpends, size_t nOutputs, size_t budget)
+{
+    size_t want = nSpends > 0 ? nSpends + (nOutputs > 3 ? 1 : 0) : nOutputs;
+    size_t workers = std::min(want, budget / 2);
+    const size_t cap = g_proverWorkerCap.load();
+    return cap != 0 ? std::min(workers, cap) : workers;
+}
+
+void ProveSaplingDescriptions(void* ctx, std::vector<SpendProofJob>& spendJobs, std::vector<OutputProofJob>& outputJobs)
+{
+    const size_t nSpends = spendJobs.size();
+    const size_t nTasks = nSpends + outputJobs.size();
+    const size_t nWorkers = ProofWorkers(nSpends, outputJobs.size(), zcl_c23_prover_budget());
+
+    auto runTask = [&](void* wctx, size_t t) {
+        if (t < nSpends) {
+            spendJobs[t].state = ProveSpend(wctx, spendJobs[t]) ? kProved : kProofFailed;
+        } else {
+            OutputProofJob& job = outputJobs[t - nSpends];
+            job.state = ProveOutput(wctx, job) ? kProved : kProofFailed;
+        }
+    };
+
+    if (nWorkers <= 1) {
+        for (size_t t = 0; t < nTasks; t++) {
+            runTask(ctx, t);
+            if ((t < nSpends ? spendJobs[t].state : outputJobs[t - nSpends].state) != kProved) {
+                break; // the first failure ends the build, as it always has
+            }
+        }
+        return;
+    }
+
+    struct BudgetSplit {
+        explicit BudgetSplit(unsigned workers) { zcl_c23_prover_budget_enter(workers); }
+        ~BudgetSplit() { zcl_c23_prover_budget_leave(); }
+    } split(nWorkers);
+
+    std::atomic<size_t> next(0);
+    std::atomic<bool> failed(false);
+    std::vector<void*> workerCtx(nWorkers, nullptr);
+    auto worker = [&](size_t w) {
+        try {
+            workerCtx[w] = librustzcash_sapling_proving_ctx_init();
+            for (;;) {
+                size_t t = next.fetch_add(1);
+                if (t >= nTasks || failed.load()) {
+                    break;
+                }
+                runTask(workerCtx[w], t);
+                bool ok = (t < nSpends ? spendJobs[t].state : outputJobs[t - nSpends].state) == kProved;
+                if (!ok) {
+                    failed.store(true);
+                }
+            }
+        } catch (...) {
+            failed.store(true);
+        }
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve(nWorkers - 1);
+    for (size_t w = 1; w < nWorkers; w++) {
+        try {
+            threads.emplace_back(worker, w);
+        } catch (const std::system_error&) {
+            // Could not start a thread: the others take its share.
+            workerCtx[w] = nullptr;
+        }
+    }
+    worker(0);
+    for (std::thread& th : threads) {
+        th.join();
+    }
+
+    for (void* wctx : workerCtx) {
+        if (wctx) {
+            zcl_c23_sapling_proving_ctx_merge(ctx, wctx);
+            librustzcash_sapling_proving_ctx_free(wctx);
+        }
+    }
+}
+
+} // namespace
+
 TransactionBuilderResult TransactionBuilder::Build()
 {
     //
@@ -179,55 +374,40 @@ TransactionBuilderResult TransactionBuilder::Build()
             return TransactionBuilderResult("Could not determine change address");
         }
     }
-
     //
     // Sapling spends and outputs
     //
+    // Everything that needs no proof is prepared here, in order, on this
+    // thread. The Groth16 proofs are the cost (about 0.6 s per spend and 0.09 s
+    // per output) and are independent of each other, so they are made by a few
+    // workers at once, each on its own proving context that is merged into the
+    // transaction's context afterwards. The descriptions are appended in the
+    // original order.
+    //
 
-    auto ctx = librustzcash_sapling_proving_ctx_init();
-
-    // Create Sapling SpendDescriptions
-    for (auto spend : spends) {
+    std::vector<SpendProofJob> spendJobs(spends.size());
+    for (size_t i = 0; i < spends.size(); i++) {
+        const SpendDescriptionInfo& spend = spends[i];
         auto cm = spend.note.cm();
         auto nf = spend.note.nullifier(
             spend.expsk.full_viewing_key(), spend.witness.position());
         if (!cm || !nf) {
-            librustzcash_sapling_proving_ctx_free(ctx);
             return TransactionBuilderResult("Spend is invalid");
         }
 
         CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
         ss << spend.witness.path();
-        std::vector<unsigned char> witness(ss.begin(), ss.end());
-
-        SpendDescription sdesc;
-        if (!librustzcash_sapling_spend_proof(
-                ctx,
-                spend.expsk.full_viewing_key().ak.begin(),
-                spend.expsk.nsk.begin(),
-                spend.note.d.data(),
-                spend.note.r.begin(),
-                spend.alpha.begin(),
-                spend.note.value(),
-                spend.anchor.begin(),
-                witness.data(),
-                sdesc.cv.begin(),
-                sdesc.rk.begin(),
-                sdesc.zkproof.data())) {
-            librustzcash_sapling_proving_ctx_free(ctx);
-            return TransactionBuilderResult("Spend proof failed");
-        }
-
-        sdesc.anchor = spend.anchor;
-        sdesc.nullifier = *nf;
-        mtx.vShieldedSpend.push_back(sdesc);
+        spendJobs[i].info = &spend;
+        spendJobs[i].witness.assign(ss.begin(), ss.end());
+        spendJobs[i].sdesc.anchor = spend.anchor;
+        spendJobs[i].sdesc.nullifier = *nf;
     }
 
-    // Create Sapling OutputDescriptions
-    for (auto output : outputs) {
+    std::vector<OutputProofJob> outputJobs(outputs.size());
+    for (size_t i = 0; i < outputs.size(); i++) {
+        const OutputDescriptionInfo& output = outputs[i];
         auto cm = output.note.cm();
         if (!cm) {
-            librustzcash_sapling_proving_ctx_free(ctx);
             return TransactionBuilderResult("Output is invalid");
         }
 
@@ -235,27 +415,51 @@ TransactionBuilderResult TransactionBuilder::Build()
 
         auto res = notePlaintext.encrypt(output.note.pk_d);
         if (!res) {
-            librustzcash_sapling_proving_ctx_free(ctx);
             return TransactionBuilderResult("Failed to encrypt note");
         }
-        auto enc = res.get();
-        auto encryptor = enc.second;
+        outputJobs[i].info = &output;
+        outputJobs[i].enc = res;
+        outputJobs[i].odesc.cm = *cm;
+    }
 
-        OutputDescription odesc;
-        if (!librustzcash_sapling_output_proof(
-                ctx,
-                encryptor.get_esk().begin(),
-                output.note.d.data(),
-                output.note.pk_d.begin(),
-                output.note.r.begin(),
-                output.note.value(),
-                odesc.cv.begin(),
-                odesc.zkproof.begin())) {
+    auto ctx = librustzcash_sapling_proving_ctx_init();
+    ProveSaplingDescriptions(ctx, spendJobs, outputJobs);
+    for (const SpendProofJob& job : spendJobs) {
+        if (job.state == kProofFailed) {
+            librustzcash_sapling_proving_ctx_free(ctx);
+            return TransactionBuilderResult("Spend proof failed");
+        }
+    }
+    for (const OutputProofJob& job : outputJobs) {
+        if (job.state == kProofFailed) {
             librustzcash_sapling_proving_ctx_free(ctx);
             return TransactionBuilderResult("Output proof failed");
         }
+    }
+    // A job still unproved here means a worker died before reaching it; never
+    // build a transaction around a default-constructed description.
+    for (const SpendProofJob& job : spendJobs) {
+        if (job.state != kProved) {
+            librustzcash_sapling_proving_ctx_free(ctx);
+            return TransactionBuilderResult("Spend proof failed");
+        }
+    }
+    for (const OutputProofJob& job : outputJobs) {
+        if (job.state != kProved) {
+            librustzcash_sapling_proving_ctx_free(ctx);
+            return TransactionBuilderResult("Output proof failed");
+        }
+    }
 
-        odesc.cm = *cm;
+    for (const SpendProofJob& job : spendJobs) {
+        mtx.vShieldedSpend.push_back(job.sdesc);
+    }
+    for (OutputProofJob& job : outputJobs) {
+        const OutputDescriptionInfo& output = *job.info;
+        OutputDescription& odesc = job.odesc;
+        auto enc = job.enc.get();
+        auto encryptor = enc.second;
+
         odesc.ephemeralKey = encryptor.get_epk();
         odesc.encCiphertext = enc.first;
 

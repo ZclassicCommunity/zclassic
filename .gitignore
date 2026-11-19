@@ -83,7 +83,6 @@ Makefile
 
 # Unit-tests
 Makefile.test
-src/test/buildenv.py
 
 # Resources cpp
 qrc_*.cpp
@@ -105,10 +104,6 @@ coverage_percent.txt
 linux-coverage-build
 linux-build
 win32-build
-qa/pull-tester/run-bitcoind-for-test.sh
-qa/pull-tester/tests-config.sh
-qa/pull-tester/cache/*
-qa/pull-tester/test.*/*
 
 !src/leveldb*/Makefile
 
@@ -116,5 +111,6 @@ qa/pull-tester/test.*/*
 
 libzcashconsensus.pc
 
-contrib/debian/files
-contrib/debian/substvars
+
+# C23 crypto core build stamp
+src/c23-symbols.stamp

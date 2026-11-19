@@ -28,6 +28,26 @@ bodies so tests can assert the `z_sendmany` change-routing payload.
 2. **E2E without synthetic input (L2):** use inputs the bundle already accepts — a `zclassic:<addr>?amount=…` arg pre-fills the Send tab (`main.cpp:296`); pre-seed QSettings one-shots so first-run dialogs fire on the connect path. Dismiss via the existing `wmclose` (WM_DELETE), detect via `xwininfo`.
 3. **Last resort (L2):** a ~40-line test-only `wmclick`/`wmtype` built from `wmclose.c` using **XTEST** (`XTestFakeButtonEvent`) — *not* plain `XSendEvent`, which Qt ignores. Never linked into the wallet. Only for the 2-3 Receive-radio E2E cases TIER-2 can't reach.
 
+## Isolated profile (testing and portable use)
+Set `ZCLWALLET_PROFILE_DIR=<existing dir>` (or pass `--profile-dir <dir>`) and the wallet keeps
+**all** of its state under that directory and never reads or writes the user's real wallet
+profile: QSettings (IniFormat in `<dir>/settings`, not the registry/plist), the wallet log and
+`*.dat` stores (`<dir>/appdata`), the extracted-daemon cache (`<dir>/cache`), the notify socket
+(`<dir>/run`), default save-dialog folder (`<dir>/exports`), and `zclassic.conf` plus the node
+datadir (`<dir>/ZClassic`, passed to the embedded daemon as `-datadir=`). The window title shows
+`[profile: <dir>]` while it is active. Only the 0.8 GB zk-SNARK params keep their default
+location (read-only); `ZCLWALLET_PARAMS_DIR` moves the wallet's own params check (the daemon
+has no params-dir option). A set-but-missing directory is a fatal error, never a silent fallback.
+All of this is one header, `src/profilepaths.h`; new code must resolve state locations through it.
+Pre-write `<dir>/ZClassic/zclassic.conf` (e.g. `regtest=1`, `server=1`, `listen=0`, `bootstrap=0`)
+to run a throwaway regtest wallet.
+
+## Abnormal exit
+Window close, File->Exit and SIGINT/SIGTERM (POSIX) all run the orderly `stop` of the embedded
+daemon. On Windows the daemon is also bound to a kill-on-close job object
+(`src/daemonjob.h`) as a last-resort backstop for a wallet that dies without cleanup; it is
+disarmed as soon as an orderly `stop` has been sent so it can never cut a shutdown short.
+
 ## Prioritized build plan
 0. **Phase 0 (S) — 3 mechanical, behavior-preserving seams** (unblocks exhaustive L0): (A) delete the unused `#include "mainwindow.h"` at `settings.cpp:1`; (B) extract `isPublicTx()` + the change-to-shielded decision into header-only `src/txclassify.h` and swap the call sites in `sendtab.cpp`; (C) extract the backup-nag gate into a free `bool shouldPromptBackup(alreadyShownSession, isSyncing, balTotal, alreadyBackedUp)` called at `rpc.cpp:1124`.
 1. **Phase 1 (M) — L0 `tst_logic`** with 4 shims (sodium-free `precompiled.h`; full `ToFields`/`Tx`; full 8-field `TransactionItem`; `AddressBook` stub). Covers ~18 checklist items, zero flakiness.

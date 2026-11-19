@@ -46,7 +46,7 @@ reports transfer progress between whole percentages. The existing compiled
 checkpoint at block 3,126,937 avoids replaying earlier blocks; imported state must
 match its commitment and later blocks remain validated. Z23-derived exact-state
 root caching and indexed block catch-up reduce redundant work. Wallet scanning
-avoids unnecessary copies. Rust cryptography remains linked.
+avoids unnecessary copies. The shielded cryptography is the C23 core in `src/c23`; no Rust is linked.
 
 Repair preserves private verified wallet backups and journals blockchain moves
 for interrupted-process recovery. The GUI retains readable balances at large
@@ -107,7 +107,7 @@ To produce macOS binaries, run the native build on macOS (Apple Silicon arm64 bu
 
 ### First Run: Fetch ZCash Parameters
 
-Before running `zclassicd`, obtain the ZCash proving parameters (~1.6 GB):
+Before running `zclassicd`, obtain the ZCash proving parameters (~0.8 GB):
 
 ```bash
 ./zcutil/fetch-params.sh

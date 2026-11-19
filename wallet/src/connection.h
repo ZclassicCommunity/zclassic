@@ -208,11 +208,11 @@ private:
     QString     ezWalletBackupError;
     void rememberRepairLocation(const std::shared_ptr<ConnectionConfig>& config);
 
-    // Item 3 (legible first-run param wait). The daemon peer-fetches ~1.7GB of zk-params
+    // Item 3 (legible first-run param wait). The daemon peer-fetches ~780MB of zk-params
     // in ZC_LoadParams BEFORE it binds its RPC port, so for 10-20 min on a fresh install
     // the port is fully REFUSING and getbootstrapinfo can't answer yet. We latch this the
     // moment verifyParams() reports the params missing (doAutoConnect), so the refused-
-    // connection warmup branch can paint the accurate "one-time 1.7GB" copy instead of a
+    // connection warmup branch can paint the accurate "one-time 780MB" copy instead of a
     // frozen "Almost ready" line. Single-run advisory flag; no persistence needed.
     bool        ezParamFetchLikely      = false;  // params were missing at connect -> a peer-fetch is in progress
 
@@ -371,6 +371,7 @@ public:
     MainWindow*                         main;
 
     void shutdown();
+    bool isShuttingDown() const { return shutdownInProgress; }
 
     void doRPC(const json& payload, const std::function<void(json)>& cb, 
                const std::function<void(QNetworkReply*, const json&)>& ne);

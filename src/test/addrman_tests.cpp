@@ -180,9 +180,11 @@ BOOST_AUTO_TEST_CASE(addrman_select)
     BOOST_CHECK(addrman.size() == 7);
 
     // Test 12: Select pulls from new and tried regardless of port number.
+    // The sequence follows the overridden RandomInt alone (Select_ draws no
+    // other randomness): tried 250.4.4.4 and 250.4.6.6, new 250.3.2.2:9999.
+    BOOST_CHECK(addrman.Select().ToString() == "250.4.4.4:8333");
     BOOST_CHECK(addrman.Select().ToString() == "250.4.6.6:8333");
     BOOST_CHECK(addrman.Select().ToString() == "250.3.2.2:9999");
-    BOOST_CHECK(addrman.Select().ToString() == "250.3.3.3:9999");
     BOOST_CHECK(addrman.Select().ToString() == "250.4.4.4:8333");
 }
 
@@ -518,4 +520,30 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_new_bucket)
     //  than 64 buckets.
     BOOST_CHECK(buckets.size() > 64);
 }
+// A table that holds a single address must return it on every selection and
+// without delay: the old random probing gave up empty about one time in twenty
+// and slept for up to 20 seconds under the lock while doing so.
+BOOST_AUTO_TEST_CASE(addrman_select_sparse_table)
+{
+    CAddrMan addrman; // randomly keyed, as in the node
+    CAddress addr(CService("250.7.7.7", 8033), NODE_NETWORK);
+    addr.nTime = GetAdjustedTime();
+    BOOST_CHECK(addrman.Add(addr, CNetAddr("250.1.2.3")));
+    BOOST_CHECK_EQUAL(addrman.size(), 1u);
+
+    const int64_t nStart = GetTimeMillis();
+    for (int i = 0; i < 2000; i++) {
+        CAddrInfo got = addrman.Select();
+        BOOST_REQUIRE_EQUAL(got.ToString(), addr.ToString());
+    }
+    BOOST_CHECK_MESSAGE(GetTimeMillis() - nStart < 5000, "2000 selections took " << (GetTimeMillis() - nStart) << " ms");
+
+    // the same once the address has moved to the tried table
+    addrman.Good(addr);
+    for (int i = 0; i < 2000; i++)
+        BOOST_REQUIRE_EQUAL(addrman.Select().ToString(), addr.ToString());
+    // and a new-only selection finds nothing there, at once
+    BOOST_CHECK_EQUAL(addrman.Select(true).ToString(), CAddrInfo().ToString());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

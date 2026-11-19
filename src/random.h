@@ -44,6 +44,14 @@ void MappedShuffle(RandomAccessIterator first,
         auto r = gen(i+1);
         assert(r >= 0);
         assert(r <= i);
+        // Drawing the element's own position leaves it where it is. Do not
+        // swap it with itself: std::swap(x, x) move-assigns x from itself,
+        // which the element types used here (a JoinSplit input holds a note
+        // witness, i.e. vectors) do not have to support, and which the
+        // checked standard library of a debug build (--enable-debug)
+        // aborts on. The permutation produced is unchanged.
+        if (static_cast<size_t>(r) == i)
+            continue;
         std::swap(first[i], first[r]);
         std::swap(mapFirst[i], mapFirst[r]);
     }

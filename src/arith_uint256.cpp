@@ -83,26 +83,85 @@ base_uint<BITS>& base_uint<BITS>::operator*=(const base_uint& b)
 template <unsigned int BITS>
 base_uint<BITS>& base_uint<BITS>::operator/=(const base_uint& b)
 {
-    base_uint<BITS> div = b;     // make a copy, so we can shift.
-    base_uint<BITS> num = *this; // make a copy, so we can subtract.
-    *this = 0;                   // the quotient.
-    int num_bits = num.bits();
-    int div_bits = div.bits();
-    if (div_bits == 0)
+    // Knuth, TAOCP vol. 2, 4.3.1 algorithm D, on 32-bit limbs (Hacker's Delight
+    // divmnu). Returns the same quotient as the former shift-and-subtract loop
+    // for every input (the unit tests compare the two); only the remainder is
+    // not materialised.
+    uint32_t u[WIDTH + 1];
+    uint32_t v[WIDTH];
+    uint32_t q[WIDTH];
+    int n = WIDTH;
+    while (n > 0 && b.pn[n - 1] == 0)
+        n--;
+    if (n == 0)
         throw uint_error("Division by zero");
-    if (div_bits > num_bits) // the result is certainly 0.
-        return *this;
-    int shift = num_bits - div_bits;
-    div <<= shift; // shift so that div and num align.
-    while (shift >= 0) {
-        if (num >= div) {
-            num -= div;
-            pn[shift / 32] |= (1 << (shift & 31)); // set a bit of the result.
+    int m = WIDTH;
+    while (m > 0 && pn[m - 1] == 0)
+        m--;
+    for (int i = 0; i < WIDTH; i++)
+        q[i] = 0;
+    if (m >= n) {
+        if (n == 1) {
+            const uint64_t d = b.pn[0];
+            uint64_t k = 0;
+            for (int j = m - 1; j >= 0; j--) {
+                const uint64_t cur = (k << 32) | pn[j];
+                q[j] = (uint32_t)(cur / d);
+                k = cur % d;
+            }
+        } else {
+            // Normalise so the top divisor limb has its high bit set.
+            int s = 0;
+            while (!((b.pn[n - 1] << s) & 0x80000000u))
+                s++;
+            for (int i = n - 1; i > 0; i--)
+                v[i] = (b.pn[i] << s) | (s ? (uint32_t)((uint64_t)b.pn[i - 1] >> (32 - s)) : 0);
+            v[0] = b.pn[0] << s;
+            u[m] = s ? (uint32_t)((uint64_t)pn[m - 1] >> (32 - s)) : 0;
+            for (int i = m - 1; i > 0; i--)
+                u[i] = (pn[i] << s) | (s ? (uint32_t)((uint64_t)pn[i - 1] >> (32 - s)) : 0);
+            u[0] = pn[0] << s;
+
+            for (int j = m - n; j >= 0; j--) {
+                // Estimate the quotient limb from the top two dividend limbs.
+                const uint64_t num = ((uint64_t)u[j + n] << 32) | u[j + n - 1];
+                uint64_t qhat = num / v[n - 1];
+                uint64_t rhat = num % v[n - 1];
+                while (qhat >= ((uint64_t)1 << 32) ||
+                       qhat * v[n - 2] > ((rhat << 32) | u[j + n - 2])) {
+                    qhat--;
+                    rhat += v[n - 1];
+                    if (rhat >= ((uint64_t)1 << 32))
+                        break;
+                }
+                // Multiply and subtract.
+                int64_t k = 0;
+                int64_t t;
+                for (int i = 0; i < n; i++) {
+                    const uint64_t p = qhat * v[i];
+                    t = (int64_t)u[i + j] - k - (int64_t)(p & 0xFFFFFFFFu);
+                    u[i + j] = (uint32_t)t;
+                    k = (int64_t)(p >> 32) - (t >> 32);
+                }
+                t = (int64_t)u[j + n] - k;
+                u[j + n] = (uint32_t)t;
+                q[j] = (uint32_t)qhat;
+                if (t < 0) {
+                    // qhat was one too large: add the divisor back.
+                    q[j]--;
+                    uint64_t c = 0;
+                    for (int i = 0; i < n; i++) {
+                        const uint64_t sum = (uint64_t)u[i + j] + v[i] + c;
+                        u[i + j] = (uint32_t)sum;
+                        c = sum >> 32;
+                    }
+                    u[j + n] += (uint32_t)c;
+                }
+            }
         }
-        div >>= 1; // shift back.
-        shift--;
     }
-    // num now contains the remainder of the division.
+    for (int i = 0; i < WIDTH; i++)
+        pn[i] = q[i];
     return *this;
 }
 

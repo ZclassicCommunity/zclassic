@@ -17,6 +17,7 @@
 #include "compat/sanity.h"
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
+#include "embeddedtor.h"
 #include "httpserver.h"
 #include "httprpc.h"
 #include "key.h"
@@ -32,6 +33,7 @@
 #include "script/standard.h"
 #include "script/sigcache.h"
 #include "scheduler.h"
+#include "dbwrapper.h"
 #include "txdb.h"
 #include "mapport.h"
 #include "torcontrol.h"
@@ -39,6 +41,7 @@
 #include "util.h"
 #include "utilmoneystr.h"
 #include "validationinterface.h"
+#include "transaction_builder.h"
 #ifdef ENABLE_WALLET
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
@@ -65,22 +68,51 @@
 #include <boost/thread.hpp>
 #include <openssl/crypto.h>
 
-#include <libsnark/common/profiling.hpp>
-
 #if ENABLE_ZMQ
 #include "zmq/zmqnotificationinterface.h"
 #endif
 
-#if ENABLE_PROTON
-#include "amqp/amqpnotificationinterface.h"
-#endif
-
 #include <fstream>
 #include <thread>
+#include <future>
+#include <exception>
 #include <chrono>
 #include "librustzcash.h"
-#include "sha256.h"
+#include "c23/glue/zcl_c23_glue.h"
+#include "crypto/sha256.h"
+#include "utilstrencodings.h"
 #include "startuptimer.h"
+#include "zslp/zslpservice.h"
+#include "znam/znamservice.h"
+
+#ifdef ZCL_C23_HAVE_PROVER_THREADS
+// Total physical memory in bytes, 0 when the platform cannot say.
+static uint64_t PhysicalMemoryBytes()
+{
+#if defined(WIN32)
+    MEMORYSTATUSEX st;
+    st.dwLength = sizeof(st);
+    return GlobalMemoryStatusEx(&st) ? (uint64_t)st.ullTotalPhys : 0;
+#elif defined(_SC_PHYS_PAGES) && defined(_SC_PAGESIZE)
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long size = sysconf(_SC_PAGESIZE);
+    return pages > 0 && size > 0 ? (uint64_t)pages * (uint64_t)size : 0;
+#else
+    return 0;
+#endif
+}
+
+// Prover thread budget: -proverthreads=<n>, 0 = auto (min(8, hardware threads)).
+static unsigned ProverThreadBudget()
+{
+    int64_t n = GetArg("-proverthreads", 0);
+    if (n > 0)
+        return n > 64 ? 64u : (unsigned)n;
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = GetNumCores() > 0 ? (unsigned)GetNumCores() : 1;
+    return hw < 8 ? hw : 8u;
+}
+#endif
 
 using namespace std;
 
@@ -93,10 +125,6 @@ bool fFeeEstimatesInitialized = false;
 
 #if ENABLE_ZMQ
 static CZMQNotificationInterface* pzmqNotificationInterface = NULL;
-#endif
-
-#if ENABLE_PROTON
-static AMQPNotificationInterface* pAMQPNotificationInterface = NULL;
 #endif
 
 #ifdef WIN32
@@ -209,6 +237,15 @@ static void InterruptBootstrapServeFreeze();
 bool ExtendServedBlocksForServe(const boost::filesystem::path& data_dir, int minAdvanceBlocks, std::string& error);
 bool BuildAnchorServeSnapshotFromGenesis(const boost::filesystem::path& data_dir, std::string& error);
 
+#ifdef WIN32
+static std::atomic<bool> fWinShutdownDone(false);
+#endif
+
+#ifdef ENABLE_WALLET
+/** True once the wallet was loaded, checked against the chain and rescanned, so Shutdown() may checkpoint it. */
+static bool fWalletInitComplete = false;
+#endif
+
 void Shutdown()
 {
     LogPrintf("%s: In progress...\n", __func__);
@@ -233,10 +270,17 @@ void Shutdown()
         pwalletMain->Flush(false);
 #endif
 #ifdef ENABLE_MINING
-    GenerateBitcoins(false, 0, Params());
+    // AppInit() can fail (unusable data or params directory, bad option) before SelectParams(); no miner
+    // threads exist then and Params() would assert.
+    if (ParamsAreSelected())
+        GenerateBitcoins(false, 0, Params());
 #endif
     StopNode();
     StopTorControl();
+    // After the P2P threads and the control client are gone, and before the
+    // datadir lock is released at exit. No-op unless -embeddedtor started it,
+    // including when AppInit2() failed part of the way.
+    StopEmbeddedTor();
     StopMapPort();
     UnregisterNodeSignals(GetNodeSignals());
 
@@ -251,6 +295,10 @@ void Shutdown()
     // mapBlockIndex/pcoinsTip, so it must not outlive them. No-op when no freeze
     // is in flight (and when -bootstrapserve=auto is not in use).
     InterruptBootstrapServeFreeze();
+
+    // The ZSLP index worker reads blocks and takes cs_main: stop it before the chain DBs are freed below.
+    zslp::StopService();
+    znam::StopService();
 
     if (fFeeEstimatesInitialized)
     {
@@ -267,6 +315,14 @@ void Shutdown()
         LOCK(cs_main);
         if (pcoinsTip != NULL) {
             FlushStateToDisk();
+#ifdef ENABLE_WALLET
+            // The coin database was just flushed to this tip. Write the wallet's checkpoint (note
+            // witnesses, nullifiers and the best-block locator, atomically) at the same point, so
+            // the next start does not have to rely on rescanning from an older locator.
+            if (pwalletMain && fWalletInitComplete && chainActive.Tip()) {
+                pwalletMain->SetBestChain(chainActive.GetLocator());
+            }
+#endif
         }
         delete pcoinsTip;
         pcoinsTip = NULL;
@@ -290,19 +346,15 @@ void Shutdown()
     }
 #endif
 
-#if ENABLE_PROTON
-    if (pAMQPNotificationInterface) {
-        UnregisterValidationInterface(pAMQPNotificationInterface);
-        delete pAMQPNotificationInterface;
-        pAMQPNotificationInterface = NULL;
-    }
-#endif
-
 #ifndef WIN32
-    try {
-        boost::filesystem::remove(GetPidFile());
-    } catch (const boost::filesystem::filesystem_error& e) {
-        LogPrintf("%s: Unable to remove pidfile: %s\n", __func__, e.what());
+    // The pid file is written only after the network is selected; the net-specific data directory
+    // (and so GetPidFile()) is not available before that.
+    if (ParamsAreSelected()) {
+        try {
+            boost::filesystem::remove(GetPidFile());
+        } catch (const boost::filesystem::filesystem_error& e) {
+            LogPrintf("%s: Unable to remove pidfile: %s\n", __func__, e.what());
+        }
     }
 #endif
     UnregisterAllValidationInterfaces();
@@ -315,6 +367,9 @@ void Shutdown()
     globalVerifyHandle.reset();
     ECC_Stop();
     LogPrintf("%s: done\n", __func__);
+#ifdef WIN32
+    fWinShutdownDone = true;
+#endif
 }
 
 /**
@@ -329,6 +384,81 @@ void HandleSIGHUP(int)
 {
     fReopenDebugLog = true;
 }
+
+#ifdef WIN32
+/**
+ * Console control events (Ctrl+C, Ctrl+Break, closing the console window, system
+ * shutdown). Without a handler Windows ends the process immediately, without
+ * flushing the chain state, wallet and block index, as if it had been killed.
+ * Request the normal clean shutdown instead. For the events after which Windows
+ * terminates the process as soon as this handler returns, wait (bounded) for the
+ * shutdown to finish.
+ */
+static BOOL WINAPI WinConsoleCtrlHandler(DWORD dwCtrlType)
+{
+    switch (dwCtrlType) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+        StartShutdown();
+        return TRUE;
+    case CTRL_LOGOFF_EVENT:
+        // Delivered only to processes outside the interactive session that is
+        // ending (a service, or a node started under a service wrapper) when
+        // some user logs off: not a reason to stop the node. Pass it on to the
+        // next (default) handler, exactly as before this handler existed.
+        return FALSE;
+    case CTRL_CLOSE_EVENT:
+    case CTRL_SHUTDOWN_EVENT:
+        StartShutdown();
+        for (int i = 0; i < 200 && !fWinShutdownDone; i++) // up to 20 s (the OS may cut this short)
+            Sleep(100);
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+#endif
+
+#if defined(WIN32) && defined(ENABLE_EMBEDDED_TOR)
+/**
+ * The datadir in the form the embedded Tor glue (src/c23/tor) expects on Windows.
+ * - UTF-8: the glue converts paths with CP_UTF8, while path::string() is in the
+ *   ANSI code page, which is UTF-8 only under the manifest on Windows 10 1903+.
+ * - Absolute, backslash-separated, no trailing separator: the glue hands Tor
+ *   GetFullPathNameW() of <datadir>\tor, and the control-port check in
+ *   torcontrol.cpp compares the COOKIEFILE Tor reports with the cookie path
+ *   built from this string, so both must be the same spelling.
+ * - When the ANSI code page is not UTF-8, the 8.3 short name of a non-ASCII path,
+ *   which is what the glue hands Tor in that case (same reason).
+ * Falls back to path::string() if a conversion fails; the glue then reports it.
+ */
+static std::string EmbeddedTorDataDir(const boost::filesystem::path& p)
+{
+    std::wstring w = p.wstring();
+    std::vector<wchar_t> buf(32768);
+    DWORD n = GetFullPathNameW(w.c_str(), (DWORD)buf.size(), buf.data(), NULL);
+    if (n == 0 || n >= buf.size())
+        return p.string();
+    w.assign(buf.data());
+    while (w.size() > 3 && (w[w.size() - 1] == L'\\' || w[w.size() - 1] == L'/'))
+        w.erase(w.size() - 1);
+    bool fAscii = true;
+    for (size_t i = 0; i < w.size(); i++)
+        if (w[i] > 0x7f) fAscii = false;
+    if (!fAscii && GetACP() != CP_UTF8) {
+        n = GetShortPathNameW(w.c_str(), buf.data(), (DWORD)buf.size());
+        if (n > 0 && n < buf.size())
+            w.assign(buf.data());
+    }
+    int u = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, NULL, 0, NULL, NULL);
+    if (u <= 0)
+        return p.string();
+    std::vector<char> out(u);
+    if (WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, out.data(), u, NULL, NULL) != u)
+        return p.string();
+    return std::string(out.data());
+}
+#endif
 
 bool static InitError(const std::string &str)
 {
@@ -390,13 +520,17 @@ std::string HelpMessage(HelpMessageMode mode)
 #endif
     }
     strUsage += HelpMessageOpt("-datadir=<dir>", _("Specify data directory"));
-    strUsage += HelpMessageOpt("-exportdir=<dir>", _("Specify directory to be used when exporting data"));
+    strUsage += HelpMessageOpt("-exportdir=<dir>", _("Specify directory to be used when exporting data and wallet backups (default: the \"backups\" directory inside the data directory)"));
     strUsage += HelpMessageOpt("-dbcache=<n>", strprintf(_("Set database cache size in megabytes (%d to %d, default: %d)"), nMinDbCache, nMaxDbCache, nDefaultDbCache));
     strUsage += HelpMessageOpt("-loadblock=<file>", _("Imports blocks from external blk000??.dat file") + " " + _("on startup"));
     strUsage += HelpMessageOpt("-maxorphantx=<n>", strprintf(_("Keep at most <n> unconnectable transactions in memory (default: %u)"), DEFAULT_MAX_ORPHAN_TRANSACTIONS));
+    strUsage += HelpMessageOpt("-mempoolmaxbytes=<n>", strprintf(_("Maximum total size in bytes of transactions held in the mempool; a new transaction that would exceed it is refused with reason \"mempool full\" and nothing is evicted (default: %u, minimum: %u)"), DEFAULT_MEMPOOL_MAX_BYTES, MIN_MEMPOOL_MAX_BYTES));
     strUsage += HelpMessageOpt("-mempooltxinputlimit=<n>", _("[DEPRECATED FROM OVERWINTER] Set the maximum number of transparent inputs in a transaction that the mempool will accept (default: 0 = no limit applied)"));
     strUsage += HelpMessageOpt("-par=<n>", strprintf(_("Set the number of script verification threads (%u to %d, 0 = auto, <0 = leave that many cores free, default: %d)"),
         -GetNumCores(), MAX_SCRIPTCHECK_THREADS, DEFAULT_SCRIPTCHECK_THREADS));
+#ifdef ZCL_C23_HAVE_PROVER_THREADS
+    strUsage += HelpMessageOpt("-proverthreads=<n>", _("Set the number of threads used to create Sapling proofs (1 to 64, 0 = auto: the lesser of 8 and the hardware threads, default: 0). Left automatic, a send also makes only as many proofs at once as fit in about 340 MB or an eighth of physical memory, whichever is less; an explicit value lifts that limit"));
+#endif
 #ifndef WIN32
     strUsage += HelpMessageOpt("-pid=<file>", strprintf(_("Specify pid file (default: %s)"), "zclassicd.pid"));
 #endif
@@ -422,13 +556,17 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-sysperms", _("Create new files with system default permissions, instead of umask 077 (only effective with disabled wallet functionality)"));
 #endif
     strUsage += HelpMessageOpt("-txindex", strprintf(_("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)"), 1));
+    strUsage += HelpMessageOpt("-zslpindex", _("Maintain a read-only ZSLP token index in <datadir>/zslpindex, used by the zslp_* rpc calls and the GUI Tokens view. Built in the background; never touches consensus or wallet.dat (default: 0). Not compatible with -prune. See doc/zslp.md"));
+    strUsage += HelpMessageOpt("-zslpindexstart=<n>", _("First block height the ZSLP index reads (default: the first block with a ZSLP transaction on mainnet, 0 on testnet and regtest)"));
+    strUsage += HelpMessageOpt("-znamindex", _("Maintain a read-only ZNAM name index in <datadir>/znamindex, used by the znam_* rpc calls and the GUI's resolve-a-name step. Built in the background; never touches consensus or wallet.dat (default: 0). Not compatible with -prune. See doc/znam.md"));
+    strUsage += HelpMessageOpt("-znamindexstart=<n>", _("First block height the ZNAM index reads (default: 0, so no registration is missed)"));
     strUsage += HelpMessageOpt("-bootstrap", strprintf(_("On a fresh datadir, fetch zk-SNARK params and the chain snapshot from a bootstrap peer before normal sync (default: %u)"), 1));
 
     strUsage += HelpMessageGroup(_("Connection options:"));
     strUsage += HelpMessageOpt("-addnode=<ip>", _("Add a node to connect to and attempt to keep the connection open"));
     strUsage += HelpMessageOpt("-banscore=<n>", strprintf(_("Threshold for disconnecting misbehaving peers (default: %u)"), 100));
     strUsage += HelpMessageOpt("-bantime=<n>", strprintf(_("Number of seconds to keep misbehaving peers from reconnecting (default: %u)"), 86400));
-    strUsage += HelpMessageOpt("-bind=<addr>", _("Bind to given address and always listen on it. Use [host]:port notation for IPv6"));
+    strUsage += HelpMessageOpt("-bind=<addr>", _("Bind to given address and always listen on it. Use [host]:port notation for IPv6. Append =onion (-bind=<addr>=onion) to make it the listener that the onion service points at (default port: the P2P port + 1)"));
     strUsage += HelpMessageOpt("-connect=<ip>", _("Connect only to the specified node(s)"));
     strUsage += HelpMessageOpt("-discover", _("Discover own IP addresses (default: 1 when listening and no -externalip or -proxy)"));
     strUsage += HelpMessageOpt("-dns", _("Allow DNS lookups for -addnode, -seednode and -connect") + " " + _("(default: 1)"));
@@ -436,6 +574,10 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-externalip=<ip>", _("Specify your own public address"));
     strUsage += HelpMessageOpt("-forcednsseed", strprintf(_("Always query for peer addresses via DNS lookup (default: %u)"), 0));
     strUsage += HelpMessageOpt("-listen", _("Accept connections from outside (default: 1 if no -proxy or -connect)"));
+    if (EmbeddedTorAvailable()) {
+        strUsage += HelpMessageOpt("-embeddedtor", strprintf(_("Run the Tor built into this binary: state in <datadir>/tor, SOCKS and control on loopback ports chosen at runtime, used for .onion peers and for the node's own onion service (default: %u)"), DEFAULT_EMBEDDED_TOR));
+        strUsage += HelpMessageOpt("-embeddedtormode=<mode>", strprintf(_("How the embedded Tor runs: inprocess (a thread of this process) or child (a separate process) (default: %s)"), DEFAULT_EMBEDDED_TOR_MODE));
+    }
     strUsage += HelpMessageOpt("-listenonion", strprintf(_("Automatically create Tor hidden service (default: %d)"), DEFAULT_LISTEN_ONION));
     strUsage += HelpMessageOpt("-natpmp", strprintf(_("Open the listen port on the router automatically via NAT-PMP/PCP, so peers can reach you (no UPnP). Maps only your own listen port (default: %d)"), DEFAULT_NATPMP));
     strUsage += HelpMessageOpt("-maxconnections=<n>", strprintf(_("Maintain at most <n> connections to peers (default: %u)"), DEFAULT_MAX_PEER_CONNECTIONS));
@@ -472,6 +614,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-salvagewallet", _("Attempt to recover private keys from a corrupt wallet.dat") + " " + _("on startup"));
     strUsage += HelpMessageOpt("-sendfreetransactions", strprintf(_("Send transactions as zero-fee transactions if possible (default: %u)"), 0));
     strUsage += HelpMessageOpt("-spendzeroconfchange", strprintf(_("Spend unconfirmed change when sending transactions (default: %u)"), 1));
+    strUsage += HelpMessageOpt("-tokenguard", strprintf(_("Keep outputs that carry ZSLP tokens or a mint baton out of automatic coin selection and out of explicit coin-control selections, so ordinary sends never burn them. -tokenguard=0 turns this off for the whole wallet: any such output, including a payment that merely looks like a token output, is then spent like an ordinary coin (default: %u)"), 1));
     strUsage += HelpMessageOpt("-txconfirmtarget=<n>", strprintf(_("If paytxfee is not set, include enough fee so transactions begin confirmation on average within n blocks (default: %u)"), DEFAULT_TX_CONFIRM_TARGET));
     strUsage += HelpMessageOpt("-txexpirydelta", strprintf(_("Set the number of blocks after which a transaction that has not been mined will become invalid (min: %u, default: %u (pre-Buttercup) or %u (post-Buttercup))"), TX_EXPIRING_SOON_THRESHOLD + 1, DEFAULT_PRE_BUTTERCUP_TX_EXPIRY_DELTA, DEFAULT_POST_BUTTERCUP_TX_EXPIRY_DELTA));
     strUsage += HelpMessageOpt("-maxtxfee=<amt>", strprintf(_("Maximum total fees (in %s) to use in a single wallet transaction; setting this too low may abort large transactions (default: %s)"),
@@ -492,14 +635,6 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-zmqpubrawtx=<address>", _("Enable publish raw transaction in <address>"));
 #endif
 
-#if ENABLE_PROTON
-    strUsage += HelpMessageGroup(_("AMQP 1.0 notification options:"));
-    strUsage += HelpMessageOpt("-amqppubhashblock=<address>", _("Enable publish hash block in <address>"));
-    strUsage += HelpMessageOpt("-amqppubhashtx=<address>", _("Enable publish hash transaction in <address>"));
-    strUsage += HelpMessageOpt("-amqppubrawblock=<address>", _("Enable publish raw block in <address>"));
-    strUsage += HelpMessageOpt("-amqppubrawtx=<address>", _("Enable publish raw transaction in <address>"));
-#endif
-
     strUsage += HelpMessageGroup(_("Debugging/Testing options:"));
     if (showDebug)
     {
@@ -510,6 +645,9 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-dropmessagestest=<n>", "Randomly drop 1 of every <n> network messages");
         strUsage += HelpMessageOpt("-fuzzmessagestest=<n>", "Randomly fuzz 1 of every <n> network messages");
         strUsage += HelpMessageOpt("-flushwallet", strprintf("Run a thread to flush wallet periodically (default: %u)", 1));
+        strUsage += HelpMessageOpt("-testsetchaininterval=<n>", strprintf("Test only: write the wallet checkpoint (locator and note state) at most every <n> seconds while running (default: %u)", DATABASE_WRITE_INTERVAL));
+        strUsage += HelpMessageOpt("-testblockindexinterval=<n>", "Test only: write the block index at most every <n> seconds while running (default: 3600, 300 during initial block download)");
+        strUsage += HelpMessageOpt("-testcrashpoint=<name>[:<n>]", "Test only: _exit(77) the <n>th time the named wallet or chain-state write point is reached; the name any matches every point (default: off)");
         strUsage += HelpMessageOpt("-stopafterblockimport", strprintf("Stop running after importing blocks from disk (default: %u)", 0));
         strUsage += HelpMessageOpt("-nuparams=hexBranchId:activationHeight", "Use given activation height for specified network upgrade (regtest-only)");
         strUsage += HelpMessageOpt("-eqparams=hexBranchId:N:K", "Use given equihash parameters for specified network upgrade"); 
@@ -573,7 +711,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageGroup(_("RPC server options:"));
     strUsage += HelpMessageOpt("-server", _("Accept command line and JSON-RPC commands"));
     strUsage += HelpMessageOpt("-rest", strprintf(_("Accept public REST requests (default: %u)"), 0));
-    strUsage += HelpMessageOpt("-rpcbind=<addr>", _("Bind to given address to listen for JSON-RPC connections. Use [host]:port notation for IPv6. This option can be specified multiple times (default: bind to all interfaces)"));
+    strUsage += HelpMessageOpt("-rpcbind=<addr>", _("Bind to given address to listen for JSON-RPC connections. Use [host]:port notation for IPv6. This option can be specified multiple times (default: bind to localhost only, ::1 and 127.0.0.1; this option is ignored unless -rpcallowip is also given, and -rpcallowip without -rpcbind binds all interfaces)"));
     strUsage += HelpMessageOpt("-rpcuser=<user>", _("Username for JSON-RPC connections"));
     strUsage += HelpMessageOpt("-rpcpassword=<pw>", _("Password for JSON-RPC connections"));
     strUsage += HelpMessageOpt("-rpcport=<port>", strprintf(_("Listen for JSON-RPC connections on <port> (default: %u or testnet: %u)"), 8023, 18023));
@@ -584,7 +722,7 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-rpcservertimeout=<n>", strprintf("Timeout during HTTP requests (default: %d)", DEFAULT_HTTP_SERVER_TIMEOUT));
     }
 
-    // Disabled until we can lock notes and also tune performance of libsnark which by default uses multiple threads
+    // Disabled until we can lock notes
     //strUsage += HelpMessageOpt("-rpcasyncthreads=<n>", strprintf(_("Set the number of threads to service Async RPC calls (default: %d)"), 1));
 
     if (mode == HMM_BITCOIND) {
@@ -664,10 +802,12 @@ void CleanupBlockRevFiles()
 void ThreadImport(std::vector<boost::filesystem::path> vImportFiles)
 {
     RenameThread("zcl-loadblk");
+    bool fImported = false;
     // -reindex
     if (fReindex) {
         CImportingNow imp;
         int nFile = 0;
+        fImported = true;
         while (true) {
             CDiskBlockPos pos(nFile, 0);
             if (!boost::filesystem::exists(GetBlockPosFilename(pos, "blk")))
@@ -679,6 +819,11 @@ void ThreadImport(std::vector<boost::filesystem::path> vImportFiles)
             LoadExternalBlockFile(file, &pos);
             nFile++;
         }
+        // The reindex flag is the record that the block index and the chainstate are not
+        // complete on disk. Both live in memory until a flush, so make them durable before
+        // the flag goes: a kill between the two left the flag cleared, an empty block index
+        // next to full block files and a node that started from genesis.
+        FlushStateToDisk();
         pblocktree->WriteReindexing(false);
         fReindex = false;
         LogPrintf("Reindexing finished\n");
@@ -694,6 +839,7 @@ void ThreadImport(std::vector<boost::filesystem::path> vImportFiles)
             CImportingNow imp;
             boost::filesystem::path pathBootstrapOld = GetDataDir() / "bootstrap.dat.old";
             LogPrintf("Importing bootstrap.dat...\n");
+            fImported = true;
             LoadExternalBlockFile(file);
             RenameOver(pathBootstrap, pathBootstrapOld);
         } else {
@@ -707,11 +853,22 @@ void ThreadImport(std::vector<boost::filesystem::path> vImportFiles)
         if (file) {
             CImportingNow imp;
             LogPrintf("Importing blocks file %s...\n", path.string());
+            fImported = true;
             LoadExternalBlockFile(file);
         } else {
             LogPrintf("Warning: Could not open blocks file %s\n", path.string());
         }
     }
+
+#ifdef ENABLE_WALLET
+    // Init offered the wallet's pending transactions to the mempool while the import
+    // was still filling the chain (empty at the start of -reindex): they were refused
+    // or could not be judged, and nothing else offers them again, so their inputs
+    // would count as unspent. Mempool admission only, nothing is relayed.
+    if (fImported && pwalletMain && !ShutdownRequested()) {
+        pwalletMain->ReacceptWalletTransactions();
+    }
+#endif
 
     if (GetBoolArg("-stopafterblockimport", false)) {
         LogPrintf("Stopping after block import\n");
@@ -813,7 +970,9 @@ static std::string CompiledParamEpoch()
         acc += std::to_string((unsigned long long)s.nSize);
         acc += '\n';
     }
-    return SHA256::hashString(acc);
+    unsigned char digest[CSHA256::OUTPUT_SIZE];
+    CSHA256().Write(reinterpret_cast<const unsigned char*>(acc.data()), acc.size()).Finalize(digest);
+    return HexStr(digest, digest + sizeof(digest));
 }
 
 static boost::filesystem::path ParamVerifyCachePath()
@@ -1173,13 +1332,21 @@ static void InterruptBootstrapServeFreeze()
  *  Ensure that Bitcoin is running in a usable environment with all
  *  necessary library support.
  */
+/** Scheduled every few seconds while -embeddedtor is on (see Step 6). */
+static void EmbeddedTorWatchdog()
+{
+    if (ShutdownRequested() || !EmbeddedTorRunning() || EmbeddedTorAlive())
+        return;
+    LogPrintf("tor: the embedded Tor has exited; shutting down (-embeddedtor never continues without Tor)\n");
+    StartShutdown();
+}
+
 bool InitSanityCheck(void)
 {
 
     boost::filesystem::path sapling_output = ZC_GetParamsDir() / "sapling-output.params";
     boost::filesystem::path sapling_spend = ZC_GetParamsDir() / "sapling-spend.params";
     boost::filesystem::path sprout_groth16 = ZC_GetParamsDir() / "sprout-groth16.params";
-    boost::filesystem::path pk_path = ZC_GetParamsDir() / "sprout-proving.key";
     boost::filesystem::path vk_path = ZC_GetParamsDir() / "sprout-verifying.key";
 
     // If parameters are missing, fetch them from a bootstrap peer over the P2P
@@ -1195,7 +1362,14 @@ bool InitSanityCheck(void)
     // once before use. A corrupted-but-correct-size param slips past this gate
     // but is caught by that loop, which then re-fetches (self-heal) before
     // failing.
-    if (!ZcashParamsPresent() && GetBoolArg("-bootstrap", true)) {
+    // A node told to use a proxy (-proxy) or to stay onion-only (-onlynet
+    // without ipv4/ipv6, with or without -embeddedtor) never fetches here: this
+    // runs before Step 6 starts Tor and sets the proxies, so the fetch would
+    // dial the bootstrap peers directly and expose the node's address.
+    const bool fParamFetchAllowed = GetBoolArg("-bootstrap", true) && !ZcashParamFetchWouldBypassProxy();
+    if (!ZcashParamsPresent() && GetBoolArg("-bootstrap", true) && !fParamFetchAllowed)
+        LogPrintf("Zcash parameters are missing; not fetching them from a bootstrap peer before the proxy is set up (-proxy, or -onlynet without ipv4/ipv6): run zcutil/fetch-params.sh\n");
+    if (!ZcashParamsPresent() && fParamFetchAllowed) {
         std::string paramError = "no bootstrap peer configured";
         BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
             fprintf(stdout, "Fetching Zcash parameters from peer %s...\n", peer.c_str());
@@ -1209,7 +1383,6 @@ bool InitSanityCheck(void)
     }
 
     if (!(
-        boost::filesystem::exists(pk_path) &&
         boost::filesystem::exists(vk_path) &&
         boost::filesystem::exists(sapling_spend) &&
         boost::filesystem::exists(sapling_output) &&
@@ -1264,8 +1437,8 @@ bool InitSanityCheck(void)
 
         // FOLLOW-UP C: sprout-verifying.key is the SOLE consensus-relevant zk param
         // whose only pre-load integrity gate is the SHA-256 below (the 3 Sapling/
-        // Groth16 params have an independent BLAKE2b gate in librustzcash; the
-        // 910 MB sprout-proving.key is prove-only / local-liveness). The vk is
+        // Groth16 params have an independent BLAKE2b gate in the C23 core; there is
+        // no PHGR13 proving key any more: nothing here creates Sprout proofs). The vk is
         // tiny (1449 bytes), so re-hashing it every launch is free, and it is the
         // key consumed by JoinSplit verify() during tx/block validation -- so we
         // never honor a cached skip for it: a same-size+same-mtime silent on-disk
@@ -1296,7 +1469,7 @@ bool InitSanityCheck(void)
         if (!check_file_hash(path.string(), spec.sha256hex)) {
             // A present, correct-size, but wrong-hash (corrupted/forged) file.
             // Self-heal once via the bootstrap-peer fetch, then re-verify.
-            if (!fParamRefetched && GetBoolArg("-bootstrap", true)) {
+            if (!fParamRefetched && fParamFetchAllowed) {
                 fParamRefetched = true;
                 std::string paramError = "no bootstrap peer configured";
                 BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
@@ -1356,8 +1529,13 @@ bool InitSanityCheck(void)
     g_startupTimer.mark("param-hash-loop");
 
     boost::filesystem::path data_dir = GetDataDir();
-    if (!boost::filesystem::is_directory(data_dir)){
-        boost::filesystem::create_directories(data_dir);
+    {
+        boost::system::error_code dirEc;
+        if (!boost::filesystem::is_directory(data_dir, dirEc)) {
+            boost::filesystem::create_directories(data_dir, dirEc);
+            if (dirEc)
+                return InitError(strprintf(_("Cannot create the data directory \"%s\": %s"), data_dir.string(), dirEc.message()));
+        }
     }
 
     fprintf(stdout, "Network: %s\n", Params().NetworkIDString().c_str());
@@ -1398,12 +1576,10 @@ static void ZC_LoadParams(
     boost::filesystem::path sapling_output = ZC_GetParamsDir() / "sapling-output.params";
     boost::filesystem::path sapling_spend = ZC_GetParamsDir() / "sapling-spend.params";
     boost::filesystem::path sprout_groth16 = ZC_GetParamsDir() / "sprout-groth16.params";
-    boost::filesystem::path pk_path = ZC_GetParamsDir() / "sprout-proving.key";
     boost::filesystem::path vk_path = ZC_GetParamsDir() / "sprout-verifying.key";
 
     // redundant checks on startup is ok and more secure
     if (!(
-        boost::filesystem::exists(pk_path) &&
         boost::filesystem::exists(vk_path) &&
         boost::filesystem::exists(sapling_spend) &&
         boost::filesystem::exists(sapling_output) &&
@@ -1422,7 +1598,7 @@ static void ZC_LoadParams(
     LogPrintf("Loading verifying key from %s\n", vk_path.string().c_str());
     gettimeofday(&tv_start, 0);
 
-    pzcashParams = ZCJoinSplit::Prepared(vk_path.string(), pk_path.string());
+    pzcashParams = ZCJoinSplit::Prepared(vk_path.string());
 
     gettimeofday(&tv_end, 0);
     elapsed = float(tv_end.tv_sec-tv_start.tv_sec) + (tv_end.tv_usec-tv_start.tv_usec)/float(1000000);
@@ -1458,6 +1634,33 @@ static void ZC_LoadParams(
     elapsed = float(tv_end.tv_sec-tv_start.tv_sec) + (tv_end.tv_usec-tv_start.tv_usec)/float(1000000);
     LogPrintf("Loaded Sapling parameters in %fs seconds.\n", elapsed);
 }
+
+// Loading and hash-checking the Sapling parameter files takes most of a second and
+// is independent of the block-index load that follows it, so AppInit2 runs it on a
+// helper thread and joins before anything that can create or verify a proof. The
+// files are still hash-checked in full before use; only the wait is overlapped.
+// The guard joins on every exit path so the thread never outlives AppInit2.
+class ZcParamsLoader
+{
+    std::future<void> fut;
+public:
+    void Start(const CChainParams& chainparams)
+    {
+        fut = std::async(std::launch::async, [&chainparams]() { ZC_LoadParams(chainparams); });
+    }
+    // Wait for the load to finish; rethrows what ZC_LoadParams threw, as the
+    // synchronous call did.
+    void Join()
+    {
+        if (fut.valid())
+            fut.get();
+    }
+    ~ZcParamsLoader()
+    {
+        if (fut.valid())
+            fut.wait();
+    }
+};
 
 bool AppInitServers(boost::thread_group& threadGroup)
 {
@@ -1541,6 +1744,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // Ignore SIGPIPE, otherwise it will bring the daemon down if the client closes unexpectedly
     signal(SIGPIPE, SIG_IGN);
 #endif
+#ifdef WIN32
+    // Clean shutdown on Ctrl+C, Ctrl+Break and console close instead of an abrupt exit
+    SetConsoleCtrlHandler(WinConsoleCtrlHandler, TRUE);
+#endif
 
     std::set_new_handler(new_handler_terminate);
 
@@ -1559,8 +1766,6 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             return InitError(_("Payment disclosure requires -experimentalfeatures."));
         } else if (mapArgs.count("-zmergetoaddress")) {
             return InitError(_("RPC method z_mergetoaddress requires -experimentalfeatures."));
-        } else if (mapArgs.count("-savesproutr1cs")) {
-            return InitError(_("Saving the Sprout R1CS requires -experimentalfeatures."));
         }
     }
 
@@ -1668,6 +1873,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     const vector<string>& categories = mapMultiArgs["-debug"];
     if (GetBoolArg("-nodebug", false) || find(categories.begin(), categories.end(), string("0")) != categories.end())
         fDebug = false;
+    // The C23 crypto core logs its reject reasons only under -debug=zc23 (or -debug=1).
+    zcl_c23_log_refresh();
 
     // Special case: if debug=zrpcunsafe, implies debug=zrpc, so add it to debug categories
     if (find(categories.begin(), categories.end(), string("zrpcunsafe")) != categories.end()) {
@@ -1688,6 +1895,19 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     if (GetBoolArg("-tor", false))
         return InitError(_("Error: Unsupported argument -tor found, use -onion."));
 
+    // Embedded Tor is opt-in. Refuse to start rather than fall back to an
+    // unproxied node when it was asked for and cannot be provided.
+    const bool fEmbeddedTor = GetBoolArg("-embeddedtor", DEFAULT_EMBEDDED_TOR);
+    EmbeddedTorMode embeddedTorMode = EMBEDDED_TOR_INPROCESS;
+    if (fEmbeddedTor) {
+        if (!EmbeddedTorAvailable())
+            return InitError(_("Error: -embeddedtor needs a build with embedded Tor (configure --with-embedded-tor)."));
+        if (!ParseEmbeddedTorMode(GetArg("-embeddedtormode", DEFAULT_EMBEDDED_TOR_MODE), embeddedTorMode))
+            return InitError(strprintf(_("Invalid -embeddedtormode: '%s' (use inprocess or child)"), GetArg("-embeddedtormode", "")));
+        if (GetArg("-onion", "") == "0")
+            return InitError(_("Error: -embeddedtor cannot be combined with -onion=0."));
+    }
+
     if (GetBoolArg("-benchmark", false))
         InitWarning(_("Warning: Unsupported argument -benchmark ignored, use -debug=bench."));
 
@@ -1707,6 +1927,22 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         nScriptCheckThreads = 0;
     else if (nScriptCheckThreads > MAX_SCRIPTCHECK_THREADS)
         nScriptCheckThreads = MAX_SCRIPTCHECK_THREADS;
+
+#ifdef ZCL_C23_HAVE_PROVER_THREADS
+    zcl_c23_set_prover_threads(ProverThreadBudget());
+    // Left automatic, a send also makes only as many proofs at once as fit in
+    // the prover's memory allowance (about 340 MB, or an eighth of physical
+    // memory), the thread budget then spread over fewer proofs; an explicit
+    // -proverthreads is the person's own choice and is not capped.
+    if (GetArg("-proverthreads", 0) > 0) {
+        SetProverWorkerCap(0);
+    } else {
+        const size_t proofsAtOnce = ProverWorkerLimit(PhysicalMemoryBytes());
+        SetProverWorkerCap(proofsAtOnce);
+        LogPrintf("Prover memory allowance: at most %u proofs at once (%u MiB of physical memory)\n",
+                  (unsigned)proofsAtOnce, (unsigned)(PhysicalMemoryBytes() >> 20));
+    }
+#endif
 
     fServer = GetBoolArg("-server", false);
 
@@ -1798,6 +2034,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     }
     bSpendZeroConfChange = GetBoolArg("-spendzeroconfchange", true);
     fSendFreeTransactions = GetBoolArg("-sendfreetransactions", false);
+    fTokenGuard = GetBoolArg("-tokenguard", true);
 
     std::string strWalletFile = GetArg("-wallet", "wallet.dat");
 #endif // ENABLE_WALLET
@@ -1824,6 +2061,15 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     }
 #endif
 
+    if (mapArgs.count("-mempoolmaxbytes")) {
+        int64_t nCap = GetArg("-mempoolmaxbytes", (int64_t)DEFAULT_MEMPOOL_MAX_BYTES);
+        if (nCap < (int64_t)MIN_MEMPOOL_MAX_BYTES) {
+            return InitError(strprintf(_("-mempoolmaxbytes=%s is too small: the minimum is %u bytes (0 does not mean unlimited)"), mapArgs["-mempoolmaxbytes"], MIN_MEMPOOL_MAX_BYTES));
+        }
+        nMempoolMaxBytes = (uint64_t)nCap;
+    }
+    LogPrintf("Mempool total size cap: %u bytes\n", nMempoolMaxBytes);
+
     // Default value of 0 for mempooltxinputlimit means no limit is applied
     if (mapArgs.count("-mempooltxinputlimit")) {
         int64_t limit = GetArg("-mempooltxinputlimit", 0);
@@ -1832,6 +2078,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         } else if (limit > 0) {
             LogPrintf("Mempool configured to reject transactions with greater than %lld transparent inputs\n", limit);
         }
+    }
+
+    // The crash and checkpoint-interval hooks exist for qa/rpc-tests/wallet_crash_consistency.sh.
+    // A stray line in zclassic.conf must not make a real node exit at a wallet write point.
+    if ((mapArgs.count("-testcrashpoint") || mapArgs.count("-testsetchaininterval") || mapArgs.count("-testblockindexinterval")) &&
+        Params().NetworkIDString() != "regtest") {
+        return InitError("-testcrashpoint, -testsetchaininterval and -testblockindexinterval may only be used on regtest.");
     }
 
     if (!mapMultiArgs["-nuparams"].empty()) {
@@ -1906,6 +2159,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     g_startupTimer.mark("setup+flags(1-3)");
     // ********************************************************* Step 4: application initialization: dir lock, daemonize, pidfile, debug log
+
+    // Select the SHA-256 backend (portable C, SHA-NI or ARMv8 SHA) after its
+    // known-answer self-test, before any thread is started, and record it.
+    LogPrintf("Using the '%s' SHA256 implementation\n", SHA256AutoDetect());
 
     // Initialize libsodium
     if (init_and_check_sodium() == -1) {
@@ -1991,23 +2248,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         threadGroup.create_thread(&ThreadShowMetricsScreen);
     }
 
-    // These must be disabled for now, they are buggy and we probably don't
-    // want any of libsnark's profiling in production anyway.
-    libsnark::inhibit_profiling_info = true;
-    libsnark::inhibit_profiling_counters = true;
 
     g_startupTimer.mark("datadir-lock+threads");
     // Initialize Zclassic circuit parameters
-    ZC_LoadParams(chainparams);
-    g_startupTimer.mark("zk-snark params");
+    ZcParamsLoader zcParamsLoader;
+    zcParamsLoader.Start(chainparams);
+    g_startupTimer.mark("zk-snark params (started)");
 
-    if (GetBoolArg("-savesproutr1cs", false)) {
-        boost::filesystem::path r1cs_path = ZC_GetParamsDir() / "r1cs";
-
-        LogPrintf("Saving Sprout R1CS to %s\n", r1cs_path.string());
-
-        pzcashParams->saveR1CS(r1cs_path.string());
-    }
 
     /* Start the RPC server already.  It will be started in "warmup" mode
      * and not really process calls already (but it will signify connections
@@ -2119,18 +2366,98 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
     }
 
+    // -embeddedtor: launch the Tor linked into this binary. Its state lives in
+    // <datadir>/tor (the datadir lock is held since Step 4); its SOCKS and
+    // control ports are loopback ports chosen at runtime.
+    if (fEmbeddedTor) {
+        std::string strTorError;
+#if defined(WIN32) && defined(ENABLE_EMBEDDED_TOR)
+        const std::string strTorDataDir = EmbeddedTorDataDir(GetDataDir());
+#else
+        const std::string strTorDataDir = GetDataDir().string();
+#endif
+        if (!StartEmbeddedTor(strTorDataDir, embeddedTorMode, strTorError))
+            return InitError(strprintf(_("Could not start the embedded Tor: %s"), strTorError));
+        proxyType addrEmbedded = proxyType(CService("127.0.0.1", EmbeddedTorSocksPort()), proxyRandomize);
+        if (!addrEmbedded.IsValid())
+            return InitError(_("The embedded Tor did not report a SOCKS port."));
+        if (onionArg == "") {
+            // An explicit -onion keeps its meaning; otherwise .onion peers
+            // are reached through the embedded Tor.
+            SetProxy(NET_ONION, addrEmbedded);
+            SetLimited(NET_ONION, false);
+        }
+        if (IsLimited(NET_IPV4) && IsLimited(NET_IPV6) && !HaveNameProxy()) {
+            // Onion-only node (-onlynet=onion) without -proxy: host names
+            // (DNS seeds, -addnode, -seednode, -connect) must never reach the
+            // system resolver. Hand them to Tor instead.
+            SetNameProxy(addrEmbedded);
+            // Literal IPv4/IPv6 destinations do not use the name proxy:
+            // ConnectSocket() dials them directly unless their network has a
+            // proxy, and -onlynet does not stop it. Those are -addnode,
+            // -connect and -seednode given as addresses, the compiled
+            // bootstrap peers init adds as -addnode on every start, and the
+            // bootstrap snapshot download. Send them through Tor as well,
+            // the same as -proxy does.
+            SetProxy(NET_IPV4, addrEmbedded);
+            SetProxy(NET_IPV6, addrEmbedded);
+            // Addresses with no network (private ranges, TEST-NET, ...) have
+            // no proxy and would still be dialled directly: refuse those.
+            SetProxyOnly(true);
+            LogPrintf("tor: onion-only node, host names and IP destinations go through the embedded Tor\n");
+            // Without -bind the P2P port listens on every interface, and a
+            // clearnet peer that connects in is sent this node's onion
+            // address (version addrMe, addr relay), tying the two together.
+            // Tor reaches the port on loopback, so listen only there.
+            if (!mapArgs.count("-bind") && !mapArgs.count("-whitebind")) {
+                mapArgs["-bind"] = "127.0.0.1";
+                mapMultiArgs["-bind"].push_back("127.0.0.1");
+                LogPrintf("tor: onion-only node without -bind, listening on 127.0.0.1 only\n");
+            }
+        }
+        // A node that asked for Tor never continues without it: if Tor exits
+        // on its own, shut down instead of leaving its loopback ports free
+        // for another local process to take over.
+        scheduler.scheduleEvery(&EmbeddedTorWatchdog, 5);
+    }
+
     // see Step 2: parameter interactions for more information about these
     fListen = GetBoolArg("-listen", DEFAULT_LISTEN);
     fDiscover = GetBoolArg("-discover", true);
     fNameLookup = GetBoolArg("-dns", true);
 
     bool fBound = false;
+    bool fOnionTargetBound = false;
     if (fListen) {
         if (mapArgs.count("-bind") || mapArgs.count("-whitebind")) {
-            BOOST_FOREACH(const std::string& strBind, mapMultiArgs["-bind"]) {
+            std::set<std::string> setBindArgs;
+            BOOST_FOREACH(const std::string& strBindArg, mapMultiArgs["-bind"]) {
+                // The same address given twice (on the command line and in the conf
+                // file) is bound once: a second bind of a listening address fails.
+                if (!setBindArgs.insert(strBindArg).second)
+                    continue;
+                // <addr>=onion: the listener the onion service points at (see doc/tor.md)
+                std::string strBind = strBindArg;
+                bool fOnionBind = false;
+                if (strBind.size() > 6 && strBind.compare(strBind.size() - 6, 6, "=onion") == 0) {
+                    strBind.resize(strBind.size() - 6);
+                    fOnionBind = true;
+                }
                 CService addrBind;
-                if (!Lookup(strBind.c_str(), addrBind, GetListenPort(), false))
+                if (!Lookup(strBind.c_str(), addrBind, fOnionBind ? GetListenPort() + 1 : GetListenPort(), false))
                     return InitError(strprintf(_("Cannot resolve -bind address: '%s'"), strBind));
+                if (fOnionBind) {
+                    if (!addrBind.IsLocal() && !addrBind.IsRFC1918())
+                        LogPrintf("Warning: -bind=%s=onion is not a loopback address; the onion service target should not be reachable from outside\n", strBind);
+                    std::string strOnionError;
+                    if (!BindListenPort(addrBind, strOnionError, false, true))
+                        return InitError(strOnionError);
+                    SetOnionServiceTarget(addrBind);
+                    fOnionTargetBound = true;
+                    fBound = true;
+                    LogPrintf("Onion service target: %s\n", addrBind.ToString());
+                    continue;
+                }
                 fBound |= Bind(addrBind, (BF_EXPLICIT | BF_REPORT_ERROR));
             }
             BOOST_FOREACH(const std::string& strBind, mapMultiArgs["-whitebind"]) {
@@ -2150,6 +2477,28 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
         if (!fBound)
             return InitError(_("Failed to listen on any port. Use -listen=0 if you want this."));
+
+        // A node that was asked to run an onion service (embedded Tor, or an explicit
+        // -torcontrol) gets a second loopback listener dedicated to it, the port after
+        // the P2P port, unless -bind=<addr>=onion chose one. ADD_ONION points there, so
+        // a connection accepted on it is known to be an onion peer. Fail-soft: without
+        // it the service targets the P2P port as before and inbound onion peers are
+        // simply not recognised (our onion address is then only sent to peers we
+        // reached over Tor). Not done for the legacy auto-detected control port, which
+        // may belong to any Tor on the host, nor for a -torcontrol that is not on this
+        // machine: that Tor does not share our loopback, so it could not reach port+1
+        // (it keeps the P2P port as the target; -bind=<addr>=onion chooses one).
+        if (!fOnionTargetBound && GetBoolArg("-listenonion", DEFAULT_LISTEN_ONION) &&
+            (fEmbeddedTor || (mapArgs.count("-torcontrol") && TorControlAddressIsLocal(GetArg("-torcontrol", ""))))) {
+            CService addrOnionBind(CNetAddr("127.0.0.1"), GetListenPort() + 1);
+            std::string strOnionError;
+            if (BindListenPort(addrOnionBind, strOnionError, false, true)) {
+                SetOnionServiceTarget(addrOnionBind);
+                LogPrintf("Onion service target: %s\n", addrOnionBind.ToString());
+            } else {
+                LogPrintf("Warning: no dedicated onion listener (%s); the onion service targets the P2P port\n", strOnionError);
+            }
+        }
 
         // Opt-in (default off): ask the router to forward our own listen port via
         // NAT-PMP/PCP so NAT/firewalled peers become reachable for inbound
@@ -2181,21 +2530,6 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     if (pzmqNotificationInterface) {
         RegisterValidationInterface(pzmqNotificationInterface);
-    }
-#endif
-
-#if ENABLE_PROTON
-    pAMQPNotificationInterface = AMQPNotificationInterface::CreateWithArguments(mapArgs);
-
-    if (pAMQPNotificationInterface) {
-
-        // AMQP support is currently an experimental feature, so fail if user configured AMQP notifications
-        // without enabling experimental features.
-        if (!fExperimentalMode) {
-            return InitError(_("AMQP support requires -experimentalfeatures."));
-        }
-
-        RegisterValidationInterface(pAMQPNotificationInterface);
     }
 #endif
 
@@ -2255,6 +2589,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         if (!ImportBootstrapDatadir(bootstrap_source, GetDataDir(), GetBoolArg("-bootstrapforce", false), bootstrap_error)) {
             return InitError(bootstrap_error);
         }
+        fBlockIndexFromSnapshot = true;
     }
 
     // Fetch the chain snapshot from a bootstrap peer. This runs automatically on
@@ -2264,7 +2599,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // peer-to-peer sync if no bootstrap peer is reachable.
     bool bootstrap_snapshot_ran = false;
     // Sub-mark: everything between net-setup and the auto bootstrap-snapshot
-    // decision -- ZMQ/Proton interface create, the -bootstrapserve preflight, and
+    // decision -- ZMQ interface create, the -bootstrapserve preflight, and
     // the optional -bootstrapdatadir manual import. On a -connect=0 -listen=0 node
     // with no -bootstrapserve these are all cheap, so this row should be ~0ms.
     g_startupTimer.mark(".pre-bootstrap-snapshot");
@@ -2351,6 +2686,14 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     if (!StubRecoveryAllowedNow(GetDataDir(), anchorForStub.nHeight, skipReason)) {
                         SetBootstrapInfoPhase("skipped", skipReason);
                         LogPrintf("Bootstrap: abandoned-stub recovery skipped: %s\n", skipReason);
+                        // The attempts are used up for this anchor: no download will resume
+                        // here, so a partial snapshot kept for it only takes disk space. A
+                        // cooldown is different: the next start may continue it.
+                        StubRecoveryState exhausted;
+                        if (ReadStubRecoveryMarker(GetDataDir(), exhausted) &&
+                            exhausted.anchorHeight == anchorForStub.nHeight &&
+                            exhausted.attempts >= kStubRecoveryMaxAttempts)
+                            RemoveStaleBootstrapStaging(GetDataDir());
                         if (explicit_peer)
                             return InitError(skipReason);
                         // else fall through to normal sync (NOT eligible).
@@ -2400,6 +2743,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 } else {
                     // Genuinely real chain (or corrupt -> reindex path): existing behavior.
                     SetBootstrapInfoPhase("skipped", bootstrap_error.empty() ? "datadir not eligible" : bootstrap_error);
+                    // A snapshot staging directory kept for resume (an earlier download
+                    // that was interrupted) is dead weight once the node has a real
+                    // chain: no bootstrap will run here again, so give the disk back.
+                    RemoveStaleBootstrapStaging(GetDataDir());
                     // Datadir already has real chain data: skip silently unless the
                     // user explicitly asked to bootstrap into it. A datadir holding
                     // only a genesis-height chainstate (a node that initialized its
@@ -2424,7 +2771,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 // Each BootstrapFromPeer attempt is self-contained (it stages into a
                 // fresh dir and cleans up on failure), so retrying is safe and cheap.
                 const int nBootstrapAttempts = 3;
-                const std::vector<std::string> bootstrapPeers = GetBootstrapPeerList();
+                const std::vector<std::string> bootstrapPeers = GetBootstrapSnapshotPeerList();
                 const int nBootstrapPeers = (int)bootstrapPeers.size();
                 int peerIndex = 0;
                 BOOST_FOREACH(const std::string& peer, bootstrapPeers) {
@@ -2492,6 +2839,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     // the (correct, self-healed) terminal state so the GUI surfaces
                     // "fast-sync unavailable, syncing normally" rather than an error.
                     SetBootstrapInfoPhase("normal_sync", bootstrap_error);
+                    // The partial snapshot stays for the next start to resume, but it
+                    // sits next to the growing chain until then: say where it is.
+                    BOOST_FOREACH(const boost::filesystem::path& keptStaging, ListBootstrapStagingDirs(GetDataDir()))
+                        LogPrintf("Bootstrap: the partial snapshot in %s is kept so a later start can resume it; "
+                                  "it uses up to the full snapshot size and is removed with -bootstrap=0 or once the chain is real\n",
+                                  keptStaging.string());
                     // No snapshot was imported this start. If we moved a genesis-only
                     // datadir aside to attempt it, move it back so the datadir is left
                     // exactly as it was found (and no backup dir accumulates). Only a
@@ -2530,6 +2883,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 conflicts ? "conflicting flag (-reindex/-reindex-chainstate/-loadblock)"
                           : (!GetBoolArg("-bootstrap", true) ? "-bootstrap=0"
                                                              : "no bootstrap peers configured"));
+            // A partial snapshot kept for resume by an earlier start is dead weight
+            // when the operator turned bootstrap off (or asked for a reindex or a
+            // block import): give the disk back instead of keeping it for ever.
+            if (conflicts || !GetBoolArg("-bootstrap", true))
+                RemoveStaleBootstrapStaging(GetDataDir());
         }
     }
 
@@ -2562,6 +2920,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 LogPrintf("Adding bootstrap peer %s as a persistent sync node\n", peer);
             }
         }
+        // Onion-only node on the onion bootstrap peers; the clearnet fallback
+        // check is scheduled after StartNode() (Step 11).
+        if (!mapArgs.count("-bootstrappeer") && BootstrapOnionOnlyActive())
+            LogPrintf("Bootstrap: onion-only node, using the onion bootstrap peers instead of the clearnet addresses\n");
     }
 
     // This now measures ONLY the bootstrap-snapshot decision + (when the datadir
@@ -2584,7 +2946,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     boost::filesystem::path blocksDir = GetDataDir() / "blocks";
     if (!boost::filesystem::exists(blocksDir))
     {
-        boost::filesystem::create_directories(blocksDir);
+        boost::system::error_code blocksEc;
+        boost::filesystem::create_directories(blocksDir, blocksEc);
+        if (blocksEc)
+            return InitError(strprintf(_("Cannot create the blocks directory \"%s\": %s"), blocksDir.string(), blocksEc.message()));
         bool linked = false;
         for (unsigned int i = 1; i < 10000; i++) {
             boost::filesystem::path source = GetDataDir() / strprintf("blk%04u.dat", i);
@@ -2635,7 +3000,17 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     bool clearWitnessCaches = false;
 
+    // An exception from the background parameter load is not a block-database
+    // error. It is kept out of the catch below (which reports "Error opening
+    // block database" and offers a -reindex) and rethrown after the load loop,
+    // where it leaves AppInit2 exactly as the synchronous ZC_LoadParams did.
+    std::exception_ptr paramsLoadError;
     bool fLoaded = false;
+    // A bootstrap install is verified after the load below and its marker cleared then; until
+    // that, the block index is the serving node's (see fBlockIndexFromSnapshot). The markers
+    // are written before the install, so a crash before the verification keeps this set.
+    if (BootstrapAnchorPendingExists(GetDataDir()) || BootstrapTrustlessPendingExists(GetDataDir()))
+        fBlockIndexFromSnapshot = true;
     while (!fLoaded) {
         bool fReset = fReindex || fReindexChainState;
         std::string strLoadError;
@@ -2658,12 +3033,44 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 // the connected chain from the existing blk files under full
                 // ConnectBlock -- rebuilding the UTXO set without a full reindex.
                 pblocktree = new CBlockTreeDB(nBlockTreeDBCache, false, fReindex);
+                // The reindex flag is the only record that the block index was wiped on purpose: a
+                // node killed after the wipe and before the flag is written starts with an empty
+                // index next to full block files, and its sync overwrites them. Write it before the
+                // chainstate is wiped (the long step), and when an earlier -reindex was cut short
+                // (flag found) run it again from the start with a wiped chainstate: the half-built
+                // one may be torn and no longer matches the index that is not loaded.
+                if (fReindex) {
+                    pblocktree->WriteReindexing(true);
+                } else {
+                    bool fWasReindexing = false;
+                    pblocktree->ReadReindexing(fWasReindexing);
+                    // The flag can only be written once the wiped block index is open again, and
+                    // opening a new LevelDB syncs its files: a -reindex killed in that window left an
+                    // empty index with no flag next to full block files. A plain restart then refused
+                    // (the chainstate names a block the index lacks), but one with -reindex-chainstate,
+                    // or with the chainstate gone, started from genesis and wrote over blk00000.dat.
+                    // An index that never recorded a block file while blk00000.dat holds data was lost
+                    // (cut short like that, or removed by hand): rebuild it from the block files.
+                    int nLastBlockFileRecorded = 0;
+                    const boost::filesystem::path pathFirstBlockFile = GetBlockPosFilename(CDiskBlockPos(0, 0), "blk");
+                    boost::system::error_code ecFirstBlockFile;
+                    const bool fFirstBlockFileHoldsData = boost::filesystem::exists(pathFirstBlockFile, ecFirstBlockFile) &&
+                        boost::filesystem::file_size(pathFirstBlockFile, ecFirstBlockFile) > 0 && !ecFirstBlockFile;
+                    if (fWasReindexing) {
+                        LogPrintf("An earlier -reindex did not finish: starting it again\n");
+                        fReindex = true;
+                    } else if (!pblocktree->ReadLastBlockFile(nLastBlockFileRecorded) && fFirstBlockFileHoldsData) {
+                        LogPrintf("The block index is empty but the block files hold blocks (an interrupted -reindex, or a removed index): reindexing them\n");
+                        pblocktree->WriteReindexing(true);
+                        fReindex = true;
+                    }
+                }
                 pcoinsdbview = new CCoinsViewDB(nCoinDBCache, false, fReindex || fReindexChainState);
                 pcoinscatcher = new CCoinsViewErrorCatcher(pcoinsdbview);
                 pcoinsTip = new CCoinsViewCache(pcoinscatcher);
 
                 if (fReindex) {
-                    pblocktree->WriteReindexing(true);
+                    TestCrashPoint("reindex-after-wipe");
                     //If we're reindexing in prune mode, wipe away unusable block files and all undo data files
                     if (fPruneMode)
                         CleanupBlockRevFiles();
@@ -2674,6 +3081,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     break;
                 }
                 g_startupTimer.mark(".loadblockindex-db");
+                try {
+                    zcParamsLoader.Join();
+                } catch (...) {
+                    paramsLoadError = std::current_exception();
+                    break;
+                }
+                g_startupTimer.mark(".zk-snark params (wait)");
 
                 // If the loaded chain has a wrong genesis, bail out immediately
                 // (we're likely using a testnet datadir, or the other way around).
@@ -2739,6 +3153,15 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     break;
                 }
                 g_startupTimer.mark(".verifydb");
+            } catch (const dbwrapper_error& e) {
+                LogPrintf("%s\n", e.what());
+                if (e.IsEnvironmental()) {
+                    // Permissions, a read-only or full disk, a path that is too long or a held lock:
+                    // rebuilding the block database cannot fix these, so do not offer -reindex.
+                    return InitError(strprintf(_("Unable to open the block database: %s"), e.what()));
+                }
+                strLoadError = _("Error opening block database");
+                break;
             } catch (const std::exception& e) {
                 if (fDebug) LogPrintf("%s\n", e.what());
                 strLoadError = _("Error opening block database");
@@ -2747,6 +3170,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
             fLoaded = true;
         } while(false);
+        if (paramsLoadError)
+            std::rethrow_exception(paramsLoadError);
 
         if (!fLoaded) {
             // first suggest a reindex
@@ -3094,6 +3519,14 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             else
                 pindexRescan = chainActive.Genesis();
         }
+        // The note state that was read back (witness caches, nullifiers) is checked against the
+        // active chain before it is trusted. A crash, a reindex or a chain that was rolled back
+        // behind the wallet can leave it ahead of, behind or on another branch than the chain;
+        // a rescan from the locator alone does not see that. This may start the rescan earlier.
+        bool fNoteStateRepaired = false;
+        if (!clearWitnessCaches && !GetBoolArg("-rescan", false) && chainActive.Tip()) {
+            fNoteStateRepaired = pwalletMain->ReconcileNoteState(pindexRescan);
+        }
         if (chainActive.Tip() && chainActive.Tip() != pindexRescan)
         {
             uiInterface.InitMessage(_("Rescanning..."));
@@ -3102,6 +3535,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             pwalletMain->ScanForWalletTransactions(pindexRescan, true);
             LogPrintf(" rescan      %15dms\n", GetTimeMillis() - nStart);
             g_startupTimer.mark("rescan");
+            TestCrashPoint("init-after-rescan");
             pwalletMain->SetBestChain(chainActive.GetLocator());
             nWalletDBUpdated++;
 
@@ -3128,9 +3562,21 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                         copyTo->WriteToDisk(&walletdb);
                     }
                 }
+                // nOrderPos was just overwritten above: the wallet's cached transaction-order index is stale.
+                {
+                    LOCK(pwalletMain->cs_wallet);
+                    pwalletMain->InvalidateTxOrderIndex();
+                }
             }
         }
+        else if (fNoteStateRepaired)
+        {
+            // Nothing to scan, but the repaired state has to reach wallet.dat in one atomic write.
+            pwalletMain->SetBestChain(chainActive.GetLocator());
+            nWalletDBUpdated++;
+        }
         pwalletMain->SetBroadcastTransactions(GetBoolArg("-walletbroadcast", true));
+        fWalletInitComplete = true;
     } // (!fDisableWallet)
 #else // ENABLE_WALLET
     LogPrintf("No wallet support compiled in!\n");
@@ -3254,6 +3700,24 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     LogPrintf("mapAddressBook.size() = %u\n",  pwalletMain ? pwalletMain->mapAddressBook.size() : 0);
 #endif
 
+    // Optional read-only ZSLP token index (off by default). It only reads blocks.
+    if (GetBoolArg("-zslpindex", false)) {
+        if (fPruneMode)
+            return InitError(_("-zslpindex needs the full block files and is not compatible with -prune."));
+        std::string errZslp;
+        if (!zslp::StartService(errZslp))
+            return InitError(errZslp);
+    }
+
+    // Optional read-only ZNAM name index (off by default). It only reads blocks and their undo data.
+    if (GetBoolArg("-znamindex", false)) {
+        if (fPruneMode)
+            return InitError(_("-znamindex needs the full block files and is not compatible with -prune."));
+        std::string errZnam;
+        if (!znam::StartService(errZnam))
+            return InitError(errZnam);
+    }
+
     // Start the thread that notifies listeners of transactions that have been
     // recently added to the mempool.
     threadGroup.create_thread(boost::bind(&TraceThread<void (*)()>, "txnotify", &ThreadNotifyRecentlyAdded));
@@ -3263,6 +3727,15 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     StartNode(threadGroup, scheduler);
     g_startupTimer.mark("start node");
+
+    // Onion-only node on the onion bootstrap peers: if neither connects (and
+    // nothing else does) within the grace period, add the clearnet ones
+    // through the proxy, once. Counted from here, not from Step 6: block
+    // loading and import can outlast the grace period before any connection
+    // is attempted, and ThreadOpenAddedConnections (started by StartNode)
+    // replaces vAddedNodes with -addnode when it starts.
+    if (!mapArgs.count("-connect") && !mapArgs.count("-bootstrappeer") && BootstrapOnionOnlyActive())
+        scheduler.scheduleFromNow(&BootstrapOnionFallbackCheck, BOOTSTRAP_ONION_GRACE_SECONDS);
 
     // Monitor the chain every minute, and alert if we get blocks much quicker or slower than expected.
     CScheduler::Function f = boost::bind(&PartitionCheck, &IsInitialBlockDownload,

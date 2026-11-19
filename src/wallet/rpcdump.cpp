@@ -424,7 +424,8 @@ UniValue z_exportwallet(const UniValue& params, bool fHelp)
             "z_exportwallet \"filename\"\n"
             "\nExports all wallet keys, for taddr and zaddr, in a human-readable format.  Overwriting an existing file is not permitted.\n"
             "\nArguments:\n"
-            "1. \"filename\"    (string, required) The filename, saved in folder set by zclassicd -exportdir option\n"
+            "1. \"filename\"    (string, required) The file name, saved in the folder set by the zclassicd -exportdir option\n"
+            "                 (default: the \"backups\" folder inside the data directory). Letters, digits, '.', '-' and '_'.\n"
             "\nResult:\n"
             "\"path\"           (string) The full path of the destination file\n"
             "\nExamples:\n"
@@ -445,7 +446,8 @@ UniValue dumpwallet(const UniValue& params, bool fHelp)
             "dumpwallet \"filename\"\n"
             "\nDumps taddr wallet keys in a human-readable format.  Overwriting an existing file is not permitted.\n"
             "\nArguments:\n"
-            "1. \"filename\"    (string, required) The filename, saved in folder set by zclassicd -exportdir option\n"
+            "1. \"filename\"    (string, required) The file name, saved in the folder set by the zclassicd -exportdir option\n"
+            "                 (default: the \"backups\" folder inside the data directory). Letters, digits, '.', '-' and '_'.\n"
             "\nResult:\n"
             "\"path\"           (string) The full path of the destination file\n"
             "\nExamples:\n"
@@ -468,15 +470,11 @@ UniValue dumpwallet_impl(const UniValue& params, bool fHelp, bool fDumpZKeys)
     } catch (const std::runtime_error& e) {
         throw JSONRPCError(RPC_INTERNAL_ERROR, e.what());
     }
-    if (exportdir.empty()) {
-        throw JSONRPCError(RPC_WALLET_ERROR, "Cannot export wallet until the zclassicd -exportdir option has been set");
+    const std::string filename = params[0].get_str();
+    if (!IsValidExportFilename(filename)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, ExportFilenameErrorText(filename));
     }
-    std::string unclean = params[0].get_str();
-    std::string clean = SanitizeFilename(unclean);
-    if (clean.compare(unclean) != 0) {
-        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Filename is invalid as only alphanumeric characters are allowed.  Try '%s' instead.", clean));
-    }
-    boost::filesystem::path exportfilepath = exportdir / clean;
+    boost::filesystem::path exportfilepath = exportdir / filename;
 
     if (boost::filesystem::exists(exportfilepath)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Cannot overwrite existing file " + exportfilepath.string());

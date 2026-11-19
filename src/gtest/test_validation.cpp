@@ -89,6 +89,9 @@ TEST(Validation, ContextualCheckInputsPassesWithCoinbase) {
 }
 
 TEST(Validation, ReceivedBlockTransactions) {
+    // ReceivedBlockTransactions() reads Params(); select a network here so that the
+    // test does not depend on an earlier test having done so.
+    SelectParams(CBaseChainParams::REGTEST);
     auto sk = libzcash::SproutSpendingKey::random();
 
     // Create a fake genesis block

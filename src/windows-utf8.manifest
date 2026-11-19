@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <!-- Windows 10 1903+: make the process ANSI code page UTF-8, so argv,
+           the *A file APIs, SHGetSpecialFolderPathA (default datadir) and
+           boost::filesystem narrow paths all carry UTF-8 and non-ASCII
+           datadir/-conf/-exportdir/user-profile paths work. -->
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+      <!-- Paths longer than MAX_PATH where the OS has LongPathsEnabled. -->
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+    </windowsSettings>
+  </application>
+</assembly>

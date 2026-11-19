@@ -29,10 +29,14 @@
 #include <QProcessEnvironment>
 #include <QTcpServer>
 #include "repairlocation.h"
+#include "profilepaths.h"
+#include "daemonjob.h"
+#include <QTemporaryDir>
 #include "walletbackup.h"
 #include "embeddeddaemon.h"
 #include "releaseversion.h"
 #include "fastsync.h"
+#include "syncstate.h"
 #include <QCryptographicHash>
 #include <QStandardItemModel>
 
@@ -65,6 +69,8 @@ static const QString ZC_SPROUT    = "zcEgrceTwvoiFdEvPWcsJHAMrpLsprMF6aRJiQa3fan
 // testnet
 static const QString ZTS_SAPLING  = "ztestsapling1wn6889vznyu42wzmkakl2effhllhpe4azhu696edg2x6me4kfsnmqwpglaxzs7tmqsq7kudemp5";
 static const QString ZTN_SPROUT   = "ztn6fYKBii4Fp4vbGhkPgrtLU4XjXp4ZBMZgShtopmDGbn1L2JLTYbBp2b7SSkNr9F3rQeNZ9idmoR7s4JCVUZ7iiM5byhF";
+// regtest (real address from a Z23 regtest node: getinfo.testnet is false there)
+static const QString ZRT_SAPLING  = "zregtestsapling1pm6ght3yqlsyupz82y5l9t9j8ram9l4e25nwvvqhqnwxt3uayjz39ydtw0scn0d00y436v9s4ha";
 }
 
 // Flip one character of a valid address to break its checksum (typo negative).
@@ -161,6 +167,75 @@ class TestLogic : public QObject {
     Q_OBJECT
 
 private slots:
+    // ---- sync state mapping (syncstate.h): daemon facts -> what the user is told ----
+    void syncState_data() {
+        QTest::addColumn<QString>("chain");
+        QTest::addColumn<int>("blocks");
+        QTest::addColumn<int>("headers");
+        QTest::addColumn<int>("tipAgeSecs");   // -1 = unknown
+        QTest::addColumn<int>("peers");
+        QTest::addColumn<int>("ibd");
+        QTest::addColumn<bool>("everSynced");
+        QTest::addColumn<int>("kind");
+        QTest::addColumn<bool>("isSyncing");
+        using namespace SyncState;
+        // The owner's case: regtest, 101 blocks, no peers -> a local network, never "starting".
+        QTest::newRow("regtest-101-nopeers") << "regtest" << 101 << 101 << 3600*24*30 << 0 << 0 << false << (int)LocalNetwork << false;
+        QTest::newRow("regtest-genesis")     << "regtest" << 0 << 0 << -1 << 0 << -1 << false << (int)LocalNetwork << false;
+        // A regtest node that is still fetching blocks it has headers for (a second local node) is syncing.
+        QTest::newRow("regtest-headers-ahead") << "regtest" << 50 << 500 << 3600 << 1 << 1 << false << (int)Syncing << true;
+        // Fresh snapshot import: blocks==headers at the anchor, peers up, tip 20 days old.
+        QTest::newRow("post-snapshot-old-tip") << "main" << 3126937 << 3126937 << 3600*24*20 << 8 << 1 << false << (int)Syncing << true;
+        QTest::newRow("headers-ahead")       << "main" << 3200000 << 3330000 << 3600*24*3 << 8 << 1 << false << (int)Syncing << true;
+        QTest::newRow("at-tip-fresh")        << "main" << 3330000 << 3330000 << 120 << 8 << 0 << false << (int)Synced << false;
+        QTest::newRow("within-2-headers")    << "main" << 3329998 << 3330000 << 150 << 8 << 0 << false << (int)Synced << false;
+        // Restart from a synced datadir, fresh tip, peers not yet connected: not "synced" yet.
+        QTest::newRow("restart-no-peers-yet") << "main" << 3330000 << 3330000 << 300 << 0 << 0 << false << (int)WaitingForPeers << true;
+        // Peers drop after having been confirmed at the tip: stay synced, do not flicker.
+        QTest::newRow("synced-then-peers-drop") << "main" << 3330000 << 3330000 << 300 << 0 << 0 << true << (int)Synced << false;
+        QTest::newRow("no-peers-old-tip")    << "main" << 3126937 << 3126937 << 3600*24*20 << 0 << 1 << false << (int)WaitingForPeers << true;
+        // Tip older than 2h with peers after being synced: wrong clock or stalled network.
+        QTest::newRow("stale-tip-peers")     << "main" << 3330000 << 3330000 << 3600*5 << 8 << 0 << true << (int)StaleTip << true;
+        QTest::newRow("first-poll-nothing")  << "main" << 0 << 0 << -1 << 0 << -1 << false << (int)Syncing << true;
+        QTest::newRow("testnet-tip-fresh")   << "test" << 900000 << 900000 << 200 << 3 << 0 << false << (int)Synced << false;
+        QTest::newRow("clock-skew-reported") << "main" << 3330000 << 3330000 << 3600*3 << 2 << 0 << false << (int)ClockSkew << false;
+        // The node itself still reports initial block download with a fresh tip (its chain has less work
+        // than the known minimum, e.g. a low-work chain fed by the only peers it has): never "synced".
+        QTest::newRow("ibd-fresh-tip-peers")    << "main" << 3330000 << 3330000 << 120 << 8 << 1 << false << (int)Syncing << true;
+        QTest::newRow("ibd-fresh-tip-everSynced-nopeers") << "main" << 3330000 << 3330000 << 120 << 0 << 1 << true << (int)WaitingForPeers << true;
+    }
+    void syncState() {
+        QFETCH(QString, chain); QFETCH(int, blocks); QFETCH(int, headers); QFETCH(int, tipAgeSecs);
+        QFETCH(int, peers); QFETCH(int, ibd); QFETCH(bool, everSynced);
+        QFETCH(int, kind); QFETCH(bool, isSyncing);
+        SyncState::Input in;
+        in.chain = chain; in.blocks = blocks; in.headers = headers;
+        in.now = 1800000000; in.tipTime = tipAgeSecs >= 0 ? in.now - tipAgeSecs : 0;
+        in.connections = peers; in.ibd = ibd; in.everSynced = everSynced;
+        in.clockWarning = (QByteArray(QTest::currentDataTag()) == "clock-skew-reported");
+        const SyncState::Verdict v = SyncState::classify(in);
+        QCOMPARE((int)v.kind, kind);
+        QCOMPARE(v.isSyncing, isSyncing);
+    }
+    void presentation_peerlessDebounce() {
+        using namespace SyncState;
+        Verdict s; s.kind = WaitingForPeers; s.isSyncing = true;
+        Verdict done; done.kind = Synced; done.isSyncing = false;
+        QCOMPARE((int)presentation(s, 0, 1), (int)PresentConnecting);
+        QCOMPARE((int)presentation(s, 0, kNoPeerDebouncePolls - 1), (int)PresentConnecting);
+        QCOMPARE((int)presentation(s, 0, kNoPeerDebouncePolls), (int)PresentNoPeers);
+        QCOMPARE((int)presentation(s, 3, 50), (int)PresentNormal);
+        QCOMPARE((int)presentation(done, 0, 50), (int)PresentNormal);
+    }
+    void syncState_formatAge() {
+        QCOMPARE(SyncState::formatAge(-1), QString());
+        QCOMPARE(SyncState::formatAge(40), QString("40 s"));
+        QCOMPARE(SyncState::formatAge(300), QString("5 min"));
+        QCOMPARE(SyncState::formatAge(3 * 3600), QString("3 h"));
+        QCOMPARE(SyncState::formatAge(20LL * 86400), QString("20 days"));
+        QCOMPARE(SyncState::formatAge(3641LL * 86400), QString("10.0 years"));
+    }
+
     void fastSync_existingWalletSkipsHistoricalReplay() {
         const QString existing = "bootstrap peer download requires a fresh chain datadir; /data/blocks already exists";
         QVERIFY(shouldMigrateToCheckpoint(true, true, 2719719, "skipped", existing));
@@ -861,6 +936,8 @@ private slots:
     void priv13_badgeClassify_data();
     void priv13_badgeClassify();
     void priv13_deshieldOnlyForPublicSendRow();
+    void priv13_transparentSendIsNotDeshield();
+    void priv13_amountColumnFitsSignedAmount();
     // --- PRIV-14: badge colour hex tokens match dark.qss ---
     void priv14_badgeColorTokens();
 
@@ -879,6 +956,13 @@ private slots:
 
     // --- First-run trust: send-gate staleness predicate (pure) ---
     void sendgate_staleWhenPollStops();               // Settings::syncGateIsStale boundary
+    void profile_unsetKeepsDefaults();
+    void profile_setRedirectsEveryPath();
+    void profile_settingsAreIniInsideProfile();
+    void profile_noDirectStateLocations();
+    void profile_blankValueFailsClosed();
+    void daemonjob_everyLaunchPathUsesTheJob();
+    void daemonjob_armedAfterEveryStart();
 
 private:
     QString sandboxAppData() const {
@@ -926,6 +1010,9 @@ void TestLogic::classifiers_data() {
     QTest::newRow("mainnet sprout zc")   << addr::ZC_SPROUT   << false << false << true  << false << true;
     QTest::newRow("testnet sapling zts") << addr::ZTS_SAPLING << true  << false << true  << true  << false;
     QTest::newRow("testnet sprout ztn")  << addr::ZTN_SPROUT  << true  << false << true  << false << true;
+    // regtest Sapling is Sapling whatever the testnet flag says (the daemon reports testnet=false)
+    QTest::newRow("regtest sapling zrt")    << addr::ZRT_SAPLING << false << false << true  << true  << false;
+    QTest::newRow("regtest sapling zrt tn") << addr::ZRT_SAPLING << true  << false << true  << true  << false;
 
     // On the WRONG network, a Sapling addr is not recognized as Sapling
     // (isSaplingAddress is net-aware), so it classifies as Sprout (z && !sapling).
@@ -961,6 +1048,7 @@ void TestLogic::invalidAddressesRejected_data() {
     QTest::newRow("bad checksum zc")    << corrupt(addr::ZC_SPROUT);
     QTest::newRow("bad checksum zts")   << corrupt(addr::ZTS_SAPLING);
     QTest::newRow("bad checksum ztn")   << corrupt(addr::ZTN_SPROUT);
+    QTest::newRow("bad checksum zrt")   << corrupt(addr::ZRT_SAPLING);
     QTest::newRow("only prefix z")      << QString("z");
     QTest::newRow("only prefix t")      << QString("t");
 }
@@ -1568,6 +1656,49 @@ void TestLogic::priv13_deshieldOnlyForPublicSendRow() {
     QCOMPARE(int(PrivacyBadgeDelegate::testClassifyForIndex(QModelIndex(), T)), int(K::Public));
 }
 
+// UX: an ordinary transparent payment (t -> t) was badged as a red "De-shield", which says
+// private funds leaked when none did. When the model says where the money came from
+// (PrivacyBadgeDelegate::FromAddrRole), only a send FROM a shielded address is a de-shield.
+void TestLogic::priv13_transparentSendIsNotDeshield() {
+    using K = PrivacyBadgeDelegate::Kind;
+    Settings::getInstance()->setTestnet(false);
+    const QString T  = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+    const QString ZS = addr::ZS_SAPLING;
+
+    QStandardItemModel model(3, 2);
+    const int R = PrivacyBadgeDelegate::FromAddrRole;
+    // row 0: sent to a t-address, from a t-address (the wallet's own history rows: empty from)
+    model.setData(model.index(0, 0), "send"); model.setData(model.index(0, 1), T);
+    model.setData(model.index(0, 0), QString(), R);
+    // row 1: sent to a t-address FROM a shielded address -> the real de-shield
+    model.setData(model.index(1, 0), "send"); model.setData(model.index(1, 1), T);
+    model.setData(model.index(1, 0), ZS, R);
+    // row 2: sent to a t-address from another t-address
+    model.setData(model.index(2, 0), "send"); model.setData(model.index(2, 1), T);
+    model.setData(model.index(2, 0), T, R);
+
+    QCOMPARE(int(PrivacyBadgeDelegate::testClassifyForIndex(model.index(0, 1), T)), int(K::Public));
+    QCOMPARE(int(PrivacyBadgeDelegate::testClassifyForIndex(model.index(1, 1), T)), int(K::Deshield));
+    QCOMPARE(int(PrivacyBadgeDelegate::testClassifyForIndex(model.index(2, 1), T)), int(K::Public));
+}
+
+// UX: the Activity list sizes its Amount column from the delegate's sizeHint. That hint
+// was measured in the default font but the amount is painted in the wider monospace
+// face, so the column came out too narrow and a sent amount lost its leading "-".
+void TestLogic::priv13_amountColumnFitsSignedAmount() {
+    QStandardItemModel model(1, 1);
+    const QString text = "-1.52000245 ZCL";
+    model.setData(model.index(0, 0), text);
+    PrivacyBadgeDelegate d(PrivacyBadgeDelegate::Mode::Amount);
+    QStyleOptionViewItem opt;
+    opt.font = QApplication::font();
+    QFont mono = PrivacyBadgeDelegate::testMonoFont();
+    mono.setPointSizeF(opt.font.pointSizeF() > 0 ? opt.font.pointSizeF() : mono.pointSizeF());
+    const int need = QFontMetrics(mono).horizontalAdvance(text) + 16;   // 8px padding each side
+    QVERIFY2(d.sizeHint(opt, model.index(0, 0)).width() >= need,
+             qPrintable(QString("hint %1 < painted %2").arg(d.sizeHint(opt, model.index(0, 0)).width()).arg(need)));
+}
+
 // =====================================================================
 // PRIV-14 — badge label + colour hex tokens. The hex MUST match dark.qss:
 //   green #1f7a1f (Private/Legacy), amber #d9822b (Public), red #c0392b (Deshield).
@@ -1915,6 +2046,203 @@ void TestLogic::sendgate_staleWhenPollStops() {
     // Past the window: stale.
     QVERIFY(Settings::syncGateIsStale(now, now - (W + 1)));
     QVERIFY(Settings::syncGateIsStale(now, now - 10 * W));
+}
+
+// ---- Profile override (ZCLWALLET_PROFILE_DIR) -------------------------------------
+// Unset => helpers return exactly the pre-override locations; set => every helper
+// resolves inside the profile; settings become IniFormat files inside it.
+void TestLogic::profile_unsetKeepsDefaults() {
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+    qunsetenv("ZCLWALLET_PARAMS_DIR");
+    QVERIFY(!ProfilePaths::active());
+    QVERIFY(ProfilePaths::valid());
+    QCOMPARE(ProfilePaths::appDataDir(), QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
+    QCOMPARE(ProfilePaths::cacheDir(), QStandardPaths::writableLocation(QStandardPaths::CacheLocation));
+    QVERIFY(ProfilePaths::runtimeDir().isEmpty());
+    QVERIFY(ProfilePaths::exportsDir().isEmpty());
+    QVERIFY(ProfilePaths::fontconfigRoot().isEmpty());
+    QVERIFY(ProfilePaths::zclassicDataDir().isEmpty());
+    QVERIFY(ProfilePaths::zclassicConfPath().isEmpty());
+    QVERIFY(ProfilePaths::daemonArgs().isEmpty());          // no -datadir: daemon default
+    QVERIFY(ProfilePaths::titleMarker().isEmpty());
+    QCOMPARE(ProfilePaths::paramsDir("/default/params"), QString("/default/params"));
+    const auto before = QSettings::defaultFormat();
+    ProfilePaths::applySettings();                           // must be a no-op
+    QCOMPARE(QSettings::defaultFormat(), before);
+}
+
+void TestLogic::profile_setRedirectsEveryPath() {
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    const QString root = QDir::cleanPath(QFileInfo(tmp.path()).absoluteFilePath());
+    qputenv("ZCLWALLET_PROFILE_DIR", root.toLocal8Bit());
+    qunsetenv("ZCLWALLET_PARAMS_DIR");
+    auto under = [&](const QString& p) {
+        return QDir::cleanPath(p) == root || QDir::cleanPath(p).startsWith(root + "/");
+    };
+    QVERIFY(ProfilePaths::active());
+    QVERIFY(ProfilePaths::valid());
+    QCOMPARE(ProfilePaths::dir(), root);
+    const QStringList all = {
+        ProfilePaths::appDataDir(), ProfilePaths::cacheDir(), ProfilePaths::runtimeDir(),
+        ProfilePaths::exportsDir(), ProfilePaths::fontconfigRoot(),
+        ProfilePaths::zclassicDataDir(), ProfilePaths::zclassicConfPath(),
+    };
+    for (const QString& p : all) {
+        QVERIFY2(!p.isEmpty(), "profile helper returned an empty path");
+        QVERIFY2(under(p), qPrintable("outside the profile: " + p));
+    }
+    QCOMPARE(ProfilePaths::zclassicConfPath(), root + "/ZClassic/zclassic.conf");
+    // The embedded daemon must be pinned to the profile datadir, never its default.
+    const QStringList args = ProfilePaths::daemonArgs();
+    QCOMPARE(args.size(), 1);
+    QVERIFY(args[0].startsWith("-datadir="));
+    QVERIFY2(under(QDir::fromNativeSeparators(args[0].mid(9))), qPrintable(args[0]));
+    QVERIFY(ProfilePaths::titleMarker().contains("profile:"));
+    // Params keep their default unless ZCLWALLET_PARAMS_DIR says otherwise.
+    QCOMPARE(ProfilePaths::paramsDir("/default/params"), QString("/default/params"));
+    qputenv("ZCLWALLET_PARAMS_DIR", (root + "/params").toLocal8Bit());
+    QVERIFY(under(ProfilePaths::paramsDir("/default/params")));
+    // A set-but-missing profile dir is invalid (main() refuses to start).
+    qputenv("ZCLWALLET_PROFILE_DIR", (root + "/does-not-exist").toLocal8Bit());
+    QVERIFY(!ProfilePaths::valid());
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+    qunsetenv("ZCLWALLET_PARAMS_DIR");
+}
+
+void TestLogic::profile_settingsAreIniInsideProfile() {
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    const QString root = QDir::cleanPath(QFileInfo(tmp.path()).absoluteFilePath());
+    qputenv("ZCLWALLET_PROFILE_DIR", root.toLocal8Bit());
+    const QString oldOrg = QCoreApplication::organizationName(), oldApp = QCoreApplication::applicationName();
+    QCoreApplication::setOrganizationName("profile-test-org");
+    QCoreApplication::setApplicationName("profile-test-app");
+    const auto fmt = QSettings::defaultFormat();
+    ProfilePaths::applySettings();
+    QCOMPARE(QSettings::defaultFormat(), QSettings::IniFormat);
+    {
+        // The wallet only ever uses the default constructor (QSettings s;).
+        QSettings s;
+        QCOMPARE(s.format(), QSettings::IniFormat);
+        s.setValue("k", 1);
+        s.sync();
+        QVERIFY2(QDir::cleanPath(s.fileName()).startsWith(root + "/"), qPrintable(s.fileName()));
+        QVERIFY(QFileInfo::exists(s.fileName()));
+    }
+    {
+        QSettings sys(QSettings::IniFormat, QSettings::SystemScope, "o", "a");
+        QVERIFY2(QDir::cleanPath(sys.fileName()).startsWith(root + "/"), qPrintable(sys.fileName()));
+    }
+    QSettings::setDefaultFormat(fmt);
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+    QCoreApplication::setOrganizationName(oldOrg);
+    QCoreApplication::setApplicationName(oldApp);
+}
+
+// Source guard: no state location is decided outside ProfilePaths any more.
+void TestLogic::profile_noDirectStateLocations() {
+    for (const char* f : {"addressbook.cpp", "senttxstore.cpp", "turnstile.cpp", "mainwindow.cpp",
+                          "connection.cpp", "notifyserver.cpp", "main.cpp"}) {
+        const QString code = readStrippedSrc(f);
+        QVERIFY2(!code.isEmpty(), f);
+        QVERIFY2(!code.contains("QStandardPaths::AppDataLocation") ||
+                 QString(f) == "connection.cpp" /* legacy conf path in the inactive branch */,
+                 f);
+        QVERIFY2(!code.contains("QStandardPaths::CacheLocation"), f);
+    }
+    const QString conn = readStrippedSrc("connection.cpp");
+    QVERIFY2(conn.contains("ProfilePaths::daemonArgs()"), "embedded launch must pin -datadir under a profile");
+    QVERIFY2(conn.contains("ProfilePaths::zclassicConfPath()"), "conf lookup must honour the profile");
+    // A conf datadir= line must not steer cookie/repair/backup paths outside the profile.
+    QVERIFY2(conn.contains("zclassicconf->dataDirOverride.clear()"),
+             "profile override must ignore a conf datadir= line");
+}
+
+// Isolation requested but empty/blank must fail closed (exit 2 in main), never mean "use
+// the real profile"; pin() canonicalizes once so cwd changes and symlink aliases agree.
+void TestLogic::profile_blankValueFailsClosed() {
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+    QVERIFY(ProfilePaths::valid());
+    qputenv("ZCLWALLET_PROFILE_DIR", QByteArray(""));
+    if (qEnvironmentVariableIsSet("ZCLWALLET_PROFILE_DIR"))   // empty values are unsettable on Windows
+        QVERIFY2(!ProfilePaths::valid(), "set-but-empty profile dir must be invalid");
+    qputenv("ZCLWALLET_PROFILE_DIR", QByteArray("   "));
+    QVERIFY2(!ProfilePaths::valid(), "blank profile dir must be invalid");
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+
+    auto consume = [](QList<QByteArray> words) {
+        QList<QByteArray> store = words;
+        std::vector<char*> argv;
+        for (auto& w : store) argv.push_back(w.data());
+        return ProfilePaths::consumeArgs(static_cast<int>(argv.size()), argv.data());
+    };
+    QVERIFY(!consume({"zclwallet", "--profile-dir="}));
+    QVERIFY(!consume({"zclwallet", "--profile-dir", ""}));
+    QVERIFY(!consume({"zclwallet", "--profile-dir", " "}));
+    QVERIFY(!consume({"zclwallet", "--profile-dir"}));
+    QVERIFY(!qEnvironmentVariableIsSet("ZCLWALLET_PROFILE_DIR"));
+    QVERIFY(consume({"zclwallet"}));
+    QVERIFY(!qEnvironmentVariableIsSet("ZCLWALLET_PROFILE_DIR"));
+
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    const QString canon = QFileInfo(tmp.path()).canonicalFilePath();
+    QVERIFY(consume({"zclwallet", QByteArray("--profile-dir=") + (tmp.path() + "/.").toLocal8Bit()}));
+    QVERIFY(ProfilePaths::valid());
+    ProfilePaths::pin();
+    QCOMPARE(QString::fromLocal8Bit(qgetenv("ZCLWALLET_PROFILE_DIR")), canon);
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+}
+
+// Source guard: the embedded daemon is only ever launched through DaemonJob::start(). A bare
+// QProcess::start() (or a `started` signal hook, which ConnectionLoader drops on handoff to
+// RPC) would leave a daemon restarted after an unexpected exit without the kill-on-close job.
+void TestLogic::daemonjob_everyLaunchPathUsesTheJob() {
+    for (const char* f : {"connection.cpp", "rpc.cpp"}) {
+        const QString code = readStrippedSrc(f);
+        QVERIFY2(!code.isEmpty(), f);
+        QVERIFY2(!code.contains(QRegularExpression(R"(ezclassicd\s*->\s*start\s*\()")),
+                 qPrintable(QString("%1 launches the daemon without DaemonJob::start").arg(f)));
+        QVERIFY2(!code.contains("DaemonJob::bind"), f);
+    }
+    QVERIFY(readStrippedSrc("connection.cpp").contains("DaemonJob::start(ezclassicd"));
+    QVERIFY(readStrippedSrc("rpc.cpp").contains("DaemonJob::start(ezclassicd"));
+    QVERIFY(readStrippedSrc("rpc.cpp").contains("DaemonJob::disarm()"));
+}
+
+// Windows: a started child is in an armed job BEFORE it runs, the job handle is not
+// inheritable, disarm() really clears kill-on-close, and a RESTART of the same QProcess
+// (what RPC::restartEmbeddedZClassicd does) is bound and armed again. Elsewhere: no-op.
+void TestLogic::daemonjob_armedAfterEveryStart() {
+#ifndef Q_OS_WIN
+    QSKIP("Windows job-object backstop only");
+#else
+    QProcess p;
+    const QString ping = QStringLiteral("ping.exe");
+    const QStringList args{"-n", "2", "127.0.0.1"};
+    for (int round = 0; round < 3; ++round) {
+        QCOMPARE(DaemonJob::start(&p, ping, args), 0ul);
+        QVERIFY2(p.state() == QProcess::Running, "child must be resumed and running");
+        QVERIFY2(DaemonJob::isInJob(&p), qPrintable(QString("round %1 not in job").arg(round)));
+        QVERIFY2(DaemonJob::isArmed(&p), qPrintable(QString("round %1 not armed").arg(round)));
+        DWORD flags = 0;
+        QVERIFY(GetHandleInformation(DaemonJob::entries().back().job, &flags));
+        QVERIFY2(!(flags & HANDLE_FLAG_INHERIT), "job handle must not be inheritable");
+        if (round == 1) {
+            DaemonJob::disarm();
+            QVERIFY(DaemonJob::isInJob(&p));
+            QVERIFY2(!DaemonJob::isArmed(&p), "disarm must clear kill-on-close");
+        }
+        QVERIFY2(p.waitForFinished(15000), "resumed child must run to completion");
+        QCOMPARE(p.exitStatus(), QProcess::NormalExit);
+    }
+    // A launch that fails to start has nothing to bind and leaks no job.
+    QProcess bad;
+    const size_t before = DaemonJob::entries().size();
+    QCOMPARE(DaemonJob::start(&bad, "Z:/definitely/not/here.exe", {}), 0ul);
+    QVERIFY2(DaemonJob::entries().size() <= before, "failed launch must not record a job");
+#endif
 }
 
 QTEST_MAIN(TestLogic)

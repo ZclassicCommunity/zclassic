@@ -22,8 +22,9 @@ using namespace libzcash;
 
 extern ZCJoinSplit* params;
 
-typedef std::array<JSDescription, 2> SproutProofs;
-// Make both the PHGR and Groth proof for a Sprout statement,
+typedef std::array<JSDescription, 1> SproutProofs;
+// Make the Groth proof for a Sprout statement (PHGR13 proofs can no longer be
+// created; verifying them is covered by test_phgr13.cpp),
 // and store the results in JSDescription objects.
 SproutProofs makeSproutProofs(
         ZCJoinSplit& js,
@@ -34,12 +35,10 @@ SproutProofs makeSproutProofs(
         uint64_t vpub_new,
         const uint256& rt
 ){
-    //Making the PHGR proof
-    JSDescription phgr(false, js, joinSplitPubKey, rt, inputs, outputs, vpub_old, vpub_new);
     //Making the Groth proof
     JSDescription groth(true, js, joinSplitPubKey, rt, inputs, outputs, vpub_old, vpub_new);
 
-    return {phgr, groth};
+    return {groth};
 
 }
 
@@ -50,9 +49,8 @@ bool verifySproutProofs(
 )
 {
     auto verifier = libzcash::ProofVerifier::Strict();
-    bool phgrPassed = jsdescs[0].Verify(js, verifier, joinSplitPubKey);
-    bool grothPassed = jsdescs[1].Verify(js, verifier, joinSplitPubKey);
-    return phgrPassed && grothPassed;
+    bool grothPassed = jsdescs[0].Verify(js, verifier, joinSplitPubKey);
+    return grothPassed;
 }
 
 
@@ -100,10 +98,10 @@ void test_full_api(ZCJoinSplit* js)
         );
     }
 
-    // Verify both PHGR and Groth Proof:
+    // Verify the Groth proof:
     ASSERT_TRUE(verifySproutProofs(*js, jsdescs, joinSplitPubKey));
 
-    // Run tests using both phgr and groth as basis for field values
+    // Run tests using the groth proof as basis for field values
     for (auto jsdesc : jsdescs)
     {
         SproutMerkleTree tree;
@@ -166,7 +164,7 @@ void test_full_api(ZCJoinSplit* js)
         }
 
 
-        // Verify both PHGR and Groth Proof:
+        // Verify the Groth proof:
         ASSERT_TRUE(verifySproutProofs(*js, jsdescs2, joinSplitPubKey2));
     }
 }

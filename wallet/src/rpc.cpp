@@ -1,4 +1,6 @@
+#include "daemonjob.h"
 #include "rpc.h"
+#include "syncstate.h"
 #include "fastsync.h"
 #include "releaseversion.h"
 #include "repairlocation.h"
@@ -16,6 +18,18 @@
 #include <QPointer>
 
 using json = nlohmann::json;
+
+QString RPC::connectingMessage() {
+    return QObject::tr("Connected — checking blockchain…");
+}
+
+// Remove only the connect-time notice. Every other status-bar message (the "Tx submitted ... txid" line that the
+// right-click Copy txid / explorer menu reads, "Sending...", "Transaction couldn't be sent") belongs to its owner and
+// must outlive the sync poll.
+void RPC::dropConnectingMessage() {
+    if (main->ui->statusBar->currentMessage() == connectingMessage())
+        main->ui->statusBar->clearMessage();
+}
 
 RPC::RPC(MainWindow* main) {
     auto cl = new ConnectionLoader(main, this);
@@ -189,8 +203,49 @@ void RPC::restartEmbeddedZClassicd() {
             clean << a;
     ezExpectedShutdown = false;   // (F1) a fresh start is not a deliberate shutdown
     main->logger->write(QString("Restarting embedded zclassicd (attempt %1)").arg(ezRestartCount));
-    ezclassicd->start(ezclassicd->program(), clean);
+    // Through DaemonJob so the restarted node is bound to a kill-on-close job again.
+    if (const auto jobErr = DaemonJob::start(ezclassicd, ezclassicd->program(), clean))
+        main->logger->write(QString("daemon job backstop unavailable (win32 error %1)").arg(jobErr));
+    // A restarted node writes a NEW auth cookie. The connection still holds the old one, so
+    // without this every poll is rejected with 401 and the wallet stays on "No Connection"
+    // although the node is up. Follow the cookie until it changes (it is rewritten very early
+    // in startup); give up quietly after about a minute.
+    followRestartedNodeCookie(120);
 }
+
+// Re-read the node's auth cookie and, if it changed, switch the live connection to it.
+// Returns true when the credentials were replaced. The cookie is a secret: never logged.
+bool RPC::refreshAuthFromCookie() {
+    if (!conn || !conn->config || !conn->config->cookieAuth || !conn->request)
+        return false;
+    const auto& cfg = conn->config;
+    const QString base = !cfg->dataDirOverride.isEmpty() ? cfg->dataDirOverride : cfg->zclassicDir;
+    if (base.isEmpty())
+        return false;
+    QFile f(QDir(base).filePath(QStringLiteral(".cookie")));
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+        return false;
+    const QString line = QTextStream(&f).readLine().trimmed();
+    f.close();
+    const int colon = line.indexOf(QLatin1Char(':'));
+    if (colon <= 0)
+        return false;
+    const QString user = line.left(colon), pass = line.mid(colon + 1);
+    if (user == cfg->rpcuser && pass == cfg->rpcpassword)
+        return false;
+    cfg->rpcuser     = user;
+    cfg->rpcpassword = pass;
+    conn->request->setRawHeader("Authorization",
+        ("Basic " + (user + ":" + pass).toLocal8Bit().toBase64()));
+    return true;
+}
+
+void RPC::followRestartedNodeCookie(int triesLeft) {
+    if (triesLeft <= 0 || refreshAuthFromCookie())
+        return;
+    QTimer::singleShot(500, main, [this, triesLeft]() { followRestartedNodeCookie(triesLeft - 1); });
+}
+
 
 // Runtime recovery for the embedded node dying unexpectedly (crash/OOM). On a
 // normal shutdown (ezExpectedShutdown) this is a no-op. Otherwise we drop into the
@@ -309,7 +364,7 @@ void RPC::setConnection(Connection* c) {
     // Don't claim "Ready!" here -- we've only just connected to the node; it may
     // still be syncing. The real status (Syncing %/Connected) is set by the
     // getblockchaininfo poll a moment later.
-    ui->statusBar->showMessage(QObject::tr("Connected — checking blockchain…"));
+    ui->statusBar->showMessage(connectingMessage());
 
     // See if we need to remove the reindex/rescan flags from the zclassic.conf file
     auto zclassicConfLocation = Settings::getInstance()->getZClassicdConfLocation();
@@ -674,6 +729,10 @@ void RPC::noConnection(bool preserveBalances) {
     // P0-6: reflect the lost connection in the main-tab sync banner.
     main->setSyncStatusConnecting();
 
+    // Nothing below can be known without a node: drop the "not yet confirmed" notice that the
+    // last balance refresh left on Home (it comes back with the next live refresh).
+    ui->unconfirmedWarning->setVisible(false);
+
     // transient-disconnect-zeroes-hero: a SOFT disconnect (one debounced getinfo
     // error, connection still live) must NOT discard the last-known balances. Keep
     // the labels/tables/send-inputs exactly as painted and only de-confidence the
@@ -687,6 +746,11 @@ void RPC::noConnection(bool preserveBalances) {
         main->updateHomeFixIt(0.0, /*fromCache=*/true);
         return;
     }
+
+    // The tables are about to be emptied, so the next successful poll MUST repopulate them
+    // even if the chain tip has not moved (refresh() only reloads when the height changes;
+    // with blocks minutes apart a restarted node would otherwise leave Home empty).
+    lastRefreshedBlock = -1;
 
     // Clear balances table.
     QMap<QString, double> emptyBalances;
@@ -711,6 +775,7 @@ void RPC::noConnection(bool preserveBalances) {
     // Phase-3b: with no connection there is no public balance to surface — clear the
     // hero and hide the amber fix-it card (transparent == 0 hides it).
     main->updateHomeFixIt(0.0);
+    main->showHeroUnavailable();
 
     // Clear send tab from address
     ui->inputsCombo->clear();
@@ -981,7 +1046,9 @@ void RPC::getInfoThenRefresh(bool force) {
         bool showWarningIcon = false;
 
 
-        static int    lastBlock = 0;
+        // (member, not a function static: noConnection() must be able to reset it so the first
+        // poll after a reconnect refreshes even when the chain tip has not moved)
+        int& lastBlock = lastRefreshedBlock;
         int curBlock  = reply["blocks"].get<json::number_integer_t>();
         int version = reply["version"].get<json::number_integer_t>();
         Settings::getInstance()->setZClassicdVersion(version);
@@ -999,6 +1066,13 @@ void RPC::getInfoThenRefresh(bool force) {
         }
 
         int connections = reply["connections"].get<json::number_integer_t>();
+        // The node itself notices a wrong system clock (peers' time offset beyond its
+        // tolerance) and says so in getinfo "errors". Without this, a wrong clock makes
+        // a perfectly synced node look hours behind.
+        bool clockWarning = false;
+        if (reply.find("errors") != reply.end() && reply["errors"].is_string())
+            clockWarning = QString::fromStdString(reply["errors"].get<std::string>())
+                               .contains(QStringLiteral("date and time"), Qt::CaseInsensitive);
         Settings::getInstance()->setPeers(connections);
 
         if (connections == 0) {
@@ -1113,7 +1187,7 @@ void RPC::getInfoThenRefresh(bool force) {
                 // unreliable on ZClassic -- pins ~0.9635 even at the tip -- so it cannot
                 // be the gate.)
                 if (connections > 0 || ezEverSynced) {
-                    target = blockNumber; progress = 1.0; isSyncing = false; ezEverSynced = true;
+                    target = blockNumber; progress = 1.0; isSyncing = false;
                 } else {
                     target = 0; progress = -1.0; isSyncing = true;   // no peers: can't confirm tip
                 }
@@ -1137,9 +1211,40 @@ void RPC::getInfoThenRefresh(bool force) {
                 progress  = -1.0;
                 isSyncing = true;
             }
+            // Decide "synced" from the tip block's age and the daemon's own IBD flag, not
+            // only blocks-vs-headers (which reads "synced" right after a snapshot import,
+            // before peers send headers). A regtest chain is a private network.
+            SyncState::Input syncIn;
+            syncIn.chain       = reply.find("chain") != reply.end() && reply["chain"].is_string()
+                                     ? QString::fromStdString(reply["chain"].get<std::string>()) : QString();
+            syncIn.blocks      = blockNumber;
+            syncIn.headers     = headers;
+            if (reply.find("tiptime") != reply.end() && reply["tiptime"].is_number())
+                syncIn.tipTime = reply["tiptime"].get<json::number_integer_t>();
+            else if (reply.find("mediantime") != reply.end() && reply["mediantime"].is_number())
+                syncIn.tipTime = reply["mediantime"].get<json::number_integer_t>(); // older daemon: ~15 min stale, fine for hours-scale tests
+            syncIn.now         = QDateTime::currentSecsSinceEpoch();
+            syncIn.connections = connections;
+            if (reply.find("initialblockdownload") != reply.end() && reply["initialblockdownload"].is_boolean())
+                syncIn.ibd = reply["initialblockdownload"].get<bool>() ? 1 : 0;
+            syncIn.everSynced  = ezEverSynced;
+            syncIn.clockWarning = clockWarning;
+            const SyncState::Verdict verdict = SyncState::classify(syncIn);
+            isSyncing = verdict.isSyncing;
+            if (verdict.kind == SyncState::Synced) ezEverSynced = true;
+            if (isSyncing && target <= 0 && headers > 0) target = headers;
+            if (!isSyncing) { target = blockNumber; progress = 1.0; }
             bool targetKnown = (target > 0);
 
+            const bool wasSyncing = Settings::getInstance()->isSyncing();
             Settings::getInstance()->setSyncing(isSyncing);
+            Settings::getInstance()->setLocalNetwork(verdict.kind == SyncState::LocalNetwork);
+            // The home hero's green/grey confidence is painted from this flag at balance
+            // refresh time. When the flag flips (first poll after connect, peers lost or
+            // regained, snapshot import finishing) repaint, so a balance is never left
+            // confident-green while the banner says the node is not caught up.
+            if (wasSyncing != isSyncing)
+                refreshBalances();
             // Stamp the time of this live poll so the send gate can ignore a frozen
             // isSyncing flag (single writer: this poll, beside the flag it stamps).
             Settings::getInstance()->setLastSyncPollEpoch(QDateTime::currentSecsSinceEpoch());
@@ -1181,7 +1286,9 @@ void RPC::getInfoThenRefresh(bool force) {
             // shouldn't flip it. Require ~3 consecutive peerless polls (~15s at the
             // 5s sync cadence); a single peer resets the counter instantly.
             if (connections == 0) ezNoPeerPolls++; else { ezNoPeerPolls = 0; ezForeignStuckSince.invalidate(); ezForeignStuckShown = false; }   // W1-4: peers back -> let the stuck dialog re-surface if it gets stuck again later
-            if (isSyncing && connections == 0 && ezNoPeerPolls >= 3) {
+            // One classification feeds both this banner and the status bar below.
+            const SyncState::Presentation pres = SyncState::presentation(verdict, connections, ezNoPeerPolls);
+            if (pres == SyncState::PresentNoPeers) {
                 // RUNTIME STUB AUTO-HEAL: a node that STARTED FINE but loaded a tiny
                 // non-genesis "stub" chain (e.g. an aborted P2P sync left ~17MB of
                 // blocks/) and then can't find peers would otherwise sit on "waiting
@@ -1243,18 +1350,20 @@ void RPC::getInfoThenRefresh(bool force) {
                     main->logger->write("Foreign node peerless/stuck past sustained window; "
                                         "surfacing actionable dialog (cannot heal a node we "
                                         "did not start)");
-                    main->setSyncStatusWaitingForPeers(true);
+                    main->setSyncStatusWaitingForPeers(true, blockNumber, verdict.tipAge);
                     main->showForeignNodeStuck();
                 } else
                 // SELF-HEAL SYNCED-ZERO-PEERS: after a LONG peerless stretch (~3min at
                 // the sync cadence) escalate the wording to point at the network. This
                 // is NOT a wipe/re-bootstrap — the daemon owns peer discovery.
                 if (ezNoPeerPolls >= 36)
-                    main->setSyncStatusWaitingForPeers(true);
+                    main->setSyncStatusWaitingForPeers(true, blockNumber, verdict.tipAge);
                 else
-                    main->setSyncStatusWaitingForPeers();
+                    main->setSyncStatusWaitingForPeers(false, blockNumber, verdict.tipAge);
+            } else if (pres == SyncState::PresentConnecting) {
+                main->setSyncStatusNetworkConnecting(blockNumber, verdict.tipAge);
             } else {
-                main->setSyncStatus(isSyncing, blockNumber, target, progress);
+                main->setSyncStatus(isSyncing, blockNumber, target, progress, verdict.tipAge, (int)verdict.kind);
             }
 
             // SELF-HEAL runtime validation surfacing (B-side). A newer daemon reports a
@@ -1303,7 +1412,7 @@ void RPC::getInfoThenRefresh(bool force) {
                         ui->blockheight->setToolTip(QObject::tr("Known headers: %1. More may still arrive.").arg(target));
                     } else {
                         // No target yet: show the height without a bogus percent.
-                        ui->heightLabel->setText(QObject::tr("Starting…"));
+                        ui->heightLabel->setText(blockNumber > 0 ? QObject::tr("Block height (syncing)") : QObject::tr("Starting…"));
                     }
                     ui->blockheight->setText(txt);
                 } else {
@@ -1325,8 +1434,25 @@ void RPC::getInfoThenRefresh(bool force) {
                 heightStr %
                 ")";
             if (isSyncing && !targetKnown)
-                statusText = QObject::tr("Starting (block %1)").arg(blockNumber);
+                statusText = blockNumber > 0 ? QObject::tr("Syncing (block %1)").arg(blockNumber)
+                                             : QObject::tr("Starting node");
+            if (pres == SyncState::PresentConnecting)
+                statusText = QObject::tr("Connecting to the ZClassic network…");
+            else if (pres == SyncState::PresentNoPeers && ezBootstrapActive)
+                statusText = QObject::tr("Downloading blockchain snapshot (%1%)").arg(ezBootstrapPct);   // same state the banner shows
+            else if (pres == SyncState::PresentNoPeers)
+                statusText = QObject::tr("No peers (block %1)").arg(Settings::getHeightString(blockNumber));
+            else if (verdict.kind == SyncState::LocalNetwork)
+                statusText = QObject::tr("Local test network (block %1)").arg(Settings::getHeightString(blockNumber));
+            else if (verdict.kind == SyncState::StaleTip)
+                statusText = QObject::tr("Waiting for new blocks (%1)").arg(Settings::getHeightString(blockNumber));
             main->statusLabel->setText(statusText);
+            // The "Connected — checking blockchain…" message from connect time is stale
+            // once the poll has a verdict. A private regtest chain legitimately has no
+            // peers: do not flag that with a warning icon.
+            dropConnectingMessage();
+            if (verdict.kind == SyncState::LocalNetwork)
+                main->statusIcon->setPixmap(connectedPm);
 
             auto zclPrice = Settings::getUSDFormat(1);
             QString tooltip;
@@ -1491,11 +1617,14 @@ bool RPC::processUnspent(const json& reply, QMap<QString, double>* balancesMap, 
         // refuses to spend it to a transparent output or alongside change. (find()/end()
         // is used rather than contains() -- the bundled nlohmann::json 3.3 predates it.)
         bool coinbase = it.find("generated") != it.end() && it["generated"].get<json::boolean_t>();
+        // "tokenbearing" (daemon token guard): still spendable=true in the listing, but z_sendmany will not spend it.
+        bool tokenBearing = it.find("tokenbearing") != it.end() && it["tokenbearing"].is_boolean() &&
+                            it["tokenbearing"].get<json::boolean_t>();
 
         newUtxos->push_back(
             UnspentOutput{ qsAddr, QString::fromStdString(it["txid"]),
                             Settings::getDecimalString(it["amount"].get<json::number_float_t>()),
-                            (int)confirmations, it["spendable"].get<json::boolean_t>(), coinbase });
+                            (int)confirmations, it["spendable"].get<json::boolean_t>(), coinbase, tokenBearing });
 
         (*balancesMap)[qsAddr] = (*balancesMap)[qsAddr] + it["amount"].get<json::number_float_t>();
     }
@@ -2223,6 +2352,8 @@ void RPC::shutdownZClassicd(bool waitForCheckpoint) {
     // snapshot-download) the daemon may refuse the connection or reply RPC_IN_WARMUP;
     // that must not pop a "Transaction Error" box -- we fall back to terminate() below.
     conn->doRPCIgnoreError(payload, [=](auto) {});
+    // The orderly stop is under way: the Windows job backstop must never cut it short.
+    DaemonJob::disarm();
     conn->shutdown();
 
     // Wait for the embedded zclassicd to finish flushing its state and exit, but

@@ -61,7 +61,7 @@ See [beta8 release notes](../../doc/release-notes-beta8.md) and the release's
 `BUILDINFO.txt` and `SHA256SUMS.txt` for the tested artifacts.
 
 The detailed sections below describe older development and packaging paths,
-including historical beta5 examples and host-local proot scripts. Use the
+including older version-specific examples and host-local proot scripts. Use the
 tracked beta8 release scripts above for current releases; adjust legacy checkout
 paths to `zclassic/wallet`.
 
@@ -75,6 +75,7 @@ It covers, in order:
 6. [Linux — single-file dev build (`make-allinone.sh`)](#5-linux--single-file-dev-build-make-allinonesh)
 7. [Linux — portable static-Qt release (`mkrelease.sh`)](#6-linux--portable-static-qt-release-mkreleasesh)
 8. [Windows — static-Qt cross build + manual embed](#7-windows--static-qt-cross-build-from-linux)
+   - [Windows — native Qt-kit release bundle (`build-windows.sh`)](#7b-windows--native-release-bundle-with-the-qt-kit-build-windowssh)
 9. [macOS — `.app` / `.dmg` + ad-hoc codesign (correct ORDER)](#8-macos--app--dmg--ad-hoc-codesign)
 10. [Two pitfalls everyone hits: qt5-websockets & libsodium](#9-the-two-pitfalls-you-must-know)
 11. [Verifying any build](#10-verifying-any-build)
@@ -325,7 +326,7 @@ and an LGPL relink-objects tarball.
 | Var | Meaning |
 |---|---|
 | `QT_STATIC` | base dir of a statically built Qt 5.15 (e.g. `/opt/qt-static`) |
-| `APP_VERSION` | version string, must match `src/version.h` (currently `2.1.2-beta5`) |
+| `APP_VERSION` | version string, must match `src/version.h` (read it from there) |
 | `PREV_VERSION` | prior version string (used for an in-place `sed` version bump in `.pro`/README) |
 | `ZCASH_DIR` | a zclassic checkout that has the daemon staged at `$ZCASH_DIR/artifacts/zclassicd` |
 
@@ -337,8 +338,8 @@ and an LGPL relink-objects tarball.
 ```bash
 cd /home/rhett/github/zcl-qt-wallet
 QT_STATIC=/opt/qt-static \
-APP_VERSION=2.1.2-beta5 \
-PREV_VERSION=2.1.2-beta5 \
+APP_VERSION=<VERSION> \
+PREV_VERSION=<PREV_VERSION> \
 ZCASH_DIR=/home/rhett/github/zclassic \
 bash src/scripts/mkrelease.sh
 ```
@@ -384,6 +385,70 @@ A full static Qt 5.15 installation including QtSvg is required. Build and test
 on a clean Windows environment before publishing; packaging regression tests
 alone do not establish that the wallet GUI starts correctly.
 
+## 7b. Windows — native release bundle with the Qt kit (`build-windows.sh`)
+
+For a Windows host with the stock Qt installer (dynamic Qt 5.15.2, MinGW 8.1). This
+is the dynamic-Qt counterpart of §7 and of `contrib/release/linux.sh`: one command
+builds the GUI, deploys Qt, adds the daemon and zips it as
+`zclwallet-v2.1.2-beta13-windows-x86_64.zip`.
+
+**Prerequisites** (nothing is installed or changed system-wide): Git Bash or MSYS2;
+the Qt kit `C:/Qt/5.15.2/mingw81_64` and its MinGW `C:/Qt/Tools/mingw810_64`;
+OpenSSL 1.1.1 DLLs (the installer's `C:/Qt/Tools/OpenSSL/Win_x64/bin`: Qt 5.15 loads
+`libssl-1_1-x64.dll` and `libcrypto-1_1-x64.dll` at run time for the https update
+check, and OpenSSL 3 does not work); a static `libsodium.a` for x86_64-w64-mingw32;
+a reviewed `zclassicd.exe`, `zclassic-cli.exe`, `zclassic-tx.exe`; Windows PowerShell
+(or `zip`) for the archive.
+
+```sh
+sh wallet/contrib/release/build-windows.sh \
+    C:/Qt/5.15.2/mingw81_64 C:/Qt/Tools/mingw810_64 \
+    C:/path/to/libsodium.a C:/path/to/daemon-dir C:/path/to/new-output-dir
+```
+
+`JOBS=14` sets the make parallelism (default: all CPUs), `ALLINONE=1` also produces
+`...-windows-x86_64-allinone.zip` whose `zclwallet.exe` carries the daemon in the
+ZQWDMON1 footer of §1 (no `zclassicd.exe` next to it; extracted to `%LOCALAPPDATA%`),
+`SKIP_PROBE=1` skips the platform-plugin probe. The output directory must be empty.
+
+Output: `<out>/zclwallet-v2.1.2-beta13-windows-x86_64/` (the bundle, with its own
+per-file `SHA256SUMS.txt`), the `.zip`, `<out>/SHA256SUMS.txt` (hashes of the zips) and
+`<out>/build/` (logs). The bundle carries the licence files (`LICENSE`, `COPYING`,
+`THIRD-PARTY-LICENSES`, `QT-LGPL-NOTICE.md`, `THIRD-PARTY-NOTICES.txt`); zip entries get
+the commit time (or `SOURCE_DATE_EPOCH`) as their timestamp. The script fails if any PE
+file in the bundle imports a DLL that is neither a Windows system DLL nor in the bundle,
+or if a bundle file is missing from or changed since its `SHA256SUMS.txt`, and runs, with
+`PATH` reduced to `System32` and `Windows` and `APPDATA`/`LOCALAPPDATA`/`USERPROFILE`
+redirected: `zclwallet.exe --print-profile-paths`, `zclassicd.exe -version` and, from a
+scratch copy, `tests/check-platform` (constructs `QGuiApplication` with the real `windows`
+platform plugin, creates no window, must print `platform=windows`).
+
+Why `windeployqt --debug`: the kit's DLLs and plugins are release builds with a
+`.gnu_debuglink` (separate debug info). `windeployqt` reads that as "debug", sees a
+release `zclwallet.exe`, skips every plugin and stops with "Unable to find the
+platform plugin"; `--release` (with or without `--force`, `--plugindir`,
+`--compiler-runtime`) cannot work around it. `--debug` only changes that matching;
+the files deployed are still the kit's release DLLs. The MinGW runtime DLLs
+(`libgcc_s_seh-1`, `libstdc++-6`, `libwinpthread-1`) are added by the script's import walk.
+The wallet uses QtCore/Gui/Widgets/Network/Svg only (no WebSockets, printing or
+multimedia), so none of those modules are bundled.
+
+Try a build without touching your wallet: set `ZCLWALLET_PROFILE_DIR` to an existing
+empty folder (or run `try-isolated.cmd` from the bundle). The wallet then keeps its
+settings (`.ini`, not the registry), logs, `zclassic.conf` and the node datadir under
+that folder, and shows `[profile: <dir>]` in the title bar.
+
+```bat
+mkdir %USERPROFILE%\zclwallet-profile
+set ZCLWALLET_PROFILE_DIR=%USERPROFILE%\zclwallet-profile
+zclwallet.exe --print-profile-paths
+```
+
+The headless widget tests need a Qt whose `QMessageBox` survives the offscreen
+platform; see `tests/README.md` (and `tests/qt-5.15.2-windows-offscreen.patch`).
+
+---
+
 ## 8. macOS — `.app` / `.dmg` + ad-hoc codesign
 
 Build this **on a Mac**. The committed script `src/scripts/mkmacdmg.sh` builds the
@@ -405,7 +470,7 @@ cd /path/to/zclassic && ./zcutil/build.sh -j$(sysctl -n hw.ncpu)
 
 ```bash
 cd /path/to/zcl-qt-wallet
-src/scripts/mkmacdmg.sh -q /path/to/static/Qt -z /path/to/zclassic -v 2.1.2-beta5
+src/scripts/mkmacdmg.sh -q /path/to/static/Qt -z /path/to/zclassic -v <VERSION>
 ```
 
 `mkmacdmg.sh` flow:
@@ -454,7 +519,7 @@ Privacy & Security → Automation).
 
 > If you intend to **notarize** (vs ad-hoc) you need a Developer ID identity and
 > `xcrun notarytool` / stapling — that is beyond this doc and is done by the mac
-> maintainer. The published `2.1.2-beta5` `.dmg`'s exact sign/notarize status is not
+> maintainer. A published `.dmg`'s exact sign/notarize status is not
 > verifiable from the Linux build box; confirm with the mac maintainer and commit
 > the precise invocation.
 
@@ -504,7 +569,7 @@ The GUI links a **static libsodium 1.0.16** built from source by
    - **Linux** links `-lsodium` → `res/libsodium.a` (the unix name).
    - **win32-g++** links `-llibsodium` → `res/liblibsodium.a` (the `lib`-prefixed name).
 
-   This repo ships `res/liblibsodium.a` (the mingw name) but **not** `res/libsodium.a`,
+   This repo ships **neither** `res/liblibsodium.a` (the mingw name, a staged build input, git-ignored) nor `res/libsodium.a`,
    so a fresh **Linux** build correctly triggers `buildlibsodium.sh`. For the Windows
    cross build, `build-gui-win.sh` stages the mingw libsodium to **both** names so the
    Linux build script never runs.
@@ -574,9 +639,9 @@ In-repo and already tracked (reference, do **not** re-commit): `src/scripts/mkre
 `src/scripts/mkmacdmg.sh`.
 
 ### Known open items
-- **Version is hard-coded** (`src/version.h` → `APP_VERSION "2.1.2-beta5"`); the
+- **Version is hard-coded** (`src/version.h` → `APP_VERSION`); the
   proot release scripts also hard-code it and must be bumped together with a tag.
 - **Repo links verified** — the README and docs reference `github.com/ZclassicCommunity/zcl-qt-wallet`
   throughout (the old `ZClassicFoundation/zclwallet` upstream references were removed).
-- The published `2.1.2-beta5` macOS `.dmg` sign/notarize details are owned by the mac
+- The sign/notarize details of a published macOS `.dmg` are owned by the mac
   maintainer and are not verifiable from the Linux box.

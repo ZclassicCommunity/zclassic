@@ -1,0 +1,21 @@
+Free the dynhost request reassembly buffer with its connection.
+
+dynhost_handlers.c allocates edge_conn->dynhost_reassembly_buf with buf_new()
+for every dynhost connection (up to the 1 MiB reassembly cap of data in it) and
+nothing frees it. connection_free_minimal() now releases it for edge
+connections (NULL, hence a no-op, for all others).
+
+--- a/src/core/mainloop/connection.c
++++ b/src/core/mainloop/connection.c
+@@ -907,6 +907,11 @@
+   }
+   if (CONN_IS_EDGE(conn)) {
+     hs_ident_edge_conn_free(TO_EDGE_CONN(conn)->hs_ident);
++    /* Dynhost request reassembly buffer (dynhost_handlers.c allocates it per
++     * connection, up to its reassembly cap); NULL for every other edge
++     * connection, and buf_free(NULL) is a no-op. */
++    buf_free(TO_EDGE_CONN(conn)->dynhost_reassembly_buf);
++    TO_EDGE_CONN(conn)->dynhost_reassembly_buf = NULL;
+   }
+   if (conn->type == CONN_TYPE_CONTROL) {
+     control_connection_t *control_conn = TO_CONTROL_CONN(conn);

@@ -130,6 +130,7 @@ TEST(Mempool, PriorityStatsDoNotCrash) {
 
 TEST(Mempool, TxInputLimit) {
     SelectParams(CBaseChainParams::REGTEST);
+    LOCK(cs_main);
 
     CTxMemPool pool(::minRelayTxFee);
     bool missingInputs;
@@ -195,6 +196,7 @@ TEST(Mempool, TxInputLimit) {
 // Valid overwinter v3 format tx gets rejected because overwinter hasn't activated yet.
 TEST(Mempool, OverwinterNotActiveYet) {
     SelectParams(CBaseChainParams::REGTEST);
+    LOCK(cs_main);
     UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
 
     // Disable IBD so AcceptToMemoryPool actually runs ContextualCheckTransaction
@@ -226,6 +228,7 @@ TEST(Mempool, OverwinterNotActiveYet) {
 // 3. fail IsStandardTx
 TEST(Mempool, SproutV3TxFailsAsExpected) {
     SelectParams(CBaseChainParams::TESTNET);
+    LOCK(cs_main);
 
     CTxMemPool pool(::minRelayTxFee);
     bool missingInputs;
@@ -246,6 +249,7 @@ TEST(Mempool, SproutV3TxFailsAsExpected) {
 // 2. fails ContextualCheckTransaction
 TEST(Mempool, SproutV3TxWhenOverwinterActive) {
     SelectParams(CBaseChainParams::REGTEST);
+    LOCK(cs_main);
     UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, Consensus::NetworkUpgrade::ALWAYS_ACTIVE);
 
     // Disable IBD so AcceptToMemoryPool actually runs ContextualCheckTransaction
@@ -274,6 +278,7 @@ TEST(Mempool, SproutV3TxWhenOverwinterActive) {
 // 1. fails CheckTransaction (specifically CheckTransactionWithoutProofVerification)
 TEST(Mempool, SproutNegativeVersionTxWhenOverwinterActive) {
     SelectParams(CBaseChainParams::REGTEST);
+    LOCK(cs_main);
     UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, Consensus::NetworkUpgrade::ALWAYS_ACTIVE);
 
     CTxMemPool pool(::minRelayTxFee);
@@ -323,6 +328,7 @@ TEST(Mempool, SproutNegativeVersionTxWhenOverwinterActive) {
 
 TEST(Mempool, ExpiringSoonTxRejection) {
     SelectParams(CBaseChainParams::REGTEST);
+    LOCK(cs_main);
     UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, Consensus::NetworkUpgrade::ALWAYS_ACTIVE);
 
     CTxMemPool pool(::minRelayTxFee);

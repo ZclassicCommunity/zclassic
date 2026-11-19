@@ -7,21 +7,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
+# Manual only: CI runs on the project's own machines (zcutil/local-ci.sh). No automatic
+# GitHub Actions runs on push or pull_request.
 on:
-  push:
-    paths-ignore:
-      - 'doc/**'
-      - 'contrib/**'
-      - '**/*.md'
   workflow_dispatch:
-    paths-ignore:
-      - '**/*.md'
-  pull_request:
-    paths-ignore:
-      - 'doc/**'
-      - 'contrib/**'
-      - '**/*.md'
-
 jobs:
   build:
     name: ${{ matrix.name }}
@@ -81,11 +70,7 @@ jobs:
 
       - name: Build depends
         run: |
-          # NO_PROTON=1 skips building Apache Qpid Proton, matching zcutil/build.sh.
-          # Proton (AMQP) is disabled in the zcash build, and proton 0.26.0 fails
-          # to compile under modern gcc (-Werror on generated protocol.h), so
-          # building it here is both pointless and a hard CI failure.
-          make $MAKEJOBS -C depends HOST=${{ matrix.host }} NO_PROTON=1 ${{ matrix.dep-opts }}
+          make $MAKEJOBS -C depends HOST=${{ matrix.host }} ${{ matrix.dep-opts }}
       - name: Save completed dependencies
         if: steps.depends-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4

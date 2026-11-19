@@ -1,0 +1,182 @@
+--- a/src/feature/dynhost/dynhost_stream.c
++++ b/src/feature/dynhost/dynhost_stream.c
+@@ -59,7 +59,7 @@
+   uint64_t conn_gid;     /* weak ref to our side of the linked pair;
+                           * 0 until initiated (Tor thread writes) */
+   int close_called;      /* caller ran dynhost_stream_close() */
+-  int terminal_fired;    /* terminal event callback has been fired */
++  int terminal_fired;    /* 1 while callback runs, 2 after it returns */
+   dynhost_stream_chunk_t *write_head;
+   dynhost_stream_chunk_t *write_tail;
+   size_t write_queued_bytes;
+@@ -78,6 +78,11 @@
+ static int g_mutex_initialized = 0;
+ static dynhost_stream_t *g_pending_head = NULL;
+ static dynhost_stream_t *g_active_head = NULL;
++/* Set by dynhost_stream_cleanup() when the dynhost subsystem shuts down,
++ * cleared by dynhost_stream_init() when it starts again. While set, no
++ * event loop will ever process a queued open, so open() refuses instead.
++ * Guarded by g_queue_mutex. */
++static int g_stopped = 0;
+
+ static void
+ ensure_mutex(void)
+@@ -108,9 +113,9 @@
+  * the handle if the caller already ran dynhost_stream_close().
+  *
+  * The callback runs outside the mutex: the callback (or another thread)
+- * may legally call dynhost_stream_close() while it runs. close() frees
+- * the handle itself when terminal_fired is set, so afterwards we must
+- * consult only the local free_now, never the handle.
++ * may legally call dynhost_stream_close() while it runs. close() records the
++ * request while the callback runs. The terminal path
++ * releases the handle after the callback returns if close was requested.
+  */
+ static void
+ stream_terminal_detached(dynhost_stream_t *s, int event)
+@@ -120,7 +125,6 @@
+
+   tor_mutex_acquire(&g_queue_mutex);
+   s->terminal_fired = 1;
+-  free_now = s->close_called;
+   chunks = s->write_head;
+   s->write_head = s->write_tail = NULL;
+   s->write_queued_bytes = 0;
+@@ -128,6 +132,10 @@
+
+   free_chunk_list(chunks);
+   s->event_cb(s, event, s->ctx);
++  tor_mutex_acquire(&g_queue_mutex);
++  s->terminal_fired = 2;
++  free_now = s->close_called;
++  tor_mutex_release(&g_queue_mutex);
+   if (free_now)
+     tor_free(s);
+ }
+@@ -184,13 +192,20 @@
+       strlcat(s->onion_address, ".onion", sizeof(s->onion_address));
+   }
+
++  log_notice(LD_REND, "Dynhost stream: open requested for %s:%u",
++             s->onion_address, (unsigned)s->port);
+   tor_mutex_acquire(&g_queue_mutex);
++  if (g_stopped) {
++    tor_mutex_release(&g_queue_mutex);
++    log_notice(LD_REND, "Dynhost stream: refused open to %s:%u: "
++               "Tor has stopped", s->onion_address, (unsigned)s->port);
++    tor_free(s);
++    return NULL;
++  }
+   s->next = g_pending_head;
+   g_pending_head = s;
+   tor_mutex_release(&g_queue_mutex);
+
+-  log_notice(LD_REND, "Dynhost stream: queued open to %s:%u",
+-             s->onion_address, (unsigned)s->port);
+   return s;
+ }
+
+@@ -238,7 +253,7 @@
+     return;
+   }
+   s->close_called = 1;
+-  free_now = s->terminal_fired;
++  free_now = s->terminal_fired == 2;
+   tor_mutex_release(&g_queue_mutex);
+
+   /* If the terminal event already fired, the module no longer
+@@ -503,16 +518,26 @@
+   check_active_streams(now);
+ }
+
+-/* ── Cleanup ───────────────────────────────────────────────── */
++/* ── Subsystem lifecycle (Tor main thread only) ────────────── */
+
+ void
++dynhost_stream_init(void)
++{
++  ensure_mutex();
++  tor_mutex_acquire(&g_queue_mutex);
++  g_stopped = 0;
++  tor_mutex_release(&g_queue_mutex);
++}
++
++void
+ dynhost_stream_cleanup(void)
+ {
+-  if (!g_mutex_initialized)
+-    return;
++  ensure_mutex();
+
+-  /* Cancel pending opens */
++  /* Refuse new opens and take the pending queue in one critical section:
++   * every open either landed on this queue or sees g_stopped. */
+   tor_mutex_acquire(&g_queue_mutex);
++  g_stopped = 1;
+   dynhost_stream_t *p = g_pending_head;
+   g_pending_head = NULL;
+   tor_mutex_release(&g_queue_mutex);
+@@ -524,13 +549,11 @@
+     p = next;
+   }
+
+-  /* Cancel active streams */
+-  while (g_active_head) {
+-    dynhost_stream_t *s = g_active_head;
+-    /* Resolve by global id — Tor may already have freed the conn. */
+-    connection_t *conn = connection_get_by_global_id(s->conn_gid);
+-    if (conn && !conn->marked_for_close)
+-      connection_mark_for_close(conn);
+-    stream_terminal(&g_active_head, s, DYNHOST_STREAM_EVENT_CLOSED);
+-  }
++  /* Tor has already freed every connection (connection_free_all runs
++   * before subsystems shut down) without unlinking it from the
++   * connection array, so a global-id lookup here would read freed
++   * memory. Only the stream records remain; end each one. */
++  while (g_active_head)
++    stream_terminal(&g_active_head, g_active_head,
++                    DYNHOST_STREAM_EVENT_CLOSED);
+ }
+--- a/src/feature/dynhost/dynhost_stream.h
++++ b/src/feature/dynhost/dynhost_stream.h
+@@ -94,7 +94,9 @@
+  *                       The deadline applies to the whole stream, not
+  *                       just connection setup; pass a large value for
+  *                       long-lived streams.
+- * @return stream handle, or NULL on invalid arguments
++ * @return stream handle, or NULL on invalid arguments or when the
++ *         dynhost subsystem has shut down (Tor stopped); no callback
++ *         fires for a NULL return
+  */
+ dynhost_stream_t *dynhost_stream_open(const char *onion_address,
+                                       uint16_t port,
+@@ -135,9 +137,17 @@
+ void dynhost_stream_process_pending(void);
+
+ /**
+- * Close all streams, fire CLOSED for each, and release all state.
+- * Called during shutdown. Tor main thread only.
++ * Accept opens again. Called when the dynhost subsystem initializes, on
++ * Tor's thread before its event loop starts. Tor main thread only.
+  */
++void dynhost_stream_init(void);
++
++/**
++ * Fire CLOSED for every pending and active stream and refuse later opens
++ * until dynhost_stream_init() runs again. Called when the dynhost
++ * subsystem shuts down, after Tor has freed its connections; it touches
++ * no connection object. Tor main thread only.
++ */
+ void dynhost_stream_cleanup(void);
+
+ struct dir_connection_t;
+--- a/src/feature/dynhost/dynhost_sys.c
++++ b/src/feature/dynhost/dynhost_sys.c
+@@ -12,0 +13 @@
++#include "feature/dynhost/dynhost_stream.h"
+@@ -21,0 +23 @@
++  dynhost_stream_init();
+@@ -38,0 +41,3 @@
++  /* Tor's event loop has exited and will never process another stream:
++   * end every one now so no caller waits on a terminal event. */
++  dynhost_stream_cleanup();

@@ -6,7 +6,7 @@ define(_CLIENT_VERSION_REVISION, 2)
 dnl Build number drives the beta/rc suffix: for build N < 25 the version renders
 dnl as "<rev>-beta(N+1)". So beta5 == build 4. Bump this by one per beta and
 dnl re-tag so the compiled version, the P2P subversion, and the git tag agree.
-define(_CLIENT_VERSION_BUILD, 10)
+define(_CLIENT_VERSION_BUILD, 12)
 define(_ZC_BUILD_VAL, m4_if(m4_eval(_CLIENT_VERSION_BUILD < 25), 1, m4_incr(_CLIENT_VERSION_BUILD), m4_eval(_CLIENT_VERSION_BUILD < 50), 1, m4_eval(_CLIENT_VERSION_BUILD - 24), m4_eval(_CLIENT_VERSION_BUILD == 50), 1, , m4_eval(_CLIENT_VERSION_BUILD - 50)))
 define(_CLIENT_VERSION_SUFFIX, m4_if(m4_eval(_CLIENT_VERSION_BUILD < 25), 1, _CLIENT_VERSION_REVISION-beta$1, m4_eval(_CLIENT_VERSION_BUILD < 50), 1, _CLIENT_VERSION_REVISION-rc$1, m4_eval(_CLIENT_VERSION_BUILD == 50), 1, _CLIENT_VERSION_REVISION, _CLIENT_VERSION_REVISION-$1)))
 define(_CLIENT_VERSION_IS_RELEASE, true)
@@ -54,6 +54,8 @@ else
 fi
 
 AC_PROG_CXX
+dnl The C23 crypto core (src/c23) and the wallet token guard (src/c23/services) are plain C.
+AC_PROG_CC
 m4_ifdef([AC_PROG_OBJCXX],[AC_PROG_OBJCXX])
 
 dnl By default, libtool for mingw refuses to link static libs into a dll for
@@ -99,12 +101,6 @@ AC_ARG_ENABLE([mining],
   [enable_mining=$enableval],
   [enable_mining=yes])
 
-AC_ARG_ENABLE([proton],
-  [AS_HELP_STRING([--disable-proton],
-  [disable Proton (AMQP messaging)])],
-  [use_proton=$enableval],
-  [use_proton=yes])
-
 AC_ARG_ENABLE(tests,
     AS_HELP_STRING([--enable-tests],[compile tests (default is yes)]),
     [use_tests=$enableval],
@@ -115,6 +111,12 @@ AC_ARG_ENABLE([asan],
   [instrument the executables with asan (default is no)])],
   [use_asan=$enableval],
   [use_asan=no])
+
+AC_ARG_WITH([embedded-tor],
+  [AS_HELP_STRING([--with-embedded-tor],
+  [link the Tor library built by depends into zclassicd and offer -embeddedtor (default is auto: yes when depends built Tor, which it does by default for linux, mingw32 and darwin hosts; --with-embedded-tor=yes fails when it is missing, --without-embedded-tor leaves it out)])],
+  [use_embedded_tor=$withval],
+  [use_embedded_tor=auto])
 
 AC_ARG_ENABLE([tsan],
   [AS_HELP_STRING([--enable-tsan],
@@ -157,8 +159,6 @@ AC_ARG_ENABLE([zmq],
   [disable ZMQ notifications])],
   [use_zmq=$enableval],
   [use_zmq=yes])
-
-AC_ARG_WITH([protoc-bindir],[AS_HELP_STRING([--with-protoc-bindir=BIN_DIR],[specify protoc bin path])], [protoc_bin_path=$withval], [])
 
 AC_ARG_ENABLE(man,
     [AS_HELP_STRING([--disable-man],
@@ -500,6 +500,13 @@ if test x$use_hardening != xno; then
     AX_CHECK_LINK_FLAG([[-Wl,-z,now]], [HARDENED_LDFLAGS="$HARDENED_LDFLAGS -Wl,-z,now"],[AC_MSG_ERROR(Cannot enable BIND_NOW)])
   fi
 
+  if test x$TARGET_OS = xlinux && test x$host_cpu = xx86_64; then
+    # Linux x86_64 only: not mingw (no support), not darwin (Apple toolchain).
+    # Both are accepted-or-skipped, so an older compiler still configures.
+    AX_CHECK_COMPILE_FLAG([-fstack-clash-protection],[HARDENED_CXXFLAGS="$HARDENED_CXXFLAGS -fstack-clash-protection"],[AC_MSG_WARN(Cannot enable -fstack-clash-protection)])
+    AX_CHECK_COMPILE_FLAG([-fcf-protection=full],[HARDENED_CXXFLAGS="$HARDENED_CXXFLAGS -fcf-protection=full"],[AC_MSG_WARN(Cannot enable -fcf-protection=full)])
+  fi
+
   if test x$TARGET_OS != xwindows; then
     # All windows code is PIC, forcing it on just adds useless compile warnings
     AX_CHECK_COMPILE_FLAG([-fPIE],[PIE_FLAGS="-fPIE"],[AC_MSG_ERROR(Cannot enable -fPIE)])
@@ -586,31 +593,6 @@ AC_SUBST(LIBMEMENV)
 if test x$enable_wallet != xno; then
     dnl Check for libdb_cxx only if wallet enabled
     BITCOIN_FIND_BDB62
-fi
-
-dnl Check Qpid Proton headers and library exist
-if test x$use_proton = xyes; then
-  AC_CHECK_HEADERS([proton/connection.hpp],
-    [],
-    [AC_MSG_WARN([Proton headers not found, disabling Proton support])
-    use_proton=no])
- AC_CHECK_LIB([qpid-proton-cpp-static], [main],
-    [PROTON_LIBS="-lqpid-proton-cpp-static"],
-    [AC_MSG_WARN([Proton qpid-proton-cpp-static library not found, disabling Proton support])
-    use_proton=no])
- AC_CHECK_LIB([qpid-proton-core-static], [main],
-    [PROTON_LIBS+=" -lqpid-proton-core-static"],
-    [AC_MSG_WARN([Proton qpid-proton-core-static library not found, disabling Proton support])
-    use_proton=no])
- AC_CHECK_LIB([qpid-proton-static], [main],
-    [PROTON_LIBS+=" -lqpid-proton-static"],
-    [AC_MSG_WARN([Proton qpid-proton-static library not found, disabling Proton support])
-    use_proton=no])
-fi
-if test x$use_proton = xyes; then
-    AC_DEFINE(ENABLE_PROTON, 1, [Define to 1 to enable Proton functions])
-else
-    AC_DEFINE(ENABLE_PROTON, 0, [Define to 1 to enable Proton functions])
 fi
 
 if test x$build_bitcoin_utils$build_bitcoind$use_tests = xnonono; then
@@ -700,7 +682,7 @@ if test x$use_pkgconfig = xyes; then
   )
 else
   # BUG: Fix this:
-  echo 'BUG: configure does not yet check for the following dependencies if pkg-config is not on the system: libcrypto++, libgmp'
+  echo 'BUG: configure does not yet check for the following dependencies if pkg-config is not on the system: libcrypto++'
 
   AC_CHECK_HEADER([openssl/crypto.h],,AC_MSG_ERROR(libcrypto headers missing))
   AC_CHECK_LIB([crypto],      [main],CRYPTO_LIBS=-lcrypto, AC_MSG_ERROR(libcrypto missing))
@@ -740,47 +722,76 @@ else
   fi
 fi
 
-# These packages don't provide pkgconfig config files across all
-# platforms, so we use older autoconf detection mechanisms:
-AC_CHECK_HEADER([gmp.h],,AC_MSG_ERROR(libgmp headers missing))
-AC_CHECK_LIB([gmp],[__gmpn_sub_n],GMP_LIBS=-lgmp, [AC_MSG_ERROR(libgmp missing)])
+dnl The C23 crypto core (src/c23, built into libzcl_c23.a) replaces librustzcash.
+dnl No Rust library is linked. The core needs a 64-bit target with __int128 and
+dnl does its own run-time CPU dispatch (ADX/BMI2/AVX2/AVX-512): never add -march
+dnl or -m<isa> flags for it.
+AC_LANG_PUSH([C])
+AC_MSG_CHECKING([whether the target is 64-bit with __int128 (C23 crypto core)])
+AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+_Static_assert(sizeof(void*)==8 && sizeof(unsigned __int128)==16, "need 64-bit");
+]])],
+  [AC_MSG_RESULT([yes])],
+  [AC_MSG_RESULT([no])
+   AC_MSG_ERROR([the C23 crypto core needs a 64-bit target with __int128 (no i686)])])
 
-AC_CHECK_HEADER([gmpxx.h],,AC_MSG_ERROR(libgmpxx headers missing))
-AC_CHECK_LIB([gmpxx],[main],GMPXX_LIBS=-lgmpxx, [AC_MSG_ERROR(libgmpxx missing)])
-
-RUST_LIBS="-lrustzcash"
-case $host in
-  *mingw*)
-    ;;
-  *)
-    RUST_LIBS="$RUST_LIBS -ldl"
-    ;;
-esac
-
-dnl Check for OpenMP support
-AX_OPENMP(
-  [AC_DEFINE(HAVE_OPENMP, 1, [Define if OpenMP is enabled])
-   AM_CONDITIONAL([HAVE_OPENMP], [true])
-   CPPFLAGS="$CPPFLAGS -DMULTICORE"
-   CXXFLAGS="$CXXFLAGS $OPENMP_CXXFLAGS"],
-  [AC_MSG_WARN([OpenMP not supported, disabling multithreading])
-   AC_DEFINE(HAVE_OPENMP, 0, [Define if OpenMP is enabled])
-   AM_CONDITIONAL([HAVE_OPENMP], [false])])
-
-# Gitian uses a config.site that sets depends_prefix, and then sets --prefix=/
-# build.sh just uses --prefix
-if test x$depends_prefix != x; then
-  LIBSNARK_DEPINST="$depends_prefix"
-else
-  LIBSNARK_DEPINST="$prefix"
+dnl Language level for libzcl_c23.a: -std=c23 when the compiler really speaks it,
+dnl else -std=gnu17 (GCC < 14, mingw-w64 GCC 13, older Apple clang); the
+dnl force-included src/c23/glue/zcl_c23_compat.h supplies the C23 spellings there.
+dnl Both modes define _GNU_SOURCE: strict -std=c23 hides the POSIX declarations
+dnl on glibc, and the Sprout prover uses sched_getaffinity/CPU_COUNT there. It
+dnl is harmless on mingw-w64 and Darwin. Override with ZCL_C23_STD=<flag> and,
+dnl if needed, ZCL_C23_STD_DEFS=<defines> (an empty value is honoured).
+AC_ARG_VAR([ZCL_C23_STD], [C language flag for the C23 crypto core (default: -std=c23 if it works, else -std=gnu17)])
+AC_ARG_VAR([ZCL_C23_STD_DEFS], [feature-test macros that go with ZCL_C23_STD (default: -D_GNU_SOURCE)])
+if test "x${ZCL_C23_STD_DEFS+set}" != xset; then
+  ZCL_C23_STD_DEFS="-D_GNU_SOURCE"
 fi
+if test "x$ZCL_C23_STD" = x; then
+  AC_CACHE_CHECK([whether $CC compiles C23 with -std=c23], [zcl_cv_cc_std_c23], [
+    zcl_save_CFLAGS="$CFLAGS"
+    CFLAGS="$CFLAGS -std=c23 -D_GNU_SOURCE"
+    AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 202000L
+#error "not C23"
+#endif
+static_assert(sizeof(uint64_t) == 8, "u64");
+static bool zcl_probe(const void *p) { return p != nullptr; }
+constexpr size_t zcl_probe_n = 4;
+int zcl_probe_main(void)
+{
+    struct timespec ts = {};
+    typeof(ts.tv_sec) s = 0;
+    char buf = (char)zcl_probe_n;
+    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
+    (void)fileno(stdin);
+    (void)strnlen(&buf, 0);
+    return zcl_probe(&s) ? (int)s : 1;
+}
+]])], [zcl_cv_cc_std_c23=yes], [zcl_cv_cc_std_c23=no])
+    CFLAGS="$zcl_save_CFLAGS"])
+  if test "x$zcl_cv_cc_std_c23" = xyes; then
+    ZCL_C23_STD="-std=c23"
+  else
+    ZCL_C23_STD="-std=gnu17"
+  fi
+fi
+AC_LANG_POP([C])
+AC_SUBST(ZCL_C23_STD)
+AC_SUBST(ZCL_C23_STD_DEFS)
+
 
 # Additional Zcash flags
 AX_CHECK_COMPILE_FLAG([-fwrapv],[CXXFLAGS="$CXXFLAGS -fwrapv"])
 AX_CHECK_COMPILE_FLAG([-fno-strict-aliasing],[CXXFLAGS="$CXXFLAGS -fno-strict-aliasing"])
 AX_CHECK_COMPILE_FLAG([-Wno-builtin-declaration-mismatch],[CXXFLAGS="$CXXFLAGS -Wno-builtin-declaration-mismatch"],,[[$CXXFLAG_WERROR]])
 
-LIBZCASH_LIBS="-lgmp -lgmpxx $BOOST_SYSTEM_LIB -lcrypto -lsodium $RUST_LIBS"
+LIBZCASH_LIBS="$BOOST_SYSTEM_LIB -lcrypto -lsodium"
 
 AC_MSG_CHECKING([whether to build bitcoind])
 AM_CONDITIONAL([BUILD_BITCOIND], [test x$build_bitcoind = xyes])
@@ -842,7 +853,49 @@ fi
 
 AM_CONDITIONAL([ENABLE_ZMQ], [test "x$use_zmq" = "xyes"])
 
-AM_CONDITIONAL([ENABLE_PROTON], [test "x$use_proton" = "xyes"])
+dnl Embedded Tor: libtor.a and its bundled helper archives from depends. Tor
+dnl uses the same libssl, libcrypto and libevent archives as the daemon, plus
+dnl zlib. The default "auto" links it when depends provides it. Embedded Tor is
+dnl compiled in but off at run time (-embeddedtor=0); without it nothing Tor-related
+dnl is compiled or linked except keyfile.c.
+dnl tor_api.h uses SOCKET on Windows and relies on <winsock2.h> being included first.
+TOR_LIBS=
+TOR_SYSTEM_LIBS=
+if test x$use_embedded_tor = xauto; then
+  if test x$build_bitcoind = xno; then
+    use_embedded_tor=no
+  else
+    AC_CHECK_HEADER([tor_api.h], [use_embedded_tor=yes],
+      [use_embedded_tor=no
+       AC_MSG_WARN([embedded Tor is not built: tor_api.h not found (depends was built with NO_EMBEDDED_TOR=1 or for a host without Tor); pass --with-embedded-tor=yes to make this an error])],
+      [[#ifdef _WIN32
+#include <winsock2.h>
+#endif
+]])
+  fi
+fi
+if test x$use_embedded_tor = xyes; then
+  if test x$build_bitcoind = xno; then
+    AC_MSG_ERROR([--with-embedded-tor needs the daemon (do not combine with --without-daemon)])
+  fi
+  AC_CHECK_HEADER([tor_api.h],, [AC_MSG_ERROR([tor_api.h not found; build depends without NO_EMBEDDED_TOR=1])],
+    [[#ifdef _WIN32
+#include <winsock2.h>
+#endif
+]])
+  AC_CHECK_HEADER([zlib.h],, [AC_MSG_ERROR([zlib.h not found; build depends without NO_EMBEDDED_TOR=1])])
+  if test x$TARGET_OS = xwindows; then
+    TOR_SYSTEM_LIBS="-lws2_32 -liphlpapi -lcrypt32 -ladvapi32 -lshell32 -luser32 -lgdi32 -lbcrypt -lshlwapi"
+  else
+    TOR_SYSTEM_LIBS="-lm -ldl"
+  fi
+  TOR_LIBS="-ltor -led25519_donna -led25519_ref10 -lkeccak-tiny -lz"
+  AC_CHECK_LIB([tor], [tor_run_main], [:], [AC_MSG_ERROR([libtor.a not usable; build depends without NO_EMBEDDED_TOR=1])],
+    [-led25519_donna -led25519_ref10 -lkeccak-tiny -lz $SSL_LIBS $CRYPTO_LIBS $EVENT_PTHREADS_LIBS $EVENT_LIBS $TOR_SYSTEM_LIBS $PTHREAD_LIBS])
+  AC_DEFINE([ENABLE_EMBEDDED_TOR],[1],[Define to 1 to link the embedded Tor])
+fi
+AM_CONDITIONAL([ENABLE_EMBEDDED_TOR], [test "x$use_embedded_tor" = "xyes"])
+
 
 AC_MSG_CHECKING([whether to build test_bitcoin])
 if test x$use_tests = xyes; then
@@ -910,14 +963,10 @@ AC_SUBST(SSL_LIBS)
 AC_SUBST(EVENT_LIBS)
 AC_SUBST(EVENT_PTHREADS_LIBS)
 AC_SUBST(ZMQ_LIBS)
-AC_SUBST(GMP_LIBS)
-AC_SUBST(GMPXX_LIBS)
-AC_SUBST(LIBSNARK_DEPINST)
+AC_SUBST(TOR_LIBS)
+AC_SUBST(TOR_SYSTEM_LIBS)
 AC_SUBST(LIBZCASH_LIBS)
-AC_SUBST(PROTON_LIBS)
-AC_CONFIG_FILES([Makefile src/Makefile doc/man/Makefile src/test/buildenv.py])
-AC_CONFIG_FILES([qa/pull-tester/run-bitcoind-for-test.sh],[chmod +x qa/pull-tester/run-bitcoind-for-test.sh])
-AC_CONFIG_FILES([qa/pull-tester/tests-config.sh],[chmod +x qa/pull-tester/tests-config.sh])
+AC_CONFIG_FILES([Makefile src/Makefile doc/man/Makefile])
 
 dnl boost's m4 checks do something really nasty: they export these vars. As a
 dnl result, they leak into secp256k1's configure and crazy things happen.
@@ -943,7 +992,7 @@ unset PKG_CONFIG_LIBDIR
 PKG_CONFIG_LIBDIR="$PKGCONFIG_LIBDIR_TEMP"
 
 ac_configure_args="${ac_configure_args} --disable-shared --with-pic --with-bignum=no --enable-module-recovery"
-AC_CONFIG_SUBDIRS([src/secp256k1 src/snark src/univalue])
+AC_CONFIG_SUBDIRS([src/secp256k1 src/univalue])
 
 AC_OUTPUT
 
@@ -961,9 +1010,9 @@ esac
 echo
 echo "Options used to compile and link:"
 echo "  with wallet   = $enable_wallet"
-echo "  with proton   = $use_proton"
 echo "  with zmq      = $use_zmq"
 echo "  with test     = $use_tests"
+echo "  embedded tor  = $use_embedded_tor"
 echo "  debug enabled = $enable_debug"
 echo "  werror        = $enable_werror"
 echo
@@ -972,6 +1021,7 @@ echo "  build os      = $BUILD_OS"
 echo
 echo "  CC            = $CC"
 echo "  CFLAGS        = $CFLAGS"
+echo "  C23 core std  = $ZCL_C23_STD $ZCL_C23_STD_DEFS"
 echo "  CPPFLAGS      = $CPPFLAGS"
 echo "  CXX           = $CXX"
 echo "  CXXFLAGS      = $CXXFLAGS"

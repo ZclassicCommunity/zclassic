@@ -52,6 +52,21 @@ struct TransparentInputInfo {
         CAmount value) : scriptPubKey(scriptPubKey), value(value) {}
 };
 
+/**
+ * The most proofs one send should make at once on a machine with `physicalBytes`
+ * of RAM (0 = unknown), at least 1. A send shares one parsed copy of the Sapling
+ * proving keys and every proof in flight has its own working set (measured in
+ * transaction_builder.cpp); the prover may use about 340 MB, or an eighth of the
+ * machine when that is less.
+ */
+size_t ProverWorkerLimit(uint64_t physicalBytes);
+
+/**
+ * Caps the proofs a send makes at once (0 = no cap). The thread budget is then
+ * shared among fewer proofs, so each runs on more threads. Set once at start-up.
+ */
+void SetProverWorkerCap(size_t workers);
+
 class TransactionBuilderResult {
 private:
     boost::optional<CTransaction> maybeTx;

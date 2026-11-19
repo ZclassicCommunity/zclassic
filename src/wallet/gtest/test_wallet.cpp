@@ -2,11 +2,14 @@
 #include <gtest/gtest.h>
 #include <sodium.h>
 
+#include <atomic>
 #include <iostream>
+#include <thread>
 #include <sys/time.h>
 
 #include "base58.h"
 #include "chainparams.h"
+#include "init.h"
 #include "key_io.h"
 #include "main.h"
 #include "primitives/block.h"
@@ -39,6 +42,9 @@ public:
     MOCK_METHOD1(WriteBestBlock, bool(const CBlockLocator& loc));
 };
 
+// init.cpp; StartShutdown() sets it, and nothing else in the tests clears it.
+extern std::atomic<bool> fRequestShutdown;
+
 template void CWallet::SetBestChainINTERNAL<MockWalletDB>(
         MockWalletDB& walletdb, const CBlockLocator& loc);
 
@@ -60,6 +66,8 @@ public:
                                 SaplingMerkleTree& saplingTree) {
         CWallet::IncrementNoteWitnesses(pindex, pblock, sproutTree, saplingTree);
     }
+    bool NoteWitnessesLost() const { return fNoteWitnessesLost; }
+    void SetNoteWitnessesLost(bool f) { fNoteWitnessesLost = f; }
     void DecrementNoteWitnesses(const CBlockIndex* pindex) {
         CWallet::DecrementNoteWitnesses(pindex);
     }
@@ -154,7 +162,7 @@ std::pair<uint256, uint256> GetWitnessesAndAnchors(TestWallet& wallet,
 
 TEST(WalletTests, SetupDatadirLocationRunAsFirstTest) {
     // Get temporary and unique path for file.
-    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / UniquePath();
     boost::filesystem::create_directories(pathTemp);
     mapArgs["-datadir"] = pathTemp.string();
 }
@@ -205,6 +213,7 @@ TEST(WalletTests, SaplingCacheValueOnDecrypt) {
     auto consensusParams = RegtestActivateSapling();
 
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = GetTestMasterSaplingSpendingKey();
     auto expsk = sk.expsk;
@@ -243,6 +252,7 @@ TEST(WalletTests, SaplingCacheValueOnDecrypt) {
 TEST(WalletTests, FindUnspentSproutNotes) {
     SelectParams(CBaseChainParams::TESTNET);
     CWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
     auto sk = libzcash::SproutSpendingKey::random();
     wallet.AddSproutSpendingKey(sk);
 
@@ -433,6 +443,7 @@ TEST(WalletTests, SetSaplingNoteAddrsInCWalletTx) {
     auto consensusParams = RegtestActivateSapling();
 
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = GetTestMasterSaplingSpendingKey();
     auto expsk = sk.expsk;
@@ -514,6 +525,7 @@ TEST(WalletTests, SetInvalidSaplingNoteDataInCWalletTx) {
 
 TEST(WalletTests, CheckSproutNoteCommitmentAgainstNotePlaintext) {
     CWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = libzcash::SproutSpendingKey::random();
     auto address = sk.address();
@@ -535,6 +547,7 @@ TEST(WalletTests, CheckSproutNoteCommitmentAgainstNotePlaintext) {
 
 TEST(WalletTests, GetSproutNoteNullifier) {
     CWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = libzcash::SproutSpendingKey::random();
     auto address = sk.address();
@@ -566,6 +579,7 @@ TEST(WalletTests, GetSproutNoteNullifier) {
 
 TEST(WalletTests, EmptyShieldedOutputsHaveNoNewNotes) {
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
     auto sk = GetTestMasterSaplingSpendingKey();
     ASSERT_TRUE(wallet.AddSaplingZKey(sk, sk.DefaultAddress()));
     CMutableTransaction tx;
@@ -583,6 +597,7 @@ TEST(WalletTests, FindMySaplingNotes) {
     auto consensusParams = RegtestActivateSapling();
 
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     // Generate dummy Sapling address
     auto sk = GetTestMasterSaplingSpendingKey();
@@ -622,6 +637,7 @@ TEST(WalletTests, ParallelSaplingScanBatchParity) {
     auto consensusParams = RegtestActivateSapling();
 
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = GetTestMasterSaplingSpendingKey();
     auto expsk = sk.expsk;
@@ -701,6 +717,7 @@ TEST(WalletTests, ParallelSaplingScanBatchViewingKeyDiscovery) {
     auto consensusParams = RegtestActivateSapling();
 
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = GetTestMasterSaplingSpendingKey();
     auto expsk = sk.expsk;
@@ -915,6 +932,7 @@ static std::vector<std::pair<CBlockIndex*, CBlock>> BuildChain(
 TEST(WalletTests, ParallelSaplingScanWindowedMultiWindowParity) {
     auto consensusParams = RegtestActivateSapling();
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = GetTestMasterSaplingSpendingKey();
     auto pa = sk.DefaultAddress();
@@ -946,6 +964,7 @@ TEST(WalletTests, ParallelSaplingScanWindowedMultiWindowParity) {
 TEST(WalletTests, ParallelSaplingScanWindowedReorgParity) {
     auto consensusParams = RegtestActivateSapling();
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = GetTestMasterSaplingSpendingKey();
     auto pa = sk.DefaultAddress();
@@ -977,6 +996,7 @@ TEST(WalletTests, ParallelSaplingScanWindowedReorgParity) {
 TEST(WalletTests, ParallelSaplingScanBenchmark) {
     auto consensusParams = RegtestActivateSapling();
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = GetTestMasterSaplingSpendingKey();
     auto pa = sk.DefaultAddress();
@@ -1020,6 +1040,7 @@ TEST(WalletTests, ParallelSaplingScanBenchmark) {
 
 TEST(WalletTests, FindMySproutNotes) {
     CWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = libzcash::SproutSpendingKey::random();
     auto sk2 = libzcash::SproutSpendingKey::random();
@@ -1045,6 +1066,7 @@ TEST(WalletTests, FindMySproutNotes) {
 
 TEST(WalletTests, FindMySproutNotesInEncryptedWallet) {
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
     uint256 r {GetRandHash()};
     CKeyingMaterial vMasterKey (r.begin(), r.end());
 
@@ -1075,6 +1097,7 @@ TEST(WalletTests, FindMySproutNotesInEncryptedWallet) {
 
 TEST(WalletTests, GetConflictedSproutNotes) {
     CWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = libzcash::SproutSpendingKey::random();
     wallet.AddSproutSpendingKey(sk);
@@ -1109,6 +1132,7 @@ TEST(WalletTests, GetConflictedSaplingNotes) {
     auto consensusParams = RegtestActivateSapling();
 
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     // Generate Sapling address
     auto sk = GetTestMasterSaplingSpendingKey();
@@ -1224,6 +1248,7 @@ TEST(WalletTests, GetConflictedSaplingNotes) {
 
 TEST(WalletTests, SproutNullifierIsSpent) {
     CWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = libzcash::SproutSpendingKey::random();
     wallet.AddSproutSpendingKey(sk);
@@ -1266,6 +1291,7 @@ TEST(WalletTests, SaplingNullifierIsSpent) {
     auto consensusParams = RegtestActivateSapling();
 
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     // Generate dummy Sapling address
     auto sk = GetTestMasterSaplingSpendingKey();
@@ -1321,6 +1347,7 @@ TEST(WalletTests, SaplingNullifierIsSpent) {
 
 TEST(WalletTests, NavigateFromSproutNullifierToNote) {
     CWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = libzcash::SproutSpendingKey::random();
     wallet.AddSproutSpendingKey(sk);
@@ -1349,6 +1376,7 @@ TEST(WalletTests, NavigateFromSaplingNullifierToNote) {
     auto consensusParams = RegtestActivateSapling();
 
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     // Generate dummy Sapling address
     auto sk = GetTestMasterSaplingSpendingKey();
@@ -1439,6 +1467,7 @@ TEST(WalletTests, NavigateFromSaplingNullifierToNote) {
 
 TEST(WalletTests, SpentSproutNoteIsFromMe) {
     CWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = libzcash::SproutSpendingKey::random();
     wallet.AddSproutSpendingKey(sk);
@@ -1470,6 +1499,7 @@ TEST(WalletTests, SpentSaplingNoteIsFromMe) {
     auto consensusParams = RegtestActivateSapling();
 
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     // Generate Sapling address
     auto sk = GetTestMasterSaplingSpendingKey();
@@ -1606,8 +1636,54 @@ TEST(WalletTests, SpentSaplingNoteIsFromMe) {
     RegtestDeactivateSapling();
 }
 
+TEST(WalletTests, SetBestChainDefersPendingRebuildAtShutdown) {
+    // With a witness rebuild pending, the shutdown checkpoint neither runs the
+    // rebuild (a rescan from genesis) nor writes: the flag is still set after
+    // it, and wallet.dat keeps its last consistent checkpoint for the next
+    // start to repair.
+    TestWallet wallet;
+    wallet.SetNoteWitnessesLost(true);
+    CBlockLocator loc;
+    StartShutdown();
+    wallet.CWallet::SetBestChain(loc);
+    const bool fPending = wallet.NoteWitnessesLost();
+    fRequestShutdown = false;
+    EXPECT_TRUE(fPending);
+    EXPECT_FALSE(ShutdownRequested());
+}
+
+TEST(WalletTests, SetBestChainWaitsForWalletLock) {
+    // The checkpoint walks mapWallet inside one wallet.dat transaction, so it must
+    // exclude every other wallet writer. The mempool notifier thread adds wallet
+    // transactions holding cs_wallet only (SyncTransaction); a checkpoint that took
+    // cs_main alone ran beside it and could deadlock inside Berkeley DB, which hung
+    // invalidateblock. Here the test thread holds cs_wallet as the notifier does:
+    // the checkpoint has to wait for it. (The pending rebuild at shutdown makes the
+    // checkpoint return without writing, as above, so no wallet file is needed.)
+    TestWallet wallet;
+    wallet.SetNoteWitnessesLost(true);
+    StartShutdown();
+    std::atomic<bool> fDone(false);
+    std::thread checkpoint;
+    {
+        LOCK(wallet.cs_wallet);
+        checkpoint = std::thread([&wallet, &fDone]() {
+            wallet.CWallet::SetBestChain(CBlockLocator());
+            fDone = true;
+        });
+        MilliSleep(500);
+        EXPECT_FALSE(fDone.load());
+    }
+    checkpoint.join();
+    fRequestShutdown = false;
+    EXPECT_TRUE(fDone.load());
+    EXPECT_TRUE(wallet.NoteWitnessesLost());
+}
+
 TEST(WalletTests, CachedWitnessesEmptyChain) {
     TestWallet wallet;
+    // No wallet lock here: EXPECT_DEATH below forks, and the child would block on a
+    // recursive mutex that the parent thread owns.
 
     auto sk = libzcash::SproutSpendingKey::random();
     wallet.AddSproutSpendingKey(sk);
@@ -1660,13 +1736,77 @@ TEST(WalletTests, CachedWitnessesEmptyChain) {
     EXPECT_TRUE((bool) sproutWitnesses[1]);
     EXPECT_TRUE((bool) saplingWitnesses[0]);
 
-    // Until #1302 is implemented, this should triggger an assertion
-    EXPECT_DEATH(wallet.DecrementNoteWitnesses(&index),
-                 ".*nWitnessCacheSize > 0.*");
+    // The cache holds only this block, so rolling it back empties it. This
+    // used to abort the daemon (assert nWitnessCacheSize > 0); the notes of
+    // the removed block simply lose their witness and nothing is lost.
+    wallet.DecrementNoteWitnesses(&index);
+    EXPECT_EQ(0, wallet.nWitnessCacheSize);
+    EXPECT_FALSE(wallet.NoteWitnessesLost());
+    ::GetWitnessesAndAnchors(wallet, sproutNotes, saplingNotes, sproutWitnesses, saplingWitnesses);
+    EXPECT_FALSE((bool) sproutWitnesses[0]);
+    EXPECT_FALSE((bool) sproutWitnesses[1]);
+    EXPECT_FALSE((bool) saplingWitnesses[0]);
+}
+
+TEST(WalletTests, DecrementWithoutCacheDoesNotAbort) {
+    // A wallet that never saw a block connect (new wallet, wallet created
+    // over an existing chain, reorg to genesis) must survive a disconnect.
+    TestWallet wallet;
+    CBlock block;
+    CBlockIndex index(block);
+    index.nHeight = 7;
+    EXPECT_EQ(0, wallet.nWitnessCacheSize);
+    wallet.DecrementNoteWitnesses(&index);
+    wallet.DecrementNoteWitnesses(&index);
+    EXPECT_EQ(0, wallet.nWitnessCacheSize);
+    EXPECT_FALSE(wallet.NoteWitnessesLost());
+}
+
+TEST(WalletTests, DecrementPastCacheMarksOlderNotesLost) {
+    // A note confirmed in an older block, whose cache is one block deep,
+    // cannot be rolled back to the block below: the wallet must say so
+    // (to rebuild its witnesses) instead of keeping a stale witness.
+    TestWallet wallet;
+    auto sk = libzcash::SproutSpendingKey::random();
+    wallet.AddSproutSpendingKey(sk);
+
+    CWalletTx wtx = GetValidSproutReceive(sk, 10, true, 4);
+    JSOutPoint jsoutpt {wtx.GetHash(), 0, 0};
+    auto nullifier = GetSproutNote(sk, wtx, 0, 0).nullifier(sk);
+    mapSproutNoteData_t sproutNoteData;
+    sproutNoteData[jsoutpt] = SproutNoteData {sk.address(), nullifier};
+    wtx.SetSproutNoteData(sproutNoteData);
+    wallet.AddToWallet(wtx, true, NULL);
+    CBlock block;
+    block.vtx.push_back(wtx);
+    CBlockIndex index(block);
+    index.nHeight = 5;
+    SproutMerkleTree sproutTree;
+    SaplingMerkleTree saplingTree;
+    wallet.IncrementNoteWitnesses(&index, &block, sproutTree, saplingTree);
+    EXPECT_EQ(1, wallet.nWitnessCacheSize);
+    // The transaction is recorded in a different (older) block than the one removed.
+    uint256 otherBlock = GetRandHash();
+    uint256 thisBlock = GetRandHash();
+    wallet.mapWallet[wtx.GetHash()].hashBlock = otherBlock;
+    index.phashBlock = &thisBlock;
+    wallet.DecrementNoteWitnesses(&index);
+    EXPECT_EQ(0, wallet.nWitnessCacheSize);
+    EXPECT_TRUE(wallet.NoteWitnessesLost());
+    // Rolling back a block that held the note itself loses nothing.
+    TestWallet wallet2;
+    wallet2.AddSproutSpendingKey(sk);
+    wallet2.AddToWallet(wtx, true, NULL);
+    wallet2.IncrementNoteWitnesses(&index, &block, sproutTree, saplingTree);
+    wallet2.mapWallet[wtx.GetHash()].hashBlock = thisBlock;
+    wallet2.DecrementNoteWitnesses(&index);
+    EXPECT_EQ(0, wallet2.nWitnessCacheSize);
+    EXPECT_FALSE(wallet2.NoteWitnessesLost());
 }
 
 TEST(WalletTests, CachedWitnessesChainTip) {
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
     std::pair<uint256, uint256> anchors1;
     CBlock block1;
     SproutMerkleTree sproutTree;
@@ -1769,6 +1909,7 @@ TEST(WalletTests, CachedWitnessesChainTip) {
 
 TEST(WalletTests, CachedWitnessesDecrementFirst) {
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
     SproutMerkleTree sproutTree;
     SaplingMerkleTree saplingTree;
 
@@ -1849,6 +1990,7 @@ TEST(WalletTests, CachedWitnessesDecrementFirst) {
 
 TEST(WalletTests, CachedWitnessesCleanIndex) {
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
     std::vector<CBlock> blocks;
     std::vector<CBlockIndex> indices;
     std::vector<JSOutPoint> sproutNotes;
@@ -1936,6 +2078,7 @@ TEST(WalletTests, CachedWitnessesCleanIndex) {
 
 TEST(WalletTests, ClearNoteWitnessCache) {
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = libzcash::SproutSpendingKey::random();
     wallet.AddSproutSpendingKey(sk);
@@ -2000,6 +2143,7 @@ TEST(WalletTests, ClearNoteWitnessCache) {
 
 TEST(WalletTests, WriteWitnessCache) {
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
     MockWalletDB walletdb;
     CBlockLocator loc;
 
@@ -2087,6 +2231,7 @@ TEST(WalletTests, SetBestChainIgnoresTxsWithoutShieldedData) {
     SelectParams(CBaseChainParams::REGTEST);
 
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
     MockWalletDB walletdb;
     CBlockLocator loc;
 
@@ -2166,6 +2311,7 @@ TEST(WalletTests, SetBestChainIgnoresTxsWithoutShieldedData) {
 
 TEST(WalletTests, UpdateSproutNullifierNoteMap) {
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
     uint256 r {GetRandHash()};
     CKeyingMaterial vMasterKey (r.begin(), r.end());
 
@@ -2201,6 +2347,7 @@ TEST(WalletTests, UpdateSproutNullifierNoteMap) {
 
 TEST(WalletTests, UpdatedSproutNoteData) {
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = libzcash::SproutSpendingKey::random();
     wallet.AddSproutSpendingKey(sk);
@@ -2250,6 +2397,7 @@ TEST(WalletTests, UpdatedSaplingNoteData) {
     auto consensusParams = RegtestActivateSapling();
 
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto m = GetTestMasterSaplingSpendingKey();
 
@@ -2358,6 +2506,7 @@ TEST(WalletTests, UpdatedSaplingNoteData) {
 
 TEST(WalletTests, MarkAffectedSproutTransactionsDirty) {
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = libzcash::SproutSpendingKey::random();
     wallet.AddSproutSpendingKey(sk);
@@ -2391,6 +2540,7 @@ TEST(WalletTests, MarkAffectedSaplingTransactionsDirty) {
     auto consensusParams = RegtestActivateSapling();
 
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     // Generate Sapling address
     auto sk = GetTestMasterSaplingSpendingKey();
@@ -2500,6 +2650,7 @@ TEST(WalletTests, MarkAffectedSaplingTransactionsDirty) {
 
 TEST(WalletTests, SproutNoteLocking) {
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = libzcash::SproutSpendingKey::random();
     wallet.AddSproutSpendingKey(sk);
@@ -2533,6 +2684,7 @@ TEST(WalletTests, SproutNoteLocking) {
 
 TEST(WalletTests, SaplingNoteLocking) {
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
     SaplingOutPoint sop1 {uint256(), 1};
     SaplingOutPoint sop2 {uint256(), 2};
 
@@ -2592,6 +2744,7 @@ TEST(WalletTests, SaplingCachedTotalEqualsSlowPath) {
     auto consensusParams = RegtestActivateSapling();
 
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = GetTestMasterSaplingSpendingKey();
     auto expsk = sk.expsk;
@@ -2689,6 +2842,7 @@ TEST(WalletTests, SaplingCachedDecryptFallbackOnNone) {
     auto consensusParams = RegtestActivateSapling();
 
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = GetTestMasterSaplingSpendingKey();
     auto expsk = sk.expsk;
@@ -2760,6 +2914,7 @@ TEST(WalletTests, SaplingCachedExcludesSpent) {
     auto consensusParams = RegtestActivateSapling();
 
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     auto sk = GetTestMasterSaplingSpendingKey();
     auto expsk = sk.expsk;
@@ -2919,6 +3074,7 @@ TEST(WalletTests, SproutCachedTotalEqualsSlowPath) {
     SelectParams(CBaseChainParams::REGTEST);
 
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
     auto sk = libzcash::SproutSpendingKey::random();
     wallet.AddSproutSpendingKey(sk);
 
@@ -2973,6 +3129,7 @@ TEST(WalletTests, SproutCachedDecryptFallbackOnNone) {
     SelectParams(CBaseChainParams::REGTEST);
 
     TestWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
     auto sk = libzcash::SproutSpendingKey::random();
     wallet.AddSproutSpendingKey(sk);
 
@@ -3025,4 +3182,103 @@ TEST(WalletTests, SproutCachedDecryptFallbackOnNone) {
     // Tear down
     chainActive.SetTip(NULL);
     mapBlockIndex.erase(blockHash);
+}
+
+// Spend gate: inconsistent / missing witnesses and unknown anchors must be
+// refused with a clear error before any proving, never abort the daemon.
+TEST(WalletTests, SaplingWitnessesWithDifferentRootsAreRefusedNotAsserted) {
+    TestWallet wallet;
+    auto sk = libzcash::SproutSpendingKey::random();
+    wallet.AddSproutSpendingKey(sk);
+
+    auto wtxA = GetValidSproutReceive(sk, 10, true, 4);
+    auto wtxB = GetValidSproutReceive(sk, 11, true, 4);
+    auto notesA = SetSaplingNoteData(wtxA);
+    auto notesB = SetSaplingNoteData(wtxB);
+    wallet.AddToWallet(wtxA, true, NULL);
+    wallet.AddToWallet(wtxB, true, NULL);
+
+    SaplingMerkleTree treeA;
+    SaplingMerkleTree treeB;
+    treeB.append(GetRandHash());
+    ASSERT_NE(treeA.witness().root(), treeB.witness().root());
+    wallet.mapWallet[wtxA.GetHash()].mapSaplingNoteData[notesA[0]].witnesses.push_front(treeA.witness());
+    wallet.mapWallet[wtxB.GetHash()].mapSaplingNoteData[notesB[0]].witnesses.push_front(treeB.witness());
+
+    std::vector<SaplingOutPoint> ops {notesA[0], notesB[0]};
+    std::vector<boost::optional<SaplingWitness>> witnesses;
+    uint256 anchor;
+    bool consistent = true;
+    ASSERT_NO_THROW(consistent = wallet.GetSaplingNoteWitnesses(ops, witnesses, anchor));
+    EXPECT_FALSE(consistent);
+    ASSERT_EQ(2u, witnesses.size());
+    EXPECT_FALSE((bool) witnesses[0]);
+    EXPECT_FALSE((bool) witnesses[1]);
+
+    CCoinsView dummy;
+    CCoinsViewCache view(&dummy);
+    std::string err;
+    EXPECT_FALSE(CheckSaplingSpendWitnesses(consistent, witnesses, anchor, view, err));
+    EXPECT_NE(std::string::npos, err.find("-rescan"));
+    EXPECT_NE(std::string::npos, err.find("do not share one anchor"));
+
+    // A single note on its own is consistent.
+    std::vector<SaplingOutPoint> one {notesA[0]};
+    consistent = wallet.GetSaplingNoteWitnesses(one, witnesses, anchor);
+    EXPECT_TRUE(consistent);
+    ASSERT_EQ(1u, witnesses.size());
+    EXPECT_TRUE((bool) witnesses[0]);
+    EXPECT_EQ(treeA.witness().root(), anchor);
+}
+
+TEST(WalletTests, SaplingSpendWithoutWitnessIsRefused) {
+    CCoinsView dummy;
+    CCoinsViewCache view(&dummy);
+    std::vector<boost::optional<SaplingWitness>> witnesses(1);
+    std::string err;
+    EXPECT_FALSE(CheckSaplingSpendWitnesses(true, witnesses, uint256(), view, err));
+    EXPECT_NE(std::string::npos, err.find("no witness"));
+    EXPECT_NE(std::string::npos, err.find("-rescan"));
+}
+
+TEST(WalletTests, SaplingSpendAnchorUnknownToChainIsRefused) {
+    SaplingMerkleTree tree;
+    tree.append(GetRandHash());
+    std::vector<boost::optional<SaplingWitness>> witnesses {tree.witness()};
+    uint256 anchor = tree.root();
+
+    CCoinsView dummy;
+    CCoinsViewCache view(&dummy);
+    std::string err;
+    EXPECT_FALSE(CheckSaplingSpendWitnesses(true, witnesses, anchor, view, err));
+    EXPECT_NE(std::string::npos, err.find("not known to the chain"));
+    EXPECT_NE(std::string::npos, err.find(anchor.GetHex()));
+
+    // Once the chain knows the anchor (not necessarily as the tip root) the gate passes.
+    view.PushAnchor(tree);
+    SaplingMerkleTree later = tree;
+    later.append(GetRandHash());
+    view.PushAnchor(later);
+    err.clear();
+    EXPECT_TRUE(CheckSaplingSpendWitnesses(true, witnesses, anchor, view, err));
+    EXPECT_TRUE(err.empty());
+}
+
+TEST(WalletTests, SproutSpendGateRefusesBadWitnessSets) {
+    SproutMerkleTree tree;
+    tree.append(GetRandHash());
+    std::vector<boost::optional<SproutWitness>> witnesses {tree.witness()};
+    uint256 anchor = tree.root();
+
+    CCoinsView dummy;
+    CCoinsViewCache view(&dummy);
+    std::string err;
+    EXPECT_FALSE(CheckSproutSpendWitnesses(false, witnesses, anchor, view, err));
+    EXPECT_NE(std::string::npos, err.find("-rescan"));
+    EXPECT_FALSE(CheckSproutSpendWitnesses(true, std::vector<boost::optional<SproutWitness>>(1), anchor, view, err));
+    EXPECT_NE(std::string::npos, err.find("no witness"));
+    EXPECT_FALSE(CheckSproutSpendWitnesses(true, witnesses, anchor, view, err));
+    EXPECT_NE(std::string::npos, err.find("not known to the chain"));
+    view.PushAnchor(tree);
+    EXPECT_TRUE(CheckSproutSpendWitnesses(true, witnesses, anchor, view, err));
 }

@@ -91,8 +91,18 @@ static const unsigned int MAX_HEADERS_RESULTS = 160;
  *  degree of disordering of blocks on disk (which make reindexing and in the future perhaps pruning
  *  harder). We'll probably want to make this a per-peer adaptive value at some point. */
 static const unsigned int BLOCK_DOWNLOAD_WINDOW = 4096;
+/** Seconds to wait for an answer to a getheaders request before giving the single header-sync
+ *  slot to another peer. A peer that is itself in initial block download silently ignores
+ *  getheaders, so without this timeout a node whose first sync peer is such a peer would wait
+ *  forever. Purely local policy: nothing is sent and nobody is disconnected. */
+static const int64_t HEADERS_RESPONSE_TIMEOUT = 120;
+/** Seconds a peer that did not answer getheaders is skipped when choosing the header-sync peer. */
+static const int64_t HEADERS_STALLED_PEER_COOLDOWN = 300;
 /** Time to wait (in seconds) between writing blocks/block index to disk. */
 static const unsigned int DATABASE_WRITE_INTERVAL = 60 * 60;
+/** The same, while in initial block download: after a crash (kill -9, power loss) everything downloaded
+ *  since the last block index write has to be fetched again, which at a full-speed sync is a lot of work. */
+static const unsigned int DATABASE_WRITE_INTERVAL_IBD = 5 * 60;
 /** Time to wait (in seconds) between flushing chainstate to disk. */
 static const unsigned int DATABASE_FLUSH_INTERVAL = 24 * 60 * 60;
 /** Maximum length of reject messages. */
@@ -141,6 +151,11 @@ extern CConditionVariable cvBlockChange;
 extern bool fExperimentalMode;
 extern bool fImporting;
 extern bool fReindex;
+/** The block index about to be loaded came with an imported chain snapshot (a bootstrap install
+ *  that is not verified yet, or -bootstrapdatadir in this run). Its failure marks are another
+ *  node's: LoadBlockIndexDB does not keep them over RewindBlockIndex, as before 95499ca26.
+ *  Set by init before the block index is loaded. */
+extern bool fBlockIndexFromSnapshot;
 /** Rebuild only the UTXO/chainstate from the existing (intact) block index and
  *  blk files, without re-reading/rebuilding the block index. Faster than -reindex
  *  and the right recovery for a desynced chainstate (block index intact). */
@@ -232,6 +247,22 @@ void ThreadScriptCheck();
 void PartitionCheck(bool (*initialDownloadCheck)(), CCriticalSection& cs, const CBlockIndex *const &bestHeader);
 /** Check whether we are doing an initial block download (synchronizing from disk or network) */
 bool IsInitialBlockDownload();
+
+/** True if a getheaders request sent at nRequestedAt (microseconds, 0 = none outstanding) has
+ *  gone unanswered for more than nTimeoutSeconds at nNow (microseconds). */
+/** Seconds between periodic block index writes. */
+int64_t BlockIndexWriteInterval(bool fInitialBlockDownload);
+
+bool HeadersRequestTimedOut(int64_t nNow, int64_t nRequestedAt, int64_t nTimeoutSeconds);
+
+/** Percent (1..99) of the init-time best-chain replay done, from the height the replay started at, the
+ *  current tip height and the height it is heading for. */
+int ReplayProgressPercent(int nBaseHeight, int nTipHeight, int nTargetHeight);
+
+/** Machine-readable sync phase for getblockchaininfo: synced, waiting_for_peers, downloading_headers,
+ *  downloading_blocks, reindexing or importing. Pure function of its arguments. */
+const char* ClassifySyncPhase(bool fInitialBlockDownload, bool fReindexing, bool fImporting,
+                              int nConnections, int nBlocks, int nHeaders);
 /** Format a string that describes several potential problems detected by the core */
 std::string GetWarnings(const std::string& strFor);
 /** Retrieve a transaction (from memory pool, or from disk, if possible) */
@@ -273,9 +304,26 @@ void FlushStateToDisk();
 /** Prune block files and flush state to disk. */
 void PruneAndFlush();
 
-/** (try to) add transaction to memory pool **/
+/** Default and minimum for -mempoolmaxbytes: cap on the summed serialized size of mempool transactions. */
+static const uint64_t DEFAULT_MEMPOOL_MAX_BYTES = 300000000;
+static const uint64_t MIN_MEMPOOL_MAX_BYTES = 5000000;
+/** Current cap (-mempoolmaxbytes). */
+extern uint64_t nMempoolMaxBytes;
+
+/**
+ * True when a transaction of nTxSize serialized bytes fits under nMempoolMaxBytes
+ * next to the transactions already in the pool (pool.GetTotalTxSize()). Otherwise
+ * returns false and fills strError. Never evicts anything.
+ */
+bool CheckMempoolCapacity(CTxMemPool& pool, size_t nTxSize, std::string& strError);
+
+/**
+ * (try to) add transaction to memory pool.
+ * fEnforceMempoolCap=false exempts the -mempoolmaxbytes check; only DisconnectTip uses it,
+ * for transactions that were already in a block and are returned to the pool on a reorg.
+ **/
 bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransaction &tx, bool fLimitFree,
-                        bool* pfMissingInputs, bool fRejectAbsurdFee=false);
+                        bool* pfMissingInputs, bool fRejectAbsurdFee=false, bool fEnforceMempoolCap=true);
 
 
 struct CNodeStateStats {
@@ -372,8 +420,12 @@ void UpdateCoins(const CTransaction& tx, CCoinsViewCache& inputs, int nHeight);
 /** Transaction validation functions */
 
 /** Context-independent validity checks */
-bool CheckTransaction(const CTransaction& tx, CValidationState& state, libzcash::ProofVerifier& verifier);
-bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidationState &state);
+/** fInBlock admits the 413 historical oversize mainnet transactions, matched by (txid, exact size)
+ *  (consensus/oversize_grandfather.h). It is true for a transaction validated as part of a block
+ *  (CheckBlock) and for a transaction the wallet loader reads back from wallet.dat; mempool, relay
+ *  and RPC callers keep the default false and the 102000 byte limit. */
+bool CheckTransaction(const CTransaction& tx, CValidationState& state, libzcash::ProofVerifier& verifier, bool fInBlock = false);
+bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidationState &state, bool fInBlock = false);
 
 /** Check for standard transaction types
  * @return True if all outputs (scriptPubKeys) use only standard transaction forms
@@ -704,5 +756,39 @@ uint64_t CalculateCurrentUsage();
  * either be based on the command-line argument '-txexpirydelta' or derived from consensusParams.
  */
 CMutableTransaction CreateNewContextualCMutableTransaction(const Consensus::Params& consensusParams, int nHeight);
+
+/**
+ * Snapshot of everything FindMostWorkChain() and its reference implementation
+ * read or change: the status flags of the given block index entries, the
+ * candidate set, the unlinked-block map, the parked-block index, the dirty and
+ * failed-block sets, the best-invalid/best-parked/finalized markers, the memo of
+ * the memoised path walk and its change counter. Used by the -checkblockindex
+ * cross-check in FindMostWorkChain() and by src/test/findmostwork_tests.cpp;
+ * other production code must not use it.
+ */
+struct BestChainState {
+    std::vector<unsigned int> status;                                       // nStatus of each entry of `all`
+    std::vector<CBlockIndex*> candidates;                                   // setBlockIndexCandidates, in set order
+    std::vector<std::pair<CBlockIndex*, CBlockIndex*> > blocksUnlinked;     // mapBlocksUnlinked
+    std::vector<CBlockIndex*> parked;                                       // blocks in the parked-block index
+    std::set<const CBlockIndex*> dirty;                                     // setDirtyBlockIndex
+    std::set<CBlockIndex*> failedBlocks;                                    // g_failed_blocks
+    CBlockIndex* pindexBestInvalid = NULL;
+    CBlockIndex* pindexBestParked = NULL;
+    const CBlockIndex* pindexFinalized = NULL;
+    CBlockIndex* memoIndex = NULL;                                          // the memo of the memoised walk
+    const CBlockIndex* memoFloor = NULL;
+    int memoFloorHeight = -1;
+    uint64_t memoEpoch = 0;
+    uint64_t epoch = 0;                                                     // BlockPathWalkEpoch()
+};
+/** Capture the state; `all` lists the block index entries. */
+BestChainState BestChainStateSave(const std::vector<CBlockIndex*>& all);
+/** Install `state` for the same list `all` (the parked-block index is rebuilt from the flags). */
+void BestChainStateRestore(const BestChainState& state, const std::vector<CBlockIndex*>& all);
+/** Same flags, candidates, unlinked blocks, parked index, dirty/failed sets and markers (memo and epoch are ignored). */
+bool BestChainStateSame(const BestChainState& a, const BestChainState& b);
+/** Test only. mode 0: the reference walk; 1: the memoised walk; 2: FindMostWorkChain() with its -checkblockindex cross-check. */
+CBlockIndex* FindMostWorkChainForTest(int mode);
 
 #endif // BITCOIN_MAIN_H

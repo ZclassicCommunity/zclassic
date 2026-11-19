@@ -59,6 +59,7 @@ TestSaplingNote GetTestSaplingNote(const libzcash::SaplingPaymentAddress& pa, CA
 CWalletTx GetValidSaplingReceive(const Consensus::Params& consensusParams,
                                  CBasicKeyStore& keyStore,
                                  const libzcash::SaplingExtendedSpendingKey &sk,
-                                 CAmount value);
+                                 CAmount value,
+                                 int nHeight = 1);
 
 #endif // ZCASH_UTIL_TEST_H

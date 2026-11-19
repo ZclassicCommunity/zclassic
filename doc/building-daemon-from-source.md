@@ -47,11 +47,11 @@ The recommended wrapper `zcutil/build-release.sh` avoids this entirely — it ma
 
 - OS: Ubuntu 20.04+, Debian 11+, Arch/Manjaro, or compatible Linux. (This box is
   Ubuntu 24.04 / GCC 14, well above the GCC 9+ / Clang 10+ floor.)
-- RAM: 4 GB+ recommended. The Rust snark/`librustzcash` compile is RAM-heavy; on
+- RAM: 4 GB+ recommended. The Boost/C++ compile is RAM-heavy; on
   low-RAM machines use a smaller `-j` (e.g. `-j4`) to avoid OOM.
 - Disk: 20 GB+ free.
 - First build is slow (**30–60 min**) because `depends/` compiles Boost and builds
-  the Rust snark + `librustzcash`.
+  and the C++ tree (the shielded crypto is built from `src/c23`, no Rust).
 
 ### 1.2 Install host build dependencies
 
@@ -65,31 +65,23 @@ cd /home/rhett/github/zclassic
 
 Ubuntu/Debian package set (`install-deps.sh:56-82`):
 `build-essential pkg-config libc6-dev m4 g++-multilib autoconf libtool automake
-libgmp-dev libdb++-dev libsodium-dev git python3 wget curl zlib1g-dev libssl-dev
+libdb++-dev libsodium-dev git python3 wget curl zlib1g-dev libssl-dev
 libevent-dev`.
 
 Arch set (`install-deps.sh:118-133`):
-`base-devel autoconf automake libtool pkgconf gmp db libsodium curl git python
+`base-devel autoconf automake libtool pkgconf db libsodium curl git python
 wget openssl libevent`.
 
 ### 1.3 The `depends/` system (what gets built, and what it pins)
 
 `./zcutil/build.sh` and `build-release.sh` first build a hermetic dependency
 prefix under `depends/<HOST>/`. `depends/` builds: Boost, OpenSSL, libevent,
-zeromq, libgmp, libsodium, googletest, Berkeley DB (wallet), plus a **pinned Rust
-toolchain** used solely to build `librustzcash` (the zk-proof static lib).
+zeromq, libsodium, googletest and Berkeley DB (wallet). There is no Rust
+toolchain and no cargo: the zk-proof code is C23 under `src/c23`
+(Z23, Apache-2.0, see `src/c23/NOTICE`) and is built by the main build.
 
-- Rust is **pinned to 1.32.0** and downloaded from `static.rust-lang.org`
-  (sha256-checked). The build does **not** use your system `cargo` — `depends` is
-  self-contained. (`depends/packages/rust.mk`)
-- `librustzcash` is pinned to git commit
-  `06da3b9ac8f278e5d4ae13088cf0a4c03d2c13f5`, built with
-  `cargo build --package librustzcash --frozen --release`.
-  (`depends/packages/librustzcash.mk`)
-- **Network access required on a clean depends build:** `static.rust-lang.org`,
-  the `z.cash` depends-sources mirror, and `github.com`.
-- Proton/AMQP is **OFF by default** for all targets (`build.sh:93`,
-  `NO_PROTON`).
+- **Network access required on a clean depends build:**
+  the `z.cash` depends-sources mirror and the upstream source hosts.
 
 The three supported host triples (`depends/Makefile:148-153`):
 
@@ -110,7 +102,7 @@ The three supported host triples (`depends/Makefile:148-153`):
   tarballs, so the linux + win depends do **not** need re-downloading.
 
 Useful `depends` knobs: `HOST=`, `NO_WALLET=1` (→ `--disable-wallet`, no bdb),
-`NO_PROTON`, `DEBUG`, `SOURCES_PATH=`, `BASE_CACHE=`.
+`DEBUG`, `SOURCES_PATH=`, `BASE_CACHE=`.
 
 ### 1.4 Windows cross toolchain (only needed for §3)
 
@@ -132,7 +124,7 @@ x86_64-w64-mingw32-g++ -v 2>&1 | sed -n 's/^Thread model: //p'   # MUST be: posi
 
 ### 1.5 Runtime prerequisite (NOT a build prereq): zk parameters
 
-Before *running* `zclassicd` (not before building it), fetch ~1.6 GB of proving
+Before *running* `zclassicd` (not before building it), fetch ~0.8 GB of proving
 parameters:
 
 ```bash
@@ -142,16 +134,14 @@ cd /home/rhett/github/zclassic
 
 Target dir is `~/.zcash-params` on Linux,
 `~/Library/Application Support/ZcashParams` on macOS (`fetch-params.sh:6-8`).
-Files: `sprout-proving.key`, `sprout-verifying.key`, `sapling-spend.params`,
-`sapling-output.params`, `sprout-groth16.params`. The daemon will fail zk
+Files: `sprout-verifying.key`, `sapling-spend.params`,
+`sapling-output.params`, `sprout-groth16.params` (about 780 MB; the 910 MB
+`sprout-proving.key` is no longer needed). The daemon will fail zk
 operations without these, but they are not needed to compile.
 
-> Note on the sprout proving key constant: `fetch-params.sh:11` names it
-> `SPROUT_PKEY_NAME='sprout-proving.key.deprecated-sworn-elves'` (the remote
-> object name); it is fetched to the local file `sprout-proving.key`.
 
 > **NOTE (GUI single-file wallet does NOT pre-download params from z.cash).**
-> z.cash now `403`s the deprecated `sprout-proving.key`, so the GUI no longer
+> z.cash has permanently `403`d the old parameter downloads, so the GUI no longer
 > pre-fetches params over HTTP. Instead the embedded daemon fetches any missing
 > params from a bootstrap peer over P2P, hash-verified
 > (`init.cpp` `InitSanityCheck` → `FetchZcashParamsFromPeer`, default
@@ -177,7 +167,7 @@ debug `-g`).
 
 > **build.sh flags are ORDER-SENSITIVE** (`build.sh:73-98`). If you pass any, they
 > must appear in this exact order, before MAKEARGS:
-> `[ --enable-lcov | --disable-tests ]  [ --disable-mining ]  [ --enable-proton ]  [ -jN ... ]`
+> `[ --enable-lcov | --disable-tests ]  [ --disable-mining ]  [ -jN ... ]`
 > Out-of-order flags are silently treated as make args. Default build is
 > `--enable-hardening` with tests **enabled**.
 
@@ -193,28 +183,28 @@ This runs depends → `autogen.sh` → `./configure --prefix=/ --disable-tests` 
 `release/x86_64-unknown-linux-gnu/` (`build-release.sh:125-137`). If you pass no
 make args it defaults to `-j$(nproc)` (`build-release.sh:60-61`).
 
-### 2c. Release build for embedding in the GUI (static libgomp)
+### 2c. Release build for embedding in the GUI
 
-A fresh desktop often lacks `libgomp.so.1`; without it the GUI's embedded node
-fails to start ("connection refused"). Statically link it:
+The daemon has no OpenMP dependency (libsnark was removed), so it needs no
+`libgomp.so.1` on the user machine and nothing special at link time:
 
 ```bash
 cd /home/rhett/github/zclassic
-ZQW_STATIC_GOMP=1 ./zcutil/build-release.sh linux -j$(nproc)
+./zcutil/build-release.sh linux -j$(nproc)
 ```
 
-`ZQW_STATIC_GOMP=1` relinks with the static `libgomp.a` + `-Wl,--as-needed` +
-`-ldl` (`build-release.sh:96-123`). **Verify the result has no libgomp dependency**
+`ZQW_STATIC_GOMP=1` is still accepted by `build-release.sh` (older GUI build scripts
+export it) and ignored. **Verify the result has no libgomp dependency**
 (see §5).
 
 > **Glibc floor warning (important for distribution).** A native build on a
 > modern host bakes in a high glibc floor. The currently committed
 > `release/x86_64-unknown-linux-gnu/zclassicd` has floor **GLIBC_2.38** and still
-> `NEEDED libgomp.so.1` — i.e. it was *not* built with `ZQW_STATIC_GOMP` and will
+> `NEEDED libgomp.so.1` — i.e. it predates the removal of libsnark and will
 > **not** run on older distros (symptom on the user's machine:
 > `version GLIBC_2.38 not found`). To produce a **portable** Linux daemon with a
 > low glibc floor, build it inside an old-base (glibc 2.31) sandbox with
-> `--enable-glibc-back-compat --enable-reduce-exports` and `ZQW_STATIC_GOMP=1`;
+> `--enable-glibc-back-compat --enable-reduce-exports`;
 > see §6. The Windows `.exe` has no such floor issue.
 
 ### 2d. Other Linux variants
@@ -229,7 +219,7 @@ make -C depends -j$(nproc) NO_WALLET=1 \
   && make -j$(nproc)
 
 # Build only the depends prefix:
-make -C depends -j$(nproc) NO_PROTON=1
+make -C depends -j$(nproc)
 ```
 
 ---
@@ -257,15 +247,13 @@ Produces stripped `release/x86_64-w64-mingw32/zclassicd.exe` (+ `zclassic-cli.ex
 `zclassic-tx.exe`). `build-release.sh:41-45` errors early if
 `x86_64-w64-mingw32-g++` is missing.
 
-For a daemon to be embedded in the Windows GUI (no libgomp runtime dependency):
+For a daemon to be embedded in the Windows GUI (no libgomp runtime dependency, nothing to link statically):
 
 ```bash
 cd /home/rhett/github/zclassic
-ZQW_STATIC_GOMP=1 ./zcutil/build-release.sh win64 -j$(nproc)
+./zcutil/build-release.sh win64 -j$(nproc)
 ```
 
-(For win64, `build-release.sh:106-110` pulls the **mingw** `libgomp.a` via
-`x86_64-w64-mingw32-gcc -print-file-name=libgomp.a`, matching the PE ABI.)
 
 ### 3b. Manual path (equivalent to what `build.sh` does), then strip
 
@@ -400,7 +388,7 @@ objdump -T /home/rhett/github/zclassic/release/x86_64-unknown-linux-gnu/zclassic
 ### 5.5 No leaked dynamic deps (esp. libgomp)
 
 ```bash
-# Should NOT list libgomp.so.1 if built with ZQW_STATIC_GOMP:
+# Must NOT list libgomp.so.1 (no OpenMP any more):
 objdump -p /home/rhett/github/zclassic/release/x86_64-unknown-linux-gnu/zclassicd | grep NEEDED
 ```
 
@@ -412,8 +400,8 @@ The native build (§2) targets the host's glibc and will not run on older distro
 The distributable Linux daemon is built inside an **Ubuntu 20.04 / glibc 2.31
 proot sandbox** that lives **outside the git repo** at `/home/rhett/zclbuild`
 (uncommitted tribal knowledge — see §8). Inside that sandbox the recipe sets
-`NO_PROTON=1`, `CONFIGURE_FLAGS='--enable-glibc-back-compat --enable-reduce-exports'`,
-`ZQW_STATIC_GOMP=1`, then calls `zcutil/build-release.sh linux`, yielding a daemon
+`CONFIGURE_FLAGS='--enable-glibc-back-compat --enable-reduce-exports'`,
+then calls `zcutil/build-release.sh linux`, yielding a daemon
 with a **GLIBC_2.29** floor and no libgomp dependency.
 
 ```bash
@@ -447,11 +435,11 @@ make -C src bitcoin_test_check      # src/Makefile.test.include:147
 # zcash gtest suite (runs src/zcash-gtest):
 make -C src zcash-gtest_check       # src/Makefile.gtest.include:74
 
-# misc local checks (bitcoin-util-test.py + secp256k1 + univalue):
+# misc local checks (secp256k1 + univalue):
 make check-local                    # src/Makefile.test.include:153
 
-# Python RPC integration tests:
-qa/pull-tester/rpc-tests.sh
+# RPC integration tests (shell, regtest): see qa/rpc-tests/README.md
+sh qa/rpc-tests/wallet_matrix.sh src
 ```
 
 > There is no verified single top-level `make check` aggregator; the verified
@@ -469,7 +457,7 @@ repo) with repo paths parameterized:
 - `/home/rhett/zclbuild/prun` — proot entrypoint (binds the repos into the
   glibc-2.31 sandbox).
 - `/home/rhett/zclbuild/focal/build/03-daemon.sh` — the portable-Linux daemon
-  recipe (host-artifact exclusion + `--enable-glibc-back-compat` + static gomp).
+  recipe (host-artifact exclusion + `--enable-glibc-back-compat`).
 - `/home/rhett/zclbuild/focal/build/{build.sh,02-openssl-qt.sh,04-gui-bundle.sh,05-static-helpers.sh}`
   — the rest of the sandbox orchestration (mostly GUI-side, but `build.sh` drives
   the whole sandbox).
@@ -500,16 +488,15 @@ the `x86_64-w64-mingw32-g++` alternative points at `-win32`. Fix:
 
 **Host-switch object mixing (linux ↔ win64 in the same tree).**
 Symptom: link errors about incompatible object architecture (COFF into ELF or
-vice-versa). Cause: in-tree static libs (`src/snark`, leveldb, univalue) rebuild
+vice-versa). Cause: in-tree static libs (leveldb, univalue) rebuild
 off their own sources, not `config.h`, so a plain `make` won't rebuild them on a
 host switch. Fix: `build-release.sh:76-93` auto-detects the host change and runs
-`make clean` + `make -C src/snark clean`. If building by hand with `build.sh`, run
-those two cleans yourself when switching `HOST`.
+`make clean`. If building by hand with `build.sh`, run
+that clean yourself when switching `HOST`.
 
 **build.sh flag order.**
-Out-of-order `--disable-tests`/`--disable-mining`/`--enable-proton` are silently
-treated as make args. Order: `[--enable-lcov|--disable-tests] [--disable-mining]
-[--enable-proton] [MAKEARGS...]` (`build.sh:73-98`).
+Out-of-order `--disable-tests`/`--disable-mining` are silently
+treated as make args. Order: `[--enable-lcov|--disable-tests] [--disable-mining] [MAKEARGS...]` (`build.sh:73-98`).
 
 **Unstripped `.exe` is ~278 MB.**
 Not an error. Strip with `x86_64-w64-mingw32-strip -s` → ~13.5 MB. Use the
@@ -519,10 +506,9 @@ host-prefixed strip for PE; the plain host `strip` cannot process PE.
 `build-release.sh` always passes `--disable-tests`, so `test_bitcoin`/`zcash-gtest`
 won't exist. Do a `build.sh` dev build without `--disable-tests` first (§7).
 
-**High glibc floor / `libgomp.so.1` missing on the user's machine.**
-Native builds bake in the host glibc floor and (without `ZQW_STATIC_GOMP`) need
-`libgomp.so.1`. For distribution build via the proot glibc-2.31 sandbox (§6) with
-`ZQW_STATIC_GOMP=1`. Verify with §5.4 and §5.5.
+**High glibc floor on the user's machine.**
+Native builds bake in the host glibc floor. For distribution build via the
+proot glibc-2.31 sandbox (§6). Verify with §5.4 and §5.5.
 
 **`src/` binaries may not exist.**
 A clean / release-built tree has binaries only in `release/<triple>/`; `src/`
@@ -537,9 +523,9 @@ the darwin toolchain are absent (§4). Fix: provide the SDK + cctools, or build 
 a Mac.
 
 **First build is slow / OOM.**
-30–60 min is normal (Boost + Rust snark + `librustzcash`). On low RAM, lower `-j`
+30–60 min is normal (Boost and the C++ tree). On low RAM, lower `-j`
 (e.g. `-j4`). A clean depends build needs network access to
-`static.rust-lang.org`, the `z.cash` depends mirror, and `github.com`.
+the `z.cash` depends mirror and the upstream source hosts.
 
 **`build-linux-ci.sh` is legacy.**
 It hardcodes a stale `VER='v2.1.1-5'` and passes `--disable-man`. Prefer

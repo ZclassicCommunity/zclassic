@@ -6,15 +6,9 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>540</width>
-    <height>504</height>
+    <width>640</width>
+    <height>640</height>
    </rect>
-  </property>
-  <property name="minimumSize">
-   <size>
-    <width>540</width>
-    <height>500</height>
-   </size>
   </property>
   <property name="windowTitle">
    <string>Settings</string>
@@ -229,7 +223,7 @@
        <item row="13" column="0" colspan="2">
         <widget class="QCheckBox" name="chkNatpmp">
          <property name="text">
-          <string>Help the network: open my port automatically (NAT-PMP/PCP, no UPnP)</string>
+          <string>Help the network: open my port automatically</string>
          </property>
         </widget>
        </item>

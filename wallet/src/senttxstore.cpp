@@ -1,3 +1,4 @@
+#include "profilepaths.h"
 #include "senttxstore.h"
 #include "settings.h"
 #include "privatefile.h"
@@ -7,7 +8,7 @@
 QString SentTxStore::writeableFile() {
     auto filename = QStringLiteral("senttxstore.dat");
 
-    auto dir = QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
+    auto dir = QDir(ProfilePaths::appDataDir());
     if (!dir.exists())
         QDir().mkpath(dir.absolutePath());
 

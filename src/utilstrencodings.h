@@ -30,6 +30,21 @@ enum SafeChars
 };
 
 std::string SanitizeFilename(const std::string& str);
+
+//! Maximum length of a file name accepted by the wallet export/backup RPCs.
+static const size_t MAX_EXPORT_FILENAME_LENGTH = 128;
+/**
+ * True if `name` is acceptable as the file name for a wallet backup or export:
+ * letters, digits, '.', '-' and '_' only, 1..MAX_EXPORT_FILENAME_LENGTH chars,
+ * beginning with a letter, digit or '_'. That excludes every path separator,
+ * "." / ".." and hidden files, so the name can only ever name a file inside the
+ * export directory.
+ */
+bool IsValidExportFilename(const std::string& name);
+/** The closest valid name to `name` (disallowed characters dropped, leading '.'/'-' trimmed). */
+std::string SanitizeExportFilename(const std::string& name);
+/** The RPC error text for a rejected export file name, including a valid suggestion when there is one. */
+std::string ExportFilenameErrorText(const std::string& name);
 /**
 * Remove unsafe chars. Safe chars chosen to allow simple messages/URLs/email
 * addresses, but avoid anything even possibly remotely dangerous like & or >

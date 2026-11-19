@@ -1,3 +1,6 @@
+#include "bootstrapprogress.h"
+#include "daemonjob.h"
+#include "profilepaths.h"
 #include "connection.h"
 #include "embeddeddaemon.h"
 #include "configfile.h"
@@ -265,9 +268,9 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
     // (downloadParams() is retained but no longer on the startup path.)
     if (!verifyParams()) {
         main->logger->write("zk-params not all present locally; deferring to the daemon's hash-verified peer-fetch");
-        // Item 3: params are missing, so the daemon will peer-fetch ~1.7GB before it even
+        // Item 3: params are missing, so the daemon will peer-fetch ~780MB before it even
         // binds its RPC port (ZC_LoadParams runs before AppInitServers). Latch this so the
-        // refused-connection warmup branch below shows the accurate "one-time 1.7GB, 10-20
+        // refused-connection warmup branch below shows the accurate "one-time 780MB, 10-20
         // min" copy instead of a frozen "Almost ready" line for the whole download. Latch-
         // only (never cleared back to false here): once the params land, getinfo succeeds
         // and the snapshot/IBD pollers overwrite the status text every poll regardless.
@@ -368,7 +371,7 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
                 // Static fallback FIRST (covers the brief pre-RPC-bind window and an
                 // older daemon with no getbootstrapinfo).
                 //
-                // Item 3: on a FRESH install the daemon peer-fetches ~1.7GB of zk-params
+                // Item 3: on a FRESH install the daemon peer-fetches ~780MB of zk-params
                 // in ZC_LoadParams BEFORE it binds its RPC port (ZC_LoadParams precedes
                 // AppInitServers in init.cpp). During that 10-20 min the port is fully
                 // REFUSING, so this branch — not getbootstrapinfo — is all the user sees,
@@ -380,7 +383,7 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
                 // below takes over with real percent.
                 if (ezParamFetchLikely) {
                     this->showInformation(QObject::tr("Step 1 of 3: Getting the security files ready…"),
-                        QObject::tr("One-time download of about 1.7 GB — on a typical home "
+                        QObject::tr("One-time download of about 780 MB — on a typical home "
                             "connection this takes 10–20 minutes. You only do this once."));
                 } else {
                     this->showInformation(QObject::tr("Step 2 of 3: Starting your wallet…"),
@@ -451,6 +454,8 @@ void ConnectionLoader::createZClassicConf() {
     QPixmap logo(":/img/res/zclassicdlogo.gif");
     ui.lblTopIcon->setBasePixmap(logo.scaled(256, 256, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     ui.btnPickDir->setEnabled(false);
+    // Profile override: the node datadir is fixed inside the profile.
+    if (ProfilePaths::active()) ui.chkCustomDatadir->setEnabled(false);
 
     ui.grpAdvanced->setVisible(false);
     QObject::connect(ui.btnAdvancedConfig, &QPushButton::toggled, [=](bool isVisible) {
@@ -474,11 +479,17 @@ void ConnectionLoader::createZClassicConf() {
         }
     });
 
+    // The intro text wraps; size the dialog to it so it is never clipped.
+    if (d.layout()) {
+        d.layout()->activate();
+        const int w = qMax(d.sizeHint().width(), 520);
+        d.resize(w, qMax(d.sizeHint().height(), d.layout()->totalHeightForWidth(w)));
+    }
     // Show the dialog
     QString datadir = "";
     bool useTor = false;
     if (d.exec() != QDialog::Accepted) {
-        showError(QObject::tr("Wallet setup was cancelled. No configuration was created. Reopen the wallet to try again."));
+        showError(QObject::tr("Wallet setup was cancelled. Nothing was set up and nothing was downloaded. Click \"Try again\" (or reopen the wallet) when you are ready."));
         return;
     }
     {
@@ -515,13 +526,13 @@ void ConnectionLoader::createZClassicConf() {
 void ConnectionLoader::downloadParams(std::function<void(void)> cb) {
     main->logger->write("Adding params to download queue");
 
-    // P1-7: make sure there is enough room before pulling ~1.7GB of security files.
+    // P1-7: make sure there is enough room before pulling ~780MB of security files.
     if (!ensureEnoughDiskSpace(zcashParamsDir()))
         return;
 
     // P1-1: this is Step 1 of onboarding.
     this->showInformation(QObject::tr("Step 1 of 3: Getting the security files ready…"),
-                          QObject::tr("One-time download of about 1.7 GB — on a typical home connection this takes 10–20 minutes. You only do this once."));
+                          QObject::tr("One-time download of about 780 MB — on a typical home connection this takes 10–20 minutes. You only do this once."));
 
     // Add all the files to the download queue
     downloadQueue = new QQueue<QUrl>();
@@ -529,7 +540,6 @@ void ConnectionLoader::downloadParams(std::function<void(void)> cb) {
     
     downloadQueue->enqueue(QUrl("https://z.cash/downloads/sapling-output.params"));
     downloadQueue->enqueue(QUrl("https://z.cash/downloads/sapling-spend.params"));    
-    downloadQueue->enqueue(QUrl("https://z.cash/downloads/sprout-proving.key"));
     downloadQueue->enqueue(QUrl("https://z.cash/downloads/sprout-verifying.key"));
     downloadQueue->enqueue(QUrl("https://z.cash/downloads/sprout-groth16.params"));
 
@@ -759,9 +769,32 @@ bool ConnectionLoader::startEmbeddedZClassicd(const QStringList& extraArgs) {
     // buffer unused stdout for the lifetime of a full-node session. Explicit
     // printtoconsole output is discarded; startup stderr is still captured below.
     ezclassicd->setStandardOutputFile(QProcess::nullDevice());
+    // Windows backstop: every launch goes through DaemonJob::start(), which binds the
+    // suspended child to a kill-on-close job (no-op elsewhere). It is not a signal hook:
+    // this loader disconnects all handlers on handoff to RPC, and RPC restarts the same
+    // QProcess through DaemonJob::start() as well. The orderly `stop` in
+    // RPC::shutdownZClassicd() disarms the job first.
     QObject::connect(ezclassicd, &QProcess::started, [=] () {
         //qDebug() << "zclassicd started";
     });
+#ifndef Q_OS_WIN
+    // Quit before the RPC handoff (File->Exit, SIGINT/SIGTERM while the node is still
+    // starting): RPC::shutdownZClassicd() does not own this process yet, so without this
+    // ~QProcess would SIGKILL a node that is mid-startup. Ask for zclassicd's orderly
+    // shutdown (SIGTERM) and wait for it instead. Once RPC owns the process its own
+    // orderly stop has already run, so this is a no-op then. (Windows: terminate() is a
+    // WM_CLOSE a console daemon ignores; unchanged there.)
+    {
+        const QPointer<QProcess> owned(ezclassicd);
+        RPC* const owner = rpc;
+        QObject::connect(qApp, &QCoreApplication::aboutToQuit, ezclassicd, [owned, owner]() {
+            if (!owned || owned->state() == QProcess::NotRunning) return;
+            if (owner && owner->getEZClassicD() == owned.data()) return;
+            owned->terminate();
+            owned->waitForFinished(30000);
+        });
+    }
+#endif
 
     // NOTIFY-SRV: stand up the push socket + write the 0600 token file BEFORE launching
     // the daemon, so the socket is already listening when the node first fires a
@@ -864,6 +897,8 @@ bool ConnectionLoader::startEmbeddedZClassicd(const QStringList& extraArgs) {
             }
         }
     }
+    // Profile override: the daemon must never fall back to its own platform datadir.
+    launchArgs << ProfilePaths::daemonArgs();
     launchArgs << "-par=0"                // auto-detect cores: parallel script
                                           // verification (startup verify + IBD;
                                           // daemon default is single-threaded)
@@ -894,15 +929,16 @@ bool ConnectionLoader::startEmbeddedZClassicd(const QStringList& extraArgs) {
     // the startup-timing log would measure from the wrong instant.
 
 #ifdef Q_OS_LINUX
-    ezclassicd->start(zclassicdProgram, launchArgs);
+    DaemonJob::start(ezclassicd, zclassicdProgram, launchArgs);
 #elif defined(Q_OS_DARWIN)
-    ezclassicd->start(zclassicdProgram, launchArgs);
+    DaemonJob::start(ezclassicd, zclassicdProgram, launchArgs);
 #else
     // Spawn by ABSOLUTE path: in the single-file release the daemon is extracted
     // outside appPath (under %LOCALAPPDATA%), so the old bare-name "zclassicd.exe"
     // + working-directory spawn would not find it.
     ezclassicd->setWorkingDirectory(appPath.absolutePath());
-    ezclassicd->start(zclassicdProgram, launchArgs);
+    if (const auto jobErr = DaemonJob::start(ezclassicd, zclassicdProgram, launchArgs))
+        main->logger->write(QString("daemon job backstop unavailable (win32 error %1)").arg(jobErr));
 #endif // Q_OS_LINUX
 
     // [gui-startup] We own this daemon and just spawned it. First-write-wins, so a
@@ -923,7 +959,7 @@ QString ConnectionLoader::ensureDaemonExtracted() {
 #else
     QString error;
     const QString path = extractEmbeddedDaemon(QCoreApplication::applicationFilePath(),
-        QStandardPaths::writableLocation(QStandardPaths::CacheLocation), &error);
+        ProfilePaths::cacheDir(), &error);
     if (path.isEmpty()) main->logger->write("Embedded daemon: " + error);
     return path;
 #endif // Q_OS_DARWIN
@@ -1694,7 +1730,7 @@ void ConnectionLoader::retryExtractionOnce(const QString& diag) {
     // re-runs its verified (SHA-256-gated) extraction from scratch. This is the SAME
     // dir ensureDaemonExtracted() writes to (<CacheLocation>/zclassic-node); we remove
     // only our own extracted-daemon dir, never anything else.
-    QDir cacheRoot(QStandardPaths::writableLocation(QStandardPaths::CacheLocation));
+    QDir cacheRoot(ProfilePaths::cacheDir());
     QDir cache(cacheRoot.filePath("zclassic-node"));
     if (cache.exists())
         cache.removeRecursively();
@@ -2068,13 +2104,13 @@ void ConnectionLoader::refreshZClassicdState(Connection* connection, std::functi
 
                 // During the bootstrap snapshot download the daemon publishes its
                 // progress as the warmup status, e.g.:
-                //   "Bootstrap snapshot:  42%  4.10 / 9.80 GB  210.5 MB/s  (8 streams)"
+                //   "Bootstrap snapshot:  42%  4.10 / 9.80 GiB  210.5 MiB/s  (8 streams)"
+                // (binary units: older daemons printed the same numbers as "GB"/"MB/s",
+                // and the parsing below accepts both labels)
                 // Drive the real 0-100 bar off that percent. The "Bootstrap snapshot:"
                 // prefix MUST stay in sync with the strprintf() at the snapshot-download
                 // emit sites in daemon src/bootstrap.cpp.
-                static const QRegularExpression reBootstrapPct(
-                    QStringLiteral("Bootstrap snapshot:\\s*(\\d+)%"));
-                QRegularExpressionMatch mPct = reBootstrapPct.match(status);
+                QRegularExpressionMatch mPct = bootstrapPercentRegex().match(status);
 
                 // SELF-HEAL WARMUP_WEDGED watchdog: track whether the warmup status
                 // string and parsed percent are ADVANCING. Reset the no-progress
@@ -2125,8 +2161,18 @@ void ConnectionLoader::refreshZClassicdState(Connection* connection, std::functi
                 if (mPct.hasMatch()) {
                     int pct = mPct.captured(1).toInt();
                     this->setBarPercent(pct);     // switches the bar from busy to 0-100
-                    // Show the "X / Y GB  Z MB/s" tail (after the first '%') as detail.
+                    // Show the "X / Y GiB  Z MiB/s" tail (after the first '%') as detail.
                     QString detail = status.section(QStringLiteral("%"), 1).trimmed();
+                    // Add a time estimate from the node's own size/rate figures.
+                    // Current daemons print GiB and MiB/s (older ones printed the same
+                    // binary numbers as GB and MB/s), so the "x1024" below is GiB->MiB.
+                    QRegularExpressionMatch mr = bootstrapRateRegex().match(detail);
+                    if (mr.hasMatch() && mr.captured(3).toDouble() > 0.05) {
+                        const double left = (mr.captured(2).toDouble() - mr.captured(1).toDouble()) * 1024.0;
+                        const qint64 secs = (qint64)(left / mr.captured(3).toDouble());
+                        detail += secs < 90 ? QObject::tr(" · under a minute left")
+                                            : QObject::tr(" · about %1 min left").arg((secs + 30) / 60);
+                    }
                     this->showInformation(
                         QObject::tr("Step 3 of 3: Downloading blockchain — %1%").arg(pct),
                         detail);
@@ -2138,12 +2184,21 @@ void ConnectionLoader::refreshZClassicdState(Connection* connection, std::functi
                     bool renderedBootstrapVerify = false;
                     if (ezBootstrapVerifyPending ||
                         ezBootstrapPhase == QStringLiteral("succeeded")) {
+                        // Show what the node is really doing (its own warm-up string,
+                        // e.g. "Activating best chain... height 3126938 (1%)") instead of
+                        // a fixed "Verifying…" line that stays even after verification.
+                        // The node's own percentage here sits at 1% for most of the
+                        // import (observed: 1% from the first block to the last), so it
+                        // is shown as moving height text only, on a busy bar.
+                        static const QRegularExpression rePct(QStringLiteral("\\s*\\(\\d+%\\)"));
                         if (ezProgress) ezProgress->setRange(0, 0);
-                        QString detail = ezBootstrapValidationState;
-                        if (detail == QStringLiteral("disabled"))
-                            detail.clear();
+                        QString detail = status;
+                        detail.remove(rePct);
+                        detail = detail.trimmed();
                         this->showInformation(
-                            QObject::tr("Step 3 of 3: Verifying blockchain… (a few minutes)"),
+                            ezBootstrapVerifyPending
+                                ? QObject::tr("Step 3 of 3: Verifying the downloaded blockchain…")
+                                : QObject::tr("Step 3 of 3: Importing the downloaded blockchain…"),
                             detail);
                         renderedBootstrapVerify = true;
                     }
@@ -2291,17 +2346,50 @@ void ConnectionLoader::probeBootstrapProgress(Connection* connection) {
             // -> indeterminate "Verifying…" so the multi-minute verify reads as work.
             if (ezBootstrapPhase == QStringLiteral("active") && pct >= 0) {
                 this->setBarPercent(pct);
+                // Detail line: size, rate and a time estimate from the node's own counters.
+                QString dl;
+                auto num = [&](const char* k) {
+                    return (bi.is_object() && bi.find(k) != bi.end() && bi[k].is_number())
+                        ? bi[k].get<double>() : 0.0; };
+                const double got = num("bytes_received"), tot = num("bytes_total"), mbps = num("mbps");
+                if (tot > 0) {
+                    // Binary units throughout: the daemon's "mbps" is MiB/s (2^20 bytes/s)
+                    // and its byte counts are exact, so GiB = 2^30 bytes.
+                    const double gib = 1073741824.0;
+                    dl = QObject::tr("%1 of %2 GiB").arg(got / gib, 0, 'f', 1).arg(tot / gib, 0, 'f', 1);
+                    if (mbps > 0.05) {
+                        dl += QObject::tr(" · %1 MiB/s").arg(mbps, 0, 'f', 1);
+                        const qint64 secs = (qint64)((tot - got) / (mbps * 1048576.0));
+                        dl += secs < 90 ? QObject::tr(" · under a minute left")
+                                        : QObject::tr(" · about %1 min left").arg((secs + 30) / 60);
+                    } else {
+                        dl += QObject::tr(" · waiting for data…");
+                    }
+                }
+                if (tot <= 0) {
+                    // Active but no manifest/bytes yet: we are still reaching a download
+                    // server (or it is not answering). Say so instead of "0%".
+                    const int pi = (int)num("peer_index"), pc = (int)num("peer_count");
+                    const int at = (int)num("attempt"), am = (int)num("attempt_max");
+                    if (ezProgress) ezProgress->setRange(0, 0);
+                    this->showInformation(
+                        QObject::tr("Step 3 of 3: Connecting to a blockchain download server…"),
+                        (pc > 0 ? QObject::tr("Server %1 of %2, attempt %3 of %4. If none answers, "
+                                              "ZClassic falls back to slower peer-to-peer sync.")
+                                      .arg(pi).arg(pc).arg(at).arg(am)
+                                : QString()));
+                } else
                 this->showInformation(
-                    QObject::tr("Step 3 of 3: Downloading blockchain — %1%").arg(pct),
-                    QString());
-            } else if (ezBootstrapVerifyPending ||
-                       ezBootstrapPhase == QStringLiteral("succeeded")) {
+                    QObject::tr("Step 3 of 3: Downloading blockchain — %1%").arg(pct), dl);
+            } else if (ezBootstrapVerifyPending) {
+                // Only while verification is genuinely pending. After it, the daemon's
+                // own warm-up string (shown by the caller) is the accurate status.
                 if (ezProgress) ezProgress->setRange(0, 0);   // busy/indeterminate
                 QString detail = ezBootstrapValidationState;
                 if (detail == QStringLiteral("disabled"))
                     detail.clear();
                 this->showInformation(
-                    QObject::tr("Step 3 of 3: Verifying blockchain… (a few minutes)"),
+                    QObject::tr("Step 3 of 3: Verifying the downloaded blockchain…"),
                     detail);
             }
             // Any other phase (idle/skipped/failed/normal_sync) -> leave the caller's
@@ -2501,6 +2589,13 @@ void ConnectionLoader::showError(QString explanation) {
 }
 
 QString ConnectionLoader::locateZClassicConfFile() {
+    if (ProfilePaths::active()) {
+        // Profile override: only ever consider the profile conf, never the real one.
+        const QString p = ProfilePaths::zclassicConfPath();
+        if (!QFileInfo::exists(p)) return QString();
+        main->logger->write("Found zclassicconf at " + p);
+        return p;
+    }
 #ifdef Q_OS_LINUX
     auto confLocation = QStandardPaths::locate(QStandardPaths::HomeLocation, ".zclassic/zclassic.conf");
 #elif defined(Q_OS_DARWIN)
@@ -2515,6 +2610,11 @@ QString ConnectionLoader::locateZClassicConfFile() {
 }
 
 QString ConnectionLoader::zclassicConfWritableLocation() {
+    if (ProfilePaths::active()) {
+        const QString p = ProfilePaths::zclassicConfPath();
+        main->logger->write("Found zclassicconf at " + p);
+        return p;
+    }
 #ifdef Q_OS_LINUX
     auto confLocation = QDir(QStandardPaths::writableLocation(QStandardPaths::HomeLocation)).filePath(".zclassic/zclassic.conf");
 #elif defined(Q_OS_DARWIN)
@@ -2529,6 +2629,12 @@ QString ConnectionLoader::zclassicConfWritableLocation() {
 }
 
 QString ConnectionLoader::zcashParamsDir() {
+    if (!ProfilePaths::paramsDir(QString()).isEmpty()) {
+        const QString p = ProfilePaths::paramsDir(QString());
+        QDir().mkpath(p);
+        main->logger->write("Using ZCLWALLET_PARAMS_DIR params directory at " + p);
+        return p;
+    }
     #ifdef Q_OS_LINUX
     auto paramsLocation = QDir(QDir(QStandardPaths::writableLocation(QStandardPaths::HomeLocation)).filePath(".zcash-params"));
 #elif defined(Q_OS_DARWIN)
@@ -2551,7 +2657,6 @@ bool ConnectionLoader::verifyParams() {
 
     if (!QFile(paramsDir.filePath("sapling-output.params")).exists()) return false;
     if (!QFile(paramsDir.filePath("sapling-spend.params")).exists()) return false;
-    if (!QFile(paramsDir.filePath("sprout-proving.key")).exists()) return false;
     if (!QFile(paramsDir.filePath("sprout-verifying.key")).exists()) return false;
     if (!QFile(paramsDir.filePath("sprout-groth16.params")).exists()) return false;
 
@@ -2929,6 +3034,14 @@ std::shared_ptr<ConnectionConfig> ConnectionLoader::autoDetectZClassicConf() {
     zclassicconf->zclassicDaemon = repairConfigBool(repairConfig.values.value("daemon", "0"));
     zclassicconf->repairConfigError = repairConfig.error;
     zclassicconf->dataDirOverride = repairConfig.values.value("datadir");
+    if (ProfilePaths::active() && !zclassicconf->dataDirOverride.isEmpty()) {
+        // Profile override: the embedded daemon is pinned with -datadir=<profile>/ZClassic,
+        // which beats a conf datadir= line. Never let that line steer the wallet's cookie
+        // path, repair location or wallet.dat backup outside the profile.
+        main->logger->write("Profile override: ignoring zclassic.conf datadir= (node datadir is " +
+                            ProfilePaths::zclassicDataDir() + ")");
+        zclassicconf->dataDirOverride.clear();
+    }
     zclassicconf->testnet = repairConfigBool(repairConfig.values.value("testnet", "0"));
     zclassicconf->regtest = repairConfigBool(repairConfig.values.value("regtest", "0"));
     zclassicconf->walletFile = repairConfig.values.value("wallet", "wallet.dat");
@@ -3033,7 +3146,7 @@ std::shared_ptr<ConnectionConfig> ConnectionLoader::loadFromSettings() {
 
 
 
-// P1-7: refuse to start a ~1.7GB download / heavy sync when the disk is nearly full.
+// P1-7: refuse to start a ~780MB download / heavy sync when the disk is nearly full.
 bool ConnectionLoader::ensureEnoughDiskSpace(const QString& path) {
     QStorageInfo storage(path);
     if (!storage.isValid() || !storage.isReady()) {

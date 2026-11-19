@@ -56,6 +56,23 @@ TEST(CRC, Extend) {
             Extend(Value("hello ", 6), "world", 5));
 }
 
+TEST(CRC, HardwareMatchesPortable) {
+  // Extend() may use the CPU CRC32C instruction; it must agree with the table
+  // implementation for every length, alignment and starting crc.
+  char buf[1024 + 16];
+  uint32_t x = 12345;
+  for (size_t i = 0; i < sizeof(buf); i++) {
+    x = x * 1664525u + 1013904223u;
+    buf[i] = static_cast<char>(x >> 24);
+  }
+  for (size_t off = 0; off < 16; off++) {
+    for (size_t n = 0; n <= 1024; n += (n < 80 ? 1 : 37)) {
+      x = x * 1664525u + 1013904223u;
+      ASSERT_EQ(ExtendPortable(x, buf + off, n), Extend(x, buf + off, n));
+    }
+  }
+}
+
 TEST(CRC, Mask) {
   uint32_t crc = Value("foo", 3);
   ASSERT_NE(crc, Mask(crc));

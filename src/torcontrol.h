@@ -19,4 +19,7 @@ void StartTorControl(boost::thread_group& threadGroup, CScheduler& scheduler);
 void InterruptTorControl();
 void StopTorControl();
 
+/** True when a -torcontrol address names this machine (loopback), so the Tor behind it shares our loopback. */
+bool TorControlAddressIsLocal(const std::string& address);
+
 #endif /* BITCOIN_TORCONTROL_H */

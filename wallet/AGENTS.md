@@ -28,7 +28,7 @@ This layout is written/read identically in three places (keep them in sync if yo
 
 **macOS is the exception.** Notarization / hardened runtime forbid executing a runtime-written binary, so on macOS the GUI does **not** use the footer — it ships the daemon as a **sibling** inside `zclwallet.app/Contents/MacOS/` (`connection.cpp:621-622` returns empty under `Q_OS_DARWIN`). The ZQWDMON1 embed is Linux/Windows-only.
 
-**Current version:** `v2.1.2-beta5` (daemon `configure.ac` build=4 → beta5; wallet `src/version.h` `APP_VERSION "2.1.2-beta5"`). The version string is hard-coded in several proot scripts — see the gotchas.
+**Current version:** read `APP_VERSION` in `src/version.h` (the daemon version comes from `configure.ac`). The version string is hard-coded in several proot scripts — see the gotchas. Examples below use `<VERSION>` for it.
 
 ---
 
@@ -49,7 +49,7 @@ EXTRA_BINDS="-b $HOME/.ccache:/root/.ccache" ./prun bash /build/build.sh
 Delivered artifact (copied back to the host repo by the build):
 
 ```bash
-ls -lh /home/rhett/github/zcl-qt-wallet/artifacts/linux-zclwallet-v2.1.2-beta5
+ls -lh /home/rhett/github/zcl-qt-wallet/artifacts/linux-zclwallet-v<VERSION>
 ```
 
 **Real-display UX matrix** (boots a real Xvfb+twm, NOT offscreen — catches the window-never-maps class of bug). Run from the host, not inside proot:
@@ -96,7 +96,7 @@ Quick per-platform entry points:
 | Daemon macOS | **No `build-release.sh` darwin target.** depends triple `x86_64-apple-darwin11` exists but the SDK + cctools are **not** on this box — see gotchas. Practically built natively on a Mac. |
 | GUI Linux portable | `./prun bash /build/build.sh` (section 2) |
 | GUI Windows | `bash /home/rhett/build-qtbase-win.sh` → `bash /home/rhett/build-gui-win.sh` → **manual** footer embed (see gotchas) |
-| GUI macOS .dmg | `src/scripts/mkmacdmg.sh -q <qt> -z <zclassic> -v 2.1.2-beta5` (on a Mac) + **manual ad-hoc codesign** |
+| GUI macOS .dmg | `src/scripts/mkmacdmg.sh -q <qt> -z <zclassic> -v <VERSION>` (on a Mac) + **manual ad-hoc codesign** |
 
 ---
 
@@ -106,52 +106,52 @@ Quick per-platform entry points:
 - [ ] **mingw must be the POSIX thread model.** The win32 model lacks `std::thread`/`std::mutex` → compile fails. `setup-mingw-toolchain.sh` sets it; verify: `x86_64-w64-mingw32-g++ -v` must print `Thread model: posix`.
 - [ ] **Always clean-build the GUI / clean when switching HOST.** Stale qmake Makefiles re-link `-lQt5WebSockets` (master's `.pro` still had it) → runtime `libQt5WebSockets.so.5` not found. Stale daemon trees mix COFF↔ELF objects. `make distclean && rm -f Makefile .qmake.stash` for the GUI; `build-release.sh` auto-`make clean`s on host change. `make-allinone.sh` aborts via an `ldd | grep Qt5WebSockets` self-check.
 - [ ] **Portable Linux MUST be built in the proot glibc-2.31 sandbox**, not on the host. A host build (glibc 2.39) bakes in `__isoc23_*` / `arc4random` / `strlcpy` with no older fallback → `version GLIBC_2.38 not found` on users' machines. `mkrelease.sh` hard-gates at ≤ GLIBC_2.31. Verify: `objdump -T <bin> | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -V | tail -1` (the good bundle reads `GLIBC_2.29`).
-- [ ] **Static-link libgomp** for the embedded daemon (`ZQW_STATIC_GOMP=1`; set by `03-daemon.sh`). A fresh desktop often lacks `libgomp.so.1` → GUI hangs at 96% then "connection refused". Check **both** GUI and daemon: `objdump -p <bin> | grep NEEDED`.
+- [ ] **No libgomp**: the daemon has no OpenMP dependency since libsnark was removed (`ZQW_STATIC_GOMP=1` is accepted and ignored). A fresh desktop often lacks `libgomp.so.1` → GUI hangs at 96% then "connection refused", so still check **both** GUI and daemon: `objdump -p <bin> | grep NEEDED`.
 - [ ] **Stale-delivery trap.** The proot build writes inside the chroot at `/build/wallet/artifacts/` (rsync-excluded from the host). `04-gui-bundle.sh:137-142` copies it back and `build.sh`'s gate asserts `sha256(built) == sha256(delivered)`. **Always run via `build.sh`, never `04` alone**, and confirm the `.sha256` sidecar before telling anyone to download.
 - [ ] **Windows GUI does NOT embed the daemon automatically.** `build-gui-win.sh` stops at `release/zclwallet.exe`. The ZQWDMON1 footer is a **separate manual Python step** using the **stripped** `src/zclassicd.exe` (`x86_64-w64-mingw32-strip -s`; ~278 MB → ~13.5 MB). Logic = `mkrelease.sh:100-108`.
 - [ ] **macOS codesign order is load-bearing and NOT in any script.** `mkmacdmg.sh` has **no** codesign step. Run `codesign --force --deep -s - zclwallet.app` **AFTER** `macdeployqt`, **BEFORE** `create-dmg` — signing before macdeployqt → Apple-Silicon SIGKILL on launch. This rule is memory-only; verify with the Mac dev.
 - [ ] **Don't trust the exit code.** A pipe-through-tail can report exit 0 even when the build failed. Always verify the artifact: footer (`tail -c 8 <bundle>` == `ZQWDMON1`), glibc floor, `ldd`/`NEEDED`, and the sha sidecar.
-- [ ] **Runtime prereq (not a build prereq):** `./zcutil/fetch-params.sh` downloads ~1.6 GB zk params into `~/.zcash-params` before first run.
+- [ ] **Runtime prereq (not a build prereq):** `./zcutil/fetch-params.sh` downloads ~0.8 GB zk params into `~/.zcash-params` before first run.
 - [ ] **macOS cannot currently be cross-built on this box:** `depends/SDKs/` is missing and `depends/x86_64-apple-darwin11` lacks the cctools toolchain. Don't expect `make -C depends HOST=x86_64-apple-darwin11` to succeed as-is.
 
 ---
 
 ## 5. Verify + publish a release
 
-The published assets live on **`ZclassicCommunity/zcl-qt-wallet`** (release `v2.1.2-beta5`, prerelease). Three platform assets are expected.
+The published assets live on **`ZclassicCommunity/zcl-qt-wallet`** (release `v<VERSION>`, prerelease). Three platform assets are expected.
 
 **Step 1 — verify each artifact locally before upload:**
 
 ```bash
 # footer magic on Linux + Windows single files:
-tail -c 8 artifacts/linux-zclwallet-v2.1.2-beta5; echo          # → ZQWDMON1
-tail -c 8 artifacts/zclwallet-v2.1.2-beta5-win64.exe; echo      # → ZQWDMON1
+tail -c 8 artifacts/linux-zclwallet-v<VERSION>; echo          # → ZQWDMON1
+tail -c 8 artifacts/zclwallet-v<VERSION>-win64.exe; echo      # → ZQWDMON1
 # Linux glibc floor (must be ≤ 2.31; current good build = 2.29):
-objdump -T artifacts/linux-zclwallet-v2.1.2-beta5 | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -V | tail -1
+objdump -T artifacts/linux-zclwallet-v<VERSION> | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -V | tail -1
 # no Qt / no stray dynamic deps in the static bundle:
-ldd artifacts/linux-zclwallet-v2.1.2-beta5 | grep -i qt        # must be empty
+ldd artifacts/linux-zclwallet-v<VERSION> | grep -i qt        # must be empty
 # sha matches its sidecar (proves it's the gated build, not stale):
-sha256sum artifacts/linux-zclwallet-v2.1.2-beta5; cat artifacts/linux-zclwallet-v2.1.2-beta5.sha256
+sha256sum artifacts/linux-zclwallet-v<VERSION>; cat artifacts/linux-zclwallet-v<VERSION>.sha256
 ```
 
 **Step 2 — 3-platform sha matrix (the actual sha256s belong in the release NOTES, not here — they change every rebuild):**
 
 | Platform | Asset | how to get/verify its sha |
 |----------|-------|---------------------------|
-| Linux | `linux-zclwallet-v2.1.2-beta5` | `sha256sum` it; must equal the `.sha256` sidecar the gate wrote |
-| Windows | `zclwallet-v2.1.2-beta5-win64.exe` | re-verify footer (`tail -c 8` == `ZQWDMON1`) + recompute the embedded-daemon hash from the footer before upload |
-| macOS | `macOS-zclwallet-v2.1.2-beta5.dmg` | built + ad-hoc-signed + verified on a Mac |
+| Linux | `linux-zclwallet-v<VERSION>` | `sha256sum` it; must equal the `.sha256` sidecar the gate wrote |
+| Windows | `zclwallet-v<VERSION>-win64.exe` | re-verify footer (`tail -c 8` == `ZQWDMON1`) + recompute the embedded-daemon hash from the footer before upload |
+| macOS | `macOS-zclwallet-v<VERSION>.dmg` | built + ad-hoc-signed + verified on a Mac |
 
 > ⚠️ **Local vs published can drift.** Any rebuild changes the sha, so the file already on the GitHub release may be older than your local `artifacts/`. Before announcing, compare `sha256sum artifacts/<asset>` against the published asset (`gh release view … --json assets`) and `--clobber` re-upload if the local gated build is the one you intend to ship. Never assume local == published.
 
 **Step 3 — publish (ad-hoc command; not in any committed script — capture it):**
 
 ```bash
-gh release upload v2.1.2-beta5 --repo ZclassicCommunity/zcl-qt-wallet --clobber \
-  artifacts/linux-zclwallet-v2.1.2-beta5 \
-  artifacts/zclwallet-v2.1.2-beta5-win64.exe \
-  artifacts/macOS-zclwallet-v2.1.2-beta5.dmg
-gh release view v2.1.2-beta5 --repo ZclassicCommunity/zcl-qt-wallet --json assets,isPrerelease,tagName
+gh release upload v<VERSION> --repo ZclassicCommunity/zcl-qt-wallet --clobber \
+  artifacts/linux-zclwallet-v<VERSION> \
+  artifacts/zclwallet-v<VERSION>-win64.exe \
+  artifacts/macOS-zclwallet-v<VERSION>.dmg
+gh release view v<VERSION> --repo ZclassicCommunity/zcl-qt-wallet --json assets,isPrerelease,tagName
 ```
 
 ---

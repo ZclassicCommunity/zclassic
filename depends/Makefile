@@ -13,7 +13,6 @@ BASEDIR = $(CURDIR)
 HASH_LENGTH:=11
 DOWNLOAD_CONNECT_TIMEOUT:=10
 DOWNLOAD_RETRIES:=3
-CRATE_REGISTRY:=vendored-sources
 
 host:=$(BUILD)
 ifneq ($(HOST),)
@@ -73,13 +72,12 @@ include builders/default.mk
 include packages/packages.mk
 
 wallet_packages_$(NO_WALLET) = $(wallet_packages)
-proton_packages_$(NO_PROTON) = $(proton_packages)
 
-packages += $($(host_arch)_$(host_os)_packages) $($(host_os)_packages) $(rust_packages) $(proton_packages_) $(wallet_packages_)
+packages += $($(host_arch)_$(host_os)_packages) $($(host_os)_packages) $(wallet_packages_)
 native_packages += $($(host_arch)_$(host_os)_native_packages) $($(host_os)_native_packages)
 all_packages = $(packages) $(native_packages)
 
-meta_depends = Makefile funcs.mk builders/default.mk hosts/default.mk hosts/$(host_os).mk builders/$(build_os).mk cargo-checksum.sh
+meta_depends = Makefile funcs.mk builders/default.mk hosts/default.mk hosts/$(host_os).mk builders/$(build_os).mk
 
 $(host_arch)_$(host_os)_native_toolchain?=$($(host_os)_native_toolchain)
 

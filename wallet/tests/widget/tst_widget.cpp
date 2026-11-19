@@ -32,6 +32,8 @@
 // disclosure not hiding t-Addr, or collapsing not returning to private).
 // ============================================================================
 #include <QtTest/QtTest>
+#include "syncstate.h"
+#include "addresscombo.h"
 #include <QApplication>
 #include <QTemporaryDir>
 #include <QRadioButton>
@@ -45,6 +47,10 @@
 #include <QFontMetrics>
 #include <QWidget>
 #include <QDialog>
+#include <QDialogButtonBox>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QScreen>
 #include <QTimer>
 #include <QSettings>
 #include <QMessageBox>
@@ -82,6 +88,7 @@
 #include "rpc.h"
 #include "settings.h"
 #include "connection.h"
+#include "namepaybox.h"
 #include "notifyserver.h"
 #include "logger.h"
 #include "../filepermissions.h"
@@ -403,6 +410,35 @@ private slots:
         QCOMPARE(w->syncStatusLabel->text(), first); // Discovering headers is not a moving finish line.
         QVERIFY(!first.contains("ETA"));
         QVERIFY(!first.contains("2400281"));
+    }
+
+    void syncBannerStatesAreHonest() {
+        std::unique_ptr<MainWindow> w(makeWindow());
+        // Behind by weeks after a snapshot import: say how far behind, no fake percent.
+        w->setSyncStatus(true, 3126937, 3126937, 1.0, 20LL * 86400, SyncState::Syncing);
+        QVERIFY2(w->syncStatusLabel->text().contains("20 days behind"), qPrintable(w->syncStatusLabel->text()));
+        QCOMPARE(w->syncProgressBar->maximum(), 0);
+        QVERIFY(!w->syncStatusLabel->text().contains("%"));
+        // Regtest with no peers (the owner's "block 101"): a local network, not "starting".
+        w->setSyncStatus(false, 101, 101, 1.0, 5LL * 86400, SyncState::LocalNetwork);
+        QVERIFY(w->syncQuietPill->isVisibleTo(w.get()));
+        QVERIFY2(w->syncQuietPill->text().contains("Local test network"), qPrintable(w->syncQuietPill->text()));
+        QVERIFY(!w->syncQuietPill->text().contains("days ago"));
+        QVERIFY(!w->syncStatusLabel->isVisibleTo(w.get()));
+        // Synced at the tip: say how fresh the newest block is.
+        w->setSyncStatus(false, 3330000, 3330000, 1.0, 140, SyncState::Synced);
+        QVERIFY2(w->syncQuietPill->text().contains("last block 2 min ago"), qPrintable(w->syncQuietPill->text()));
+        // No peers: tell the user where the chain stands.
+        w->setSyncStatusWaitingForPeers(false, 3330000, 300);
+        QVERIFY2(w->syncStatusLabel->text().contains("3,330,000"), qPrintable(w->syncStatusLabel->text()));
+        QVERIFY(w->syncStatusLabel->text().contains("5 min"));
+        // Stale tip with peers: wrong clock / stalled network is named.
+        w->setSyncStatus(true, 3330000, 3330000, 1.0, 5 * 3600, SyncState::StaleTip);
+        QVERIFY2(w->syncStatusLabel->text().contains("date and time"), qPrintable(w->syncStatusLabel->text()));
+        // Wrong system clock: node is caught up but says so; banner names the clock.
+        w->setSyncStatus(false, 3330000, 3330000, 1.0, 3 * 3600, SyncState::ClockSkew);
+        QVERIFY2(w->syncStatusLabel->text().contains("date or time"), qPrintable(w->syncStatusLabel->text()));
+        QVERIFY(!w->syncQuietPill->isVisibleTo(w.get()));
     }
 
     void fundedHomeFitsTextWithAllCards() {
@@ -988,12 +1024,557 @@ private slots:
     }
 
 #ifdef ZCL_WIDGET_TEST
+    // Token guard (daemon v2.1.2-beta13): z_sendmany failures may now carry a note that
+    // ZSLP token outputs were protected. The friendly headline must say so instead of
+    // blaming confirmations or the balance, which would send the user chasing the wrong cause.
+    void sendError_tokenGuardHeadline() {
+        std::unique_ptr<MainWindow> w(makeWindow());
+        const QString notes[] = {
+            // verbatim from the daemon (wallet_tokenguard.sh, regtest z_sendmany)
+            "Could not find any non-coinbase UTXOs to spend. (8 token-bearing outputs holding "
+            "0.00004368 are protected and were not used: spending them as ordinary funds would "
+            "burn the ZSLP tokens or mint baton they carry)",
+            "Insufficient funds, no UTXOs found for taddr from address. (2 token-bearing outputs "
+            "holding 0.00001092 are protected and were not used: spending them as ordinary funds "
+            "would burn the ZSLP tokens or mint baton they carry)",
+            "Insufficient funds: have 1.00, need 2.00 (1 token-bearing output holding 0.00000546 "
+            "is protected and was not used: spending it as ordinary funds would burn the ZSLP "
+            "tokens or mint baton it carries)",
+            "Input 00:0 carries ZSLP tokens or a mint baton and is protected: spending it in a "
+            "transaction that is not a matching token transfer burns them. It was chosen "
+            "explicitly, so nothing was selected in its place; to spend it anyway, request the "
+            "token-input override explicitly",
+        };
+        for (const QString& raw : notes) {
+            const QString headline = w->testHumaneSendError(raw);
+            QVERIFY2(headline.contains("token", Qt::CaseInsensitive), qPrintable(headline));
+            QVERIFY2(!headline.contains("confirmed yet"), qPrintable(headline));
+            QVERIFY2(!headline.contains("enough confirmed"), qPrintable(headline));
+        }
+        // Unchanged mappings for the ordinary causes.
+        QVERIFY(w->testHumaneSendError("Insufficient funds, no UTXOs found for taddr from address.")
+                    .contains("confirmed yet"));
+        QVERIFY(w->testHumaneSendError("Insufficient transparent funds, have 1, need 2")
+                    .contains("enough confirmed"));
+    }
+
     // ---- E2: confirmTx with a t-recipient reveals publicWarning -----------
     // confirmTx() is private and blocks on d.exec(); the test-only public seam
     // MainWindow::testConfirmTx (guarded by ZCL_WIDGET_TEST) lets us call it,
     // and a QTimer::singleShot(0) modal-dismisser reads the confirm dialog's
     // publicWarning visibility BEFORE closing the dialog, then injects the
     // answer (reject) so exec() returns without a deadlock.
+    // ---- UX: a button the user pressed must never silently do nothing -----------
+    // With no node connection, "Back up my wallet" used to return without a word.
+    void ux1_backupWithoutConnectionSaysWhy() {
+        MainWindow* w = makeWindow();
+        _infoSeen = 0;
+        armInfoCounter();
+        w->testBackupWallet();
+        ++_modalGen;                       // stop the poller
+        QVERIFY2(_infoSeen >= 1, "Back up my wallet did nothing and said nothing without a connection");
+        settleAndDelete(w);
+    }
+
+    // "Review and send" with no Pay-from address (node still starting) used to do nothing.
+    void ux2_reviewSendWithNoPayFromSaysWhy() {
+        MainWindow* w = makeWindow();
+        _infoSeen = 0;
+        armInfoCounter();
+        w->testSendButton();
+        ++_modalGen;
+        QVERIFY2(_infoSeen >= 1, "Review and send did nothing and said nothing with no Pay-from address");
+        settleAndDelete(w);
+    }
+
+    // The confirm dialog must show every row at full height. With a public send, an
+    // auto-shielded change row, and the syncing + no-peers warnings stacked under it, the
+    // rows used to be squeezed to half height so the amount and fee could not be read.
+    void ux3_confirmDialogRowsAreNotClipped() {
+        MainWindow* w = makeWindow();
+        w->testSeedBalances();
+        Settings::getInstance()->setSyncing(true);
+        Settings::getInstance()->setPeers(0);
+
+        const QString T  = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+        const QString ZS = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        Tx tx; tx.fromAddr = T; tx.fee = 0.0001;
+        ToFields a; a.addr = T;  a.amount = 1.25;   tx.toAddrs.append(a);
+        ToFields b; b.addr = ZS; b.amount = 6.5199; b.txtMemo = QStringLiteral("auto-shield-change"); tx.toAddrs.append(b);
+
+        QString clipped = QStringLiteral("dialog never appeared");
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            QWidget* dlg = QApplication::activeModalWidget();
+            if (!dlg) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+            clipped.clear();
+            const auto labels = dlg->findChildren<QLabel*>();
+            for (QLabel* l : labels) {
+                if (!l->isVisibleTo(dlg) || l->text().isEmpty()) continue;
+                int need = l->hasHeightForWidth() ? l->heightForWidth(l->width()) : l->sizeHint().height();
+                if (l->height() + 1 < need)
+                    clipped += QString("%1 h=%2 need=%3; ").arg(l->objectName()).arg(l->height()).arg(need);
+            }
+            if (auto* qd = qobject_cast<QDialog*>(dlg)) qd->reject();
+        };
+        QTimer::singleShot(0, [&]() { poll(300); });
+        w->testConfirmTx(tx);
+        ++_modalGen;
+        QVERIFY2(clipped.isEmpty(), qPrintable("confirm dialog rows clipped: " + clipped));
+        Settings::getInstance()->setSyncing(false);
+        Settings::getInstance()->setPeers(8);
+        settleAndDelete(w);
+    }
+
+    // A send whose rows do not fit under the dialog's 90%-of-screen cap scrolls the
+    // recipients instead of squeezing them. The user must not be able to confirm rows
+    // they cannot see without being told: the scroll bar is always shown, a notice with
+    // the row count and total sits OUTSIDE the scroll area, the buttons stay on screen,
+    // every row keeps its full wrapped height and the rows stay in send order.
+    void ux3b_confirmDialogScrollKeepsTotalsAndButtonsVisible() {
+        MainWindow* w = makeWindow();
+        w->testSeedBalances();
+        const QString T  = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+        const QString ZS = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        const int n = 16;
+        Tx tx; tx.fromAddr = T; tx.fee = 0.0001;
+        for (int i = 0; i < n; ++i) {
+            ToFields a; a.addr = ZS; a.amount = 0.01 * (i + 1);
+            a.txtMemo = QStringLiteral("memo for row %1").arg(i + 1);
+            tx.toAddrs.append(a);
+        }
+
+        QString problems = QStringLiteral("dialog never appeared");
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            QWidget* dlg = QApplication::activeModalWidget();
+            if (!dlg) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+            problems.clear();
+            auto* area = dlg->findChild<QScrollArea*>("confirmScrollArea");
+            auto* notice = dlg->findChild<QLabel*>("confirmScrollNotice");
+            auto* buttons = dlg->findChild<QDialogButtonBox*>("buttonBox");
+            if (!area) problems += "no scroll area for an overfull dialog; ";
+            if (!notice) problems += "no scroll notice; ";
+            if (!buttons) problems += "no button box; ";
+            if (QScreen* sc = QGuiApplication::primaryScreen())
+                if (dlg->height() > int(sc->availableGeometry().height() * 0.9) + 1)
+                    problems += QString("dialog h=%1 exceeds the screen cap; ").arg(dlg->height());
+            if (area) {
+                if (area->verticalScrollBarPolicy() != Qt::ScrollBarAlwaysOn)
+                    problems += "vertical scroll bar policy is not AlwaysOn; ";
+                if (!area->verticalScrollBar()->isVisibleTo(dlg) || area->verticalScrollBar()->maximum() <= 0)
+                    problems += "scroll bar not visible or nothing to scroll; ";
+                if (!(area->focusPolicy() & Qt::TabFocus))
+                    problems += "scroll area cannot be reached with the keyboard; ";
+                if (notice && area->isAncestorOf(notice)) problems += "notice scrolls away; ";
+                if (buttons && area->isAncestorOf(buttons)) problems += "buttons scroll away; ";
+            }
+            const QRect inside = dlg->rect();
+            for (QWidget* must : {static_cast<QWidget*>(notice), static_cast<QWidget*>(buttons)}) {
+                if (!must) continue;
+                const QRect r(must->mapTo(dlg, QPoint(0, 0)), must->size());
+                if (!must->isVisibleTo(dlg) || !inside.contains(r) || must->height() < must->minimumSizeHint().height())
+                    problems += QString("%1 not fully on the dialog; ").arg(must->objectName());
+            }
+            if (notice) {
+                if (!notice->text().contains(QString::number(n + 1)))
+                    problems += "notice lacks the row count: " + notice->text() + "; ";
+                double total = tx.fee;
+                for (const auto& t : tx.toAddrs) total += t.amount;
+                if (!notice->text().contains(Settings::getZCLDisplayFormat(total)))
+                    problems += "notice lacks the total: " + notice->text() + "; ";
+            }
+            int lastY = -1;
+            for (int i = 1; i <= n; ++i) {
+                QLabel* a = dlg->findChild<QLabel*>(QString("Addr%1").arg(i));
+                QLabel* m = dlg->findChild<QLabel*>(QString("Memo%1").arg(i));
+                if (!a || !m) { problems += QString("row %1 missing; ").arg(i); continue; }
+                const int y = a->mapTo(dlg, QPoint(0, 0)).y();
+                if (y <= lastY) problems += QString("row %1 out of order; ").arg(i);
+                lastY = y;
+            }
+            for (QLabel* l : dlg->findChildren<QLabel*>()) {
+                if (!l->isVisibleTo(dlg) || l->text().isEmpty()) continue;
+                int need = l->hasHeightForWidth() ? l->heightForWidth(l->width()) : l->sizeHint().height();
+                if (l->height() + 1 < need)
+                    problems += QString("%1 h=%2 need=%3; ").arg(l->objectName()).arg(l->height()).arg(need);
+            }
+            if (!dlg->findChild<QLabel*>("minerFee")) problems += "fee row missing; ";
+            if (auto* qd = qobject_cast<QDialog*>(dlg)) qd->reject();
+        };
+        QTimer::singleShot(0, [&]() { poll(300); });
+        w->testConfirmTx(tx);
+        ++_modalGen;
+        QVERIFY2(problems.isEmpty(), qPrintable("scrolling confirm dialog: " + problems));
+        settleAndDelete(w);
+    }
+
+    // The Activity list must give the address column the spare width and keep the type,
+    // date and amount columns readable (they were cut to "Recei...", "2026-11...").
+    void ux4_activityColumnsAreReadable() {
+        MainWindow* w = makeWindow();
+        w->resize(1100, 700);
+        QTableView* t = w->findChild<QTableView*>("transactionsTable");
+        QVERIFY(t);
+        QCOMPARE(int(t->horizontalHeader()->sectionResizeMode(1)), int(QHeaderView::Stretch));
+        QCOMPARE(int(t->horizontalHeader()->sectionResizeMode(0)), int(QHeaderView::ResizeToContents));
+        QCOMPARE(int(t->horizontalHeader()->sectionResizeMode(2)), int(QHeaderView::ResizeToContents));
+        QVERIFY2(!t->verticalHeader()->isVisible(), "row-number gutter should be hidden");
+        QTableView* b = w->findChild<QTableView*>("balancesTable");
+        QVERIFY(b);
+        QCOMPARE(int(b->horizontalHeader()->sectionResizeMode(0)), int(QHeaderView::Stretch));   // address gets the room
+        QCOMPARE(int(b->horizontalHeader()->sectionResizeMode(1)), int(QHeaderView::ResizeToContents));
+        settleAndDelete(w);
+    }
+
+    // The first time the window is closed to the tray, the user is told in a dialog that
+    // the node keeps running and can quit instead. (A tray balloon was easy to miss.)
+    void ux5_firstCloseToTrayExplainsAndOffersQuit() {
+        MainWindow* w = makeWindow();
+        for (int pass = 0; pass < 2; ++pass) {
+            const QString want = pass == 0 ? QStringLiteral("Keep running in the tray")
+                                           : QStringLiteral("Quit ZClassic now");
+            QString seenText;
+            const int gen = ++_modalGen;
+            std::function<void(int)> poll = [&](int tries) {
+                if (gen != _modalGen) return;
+                auto* mb = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+                if (!mb) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+                seenText = mb->text() + " " + mb->informativeText();
+                for (QAbstractButton* b : mb->buttons())
+                    if (b->text() == want) { b->click(); return; }
+                mb->reject();
+            };
+            QTimer::singleShot(0, [&]() { poll(300); });
+            const bool keep = w->testAskKeepRunningInTray();
+            ++_modalGen;
+            QVERIFY2(seenText.contains("does not stop"), qPrintable("notice text: " + seenText));
+            QVERIFY2(seenText.contains("File > Exit"), "notice must say how to quit");
+            QCOMPARE(keep, pass == 0);
+        }
+        settleAndDelete(w);
+    }
+
+    // The Options tab explains each setting in a wrapped sentence or two. Inside a fixed
+    // tab page those were squeezed to a line and a half and cut off mid-sentence. Every
+    // explanation must have its full wrapped height (the page scrolls instead).
+    void ux6_settingsOptionsAreNotCutOff() {
+        MainWindow* w = makeWindow();
+        QAction* act = w->findChild<QAction*>("actionSettings");
+        QVERIFY(act);
+        QString cut = QStringLiteral("settings dialog never appeared");
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            QWidget* dlg = QApplication::activeModalWidget();
+            if (!dlg || dlg->objectName() != "Settings") {
+                if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); });
+                return;
+            }
+            cut.clear();
+            for (int page = 1; page <= 2; ++page) {
+                auto* tabs = dlg->findChild<QTabWidget*>("tabWidget");
+                tabs->setCurrentIndex(page);
+                QApplication::processEvents();
+                QWidget* pw = tabs->currentWidget();
+                if (auto* sa = qobject_cast<QScrollArea*>(pw)) pw = sa->widget();
+                for (QLabel* l : pw->findChildren<QLabel*>()) {
+                    if (!l->wordWrap() || l->text().isEmpty()) continue;
+                    const int need = l->heightForWidth(l->width());
+                    if (l->height() + 1 < need)
+                        cut += QString("page%1 %2 h=%3 need=%4; ").arg(page).arg(l->objectName()).arg(l->height()).arg(need);
+                }
+            }
+            static_cast<QDialog*>(dlg)->reject();
+        };
+        QTimer::singleShot(0, [&]() { poll(300); });
+        act->trigger();
+        ++_modalGen;
+        QVERIFY2(cut.isEmpty(), qPrintable("settings text cut off: " + cut));
+        settleAndDelete(w);
+    }
+
+    // Double-clicking an Activity row with no memo used to do nothing. It must answer.
+    void ux7_doubleClickActivityRowShowsDetails() {
+        MainWindow* w = makeWindow();
+        auto* model = const_cast<TxTableModel*>(w->getRPC()->getTransactionsModel());
+        QList<TransactionItem> rows;
+        rows.append(TransactionItem{"send", 1700000000, "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi",
+                                    "deadbeef0123", -1.0, 0, "", ""});
+        model->addTData(rows);
+        QTableView* t = w->findChild<QTableView*>("transactionsTable");
+        QVERIFY(t);
+        QString seen = QStringLiteral("no details box appeared");
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            auto* mb = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            if (!mb || mb->objectName() != "txDetailsBox") {
+                if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); });
+                return;
+            }
+            seen = mb->text() + " | " + mb->informativeText();
+            mb->done(0);
+        };
+        QTimer::singleShot(0, [&]() { poll(300); });
+        emit t->doubleClicked(model->index(0, 0));
+        ++_modalGen;
+        QVERIFY2(seen.contains("deadbeef0123") && seen.contains("Sent"), qPrintable(seen));
+        QVERIFY2(seen.contains("Waiting for its first confirmation"), qPrintable(seen));
+        settleAndDelete(w);
+    }
+
+    // With the node gone the wallet cannot know the balance. The Home hero painted
+    // "0 ZCL" and "receive ZCL to get started", which reads as "my funds are gone".
+    void ux8_noConnectionDoesNotShowZeroBalance() {
+        MainWindow* w = makeWindow();
+        w->getRPC()->noConnection(false);
+        QVERIFY2(w->testHeroText() != QStringLiteral("0 ZCL") && !w->testHeroText().startsWith("0"),
+                 qPrintable("hero shows " + w->testHeroText()));
+        QVERIFY2(!w->testHeroHelperVisible(), "the 'receive ZCL to get started' helper must not show without a connection");
+        QVERIFY2(w->testHeroQualifier().contains("not affected"), qPrintable(w->testHeroQualifier()));
+        // The debounced soft-disconnect path fires after the full teardown when a node dies;
+        // it repainted the blank labels as "0 ZCL" over the message above.
+        w->getRPC()->noConnection(true);
+        QVERIFY2(!w->testHeroText().startsWith("0"), qPrintable("after soft disconnect hero shows " + w->testHeroText()));
+        QVERIFY2(!w->testHeroHelperVisible(), "helper reappeared after soft disconnect");
+        settleAndDelete(w);
+    }
+
+    // ---- combo fixes: status messages must agree with the classified sync state -------------
+
+    // Run confirmTx and report whether the red "no peers" warning was visible in the dialog.
+    bool confirmShowsNoPeersWarning(MainWindow* w) {
+        const QString T  = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+        const QString ZS = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        Tx tx; tx.fromAddr = T; tx.fee = 0.0001;
+        ToFields a; a.addr = ZS; a.amount = 1.25; tx.toAddrs.append(a);
+        int seen = -1;
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            QWidget* dlg = QApplication::activeModalWidget();
+            if (!dlg) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+            QLabel* l = dlg->findChild<QLabel*>("nopeersWarning");
+            seen = (l && l->isVisibleTo(dlg)) ? 1 : 0;
+            if (auto* qd = qobject_cast<QDialog*>(dlg)) qd->reject();
+        };
+        QTimer::singleShot(0, [&]() { poll(300); });
+        w->testConfirmTx(tx);
+        ++_modalGen;
+        return seen == 1;
+    }
+
+    void combo1_localNetworkConfirmHasNoPeerWarning() {
+        MainWindow* w = makeWindow();
+        w->testSeedBalances();
+        Settings::getInstance()->setPeers(0);
+        Settings::getInstance()->setLocalNetwork(true);
+        QVERIFY2(!confirmShowsNoPeersWarning(w), "regtest confirm shows a no-peers warning");
+        // A real network with no peers keeps the warning exactly as before.
+        Settings::getInstance()->setLocalNetwork(false);
+        QVERIFY2(confirmShowsNoPeersWarning(w), "real network with 0 peers lost its warning");
+        Settings::getInstance()->setPeers(8);
+        settleAndDelete(w);
+    }
+
+    QString sendSuccessText(MainWindow* w) {
+        w->testShowSendSuccess(QStringLiteral("00"));
+        const auto boxes = w->findChildren<QMessageBox*>();   // closed ones may await deletion: take the newest
+        QMessageBox* box = boxes.isEmpty() ? nullptr : boxes.last();
+        const QString t = box ? box->text() + "|" + box->informativeText() : QString("no box");
+        if (box) box->close();
+        return t;
+    }
+
+    void combo2_localNetworkResultTextIsTrue() {
+        MainWindow* w = makeWindow();
+        Settings::getInstance()->setPeers(0);
+        Settings::getInstance()->setLocalNetwork(true);
+        const QString local = sendSuccessText(w);
+        QVERIFY2(local.contains("local test network") && local.contains("mined") && !local.contains("not sent"),
+                 qPrintable(local));
+        Settings::getInstance()->setLocalNetwork(false);
+        const QString real = sendSuccessText(w);
+        QVERIFY2(real.contains("not sent to the network yet"), qPrintable(real));
+        Settings::getInstance()->setPeers(8);
+        settleAndDelete(w);
+    }
+
+    void combo3_disconnectHidesPendingNotice() {
+        MainWindow* w = makeWindow();
+        w->show();
+        QLabel* l = w->findChild<QLabel*>("unconfirmedWarning");
+        QVERIFY(l);
+        w->getRPC()->testSetBalances(new QMap<QString, double>());
+        w->getRPC()->testSetUTXOs(new QList<UnspentOutput>());
+        w->getRPC()->testUpdateUI(true);
+        QVERIFY(l->isVisibleTo(w));
+        w->getRPC()->noConnection(false);
+        QVERIFY2(!l->isVisibleTo(w), "pending-funds notice survived a disconnect");
+        w->getRPC()->testUpdateUI(false);
+        settleAndDelete(w);
+    }
+
+    void combo4_peerlessDebounceIsOneState() {
+        using namespace SyncState;
+        Verdict syncing; syncing.kind = WaitingForPeers; syncing.isSyncing = true;
+        Verdict synced;  synced.kind = Synced; synced.isSyncing = false;
+        Verdict local;   local.kind = LocalNetwork; local.isSyncing = false;
+        for (int polls = 1; polls <= 2; ++polls)
+            QCOMPARE((int)presentation(syncing, 0, polls), (int)PresentConnecting);
+        QCOMPARE((int)presentation(syncing, 0, 3), (int)PresentNoPeers);
+        QCOMPARE((int)presentation(syncing, 5, 9), (int)PresentNormal);
+        QCOMPARE((int)presentation(synced, 0, 9), (int)PresentNormal);
+        QCOMPARE((int)presentation(local, 0, 9), (int)PresentNormal);
+        MainWindow* w = makeWindow();
+        w->setSyncStatusNetworkConnecting(0, -1);
+        QCOMPARE(w->syncStatusLabel->text(), QString("Connecting to the ZClassic network…"));
+        QVERIFY(!w->syncStatusLabel->text().contains("Syncing"));
+        settleAndDelete(w);
+    }
+
+    void combo5_emptyRecipientMessageHasNoDoubleSpace() {
+        MainWindow* w = makeWindow();
+        Tx tx; tx.fromAddr = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+        ToFields a; a.addr = QString(); a.amount = 1; tx.toAddrs.append(a);
+        const QString m = w->testDoSendTxValidations(tx);
+        QVERIFY2(m.contains("Recipient Address") && m.contains("Invalid") && !m.contains("  "), qPrintable(m));
+        tx.toAddrs[0].addr = "bogus";
+        QCOMPARE(w->testDoSendTxValidations(tx), QString("Recipient Address bogus is Invalid"));
+        settleAndDelete(w);
+    }
+
+    void combo6_payFromComboElidesMiddleKeepsBalance() {
+        AddressCombo c;
+        const QString z = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        c.addItem(z, 1234.5);
+        c.setCurrentIndex(0);
+        const QString shown = c.displayText(260);
+        QVERIFY2(shown.contains(QChar(0x2026)), qPrintable(shown));
+        QVERIFY2(shown.endsWith("ZCL)") || shown.endsWith(")"), qPrintable(shown));
+        QVERIFY2(shown.contains("1,234.5") || shown.contains("1234.5"), qPrintable(shown));
+        QVERIFY2(shown.startsWith("zs1"), qPrintable(shown));
+        QCOMPARE(c.currentText(), z);                       // the real address is untouched
+        QVERIFY(!c.displayText(100000).contains(QChar(0x2026)));
+    }
+
+    // A locked (encrypted) wallet cannot send, and this app has no unlock button. The
+    // message must say nothing moved and how to proceed, not just "Unlock it".
+    void ux9_lockedWalletErrorSaysNothingMovedAndHow() {
+        MainWindow* w = makeWindow();
+        const QString m = w->testHumaneSendError(
+            "Error: Please enter the wallet passphrase with walletpassphrase first.");
+        QVERIFY2(m.contains("Nothing was sent"), qPrintable(m));
+        QVERIFY2(m.contains("walletpassphrase"), qPrintable(m));
+        settleAndDelete(w);
+    }
+
+    // About must show the node's version as well as the wallet's.
+    // The node line is decoded like the daemon's FormatVersion(): beta, rc, release and
+    // post-release builds. (The wallet's own APP_VERSION also reads "2.1.2-beta13", so the
+    // check looks at the "Node (zclassicd):" line only.)
+    void ux10_aboutShowsNodeVersion() {
+        MainWindow* w = makeWindow();
+        QAction* act = w->findChild<QAction*>("actionAbout");
+        QVERIFY(act);
+        const QList<QPair<int, QString>> cases = {
+            {2010212, "Node (zclassicd): v2.1.2-beta13"},
+            {2010226, "Node (zclassicd): v2.1.2-rc2"},
+            {2010250, "Node (zclassicd): v2.1.2"},
+            {2010251, "Node (zclassicd): v2.1.2-1"},
+        };
+        for (const auto& c : cases) {
+            Settings::getInstance()->setZClassicdVersion(c.first);
+            QString seen = QStringLiteral("about dialog never appeared");
+            QString body;
+            const int gen = ++_modalGen;
+            std::function<void(int)> poll = [&](int tries) {
+                if (gen != _modalGen) return;
+                QWidget* dlg = QApplication::activeModalWidget();
+                QLabel* l = dlg ? dlg->findChild<QLabel*>("versionLabel") : nullptr;
+                if (!l) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+                seen = l->text();
+                if (QLabel* b = dlg->findChild<QLabel*>("label")) body = b->text();
+                static_cast<QDialog*>(dlg)->reject();
+            };
+            QTimer::singleShot(0, [&]() { poll(300); });
+            act->trigger();
+            ++_modalGen;
+            const QString nodeLine = seen.section(QChar('\n'), 1, 1);
+            QVERIFY2(nodeLine == c.second, qPrintable(QString("%1 -> '%2'").arg(c.first).arg(nodeLine)));
+            // Links must not keep the dark-blue colour that is unreadable on the dark theme.
+            QVERIFY2(body.contains("href") && !body.contains("#0000ff"), "About links are still dark blue");
+        }
+        settleAndDelete(w);
+    }
+
+    // Quitting stops only a node the wallet started. Connected to an external node (no
+    // embedded process), neither the Exit item nor the first-close notice may say quitting
+    // stops "the node".
+    void ux13_externalNodeQuitWordingIsHonest() {
+        MainWindow* w = makeWindow();
+        QVERIFY(!w->getRPC()->isEmbedded());
+        QMenu* file = w->findChild<QMenu*>("menuFile");
+        QAction* exitAct = w->findChild<QAction*>("actionExit");
+        QVERIFY(file && exitAct);
+        emit file->aboutToShow();
+        QVERIFY2(!exitAct->text().contains("stops the node"), qPrintable(exitAct->text()));
+        QString seenText;
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            auto* mb = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            if (!mb) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+            seenText = mb->informativeText();
+            mb->reject();
+        };
+        QTimer::singleShot(0, [&]() { poll(300); });
+        w->testAskKeepRunningInTray();
+        ++_modalGen;
+        QVERIFY2(!seenText.contains("stop the node"), qPrintable(seenText));
+        QVERIFY2(seenText.contains("leaves that node running"), qPrintable(seenText));
+        settleAndDelete(w);
+    }
+
+    // After the node is restarted it writes a new auth cookie. The wallet must pick it up,
+    // otherwise every poll is rejected (401) and it stays on "No Connection" with the node up.
+    void ux11_restartedNodeCookieIsFollowed() {
+        MainWindow* w = makeWindow();
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        auto cfg = std::make_shared<ConnectionConfig>();
+        cfg->zclassicDir = dir.path();
+        cfg->rpcuser = "__cookie__";
+        cfg->rpcpassword = "OLD";
+        cfg->cookieAuth = true;
+        auto* req = new QNetworkRequest();
+        req->setRawHeader("Authorization", "Basic old");
+        auto* c = new Connection(w, new QNetworkAccessManager(w), req, cfg);
+        w->getRPC()->testSetConnection(c);
+
+        QFile f(dir.filePath(".cookie"));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("__cookie__:NEWSECRET");
+        f.close();
+        QVERIFY(w->getRPC()->testRefreshAuthFromCookie());
+        QCOMPARE(cfg->rpcpassword, QStringLiteral("NEWSECRET"));
+        QCOMPARE(req->rawHeader("Authorization"), QByteArray("Basic ") + QByteArray("__cookie__:NEWSECRET").toBase64());
+        QVERIFY2(!w->getRPC()->testRefreshAuthFromCookie(), "an unchanged cookie must not report a change");
+        settleAndDelete(w);
+    }
+
+    // After the node is lost the tables are emptied; the next successful poll must repopulate
+    // them even if the chain tip has not moved (refresh only reloads when the height changes).
+    void ux12_teardownForcesNextRefresh() {
+        MainWindow* w = makeWindow();
+        w->getRPC()->noConnection(false);
+        QCOMPARE(w->getRPC()->testLastRefreshedBlock(), -1);
+        settleAndDelete(w);
+    }
+
     void e2_publicWarningVisibleForTransparentRecipient() {
         MainWindow* w = makeWindow();
 
@@ -1520,6 +2101,134 @@ private slots:
 
         QSettings().remove("options/autoshield");
         QSettings().sync();
+        settleAndDelete(w);
+    }
+
+    // ---- P9b: token-bearing outputs are NOT spendable ZCL for the GUI ------------------
+    // listunspent still lists a token-guarded output as spendable=true and only adds "tokenbearing". The
+    // daemon's z_sendmany skips it, so a change sized from it would overshoot and every auto-shield send
+    // from that t-address would fail "Insufficient transparent funds". Parsed through the real
+    // processUnspent(); FAILS if tokenbearing is ignored (change would be 546 zat larger, Send max too).
+    void p9b_tokenBearingOutputIsNotSpendable() {
+        MainWindow* w = makeWindow();
+        const QString T  = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+        const QString ZS = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        QSettings().setValue("options/autoshield", true);
+        QSettings().sync();
+
+        const json reply = json::parse(
+            "[{\"address\":\"" + T.toStdString() + "\",\"txid\":\"a1\",\"amount\":10.0,\"confirmations\":10,"
+            "\"spendable\":true,\"tokenbearing\":false},"
+            "{\"address\":\"" + T.toStdString() + "\",\"txid\":\"a2\",\"amount\":0.00000546,\"confirmations\":10,"
+            "\"spendable\":true,\"tokenbearing\":true},"
+            "{\"address\":\"" + T.toStdString() + "\",\"txid\":\"a3\",\"amount\":1.0,\"confirmations\":10,\"spendable\":true}]");
+        QList<UnspentOutput>* parsed = w->getRPC()->testParseUnspent(reply);
+        QCOMPARE(parsed->size(), 3);
+        QVERIFY(!(*parsed)[0].tokenBearing);
+        QVERIFY((*parsed)[1].tokenBearing);
+        QVERIFY(!(*parsed)[2].tokenBearing);   // an older daemon omits the field
+        w->getRPC()->testSetUTXOs(parsed);
+        auto* bals = new QMap<QString, double>(); (*bals)[T] = 11.00000546;
+        w->getRPC()->testSetBalances(bals);
+        auto* zs = new QList<QString>(); zs->append(ZS);
+        w->getRPC()->testSetZAddresses(zs);
+
+        // Send max / Shield my funds basis: the 546 zat token output is not spendable ZCL.
+        QCOMPARE(w->testSpendableOrFallback(T), 11.0);
+
+        w->ui->inputsCombo->clear();
+        w->ui->inputsCombo->addItem(T, 11.0);
+        w->ui->inputsCombo->setCurrentIndex(0);
+        w->ui->Address1->setText("zs10m00rvkhfm4f7n23e4sxsx275r7ptnggx39ygl0vy46j9mdll5c97gl6dxgpk0njuptg2mn9w5s");
+        w->ui->Amount1->setText("1");
+        Tx tx = w->testCreateTxFromSendPage();
+        QVERIFY(!tx.fromAddr.isEmpty());
+        bool sawChange = false;
+        for (const auto& to : tx.toAddrs) {
+            if (to.addr == ZS) {
+                sawChange = true;
+                // 11 - 1 - fee(0.0001) = 9.9999 ZCL exactly; with the token output counted it would be +546 zat.
+                QCOMPARE((qint64)llround(to.amount * 1e8), (qint64)999990000);
+            }
+        }
+        QVERIFY2(sawChange, "auto-shield change must route to Sapling");
+
+        QSettings().remove("options/autoshield");
+        QSettings().sync();
+        settleAndDelete(w);
+    }
+
+    // ---- first-close notice: "Quit ZClassic now" must really quit --------------------------------
+    // The choice used to call close() from inside the close event it was answering. Qt ignores a nested close()
+    // (the widget is already closing), so nothing happened and `quitting` stayed latched. FAILS if the window is
+    // still open (or the quit never reaches the application) after the button is pressed.
+    void ux14_firstCloseNoticeQuitNowReallyQuits() {
+        MainWindow* w = makeWindow();
+        w->testForceTray();
+        QSettings().remove("tray/hintShown");
+        QSettings().setValue("options/keepintray", true);
+        QSettings().sync();
+        const int gen = ++_modalGen;
+        std::function<void(int)> poll = [&](int tries) {
+            if (gen != _modalGen) return;
+            auto* mb = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            if (!mb) { if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); }); return; }
+            for (QAbstractButton* b : mb->buttons())
+                if (mb->buttonRole(b) == QMessageBox::DestructiveRole) { b->click(); return; }
+            mb->reject();
+        };
+        bool timedOut = false;
+        QTimer safety;
+        safety.setSingleShot(true);
+        QObject::connect(&safety, &QTimer::timeout, [&]() { timedOut = true; QApplication::quit(); });
+        safety.start(4000);
+        QTimer::singleShot(0, [&]() { poll(300); w->close(); });
+        QApplication::exec();
+        safety.stop();
+        QVERIFY2(!timedOut, "Quit ZClassic now did not quit the application");
+        QVERIFY(w->isQuitting());
+        QVERIFY2(!w->isVisible(), "the window is still open after Quit ZClassic now");
+        QSettings().remove("tray/hintShown");
+        QSettings().remove("options/keepintray");
+        QSettings().sync();
+        settleAndDelete(w);
+    }
+
+    // ---- a second quit request while the node is flushing must not end the wait -------------------
+    // shutdownZClassicd() waits in a nested event loop; qApp->quit() ends every loop, after which the node's
+    // QProcess is destroyed and killed mid-flush. FAILS if closeEvent quits the application while a shutdown is
+    // already waiting.
+    void ux15_secondQuitDuringShutdownIsIgnored() {
+        MainWindow* w = makeWindow();
+        w->getRPC()->testSetShuttingDown(true);
+        bool waited = false;
+        QTimer later;
+        later.setSingleShot(true);
+        QObject::connect(&later, &QTimer::timeout, [&]() { waited = true; QApplication::quit(); });
+        later.start(400);
+        QTimer::singleShot(0, [&]() { w->doClose(); });
+        QApplication::exec();
+        later.stop();
+        w->getRPC()->testSetShuttingDown(false);
+        QVERIFY2(waited, "a second quit request ended the application while the node was still shutting down");
+        settleAndDelete(w);
+    }
+
+    // ---- the sync poll leaves other status-bar messages alone ---------------------------------------
+    void ux16_syncPollKeepsTheTxidStatusLine() {
+        MainWindow* w = makeWindow();
+        auto* sb = w->ui->statusBar;
+        sb->showMessage(Settings::txidStatusMessage + " deadbeef");
+        w->getRPC()->testDropConnectingMessage();
+        QVERIFY2(sb->currentMessage().startsWith(Settings::txidStatusMessage),
+                 "the txid status line (Copy txid / explorer menu) was cleared by the sync poll");
+        sb->showMessage(tr("Sending..."));
+        w->getRPC()->testDropConnectingMessage();
+        QCOMPARE(sb->currentMessage(), tr("Sending..."));
+        // the connect-time notice is still dropped once the poll has a verdict
+        sb->showMessage(RPC::connectingMessage());
+        w->getRPC()->testDropConnectingMessage();
+        QVERIFY(sb->currentMessage().isEmpty());
         settleAndDelete(w);
     }
 
@@ -2966,6 +3675,88 @@ private:
             }
             if (tries > 0) armModalDismisser(tries - 1);
         });
+    }
+
+private slots:
+    // ---- pay to a name (src/namepaybox.h): the REAL Send tab, with the node's lookup replaced by a fake ----
+    //
+    // The transaction the Send tab builds carries the ADDRESS the user confirmed, never the name; an entry that is
+    // not a name is used exactly as typed, and a name that was not confirmed is not turned into anything.
+    void nameRecipientIsSentAsTheConfirmedAddress() {
+        const QString T      = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+        const QString PAYEE  = "t1cEFAvXjAZ1JpCCCPrUrcYQr5Kj9FRSXYa";
+        QSettings().setValue("options/autoshield", false);
+        QSettings().sync();
+
+        MainWindow* w = makeWindow();
+        auto* ui = w->ui;
+        auto* bals = new QMap<QString, double>(); (*bals)[T] = 10.0;
+        w->getRPC()->testSetBalances(bals);
+        auto* utxos = new QList<UnspentOutput>();
+        utxos->append(UnspentOutput{ T, "txid0", "10.0", /*conf=*/10, /*spendable=*/true });
+        w->getRPC()->testSetUTXOs(utxos);
+        w->getRPC()->testSetZAddresses(new QList<QString>());
+        ui->inputsCombo->clear();
+        ui->inputsCombo->addItem(T, 10.0);
+        ui->inputsCombo->setCurrentIndex(0);
+        ui->Amount1->setText("1");
+
+        auto* box = w->findChild<NamePayBox*>("NameBox1");
+        QVERIFY2(box, "the first recipient has a name box");
+        int lookups = 0;
+        box->setResolver([&](const QString& name, const NamePayBox::Reply& done) {
+            lookups++;
+            nlohmann::json r = {{"name", name.toStdString()}, {"resolved", true}, {"value", PAYEE.toStdString()},
+                                {"type", "t-address"}, {"kind", "transparent"}, {"payable", true},
+                                {"address", PAYEE.toStdString()}, {"set_height", 100}, {"set_txid", "ab"},
+                                {"set_by_record", false}, {"blocks_since_change", 5000}, {"changed_recently", false},
+                                {"recent_change_blocks", 100}, {"owner", "t1owner"}, {"registered_height", 90},
+                                {"registered_txid", "cd"}, {"expiry_height", 999999}, {"expired", false},
+                                {"warnings", nlohmann::json::array()}, {"records", nlohmann::json::array()},
+                                {"index", {{"synced", true}}}};
+            done(true, r);
+        });
+
+        // 1. an address typed as before: no box, no lookup, the text is the recipient
+        ui->Address1->setText(PAYEE);
+        QVERIFY(!box->isVisibleTo(ui->sendToWidgets));
+        QCOMPARE(w->testCreateTxFromSendPage().toAddrs.at(0).addr, PAYEE);
+        QCOMPARE(lookups, 0);
+
+        // 2. a name: looked up, shown in full, NOT yet a recipient (nothing is confirmed)
+        ui->Address1->setText("@alice");
+        QVERIFY(box->isVisibleTo(ui->sendToWidgets));
+        box->resolveNow();
+        QCOMPARE(lookups, 1);
+        QCOMPARE(box->addressLabel()->text(), PAYEE);
+        QVERIFY(!box->confirmed());
+        QCOMPARE(w->testCreateTxFromSendPage().toAddrs.at(0).addr, QString("@alice"));
+
+        // 3. the user confirms the ADDRESS: the transaction is built with exactly that address
+        box->confirmCheck()->setChecked(true);
+        Tx tx = w->testCreateTxFromSendPage();
+        QVERIFY(!tx.fromAddr.isEmpty());
+        QCOMPARE(tx.toAddrs.at(0).addr, PAYEE);
+        for (const auto& to : tx.toAddrs)
+            QVERIFY2(!to.addr.contains('@') && !to.txtMemo.contains("alice") && !to.encodedMemo.contains("616c696365"), "nothing name-related goes into the transaction");
+
+        // 4. editing the entry drops the confirmation: another name does not inherit it
+        ui->Address1->setText("@alicf");
+        QVERIFY(!box->confirmed());
+        QCOMPARE(w->testCreateTxFromSendPage().toAddrs.at(0).addr, QString("@alicf"));
+
+        // 5. a look-alike spelling is refused and looked up by no one
+        const int before = lookups;
+        ui->Address1->setText(QString("@al") + QChar(0x0456) + "ce");
+        box->resolveNow();
+        QCOMPARE(lookups, before);
+        QVERIFY(box->statusLabel()->text().contains("look-alike"));
+
+        // 6. back to an address: the box goes away and the field is what it always was
+        ui->Address1->setText(PAYEE);
+        QVERIFY(!box->isVisibleTo(ui->sendToWidgets));
+        QCOMPARE(w->testCreateTxFromSendPage().toAddrs.at(0).addr, PAYEE);
+        settleAndDelete(w);
     }
 #endif
 };

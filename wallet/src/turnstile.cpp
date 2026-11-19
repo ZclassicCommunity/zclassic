@@ -1,3 +1,4 @@
+#include "profilepaths.h"
 #include "turnstile.h"
 #include "mainwindow.h"
 #include "balancestablemodel.h"
@@ -22,7 +23,7 @@ void printPlan(QList<TurnstileMigrationItem> plan) {
 QString Turnstile::writeableFile() {
     auto filename = QStringLiteral("turnstilemigrationplan.dat");
 
-    auto dir = QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
+    auto dir = QDir(ProfilePaths::appDataDir());
     if (!dir.exists())
         QDir().mkpath(dir.absolutePath());
 

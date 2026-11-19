@@ -125,7 +125,7 @@ TEST_F(DeprecationTest, DeprecatedNodeIgnoredOnTestnet) {
 
 TEST_F(DeprecationTest, AlertNotify) {
     boost::filesystem::path temp = GetTempPath() /
-        boost::filesystem::unique_path("alertnotify-%%%%.txt");
+        UniquePath("alertnotify-%%%%.txt");
 
     mapArgs["-alertnotify"] = std::string("echo %s >> ") + temp.string();
 

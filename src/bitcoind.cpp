@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "clientversion.h"
+#include "embeddedtor.h"
 #include "rpc/server.h"
 #include "init.h"
 #include "main.h"
@@ -12,6 +13,14 @@
 #include "util.h"
 #include "httpserver.h"
 #include "httprpc.h"
+
+#ifdef WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN 1
+#endif
+#include <windows.h>
+#include <shellapi.h>
+#endif
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem.hpp>
@@ -62,6 +71,61 @@ void WaitForShutdown(boost::thread_group* threadGroup)
 //
 // Start
 //
+/** Create `dir` if missing. Prints one clear error line naming the path and returns false on failure. */
+static bool EnsureDirectoryExists(const boost::filesystem::path& dir, const char* what)
+{
+    if (dir.empty())
+        return true; // a missing -datadir is reported by the caller
+    boost::system::error_code ec;
+    if (boost::filesystem::is_directory(dir, ec))
+        return true;
+    ec.clear();
+    boost::filesystem::create_directories(dir, ec);
+    if (ec || !boost::filesystem::is_directory(dir, ec)) {
+        fprintf(stderr, "Error: Cannot create the %s \"%s\": %s\n", what, dir.string().c_str(),
+                ec ? ec.message().c_str() : "not a directory");
+        return false;
+    }
+    return true;
+}
+
+#ifdef WIN32
+/**
+ * Without the Windows "long paths" setting, every path the node opens is limited to MAX_PATH (259
+ * characters). The deepest file below the datadir is the "\chainstate-verify\MANIFEST-000001" of a
+ * LevelDB (34 characters; 36 with larger file numbers), so a datadir this long fails later with a
+ * misleading "Error opening block database". Refuse it up front and say why. When the system has
+ * LongPathsEnabled set the manifest's longPathAware opt-in makes such paths work, so nothing is refused.
+ */
+static bool WinLongPathsEnabled()
+{
+    HKEY hKey;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Control\\FileSystem", 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+        return false;
+    DWORD dwValue = 0, dwSize = sizeof(dwValue), dwType = 0;
+    LONG rc = RegQueryValueExA(hKey, "LongPathsEnabled", NULL, &dwType, (LPBYTE)&dwValue, &dwSize);
+    RegCloseKey(hKey);
+    return rc == ERROR_SUCCESS && dwType == REG_DWORD && dwValue != 0;
+}
+
+static bool WinDataDirLengthOk()
+{
+    static const size_t MAX_PATH_CHARS = 259; // MAX_PATH minus the terminating NUL
+    static const size_t LONGEST_DATADIR_SUFFIX = 36;
+    const std::string dir = GetDataDir(true).string();
+    if (dir.size() + LONGEST_DATADIR_SUFFIX <= MAX_PATH_CHARS || WinLongPathsEnabled())
+        return true;
+    fprintf(stderr,
+            "Error: the data directory path \"%s\" is %u characters long. Windows limits paths to %u characters\n"
+            "unless long paths are enabled, and the node needs up to %u more below the data directory, so the\n"
+            "path may be at most %u characters. Use a shorter -datadir, or enable long paths (set the DWORD\n"
+            "HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\\LongPathsEnabled to 1 and restart Windows).\n",
+            dir.c_str(), (unsigned)dir.size(), (unsigned)MAX_PATH_CHARS, (unsigned)LONGEST_DATADIR_SUFFIX,
+            (unsigned)(MAX_PATH_CHARS - LONGEST_DATADIR_SUFFIX));
+    return false;
+}
+#endif
+
 bool AppInit(int argc, char* argv[])
 {
     boost::thread_group threadGroup;
@@ -98,17 +162,11 @@ bool AppInit(int argc, char* argv[])
     try
     {
 
-        if (!boost::filesystem::is_directory(GetDataDir(false)))
-        {
-            // mkdir data directory if it doesn't exist
-            boost::filesystem::create_directories(GetDataDir(false));
-        }
-
-        if (!boost::filesystem::is_directory(ZC_GetParamsDir()))
-        {
-            // mkdir zclassic params directory if it doesn't exist
-            boost::filesystem::create_directories(ZC_GetParamsDir());
-        }
+        // mkdir the data and params directories if they don't exist; a directory that cannot be
+        // created or probed (permissions, read-only filesystem, path too long) is reported as one clear line.
+        if (!EnsureDirectoryExists(GetDataDir(false), "data directory") ||
+            !EnsureDirectoryExists(ZC_GetParamsDir(), "zclassic params directory"))
+            return false;
 
         if (!boost::filesystem::is_directory(GetDataDir(false)))
         {
@@ -117,11 +175,23 @@ bool AppInit(int argc, char* argv[])
         }
 
         
+        // ReadConfigFile appends every repeatable option (-bind, -addnode, ...) to
+        // mapMultiArgs each time it runs, so the file is read a second time only
+        // when the first call found none and a default one was just written.
+        bool fConfigRead = false;
         try
         {
             ReadConfigFile(mapArgs, mapMultiArgs);
-        } catch (const std::exception& e) {
+            fConfigRead = true;
+        } catch (const missing_zcash_conf& e) {
             boost::filesystem::path config_file_path = GetConfigFile();
+
+            if (mapArgs.count("-conf")) {
+                // An explicitly named configuration file is never created behind the user's back.
+                fprintf(stderr, "Error: Specified configuration file \"%s\" does not exist or cannot be read.\n",
+                        config_file_path.string().c_str());
+                return false;
+            }
 
             std::ofstream basic_conf_file (config_file_path.string());
             basic_conf_file << "txindex=1" << std::endl;
@@ -129,11 +199,17 @@ bool AppInit(int argc, char* argv[])
             basic_conf_file << "rpcpassword=zclpass" << std::endl;
             basic_conf_file.close();
 
-        }        
+        } catch (const std::exception& e) {
+            // A configuration file that exists but cannot be parsed must not be overwritten.
+            fprintf(stderr, "Error reading configuration file \"%s\": %s\n",
+                    GetConfigFile().string().c_str(), e.what());
+            return false;
+        }
 
         try
         {
-            ReadConfigFile(mapArgs, mapMultiArgs);
+            if (!fConfigRead)
+                ReadConfigFile(mapArgs, mapMultiArgs);
         } catch (const missing_zcash_conf& e) {
             fprintf(stderr,
                 (_("Before starting zclassicd, you need to create a configuration file:\n"
@@ -149,7 +225,7 @@ bool AppInit(int argc, char* argv[])
                  _("- Source code:  %s\n"
                    "- .deb package: %s\n")).c_str(),
                 GetConfigFile().string().c_str(),
-                "contrib/debian/examples/zclassic.conf",
+                "contrib/examples/zclassic.conf",
                 "/usr/share/doc/zcash/examples/zclassic.conf");
             return false;
         } catch (const std::exception& e) {
@@ -161,6 +237,21 @@ bool AppInit(int argc, char* argv[])
             fprintf(stderr, "Error: Invalid combination of -regtest and -testnet.\n");
             return false;
         }
+
+        // The network-specific data directory is created on first use; report a failure (permissions,
+        // read-only filesystem, path too long) as one clear line instead of an uncaught exception.
+        try {
+            GetDataDir(true);
+        } catch (const boost::filesystem::filesystem_error& e) {
+            fprintf(stderr, "Error: Cannot create the data directory \"%s\": %s\n",
+                    e.path1().string().c_str(), e.code().message().c_str());
+            return false;
+        }
+
+#ifdef WIN32
+        if (!WinDataDirLengthOk())
+            return false;
+#endif
 
         // Command-line RPC
         bool fCommandLine = false;
@@ -201,6 +292,14 @@ bool AppInit(int argc, char* argv[])
 
         fRet = AppInit2(threadGroup, scheduler);
     }
+    catch (const boost::filesystem::filesystem_error& e) {
+        // A path problem while starting up (permissions, read-only filesystem, path too long): one clear line.
+        fprintf(stderr, "Error: %s: \"%s\"\n"
+                "Check the directory permissions and the HOME environment variable, or choose another location with -datadir=<dir>.\n",
+                e.code().message().c_str(), e.path1().string().c_str());
+        LogPrintf("AppInit: %s\n", e.what());
+        fRet = false;
+    }
     catch (const std::exception& e) {
         PrintExceptionContinue(&e, "AppInit()");
     } catch (...) {
@@ -223,8 +322,54 @@ bool AppInit(int argc, char* argv[])
     return fRet;
 }
 
+#ifdef WIN32
+/**
+ * The C runtime hands main() the command line converted to the ANSI code page.
+ * Characters the code page cannot represent become '?', which then fails with
+ * "Invalid argument" or points at a different directory. With the UTF-8 active
+ * code page manifest (Windows 10 1903+) the conversion is lossless; on older
+ * Windows, refuse a lossy command line with a clear message instead.
+ */
+static bool WinCommandLineIsLossy()
+{
+    if (GetACP() == CP_UTF8) return false;
+    int nArgs = 0;
+    LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &nArgs);
+    if (!wargv) return false;
+    bool lossy = false;
+    // Skip argv[0]: the executable path is not used to open anything (the embedded
+    // Tor child is located with GetModuleFileNameW), so a binary kept under a
+    // non-ANSI folder with an ASCII datadir must keep working.
+    for (int i = 1; i < nArgs && !lossy; i++) {
+        BOOL usedDefault = FALSE;
+        if (WideCharToMultiByte(CP_ACP, 0x00000400 /* WC_NO_BEST_FIT_CHARS */, wargv[i], -1, NULL, 0, "?", &usedDefault) > 0 && usedDefault)
+            lossy = true;
+    }
+    LocalFree(wargv);
+    return lossy;
+}
+#endif
+
 int main(int argc, char* argv[])
 {
+    // -embeddedtormode=child re-executes this binary as its Tor process. That
+    // role must be taken before anything else runs; in every other case this
+    // returns -1 at once (and always does in a build without embedded Tor).
+    int nTorChild = EmbeddedTorDispatch(argc, argv);
+    if (nTorChild >= 0)
+        return nTorChild;
+
+#ifdef WIN32
+    if (WinCommandLineIsLossy()) {
+        fprintf(stderr,
+                "Error: the command line contains characters that the system ANSI code page (%u) cannot represent,\n"
+                "for example a non-ASCII -datadir, -conf or -exportdir path. Use Windows 10 version 1903 or later\n"
+                "(this program asks for the UTF-8 code page), or use a path made of ANSI-representable characters.\n",
+                GetACP());
+        return EXIT_FAILURE;
+    }
+#endif
+
     SetupEnvironment();
 
     // Connect bitcoind signal handlers

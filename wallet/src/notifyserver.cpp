@@ -1,3 +1,4 @@
+#include "profilepaths.h"
 #include "notifyserver.h"
 #include "securerandom.h"   // CSPRNG per-session token
 #include "privatefile.h"
@@ -205,6 +206,13 @@ bool NotifyServer::tokenMatches(const QByteArray& candidate) const {
 // ---- Connector / shared-path plumbing --------------------------------------
 
 static QString notifyRuntimeDir() {
+    if (ProfilePaths::active()) {
+        // Profile override: socket + token live inside the profile (owner-only).
+        const QString pd = ProfilePaths::runtimeDir();
+        QDir().mkpath(pd);
+        QFile::setPermissions(pd, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+        return pd;
+    }
     // Per-user + stable across the GUI and the connector process (same user => same
     // QStandardPaths). Prefer the OS runtime dir (Linux: /run/user/UID, a 0700
     // tmpfs); fall back to the temp dir where that is unavailable (macOS/Windows or

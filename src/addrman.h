@@ -50,6 +50,11 @@ private:
     friend class CAddrMan;
 
 public:
+    //! read access for code that persists entries itself (the onion store)
+    const CNetAddr& GetSource() const { return source; }
+    int64_t GetLastSuccess() const { return nLastSuccess; }
+    int GetAttempts() const { return nAttempts; }
+    bool IsTried() const { return fInTried; }
 
     ADD_SERIALIZE_METHODS;
 
@@ -177,6 +182,9 @@ private:
 
     //! last used nId
     int nIdCount;
+
+    //! true for the Tor v3 onion store, false for the peers.dat table
+    bool fOnionStore;
 
     //! table with information about all nIds
     std::map<int, CAddrInfo> mapInfo;
@@ -437,6 +445,8 @@ public:
     void Clear()
     {
         std::vector<int>().swap(vRandom);
+        mapInfo.clear();
+        mapAddr.clear();
         nKey = GetRandHash();
         for (size_t bucket = 0; bucket < ADDRMAN_NEW_BUCKET_COUNT; bucket++) {
             for (size_t entry = 0; entry < ADDRMAN_BUCKET_SIZE; entry++) {
@@ -454,9 +464,29 @@ public:
         nNew = 0;
     }
 
-    CAddrMan()
+    /**
+     * fOnionStoreIn selects what this table holds. The default table is the
+     * one peers.dat serialises (16-byte addresses): it refuses Tor v3
+     * addresses, which would not survive that format. The onion store holds
+     * only Tor v3 addresses (and is persisted separately, see
+     * onion_peers.dat), so a downgrade never sees them.
+     */
+    explicit CAddrMan(bool fOnionStoreIn = false) : fOnionStore(fOnionStoreIn)
     {
         Clear();
+    }
+
+    bool IsOnionStore() const { return fOnionStore; }
+
+    //! A copy of every entry (the onion store persists them itself).
+    std::vector<CAddrInfo> GetEntries() const
+    {
+        LOCK(cs);
+        std::vector<CAddrInfo> v;
+        v.reserve(mapInfo.size());
+        for (std::map<int, CAddrInfo>::const_iterator it = mapInfo.begin(); it != mapInfo.end(); ++it)
+            v.push_back(it->second);
+        return v;
     }
 
     ~CAddrMan()

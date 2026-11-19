@@ -4,6 +4,7 @@
 #include <boost/static_assert.hpp>
 #include "prf.h"
 #include "librustzcash.h"
+#include "zcl_c23_sapling_scan.h"
 
 #define NOTEENCRYPTION_CIPHER_KEYSIZE 32
 
@@ -164,6 +165,16 @@ boost::optional<SaplingEncPlaintext> AttemptSaplingEncDecryption(
         return boost::none;
     }
 
+    return AttemptSaplingEncDecryptionFromDH(ciphertext, dhsecret, epk);
+}
+
+
+boost::optional<SaplingEncPlaintext> AttemptSaplingEncDecryptionFromDH(
+    const SaplingEncCiphertext &ciphertext,
+    const uint256 &dhsecret,
+    const uint256 &epk
+)
+{
     // Construct the symmetric key
     unsigned char K[NOTEENCRYPTION_CIPHER_KEYSIZE];
     KDF_Sapling(K, dhsecret, epk);
@@ -185,6 +196,28 @@ boost::optional<SaplingEncPlaintext> AttemptSaplingEncDecryption(
     }
 
     return plaintext;
+}
+
+SaplingIvkBatchAgreement::SaplingIvkBatchAgreement(const uint256 &epk, size_t expectedIvks)
+    : epk_(epk), ctx_(zcl_c23_sapling_scan_begin(epk.begin(), expectedIvks))
+{
+}
+
+SaplingIvkBatchAgreement::~SaplingIvkBatchAgreement()
+{
+    zcl_c23_sapling_scan_end(ctx_);
+}
+
+void SaplingIvkBatchAgreement::agree(const unsigned char *ivks, size_t n, unsigned char *dh, unsigned char *ok) const
+{
+    if (ctx_ != nullptr) {
+        zcl_c23_sapling_scan_agree(ctx_, ivks, n, dh, ok);
+        return;
+    }
+    // Batched core unavailable: the original one-at-a-time agreement.
+    for (size_t i = 0; i < n; i++) {
+        ok[i] = librustzcash_sapling_ka_agree(epk_.begin(), ivks + 32 * i, dh + 32 * i) ? 1 : 0;
+    }
 }
 
 boost::optional<SaplingEncPlaintext> AttemptSaplingEncDecryption (

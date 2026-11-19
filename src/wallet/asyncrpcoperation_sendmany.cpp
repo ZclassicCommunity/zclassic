@@ -100,7 +100,12 @@ AsyncRPCOperation_sendmany::AsyncRPCOperation_sendmany(
 
             isfromzaddr_ = true;
             frompaymentaddress_ = address;
-            spendingkey_ = boost::apply_visitor(GetSpendingKeyForPaymentAddress(pwalletMain), address).get();
+            auto sk = boost::apply_visitor(GetSpendingKeyForPaymentAddress(pwalletMain), address);
+            if (!sk) {
+                // The wallet knows the key but cannot decrypt it: it is encrypted and locked.
+                throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED, "Error: Please enter the wallet passphrase with walletpassphrase first.");
+            }
+            spendingkey_ = sk.get();
         } else {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid from address");
         }
@@ -214,15 +219,15 @@ bool AsyncRPCOperation_sendmany::main_impl() {
         if (isSingleZaddrOutput) {
             bool b = find_utxos(true);
             if (!b) {
-                throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient funds, no UTXOs found for taddr from address.");
+                throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient funds, no UTXOs found for taddr from address." + TokenGuardExcludedNote(tokenGuardReport_));
             }
         } else {
             bool b = find_utxos(false);
             if (!b) {
                 if (isMultipleZaddrOutput) {
-                    throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any non-coinbase UTXOs to spend. Coinbase UTXOs can only be sent to a single zaddr recipient.");
+                    throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any non-coinbase UTXOs to spend. Coinbase UTXOs can only be sent to a single zaddr recipient." + TokenGuardExcludedNote(tokenGuardReport_));
                 } else {
-                    throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any non-coinbase UTXOs to spend.");
+                    throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any non-coinbase UTXOs to spend." + TokenGuardExcludedNote(tokenGuardReport_));
                 }
             }
         }        
@@ -267,7 +272,7 @@ bool AsyncRPCOperation_sendmany::main_impl() {
     if (isfromtaddr_ && (t_inputs_total < targetAmount)) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
             strprintf("Insufficient transparent funds, have %s, need %s",
-            FormatMoney(t_inputs_total), FormatMoney(targetAmount)));
+            FormatMoney(t_inputs_total), FormatMoney(targetAmount)) + TokenGuardExcludedNote(tokenGuardReport_));
     }
     
     if (isfromzaddr_ && (z_inputs_total < targetAmount)) {
@@ -309,7 +314,7 @@ bool AsyncRPCOperation_sendmany::main_impl() {
         if (dustChange < dustThreshold && dustChange != 0) {
             throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
                 strprintf("Insufficient transparent funds, have %s, need %s more to avoid creating invalid change output %s (dust threshold is %s)",
-                FormatMoney(t_inputs_total), FormatMoney(dustThreshold - dustChange), FormatMoney(dustChange), FormatMoney(dustThreshold)));
+                FormatMoney(t_inputs_total), FormatMoney(dustThreshold - dustChange), FormatMoney(dustChange), FormatMoney(dustThreshold)) + TokenGuardExcludedNote(tokenGuardReport_));
         }
 
         t_inputs_ = selectedTInputs;
@@ -429,7 +434,11 @@ bool AsyncRPCOperation_sendmany::main_impl() {
         std::vector<boost::optional<SaplingWitness>> witnesses;
         {
             LOCK2(cs_main, pwalletMain->cs_wallet);
-            pwalletMain->GetSaplingNoteWitnesses(ops, witnesses, anchor);
+            bool consistent = pwalletMain->GetSaplingNoteWitnesses(ops, witnesses, anchor);
+            std::string witnessError;
+            if (!ops.empty() && !CheckSaplingSpendWitnesses(consistent, witnesses, anchor, *pcoinsTip, witnessError)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, witnessError);
+            }
         }
 
         // Add Sapling spends
@@ -559,17 +568,22 @@ bool AsyncRPCOperation_sendmany::main_impl() {
         zOutputsDeque.push_back(o);
     }
 
-    // When spending notes, take a snapshot of note witnesses and anchors as the treestate will
+    // When spending notes, take a snapshot of the witnesses and anchors of the selected notes (zInputsDeque,
+    // not every candidate note, so an unused note cannot block the send) as the treestate will
     // change upon arrival of new blocks which contain joinsplit transactions.  This is likely
     // to happen as creating a chained joinsplit transaction can take longer than the block interval.
     if (z_sprout_inputs_.size() > 0) {
         LOCK2(cs_main, pwalletMain->cs_wallet);
-        for (auto t : z_sprout_inputs_) {
+        for (auto t : zInputsDeque) {
             JSOutPoint jso = std::get<0>(t);
             std::vector<JSOutPoint> vOutPoints = { jso };
             uint256 inputAnchor;
             std::vector<boost::optional<SproutWitness>> vInputWitnesses;
-            pwalletMain->GetSproutNoteWitnesses(vOutPoints, vInputWitnesses, inputAnchor);
+            bool consistent = pwalletMain->GetSproutNoteWitnesses(vOutPoints, vInputWitnesses, inputAnchor);
+            std::string witnessError;
+            if (!CheckSproutSpendWitnesses(consistent, vInputWitnesses, inputAnchor, *pcoinsTip, witnessError)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, witnessError);
+            }
             jsopWitnessAnchorMap[ jso.ToString() ] = WitnessAnchorData{ vInputWitnesses[0], inputAnchor };
         }
     }
@@ -989,6 +1003,7 @@ bool AsyncRPCOperation_sendmany::find_utxos(bool fAcceptCoinbase=false) {
     std::set<CTxDestination> destinations;
     destinations.insert(fromtaddr_);
     vector<COutput> vecOutputs;
+    tokenGuardReport_ = CTokenGuardReport();
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
@@ -1017,6 +1032,14 @@ bool AsyncRPCOperation_sendmany::find_utxos(bool fAcceptCoinbase=false) {
         // By default we ignore coinbase outputs
         bool isCoinbase = out.tx->IsCoinBase();
         if (isCoinbase && fAcceptCoinbase==false) {
+            continue;
+        }
+
+        // Wallet token guard: z_sendmany takes UTXOs smallest first, so
+        // without this the 546 zatoshi outputs that carry ZSLP tokens or a
+        // mint baton would be the FIRST ones spent, and their tokens burned.
+        if (out.tx->IsTokenGuarded(out.i)) {
+            tokenGuardReport_.Exclude(out.tx->vout[out.i].nValue);
             continue;
         }
 
@@ -1108,7 +1131,11 @@ UniValue AsyncRPCOperation_sendmany::perform_joinsplit(AsyncJoinSplitInfo & info
     uint256 anchor;
     {
         LOCK(cs_main);
-        pwalletMain->GetSproutNoteWitnesses(outPoints, witnesses, anchor);
+        bool consistent = pwalletMain->GetSproutNoteWitnesses(outPoints, witnesses, anchor);
+        std::string witnessError;
+        if (!outPoints.empty() && !CheckSproutSpendWitnesses(consistent, witnesses, anchor, *pcoinsTip, witnessError)) {
+            throw std::runtime_error(witnessError);
+        }
     }
     return perform_joinsplit(info, witnesses, anchor);
 }

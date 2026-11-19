@@ -78,6 +78,9 @@ bool LogAcceptCategory(const char* category);
 /** Send a string to the log output */
 int LogPrintStr(const std::string &str);
 
+/** Test-only: _exit(77) when -testcrashpoint names this call site (inert otherwise). */
+void TestCrashPoint(const char* name);
+
 #define LogPrintf(...) LogPrint(NULL, __VA_ARGS__)
 
 /**
@@ -122,6 +125,7 @@ const boost::filesystem::path &ZC_GetParamsDir();
 void PrintExceptionContinue(const std::exception *pex, const char* pszThread);
 void ParseParameters(int argc, const char*const argv[]);
 void FileCommit(FILE *fileout);
+bool DirectoryCommit(const boost::filesystem::path& dir);
 /** Hash every byte through EOF; leave digest empty on any open/read error. */
 bool HashFileSHA256(const boost::filesystem::path& path, std::string& digest, std::string& error);
 bool TruncateFile(FILE *file, unsigned int length);
@@ -130,6 +134,19 @@ void AllocateFileRange(FILE *file, unsigned int offset, unsigned int length);
 bool RenameOver(boost::filesystem::path src, boost::filesystem::path dest);
 bool TryCreateDirectory(const boost::filesystem::path& p);
 boost::filesystem::path GetDefaultDataDir();
+
+/**
+ * `n` lowercase hex characters from the node's own CSPRNG (GetRandBytes). Used for temporary names:
+ * Boost's unique_path() reads the platform RNG, which on Windows (BCryptGenRandom) can throw.
+ */
+std::string RandomSuffix(size_t n);
+
+/**
+ * Drop-in for boost::filesystem::unique_path(): every '%' of `model` becomes a random hex digit from
+ * RandomSuffix(). Like unique_path() it does not test that the name is unused; 16 hex digits of the default
+ * model make a collision negligible.
+ */
+boost::filesystem::path UniquePath(const std::string& model = "%%%%-%%%%-%%%%-%%%%");
 const boost::filesystem::path &GetDataDir(bool fNetSpecific = true);
 void ClearDatadirCache();
 boost::filesystem::path GetConfigFile();

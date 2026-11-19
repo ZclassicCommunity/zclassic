@@ -73,12 +73,21 @@ SOURCES += \
     src/logger.cpp \
     src/addresscombo.cpp \
     src/recurring.cpp \
-    src/notifyserver.cpp
+    src/notifyserver.cpp \
+    src/tokensmodel.cpp \
+    src/tokenssendmodel.cpp \
+    src/tokenssend.cpp \
+    src/tokensview.cpp \
+    src/namesmodel.cpp \
+    src/namepaybox.cpp \
+    src/namesview.cpp
 
 HEADERS += \
     src/releaseversion.h \
     src/fastsync.h \
     src/embeddeddaemon.h \
+    src/daemonjob.h \
+    src/profilepaths.h \
     src/notifyserver.h \
     src/securerandom.h \
     src/privatefile.h \
@@ -104,11 +113,20 @@ HEADERS += \
     src/turnstile.h \
     src/qrcodelabel.h \
     src/connection.h \
+    src/bootstrapprogress.h \
     src/fillediconlabel.h \
     src/addressbook.h \
     src/logger.h \
     src/addresscombo.h \ 
-    src/recurring.h
+    src/recurring.h \
+    src/tokensmodel.h \
+    src/tokenssendmodel.h \
+    src/tokenssend.h \
+    src/pollguard.h \
+    src/tokensview.h \
+    src/namesmodel.h \
+    src/namepaybox.h \
+    src/namesview.h
 
 FORMS += \
     src/mainwindow.ui \
@@ -162,17 +180,13 @@ qnx: target.path = /tmp/$${TARGET}/bin
 else: unix:!android: target.path = /opt/$${TARGET}/bin
 !isEmpty(target.path): INSTALLS += target
 
-win32:CONFIG(release, debug|release): LIBS += -L$$PWD/res/ -llibsodium
-else:win32:CONFIG(debug, debug|release): LIBS += -L$$PWD/res/ -llibsodiumd
+win32: LIBS += -L$$PWD/res/ -llibsodium
 else:unix: LIBS += -L$$PWD/res/ -lsodium
 
 INCLUDEPATH += $$PWD/res
 DEPENDPATH += $$PWD/res
 
-win32-g++:CONFIG(release, debug|release): PRE_TARGETDEPS += $$PWD/res/liblibsodium.a
-else:win32-g++:CONFIG(debug, debug|release): PRE_TARGETDEPS += $$PWD/res/liblibsodium.a
-else:win32:!win32-g++:CONFIG(release, debug|release): PRE_TARGETDEPS += $$PWD/res/libsodium.lib
-else:win32:!win32-g++:CONFIG(debug, debug|release): PRE_TARGETDEPS += $$PWD/res/libsodiumd.lib
+win32: PRE_TARGETDEPS += $$PWD/res/liblibsodium.a
 else:unix: PRE_TARGETDEPS += $$PWD/res/libsodium.a
 
 # Windows 7+ metadata APIs used for handle-based startup access checks.

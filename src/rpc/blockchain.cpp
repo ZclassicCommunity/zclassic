@@ -16,6 +16,11 @@
 #include "streams.h"
 #include "sync.h"
 #include "util.h"
+#include "validationinterface.h"
+#ifdef ENABLE_WALLET
+#include "init.h"
+#include "wallet/wallet.h"
+#endif
 
 #include <stdint.h>
 
@@ -752,8 +757,12 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
             "  \"chain\": \"xxxx\",        (string) current network name as defined in BIP70 (main, test, regtest)\n"
             "  \"blocks\": xxxxxx,         (numeric) the current number of blocks processed in the server\n"
             "  \"headers\": xxxxxx,        (numeric) the current number of headers we have validated\n"
+            "  \"initialblockdownload\": true|false, (boolean) whether the node considers itself in initial block download\n"
+            "  \"syncphase\": \"xxxx\",  (string) synced|waiting_for_peers|downloading_headers|downloading_blocks|reindexing|importing\n"
+            "  \"connections\": n,        (numeric) number of peer connections\n"
             "  \"bestblockhash\": \"...\", (string) the hash of the currently best block\n"
             "  \"mediantime\" : ttt,       (numeric) The median block time of the current best block\n"
+            "  \"tiptime\" : ttt,          (numeric) Timestamp of the best block, seconds since epoch\n"
             "  \"difficulty\": xxxxxx,     (numeric) the current difficulty\n"
             "  \"verificationprogress\": xxxx, (numeric) estimate of verification progress [0..1]\n"
             "  \"chainwork\": \"xxxx\"     (string) total amount of work in active chain, in hexadecimal\n"
@@ -814,17 +823,39 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
     UniValue obj(UniValue::VOBJ);
     obj.push_back(Pair("chain",                 Params().NetworkIDString()));
     obj.push_back(Pair("blocks",                (int)chainActive.Height()));
-    obj.push_back(Pair("headers",               pindexBestHeader ? pindexBestHeader->nHeight : -1));
+    // Every block we have connected has a header we have validated, so the header
+    // count is never below the block count. (RewindBlockIndex no longer drags
+    // pindexBestHeader down to the tip after a snapshot import; this guards the
+    // presentation against any other path that leaves it behind.)
+    int nHeaders = pindexBestHeader ? pindexBestHeader->nHeight : -1;
+    if (nHeaders < chainActive.Height())
+        nHeaders = chainActive.Height();
+    obj.push_back(Pair("headers",               nHeaders));
     // Best estimate of the network tip height. Headers sync ahead of blocks during
     // IBD, so this is >= "blocks" while catching up and equals it once synced. GUI
     // wallets use blocks/estimatedheight for an accurate, block-based progress bar
     // (verificationprogress is a coarse tx-count heuristic, poor for a sync bar).
-    int nEstimatedHeight = chainActive.Height();
-    if (pindexBestHeader && pindexBestHeader->nHeight > nEstimatedHeight)
-        nEstimatedHeight = pindexBestHeader->nHeight;
+    int nEstimatedHeight = nHeaders;
     obj.push_back(Pair("estimatedheight",       nEstimatedHeight));
+    // Explicit sync state for GUI wallets, so they need not infer it from block age.
+    // initialblockdownload is the node's own IsInitialBlockDownload(); syncphase is one of
+    // synced, waiting_for_peers, downloading_headers, downloading_blocks, reindexing, importing.
+    {
+        int nConnections = 0;
+        {
+            LOCK(cs_vNodes);
+            nConnections = (int)vNodes.size();
+        }
+        const bool fIBD = IsInitialBlockDownload();
+        obj.push_back(Pair("initialblockdownload", fIBD));
+        obj.push_back(Pair("syncphase", std::string(ClassifySyncPhase(fIBD, fReindex, fImporting, nConnections,
+                                                                       (int)chainActive.Height(), nEstimatedHeight))));
+        obj.push_back(Pair("connections", nConnections));
+    }
     obj.push_back(Pair("bestblockhash",         chainActive.Tip()->GetBlockHash().GetHex()));
     obj.push_back(Pair("mediantime",            (int64_t)chainActive.Tip()->GetMedianTimePast()));
+    // Additive status fields for GUI sync display (no behaviour change).
+    obj.push_back(Pair("tiptime",              (int64_t)chainActive.Tip()->GetBlockTime()));
     obj.push_back(Pair("difficulty",            (double)GetNetworkDifficulty()));
     obj.push_back(Pair("verificationprogress",  Checkpoints::GuessVerificationProgress(Params().Checkpoints(), chainActive.Tip())));
     obj.push_back(Pair("chainwork",             chainActive.Tip()->nChainWork.GetHex()));
@@ -1071,6 +1102,24 @@ UniValue getmempoolinfo(const UniValue& params, bool fHelp)
     return mempoolInfoToJSON();
 }
 
+// Blocks an unwind (finalizeblock, invalidateblock, parkblock) disconnected may
+// have left wallet witnesses only a rescan can rebuild, which the wallet defers
+// until the disconnects are over (CWallet::ChainTip). Unless the chain moved
+// forward again, nothing else tells it they are until its next periodic
+// write, so record the new tip now (the wallet rebuilds before writing).
+static void NotifyWalletsOfUnwoundTip()
+{
+    LOCK(cs_main);
+    GetMainSignals().SetBestChain(chainActive.GetLocator());
+#ifdef ENABLE_WALLET
+    // The wallet alone, not the UpdatedBlockTip signal: that also reaches ZMQ,
+    // which would publish hashblock for a tip it already announced (or that did
+    // not change, when nothing was unwound).
+    if (pwalletMain)
+        pwalletMain->UpdatedBlockTip(chainActive.Tip());
+#endif
+}
+
 UniValue finalizeblock(const UniValue& params, bool fHelp) {
     if (fHelp || params.size() != 1) {
         throw std::runtime_error(
@@ -1103,6 +1152,7 @@ UniValue finalizeblock(const UniValue& params, bool fHelp) {
     if (state.IsValid()) {
         ActivateBestChain(state);
     }
+    NotifyWalletsOfUnwoundTip();
 
     if (!state.IsValid()) {
         throw JSONRPCError(RPC_DATABASE_ERROR, state.GetRejectReason());
@@ -1141,6 +1191,7 @@ UniValue invalidateblock(const UniValue& params, bool fHelp)
     if (state.IsValid()) {
         ActivateBestChain(state);
     }
+    NotifyWalletsOfUnwoundTip();
 
     if (!state.IsValid()) {
         throw JSONRPCError(RPC_DATABASE_ERROR, state.GetRejectReason());
@@ -1179,6 +1230,7 @@ UniValue parkblock(const UniValue& params, bool fHelp) {
     if (state.IsValid()) {
         ActivateBestChain(state);
     }
+    NotifyWalletsOfUnwoundTip();
 
     if (!state.IsValid()) {
         throw JSONRPCError(RPC_DATABASE_ERROR, state.GetRejectReason());
@@ -1215,6 +1267,8 @@ UniValue unparkblock(const UniValue& params, bool fHelp) {
         CBlockIndex *pblockindex = mapBlockIndex[hash];
         UnparkBlockAndChildren(pblockindex);
     }
+    // As durable as parkblock, which flushes: see reconsiderblock.
+    FlushStateToDisk();
 
     CValidationState state;
     ActivateBestChain(state);
@@ -1252,6 +1306,12 @@ UniValue reconsiderblock(const UniValue& params, bool fHelp)
         CBlockIndex* pblockindex = mapBlockIndex[hash];
         ResetBlockFailureFlags(pblockindex);
     }
+    // invalidateblock writes its failure flags to disk at once, and failed blocks keep their
+    // branch ID over a restart, so the flags survive it. A reconsider kept in memory only was
+    // lost by a kill: the node came back with the blocks still failed and refused the peers'
+    // chain until reconsiderblock was run again. Clearing flags is always safe to write (the
+    // on-disk coins never name a failed block, see UnwindBlock).
+    FlushStateToDisk();
 
     CValidationState state;
     ActivateBestChain(state);
@@ -1278,8 +1338,8 @@ UniValue getbootstrapinfo(const UniValue& params, bool fHelp)
             "  \"percent\": n,               (numeric, only when phase==\"active\") 0-100 download progress\n"
             "  \"bytes_received\": n,        (numeric, only when phase==\"active\")\n"
             "  \"bytes_total\": n,           (numeric, only when phase==\"active\")\n"
-            "  \"mbps\": x.x,                (numeric, only when phase==\"active\") download throughput\n"
-            "  \"streams\": n,               (numeric, only when phase==\"active\") parallel streams\n"
+            "  \"mbps\": x.x,                (numeric, only when phase==\"active\") download throughput in MiB/s (2^20 bytes per second)\n"
+            "  \"streams\": n,               (numeric, only when phase==\"active\") parallel streams currently connected\n"
             "  \"peer\": \"host:port\",        (string) current/last bootstrap peer (\"\" if none)\n"
             "  \"peer_index\": n,            (numeric) 1-based index of the peer being tried\n"
             "  \"peer_count\": n,            (numeric) number of bootstrap peers in the list\n"

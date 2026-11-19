@@ -1,14 +1,23 @@
 #!/bin/sh
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-: "${ZCL_DAEMON_BUILD_DIR:?Supply the same-source native daemon build directory for static-library auditing}"
-: "${ZCL_DAEMON_DEPENDS_PREFIX:?Supply the native depends prefix for that build}"
-case "$ZCL_DAEMON_BUILD_DIR:$ZCL_DAEMON_DEPENDS_PREFIX" in
-    /*:/*) ;;
-    *) echo 'Daemon build and depends paths must be absolute.' >&2; exit 1 ;;
-esac
-test -f "$ZCL_DAEMON_BUILD_DIR/src/libbitcoin_server.a"
-test -f "$ZCL_DAEMON_DEPENDS_PREFIX/lib/librustzcash.a"
+release_version=2.1.2-beta13
+# The native daemon build tree (static-library and exact-build audit) is optional:
+# a CI job that only downloads the daemon artifact has no build tree. Without it
+# the daemon is still pinned by ZCL_DAEMON_SHA256 and the artifact's SOURCE_COMMIT,
+# and every bundled Mach-O file is audited below; the archive audit is skipped
+# and recorded as skipped in the validation output.
+audit=0
+if [ -n "${ZCL_DAEMON_BUILD_DIR:-}${ZCL_DAEMON_DEPENDS_PREFIX:-}" ]; then
+    : "${ZCL_DAEMON_BUILD_DIR:?Set both ZCL_DAEMON_BUILD_DIR and ZCL_DAEMON_DEPENDS_PREFIX, or neither}"
+    : "${ZCL_DAEMON_DEPENDS_PREFIX:?Set both ZCL_DAEMON_BUILD_DIR and ZCL_DAEMON_DEPENDS_PREFIX, or neither}"
+    case "$ZCL_DAEMON_BUILD_DIR:$ZCL_DAEMON_DEPENDS_PREFIX" in
+        /*:/*) ;;
+        *) echo 'Daemon build and depends paths must be absolute.' >&2; exit 1 ;;
+    esac
+    test -f "$ZCL_DAEMON_BUILD_DIR/src/libbitcoin_server.a"
+    audit=1
+fi
 qt=${ZCL_QT_PREFIX:-$(brew --prefix qt@5)}
 cd "$root"
 work=${ZCL_MAC_BUILD_DIR:-"$root/artifacts/mac-build"}
@@ -29,11 +38,20 @@ make -j2
 : "${ZCL_DAEMON:?Supply the newly built daemon path}"
 : "${ZCL_DAEMON_SHA256:?Supply the verified daemon SHA256}"
 printf '%s  %s\n' "$ZCL_DAEMON_SHA256" "$ZCL_DAEMON" | shasum -a 256 -c -
-cmp "$ZCL_DAEMON" "$ZCL_DAEMON_BUILD_DIR/src/zclassicd" || {
-    echo 'The packaged daemon must match the audited native build exactly.' >&2
-    exit 1
-}
-"$ZCL_DAEMON" --version | grep -F '2.1.2-beta11'
+if [ "$audit" = 1 ]; then
+    # build-release.sh ships a stripped copy of src/zclassicd; accept either form.
+    # strip re-signs ad hoc using the file name as the identifier, so strip a
+    # copy that keeps the name zclassicd to reproduce build-release.sh exactly.
+    mkdir -p "$work/stripped"
+    stripped="$work/stripped/zclassicd"
+    cp "$ZCL_DAEMON_BUILD_DIR/src/zclassicd" "$stripped"
+    strip "$stripped"
+    cmp -s "$ZCL_DAEMON" "$ZCL_DAEMON_BUILD_DIR/src/zclassicd" || cmp -s "$ZCL_DAEMON" "$stripped" || {
+        echo 'The packaged daemon must match the audited native build exactly (stripped or not).' >&2
+        exit 1
+    }
+fi
+"$ZCL_DAEMON" --version | grep -F '2.1.2-beta13'
 cp "$ZCL_DAEMON" zclwallet.app/Contents/MacOS/zclassicd
 if [ "$static_qt" = 0 ]; then
     "$qt/bin/macdeployqt" zclwallet.app -verbose=2
@@ -49,6 +67,7 @@ fi
 otool -l "$root/res/libsodium.a" > minimum-os.txt
 # A final executable can report an older floor than its static inputs. Audit the
 # complete native dependency prefix and local archives, including proof code.
+if [ "$audit" = 1 ]; then
 find -L "$ZCL_DAEMON_BUILD_DIR/src" "$ZCL_DAEMON_DEPENDS_PREFIX/lib" \
     -type f -name '*.a' -print > daemon-archives.txt
 test -s daemon-archives.txt
@@ -57,6 +76,10 @@ while IFS= read -r archive; do
     shasum -a 256 "$archive" >> "$root/artifacts/release/macos-daemon-archives-SHA256SUMS.txt"
     otool -l "$archive" >> minimum-os.txt
 done < daemon-archives.txt
+else
+    : > "$root/artifacts/release/macos-daemon-archives-SHA256SUMS.txt"
+    echo 'daemon static-archive audit skipped: no ZCL_DAEMON_BUILD_DIR (daemon pinned by SHA256 only)' >> "$root/artifacts/release/macos-validation.txt"
+fi
 if [ "$static_qt" = 1 ]; then
     # A static archive can require a newer OS without raising the executable's
     # load-command minimum. Include toolchain objects in the compatibility gate.
@@ -151,10 +174,10 @@ mkdir dmg-root
 chmod 755 dmg-root
 mv zclwallet.app dmg-root/ZclWallet.app
 ln -s /Applications dmg-root/Applications
-output="$root/artifacts/release/zclwallet-v2.1.2-beta11-macos-arm64.dmg"
+output="$root/artifacts/release/zclwallet-v${release_version}-macos-arm64.dmg"
 [ ! -e "$output" ]
-hdiutil create -volname ZClassic-beta11 -srcfolder dmg-root -format UDZO "$output"
+hdiutil create -volname ZClassic-beta13 -srcfolder dmg-root -format UDZO "$output"
 hdiutil verify "$output"
 chmod 644 "$output"
 cd "$root/artifacts/release"
-shasum -a 256 zclwallet-v2.1.2-beta11-macos-arm64.dmg > macos-SHA256SUMS.txt
+shasum -a 256 zclwallet-v${release_version}-macos-arm64.dmg > macos-SHA256SUMS.txt

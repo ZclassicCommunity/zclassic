@@ -61,6 +61,8 @@ namespace Ui {
     class MainWindow;
 }
 
+class NamePayBox;
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -92,12 +94,23 @@ public:
     // diverging fresh snapshot (injected via RPC::testSetRepollUTXOs) and proceeds otherwise.
     bool testVerifyAutoShield(const Tx& tx) { return verifyAutoShieldUnchanged(tx); }
     void testSeedBalances();
+    QString testHumaneSendError(const QString& raw) { return humaneSendError(raw); }
+    QString testDoSendTxValidations(const Tx& tx) { return doSendTxValidations(tx); }
+    void    testShowSendSuccess(const QString& txid) { showSendSuccess(txid); }
+    void testForceTray() { testTrayForced = true; setupTrayIcon(); }
+    double  testSpendableOrFallback(const QString& addr) { return spendableOrFallback(addr); }
     // Build the send-page Tx through the REAL createTxFromSendPage() path so the
     // L1 fail-open tests (PRIV-10) exercise the actual production routing.
     Tx   testCreateTxFromSendPage() { return createTxFromSendPage(); }
     // Drive the REAL shield flow the Home fix-it button now uses (PRIV-18): set up
     // a t -> default-Sapling send on the Send page exactly as a click would.
     void testShieldPublicFunds()    { shieldPublicFunds(); }
+    void testBackupWallet()         { backupWallet(); }
+    void testSendButton()           { sendButton(); }
+    bool testAskKeepRunningInTray() { return askKeepRunningInTray(); }
+    QString testHeroText()   { return homeHeroPrivate ? homeHeroPrivate->text() : QString(); }
+    bool    testHeroHelperVisible() { return homeHeroHelper && !homeHeroHelper->isHidden(); }
+    QString testHeroQualifier()     { return homeHeroQualifier ? homeHeroQualifier->text() : QString(); }
 #endif
 
     QString doSendTxValidations(Tx tx);
@@ -175,7 +188,9 @@ public:
     QString             lastBannerSheet;
     void applyBannerStyle(const QString& sheet);
 
-    void setSyncStatus(bool isSyncing, int blockNumber, int estimatedHeight, double progress);
+    // tipAge: seconds since the newest block (-1 unknown); kind: SyncState::Kind (-1 none).
+    void setSyncStatus(bool isSyncing, int blockNumber, int estimatedHeight, double progress,
+                       qint64 tipAge = -1, int kind = -1);
     void setSyncStatusConnecting();
     QString connectionStartupError; // Retained across disconnected polling; cleared on retry/success.
     QString connectionStartupProgress; // Visible even when the startup overlay is closed.
@@ -204,6 +219,10 @@ public:
     // the WARMING (de-confidenced) hero state regardless of the isSyncing flag, which
     // is not yet set on the very first paint. All live callers use the default (false).
     void updateHomeFixIt(double transparent, bool fromCache = false);
+    // No node connection: the balance is UNKNOWN, not zero. Replaces the hero's "0 ZCL" and
+    // its "receive ZCL to get started" helper (which read as "your funds are gone") with a
+    // dash and an explicit note that funds are unaffected.
+    void showHeroUnavailable();
 
     // PRIV-28 eager Sapling provisioning: ensure at least one Sapling z-address
     // exists so the send/shield path never has to block on key generation (the
@@ -212,7 +231,8 @@ public:
     void ensureSaplingProvisioned();
     // longStretch=true after a LONG peerless stretch (~3min): adds a stronger
     // "check your internet / try again later" hint (SELF-HEAL SYNCED-ZERO-PEERS).
-    void setSyncStatusWaitingForPeers(bool longStretch = false);
+    void setSyncStatusWaitingForPeers(bool longStretch = false, int blockNumber = 0, qint64 tipAge = -1);
+    void setSyncStatusNetworkConnecting(int blockNumber = 0, qint64 tipAge = -1);
     // Bootstrap snapshot download in progress (getbootstrapinfo phase==active): show a
     // determinate "Downloading blockchain snapshot — X%" (with GB + MB/s when known)
     // instead of the misleading "waiting for peers" -- the node is actively
@@ -317,9 +337,16 @@ private:
     void resizeEvent(QResizeEvent* event) override;
 
     void setupTrayIcon();
+    bool trayAvailable() const;   // the system tray exists (a test can force it)
+#ifdef ZCL_WIDGET_TEST
+    bool testTrayForced = false;
+#endif
     QSystemTrayIcon* trayIcon       = nullptr;
     bool             quitting       = false;
     bool             trayHintShown  = false;
+    // First-time close notice: tells the user the node keeps running and offers to quit now.
+    // Returns true to keep running in the tray, false if the user chose to quit.
+    bool askKeepRunningInTray();
 
     void setupSendTab();
     void setupTransactionsTab();
@@ -472,6 +499,17 @@ private:
     void editSchedule();
 
     void addressChanged(int number, const QString& text);
+    // Everything that depends on what the Pay-to field currently stands for (validation border, memo, badge,
+    // totals). Split out of addressChanged so a change of a name's answer can refresh it without re-reading the text.
+    void refreshAddressField(int number);
+    // Pay to a name ("@alice"): see src/namepaybox.h. The box under the field holds the lookup and the user's
+    // confirmation of the ADDRESS; the transaction only ever carries that address.
+    NamePayBox* nameBoxFor(int number) const;
+    NamePayBox* makeNameBox(int number, QWidget* parent);
+    // False when sending must wait: a name is unconfirmed, still being looked up, or is being checked again just
+    // before sending (sendButton() is then called again by the check itself).
+    bool checkNameRecipients();
+    bool nameRecheckPassed_ = false;
     void amountChanged (int number, const QString& text);
     // PRESENTATION-ONLY helpers (no money/zatoshi math): the live private/public verdict
     // badge above the Send form (echoes sendCategoryOf), and the running "You'll send X +
@@ -541,5 +579,9 @@ private:
 
     QMovie*      loadingMovie;
 };
+
+// Activity (transactions) table column sizing; see mainwindow.cpp.
+void applyActivityColumnLayout(QTableView* table);
+void applyBalanceColumnLayout(QTableView* table);
 
 #endif // MAINWINDOW_H

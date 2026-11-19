@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "zcash/Address.hpp"
+#include "main.h"
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
 #include "util.h"
@@ -20,6 +21,7 @@ TEST(wallet_zkeys_tests, StoreAndLoadSaplingZkeys) {
     SelectParams(CBaseChainParams::MAIN);
 
     CWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     // wallet should be empty
     std::set<libzcash::SaplingPaymentAddress> addrs;
@@ -114,6 +116,7 @@ TEST(wallet_zkeys_tests, store_and_load_zkeys) {
     SelectParams(CBaseChainParams::MAIN);
 
     CWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     // wallet should be empty
     std::set<libzcash::SproutPaymentAddress> addrs;
@@ -171,6 +174,7 @@ TEST(wallet_zkeys_tests, StoreAndLoadViewingKeys) {
     SelectParams(CBaseChainParams::MAIN);
 
     CWallet wallet;
+    LOCK2(cs_main, wallet.cs_wallet);
 
     // wallet should be empty
     std::set<libzcash::SproutPaymentAddress> addrs;
@@ -217,12 +221,13 @@ TEST(wallet_zkeys_tests, write_zkey_direct_to_db) {
 
     // Get temporary and unique path for file.
     // Note: / operator to append paths
-    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / UniquePath();
     boost::filesystem::create_directories(pathTemp);
     mapArgs["-datadir"] = pathTemp.string();
 
     bool fFirstRun;
     CWallet wallet("wallet.dat");
+    LOCK2(cs_main, wallet.cs_wallet);
     ASSERT_EQ(DB_LOAD_OK, wallet.LoadWallet(fFirstRun));
 
     // No default CPubKey set
@@ -289,12 +294,13 @@ TEST(wallet_zkeys_tests, WriteViewingKeyDirectToDB) {
 
     // Get temporary and unique path for file.
     // Note: / operator to append paths
-    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / UniquePath();
     boost::filesystem::create_directories(pathTemp);
     mapArgs["-datadir"] = pathTemp.string();
 
     bool fFirstRun;
     CWallet wallet("wallet-vkey.dat");
+    LOCK2(cs_main, wallet.cs_wallet);
     ASSERT_EQ(DB_LOAD_OK, wallet.LoadWallet(fFirstRun));
 
     // No default CPubKey set
@@ -334,12 +340,13 @@ TEST(wallet_zkeys_tests, write_cryptedzkey_direct_to_db) {
 
     // Get temporary and unique path for file.
     // Note: / operator to append paths
-    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / UniquePath();
     boost::filesystem::create_directories(pathTemp);
     mapArgs["-datadir"] = pathTemp.string();
 
     bool fFirstRun;
     CWallet wallet("wallet_crypted.dat");
+    LOCK2(cs_main, wallet.cs_wallet);
     ASSERT_EQ(DB_LOAD_OK, wallet.LoadWallet(fFirstRun));
 
     // No default CPubKey set
@@ -372,6 +379,7 @@ TEST(wallet_zkeys_tests, write_cryptedzkey_direct_to_db) {
 
     // Create a new wallet from the existing wallet path
     CWallet wallet2("wallet_crypted.dat");
+    LOCK(wallet2.cs_wallet);
     ASSERT_EQ(DB_LOAD_OK, wallet2.LoadWallet(fFirstRun));
 
     // Confirm it's not the same as the other wallet
@@ -408,12 +416,13 @@ TEST(wallet_zkeys_tests, WriteCryptedSaplingZkeyDirectToDb) {
 
     // Get temporary and unique path for file.
     // Note: / operator to append paths
-    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+    boost::filesystem::path pathTemp = boost::filesystem::temp_directory_path() / UniquePath();
     boost::filesystem::create_directories(pathTemp);
     mapArgs["-datadir"] = pathTemp.string();
 
     bool fFirstRun;
     CWallet wallet("wallet_crypted_sapling.dat");
+    LOCK2(cs_main, wallet.cs_wallet);
     ASSERT_EQ(DB_LOAD_OK, wallet.LoadWallet(fFirstRun));
 
      // No default CPubKey set
@@ -461,6 +470,7 @@ TEST(wallet_zkeys_tests, WriteCryptedSaplingZkeyDirectToDb) {
 
     // Create a new wallet from the existing wallet path
     CWallet wallet2("wallet_crypted_sapling.dat");
+    LOCK(wallet2.cs_wallet);
     ASSERT_EQ(DB_LOAD_OK, wallet2.LoadWallet(fFirstRun));
 
     // Confirm it's not the same as the other wallet

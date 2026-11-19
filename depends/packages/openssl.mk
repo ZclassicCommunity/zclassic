@@ -1,15 +1,19 @@
 package=openssl
-$(package)_version=1.1.1w
-$(package)_download_path=https://www.openssl.org/source
+$(package)_version=3.5.9
+$(package)_download_path=https://github.com/openssl/openssl/releases/download/openssl-$($(package)_version)
 $(package)_file_name=$(package)-$($(package)_version).tar.gz
-$(package)_sha256_hash=cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8
+$(package)_sha256_hash=603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
 
 define $(package)_set_vars
 $(package)_config_env=AR="$($(package)_ar)" RANLIB="$($(package)_ranlib)" CC="$($(package)_cc)"
 $(package)_config_env_darwin=CC="$($(package)_cc) $(shell command -v xcrun >/dev/null 2>&1 && echo "-isysroot$$(xcrun --show-sdk-path)")"
-$(package)_config_opts=--prefix=$(host_prefix) --openssldir=$(host_prefix)/etc/openssl
+$(package)_config_opts=--prefix=$(host_prefix) --libdir=lib --openssldir=$(host_prefix)/etc/openssl
 $(package)_config_opts+=no-afalgeng
-$(package)_config_opts+=no-asm
+$(package)_config_opts+=no-legacy
+$(package)_config_opts+=no-module
+$(package)_config_opts+=no-apps
+$(package)_config_opts+=no-tests
+$(package)_config_opts+=no-docs
 $(package)_config_opts+=no-async
 $(package)_config_opts+=no-bf
 $(package)_config_opts+=no-blake2
@@ -66,7 +70,7 @@ $(package)_config_opts+=no-ssl-trace
 $(package)_config_opts+=no-tls1
 $(package)_config_opts+=no-tls1-method
 $(package)_config_opts+=no-ts
-$(package)_config_opts+=no-ui
+$(package)_config_opts+=no-ui-console
 $(package)_config_opts+=no-unit-test
 $(package)_config_opts+=no-weak-ssl-ciphers
 $(package)_config_opts+=no-whirlpool
@@ -90,8 +94,7 @@ $(package)_config_opts_i686_mingw32=mingw
 endef
 
 define $(package)_preprocess_cmds
-  sed -i.old 's/built on: $$$$date/built on: date not available/' util/mkbuildinf.pl && \
-  sed -i.old "s|\"engines\", \"apps\", \"test\"|\"engines\"|" Configure
+  sed -i.old 's/built on: $$$$date/built on: date not available/' util/mkbuildinf.pl
 endef
 
 define $(package)_config_cmds

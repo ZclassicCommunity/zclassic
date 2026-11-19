@@ -468,7 +468,16 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             ssValue >> wtx;
             CValidationState state;
             auto verifier = libzcash::ProofVerifier::Strict();
-            if (!(CheckTransaction(wtx, state, verifier) && (wtx.GetHash() == hash) && state.IsValid()))
+            // A stored wallet transaction may be one of the 413 historical oversize
+            // mainnet transactions (consensus/oversize_grandfather.h). Those were mined
+            // and are identified by (txid, exact size), so accept them here as CheckBlock
+            // does. With the strict limit such a record failed this check on every start:
+            // the wallet reported a wallet.dat read error, dropped the transaction and
+            // forced a full rescan each time. Nothing else is relaxed: the record must still
+            // hash to its key, and a wallet transaction is relayed only at depth 0, i.e. while
+            // it is in the mempool, which only the strict AcceptToMemoryPool admits.
+            const bool fAdmitGrandfatheredOversize = true; // CheckTransaction fInBlock
+            if (!(CheckTransaction(wtx, state, verifier, fAdmitGrandfatheredOversize) && (wtx.GetHash() == hash) && state.IsValid()))
                 return false;
 
             // Undo serialize changes in 31600
@@ -1054,6 +1063,15 @@ DBErrors CWalletDB::ZapWalletTx(CWallet* pwallet, vector<CWalletTx>& vWtx)
     if (err != DB_LOAD_OK)
         return err;
 
+    // The transactions are erased one by one here and found again only by the -rescan that
+    // -zapwallettxes implies. Point the best-block locator at no block first, so that a process
+    // that dies before that rescan has ended rescans from genesis on its next start, instead of
+    // trusting a locator that promises transactions which are no longer in the file. The write
+    // reaches the log before any erase does. An empty locator is what older releases also read
+    // as "rescan from genesis".
+    if (!vTxHash.empty() && !WriteBestBlock(CBlockLocator()))
+        return DB_CORRUPT;
+
     // erase each wallet TX
     BOOST_FOREACH (uint256& hash, vTxHash) {
         if (!EraseTx(hash))
@@ -1129,6 +1147,24 @@ bool BackupWallet(const CWallet& wallet, const string& strDest)
 {
     if (!wallet.fFileBacked)
         return false;
+
+    // The destination must not be the wallet file itself: copy_file opens the
+    // destination with O_TRUNC before it compares the two files, which would
+    // cut wallet.dat to zero bytes. Decide this before the database is closed.
+    boost::filesystem::path pathSrc = GetDataDir() / wallet.strWalletFile;
+    boost::filesystem::path pathDest(strDest);
+    if (boost::filesystem::is_directory(pathDest))
+        pathDest /= wallet.strWalletFile;
+    try {
+        if (boost::filesystem::exists(pathDest) && boost::filesystem::equivalent(pathSrc, pathDest)) {
+            LogPrintf("BackupWallet: refusing to back up %s onto itself\n", pathDest.string());
+            return false;
+        }
+    } catch (const boost::filesystem::filesystem_error& e) {
+        LogPrintf("BackupWallet: cannot compare %s with the wallet file - %s\n", pathDest.string(), e.what());
+        return false;
+    }
+
     while (true)
     {
         {
@@ -1140,20 +1176,35 @@ bool BackupWallet(const CWallet& wallet, const string& strDest)
                 bitdb.CheckpointLSN(wallet.strWalletFile);
                 bitdb.mapFileUseCount.erase(wallet.strWalletFile);
 
-                // Copy wallet.dat
-                boost::filesystem::path pathSrc = GetDataDir() / wallet.strWalletFile;
-                boost::filesystem::path pathDest(strDest);
-                if (boost::filesystem::is_directory(pathDest))
-                    pathDest /= wallet.strWalletFile;
-
+                // Copy wallet.dat atomically: write and verify a temporary file next to
+                // the destination, then rename it over. The database stays closed
+                // (and the lock held) until the source has been read again.
+                // pathTmp stays empty until named, so the catch can never remove pathDest.
+                boost::filesystem::path pathTmp;
                 try {
-                    boost::filesystem::copy_file(pathSrc, pathDest, boost::filesystem::copy_options::overwrite_existing);
-                    LogPrintf("copied wallet.dat to %s\n", pathDest.string());
-                    return true;
-                } catch (const boost::filesystem::filesystem_error& e) {
+                    pathTmp = pathDest.string() + ".tmp." + RandomSuffix(16);
+                    // Exclusive create (never follows a planted name); synchronize_data
+                    // fdatasyncs (F_FULLFSYNC on macOS, FlushFileBuffers on Windows) and
+                    // reports its failure, unlike FileCommit.
+                    boost::filesystem::copy_file(pathSrc, pathTmp, boost::filesystem::copy_options::synchronize_data);
+                    std::string digestSrc, digestTmp, err;
+                    if (!HashFileSHA256(pathSrc, digestSrc, err) || !HashFileSHA256(pathTmp, digestTmp, err))
+                        throw std::runtime_error(err);
+                    if (digestSrc != digestTmp)
+                        throw std::runtime_error("SHA-256 of the copy differs from the wallet file");
+                    // Throws with the OS error; MoveFileExW(REPLACE_EXISTING) on Windows.
+                    boost::filesystem::rename(pathTmp, pathDest);
+                } catch (const std::exception& e) {
+                    boost::system::error_code ec;
+                    if (!pathTmp.empty())
+                        boost::filesystem::remove(pathTmp, ec);
                     LogPrintf("error copying wallet.dat to %s - %s\n", pathDest.string(), e.what());
                     return false;
                 }
+                if (!DirectoryCommit(pathDest.parent_path()))
+                    LogPrintf("BackupWallet: %s is in place but its directory could not be synced\n", pathDest.string());
+                LogPrintf("copied wallet.dat to %s (verified, SHA-256 matches)\n", pathDest.string());
+                return true;
             }
         }
         MilliSleep(100);

@@ -44,7 +44,7 @@ set -uo pipefail
 
 # ---- committed constants (match shot.sh / uxmatrix.sh conventions) -----------
 DISP=":99"
-APP_VERSION="${APP_VERSION:-2.1.2-beta5}"
+APP_VERSION="${APP_VERSION:-2.1.2-beta13}"
 BUN="/src/wallet/artifacts/linux-zclwallet-v${APP_VERSION}"
 MOCK="/src/wallet/tests/mock/mockrpc.py"
 SCENARIO="${MOCK_SCENARIO:-funded-synced}"

@@ -7,6 +7,7 @@
 
 #include "net.h"
 #include "protocol.h"
+#include "bootstrap_resume.h"
 #include "streams.h"
 
 #include <stdint.h>
@@ -42,9 +43,52 @@ static const int64_t BOOTSTRAP_SNAPSHOT_DISK_SAFETY_MARGIN_BYTES = 1LL * 1024 * 
 // serving node throttles it, and the throttled rate to fall back to.
 static const int64_t BOOTSTRAP_SERVE_DEFAULT_MAX_BYTES_PER_DAY = 100LL * 1024 * 1024 * 1024; // 100 GiB
 static const int64_t BOOTSTRAP_SERVE_DEFAULT_THROTTLE_KBPS = 1024;                            // 1 MiB/s
+//! Seconds an onion-only node waits, counted from StartNode(), for an onion
+//! bootstrap peer before it falls back to the clearnet bootstrap peers
+//! through Tor.
+static const int64_t BOOTSTRAP_ONION_GRACE_SECONDS = 300;
 
 bool BootstrapSnapshotPathsExist(const boost::filesystem::path& root);
 bool IsBootstrapFreshChainDatadir(const boost::filesystem::path& data_dir, std::string& error);
+
+/** Remove bootstrap-peer-staging-* directories under data_dir, except the one named keepName
+ *  (empty keepName removes them all). An interrupted or killed snapshot download leaves its
+ *  staging directory behind so the next attempt can resume it; only directories of a different
+ *  snapshot (or of older, per-epoch naming) are removed while a download is in progress, and
+ *  everything is removed when no bootstrap will run any more. Returns the number removed. */
+size_t RemoveStaleBootstrapStaging(const boost::filesystem::path& data_dir, const std::string& keepName = std::string());
+
+/** The bootstrap-peer-staging-* directories under data_dir (a kept, resumable partial download). */
+std::vector<boost::filesystem::path> ListBootstrapStagingDirs(const boost::filesystem::path& data_dir);
+
+/** Choose and prepare the staging directory for the snapshot `manifest` describes. The name is
+ *  stable for a given snapshot anchor (bootstrap_resume.h), so a directory left by an interrupted
+ *  attempt is found again. `verdict` says whether it was reused (BSV_REUSE_*) or started clean;
+ *  directories of other snapshots and directories without a valid marker are deleted. Nothing in a
+ *  reused directory is trusted: the downloader re-verifies every file against `manifest`. */
+bool BootstrapPrepareStaging(const boost::filesystem::path& data_dir, const CBootstrapSnapshotManifest& manifest,
+                             boost::filesystem::path& staging, BootstrapStagingVerdict& verdict, std::string& error);
+
+/** Classify every file of `manifest` in `staging` against the manifest's SHA-256 hashes (see
+ *  bootstrap_resume.h for the decision rules): complete verified files are kept, partial files
+ *  are marked to continue from a chunk-aligned offset, corrupt/wrong-size/unknown files are
+ *  deleted. `pending` receives the manifest indices still to fetch; `completed` the verified
+ *  bytes plus the bytes of resumable partial files. Hashing runs on a few threads. */
+bool BootstrapResumeScan(const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging,
+                         std::vector<uint32_t>& pending, uint64_t& completed,
+                         BootstrapResumeStats& stats, std::string& error);
+
+/** Download a manifest's files into `staging` over up to `nStreams` parallel connections to
+ *  `peerAddress`, reusing what BootstrapResumeScan finds there. A failed stream is retried with
+ *  backoff while the others continue; see the definition for the fatal conditions. */
+bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::string& peer,
+                                       const CBootstrapSnapshotManifest& manifest,
+                                       const boost::filesystem::path& staging, int timeout_ms, int nStreams,
+                                       std::string& error);
+/** Test hook: shorten the parallel downloader's whole-attempt watchdogs (no byte at all for
+ *  `stallFailMs`; aggregate rate below the minimum throughput over `aggregateWindowMs`).
+ *  A value <= 0 restores the five-minute default. */
+void BootstrapSetWatchdogForTests(int64_t stallFailMs, int64_t aggregateWindowMs);
 // True if the datadir holds only a genesis-height chainstate (initialized but
 // never synced past genesis); such a datadir carries no real chain.
 bool IsGenesisOnlyChainDatadir(const boost::filesystem::path& data_dir, std::string& error);
@@ -119,6 +163,51 @@ std::vector<std::string> DiscoverBootstrapPeers();
 //! Effective bootstrap peer list: all -bootstrappeer entries (repeatable) if
 //! set, else the compiled per-network defaults (CChainParams::BootstrapPeers).
 std::vector<std::string> GetBootstrapPeerList();
+
+//! Which bootstrap peers a node uses. Pure so it can be tested for every
+//! mode. `fOnionReachable`: an onion proxy is set (embedded Tor up, or
+//! -onion/-proxy). `fOnionOnly`: IPv4 and IPv6 are both limited
+//! (-onlynet=onion). `fFallback`: the onion peers stayed unreachable.
+//!  - Tor off / no onion proxy / no onion peers: the clearnet peers (as before).
+//!  - Tor on, clearnet allowed: the clearnet peers only. The onion services
+//!    are the same two nodes, so adding them would just double-count each
+//!    node (two slots, two connections to one machine).
+//!  - onion-only: the onion peers, so the node never leaves Tor to dial the
+//!    clearnet IPs through an exit; after fallback, the clearnet peers.
+std::vector<std::string> SelectBootstrapPeers(const std::vector<std::string>& clearnet,
+                                              const std::vector<std::string>& onion,
+                                              bool fOnionReachable, bool fOnionOnly, bool fFallback);
+
+//! True when this node is onion-only with an onion proxy configured right now.
+bool BootstrapOnionOnlyActive();
+
+//! True when the arguments say that no connection may leave the node directly
+//! (-proxy, or an -onlynet list without ipv4/ipv6). The Zcash parameter fetch
+//! of init runs before the proxies are set up and would dial the bootstrap
+//! peers directly, so it must be skipped then.
+bool ZcashParamFetchWouldBypassProxy();
+
+//! True when the (IPv4) clearnet bootstrap peers would be dialled through a
+//! proxy. Without one (-onion given but no -proxy) the connection leaves from
+//! the node's own address, so an onion-only node must not use them.
+bool BootstrapClearnetProxied();
+
+//! Whether the clearnet bootstrap peers should now be added to an onion-only
+//! node: it has waited `nGraceSeconds`, no onion bootstrap peer is connected
+//! and it has no other outbound peer (a node with healthy onion peers never
+//! needs to leave Tor).
+bool BootstrapFallbackDue(bool fOnionOnly, int nOnionBootstrapConnected, int nOutbound,
+                          int64_t nElapsedSeconds, int64_t nGraceSeconds);
+
+//! Scheduled once by init for an onion-only node using the onion bootstrap
+//! peers: after the grace period, applies BootstrapFallbackDue() and, if due,
+//! logs once and adds the clearnet bootstrap peers as persistent sync nodes.
+void BootstrapOnionFallbackCheck();
+
+//! Peers for the snapshot fetch: GetBootstrapPeerList(), and for an onion-only
+//! node the clearnet peers (through the proxy that covers them, never directly)
+//! are tried after the onion ones.
+std::vector<std::string> GetBootstrapSnapshotPeerList();
 
 //! Auto-serve (-bootstrapserve=auto): activate serving from the immutable copy
 //! this node retained when it fast-synced (data_dir/bootstrap-serve-source).

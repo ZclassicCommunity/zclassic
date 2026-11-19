@@ -169,7 +169,7 @@ BOOST_FIXTURE_TEST_SUITE(bootstrap_snapshot_protocol_tests, BasicTestingSetup)
 BOOST_AUTO_TEST_CASE(bootstrap_reconnect_reuses_only_verified_complete_files)
 {
     namespace fs = boost::filesystem;
-    const fs::path staging = fs::temp_directory_path() / fs::unique_path("bootstrap-resume-%%%%-%%%%");
+    const fs::path staging = fs::temp_directory_path() / UniquePath("bootstrap-resume-%%%%-%%%%");
     struct Cleanup {
         fs::path path;
         ~Cleanup() { boost::system::error_code ec; fs::remove_all(path, ec); }
@@ -212,7 +212,7 @@ BOOST_AUTO_TEST_CASE(bootstrap_reconnect_reuses_only_verified_complete_files)
 BOOST_AUTO_TEST_CASE(bootstrap_download_disconnect_then_resume)
 {
     namespace fs = boost::filesystem;
-    const fs::path staging = fs::temp_directory_path() / fs::unique_path("bootstrap-wire-resume-%%%%-%%%%");
+    const fs::path staging = fs::temp_directory_path() / UniquePath("bootstrap-wire-resume-%%%%-%%%%");
     struct Cleanup {
         fs::path path;
         ~Cleanup() { boost::system::error_code ec; fs::remove_all(path, ec); }
@@ -1142,7 +1142,7 @@ BOOST_AUTO_TEST_CASE(bootstrap_network_message_header_failures)
 
 BOOST_AUTO_TEST_CASE(bootstrap_fresh_chain_datadir_checks_chain_files)
 {
-    boost::filesystem::path root = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("zclassic-bootstrap-fresh-%%%%-%%%%-%%%%");
+    boost::filesystem::path root = boost::filesystem::temp_directory_path() / UniquePath("zclassic-bootstrap-fresh-%%%%-%%%%-%%%%");
     boost::filesystem::create_directories(root);
 
     std::string error;
@@ -1196,7 +1196,7 @@ BOOST_AUTO_TEST_CASE(bootstrap_genesis_only_datadir_is_eligible_real_chain_is_no
     std::string error;
 
     // ---- genesis-only datadir ----
-    fs::path gen = fs::temp_directory_path() / fs::unique_path("zclassic-bootstrap-genonly-%%%%-%%%%-%%%%");
+    fs::path gen = fs::temp_directory_path() / UniquePath("zclassic-bootstrap-genonly-%%%%-%%%%-%%%%");
     fs::create_directories(gen);
     WriteChainstateWithTip(gen, Params().GenesisBlock().GetHash());
     fs::create_directories(gen / "blocks");
@@ -1215,7 +1215,7 @@ BOOST_AUTO_TEST_CASE(bootstrap_genesis_only_datadir_is_eligible_real_chain_is_no
     BOOST_CHECK(IsBootstrapFreshChainDatadir(gen, error));
 
     // ---- real (post-genesis) chain datadir: must never be clobbered ----
-    fs::path real = fs::temp_directory_path() / fs::unique_path("zclassic-bootstrap-real-%%%%-%%%%-%%%%");
+    fs::path real = fs::temp_directory_path() / UniquePath("zclassic-bootstrap-real-%%%%-%%%%-%%%%");
     fs::create_directories(real);
     WriteChainstateWithTip(real, uint256S("0x00000000000000000000000000000000000000000000000000000000deadbeef"));
     fs::create_directories(real / "blocks");
@@ -1232,7 +1232,7 @@ BOOST_AUTO_TEST_CASE(bootstrap_genesis_only_datadir_is_eligible_real_chain_is_no
     // ---- size gate: a genesis-tip chainstate padded past the threshold is
     //      classified as a real chain WITHOUT opening leveldb (the cheap stat
     //      walk short-circuits, so a synced node never re-opens its live DB). ----
-    fs::path big = fs::temp_directory_path() / fs::unique_path("zclassic-bootstrap-big-%%%%-%%%%-%%%%");
+    fs::path big = fs::temp_directory_path() / UniquePath("zclassic-bootstrap-big-%%%%-%%%%-%%%%");
     fs::create_directories(big);
     WriteChainstateWithTip(big, Params().GenesisBlock().GetHash()); // tip == genesis
     {
@@ -1249,7 +1249,7 @@ BOOST_AUTO_TEST_CASE(bootstrap_genesis_only_datadir_is_eligible_real_chain_is_no
     //      while blocks/ keeps the full downloaded chain). Must NOT be treated as
     //      genesis-only, must NOT be eligible, and the real blocks must be left
     //      strictly in place — never moved aside or deleted. ----
-    fs::path rblocks = fs::temp_directory_path() / fs::unique_path("zclassic-bootstrap-rblocks-%%%%-%%%%-%%%%");
+    fs::path rblocks = fs::temp_directory_path() / UniquePath("zclassic-bootstrap-rblocks-%%%%-%%%%-%%%%");
     fs::create_directories(rblocks);
     WriteChainstateWithTip(rblocks, Params().GenesisBlock().GetHash()); // chainstate at genesis
     fs::create_directories(rblocks / "blocks");
@@ -1274,8 +1274,8 @@ BOOST_AUTO_TEST_CASE(bootstrap_genesis_only_datadir_is_eligible_real_chain_is_no
 
 BOOST_AUTO_TEST_CASE(bootstrap_import_datadir_refuses_existing_without_force)
 {
-    boost::filesystem::path source = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("zclassic-bootstrap-import-source-%%%%-%%%%-%%%%");
-    boost::filesystem::path dest = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("zclassic-bootstrap-import-dest-%%%%-%%%%-%%%%");
+    boost::filesystem::path source = boost::filesystem::temp_directory_path() / UniquePath("zclassic-bootstrap-import-source-%%%%-%%%%-%%%%");
+    boost::filesystem::path dest = boost::filesystem::temp_directory_path() / UniquePath("zclassic-bootstrap-import-dest-%%%%-%%%%-%%%%");
 
     WriteFixtureFile(source / "blocks" / "blk00000.dat", "source-block");
     WriteFixtureFile(source / "blocks" / "index" / "000001.ldb", "source-index");
@@ -1293,8 +1293,8 @@ BOOST_AUTO_TEST_CASE(bootstrap_import_datadir_refuses_existing_without_force)
 
 BOOST_AUTO_TEST_CASE(bootstrap_import_datadir_force_backs_up_and_replaces)
 {
-    boost::filesystem::path source = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("zclassic-bootstrap-import-source-%%%%-%%%%-%%%%");
-    boost::filesystem::path dest = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("zclassic-bootstrap-import-dest-%%%%-%%%%-%%%%");
+    boost::filesystem::path source = boost::filesystem::temp_directory_path() / UniquePath("zclassic-bootstrap-import-source-%%%%-%%%%-%%%%");
+    boost::filesystem::path dest = boost::filesystem::temp_directory_path() / UniquePath("zclassic-bootstrap-import-dest-%%%%-%%%%-%%%%");
 
     WriteFixtureFile(source / "blocks" / "blk00000.dat", "source-block");
     WriteFixtureFile(source / "blocks" / "index" / "000001.ldb", "source-index");
@@ -1582,7 +1582,7 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_rejects_oversize)
 BOOST_AUTO_TEST_CASE(zcash_param_specs_pin_expected_sizes)
 {
     const std::vector<ZcashParamSpec>& specs = GetZcashParamSpecs();
-    BOOST_REQUIRE_EQUAL(specs.size(), 5);
+    BOOST_REQUIRE_EQUAL(specs.size(), 4);
 
     BOOST_CHECK_EQUAL(specs[0].name, "sapling-output.params");
     BOOST_CHECK_EQUAL(specs[0].nSize, 3592860ULL);
@@ -1590,10 +1590,8 @@ BOOST_AUTO_TEST_CASE(zcash_param_specs_pin_expected_sizes)
     BOOST_CHECK_EQUAL(specs[1].nSize, 47958396ULL);
     BOOST_CHECK_EQUAL(specs[2].name, "sprout-groth16.params");
     BOOST_CHECK_EQUAL(specs[2].nSize, 725523612ULL);
-    BOOST_CHECK_EQUAL(specs[3].name, "sprout-proving.key");
-    BOOST_CHECK_EQUAL(specs[3].nSize, 910173851ULL);
-    BOOST_CHECK_EQUAL(specs[4].name, "sprout-verifying.key");
-    BOOST_CHECK_EQUAL(specs[4].nSize, 1449ULL);
+    BOOST_CHECK_EQUAL(specs[3].name, "sprout-verifying.key");
+    BOOST_CHECK_EQUAL(specs[3].nSize, 1449ULL);
 }
 
 BOOST_AUTO_TEST_CASE(bootstrap_manifest_and_chunk_service_helpers)
@@ -1603,7 +1601,7 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_and_chunk_service_helpers)
     const std::string oldServe = hadServe ? mapArgs["-bootstrapserve"] : "";
     const std::string oldSource = hadSource ? mapArgs["-bootstrapsourcedir"] : "";
 
-    boost::filesystem::path root = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("zclassic-bootstrap-source-%%%%-%%%%-%%%%");
+    boost::filesystem::path root = boost::filesystem::temp_directory_path() / UniquePath("zclassic-bootstrap-source-%%%%-%%%%-%%%%");
     boost::filesystem::create_directories(root / "blocks" / "index");
     boost::filesystem::create_directories(root / "chainstate");
 
@@ -2016,9 +2014,9 @@ BOOST_AUTO_TEST_CASE(bootstrap_snapshot_full_transfer_roundtrip)
     const std::string oldSource = hadSource ? mapArgs["-bootstrapsourcedir"] : "";
 
     namespace fs = boost::filesystem;
-    const fs::path root    = fs::temp_directory_path() / fs::unique_path("zclassic-bs-e2e-src-%%%%-%%%%-%%%%");
-    const fs::path dest    = fs::temp_directory_path() / fs::unique_path("zclassic-bs-e2e-dst-%%%%-%%%%-%%%%");
-    const fs::path staging = fs::temp_directory_path() / fs::unique_path("zclassic-bs-e2e-stg-%%%%-%%%%-%%%%");
+    const fs::path root    = fs::temp_directory_path() / UniquePath("zclassic-bs-e2e-src-%%%%-%%%%-%%%%");
+    const fs::path dest    = fs::temp_directory_path() / UniquePath("zclassic-bs-e2e-dst-%%%%-%%%%-%%%%");
+    const fs::path staging = fs::temp_directory_path() / UniquePath("zclassic-bs-e2e-stg-%%%%-%%%%-%%%%");
 
     fs::create_directories(root / "blocks" / "index");
     fs::create_directories(root / "chainstate");
@@ -2138,7 +2136,7 @@ BOOST_AUTO_TEST_CASE(bootstrap_auto_serve_activates_on_matching_marker)
     const std::string oldSource = hadSource ? mapArgs["-bootstrapsourcedir"] : "";
 
     namespace fs = boost::filesystem;
-    const fs::path data_dir = fs::temp_directory_path() / fs::unique_path("zclassic-bootstrap-autoserve-ok-%%%%-%%%%-%%%%");
+    const fs::path data_dir = fs::temp_directory_path() / UniquePath("zclassic-bootstrap-autoserve-ok-%%%%-%%%%-%%%%");
     const fs::path serveSrc = data_dir / "bootstrap-serve-source";
     // Empty dirs satisfy BootstrapSnapshotPathsExist (it only checks the tree).
     fs::create_directories(serveSrc / "blocks" / "index");
@@ -2172,7 +2170,7 @@ BOOST_AUTO_TEST_CASE(bootstrap_auto_serve_rejects_stale_anchor)
     const std::string oldSource = hadSource ? mapArgs["-bootstrapsourcedir"] : "";
 
     namespace fs = boost::filesystem;
-    const fs::path data_dir = fs::temp_directory_path() / fs::unique_path("zclassic-bootstrap-autoserve-stale-%%%%-%%%%-%%%%");
+    const fs::path data_dir = fs::temp_directory_path() / UniquePath("zclassic-bootstrap-autoserve-stale-%%%%-%%%%-%%%%");
     const fs::path serveSrc = data_dir / "bootstrap-serve-source";
     fs::create_directories(serveSrc / "blocks" / "index");
     fs::create_directories(serveSrc / "chainstate");
@@ -2203,7 +2201,7 @@ BOOST_AUTO_TEST_CASE(bootstrap_auto_serve_no_serve_dir)
     const std::string oldSource = hadSource ? mapArgs["-bootstrapsourcedir"] : "";
 
     namespace fs = boost::filesystem;
-    const fs::path data_dir = fs::temp_directory_path() / fs::unique_path("zclassic-bootstrap-autoserve-noserve-%%%%-%%%%-%%%%");
+    const fs::path data_dir = fs::temp_directory_path() / UniquePath("zclassic-bootstrap-autoserve-noserve-%%%%-%%%%-%%%%");
     fs::create_directories(data_dir);
     const fs::path marker = data_dir / "bootstrap-serve-source.anchor";
     // An orphan marker with no serve dir alongside it.
@@ -2362,7 +2360,7 @@ BOOST_AUTO_TEST_CASE(bootstrap_pending_markers_are_durable_and_gate_verification
 
     // --- anchor-mode marker (the production-default path) ---
     {
-        const fs::path data_dir = fs::temp_directory_path() / fs::unique_path("zclassic-bs-anchor-pending-%%%%-%%%%-%%%%");
+        const fs::path data_dir = fs::temp_directory_path() / UniquePath("zclassic-bs-anchor-pending-%%%%-%%%%-%%%%");
         fs::create_directories(data_dir);
 
         // A fresh datadir has no pending marker, so a normal (non-bootstrap) start
@@ -2412,7 +2410,7 @@ BOOST_AUTO_TEST_CASE(bootstrap_pending_markers_are_durable_and_gate_verification
 
     // --- trustless-mode marker (off-by-default Option B path) ---
     {
-        const fs::path data_dir = fs::temp_directory_path() / fs::unique_path("zclassic-bs-trustless-pending-%%%%-%%%%-%%%%");
+        const fs::path data_dir = fs::temp_directory_path() / UniquePath("zclassic-bs-trustless-pending-%%%%-%%%%-%%%%");
         fs::create_directories(data_dir);
 
         BOOST_CHECK(!BootstrapTrustlessPendingExists(data_dir));
