@@ -21,6 +21,12 @@ replay.
 
 - Bash: segments, quoting, `sh -c`, `eval`, `ssh`, heredocs, `$( )`, `NAME=value`, `cd`, `xargs`
   and `cmd /c`, `cmd //c`, `cmd.exe /k` (rescanned with the cmd/PowerShell rules).
+- Pipelines: the literal text of `echo`, `printf`, `cat <<EOF` or a here-string that feeds `sh`,
+  `bash`, `bash -s`, `dash` or `zsh` is scanned as commands; any other producer feeding a shell
+  (`curl ... | sh`, `base64 -d | sh`, `cat file | sh`) is `guard.too_complex`. A producer that
+  lists or searches a datadir, an ancestor of one or a name such as `wallet.dat` (`find ~ -name
+  wallet.dat`, `ls -d ~/.zcl*`, `Get-ChildItem $env:APPDATA -Filter Zcl*`) and feeds `xargs rm`, a
+  `while read` deleting loop or `Remove-Item` is refused like `find -delete`.
 - PowerShell: `Remove-Item`, `Move-Item`, writers, `Start-Process`, `powershell -Command`,
   `$name = expr` (a string, `Join-Path`, `a + b`), `[IO.File]` and `[IO.Directory]` writes and
   deletes, and `Invoke-WebRequest`, `Invoke-RestMethod`, `iwr`, `irm`, `curl`, `WebClient` and
@@ -38,6 +44,19 @@ replay.
 These are not closed. The list is kept in the header of `rules.c`; the main ones:
 
 - Aliases and shell functions are not expanded (`alias g=git; g push`).
+- Computed command text is not run: `eval "$(printf 'rm -rf %s' ~/.zclassic)"`, `bash -c "$(... |
+  base64 -d)"`. Inline code of perl, node and ruby is checked only for a datadir name next to a
+  deleting or writing call. `iex` and `[scriptblock]::Create` with a computed argument are
+  `guard.too_complex`.
+- `set -- ~/.zclassic; rm -rf "$1"` (positional parameters are not tracked; `read -r D <<< x` is).
+  `ln -s <datadir or ancestor> link` is refused, a chain of links is not followed.
+- `nc`, `ncat`, `socat`, `telnet` to 8232 or 8233 are refused (`-z` probes pass); other ways to open
+  a socket, and an `@-` body from a computed producer, are not read.
+- `zclassic-cli -regtest -conf=/tmp/x/zclassic.conf dumpprivkey t1` is allowed: a test conf can set
+  `rpcport` and mainnet credentials, and the `-regtest` exemption does not read the file.
+- `gh api` is checked only for writes to `heads/master`; merging a pull request or making a ref
+  through another endpoint is not.
+- A producer written as a script, or narrowed by a `Where-Object` filter alone, is not read.
 - `rm -r "$(echo ~)"`: a substitution that computes an ancestor is not run.
 - `sh script.sh` and `bash x.sh`: the script's content is not read; `curl -d @file`,
   `iwr -InFile` and `sqlq db < file.sql` do not read the file.

@@ -24,7 +24,12 @@
  * C:\Users\<u> ...) and a glob or brace that could reach one. A cd is tracked as a path prefix
  * along the command chain, and a NAME=value assignment earlier in the command is expanded when
  * the name is used. A datadir piped into xargs <writer> (or a PowerShell deleter with no path of
- * its own) is a datadir write. Spend and key-export names count only in the method position
+ * its own) is a datadir write, and so is one fed by a producer that lists or searches a datadir
+ * place: find, ls or Get-ChildItem of a datadir, an ancestor or a glob that could reach one (the
+ * find -delete checks), or a name pattern such as wallet.dat or Zcl* under a non-test root;
+ * `while read f; do rm "$f"` loops count the same way. A literal echo, printf, here-string or
+ * heredoc piped into sh, bash, dash or zsh is scanned as commands; any other producer feeding a
+ * shell's stdin is guard.too_complex. Spend and key-export names count only in the method position
  * (first word after the RPC client, or a JSON-RPC "method" value in a request body).
  *
  * Options of zclassicd and zclassic-cli are read the way ParseParameters reads them: up to the
@@ -58,7 +63,28 @@
  *                                        allowed: a visible method is the method
  *   tar --remove-files -C <ancestor> .   the archived operands count, an ancestor given by -C does not
  *   Windows 8.3 names                    ZCLASS~N and ZCASHP~N under AppData are matched; other
- *                                        short forms of a profile path are not */
+ *                                        short forms of a profile path are not
+ *   eval "$(printf ...)", bash -c        computed command text is not run (also PowerShell code built
+ *     "$(... | base64 -d)"              at run time from a non-literal, other than iex and Create)
+ *   perl/node/ruby -e code               only a datadir name next to a deleting or writing call
+ *                                        is seen; names computed in the code (...+'/.zclassic') and
+ *                                        `perl -e 'exec "python3"'` are not
+ *   set -- ~/.zclassic; rm -rf "$1"      positional parameters are not tracked (read -r D <<< x is)
+ *   ln -s a b; rm -rf b/                 `ln -s <datadir or ancestor>` is refused, a link to
+ *                                        another place that is itself a link to one is not followed
+ *   curl -d @- from a computed producer  an `@-` body is read only when echo, printf or a heredoc
+ *   nc host 8232 < req                   feeds it; nc/ncat/socat/telnet to 8232 or 8233 are refused
+ *                                        (-z probes pass), other ways to open a socket are not
+ *   zclassic-cli -regtest -conf=/tmp/x   a test -conf can set rpcport and mainnet credentials; the
+ *                                        -regtest exemption does not read the file
+ *   gh api (other endpoints)             only a write to heads/master is refused; merging a pull
+ *                                        request or creating a ref through another endpoint is not
+ *   find x | xargs rm, ls | xargs rm     a producer is judged by its own paths and name patterns
+ *                                        (a pattern opening with * is too generic); a Where-Object
+ *                                        filter or a producer written as a script is not read
+ *   | sh, | bash, <<< (stdin script)     the text of echo, printf, cat <<EOF and a here-string is
+ *                                        scanned; any other producer (curl, base64 -d, cat file)
+ *                                        is too complex; `sh < file` reads the file unseen */
 
 #include <ctype.h>
 #include <stdbool.h>
@@ -141,6 +167,7 @@ struct tok {
 
 static const char *eval_buf(const char *s, size_t len, int depth);
 static const char *ps_eval(const char *s, size_t len, int depth);
+static bool ci_has(const char *s, const char *needle);
 
 /* ---- quote-aware skipping inside $( ) and heredocs ---------------- */
 
@@ -1317,6 +1344,22 @@ static const char *path_rule(const char *w)
 
 /* ---- per-segment rules ------------------------------------------- */
 
+/* State carried along a ; && || | chain: where a cd put us ("" unknown), whether an earlier
+ * segment of the pipeline being read names a datadir or lists/searches a place that holds one
+ * (pipe_hit), the text the previous segment prints when it is a literal echo, printf or cat of a
+ * heredoc (prod_lit/prod), and a `while read` loop fed by such a pipeline (loop_fed). */
+#define MAX_READ_VARS 4
+struct chain {
+    char cwd[CWD_CAP];
+    bool pipe_dd;
+    bool pipe_hit;
+    bool prod_lit;
+    char *prod;
+    bool loop_fed;
+    char read_vars[MAX_READ_VARS][40];
+    int nread;
+};
+
 struct cmdv {
     const struct gctx *c;
     const struct gseg *sg;
@@ -1328,6 +1371,7 @@ struct cmdv {
     int depth;
     bool in_dd;      /* the tracked working directory is inside a datadir */
     const char *cwd; /* the tracked working directory, "" when unknown */
+    const struct chain *ch; /* the chain being read; NULL for PowerShell */
 };
 
 static bool is_python_cmd(const char *cmd)
@@ -1617,6 +1661,9 @@ static const char *check_http(const struct cmdv *v)
 {
     for (int i = 0; i < v->na; i++) {
         const char *b = body_arg(v->a, v->na, i);
+        if (b && strcmp(b, "@-") == 0 && v->ch && v->sg->pipe_in && v->ch->prod_lit &&
+            v->ch->prod && payload_has_method(v->ch->prod))
+            return R_SPEND; /* echo '{"method":...}' | curl -d @- */
         if (b && payload_has_method(b)) return R_SPEND;
     }
     if (v->sg->hd_has && body_has_method(v->c->src + v->sg->hd_off, v->sg->hd_len))
@@ -1913,11 +1960,37 @@ static const char *check_daemon_datadir(const struct cmdv *v)
 }
 
 /* guard.hosted_ci: gh workflow run, gh run rerun, and API workflow dispatches. */
+/* gh api that writes (PATCH, POST, PUT, DELETE, or fields, which make it a POST) to the ref of
+ * master: it moves or deletes master without `git push`. */
+static const char *gh_api_master(const struct cmdv *v)
+{
+    static const char *const writes[] = {"PATCH", "POST", "PUT", "DELETE"};
+    const char *method = NULL;
+    bool fields = false, master = false;
+    for (int i = 0; i < v->na; i++) {
+        const char *a = v->a[i];
+        if ((strcmp(a, "-X") == 0 || strcmp(a, "--method") == 0) && i + 1 < v->na)
+            method = v->a[++i];
+        else if (strncmp(a, "--method=", 9) == 0) method = a + 9;
+        else if (strncmp(a, "-X", 2) == 0 && a[2]) method = a + 2;
+        else if (strcmp(a, "-f") == 0 || strcmp(a, "-F") == 0 || strcmp(a, "--field") == 0 ||
+                 strcmp(a, "--raw-field") == 0 || strcmp(a, "--input") == 0)
+            fields = true;
+        if (strstr(a, "heads/master") != NULL) master = true;
+    }
+    if (!master) return NULL;
+    if (!method) return fields ? R_PUSH : NULL;
+    for (size_t k = 0; k < sizeof writes / sizeof writes[0]; k++)
+        if (strcasecmp(method, writes[k]) == 0) return R_PUSH;
+    return NULL;
+}
+
 static const char *check_gh(const struct cmdv *v)
 {
     const char *pos[2] = {"", ""};
     int np = 0;
     if (strcmp(v->cmd, "gh") != 0) return NULL;
+    if (v->na > 0 && strcmp(v->a[0], "api") == 0 && gh_api_master(v)) return R_PUSH;
     for (int i = 0; i < v->na; i++) {
         if (strstr(v->a[i], "/dispatches") || strstr(v->a[i], "/rerun") ||
             strstr(v->a[i], "repository_dispatch"))
@@ -2420,6 +2493,44 @@ static const char *nested_ssh(const struct cmdv *v, bool *script)
     return eval_joined(v, i);
 }
 
+/* sh/bash read their script from stdin when there is no -c and no script file operand, or with
+ * -s (`bash -s args`) or a lone `-`. */
+static bool shell_stdin_is_script(const struct cmdv *v)
+{
+    bool s_flag = false;
+    int i = 0;
+    for (; i < v->na && v->a[i][0] == '-' && v->a[i][1]; i++) {
+        if (strcmp(v->a[i], "--") == 0) {
+            i++;
+            break;
+        }
+        if (short_group_has(v->a[i], 'c')) return false;
+        if (short_group_has(v->a[i], 's')) s_flag = true;
+        if (strcmp(v->a[i], "-o") == 0 || strcmp(v->a[i], "+o") == 0) i++;
+    }
+    return i >= v->na || s_flag || strcmp(v->a[i], "-") == 0;
+}
+
+/* A shell that reads its script from stdin: a here-string is scanned as commands, and so is the
+ * literal text of an echo, printf or cat of a heredoc that feeds it through a pipe. Any other
+ * producer (base64 -d | sh, curl | sh, cat file | sh) cannot be read, so it is too complex.
+ * check_opts: false for ssh, where the remote command (a shell) is not in v->a. */
+static const char *shell_stdin_text(const struct cmdv *v, bool check_opts)
+{
+    const struct gctx *c = v->c;
+    const char *r = NULL;
+    int si;
+    if (!c || v->sg < c->segs || v->sg >= c->segs + c->nsegs) return NULL;
+    si = (int)(v->sg - c->segs);
+    for (int k = 0; !r && k < c->nhs; k++)
+        if (c->hstr_seg[k] == si) r = eval_buf(c->hstr[k], strlen(c->hstr[k]), v->depth + 1);
+    if (r) return r;
+    if (!v->sg->pipe_in || v->sg->hd_has || !v->ch) return NULL;
+    if (check_opts && !shell_stdin_is_script(v)) return NULL;
+    if (!v->ch->prod_lit) return R_COMPLEX;
+    return v->ch->prod ? eval_buf(v->ch->prod, strlen(v->ch->prod), v->depth + 1) : NULL;
+}
+
 static const char *check_nested(const struct cmdv *v)
 {
     bool script = false;
@@ -2430,7 +2541,73 @@ static const char *check_nested(const struct cmdv *v)
     else if (is_ps_name(v->cmd)) return nested_ps(v);
     else if (strcmp(v->cmd, "cmd") == 0) return nested_cmdexe(v);
     else return NULL;
-    return r ? r : (script ? eval_here(v) : NULL);
+    if (r || !script) return r;
+    r = eval_here(v);
+    if (r) return r;
+    return shell_stdin_text(v, is_shell_name(v->cmd));
+}
+
+/* nc, ncat, socat, telnet aimed at a mainnet RPC or P2P port (8232, 8233): the request body comes
+ * from stdin or a file, so a spend or key-export method in it cannot be read. -z only probes. */
+static const char *check_raw_rpc(const struct cmdv *v)
+{
+    static const char *const tools[] = {"nc", "ncat", "netcat", "socat", "telnet"};
+    if (!IN_LIST(v->cmd, tools)) return NULL;
+    for (int i = 0; i < v->na; i++) {
+        const char *a = v->a[i];
+        if (strcmp(a, "-z") == 0 || short_group_has(a, 'z')) return NULL;
+    }
+    for (int i = 0; i < v->na; i++)
+        for (const char *p = v->a[i]; (p = strstr(p, "823")) != NULL; p++)
+            if ((p[3] == '2' || p[3] == '3') && !isdigit((unsigned char)p[4]) &&
+                (p == v->a[i] || !isdigit((unsigned char)p[-1])))
+                return R_SPEND;
+    return NULL;
+}
+
+/* ln -s <datadir or ancestor> link: a later `rm -r link/` deletes the target's contents. */
+static const char *check_symlink(const struct cmdv *v)
+{
+    int last = -1;
+    bool sym = false;
+    if (strcmp(v->cmd, "ln") != 0) return NULL;
+    for (int i = 0; i < v->na; i++)
+        if (strcmp(v->a[i], "--symbolic") == 0 || short_group_has(v->a[i], 's')) sym = true;
+    if (!sym) return NULL;
+    for (int i = 0; i < v->na; i++)
+        if (v->a[i][0] != '-' || !v->a[i][1]) last = i;
+    for (int i = 0; i < last; i++) {
+        const char *r;
+        if ((v->a[i][0] != '-' || !v->a[i][1]) && (r = tgt(v, v->a[i], true)) != NULL) return r;
+    }
+    return NULL;
+}
+
+/* Inline code of perl, node, ruby and the like that names a datadir next to a deleting or
+ * writing call (rmtree, rmSync, unlink, File.delete, writeFile ...). */
+static bool word_run_destroys(const char *s)
+{
+    static const char *const verbs[] = {"rm", "unlink", "remove", "delete", "write", "rename",
+                                        "move", "truncate", "chmod", "chown", "system", "exec",
+                                        "spawn", "popen"};
+    for (size_t i = 0; s[i];) {
+        size_t j = i;
+        while (is_word_char(s[j])) j++;
+        for (size_t k = 0; j > i && k < sizeof verbs / sizeof verbs[0]; k++)
+            if (strncasecmp(s + i, verbs[k], strlen(verbs[k])) == 0) return true;
+        i = j > i ? j : i + 1;
+    }
+    return false;
+}
+
+static const char *check_interp(const struct cmdv *v)
+{
+    static const char *const interps[] = {"perl", "node", "nodejs", "ruby", "php", "lua", "deno",
+                                          "bun", "osascript"};
+    if (!IN_LIST(v->cmd, interps)) return NULL;
+    for (int i = 0; i < v->na; i++)
+        if (mentions_datadir(v->a[i]) && word_run_destroys(v->a[i])) return R_DATADIR;
+    return NULL;
 }
 
 typedef const char *(*check_fn)(const struct cmdv *);
@@ -2438,6 +2615,7 @@ typedef const char *(*check_fn)(const struct cmdv *);
 static const check_fn checks[] = {
     check_python,       check_git,          check_export,  check_rpc, check_gh,
     check_reindex_args, check_daemon_datadir, check_writer_paths, check_nested,
+    check_raw_rpc,      check_symlink,      check_interp,
 };
 
 /* A refusal is returned; a warning is remembered in *warn and dropped, so a warning never hides
@@ -2453,12 +2631,6 @@ static const char *pick(const char *r, const char **warn)
 
 /* ---- the working directory and variables of one command chain ---------------------------- */
 
-/* State carried along a ; && || | chain: where a cd put us ("" unknown) and whether an earlier
- * segment of the pipeline being read names a datadir. */
-struct chain {
-    char cwd[CWD_CAP];
-    bool pipe_dd;
-};
 
 /* A path that starts at a root, so a cd to it replaces the tracked directory. */
 static bool rooted_word(const char *t)
@@ -2752,8 +2924,230 @@ static void note_xargs_repl(char **w, int from, int to)
     }
 }
 
+/* ---- what a pipeline producer prints and where it looks ----------------------------------- */
+
+/* A name pattern (find -name, Get-ChildItem -Filter) that can match a datadir or wallet name.
+ * A pattern that opens with a wildcard (*.dat) is too generic to count on its own. */
+static bool pattern_names_datadir(const char *p)
+{
+    static const char *const names[] = {"zclassic", ".zclassic", ".zclassic-c23", ".zcash-params",
+                                        "zcashparams", "wallet.dat"};
+    if (!p[0] || strchr("*?[", p[0])) return false;
+    for (size_t k = 0; k < sizeof names / sizeof names[0]; k++)
+        if (glob_match(p, names[k])) return true;
+    return false;
+}
+
+/* A search root outside every test location: an absolute path or a variable. */
+static bool loose_root(const char *root)
+{
+    return rooted_word(root) && !is_test_dir(root);
+}
+
+/* find whose roots or name patterns reach a datadir (or a folder holding one). */
+static bool find_hit(const struct cmdv *v)
+{
+    bool loose = false;
+    int i = 0;
+    while (i < v->na && (strcmp(v->a[i], "-H") == 0 || strcmp(v->a[i], "-L") == 0 ||
+                         strcmp(v->a[i], "-P") == 0))
+        i++;
+    if (find_roots(v)) return true;
+    for (; i < v->na && v->a[i][0] != '-' && v->a[i][0] != '(' && v->a[i][0] != '!'; i++)
+        if (loose_root(v->a[i])) loose = true;
+    for (int k = 0; k + 1 < v->na; k++) {
+        const char *a = v->a[k], *p = v->a[k + 1];
+        if (strcmp(a, "-name") == 0 || strcmp(a, "-iname") == 0) {
+            if (loose && pattern_names_datadir(p)) return true;
+        } else if (strcmp(a, "-path") == 0 || strcmp(a, "-ipath") == 0 ||
+                   strcmp(a, "-wholename") == 0) {
+            if (mentions_datadir(p)) return true;
+        }
+    }
+    return false;
+}
+
+/* A command that prints paths of a datadir place: ls, echo or realpath of it or of a glob that
+ * could reach one, or a find that searches such a place. */
+static bool producer_hit(const struct cmdv *v)
+{
+    static const char *const lists[] = {"ls", "dir", "vdir", "echo", "printf", "realpath",
+                                        "readlink", "stat"};
+    if (strcmp(v->cmd, "find") == 0) return find_hit(v);
+    if (!IN_LIST(v->cmd, lists)) return false;
+    for (int i = 0; i < v->na; i++)
+        if (v->a[i][0] != '-' && tgt(v, v->a[i], false)) return true;
+    return false;
+}
+
+static void prod_set(struct chain *ch, char *text)
+{
+    free(ch->prod);
+    ch->prod = text;
+    ch->prod_lit = text != NULL;
+}
+
+/* printf FORMAT ARGS rendered: %s %b %d... take the arguments in turn (the format is reused while
+ * arguments remain), \n and \t become characters. */
+static char *printf_render(const char *fmt, char **args, int nargs)
+{
+    struct sbuf b = {NULL, 0, 0};
+    int ai = 0;
+    bool conv;
+    do {
+        conv = false;
+        for (const char *p = fmt; *p; p++) {
+            if (*p == '\\' && p[1]) {
+                p++;
+                if (*p == 'n') sb_add(&b, "\n", 1);
+                else if (*p == 't') sb_add(&b, "\t", 1);
+                else sb_add(&b, p, 1);
+            } else if (*p == '%' && p[1] == '%') {
+                sb_add(&b, "%", 1);
+                p++;
+            } else if (*p == '%') {
+                const char *q = p + 1;
+                while (*q && !isalpha((unsigned char)*q)) q++;
+                if (!*q) {
+                    sb_add(&b, p, strlen(p));
+                    break;
+                }
+                conv = true;
+                if (ai < nargs) {
+                    sb_add(&b, args[ai], strlen(args[ai]));
+                    ai++;
+                }
+                p = q;
+            } else {
+                sb_add(&b, p, 1);
+            }
+        }
+    } while (conv && ai < nargs && b.cap != (size_t)-1);
+    if (b.cap == (size_t)-1) return NULL;
+    return b.p ? b.p : strdup(""); // raw-alloc-ok:build-tool
+}
+
+/* echo text with the two-character \n made a newline (echo -e and a shell reading it agree). */
+static char *echo_render(char **w, int n)
+{
+    struct sbuf b = {NULL, 0, 0};
+    for (int i = 0; i < n; i++) {
+        if (i) sb_add(&b, " ", 1);
+        for (const char *p = w[i]; *p; p++) {
+            if (p[0] == '\\' && p[1] == 'n') {
+                sb_add(&b, "\n", 1);
+                p++;
+            } else {
+                sb_add(&b, p, 1);
+            }
+        }
+    }
+    if (b.cap == (size_t)-1) return NULL;
+    return b.p ? b.p : strdup(""); // raw-alloc-ok:build-tool
+}
+
+/* The text a segment prints when that is known without running anything: echo and printf of
+ * literal words, and cat of its own heredoc or here-string. Caller frees; NULL otherwise. */
+static char *literal_output(const struct gctx *c, int si, char **w, int n)
+{
+    struct pinfo pi = {false};
+    const struct gseg *sg = &c->segs[si];
+    int ci = find_cmd(w, n, &pi), k;
+    const char *cmd;
+    if (ci < 0) return NULL;
+    cmd = base_name(w[ci]);
+    k = ci + 1;
+    if (strcmp(cmd, "echo") == 0) {
+        while (k < n && w[k][0] == '-' && w[k][1] && strspn(w[k] + 1, "neE") == strlen(w[k] + 1))
+            k++;
+        return echo_render(w + k, n - k);
+    }
+    if (strcmp(cmd, "printf") == 0) {
+        while (k < n && w[k][0] == '-' && w[k][1]) k += strcmp(w[k], "-v") == 0 ? 2 : 1;
+        return k < n ? printf_render(w[k], w + k + 1, n - k - 1) : NULL;
+    }
+    if (strcmp(cmd, "cat") == 0) {
+        struct sbuf b = {NULL, 0, 0};
+        for (; k < n; k++)
+            if (w[k][0] != '-') return NULL; /* a file operand */
+        if (sg->hd_has) {
+            sb_add(&b, c->src + sg->hd_off, sg->hd_len);
+        } else {
+            for (int h = 0; h < c->nhs; h++)
+                if (c->hstr_seg[h] == si) {
+                    sb_add(&b, c->hstr[h], strlen(c->hstr[h]));
+                    sb_add(&b, "\n", 1);
+                }
+        }
+        if (b.cap == (size_t)-1) return NULL;
+        return b.p;
+    }
+    return NULL;
+}
+
+/* A `while read` loop that takes its lines from a pipeline naming or searching a datadir place
+ * (find ~ -name x | while read f; do rm "$f"; done): its read variables name that place. A
+ * here-string read (read -r D <<< ~/.zclassic) records the variable. */
+static void note_read(const struct gctx *c, int si, const struct cmdv *v, const struct xw *x,
+                      int ci, struct chain *ch)
+{
+    static const char *const valued = " -p -d -n -N -t -u -a ";
+    char names[MAX_READ_VARS][40];
+    int nn = 0;
+    bool in_while = false;
+    for (int j = 0; j < ci; j++)
+        if (strcmp(x->w[j], "while") == 0 || strcmp(x->w[j], "until") == 0) in_while = true;
+    for (int i = 0; i < v->na; i++) {
+        if (v->a[i][0] == '-' && v->a[i][1]) {
+            if (opt_takes_arg(valued, v->a[i])) i++;
+        } else if (nn < MAX_READ_VARS) {
+            snprintf(names[nn++], sizeof names[0], "%s", v->a[i]);
+        }
+    }
+    if (nn == 0) snprintf(names[nn++], sizeof names[0], "REPLY");
+    for (int k = 0; k < c->nhs; k++) {
+        if (c->hstr_seg[k] != si) continue;
+        for (int j = 0; j < nn; j++) var_set(names[j], strlen(names[j]), c->hstr[k]);
+        break;
+    }
+    if (in_while && c->segs[si].pipe_in && (ch->pipe_dd || ch->pipe_hit)) {
+        ch->loop_fed = true;
+        ch->nread = nn;
+        for (int j = 0; j < nn; j++)
+            snprintf(ch->read_vars[j], sizeof ch->read_vars[0], "%s", names[j]);
+    }
+}
+
+/* t refers to the variable name ($name or ${name}). */
+static bool refs_var(const char *t, const char *name)
+{
+    size_t n = strlen(name);
+    for (const char *p = strchr(t, '$'); p; p = strchr(p + 1, '$')) {
+        const char *q = p[1] == '{' ? p + 2 : p + 1;
+        if (strncmp(q, name, n) == 0 && !is_word_char(q[n])) return true;
+    }
+    return false;
+}
+
+/* A command that deletes, moves or re-owns what its operands name. */
+static bool is_destroyer(const char *cmd)
+{
+    static const char *const names[] = {"mv", "chmod", "chown", "chgrp"};
+    return is_deleter(cmd) || IN_LIST(cmd, names);
+}
+
+/* Inside a loop fed by a datadir place: a destroyer whose operand is a read variable. */
+static bool loop_destroys(const struct cmdv *v, const struct chain *ch)
+{
+    if (!ch->loop_fed || !is_destroyer(v->cmd)) return false;
+    for (int i = 0; i < v->na; i++)
+        for (int j = 0; j < ch->nread; j++)
+            if (refs_var(v->a[i], ch->read_vars[j])) return true;
+    return false;
+}
+
 static const char *seg_run(const struct gctx *c, int si, int depth, struct chain *ch,
-                           struct xw *x, bool hs_dd)
+                           struct xw *x, bool hs_dd, bool *hit)
 {
     const struct gseg *sg = &c->segs[si];
     struct pinfo pi = {false};
@@ -2761,6 +3155,7 @@ static const char *seg_run(const struct gctx *c, int si, int depth, struct chain
     struct cmdv v;
     bool xargs = false;
     int ci = find_cmd(x->w, x->n, &pi);
+    *hit = false;
     if (pi.id_assign) return R_IDENT;
     if (ci < 0) return NULL;
     strip_exe(x->w[ci]);
@@ -2772,15 +3167,21 @@ static const char *seg_run(const struct gctx *c, int si, int depth, struct chain
             note_xargs_repl(x->w, j + 1, ci);
         }
     v = (struct cmdv){c, sg, base_name(x->w[ci]), x->w + ci + 1, x->n - ci - 1, x->w, x->n,
-                      depth, false, ch->cwd};
+                      depth, false, ch->cwd, ch};
     track_cd(&v, ch->cwd);
     v.in_dd = ch->cwd[0] && mentions_datadir(ch->cwd);
     if (is_decl_cmd(v.cmd))
         for (int k = 0; k < v.na; k++)
             if (is_assign(v.a[k])) record_assign(v.a[k]);
     note_for_loop(&v);
-    /* xargs <writer> takes its targets from stdin: a datadir named upstream is a datadir write */
+    if (strcmp(v.cmd, "done") == 0) ch->loop_fed = false;
+    if (strcmp(v.cmd, "read") == 0) note_read(c, si, &v, x, ci, ch);
+    /* xargs <writer> takes its targets from stdin: a datadir named upstream is a datadir write,
+     * and so is a destroyer fed by a producer that lists or searches a datadir place */
     if (xargs && (ch->pipe_dd || hs_dd) && writer_kind(&v) != W_NONE) return R_DATADIR;
+    if (xargs && ch->pipe_hit && is_destroyer(v.cmd)) return R_DATADIR;
+    if (loop_destroys(&v, ch)) return R_DATADIR;
+    *hit = producer_hit(&v);
     for (size_t k = 0; !r && k < sizeof checks / sizeof checks[0]; k++)
         r = pick(checks[k](&v), &warn);
     return r ? r : warn;
@@ -2791,14 +3192,20 @@ static const char *seg_check(const struct gctx *c, int si, int depth, struct cha
     const struct gseg *sg = &c->segs[si];
     struct xw x;
     const char *r;
-    bool hs_dd, dd;
+    bool hs_dd, dd, hit;
     for (int j = 0; j < sg->nw && is_assign(c->words[sg->w0 + j]); j++)
         record_assign(c->words[sg->w0 + j]);
     if (!xw_build(c, sg, &x)) return NULL;
-    if (!sg->pipe_in) ch->pipe_dd = false;
+    if (!sg->pipe_in) {
+        ch->pipe_dd = false;
+        ch->pipe_hit = false;
+        prod_set(ch, NULL);
+    }
     dd = seg_names_datadir(c, si, &x, &hs_dd);
-    r = seg_run(c, si, depth, ch, &x, hs_dd);
+    r = seg_run(c, si, depth, ch, &x, hs_dd, &hit);
     if (dd) ch->pipe_dd = true;
+    if (hit) ch->pipe_hit = true;
+    prod_set(ch, literal_output(c, si, x.w, x.n)); /* what the next segment of a pipe reads */
     xw_free(&x);
     return r;
 }
@@ -2850,6 +3257,7 @@ static const char *eval_buf(const char *s, size_t len, int depth)
     }
     for (int i = 0; !r && i < c->nsubs; i++)
         r = pick(eval_buf(s + c->subs[i].off, c->subs[i].len, depth + 1), &warn);
+    free(ch.prod);
     free(c->arena);
     free(c);
     return r ? r : warn;
@@ -2902,6 +3310,8 @@ struct psseg {
     char cwd[CWD_CAP];
     int depth;
     bool pipe_dd;  /* a segment of this statement names a datadir */
+    bool pipe_hit; /* a segment of this statement lists or searches a place that holds one */
+    bool open_eval; /* [scriptblock]::Create seen: the literal text of the next segment is code */
     bool saw_pipe; /* a | came earlier in this statement */
     bool open_writer; /* a deleter or writer with no path operand: a later segment feeds it */
     bool open_anc;    /* the writer is a .NET Delete or Move: a folder that holds a datadir counts too */
@@ -3229,6 +3639,12 @@ static void ps_assign(struct psseg *s)
     fx = *first ? ps_expand(first) : NULL;
     val = ps_value(s->w, s->n, from, fx ? fx : first, NULL);
     free(fx);
+    if (val && ci_has(val, "getfolderpath")) {
+        /* [Environment]::GetFolderPath('ApplicationData'): the folder name is the next segment
+         * (the parenthesis splits it), and becomes the value of the variable */
+        free(val);
+        val = NULL;
+    }
     if (!val) { /* `$d = and the expression follows in the next segment */
         snprintf(s->pend_var, sizeof s->pend_var, "%s", low);
     } else {
@@ -3323,7 +3739,9 @@ static bool ps_delete_word(const char *w)
     }
     for (char *p = lc; *p; p++) *p = (char)tolower((unsigned char)*p);
     strip_exe(lc);
-    r = PS_IN(lc, ps_del) || (strstr(lc, "io.") && (strstr(lc, "::delete") || strstr(lc, "::move")));
+    r = PS_IN(lc, ps_del) || (strstr(lc, "io.") && (strstr(lc, "::delete") || strstr(lc, "::move"))) ||
+        ends_ci(lc, ".delete") || ends_ci(lc, ".moveto") || ends_ci(lc, ".deletefolder") ||
+        ends_ci(lc, ".deletefile") || ends_ci(lc, ".movefolder") || ends_ci(lc, ".movefile");
     free(lc);
     return r;
 }
@@ -3353,6 +3771,59 @@ static void ps_note_facts(struct psseg *s)
     }
     if (s->st_del && s->st_base && s->st_name) ps_note(s, R_DATADIR);
     if (s->st_web && s->st_meth) ps_note(s, R_SPEND);
+}
+
+/* A listing cmdlet (Get-ChildItem, gci, dir, ls, Get-Item) whose path is a datadir or a folder
+ * that holds one (an ancestor), or whose -Filter/-Include names one (Zcl*, wallet.dat) under a
+ * search root outside the test locations. What it lists then feeds a deleter downstream. */
+static bool ps_lister_hit(const struct psseg *s)
+{
+    static const char *const listers[] = {"get-childitem", "gci", "dir", "ls", "get-item", "gi"};
+    static const char *const valued[] = {"-exclude", "-depth", "-attributes", "-stream",
+                                         "-readcount"};
+    struct gseg zero;
+    struct cmdv cv;
+    char low[24];
+    const char *pats[8], *roots[16];
+    int np = 0, nr = 0;
+    bool loose = false;
+    size_t n;
+    if (s->n < 2) return false;
+    n = strlen(s->w[0]);
+    if (n >= sizeof low) return false;
+    for (size_t k = 0; k <= n; k++) low[k] = (char)tolower((unsigned char)s->w[0][k]);
+    if (!PS_IN(low, listers)) return false;
+    memset(&zero, 0, sizeof zero);
+    cv = (struct cmdv){NULL, &zero, "", NULL, 0, NULL, 0, s->depth, false, s->cwd, NULL};
+    for (int i = 1; i < s->n; i++) {
+        const char *a = s->w[i];
+        if (a[0] == '-' && a[1]) {
+            size_t len = strcspn(a, ":");
+            const char *val = a[len] == ':' && a[len + 1] ? a + len + 1 : NULL;
+            char pn[24];
+            if (len >= sizeof pn) continue;
+            for (size_t k = 0; k < len; k++) pn[k] = (char)tolower((unsigned char)a[k]);
+            pn[len] = '\0';
+            if (!val && (PS_IN(pn, valued) || strcmp(pn, "-filter") == 0 ||
+                         strcmp(pn, "-include") == 0 || strcmp(pn, "-path") == 0 ||
+                         strcmp(pn, "-literalpath") == 0) &&
+                i + 1 < s->n)
+                val = s->w[++i];
+            if (!val) continue;
+            if ((strcmp(pn, "-filter") == 0 || strcmp(pn, "-include") == 0) && np < 8) pats[np++] = val;
+            else if ((strcmp(pn, "-path") == 0 || strcmp(pn, "-literalpath") == 0) && nr < 16)
+                roots[nr++] = val;
+        } else if (nr < 16) {
+            roots[nr++] = a;
+        }
+    }
+    for (int i = 0; i < nr; i++) {
+        if (tgt(&cv, roots[i], true)) return true;
+        if (loose_root(roots[i])) loose = true;
+    }
+    for (int i = 0; loose && i < np; i++)
+        if (pattern_names_datadir(pats[i])) return true;
+    return false;
 }
 
 static const char *ps_seg(struct psseg *s)
@@ -3388,13 +3859,14 @@ static const char *ps_seg(struct psseg *s)
     strip_exe(lc);
     memset(&zero, 0, sizeof zero);
     v = (struct cmdv){NULL, &zero, lc, s->w + ci + 1, s->n - ci - 1, s->w + ci, s->n - ci,
-                      s->depth, s->cwd[0] && mentions_datadir(s->cwd), s->cwd};
+                      s->depth, s->cwd[0] && mentions_datadir(s->cwd), s->cwd, NULL};
     if (PS_IN(lc, checks_ps)) {
         struct cmdv cdv = v;
         cdv.cmd = lc[0] == 'p' && lc[1] == 'o' ? "popd" : "cd";
         track_cd(&cdv, s->cwd);
     } else if (strcmp(lc, "iex") == 0 || strcmp(lc, "invoke-expression") == 0) {
-        r = eval_joined_as(&v, 0, true);
+        /* no literal text (iex (decode ...), $x | iex, iex $cmd): the code cannot be read */
+        r = v.na == 0 || v.a[0][0] == '$' ? R_COMPLEX : eval_joined_as(&v, 0, true);
     } else if (PS_IN(lc, starts)) {
         r = ps_start_process(&v);
     } else if (ps_dotnet_writer(lc)) {
@@ -3405,7 +3877,7 @@ static const char *ps_seg(struct psseg *s)
         /* no path of its own: the pipeline (Get-ChildItem <datadir> | Remove-Item) or a later
          * parenthesised segment (Remove-Item (Get-Item <datadir>)) carries the target */
         s->open_writer = true;
-        if (s->pipe_dd && s->saw_pipe) r = R_DATADIR;
+        if ((s->pipe_dd || s->pipe_hit) && s->saw_pipe) r = R_DATADIR;
     } else {
         r = ps_writer(lc, &v);
     }
@@ -3419,18 +3891,31 @@ static const char *ps_seg(struct psseg *s)
 /* A new statement (; newline &) forgets the pipeline and the statement facts. */
 #define PS_NEW_STATEMENT(st) \
     ((st).pipe_dd = (st).saw_pipe = (st).open_writer = (st).open_anc = (st).st_del = (st).st_base = \
-         (st).st_name = (st).st_web = (st).st_meth = false, (st).pend_var[0] = '\0')
+         (st).st_name = (st).st_web = (st).st_meth = (st).pipe_hit = (st).open_eval = false, \
+     (st).pend_var[0] = '\0')
 
 /* End the current segment: scan its words, then drop them. */
 static void ps_end_seg(struct psseg *s)
 {
-    bool names = false, fed = s->open_writer, cmd = false;
+    bool names = false, fed = s->open_writer, cmd = false, hit, sb_here = false;
     char *val;
     char pend[sizeof s->pend_var];
     memcpy(pend, s->pend_var, sizeof pend);
     s->pend_var[0] = '\0';
+    for (int i = 0; i < s->n; i++)
+        if (ci_has(s->w[i], "scriptblock]::create")) sb_here = true;
     ps_assign(s);          /* `$d = expr` records d and consumes its words */
     ps_expand_words(s);    /* known variables are replaced by their value */
+    if (s->open_eval && !sb_here && s->n > 0) {
+        /* the literal argument of [scriptblock]::Create is code: scan it, or give up when it is
+         * computed */
+        for (int i = 0; i < s->n; i++)
+            ps_note(s, s->w[i][0] == '$' ? R_COMPLEX
+                                         : ps_eval(s->w[i], strlen(s->w[i]), s->depth + 1));
+        s->open_eval = false;
+    }
+    if (sb_here) s->open_eval = true;
+    hit = ps_lister_hit(s);
     if (pend[0] && s->n > 0) {
         /* the expression of a `$d =` that ended the previous segment */
         val = ps_value(s->w, s->n, 0, NULL, &cmd);
@@ -3451,7 +3936,7 @@ static void ps_end_seg(struct psseg *s)
             struct gseg zero;
             struct cmdv cv;
             memset(&zero, 0, sizeof zero);
-            cv = (struct cmdv){NULL, &zero, "", NULL, 0, NULL, 0, s->depth, false, s->cwd};
+            cv = (struct cmdv){NULL, &zero, "", NULL, 0, NULL, 0, s->depth, false, s->cwd, NULL};
             ps_note(s, tgt(&cv, val, true));
         }
         free(val);
@@ -3460,7 +3945,7 @@ static void ps_end_seg(struct psseg *s)
         struct gseg zero;
         struct cmdv cv;
         memset(&zero, 0, sizeof zero);
-        cv = (struct cmdv){NULL, &zero, "", NULL, 0, NULL, 0, s->depth, false, s->cwd};
+        cv = (struct cmdv){NULL, &zero, "", NULL, 0, NULL, 0, s->depth, false, s->cwd, NULL};
         for (int i = 0; i < s->n; i++) {
             char *cp = strdup(s->w[i]); // raw-alloc-ok:build-tool
             if (!cp) {
@@ -3475,8 +3960,9 @@ static void ps_end_seg(struct psseg *s)
     }
     if (s->n > 0) ps_note_facts(s);
     if (!s->r) ps_note(s, ps_seg(s));
-    if (names && fed) ps_note(s, R_DATADIR);
+    if ((names || hit) && fed) ps_note(s, R_DATADIR);
     if (names) s->pipe_dd = true;
+    if (hit) s->pipe_hit = true;
     for (int i = 0; i < s->n; i++) free(s->w[i]);
     s->n = 0;
     s->pend_redir = false;
@@ -3508,6 +3994,21 @@ static void ps_end_word(struct psseg *s, char *buf, size_t *n, bool *quoted)
         return;
     }
     ps_push(s, wd);
+}
+
+/* The word names zclassic-cli or zcash-cli (any folder, any case, with or without .exe). */
+static bool ps_client_word(const char *w)
+{
+    const char *name = w;
+    char low[24];
+    size_t n;
+    for (const char *p = w; *p; p++)
+        if (*p == '/' || *p == '\\') name = p + 1;
+    n = strlen(name);
+    if (n >= sizeof low) return false;
+    for (size_t k = 0; k <= n; k++) low[k] = (char)tolower((unsigned char)name[k]);
+    strip_exe(low);
+    return is_client_name(low);
 }
 
 /* A $( ) subexpression starting at s[i] == '$': its body scans as commands; returns the index
@@ -3594,11 +4095,17 @@ static const char *ps_eval(const char *s, size_t len, int depth)
             }
         } else if (strchr(";|&\n(){}", ch)) {
             ps_end_word(&st, buf, &n, &quoted);
+            if (ch == '(' && st.n > 0 && ps_client_word(st.w[0])) {
+                /* zclassic-cli ('dump' + 'privkey'): the method is an expression, so it is hidden */
+                char *mark = strdup("$(expression)"); // raw-alloc-ok:build-tool
+                if (mark) ps_push(&st, mark);
+                else g_complex = true;
+            }
             if (!(ch == '&' && st.n == 0)) { /* a leading & is the call operator */
                 ps_end_seg(&st);
                 if (ch == '|' && i + 1 < len && s[i + 1] == '|') {
                     i++; /* || chains, no pipe */
-                    st.pipe_dd = st.saw_pipe = st.open_writer = st.open_anc = false;
+                    st.pipe_dd = st.pipe_hit = st.saw_pipe = st.open_writer = st.open_anc = false;
                 } else if (ch == '|') {
                     st.saw_pipe = true;
                 }
