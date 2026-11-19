@@ -70,9 +70,17 @@ namespace {
 double PeakRssMiB()
 {
 #ifdef WIN32
+    // psapi.dll is loaded by name: the tree targets _WIN32_WINNT 0x0501, which does not declare the kernel32
+    // forwarders, and this keeps the gtest link line unchanged.
+    typedef BOOL(WINAPI * GetProcessMemoryInfoFn)(HANDLE, PPROCESS_MEMORY_COUNTERS, DWORD);
+    HMODULE psapi = LoadLibraryA("psapi.dll");
+    if (!psapi) return 0.0;
+    GetProcessMemoryInfoFn getInfo = reinterpret_cast<GetProcessMemoryInfoFn>(reinterpret_cast<void*>(GetProcAddress(psapi, "GetProcessMemoryInfo")));
     PROCESS_MEMORY_COUNTERS pmc;
-    if (!K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) return 0.0;
-    return pmc.PeakWorkingSetSize / 1048576.0;
+    double mib = 0.0;
+    if (getInfo && getInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) mib = pmc.PeakWorkingSetSize / 1048576.0;
+    FreeLibrary(psapi);
+    return mib;
 #else
     struct rusage ru;
     if (getrusage(RUSAGE_SELF, &ru) != 0) return 0.0;
@@ -486,9 +494,7 @@ TEST(WalletPerf, DISABLED_Bench)
     timer.Print();
     printf("[wperf] wallet.dat bytes %llu\n", (unsigned long long)boost::filesystem::file_size(dir / "wallet.dat"));
     {
-        struct rusage ru;
-        getrusage(RUSAGE_SELF, &ru);
-        printf("[wperf] peak RSS %.1f MiB\n", ru.ru_maxrss / 1024.0);
+        printf("[wperf] peak RSS %.1f MiB\n", PeakRssMiB());
     }
     printf("[wperf] state digest %s\n", digest.c_str());
 
