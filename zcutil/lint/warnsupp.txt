@@ -1,0 +1,6 @@
+# zcl-lint warnsupp baseline: warning suppressions (pragmas and -Wno- flags) per path.
+# Shrink-only: lower a count or delete a row when it falls; never raise one or add a path.
+# Regenerate with: zcl-lint warnsupp --update-baseline (refused while anything rose).
+configure.ac	7
+src/tinyformat.h	2
+src/util.cpp	4

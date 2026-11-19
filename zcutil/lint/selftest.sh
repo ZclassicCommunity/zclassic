@@ -105,6 +105,7 @@ cp "$cv" src/c23/tools/check-vendor.sh
 : > configure.ac
 # something for every rule to scan (an empty scan set is a failure)
 printf '# t\n' > notes.md; printf 'int top;\n' > top.c; printf '#!/bin/sh\n:\n' > top.sh
+mkdir -p src; printf 'int top2(void) { return 1; }\n' > src/top2.c
 printf 'int answer(void) { return 42; }\n' > zcutil/tools/vendor/x/a.c
 blob=$(git hash-object zcutil/tools/vendor/x/a.c)
 pin=0123456789012345678901234567890123456789
@@ -118,7 +119,7 @@ printf 'int answer(void) { return 42; }\n' > zcutil/tools/vendor/x/a.c; printf '
 run 1 'does not match its vendored tree' vendor
 rm zcutil/tools/vendor/x/extra.c; track
 # `all`, and the python hook: hollow (exit 2) when zcutil/check-no-python.sh is absent, run (and fatal) when present
-for r in no-new-jq no-new-bash banned-str md-links; do "$bin" --root . $r --update-baseline >/dev/null 2>&1; done
+for r in no-new-jq no-new-bash banned-str md-links filesize complexity long-functions warnsupp; do "$bin" --root . $r --update-baseline >/dev/null 2>&1; done
 run 2 "nothing scanned" no-python
 printf 'exit 7\n' > zcutil/check-no-python.sh; track
 run 1 '' all
