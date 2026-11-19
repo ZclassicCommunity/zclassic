@@ -11,6 +11,8 @@
 #include <direct.h>
 #include <io.h>
 #define POPEN _popen
+#define QO "\""   /* cmd.exe strips one outer quote pair: wrap the whole command */
+#define QC "\""
 #define PCLOSE _pclose
 #define MKDIR(p) _mkdir(p)
 #define CLOSESOCK closesocket
@@ -22,6 +24,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #define POPEN popen
+#define QO ""
+#define QC ""
 #define PCLOSE pclose
 #define MKDIR(p) mkdir((p), 0700)
 #define CLOSESOCK close
@@ -49,7 +53,7 @@ int main(int argc, char **argv)
     for (long r = 0; r < rounds; r++) {
         long ports[64]; SOCKET socks[64]; int mine[64]; long n = 0;
         FILE *p;
-        snprintf(cmd, sizeof cmd, "\"%s\" lease %ld --block --dir \"%s\" --owner %ld", argv[1], count, argv[2], SELFPID());
+        snprintf(cmd, sizeof cmd, QO "\"%s\" lease %ld --block --dir \"%s\" --owner %ld" QC, argv[1], count, argv[2], SELFPID());
         p = POPEN(cmd, "r");
         if (!p) { leasefail++; continue; }
         while (n < count && fgets(line, sizeof line, p)) ports[n++] = atol(line);
@@ -72,7 +76,7 @@ int main(int argc, char **argv)
             snprintf(path, sizeof path, "%s/%ld", held, ports[i]);
             if (mine[i]) remove(path);
         }
-        snprintf(cmd, sizeof cmd, "\"%s\" release --dir \"%s\" --owner %ld", argv[1], argv[2], SELFPID());
+        snprintf(cmd, sizeof cmd, QO "\"%s\" release --dir \"%s\" --owner %ld" QC, argv[1], argv[2], SELFPID());
         if (system(cmd) != 0) leasefail++;
         done++;
     }
