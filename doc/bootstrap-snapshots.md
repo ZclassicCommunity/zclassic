@@ -68,10 +68,10 @@ standard P2P port (mainnet 8033) with `-bootstrapserve` serves it. `-bootstrappe
 takes the serving node's `host[:port]` and defaults to the standard P2P port; pass an
 explicit `:port` only if a particular server runs its node on a non-standard port.
 
-The compiled mainnet snapshot endpoints are `74.50.74.102:8035` and
-`205.209.104.118:8035`. These are configured for separate snapshot-serving nodes;
+The compiled mainnet snapshot endpoints are `74.50.74.102:8035`, `205.209.104.118:8035`,
+`64.20.43.62:8035` and `64.20.37.202:8035` (four servers; the download spreads its streams over all of them). These are configured for separate snapshot-serving nodes;
 the ordinary P2P services on those hosts' port 8033 do not implement this legacy snapshot
-protocol. Keep the explicit port when selecting either snapshot service manually.
+protocol. Keep the explicit port when selecting any snapshot service manually.
 This does not change the mainnet P2P default port or checkpoint validation.
 During beta11 qualification, the second mirror is still initializing and must
 pass snapshot verification and a public download test before release.
