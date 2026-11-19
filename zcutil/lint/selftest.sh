@@ -117,9 +117,9 @@ run 1 'does not match its vendored tree' vendor
 printf 'int answer(void) { return 42; }\n' > zcutil/tools/vendor/x/a.c; printf 'x\n' > zcutil/tools/vendor/x/extra.c; track
 run 1 'does not match its vendored tree' vendor
 rm zcutil/tools/vendor/x/extra.c; track
-# `all`, and the python hook: skipped when zcutil/check-no-python.sh is absent, run (and fatal) when present
+# `all`, and the python hook: hollow (exit 2) when zcutil/check-no-python.sh is absent, run (and fatal) when present
 for r in no-new-jq no-new-bash banned-str md-links; do "$bin" --root . $r --update-baseline >/dev/null 2>&1; done
-run 0 'no-python: skipped' all
+run 2 "nothing scanned" no-python
 printf 'exit 7\n' > zcutil/check-no-python.sh; track
 run 1 '' all
 printf 'exit 0\n' > zcutil/check-no-python.sh; track
