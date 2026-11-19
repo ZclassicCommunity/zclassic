@@ -1,0 +1,1 @@
+{"commit":"c0ffee","tree":"t1","stage":"test-run/debug","step":"unit-a","verdict":"PASS","seconds":9,"started":"2026-11-19T00:00:00Z","os":"Linux","arch":"x86_64","gcc":"gcc 14","mingw":"","glibc":"","env_names":["CC"],"env_sha256":"00","log_sha256":"11"}

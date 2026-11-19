@@ -6,7 +6,7 @@
 # A unit adds its own directory to SUBDIRS (one line); each subdirectory has its own Makefile
 # with `all` and `check` targets, so units never share a source file.
 EXEEXT ?=
-SUBDIRS = tools dev dev/tests dev/hooks dev/review dev/code dev/wiki dev/doctor dev/gen dev/mutate agent/mcp agent/guard dev/verify lint
+SUBDIRS = tools dev dev/tests dev/hooks dev/review dev/code dev/wiki dev/doctor dev/gen dev/timings dev/flaky dev/mutate agent/mcp agent/guard dev/verify lint
 
 all check clean: $(SUBDIRS:%=%.rule)
 

@@ -32,6 +32,7 @@ zcutil/bin/zcl-dev review record|check <base>..<tip>        # review verdicts: r
 zcutil/bin/zcl-dev wiki [topic]                             # walk the docs and source trees one topic at a time
 zcutil/bin/zcl-dev lessons find <words>                     # search lessons, traps and facts (add: lessons add)
 zcutil/bin/zcl-dev know <term>                              # closed FACTS table answer, UNKNOWN when no row; know --check validates it
+zcutil/bin/zcl-dev flaky -n N [--jobs J] -- <argv...>          # repeat a test N times in isolated workdirs: PASS, FLAKY or FAILING with logs; zcl-dev timings <outdir>... summarizes local-ci step durations
 zcutil/bin/zcl-dev gen --check rpc-parity                   # also: gen --check flags, gen rpc-reference|args-reference|inventory
 zcutil/bin/zcl-lint all                                     # every lint rule and ratchet; zcl-lint kpi prints the tree-health floor
 zcutil/bin/zcl-dev verify --gates                           # the check-dev-tools gates after `make -C zcutil check`: zcl-lint all, check-tests (when built), know, rpc-parity, flags; stops at the first failure
