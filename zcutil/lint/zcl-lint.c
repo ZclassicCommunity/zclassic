@@ -15,6 +15,9 @@
  * Exit: 0 clean, 1 findings, 2 usage, internal error or hollow scan (nothing was scanned).
  */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under a POSIX-only mask */
+#endif
 #include "lintlib.h"
 
 #include <stdio.h>

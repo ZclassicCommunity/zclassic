@@ -15,6 +15,9 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE 1
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under a POSIX-only mask */
+#endif
 #include <ctype.h>
 #include <errno.h>
 #include <stdarg.h>

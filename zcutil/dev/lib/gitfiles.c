@@ -1,6 +1,9 @@
 /* gitfiles: see gitfiles.h. MIT, like the rest of zclassicd. */
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L /* popen under a strict -std=c2x */
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under a POSIX-only mask */
+#endif
 #endif
 #if defined(__MINGW32__) && !defined(__USE_MINGW_ANSI_STDIO)
 #define __USE_MINGW_ANSI_STDIO 1

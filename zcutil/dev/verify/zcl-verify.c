@@ -25,6 +25,9 @@
  * unavailable, or select failed). A skipped optional step never hides behind a pass: the summary names it.
  */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under a POSIX-only mask */
+#endif
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>

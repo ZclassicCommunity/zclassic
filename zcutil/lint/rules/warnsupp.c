@@ -7,6 +7,9 @@
  * Makefile.am and *.include build fragments. Baseline zcutil/lint/warnsupp.txt, shrink-only.
  */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under a POSIX-only mask */
+#endif
 #include "../lintlib.h"
 
 #include <ctype.h>
