@@ -544,6 +544,9 @@ ParsedIndexBatch ParseIndexBatch(const RawIndexBatch& raw, const Consensus::Para
         out.parsed[i] = 1;
         out.hash[i] = out.disk[i].GetBlockHash();
         out.powOk[i] = CheckProofOfWork(out.hash[i], out.disk[i].nBits, consensus);
+        // The index keeps no solution (fSolutionOnDisk): free it here, on the worker,
+        // not when the consumer drops the batch (3.3 M frees on the load thread).
+        std::vector<unsigned char>().swap(out.disk[i].nSolution);
     }
     return out;
 }
