@@ -1404,7 +1404,7 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_rejects_case_folded_duplicate
     CBootstrapSnapshotManifest manifest = ValidBootstrapManifest();
     manifest.vFiles.push_back(manifest.vFiles[0]);
     std::string& dup = manifest.vFiles.back().strPath;
-    for (size_t i = 0; i < dup.size(); ++i)
+    for (size_t i = dup.rfind('/') + 1; i < dup.size(); ++i)
         if (dup[i] >= 'a' && dup[i] <= 'z')
             dup[i] = (char)(dup[i] - 'a' + 'A');
     BOOST_REQUIRE(dup != manifest.vFiles[0].strPath);

@@ -2163,7 +2163,7 @@ BOOST_AUTO_TEST_CASE(after_a_refresh_of_the_primary_the_next_attempt_keeps_the_s
         FakeBootstrapServer a(s);
         a.chunkDelayMs = 3;
         a.manifestFor = [&](int conn) { return conn < 2 ? s.manifest : s2.manifest; };
-        a.dropBefore = [](int conn, uint32_t, uint64_t, int seq) { return conn < 2 && seq == 40; };
+        a.dropBefore = [](int conn, uint32_t, uint64_t, int seq) { return conn < 2 && seq == 7; };
         BootstrapSetWatchdogForTests(6000, 6000);
         const bool ok = DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 3000, 2, error);
         BootstrapSetWatchdogForTests(0, 0);
