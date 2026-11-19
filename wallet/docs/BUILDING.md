@@ -142,7 +142,7 @@ without following links, hashed through that handle, and on Windows held open wi
 `FILE_SHARE_READ` only until `QProcess::start` has created the process, so it cannot be
 written, deleted or renamed in between; on POSIX the file and its directories must be
 owned by the user and not group/world-writable. On failure the node is not started and
-the reason is shown and logged. Residual: on POSIX the check and the `exec` are two
+the reason is logged (and, on the first start, shown). Residual: on POSIX the check and the `exec` are two
 steps (a same-user or root attacker is out of scope); a bundle sibling `zclassicd` is
 covered by the bundle checksums, not by this pin.
 The reader seeks from EOF: magic = last 8 bytes, `len` = the 8 bytes before it
