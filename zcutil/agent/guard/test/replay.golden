@@ -1,0 +1,5 @@
+REFUSE guard.datadir rm -rf ~/.zclassic/blocks && echo done
+REFUSE guard.python tools/gen.py
+WARN guard.consensus_seal src/pow.cpp
+REFUSE guard.git_push git push origin master
+replay: 6 calls, 3 refused, 1 warned
