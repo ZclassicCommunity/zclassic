@@ -1312,7 +1312,7 @@ bool ReconcileNoteWitnesses(NoteData& nd, int nForkHeight, int nTipHeight, int n
              nd.witnessHeight, (unsigned)nd.witnesses.size(), (int)(bool)nd.nullifier, nTxHeight, nForkHeight, nTipHeight, (int)nd.fRetired);
 
     if (nd.fRetired) {
-        // Spent by a mined wallet transaction and stored in the retired form (one frozen Sapling
+        // Spent by a mined wallet transaction and stored in the retired form (frozen Sapling
         // witness or none, height -1): it needs no witness and no rescan. If that spend is ever
         // disconnected, UnretireNotesSpentFrom brings the note back and arms the rebuild.
         return false;
@@ -1390,14 +1390,15 @@ namespace {
  * fFlags is set when any note changed state.
  */
 /**
- * The stored form of a retired note. A Sapling note keeps exactly ONE frozen witness (the
- * newest one) with witnessHeight -1; every other note keeps none (empty list, height -1).
+ * The stored form of a retired note. A Sapling note keeps up to RETIRED_WITNESSES_KEPT frozen witnesses (the
+ * newest ones) with witnessHeight -1; every other note keeps none (empty list, height -1). Fewer (the one-witness
+ * form of an earlier build, none for a test build) is recognised too.
  * See RetireNotes for why. Both ends are what an older binary accepts without an assertion.
  */
 template <typename NoteData>
 bool IsRetiredForm(const NoteData& nd, bool fKeepWitness)
 {
-    return nd.witnessHeight == -1 && nd.witnesses.size() <= (fKeepWitness ? 1u : 0u);
+    return nd.witnessHeight == -1 && nd.witnesses.size() <= (fKeepWitness ? RETIRED_WITNESSES_KEPT : 0u);
 }
 
 /**
@@ -1428,8 +1429,8 @@ void RetireNotes(NoteDataMap& noteDataMap,
         if (fStoredFormOnly && !IsRetiredForm(nd, fKeepWitness)) {
             continue;
         }
-        if (!fStoredFormOnly && fKeepWitness && nd.witnesses.empty()) {
-            // A Sapling note without a witness has nothing to freeze: a rescan or a rebuild has not
+        if (!fStoredFormOnly && fKeepWitness && nd.witnesses.size() < RETIRED_WITNESSES_KEPT) {
+            // A Sapling note with fewer than RETIRED_WITNESSES_KEPT witnesses has too little to freeze: a rescan or a rebuild has not
             // reached its block yet (the wallet transactions are all loaded before it starts), and a
             // note retired now would be skipped by that rescan and stay without any witness. It is
             // retired by a sweep once its witness exists, or, for a record that already is in the
@@ -1442,9 +1443,9 @@ void RetireNotes(NoteDataMap& noteDataMap,
             continue;
         }
         if (!IsRetiredForm(nd, fKeepWitness)) {
-            // Keep the newest witness only (a wallet from a test build holds none: that form is
+            // Keep the newest witnesses only (a wallet from a test build holds none: that form is
             // recognised too, there is nothing to freeze).
-            while (nd.witnesses.size() > (fKeepWitness ? 1u : 0u)) {
+            while (nd.witnesses.size() > (fKeepWitness ? RETIRED_WITNESSES_KEPT : 0u)) {
                 nd.witnesses.pop_back();
             }
             nd.witnessHeight = -1;
@@ -2529,7 +2530,7 @@ bool CWallet::UpdatedNoteData(const CWalletTx& wtxIn, CWalletTx& wtx)
             }
             tmp.at(nd.first).witnessHeight = nd.second.witnessHeight;
             // The retired state belongs to the wallet, not to a freshly decrypted copy of the
-            // note: it must survive the replacement (the stored form is height -1 with at most one frozen witness).
+            // note: it must survive the replacement (the stored form is height -1 with at most RETIRED_WITNESSES_KEPT frozen witnesses).
             tmp.at(nd.first).fRetired = nd.second.fRetired;
         }
         // Now copy over the updated note data

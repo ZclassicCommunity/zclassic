@@ -132,13 +132,13 @@ runs at start-up (`ReconcileNoteState`) and every `RETIRE_SWEEP_INTERVAL` (10) b
 update; the nullifier stays in the record (it is what keeps the note spent) and
 `UpdateSaplingNullifierNoteMapWithTx` leaves a retired note alone.
 
-**The retired form on disk.** `witnessHeight = -1`, nullifier kept, and for a Sapling note exactly ONE
-frozen witness (the newest one; about 0.8 KiB per note): the record layout is unchanged. Sprout notes
-and the notes retired by test builds (before this change) keep no witness (an empty list); both forms
+**The retired form on disk.** `witnessHeight = -1`, nullifier kept, and for a Sapling note up to FOUR
+frozen witnesses (`RETIRED_WITNESSES_KEPT`, the newest ones; about 0.78 KiB each): the record layout is unchanged. Sprout notes
+and the notes retired by test builds keep no witness (an empty list), the notes retired by the one-witness build keep one; all forms
 are recognised at load, by `ReconcileNoteState`, by un-retire and by the health report
 (`witnesses_held_spent` counts the frozen ones).
 
-Why one witness and not none. Released binaries (v2.1.2-beta12 and before) move the height of a note
+Why witnesses and not none. Released binaries (v2.1.2-beta12 and before) move the height of a note
 without a witness to the tip with every block (`UpdateWitnessHeights`), so a later rescan that starts
 below the note (`importprivkey`, `z_importkey`, `z_importviewingkey`, `importwallet` with rescan)
 makes `WitnessNoteIfMine` skip it, and `UpdateSaplingNullifierNoteMapWithTx` erases the nullifier of a
@@ -166,20 +166,34 @@ invalidate/reconsider, `importprivkey` and `z_importkey` with rescan, a restart,
 unrelated note; balances and note counts equal the -rescan reference, and this build reads the
 result back equal to a -rescan of the same wallet.dat).
 
-The corner that is left. A retired record holds one witness, and an older binary adds one per block
-it connects and removes one per block it disconnects. If the FIRST thing an older binary does on such
-a wallet is to disconnect a block (an orphaned tip, an `invalidateblock`) and a rescan from below the
-note follows (`z_importkey` with rescan), the witness is gone, the rescan erases the nullifier, and
-that older binary counts the spent notes as unspent until this build opens the wallet again (it
-finds confirmed notes without a witness and rescans from their height; nothing is spent twice and
-nothing can be sent from those notes, the older binary fails with "Missing witness"). Measured on
-the previous release: disconnect first, then rescan: 347 notes instead of 107; a block connected
-before the disconnect: 107. Keeping two witnesses would survive one such disconnect, N+1 survive N.
+How many (`RETIRED_WITNESSES_KEPT` = 4). An older binary adds one witness per block it connects
+(`CopyPreviousWitnesses`, at most 100) and removes one per block it disconnects
+(`DecrementNoteWitnesses`), so a record with W witnesses survives W - 1 disconnects that come before
+any connect, and one witness survived none. Checked in the beta12 source for four entries at height -1:
+`CopyPreviousWitnesses` and `UpdateWitnessHeights` assert only `nWitnessCacheSize >= witnesses.size()`
+(a sweep retires a Sapling note only when it holds four witnesses, so the cache size written with the
+wallet is at least four) and `witnessHeight == -1 || == tip - 1`; `DecrementNoteWitnesses` asserts
+`witnessHeight == -1 || == tip` and `nWitnessCacheSize - 1 >= witnesses.size()` after the pop, which
+holds because the cache size drops by one with every pop; `WitnessNoteIfMine` replaces the list of a
+note still at -1 when a rescan meets its block; zap and `-rescan` clear the cache. Nothing else reads
+the list's length. The cost is 3 more witnesses per retired note: a retired record weighs about
+4.7 KiB (a live one 77 KiB).
+
+**The stated limit.** An older binary whose first events after the downgrade are FOUR or more block
+disconnects (an orphaned tip, `invalidateblock`), followed by a rescan from below the note
+(`z_importkey` or `importwallet` with rescan), has no witness left, the rescan erases the nullifier,
+and it counts those spent notes as unspent (347 notes instead of 107 in the test wallet) until it
+runs with `-rescan` or this build opens the wallet again: this build finds confirmed notes without a
+witness and rescans from their height. Nothing is spent twice and nothing can be sent from those
+notes (the older binary fails with "Missing witness"). One, two and three disconnects first, then the
+rescan, leave the older binaries correct (`wallet_witness_retire.sh` scenario 5, previous release and
+parent commit); so does any number of disconnects after a block was connected, because each connect
+adds a witness.
 
 `ClearNoteWitnessCache` (`-rescan`, `-zapwallettxes`, the rebuild after an unwind) clears the retired
 state with the witnesses: a note that stayed retired would be skipped by the rebuild and be stored
-with no witness at all, which is the form older binaries lose track of. And a Sapling note without a
-witness is not retired by a sweep (there is nothing to freeze; a rescan has not reached its block
+with no witness at all, which is the form older binaries lose track of. And a Sapling note with fewer than
+four witnesses is not retired by a sweep (there is too little to freeze; a rescan has not reached its block
 yet); a record already stored in the retired form is recognised at start-up.
 
 A note that the chain at start-up does not show as deeply spent is not retired by the sweep. At
@@ -214,10 +228,12 @@ rewrite, and the next start would find the stale witness exactly as it finds one
 **What it saves.** Every live note transaction is still rewritten at the first checkpoint after each
 block (its witness moved); the saving in normal running is the retired share of the wallet, which is
 neither updated per block nor rewritten. `WalletPerf` bench (2000 Sapling notes, 90% spent and
-buried, 13800 wallet transactions, one run on a loaded host): per foreign block the witness update
-plus the chain-tip handling is 10.0 ms with the spends under 100 deep and 6.7 ms once they are
-retired; the checkpoint one block after a block (200 live notes, 77 KiB of witnesses each, dominate)
-takes 1582 ms the way the previous release wrote it and 1222 ms now. A checkpoint with no block in
-between (a clean stop, a second checkpoint) goes from 1717 ms to 6 ms, and the checkpoint after a
-block with nothing live from 2001 ms to 11 ms: those two are not the per-block case. A retired note
-record weighs 2.35 KiB (0.78 KiB of it the frozen witness) against 77 KiB for a live one.
+buried, 13800 wallet transactions, a shared and loaded host): per foreign block the witness update
+plus the chain-tip handling is 9.9 ms with the spends under 100 deep and 6.7 ms once they are
+retired. The checkpoint one block after a block (200 live notes with 77 KiB of witnesses each dominate
+what is written) is dominated by disk speed on this host and did not give a stable figure: in three
+runs the previous release's way of writing took 3810, 1582 and 2941 ms and this build 2605, 1222 and
+3683 ms. A checkpoint with no block in between (a clean stop, a second checkpoint) goes from 686 ms to
+6 ms, and the checkpoint after a block with nothing live from 631 ms to 9 ms: those two are not the
+per-block case. A retired note record weighs 4.60 KiB (four frozen witnesses, 0.78 KiB each) against
+77 KiB for a live one, 1.57 KiB with no witness at all.

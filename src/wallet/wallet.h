@@ -69,6 +69,25 @@ static const unsigned int MAX_FREE_TRANSACTION_CREATE_SIZE = 1000;
 //  Should be large enough that we can expect not to reorg beyond our cache
 //  unless there is some exceptional network disruption.
 static const unsigned int WITNESS_CACHE_SIZE = MAX_REORG_LENGTH + 1;
+/**
+ * How many witnesses (the newest ones) a retired Sapling note keeps in wallet.dat, with witnessHeight -1.
+ *
+ * Why any: released binaries (v2.1.2-beta12 and before) erase the nullifier of a note whose witness list is
+ * empty whenever a rescan looks at its transaction (z_importkey, importwallet), and the spent note then reads
+ * as unspent. They move the height of a note to the tip with every connected block (and copy one witness per
+ * block, never below one) and pop one witness per disconnected block, so a record with W witnesses survives
+ * W - 1 disconnects that come before any connect. Four survive the orphaned tips and short reorgs that a node
+ * sees in practice (up to three blocks); one survived none (measured: disconnect, then rescan, 347 notes
+ * instead of 107).
+ *
+ * The cost: about 0.78 KiB per witness, 3.1 KiB per retired note on top of the record (a retired record
+ * weighs about 4.7 KiB, a live one 77 KiB). The limit that is left: an older binary whose first events after
+ * a downgrade are FOUR or more disconnects, followed by a rescan from below the note, counts those spent
+ * notes as unspent until it runs with -rescan or this build opens the wallet again and repairs it.
+ * Must be at most the smallest witness cache a retired note can have (a sweep retires a note only when it
+ * holds this many witnesses, so nWitnessCacheSize on disk is never smaller than this).
+ */
+static const size_t RETIRED_WITNESSES_KEPT = 4;
 /** A block update looks for newly retirable notes (CWallet::RetireSpentNotes) every this many blocks. */
 static const unsigned int RETIRE_SWEEP_INTERVAL = 10;
 //! Most new tips at which the wallet re-offers its transactions after a disconnect (CWallet::UpdatedBlockTip)
@@ -270,7 +289,7 @@ public:
     /**
      * The note was spent by a wallet transaction buried deeper than WITNESS_CACHE_SIZE
      * blocks (see CWallet::RetireSpentNotes). Its witnessHeight is -1, its witness list holds at
-     * most one frozen witness (Sapling; none for Sprout and for test-build wallets), and no block
+     * most RETIRED_WITNESSES_KEPT frozen witnesses (Sapling; none for Sprout and for test-build wallets), and no block
      * update touches it. MEMORY-ONLY, like 'value': never serialized, so wallet.dat keeps the
      * same layout (a retired note is stored as one witness or none, witnessHeight=-1, nullifier
      * kept) and the flag is rebuilt from the chain at load.
@@ -902,9 +921,10 @@ public:
      * go further, and safety rests on UnretireNotesSpentFrom, which every disconnect that reaches
      * a recorded spend height calls (the note comes back unspent, the witness rebuild is armed).
      *
-     * Stored form (what an older binary sees): witnessHeight -1 and, for a Sapling note, ONE frozen
-     * witness (the newest) so that released binaries keep deriving its nullifier; a Sprout note, and
-     * a note of a test build, keep none. Both are recognised. Returns the number of stored note
+     * Stored form (what an older binary sees): witnessHeight -1 and, for a Sapling note, up to
+     * RETIRED_WITNESSES_KEPT (4) frozen
+     * witnesses (the newest) so that released binaries keep deriving its nullifier; a Sprout note, and
+     * a note of a test build, keep none. All of them (four, fewer, none) are recognised. Returns the number of stored note
      * records this call changed. Idempotent; it also normalises a retired note an older binary
      * rewrote with a witness height. fStoredForm (start-up): a note already in the stored form
      * and spent by a mined wallet transaction is retired at any depth, for a chain that starts

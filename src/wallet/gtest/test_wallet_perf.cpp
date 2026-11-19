@@ -450,7 +450,7 @@ TEST(WalletPerf, DISABLED_Bench)
                 if (item.second.mapSaplingNoteData.begin()->second.witnessHeight == -1) { nRetired++; bRetired += ss.size(); } // the retired form: height -1, at most one frozen witness
                 else { nLive++; bLive += ss.size(); }
             }
-            printf("[wperf] note records read back: %u live, with a full witness cache, %.1f KiB each (%.1f MiB); %u retired (height -1, one frozen witness), %.2f KiB each (%.2f MiB)\n",
+            printf("[wperf] note records read back: %u live, with a full witness cache, %.1f KiB each (%.1f MiB); %u retired (height -1, frozen witnesses), %.2f KiB each (%.2f MiB)\n",
                    (unsigned)nLive, nLive ? bLive / 1024.0 / nLive : 0.0, bLive / 1048576.0,
                    (unsigned)nRetired, nRetired ? bRetired / 1024.0 / nRetired : 0.0, bRetired / 1048576.0);
         }

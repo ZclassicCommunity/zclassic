@@ -22,7 +22,9 @@
 #   5 downgrade   the wallet.dat of scenario 1 opened by the previous release and by the parent
 #                 commit's build: blocks mined, importprivkey and z_importkey with rescan, a restart, a
 #                 spend of an unrelated note, balances and note counts equal the -rescan reference; then
-#                 opened again by this build (equal to a -rescan of the same wallet.dat)
+#                 opened again by this build (equal to a -rescan of the same wallet.dat); then 1, 2 and 3
+#                 block disconnects as the FIRST events on the older binary, followed by z_importkey with
+#                 rescan, must leave balances and notes equal; 4 disconnects are recorded (the stated limit)
 #
 #   6 stalechain  kill -9 between the wallet checkpoint and the coins flush: the chain restarts below the
 #                 checkpoint; retired notes need no rescan
@@ -341,6 +343,30 @@ scn_downgrade() {
         start 6 "$BIN" -connect=0 -rescan -disablesafemode || return
         ck "downgrade $label: this build, opened again, equals a -rescan of the same wallet.dat" "$(snap 6 | zn)" "$S5"
         stop 6
+        # the first events on the older binary are block disconnects (an orphaned tip, invalidateblock): it pops one
+        # frozen witness per block, so up to RETIRED_WITNESSES_KEPT - 1 = 3 are survived; 4 are the stated limit
+        for k in 1 2 3 4; do
+            # the reference for this chain height: the same blocks invalidated, then a -rescan, by this build
+            rm -rf "$SD/node3"; cp -a "$WORK/final0" "$SD/node3"; rm -f "$SD/node3/regtest/.lock" "$SD/node3/pid"
+            start 3 "$BIN" -connect=0 -disablesafemode || return
+            j=0; while [ $j -lt $k ]; do cli 3 invalidateblock "$(cli 3 getbestblockhash)" >/dev/null 2>&1; j=$((j + 1)); done
+            stop 3
+            start 3 "$BIN" -connect=0 -rescan -disablesafemode || return; REFK=$(snap 3); stop 3
+            rm -rf "$SD/node5"; cp -a "$WORK/final0" "$SD/node5"; rm -f "$SD/node5/regtest/.lock" "$SD/node5/pid"
+            start 5 "$bd" -connect=0 -disablesafemode || return
+            j=0; while [ $j -lt $k ]; do cli 5 invalidateblock "$(cli 5 getbestblockhash)" >/dev/null 2>&1; j=$((j + 1)); done
+            cli 5 z_importkey "$ZK" yes >/dev/null 2>&1
+            if [ $k -le 3 ]; then
+                ck "downgrade $label: $k disconnects first, then z_importkey with rescan: balances and notes as the -rescan reference" "$(snap 5 | zn)" "$(printf "%s" "$REFK" | zn)"
+                stop 5
+            else
+                obs "$label: 4 disconnects first, then z_importkey with rescan: unspent notes (the reference has 107)" "$(nnotes 5)"
+                stop 5
+                start 5 "$BIN" -connect=0 -disablesafemode -debug=wallet || return
+                ck "downgrade $label: 4 disconnects first: this build repairs it at its next start (balances and notes as the reference)" "$(snap 5 | zn)" "$(printf "%s" "$REFK" | zn)"
+                stop 5
+            fi
+        done
     done
 }
 
