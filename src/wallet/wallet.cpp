@@ -27,8 +27,10 @@
 
 #include <assert.h>
 
+#include <algorithm>
 #include <atomic>
 #include <exception>
+#include <functional>
 #include <mutex>
 
 #include <boost/algorithm/string/replace.hpp>
@@ -651,6 +653,19 @@ void CWallet::WitnessChainTip(const CBlockIndex* pindex,
         SproutMerkleTree sproutWork = sproutTree;
         SaplingMerkleTree saplingWork = saplingTree;
         IncrementNoteWitnesses(pindex, pblock, sproutWork, saplingWork);
+        // Every few blocks look for notes whose spend has just become deeper than the cache.
+        // A retired note costs nothing from then on; the sweep itself costs one nullifier lookup
+        // per live note, so it is not made at every block. Skipped (retried at the next
+        // interval) when cs_main is not available without waiting: the caller holds cs_wallet,
+        // and cs_main must never be waited for after it.
+        if (nRetireSweepHeight < 0 || pindex->nHeight < nRetireSweepHeight ||
+            pindex->nHeight - nRetireSweepHeight >= (int)RETIRE_SWEEP_INTERVAL) {
+            TRY_LOCK(cs_main, lockMain);
+            if (lockMain) {
+                nRetireSweepHeight = pindex->nHeight;
+                RetireSpentNotesLocked();
+            }
+        }
     } else {
         DecrementNoteWitnesses(pindex);
     }
@@ -658,12 +673,30 @@ void CWallet::WitnessChainTip(const CBlockIndex* pindex,
 
 void CWallet::NoteTxIndexAdd(const uint256& hash, const CWalletTx& wtx)
 {
-    if (!wtx.mapSproutNoteData.empty() || !wtx.mapSaplingNoteData.empty()) {
+    if (wtx.mapSproutNoteData.empty() && wtx.mapSaplingNoteData.empty()) {
+        return;
+    }
+    // A transaction whose notes are all retired leaves the live index: the block updates never
+    // look at it again.
+    bool fAllRetired = true;
+    for (const auto& item : wtx.mapSproutNoteData) {
+        if (!item.second.fRetired) { fAllRetired = false; break; }
+    }
+    if (fAllRetired) {
+        for (const auto& item : wtx.mapSaplingNoteData) {
+            if (!item.second.fRetired) { fAllRetired = false; break; }
+        }
+    }
+    if (fAllRetired) {
+        setNoteTxIndex.erase(hash);
+        setNoteTxRetired.insert(hash);
+    } else {
+        setNoteTxRetired.erase(hash);
         setNoteTxIndex.insert(hash);
     }
 }
 
-void CWallet::CollectNoteTxs(std::vector<CWalletTx*>& out)
+void CWallet::CollectNoteTxs(std::vector<CWalletTx*>& out, bool fIncludeRetired)
 {
     AssertLockHeld(cs_wallet);
     // Two passes at most: if the first finds the index out of step with
@@ -673,25 +706,38 @@ void CWallet::CollectNoteTxs(std::vector<CWalletTx*>& out)
         out.clear();
         bool fStale = (mapWallet.size() != nNoteTxIndexWalletSize);
         if (!fStale) {
-            out.reserve(setNoteTxIndex.size());
-            for (const uint256& hash : setNoteTxIndex) {
-                auto mi = mapWallet.find(hash);
-                if (mi == mapWallet.end()) {
-                    fStale = true;
+            out.reserve(setNoteTxIndex.size() + (fIncludeRetired ? setNoteTxRetired.size() : 0));
+            for (const std::set<uint256>* pset : {&setNoteTxIndex, &setNoteTxRetired}) {
+                if (pset == &setNoteTxRetired && !fIncludeRetired) {
                     break;
                 }
-                CWalletTx& wtx = mi->second;
-                if (!wtx.mapSproutNoteData.empty() || !wtx.mapSaplingNoteData.empty()) {
-                    out.push_back(&wtx);
+                for (const uint256& hash : *pset) {
+                    auto mi = mapWallet.find(hash);
+                    if (mi == mapWallet.end()) {
+                        fStale = true;
+                        break;
+                    }
+                    CWalletTx& wtx = mi->second;
+                    if (!wtx.mapSproutNoteData.empty() || !wtx.mapSaplingNoteData.empty()) {
+                        out.push_back(&wtx);
+                    }
+                }
+                if (fStale) {
+                    break;
                 }
             }
         }
         if (!fStale) {
+            if (fIncludeRetired) {
+                // Two sets merged: keep the txid order of a full walk.
+                std::sort(out.begin(), out.end(), [](const CWalletTx* a, const CWalletTx* b) { return a->GetHash() < b->GetHash(); });
+            }
             return;
         }
         LogPrint("wallet", "%s: rebuilding note index (%u entries, expected %u)\n",
                  __func__, (unsigned)mapWallet.size(), (unsigned)nNoteTxIndexWalletSize);
         setNoteTxIndex.clear();
+        setNoteTxRetired.clear();
         for (std::pair<const uint256, CWalletTx>& wtxItem : mapWallet) {
             NoteTxIndexAdd(wtxItem.first, wtxItem.second);
         }
@@ -1141,9 +1187,14 @@ bool ReconcileNoteWitnesses(NoteData& nd, int nForkHeight, int nTipHeight, int n
     typedef typename std::remove_reference<decltype(nd.witnesses.front())>::type Witness;
     bool fChanged = false;
     stats.nNotes++;
-    LogPrint("wallet", "%s: note witnessHeight=%d witnesses=%u nullifier=%d txHeight=%d fork=%d tip=%d\n", __func__,
-             nd.witnessHeight, (unsigned)nd.witnesses.size(), (int)(bool)nd.nullifier, nTxHeight, nForkHeight, nTipHeight);
+    LogPrint("wallet", "%s: note witnessHeight=%d witnesses=%u nullifier=%d txHeight=%d fork=%d tip=%d retired=%d\n", __func__,
+             nd.witnessHeight, (unsigned)nd.witnesses.size(), (int)(bool)nd.nullifier, nTxHeight, nForkHeight, nTipHeight, (int)nd.fRetired);
 
+    if (nd.fRetired) {
+        // Spent deeper than any reorg the node accepts: it keeps no witness on purpose and
+        // needs no rescan (RetireSpentNotes left witnesses={} and witnessHeight=-1).
+        return false;
+    }
     if (nd.witnesses.empty()) {
         // Nothing cached. A note that is not in the chain yet (unconfirmed) gets its witness
         // when its block is connected. One that is confirmed needs a rescan to the block that
@@ -1208,6 +1259,189 @@ bool ReconcileNoteWitnesses(NoteData& nd, int nForkHeight, int nTipHeight, int n
 
 } // namespace
 
+namespace {
+
+/**
+ * Retire the notes of one map that a deep spend covers (see CWallet::RetireSpentNotes).
+ * findDeepSpend gives the height and txid of a wallet transaction that spends the nullifier
+ * and is buried deeper than WITNESS_CACHE_SIZE. nStored counts the records that had to change;
+ * fFlags is set when any note changed state.
+ */
+template <typename NoteDataMap>
+void RetireNotes(NoteDataMap& noteDataMap,
+                 const std::function<bool(const uint256&, int&, uint256&)>& findDeepSpend,
+                 std::set<std::pair<int, uint256>>& retiredSpends,
+                 size_t& nStored, bool& fFlags)
+{
+    for (auto& item : noteDataMap) {
+        auto& nd = item.second;
+        if (nd.fRetired || !nd.nullifier) {
+            continue;
+        }
+        int nSpendHeight = -1;
+        uint256 hashSpender;
+        if (!findDeepSpend(*nd.nullifier, nSpendHeight, hashSpender)) {
+            continue;
+        }
+        // The one stored form an older binary accepts for a note without a witness: an empty
+        // list and height -1 (it asserts height == -1 or == tip - 1 whenever it copies a witness).
+        if (!nd.witnesses.empty() || nd.witnessHeight != -1) {
+            nd.witnesses.clear();
+            nd.witnessHeight = -1;
+            nStored++;
+        }
+        nd.fRetired = true;
+        fFlags = true;
+        retiredSpends.insert(std::make_pair(nSpendHeight, hashSpender));
+    }
+}
+
+template <typename NoteDataMap>
+bool UnretireNotes(NoteDataMap& noteDataMap, const std::set<uint256>& nullifiers, bool fAll)
+{
+    bool fAny = false;
+    for (auto& item : noteDataMap) {
+        auto& nd = item.second;
+        if (nd.fRetired && (fAll || (nd.nullifier && nullifiers.count(*nd.nullifier)))) {
+            nd.fRetired = false;
+            fAny = true;
+        }
+    }
+    return fAny;
+}
+
+} // namespace
+
+size_t CWallet::RetireSpentNotes()
+{
+    LOCK2(cs_main, cs_wallet);
+    return RetireSpentNotesLocked();
+}
+
+size_t CWallet::RetireSpentNotesLocked()
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(cs_wallet);
+    if (!chainActive.Tip()) {
+        return 0;
+    }
+    // A spender is deep when GetDepthInMainChain() > WITNESS_CACHE_SIZE: it is in the active chain
+    // (merkle branch verified) with more than WITNESS_CACHE_SIZE blocks on top of it and
+    // including it. The node refuses a reorg of more than MAX_REORG_LENGTH (= WITNESS_CACHE_SIZE - 1)
+    // blocks, so that spend can no longer be undone by the node itself.
+    auto deepSpend = [this](const TxNullifiers& spends, const uint256& nullifier, int& nHeight, uint256& hashSpender) {
+        std::pair<TxNullifiers::const_iterator, TxNullifiers::const_iterator> range = spends.equal_range(nullifier);
+        for (TxNullifiers::const_iterator it = range.first; it != range.second; ++it) {
+            std::map<uint256, CWalletTx>::const_iterator mit = mapWallet.find(it->second);
+            if (mit == mapWallet.end() || mit->second.GetDepthInMainChain() <= (int)WITNESS_CACHE_SIZE) {
+                continue;
+            }
+            BlockMap::iterator bi = mapBlockIndex.find(mit->second.hashBlock);
+            if (bi == mapBlockIndex.end()) {
+                continue;
+            }
+            nHeight = bi->second->nHeight;
+            hashSpender = it->second;
+            return true;
+        }
+        return false;
+    };
+    const std::function<bool(const uint256&, int&, uint256&)> sproutDeep =
+        [&](const uint256& nf, int& h, uint256& s) { return deepSpend(mapTxSproutNullifiers, nf, h, s); };
+    const std::function<bool(const uint256&, int&, uint256&)> saplingDeep =
+        [&](const uint256& nf, int& h, uint256& s) { return deepSpend(mapTxSaplingNullifiers, nf, h, s); };
+
+    size_t nStored = 0;
+    std::vector<CWalletTx*> noteTxs;
+    CollectNoteTxs(noteTxs);
+    for (CWalletTx* pwtx : noteTxs) {
+        bool fFlags = false;
+        RetireNotes(pwtx->mapSproutNoteData, sproutDeep, setRetiredSpends, nStored, fFlags);
+        RetireNotes(pwtx->mapSaplingNoteData, saplingDeep, setRetiredSpends, nStored, fFlags);
+        if (fFlags) {
+            NoteTxIndexAdd(pwtx->GetHash(), *pwtx);
+        }
+    }
+    if (nStored > 0) {
+        LogPrint("wallet", "%s: %u note records changed, %u transactions with live notes remain\n",
+                 __func__, (unsigned)nStored, (unsigned)setNoteTxIndex.size());
+    }
+    return nStored;
+}
+
+size_t CWallet::CountRetiredNotes() const
+{
+    LOCK(cs_wallet);
+    size_t n = 0;
+    for (const std::pair<const uint256, CWalletTx>& wtxItem : mapWallet) {
+        for (const auto& item : wtxItem.second.mapSproutNoteData) n += item.second.fRetired;
+        for (const auto& item : wtxItem.second.mapSaplingNoteData) n += item.second.fRetired;
+    }
+    return n;
+}
+
+void CWallet::UnretireNotesSpentFrom(int nHeight)
+{
+    AssertLockHeld(cs_wallet);
+    std::set<uint256> sproutNullifiers, saplingNullifiers;
+    bool fAll = false;
+    bool fAny = false;
+    while (!setRetiredSpends.empty() && setRetiredSpends.rbegin()->first >= nHeight) {
+        const uint256 hashSpender = setRetiredSpends.rbegin()->second;
+        setRetiredSpends.erase(std::prev(setRetiredSpends.end()));
+        fAny = true;
+        std::map<uint256, CWalletTx>::const_iterator mit = mapWallet.find(hashSpender);
+        if (mit == mapWallet.end()) {
+            fAll = true; // the spender is gone: its notes cannot be named, bring every retired note back
+            continue;
+        }
+        for (const JSDescription& jsdesc : mit->second.vjoinsplit) {
+            for (const uint256& nf : jsdesc.nullifiers) sproutNullifiers.insert(nf);
+        }
+        for (const SpendDescription& spend : mit->second.vShieldedSpend) {
+            saplingNullifiers.insert(spend.nullifier);
+        }
+    }
+    if (!fAny) {
+        return;
+    }
+    size_t nBack = 0;
+    std::vector<CWalletTx*> noteTxs;
+    CollectNoteTxs(noteTxs, true);
+    for (CWalletTx* pwtx : noteTxs) {
+        const bool fBack = UnretireNotes(pwtx->mapSproutNoteData, sproutNullifiers, fAll) |
+                           UnretireNotes(pwtx->mapSaplingNoteData, saplingNullifiers, fAll);
+        if (fBack) {
+            nBack++;
+            NoteTxIndexAdd(pwtx->GetHash(), *pwtx);
+        }
+    }
+    if (nBack > 0) {
+        // The witnesses of those notes were dropped when they were retired: the same repair as for
+        // a witness a disconnect could not roll back rebuilds them (once, at the next tip or checkpoint).
+        fNoteWitnessesLost = true;
+        LogPrintf("%s: the unwind reached a block that spent retired notes (height %d); %u transactions get their note witnesses rebuilt\n",
+                  __func__, nHeight, (unsigned)nBack);
+    }
+}
+
+void CWallet::UnretireNotesSpentBy(const uint256& hashSpender)
+{
+    AssertLockHeld(cs_wallet);
+    int nHeight = -1;
+    for (const auto& e : setRetiredSpends) {
+        if (e.second == hashSpender) {
+            nHeight = e.first;
+            break;
+        }
+    }
+    if (nHeight >= 0) {
+        // Everything from that height on is brought back along with it: coarser than needed,
+        // and the wallet transaction is leaving the wallet, which is not a normal event.
+        UnretireNotesSpentFrom(nHeight);
+    }
+}
+
 bool CWallet::ReconcileNoteState(CBlockIndex*& pindexRescan)
 {
     LOCK2(cs_main, cs_wallet);
@@ -1220,6 +1454,16 @@ bool CWallet::ReconcileNoteState(CBlockIndex*& pindexRescan)
     NoteStateStats stats;
     bool fChanged = false;
     size_t nNullifiers = 0;
+
+    // Notes spent deeper than any accepted reorg need no witness: retire them first (this reads
+    // the chain, not the locator), so the checks below only see notes that can still be spent.
+    // Retiring changes the stored records, so it counts as a change to write back.
+    const size_t nRetired = RetireSpentNotes();
+    if (nRetired > 0) {
+        fChanged = true;
+        LogPrintf("Wallet note state: %u notes spent more than %u blocks deep need no witness any more\n",
+                  (unsigned)nRetired, (unsigned)WITNESS_CACHE_SIZE);
+    }
 
     std::vector<CWalletTx*> noteTxs;
     CollectNoteTxs(noteTxs);
@@ -1286,6 +1530,7 @@ void CopyPreviousWitnesses(NoteDataMap& noteDataMap, int indexHeight, int64_t nW
 {
     for (auto& item : noteDataMap) {
         auto* nd = &(item.second);
+        if (nd->fRetired) continue; // spent deep: no witness, no update (RetireSpentNotes)
         // Only increment witnesses that are behind the current height
         if (nd->witnessHeight < indexHeight) {
             // Check the validity of the cache
@@ -1319,6 +1564,7 @@ void CollectAppendTargets(NoteDataMap& noteDataMap, int indexHeight, std::vector
 {
     for (auto& item : noteDataMap) {
         auto* nd = &(item.second);
+        if (nd->fRetired) continue;
         if (nd->witnessHeight < indexHeight && nd->witnesses.size() > 0) {
             out.push_back(nd);
         }
@@ -1351,7 +1597,8 @@ template<typename OutPoint, typename NoteData, typename Tree>
 NoteData* WitnessNoteIfMine(std::map<OutPoint, NoteData>& noteDataMap, int indexHeight, int64_t nWitnessCacheSize, const OutPoint& key, const Tree& tree, bool* pfWasTarget)
 {
     auto mi = noteDataMap.find(key);
-    if (mi != noteDataMap.end() && mi->second.witnessHeight < indexHeight) {
+    // A retired note (spent deep) is never witnessed again, even when a rescan meets its block.
+    if (mi != noteDataMap.end() && !mi->second.fRetired && mi->second.witnessHeight < indexHeight) {
         auto* nd = &(mi->second);
         const auto witness = tree.witness();
         *pfWasTarget = (nd->witnesses.size() > 0);
@@ -1388,6 +1635,7 @@ void UpdateWitnessHeights(NoteDataMap& noteDataMap, int indexHeight, int64_t nWi
 {
     for (auto& item : noteDataMap) {
         auto* nd = &(item.second);
+        if (nd->fRetired) continue;
         if (nd->witnessHeight < indexHeight) {
             nd->witnessHeight = indexHeight;
             // Check the validity of the cache
@@ -1517,6 +1765,7 @@ bool DecrementNoteWitnesses(NoteDataMap& noteDataMap, int indexHeight, const uin
     bool fLost = false;
     for (auto& item : noteDataMap) {
         auto* nd = &(item.second);
+        if (nd->fRetired) continue;
         // Only decrement witnesses that are not above the current height
         if (nd->witnessHeight <= indexHeight) {
             const bool fHadWitness = !nd->witnesses.empty();
@@ -1557,6 +1806,11 @@ void CWallet::DecrementNoteWitnesses(const CBlockIndex* pindex)
     // chain, a reorg to genesis, a rescan that skipped old blocks): there is
     // nothing left to roll back and it must not go below zero.
     const int64_t nSizeAfter = nWitnessCacheSize > 0 ? nWitnessCacheSize - 1 : 0;
+    // A retired note was spent more than WITNESS_CACHE_SIZE blocks deep, so only an unwind the
+    // node does not accept by itself (an operator invalidateblock/parkblock, or finalizeblock
+    // of another branch) reaches its spend. Such a note is unspent again and needs its witness
+    // back: it comes back live here and the rebuild is armed (see UnretireNotesSpentFrom).
+    UnretireNotesSpentFrom(pindex->nHeight);
     const uint256 indexHash = pindex->phashBlock ? *pindex->phashBlock : uint256();
     // As in IncrementNoteWitnesses, entries without note data have empty
     // loops here and are skipped.
@@ -1864,6 +2118,11 @@ void CWallet::UpdateSaplingNullifierNoteMapWithTx(CWalletTx& wtx) {
 
     for (mapSaplingNoteData_t::value_type &item : wtx.mapSaplingNoteData) {
         SaplingOutPoint op = item.first;
+        // A retired note has no witness on purpose and must keep its nullifier: the nullifier is
+        // what tells the wallet the note is spent.
+        if (item.second.fRetired) {
+            continue;
+        }
         SaplingNoteData nd = item.second;
 
         if (nd.witnesses.empty()) {
@@ -2061,6 +2320,9 @@ bool CWallet::UpdatedNoteData(const CWalletTx& wtxIn, CWalletTx& wtx)
                 tmp.at(nd.first).nullifier = nd.second.nullifier;
             }
             tmp.at(nd.first).witnessHeight = nd.second.witnessHeight;
+            // The retired state belongs to the wallet, not to a freshly decrypted copy of the
+            // note: it must survive the replacement (the stored form is already witnesses={}, -1).
+            tmp.at(nd.first).fRetired = nd.second.fRetired;
         }
         // Now copy over the updated note data
         wtx.mapSproutNoteData = tmp;
@@ -2083,6 +2345,7 @@ bool CWallet::UpdatedNoteData(const CWalletTx& wtxIn, CWalletTx& wtx)
                 tmp.at(nd.first).nullifier = nd.second.nullifier;
             }
             tmp.at(nd.first).witnessHeight = nd.second.witnessHeight;
+            tmp.at(nd.first).fRetired = nd.second.fRetired; // see the Sprout loop above
         }
 
         // Now copy over the updated note data
@@ -2188,10 +2451,14 @@ void CWallet::EraseFromWallet(const uint256 &hash)
         return;
     {
         LOCK(cs_wallet);
+        // A transaction that retired notes by spending them must not leave the wallet while those
+        // notes stay retired (they would read as unspent but hold no witness).
+        UnretireNotesSpentBy(hash);
         if (mapWallet.erase(hash)) {
             fTxOrderValid = false;
             nNoteTxIndexWalletSize--;
             setNoteTxIndex.erase(hash);
+            setNoteTxRetired.erase(hash);
             CWalletDB(strWalletFile).EraseTx(hash);
         }
     }

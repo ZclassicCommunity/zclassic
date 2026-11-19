@@ -68,6 +68,8 @@ static const unsigned int MAX_FREE_TRANSACTION_CREATE_SIZE = 1000;
 //  Should be large enough that we can expect not to reorg beyond our cache
 //  unless there is some exceptional network disruption.
 static const unsigned int WITNESS_CACHE_SIZE = MAX_REORG_LENGTH + 1;
+/** A block update looks for newly retirable notes (CWallet::RetireSpentNotes) every this many blocks. */
+static const unsigned int RETIRE_SWEEP_INTERVAL = 10;
 //! Most new tips at which the wallet re-offers its transactions after a disconnect (CWallet::UpdatedBlockTip)
 static const int REACCEPT_TIPS_AFTER_UNWIND = 20;
 //! nReacceptTipsLeft after a start-up (import, rescan) offer that refused some: the
@@ -264,6 +266,15 @@ public:
      */
     boost::optional<CAmount> value;
 
+    /**
+     * The note was spent by a wallet transaction buried deeper than WITNESS_CACHE_SIZE
+     * blocks (see CWallet::RetireSpentNotes). Its witness list is empty and witnessHeight is -1,
+     * and no block update touches it. MEMORY-ONLY, like 'value': never serialized, so
+     * wallet.dat keeps the same layout (a retired note is stored as witnesses={},
+     * witnessHeight=-1, nullifier kept) and is rebuilt from the chain at load.
+     */
+    bool fRetired {false};
+
     SproutNoteData() : address(), nullifier(), witnessHeight {-1}, value(boost::none) { }
     SproutNoteData(libzcash::SproutPaymentAddress a) :
             address {a}, nullifier(), witnessHeight {-1}, value(boost::none) { }
@@ -336,6 +347,9 @@ public:
      * serialized, boost::none until the note is first decrypted.
      */
     boost::optional<libzcash::SaplingPaymentAddress> address;
+
+    /** Memory-only, see SproutNoteData::fRetired. */
+    bool fRetired {false};
 
     ADD_SERIALIZE_METHODS;
 
@@ -877,6 +891,24 @@ public:
      */
     bool ReconcileNoteState(CBlockIndex*& pindexRescan);
 
+    /**
+     * Retire the notes whose nullifier is spent by a wallet transaction that is more than
+     * WITNESS_CACHE_SIZE blocks deep in the active chain. No reorg the node accepts (it refuses
+     * more than MAX_REORG_LENGTH = WITNESS_CACHE_SIZE - 1 blocks) can un-spend such a note, so it
+     * never needs a witness again: its witness list is cleared and witnessHeight set to -1 (the
+     * only state older binaries accept for a note without a witness), once, and the block updates
+     * skip it from then on. Sprout and Sapling. Returns the number of stored note records this call
+     * changed (a note already stored as witnesses={}, height -1 is retired in memory but counts none).
+     * Safe to call at any time (idempotent); it also normalises a retired note an older binary
+     * rewrote with a witness height. Takes cs_main and cs_wallet.
+     */
+    size_t RetireSpentNotes();
+    /** RetireSpentNotes for a caller that holds cs_main and cs_wallet. */
+    size_t RetireSpentNotesLocked();
+
+    /** Number of notes currently retired (memory only; rebuilt by RetireSpentNotes). */
+    size_t CountRetiredNotes() const;
+
 protected:
     /**
      * pindex is the new tip being connected.
@@ -945,15 +977,39 @@ protected:
      * before the next witness update (CollectNoteTxs).
      */
     std::set<uint256> setNoteTxIndex;
+    /**
+     * The wallet transactions that carry note data and all of whose notes are retired
+     * (see RetireSpentNotes). Together with setNoteTxIndex (which therefore holds only the
+     * transactions with at least one live note) it covers every note transaction; each hash is in
+     * one of the two. Block updates look at setNoteTxIndex only, so their cost follows the
+     * unspent notes, not every note ever received.
+     */
+    std::set<uint256> setNoteTxRetired;
+    /**
+     * (height of the block, txid) of the wallet transactions whose spend retired a note, so a
+     * disconnect that reaches that height (an operator invalidateblock/parkblock deeper than
+     * the reorg limit) can bring those notes back (UnretireNotesSpentFrom).
+     */
+    std::set<std::pair<int, uint256>> setRetiredSpends;
+    /** Tip height of the last RetireSpentNotes sweep made from a block update. */
+    int nRetireSweepHeight = -1;
     size_t nNoteTxIndexWalletSize = 0;
     void NoteTxIndexAdd(const uint256& hash, const CWalletTx& wtx);
     /**
-     * Fill out with the mapWallet entries that currently carry note data,
-     * in txid order (the same relative order as a full mapWallet walk).
+     * Fill out with the mapWallet entries that currently carry note data
+     * (live notes only, unless fIncludeRetired), in txid order (the same
+     * relative order as a full mapWallet walk).
      * Requires cs_wallet. The pointers stay valid until mapWallet is next
      * inserted into or erased from.
      */
-    void CollectNoteTxs(std::vector<CWalletTx*>& out);
+    void CollectNoteTxs(std::vector<CWalletTx*>& out, bool fIncludeRetired = false);
+    /**
+     * A disconnect reached the block at nHeight: every note retired by a spend in that block or
+     * above is live again. Its witness is gone, so the rebuild (fNoteWitnessesLost) is armed.
+     */
+    void UnretireNotesSpentFrom(int nHeight);
+    /** The same for the notes retired by one wallet transaction (it left the wallet). */
+    void UnretireNotesSpentBy(const uint256& hashSpender);
 
     /**
      * Wallet transactions as (nOrderPos, txid), which is the order
@@ -1153,6 +1209,9 @@ public:
         fNoteWitnessesLost = false;
         nReacceptTipsLeft = 0;
         setNoteTxIndex.clear();
+        setNoteTxRetired.clear();
+        setRetiredSpends.clear();
+        nRetireSweepHeight = -1;
         nNoteTxIndexWalletSize = 0;
     }
 
