@@ -79,7 +79,7 @@ done
 kill -0 "$npid" 2>/dev/null && [ "$misses" = 0 ] && ok "node answered getblockcount every 2 s for 60 s after the kill" \
     || bad "node missed $misses of 30 getblockcount calls (alive: $(kill -0 "$npid" 2>/dev/null && echo yes || echo no))"
 [ "$seen_restarting" = 1 ] && ok "torstatus went to restarting" || bad "torstatus never showed restarting"
-while [ -z "$back" ] && [ $(( $(date +%s) - t0 )) -lt 120 ]; do
+while [ -z "$back" ] && [ $(( $(date +%s) - t0 )) -lt 120 ]; do # real-clock: the 120 s limit is the spec
     [ "$(torstatus)" = running ] && [ -n "$(onion)" ] && back=$(( $(date +%s) - t0 )) || sleep 1
 done
 [ -n "$back" ] && ok "Tor running and onion advertised again ${back}s after the kill" \
