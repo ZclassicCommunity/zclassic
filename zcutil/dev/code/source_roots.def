@@ -1,0 +1,57 @@
+# source_roots.def: the one definition of the zclassicd source universe for `zcl-dev code`.
+#
+# Tab-separated rows, '#' starts a comment.
+#   group     <name>    <path prefix>   top-level group in `code map`; the first matching row wins
+#   vendored  <path prefix>             third-party or verbatim-vendored tree: counted, never scanned
+#   include   <dir>                     include directory for resolving #include, tried in order
+#                                       (a quoted include tries the including file's directory first)
+#   automake  <file>                    autotools makefile read for *_SOURCES / *_LDADD, in order
+# The universe is every tracked .c .cc .cpp .cxx .h .hpp .hh .sh file outside a vendored prefix.
+
+# ---- vendored trees (also listed in zcutil/lint, zcutil/tools/NOTICE)
+vendored	src/leveldb/
+vendored	src/secp256k1/
+vendored	src/univalue/
+vendored	src/c23/vendor/
+vendored	src/c23/services/vendor/
+vendored	src/pow/tromp/
+vendored	wallet/src/3rdparty/
+vendored	zcutil/tools/vendor/
+vendored	depends/
+
+# ---- groups (more specific prefixes first)
+group	c23-core	src/c23/
+group	daemon-tests	src/test/
+group	daemon-tests	src/gtest/
+group	daemon-tests	src/wallet/test/
+group	daemon-wallet	src/wallet/
+group	daemon-consensus	src/consensus/
+group	daemon-consensus	src/script/
+group	daemon-consensus	src/primitives/
+group	daemon-consensus	src/zcash/
+group	daemon-rpc	src/rpc/
+group	daemon	src/
+group	gui-wallet-tests	wallet/tests/
+group	gui-wallet	wallet/
+group	tools	zcutil/
+group	qa	qa/
+group	contrib	contrib/
+group	docs	doc/
+
+# ---- include directories, in the order the build tries them (src/Makefile.am AM_CPPFLAGS)
+include	src/c23/compat
+include	src
+include	src/univalue/include
+include	src/secp256k1/include
+include	src/leveldb/include
+include	src/leveldb/helpers/memenv
+include	src/c23
+include	wallet/src
+# src/c23/services/tools build with -iquote src/c23/services/glue; other per-target -iquote
+# directories are not modelled.
+include	src/c23/services/glue
+
+# ---- autotools makefiles, one namespace, sources relative to the first file's directory
+automake	src/Makefile.am
+automake	src/Makefile.test.include
+automake	src/Makefile.gtest.include

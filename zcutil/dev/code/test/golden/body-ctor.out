@@ -1,0 +1,5 @@
+path: src/core.cpp
+function: Counter::Counter
+matches: 1
+lines: 21-21
+    Counter() : n_(0), tag_{1} {}

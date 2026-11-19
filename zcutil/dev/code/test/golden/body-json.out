@@ -1,0 +1,1 @@
+{"cmd":"body","path":"src/core.cpp","function":"Max","matches":1,"lines":"41-44","total":4,"after":0,"next":null,"rows":[{"text":"template <typename T> T Max(T a, T b)"},{"text":"{"},{"text":"    return a > b ? a : b;"},{"text":"}"}]}

@@ -1,0 +1,8 @@
+path: src/core.cpp
+function: Annotated
+matches: 1
+lines: 57-60
+void Annotated(int a) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    (void)a;
+}

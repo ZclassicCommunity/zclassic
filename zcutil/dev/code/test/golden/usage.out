@@ -1,0 +1,10 @@
+usage: zcl-dev code <command> [--json] [--after=N]
+  map                          groups with file, LOC and language counts
+  owner <path>                 AGENTS.md, rules, autotools targets, traps and lessons
+  impact <path> [--tests] [--depth=N]   reverse #include closure
+  cost <path>                  TUs that recompile and targets that relink
+  file <path>                  includes and definitions with line ranges
+  sym <name>                   definition sites
+  refs <name>                  git grep -w, at most 50 hits
+  body <path> <func>           print one function
+  recent [--since=7d]          files changed recently, by area

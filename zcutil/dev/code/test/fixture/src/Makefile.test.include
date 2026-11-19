@@ -1,0 +1,6 @@
+noinst_PROGRAMS += test/test_fx
+FX_TESTS = \
+  test/foo_tests.cpp
+FX_TESTS += test/wallet_tests.cpp
+test_test_fx_SOURCES = $(FX_TESTS)
+test_test_fx_LDADD = $(LIBFX_CORE) $(LIBFX_WALLET)

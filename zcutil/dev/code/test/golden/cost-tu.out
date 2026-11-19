@@ -1,0 +1,8 @@
+path: src/core.cpp
+built-tus: 1
+headers-in-closure: 0
+relink-targets: 2
+unresolved-quoted-includes: 1
+target  libfx_core.a  1
+relink  fxd
+relink  test/test_fx

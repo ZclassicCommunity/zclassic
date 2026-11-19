@@ -1,0 +1,4 @@
+symbol: Blob::Set
+scanned-files: 10
+definitions: 1
+func  Blob::Set  src/core.cpp  78-82

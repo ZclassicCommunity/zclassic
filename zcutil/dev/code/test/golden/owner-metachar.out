@@ -1,0 +1,10 @@
+path: src/x$(touch PWNED).cpp
+agents: AGENTS.md
+tests: Tests: run the fixture suites.
+rule  src/* -> unit-a
+compiled-by  none (not listed in any *_SOURCES)
+guide  ci steps (ALL, broad rule: src/x$(touch PWNED).cpp): unit-a
+guide  lessons (doc/agent/LESSONS.md):
+guide    DONE src/core.cpp - keep raw strings out of the brace matcher.
+guide  traps (doc/agent/TRAPS.md):
+guide    (1) Core
