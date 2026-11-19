@@ -2,7 +2,7 @@
 
 Beta13 is a new wallet **and** a new node (both v2.1.2-beta13). The shielded cryptography no longer uses Rust or libsnark: it is the C23 core in `src/c23`. Start-up and balance queries are faster, shielded sends use less memory, wallet state survives hard kills and chain reorganisations with correct balances, and syncing from block 0 works again.
 
-**No consensus rule, checkpoint, activation height or the IBD proof-skip is changed**, by any change listed below either. The only edit to a sealed consensus file since the first beta13 notes removes a dead DNS seed from `src/chainparams.cpp`; it is a network seed, not a consensus parameter. One owner-approved consensus-adjacent change: the 413 historical oversize transactions are admitted by an explicit allowlist (the same table Z23 uses), which is what makes a sync from block 0 possible.
+**No consensus rule, checkpoint, activation height or the IBD proof-skip is changed**, by any change listed below either. The only edits to a sealed consensus file since the first beta13 notes are in `src/chainparams.cpp`: a dead DNS seed is removed and two snapshot server addresses (with their onion addresses) are added. These are network addresses, not consensus parameters. One owner-approved consensus-adjacent change: the 413 historical oversize transactions are admitted by an explicit allowlist (the same table Z23 uses), which is what makes a sync from block 0 possible.
 
 ## What is new
 - **No Rust, no libsnark.** Sapling, Sprout (Groth16 and PHGR13) and Equihash verification are C23, checked against a manifest. `sprout-proving.key`, libgmp and OpenMP are no longer needed. New Sprout PHGR13 proofs can no longer be created (they only existed before Sapling); they are still verified.
