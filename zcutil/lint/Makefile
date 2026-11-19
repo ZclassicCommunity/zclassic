@@ -2,6 +2,7 @@
 #   make -C zcutil/lint              build ../bin/zcl-lint
 #   make -C zcutil/lint check        selftest of every rule against fixture repositories
 #   make -C zcutil/lint lint         run all rules on this tree (also: make -C src lint-fast)
+# Rules: see rules.def; selftest.sh and selftest_shape.sh drive fixture repositories.
 # Sources: zcl-lint.c (driver), lintlib.{c,h} (shared helpers), rules/*.c (one file per rule), rules.def.
 CC ?= cc
 EXEEXT ?=
@@ -19,6 +20,7 @@ $(OUT): $(SRC) $(HDR)
 
 check: $(OUT)
 	sh selftest.sh $(OUT)
+	sh selftest_shape.sh $(OUT)
 	$(CC) -std=c2x -Wall -Wextra -Werror -fsyntax-only zcl-lint.c lintlib.c $(RULES)
 	$(CC) -std=gnu17 -Wall -Wextra -Werror -o ../bin/lintlib-test lintlib_test.c lintlib.c && ../bin/lintlib-test
 

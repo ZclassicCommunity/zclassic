@@ -1,0 +1,9 @@
+# zcl-lint long-functions baseline: line count above 500 per function per path.
+# Shrink-only: lower a count or delete a row when it falls; never raise one or add a path.
+# Regenerate with: zcl-lint long-functions --update-baseline (refused while anything rose).
+src/init.cpp	AppInit2(2)	2116
+src/main.cpp	ProcessMessage(4)	1043
+src/script/interpreter.cpp	EvalScript(6)	783
+src/wallet/asyncrpcoperation_mergetoaddress.cpp	AsyncRPCOperation_mergetoaddress::main_impl(0)	551
+src/wallet/asyncrpcoperation_sendmany.cpp	AsyncRPCOperation_sendmany::main_impl(0)	726
+wallet/src/rpc.cpp	RPC::getInfoThenRefresh(1)	528
