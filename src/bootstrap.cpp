@@ -1487,6 +1487,38 @@ static bool WriteBootstrapChunkToFile(const boost::filesystem::path& path, const
     return true;
 }
 
+// Hash-while-writing support. A file's SHA-256 is computed over its bytes as they arrive, so finishing
+// it costs no second read. A resumed .part is hashed once up to the offset the download continues from.
+// Anything unusual (a short prefix, a chunk that is not the next one) just turns the incremental hash off
+// for that file, which is then verified by re-reading it exactly as before.
+static bool HashBootstrapPrefix(const boost::filesystem::path& path, uint64_t length, CSHA256& hasher)
+{
+    FILE* f = fopen(path.string().c_str(), "rb");
+    if (!f)
+        return false;
+    std::vector<unsigned char> buffer(1024 * 1024);
+    uint64_t left = length;
+    bool ok = true;
+    while (left > 0) {
+        const size_t want = (size_t)std::min<uint64_t>(left, buffer.size());
+        if (fread(buffer.data(), 1, want, f) != want) {
+            ok = false;
+            break;
+        }
+        hasher.Write(buffer.data(), want);
+        left -= want;
+    }
+    fclose(f);
+    return ok;
+}
+
+static uint256 FinishBootstrapHasher(CSHA256& hasher)
+{
+    unsigned char digest[CSHA256::OUTPUT_SIZE];
+    hasher.Finalize(digest);
+    return uint256S("0x" + HexStr(digest, digest + CSHA256::OUTPUT_SIZE));
+}
+
 static bool VerifyBootstrapDownloadedFile(const boost::filesystem::path& path, const CBootstrapSnapshotFile& file, std::string& error)
 {
     uint256 hash;
@@ -1914,13 +1946,14 @@ struct BootstrapRemoteIndex {
     BootstrapRemoteIndex() : shared(0) {}
 };
 
-// False if `remote` is not the same snapshot (network, anchor, chunk size, version, commitment) or shares no file.
+// False if `remote` is for another network or chunk size, or shares no file with the trusted manifest.
 static bool BootstrapBuildRemoteIndex(const CBootstrapSnapshotManifest& master, const CBootstrapSnapshotManifest& remote, BootstrapRemoteIndex& out)
 {
-    if (remote.nVersion != master.nVersion || remote.strNetwork != master.strNetwork || remote.nHeight != master.nHeight ||
-        remote.hashBlock != master.hashBlock || remote.hashAnchorSha256 != master.hashAnchorSha256 ||
-        remote.hashAnchorSha3 != master.hashAnchorSha3 || remote.nChunkSize != master.nChunkSize ||
-        remote.hashChainstateSerialized != master.hashChainstateSerialized)
+    // Another height, block or commitment is fine: the snapshot being downloaded is always the trusted
+    // one; this server only supplies files that are byte-identical (same path, size and SHA-256) to the
+    // trusted manifest's own, e.g. the append-only block files two snapshots have in common. Nothing else
+    // of its snapshot is ever taken. Requests are chunk-aligned, so the chunk size must agree.
+    if (remote.strNetwork != master.strNetwork || remote.nChunkSize != master.nChunkSize)
         return false;
     std::map<std::string, uint32_t> byPath;
     for (size_t i = 0; i < remote.vFiles.size(); ++i)
@@ -2050,7 +2083,7 @@ private:
 
 // fsync a partially written file every this many chunks so a power loss costs
 // bounded re-download (a kill -9 loses nothing: the data is in the page cache).
-static const unsigned int BOOTSTRAP_PART_SYNC_CHUNKS = 16;
+static const unsigned int BOOTSTRAP_PART_SYNC_CHUNKS = 64;
 
 // Download the chunks for the files a feed hands out, over a single connection,
 // using a pipelined request window. Writes each file to a .part path, verifies
@@ -2121,6 +2154,9 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
     boost::filesystem::path open_path;
     boost::filesystem::path open_part;
     unsigned int chunks_since_sync = 0;
+    CSHA256 fileHasher;          // over the bytes of the open file written so far
+    uint64_t fileHashed = 0;     // how many bytes fileHasher has seen (the next chunk must start there)
+    bool fileHashValid = false;
     uint64_t stream_received = 0;
     int last_logged_percent = -1;
     uint64_t last_reported_bytes = 0;
@@ -2202,12 +2238,29 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
                 ok = false;
                 break;
             }
+            fileHasher = CSHA256();
+            fileHashed = request.nOffset;
+            fileHashValid = true;
+            if (request.nOffset > 0) {
+                // continuing a partial file: its prefix (what is on disk now, torn or not) is hashed once
+                fflush(fp);
+                fileHashValid = HashBootstrapPrefix(open_part, request.nOffset, fileHasher);
+            }
         }
 
         if (!WriteBootstrapChunkToFile(open_part, chunk, fp, error)) {
             setFatal();
             ok = false;
             break;
+        }
+        if (fileHashValid) {
+            if (chunk.nOffset == fileHashed) {
+                if (!chunk.vData.empty())
+                    fileHasher.Write(&chunk.vData[0], chunk.vData.size());
+                fileHashed += chunk.vData.size();
+            } else {
+                fileHashValid = false;
+            }
         }
         stream_received += chunk.vData.size();
         feed.NoteChunk(request.nFileIndex, chunk.vData.size());
@@ -2234,7 +2287,19 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
                 ok = false;
                 break;
             }
-            if (!VerifyBootstrapDownloadedFile(open_part, file, error)) {
+            bool verified;
+            boost::system::error_code szec;
+            if (fileHashValid && fileHashed == file.nSize && boost::filesystem::file_size(open_part, szec) == file.nSize && !szec) {
+                const uint256 got = FinishBootstrapHasher(fileHasher);
+                verified = (got == file.hashSha256);
+                if (!verified)
+                    error = strprintf("bootstrap downloaded file hash mismatch for %s: computed=%s expected=%s",
+                                      file.strPath, got.ToString(), file.hashSha256.ToString());
+            } else {
+                verified = VerifyBootstrapDownloadedFile(open_part, file, error);
+            }
+            fileHashValid = false;
+            if (!verified) {
                 // Wrong bytes: drop the file (a resumed .part may have been torn by
                 // an earlier crash) and re-fetch it from byte 0.
                 boost::system::error_code rmec;
