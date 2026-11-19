@@ -701,6 +701,14 @@ void CWallet::CollectNoteTxs(std::vector<CWalletTx*>& out)
 
 void CWallet::SetBestChain(const CBlockLocator& loc)
 {
+    // The checkpoint walks mapWallet and writes it in one wallet.dat transaction. Its callers
+    // hold cs_main only, and the mempool notifier thread adds wallet transactions under
+    // cs_wallet alone (SyncTransaction). Without cs_wallet here the two ran at once: the walk
+    // raced the update, and the notifier's write could wait on a page lock of this transaction
+    // while the transaction waited on one held by that write. Berkeley DB runs no deadlock
+    // detector in this environment, so both waited forever (an invalidateblock, which writes
+    // the checkpoint, never returned).
+    LOCK2(cs_main, cs_wallet);
     // Never write out witnesses a disconnect could not roll back: the flag is
     // memory only, so a restart would keep those notes without a witness.
     if (fNoteWitnessesLost) {

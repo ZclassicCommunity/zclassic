@@ -2,7 +2,9 @@
 #include <gtest/gtest.h>
 #include <sodium.h>
 
+#include <atomic>
 #include <iostream>
+#include <thread>
 #include <sys/time.h>
 
 #include "base58.h"
@@ -1648,6 +1650,34 @@ TEST(WalletTests, SetBestChainDefersPendingRebuildAtShutdown) {
     fRequestShutdown = false;
     EXPECT_TRUE(fPending);
     EXPECT_FALSE(ShutdownRequested());
+}
+
+TEST(WalletTests, SetBestChainWaitsForWalletLock) {
+    // The checkpoint walks mapWallet inside one wallet.dat transaction, so it must
+    // exclude every other wallet writer. The mempool notifier thread adds wallet
+    // transactions holding cs_wallet only (SyncTransaction); a checkpoint that took
+    // cs_main alone ran beside it and could deadlock inside Berkeley DB, which hung
+    // invalidateblock. Here the test thread holds cs_wallet as the notifier does:
+    // the checkpoint has to wait for it. (The pending rebuild at shutdown makes the
+    // checkpoint return without writing, as above, so no wallet file is needed.)
+    TestWallet wallet;
+    wallet.SetNoteWitnessesLost(true);
+    StartShutdown();
+    std::atomic<bool> fDone(false);
+    std::thread checkpoint;
+    {
+        LOCK(wallet.cs_wallet);
+        checkpoint = std::thread([&wallet, &fDone]() {
+            wallet.CWallet::SetBestChain(CBlockLocator());
+            fDone = true;
+        });
+        MilliSleep(500);
+        EXPECT_FALSE(fDone.load());
+    }
+    checkpoint.join();
+    fRequestShutdown = false;
+    EXPECT_TRUE(fDone.load());
+    EXPECT_TRUE(wallet.NoteWitnessesLost());
 }
 
 TEST(WalletTests, CachedWitnessesEmptyChain) {
