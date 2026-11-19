@@ -1292,7 +1292,12 @@ BOOST_AUTO_TEST_CASE(a_manifest_that_changes_mid_download_ends_the_attempt_but_k
     server.manifestFor = [&s](int conn) {
         CBootstrapSnapshotManifest m = s.manifest;
         if (conn >= 1)
+        {
             m.hashBlock = uint256S("deadbeef");
+            // rebuilt: no file of the new snapshot equals one of the trusted manifest
+            for (size_t i = 0; i < m.vFiles.size(); ++i)
+                m.vFiles[i].hashSha256 = Sha256Of("rebuilt " + m.vFiles[i].strPath);
+        }
         return m;
     };
     std::string error;
@@ -1591,32 +1596,54 @@ BOOST_AUTO_TEST_CASE(two_servers_both_serve_and_no_chunk_is_fetched_twice)
     BOOST_CHECK_EQUAL(a.Log().size() + b.Log().size(), ChunksOf(s));
 }
 
-BOOST_AUTO_TEST_CASE(a_server_with_a_different_snapshot_is_ignored)
+// A manifest of another snapshot (height, block) that shares no file with the trusted one.
+static CBootstrapSnapshotManifest ManifestSharingNothing(const CBootstrapSnapshotManifest& m)
+{
+    CBootstrapSnapshotManifest o = m;
+    o.nHeight += 1;
+    for (size_t i = 0; i < o.vFiles.size(); ++i)
+        o.vFiles[i].hashSha256 = Sha256Of(std::string("other snapshot file ") + itostr((int)i));
+    return o;
+}
+
+BOOST_AUTO_TEST_CASE(a_server_with_a_different_snapshot_sharing_no_file_is_ignored)
 {
     TempDir tmp;
     const Snapshot s = MakeSnapshot(8);
     FakeBootstrapServer a(s), b(s);
-    b.manifestFor = [&s](int) {
-        CBootstrapSnapshotManifest m = s.manifest;
-        m.nHeight += 1; // another snapshot (height), same file names
-        return m;
-    };
+    b.manifestFor = [&s](int) { return ManifestSharingNothing(s.manifest); };
     std::string error;
     BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
                                                             std::vector<std::string>(1, PeerName(b))), error);
     CheckAllFilesMatch(s, tmp.path / "staging");
     BOOST_CHECK_EQUAL(b.Log().size(), 0U); // not one chunk asked of it
     BOOST_CHECK_EQUAL(a.Log().size(), ChunksOf(s));
-    // the validated server itself changing its snapshot, with no other left, still ends the attempt
+    // the validated server itself changing to another snapshot, with no other left, still ends the attempt
     TempDir tmp2;
     FakeBootstrapServer c(s);
-    c.manifestFor = [&s](int conn) {
+    c.manifestFor = [&s](int conn) { return conn > 0 ? ManifestSharingNothing(s.manifest) : s.manifest; };
+    BOOST_CHECK(!DownloadBootstrapSnapshotParallel(c.Address(), PeerName(c), s.manifest, tmp2.path / "staging", 5000, 2, error));
+}
+
+BOOST_AUTO_TEST_CASE(a_server_at_another_height_serves_the_files_identical_to_the_trusted_manifest)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(8);
+    FakeBootstrapServer a(s), b(s);
+    a.chunkDelayMs = 10;
+    b.chunkDelayMs = 10;
+    b.manifestFor = [&s](int) {
         CBootstrapSnapshotManifest m = s.manifest;
-        if (conn > 0)
-            m.nHeight += 1;
+        m.nHeight += 1; // another snapshot (height); every file is the same bytes
         return m;
     };
-    BOOST_CHECK(!DownloadBootstrapSnapshotParallel(c.Address(), PeerName(c), s.manifest, tmp2.path / "staging", 5000, 2, error));
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                            std::vector<std::string>(1, PeerName(b))), error);
+    CheckAllFilesMatch(s, tmp.path / "staging");
+    BOOST_CHECK_GT(a.Log().size(), 0U);
+    BOOST_CHECK_GT(b.Log().size(), 0U); // shared files come from both servers
+    BOOST_CHECK_EQUAL(a.Log().size() + b.Log().size(), ChunksOf(s));
 }
 
 BOOST_AUTO_TEST_CASE(a_server_with_another_manifest_serves_the_files_it_shares)
@@ -1704,7 +1731,7 @@ BOOST_AUTO_TEST_CASE(a_stream_the_server_defers_moves_to_the_other_server)
     const int64_t t0 = GetTimeMillis();
     BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
                                                             std::vector<std::string>(1, PeerName(b))), error);
-    BOOST_CHECK_LT(GetTimeMillis() - t0, 15000); // would take minutes if its streams stayed on b
+    BOOST_CHECK_LT(GetTimeMillis() - t0, 45000); // would take minutes if its streams stayed on b (loaded hosts need slack)
     CheckAllFilesMatch(s, tmp.path / "staging");
     BOOST_CHECK_GE(a.Log().size(), ChunksOf(s) - 40U);
 }

@@ -1903,13 +1903,14 @@ struct BootstrapRemoteIndex {
     BootstrapRemoteIndex() : shared(0) {}
 };
 
-// False if `remote` is not the same snapshot (network, anchor, chunk size, version, commitment) or shares no file.
+// False if `remote` is for another network or chunk size, or shares no file with the trusted manifest.
 static bool BootstrapBuildRemoteIndex(const CBootstrapSnapshotManifest& master, const CBootstrapSnapshotManifest& remote, BootstrapRemoteIndex& out)
 {
-    if (remote.nVersion != master.nVersion || remote.strNetwork != master.strNetwork || remote.nHeight != master.nHeight ||
-        remote.hashBlock != master.hashBlock || remote.hashAnchorSha256 != master.hashAnchorSha256 ||
-        remote.hashAnchorSha3 != master.hashAnchorSha3 || remote.nChunkSize != master.nChunkSize ||
-        remote.hashChainstateSerialized != master.hashChainstateSerialized)
+    // Another height, block or commitment is fine: the snapshot being downloaded is always the trusted
+    // one; this server only supplies files that are byte-identical (same path, size and SHA-256) to the
+    // trusted manifest's own, e.g. the append-only block files two snapshots have in common. Nothing else
+    // of its snapshot is ever taken. Requests are chunk-aligned, so the chunk size must agree.
+    if (remote.strNetwork != master.strNetwork || remote.nChunkSize != master.nChunkSize)
         return false;
     std::map<std::string, uint32_t> byPath;
     for (size_t i = 0; i < remote.vFiles.size(); ++i)
