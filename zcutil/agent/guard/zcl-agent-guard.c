@@ -15,9 +15,10 @@
  *   zcl-agent-guard --replay TRANSCRIPT   evaluate a transcript (JSONL) offline
  *
  * Hook contract: exit 2 plus one stderr line refuses the call; exit 0 allows it (a warning is a
- * stderr line plus a PreToolUse "ask" decision on stdout, exit 0). Malformed input fails open
- * with a warning: this is a safety net,
- * not the primary control. Precision matters as much as coverage, because a false refusal
+ * stderr line plus a PreToolUse "ask" decision on stdout, exit 0). Empty input and a named tool
+ * that is not checked fail open; input the guard cannot read for a checked tool is refused
+ * (guard.too_complex). This is a safety net, not the primary control. Precision matters as
+ * much as coverage, because a false refusal
  * stalls the worker.
  *
  * Shell scanning is documented in rules.c. Hook JSON is parsed with the vendored zjsonp. */
@@ -43,6 +44,7 @@
 
 struct call {
     char *name, *cmd, *file, *nb, *content;
+    bool bad; /* a field was present but could not be decoded (bad escape, out of memory) */
 };
 
 static void call_free(struct call *c)
@@ -115,6 +117,7 @@ static bool parse_input(zjsonp *p, const char *text, struct call *call)
         if (slot && v.kind == ZJRP_STR) {
             free(*slot);
             *slot = dec_str(text, &v);
+            if (!*slot) call->bad = true;
         } else if (!skip_value(p, &v)) {
             return false;
         }
@@ -137,6 +140,7 @@ static bool parse_hook(const char *text, size_t len, struct call *call)
         if (strcmp(key, "tool_name") == 0 && v.kind == ZJRP_STR) {
             free(call->name);
             call->name = dec_str(text, &v);
+            if (!call->name) call->bad = true;
         } else if (strcmp(key, "tool_input") == 0 && v.kind == ZJRP_OBJ_OPEN) {
             if (!parse_input(&p, text, call)) return false;
         } else if (!skip_value(&p, &v)) {
@@ -148,6 +152,7 @@ static bool parse_hook(const char *text, size_t len, struct call *call)
 static const char *eval_call(const struct call *c)
 {
     if (!c->name) return NULL;
+    if (c->bad) return R_COMPLEX; /* an undecodable field: the call cannot be checked */
     if (strcmp(c->name, "Bash") == 0) return c->cmd ? ag_eval_bash(c->cmd) : NULL;
     if (strcmp(c->name, "PowerShell") == 0) return c->cmd ? ag_eval_ps(c->cmd) : NULL;
     if (strcmp(c->name, "NotebookEdit") == 0) return ag_eval_path(c->name, c->nb, NULL);
@@ -442,6 +447,14 @@ static void print_ask(const char *rule)
     fflush(stdout);
 }
 
+/* True for empty or whitespace-only input. */
+static bool blank(const char *s, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        if (s[i] != ' ' && s[i] != '\t' && s[i] != '\r' && s[i] != '\n') return false;
+    return true;
+}
+
 static int cmd_hook(void)
 {
     size_t len = 0;
@@ -449,7 +462,7 @@ static int cmd_hook(void)
     char *in = read_stdin(&len, &big);
     struct call call;
     const char *r = NULL;
-    bool ok;
+    bool ok, undecodable = false;
     memset(&call, 0, sizeof call);
     if (big) {
         /* Input over the cap cannot be parsed, and the hook only runs for the checked tools, so
@@ -464,11 +477,31 @@ static int cmd_hook(void)
         fprintf(stderr, "zcl-agent-guard: warning: unreadable hook input; allowing\n");
         return 0;
     }
+    if (blank(in, len)) {
+        free(in);
+        fprintf(stderr, "zcl-agent-guard: warning: empty hook input; allowing\n");
+        return 0;
+    }
     ok = parse_hook(in, len, &call);
-    if (ok) r = eval_call(&call);
-    else fprintf(stderr, "zcl-agent-guard: warning: unexpected hook input; allowing\n");
+    /* Past this point the input is a hook call. A tool that is named and not checked is allowed;
+     * anything the guard cannot read (bad JSON, a bad escape, invalid UTF-8, nesting too deep)
+     * for a checked tool, or for a call that never names its tool, is refused: failing open
+     * here would let a crafted payload switch the guard off. */
+    if (call.name && !call_is_checked(&call)) {
+        r = NULL;
+    } else if (!ok || call.bad) {
+        r = R_COMPLEX;
+        undecodable = true;
+    } else {
+        r = eval_call(&call);
+    }
     call_free(&call);
     free(in);
+    if (undecodable) {
+        fprintf(stderr, "zcl-agent-guard refused (%s): hook input could not be decoded. %s\n", r,
+                ag_rule_text(r));
+        return 2;
+    }
     if (!r) return 0;
     if (ag_rule_is_warning(r)) {
         fprintf(stderr, "zcl-agent-guard warning (%s): %s\n", r, ag_rule_text(r));

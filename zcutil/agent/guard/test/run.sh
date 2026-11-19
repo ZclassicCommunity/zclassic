@@ -25,9 +25,26 @@ hook seal-warn 0 'guard.consensus_seal.*UNSEAL.md' '{"tool_name":"Edit","tool_in
 hook key-order 2 'guard.git_push' '{"tool_input":{"command":"git push origin master"},"tool_name":"Bash","session_id":"s"}'
 hook escaped 2 'guard.python' '{"tool_name":"Bash","tool_input":{"command":"echo \"hi\"\npython3 -V"}}'
 hook read-tool 0 '' '{"tool_name":"Read","tool_input":{"file_path":"/home/x/.zclassic/debug.log"}}'
-hook garbage 0 'unexpected hook input' 'not json'
-hook empty 0 'unexpected hook input' ''
+hook garbage 2 'guard.too_complex' 'not json'
+hook empty 0 'empty hook input' ''
+hook blank 0 'empty hook input' '   '
 hook no-tool 0 '' '{"hook_event_name":"PreToolUse"}'
+
+# input the guard cannot decode must refuse for a checked tool (or a call naming no tool): a
+# crafted payload must not switch the guard off by being unreadable. An unchecked tool is allowed.
+hook lone-surrogate 2 'guard.too_complex' '{"tool_name":"Bash","tool_input":{"command":"rm -rf ~/.zclassic # \ud800"}}'
+hook lone-surrogate-path 2 'guard.too_complex' '{"tool_name":"Write","tool_input":{"file_path":"a\udc00","content":"x"}}'
+hook no-tool-bad 2 'guard.too_complex' '{"tool_input":{"command":"\ud800"}}'
+hook unchecked-bad 0 '' '{"tool_name":"Read","tool_input":{"file_path":"\ud800"}}'
+printf '{"tool_name":"Bash","tool_input":{"command":"rm -rf ~/.zclassic","x":"\377"}}' |
+    "$g" > "$out/o" 2> "$out/e"; rc=$?
+[ "$rc" = 2 ] && grep -q 'guard.too_complex' "$out/e" || bad "invalid UTF-8 (rc $rc): $(cat "$out/e")"
+deep=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "["; for (i = 0; i < 200; i++) printf "]" }')
+printf '{"tool_name":"Bash","tool_input":{"command":"rm -rf ~/.zclassic","x":%s}}' "$deep" |
+    "$g" > "$out/o" 2> "$out/e"; rc=$?
+[ "$rc" = 2 ] && grep -q 'guard.too_complex' "$out/e" || bad "deep nesting (rc $rc): $(cat "$out/e")"
+# a Bash call that holds a refusal and an escape the guard cannot read is still refused
+hook refusal-with-escape 2 'guard.datadir' '{"tool_name":"Bash","tool_input":{"command":"rm -rf ~/.zclassic"},"x":"é"}'
 
 # a warning must reach the model: a PreToolUse "ask" decision on stdout, exit 0 (stderr of an
 # exit-0 hook is only a debug log)
