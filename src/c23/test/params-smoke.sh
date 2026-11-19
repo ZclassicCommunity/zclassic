@@ -29,7 +29,7 @@
 #                        SHA-256 gate is skipped and only the crypto library's
 #                        own check of the file stands between it and startup
 set -u
-bin=""; work=""; params="${HOME:-}/.zcash-params"; base=38332; label=""
+bin=""; work=""; params="${HOME:-}/.zcash-params"; base=""; label=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --bin) bin=$2; shift 2 ;;
@@ -44,6 +44,8 @@ done
     echo "usage: params-smoke.sh --bin <dir> --work <dir> [--params <dir>]" >&2; exit 2; }
 mkdir -p "$work" || exit 2
 work=$(cd "$work" && pwd)
+. "$(dirname "$0")/../../../qa/lib/isolation.sh"
+iso_base base "$base" 16
 [ -z "$(ls -A "$work")" ] || { echo "params-smoke: $work is not empty" >&2; exit 2; }
 FILES="sapling-spend.params sapling-output.params sprout-groth16.params sprout-verifying.key"
 

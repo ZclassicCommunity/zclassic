@@ -17,7 +17,7 @@ command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/wallet_matrix_lib.sh"
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
-BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 SD=$WORK/reindex; rm -rf "$SD"; mkdir -p "$SD"; : >"$SD/pids"
 SCN_LOG=$WORK/checks.log; : >"$SCN_LOG"; SCN_ID=reindex; OBS_LOG=$WORK/obs.log; : >"$OBS_LOG"
 trap 'stop_all' EXIT
@@ -43,7 +43,7 @@ start_reindex() { # start without waiting for the chain; returns when RPC answer
     dir=$SD/node0; mkdir -p "$dir"
     [ -f "$dir/zclassic.conf" ] || { echo "regtest=1"; echo "rpcuser=ri"; echo "rpcpassword=ri0"; } >"$dir/zclassic.conf"
     echo "$BIN" >"$dir/bindir"; rm -f "$dir/regtest/.lock"
-    "$BIN/zclassicd" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 -listen=0 \
+    $ZCL_RUN "$BIN/zclassicd" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 -listen=0 \
         -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -rpcport=$((BASE + 100)) -dnsseed=0 -discover=0 -listenonion=0 -upnp=0 \
         -debuglogfile=1 -exportdir="$SD/export" -experimentalfeatures $NU_ARGS "$@" >>"$dir/stdout.log" 2>&1 &
     echo "$!" >"$dir/pid"; echo "$!" >>"$SD/pids"

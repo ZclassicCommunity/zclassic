@@ -7,7 +7,7 @@
 #   env DAEMON_ENV  "VAR=val" exported to the node 0 daemon only (e.g. MALLOC_ARENA_MAX=2)
 #   env OUT=<file>  where the result lines go (default <work>/bench.txt)
 # Regtest only, temporary datadirs under --work; pick --base inside a free port range.
-BIN=""; WORK=""; PEER_BIN=""; PORT_BASE=51000
+BIN=""; WORK=""; PEER_BIN=""; PORT_BASE=""
 while [ $# -gt 0 ]; do
     case $1 in
         --bin) BIN=$2; shift 2 ;; --work) WORK=$2; shift 2 ;; --peer-bin) PEER_BIN=$2; shift 2 ;;
@@ -20,7 +20,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 SCN_ID=bench; SCN_LOG=$WORK/bench.log; OBS_LOG=$WORK/obs.txt; : >"$SCN_LOG"
 SD=$WORK/sbench; rm -rf "$SD"; mkdir -p "$SD"
-BASE=$PORT_BASE
+iso_base BASE "$PORT_BASE" 112
 trap 'peak_stop; stop_all' EXIT
 OUT=${OUT:-$WORK/bench.txt}; : >"$OUT"
 

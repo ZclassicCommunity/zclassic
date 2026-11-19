@@ -18,7 +18,7 @@ command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/wallet_matrix_lib.sh"
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
-BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 SD=$WORK/mempool_cap; rm -rf "$SD"; mkdir -p "$SD"
 SCN_ID=mempool_cap; SCN_LOG=$WORK/mempool_cap.log; OBS_LOG=$WORK/obs.txt; : >"$SCN_LOG"; : >"$OBS_LOG"
 trap 'stop_all' EXIT

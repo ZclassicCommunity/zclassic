@@ -8,7 +8,7 @@
 # usage: sh qa/rpc-tests/wallet_encrypt_crossversion.sh --bin <new bindir> --old-bin <old bindir>
 #            --work <empty scratch dir> [--port-base <n>]
 set -u
-BIN=""; PEER_BIN=""; work=""; BASE=52400
+BIN=""; PEER_BIN=""; work=""; BASE=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --bin) BIN=$2; shift 2 ;;
@@ -30,6 +30,7 @@ SCN_LOG=$SD/scn.log; OBS_LOG=$SD/obs.log; SCN_ID=wec
 : >"$SCN_LOG"; : >"$OBS_LOG"
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/wallet_matrix_lib.sh"
+iso_base BASE "$BASE" 112
 trap 'stop_all' EXIT INT TERM
 
 P1=correct-horse-1; P2=battery-staple-2

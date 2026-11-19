@@ -45,7 +45,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/wallet_matrix_lib.sh"
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 RESULTS=$WORK/results.txt; HITS=$WORK/hits.txt; : >"$RESULTS"; : >"$HITS"
-BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 trap 'stop_all' EXIT
 
 # ---- reproducible randomness (LCG; the shell's $RANDOM is not portable) ------
@@ -87,7 +87,7 @@ start_once() {
     mkdir -p "$dir" "$SD/export"; echo "$bd" >"$dir/bindir"
     [ -f "$dir/zclassic.conf" ] || { echo "regtest=1"; echo "rpcuser=cc"; echo "rpcpassword=cc$n"; } >"$dir/zclassic.conf"
     rm -f "$dir/regtest/.lock"
-    "$bd/zclassicd" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 \
+    $ZCL_RUN "$bd/zclassicd" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 \
         -listen=1 -bind=127.0.0.1 -port=$((BASE + n)) \
         -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -rpcport=$((BASE + 100 + n)) \
         -dnsseed=0 -discover=0 -listenonion=0 -upnp=0 -keypool=10 -debuglogfile=1 -exportdir="$SD/export" \
@@ -405,7 +405,7 @@ run_seed() {
     st=PASS; [ "$nf" = 0 ] && [ "$np" -gt 0 ] || st=FAIL
     echo "$SEED|$st|$np pass $nf fail|$(elapsed "$t0")s" >>"$RESULTS"
     say "   -> seed $SEED $st ($np pass, $nf fail)"
-    BASE=$((BASE + 7)); [ $BASE -lt 60000 ] || BASE=20000
+    iso_rebase BASE 112 7
 }
 
 for s in $SEEDS; do run_seed "$s"; done

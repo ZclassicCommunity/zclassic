@@ -17,12 +17,13 @@ while [ $# -gt 0 ]; do
 done
 [ -x "$B/zclassicd" ] && [ -n "$W" ] || { echo "usage: $0 --bin DIR --work DIR [--base port]" >&2; exit 2; }
 command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
-P=${P:-$((20000 + ($$ % 20000)))}; R=0; F=0
+. "$(dirname "$0")/../lib/isolation.sh"
+iso_base P "$P" 16; R=0; F=0
 rm -rf "$W"; mkdir -p "$W"; W=$(cd "$W" && pwd)
 trap 'for f in "$W"/*/pid "$W"/*.ref/pid; do [ -f "$f" ] && kill -9 "$(cat "$f")" 2>/dev/null; done' EXIT
 A0="-regtest -server=1 -listen=0 -showmetrics=0 -debuglogfile=1 -keypool=5 -nuparams=5ba81b19:1 -nuparams=76b809bb:1 -experimentalfeatures -zmergetoaddress -rpcport=$P -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -walletbroadcast=0"
 cli() { $B/zclassic-cli -regtest -datadir=$D -rpcport=$P -rpcuser=u -rpcpassword=p "$@"; }
-st() { rm -f $D/regtest/.lock; mkdir -p $D/export; $B/zclassicd $A0 -exportdir=$D/export -datadir=$D "$@" >> $D/out.log 2>&1 & echo $! > $D/pid; for i in $(seq 240); do cli getblockcount >/dev/null 2>&1 && return 0; kill -0 $(cat $D/pid) 2>/dev/null || { wait $(cat $D/pid); return $?; }; sleep 0.25; done; return 1; }
+st() { rm -f $D/regtest/.lock; mkdir -p $D/export; $ZCL_RUN $B/zclassicd $A0 -exportdir=$D/export -datadir=$D "$@" >> $D/out.log 2>&1 & echo $! > $D/pid; for i in $(seq 240); do cli getblockcount >/dev/null 2>&1 && return 0; kill -0 $(cat $D/pid) 2>/dev/null || { wait $(cat $D/pid); return $?; }; sleep 0.25; done; return 1; }
 sp() { cli stop >/dev/null 2>&1; while kill -0 $(cat $D/pid) 2>/dev/null; do sleep 0.2; done; }
 wop() { for i in $(seq 600); do s=$(cli z_getoperationstatus "[\"$1\"]" | jq -r ".[0].status"); case $s in success|failed) return;; esac; sleep 0.5; done; }
 snap() { echo "$(cli z_gettotalbalance 1 | jq -c "[.transparent,.private]") $(cli z_listunspent 1 | jq -c "[.[]|.txid[0:8]+\":\"+(.outindex // .jsoutindex|tostring)+\":\"+(.amount|tostring)]|sort") $(cli listunspent 1 | jq -c "[.[]|.txid[0:8]+\":\"+(.vout|tostring)]|sort")"; }

@@ -26,7 +26,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/wallet_matrix_lib.sh"
 NU_ARGS=""   # default regtest upgrade heights: the blocks (287-byte records) the reproduction was found with
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
-BASE=${PORT_BASE:-$((24000 + ($$ % 15000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 SD=$WORK/stale; rm -rf "$SD"; mkdir -p "$SD"; : >"$SD/pids"
 SCN_LOG=$WORK/checks.log; : >"$SCN_LOG"; SCN_ID=stale; OBS_LOG=$WORK/obs.log; : >"$OBS_LOG"
 trap 'stop_all' EXIT

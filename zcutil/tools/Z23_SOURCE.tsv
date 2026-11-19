@@ -3,4 +3,5 @@
 # requires_ancestor=55245e2bd
 # columns: zclassicd_path<TAB>z23_path<TAB>git_blob_sha1<TAB>z23_commit<TAB>manifest_sha3_256_or_unsealed
 zcutil/tools/vendor/platform/modules/platform/include/platform/glob_match.h	platform/modules/platform/include/platform/glob_match.h	5a025e2163c730b4a8f72a40acf3174dcbee6693	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
+zcutil/tools/vendor/tools/process_group_exec.c	tools/process_group_exec.c	91f089c6a2bdfcf36d0cd8cedbfabcf81d1b9796	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
 zcutil/tools/LICENSE.z23	LICENSE	d645695673349e3947e8e5ae42332d0ac3164cd7	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed

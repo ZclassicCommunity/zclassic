@@ -34,7 +34,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 for f in "$HERE"/wallet_matrix_scn?.sh; do . "$f"; done
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 RESULTS=$WORK/results.txt; OBS_LOG=$WORK/obs.txt; : >"$RESULTS"; : >"$OBS_LOG"
-BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 trap 'stop_all' EXIT
 
 run_scn() {
@@ -53,7 +53,7 @@ run_scn() {
     if [ -f "$SD/skip" ] && [ "$nf" = 0 ]; then st="SKIP ($(cat "$SD/skip"))"; fi
     echo "$id|$name|$st|$np pass $nf fail|$(elapsed "$t0")s" >>"$RESULTS"
     say "   -> $st ($np pass, $nf fail)"
-    BASE=$((BASE + 7)); [ $BASE -lt 60000 ] || BASE=20000
+    iso_rebase BASE 112 7
 }
 
 run_scn 1 "transparent wallet RPCs" scn_transparent

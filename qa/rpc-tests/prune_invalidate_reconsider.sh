@@ -28,14 +28,15 @@ while [ $# -gt 0 ]; do
 done
 [ -x "$B/zclassicd" ] && [ -n "$W" ] || { echo "usage: $0 --bin DIR --work DIR [--base port]" >&2; exit 2; }
 command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
-P=${P:-$((20000 + ($$ % 20000)))}; R=0; F=0
+. "$(dirname "$0")/../lib/isolation.sh"
+iso_base P "$P" 16; R=0; F=0
 rm -rf "$W"; mkdir -p "$W/w" "$W/p"; W=$(cd "$W" && pwd)
 trap 'for d in w p; do [ -f "$W/$d/pid" ] && kill -9 "$(cat "$W/$d/pid")" 2>/dev/null; done' EXIT
 for d in w p; do printf "rpcuser=u\nrpcpassword=p\n" > "$W/$d/zclassic.conf"; done
 A0="-regtest -server=1 -showmetrics=0 -debuglogfile=1 -keypool=5 -nuparams=5ba81b19:1 -nuparams=76b809bb:1 -experimentalfeatures -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -dnsseed=0 -discover=0 -listenonion=0 -bootstrap=0"
 port() { case $1 in w) echo $P ;; p) echo $((P + 1)) ;; esac; }
 cli() { n=$1; shift; "$B/zclassic-cli" -regtest -datadir="$W/$n" -rpcport=$(port $n) -rpcuser=u -rpcpassword=p "$@"; }
-st() { n=$1; shift; rm -f "$W/$n/regtest/.lock"; "$B/zclassicd" $A0 -datadir="$W/$n" -rpcport=$(port $n) "$@" >> "$W/$n/out.log" 2>&1 & echo $! > "$W/$n/pid"
+st() { n=$1; shift; rm -f "$W/$n/regtest/.lock"; $ZCL_RUN "$B/zclassicd" $A0 -datadir="$W/$n" -rpcport=$(port $n) "$@" >> "$W/$n/out.log" 2>&1 & echo $! > "$W/$n/pid"
     for k in $(seq 900); do cli $n getblockcount >/dev/null 2>&1 && return 0; kill -0 "$(cat "$W/$n/pid")" 2>/dev/null || return 1; sleep 0.1; done; return 1; }
 sp() { cli $1 stop >/dev/null 2>&1; while kill -0 "$(cat "$W/$1/pid")" 2>/dev/null; do sleep 0.2; done; }
 ok() { R=$((R + 1)); echo "ok   $1"; }
