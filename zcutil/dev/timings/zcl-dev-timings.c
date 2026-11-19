@@ -29,9 +29,12 @@
 enum { V_PASS, V_FAIL, V_SKIP };
 static const char *const vname[] = {"PASS", "FAIL", "SKIP"};
 
+enum { F_NONE, F_DEBUG, F_RELEASE };
+static const char *const fname[] = {"", "debug", "release"};
+
 struct rec {
     char name[NAME_MAX_LEN];
-    int verdict;
+    int verdict, flavor;
     double secs;
 };
 
@@ -47,6 +50,7 @@ struct sample {
 
 struct step {
     char name[NAME_MAX_LEN];
+    int flavor;
     int pass, fail, skip;
     struct sample *s;
     size_t n, cap;
@@ -133,6 +137,7 @@ static int fill_rec(struct rec *r, const char *name, const char *verdict, const 
     if ((r->verdict = verdict_code(verdict)) < 0) return -1;
     if (parse_secs(secs, &r->secs)) return -1;
     memcpy(r->name, name, n + 1);
+    r->flavor = F_NONE;
     return 0;
 }
 
@@ -182,16 +187,27 @@ static int get_num(const char *line, const char *key, char *dst, size_t cap)
     return 0;
 }
 
+/* flavor named by a receipt stage such as test-run/debug; F_NONE for any other stage */
+static int receipt_flavor(const char *stage)
+{
+    if (strncmp(stage, "test-run/", 9)) return F_NONE;
+    for (int f = F_DEBUG; f <= F_RELEASE; f++)
+        if (!strcmp(stage + 9, fname[f])) return f;
+    return F_NONE;
+}
+
 /* one receipts.jsonl line; modified in place only by trimming a trailing CR */
 static int parse_receipt_line(char *line, struct rec *r)
 {
-    char verdict[16], secs[32], name[NAME_MAX_LEN];
+    char verdict[16], secs[32], name[NAME_MAX_LEN], stage[64];
     size_t n = strlen(line);
     if (n && line[n - 1] == '\r') line[--n] = 0;
     if (n < 2 || line[0] != '{' || line[n - 1] != '}') return -1;
     if (get_str(line, "step", name, sizeof name) || get_str(line, "verdict", verdict, sizeof verdict)) return -1;
     if (get_num(line, "seconds", secs, sizeof secs)) return -1;
-    return fill_rec(r, name, verdict, secs);
+    if (fill_rec(r, name, verdict, secs)) return -1;
+    if (!get_str(line, "stage", stage, sizeof stage)) r->flavor = receipt_flavor(stage);
+    return 0;
 }
 
 /* ---------------------------------------------------------------- file loading */
@@ -259,17 +275,34 @@ static int load_file(const char *path, line_parser parse, struct recs *out, char
 
 static const char *const tsv_names[] = {"results.tsv", "test/results.tsv", "test-release/results.tsv"};
 
-/* results.tsv of every flavor present; 1 when usable (all present ones parsed, at least one present) */
+enum { LOAD_EMPTY = 3 };
+
+/* One results.tsv: records tagged by flavor. An empty file (local-ci creates it before the build stage) has
+ * no step rows and is unavailable, not a zero-step success; it does not make the other files suspect. */
+static int load_one_tsv(struct ctx *c, const char *path, int flavor, struct recs *out)
+{
+    char reason[128];
+    size_t base = out->n;
+    int rc = load_file(path, parse_tsv_line, out, reason, sizeof reason);
+    if (rc == LOAD_OK && out->n == base) { rc = LOAD_EMPTY; snprintf(reason, sizeof reason, "empty (no step rows)"); }
+    if (rc == LOAD_MISSING) return rc;
+    if (rc != LOAD_OK) { lines_add(&c->unavailable, "unavailable: %s: %s%s", path, reason, ""); return rc; }
+    for (size_t i = base; i < out->n; i++) out->v[i].flavor = flavor;
+    return rc;
+}
+
+/* results.tsv of every flavor present; 1 when usable (none corrupt, at least one record) */
 static int load_results(struct ctx *c, const char *dir, struct recs *out)
 {
+    static const int flavors[] = {F_NONE, F_DEBUG, F_RELEASE};
     int found = 0, bad = 0;
     for (size_t i = 0; i < 3; i++) {
-        char path[LINE_MAX_LEN], reason[128];
+        char path[LINE_MAX_LEN];
         snprintf(path, sizeof path, "%s/%s", dir, tsv_names[i]);
-        int rc = load_file(path, parse_tsv_line, out, reason, sizeof reason);
+        int rc = load_one_tsv(c, path, flavors[i], out);
         if (rc == LOAD_MISSING) continue;
         found++;
-        if (rc == LOAD_BAD) { bad++; lines_add(&c->unavailable, "unavailable: %s: %s%s", path, reason, ""); }
+        if (rc == LOAD_BAD) bad++;
     }
     if (!found) {
         char path[LINE_MAX_LEN];
@@ -277,7 +310,7 @@ static int load_results(struct ctx *c, const char *dir, struct recs *out)
         lines_add(&c->unavailable, "unavailable: %s: not found%s%s", path, " (also tried test/ and test-release/)", "");
     }
     if (bad) out->n = 0;
-    return found && !bad;
+    return found && !bad && out->n > 0;
 }
 
 static int load_receipts(struct ctx *c, const char *dir, struct recs *out)
@@ -289,10 +322,14 @@ static int load_receipts(struct ctx *c, const char *dir, struct recs *out)
     return rc == LOAD_OK;
 }
 
-static const struct rec *last_of(const struct recs *r, const char *name)
+/* last record of that step and flavor; when loose, a record of unknown flavor (F_NONE) matches any flavor */
+static const struct rec *last_of(const struct recs *r, const char *name, int flavor, int loose)
 {
-    for (size_t i = r->n; i-- > 0;)
-        if (!strcmp(r->v[i].name, name)) return &r->v[i];
+    for (size_t i = r->n; i-- > 0;) {
+        int f = r->v[i].flavor;
+        if (strcmp(r->v[i].name, name)) continue;
+        if (f == flavor || (loose && (f == F_NONE || flavor == F_NONE))) return &r->v[i];
+    }
     return NULL;
 }
 
@@ -301,7 +338,8 @@ static int compare_sources(struct ctx *c, const char *dir, const struct recs *ts
 {
     int mism = 0;
     for (size_t i = 0; i < tsv->n; i++) {
-        const struct rec *a = last_of(tsv, tsv->v[i].name), *b = last_of(rc, tsv->v[i].name);
+        const struct rec *a = last_of(tsv, tsv->v[i].name, tsv->v[i].flavor, 0);
+        const struct rec *b = last_of(rc, tsv->v[i].name, tsv->v[i].flavor, 1);
         if (a != &tsv->v[i] || !b || a->verdict == b->verdict) continue;
         char msg[LINE_MAX_LEN];
         snprintf(msg, sizeof msg, "MISMATCH %s: step %s results.tsv=%s receipts.jsonl=%s", dir, a->name,
@@ -312,21 +350,29 @@ static int compare_sources(struct ctx *c, const char *dir, const struct recs *ts
     return mism;
 }
 
-static struct step *step_for(struct ctx *c, const char *name)
+/* Row for a step in a flavor. A record of unknown flavor joins the first row of that name and a flavored
+ * record adopts a flavorless row, so one flavor seen in several sources stays one row; debug and release
+ * stay apart. */
+static struct step *step_for(struct ctx *c, const char *name, int flavor)
 {
-    for (size_t i = 0; i < c->nsteps; i++)
-        if (!strcmp(c->steps[i].name, name)) return &c->steps[i];
+    for (size_t i = 0; i < c->nsteps; i++) {
+        struct step *s = &c->steps[i];
+        if (strcmp(s->name, name)) continue;
+        if (s->flavor == flavor || flavor == F_NONE) return s;
+        if (s->flavor == F_NONE) { s->flavor = flavor; return s; }
+    }
     c->steps = grow(c->steps, &c->capsteps, c->nsteps + 1, sizeof *c->steps);
     struct step *s = &c->steps[c->nsteps++];
     memset(s, 0, sizeof *s);
     memcpy(s->name, name, strlen(name) + 1);
+    s->flavor = flavor;
     return s;
 }
 
 static void add_recs(struct ctx *c, const struct recs *r, int od)
 {
     for (size_t i = 0; i < r->n; i++) {
-        struct step *s = step_for(c, r->v[i].name);
+        struct step *s = step_for(c, r->v[i].name, r->v[i].flavor);
         if (r->v[i].verdict == V_SKIP) { s->skip++; continue; }
         if (r->v[i].verdict == V_PASS) s->pass++;
         else s->fail++;
@@ -352,6 +398,7 @@ struct stat_row {
     const struct step *st;
     double min, med, max, last, prior;
     int has_trend;
+    int split; /* the step has rows for more than one flavor: label the flavor */
 };
 
 static void fill_row(const struct step *st, struct stat_row *r)
@@ -397,7 +444,10 @@ static struct stat_row *build_rows(const struct ctx *c, const char *only, size_t
     size_t n = 0;
     for (size_t i = 0; rows && i < c->nsteps; i++) {
         if (only && strcmp(only, c->steps[i].name)) continue;
-        fill_row(&c->steps[i], &rows[n++]);
+        fill_row(&c->steps[i], &rows[n]);
+        for (size_t j = 0; j < c->nsteps; j++)
+            if (j != i && !strcmp(c->steps[j].name, c->steps[i].name)) rows[n].split = 1;
+        n++;
     }
     if (rows) qsort(rows, n, sizeof *rows, cmp_row);
     *nrows = rows ? n : 0;
@@ -421,7 +471,9 @@ static void print_row(const struct stat_row *r)
     } else snprintf(rate, sizeof rate, "n/a");
     if (r->has_trend)
         snprintf(trend, sizeof trend, "  last %.1fs vs prior median %.1fs%s", r->last, r->prior, is_slower(r) ? " SLOWER" : "");
-    printf("%-34s %5d %6s %5d %9s %9s %9s%s\n", r->st->name, timed, rate, r->st->skip, mn, md, mx, trend);
+    char label[NAME_MAX_LEN + 16];
+    snprintf(label, sizeof label, r->split ? "%s [%s]" : "%s", r->st->name, fname[r->st->flavor]);
+    printf("%-34s %5d %6s %5d %9s %9s %9s%s\n", label, timed, rate, r->st->skip, mn, md, mx, trend);
 }
 
 static void print_text(const struct ctx *c, const struct stat_row *rows, size_t n, const char *only)
@@ -468,6 +520,7 @@ static void print_json(const struct ctx *c, const struct stat_row *rows, size_t 
         const struct step *s = rows[i].st;
         printf("%s{\"step\":", i ? "," : "");
         json_str(s->name);
+        if (rows[i].split) printf(",\"flavor\":\"%s\"", fname[s->flavor]);
         printf(",\"runs\":%d,\"pass\":%d,\"fail\":%d,\"skip\":%d,\"min_s\":%.3f,\"median_s\":%.3f,\"max_s\":%.3f,\"slower\":%s}",
                s->pass + s->fail, s->pass, s->fail, s->skip, rows[i].min, rows[i].med, rows[i].max,
                is_slower(&rows[i]) ? "true" : "false");
@@ -535,12 +588,14 @@ static void selftest_receipt(void)
     CHECK(parse_receipt_line(good, &r) == 0 && r.verdict == V_FAIL && r.secs == 41 && !strcmp(r.name, "unit-a"));
     CHECK(parse_receipt_line(nostep, &r) != 0 && parse_receipt_line(trunc, &r) != 0);
     CHECK(parse_receipt_line(badsec, &r) != 0 && parse_receipt_line(junk, &r) != 0);
+    CHECK(receipt_flavor("test-run/debug") == F_DEBUG && receipt_flavor("test-run/release") == F_RELEASE);
+    CHECK(receipt_flavor("test-run/x") == F_NONE && receipt_flavor("stage") == F_NONE && receipt_flavor("test-build") == F_NONE);
 }
 
 static void selftest_stats(void)
 {
     double a[] = {5, 1, 3}, b[] = {4, 1, 2, 3};
-    struct step s = {{0}, 0, 0, 0, NULL, 0, 0};
+    struct step s = {{0}, 0, 0, 0, 0, NULL, 0, 0};
     struct sample smp[] = {{10, 0}, {12, 1}, {30, 2}};
     struct stat_row row;
     CHECK(median_of(a, 3) == 3 && median_of(b, 4) == 2.5 && median_of(a, 0) == 0);

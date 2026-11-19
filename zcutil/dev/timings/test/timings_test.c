@@ -89,6 +89,9 @@ int main(int argc, char **argv)
     check_case("all-unreadable", 2, (const char *[]){"fixture/empty", "fixture/does-not-exist", NULL});
     check_case("json", 0, (const char *[]){"--json", "fixture/good1", "fixture/good2", "fixture/good3", NULL});
     check_case("step-filter", 0, (const char *[]){"--step", "regtest-smoke", "fixture/good1", "fixture/good2", "fixture/good3", NULL});
+    check_case("empty-results-falls-back", 0, (const char *[]){"fixture/emptytsv", NULL});
+    check_case("empty-results-only", 2, (const char *[]){"fixture/emptyonly", NULL});
+    check_case("flavors-not-mismatch", 0, (const char *[]){"fixture/flavors", NULL});
     check_case("no-args", 2, (const char *[]){NULL});
     if (failures) { printf("zcl-dev-timings tests: %d failure(s)\n", failures); return 1; }
     puts("zcl-dev-timings tests: ok");

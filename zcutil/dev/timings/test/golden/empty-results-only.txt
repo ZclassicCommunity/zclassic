@@ -1,0 +1,5 @@
+timings: read 0 of 1 outdirs
+unavailable: fixture/emptyonly/test/results.tsv: empty (no step rows)
+unavailable: fixture/emptyonly/receipts.jsonl: not found
+no readable results.tsv or receipts.jsonl: nothing to report
+exit 2
