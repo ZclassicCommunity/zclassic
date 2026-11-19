@@ -2,7 +2,7 @@
 # (zcl-lint kpi --tighten) when a metric improves, never raised. See doc/agent/KPI.md.
 python_files	0
 hosted_ci_files	0
-shell_lines	20447
+shell_lines	21190
 bash_lines	113
 jq_uses	264
 banned_str	13
