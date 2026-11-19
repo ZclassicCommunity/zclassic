@@ -2080,6 +2080,35 @@ BOOST_AUTO_TEST_CASE(peer_board_does_not_steal_from_a_stream_that_just_connected
     BOOST_CHECK_EQUAL(d.Assign(1, 3300), 0); // the victim's server is avoided for a while
 }
 
+BOOST_AUTO_TEST_CASE(peer_board_a_stream_is_not_taken_from_a_fast_server_to_a_slow_one)
+{
+    // A stream that gets a small share of a fast server's cap just now must not be "stolen" for a slow server
+    // that gives its single stream more: judged by what each server delivers in all, the fast one wins.
+    BootstrapPeerPolicy pol;
+    pol.windowMs = 1000;
+    pol.stallMs = 1000000;
+    pol.moveCooldownMs = 1000;
+    pol.stealMinSeconds = 3;
+    BootstrapPeerBoard b(2, 5, pol);
+    b.SetPeerHas(1, std::vector<uint8_t>());
+    for (int s = 0; s < 3; ++s)
+        b.Attach(s, 0, 0);
+    b.Attach(3, 1, 0);
+    for (int s = 0; s < 4; ++s)
+        b.NoteClaim(s, 1 + s, (uint64_t)1 << 30, false);
+    for (int64_t t = 100; t <= 3000; t += 100) {
+        b.NoteChunk(0, 1, 209715, t); // 2 MiB/s
+        b.NoteChunk(1, 2, 209715, t); // 2 MiB/s
+        b.NoteChunk(2, 3, 52428, t);  // 0.5 MiB/s
+        b.NoteChunk(3, 4, 83886, t);  // the slow server: 0.8 MiB/s
+    }
+    b.SetIdle(4, true);
+    // the only legitimate steal is from the slow server toward the fast one, never a stream of the fast server
+    const std::vector<BootstrapMove> mv = b.Rebalance(3000);
+    for (size_t i = 0; i < mv.size(); ++i)
+        BOOST_CHECK_MESSAGE(mv[i].stream == 3, "stream " << mv[i].stream << " of the fast server was moved");
+}
+
 BOOST_AUTO_TEST_CASE(peer_board_an_idle_stream_takes_over_a_slow_holder_when_the_fast_server_has_no_stream_left)
 {
     // The end of a download over a fast and a slow server: the fast server's streams ran out of files and are idle,
