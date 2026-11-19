@@ -138,7 +138,17 @@ mkdir -p src doc/agent && printf 'int pow;\n' > src/pow.cpp && track
 mkdir -p src qa; echo "int x;" > src/f.c; echo "echo ok" > qa/ok.sh; track
 for r in no-new-jq no-new-bash banned-str md-links doc-paths filesize complexity long-functions warnsupp secretlog testiso shellport wallclock; do "$bin" --root . $r --update-baseline >/dev/null 2>&1; done
 run 2 "nothing scanned" no-python
+# `all` also runs kpi and wiring: give the fixture every kpi source, the rule table and the documented list
+cp "$here/rules.def" zcutil/lint/rules.def
+{ echo '<!-- LINT-RULES-BEGIN -->'; sed -n 's/^LINT_RULE("\([^"]*\)".*/- `\1`/p' zcutil/lint/rules.def; echo '<!-- LINT-RULES-END -->'; } > doc/local-ci.md
+mkdir -p zcutil/dev/gen zcutil/bin src/test src/gtest
+printf '# flags\n' > zcutil/dev/gen/flags-undocumented.txt; printf '# lessons\n' > doc/agent/LESSONS.md
+printf 'test/a_tests.cpp\n' > src/Makefile.test.include; printf 'gtest/test_a.cpp\n' > src/Makefile.gtest.include
+printf 'int x;\n' > src/test/a_tests.cpp; printf 'int y;\n' > src/gtest/test_a.cpp
+printf '#!/bin/sh\necho "check-rules: OK"\n' > zcutil/bin/zcl-dev; chmod +x zcutil/bin/zcl-dev
+track
 printf 'exit 7\n' > zcutil/check-no-python.sh; track
+"$bin" --root . kpi --update-baseline >/dev/null 2>&1; track
 run 1 '' all
 printf 'exit 0\n' > zcutil/check-no-python.sh; track
 run 0 'vendor: ok' all

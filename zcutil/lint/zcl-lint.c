@@ -3,7 +3,7 @@
  * Copyright 2026 Rhett Creighton - Apache License 2.0 (see LICENSE.z23, NOTICE).
  * Derived from Z23 tools/lint/lintc gates (see NOTICE); modified, not a verbatim copy.
  *
- * usage: zcl-lint [--root DIR] <rule>|all [--update-baseline] [--reseal --reason TEXT]
+ * usage: zcl-lint [--root DIR] <rule>|all [--update-baseline|--tighten] [--reseal --reason TEXT]
  *   rules: see rules.def (every rule name is listed there)
  *   --reseal --reason is the consensus-seal ritual only (doc/agent/UNSEAL.md).
  * This file is only the driver. The rules live in rules/<rule>.c, the shared helpers in lintlib.{c,h}, and
@@ -35,11 +35,14 @@ static const struct rule rules[] = {
 bool lint_reseal = false;          /* --reseal: consensus-seal rewrites its seal (the ritual) */
 const char *lint_reason = NULL;    /* --reason TEXT: the required reason for --reseal */
 
+/* --tighten is the kpi spelling of --update-baseline: both lower a floor, never raise one. */
+static bool is_update_flag(const char *a) { return !strcmp(a, "--update-baseline") || !strcmp(a, "--tighten"); }
+
 static void usage(void)
 {
     fputs("usage: zcl-lint [--root DIR] ", stderr);
     for (size_t i = 0; i < NRULES; i++) fprintf(stderr, "%s|", rules[i].name);
-    fputs("all [--update-baseline] [--reseal --reason TEXT]\n", stderr);
+    fputs("all [--update-baseline|--tighten] [--reseal --reason TEXT]\n", stderr);
 }
 
 int main(int argc, char **argv)
@@ -48,7 +51,7 @@ int main(int argc, char **argv)
     bool update = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--root") && i + 1 < argc) lint_root = argv[++i];
-        else if (!strcmp(argv[i], "--update-baseline")) update = true;
+        else if (is_update_flag(argv[i])) update = true;
         else if (!strcmp(argv[i], "--reseal")) lint_reseal = true;
         else if (!strcmp(argv[i], "--reason") && i + 1 < argc && argv[i + 1][0] != '-') lint_reason = argv[++i];
         else if (!want && argv[i][0] != '-') want = argv[i];
