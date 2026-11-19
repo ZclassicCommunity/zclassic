@@ -140,8 +140,7 @@ static int zqOpenAppend(const QString& path) {
 // binary, a redirected or detached run) sends it to OutputDebugString instead. While capturing, route every Qt
 // message to stderr ourselves so the capture sees the same text on every platform.
 static void zqCaptureMessage(QtMsgType type, const QMessageLogContext&, const QString& msg) {
-    fprintf(stderr, "%s
-", msg.toLocal8Bit().constData());
+    fprintf(stderr, "%s\n", msg.toLocal8Bit().constData());
     fflush(stderr);
     if (type == QtFatalMsg) abort();
 }
