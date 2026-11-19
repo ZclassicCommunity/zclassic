@@ -2261,7 +2261,7 @@ BOOST_AUTO_TEST_CASE(peer_board_assigns_a_stream_to_a_server_that_has_something_
     b.SetPeerHas(1, has);
     std::vector<uint8_t> unfinished(10, 0);
     unfinished[5] = unfinished[6] = 1; // what is left is held by the primary only
-    b.SetUnfinishedSource([unfinished]() { return unfinished; });
+    b.SetPendingSource([unfinished]() { return unfinished; });
     for (int s = 0; s < 4; ++s) {
         bool useful = false;
         BOOST_CHECK_EQUAL(b.Assign(s, 1000 + s, &useful), 0);
@@ -2271,7 +2271,7 @@ BOOST_AUTO_TEST_CASE(peer_board_assigns_a_stream_to_a_server_that_has_something_
     // nothing at all for anyone (every pending file is pinned elsewhere or gone): the caller is told to wait
     BootstrapPeerBoard c(2, 2);
     std::vector<uint8_t> none(4, 0);
-    c.SetUnfinishedSource([none]() { return none; });
+    c.SetPendingSource([none]() { return none; });
     c.SetPeerHas(1, std::vector<uint8_t>());
     bool useful = true;
     c.Assign(0, 0, &useful);
@@ -2279,7 +2279,7 @@ BOOST_AUTO_TEST_CASE(peer_board_assigns_a_stream_to_a_server_that_has_something_
     // a server that has not answered yet is probed
     BootstrapPeerBoard d(2, 2);
     std::vector<uint8_t> some(4, 1);
-    d.SetUnfinishedSource([some]() { return some; });
+    d.SetPendingSource([some]() { return some; });
     bool probe = false;
     d.Assign(0, 0, &probe);
     d.Attach(0, 0, 0);

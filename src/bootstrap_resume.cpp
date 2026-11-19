@@ -327,6 +327,12 @@ int BootstrapPeerBoard::StreamPeer(int s) const
     return (s >= 0 && (size_t)s < streams.size() && streams[s].connected) ? streams[s].peer : -1;
 }
 
+void BootstrapPeerBoard::SetPendingSource(const std::function<std::vector<uint8_t>()>& fn)
+{
+    std::lock_guard<std::mutex> lock(mtx);
+    pendingFn = fn;
+}
+
 void BootstrapPeerBoard::SetUnfinishedSource(const std::function<std::vector<uint8_t>()>& fn)
 {
     std::lock_guard<std::mutex> lock(mtx);
@@ -419,7 +425,7 @@ int BootstrapPeerBoard::Assign(int s, int64_t nowMs, bool* anyUseful)
     }
     // Servers that have something for this stream: one that has not answered yet (it must be probed) or that
     // holds a pending file the stream may fetch. When no server does, the caller waits instead of connecting.
-    const std::vector<uint8_t> unfinished = unfinishedFn ? unfinishedFn() : std::vector<uint8_t>();
+    const std::vector<uint8_t> unfinished = pendingFn ? pendingFn() : (unfinishedFn ? unfinishedFn() : std::vector<uint8_t>());
     std::vector<bool> useful(peers.size(), false);
     bool any = false;
     for (size_t p = 0; p < peers.size(); ++p) {
@@ -968,6 +974,16 @@ std::vector<uint8_t> BootstrapWorkQueue::UnfinishedMask(size_t nFiles) const
         if (*it < nFiles)
             mask[*it] = 1;
     for (std::set<uint32_t>::const_iterator it = claimed.begin(); it != claimed.end(); ++it)
+        if (*it < nFiles)
+            mask[*it] = 1;
+    return mask;
+}
+
+std::vector<uint8_t> BootstrapWorkQueue::PendingMask(size_t nFiles) const
+{
+    std::lock_guard<std::mutex> lock(mtx);
+    std::vector<uint8_t> mask(nFiles, 0);
+    for (std::deque<uint32_t>::const_iterator it = pending.begin(); it != pending.end(); ++it)
         if (*it < nFiles)
             mask[*it] = 1;
     return mask;
