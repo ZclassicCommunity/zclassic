@@ -514,6 +514,7 @@ BOOST_AUTO_TEST_CASE(peer_board_idle_stream_steals_from_a_much_slower_holder)
     pol.windowMs = 1000;
     pol.stallMs = 1000000;
     pol.stealMinSeconds = 15;
+    pol.moveCooldownMs = 1000;
     BootstrapPeerBoard b(2, 3, pol);
     b.Attach(0, b.Assign(0, 0), 0);
     b.Attach(1, b.Assign(1, 0), 0);
@@ -590,7 +591,7 @@ BOOST_AUTO_TEST_CASE(peer_board_blames_the_peer_that_supplied_a_bad_file)
     BOOST_CHECK(!solo.HashFailed(0, 5));
     BOOST_CHECK(!solo.Peer(0, 20).banned);
 
-    // bytes of unknown origin already on disk: the culprit is unknown, only a second failure benches
+    // bytes of unknown origin already on disk: the culprit is unknown, so nobody is benched, however often it fails
     BootstrapPeerBoard m(2, 2);
     m.Attach(0, m.Assign(0, 0), 0);
     m.Attach(1, m.Assign(1, 0), 0);
@@ -602,9 +603,9 @@ BOOST_AUTO_TEST_CASE(peer_board_blames_the_peer_that_supplied_a_bad_file)
     m.NoteChunk(0, 9, 50, 30);
     m.NoteChunk(1, 9, 50, 30); // two suppliers
     BOOST_CHECK(m.HashFailed(0, 9));
-    BOOST_CHECK(m.Peer(0, 40).banned); // its second failure; the other has one and stays
+    BOOST_CHECK(!m.Peer(0, 40).banned);
     BOOST_CHECK(!m.Peer(1, 40).banned);
-    BOOST_CHECK_EQUAL(m.UsablePeers(), 1U);
+    BOOST_CHECK_EQUAL(m.UsablePeers(), 2U);
 }
 
 BOOST_AUTO_TEST_CASE(progress_line_names_the_servers_only_when_there_are_several)
@@ -1771,6 +1772,324 @@ BOOST_AUTO_TEST_CASE(partial_files_fetched_from_one_server_continue_from_the_oth
                                                             std::vector<std::string>(1, PeerName(c))), error);
     CheckAllFilesMatch(s, tmp.path / "staging");
     BOOST_CHECK_LE(b.Log().size() + c.Log().size(), ChunksOf(s) - stored);
+}
+
+
+// ---- blame, pins, holders, connection limits (BootstrapPeerBoard) ----
+
+BOOST_AUTO_TEST_CASE(peer_board_a_lying_secondary_does_not_get_the_honest_primary_banned)
+{
+    // The secondary writes a bad prefix of two files and drops before the last chunk; the primary continues each
+    // .part and finishes it, so the failure names both. Nobody may be benched on that (the primary is honest and the
+    // only server of other files), and each file goes back to ONE server, the primary.
+    BootstrapPeerBoard b(2, 2);
+    b.Attach(0, b.Assign(0, 0), 0);
+    b.Attach(1, b.Assign(1, 0), 0);
+    BOOST_CHECK_EQUAL(b.StreamPeer(0), 0);
+    BOOST_CHECK_EQUAL(b.StreamPeer(1), 1);
+    std::vector<uint8_t> unfinished(16, 0);
+    for (uint32_t f = 10; f < 12; ++f) {
+        unfinished[f] = 1;
+        b.NoteClaim(1, f, 100, false);
+        b.NoteChunk(1, f, 50, 10);
+        b.NoteRelease(1, f);
+        b.NoteClaim(0, f, 50, true);
+        b.NoteChunk(0, f, 50, 20);
+        BOOST_CHECK(b.HashFailed(0, f, &unfinished));
+    }
+    BOOST_CHECK(!b.Peer(0, 30).banned);
+    BOOST_CHECK(!b.Peer(1, 30).banned);
+    std::vector<uint8_t> mask(16, 1);
+    b.MaskPinned(1, mask); // the stream of the secondary must leave both files alone
+    BOOST_CHECK(!mask[10] && !mask[11] && mask[9]);
+    mask.assign(16, 1);
+    b.MaskPinned(0, mask); // the primary's stream may take them
+    BOOST_CHECK(mask[10] && mask[11]);
+    // the primary fetches file 10 again from byte 0 and it verifies: the pin is gone with the file
+    b.NoteClaim(0, 10, 100, false);
+    b.NoteChunk(0, 10, 100, 40);
+    b.NoteComplete(0, 10);
+    mask.assign(16, 1);
+    b.MaskPinned(1, mask);
+    BOOST_CHECK(mask[10] && !mask[11]);
+    // a server that alone supplied a failing file is benched
+    b.NoteClaim(1, 12, 100, false);
+    b.NoteChunk(1, 12, 100, 50);
+    unfinished[12] = 1;
+    b.HashFailed(1, 12, &unfinished);
+    BOOST_CHECK(b.Peer(1, 60).banned);
+    BOOST_CHECK(!b.Peer(0, 60).banned);
+}
+
+BOOST_AUTO_TEST_CASE(peer_board_two_torn_parts_of_unknown_origin_bench_nobody)
+{
+    BootstrapPeerBoard b(2, 2);
+    b.Attach(0, b.Assign(0, 0), 0);
+    b.Attach(1, b.Assign(1, 0), 0);
+    for (uint32_t f = 3; f < 5; ++f) {
+        b.NoteClaim(0, f, 50, true); // resumed from a .part of unknown origin
+        b.NoteChunk(0, f, 50, 10);
+        BOOST_CHECK(b.HashFailed(0, f));
+        b.NoteClaim(0, f, 100, true);
+        b.NoteChunk(0, f, 50, 20);
+        BOOST_CHECK(b.HashFailed(0, f));
+    }
+    BOOST_CHECK(!b.Peer(0, 30).banned);
+    BOOST_CHECK(!b.Peer(1, 30).banned);
+    BOOST_CHECK_EQUAL(b.UsablePeers(), 2U);
+}
+
+BOOST_AUTO_TEST_CASE(peer_board_never_benches_the_only_holder_of_a_pending_file)
+{
+    BootstrapPeerBoard b(2, 2);
+    b.Attach(0, b.Assign(0, 0), 0);
+    b.Attach(1, b.Assign(1, 0), 0);
+    std::vector<uint8_t> has0(8, 1);
+    has0[6] = 0; // file 6 is held by peer 1 only
+    b.SetPeerHas(0, has0);
+    std::vector<uint8_t> unfinished(8, 0);
+    unfinished[5] = unfinished[6] = 1;
+    b.NoteClaim(1, 5, 100, false);
+    b.NoteChunk(1, 5, 100, 10);
+    BOOST_CHECK(b.HashFailed(1, 5, &unfinished)); // peer 1 supplied file 5 alone but holds the only copy of 6
+    BOOST_CHECK(!b.Peer(1, 20).banned);
+    unfinished[6] = 0; // once nothing needs it any more it may be benched
+    b.NoteClaim(1, 5, 100, false);
+    b.NoteChunk(1, 5, 100, 30);
+    b.HashFailed(1, 5, &unfinished);
+    BOOST_CHECK(b.Peer(1, 40).banned);
+    // the primary is not benched while it is the only source of a pending file either
+    BootstrapPeerBoard c(2, 2);
+    c.Attach(0, c.Assign(0, 0), 0);
+    c.Attach(1, c.Assign(1, 0), 0);
+    std::vector<uint8_t> has1(8, 1);
+    has1[4] = 0; // file 4 is held by the primary only
+    c.SetPeerHas(1, has1);
+    std::vector<uint8_t> pend(8, 0);
+    pend[4] = pend[2] = 1;
+    c.NoteClaim(0, 2, 100, false);
+    c.NoteChunk(0, 2, 100, 10);
+    c.HashFailed(0, 2, &pend);
+    BOOST_CHECK(!c.Peer(0, 20).banned);
+}
+
+BOOST_AUTO_TEST_CASE(peer_board_knows_when_a_pending_file_has_no_usable_holder)
+{
+    BootstrapPeerBoard b(2, 2);
+    std::vector<uint8_t> has1(4, 0);
+    has1[1] = 1;
+    b.SetPeerHas(1, has1); // peer 1 holds file 1 only; peer 0 holds everything
+    std::vector<uint8_t> need(4, 0);
+    need[0] = need[1] = 1;
+    BOOST_CHECK(b.EveryFileHasHolder(need));
+    b.ManifestMismatch(0); // the holder of file 0 is gone
+    BOOST_CHECK(!b.EveryFileHasHolder(need));
+    need[0] = 0;
+    BOOST_CHECK(b.EveryFileHasHolder(need)); // file 1 is still held by peer 1
+}
+
+BOOST_AUTO_TEST_CASE(peer_board_limits_connection_attempts_per_server_and_minute)
+{
+    BootstrapPeerPolicy pol;
+    pol.maxConnectsPerMinute = 5;
+    BootstrapPeerBoard b(2, 2, pol);
+    for (int i = 0; i < 5; ++i)
+        BOOST_CHECK(b.AllowConnect(0, 1000 + i));
+    BOOST_CHECK(!b.AllowConnect(0, 2000));
+    BOOST_CHECK(b.AllowConnect(1, 2000)); // another server has its own share
+    BOOST_CHECK(b.AllowConnect(0, 62000)); // a minute later
+}
+
+BOOST_AUTO_TEST_CASE(peer_board_applies_each_move_under_its_own_lock_with_the_peer_it_was_decided_for)
+{
+    BootstrapPeerPolicy pol;
+    pol.windowMs = 1000;
+    pol.stallMs = 2000;
+    BootstrapPeerBoard b(2, 4, pol);
+    for (int s = 0; s < 4; ++s)
+        b.Attach(s, b.Assign(s, 0), 0);
+    for (int64_t t = 100; t <= 3000; t += 100) {
+        b.NoteChunk(0, 10, 1000, t);
+        b.NoteChunk(2, 11, 1000, t);
+    }
+    std::vector<BootstrapMove> applied;
+    const std::vector<BootstrapMove> mv = b.Rebalance(3000, [&applied](const BootstrapMove& m) { applied.push_back(m); });
+    BOOST_REQUIRE_EQUAL(mv.size(), 2U);
+    BOOST_REQUIRE_EQUAL(applied.size(), 2U);
+    for (size_t i = 0; i < mv.size(); ++i) {
+        BOOST_CHECK_EQUAL(applied[i].stream, mv[i].stream);
+        BOOST_CHECK_EQUAL(mv[i].peer, 1); // the quiet server's streams, named while they were still attached to it
+    }
+}
+
+BOOST_AUTO_TEST_CASE(peer_board_does_not_steal_from_a_stream_that_just_connected)
+{
+    BootstrapPeerPolicy pol; // production defaults
+    BootstrapPeerBoard b(2, 3, pol);
+    b.Attach(0, b.Assign(0, 0), 0);
+    b.NoteClaim(0, 1, (uint64_t)1 << 30, false);
+    for (int64_t t = 100; t <= 20000; t += 100)
+        b.NoteChunk(0, 1, 104858, t); // peer 0: ~1 MiB/s on one mature stream
+    b.Attach(1, 1, 20000);            // stream 1 just attached to peer 1
+    b.NoteClaim(1, 2, (uint64_t)128 << 20, false);
+    b.SetIdle(2, true);
+    std::vector<BootstrapMove> mv = b.Rebalance(20200); // first manager tick, 200 ms later
+    BOOST_CHECK_MESSAGE(mv.empty(), "stream stolen 200 ms after attach, nothing measured yet");
+    BootstrapPeerBoard c(2, 3, pol);
+    c.Attach(0, c.Assign(0, 0), 0);
+    c.NoteClaim(0, 1, (uint64_t)1 << 30, false);
+    for (int64_t t = 100; t <= 20000; t += 100)
+        c.NoteChunk(0, 1, 1048576, t); // peer 0: 10 MiB/s
+    c.Attach(1, 1, 20000);
+    c.NoteClaim(1, 2, (uint64_t)128 << 20, false);
+    c.NoteChunk(1, 2, 1048576, 20300);
+    c.SetIdle(2, true);
+    mv = c.Rebalance(20400);
+    BOOST_CHECK_MESSAGE(mv.empty(), "stream stolen 400 ms after attach on one sample");
+    // a stream with a full window but inside the move cooldown is left alone too, and a steal benches the server
+    // of the victim for the next assignment
+    BootstrapPeerPolicy p2;
+    p2.windowMs = 1000;
+    p2.stallMs = 1000000;
+    p2.stealMinSeconds = 15;
+    p2.moveCooldownMs = 3000;
+    BootstrapPeerBoard d(2, 3, p2);
+    d.Attach(0, d.Assign(0, 0), 0);
+    d.Attach(1, d.Assign(1, 0), 0);
+    d.NoteClaim(0, 8, 100000, false);
+    d.NoteClaim(1, 7, 1000000, false);
+    d.SetIdle(2, true);
+    for (int64_t t = 100; t <= 2500; t += 100) {
+        d.NoteChunk(0, 8, 10000, t);
+        d.NoteChunk(1, 7, 10, t);
+    }
+    BOOST_CHECK(d.Rebalance(2500).empty()); // window full, cooldown (3 s from the attach) not over
+    for (int64_t t = 2600; t <= 3200; t += 100) {
+        d.NoteChunk(0, 8, 10000, t);
+        d.NoteChunk(1, 7, 10, t);
+    }
+    mv = d.Rebalance(3200);
+    BOOST_REQUIRE_EQUAL(mv.size(), 1U);
+    BOOST_CHECK(mv[0].reason == BMR_STEAL);
+    BOOST_CHECK_EQUAL(mv[0].peer, 1);
+    d.Detach(1);
+    BOOST_CHECK_EQUAL(d.Assign(1, 3300), 0); // the victim's server is avoided for a while
+}
+
+// ---- downloads against fake servers: liveness ----
+
+BOOST_AUTO_TEST_CASE(a_secondary_that_lies_mid_file_and_hands_over_does_not_cost_the_attempt)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(10);
+    FakeBootstrapServer a(s), b(s);
+    a.chunkDelayMs = 4; // honest primary, a little slower
+    // the secondary: an honest first chunk, wrong bytes after it, and it never serves a file's last chunk, so
+    // the honest primary always finishes the files the secondary touched
+    b.tamper = [](int, uint32_t, uint64_t offset, std::string& data) {
+        if (offset >= TEST_CHUNK && !data.empty())
+            data[0] ^= 1;
+    };
+    b.dropBefore = [&s](int, uint32_t file, uint64_t offset, int) {
+        return offset + TEST_CHUNK >= s.contents[file].size();
+    };
+    BootstrapSetWatchdogForTests(8000, 8000);
+    std::string error;
+    const bool ok = DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 3000, 4, error,
+                                                      std::vector<std::string>(1, PeerName(b)));
+    BootstrapSetWatchdogForTests(0, 0);
+    BOOST_CHECK_MESSAGE(ok, "download with an honest, reachable primary failed: " << error);
+    if (ok)
+        CheckAllFilesMatch(s, tmp.path / "staging");
+}
+
+BOOST_AUTO_TEST_CASE(a_resumed_prefix_written_by_a_lying_server_is_fetched_again_from_one_server)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(6);
+    std::string error;
+    {
+        // first run: the only server writes wrong bytes after the first chunk of every file and never serves a
+        // last chunk, so the attempt ends and leaves torn .part files behind
+        FakeBootstrapServer liar(s);
+        liar.tamper = [](int, uint32_t, uint64_t offset, std::string& data) {
+            if (offset >= TEST_CHUNK && !data.empty())
+                data[0] ^= 1;
+        };
+        liar.dropBefore = [&s](int, uint32_t file, uint64_t offset, int) { return offset + TEST_CHUNK >= s.contents[file].size(); };
+        BootstrapSetWatchdogForTests(2000, 2000);
+        const bool ok = DownloadBootstrapSnapshotParallel(liar.Address(), PeerName(liar), s.manifest, tmp.path / "staging", 1500, 2, error);
+        BootstrapSetWatchdogForTests(0, 0);
+        BOOST_CHECK(!ok);
+    }
+    // second run: two honest servers. Each resumed .part fails its hash (unknown origin); the file is fetched again
+    // from byte 0 from one of them and nobody is benched or the attempt lost.
+    FakeBootstrapServer a(s), b(s);
+    BootstrapSetWatchdogForTests(8000, 8000);
+    const bool ok2 = DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 3000, 4, error,
+                                                       std::vector<std::string>(1, PeerName(b)));
+    BootstrapSetWatchdogForTests(0, 0);
+    BOOST_CHECK_MESSAGE(ok2, error);
+    if (ok2)
+        CheckAllFilesMatch(s, tmp.path / "staging");
+}
+
+BOOST_AUTO_TEST_CASE(a_primary_that_refreshes_its_snapshot_ends_the_attempt_at_once)
+{
+    // The only server refreshes its snapshot: later connections get a manifest that differs in ONE file (as a
+    // growing block bundle tail would). The attempt ends at once ("manifest differs"); the caller retries with
+    // the new manifest. It must not idle until a watchdog or reconnect in a storm.
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(10);
+    FakeBootstrapServer a(s);
+    CBootstrapSnapshotManifest changed = s.manifest;
+    const uint32_t last = (uint32_t)changed.vFiles.size() - 1;
+    changed.vFiles[last].hashSha256 = uint256S("0x77");
+    a.manifestFor = [&](int conn) { return conn < 4 ? s.manifest : changed; };
+    a.dropBefore = [](int conn, uint32_t, uint64_t, int seq) { return conn < 4 && seq == 2; };
+    BootstrapSetWatchdogForTests(6000, 6000);
+    std::string error;
+    const int64_t t0 = GetTimeMillis();
+    const bool ok = DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 3000, 4, error);
+    const int64_t ms = GetTimeMillis() - t0;
+    BootstrapSetWatchdogForTests(0, 0);
+    BOOST_CHECK(!ok);
+    BOOST_CHECK_MESSAGE(error.find("differs from the master manifest") != std::string::npos, error);
+    BOOST_CHECK_MESSAGE(ms < 3000, "the attempt idled " << ms << " ms over " << a.connections.load() << " connections before ending (" << error << ")");
+    BOOST_CHECK_LT(a.connections.load(), 12);
+}
+
+BOOST_AUTO_TEST_CASE(after_a_refresh_of_the_primary_the_next_attempt_keeps_the_shared_files)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(10);
+    // the refreshed snapshot: the last file grew (here: other bytes), the other nine are the same
+    Snapshot s2 = s;
+    const size_t last = s2.contents.size() - 1;
+    s2.contents[last] = Bytes(s2.contents[last].size(), 77);
+    s2.manifest.vFiles[last].hashSha256 = Sha256Of(s2.contents[last]);
+    std::string error;
+    {
+        FakeBootstrapServer a(s);
+        a.chunkDelayMs = 3;
+        a.manifestFor = [&](int conn) { return conn < 2 ? s.manifest : s2.manifest; };
+        a.dropBefore = [](int conn, uint32_t, uint64_t, int seq) { return conn < 2 && seq == 40; };
+        BootstrapSetWatchdogForTests(6000, 6000);
+        const bool ok = DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 3000, 2, error);
+        BootstrapSetWatchdogForTests(0, 0);
+        BOOST_CHECK(!ok);
+        BOOST_CHECK_MESSAGE(error.find("differs from the master manifest") != std::string::npos, error);
+    }
+    size_t staged = 0;
+    for (size_t i = 0; i + 1 < s.manifest.vFiles.size(); ++i)
+        if (fs::exists(tmp.path / "staging" / s.manifest.vFiles[i].strPath))
+            ++staged;
+    // the caller starts again with the new manifest: the staged files that are still the same are reused
+    FakeBootstrapServer b(s2);
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(b.Address(), PeerName(b), s2.manifest, tmp.path / "staging", 5000, 4, error), error);
+    CheckAllFilesMatch(s2, tmp.path / "staging");
+    BOOST_CHECK_MESSAGE(staged > 0, "the first attempt staged no complete file; the test proves nothing");
+    BOOST_CHECK_LT(b.Log().size(), ChunksOf(s2)); // the staged files were not fetched again
 }
 
 
