@@ -19,6 +19,13 @@ void StartTorControl(boost::thread_group& threadGroup, CScheduler& scheduler);
 void InterruptTorControl();
 void StopTorControl();
 
+/**
+ * The embedded Tor was restarted (new loopback ports): make the control client
+ * reconnect at once, backoff reset, and re-create the onion service from the
+ * cached key. Safe from any thread; a no-op when the control client is off.
+ */
+void TorControlKick();
+
 /** True when a -torcontrol address names this machine (loopback), so the Tor behind it shares our loopback. */
 bool TorControlAddressIsLocal(const std::string& address);
 

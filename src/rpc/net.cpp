@@ -14,6 +14,7 @@
 #include "util.h"
 #include "version.h"
 #include "deprecation.h"
+#include "embeddedtor.h"
 
 #include <boost/foreach.hpp>
 
@@ -460,6 +461,7 @@ UniValue getnetworkinfo(const UniValue& params, bool fHelp)
             "  }\n"
             "  ,...\n"
             "  ]\n"
+            "  \"torstatus\": \"running\",              (string) only with -embeddedtor: the embedded Tor is off (not started yet), running, restarting, or failed:<fault> (no more restarts)\n"
             "  \"warnings\": \"...\"                    (string) any network warnings (such as alert messages) \n"
             "}\n"
             "\nExamples:\n"
@@ -491,6 +493,8 @@ UniValue getnetworkinfo(const UniValue& params, bool fHelp)
         }
     }
     obj.push_back(Pair("localaddresses", localAddresses));
+    if (GetBoolArg("-embeddedtor", DEFAULT_EMBEDDED_TOR))
+        obj.push_back(Pair("torstatus", EmbeddedTorStatusToken()));
     obj.push_back(Pair("warnings",       GetWarnings("statusbar")));
     return obj;
 }

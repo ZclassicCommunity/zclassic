@@ -14,6 +14,7 @@
 #include "util.h"
 #include "crypto/hmac_sha256.h"
 
+#include <atomic>
 #include <vector>
 #include <deque>
 #include <set>
@@ -447,12 +448,26 @@ static CService DefaultTorSocksProxy(const std::string &target)
     return CService("127.0.0.1", 9050);
 }
 
+/** This node's Tor is the embedded one: started, or armed and restarting. */
+static bool EmbeddedTorInUse()
+{
+    return EmbeddedTorManaged() || EmbeddedTorRunning();
+}
+
+/** The control client talks to the embedded Tor (no -torcontrol). While it is
+ * restarting this stays true, so the client never falls back to another Tor
+ * on the default control port. */
+static bool UseEmbeddedTorControl()
+{
+    return !mapArgs.count("-torcontrol") && EmbeddedTorInUse();
+}
+
 /** Control port to connect to: -torcontrol when given, else the embedded
  * Tor's control port when one is running, else the default.
  */
 static std::string GetTorControlTarget()
 {
-    if (!mapArgs.count("-torcontrol") && EmbeddedTorRunning())
+    if (UseEmbeddedTorControl())
         return strprintf("127.0.0.1:%u", EmbeddedTorControlPort());
     return GetArg("-torcontrol", DEFAULT_TOR_CONTROL);
 }
@@ -473,6 +488,9 @@ public:
 
     /** Reconnect, after getting disconnected */
     void Reconnect();
+
+    /** The embedded Tor was just (re)started: reconnect now, backoff reset. */
+    void Kick();
 private:
     struct event_base* base;
     std::string target;
@@ -480,6 +498,8 @@ private:
     std::string private_key;
     std::string service_id;
     bool reconnect;
+    /** Connected to the control port (between connected_cb and disconnected_cb) */
+    bool connected;
     struct event *reconnect_ev;
     float reconnect_timeout;
     CService service;
@@ -504,6 +524,8 @@ private:
     void connected_cb(TorControlConnection& conn);
     /** Callback after connection lost or failed connection attempt */
     void disconnected_cb(TorControlConnection& conn);
+    /** Arm the reconnect timer with the current backoff, then grow it */
+    void schedule_reconnect();
 
     /** Callback for reconnect timer */
     static void reconnect_cb(evutil_socket_t fd, short what, void *arg);
@@ -511,7 +533,7 @@ private:
 
 TorController::TorController(struct event_base* baseIn, const std::string& target):
     base(baseIn),
-    target(target), conn(base), reconnect(true), reconnect_ev(0),
+    target(target), conn(base), reconnect(true), connected(false), reconnect_ev(0),
     reconnect_timeout(RECONNECT_TIMEOUT_START)
 {
     reconnect_ev = event_new(base, -1, 0, reconnect_cb, this);
@@ -610,7 +632,7 @@ void TorController::auth_cb(TorControlConnection& conn, const TorControlReply& r
 
         // Now that we know Tor is running setup the proxy for onion addresses
         // if -onion isn't set to something else.
-        if (GetArg("-onion", "") != "" || EmbeddedTorRunning()) {
+        if (GetArg("-onion", "") != "" || EmbeddedTorInUse()) {
             // -onion names the proxy, or init already pointed the onion proxy
             // at the embedded Tor's SOCKS port.
             add_onion(conn);
@@ -643,7 +665,7 @@ void TorController::socks_cb(TorControlConnection& conn, const TorControlReply& 
     }
     // Checked again: -onion cannot change at runtime, but an embedded Tor's
     // proxy must never be replaced by another Tor's.
-    if (GetArg("-onion", "") == "" && !EmbeddedTorRunning()) {
+    if (GetArg("-onion", "") == "" && !EmbeddedTorInUse()) {
         proxyType addrOnion = proxyType(addrSocks, true);
         SetProxy(NET_ONION, addrOnion);
         SetLimited(NET_ONION, false);
@@ -762,7 +784,7 @@ void TorController::protocolinfo_cb(TorControlConnection& conn, const TorControl
             LogPrint("tor", "tor: Supported authentication method: %s\n", s);
         }
         std::string torpassword = GetArg("-torpassword", "");
-        if (!mapArgs.count("-torcontrol") && EmbeddedTorRunning()) {
+        if (UseEmbeddedTorControl()) {
             // The embedded Tor offers SAFECOOKIE with the cookie file init
             // configured. Anything else answering on its control port (a
             // local process that took the port after Tor went away) offering
@@ -823,6 +845,7 @@ void TorController::protocolinfo_cb(TorControlConnection& conn, const TorControl
 void TorController::connected_cb(TorControlConnection& conn)
 {
     reconnect_timeout = RECONNECT_TIMEOUT_START;
+    connected = true;
     // First send a PROTOCOLINFO command to figure out what authentication is expected
     if (!conn.Command("PROTOCOLINFO 1", boost::bind(&TorController::protocolinfo_cb, this, _1, _2)))
         LogPrintf("tor: Error sending initial protocolinfo command\n");
@@ -834,11 +857,16 @@ void TorController::disconnected_cb(TorControlConnection& conn)
     if (service.IsValid())
         RemoveLocal(service);
     service = CService();
+    connected = false;
     if (!reconnect)
         return;
 
     LogPrint("tor", "tor: Not connected to Tor control port %s, trying to reconnect\n", target);
+    schedule_reconnect();
+}
 
+void TorController::schedule_reconnect()
+{
     // Single-shot timer for reconnect. Use exponential backoff.
     struct timeval time = MillisToTimeval(int64_t(reconnect_timeout * 1000.0));
     if (reconnect_ev)
@@ -851,10 +879,35 @@ void TorController::Reconnect()
     /* Try to reconnect and reestablish if we get booted - for example, Tor
      * may be restarting.
      */
+    if (UseEmbeddedTorControl()) {
+        // A restarted embedded Tor has new loopback ports: look them up on
+        // every attempt instead of using the ones from construction. While
+        // it is down there is nothing to connect to; never fall back to a
+        // Tor on the default control port. TorControlKick() cuts the wait
+        // short once it is back. The cookie path is read afresh in
+        // protocolinfo_cb, and ADD_ONION reuses the cached key, so the onion
+        // address stays the same.
+        if (!EmbeddedTorRunning()) {
+            LogPrint("tor", "tor: Waiting for the embedded Tor to come back\n");
+            schedule_reconnect();
+            return;
+        }
+        target = GetTorControlTarget();
+    }
     if (!conn.Connect(target, boost::bind(&TorController::connected_cb, this, _1),
          boost::bind(&TorController::disconnected_cb, this, _1) )) {
         LogPrintf("tor: Re-initiating connection to Tor control port %s failed\n", target);
     }
+}
+
+void TorController::Kick()
+{
+    reconnect_timeout = RECONNECT_TIMEOUT_START;
+    if (connected)
+        return;
+    if (reconnect_ev)
+        event_del(reconnect_ev);
+    Reconnect();
 }
 
 std::string TorController::GetPrivateKeyFile()
@@ -886,12 +939,37 @@ void TorController::reconnect_cb(evutil_socket_t fd, short what, void *arg)
 /****** Thread ********/
 static struct event_base *gBase;
 static boost::thread torControlThread;
+/** The controller, read and written only on the torcontrol thread. */
+static TorController *gController = NULL;
+/** gBase for TorControlKick, which other threads call: set once it exists, cleared before it is freed. */
+static std::atomic<struct event_base*> gKickBase(nullptr);
 
 static void TorControlThread()
 {
     TorController ctrl(gBase, GetTorControlTarget());
 
+    gController = &ctrl;
     event_base_dispatch(gBase);
+    gController = NULL;
+}
+
+/** Runs on the torcontrol thread (event loop), queued by TorControlKick. */
+static void TorControlKickCb(evutil_socket_t, short, void*)
+{
+    if (gController)
+        gController->Kick();
+}
+
+void TorControlKick()
+{
+    // gBase was made after evthread_use_*threads(), so queueing an event on it
+    // from another thread is safe; the callback runs on the event loop.
+    struct event_base* base = gKickBase.load();
+    if (!base)
+        return;
+    struct timeval now = {0, 0};
+    if (event_base_once(base, -1, EV_TIMEOUT, TorControlKickCb, NULL, &now) != 0)
+        LogPrintf("tor: Could not queue a reconnect to the restarted Tor; the reconnect backoff applies\n");
 }
 
 void StartTorControl(boost::thread_group& threadGroup, CScheduler& scheduler)
@@ -909,6 +987,7 @@ void StartTorControl(boost::thread_group& threadGroup, CScheduler& scheduler)
     }
 
     torControlThread = boost::thread(boost::bind(&TraceThread<void (*)()>, "torcontrol", &TorControlThread));
+    gKickBase = gBase;
 }
 
 void InterruptTorControl()
@@ -933,6 +1012,7 @@ bool TorControlAddressIsLocal(const std::string& address)
 void StopTorControl()
 {
     if (gBase) {
+        gKickBase = nullptr;
         torControlThread.join();
         event_base_free(gBase);
         gBase = 0;
