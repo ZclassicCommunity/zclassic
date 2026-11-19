@@ -320,7 +320,7 @@ Merging the eight wave 3 units (`own/zcl-unit-and-security`, `w3-crc32c-arm`, `w
 
 - kpi-floor `shell_lines`: 24178 -> 24451, exactly the three new qa scripts: `qa/rpc-tests/tor_restart.sh` (103 lines),
   `qa/rpc-tests/nodestatus.sh` (97 lines) and `qa/rpc-tests/blockindex_header_restart.sh` (73 lines). It is debt, to be paid by porting them to C23.
-- kpi-floor `complexity_debt`: 6449 -> 6388 (measured; the lazy-parameter unit lowered the complexity rows of `librustzcash_compat.c`). Shrink-only, so a lowered floor.
+- kpi-floor `complexity_debt`: 6449 -> 6380 (measured, after `zcl-lint complexity --update-baseline` lowered five rows that fell: `CAddrMan::Unserialize`, `TorController::protocolinfo_cb`, `wallethealth::assess`, `cxx_defs`, `norm_path`). Shrink-only, so a lowered floor.
 - filesize `src/c23/compat/librustzcash_compat.c`: 1895 -> 1887 (measured; the row follows the lazy-parameter rewrite of that file).
 
 Nothing else was baselined: the new options, RPC and files carry their help text, registration, conversion and `impact.rules` rows.

@@ -6,7 +6,7 @@ qa/key1-guard.c	main(2)	33
 src/addrman.cpp	CAddrMan::Add_(3)	25
 src/addrman.cpp	CAddrMan::Check_(0)	32
 src/addrman.cpp	CAddrMan::Select_(1)	30
-src/addrman.h	CAddrMan::Unserialize(1)	23
+src/addrman.h	CAddrMan::Unserialize(1)	20
 src/arith_uint256.cpp	base_uint<BITS>::operator/=(1)	24
 src/bech32.cpp	bech32::Decode(1)	20
 src/bitcoin-cli.cpp	CommandLineRPC(2)	22
@@ -199,7 +199,7 @@ src/test/zslpbuild_tests.cpp	BOOST_AUTO_TEST_CASE(evaluate_agrees_with_apply)	40
 src/test/zslpbuild_tests.cpp	BOOST_AUTO_TEST_CASE(rebuild_mainnet_messages)	25
 src/tinyformat.h	tinyformat::TINYFORMAT_DEFINE_FORMATVALUE_CHAR(unsignedchar)	62
 src/torcontrol.cpp	ParseTorReplyMapping(1)	31
-src/torcontrol.cpp	TorController::protocolinfo_cb(2)	22
+src/torcontrol.cpp	TorController::protocolinfo_cb(2)	21
 src/transaction_builder.cpp	ProveSaplingDescriptions(3)	19
 src/transaction_builder.cpp	TransactionBuilder::Build(0)	28
 src/txdb.cpp	CBlockTreeDB::LoadBlockIndexGuts(0)	24
@@ -331,7 +331,6 @@ wallet/src/tokenssendmodel.cpp	tokens::parseAmount(2)	22
 wallet/src/turnstile.cpp	Turnstile::executeMigrationStep(0)	17
 wallet/src/txtablemodel.cpp	TxTableModel::data(2)	33
 wallet/src/walletbackup.h	WalletBackup::create(3)	20
-wallet/src/wallethealth.h	wallethealth::assess(2)	17
 zcutil/agent/guard/rules.c	brace_one(5)	17
 zcutil/agent/guard/rules.c	check_gh(1)	16
 zcutil/agent/guard/rules.c	check_nested(1)	18
@@ -403,7 +402,7 @@ zcutil/dev/lib/automake.c	am_load(2)	29
 zcutil/dev/lib/automake.c	expand(6)	18
 zcutil/dev/lib/automake.c	read_makefile(3)	54
 zcutil/dev/lib/cxxscan.c	cxx_blank_directives(2)	22
-zcutil/dev/lib/cxxscan.c	cxx_defs(3)	146
+zcutil/dev/lib/cxxscan.c	cxx_defs(3)	145
 zcutil/dev/lib/cxxscan.c	cxx_includes(3)	31
 zcutil/dev/lib/cxxscan.c	cxx_mask(2)	66
 zcutil/dev/lib/cxxscan.c	func_name(3)	34
@@ -416,7 +415,7 @@ zcutil/dev/tests/zcl-dev-tests.c	cmd_t_fast(2)	83
 zcutil/dev/tests/zcl-dev-tests.c	cmd_t_list(2)	23
 zcutil/dev/tests/zcl-dev-tests.c	main(2)	20
 zcutil/dev/tests/zcl-dev-tests.c	makefile_var(3)	16
-zcutil/dev/tests/zcl-dev-tests.c	norm_path(1)	27
+zcutil/dev/tests/zcl-dev-tests.c	norm_path(1)	26
 zcutil/dev/tests/zcl-dev-tests.c	qa_unreachable(2)	18
 zcutil/dev/tests/zcl-dev-tests.c	select_path(4)	21
 zcutil/dev/wiki/facts.c	facts_check(2)	33
