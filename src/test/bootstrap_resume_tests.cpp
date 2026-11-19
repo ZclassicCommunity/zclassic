@@ -2265,11 +2265,15 @@ BOOST_AUTO_TEST_CASE(a_fast_secondary_holding_few_files_does_not_make_the_downlo
                                                                 std::vector<std::string>(1, PeerName(b))), error);
         both = GetTimeMillis() - t0;
         CheckAllFilesMatch(s, tmp.path / "staging");
+        // The primary must get all its streams: with the secondary out of files, no stream may sit on it (that was
+        // the failure: the primary never got its 4th stream). Wall times are far too noisy on a loaded host for a
+        // tight comparison, so the time check below only catches a stall.
+        BOOST_CHECK_GE(a.maxLive.load(), 4);
         BOOST_TEST_MESSAGE("partial secondary: alone " << alone << " ms, with a fast partial secondary " << both << " ms; a connections="
                            << a.connections.load() << " b connections=" << b.connections.load());
     }
-    // 15% and half a second of noise
-    BOOST_CHECK_MESSAGE(both * 100 <= alone * 115 + 50000, "a fast partial secondary made it slower: " << both << " ms vs " << alone << " ms alone");
+    // twice as long and three seconds of noise: a stall, not jitter
+    BOOST_CHECK_MESSAGE(both <= alone * 2 + 3000, "a fast partial secondary made it slower: " << both << " ms vs " << alone << " ms alone");
 }
 
 // ---- downloads against fake servers: liveness ----
