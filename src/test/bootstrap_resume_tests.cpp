@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -493,6 +494,95 @@ BOOST_AUTO_TEST_CASE(prepare_staging_never_opens_a_marker_that_is_not_a_regular_
     BOOST_CHECK(!fs::exists(staging / "blocks" / "x"));
 }
 #endif
+
+// A start after a kill during the install of a downloaded snapshot (pending marker written, then
+// blocks/ and chainstate/ renamed out of the staging directory one after the other).
+namespace {
+void TouchFile(const fs::path& p, const std::string& content = "x")
+{
+    fs::create_directories(p.parent_path());
+    std::ofstream(p.string().c_str(), std::ios::binary) << content;
+}
+// a datadir as an interrupted install leaves it: which of the directories are installed, which are still staged
+fs::path MakeInterruptedInstall(const fs::path& dir, bool blocks, bool chainstate, bool marker, bool stagingBlocks, bool stagingChainstate, bool staging = true)
+{
+    fs::create_directories(dir);
+    if (blocks) TouchFile(dir / "blocks" / "index" / "000001.ldb", "blocks-installed");
+    if (chainstate) TouchFile(dir / "chainstate" / "000001.ldb", "chainstate-installed");
+    if (marker) BOOST_REQUIRE(WriteBootstrapTrustlessPending(dir, 5, uint256S("01"), uint256S("02")));
+    const fs::path st = dir / (std::string(BOOTSTRAP_STAGING_PREFIX) + "0123456789abcdef");
+    if (staging) {
+        TouchFile(st / BOOTSTRAP_STAGING_MARKER, "z23-bootstrap-staging 1\n");
+        if (stagingBlocks) TouchFile(st / "blocks" / "blk00000.dat", "staged-blocks");
+        if (stagingChainstate) TouchFile(st / "chainstate" / "000001.ldb", "staged-chainstate");
+    }
+    return st;
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(interrupted_install_is_recovered_or_refused_never_deleted)
+{
+    std::string error;
+    {   // no marker: the directories are the user's chain data, nothing is touched
+        TempDir tmp;
+        MakeInterruptedInstall(tmp.path, true, true, false, false, false, false);
+        BOOST_CHECK_EQUAL(RecoverInterruptedBootstrapInstall(tmp.path, error), BIR_NONE);
+        BOOST_CHECK(fs::exists(tmp.path / "blocks" / "index" / "000001.ldb"));
+        BOOST_CHECK(fs::exists(tmp.path / "chainstate" / "000001.ldb"));
+        // a lone blocks/ without a marker is not an install either
+        TempDir lone;
+        MakeInterruptedInstall(lone.path, true, false, false, false, true);
+        BOOST_CHECK_EQUAL(RecoverInterruptedBootstrapInstall(lone.path, error), BIR_NONE);
+        BOOST_CHECK(fs::exists(lone.path / "blocks" / "index" / "000001.ldb"));
+    }
+    {   // marker, nothing installed yet: the marker is cleared, the staged snapshot kept
+        TempDir tmp;
+        const fs::path st = MakeInterruptedInstall(tmp.path, false, false, true, true, true);
+        BOOST_CHECK_EQUAL(RecoverInterruptedBootstrapInstall(tmp.path, error), BIR_STALE_MARKER);
+        BOOST_CHECK(!BootstrapTrustlessPendingExists(tmp.path));
+        BOOST_CHECK(fs::exists(st / "blocks" / "blk00000.dat") && fs::exists(st / "chainstate" / "000001.ldb"));
+    }
+    {   // both installed: the marker stays for the verification, the staging husk goes
+        TempDir tmp;
+        const fs::path st = MakeInterruptedInstall(tmp.path, true, true, true, false, false);
+        BOOST_CHECK_EQUAL(RecoverInterruptedBootstrapInstall(tmp.path, error), BIR_INSTALLED);
+        BOOST_CHECK(BootstrapTrustlessPendingExists(tmp.path));
+        BOOST_CHECK(fs::exists(tmp.path / "blocks" / "index" / "000001.ldb"));
+        BOOST_CHECK(fs::exists(tmp.path / "chainstate" / "000001.ldb"));
+        BOOST_CHECK(!fs::exists(st));
+    }
+    {   // blocks/ installed, chainstate/ still staged: blocks/ goes back, marker cleared, a second start sees nothing
+        TempDir tmp;
+        const fs::path st = MakeInterruptedInstall(tmp.path, true, false, true, false, true);
+        BOOST_CHECK_EQUAL(RecoverInterruptedBootstrapInstall(tmp.path, error), BIR_ROLLED_BACK);
+        BOOST_CHECK(!fs::exists(tmp.path / "blocks"));
+        BOOST_CHECK(fs::exists(st / "blocks" / "index" / "000001.ldb"));
+        BOOST_CHECK(fs::exists(st / "chainstate" / "000001.ldb"));
+        BOOST_CHECK(!BootstrapTrustlessPendingExists(tmp.path));
+        BOOST_CHECK_EQUAL(RecoverInterruptedBootstrapInstall(tmp.path, error), BIR_NONE);
+    }
+    {   // the mirror image (chainstate/ alone, as an unordered power loss could show)
+        TempDir tmp;
+        const fs::path st = MakeInterruptedInstall(tmp.path, false, true, true, true, false);
+        BOOST_CHECK_EQUAL(RecoverInterruptedBootstrapInstall(tmp.path, error), BIR_ROLLED_BACK);
+        BOOST_CHECK(!fs::exists(tmp.path / "chainstate"));
+        BOOST_CHECK(fs::exists(st / "chainstate" / "000001.ldb") && fs::exists(st / "blocks" / "blk00000.dat"));
+    }
+    {   // blocks/ with a marker but no staging directory to return it to: refused, untouched
+        TempDir tmp;
+        MakeInterruptedInstall(tmp.path, true, false, true, false, false, false);
+        BOOST_CHECK_EQUAL(RecoverInterruptedBootstrapInstall(tmp.path, error), BIR_REFUSE);
+        BOOST_CHECK(error.find("left untouched") != std::string::npos);
+        BOOST_CHECK(fs::exists(tmp.path / "blocks" / "index" / "000001.ldb"));
+        BOOST_CHECK(BootstrapTrustlessPendingExists(tmp.path));
+    }
+    {   // a staging directory that still holds its own blocks/ is not where this blocks/ came from
+        TempDir tmp;
+        MakeInterruptedInstall(tmp.path, true, false, true, true, true);
+        BOOST_CHECK_EQUAL(RecoverInterruptedBootstrapInstall(tmp.path, error), BIR_REFUSE);
+        BOOST_CHECK(fs::exists(tmp.path / "blocks" / "index" / "000001.ldb"));
+    }
+}
 
 BOOST_AUTO_TEST_CASE(scan_keeps_verified_resumes_partial_and_deletes_the_rest)
 {

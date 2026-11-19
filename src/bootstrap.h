@@ -343,6 +343,25 @@ void BootstrapTrustlessPendingClear(const boost::filesystem::path& data_dir);
 bool WriteBootstrapAnchorPending(const boost::filesystem::path& data_dir, int height, const uint256& hashBlock);
 bool BootstrapAnchorPendingExists(const boost::filesystem::path& data_dir);
 void BootstrapAnchorPendingClear(const boost::filesystem::path& data_dir);
+//! What a start finds of a bootstrap install that was interrupted (see
+//! RecoverInterruptedBootstrapInstall).
+enum BootstrapInstallRecovery {
+    BIR_NONE,                //!< no pending-verification marker: nothing was interrupted
+    BIR_STALE_MARKER,        //!< the marker was written but nothing was installed: marker cleared
+    BIR_ROLLED_BACK,         //!< one of blocks/ chainstate/ was moved back into its staging directory
+    BIR_INSTALLED,           //!< blocks/ and chainstate/ are both installed; verification is still due
+    BIR_REFUSE,              //!< partial install with no staging directory to return it to: left untouched
+};
+//! Called at start, before the datadir is judged for a bootstrap. The pending marker is
+//! written before the install moves blocks/ and chainstate/ out of the staging directory
+//! (one rename each, blocks/ first), so a marker with a half-installed datadir is
+//! evidence that the install, and nothing else, created it. A half-installed datadir is
+//! rolled back by renaming the installed directory back into the staging directory it
+//! came from (nothing is deleted; the next install re-verifies every staged file) and
+//! the marker is cleared. A complete install keeps its marker for the verification that
+//! the caller runs after the databases open. Any other half-installed datadir (no such
+//! staging directory) is refused, not deleted: error says why.
+BootstrapInstallRecovery RecoverInterruptedBootstrapInstall(const boost::filesystem::path& data_dir, std::string& error);
 //! Read the (height, hash) recorded in the anchor-pending marker. For a v3 growable
 //! import this is the GROWN BUNDLE TIP (so the post-import forward-connect can find it
 //! without relying on pindexBestHeader, which LoadBlockIndexDB leaves at the anchor for
