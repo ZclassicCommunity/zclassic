@@ -87,4 +87,20 @@ public:
     bool ReadDiskBlockIndex(const uint256& hash, CDiskBlockIndex& diskindex);
 };
 
+//! Entries in the LRU in front of ReadBlockIndexSolution.
+static const size_t BLOCK_INDEX_SOLUTION_CACHE_SIZE = 4096;
+
+//! The Equihash solution of a block-index entry loaded from disk (fSolutionOnDisk),
+//! read from pblocktree by block hash through a small LRU. The stored record must
+//! hash to `hash` and carry a non-empty solution; otherwise this logs and returns false.
+bool ReadBlockIndexSolution(const uint256& hash, std::vector<unsigned char>& out);
+
+struct BlockIndexSolutionCacheStats {
+    uint64_t hits;
+    uint64_t misses;
+    size_t entries;
+};
+BlockIndexSolutionCacheStats GetBlockIndexSolutionCacheStats();
+void ClearBlockIndexSolutionCacheForTest();
+
 #endif // BITCOIN_TXDB_H
