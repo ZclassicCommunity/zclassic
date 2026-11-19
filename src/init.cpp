@@ -264,26 +264,37 @@ static bool fChainLoadVerified = false;
  *  verifiably clean: the startup load finished, no reindex, import or bootstrap validation is in
  *  flight, nothing raised a fatal warning (AbortNode and thread exceptions set strMiscWarning),
  *  and the flushed coins best block is the chain tip. */
+/** Why the bootstrap state forbids a clean-shutdown marker, or NULL. */
+static const char* BootstrapCleanMarkerBlocker()
+{
+    const int bvState = GetBootstrapValidationStatus().state;
+    if (bvState != BVS_DISABLED && bvState != BVS_VALIDATED)
+        return "bootstrap validation in progress";
+    if (BootstrapAnchorPendingExists(GetDataDir()) || BootstrapTrustlessPendingExists(GetDataDir()))
+        return "bootstrap install pending";
+    return NULL;
+}
+
+/** Why this stop may not write a clean-shutdown marker, or NULL when it may. The checks run in
+ *  this order and stop at the first that fails. */
+static const char* CleanMarkerBlocker(bool fTipCaptured, const ShutdownBinding& binding)
+{
+    if (!fTipCaptured || !fChainLoadVerified)
+        return "chain databases were not loaded and verified";
+    if (fReindex || fReindexChainState || fImporting || mapArgs.count("-reindex") || mapArgs.count("-reindex-chainstate"))
+        return "reindex or block import in progress";
+    if (!strMiscWarning.empty())
+        return "a fatal error or warning was raised";
+    if (binding.coinsBest != binding.tipHash)
+        return "coins database is not at the chain tip";
+    return BootstrapCleanMarkerBlocker();
+}
+
 static void MaybeWriteCleanShutdownMarker(bool fTipCaptured, ShutdownBinding binding)
 {
     if (!fDatadirLockHeld || !ParamsAreSelected())
         return;
-    const char* why = NULL;
-    if (!fTipCaptured || !fChainLoadVerified)
-        why = "chain databases were not loaded and verified";
-    else if (fReindex || fReindexChainState || fImporting || mapArgs.count("-reindex") || mapArgs.count("-reindex-chainstate"))
-        why = "reindex or block import in progress";
-    else if (!strMiscWarning.empty())
-        why = "a fatal error or warning was raised";
-    else if (binding.coinsBest != binding.tipHash)
-        why = "coins database is not at the chain tip";
-    else {
-        const int bvState = GetBootstrapValidationStatus().state;
-        if (bvState != BVS_DISABLED && bvState != BVS_VALIDATED)
-            why = "bootstrap validation in progress";
-        else if (BootstrapAnchorPendingExists(GetDataDir()) || BootstrapTrustlessPendingExists(GetDataDir()))
-            why = "bootstrap install pending";
-    }
+    const char* why = CleanMarkerBlocker(fTipCaptured, binding);
     if (why) {
         LogPrintf("Shutdown: no clean shutdown marker: %s\n", why);
         return;
@@ -317,6 +328,44 @@ static std::string DescribeLockHolder(const boost::filesystem::path& pidfile)
     return strprintf(_("The lock is held but pid %d is not running; another process holds it or the filesystem does not release locks (network share)."), pid);
 }
 #endif
+
+/** Under cs_main: flush the chain state (and the wallet checkpoint at the same tip), capture the
+ *  tip and coins best block for the clean-shutdown marker, then close the chain databases. */
+static void ShutdownFlushAndCloseChain(bool& fTipCaptured, ShutdownBinding& binding)
+{
+    LOCK(cs_main);
+    {
+        PhaseTimer t("Shutdown", "flush-state");
+        if (pcoinsTip != NULL) {
+            FlushStateToDisk();
+#ifdef ENABLE_WALLET
+            // The coin database was just flushed to this tip. Write the wallet's checkpoint (note
+            // witnesses, nullifiers and the best-block locator, atomically) at the same point, so
+            // the next start does not have to rely on rescanning from an older locator.
+            if (pwalletMain && fWalletInitComplete && chainActive.Tip()) {
+                pwalletMain->SetBestChain(chainActive.GetLocator());
+            }
+#endif
+            if (chainActive.Tip()) {
+                binding.tipHash = chainActive.Tip()->GetBlockHash();
+                binding.tipHeight = chainActive.Height();
+                binding.coinsBest = pcoinsTip->GetBestBlock();
+                fTipCaptured = true;
+            }
+        }
+    }
+    {
+        PhaseTimer t("Shutdown", "db-close");
+        delete pcoinsTip;
+        pcoinsTip = NULL;
+        delete pcoinscatcher;
+        pcoinscatcher = NULL;
+        delete pcoinsdbview;
+        pcoinsdbview = NULL;
+        delete pblocktree;
+        pblocktree = NULL;
+    }
+}
 
 void Shutdown()
 {
@@ -408,40 +457,7 @@ void Shutdown()
     // Chain tip and coins best block as flushed below, for the clean-shutdown marker.
     bool fMarkerTipCaptured = false;
     ShutdownBinding markerBinding;
-    {
-        LOCK(cs_main);
-        {
-            PhaseTimer t("Shutdown", "flush-state");
-            if (pcoinsTip != NULL) {
-                FlushStateToDisk();
-#ifdef ENABLE_WALLET
-                // The coin database was just flushed to this tip. Write the wallet's checkpoint (note
-                // witnesses, nullifiers and the best-block locator, atomically) at the same point, so
-                // the next start does not have to rely on rescanning from an older locator.
-                if (pwalletMain && fWalletInitComplete && chainActive.Tip()) {
-                    pwalletMain->SetBestChain(chainActive.GetLocator());
-                }
-#endif
-                if (chainActive.Tip()) {
-                    markerBinding.tipHash = chainActive.Tip()->GetBlockHash();
-                    markerBinding.tipHeight = chainActive.Height();
-                    markerBinding.coinsBest = pcoinsTip->GetBestBlock();
-                    fMarkerTipCaptured = true;
-                }
-            }
-        }
-        {
-            PhaseTimer t("Shutdown", "db-close");
-            delete pcoinsTip;
-            pcoinsTip = NULL;
-            delete pcoinscatcher;
-            pcoinscatcher = NULL;
-            delete pcoinsdbview;
-            pcoinsdbview = NULL;
-            delete pblocktree;
-            pblocktree = NULL;
-        }
-    }
+    ShutdownFlushAndCloseChain(fMarkerTipCaptured, markerBinding);
     MaybeWriteCleanShutdownMarker(fMarkerTipCaptured, markerBinding);
 #ifdef ENABLE_WALLET
     {
@@ -786,7 +802,7 @@ std::string HelpMessage(HelpMessageMode mode)
     if (showDebug)
     {
         strUsage += HelpMessageOpt("-checkpoints", strprintf("Disable expensive verification for known chain history (default: %u)", 1));
-        strUsage += HelpMessageOpt("-dbmaxopenfiles=<n>", "Maximum number of files each LevelDB database (block index, chainstate) keeps open (default: derived from the file descriptor budget)");
+        strUsage += HelpMessageOpt("-dbmaxopenfiles=<n>", "Maximum number of files each LevelDB database (block index, chainstate) keeps open (default: derived from the file descriptor budget). Each open table keeps its index and bloom filter blocks in memory outside -dbcache");
         strUsage += HelpMessageOpt("-checkblockindex", "Run block index consistency checks (default: 0, 1 in regtest)");
         strUsage += HelpMessageOpt("-checkmempool=<n>", "Run mempool consistency checks on one in <n> operations, 0 = never (default: 0, 1 in regtest)");
         strUsage += HelpMessageOpt("-dblogsize=<n>", strprintf("Flush database activity from memory pool to disk log every <n> megabytes (default: %u)", 100));
@@ -3169,9 +3185,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     LogPrintf("Prune: pruned datadir may not have more than %d blocks; -checkblocks=%d may fail\n",
                         MIN_BLOCKS_TO_KEEP, GetArg("-checkblocks", 288));
                 }
-                // After a verified clean stop (marker consumed, files unchanged, same tip and coins
-                // best block) the full depth re-checks blocks that were checked at the previous
-                // start and not touched since: check the newest 6 at the same level instead.
+                // Clean stop matched (same tip and coins best block; file names, sizes and mtimes, not
+                // contents): check the newest 6 blocks at the same level. Blocks connected during earlier
+                // short starts are not re-checked at full depth until a start without a matching marker.
                 const char* fullWhy = NULL;
                 if (!GetBoolArg("-cleanshutdownmarker", true))
                     fullWhy = "disabled";

@@ -95,9 +95,6 @@ src/gtest/test_sapling_scan_batch.cpp	TEST(SaplingScanBatch,MainnetOutputsAgreeA
 src/headerprecheck.cpp	PreverifyHeadersEquihash(1)	21
 src/init.cpp	AppInit2(2)	424
 src/init.cpp	InitSanityCheck(0)	43
-src/init.cpp	LoadVerifiedParamCache(1)	25
-src/init.cpp	MaybeWriteCleanShutdownMarker(2)	18
-src/init.cpp	Shutdown(0)	16
 src/key.cpp	ec_privkey_import_der(4)	19
 src/main.cpp	AcceptBlock(5)	23
 src/main.cpp	AcceptBlockHeader(3)	16

@@ -3,7 +3,7 @@
 # Regenerate with: zcl-lint filesize --update-baseline (refused while anything rose).
 src/bootstrap.cpp	5840
 src/c23/compat/librustzcash_compat.c	1895
-src/init.cpp	3989
+src/init.cpp	3852
 src/main.cpp	8246
 src/net.cpp	2794
 src/netbase.cpp	1625
