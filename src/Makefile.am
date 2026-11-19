@@ -201,6 +201,7 @@ BITCOIN_CORE_H = \
   script/script_error.h \
   script/sigcache.h \
   script/sign.h \
+  shieldedcache.h \
   script/standard.h \
   script/script_flags.h \
   script/sigencoding.cpp \
@@ -334,6 +335,7 @@ libbitcoin_server_a_SOURCES = \
   znam/znamresolve.cpp \
   znam/znamservice.cpp \
   script/sigcache.cpp \
+  shieldedcache.cpp \
   timedata.cpp \
   torcontrol.cpp \
   txdb.cpp \

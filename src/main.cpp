@@ -26,6 +26,7 @@
 #include "pow.h"
 #include "parkedblockindex.h"
 #include "rpc/server.h"
+#include "shieldedcache.h"
 #include "txdb.h"
 #include "txmempool.h"
 #include "ui_interface.h"
@@ -1088,6 +1089,13 @@ bool ContextualCheckTransaction(
     if (!tx.vShieldedSpend.empty() ||
         !tx.vShieldedOutput.empty())
     {
+        // The Sapling checks below are a pure function of the transaction
+        // bytes (txid) and the branch id (dataToBeSigned). A transaction that
+        // already passed them under this branch id, typically on entering the
+        // mempool, is not verified again; failures are never cached
+        // (shieldedcache.h).
+        const uint32_t saplingBranchId = CurrentEpochBranchId(nHeight, Params().GetConsensus());
+        if (!ShieldedVerdictContains(tx.GetHash(), saplingBranchId)) {
         auto ctx = librustzcash_sapling_verification_ctx_init();
 
         for (const SpendDescription &spend : tx.vShieldedSpend) {
@@ -1136,6 +1144,8 @@ bool ContextualCheckTransaction(
         }
 
         librustzcash_sapling_verification_ctx_free(ctx);
+        ShieldedVerdictInsert(tx.GetHash(), saplingBranchId);
+        }
     }
     return true;
 }
