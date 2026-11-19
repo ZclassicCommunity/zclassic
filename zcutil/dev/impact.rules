@@ -67,3 +67,7 @@ zcutil/embedded-tor-check.sh	check-dev-tools
 zcutil/lint/*	zcl-lint check-dev-tools
 zcutil/tools/Makefile|zcutil/tools/.gitignore|zcutil/tools/test-jsonq.sh	build-jsonq check-dev-tools
 qa/lib/*|qa/rpc-tests/jsonq_lib.sh	ALL
+
+# ---- units ported from Z23 (validation caches, clean-shutdown marker, RPC observability, HTTP overload)
+src/headerprecheck.*|src/shieldedcache.*|src/shutdownmarker.*|src/phasetimer.h	ALL qa/rpc-tests/chain_clean_shutdown_marker.sh qa/rpc-tests/datadir_lock_message.sh
+qa/rpc-tests/datadir_lock_message.sh|qa/rpc-tests/getrpcinfo.sh|qa/rpc-tests/rpc_busy.sh	regtest-smoke
