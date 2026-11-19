@@ -205,4 +205,34 @@ BOOST_AUTO_TEST_CASE(torwatch_policy_child_unlimited)
     BOOST_CHECK_EQUAL(p.nextAttemptMs, now + 1000 + TOR_RETRY_CAP_MS);
 }
 
+// The driver gives up from outside the policy when an in-process Tor did not
+// stop (a second one must never start beside it): it reports the pending
+// start as failed and sets gaveUp, after which no decision is ever taken.
+BOOST_AUTO_TEST_CASE(torwatch_policy_external_give_up_while_starting)
+{
+    TorRestartPolicy p = NewPolicy(true);
+    BOOST_CHECK(TorRestartStep(p, false, 1000) == TorRestartDecision::STOP_AND_SCHEDULE);
+    BOOST_CHECK(TorRestartStep(p, false, p.nextAttemptMs) == TorRestartDecision::START_NOW);
+    TorRestartStarted(p, false, p.nextAttemptMs + 1);
+    p.gaveUp = true;
+    for (int i = 1; i <= 5; i++) {
+        BOOST_CHECK(TorRestartStep(p, false, 1000000 * i) == TorRestartDecision::NOTHING);
+        BOOST_CHECK(TorRestartStep(p, true, 1000000 * i) == TorRestartDecision::NOTHING);
+    }
+}
+
+// The restart thread re-wires before it reports success; a death seen after
+// the report is a fresh STOP_AND_SCHEDULE (the tick fences again), never lost.
+BOOST_AUTO_TEST_CASE(torwatch_policy_death_right_after_success_refences)
+{
+    TorRestartPolicy p = NewPolicy(false);
+    BOOST_CHECK(TorRestartStep(p, false, 1000) == TorRestartDecision::STOP_AND_SCHEDULE);
+    BOOST_CHECK(TorRestartStep(p, false, p.nextAttemptMs) == TorRestartDecision::START_NOW);
+    // While the start runs the probe sees no Tor: the policy must not act.
+    BOOST_CHECK(TorRestartStep(p, false, 7000) == TorRestartDecision::NOTHING);
+    TorRestartStarted(p, true, 8000);
+    BOOST_CHECK(TorRestartStep(p, false, 8001) == TorRestartDecision::STOP_AND_SCHEDULE);
+    BOOST_CHECK_EQUAL(p.nextAttemptMs, 8001 + 15000);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

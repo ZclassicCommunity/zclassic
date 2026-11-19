@@ -163,15 +163,16 @@ static zcl_tor_embed* UnpublishEmbeddedTor(bool& inProcess)
     return h;
 }
 
-void StopEmbeddedTor()
+bool StopEmbeddedTor()
 {
     LOCK(cs_embeddedTorLifecycle);
     bool inProcess = false;
     zcl_tor_embed* h = UnpublishEmbeddedTor(inProcess);
     if (!h)
-        return;
+        return true;
     int64_t nStart = GetTimeMillis();
-    if (zcl_tor_embed_stop(h, 15000) == 0) {
+    const bool stopped = zcl_tor_embed_stop(h, 15000) == 0;
+    if (stopped) {
         zcl_tor_embed_free(h);
         LogPrintf("tor: embedded Tor stopped in %dms\n", GetTimeMillis() - nStart);
     } else {
@@ -180,6 +181,7 @@ void StopEmbeddedTor()
     }
     if (inProcess)
         RestoreLibeventLogging();
+    return stopped;
 }
 
 std::string EmbeddedTorCookiePath()
@@ -240,8 +242,9 @@ bool StartEmbeddedTor(const std::string&, EmbeddedTorMode, std::string& strError
     return false;
 }
 
-void StopEmbeddedTor()
+bool StopEmbeddedTor()
 {
+    return true;
 }
 
 bool EmbeddedTorRunning()
@@ -290,12 +293,10 @@ enum EmbeddedTorStatusCode {
     TOR_STATUS_FAILED,
 };
 
-/** Where the proxies point while Tor is down: a privileged loopback port that
- * nothing listens on and an unprivileged local process cannot take over, so
- * proxied connections fail closed instead of reaching whoever grabbed Tor's
- * old SOCKS port. */
-static const char* const TOR_DOWN_PROXY_HOST = "127.0.0.1";
-static const int TOR_DOWN_PROXY_PORT = 1;
+// While Tor is down its proxies point at ProxyFenceAddress() (netbase): a
+// connection through a fenced proxy is refused before any socket is opened,
+// so it fails closed and no local process can stand in for Tor's SOCKS port,
+// whatever ports the OS lets unprivileged processes bind.
 
 struct EmbeddedTorWatch {
     std::string datadir;
@@ -312,6 +313,7 @@ static std::atomic<int> g_torStatus(TOR_STATUS_OFF);
 static std::atomic<int> g_torFault(static_cast<int>(TorFault::NONE));
 static std::atomic<bool> g_torWatchStopRequest(false);
 static std::atomic<bool> g_torWatchStartRequest(false);
+static std::atomic<bool> g_torStopLeaked(false); //!< a stop timed out; that Tor may still run
 static CCriticalSection cs_torWatch;
 static EmbeddedTorWatch g_torWatch; // guarded by cs_torWatch
 
@@ -365,72 +367,114 @@ static void EmbeddedTorWatchArm(const std::string& datadir, EmbeddedTorMode mode
     TorScanLogTail(g_torWatch.logPath, 0, &g_torWatch.logOffset);
     g_torWatch.policy = TorRestartPolicy();
     g_torWatch.policy.inProcess = (mode == EMBEDDED_TOR_INPROCESS);
+    g_torStopLeaked = false;
     g_torFault = static_cast<int>(TorFault::NONE);
     g_torStatus = TOR_STATUS_RUNNING;
 }
 
-/** Point every proxy init gave the embedded Tor at `addr`. */
-static void PointEmbeddedTorProxies(const CService& addr)
+/** Point every proxy init gave the embedded Tor at its SOCKS port, or at the
+ * fence when `socksPort` is 0 (Tor down or unpublished). */
+static void PointEmbeddedTorProxies(uint16_t socksPort)
 {
-    bool onion, clearnet, randomize;
-    {
-        LOCK(cs_torWatch);
-        onion = g_torWatch.rewireOnion;
-        clearnet = g_torWatch.rewireClearnet;
-        randomize = g_torWatch.randomize;
-    }
-    const proxyType proxy(addr, randomize);
-    if (onion)
+    AssertLockHeld(cs_torWatch);
+    const CService addr = socksPort ? CService("127.0.0.1", socksPort) : ProxyFenceAddress();
+    const proxyType proxy(addr, g_torWatch.randomize);
+    if (g_torWatch.rewireOnion)
         SetProxy(NET_ONION, proxy);
-    if (clearnet) {
+    if (g_torWatch.rewireClearnet) {
         SetProxy(NET_IPV4, proxy);
         SetProxy(NET_IPV6, proxy);
         SetNameProxy(proxy);
     }
 }
 
+/** No more restarts in this process: proxies stay fenced, status failed. */
+static void EmbeddedTorWatchGiveUp(const std::string& why)
+{
+    AssertLockHeld(cs_torWatch);
+    g_torWatch.policy.gaveUp = true;
+    g_torFault = static_cast<int>(TorFault::START_LIMIT);
+    g_torStatus = TOR_STATUS_FAILED;
+    PointEmbeddedTorProxies(0);
+    LogPrintf("tor: %s; not restarting it again, the node keeps running without its onion service until it is restarted\n",
+              why);
+}
+
 /** Tor just died: record why, fence its old ports, hand the stop to the thread. */
 static void EmbeddedTorWatchOnStop(int64_t delayMs)
 {
-    TorFault fault;
-    {
-        LOCK(cs_torWatch);
-        fault = TorScanLogTail(g_torWatch.logPath, g_torWatch.logOffset, &g_torWatch.logOffset);
-    }
+    AssertLockHeld(cs_torWatch);
+    TorFault fault = TorScanLogTail(g_torWatch.logPath, g_torWatch.logOffset, &g_torWatch.logOffset);
     if (fault == TorFault::NONE)
         fault = TorFault::EXITED;
     g_torFault = static_cast<int>(fault);
     g_torStatus = TOR_STATUS_RESTARTING;
     LogPrintf("tor: embedded Tor stopped (fault=%s); restarting in %ds, node keeps running\n",
               TorFaultToken(fault), (int)((delayMs + 999) / 1000));
-    PointEmbeddedTorProxies(CService(TOR_DOWN_PROXY_HOST, TOR_DOWN_PROXY_PORT));
+    PointEmbeddedTorProxies(0);
     g_torWatchStopRequest = true;
 }
 
-/** Scheduler job (every 5 s): evaluates the policy; never blocks on Tor. */
+/** Scheduler job (every 5 s): evaluates the policy; never blocks on Tor. The
+ * liveness probe, the decision and the fence happen under cs_torWatch, so they
+ * are ordered against the restart thread re-wiring a fresh instance. */
 static void EmbeddedTorWatchTick()
 {
     if (ShutdownRequested() || g_torStatus.load() == TOR_STATUS_OFF)
         return;
+    LOCK(cs_torWatch);
     const bool alive = EmbeddedTorAlive();
     const int64_t now = GetTimeMillis();
-    TorRestartDecision d;
-    int64_t delayMs;
-    {
-        LOCK(cs_torWatch);
-        d = TorRestartStep(g_torWatch.policy, alive, now);
-        delayMs = g_torWatch.policy.nextAttemptMs - now;
-    }
+    const TorRestartDecision d = TorRestartStep(g_torWatch.policy, alive, now);
     if (d == TorRestartDecision::STOP_AND_SCHEDULE) {
-        EmbeddedTorWatchOnStop(delayMs);
+        EmbeddedTorWatchOnStop(g_torWatch.policy.nextAttemptMs - now);
     } else if (d == TorRestartDecision::START_NOW) {
         g_torWatchStartRequest = true;
     } else if (d == TorRestartDecision::GIVE_UP) {
-        g_torFault = static_cast<int>(TorFault::START_LIMIT);
-        g_torStatus = TOR_STATUS_FAILED;
-        LogPrintf("tor: embedded Tor restarted %d times in this process (inprocess mode); not restarting it again, the node keeps running without its onion service until it is restarted\n",
-                  TOR_MAX_RESTARTS_IN_PROCESS);
+        EmbeddedTorWatchGiveUp(strprintf("embedded Tor restarted %d times in this process (inprocess mode)",
+                                         TOR_MAX_RESTARTS_IN_PROCESS));
     }
+}
+
+/** Stop whatever is left; true when a restart may start a new Tor. An
+ * in-process Tor that did not stop shares libevent and OpenSSL state with the
+ * node, so a second one is never started beside it. */
+static bool EmbeddedTorWatchClearForStart(EmbeddedTorMode mode)
+{
+    if (!StopEmbeddedTor())
+        g_torStopLeaked = true;
+    if (mode != EMBEDDED_TOR_INPROCESS || !g_torStopLeaked.load())
+        return true;
+    LOCK(cs_torWatch);
+    TorRestartStarted(g_torWatch.policy, false, GetTimeMillis());
+    EmbeddedTorWatchGiveUp("embedded Tor did not stop within 15s (inprocess mode)");
+    return false;
+}
+
+/** Report a start to the policy. On success the proxies and the status are
+ * set first, under the same lock: once the policy knows the instance is up a
+ * tick may fence it again, and nothing here may overwrite that fence. */
+static void EmbeddedTorWatchReport(bool ok, const std::string& err)
+{
+    LOCK(cs_torWatch);
+    const int64_t now = GetTimeMillis();
+    if (ok) {
+        PointEmbeddedTorProxies(EmbeddedTorSocksPort());
+        g_torFault = static_cast<int>(TorFault::NONE);
+        g_torStatus = TOR_STATUS_RUNNING;
+    }
+    TorRestartStarted(g_torWatch.policy, ok, now);
+    const int attempt = g_torWatch.policy.attempts;
+    const TorFault fault = TorScanLogTail(g_torWatch.logPath, g_torWatch.logOffset, &g_torWatch.logOffset);
+    if (ok) {
+        LogPrintf("tor: embedded Tor restarted (attempt %d); re-creating the onion service\n", attempt);
+        return;
+    }
+    if (fault != TorFault::NONE)
+        g_torFault = static_cast<int>(fault);
+    LogPrintf("tor: embedded Tor restart %d failed (fault=%s): %s; next attempt in %ds\n", attempt,
+              TorFaultToken(EmbeddedTorFault()), TorRedactOnion(err),
+              (int)((g_torWatch.policy.nextAttemptMs - now + 999) / 1000));
 }
 
 /** One START_NOW: start Tor, report to the policy, re-wire on success. */
@@ -443,32 +487,13 @@ static void EmbeddedTorWatchRestart()
         datadir = g_torWatch.datadir;
         mode = g_torWatch.mode;
     }
-    StopEmbeddedTor(); // idempotent; releases a handle the stop request left
+    if (!EmbeddedTorWatchClearForStart(mode))
+        return;
     std::string err;
     const bool ok = StartEmbeddedTor(datadir, mode, err);
-    int attempt;
-    int64_t delayMs;
-    TorFault fault;
-    {
-        LOCK(cs_torWatch);
-        const int64_t now = GetTimeMillis();
-        TorRestartStarted(g_torWatch.policy, ok, now);
-        attempt = g_torWatch.policy.attempts;
-        delayMs = g_torWatch.policy.nextAttemptMs - now;
-        fault = TorScanLogTail(g_torWatch.logPath, g_torWatch.logOffset, &g_torWatch.logOffset);
-    }
-    if (!ok) {
-        if (fault != TorFault::NONE)
-            g_torFault = static_cast<int>(fault);
-        LogPrintf("tor: embedded Tor restart %d failed (fault=%s): %s; next attempt in %ds\n", attempt,
-                  TorFaultToken(EmbeddedTorFault()), TorRedactOnion(err), (int)((delayMs + 999) / 1000));
-        return;
-    }
-    PointEmbeddedTorProxies(CService("127.0.0.1", EmbeddedTorSocksPort()));
-    g_torFault = static_cast<int>(TorFault::NONE);
-    g_torStatus = TOR_STATUS_RUNNING;
-    LogPrintf("tor: embedded Tor restarted (attempt %d); re-creating the onion service\n", attempt);
-    TorControlKick();
+    EmbeddedTorWatchReport(ok, err);
+    if (ok)
+        TorControlKick();
 }
 
 /** Body of the zcl-torwatch thread: performs the stops and starts the tick asks for. */
@@ -476,8 +501,8 @@ static void EmbeddedTorWatchThread()
 {
     while (true) {
         MilliSleep(250); // interruption point: join_all before Shutdown() stops the thread here
-        if (g_torWatchStopRequest.exchange(false))
-            StopEmbeddedTor();
+        if (g_torWatchStopRequest.exchange(false) && !StopEmbeddedTor())
+            g_torStopLeaked = true;
         if (g_torWatchStartRequest.exchange(false))
             EmbeddedTorWatchRestart();
     }

@@ -36,17 +36,23 @@ missing, `--without-embedded-tor` leaves it out). It is off unless asked for:
   (`exited`, `port_in_use`, `config_invalid`, `datadir`). In inprocess mode
   Tor shares libevent and OpenSSL state with the node, so it is restarted at
   most 3 times per process, then given up (`failed:start_limit`) until the
-  node is restarted; child mode has no limit.
+  node is restarted; it is also given up at once if an in-process Tor does
+  not stop within 15 s, so two never run side by side. Child mode has no
+  limit.
 - While Tor is down the proxies it served (onion, and on an onion-only node
-  also IPv4, IPv6 and host names) point at 127.0.0.1:1, a privileged port no
-  unprivileged process can take: those connections fail closed, nothing goes
-  out in clear and no local process can stand in for the old SOCKS port. An
-  onion-only node therefore has no peers until Tor is back. The control
+  also IPv4, IPv6 and host names) point at a fence (127.0.0.1 port 0) that
+  the node refuses to connect to before opening any socket: those
+  connections fail closed, nothing goes out in clear, and no local process
+  can stand in for the old SOCKS port, whatever low ports the OS lets
+  unprivileged processes bind (Windows, macOS, containers). An onion-only
+  node therefore has no peers until Tor is back. The control
   client waits for the embedded Tor and never falls back to another Tor on
   the default control port. After a restart the proxies move to the new
   SOCKS port, the control client reconnects to the new control port at once
   and re-creates the onion service from `<datadir>/onion_v3_private_key`, so
   the onion address is unchanged.
+- A shutdown that arrives while a restart is starting Tor waits for that
+  start to finish or time out (at most 30 s) before the node exits.
 - `getnetworkinfo` has a `torstatus` field when `-embeddedtor` is on:
   `running`, `restarting`, or `failed:<token>`.
 

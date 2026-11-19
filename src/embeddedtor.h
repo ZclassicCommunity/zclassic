@@ -57,9 +57,11 @@ bool StartEmbeddedTor(const std::string& datadir, EmbeddedTorMode mode, std::str
 
 /**
  * Stop Tor and wait for it to be gone. Idempotent, safe to call when it was
- * never started; EmbeddedTorRunning() is false afterwards.
+ * never started; EmbeddedTorRunning() is false afterwards. Returns false only
+ * when a running Tor did not stop within 15 s (its handle is then leaked,
+ * since Tor may still use it).
  */
-void StopEmbeddedTor();
+bool StopEmbeddedTor();
 
 /** True between a successful StartEmbeddedTor and StopEmbeddedTor. */
 bool EmbeddedTorRunning();
