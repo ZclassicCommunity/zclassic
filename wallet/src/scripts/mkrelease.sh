@@ -105,15 +105,7 @@ mkdir -p artifacts >/dev/null 2>&1
 # ConnectionLoader::ensureDaemonExtracted). No separate zclassicd file ships.
 SINGLE=artifacts/linux-zclwallet-v$APP_VERSION
 cp zclwallet "$SINGLE"
-python3 - "$ZCASH_DIR/artifacts/zclassicd" "$SINGLE" <<'PYEOF'
-import sys, hashlib, struct
-daemon = open(sys.argv[1], 'rb').read()
-with open(sys.argv[2], 'ab') as f:
-    f.write(daemon)                              # GUI | daemon
-    f.write(hashlib.sha256(daemon).digest())     #     | sha256 (32)
-    f.write(struct.pack('<Q', len(daemon)))      #     | len    (8, little-endian)
-    f.write(b'ZQWDMON1')                         #     | magic  (8)
-PYEOF
+sh "$(dirname "$0")/../../contrib/embed-footer.sh" append "$SINGLE" "$ZCASH_DIR/artifacts/zclassicd"
 chmod +x "$SINGLE"
 echo "[OK]"
 

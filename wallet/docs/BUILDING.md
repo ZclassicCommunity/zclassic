@@ -182,7 +182,6 @@ embedded copy:
 ## 2. Prerequisites
 
 ### Common (all platforms)
-- `python3` (used for the footer-embed / footer-verify steps)
 - A built **`zclassicd`** to embed — see [§3](#3-build-the-daemon-zclassicd-to-embed).
 
 ### Linux — dynamic dev build
@@ -192,7 +191,7 @@ A clean Ubuntu/Debian box needs at least:
 sudo apt update
 sudo apt install -y build-essential autoconf automake libtool pkg-config \
     qtbase5-dev qttools5-dev-tools qt5-qmake qtbase5-dev-tools \
-    wget curl python3 file binutils
+    wget curl file binutils
 ```
 
 > The libsodium static archive is built **from source by the build itself** (no
@@ -316,8 +315,8 @@ What it does (`contrib/make-allinone.sh`):
 - `make distclean; rm -f .qmake.stash Makefile`, then `qmake … CONFIG+=release`
   + `make -j$(nproc)` (lines 42-48).
 - **Aborts** if `ldd ./zclwallet` shows `Qt5WebSockets` (lines 51-59).
-- Appends `[daemon][sha256:32][len:8 LE][ZQWDMON1:8]` via a Python heredoc
-  (lines 64-72), then re-reads and validates the footer (lines 77-111).
+- Appends `[daemon][sha256:32][len:8 LE][ZQWDMON1:8]` with `contrib/embed-footer.sh append`, then
+  re-reads and validates the footer with `contrib/embed-footer.sh verify` (POSIX sh + openssl).
 
 **Test the embedded daemon** (run from a dir with no sibling daemon):
 
@@ -617,15 +616,8 @@ readelf -h <linux-bundle> >/dev/null && echo "valid ELF"
 file <win-bundle>            # expect: PE32+ executable (GUI) x86-64 ... for MS Windows
 
 # --- footer round-trips (sha matches, embedded daemon is the right kind) ---
-python3 - <bundle> <<'PYEOF'
-import os, struct, hashlib, sys
-p = sys.argv[1]; sz = os.path.getsize(p)
-with open(p, 'rb') as f:
-    f.seek(-48, 2); h = f.read(32); dl = struct.unpack('<Q', f.read(8))[0]; m = f.read(8)
-    f.seek(sz - 48 - dl); d = f.read(dl)
-print('magic', m, 'len', dl, 'gui_size', sz-48-dl,
-      'sha_ok', hashlib.sha256(d).digest() == h, 'head', d[:2])  # head: b'\x7fE'=ELF, b'MZ'=PE
-PYEOF
+sh wallet/contrib/embed-footer.sh verify <bundle>   # magic, length and sha256 of the embedded daemon
+tail -c +$(( $(wc -c < <bundle>) - 48 - <daemon-length> + 1 )) <bundle> | head -c 2 | od -An -c   #  E = ELF daemon, M Z = PE
 
 # --- no Qt .so leaked into a static release (must be EMPTY) ---
 ldd <linux-bundle> | grep -i qt

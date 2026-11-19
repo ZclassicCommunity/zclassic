@@ -6,7 +6,7 @@
 #
 # This is the docs/TESTING.md L2 lane specialised for the MOCK backend: where
 # uxmatrix.sh launches the bundle's embedded zclassicd against an isolated chain,
-# this lane launches the bundle with --no-embedded against tests/mock/mockrpc.py.
+# this lane launches the bundle with --no-embedded against tests/mock/mockrpc (built from mockrpc.c).
 # That exercises the REAL ConnectionLoader handshake (autoDetectZClassicConf ->
 # refreshZClassicdState getinfo -> classifyForeignDaemon getbootstrapinfo ->
 # doRPCSetConnection -> "Payment UI now ready!") on the real xcb window path,
@@ -46,7 +46,9 @@ set -uo pipefail
 DISP=":99"
 APP_VERSION="${APP_VERSION:-2.1.2-beta13}"
 BUN="/src/wallet/artifacts/linux-zclwallet-v${APP_VERSION}"
-MOCK="/src/wallet/tests/mock/mockrpc.py"
+MOCK_SRC="/src/wallet/tests/mock/mockrpc.c"
+MOCK_FIXTURES="/src/wallet/tests/mock/fixtures"
+MOCK="/zhome/mockrpc"                  # compiled from MOCK_SRC below
 SCENARIO="${MOCK_SCENARIO:-funded-synced}"
 RPCPORT="${RPCPORT:-18992}"            # ISOLATED — never peer#1's 8023/8232
 DD="/zhome/.zclassic"
@@ -159,8 +161,10 @@ log "seeded QSettings: ez/onboardingShown=true, options/walletbackedup=true (sup
 # ============================================================================ #
 hr
 log "starting mock: scenario=$SCENARIO port=$RPCPORT log=$MOCK_LOG"
-MOCK_PORT="$RPCPORT" MOCK_SCENARIO="$SCENARIO" MOCK_LOG="$MOCK_LOG" \
-  python3 "$MOCK" >/zhome/mock.stderr.log 2>&1 &
+cc -std=c2x -O2 -o "$MOCK" "$MOCK_SRC" >/zhome/mock.build.log 2>&1 \
+  || { fail "could not build the mock (cc -std=c2x)"; sed "s/^/  cc| /" /zhome/mock.build.log; exit 1; }
+MOCK_PORT="$RPCPORT" MOCK_SCENARIO="$SCENARIO" MOCK_LOG="$MOCK_LOG" MOCK_FIXTURES="$MOCK_FIXTURES" \
+  "$MOCK" >/zhome/mock.stderr.log 2>&1 &
 MOCKPID=$!
 # Poll the mock's health endpoint until it answers (never a blind sleep).
 mock_up=no
@@ -169,7 +173,7 @@ for i in $(seq 1 30); do
     log "mock died during startup — log:"; sed 's/^/  mock| /' /zhome/mock.stderr.log 2>/dev/null
     break
   fi
-  # bash /dev/tcp probe + a GET / health read (python is already up if it answers).
+  # bash /dev/tcp probe + a GET / health read (the mock is up if it answers).
   if timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$RPCPORT; printf 'GET / HTTP/1.0\r\n\r\n' >&3; grep -q '\"ok\": true' <&3" 2>/dev/null; then
     mock_up=yes; break
   fi

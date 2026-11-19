@@ -22,8 +22,7 @@ You are about to build **ZClassic**: the daemon (`zclassicd`) and the all-in-one
 ```
 
 This layout is written/read identically in three places (keep them in sync if you touch it):
-- write (release): `zcl-qt-wallet/src/scripts/mkrelease.sh:100-108`
-- write (dev): `zcl-qt-wallet/contrib/make-allinone.sh:64-72`
+- write (release and dev): `wallet/contrib/embed-footer.sh append`, called by `src/scripts/mkrelease.sh` and `contrib/make-allinone.sh` (`contrib/cross/package-win.sh` and `contrib/release/linux.sh` stream the same bytes)
 - read (runtime): `zcl-qt-wallet/src/connection.cpp` `ensureDaemonExtracted()` (~`:615-700`)
 
 **macOS is the exception.** Notarization / hardened runtime forbid executing a runtime-written binary, so on macOS the GUI does **not** use the footer — it ships the daemon as a **sibling** inside `zclwallet.app/Contents/MacOS/` (`connection.cpp:621-622` returns empty under `Q_OS_DARWIN`). The ZQWDMON1 embed is Linux/Windows-only.
@@ -108,7 +107,7 @@ Quick per-platform entry points:
 - [ ] **Portable Linux MUST be built in the proot glibc-2.31 sandbox**, not on the host. A host build (glibc 2.39) bakes in `__isoc23_*` / `arc4random` / `strlcpy` with no older fallback → `version GLIBC_2.38 not found` on users' machines. `mkrelease.sh` hard-gates at ≤ GLIBC_2.31. Verify: `objdump -T <bin> | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -V | tail -1` (the good bundle reads `GLIBC_2.29`).
 - [ ] **No libgomp**: the daemon has no OpenMP dependency since libsnark was removed (`ZQW_STATIC_GOMP=1` is accepted and ignored). A fresh desktop often lacks `libgomp.so.1` → GUI hangs at 96% then "connection refused", so still check **both** GUI and daemon: `objdump -p <bin> | grep NEEDED`.
 - [ ] **Stale-delivery trap.** The proot build writes inside the chroot at `/build/wallet/artifacts/` (rsync-excluded from the host). `04-gui-bundle.sh:137-142` copies it back and `build.sh`'s gate asserts `sha256(built) == sha256(delivered)`. **Always run via `build.sh`, never `04` alone**, and confirm the `.sha256` sidecar before telling anyone to download.
-- [ ] **Windows GUI does NOT embed the daemon automatically.** `build-gui-win.sh` stops at `release/zclwallet.exe`. The ZQWDMON1 footer is a **separate manual Python step** using the **stripped** `src/zclassicd.exe` (`x86_64-w64-mingw32-strip -s`; ~278 MB → ~13.5 MB). Logic = `mkrelease.sh:100-108`.
+- [ ] **Windows GUI does NOT embed the daemon automatically.** `build-gui-win.sh` stops at `release/zclwallet.exe`. The ZQWDMON1 footer is a **separate manual step** (`sh wallet/contrib/embed-footer.sh append <gui.exe> <daemon.exe>`, or `contrib/cross/package-win.sh`) using the **stripped** `src/zclassicd.exe` (`x86_64-w64-mingw32-strip -s`; ~278 MB → ~13.5 MB). Logic = `contrib/embed-footer.sh`.
 - [ ] **macOS codesign order is load-bearing and NOT in any script.** `mkmacdmg.sh` has **no** codesign step. Run `codesign --force --deep -s - zclwallet.app` **AFTER** `macdeployqt`, **BEFORE** `create-dmg` — signing before macdeployqt → Apple-Silicon SIGKILL on launch. This rule is memory-only; verify with the Mac dev.
 - [ ] **Don't trust the exit code.** A pipe-through-tail can report exit 0 even when the build failed. Always verify the artifact: footer (`tail -c 8 <bundle>` == `ZQWDMON1`), glibc floor, `ldd`/`NEEDED`, and the sha sidecar.
 - [ ] **Runtime prereq (not a build prereq):** `./zcutil/fetch-params.sh` downloads ~0.8 GB zk params into `~/.zcash-params` before first run.
