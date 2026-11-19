@@ -1,1 +1,2 @@
-zcl-dev-tests: check-tests: base ref 'origin/master' does not resolve to a commit; pass --base=<ref> (for example --base=origin/main) so zcutil/dev/tests.baseline growth can be checked
+FAIL baseline-grew: zcutil/dev/tests/baseline gained qa/rpc-tests/late.sh relative to HEAD; the baseline may only shrink
+zcl-dev-tests: base: HEAD (no origin/master and no upstream branch; the baseline growth check compares against HEAD)

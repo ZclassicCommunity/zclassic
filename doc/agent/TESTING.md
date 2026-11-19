@@ -14,7 +14,7 @@ zcutil/bin/zcl-dev t-fast src/test/bech32_tests.cpp
 | Command | Does |
 |---|---|
 | `zcl-dev tests [--json] <path>...` | Prints the focused set: `boost:<suite>`, `gtest:<Suite>`, `qa:<script>` lines, then `broad:` and `note:` lines. |
-| `zcl-dev t-fast [--changed[=base]] [--dry-run] [--narrow] [--no-qa] [--json] [--bin=src] [<path>...]` | Runs that set. `--changed` takes the committed diff against `base` (default `origin/master`). `--dry-run` prints the exact argv, one `exec:` line per command. |
+| `zcl-dev t-fast [--changed[=base]] [--dry-run] [--narrow] [--no-qa] [--json] [--bin=src] [<path>...]` | Runs that set. `--changed` takes the committed diff against `base` (default `origin/master`, else the upstream merge-base, else `HEAD`). `--dry-run` prints the exact argv, one `exec:` line per command. |
 | `zcl-dev t-list [--json] [--after=N] [boost\|gtest\|qa\|ci]` | Every Boost suite, gtest suite, qa script and local-ci step. |
 | `zcl-dev check-tests [--json] [--after=N] [--base=ref] [--update-baseline]` | The registration gate (below). | It reads tracked files only: `git add` a new test file before running it. `--json` lists are capped, with `<key>_omitted` counts.
 
@@ -66,15 +66,17 @@ Prefix those with `devbuild --wait` on a maintainer host.
 * a Boost suite name is declared in two files;
 * a `tests.rules` glob matches no file, or a token names an unknown suite, script or keyword;
 * a `qa/rpc-tests/*.sh` script (not `*_lib.sh`, not a `_scn<N>.sh` fragment) is not named by `impact.rules`, `tests.rules` or a non-comment line of `local-ci.sh` (whole-name match, so `send.sh` is not reached by `zslp_send.sh`), and is not called by a script that is;
-* `zcutil/dev/tests.baseline` gained a row relative to `--base=<ref>` (default `origin/master`; an unsafe or unresolvable ref exits 2, so pass `--base=` where that branch does not exist; skipped only when the ref resolves and has no baseline).
+* `zcutil/dev/tests/baseline` gained a row relative to `--base=<ref>` (default `origin/master`; where that does not resolve, the merge-base with the upstream branch, then `HEAD`, and the command says which; an unsafe or unresolvable explicit ref exits 2; skipped only when the ref resolves and has no baseline). The ratchet trusts the base it is given, so the gate wiring (local-ci, U16) must pass the merge-base with the integration branch, for example `--base=origin/master`; the `HEAD` fallback only catches uncommitted growth.
 
 It exits 2 on a hollow scan (no Boost files, no gtest files or no suites found).
 
-Some scripts in the tree are run by no CI step today. They are listed in `zcutil/dev/tests.baseline`, a ratchet that may only shrink: a new unreachable script fails, a baseline row that became reachable fails, and `check-tests --update-baseline` drops fixed rows but refuses while anything new is unreachable. Fix an entry by running the script from a `local-ci.sh` step or a `qa:` token, never by adding rows.
+Some scripts in the tree are run by no CI step today. They are listed in `zcutil/dev/tests/baseline`, a ratchet that may only shrink: a new unreachable script fails, a baseline row that became reachable fails, and `check-tests --update-baseline` drops fixed rows but refuses while anything new is unreachable. Fix an entry by running the script from a `local-ci.sh` step or a `qa:` token, never by adding rows.
 
 ## Files
 
 * `zcutil/dev/tests/zcl-dev-tests.c`: one binary, installed under four names (`zcl-dev-tests`, `-t-fast`, `-t-list`, `-check-tests`); the command is its own file name, and `zcl-dev` dispatches to it.
-* `zcutil/dev/tests.rules`, `zcutil/dev/tests.baseline`: the data.
+* `zcutil/dev/tests.rules`, `zcutil/dev/tests/baseline`: the data.
 * `make -C zcutil/dev/tests check`: self-test on a fixture tree with fake test binaries and golden outputs (`UPDATE=1 sh zcutil/dev/tests/test/run.sh zcutil/bin` rewrites them).
 * The code is plain C (gnu17, also `-std=c2x`), libc only, and cross-builds with `x86_64-w64-mingw32-gcc`.
+
+The `narrow` token in `tests.rules` is an allowlist enforced when the set is built, by `tests` and `t-fast` as well as by `check-tests`: it only takes effect on `src/bech32.*`. On any other path the row is ignored with a note and the `broad:` full run stays, so a hand-edited rules file cannot narrow a consensus, chain or wallet path. On Windows, `^` is not accepted in refs (cmd.exe strips it); use the `~N` form.

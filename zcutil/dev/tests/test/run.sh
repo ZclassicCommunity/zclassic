@@ -186,9 +186,9 @@ case_ check-tests-bad-rules 1 ct
 fresh qa
 printf '#!/bin/sh\n' >"$w/qa/rpc-tests/orphan.sh"
 case_ check-tests-unreachable-qa 1 ct
-printf 'qa/rpc-tests/orphan.sh\n' >>"$w/zcutil/dev/tests.baseline"
+printf 'qa/rpc-tests/orphan.sh\n' >>"$w/zcutil/dev/tests/baseline"
 case_ check-tests-baselined-qa 0 ct
-printf 'qa/rpc-tests/y.sh\n' >>"$w/zcutil/dev/tests.baseline"
+printf 'qa/rpc-tests/y.sh\n' >>"$w/zcutil/dev/tests/baseline"
 case_ check-tests-stale-baseline 1 ct
 case_ check-tests-update-baseline 0 ct --update-baseline
 case_ check-tests-after-update 0 ct
@@ -212,8 +212,8 @@ case_ check-tests-unreachable-word 1 ct
 fresh grown
 git -C "$w" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
 printf "#!/bin/sh\n" >"$w/qa/rpc-tests/late.sh"
-printf "qa/rpc-tests/late.sh\n" >>"$w/zcutil/dev/tests.baseline"
-case_ check-tests-baseline-default-base 2 sh -c "git -C '$w' add -A; '$bindir/zcl-dev-check-tests' -C '$w'"
+printf "qa/rpc-tests/late.sh\n" >>"$w/zcutil/dev/tests/baseline"
+case_ check-tests-baseline-default-base 1 sh -c "git -C '$w' add -A; '$bindir/zcl-dev-check-tests' -C '$w'"
 case_ check-tests-baseline-unknown-ref 2 ct --base=nonexistent
 case_ check-tests-baseline-unsafe-ref 2 ct --base='a;b'
 case_ check-tests-baseline-base-without-baseline 0 ct
@@ -269,5 +269,22 @@ if [ -n "${ZCL_TESTS_BIN:-}" ] && [ -x "$ZCL_TESTS_BIN/zcash-gtest" ]; then
 else
     echo "skip gtest-param-filter (set ZCL_TESTS_BIN=<dir with zcash-gtest>)"
 fi
+# ---- a hand-edited tests.rules cannot narrow a path that is not on the narrow allowlist, at run time
+fresh narrowrt
+printf "src/main.cpp\tboost:foo_tests narrow\n" >>"$w/zcutil/dev/tests.rules"
+case_ tests-narrow-ignored-at-runtime 0 t --as=tests src/main.cpp
+case_ t-fast-dry-narrow-ignored-at-runtime 0 tf --dry-run src/main.cpp
+# ---- default base: origin/master, else merge-base with the upstream branch, else HEAD; each is said
+fresh upbase
+br=$(git -C "$w" branch --show-current)
+git -C "$w" branch up
+git -C "$w" config branch.$br.remote .
+git -C "$w" config branch.$br.merge refs/heads/up
+git -C "$w" -c user.name=t -c user.email=t@t commit -q --allow-empty -m more
+case_ check-tests-default-base-upstream 0 sh -c "git -C \"$w\" add -A; \"$bindir/zcl-dev-check-tests\" -C \"$w\" 2>&1 | grep -c \"base: merge-base of HEAD with upstream\""
+case_ check-tests-default-base-head 0 sh -c "git -C \"$w\" config --unset branch.$br.merge; git -C \"$w\" add -A; \"$bindir/zcl-dev-check-tests\" -C \"$w\" 2>&1 | grep -c \"base: HEAD\""
+# ---- --json caps one element: a long path is cut, not printed whole
+long=$(printf "src/%0600d.cpp" 0)
+case_ tests-json-element-clamped 0 sh -c "\"$bindir/zcl-dev-tests\" -C \"$w\" --as=tests --json $long | grep -c \"\.\.\.\\\"\""
 if [ "$fails" -ne 0 ]; then echo "zcl-dev-tests: $fails of $n FAILED"; exit 1; fi
 echo "zcl-dev-tests: all $n passed"

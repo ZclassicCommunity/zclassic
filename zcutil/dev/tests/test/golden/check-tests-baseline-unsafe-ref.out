@@ -1,1 +1,1 @@
-zcl-dev-tests: check-tests: unsafe base ref 'a;b'; pass --base=<ref> naming the branch to compare zcutil/dev/tests.baseline with
+zcl-dev-tests: check-tests: unsafe base ref 'a;b'; pass --base=<ref> naming the branch to compare zcutil/dev/tests/baseline with

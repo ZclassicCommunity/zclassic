@@ -1,2 +1,2 @@
-FAIL unreachable-qa: qa/rpc-tests/orphan2.sh is not named by impact.rules, tests.rules or local-ci.sh (run it from a local-ci step or a tests.rules qa: token; zcutil/dev/tests.baseline may only shrink)
-FAIL unreachable-qa: qa/rpc-tests/send.sh is not named by impact.rules, tests.rules or local-ci.sh (run it from a local-ci step or a tests.rules qa: token; zcutil/dev/tests.baseline may only shrink)
+FAIL unreachable-qa: qa/rpc-tests/orphan2.sh is not named by impact.rules, tests.rules or local-ci.sh (run it from a local-ci step or a tests.rules qa: token; zcutil/dev/tests/baseline may only shrink)
+FAIL unreachable-qa: qa/rpc-tests/send.sh is not named by impact.rules, tests.rules or local-ci.sh (run it from a local-ci step or a tests.rules qa: token; zcutil/dev/tests/baseline may only shrink)

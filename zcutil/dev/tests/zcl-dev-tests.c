@@ -204,9 +204,14 @@ static int ci_eq(const char *a, const char *b)
 
 static int safe_ref(const char *s)
 {
+#ifdef _WIN32
+    const char *allowed = "._/~@-"; /* cmd.exe strips an unquoted ^: use ~N forms */
+#else
+    const char *allowed = "._/~^@-";
+#endif
     if (!*s || *s == '-') return 0;
     for (; *s; s++)
-        if (!isalnum((unsigned char)*s) && !strchr("._/~^@-", *s)) return 0;
+        if (!isalnum((unsigned char)*s) && !strchr(allowed, *s)) return 0;
     return 1;
 }
 
@@ -223,16 +228,31 @@ static void split_words(const char *s, const char *seps, List *out)
 
 /* ---- JSON and paging ----------------------------------------------------- */
 
-static void jstr(const char *s)
+static void jstr_cap(const char *s, size_t max)
 {
     putchar('"');
-    for (; *s; s++) {
+    for (size_t k = 0; *s; s++, k++) {
+        if (max && k >= max) { fputs("...", stdout); break; }
         unsigned char c = (unsigned char)*s;
         if (c == '"' || c == '\\') printf("\\%c", c);
         else if (c < 0x20) printf("\\u%04x", c);
         else putchar(c);
     }
     putchar('"');
+}
+
+static void jstr(const char *s) { jstr_cap(s, 0); }
+
+/* Exact escaped size of s after the clamp. */
+static size_t jlen(const char *s, size_t max)
+{
+    size_t n = 0;
+    for (size_t k = 0; *s; s++, k++) {
+        if (max && k >= max) { n += 3; break; }
+        unsigned char c = (unsigned char)*s;
+        n += (c == '"' || c == '\\') ? 2 : (c < 0x20 ? 6 : 1);
+    }
+    return n + 2;
 }
 
 /* Print the list as a JSON array, stopping once `budget` bytes are used (0: no cap); a cut list is
@@ -243,10 +263,10 @@ static void jlist_cap(const char *key, const List *l, int comma, size_t budget)
     jstr(key);
     fputs(":[", stdout);
     for (i = 0; i < l->n; i++) {
-        size_t len = strlen(l->v[i]) + 3;
+        size_t clamp = budget ? 400 : 0, len = jlen(l->v[i], clamp) + 3; /* one element never exceeds 400 source bytes */
         if (budget && i && used + len > budget) break;
         if (i) putchar(',');
-        jstr(l->v[i]);
+        jstr_cap(l->v[i], clamp);
         used += len;
     }
     putchar(']');
@@ -591,6 +611,18 @@ static int impact_broad(const Rules *impact, const char *path, char **why)
     return 0;
 }
 
+/* `narrow` may replace the full run only on leaf encodings listed here (src/bech32.*; src/narrow.cpp is
+ * the fixture's). Every other path that impact.rules marks ALL, or maps nowhere, must stay broad: an
+ * allowlist, so a new consensus or chain-state path is protected without anyone updating a denylist.
+ * Enforced at run time by select_path() as well as by check-tests: a hand-edited tests.rules cannot
+ * narrow a path that is not listed. */
+static int narrow_allowed(const char *path)
+{
+    static const char *const ok[] = {"src/bech32.", "src/narrow.cpp", NULL};
+    for (const char *const *p = ok; *p; p++) if (has_prefix(path, *p)) return 1;
+    return 0;
+}
+
 static void select_path(Sel *s, const char *p, const Rules *rules, const Rules *impact)
 {
     size_t before = s->boost.n + s->gtest.n + s->qa.n;
@@ -612,6 +644,10 @@ static void select_path(Sel *s, const char *p, const Rules *rules, const Rules *
     heuristic(s, p);
     char *why = NULL;
     if (impact_broad(impact, p, &why)) {
+        if (narrow && !narrow_allowed(p)) {
+            list_push_free(&s->notes, xfmt("ignored a `narrow` row in %s for %s: not on the narrow allowlist, so the full run stays", RULES_FILE, p));
+            narrow = 0;
+        }
         if (narrow) {
             s->narrowed = 1;
             list_add(&s->notes, why);
@@ -836,16 +872,6 @@ static void check_unique(List *f)
     }
 }
 
-/* `narrow` may replace the full run only on leaf encodings listed here (src/bech32.*; src/narrow.cpp is
- * the fixture's). Every other path that impact.rules marks ALL, or maps nowhere, must stay broad: an
- * allowlist, so a new consensus or chain-state path is protected without anyone updating a denylist. */
-static int narrow_allowed(const char *path)
-{
-    static const char *const ok[] = {"src/bech32.", "src/narrow.cpp", NULL};
-    for (const char *const *p = ok; *p; p++) if (has_prefix(path, *p)) return 1;
-    return 0;
-}
-
 static void check_rules_tokens(List *f, const Rules *rules)
 {
     Rules impact = load_rules(IMPACT_FILE);
@@ -872,7 +898,7 @@ static void check_rules_tokens(List *f, const Rules *rules)
     }
 }
 
-#define BASELINE_FILE "zcutil/dev/tests.baseline"
+#define BASELINE_FILE "zcutil/dev/tests/baseline"
 
 /* Does the text of `script` run `target`: its basename, or a glob such as wallet_matrix_scn?.sh. */
 static int script_calls(const char *script, const char *target)
@@ -940,6 +966,43 @@ static void qa_unreachable(const Rules *rules, List *out)
     for (size_t q = 0; q < qa.n; q++) if (!list_has(&reach, qa.v[q])) list_push(out, qa.v[q]);
 }
 
+/* The default --base: origin/master when it resolves; else the merge-base with the upstream branch;
+ * else HEAD. Says on stderr which one it used. A base the caller names is used as given. */
+static const char *default_base(void)
+{
+    static char buf[128];
+    List l = {0}, up = {0};
+#ifdef _WIN32
+    const char *q = "git rev-parse --verify --quiet origin/master^^{commit}";
+#else
+    const char *q = "git rev-parse --verify --quiet origin/master^{commit}";
+#endif
+    if (!cmd_lines(q, &l) && l.n) {
+        fprintf(stderr, "zcl-dev-tests: base: origin/master (default)\n");
+        return "origin/master";
+    }
+    List br = {0}, cf = {0};
+    char qc[256];
+    /* ask config first: @{u} prints a fatal message when no upstream is set */
+    if (!cmd_lines("git symbolic-ref -q --short HEAD", &br) && br.n && safe_ref(br.v[0])) {
+        snprintf(qc, sizeof qc, "git config --get branch.%s.merge", br.v[0]);
+        if (cmd_lines(qc, &cf) || !cf.n) up.n = 0;
+        else cmd_lines("git rev-parse --abbrev-ref --symbolic-full-name @{u}", &up);
+    }
+    if (up.n && safe_ref(up.v[0])) {
+        char cmd[256];
+        List mb = {0};
+        snprintf(cmd, sizeof cmd, "git merge-base HEAD %s", up.v[0]);
+        if (!cmd_lines(cmd, &mb) && mb.n && strlen(mb.v[0]) < sizeof buf) {
+            snprintf(buf, sizeof buf, "%s", mb.v[0]);
+            fprintf(stderr, "zcl-dev-tests: base: merge-base of HEAD with upstream %s (%s); origin/master does not resolve here\n", up.v[0], buf);
+            return buf;
+        }
+    }
+    fprintf(stderr, "zcl-dev-tests: base: HEAD (no origin/master and no upstream branch; the baseline growth check compares against HEAD)\n");
+    return "HEAD";
+}
+
 /* The ratchet compares against a base ref; a ref that is unsafe or does not name a commit must fail,
  * or the growth check would silently not run. Returns 0 when usable, else prints why. */
 static int base_ref_ok(const char *ref)
@@ -956,7 +1019,7 @@ static int base_ref_ok(const char *ref)
     snprintf(cmd, sizeof cmd, "git rev-parse --verify --quiet %s^{commit}", ref);
 #endif
     if (cmd_lines(cmd, &out) || !out.n) {
-        fprintf(stderr, "zcl-dev-tests: check-tests: base ref '%s' does not resolve to a commit; pass --base=<ref> (for example --base=origin/main) so %s growth can be checked\n", ref, BASELINE_FILE);
+        fprintf(stderr, "zcl-dev-tests: check-tests: base ref '%s' does not resolve to a commit; pass --base=<ref> (for example --base=origin/master) so %s growth can be checked\n", ref, BASELINE_FILE);
         return 1;
     }
     return 0;
@@ -1010,7 +1073,7 @@ static int update_baseline(const List *stale, size_t rose)
 static int cmd_check_tests(int argc, char **argv)
 {
     int json = 0, upd = 0;
-    const char *base_ref = "origin/master";
+    const char *base_ref = NULL;
     size_t after = 0;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--json")) json = 1;
@@ -1019,6 +1082,7 @@ static int cmd_check_tests(int argc, char **argv)
         else if (has_prefix(argv[i], "--base=")) base_ref = argv[i] + 7;
         else die("usage: zcl-dev check-tests [--json] [--after=N] [--base=ref] [--update-baseline]");
     }
+    if (!base_ref) base_ref = default_base();
     if (base_ref_ok(base_ref)) return 2;
     load_files(1);
     build_index();
@@ -1316,7 +1380,7 @@ static void plan_qa(Plan *pl, const char *entry, const char *bindir)
 static int cmd_t_fast(int argc, char **argv)
 {
     int json = 0, dry = 0, narrow = 0, noqa = 0, changed = 0;
-    const char *base = "origin/master", *bindir = "src";
+    const char *base = NULL, *bindir = "src";
     List paths = {0};
     for (int i = 0; i < argc; i++) {
         const char *a = argv[i];
@@ -1333,6 +1397,7 @@ static int cmd_t_fast(int argc, char **argv)
     if (changed) {
         char cmd[512];
         List diff = {0};
+        if (!base) base = default_base();
         if (!safe_ref(base)) die("t-fast: unsafe base ref '%s'", base);
         snprintf(cmd, sizeof cmd, "git diff --name-only %s...HEAD", base);
         if (cmd_lines(cmd, &diff)) die("t-fast: %s failed (is %s a known ref?)", cmd, base);
