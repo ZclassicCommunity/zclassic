@@ -482,7 +482,7 @@ bool static InitWarning(const std::string &str)
 static void AnnounceAutomaticReindex(const std::string& reason)
 {
     strReindexReason = reason;
-    const std::string msg = strprintf(_("Reindexing the block database: %s. This rebuilds the block index and chain state from the block files already on disk and can take several hours; the node is not stuck. It is safe to stop and restart the node at any time: an interrupted reindex resumes by itself."), reason);
+    const std::string msg = strprintf(_("Reindexing the block database: %s. This rebuilds the block index and chain state from the block files already on disk and can take several hours; the node is not stuck. It is safe to stop and restart the node at any time: an interrupted reindex starts again from the beginning by itself."), reason);
     uiInterface.InitMessage(msg);
     InitWarning(msg);
 }
