@@ -136,7 +136,7 @@ start_client() { # <peer list: "1" "2" or "1 2"> [extra args]
     CPID=$!
 }
 kill_client() { kill -9 "$CPID" 2>/dev/null; wait "$CPID" 2>/dev/null; rm -f "$cdir/regtest/zclassicd.pid" "$cdir/regtest/.lock"; }
-end_client() { stop_node "$client_bin" "$cdir"; wait "$CPID" 2>/dev/null; }
+end_client() { { echo "== client log at the end of a run"; grep -a "Bootstrap:" "$client_log"; } >>"$work/client-bootstrap-all.log" 2>/dev/null; stop_node "$client_bin" "$cdir"; wait "$CPID" 2>/dev/null; }
 fresh_client() { rm -rf "$cdir"; }
 client_log=$cdir/regtest/debug.log
 served_bytes() { # <n> [from-line]
