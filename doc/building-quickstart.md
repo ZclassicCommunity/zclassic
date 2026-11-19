@@ -35,7 +35,7 @@ The version is `CLIENT_VERSION_*` in `src/clientversion.h` (build N reports as b
 
 ## Gotchas
 
-- `HOST` is an environment variable, never an argument: `HOST=x86_64-w64-mingw32 ./zcutil/build.sh` cross-builds; `./zcutil/build.sh HOST=...` silently builds for the host. Prefer `build-release.sh win64`.
+- `HOST` is an environment variable, never an argument: `HOST=x86_64-w64-mingw32 ./zcutil/build.sh` cross-builds; `./zcutil/build.sh HOST=...` does not cross-build (the token reaches only the `make` calls; `configure` uses the host depends). Prefer `build-release.sh win64`.
 - The mingw compiler must use the POSIX thread model (`x86_64-w64-mingw32-g++ -v` prints `Thread model: posix`), or `std::thread` and `std::mutex` fail to compile.
 - Clean when you switch `HOST`: stale trees mix ELF and COFF objects. For the wallet, `make distclean && rm -f Makefile .qmake.stash` before a different kit.
 - Release binaries are built with GCC 9 on glibc 2.31 so they run on old distributions. A newer host raises the floor; `local-ci.sh daemon-linux` and `wallet/contrib/release/linux.sh` enforce `GLIBC_2.31` and report it. Use `local-ci.sh` (a focal root filesystem built without root) rather than a host build for anything you ship.

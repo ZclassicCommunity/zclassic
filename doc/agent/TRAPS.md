@@ -4,7 +4,7 @@
 
 ## (1) Consensus and chain state
 
-Paths: src/main.cpp src/consensus/ src/chain.cpp src/validation src/pow.cpp src/script/ src/zcash/ src/coins.cpp
+Paths: src/main.cpp src/consensus/ src/chain.cpp src/pow.cpp src/script/ src/zcash/ src/coins.cpp
 
 - **Do not change a rule, checkpoint, activation height or acceptance predicate to fix a bug or a speedup.** zclassicd is the reference and Z23 matches it bug-for-bug; a "cleaner" check forks the chain. Prove any rewrite accept/reject-identical on the same inputs, and fix divergences in both implementations. Where: `src/main.cpp`, `src/consensus/`. Verify fresh: run the differential and golden tests (`src/c23/test/run.sh`) before and after.
 - **Do not "fix" the oversize-transaction grandfather table or the pinned Groth16 point-decode quirk.** They reproduce historical chain behaviour. Where: `src/consensus/oversize_grandfather.cpp`, [doc/oversize-grandfather.md](../oversize-grandfather.md), [src/c23/README.md](../../src/c23/README.md) ("Known pinned quirk"). Verify fresh: read both before touching.
@@ -13,7 +13,7 @@ Paths: src/main.cpp src/consensus/ src/chain.cpp src/validation src/pow.cpp src/
 
 ## (2) Wallet database and locks
 
-Paths: src/wallet/ src/rpc/rpcwallet.cpp src/init.cpp doc/wallet-crash-consistency.md
+Paths: src/wallet/ src/init.cpp doc/wallet-crash-consistency.md
 
 - **Do not assume a committed wallet write is on disk.** The environment opens with `DB_TXN_WRITE_NOSYNC`, so a commit reaches the log buffer, not the platter; durability needs an explicit checkpoint/flush (`CDB::Flush`, `ThreadFlushWalletDB`, shutdown flush). Where: `src/wallet/db.cpp`, `src/wallet/walletdb.cpp`. Verify fresh: [wallet-crash-consistency.md](../wallet-crash-consistency.md) and the `wallet_crash_*` scripts.
 - **Do not call `SetBestChain` (or write the checkpoint) holding only `cs_main`.** The whole checkpoint runs under `cs_main` then `cs_wallet`: Berkeley DB has no deadlock detector here, so a notifier-thread write racing the checkpoint waits forever (an `invalidateblock` never returned). Where: `CWallet::SetBestChain` in `src/wallet/wallet.cpp`.
@@ -34,7 +34,7 @@ Paths: src/c23/ zcutil/tools/ src/Makefile.am THIRD-PARTY-LICENSES
 
 Paths: zcutil/ depends/ configure.ac Makefile.am src/Makefile.am
 
-- **Do not pass `HOST=` as an argument to `build.sh`.** It is an environment variable; the argument is a no-op and you get a host build. Where: `zcutil/build.sh`.
+- **Do not pass `HOST=` as an argument to `build.sh`.** It is an environment variable: as an argument it reaches only the `make` calls (depends may be built for it) while `configure` still uses `depends/<build triple>`, so you get a host or mixed build, not a cross build. Where: `zcutil/build.sh` (`HOST` defaults to `BUILD`; `DEPS_DIR` uses the shell variable).
 - **Do not build a shipped Linux binary on a new host.** Newer glibc raises the symbol floor; the candidate must stay at `GLIBC_2.31`. Use `zcutil/local-ci.sh daemon-linux`. Where: `zcutil/local-ci.sh` (`inner_daemon_linux`).
 - **Do not trust a build's exit status behind a pipe.** Check the artifact (footer, floor, `NEEDED`, hash sidecar). Where: [doc/building-quickstart.md](../building-quickstart.md).
 

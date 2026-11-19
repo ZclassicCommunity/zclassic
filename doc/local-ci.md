@@ -89,10 +89,12 @@ zcutil/local-ci.sh --commit <sha> --only wallet_matrix-1-9,zslp_index test <outd
 ZCL_CI_BASE=<base-ref> zcutil/local-ci.sh --commit <sha> test-changed <outdir>
 ```
 
-`--only` takes a comma list of `test` step names (the names in the results table); the
-build always runs, the other steps are neither run nor recorded, and the flavors keep
+`--only` takes a comma list of `test` step names (the names in the results table; a name
+that is not a `step` fails at once, so a typo cannot run nothing and pass); the build always runs, the other steps are neither run nor recorded, and the flavors keep
 their usual split (the debug-only steps do not run in the release flavor). A path with no
-rule selects everything; Markdown and `doc/` select only `check-dev-tools`. Stages
+rule selects everything, and so does a rule with the token `ALL` (consensus, chain state,
+`src/main.cpp`, the daemon wallet, chain parameters and the build system use it, so a change
+there never runs only a subset); Markdown and `doc/` select only `check-dev-tools`. Stages
 (`daemon-linux`, `daemon-win64`, `wallet-linux`) are separate commands: `select` lists them
 under `stages:` and `test-changed` prints them as "also needed". A new step needs a rule
 in `impact.rules` (`check-rules` checks that its name is a `step` in `local-ci.sh`).

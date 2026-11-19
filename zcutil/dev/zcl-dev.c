@@ -285,17 +285,32 @@ static int rule_match(const Rule *r, const char *path)
     return 0;
 }
 
-typedef struct { List steps, stages, scripts; int all; char *unmapped; } Impact;
+/* why: the reason the scope is ALL ("unmapped source path: ..." or "broad rule: ..."). */
+typedef struct { List steps, stages, scripts; int all; char *why; } Impact;
+
+/* A rule token that selects every step (consensus, chain state, wallet, build system). */
+#define ALL_TOKEN "ALL"
 
 static int is_doc_path(const char *p)
 {
     return has_prefix(p, "doc/") || has_suffix(p, ".md");
 }
 
-static void add_token(Impact *im, const char *t)
+static void set_all(Impact *im, const char *kind, const char *path)
+{
+    if (!im->all) {
+        size_t n = strlen(kind) + strlen(path) + 1;
+        im->why = xrealloc(NULL, n);
+        snprintf(im->why, n, "%s%s", kind, path);
+    }
+    im->all = 1;
+}
+
+static void add_token(Impact *im, const char *t, const char *path)
 {
     if (!strcmp(t, "-")) return;
-    if (strchr(t, '/')) list_add(&im->scripts, t);
+    if (!strcmp(t, ALL_TOKEN)) set_all(im, "broad rule: ", path);
+    else if (strchr(t, '/')) list_add(&im->scripts, t);
     else if (is_stage(t)) list_add(&im->stages, t);
     else list_add(&im->steps, t);
 }
@@ -308,11 +323,9 @@ static void impact_path(Impact *im, const Rules *rs, const char *path)
     for (size_t i = 0; i < rs->n; i++) {
         if (!rule_match(&rs->v[i], path)) continue;
         hit = 1;
-        for (size_t t = 0; t < rs->v[i].tokens.n; t++) add_token(im, rs->v[i].tokens.v[t]);
+        for (size_t t = 0; t < rs->v[i].tokens.n; t++) add_token(im, rs->v[i].tokens.v[t], path);
     }
-    if (hit) return;
-    if (!im->all) im->unmapped = xstrdup(path);
-    im->all = 1;
+    if (!hit) set_all(im, "unmapped source path: ", path);
 }
 
 static void impact_expand_all(Impact *im, const Rules *rs)
@@ -321,7 +334,8 @@ static void impact_expand_all(Impact *im, const Rules *rs)
     for (size_t i = 0; i < rs->n; i++)
         for (size_t t = 0; t < rs->v[i].tokens.n; t++) {
             const char *tk = rs->v[i].tokens.v[t];
-            if (strcmp(tk, "-") && !strchr(tk, '/') && !is_stage(tk)) list_add(&im->steps, tk);
+            if (strcmp(tk, "-") && strcmp(tk, ALL_TOKEN) && !strchr(tk, '/') && !is_stage(tk))
+                list_add(&im->steps, tk);
         }
 }
 
@@ -369,7 +383,7 @@ static int cmd_select(int argc, char **argv)
         return 0;
     }
     printf("base: %s  files: %zu\n", use_stdin ? "(stdin)" : base, files.n);
-    if (im.all) printf("scope: ALL (unmapped source path: %s)\n", im.unmapped);
+    if (im.all) printf("scope: ALL (%s)\n", im.why);
     else printf("scope: selective\n");
     char *s = join(&im.steps, " "), *g = join(&im.stages, " "), *c = join(&im.scripts, " ");
     printf("steps: %s\nstages: %s\nscripts: %s\n", s, g, c);
@@ -412,7 +426,7 @@ static int cmd_check_rules(void)
     for (size_t r = 0; r < rs.n; r++)
         for (size_t t = 0; t < rs.v[r].tokens.n; t++) {
             const char *tk = rs.v[r].tokens.v[t];
-            if (!strcmp(tk, "-")) continue;
+            if (!strcmp(tk, "-") || !strcmp(tk, ALL_TOKEN)) continue;
             if (strchr(tk, '/')) {
                 if (!list_has(&files, tk)) {
                     fprintf(stderr, "FAIL: %s:%zu: script %s is not tracked\n", RULES_FILE, rs.v[r].line, tk);
@@ -635,7 +649,8 @@ static int cmd_guide(int argc, char **argv)
         printf("\nrules (%s):\n", agents.v[i]);
         for (size_t k = 0; k < b.n; k++) printf("  %s\n", b.v[k]);
     }
-    printf("\nci steps%s: ", im.all ? " (ALL: unmapped path)" : "");
+    if (im.all) printf("\nci steps (ALL, %s): ", im.why);
+    else printf("\nci steps: ");
     if (im.steps.n) { char *j = join(&im.steps, " "); puts(j); free(j); } else puts("(none)");
     if (im.stages.n) { char *j = join(&im.stages, " "); printf("ci stages: %s\n", j); free(j); }
     if (im.scripts.n) { char *j = join(&im.scripts, " "); printf("qa scripts: %s\n", j); free(j); }

@@ -438,6 +438,13 @@ while [ $# -gt 0 ]; do
     esac
 done
 CMD=${1:-}; [ -n "$CMD" ] || { sed -n '2,/^set -eu/p' "$SELF" | sed '$d'; exit 2; }
+# --only (or an inherited ZCL_CI_ONLY): every name must be a step, or a typo would run nothing and pass.
+if [ -n "${ZCL_CI_ONLY:-}" ]; then
+    case $ZCL_CI_ONLY in *[!A-Za-z0-9_.,-]*) die "ZCL_CI_ONLY takes a comma list of step names" ;; esac
+    for n in $(printf '%s' "$ZCL_CI_ONLY" | tr ',' ' '); do
+        grep -q "^ *step $n " "$SELF" || die "--only: $n is not a step of local-ci.sh"
+    done
+fi
 ENVDIR=${ZCL_CI_ENV:-$HOME/work/zc23-localci-env}
 CACHE=${ZCL_CI_CACHE:-$HOME/work/zc23-localci-cache}
 if [ -z "$JOBS" ]; then JOBS=$(getconf _NPROCESSORS_ONLN); [ "$JOBS" -le 8 ] || JOBS=8; fi

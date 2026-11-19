@@ -39,6 +39,11 @@ printf 'nothing/*\tunit-a\n' >>"$work/zcutil/dev/impact.rules"
 case_ check-rules-dead-rule 1 z check-rules
 printf '# rules\nsrc/*.c\tunit-a qa/x.sh\nwallet/src/*\tno-such-step\nqa/*|zcutil/*\t-\n' >"$work/zcutil/dev/impact.rules"
 case_ check-rules-bad-step 1 z check-rules
+# an ALL rule selects every step (and is not a step name for check-rules)
+printf '# rules\nsrc/a.c\tALL qa/x.sh\nsrc/b.c\tunit-a\nwallet/src/*\twallet-gui\nqa/*|zcutil/*\t-\n' >"$work/zcutil/dev/impact.rules"
+case_ select-broad 0 sh -c "printf 'src/b.c\nsrc/a.c\n' | '$bin' -C '$work' select --stdin"
+case_ select-broad-steps 0 sh -c "printf 'src/a.c\n' | '$bin' -C '$work' select --steps --stdin"
+case_ check-rules-broad 0 z check-rules
 # a lesson naming an untracked path fails check-docs
 printf 'DONE src/missing.c — gone.\n' >>"$work/doc/agent/LESSONS.md"
 case_ check-docs-bad-path 1 z check-docs
