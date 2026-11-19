@@ -314,7 +314,7 @@ step() {
 }
 
 # Each of these is a function so `step` can run it in a subshell with set -e off.
-t_devtools() { make -C zcutil/dev check; }
+t_devtools() { MAKEFLAGS= make -C zcutil check && zcutil/bin/zcl-dev verify --gates; }   # selftests serial (they run tools make still links), then the gates
 t_vendor()   { make -C src check-c23-vendor; }
 t_toolsvendor() { sh src/c23/tools/check-vendor.sh zcutil/tools/Z23_SOURCE.tsv; }
 t_jsonq()    { make -C zcutil/tools check; }   # builds zcutil/bin/jsonq (host cc) and runs its fixture test; the shell tests need it

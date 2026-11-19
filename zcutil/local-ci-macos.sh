@@ -5,7 +5,7 @@
 # GitHub.  zcutil/local-ci.sh `macos` copies the bundle and this script over ssh and
 # runs it for you.
 #
-# usage: sh local-ci-macos.sh --bundle <file.bundle> --commit <sha> --out <dir> [daemon|wallet-tests|wallet|all]
+# usage: sh local-ci-macos.sh --bundle <file.bundle> --commit <sha> --out <dir> [dev-tools|daemon|wallet-tests|wallet|all]
 #
 #   daemon  static macOS daemon with embedded Tor, otool allowlist, --version,
 #           regtest smoke, bounded embedded-Tor check  -> <out>/daemon-macos-arm64
@@ -13,7 +13,7 @@
 #           (qmake, offscreen platform) and run them; no daemon needed
 #   wallet  pinned static Qt 5.15.19 + the wallet bundle -> <out>/wallet-macos-candidate
 #           (needs <out>/daemon-macos-arm64 of the same commit; builds Qt once, ~1 h)
-#   all     daemon, wallet-tests, then wallet
+#   all     dev-tools (the check-dev-tools step of local-ci.sh), daemon, wallet-tests, then wallet
 #
 # Everything lives under $ZCL_CI_ROOT (default ~/work/zc23-localci): work/ (fresh clone per
 # run), cache/ (depends sources+built, Qt toolchain).  Other directories are never touched,
@@ -29,7 +29,7 @@ while [ $# -gt 0 ]; do
         --bundle) bundle=$2; shift 2 ;;
         --commit) commit=$2; shift 2 ;;
         --out) out=$2; shift 2 ;;
-        daemon|wallet-tests|wallet|all) what=$1; shift ;;
+        dev-tools|daemon|wallet-tests|wallet|all) what=$1; shift ;;
         -h|--help) sed -n "2,23p" "$0"; exit 0 ;;
         *) echo "local-ci-macos: unknown argument $1" >&2; exit 2 ;;
     esac
@@ -185,5 +185,5 @@ case $what in
     daemon) do_daemon ;;
     wallet-tests) do_wallet_tests ;;
     wallet) do_wallet ;;
-    all) do_daemon; do_wallet_tests; do_wallet ;;
+    dev-tools|all) say "dev-tools: $commit"; checkout; cd "$SRC"; mkdir -p "$out/logs"; { make -C zcutil -j"$JOBS" && MAKEFLAGS= make -C zcutil check && zcutil/bin/zcl-dev verify --gates; } >"$out/logs/dev-tools-macos.log" 2>&1 || { tail -40 "$out/logs/dev-tools-macos.log"; die "check-dev-tools failed (log $out/logs/dev-tools-macos.log)"; }; tail -3 "$out/logs/dev-tools-macos.log"; say "dev-tools OK"; [ "$what" = dev-tools ] || { do_daemon; do_wallet_tests; do_wallet; } ;;
 esac
