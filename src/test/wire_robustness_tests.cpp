@@ -14,6 +14,8 @@
 //
 
 #include "bloom.h"
+#include "crypto/common.h"
+#include "crypto/sha256.h"
 #include "chainparams.h"
 #include "merkleblock.h"
 #include "netbase.h"
@@ -131,58 +133,79 @@ std::string Outcome(Kind k, const Bytes& b, bool* pDecoded = NULL)
     return "";
 }
 
+// The six mutation kinds. Each draws from rng in the same order the single
+// switch did, so a PRNG seed still names the same cases.
+
+void MutateBitFlip(Rng& rng, Bytes& r)
+{
+    if (!r.empty())
+        r[rng.Below(r.size())] ^= (unsigned char)(1u << rng.Below(8));
+}
+
+void MutateByteSet(Rng& rng, Bytes& r)
+{
+    if (!r.empty()) {
+        static const unsigned char interesting[] = {0x00, 0x01, 0x7f, 0x80, 0xfc, 0xfd, 0xfe, 0xff};
+        r[rng.Below(r.size())] = (rng.Below(2) ? interesting[rng.Below(sizeof(interesting))]
+                                                : (unsigned char)rng.Next());
+    }
+}
+
+void MutateTruncate(Rng& rng, Bytes& r)
+{
+    r.resize(rng.Below(r.size() + 1));
+}
+
+void MutateInsert(Rng& rng, Bytes& r)
+{
+    // insert 1..8 random bytes
+    size_t pos = rng.Below(r.size() + 1);
+    size_t n = 1 + rng.Below(8);
+    Bytes ins(n);
+    for (size_t i = 0; i < n; i++)
+        ins[i] = (unsigned char)rng.Next();
+    r.insert(r.begin() + pos, ins.begin(), ins.end());
+}
+
+void MutateSplice(Rng& rng, Bytes& r, const std::vector<Seed>& seeds)
+{
+    // splice a prefix of this seed onto a suffix of another
+    const Bytes& o = seeds[rng.Below(seeds.size())].bytes;
+    size_t cut1 = rng.Below(r.size() + 1);
+    size_t cut2 = rng.Below(o.size() + 1);
+    r.resize(cut1);
+    r.insert(r.end(), o.begin() + cut2, o.end());
+}
+
+void MutateCompactSize(Rng& rng, Bytes& r)
+{
+    // inject a 0xFD/0xFE/0xFF compact size, overwriting or inserting
+    static const unsigned char marks[] = {0xfd, 0xfe, 0xff};
+    unsigned char m = marks[rng.Below(3)];
+    size_t n = m == 0xfd ? 2 : (m == 0xfe ? 4 : 8);
+    Bytes inj(1, m);
+    for (size_t i = 0; i < n; i++) {
+        // favour huge claimed lengths
+        inj.push_back(rng.Below(3) ? (unsigned char)0xff : (unsigned char)rng.Next());
+    }
+    size_t pos = rng.Below(r.size() + 1);
+    if (rng.Below(2) && pos + inj.size() <= r.size())
+        std::copy(inj.begin(), inj.end(), r.begin() + pos);
+    else
+        r.insert(r.begin() + pos, inj.begin(), inj.end());
+}
+
 Bytes Mutate(Rng& rng, const Bytes& a, const std::vector<Seed>& seeds, int& mode)
 {
     Bytes r = a;
     mode = (int)rng.Below(6);
     switch (mode) {
-    case 0: // bit flip
-        if (!r.empty())
-            r[rng.Below(r.size())] ^= (unsigned char)(1u << rng.Below(8));
-        break;
-    case 1: // byte set
-        if (!r.empty()) {
-            static const unsigned char interesting[] = {0x00, 0x01, 0x7f, 0x80, 0xfc, 0xfd, 0xfe, 0xff};
-            r[rng.Below(r.size())] = (rng.Below(2) ? interesting[rng.Below(sizeof(interesting))]
-                                                    : (unsigned char)rng.Next());
-        }
-        break;
-    case 2: // truncate
-        r.resize(rng.Below(r.size() + 1));
-        break;
-    case 3: { // insert 1..8 random bytes
-        size_t pos = rng.Below(r.size() + 1);
-        size_t n = 1 + rng.Below(8);
-        Bytes ins(n);
-        for (size_t i = 0; i < n; i++)
-            ins[i] = (unsigned char)rng.Next();
-        r.insert(r.begin() + pos, ins.begin(), ins.end());
-        break;
-    }
-    case 4: { // splice a prefix of this seed onto a suffix of another
-        const Bytes& o = seeds[rng.Below(seeds.size())].bytes;
-        size_t cut1 = rng.Below(r.size() + 1);
-        size_t cut2 = rng.Below(o.size() + 1);
-        r.resize(cut1);
-        r.insert(r.end(), o.begin() + cut2, o.end());
-        break;
-    }
-    case 5: { // inject a 0xFD/0xFE/0xFF compact size, overwriting or inserting
-        static const unsigned char marks[] = {0xfd, 0xfe, 0xff};
-        unsigned char m = marks[rng.Below(3)];
-        size_t n = m == 0xfd ? 2 : (m == 0xfe ? 4 : 8);
-        Bytes inj(1, m);
-        for (size_t i = 0; i < n; i++) {
-            // favour huge claimed lengths
-            inj.push_back(rng.Below(3) ? (unsigned char)0xff : (unsigned char)rng.Next());
-        }
-        size_t pos = rng.Below(r.size() + 1);
-        if (rng.Below(2) && pos + inj.size() <= r.size())
-            std::copy(inj.begin(), inj.end(), r.begin() + pos);
-        else
-            r.insert(r.begin() + pos, inj.begin(), inj.end());
-        break;
-    }
+    case 0: MutateBitFlip(rng, r); break;
+    case 1: MutateByteSet(rng, r); break;
+    case 2: MutateTruncate(rng, r); break;
+    case 3: MutateInsert(rng, r); break;
+    case 4: MutateSplice(rng, r, seeds); break;
+    case 5: MutateCompactSize(rng, r); break;
     }
     return r;
 }
@@ -365,6 +388,37 @@ BOOST_AUTO_TEST_CASE(mutated_inputs_only_fail_with_ios_failure)
     BOOST_TEST_MESSAGE("wire_robustness: " << total << " mutations, " << accepted << " decoded, "
                        << (total - accepted) << " rejected, " << elapsed / 1000 << " ms");
     BOOST_CHECK_EQUAL(failures, 0u);
+}
+
+BOOST_AUTO_TEST_CASE(mutation_stream_is_pinned)
+{
+    // The PRNG seed names the cases: the same seed must keep giving the same
+    // mutated inputs, mode by mode, whatever shape Mutate takes. SHA256 over
+    // (mode, length, bytes) of the first 200 mutations of every seed.
+    std::vector<Seed> seeds = BuildSeeds();
+    Rng rng(WIRE_PRNG_SEED);
+    CSHA256 h;
+    size_t modes[6] = {0, 0, 0, 0, 0, 0};
+    for (size_t si = 0; si < seeds.size(); si++) {
+        for (int c = 0; c < 200; c++) {
+            int mode = -1;
+            Bytes m = Mutate(rng, seeds[si].bytes, seeds, mode);
+            BOOST_REQUIRE(mode >= 0 && mode < 6);
+            modes[mode]++;
+            unsigned char hdr[9];
+            hdr[0] = (unsigned char)mode;
+            WriteLE64(hdr + 1, (uint64_t)m.size());
+            h.Write(hdr, sizeof(hdr));
+            if (!m.empty())
+                h.Write(&m[0], m.size());
+        }
+    }
+    uint256 digest;
+    h.Finalize(digest.begin());
+    BOOST_TEST_MESSAGE("mutation stream: " << seeds.size() << " seeds, modes " << modes[0] << "/" << modes[1] << "/"
+                       << modes[2] << "/" << modes[3] << "/" << modes[4] << "/" << modes[5] << ", sha256 "
+                       << digest.GetHex());
+    BOOST_CHECK_EQUAL(digest.GetHex(), "96f88a2bc55d2b2a60c98afc2ec76330b185d6dc0a5a993c5c376362be5c469b");
 }
 
 BOOST_AUTO_TEST_CASE(compact_size_bounds)

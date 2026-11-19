@@ -113,9 +113,10 @@ static bool ParseHash(const std::string& s, uint256& out)
     return true;
 }
 
-bool ParseBinding(const std::string& text, ShutdownBinding& out)
+// "key=value\n" lines into kv: false on a line without '=', an empty key, a
+// repeated key, or text whose last line has no '\n'.
+static bool ReadKeyValueLines(const std::string& text, std::map<std::string, std::string>& kv)
 {
-    std::map<std::string, std::string> kv;
     size_t pos = 0;
     while (pos < text.size()) {
         size_t nl = text.find('\n', pos);
@@ -129,12 +130,26 @@ bool ParseBinding(const std::string& text, ShutdownBinding& out)
         if (!kv.insert(std::make_pair(line.substr(0, eq), line.substr(eq + 1))).second)
             return false; // repeated key
     }
+    return true;
+}
+
+// Exactly the six marker keys, no more and no fewer.
+static bool HasExactlyMarkerKeys(const std::map<std::string, std::string>& kv)
+{
     static const char* const keys[] = {"magic", "version", "tip", "height", "coins", "files"};
     if (kv.size() != sizeof(keys) / sizeof(keys[0]))
         return false;
     for (const char* k : keys)
         if (!kv.count(k))
             return false;
+    return true;
+}
+
+bool ParseBinding(const std::string& text, ShutdownBinding& out)
+{
+    std::map<std::string, std::string> kv;
+    if (!ReadKeyValueLines(text, kv) || !HasExactlyMarkerKeys(kv))
+        return false;
     if (kv["magic"] != MARKER_MAGIC || kv["version"] != MARKER_VERSION)
         return false;
     ShutdownBinding b;

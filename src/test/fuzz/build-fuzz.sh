@@ -4,8 +4,8 @@
 # touches autotools or the default build; see README.md.
 #
 # usage: build-fuzz.sh <builddir-with-configured-tree> <outdir> [cxx]
-#   builddir  the configured and built tree (the directory holding src/Makefile
-#             and src/libbitcoin_server.a); an in-tree build is the supported layout
+#   builddir  the configured and built tree, in or out of the source tree (the
+#             directory holding src/Makefile and src/libbitcoin_server.a)
 #   outdir    receives fuzz_block, fuzz_tx, fuzz_p2p_payload
 #   cxx       C++ compiler, default g++. A clang++ links libFuzzer
 #             (-fsanitize=fuzzer); any other compiler links replay_main.cpp,
@@ -37,31 +37,27 @@ mkv() { make -s --no-print-directory -C "$SRC" -o Makefile -o config.status -f M
 DEFS=$(mkv DEFS)
 DEFAULT_INCLUDES=$(mkv DEFAULT_INCLUDES)
 CPPFLAGS=$(mkv CPPFLAGS)
-AM_CPPFLAGS=$(mkv AM_CPPFLAGS)
-INCLUDES=$(mkv BITCOIN_INCLUDES)
+AM_CPPFLAGS=$(mkv AM_CPPFLAGS) INCLUDES=$(mkv BITCOIN_INCLUDES)
 LDFLAGS=$(mkv LDFLAGS)
-BOOST_LIBS=$(mkv BOOST_LIBS)
-BDB_LIBS=$(mkv BDB_LIBS)
+BOOST_LIBS=$(mkv BOOST_LIBS) BDB_LIBS=$(mkv BDB_LIBS)
 SSL_LIBS=$(mkv SSL_LIBS)
 CRYPTO_LIBS=$(mkv CRYPTO_LIBS)
 EVENT_LIBS=$(mkv EVENT_LIBS)
 EVENT_PT_LIBS=$(mkv EVENT_PTHREADS_LIBS)
 ZCASH_LIBS=$(mkv LIBZCASH_LIBS)
-TOR_LIBS=$(mkv TOR_LIBS)
-TOR_SYS_LIBS=$(mkv TOR_SYSTEM_LIBS)
+TOR_LIBS=$(mkv TOR_LIBS) TOR_SYS_LIBS=$(mkv TOR_SYSTEM_LIBS)
 ZMQ_LIBS=$(mkv ZMQ_LIBS)
 
-
-# Static libraries, in test_bitcoin's LDADD order (src/Makefile.test.include).
+# Static libraries, in test_bitcoin's LDADD order (src/Makefile.test.include), then two
+# that only some configurations build: with ZMQ, init.o needs libbitcoin_zmq.a.
 ARCHIVES=
 for a in libbitcoin_wallet.a libbitcoin_server.a libzcl_tokenguard.a libzcl_tor.a libbitcoin_cli.a \
          libbitcoin_common.a libbitcoin_util.a crypto/libbitcoin_crypto.a libzcl_c23_hash.a \
          univalue/.libs/libunivalue.a leveldb/libleveldb.a leveldb/libmemenv.a \
-         secp256k1/.libs/libsecp256k1.a libzcash.a libzcl_c23.a libzcl_c23_seam.a; do
+         secp256k1/.libs/libsecp256k1.a libzcash.a libzcl_c23.a libzcl_c23_seam.a \
+         libbitcoin_consensus.a libbitcoin_zmq.a; do
     [ -f "$SRC/$a" ] && ARCHIVES="$ARCHIVES $SRC/$a"
 done
-# libbitcoin_consensus.a exists only in some configurations.
-[ -f "$SRC/libbitcoin_consensus.a" ] && ARCHIVES="$ARCHIVES $SRC/libbitcoin_consensus.a"
 
 SAN="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 case $CXX in
@@ -69,10 +65,13 @@ case $CXX in
     *)       MODE=replay;    DRIVER="$HERE/replay_main.cpp"; COMPILE_SAN="$SAN" ;;
 esac
 
-# -std=gnu++17 is only needed if the tree was configured with it; follow the
-# tree's own CXX setting for the dialect when it names one.
-STD=$(mkv CXX | sed -n 's/.*\(-std=[a-z+0-9]*\).*/\1/p')
+# The tree's own dialect: the last -std= of CXX and CXXFLAGS, as the compiler takes it.
+STD=$(echo "$(mkv CXX) $(mkv CXXFLAGS)" | sed -n 's/.*\(-std=[a-z+0-9]*\).*/\1/p')
 [ -n "$STD" ] || STD=-std=c++11
+
+# GNU ld and lld need the archives grouped; the macOS linker has no --start-group.
+GROUP_BEGIN=-Wl,--start-group GROUP_END=-Wl,--end-group
+[ "$(uname -s)" != Darwin ] || GROUP_BEGIN= GROUP_END=
 
 # The include flags are relative to src/ (-I.), so compile from there.
 cd "$SRC"
@@ -82,8 +81,8 @@ for t in fuzz_block fuzz_tx fuzz_p2p_payload; do
     $CXX $STD -g -O1 $COMPILE_SAN -DHAVE_CONFIG_H $DEFS $DEFAULT_INCLUDES $CPPFLAGS $AM_CPPFLAGS $INCLUDES \
         -fwrapv -fno-strict-aliasing -pthread \
         "$HERE/$t.cpp" $DRIVER $LDFLAGS \
-        -Wl,--start-group $ARCHIVES $TOR_LIBS $BOOST_LIBS $BDB_LIBS $SSL_LIBS $CRYPTO_LIBS \
-        $EVENT_PT_LIBS $EVENT_LIBS $ZCASH_LIBS $TOR_SYS_LIBS $ZMQ_LIBS -lpthread -ldl -lm -Wl,--end-group \
+        $GROUP_BEGIN $ARCHIVES $TOR_LIBS $BOOST_LIBS $BDB_LIBS $SSL_LIBS $CRYPTO_LIBS \
+        $EVENT_PT_LIBS $EVENT_LIBS $ZCASH_LIBS $TOR_SYS_LIBS $ZMQ_LIBS -lpthread -ldl -lm $GROUP_END \
         -o "$OUT/$t"
 done
 echo "build-fuzz.sh: built $OUT/fuzz_block $OUT/fuzz_tx $OUT/fuzz_p2p_payload ($MODE)"

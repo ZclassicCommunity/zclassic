@@ -9,6 +9,7 @@
 
 #include "main.h"
 #include "net.h"
+#include "netoutbound.h"
 
 #include "addrman.h"
 #include "addrv2.h"
@@ -1475,72 +1476,53 @@ CAddrMan& SelectDialTable(bool fOnionProxy, uint32_t nRand)
     return addrman;
 }
 
-/** An address tried less than this many seconds ago is never dialled again, however
- *  small the table (see SelectOutboundCandidate). */
-static const int64_t OUTBOUND_MIN_REDIAL_SECONDS = 60;
-/** Draws from the table in one selection round. */
-static const int OUTBOUND_MAX_DRAWS = 300;
+namespace {
+/** The draws of one selection round, from an address table (netoutbound.h). */
+class CAddrManDrawSource : public COutboundDrawSource
+{
+public:
+    CAddrManDrawSource(CAddrMan& manIn, const std::set<std::vector<unsigned char> >& setConnectedIn,
+                       const COutboundSkip& skipIn, int64_t nANowIn)
+        : man(manIn), setConnected(setConnectedIn), skip(skipIn), nANow(nANowIn) {}
+
+    /** The address of the latest draw. */
+    CAddrInfo last;
+
+    COutboundDraw Draw() override
+    {
+        last = man.Select();
+        COutboundDraw draw;
+        draw.fValid = last.IsValid();
+        if (!draw.fValid)
+            return draw;
+        // A host in skip.hosts is our own address as our peers see it, or an -addnode
+        // host, which the addcon thread keeps connected on its own port. It, and an
+        // IPv6 address when this host has no IPv6 route, would each cost a connect
+        // timeout (or a second slot for one server) and could not help.
+        draw.fFree = setConnected.count(last.GetGroup()) || IsLocal(last) || skip.hosts.count(CNetAddr(last)) ||
+                     (skip.fNoIPv6Route && last.GetNetwork() == NET_IPV6);
+        draw.fLimited = IsLimited(last);
+        draw.nLastTry = last.nLastTry;
+        draw.fTerrible = last.IsTerrible(nANow);
+        draw.fDefaultPort = last.GetPort() == Params().GetDefaultPort();
+        return draw;
+    }
+
+private:
+    CAddrMan& man;
+    const std::set<std::vector<unsigned char> >& setConnected;
+    const COutboundSkip& skip;
+    const int64_t nANow;
+};
+} // namespace
 
 CAddrInfo SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow,
                                   const COutboundSkip& skip)
 {
-    int nTries = 0;
-    for (int nDraws = 0; nDraws < OUTBOUND_MAX_DRAWS; nDraws++)
-    {
-        CAddrInfo addr = man.Select();
-
-        // an empty table: nothing to choose from this round
-        if (!addr.IsValid())
-            break;
-
-        // An address on the network group of an outbound peer, or one of our own, is
-        // not a candidate, but it does not use up the round either: on a small table
-        // (a fresh node knows a handful of addresses) one such draw would otherwise
-        // end the round before the port and recency rules could let anything through.
-        if (setConnected.count(addr.GetGroup()) || IsLocal(addr))
-            continue;
-
-        // Nor is a host in skip.hosts (our own address as our peers see it, or an
-        // -addnode host, which the addcon thread keeps connected on its own port),
-        // or an IPv6 address when this host has no IPv6 route: each would cost a
-        // connect timeout (or a second slot for one server) and could not help.
-        if (skip.hosts.count(CNetAddr(addr)) || (skip.fNoIPv6Route && addr.GetNetwork() == NET_IPV6))
-            continue;
-
-        // If we didn't find an appropriate destination after trying 100 addresses fetched from addrman,
-        // stop this loop, and let the outer loop run again (which sleeps, adds seed nodes, recalculates
-        // already-connected network ranges, ...) before trying new addrman addresses.
-        nTries++;
-        if (nTries > 100)
-            break;
-
-        if (IsLimited(addr))
-            continue;
-
-        // never redial within a minute: on a small table the relaxation below would
-        // otherwise hand the same address (one that answers and drops us at once is
-        // the one the tried table keeps) to every round and starve the others
-        if (nANow - addr.nLastTry < OUTBOUND_MIN_REDIAL_SECONDS)
-            continue;
-
-        // only consider very recently tried nodes after 30 failed attempts
-        if (nANow - addr.nLastTry < 600 && nTries < 30)
-            continue;
-
-        // nor, before as many draws, an address addrman counts as terrible: not seen
-        // for a month (peers gossip addresses years old), or tried often without a
-        // success. On a small table these are most of the dead addresses, and each
-        // one dialled costs a connect timeout before a live peer is reached.
-        if (addr.IsTerrible(nANow) && nTries < 30)
-            continue;
-
-        // do not allow non-default ports, unless after 50 invalid addresses selected already
-        if (addr.GetPort() != Params().GetDefaultPort() && nTries < 50)
-            continue;
-
-        return addr;
-    }
-    return CAddrInfo();
+    CAddrManDrawSource source(man, setConnected, skip, nANow);
+    if (SelectOutboundDraw(source, nANow) < 0)
+        return CAddrInfo();
+    return source.last;
 }
 
 /** Network groups an outbound dial is in progress to (see CDialGroupReservation). */
@@ -1692,6 +1674,78 @@ static void ThreadOpenConnectionsDialer(int nDialer)
     OpenConnectionsLoop(nDialer);
 }
 
+// Add the fixed seed nodes while the table is thin: on a fresh start (the DNS
+// seeds give a handful of addresses at best, often none), or if DNS seeds are
+// all down (an infrastructure attack?). They go through the same selection.
+static void AddFixedSeedsIfThin()
+{
+    if (!FixedSeedsWanted(addrman.size()))
+        return;
+    static bool done = false;
+    if (!done) {
+        LogPrintf("Adding fixed seed nodes: the address table holds %d addresses.\n", addrman.size());
+        addrman.Add(convertSeed6(Params().FixedSeeds()), CNetAddr("127.0.0.1"));
+        done = true;
+    }
+}
+
+// Only connect out to one peer per network group (/16 for IPv4), counting
+// the groups other dialers are connecting to. Those are read first: a dial
+// that finishes adds its node to vNodes before it releases its group, so
+// a group is always seen in one of the two.
+// Do this here so we don't have to critsect vNodes inside mapAddresses critsect.
+static void CollectOutboundGroups(std::set<std::vector<unsigned char> >& setConnected,
+                                  std::vector<std::pair<CNetAddr, CNetAddr> >& vReportedLocal)
+{
+    setConnected = DialingGroups();
+    LOCK(cs_vNodes);
+    BOOST_FOREACH(CNode* pnode, vNodes) {
+        if (!pnode->fInbound) {
+            setConnected.insert(pnode->addr.GetGroup());
+            vReportedLocal.push_back(std::make_pair(CNetAddr(pnode->addr), CNetAddr(pnode->GetAddrLocal())));
+        }
+    }
+}
+
+// Hosts not to dial: our own public address once two outbound peers on
+// different network groups report it (one peer alone cannot make us avoid
+// an address), and the -addnode hosts (the bootstrap servers among them).
+static COutboundSkip CurrentOutboundSkip(const std::vector<std::pair<CNetAddr, CNetAddr> >& vReportedLocal)
+{
+    COutboundSkip skip;
+    skip.hosts = PeerReportedLocal(vReportedLocal);
+    std::vector<std::string> vAddedNow;
+    {
+        LOCK(cs_vAddedNodes);
+        vAddedNow = vAddedNodes;
+    }
+    std::map<CNetAddr, std::string> mapAddNodeNow;
+    {
+        LOCK(cs_mapAddNodeAddresses);
+        mapAddNodeNow = mapAddNodeAddresses;
+    }
+    std::set<CNetAddr> setAddNodeHosts = CurrentAddNodeHosts(mapAddNodeNow, vAddedNow);
+    skip.hosts.insert(setAddNodeHosts.begin(), setAddNodeHosts.end());
+    proxyType proxyIPv6;
+    skip.fNoIPv6Route = !IsLimited(NET_IPV6) && !GetProxy(NET_IPV6, proxyIPv6) && !HostHasIPv6Route();
+    return skip;
+}
+
+// Hold the group while dialling. Another dialer may have taken it, or
+// connected to it, since setConnected was read: then this round is over.
+static void DialOutboundPick(const CAddrInfo& addrPick, CSemaphoreGrant& grant)
+{
+    const CAddress addrConnect = addrPick;
+    CDialGroupReservation reservation(addrConnect.GetGroup());
+    if (!reservation || OutboundGroupConnected(addrConnect.GetGroup()))
+        return;
+    proxyType proxyDial;
+    const bool fDirect = !addrConnect.IsTor() && !GetProxy(addrConnect.GetNetwork(), proxyDial);
+    OpenNetworkConnection(addrConnect, &grant, NULL, false,
+                          OutboundConnectTimeout(fDirect, mapArgs.count("-timeout") > 0, addrPick.GetAttempts(),
+                                                 addrPick.nLastTry, addrPick.GetLastSuccess(), nConnectTimeout));
+}
+
 static void OpenConnectionsLoop(int nDialer)
 {
     // Initiate network connections
@@ -1715,59 +1769,16 @@ static void OpenConnectionsLoop(int nDialer)
             continue;
         boost::this_thread::interruption_point();
 
-        // Add the fixed seed nodes while the table is thin: on a fresh start (the DNS
-        // seeds give a handful of addresses at best, often none), or if DNS seeds are
-        // all down (an infrastructure attack?). They go through the same selection.
-        if (nDialer == 0 && FixedSeedsWanted(addrman.size())) {
-            static bool done = false;
-            if (!done) {
-                LogPrintf("Adding fixed seed nodes: the address table holds %d addresses.\n", addrman.size());
-                addrman.Add(convertSeed6(Params().FixedSeeds()), CNetAddr("127.0.0.1"));
-                done = true;
-            }
-        }
+        if (nDialer == 0)
+            AddFixedSeedsIfThin();
 
         //
         // Choose an address to connect to based on most recently seen
         //
-        CAddress addrConnect;
-
-        // Only connect out to one peer per network group (/16 for IPv4), counting
-        // the groups other dialers are connecting to. Those are read first: a dial
-        // that finishes adds its node to vNodes before it releases its group, so
-        // a group is always seen in one of the two.
-        // Do this here so we don't have to critsect vNodes inside mapAddresses critsect.
-        set<vector<unsigned char> > setConnected = DialingGroups();
+        set<vector<unsigned char> > setConnected;
         std::vector<std::pair<CNetAddr, CNetAddr> > vReportedLocal;
-        {
-            LOCK(cs_vNodes);
-            BOOST_FOREACH(CNode* pnode, vNodes) {
-                if (!pnode->fInbound) {
-                    setConnected.insert(pnode->addr.GetGroup());
-                    vReportedLocal.push_back(std::make_pair(CNetAddr(pnode->addr), CNetAddr(pnode->GetAddrLocal())));
-                }
-            }
-        }
-
-        // Hosts not to dial: our own public address once two outbound peers on
-        // different network groups report it (one peer alone cannot make us avoid
-        // an address), and the -addnode hosts (the bootstrap servers among them).
-        COutboundSkip skip;
-        skip.hosts = PeerReportedLocal(vReportedLocal);
-        std::vector<std::string> vAddedNow;
-        {
-            LOCK(cs_vAddedNodes);
-            vAddedNow = vAddedNodes;
-        }
-        std::map<CNetAddr, std::string> mapAddNodeNow;
-        {
-            LOCK(cs_mapAddNodeAddresses);
-            mapAddNodeNow = mapAddNodeAddresses;
-        }
-        std::set<CNetAddr> setAddNodeHosts = CurrentAddNodeHosts(mapAddNodeNow, vAddedNow);
-        skip.hosts.insert(setAddNodeHosts.begin(), setAddNodeHosts.end());
-        proxyType proxyIPv6;
-        skip.fNoIPv6Route = !IsLimited(NET_IPV6) && !GetProxy(NET_IPV6, proxyIPv6) && !HostHasIPv6Route();
+        CollectOutboundGroups(setConnected, vReportedLocal);
+        const COutboundSkip skip = CurrentOutboundSkip(vReportedLocal);
 
         int64_t nANow = GetAdjustedTime();
 
@@ -1783,22 +1794,10 @@ static void OpenConnectionsLoop(int nDialer)
         CAddrMan* pmanSelect = &SelectDialTable(GetProxy(NET_ONION, proxyOnion), GetRand(4));
 
         CAddrInfo addrPick = SelectOutboundCandidate(*pmanSelect, setConnected, nANow, skip);
-        if (addrPick.IsValid())
-            addrConnect = addrPick;
-
-        if (!addrConnect.IsValid())
+        if (!addrPick.IsValid())
             continue;
 
-        // Hold the group while dialling. Another dialer may have taken it, or
-        // connected to it, since setConnected was read: then this round is over.
-        CDialGroupReservation reservation(addrConnect.GetGroup());
-        if (!reservation || OutboundGroupConnected(addrConnect.GetGroup()))
-            continue;
-        proxyType proxyDial;
-        const bool fDirect = !addrConnect.IsTor() && !GetProxy(addrConnect.GetNetwork(), proxyDial);
-        OpenNetworkConnection(addrConnect, &grant, NULL, false,
-                              OutboundConnectTimeout(fDirect, mapArgs.count("-timeout") > 0, addrPick.GetAttempts(),
-                                                     addrPick.nLastTry, addrPick.GetLastSuccess(), nConnectTimeout));
+        DialOutboundPick(addrPick, grant);
     }
 }
 

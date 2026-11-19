@@ -11,6 +11,8 @@
 #include "util.h"
 #include "utiltime.h"
 
+#include <algorithm>
+#include <ctype.h>
 #include <stdio.h>
 #include <string>
 
@@ -106,6 +108,78 @@ BOOST_AUTO_TEST_CASE(parse_rejects_malformed)
     ShutdownBinding fresh;
     BOOST_CHECK(!ParseBinding("magic=ZCLSHUT\n", fresh));
     BOOST_CHECK_EQUAL(fresh.tipHeight, -1);
+}
+
+// Line framing, key set and value rules of ParseBinding, one malformed shape at
+// a time (characterization: these pin today's results).
+BOOST_AUTO_TEST_CASE(parse_binding_framing_and_values)
+{
+    const ShutdownBinding sample = SampleBinding();
+    const std::string good = SerializeBinding(sample);
+    const std::string tipLine = "tip=" + sample.tipHash.GetHex() + "\n";
+    const std::string coinsLine = "coins=" + sample.coinsBest.GetHex() + "\n";
+    const std::string filesLine = "files=" + sample.filesDigest.GetHex() + "\n";
+    ShutdownBinding out;
+
+    // framing: an empty key, a blank line, CRLF endings, a lone newline
+    BOOST_CHECK(!ParseBinding("=x\n" + good, out));
+    BOOST_CHECK(!ParseBinding(Replace(good, tipLine, tipLine + "=\n"), out));
+    BOOST_CHECK(!ParseBinding(good + "\n", out));
+    BOOST_CHECK(!ParseBinding("\n", out));
+    BOOST_CHECK(!ParseBinding(Replace(good, "magic=ZCLSHUT\n", "magic=ZCLSHUT\r\n"), out));
+    BOOST_CHECK(!ParseBinding(Replace(good, tipLine, "tip=" + sample.tipHash.GetHex() + "\r\n"), out));
+    // an embedded NUL in the height value
+    BOOST_CHECK(!ParseBinding(Replace(good, "height=1234567\n", std::string("height=12\0" "34567\n", 16)), out));
+
+    // key set: six keys with one unknown in place of a known one, a key that
+    // differs only in case, and a key with a trailing space
+    BOOST_CHECK(!ParseBinding(Replace(good, coinsLine, "coin=" + sample.coinsBest.GetHex() + "\n"), out));
+    BOOST_CHECK(!ParseBinding(Replace(good, "magic=", "Magic="), out));
+    BOOST_CHECK(!ParseBinding(Replace(good, "version=", "version ="), out));
+    // each key missing in turn
+    BOOST_CHECK(!ParseBinding(Replace(good, "magic=ZCLSHUT\n", ""), out));
+    BOOST_CHECK(!ParseBinding(Replace(good, "version=1\n", ""), out));
+    BOOST_CHECK(!ParseBinding(Replace(good, "height=1234567\n", ""), out));
+    BOOST_CHECK(!ParseBinding(Replace(good, coinsLine, ""), out));
+    BOOST_CHECK(!ParseBinding(Replace(good, filesLine, ""), out));
+    // a repeated key whose second value is the same
+    BOOST_CHECK(!ParseBinding(Replace(good, "version=1\n", "version=1\nversion=1\n"), out));
+
+    // values: an '=' inside a value belongs to the value
+    BOOST_CHECK(!ParseBinding(Replace(good, tipLine, "tip==" + sample.tipHash.GetHex().substr(1) + "\n"), out));
+    // bad hex in coins and files, a 65-digit and an empty hash
+    BOOST_CHECK(!ParseBinding(Replace(good, coinsLine, "coins=" + std::string(64, 'z') + "\n"), out));
+    BOOST_CHECK(!ParseBinding(Replace(good, filesLine, "files=" + std::string(65, '0') + "\n"), out));
+    BOOST_CHECK(!ParseBinding(Replace(good, filesLine, "files=\n"), out));
+    // height: empty, padded, beyond int32, a magic and version with padding
+    BOOST_CHECK(!ParseBinding(Replace(good, "height=1234567\n", "height=\n"), out));
+    BOOST_CHECK(!ParseBinding(Replace(good, "height=1234567\n", "height= 1234567\n"), out));
+    BOOST_CHECK(!ParseBinding(Replace(good, "height=1234567\n", "height=1234567 \n"), out));
+    BOOST_CHECK(!ParseBinding(Replace(good, "height=1234567\n", "height=2147483648\n"), out));
+    BOOST_CHECK(!ParseBinding(Replace(good, "magic=ZCLSHUT\n", "magic=ZCLSHUT \n"), out));
+    BOOST_CHECK(!ParseBinding(Replace(good, "version=1\n", "version=01\n"), out));
+
+    // accepted: any line order, upper-case hex, height 0 and INT32_MAX
+    std::string reordered = Replace(good, "magic=ZCLSHUT\n", "");
+    reordered = Replace(reordered, filesLine, filesLine + "magic=ZCLSHUT\n");
+    BOOST_CHECK(ParseBinding(reordered, out));
+    BOOST_CHECK(SameBinding(sample, out));
+    std::string upper = sample.tipHash.GetHex();
+    std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+    BOOST_CHECK(ParseBinding(Replace(good, tipLine, "tip=" + upper + "\n"), out));
+    BOOST_CHECK(out.tipHash == sample.tipHash);
+    BOOST_CHECK(ParseBinding(Replace(good, "height=1234567\n", "height=0\n"), out));
+    BOOST_CHECK_EQUAL(out.tipHeight, 0);
+    BOOST_CHECK(ParseBinding(Replace(good, "height=1234567\n", "height=2147483647\n"), out));
+    BOOST_CHECK_EQUAL(out.tipHeight, 2147483647);
+
+    // a failure late in the parse (the last value checked) leaves out as it was
+    ShutdownBinding kept = sample;
+    kept.tipHeight = 7;
+    BOOST_CHECK(!ParseBinding(Replace(good, "height=1234567\n", "height=-5\n"), kept));
+    BOOST_CHECK(!ParseBinding(Replace(good, filesLine, "files=" + std::string(64, 'g') + "\n"), kept));
+    BOOST_CHECK_EQUAL(kept.tipHeight, 7);
+    BOOST_CHECK(kept.filesDigest == sample.filesDigest);
 }
 
 BOOST_AUTO_TEST_CASE(write_and_consume_single_use)
