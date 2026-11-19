@@ -573,6 +573,7 @@ BOOST_AUTO_TEST_CASE(peer_board_blames_the_peer_that_supplied_a_bad_file)
     BOOST_CHECK_EQUAL(b.Assign(1, 30), 0);
     // streams still on the benched peer are told to leave
     BootstrapPeerBoard c(2, 2);
+    c.SetPeerHas(1, std::vector<uint8_t>()); // the other server has answered: it is a holder
     c.Attach(0, c.Assign(0, 0), 0);
     c.Attach(1, c.Assign(1, 0), 0);
     c.NoteClaim(0, 6, 100, false);
@@ -1853,6 +1854,7 @@ BOOST_AUTO_TEST_CASE(peer_board_never_benches_the_only_holder_of_a_pending_file)
     std::vector<uint8_t> has0(8, 1);
     has0[6] = 0; // file 6 is held by peer 1 only
     b.SetPeerHas(0, has0);
+    b.SetPeerHas(1, std::vector<uint8_t>()); // peer 1 has answered: it holds everything
     std::vector<uint8_t> unfinished(8, 0);
     unfinished[5] = unfinished[6] = 1;
     b.NoteClaim(1, 5, 100, false);
@@ -2008,6 +2010,260 @@ BOOST_AUTO_TEST_CASE(peer_board_an_idle_stream_takes_over_a_slow_holder_when_the
     BOOST_REQUIRE_EQUAL(mv.size(), 1U);
     BOOST_CHECK_EQUAL(mv[0].stream, 1);
     BOOST_CHECK(mv[0].reason == BMR_STEAL);
+}
+
+// ---- second review: servers that hold nothing, dead servers, unanswered servers, liars ----
+
+BOOST_AUTO_TEST_CASE(peer_board_a_server_without_pending_files_does_not_pull_streams)
+{
+    BootstrapPeerPolicy pol;
+    pol.windowMs = 1000;
+    pol.stallMs = 1000000;
+    pol.moveCooldownMs = 1000;
+    pol.penaltyMs = 1000;
+    BootstrapPeerBoard b(2, 4, pol);
+    std::vector<uint8_t> has(10, 0);
+    has[0] = 1; // peer 1 shares only file 0
+    b.SetPeerHas(1, has);
+    b.SetPartial(1, true);
+    b.Attach(3, 1, 0);
+    b.NoteClaim(3, 0, (uint64_t)20 << 20, false);
+    for (int64_t t = 100; t <= 2000; t += 100)
+        b.NoteChunk(3, 0, 1048576, t); // 10 MiB/s
+    b.NoteComplete(3, 0);
+    b.Detach(3); // it ran out of files
+    for (int s = 0; s < 3; ++s) {
+        b.Attach(s, 0, 2000);
+        b.NoteClaim(s, 5 + s, (uint64_t)1 << 30, false);
+    }
+    for (int64_t t = 2100; t <= 6000; t += 100)
+        for (int s = 0; s < 3; ++s)
+            b.NoteChunk(s, 5 + s, 104858, t); // 1 MiB/s each
+    b.SetIdle(3, true);
+    const std::vector<BootstrapMove> mv = b.Rebalance(6000);
+    std::string r;
+    for (size_t i = 0; i < mv.size(); ++i)
+        r += strprintf(" stream %d %s", mv[i].stream, mv[i].reason == BMR_SLOW ? "SLOW" : mv[i].reason == BMR_STEAL ? "STEAL" : "other");
+    BOOST_CHECK_MESSAGE(mv.empty(), "streams moved off the only holder toward a server that has none of their files:" << r);
+}
+
+BOOST_AUTO_TEST_CASE(peer_board_a_remembered_rate_never_makes_a_slow_server_move_and_dies_with_the_connection)
+{
+    BootstrapPeerPolicy pol;
+    pol.windowMs = 1000;
+    pol.stallMs = 1000000;
+    pol.moveCooldownMs = 1000;
+    pol.penaltyMs = 1000;
+    pol.stealMinSeconds = 3;
+    // peer 1 holds everything and once ran at 10 MiB/s; peer 0 has three live streams at 1 MiB/s. Without an idle
+    // stream nothing may move on the strength of the old rate (only live rates are compared for a slow server).
+    BootstrapPeerBoard b(2, 4, pol);
+    b.SetPeerHas(1, std::vector<uint8_t>());
+    b.Attach(3, 1, 0);
+    b.NoteClaim(3, 0, (uint64_t)20 << 20, false);
+    for (int64_t t = 100; t <= 2000; t += 100)
+        b.NoteChunk(3, 0, 1048576, t);
+    b.NoteComplete(3, 0);
+    b.Detach(3);
+    for (int s = 0; s < 3; ++s) {
+        b.Attach(s, 0, 2000);
+        b.NoteClaim(s, 5 + s, (uint64_t)1 << 30, false);
+    }
+    for (int64_t t = 2100; t <= 6000; t += 100)
+        for (int s = 0; s < 3; ++s)
+            b.NoteChunk(s, 5 + s, 104858, t);
+    BOOST_CHECK(b.Rebalance(6000).empty());
+    // with an idle stream the old rate may steal ...
+    BootstrapPeerBoard c(2, 4, pol);
+    c.SetPeerHas(1, std::vector<uint8_t>());
+    c.Attach(3, 1, 0);
+    c.NoteClaim(3, 0, (uint64_t)20 << 20, false);
+    for (int64_t t = 100; t <= 2000; t += 100)
+        c.NoteChunk(3, 0, 1048576, t);
+    c.NoteComplete(3, 0);
+    c.Detach(3);
+    for (int s = 0; s < 3; ++s) {
+        c.Attach(s, 0, 2000);
+        c.NoteClaim(s, 5 + s, (uint64_t)1 << 30, false);
+    }
+    for (int64_t t = 2100; t <= 6000; t += 100)
+        for (int s = 0; s < 3; ++s)
+            c.NoteChunk(s, 5 + s, 104858, t);
+    c.SetIdle(3, true);
+    BOOST_CHECK_EQUAL(c.Rebalance(6000).size(), 1U);
+    // ... but not once a connection to that server failed: the rate it had says nothing about it now
+    BootstrapPeerBoard d(2, 4, pol);
+    d.SetPeerHas(1, std::vector<uint8_t>());
+    d.Attach(3, 1, 0);
+    d.NoteClaim(3, 0, (uint64_t)20 << 20, false);
+    for (int64_t t = 100; t <= 2000; t += 100)
+        d.NoteChunk(3, 0, 1048576, t);
+    d.NoteComplete(3, 0);
+    d.Detach(3);
+    d.ConnectFailed(1, 2000);
+    for (int s = 0; s < 3; ++s) {
+        d.Attach(s, 0, 2000);
+        d.NoteClaim(s, 5 + s, (uint64_t)1 << 30, false);
+    }
+    for (int64_t t = 2100; t <= 6000; t += 100)
+        for (int s = 0; s < 3; ++s)
+            d.NoteChunk(s, 5 + s, 104858, t);
+    d.SetIdle(3, true);
+    BOOST_CHECK(d.Rebalance(6000).empty());
+}
+
+BOOST_AUTO_TEST_CASE(peer_board_assigns_a_stream_to_a_server_that_has_something_for_it)
+{
+    BootstrapPeerBoard b(2, 4);
+    std::vector<uint8_t> has(10, 0);
+    has[0] = has[1] = 1; // peer 1 holds files 0 and 1 only
+    b.SetPeerHas(1, has);
+    std::vector<uint8_t> unfinished(10, 0);
+    unfinished[5] = unfinished[6] = 1; // what is left is held by the primary only
+    b.SetUnfinishedSource([unfinished]() { return unfinished; });
+    for (int s = 0; s < 4; ++s) {
+        bool useful = false;
+        BOOST_CHECK_EQUAL(b.Assign(s, 1000 + s, &useful), 0);
+        BOOST_CHECK(useful);
+        b.Attach(s, 0, 1000 + s);
+    }
+    // nothing at all for anyone (every pending file is pinned elsewhere or gone): the caller is told to wait
+    BootstrapPeerBoard c(2, 2);
+    std::vector<uint8_t> none(4, 0);
+    c.SetUnfinishedSource([none]() { return none; });
+    c.SetPeerHas(1, std::vector<uint8_t>());
+    bool useful = true;
+    c.Assign(0, 0, &useful);
+    BOOST_CHECK(!useful);
+    // a server that has not answered yet is probed
+    BootstrapPeerBoard d(2, 2);
+    std::vector<uint8_t> some(4, 1);
+    d.SetUnfinishedSource([some]() { return some; });
+    bool probe = false;
+    d.Assign(0, 0, &probe);
+    d.Attach(0, 0, 0);
+    BOOST_CHECK_EQUAL(d.Assign(1, 1, &probe), 1);
+    BOOST_CHECK(probe);
+}
+
+BOOST_AUTO_TEST_CASE(peer_board_a_server_that_never_answered_holds_nothing)
+{
+    // the primary alone supplied a failing file; the other server never sent its manifest, so it is no holder
+    // and the primary must not be benched on its account
+    BootstrapPeerBoard b(2, 2);
+    b.Attach(0, b.Assign(0, 0), 0);
+    b.NoteClaim(0, 5, 100, false);
+    b.NoteChunk(0, 5, 100, 10);
+    std::vector<uint8_t> unfinished(8, 0);
+    unfinished[5] = 1;
+    b.HashFailed(0, 5, &unfinished);
+    BOOST_CHECK(!b.Peer(0, 20).banned);
+    std::vector<uint8_t> need(8, 0);
+    need[5] = 1;
+    b.ManifestMismatch(0);
+    BOOST_CHECK(!b.EveryFileHasHolder(need)); // nobody that has answered holds file 5
+    b.SetPeerHas(1, std::vector<uint8_t>());
+    BOOST_CHECK(b.EveryFileHasHolder(need));
+    // once it has answered it is a holder and the sole supplier is benched
+    BootstrapPeerBoard c(2, 2);
+    c.Attach(0, c.Assign(0, 0), 0);
+    c.SetPeerHas(1, std::vector<uint8_t>());
+    c.NoteClaim(0, 5, 100, false);
+    c.NoteChunk(0, 5, 100, 10);
+    c.HashFailed(0, 5, &unfinished);
+    BOOST_CHECK(c.Peer(0, 20).banned);
+}
+
+BOOST_AUTO_TEST_CASE(peer_board_a_lying_supplier_is_benched_after_two_files_one_server_then_got_right)
+{
+    BootstrapPeerBoard b(2, 2);
+    b.Attach(0, b.Assign(0, 0), 0);
+    b.Attach(1, b.Assign(1, 0), 0);
+    b.SetPeerHas(1, std::vector<uint8_t>());
+    std::vector<uint8_t> unfinished(16, 0);
+    b.SetUnfinishedSource([&unfinished]() { return unfinished; });
+    for (uint32_t f = 10; f < 12; ++f) {
+        unfinished[f] = 1;
+        // both suppliers touched the file and it failed; it is pinned to the primary, which fetches it again
+        b.NoteClaim(1, f, 100, false);
+        b.NoteChunk(1, f, 50, 10);
+        b.NoteRelease(1, f);
+        b.NoteClaim(0, f, 50, true);
+        b.NoteChunk(0, f, 50, 20);
+        b.HashFailed(0, f, &unfinished);
+        b.NoteClaim(0, f, 100, false); // from byte 0
+        b.NoteChunk(0, f, 100, 40);
+        unfinished[f] = 0;
+        b.NoteComplete(0, f);
+        if (f == 10)
+            BOOST_CHECK(!b.Peer(1, 45).banned);
+    }
+    BOOST_CHECK(!b.Peer(0, 50).banned);
+    BOOST_CHECK(b.Peer(1, 50).banned); // two files its attempts failed and the primary alone got right
+    // never while it is the only holder of a file still to come
+    BootstrapPeerBoard c(2, 2);
+    c.Attach(0, c.Assign(0, 0), 0);
+    c.Attach(1, c.Assign(1, 0), 0);
+    std::vector<uint8_t> has0(16, 1);
+    has0[14] = 0; // file 14 is held by peer 1 only
+    c.SetPeerHas(0, has0);
+    c.SetPeerHas(1, std::vector<uint8_t>());
+    std::vector<uint8_t> pend(16, 0);
+    pend[14] = 1;
+    c.SetUnfinishedSource([&pend]() { return pend; });
+    for (uint32_t f = 10; f < 12; ++f) {
+        c.NoteClaim(1, f, 100, false);
+        c.NoteChunk(1, f, 50, 10);
+        c.NoteRelease(1, f);
+        c.NoteClaim(0, f, 50, true);
+        c.NoteChunk(0, f, 50, 20);
+        c.HashFailed(0, f, &pend);
+        c.NoteClaim(0, f, 100, false);
+        c.NoteChunk(0, f, 100, 40);
+        c.NoteComplete(0, f);
+    }
+    BOOST_CHECK(!c.Peer(1, 50).banned);
+}
+
+BOOST_AUTO_TEST_CASE(a_fast_secondary_holding_few_files_does_not_make_the_download_slower)
+{
+    BootstrapPeerPolicy pol; // what -bootstrapschedwindowms=1000 sets
+    pol.windowMs = 1000;
+    pol.stallMs = 2000;
+    pol.moveCooldownMs = pol.penaltyMs = 3000;
+    pol.stealMinSeconds = 1;
+    PolicyGuard guard(pol);
+    const Snapshot s = MakeSnapshot(60);
+    int64_t alone = 0, both = 0;
+    {
+        TempDir tmp;
+        FakeBootstrapServer a(s);
+        a.chunkDelayMs = 40;
+        std::string error;
+        const int64_t t0 = GetTimeMillis();
+        BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error), error);
+        alone = GetTimeMillis() - t0;
+    }
+    {
+        TempDir tmp;
+        FakeBootstrapServer a(s), b(s);
+        a.chunkDelayMs = 40;
+        b.chunkDelayMs = 2;
+        CBootstrapSnapshotManifest other = s.manifest; // another height: shares only the first 8 files
+        for (size_t i = 8; i < other.vFiles.size(); ++i)
+            other.vFiles[i].hashSha256 = uint256S(strprintf("0x%x", (unsigned)(1000 + i)));
+        b.manifestFor = [&](int) { return other; };
+        std::string error;
+        const int64_t t0 = GetTimeMillis();
+        BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                                std::vector<std::string>(1, PeerName(b))), error);
+        both = GetTimeMillis() - t0;
+        CheckAllFilesMatch(s, tmp.path / "staging");
+        BOOST_TEST_MESSAGE("partial secondary: alone " << alone << " ms, with a fast partial secondary " << both << " ms; a connections="
+                           << a.connections.load() << " b connections=" << b.connections.load());
+    }
+    // 15% and half a second of noise
+    BOOST_CHECK_MESSAGE(both * 100 <= alone * 115 + 50000, "a fast partial secondary made it slower: " << both << " ms vs " << alone << " ms alone");
 }
 
 // ---- downloads against fake servers: liveness ----
