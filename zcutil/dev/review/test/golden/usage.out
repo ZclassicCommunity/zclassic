@@ -1,0 +1,2 @@
+zcl-dev review: usage: zcl-dev review check [--json] [--rows-from <commit>] [--after=N] <base>..<tip>
+exit=2

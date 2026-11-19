@@ -1,5 +1,5 @@
 # zcl-dev-hooks (`zcl-dev hooks install|status`) and zcl-dev-hook (what the git hook shims exec):
-# one source, one binary, two names. Libc only; host cc, mingw cross compiler and macOS clang.
+# one source plus ../review/review-core.c (the pre-push review gate), two names. Libc only; host cc, mingw cross compiler and macOS clang.
 # Outputs go to ../../bin (git-ignored).
 #   make -C zcutil/dev/hooks                                        host compiler
 #   make -C zcutil/dev/hooks CC=x86_64-w64-mingw32-gcc EXEEXT=.exe  cross build
@@ -10,22 +10,25 @@ CFLAGS ?= -O2 -g
 STD ?= -std=gnu17
 WARN ?= -Wall -Wextra -Werror
 BIN = ../../bin
+REVIEW = ../review
 ifneq ($(EXEEXT),)
 CFLAGS += -D__USE_MINGW_ANSI_STDIO=1
 endif
 
 all: $(BIN)/zcl-dev-hooks$(EXEEXT) $(BIN)/zcl-dev-hook$(EXEEXT)
 
-$(BIN)/zcl-dev-hooks$(EXEEXT): zcl-dev-hooks.c
+$(BIN)/zcl-dev-hooks$(EXEEXT): zcl-dev-hooks.c $(REVIEW)/review-core.c $(REVIEW)/review-core.h
 	mkdir -p $(BIN)
-	$(CC) $(STD) $(WARN) $(CFLAGS) -o $@ zcl-dev-hooks.c
+	$(CC) $(STD) $(WARN) $(CFLAGS) -I$(REVIEW) -o $@ zcl-dev-hooks.c $(REVIEW)/review-core.c
 
 $(BIN)/zcl-dev-hook$(EXEEXT): $(BIN)/zcl-dev-hooks$(EXEEXT)
 	cp $< $@
 
-# The pre-push test drives the real zcl-dev select, so build the dev tools first.
+# The pre-push test drives the real zcl-dev select, so build the dev tools first; the review gate cases are
+# in ../review/test/fixtures.c (--hook), built here.
 check: all
 	$(MAKE) -C .. all EXEEXT=$(EXEEXT)
+	$(MAKE) -C $(REVIEW) $(BIN)/zcl-review-fixtures
 	sh test/run.sh $(BIN)
 
 clean:

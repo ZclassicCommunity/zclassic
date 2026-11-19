@@ -54,7 +54,6 @@ git -C "$repo" commit -q --no-verify -m init
 ci() { git -C "$repo" commit -q --no-verify --allow-empty -m "$1"; }
 hooked() { git -C "$repo" commit -q -m "$1"; }
 zd() { "$bindir/zcl-dev-hooks" "$@"; }
-
 # ---- install and status
 cd "$repo"
 expect "status before install is not ready" 1 "NOT ready" zd status
@@ -66,7 +65,6 @@ expect "install refuses a foreign hooksPath" 1 "already 'other'" zd install
 expect "install --force" 0 "zcutil/githooks" zd install --force
 expect "dispatch through zcl-dev" 0 "hooks: installed" "$bindir/zcl-dev" -C "$repo" hooks status
 [ "$(git config core.hooksPath)" = zcutil/githooks ] || bad "hooksPath value"
-
 # ---- pre-commit: primary checkout guard
 echo 1 >>src/a.c; git add src/a.c
 expect "master commit in primary" 0 "" hooked c1
@@ -242,7 +240,7 @@ expect "ZCL_PUSH_OK overrides, loudly" 0 "ZCL_PUSH_OK override" env ZCL_PUSH_OK=
 grep -q "ref=refs/heads/master .*new=$d reason=test reason" "$repo/.git/zcl-push-overrides.log" && ok "override recorded in .git/zcl-push-overrides.log" || bad "override log"
 expect "deleting master refused" 1 "deleting refs/heads/master" git push -q origin :master
 [ "$(git -C "$remote" rev-parse master)" = "$d" ] || bad "remote master moved unexpectedly"
-
+"$bindir"/zcl-review-fixtures --hook "$bindir" "$src/githooks" || fails=$((fails + 1)) # review gate cases: real pushes, in C
 [ "$fails" = 0 ] && { echo "hooks: all tests passed"; exit 0; }
 echo "hooks: $fails FAILED" >&2
 exit 1

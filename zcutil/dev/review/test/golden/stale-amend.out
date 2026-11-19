@@ -1,0 +1,4 @@
+review: 1 of 2 commits in @base..@r1a have no accepted review:
+  @c2a fix: two (stale row)
+record: zcl-dev review record --reviewer <name> --verdict ACCEPT @base..@r1a
+exit=1

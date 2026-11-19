@@ -1,0 +1,3 @@
+@base..@c2	@tree2	claude opus 5.5,claude sonnet 5.5	gpt reviewer	ACCEPT-WITH-FIXES	<date>	log /tmp/review-1.log
+git commit -m "review: record @base..@c2" -- doc/agent/REVIEWS.tsv
+exit=0

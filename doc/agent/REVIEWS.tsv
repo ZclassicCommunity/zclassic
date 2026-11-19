@@ -1,0 +1,11 @@
+# Review record: one row per review, tab-separated, appended by zcl-dev review record (never edit by hand).
+# A verdict covers the non-merge commits of its range that descend from the range base, and only while the
+# row tip commit still has the tree recorded in tip_tree; a rewritten history makes the row stale.
+# range      <base40>..<tip40> (full commit ids)
+# tip_tree   40-hex tree of the tip commit
+# authors    sorted, comma-joined, lowercased Co-Authored-By names of the range, or human:<git author> for a commit without one
+# reviewer   free text, lowercased, no tab; never an author of the covered commits (compared lowercased, only a-z0-9 kept)
+# verdict    ACCEPT | ACCEPT-WITH-FIXES | REJECT (a later REJECT row overrides earlier accepts it contains)
+# date       UTC YYYY-MM-DDTHH:MM:SSZ
+# evidence   at most 200 printable characters, no tab: a log path or a short note
+# Commits whose only changed path is this file need no row. check reads this file from the tip commit.

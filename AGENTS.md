@@ -28,6 +28,7 @@ make -C zcutil check                                        # every developer to
 zcutil/bin/zcl-dev doctor                                   # what this host lacks to build and test, with the fix for each gap
 zcutil/bin/zcl-dev verify [--base ref]                      # one trip for committed changes: select, focused tests when built (needs the zcl-dev-t-fast alias), zcl-lint all, test-changed hint (no `tests`, `t-fast --changed` or `hooks install` line yet: they land with their tools; zcl-lint has no `fast`, so verify runs `all`); on Windows (Git Bash) it runs zcl-lint.exe too, with sh.exe from PATH
 zcutil/bin/zcl-dev code map|owner|impact|file|sym|refs ...  # code intelligence: navigate before searching
+zcutil/bin/zcl-dev review record|check <base>..<tip>        # review verdicts: record a non-author verdict in doc/agent/REVIEWS.tsv, check a range is covered (pre-push requires it for master and release/*)
 zcutil/bin/zcl-dev wiki [topic]                             # walk the docs and source trees one topic at a time
 zcutil/bin/zcl-dev lessons find <words>                     # search lessons, traps and facts (add: lessons add)
 zcutil/bin/zcl-dev know <term>                              # closed FACTS table answer, UNKNOWN when no row; know --check validates it
@@ -47,7 +48,7 @@ Before editing, run `zcutil/bin/zcl-dev guide <paths>`: nearest rules, CI steps,
 - **No Python, no Rust, no GitHub CI.** New tooling is C23 or small POSIX sh. CI runs on our own machines: `zcutil/local-ci.sh` (macOS: `zcutil/local-ci-macos.sh`). Never add or dispatch GitHub Actions.
 - **Custody.** The wallet holds keys. Never spend funds, export keys or touch a real datadir, wallet file or profile. Tests use isolated datadirs, isolated profiles and leased ports; never derive a port from the PID.
 - **Portability.** Anything linked into the daemon or wallet must build on Linux, macOS arm64 and the mingw cross-compiler. Release builds use GCC 9: C compiles as gnu17 (no `nullptr`, `constexpr`, attributes, `typeof`, `_BitInt`, `#embed`); developer tools avoid C23-only syntax too.
-- **Review.** Every change is reviewed by someone other than its author before merge. Commits are authored by the repository owner; an AI-written commit ends with a `Co-Authored-By:` trailer naming the model.
+- **Review.** Every change is reviewed by someone other than its author before merge. Commits are authored by the repository owner; an AI-written commit ends with a `Co-Authored-By:` trailer naming the model. The verdict is kept in [doc/agent/REVIEWS.tsv](doc/agent/REVIEWS.tsv) (`zcl-dev review record`, bound to the commit range and tip tree, reviewer never an author) and the pre-push hook refuses commits on master and release/* that no row covers; only `git push --no-verify` bypasses it. Known gap: merge commits are not checked, so content added only by a merge resolution is not covered by a row.
 - **Preserve unrelated work.** Never reset, overwrite or commit other people's dirty files. Never rewrite shared history.
 - **Production.** Do not restart, deploy to or edit a production service or its datadir without being asked; never restart one twice in quick succession.
 

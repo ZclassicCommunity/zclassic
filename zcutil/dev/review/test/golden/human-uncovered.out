@@ -1,0 +1,4 @@
+review: 1 of 1 commits in @c2..@c3 have no accepted review:
+  @c3 chore: human edit (no row)
+record: zcl-dev review record --reviewer <name> --verdict ACCEPT @c2..@c3
+exit=1

@@ -1,0 +1,4 @@
+exit=1
+lines=1
+under 16 KiB
+{"ok":false,"commits":80,"exempt":0,"uncovered":80,"after":0

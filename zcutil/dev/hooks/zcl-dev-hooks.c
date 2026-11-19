@@ -45,6 +45,13 @@
  * lines anyone can append (or point ZCL_CI_OUT at); the receipt tree field is not checked against the
  * commit; `git push --no-verify` writes no override log; merge and cherry-pick run no pre-commit; tags
  * are not gated. A pass is not proof that the commit was tested.
+ * Review: after the receipt admission, the same push must pass the review check of
+ * zcutil/dev/review/review-core.c over <remote tip, or the merge base of a forced push, or the remote
+ * master for a new ref>..<pushed commit>: every non-merge commit is covered by an ACCEPT row of
+ * doc/agent/REVIEWS.tsv (read from the pushed commit) written by a non-author for that tip tree.
+ * ZCL_PUSH_OK does NOT waive review; only `git push --no-verify` skips it, which is the operator's explicit
+ * choice. Review is in force when the record exists at the base or at the pushed commit, so lines of history
+ * older than the record are not blocked, but deleting the record in the pushed commit does not bypass it.
  * Override ZCL_PUSH_OK=<reason>: printed and appended to <common git dir>/zcl-push-overrides.log.
  * Exit codes: 0 allowed, 1 refused, 2 broken (cannot run git, bad arguments).
  */
@@ -75,6 +82,8 @@
 #include <unistd.h>
 #define EXE_SUFFIX ""
 #endif
+
+#include "review-core.h"
 
 #define HOOKS_PATH "zcutil/githooks"
 #define TSV_PATH "zcutil/tools/Z23_SOURCE.tsv"
@@ -782,6 +791,61 @@ static void judge(const Repo *r, const char *remote, const char *rref, const cha
         snprintf(why + w, cap - w, "%s%s", w ? "; " : "", msg);
 }
 
+/* A new release ref is reviewed from where it leaves the remote's master: the master tip when that is an
+ * ancestor of the pushed commit, else the merge base (a release cut at a reviewed commit older than master). */
+static char *new_ref_base(const char *remote, const char *lsha)
+{
+    char *m = trusted_master(remote);
+    if (!m) return NULL;
+    const char *mbv[] = {"git", "merge-base", m, lsha, NULL};
+    RvBuf b;
+    char *mb = NULL;
+    if (rv_git(mbv, &b) == 0) {
+        b.p[strcspn(b.p, "\r\n")] = 0;
+        if (is_sha(b.p)) mb = xstrdup(b.p);
+    }
+    rv_buf_free(&b);
+    free(m);
+    return mb;
+}
+
+/* The commit the review range starts from: the remote tip when the push fast-forwards it, else the merge base
+ * (a forced push is reviewed from where history diverged), else for a NEW ref the remote's master tip. Caller
+ * frees; NULL when none is known. */
+static char *review_base(const char *remote, const char *rref, const char *lsha, const char *rsha)
+{
+    if (is_zero(rsha)) return ieq_prefix(rref, "refs/heads/master") ? NULL : new_ref_base(remote, lsha);
+    const char *anc[] = {"git", "merge-base", "--is-ancestor", rsha, lsha, NULL}; /* argv, no shell */
+    if (rv_git(anc, NULL) == 0) return xstrdup(rsha);
+    const char *mbv[] = {"git", "merge-base", rsha, lsha, NULL};
+    RvBuf b;
+    char *mb = NULL;
+    if (rv_git(mbv, &b) == 0) {
+        b.p[strcspn(b.p, "\r\n")] = 0;
+        if (is_sha(b.p)) mb = xstrdup(b.p);
+    }
+    rv_buf_free(&b);
+    return mb;
+}
+
+/* Review gate for one admitted update of a protected ref: 1 and a message when it must be refused. ZCL_PUSH_OK
+ * never reaches here as a waiver. Creating master on an empty remote has no base and no earlier line to review. */
+static int review_gate(const char *remote, const char *rref, const char *lsha, const char *rsha, char *msg, size_t cap)
+{
+    msg[0] = 0;
+    if (is_zero(lsha)) return 0;
+    if (is_zero(rsha) && ieq_prefix(rref, "refs/heads/master")) return 0;
+    char *base = review_base(remote, rref, lsha, rsha);
+    if (!base) {
+        if (!rv_rows_exist(lsha)) return 0;
+        snprintf(msg, cap, "review: no trusted base commit to review %.12s from (fetch the remote first)", lsha);
+        return 1;
+    }
+    int rc = rv_gate(base, lsha, msg, cap);
+    free(base);
+    return rc != 0;
+}
+
 static int pre_push(const char *remote)
 {
     Repo r = repo_open();
@@ -793,14 +857,21 @@ static int pre_push(const char *remote)
         if (!is_sha(lsha) || !is_sha(rsha)) die("malformed ref update line from git");
         char why[4096];
         judge(&r, remote, rref, lsha, rsha, why, sizeof why);
-        if (!why[0]) continue;
         const char *ov = getenv("ZCL_PUSH_OK");
-        if (ov && *ov) { record_override(&r, rref, rsha, lsha, ov); continue; }
-        fprintf(stderr, "zcl-dev-hook: refusing to push %.12s to %s: %s.\n"
-                        "  Land through a local-ci run on the exact commit (zcutil/local-ci.sh test-changed),\n"
-                        "  then push. Deliberate exception: ZCL_PUSH_OK=<reason> git push ... (logged).\n",
-                lsha, rref, why);
-        refused = 1;
+        if (why[0] && ov && *ov) record_override(&r, rref, rsha, lsha, ov);
+        else if (why[0]) {
+            fprintf(stderr, "zcl-dev-hook: refusing to push %.12s to %s: %s.\n"
+                            "  Land through a local-ci run on the exact commit (zcutil/local-ci.sh test-changed),\n"
+                            "  then push. Deliberate exception: ZCL_PUSH_OK=<reason> git push ... (logged).\n",
+                    lsha, rref, why);
+            refused = 1;
+            continue;
+        }
+        char rmsg[8192];
+        if (review_gate(remote, rref, lsha, rsha, rmsg, sizeof rmsg)) {
+            fprintf(stderr, "zcl-dev-hook: refusing to push %.12s to %s: %s\n", lsha, rref, rmsg);
+            refused = 1;
+        }
     }
     free(r.gitdir);
     free(r.top);
