@@ -324,13 +324,49 @@ static void enter_repo(const char *dir)
     if (chdir(l.v[0])) die("cannot chdir to %s", l.v[0]);
 }
 
+/* Repo-relative, canonical form of a path argument: `\` becomes `/`, an absolute path inside the work tree
+ * is made relative, and `.`, empty and `..` segments are collapsed. A path that climbs out of the tree is
+ * refused, so a prefix test (narrow_allowed) and a glob (impact.rules) see the same file. */
 static char *norm_path(const char *arg)
 {
-    char *p = xstrdup(arg), *r;
+    char *p = xstrdup(arg), *r, cwd[4096];
     for (r = p; *r; r++) if (*r == '\\') *r = '/';
     r = p;
-    while (r[0] == '.' && r[1] == '/') r += 2;
-    char *out = xfmt("%s%s", r[0] == '/' ? "" : prefix, r);
+    if (r[0] == '/' || (r[0] && r[1] == ':' && r[2] == '/')) {
+        if (!getcwd(cwd, sizeof cwd)) die("cannot read the current directory");
+        for (char *c = cwd; *c; c++) if (*c == '\\') *c = '/';
+        size_t n = strlen(cwd);
+        if (strncmp(r, cwd, n) || r[n] != '/') return p; /* outside the tree: unmapped, so broad */
+        r += n + 1;
+    } else {
+        char *j = xfmt("%s%s", prefix, r);
+        free(p);
+        p = r = j;
+    }
+    char *out = xrealloc(NULL, strlen(r) + 1), *w = out;
+    size_t depth = 0;
+    *w = 0;
+    while (*r) {
+        char *e = strchr(r, '/');
+        size_t len = e ? (size_t)(e - r) : strlen(r);
+        if (len == 0 || (len == 1 && r[0] == '.')) {
+            /* skip */
+        } else if (len == 2 && r[0] == '.' && r[1] == '.') {
+            if (!depth) die("path %s climbs out of the repository", arg);
+            while (w > out && w[-1] != '/') w--;
+            if (w > out) w--;
+            *w = 0;
+            depth--;
+        } else {
+            if (w > out) *w++ = '/';
+            memcpy(w, r, len);
+            w += len;
+            *w = 0;
+            depth++;
+        }
+        r += len + (e ? 1 : 0);
+    }
+    if (!out[0]) die("path %s names the repository root, not a file", arg);
     free(p);
     return out;
 }
@@ -498,7 +534,7 @@ static int rule_match(const Rule *r, const char *path)
 /* ---- selection ----------------------------------------------------------- */
 
 typedef struct {
-    List boost, gtest, qa, notes, nofocus, wallet_qt;
+    List boost, gtest, qa, notes, nofocus, wallet_qt, ignored;
     int broad, narrowed;
     char *why;
 } Sel;
@@ -619,7 +655,8 @@ static int impact_broad(const Rules *impact, const char *path, char **why)
 static int narrow_allowed(const char *path)
 {
     static const char *const ok[] = {"src/bech32.", "src/narrow.cpp", NULL};
-    for (const char *const *p = ok; *p; p++) if (has_prefix(path, *p)) return 1;
+    for (const char *const *p = ok; *p; p++)
+        if (has_prefix(path, *p) && !strchr(path + strlen(*p), '/')) return 1; /* a leaf, never a directory below it */
     return 0;
 }
 
@@ -645,7 +682,7 @@ static void select_path(Sel *s, const char *p, const Rules *rules, const Rules *
     char *why = NULL;
     if (impact_broad(impact, p, &why)) {
         if (narrow && !narrow_allowed(p)) {
-            list_push_free(&s->notes, xfmt("ignored a `narrow` row in %s for %s: not on the narrow allowlist, so the full run stays", RULES_FILE, p));
+            list_push_free(&s->ignored, xfmt("ignored a `narrow` row in %s for %s: not on the narrow allowlist, so the full run stays", RULES_FILE, p));
             narrow = 0;
         }
         if (narrow) {
@@ -676,6 +713,7 @@ static void sel_finish(Sel *s)
         list_push_free(&s->notes, xfmt("impact.rules marks ALL (%s) but tests.rules narrows it to the focused set; run zcutil/local-ci.sh test-changed before landing", w));
         free(w);
     }
+    for (size_t i = 0; i < s->ignored.n; i++) list_add(&s->notes, s->ignored.v[i]);
     if (s->nofocus.n) {
         size_t show = s->nofocus.n < 4 ? s->nofocus.n : 4;
         List first = {0};
@@ -710,7 +748,7 @@ static void print_sel(const Sel *s, const List *paths, int json)
         printf("{");
         jlist_cap("paths", paths, 1, 3000); /* five capped lists keep one object under 16 KiB */
         printf("\"broad\":%s,\"why\":", s->broad ? "true" : "false");
-        jstr(s->why ? s->why : "");
+        jstr_cap(s->why ? s->why : "", 400);
         printf(",\"narrowed\":%s,", s->narrowed ? "true" : "false");
         jlist_cap("boost", &s->boost, 1, 3000);
         jlist_cap("gtest", &s->gtest, 1, 3000);

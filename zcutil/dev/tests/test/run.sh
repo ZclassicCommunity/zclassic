@@ -286,5 +286,24 @@ case_ check-tests-default-base-head 0 sh -c "git -C \"$w\" config --unset branch
 # ---- --json caps one element: a long path is cut, not printed whole
 long=$(printf "src/%0600d.cpp" 0)
 case_ tests-json-element-clamped 0 sh -c "\"$bindir/zcl-dev-tests\" -C \"$w\" --as=tests --json $long | grep -c \"\.\.\.\\\"\""
+# ---- path arguments are canonicalized: no traversal form narrows a broad path
+fresh traversal
+case_ tests-traversal-dotdot 0 t --as=tests src/narrow.cpp/../core/engine.cpp
+case_ tests-traversal-dot-segments 0 t --as=tests ./src//core/./engine.cpp
+case_ tests-traversal-backslash 0 t --as=tests "src\narrow.cpp\..\core\engine.cpp"
+case_ tests-traversal-absolute 0 t --as=tests "$w/src/narrow.cpp/../core/engine.cpp"
+case_ tests-traversal-escape 2 t --as=tests src/../../etc/passwd
+case_ tests-traversal-root 2 t --as=tests src/..
+case_ tests-traversal-subdir 0 sh -c "cd \"$w/src\" && \"$bindir/zcl-dev-tests\" --as=tests narrow.cpp/../core/engine.cpp"
+case_ t-fast-dry-traversal 0 tf --dry-run --no-qa src/narrow.cpp/../core/engine.cpp
+case_ t-fast-dry-traversal-dir 0 tf --dry-run --no-qa src/narrow.cpp/x/../../core/engine.cpp
+# a leaf on the allowlist still narrows, a directory below it does not
+case_ t-fast-dry-narrow-leaf 0 tf --dry-run --no-qa src/narrow.cpp
+# ---- an ignored narrow row is not folded into the narrowed sentence; why is clamped
+fresh mixed
+printf "src/main.cpp\tboost:foo_tests narrow\n" >>"$w/zcutil/dev/tests.rules"
+case_ tests-mixed-ignored-note 0 t --as=tests src/narrow.cpp src/main.cpp
+longp=$(printf "src/%030000d.cpp" 0)
+case_ tests-why-clamped 0 sh -c "out=\$(\"$bindir/zcl-dev-tests\" -C \"$w\" --as=tests --json $longp); [ \${#out} -lt 16384 ] && echo under 16 KiB || echo over \${#out}"
 if [ "$fails" -ne 0 ]; then echo "zcl-dev-tests: $fails of $n FAILED"; exit 1; fi
 echo "zcl-dev-tests: all $n passed"
