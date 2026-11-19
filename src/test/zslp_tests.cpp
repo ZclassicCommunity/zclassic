@@ -824,7 +824,7 @@ BOOST_AUTO_TEST_CASE(review_message_position)
 }
 
 // token-name-rules parity vectors: src/test/data/token_name_rules.txt is shared byte for byte with Z23
-// (tests/vectors/token_name_rules.txt); every slp record is read by both implementations and must give the same
+// (tests/fixtures/token_name_rules/token_name_rules.txt); every slp record is read by both implementations and must give the same
 // answer. The file is read at run time (the tests run from the source tree); a missing file fails, never skips.
 BOOST_AUTO_TEST_CASE(token_name_rules_vectors)
 {

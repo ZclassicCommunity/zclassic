@@ -887,7 +887,7 @@ BOOST_AUTO_TEST_CASE(resolve_record_types_and_validation)
 }
 
 // ---- token-name-rules parity vectors ---------------------------------------------------------
-// src/test/data/token_name_rules.txt is shared byte for byte with Z23 (tests/vectors/token_name_rules.txt): every
+// src/test/data/token_name_rules.txt is shared byte for byte with Z23 (tests/fixtures/token_name_rules/token_name_rules.txt): every
 // record is read by both implementations and must give the same answer. The file is read at run time (the tests run
 // from the source tree); a missing file fails the test, it is never skipped.
 
