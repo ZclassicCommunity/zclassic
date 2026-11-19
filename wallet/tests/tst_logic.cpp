@@ -888,6 +888,8 @@ private slots:
     void launchProbe_skipInitialProbe();
     void launchProbe_loopbackPortFree();
     void launchProbe_warmupPollMs();
+    void launchProbe_confNamesRpcNetwork();
+    void launchProbe_every();
     void embeddedDaemon_integrity();
     void embeddedDaemon_footerLocation();
     void embeddedDaemon_pinsLaunchedFile();
@@ -2978,43 +2980,113 @@ void TestLogic::health_eachAttentionStateIsReported() {
     QVERIFY(many.tooltip().contains("being rebuilt") && many.tooltip().contains("never confirm"));
 }
 
+
 // The first getinfo of a launch is skipped only when its refusal is certain.
 static int g_portFreeCalls = 0;
+static int g_confReads = 0;
 static bool fakePortFree(quint16) { ++g_portFreeCalls; return true; }
 static bool fakePortBusy(quint16) { ++g_portFreeCalls; return false; }
+static bool fakeConfPlain(const QString&) { ++g_confReads; return false; }
+static bool fakeConfNamesRpc(const QString&) { ++g_confReads; return true; }
+
+static LaunchProbe::ProbeInputs probeInputs(bool useEmbedded, bool externalDaemon, bool nodeSpawned,
+                                            const QString& host, const QString& port)
+{
+    return {useEmbedded, externalDaemon, nodeSpawned, host, port, []() { return QStringLiteral("zclassic.conf"); }};
+}
 
 void TestLogic::launchProbe_skipInitialProbe() {
+    using LaunchProbe::skipInitialProbe;
     const QString lo = QStringLiteral("127.0.0.1");
-    QVERIFY(LaunchProbe::skipInitialProbe(true, false, false, lo, "8023", fakePortFree));
-    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, false, lo, "8023", fakePortBusy));
-    // Every other condition keeps the probe, and does not even bind the port.
+    const auto ok = probeInputs(true, false, false, lo, "8023");
+    QVERIFY(skipInitialProbe(ok, true, fakePortFree, fakeConfPlain));
+    QVERIFY(!skipInitialProbe(ok, true, fakePortBusy, fakeConfPlain));
+    // A conf with rpcallowip or rpcbind (the node then binds 0.0.0.0 / [::]) never
+    // skips, and the port is not even bound.
     g_portFreeCalls = 0;
-    QVERIFY(!LaunchProbe::skipInitialProbe(false, false, false, lo, "8023", fakePortFree)); // external node mode
-    QVERIFY(!LaunchProbe::skipInitialProbe(true, true, false, lo, "8023", fakePortFree));   // conf names a daemon
-    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, true, lo, "8023", fakePortFree));   // node already spawned
-    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, false, "localhost", "8023", fakePortFree));
-    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, false, "192.168.1.5", "8023", fakePortFree));
-    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, false, lo, "", fakePortFree));
-    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, false, lo, "0", fakePortFree));
-    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, false, lo, "65536", fakePortFree));
-    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, false, lo, "80x", fakePortFree));
+    QVERIFY(!skipInitialProbe(ok, true, fakePortFree, fakeConfNamesRpc));
     QCOMPARE(g_portFreeCalls, 0);
+    // Off Windows the probe always runs: no conf read, no bind.
+    g_portFreeCalls = 0; g_confReads = 0;
+    QVERIFY(!skipInitialProbe(ok, false, fakePortFree, fakeConfPlain));
+    // Every other condition keeps the probe, and neither reads the conf nor binds the port.
+    QVERIFY(!skipInitialProbe(probeInputs(false, false, false, lo, "8023"), true, fakePortFree, fakeConfPlain)); // external node mode
+    QVERIFY(!skipInitialProbe(probeInputs(true, true, false, lo, "8023"), true, fakePortFree, fakeConfPlain));   // conf names a daemon
+    QVERIFY(!skipInitialProbe(probeInputs(true, false, true, lo, "8023"), true, fakePortFree, fakeConfPlain));   // node already spawned
+    QVERIFY(!skipInitialProbe(probeInputs(true, false, false, "localhost", "8023"), true, fakePortFree, fakeConfPlain));
+    QVERIFY(!skipInitialProbe(probeInputs(true, false, false, "192.168.1.5", "8023"), true, fakePortFree, fakeConfPlain));
+    QVERIFY(!skipInitialProbe(probeInputs(true, false, false, lo, ""), true, fakePortFree, fakeConfPlain));
+    QVERIFY(!skipInitialProbe(probeInputs(true, false, false, lo, "0"), true, fakePortFree, fakeConfPlain));
+    QVERIFY(!skipInitialProbe(probeInputs(true, false, false, lo, "65536"), true, fakePortFree, fakeConfPlain));
+    QVERIFY(!skipInitialProbe(probeInputs(true, false, false, lo, "80x"), true, fakePortFree, fakeConfPlain));
+    QCOMPARE(g_portFreeCalls, 0);
+    QCOMPARE(g_confReads, 0);
+    // The default platform flag is Windows-only.
+#ifdef Q_OS_WIN
+    QVERIFY(LaunchProbe::kSkipSupported);
+#else
+    QVERIFY(!LaunchProbe::kSkipSupported);
+    QVERIFY(!skipInitialProbe(ok));
+#endif
+}
+
+void TestLogic::launchProbe_confNamesRpcNetwork() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    auto conf = [&](const QString& name, const QByteArray& body) {
+        const QString path = dir.filePath(name);
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly)) return QString();
+        f.write(body);
+        return path;
+    };
+    using LaunchProbe::confNamesRpcNetwork;
+    QVERIFY(!confNamesRpcNetwork(conf("plain.conf", "server=1\nrpcport=8023\n# rpcallowip=0.0.0.0/0\n#rpcbind=0.0.0.0\n")));
+    QVERIFY(confNamesRpcNetwork(conf("allow.conf", "server=1\nrpcallowip=192.168.1.0/24\n")));
+    QVERIFY(confNamesRpcNetwork(conf("bind.conf", "  rpcbind = 0.0.0.0\r\n")));
+    QVERIFY(!confNamesRpcNetwork(conf("other.conf", "rpcallowipx=1\nmyrpcbind=1\n")));
+    // Doubt keeps the probe: no conf path, or a conf that cannot be read.
+    QVERIFY(confNamesRpcNetwork(QString()));
+    QVERIFY(confNamesRpcNetwork(dir.filePath("missing.conf")));
 }
 
 void TestLogic::launchProbe_loopbackPortFree() {
-    // A listening server on 127.0.0.1 makes the port busy; once it closes the port is free.
-    QTcpServer server;
-    QVERIFY(server.listen(QHostAddress(QHostAddress::LocalHost), 0));
-    const quint16 port = server.serverPort();
-    QVERIFY(port != 0);
-    QVERIFY(!LaunchProbe::loopbackPortFree(port));
-    QVERIFY(!LaunchProbe::skipInitialProbe(true, false, false, "127.0.0.1", QString::number(port)));
-    server.close();
-    QVERIFY(LaunchProbe::loopbackPortFree(port));
-    QVERIFY(LaunchProbe::skipInitialProbe(true, false, false, "127.0.0.1", QString::number(port)));
-    QVERIFY(LaunchProbe::loopbackPortFree(port)); // the probe released the port again
+    // Listeners of every shape a node can open: loopback (its default), IPv4 any and
+    // the dual-stack any (rpcallowip without rpcbind). Each must make the port busy.
+    // Off Windows the answer is always "not free", so the probe always runs there.
+    const QHostAddress shapes[] = {QHostAddress(QHostAddress::LocalHost),
+                                   QHostAddress(QHostAddress::AnyIPv4),
+                                   QHostAddress(QHostAddress::Any)};
+    for (const QHostAddress& shape : shapes) {
+        QTcpServer server;
+        QVERIFY2(server.listen(shape, 0), qPrintable(shape.toString()));
+        const quint16 port = server.serverPort();
+        QVERIFY(!LaunchProbe::loopbackPortFree(port));
+        QVERIFY(!LaunchProbe::skipInitialProbe(probeInputs(true, false, false, "127.0.0.1", QString::number(port)),
+                                               LaunchProbe::kSkipSupported, LaunchProbe::loopbackPortFree, fakeConfPlain));
+        server.close();
+#ifdef Q_OS_WIN
+        QVERIFY(LaunchProbe::loopbackPortFree(port));
+        QVERIFY(LaunchProbe::loopbackPortFree(port)); // the probe released the port again
+#else
+        QVERIFY(!LaunchProbe::loopbackPortFree(port));
+#endif
+    }
     QVERIFY(!LaunchProbe::loopbackPortFree(0));
 }
+
+void TestLogic::launchProbe_every() {
+    LaunchProbe::Every every;
+    int runs = 0;
+    QVERIFY(every.run(1000, [&]() { ++runs; }));
+    QVERIFY(!every.run(1000, [&]() { ++runs; }));
+    QVERIFY(!every.run(1000, [&]() { ++runs; }));
+    QCOMPARE(runs, 1);
+    QTest::qWait(30);
+    QVERIFY(every.run(20, [&]() { ++runs; }));
+    QCOMPARE(runs, 2);
+}
+
 
 void TestLogic::launchProbe_warmupPollMs() {
     QCOMPARE(LaunchProbe::warmupPollMs(0), 100);

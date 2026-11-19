@@ -54,6 +54,7 @@ SOURCES += \
     src/embeddeddaemon.cpp \
     src/startupaccess.cpp \
     src/launchprobe.cpp \
+    src/portprobe_win.cpp \
     src/main.cpp \
     src/mainwindow.cpp \
     src/rpc.cpp \
@@ -105,6 +106,7 @@ HEADERS += \
     src/repairlocation.h \
     src/startupaccess.h \
     src/launchprobe.h \
+    src/portprobe_win.h \
     src/mainwindow.h \
     src/precompiled.h \
     src/rpc.h \
@@ -189,7 +191,7 @@ qnx: target.path = /tmp/$${TARGET}/bin
 else: unix:!android: target.path = /opt/$${TARGET}/bin
 !isEmpty(target.path): INSTALLS += target
 
-win32: LIBS += -L$$PWD/res/ -llibsodium
+win32: LIBS += -L$$PWD/res/ -llibsodium -lws2_32
 else:unix: LIBS += -L$$PWD/res/ -lsodium
 
 INCLUDEPATH += $$PWD/res

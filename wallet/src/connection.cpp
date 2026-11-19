@@ -37,6 +37,7 @@
 #include <QDirIterator>
 
 using json = nlohmann::json;
+static LaunchProbe::Every bootstrapProbeEvery, waitingLogEvery;   // warm-up poll side work, at most 1/s
 
 ConnectionLoader::ConnectionLoader(MainWindow* main, RPC* rpc) {
     this->main = main;
@@ -401,13 +402,11 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
                 // it so the splash shows MOVING "Downloading blockchain — X%"/"Verifying…"
                 // instead of the frozen "Almost ready" line. Async + advisory: if the port
                 // is still fully refusing it just errors out harmlessly and the static text
-                // above stays; it never blocks or changes the poll cadence below. Owned
-                // embedded daemon only (it always has the RPC); a foreign daemon attaches on
-                // the getinfo-success path before this branch matters.
+                // above stays; it never blocks or changes the poll cadence below. Owned embedded
+                // daemon only; a foreign daemon attaches on the getinfo-success path first.
                 if (ezclassicd != nullptr)
                     this->probeBootstrapProgress(connection);
-                // Probe quickly during the first few seconds of warmup so warm restarts
-                // reconnect without waiting a full extra second, then settle to 1s.
+                // Not warmupPollMs: each retry rebuilds the connection and a refused connect already takes 2-4 s on Windows.
                 int probeMs = (ezWarmupTimer.isValid() && ezWarmupTimer.elapsed() < 4000) ? 250 : 1000;
                 QTimer::singleShot(probeMs, [=]() { doAutoConnect(); });
                 return;
@@ -419,9 +418,9 @@ void ConnectionLoader::doAutoConnect(bool tryEzclassicdStart) {
             main->logger->write("Embedded zclassicd exited and did not come online");
             this->handleStartupFailure();
         };
-        // Nothing listens on our RPC port: skip the doomed probe (2-4 s on Windows; launchprobe.h).
-        if (LaunchProbe::skipInitialProbe(Settings::getInstance()->useEmbedded(), config->zclassicDaemon,
-                                          ezclassicd != nullptr, config->host, config->port))
+        // Windows, nothing bound to our RPC port: skip the doomed probe (2-4 s; launchprobe.h).
+        if (LaunchProbe::skipInitialProbe({Settings::getInstance()->useEmbedded(), config->zclassicDaemon,
+                ezclassicd != nullptr, config->host, config->port, [this]() { return locateZClassicConfFile(); }}))
             onRefused();
         else
             refreshZClassicdState(connection, onRefused);
@@ -2245,10 +2244,11 @@ void ConnectionLoader::refreshZClassicdState(Connection* connection, std::functi
                     // an older daemon (advisory cache latches off; the string parse above is
                     // the sole source then). Bob-fix: this same helper is now also called
                     // from the connection-refused poll path so the download window — where
-                    // getinfo is refused, not -28 — is no longer a frozen line.
-                    this->probeBootstrapProgress(connection);
+                    // getinfo is refused, not -28 — is no longer a frozen line. At most once a
+                    // second however fast the poll runs (each reply also writes QSettings).
+                    bootstrapProbeEvery.run(1000, [&]() { this->probeBootstrapProgress(connection); });
                 }
-                main->logger->write("Waiting for zclassicd to come online.");
+                waitingLogEvery.run(1000, [&]() { main->logger->write("Waiting for zclassicd to come online."); });
                 const qint64 sinceSpawn = ezWarmupTimer.isValid() ? ezWarmupTimer.elapsed() : -1;
                 QTimer::singleShot(LaunchProbe::warmupPollMs(sinceSpawn), [=]() { this->refreshZClassicdState(connection, refused); });
             } else {

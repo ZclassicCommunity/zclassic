@@ -50,6 +50,7 @@ SOURCES += \
     ../../src/embeddeddaemon.cpp \
     ../../src/startupaccess.cpp \
     ../../src/launchprobe.cpp \
+    ../../src/portprobe_win.cpp \
     ../../src/mainwindow.cpp \
     ../../src/rpc.cpp \
     ../../src/balancestablemodel.cpp \
@@ -135,3 +136,4 @@ static {
 
 # Windows 7+ metadata APIs used for handle-based startup access checks.
 win32: DEFINES += _WIN32_WINNT=0x0601 WINVER=0x0601
+win32: LIBS += -lws2_32
