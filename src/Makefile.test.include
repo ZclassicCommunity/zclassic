@@ -104,6 +104,7 @@ BITCOIN_TESTS =\
   test/bootstrap_onion_tests.cpp \
   test/embeddedtor_tests.cpp \
   test/torcontrol_tests.cpp \
+  test/torwatch_tests.cpp \
   test/transaction_tests.cpp \
   test/uint256_tests.cpp \
   test/zslp_tests.cpp \
