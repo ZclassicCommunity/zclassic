@@ -3058,10 +3058,8 @@ bool static FlushStateToDisk(CValidationState &state, FlushStateMode mode) {
     return true;
 }
 
-void FlushStateToDisk() {
-    CValidationState state;
-    FlushStateToDisk(state, FLUSH_STATE_ALWAYS);
-}
+bool FlushStateToDiskChecked() { CValidationState state; return FlushStateToDisk(state, FLUSH_STATE_ALWAYS); }
+void FlushStateToDisk() { FlushStateToDiskChecked(); }
 
 void PruneAndFlush() {
     CValidationState state;

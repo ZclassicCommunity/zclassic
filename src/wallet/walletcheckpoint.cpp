@@ -35,19 +35,25 @@ void CWallet::CheckpointIfLagging(const CBlockIndex* pindex)
     // -testsetchaininterval is a test hook that decides when checkpoints happen.
     if (!pindex || mapArgs.count("-testsetchaininterval")) return;
     if (pindex->nHeight - std::max(nCheckpointHeight.load(), 0) <= CHECKPOINT_CATCHUP_LAG_BLOCKS) return;
-    const int64_t nNow = GetTime();
-    if (nNow < nTimeCatchupCheckpoint.load() + CHECKPOINT_CATCHUP_MIN_INTERVAL) return;
     // The wallet followed every block in memory (ChainTip, under cs_main), so at this tip it is consistent with
     // the chain: the same single-transaction checkpoint as the periodic one. Not while the node is still behind
     // the best header (a long sync would rewrite the wallet at every attempt).
     LOCK(cs_main);
     if (!chainActive.Tip() || (pindexBestHeader && chainActive.Height() < pindexBestHeader->nHeight)) return;
+    // Both checks again under the lock: two concurrent tip callers must not both flush.
+    const int64_t nNow = GetTime();
+    if (chainActive.Height() - std::max(nCheckpointHeight.load(), 0) <= CHECKPOINT_CATCHUP_LAG_BLOCKS ||
+        nNow < nTimeCatchupCheckpoint.load() + CHECKPOINT_CATCHUP_MIN_INTERVAL) return;
     nTimeCatchupCheckpoint = nNow;
     LogPrintf("%s: the node caught up %d blocks past the last wallet checkpoint; writing it now\n", __func__,
               chainActive.Height() - std::max(nCheckpointHeight.load(), 0));
     // The chain state reaches the disk first, as at shutdown: a crash must not leave the wallet ahead of the chain
     // on disk (the next start would drop its note state and rescan). cs_wallet is taken only by SetBestChain, after
     // the flush (the periodic path takes cs_LastBlockFile before cs_wallet).
-    FlushStateToDisk();
+    if (!FlushStateToDiskChecked()) {
+        // Writing the wallet now would leave it ahead of a chain state that never reached the disk.
+        NoteCheckpointResult(false);
+        return;
+    }
     SetBestChain(chainActive.GetLocator());
 }

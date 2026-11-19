@@ -2839,6 +2839,8 @@ void TestLogic::health_eachAttentionStateIsReported() {
     QVERIFY(one({{"sapling", {{"witness_missing", 2}}}}, true, "2 shielded note(s) cannot be spent yet"));
     QVERIFY(one({{"checkpoint_height", 1998000}}, true, "2000 blocks ago"));
     QVERIFY(one({{"checkpoint_failed", true}, {"checkpoint_failures", 1}}, true, "could not be saved"));
+    // pinned: the line is part of the synced block, so it is silent while the node still catches up
+    QVERIFY(!wallethealth::assess(healthInfo({{"checkpoint_failed", true}}), false).any());
     // a failed write is reported once, not together with the lag it causes
     QVERIFY(one({{"checkpoint_failed", true}, {"checkpoint_height", 1998000}}, true, "could not be saved"));
     QVERIFY(one({{"pending_sends", {{"not_in_mempool", 1}}}}, true, "not in the node's mempool"));
