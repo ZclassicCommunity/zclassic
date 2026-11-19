@@ -305,7 +305,7 @@ verify() {
         [ $rs -lt 3 ] || { bad "$it $label: reference node did not start ($(tail -n 1 "$SD/node2/stdout.log" 2>/dev/null | cut -c1-200))"; keep_fail "$it"; return 1; }
         sleep 5; rm -f "$SD/node2/regtest/.lock"
     done
-    converge 0 1 || { bad "$it $label: node 0 did not reach the peer's tip"; keep_fail "$it"; return 1; }
+    converge 0 1 || { alive_n 1 || bad "$it $label: the peer (node 1) is not running: it died outside the test"; bad "$it $label: node 0 did not reach the peer's tip"; keep_fail "$it"; return 1; }
     converge 2 1 || { bad "$it $label: reference did not reach the peer's tip"; keep_fail "$it"; return 1; }
     settle_mempools
     sleep 1
