@@ -25,7 +25,7 @@ The beta13 app targets **macOS 14 or newer on Apple Silicon** and was tested nat
 
 ## What happens on first launch
 
-The wallet starts its built-in node, which automatically downloads its security files and a compiled-checkpoint snapshot (about 11.2 GB in the tested release) from the network — all checked for integrity, with a progress bar. Depending on your connection, this can take a little while. When it finishes, your wallet opens. **That is the entire setup** — there's nothing to download or configure by hand.
+The wallet starts its built-in node, which automatically downloads its security files and a compiled-checkpoint snapshot (about 11 GB) from the network — all checked for integrity, with a progress bar. Depending on your connection, this can take a little while. When it finishes, your wallet opens. **That is the entire setup** — there's nothing to download or configure by hand.
 
 Your private keys and wallet state are stored in `wallet.dat`, which the node updates during normal operation. Back up your wallet before upgrading. Keep your existing data directory.
 
