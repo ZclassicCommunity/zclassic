@@ -234,6 +234,15 @@ bool SetNameProxy(const proxyType &addrProxy);
 void ClearProxies();
 bool HaveNameProxy();
 /**
+ * The proxy fence (127.0.0.1 port 0). A network whose proxy is temporarily
+ * gone (the embedded Tor restarting) is pointed here: ConnectSocket() and
+ * ConnectSocketByName() refuse a fenced proxy before opening any socket, so
+ * the connection fails closed, never directly and never to a local listener,
+ * independent of which ports the OS lets unprivileged processes bind.
+ */
+inline CService ProxyFenceAddress() { return CService(CNetAddr("127.0.0.1"), 0); }
+inline bool IsProxyFence(const proxyType& proxy) { return proxy.proxy == ProxyFenceAddress(); }
+/**
  * Proxy-only mode (off by default; turned on only for an onion-only
  * -embeddedtor node): ConnectSocket() refuses to dial a non-loopback address
  * directly when its network has no proxy, instead of falling back to a direct
