@@ -226,13 +226,23 @@ sample_streams() { # <seconds> ; prints "t=<s> percent=<p> streams=<n>" every 0.
 # ---------------------------------------------------------------------------------------------
 # tests
 # ---------------------------------------------------------------------------------------------
+restart_args() { # a node killed after its install was verified (blocks/ and chainstate/, no pending marker) has finished
+    # its bootstrap: restart it as a user would, without asking to bootstrap into that chain again (an explicit
+    # -bootstrappeer on a datadir that holds a chain is refused by design). A kill during the install itself (marker
+    # present, or one of the directories missing) is restarted with the same arguments and must recover by itself.
+    if [ -e "$cdir/regtest/blocks" ] && [ -e "$cdir/regtest/chainstate" ] &&
+       [ ! -e "$cdir/regtest/bootstrap-trustless-pending" ] && [ ! -e "$cdir/regtest/bootstrap-anchor-pending" ]; then
+        echo "-bootstrap=0"
+    fi
+}
 test_kills() {
     say "== kill -9 at $kills random instants, restart each time =="
     fresh_client; start_server || return 1
     from=$(log_lines)
     n=0; finished=0
     while [ $n -lt "$kills" ]; do
-        start_client
+        ra=$(restart_args); [ -z "$ra" ] || say "the previous run had finished its bootstrap; restarting it without -bootstrap"
+        start_client $ra
         t=$(rand_ms_for_kill)
         sleep_ms "$t"
         if ! kill -0 "$CPID" 2>/dev/null; then say "client exited by itself after $n kills"; finished=1; break; fi
@@ -243,8 +253,10 @@ test_kills() {
         say "kill $n at +${t} ms: staging $(staging_state)"
     done
     if [ $finished -eq 0 ]; then
-        start_client
-        if ! wait_imported "$client_bin"; then fail "kills: client never reached height $fx_height"; tail -20 "$client_log"; end_client; stop_server; return 1; fi
+        start_client $(restart_args)
+        if ! wait_imported "$client_bin"; then
+            fail "kills: client never reached height $fx_height (datadir: $(ls -A "$cdir/regtest" | tr -s "[:space:]" " "))"; tail -20 "$client_log"; end_client; stop_server; return 1
+        fi
     fi
     check_imported "kills (${n} kills)"
     served=$(served_bytes "$from")

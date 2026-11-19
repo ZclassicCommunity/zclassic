@@ -554,6 +554,7 @@ static bool ValidateBootstrapChunkRange(uint64_t offset, uint64_t length, uint64
 static bool InstallStagedBootstrapChainData(const boost::filesystem::path& staging,
                                             const boost::filesystem::path& data_dir,
                                             std::string& error);
+static void BootstrapFsyncDir(const boost::filesystem::path& dir);
 
 // Portable 64-bit seek. fseek()'s `long` second argument wraps on 32-bit
 // platforms and on Windows (where `long` is 32 bits), so bootstrap files
@@ -1435,13 +1436,21 @@ static bool InstallStagedBootstrapChainData(const boost::filesystem::path& stagi
             return false;
         }
 
+        // Both renames are persisted in order (each parent directory is synced before the next
+        // step), so after a power loss the datadir shows blocks/ alone or both, never
+        // chainstate/ alone; RecoverInterruptedBootstrapInstall reads that.
         boost::filesystem::rename(staging / "blocks", blocks_dir);
         installed_blocks = true;
+        BootstrapFsyncDir(data_dir);
+        BootstrapFsyncDir(staging);
         TestCrashPoint("bootstrap-install-after-blocks-rename");
         boost::filesystem::rename(staging / "chainstate", chainstate_dir);
         installed_chainstate = true;
+        BootstrapFsyncDir(data_dir);
+        BootstrapFsyncDir(staging);
         TestCrashPoint("bootstrap-install-after-chainstate-rename");
         boost::filesystem::remove_all(staging);
+        BootstrapFsyncDir(data_dir);
         return true;
     } catch (const boost::filesystem::filesystem_error& e) {
         try {
@@ -3907,6 +3916,84 @@ std::vector<boost::filesystem::path> ListBootstrapStagingDirs(const boost::files
             dirs.push_back(it->path());
     }
     return dirs;
+}
+
+static bool BootstrapPathPresent(const boost::filesystem::path& p)
+{
+    boost::system::error_code ec;
+    return boost::filesystem::symlink_status(p, ec).type() != boost::filesystem::file_not_found;
+}
+
+static bool BootstrapIsRealDirectory(const boost::filesystem::path& p)
+{
+    boost::system::error_code ec;
+    return boost::filesystem::is_directory(boost::filesystem::symlink_status(p, ec));
+}
+
+BootstrapInstallRecovery RecoverInterruptedBootstrapInstall(const boost::filesystem::path& data_dir, std::string& error)
+{
+    error.clear();
+    if (!BootstrapAnchorPendingExists(data_dir) && !BootstrapTrustlessPendingExists(data_dir))
+        return BIR_NONE;
+    const boost::filesystem::path blocks = data_dir / "blocks";
+    const boost::filesystem::path chainstate = data_dir / "chainstate";
+    const bool haveBlocks = BootstrapPathPresent(blocks);
+    const bool haveChainstate = BootstrapPathPresent(chainstate);
+
+    if (haveBlocks && haveChainstate) {
+        // Both renames happened. What is left of the staging directory is the husk of the
+        // finished install (or the install died inside its remove_all); the snapshot is
+        // in the datadir and its verification, keyed on the marker, still has to run.
+        RemoveStaleBootstrapStaging(data_dir);
+        return BIR_INSTALLED;
+    }
+    if (!haveBlocks && !haveChainstate) {
+        // The marker is written before the first rename: the install never started.
+        BootstrapAnchorPendingClear(data_dir);
+        BootstrapTrustlessPendingClear(data_dir);
+        BootstrapFsyncDir(data_dir);
+        return BIR_STALE_MARKER;
+    }
+
+    // Exactly one directory is installed. Evidence that the install put it there: the
+    // marker, plus a staging directory that holds the other one and lacks this one (the
+    // rename moved it out). Move it back; its files are verified again by the next install.
+    const char* present = haveBlocks ? "blocks" : "chainstate";
+    const char* absent = haveBlocks ? "chainstate" : "blocks";
+    std::vector<boost::filesystem::path> candidates;
+    const std::vector<boost::filesystem::path> stagingDirs = ListBootstrapStagingDirs(data_dir);
+    for (size_t i = 0; i < stagingDirs.size(); ++i) {
+        const boost::filesystem::path& dir = stagingDirs[i];
+        boost::system::error_code ec;
+        if (BootstrapIsRealDirectory(dir) &&
+            boost::filesystem::symlink_status(dir / BOOTSTRAP_STAGING_MARKER, ec).type() == boost::filesystem::regular_file &&
+            BootstrapIsRealDirectory(dir / absent) && !BootstrapPathPresent(dir / present))
+            candidates.push_back(dir);
+    }
+    if (candidates.size() != 1 || !BootstrapIsRealDirectory(data_dir / present)) {
+        error = strprintf("%s was left by an interrupted bootstrap install without %s/, and the downloaded snapshot it came "
+                          "from (a bootstrap-peer-staging-* directory holding %s/) cannot be found uniquely in %s (%u found); "
+                          "it is left untouched. If it holds no chain data you need, remove blocks/ and chainstate/ from "
+                          "the datadir and start again",
+                          (data_dir / present).string(), absent, absent, data_dir.string(), (unsigned int)candidates.size());
+        return BIR_REFUSE;
+    }
+    boost::system::error_code ec;
+    boost::filesystem::rename(data_dir / present, candidates[0] / present, ec);
+    if (ec) {
+        error = strprintf("could not move the half-installed %s back into %s: %s", (data_dir / present).string(),
+                          candidates[0].string(), ec.message());
+        return BIR_REFUSE;
+    }
+    BootstrapFsyncDir(data_dir);
+    BootstrapFsyncDir(candidates[0]);
+    LogPrintf("Bootstrap: an install was interrupted after moving %s/; moved it back into %s, the next install checks every file again\n",
+              present, candidates[0].filename().string());
+    TestCrashPoint("bootstrap-recover-after-rollback");
+    BootstrapAnchorPendingClear(data_dir);
+    BootstrapTrustlessPendingClear(data_dir);
+    BootstrapFsyncDir(data_dir);
+    return BIR_ROLLED_BACK;
 }
 
 bool BootstrapPrepareStaging(const boost::filesystem::path& data_dir, const CBootstrapSnapshotManifest& manifest,
