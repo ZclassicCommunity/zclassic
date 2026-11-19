@@ -1,0 +1,8 @@
+path: src/test/foo_tests.cpp
+function: a_is_one
+matches: 1
+lines: 4-7
+BOOST_AUTO_TEST_CASE(a_is_one)
+{
+    BOOST_CHECK_EQUAL(a_value(), 1);
+}

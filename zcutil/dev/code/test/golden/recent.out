@@ -1,0 +1,21 @@
+since: 1d
+files: 19
+core  src/Makefile.am  1
+core  src/Makefile.test.include  1
+core  src/a.h  1
+core  src/b.h  1
+core  src/common.h  1
+core  src/core.cpp  1
+core  src/extra.cpp  1
+core  src/main.cpp  1
+core  src/vendor/lib.h  1
+other  AGENTS.md  1
+other  doc/agent/LESSONS.md  1
+other  doc/agent/TRAPS.md  1
+other  zcutil/dev/code/source_roots.def  1
+other  zcutil/dev/impact.rules  1
+tests  src/test/foo_tests.cpp  1
+tests  src/test/wallet_tests.cpp  1
+wallet  src/wallet/AGENTS.md  1
+wallet  src/wallet/wallet.cpp  1
+wallet  src/wallet/wallet.h  1

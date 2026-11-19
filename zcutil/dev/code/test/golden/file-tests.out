@@ -1,0 +1,7 @@
+path: src/test/foo_tests.cpp
+lines: 8
+includes: 2
+definitions: 1
+include  "a.h"  1
+include  <boost/test/unit_test.hpp>  2
+func  BOOST_AUTO_TEST_CASE(a_is_one)  4-7

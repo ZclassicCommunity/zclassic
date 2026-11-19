@@ -1,0 +1,23 @@
+path: src/core.cpp
+lines: 75
+includes: 3
+definitions: 16
+include  "a.h"  2
+include  "common.h"  3
+include  <vector>  4
+func  helper  14-14
+class  Counter  19-30
+func  Counter::Counter  21-21
+func  Counter::Next  22-22
+func  Counter::operator==  23-23
+func  Counter::Pick  25-25
+func  Counter::Twice  32-39
+func  Max  41-44
+class  Pt  46-49
+func  Default  55-55
+func  Annotated  57-60
+func  Trailing  62-62
+func  c_entry  66-66
+func  a_value  69-69
+func  b_value  70-70
+func  c_one_liner  72-75

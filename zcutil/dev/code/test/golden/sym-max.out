@@ -1,0 +1,4 @@
+symbol: Max
+scanned-files: 10
+definitions: 1
+func  Max  src/core.cpp  41-44
