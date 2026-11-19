@@ -162,6 +162,6 @@ These produce the releases and exist **only as loose files on this box** — los
 - `/home/rhett/zclbuild/` whole pipeline → daemon `zcutil/portable-builder/` or a dedicated repo:
   `prun`, `focal/build/{build.sh,02-openssl-qt.sh,03-daemon.sh,04-gui-bundle.sh,05-static-helpers.sh,run.sh,uxmatrix.sh,wmclose.c,markers.txt}`. Also needs a `00-bootstrap-rootfs.sh` + apt manifest documenting how the `focal/` rootfs was provisioned (gcc-9, meson/ninja/bison, the static `.a` libs, Xvfb/twm), since that recipe is captured nowhere.
 - `/home/rhett/build-qtbase-win.sh`, `/home/rhett/build-gui-win.sh` → `zcl-qt-wallet/contrib/cross/`. Note `build-gui-win.sh` does NOT embed the daemon.
-- **Missing entirely:** a shared `embed-daemon.py` (the ZQWDMON1 footer append) used by Linux/Windows/all-in-one, and a `codesign` step inside `mkmacdmg.sh` (after `macdeployqt`, before `create-dmg`). The 3-asset `gh release upload --clobber` publish command is also in no script.
+- **Missing entirely:** a `codesign` step inside `mkmacdmg.sh` (after `macdeployqt`, before `create-dmg`). The 3-asset `gh release upload --clobber` publish command is also in no script.
 
 **Already in-repo (reference, don't re-create):** `zcl-qt-wallet/src/scripts/mkrelease.sh`, `contrib/make-allinone.sh`, `src/scripts/mkmacdmg.sh`, `res/libsodium/buildlibsodium.sh`, `src/scripts/dotranslations.sh`; daemon `zcutil/{build.sh,build-release.sh,install-deps.sh,setup-mingw-toolchain.sh}`, `BUILD.md`.

@@ -57,7 +57,7 @@ FOCAL_VER=20.04.5
 FOCAL_TGZ=ubuntu-base-$FOCAL_VER-base-amd64.tar.gz
 FOCAL_URL=https://cdimage.ubuntu.com/ubuntu-base/releases/20.04/release
 FOCAL_SHA256=60e216b60947653dc8989be3821380268315b99b2959c29882781541bfe5a426
-DAEMON_PKGS="build-essential libtool autotools-dev automake pkg-config bsdmainutils curl ca-certificates git ccache bison python3"
+DAEMON_PKGS="build-essential libtool autotools-dev automake pkg-config bsdmainutils curl ca-certificates git ccache bison"
 MINGW_PKGS="g++-mingw-w64-x86-64"
 WALLET_PKGS="ca-certificates curl git build-essential perl pkg-config xz-utils libsodium-dev libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxi-dev libxrender-dev libxcb1-dev libxcb-util0-dev libxcb-glx0-dev libxcb-keysyms1-dev libxcb-image0-dev libxcb-shm0-dev libxcb-icccm4-dev libxcb-sync-dev libxcb-xfixes0-dev libxcb-shape0-dev libxcb-randr0-dev libxcb-render-util0-dev libxcb-xinerama0-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev"
 # Test-only extras: tools the shell tests call, and Qt for the wallet logic/widget tests.
@@ -256,6 +256,13 @@ step() {
 # Each of these is a function so `step` can run it in a subshell with set -e off.
 t_vendor()   { make -C src check-c23-vendor; }
 t_norust()   { make -C src check-c23-no-rust; }
+# Source-tree gates and the C23/sh replacements of the former Python tools (all need only cc, sh, curl).
+t_nopython()    { sh zcutil/check-no-python.sh --self-test && sh zcutil/check-no-python.sh; }
+t_key1()        { sh qa/key1-guard.sh /w/src; }
+t_seeds()       { sh contrib/seeds/test-generate-seeds.sh /w/src; }
+t_zmqsub()      { sh contrib/zmq/test-zmq-sub.sh "/w/src/depends/$HOST" 38960; }
+t_footer()      { sh wallet/contrib/embed-footer.sh selftest; }
+t_mockrpc()     { sh wallet/tests/mock/test-mockrpc.sh 38950; }
 t_torsyms()  { make -C src check-c23-tor-symbols TOR_LIBDIR="/w/src/depends/$HOST/lib"; }
 t_treeroot() {
     cc -std=c2x -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Isrc \
@@ -313,6 +320,12 @@ inner_test_run() {
     mkdir -p $TD/logs
     step check-c23-vendor 1800 t_vendor
     step check-c23-no-rust 1800 t_norust
+    step check-no-python 300 t_nopython
+    step key1-guard 300 t_key1
+    step seed-generator 300 t_seeds
+    step zmq-sub-example 300 t_zmqsub
+    step wallet-embed-footer 300 t_footer
+    step wallet-mockrpc 300 t_mockrpc
     step check-c23-tor-symbols 1800 t_torsyms
     step test_bitcoin-full 7200 t_testbitcoin
     step zcash-gtest-full 7200 t_gtest

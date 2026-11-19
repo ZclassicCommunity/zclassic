@@ -44,7 +44,7 @@ sudo apt-get install -y \
     build-essential pkg-config libc6-dev m4 g++-multilib \
     autoconf libtool automake \
     libdb++-dev libsodium-dev \
-    git python3 wget curl \
+    git wget curl \
     zlib1g-dev libssl-dev libevent-dev
 ```
 
@@ -54,7 +54,7 @@ sudo apt-get install -y \
 sudo pacman -S --needed \
     base-devel autoconf automake libtool pkgconf \
     db libsodium curl \
-    git python wget openssl libevent
+    git wget openssl libevent
 ```
 
 #### Other Distributions

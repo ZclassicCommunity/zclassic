@@ -647,7 +647,6 @@ committed so this guide is fully reproducible without tribal knowledge:
 |---|---|---|
 | `/home/rhett/build-qtbase-win.sh` | cross-builds static qtbase 5.15.x for win32-g++ | `contrib/cross/build-qtbase-win.sh` |
 | `/home/rhett/build-gui-win.sh` | cross-builds `release/zclwallet.exe` (does NOT embed) | `contrib/cross/build-gui-win.sh` |
-| *(missing)* a shared `embed-daemon.py` | the ZQWDMON1 footer append, identical to `mkrelease.sh:100-108`; today the Windows embed is a manual one-liner | `contrib/embed-daemon.py` (used by Linux/Windows/all-in-one) |
 | *(missing)* codesign step in `mkmacdmg.sh` | `codesign --force --deep -s - zclwallet.app` AFTER `macdeployqt`, BEFORE `create-dmg` | edit `src/scripts/mkmacdmg.sh` after line 85 (macdeployqt), before line 91 (create-dmg) |
 | `/home/rhett/zclbuild/*` (proot builder: `prun`, `focal/build/{02-openssl-qt.sh,03-daemon.sh,04-gui-bundle.sh,05-static-helpers.sh,build.sh}`) | the only way to produce the portable glibc-2.31 static-Qt Linux single file + `.deb` | a dedicated build-env repo, or `contrib/portable-builder/` |
 

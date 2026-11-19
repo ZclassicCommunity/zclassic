@@ -126,7 +126,10 @@ Results are in `test/` (debug) and `test-release/`.
 
 The debug stage runs:
 `check-c23-vendor`,
-`check-c23-no-rust`, `check-c23-tor-symbols`, the tree-root ASan/UBSan check, full
+`check-c23-no-rust`, `check-c23-tor-symbols`, `check-no-python` (with its self-test), `key1-guard`
+(KEY-1 wallet secrecy guard, with poisoned-copy cases), `seed-generator` (byte-for-byte `chainparamsseeds.h`),
+`zmq-sub-example`, `wallet-embed-footer` and `wallet-mockrpc` (the C23/sh tools that replaced the
+Python ones; they run in both flavors), the tree-root ASan/UBSan check, full
 `test_bitcoin`, full `zcash-gtest`, `src/c23/test/run.sh --linked` (golden corpus),
 `regtest-smoke.sh`, `wallet_matrix.sh` scenarios 1-9, `wallet_tokenguard.sh` (plain and
 with Sapling active), `zslp_index.sh`, the wallet logic and widget tests (Qt from the

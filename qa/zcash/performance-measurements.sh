@@ -145,9 +145,8 @@ EOF
     fi
     if [ $ARCHIVE_RESULT -ne 0 ]; then
         zcashd_stop
-        echo
-        echo "The benchmark archive (a mainnet block-107134 datadir slice) has no generator in this repository"
-        echo "and place it in the base directory of the repository."
+        echo "This repository has no generator for the benchmark archive (block-107134 datadir slice);"
+        echo "supply it yourself and place it in the base directory of the repository."
         echo "(its former Python generator was removed with the rest of the Python tooling)"
         exit 1
     fi
