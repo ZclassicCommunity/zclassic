@@ -538,12 +538,19 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-exportdir=<dir>", _("Specify directory to be used when exporting data and wallet backups (default: the \"backups\" directory inside the data directory)"));
     strUsage += HelpMessageOpt("-dbcache=<n>", strprintf(_("Set database cache size in megabytes (%d to %d, default: %d)"), nMinDbCache, nMaxDbCache, nDefaultDbCache));
     strUsage += HelpMessageOpt("-dbflushinterval=<n>", strprintf(_("At the chain tip, write the chain state (coins, block index, block files) to disk at most every <n> seconds, so a crash or kill loses at most that much of the durable height; 0 means once a day (default: %u). Initial block download flushes only when the cache is full"), DATABASE_FLUSH_INTERVAL_TIP));
+    strUsage += HelpMessageOpt("-equihashimpl=<impl>", _("Equihash solution verifier: c23 or cpp (default: c23)"));
+    strUsage += HelpMessageOpt("-finalizationdelay=<n>", _("Local policy: seconds a block must have been known before auto-finalization may pin it (default: 1800, 900 after Buttercup)"));
+    strUsage += HelpMessageOpt("-finalizationminpeers=<n>", strprintf(_("Local policy: independent outbound peers that must corroborate a block before auto-finalization (minimum 1, default: %u)"), DEFAULT_FINALIZATION_MIN_PEERS));
+    strUsage += HelpMessageOpt("-finalizationrequirepeers", _("Local policy: hold auto-finalization until live peers corroborate the chain; -finalizationrequirepeers=0 removes the gate (default: 1)"));
     strUsage += HelpMessageOpt("-loadblock=<file>", _("Imports blocks from external blk000??.dat file") + " " + _("on startup"));
     strUsage += HelpMessageOpt("-maxorphantx=<n>", strprintf(_("Keep at most <n> unconnectable transactions in memory (default: %u)"), DEFAULT_MAX_ORPHAN_TRANSACTIONS));
+    strUsage += HelpMessageOpt("-maxreorgdepth=<n>", strprintf(_("Local policy: depth in blocks behind the tip at which auto-finalization pins a block; a negative value disables auto-finalization (default: %u)"), DEFAULT_MAX_REORG_DEPTH));
     strUsage += HelpMessageOpt("-mempoolmaxbytes=<n>", strprintf(_("Maximum total size in bytes of transactions held in the mempool; a new transaction that would exceed it is refused with reason \"mempool full\" and nothing is evicted (default: %u, minimum: %u)"), DEFAULT_MEMPOOL_MAX_BYTES, MIN_MEMPOOL_MAX_BYTES));
     strUsage += HelpMessageOpt("-mempooltxinputlimit=<n>", _("[DEPRECATED FROM OVERWINTER] Set the maximum number of transparent inputs in a transaction that the mempool will accept (default: 0 = no limit applied)"));
     strUsage += HelpMessageOpt("-par=<n>", strprintf(_("Set the number of script verification threads (%u to %d, 0 = auto, <0 = leave that many cores free, default: %d)"),
         -GetNumCores(), MAX_SCRIPTCHECK_THREADS, DEFAULT_SCRIPTCHECK_THREADS));
+    strUsage += HelpMessageOpt("-paramcache", _("Keep a cache of verified proving-parameter files so a match need not be re-hashed at startup; -noparamcache hashes every file (default: 1)"));
+    strUsage += HelpMessageOpt("-parkdeepreorg", _("Park the competing chain of a reorg deeper than one block until it has enough work to take over (default: 1)"));
 #ifdef ZCL_C23_HAVE_PROVER_THREADS
     strUsage += HelpMessageOpt("-proverthreads=<n>", _("Set the number of threads used to create Sapling proofs (1 to 64, 0 = auto: the lesser of 8 and the hardware threads, default: 0). Left automatic, a send also makes only as many proofs at once as fit in about 340 MB or an eighth of physical memory, whichever is less; an explicit value lifts that limit"));
 #endif
@@ -610,6 +617,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-proxyrandomize", strprintf(_("Randomize credentials for every proxy connection. This enables Tor stream isolation (default: %u)"), 1));
     strUsage += HelpMessageOpt("-seednode=<ip>", _("Connect to a node to retrieve peer addresses, and disconnect"));
     strUsage += HelpMessageOpt("-timeout=<n>", strprintf(_("Specify connection timeout in milliseconds (minimum: 1, default: %d)"), DEFAULT_CONNECT_TIMEOUT));
+    strUsage += HelpMessageOpt("-uacomment=<cmt>", _("Append a comment to the user agent string; may be given more than once (letters, digits and a few symbols only)"));
     strUsage += HelpMessageOpt("-torcontrol=<ip>:<port>", strprintf(_("Tor control port to use if onion listening enabled (default: %s)"), DEFAULT_TOR_CONTROL));
     strUsage += HelpMessageOpt("-torpassword=<pass>", _("Tor control port password (default: empty)"));
     strUsage += HelpMessageOpt("-whitebind=<addr>", _("Bind to given address and whitelist peers connecting to it. Use [host]:port notation for IPv6"));
@@ -655,6 +663,8 @@ std::string HelpMessage(HelpMessageMode mode)
     if (showDebug)
     {
         strUsage += HelpMessageOpt("-checkpoints", strprintf("Disable expensive verification for known chain history (default: %u)", 1));
+        strUsage += HelpMessageOpt("-checkblockindex", "Run block index consistency checks (default: 0, 1 in regtest)");
+        strUsage += HelpMessageOpt("-checkmempool=<n>", "Run mempool consistency checks on one in <n> operations, 0 = never (default: 0, 1 in regtest)");
         strUsage += HelpMessageOpt("-dblogsize=<n>", strprintf("Flush database activity from memory pool to disk log every <n> megabytes (default: %u)", 100));
         strUsage += HelpMessageOpt("-disablesafemode", strprintf("Disable safemode, override a real safe mode event (default: %u)", 0));
         strUsage += HelpMessageOpt("-testsafemode", strprintf("Force safe mode (default: %u)", 0));
@@ -730,6 +740,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-server", _("Accept command line and JSON-RPC commands"));
     strUsage += HelpMessageOpt("-rest", strprintf(_("Accept public REST requests (default: %u)"), 0));
     strUsage += HelpMessageOpt("-rpcbind=<addr>", _("Bind to given address to listen for JSON-RPC connections. Use [host]:port notation for IPv6. This option can be specified multiple times (default: bind to localhost only, ::1 and 127.0.0.1; this option is ignored unless -rpcallowip is also given, and -rpcallowip without -rpcbind binds all interfaces)"));
+    strUsage += HelpMessageOpt("-rpccookiefile=<file>", _("Location of the JSON-RPC auth cookie; a relative path is under the data directory (default: .cookie)"));
     strUsage += HelpMessageOpt("-rpcuser=<user>", _("Username for JSON-RPC connections"));
     strUsage += HelpMessageOpt("-rpcpassword=<pw>", _("Password for JSON-RPC connections"));
     strUsage += HelpMessageOpt("-rpcport=<port>", strprintf(_("Listen for JSON-RPC connections on <port> (default: %u or testnet: %u)"), 8023, 18023));
