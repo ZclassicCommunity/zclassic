@@ -1381,16 +1381,16 @@ bool InitSanityCheck(void)
     // dial the bootstrap peers directly and expose the node's address.
     const bool fParamFetchAllowed = GetBoolArg("-bootstrap", true) && !ZcashParamFetchWouldBypassProxy();
     if (!ZcashParamsPresent() && GetBoolArg("-bootstrap", true) && !fParamFetchAllowed)
-        LogPrintf("Zcash parameters are missing; not fetching them from a bootstrap peer before the proxy is set up (-proxy, or -onlynet without ipv4/ipv6): run zcutil/fetch-params.sh\n");
+        LogPrintf("zk-SNARK parameters are missing; not fetching them from a bootstrap peer before the proxy is set up (-proxy, or -onlynet without ipv4/ipv6): run zcutil/fetch-params.sh\n");
     if (!ZcashParamsPresent() && fParamFetchAllowed) {
         std::string paramError = "no bootstrap peer configured";
         BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
-            fprintf(stdout, "Fetching Zcash parameters from peer %s...\n", peer.c_str());
-            LogPrintf("Fetching Zcash parameters from bootstrap peer %s...\n", peer);
+            fprintf(stdout, "Fetching zk-SNARK parameters from peer %s...\n", peer.c_str());
+            LogPrintf("Fetching zk-SNARK parameters from bootstrap peer %s...\n", peer);
             if (FetchZcashParamsFromPeer(peer, paramError)) {
                 break;
             }
-            LogPrintf("Zcash param fetch from %s failed: %s\n", peer, paramError);
+            LogPrintf("zk-SNARK parameter fetch from %s failed: %s\n", peer, paramError);
         }
         // If it still failed, the existence check below reports the error.
     }
@@ -1402,12 +1402,12 @@ bool InitSanityCheck(void)
         boost::filesystem::exists(sprout_groth16)
     )) {
         InitError(strprintf(
-            "Zcash parameter files are missing from %s. Run zcutil/fetch-params.sh before starting zclassicd, or pass -bootstrappeer=<host> to fetch them from a peer.",
+            "zk-SNARK parameter files are missing from %s. Run zcutil/fetch-params.sh before starting zclassicd, or pass -bootstrappeer=<host> to fetch them from a peer.",
             ZC_GetParamsDir().string()));
         return false;
     }
 
-    // Validate every required Zcash parameter file against the single
+    // Validate every required zk-SNARK parameter file against the single
     // compiled SHA-256 table in bootstrap.cpp. Keeping one source of truth
     // means a future hash update can't silently disagree between startup
     // validation and the bootstrap-snapshot fetch path. This GetZcashParamSpecs()
@@ -1485,13 +1485,13 @@ bool InitSanityCheck(void)
                 fParamRefetched = true;
                 std::string paramError = "no bootstrap peer configured";
                 BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
-                    fprintf(stdout, "Re-fetching corrupted Zcash parameter from peer %s...\n", peer.c_str());
+                    fprintf(stdout, "Re-fetching corrupted zk-SNARK parameter from peer %s...\n", peer.c_str());
                     LogPrintf("Param hash mismatch for %s; re-fetching from bootstrap peer %s...\n",
                               spec.name, peer);
                     if (FetchZcashParamsFromPeer(peer, paramError)) {
                         break;
                     }
-                    LogPrintf("Zcash param re-fetch from %s failed: %s\n", peer, paramError);
+                    LogPrintf("zk-SNARK parameter re-fetch from %s failed: %s\n", peer, paramError);
                 }
                 // Restart the verification from the first file: the re-fetch
                 // re-hashes and may have repaired any of them. Drop staged
@@ -1596,7 +1596,7 @@ static void ZC_LoadParams(
         boost::filesystem::exists(sprout_groth16)
     )) {
         uiInterface.ThreadSafeMessageBox(strprintf(
-            _("Cannot find the Zcash network parameters in the following directory:\n"
+            _("Cannot find the zk-SNARK parameters in the following directory:\n"
               "%s\n"
               "Please run 'zclassic-fetch-params' or './zcutil/fetch-params.sh' and then restart."),
                 ZC_GetParamsDir()),
@@ -2193,7 +2193,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     // Split the former coarse "ecc+sodium+sanity" mark: this isolates ECC_Start()'s
     // secp256k1 table precompute from InitSanityCheck() (which hashes the ~1.69 GB
-    // of Zcash params). Proves which half the ~8.9s actually lives in.
+    // of zk-SNARK params). Proves which half the ~8.9s actually lives in.
     g_startupTimer.mark("ecc-start");
 
     // Sanity check

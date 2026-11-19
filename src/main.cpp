@@ -7028,8 +7028,8 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
         CBootstrapSnapshotManifest manifest;
         std::string err;
         if (!GetZcashParamManifest(manifest, err)) {
-            LogPrint("net", "could not build zcash param manifest for peer=%d: %s\n", pfrom->id, err);
-            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("zcash params unavailable"));
+            LogPrint("net", "could not build zk-SNARK parameter manifest for peer=%d: %s\n", pfrom->id, err);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("zk-SNARK parameters unavailable"));
             return true;
         }
         pfrom->PushMessage(NetMsgType::BSPMAN, manifest);
@@ -7058,7 +7058,7 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
             return error("bspman has trailing bytes from peer=%d", pfrom->id);
         }
 
-        LogPrint("net", "received unsolicited zcash param manifest from peer=%d\n", pfrom->id);
+        LogPrint("net", "received unsolicited zk-SNARK parameter manifest from peer=%d\n", pfrom->id);
     }
 
     else if (strCommand == NetMsgType::GETBSPCHK)
@@ -7067,16 +7067,16 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
             pfrom, vRecv, strCommand,
             pfrom->fBootstrapParamManifestSent,
             EnqueueBootstrapParamChunkRequest,
-            "zcash param", "zcash param manifest required",
-            "invalid zcash param chunk length", "invalid zcash param chunk offset",
-            "invalid zcash param chunk request");
+            "zk-SNARK parameter", "zk-SNARK parameter manifest required",
+            "invalid zk-SNARK parameter chunk length", "invalid zk-SNARK parameter chunk offset",
+            "invalid zk-SNARK parameter chunk request");
     }
 
     else if (strCommand == NetMsgType::BSPCHK)
     {
         return RecvBootstrapChunk(
             pfrom, vRecv, strCommand,
-            "zcash param", "invalid zcash param chunk size");
+            "zk-SNARK parameter", "invalid zk-SNARK parameter chunk size");
     }
 
 
