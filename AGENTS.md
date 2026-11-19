@@ -27,7 +27,7 @@ zcutil/local-ci.sh --commit <sha> all <outdir>              # full candidate; ma
 make -C zcutil/dev check                                    # tests of the developer tool
 ```
 
-Run a single qa script as `sh qa/rpc-tests/<script>.sh <dir-with-zclassicd>`. Unit tests: `src/test/test_bitcoin --run_test=<suite>` after a `--enable-tests` build ([doc/unit-tests.md](doc/unit-tests.md)). Where the host has a build broker (for example `devbuild --wait`), run heavy commands behind it.
+Run a single qa script by the form its usage line gives: most take `sh qa/rpc-tests/<script>.sh --bin <dir-with-zclassicd> --work <empty dir> [--base <port>]` (add `--peer-bin <previous release>` where its header asks for one); `token_name_rules`, `wallet_tokenguard`, `znam_index`, `zslp_*`, `startup_bad_home` and `zclassic_tx_util` take one positional `<dir>` holding the binaries. Ports are leased automatically (qa/lib/README.md), so no port needs choosing. Unit tests: `src/test/test_bitcoin --run_test=<suite>` after a `--enable-tests` build ([doc/unit-tests.md](doc/unit-tests.md)). Where the host has a build broker (for example `devbuild --wait`), run heavy commands behind it.
 
 Before editing, run `zcutil/dev/zcl-dev guide <paths>`: nearest rules, CI steps, lessons and traps in one brief.
 

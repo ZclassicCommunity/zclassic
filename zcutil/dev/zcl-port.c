@@ -10,9 +10,14 @@
  * "owner start", created with O_EXCL, so two concurrent callers never get
  * the same port. A lease whose owner pid is dead (or over a day old) is
  * reclaimed, so a script that passes --owner $$ needs no cleanup trap.
- * Default range 20000-32000: below every OS ephemeral range and above the
- * node ports (8023, 8033, 8232, 8233, 18xxx). Override: --range or env
- * ZCL_PORT_RANGE=LO-HI. Default dir: <tmp>/zcl-port-<user> (env ZCL_PORT_DIR).
+ * Default range 12000-17900: below every OS ephemeral range, above the node
+ * ports (8023, 8033, 8232, 8233) and below 18xxx and the 20000-39999 span that
+ * older tests derive from their pid. Override: --range or env
+ * ZCL_PORT_RANGE=LO-HI. Default dir: /tmp/zcl-port-<uid> on POSIX (TMPDIR is
+ * ignored on purpose so every run shares one lease set), <TEMP>\zcl-port-<user>
+ * on Windows; env ZCL_PORT_DIR overrides. A lease records the pid namespace of
+ * its owner: a lease made in another pid namespace (a sandbox) is never judged
+ * dead by pid, only by age.
  * Plain C (gnu17), libc + sockets, POSIX and winsock.
  * Exit: 0 ok, 1 no free ports, 2 usage or I/O error. */
 #ifdef _WIN32
@@ -52,7 +57,8 @@
 #define GARBLED_AGE_S 60L
 
 static char dir[512];
-static long range_lo = 20000, range_hi = 32000;
+static long range_lo = 12000, range_hi = 17900;
+static long my_ns, last_ns; /* pid namespace id of this process / of the lease last read; 0 = unknown */
 static long owner_pid;
 static unsigned long long rng = 88172645463325252ULL;
 
@@ -114,6 +120,14 @@ static void lease_path(char *out, size_t cap, long port)
     snprintf(out, cap, "%s" SEP "%ld", dir, port);
 }
 
+/* A pid is only meaningful inside its own pid namespace: a lease made in another one
+ * (a bwrap/unshare sandbox sharing this directory) is treated as live until it ages out. */
+static int owner_alive(long pid, long ns)
+{
+    if (ns && my_ns && ns != my_ns) return 1;
+    return pid_alive(pid);
+}
+
 /* Read "owner start". Returns 1 parsed, 0 unreadable or garbled (mtime in
  * *mt so the caller can age an empty file left by a crashed writer). */
 static int read_lease(const char *path, long *owner, long *start, long *mt)
@@ -128,7 +142,8 @@ static int read_lease(const char *path, long *owner, long *start, long *mt)
     if (!f) return 0;
     if (!fgets(buf, sizeof buf, f)) buf[0] = 0;
     fclose(f);
-    return sscanf(buf, "%ld %ld", owner, start) == 2 && *owner > 0;
+    last_ns = 0;
+    return sscanf(buf, "%ld %ld %ld", owner, start, &last_ns) >= 2 && *owner > 0;
 }
 
 /* 1 = removed a stale lease (caller may retry), 0 = live or gone. Rename
@@ -141,7 +156,7 @@ static int reclaim_if_stale(const char *path)
     long now = (long)time(NULL);
     int rc = read_lease(path, &o, &s, &mt);
     if (rc < 0) return 1; /* vanished: retry the create */
-    if (rc == 1 ? (pid_alive(o) && now - s < MAX_AGE_S) : now - mt < GARBLED_AGE_S)
+    if (rc == 1 ? (owner_alive(o, last_ns) && now - s < MAX_AGE_S) : now - mt < GARBLED_AGE_S)
         return 0;
     snprintf(tmp, sizeof tmp, "%s.rm%ld", path, (long)PID_SELF);
     if (rename(path, tmp) != 0) return 1;
@@ -170,7 +185,7 @@ static int take(long port)
         if (errno != EEXIST || !reclaim_if_stale(path)) return -1;
     }
     if (fd < 0) return -1;
-    snprintf(body, sizeof body, "%ld %ld\n", owner_pid, (long)time(NULL));
+    snprintf(body, sizeof body, "%ld %ld %ld\n", owner_pid, (long)time(NULL), my_ns);
     if (write(fd, body, strlen(body)) < 0) { /* empty lease ages out */ }
     close(fd);
     if (!port_bindable((int)port)) { remove(path); return -1; }
@@ -243,14 +258,14 @@ static void each_lease(void (*fn)(long, long, long, void *), void *arg)
 static void print_one(long port, long o, long s, void *arg)
 {
     (void)arg;
-    printf("%ld owner=%ld start=%ld %s\n", port, o, s, pid_alive(o) ? "live" : "stale");
+    printf("%ld owner=%ld start=%ld %s\n", port, o, s, owner_alive(o, last_ns) ? "live" : "stale");
 }
 
 static void drop_owner(long port, long o, long s, void *arg)
 {
     char p[600];
     (void)s;
-    if (o == *(long *)arg) { lease_path(p, sizeof p, port); remove(p); }
+    if (o == *(long *)arg && (!last_ns || !my_ns || last_ns == my_ns)) { lease_path(p, sizeof p, port); remove(p); }
 }
 
 static void ensure_dir(char *p)
@@ -271,7 +286,14 @@ static void default_dir(void)
 #else
     snprintf(user, sizeof user, "%ld", (long)getuid());
 #endif
+#ifdef _WIN32
     snprintf(dir, sizeof dir, "%s" SEP "zcl-port-%s", t, user);
+#else
+    /* One fixed directory, not $TMPDIR: runs with different TMPDIRs (or a private /tmp
+     * in a sandbox that bind-mounts this directory) must share the same leases. */
+    (void)t;
+    snprintf(dir, sizeof dir, "/tmp/zcl-port-%s", user);
+#endif
 }
 
 int main(int argc, char **argv)
@@ -299,6 +321,7 @@ int main(int argc, char **argv)
     rng ^= (unsigned long long)GetCurrentProcessId() * 2654435761ULL ^ ((unsigned long long)time(NULL) << 20) ^ (unsigned long long)GetTickCount();
 #else
     if (!have_owner) owner_pid = (long)getppid();
+    { struct stat nst; if (stat("/proc/self/ns/pid", &nst) == 0) my_ns = (long)nst.st_ino; }
     { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
       rng ^= ((unsigned long long)getpid() * 2654435761ULL) ^ ((unsigned long long)ts.tv_nsec << 20) ^ (unsigned long long)ts.tv_sec; }
 #endif

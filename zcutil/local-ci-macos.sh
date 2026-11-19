@@ -19,7 +19,7 @@
 # run), cache/ (depends sources+built, Qt toolchain).  Other directories are never touched,
 # and no daemon other than the one this script started is ever signalled.
 # Prerequisites (Homebrew): autoconf automake libtool pkg-config coreutils; for the wallet
-# also libsodium (and qt@5 for wallet-tests).  Env: ZCL_CI_JOBS (default 4), ZCL_CI_PORT_BASE (default 41200),
+# also libsodium (and qt@5 for wallet-tests).  Env: ZCL_CI_JOBS (default 4), ZCL_CI_PORT_BASE (default: leased ports),
 # ZCL_CI_EXPECT_VERSION (default derived from src/clientversion.h).
 set -eu
 
@@ -42,7 +42,7 @@ mkdir -p "$ROOT/work" "$ROOT/cache/depends-sources" "$ROOT/cache/depends-built" 
 bundle=$(cd "$(dirname "$bundle")" && pwd)/$(basename "$bundle")
 out=$(cd "$out" && pwd)
 JOBS=${ZCL_CI_JOBS:-4}
-PORT_BASE=${ZCL_CI_PORT_BASE:-41200}
+PORT_BASE=${ZCL_CI_PORT_BASE:-}   # empty: the smoke test leases its ports (qa/lib/isolation.sh)
 export SOURCES_PATH="$ROOT/cache/depends-sources" BASE_CACHE="$ROOT/cache/depends-built"
 # Fixed absolute path so depends/Qt prefixes stay valid between runs.
 SRC=$ROOT/work/src
@@ -111,9 +111,9 @@ do_daemon() {
     else
         say "fetch Zcash parameters"; bash zcutil/fetch-params.sh || die "fetch-params"
     fi
-    say "regtest smoke (ports from $PORT_BASE)"
+    say "regtest smoke (ports ${PORT_BASE:+from $PORT_BASE}${PORT_BASE:-leased})"
     rm -rf "$out/smoke"
-    sh src/c23/test/regtest-smoke.sh --bin "$cand" --work "$out/smoke" --port-base "$PORT_BASE" >"$out/logs/smoke-macos.log" 2>&1 \
+    sh src/c23/test/regtest-smoke.sh --bin "$cand" --work "$out/smoke" ${PORT_BASE:+--port-base "$PORT_BASE"} >"$out/logs/smoke-macos.log" 2>&1 \
         || { tail -30 "$out/logs/smoke-macos.log"; die "regtest smoke failed"; }
     tail -3 "$out/logs/smoke-macos.log"
     say "bounded embedded Tor check"

@@ -341,16 +341,16 @@ t_c23linked() {
 t_smoke() {
     rm -rf $TD/smoke
     if [ -d /prev ]; then
-        sh src/c23/test/regtest-smoke.sh --bin /w/src/src --work $TD/smoke --peer-bin /prev --port-base 38232
+        sh src/c23/test/regtest-smoke.sh --bin /w/src/src --work $TD/smoke --peer-bin /prev
     else
-        sh src/c23/test/regtest-smoke.sh --bin /w/src/src --work $TD/smoke --port-base 38232
+        sh src/c23/test/regtest-smoke.sh --bin /w/src/src --work $TD/smoke
     fi
 }
 t_matrix() {
     rm -rf $TD/matrix
     if [ -d /prev ]; then peer="--peer-bin /prev"; else peer=""; fi
     # shellcheck disable=SC2086
-    sh qa/rpc-tests/wallet_matrix.sh --bin /w/src/src --work $TD/matrix --only 1,2,3,4,5,6,7,8,9 --base 30000 $peer
+    sh qa/rpc-tests/wallet_matrix.sh --bin /w/src/src --work $TD/matrix --only 1,2,3,4,5,6,7,8,9 $peer
 }
 t_txutil()      { sh qa/rpc-tests/zclassic_tx_util.sh /w/src/src; }
 t_badhome()     { sh qa/rpc-tests/startup_bad_home.sh /w/src/src; }
@@ -491,6 +491,12 @@ enter() {
     extra=${EXTRA_BINDS:-}
     [ -z "$GOLDEN" ] || extra="$extra --ro-bind $GOLDEN /golden"
     [ -z "${ZCL_CI_PREV_BIN:-}" ] || extra="$extra --ro-bind $ZCL_CI_PREV_BIN /prev"
+    # Port leases (qa/lib/isolation.sh, zcutil/dev/zcl-port) must be shared by every run on this
+    # host, so the sandbox sees the host's lease directory (the sandbox /tmp is private).
+    if [ "$net" != none ]; then
+        pd=${ZCL_PORT_DIR:-/tmp/zcl-port-$(id -u)}
+        mkdir -p "$pd" && chmod 700 "$pd" && extra="$extra --bind $pd /zcl-port --setenv ZCL_PORT_DIR /zcl-port"
+    fi
     mkdir -p "$CACHE/zcash-params" "$CACHE/home-tmp"
     # step limits and the log cap reach the steps (--clearenv drops everything else)
     passenv=""

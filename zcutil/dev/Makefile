@@ -21,6 +21,7 @@ zcl-dev.exe: zcl-dev.c $(HDR)
 check: zcl-dev
 	sh test/run.sh ./zcl-dev
 	sh test/ci-receipts.sh ./zcl-dev
+	sh zcl-port-selftest.sh
 	./zcl-dev check-rules
 	./zcl-dev check-docs
 

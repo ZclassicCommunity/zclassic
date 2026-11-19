@@ -4,7 +4,7 @@ Imports the root contract: [../AGENTS.md](../AGENTS.md). Index of scripts: [rpc-
 
 ## How a test script is built
 
-- POSIX `sh`, one scenario per file in `qa/rpc-tests/`, a header comment naming its environment variables and what it proves. Run: `sh qa/rpc-tests/<script>.sh <dir-with-zclassicd-and-zclassic-cli>`.
+- POSIX `sh`, one scenario per file in `qa/rpc-tests/`, a header comment naming its environment variables and what it proves. Run: `sh qa/rpc-tests/<script>.sh --bin <dir-with-zclassicd-and-zclassic-cli> --work <empty dir>` for most scripts; the token, name, zslp, `startup_bad_home` and `zclassic_tx_util` scripts take one positional `<dir>` instead. The usage line in each header is authoritative; ports are leased by `qa/lib/isolation.sh`.
 - It starts regtest nodes in a fresh `mktemp -d` datadir, drives them with `zclassic-cli`, and removes everything on exit (trap on EXIT/INT/TERM). It never touches a real datadir, wallet or home directory.
 - Shared helpers live in `wallet_matrix_lib.sh` (start, `kill9`, `sync_to`, `wait_height`); reuse them before writing new ones. `jq` is an allowed test dependency (the focal CI rootfs installs it); a new script must still run where only `jq`, `sh` and the build tools exist.
 - Assertions print a named line and the script exits non-zero on the first unexplained failure. Never loosen an assertion, a tolerance or a timeout to make a run pass; find the cause.
