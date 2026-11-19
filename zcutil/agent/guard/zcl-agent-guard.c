@@ -10,11 +10,13 @@
  *
  *   zcl-agent-guard                       hook mode: PreToolUse JSON on stdin
  *   zcl-agent-guard --bash CMD            print ALLOW, WARN <rule> or REFUSE <rule> <text>
+ *   zcl-agent-guard --ps CMD              the same for a PowerShell command
  *   zcl-agent-guard --path TOOL FILE [CONTENT]
  *   zcl-agent-guard --replay TRANSCRIPT   evaluate a transcript (JSONL) offline
  *
  * Hook contract: exit 2 plus one stderr line refuses the call; exit 0 allows it (a warning is a
- * stderr line with exit 0). Unreadable input fails open with a warning: this is a safety net,
+ * stderr line plus a PreToolUse "ask" decision on stdout, exit 0). Malformed input fails open
+ * with a warning: this is a safety net,
  * not the primary control. Precision matters as much as coverage, because a false refusal
  * stalls the worker.
  *
@@ -147,6 +149,7 @@ static const char *eval_call(const struct call *c)
 {
     if (!c->name) return NULL;
     if (strcmp(c->name, "Bash") == 0) return c->cmd ? ag_eval_bash(c->cmd) : NULL;
+    if (strcmp(c->name, "PowerShell") == 0) return c->cmd ? ag_eval_ps(c->cmd) : NULL;
     if (strcmp(c->name, "NotebookEdit") == 0) return ag_eval_path(c->name, c->nb, NULL);
     if (strcmp(c->name, "Edit") == 0 || strcmp(c->name, "Write") == 0 ||
         strcmp(c->name, "MultiEdit") == 0)
@@ -156,7 +159,7 @@ static const char *eval_call(const struct call *c)
 
 static bool call_is_checked(const struct call *c)
 {
-    static const char *const tools[] = {"Bash", "Edit", "Write", "MultiEdit",
+    static const char *const tools[] = {"Bash", "PowerShell", "Edit", "Write", "MultiEdit",
                                         "NotebookEdit"};
     if (!c->name) return false;
     for (size_t i = 0; i < sizeof tools / sizeof tools[0]; i++)
@@ -400,17 +403,19 @@ static int cmd_replay(const char *file, struct out *o)
 
 /* ---- hook mode and CLI ------------------------------------------- */
 
-static char *read_stdin(size_t *len)
+/* Reads stdin up to MAX_INPUT; *big is set when more input follows, which is then unread. */
+static char *read_stdin(size_t *len, bool *big)
 {
     size_t cap = 65536, n = 0;
     char *buf = malloc(cap); // raw-alloc-ok:build-tool
+    *big = false;
     while (buf) {
         size_t got = fread(buf + n, 1, cap - n, stdin);
         n += got;
         if (n < cap) break;
         if (cap >= MAX_INPUT) {
-            free(buf);
-            return NULL;
+            *big = fgetc(stdin) != EOF;
+            break;
         }
         cap *= 2;
         char *nb = realloc(buf, cap); // raw-alloc-ok:build-tool
@@ -424,14 +429,37 @@ static char *read_stdin(size_t *len)
     return buf;
 }
 
+/* A warning reaches the model only as a PreToolUse decision on stdout (stderr of an exit-0 hook
+ * goes to the debug log): ask puts the call in front of the human with the rule text. */
+static void print_ask(const char *rule)
+{
+    char reason[700];
+    snprintf(reason, sizeof reason, "%s: %s", rule, ag_rule_text(rule));
+    printf("{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\","
+           "\"permissionDecision\":\"ask\",\"permissionDecisionReason\":");
+    json_str(stdout, reason, sizeof reason);
+    printf("}}\n");
+    fflush(stdout);
+}
+
 static int cmd_hook(void)
 {
     size_t len = 0;
-    char *in = read_stdin(&len);
+    bool big = false;
+    char *in = read_stdin(&len, &big);
     struct call call;
     const char *r = NULL;
     bool ok;
     memset(&call, 0, sizeof call);
+    if (big) {
+        /* Input over the cap cannot be parsed, and the hook only runs for the checked tools, so
+         * a Write of a huge body to a vendor or workflow path must not slip through. */
+        free(in);
+        fprintf(stderr,
+                "zcl-agent-guard refused (%s): hook input over %u MiB. %s\n", R_COMPLEX,
+                MAX_INPUT >> 20, ag_rule_text(R_COMPLEX));
+        return 2;
+    }
     if (!in) {
         fprintf(stderr, "zcl-agent-guard: warning: unreadable hook input; allowing\n");
         return 0;
@@ -444,6 +472,7 @@ static int cmd_hook(void)
     if (!r) return 0;
     if (ag_rule_is_warning(r)) {
         fprintf(stderr, "zcl-agent-guard warning (%s): %s\n", r, ag_rule_text(r));
+        print_ask(r);
         return 0;
     }
     fprintf(stderr,
@@ -476,7 +505,7 @@ static int usage(void)
 {
     fprintf(stderr,
             "usage: zcl-agent-guard [--json] [--after=N] "
-            "[--bash CMD | --path TOOL FILE [CONTENT] | --replay FILE]\n"
+            "[--bash CMD | --ps CMD | --path TOOL FILE [CONTENT] | --replay FILE]\n"
             "       no arguments: PreToolUse hook on stdin (exit 2 refuses)\n");
     return 64;
 }
@@ -497,6 +526,7 @@ int main(int argc, char **argv)
         else return usage();
     }
     if (n == 0) return cmd_hook();
+    if (n == 2 && strcmp(args[0], "--ps") == 0) return print_verdict(ag_eval_ps(args[1]), o.json);
     if (n == 2 && strcmp(args[0], "--bash") == 0)
         return print_verdict(ag_eval_bash(args[1]), o.json);
     if ((n == 3 || n == 4) && strcmp(args[0], "--path") == 0)

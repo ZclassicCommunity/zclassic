@@ -17,9 +17,12 @@
 #define R_CI "guard.hosted_ci"
 #define R_VENDOR "guard.vendor_edit"
 #define R_SEAL "guard.consensus_seal" /* a warning, never a refusal */
+#define R_COMPLEX "guard.too_complex" /* a cap was hit: the call cannot be checked */
 
 /* Each returns the rule id the call breaks, or NULL when the call is allowed. */
 const char *ag_eval_bash(const char *cmd);
+/* A PowerShell command (the PowerShell tool on Windows). */
+const char *ag_eval_ps(const char *cmd);
 const char *ag_eval_path(const char *tool, const char *path, const char *content);
 
 /* True for a rule that warns on stderr and still allows the call. */

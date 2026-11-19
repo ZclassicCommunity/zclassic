@@ -29,6 +29,45 @@ hook garbage 0 'unexpected hook input' 'not json'
 hook empty 0 'unexpected hook input' ''
 hook no-tool 0 '' '{"hook_event_name":"PreToolUse"}'
 
+# a warning must reach the model: a PreToolUse "ask" decision on stdout, exit 0 (stderr of an
+# exit-0 hook is only a debug log)
+printf '%s' '{"tool_name":"Edit","tool_input":{"file_path":"src/pow.cpp","old_string":"a","new_string":"b"}}' |
+    "$g" > "$out/o" 2> /dev/null; rc=$?
+[ "$rc" = 0 ] || bad "seal-ask: exit $rc"
+grep -q '^{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"guard.consensus_seal: .*UNSEAL.md.*"}}$' "$out/o" ||
+    bad "seal-ask: stdout lacks the ask decision: $(cat "$out/o")"
+printf '%s' '{"tool_name":"Bash","tool_input":{"command":"ls"}}' | "$g" > "$out/o" 2> /dev/null
+[ ! -s "$out/o" ] || bad "an allowed call must print nothing on stdout"
+printf '%s' '{"tool_name":"Bash","tool_input":{"command":"python3 x"}}' | "$g" > "$out/o" 2> /dev/null
+[ ! -s "$out/o" ] || bad "a refusal must print nothing on stdout"
+
+# the PowerShell tool is checked like Bash, with PowerShell deleters and writers
+hook ps-push 2 'guard.git_push' '{"tool_name":"PowerShell","tool_input":{"command":"git push --force origin master; python3 x"}}'
+hook ps-remove 2 'guard.datadir' '{"tool_name":"PowerShell","tool_input":{"command":"Remove-Item -Recurse $env:APPDATA\\ZClassic"}}'
+hook ps-setcontent 2 'guard.hosted_ci' '{"tool_name":"PowerShell","tool_input":{"command":"Set-Content .github\\workflows\\ci.yml x"}}'
+hook ps-allow 0 '' '{"tool_name":"PowerShell","tool_input":{"command":"Get-ChildItem build"}}'
+hook notebook-refuse 2 'guard.vendor_edit' '{"tool_name":"NotebookEdit","tool_input":{"notebook_path":"zcutil/tools/vendor/n.ipynb"}}'
+"$g" --ps 'Remove-Item -Recurse $env:APPDATA\ZClassic' > "$out/o"; rc=$?
+[ "$rc" = 1 ] && grep -q '^REFUSE guard.datadir ' "$out/o" || bad "--ps refuse (rc $rc)"
+
+# the settings matcher must name every checked tool
+m=$(grep '"matcher"' "$here/../../../../.claude/settings.json" 2> /dev/null)
+if [ -n "$m" ]; then
+    for t in Bash PowerShell Edit Write MultiEdit NotebookEdit; do
+        case $m in *"$t"*) ;; *) bad "settings.json matcher lacks $t" ;; esac
+    done
+fi
+
+# hook input over the 32 MiB cap cannot be parsed and must refuse, not fail open
+{
+    printf '{"tool_name":"Write","tool_input":{"file_path":".github/workflows/ci.yml","content":"'
+    head -c 34000000 /dev/zero | tr '\0' a
+    printf '"}}'
+} > "$out/big.json"
+"$g" < "$out/big.json" > /dev/null 2> "$out/e"; rc=$?
+[ "$rc" = 2 ] && grep -q 'guard.too_complex' "$out/e" || bad "oversized input (rc $rc): $(head -c 200 "$out/e")"
+rm -f "$out/big.json"
+
 # CLI verdicts and exit codes
 "$g" --bash 'ls' > "$out/o"; [ $? = 0 ] && [ "$(cat "$out/o")" = ALLOW ] || bad "--bash allow"
 "$g" --bash 'git push origin master' > "$out/o"; rc=$?

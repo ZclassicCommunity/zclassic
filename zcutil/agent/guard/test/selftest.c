@@ -4,13 +4,15 @@
  * the rule it must hit (or NULL for allow). Quoting, env prefixes, sh -c nesting, ssh, heredocs and
  * && chains are covered on purpose: a missed refusal and a false refusal both fail the run. */
 
+#include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "rules.h"
 
 struct tcase {
-    char kind;          /* 'B' bash, 'P' path */
+    char kind;          /* 'B' bash, 'S' PowerShell, 'P' path */
     const char *tool;   /* P: tool name */
     const char *input;  /* B: command, P: file path */
     const char *extra;  /* P: Write content, else NULL */
@@ -19,6 +21,7 @@ struct tcase {
 
 #define B(cmd, want) {'B', NULL, cmd, NULL, want}
 #define P(tool, path, want) {'P', tool, path, NULL, want}
+#define S(cmd, want) {'S', NULL, cmd, NULL, want}
 
 static const struct tcase cases[] = {
     /* guard.datadir: writes, rm and mv under a node datadir */
@@ -264,23 +267,171 @@ static const struct tcase cases[] = {
     B("echo \"$(rm -rf ~/.zclassic/blocks)\"", R_DATADIR),
     B("echo \"`python3 -V`\"", R_PYTHON),
     B("echo '$(rm -rf ~/.zclassic/blocks)'", NULL),
+    /* macOS default datadir and params dir: Library/Application Support/{ZClassic,ZcashParams} */
+    B("rm -rf ~/Library/Application\\ Support/ZClassic/wallet.dat", R_DATADIR),
+    B("rm -rf \"$HOME/Library/Application Support/ZcashParams\"", R_DATADIR),
+    B("mv '/Users/x/Library/Application Support/zclassic' /tmp/old", R_DATADIR),
+    P("Write", "/Users/x/Library/Application Support/Zclassic/wallet.dat", R_DATADIR),
+    B("rm -rf ~/Library/Application\\ Support/Other", NULL),
+    B("rm -rf ~/Library/Caches/ZClassic", NULL),
+    P("Edit", "/Users/x/Library/Application Support/Code/settings.json", NULL),
+    /* more writers and prefixes that reach a datadir */
+    B("unlink ~/.zclassic/wallet.dat", R_DATADIR),
+    B("mkdir ~/.zclassic/x", R_DATADIR),
+    B("doas rm -rf ~/.zclassic", R_DATADIR),
+    B("busybox rm -rf ~/.zclassic", R_DATADIR),
+    B("stdbuf -o0 rm -rf ~/.zclassic", R_DATADIR),
+    B("setsid rm -rf ~/.zclassic", R_DATADIR),
+    B("watch -n 5 rm -rf ~/.zclassic", R_DATADIR),
+    B("unzip -o x.zip -d ~/.zclassic", R_DATADIR),
+    B("cd ~/.zclassic && unzip -o x.zip", R_DATADIR),
+    B("git clean -fdx ~/.zclassic", R_DATADIR),
+    B("git rm -r ~/.zclassic", R_DATADIR),
+    B("git -C ~/.zclassic clean -fdx", R_DATADIR),
+    B("for d in ~/.zclassic; do rm -rf $d; done", R_DATADIR),
+    B("for d in ~/.zclassic; do rm -rf \"${d}/blocks\"; done", R_DATADIR),
+    B("for d in a b; do rm -rf $d; done", NULL),
+    B("unzip x.zip -d /tmp/x", NULL),
+    B("git clean -fdx build", NULL),
+    B("mkdir -p build/x", NULL),
+    /* paths compare case-insensitively and after normalisation */
+    P("Write", ".GitHub/Workflows/ci.yml", R_CI),
+    P("Write", ".github//workflows/ci.yml", R_CI),
+    P("Write", "./.github/./workflows/ci.yml", R_CI),
+    P("Edit", "ZCUTIL/TOOLS/VENDOR/x.c", R_VENDOR),
+    P("Edit", "zcutil/tools/../tools/vendor/x.c", R_VENDOR),
+    P("Edit", "zcutil//tools/vendor/x.c", R_VENDOR),
+    P("Edit", "zcutil\\Tools\\Vendor\\x.c", R_VENDOR),
+    P("Edit", "SRC/POW.CPP", R_SEAL),
+    P("Edit", "src/./script/../pow.cpp", R_SEAL),
+    P("Edit", "zcutil/tools/vendor/../x.c", NULL),
+    P("Edit", "zcutil/tools/vendorx/y.c", NULL),
+    P("Edit", "src/powx.cpp", NULL),
+    /* the -regtest hint counts only a -regtest word, not a comment or a path */
+    B("C=zclassic-cli; $C dumpwallet /tmp/w # -regtest", R_SPEND),
+    B("C=zclassic-cli; ls /tmp/-regtest; $C sendtoaddress t 1", R_SPEND),
+    B("C=\"zclassic-cli -regtest\"; $C sendtoaddress t 1", NULL),
+    /* gh api endpoints that dispatch or rerun a workflow */
+    B("gh api repos/a/b/actions/runs/1/rerun -X POST", R_CI),
+    B("gh api repos/a/b/actions/runs/1/rerun-failed-jobs -X POST", R_CI),
+    B("gh api repos/a/b/dispatches -f event_type=x", R_CI),
+    B("gh api repos/a/b/actions/runs", NULL),
+    /* PowerShell tool: program rules and PowerShell deleters and writers */
+    S("git push --force origin master; python3 x", R_PUSH),
+    S("git push origin feature", NULL),
+    S("python x.py", R_PYTHON),
+    S("pip install x", R_PYTHON),
+    S("git config user.name x", R_IDENT),
+    S("git commit --author=x -m m", R_IDENT),
+    S("$env:GIT_AUTHOR_NAME = \"x\"", R_IDENT),
+    S("gh workflow run ci.yml", R_CI),
+    S("zclassic-cli sendtoaddress t 1", R_SPEND),
+    S("& 'C:\\bin\\zclassic-cli.exe' dumpwallet w", R_SPEND),
+    S("zclassic-cli -regtest sendtoaddress t 1", NULL),
+    S("zclassicd -reindex", R_REINDEX),
+    S("zclassicd", R_DATADIR),
+    S("Remove-Item -Recurse $env:APPDATA\\ZClassic", R_DATADIR),
+    S("Remove-Item -Recurse -Force \"$env:APPDATA\\ZcashParams\"", R_DATADIR),
+    S("ri -r ${env:APPDATA}\\Zclassic\\wallet.dat", R_DATADIR),
+    S("del $HOME\\.zclassic\\wallet.dat", R_DATADIR),
+    S("Remove-Item -Path:$env:USERPROFILE\\.zclassic -Recurse", R_DATADIR),
+    S("rd /s /q %APPDATA%\\ZClassic", R_DATADIR),
+    S("Move-Item $env:APPDATA\\ZClassic C:\\old", R_DATADIR),
+    S("Copy-Item wallet.dat -Destination $env:APPDATA\\ZClassic\\", R_DATADIR),
+    S("Copy-Item a.dat $env:APPDATA\\ZClassic\\", R_DATADIR),
+    S("Out-File -FilePath x; echo hi > $env:APPDATA\\ZClassic\\a.txt", R_DATADIR),
+    S("Set-Content -Path ..\\.github\\workflows\\ci.yml -Value x", R_CI),
+    S("\"x\" | Out-File zcutil\\tools\\vendor\\a.c", R_VENDOR),
+    S("Set-Content x.py 1", R_PYTHON),
+    S("Set-Location $env:APPDATA\\ZClassic; Remove-Item wallet.dat", R_DATADIR),
+    S("pwsh -NoProfile -Command \"Remove-Item -Recurse $env:APPDATA\\ZClassic\"", R_DATADIR),
+    S("powershell -c 'python x'", R_PYTHON),
+    S("iex \"python x\"", R_PYTHON),
+    S("cmd /c \"rmdir /s /q %APPDATA%\\ZClassic\"", R_DATADIR),
+    S("bash -c \"rm -rf ~/.zclassic\"", R_DATADIR),
+    S("Write-Output \"$(Remove-Item -Recurse $env:APPDATA\\ZClassic)\"", R_DATADIR),
+    S("Expand-Archive x.zip -DestinationPath $env:APPDATA\\ZClassic", R_DATADIR),
+    S("Invoke-WebRequest http://x -OutFile $env:APPDATA\\ZClassic\\a", R_DATADIR),
+    S("powershell -EncodedCommand AAAA", R_COMPLEX),
+    S("Get-ChildItem $env:APPDATA\\ZClassic", NULL),
+    S("Get-Content $env:APPDATA\\ZClassic\\debug.log | Select-Object -Last 5", NULL),
+    S("Remove-Item -Recurse build\\tmp", NULL),
+    S("Remove-Item old.py", NULL),
+    S("Set-Content notes.txt hello", NULL),
+    S("Write-Host \"python and Remove-Item are words\"", NULL),
+    S("git status", NULL),
+    S("Set-Location build; Remove-Item x", NULL),
 };
+
+
+/* A command past a tokeniser cap or the nesting limit must be refused as too complex: a guard
+ * that silently drops the tail would allow `rm -rf ~/.zclassic` hidden behind it. */
+static char *repeat(const char *unit, size_t times, const char *head, const char *tail)
+{
+    size_t ul = strlen(unit), hl = strlen(head), tl = strlen(tail);
+    char *s = malloc(hl + ul * times + tl + 1);
+    if (!s) return NULL;
+    memcpy(s, head, hl);
+    for (size_t i = 0; i < times; i++) memcpy(s + hl + i * ul, unit, ul);
+    memcpy(s + hl + ul * times, tail, tl + 1);
+    return s;
+}
+
+static int cap_case(const char *name, char *cmd, bool ps, const char *want)
+{
+    const char *got;
+    int bad = 0;
+    if (!cmd) {
+        printf("FAIL cap %s: out of memory\n", name);
+        return 1;
+    }
+    got = ps ? ag_eval_ps(cmd) : ag_eval_bash(cmd);
+    if ((got == NULL) != (want == NULL) || (got && strcmp(got, want) != 0)) {
+        printf("FAIL cap %s: want %s got %s\n", name, want ? want : "ALLOW", got ? got : "ALLOW");
+        bad = 1;
+    }
+    free(cmd);
+    return bad;
+}
+
+static int cap_cases(void)
+{
+    const char *rm = "rm -rf ~/.zclassic";
+    int bad = 0;
+    bad += cap_case("segments", repeat("true && ", 3000, "", rm), false, R_COMPLEX);
+    bad += cap_case("words", repeat("a ", 20000, "echo ", "; rm -rf ~/.zclassic"), false, R_COMPLEX);
+    bad += cap_case("subs", repeat("$(true)", 200, "echo \"", "$(rm -rf ~/.zclassic)\""), false,
+                    R_COMPLEX);
+    bad += cap_case("redirects", repeat(">/tmp/a ", 700, "echo x ", ">~/.zclassic/w"), false,
+                    R_COMPLEX);
+    bad += cap_case("heredocs", repeat("<<E ", 6, "cat ", "\nx\nE\nE\nE\nE\nE\nE\n"), false,
+                    R_COMPLEX);
+    bad += cap_case("nesting", repeat("eval ", 12, "", rm), false, R_COMPLEX);
+    bad += cap_case("nesting ps", repeat("iex ", 12, "", "'python x'"), true, R_COMPLEX);
+    bad += cap_case("nest ok", repeat("eval ", 3, "", rm), false, R_DATADIR);
+    bad += cap_case("many words ok", repeat("a ", 1500, "ls ", ""), false, NULL);
+    bad += cap_case("refusal first", repeat("true && ", 3000, "rm -rf ~/.zclassic && ", ""), false,
+                    R_DATADIR);
+    return bad;
+}
 
 int main(void)
 {
-    int bad = 0;
+    int bad = cap_cases();
     size_t n = sizeof cases / sizeof cases[0];
     size_t allow = 0, refuse = 0, warn = 0;
     for (size_t i = 0; i < n; i++) {
         const struct tcase *c = &cases[i];
-        const char *got = c->kind == 'B' ? ag_eval_bash(c->input)
+        const char *got = c->kind == 'B'   ? ag_eval_bash(c->input)
+                          : c->kind == 'S' ? ag_eval_ps(c->input)
                                          : ag_eval_path(c->tool, c->input, c->extra);
         if (!c->want) allow++;
         else if (ag_rule_is_warning(c->want)) warn++;
         else refuse++;
         if ((got == NULL) != (c->want == NULL) || (got && strcmp(got, c->want) != 0)) {
             printf("FAIL case %zu: %s %s\n  want %s got %s\n", i,
-                   c->kind == 'B' ? "bash" : c->tool, c->input, c->want ? c->want : "ALLOW",
+                   c->kind == 'B' ? "bash" : c->kind == 'S' ? "ps" : c->tool, c->input,
+                   c->want ? c->want : "ALLOW",
                    got ? got : "ALLOW");
             bad++;
         }

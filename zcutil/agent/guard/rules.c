@@ -26,7 +26,7 @@
  *   alias g=git; g push                  aliases and shell functions are not expanded
  *   D=~/.zclassic; rm $D/x               variable values are not tracked
  *   -datadir=$D                          a variable datadir is assumed to be a test directory
- *   $C sendmany (C=zclassic-cli ...)     a variable client counts as regtest when -regtest appears
+ *   $C sendmany (C=zclassic-cli ...)     a variable client counts as regtest when a -regtest word appears
  *                                        anywhere in the command
  *   xargs / find -exec git push          only xargs as a wrapper; find -exec only for writers
  *   sh script.sh / bash x.sh             the script file's content is not read
@@ -53,11 +53,18 @@
 #include "rules.h"
 
 #define MAX_NEST 4
-#define MAX_WORDS 4096
-#define MAX_SEGS 1024
+#define MAX_WORDS 8192
+#define MAX_SEGS 2048
 #define MAX_REDIR 512
-#define MAX_SUBS 64
+#define MAX_SUBS 128
 #define MAX_HD 4
+
+/* Set when any cap or depth limit drops input: the verdict is then guard.too_complex, never
+ * allow (a guard that skips the tail of a long command fails open). */
+static bool g_complex;
+
+/* Name of the variable of a `for VAR in <datadir>` loop seen earlier in the command, else "". */
+static char g_loopvar[48];
 
 struct gseg {
     int w0, nw;
@@ -97,6 +104,7 @@ struct tok {
 };
 
 static const char *eval_buf(const char *s, size_t len, int depth);
+static const char *ps_eval(const char *s, size_t len, int depth);
 
 /* ---- quote-aware skipping inside $( ) and heredocs ---------------- */
 
@@ -156,7 +164,10 @@ static size_t skip_heredoc(const char *s, size_t len, size_t i)
 static size_t skip_paren(const char *s, size_t len, size_t i, int lvl)
 {
     int depth = 1;
-    if (lvl > 12) return len;
+    if (lvl > 12) {
+        g_complex = true;
+        return len;
+    }
     while (i < len) {
         char ch = s[i];
         if (ch == '\\') {
@@ -220,15 +231,24 @@ static void tk_mark_quoted(struct tok *t)
 static void tk_route_word(struct tok *t, char *wd)
 {
     struct gctx *c = t->c;
-    if (t->pend == P_NONE && c->nwords < MAX_WORDS) {
-        c->words[c->nwords++] = wd;
-    } else if (t->pend == P_OUT && c->nredir < MAX_REDIR) {
-        c->redir_seg[c->nredir] = c->nsegs;
-        c->redir[c->nredir++] = wd;
-    } else if (t->pend == P_HEREDOC && t->nhd < MAX_HD) {
-        t->hd[t->nhd].seg = c->nsegs;
-        snprintf(t->hd[t->nhd].delim, sizeof t->hd[t->nhd].delim, "%s", wd);
-        t->nhd++;
+    if (t->pend == P_NONE) {
+        if (c->nwords < MAX_WORDS) c->words[c->nwords++] = wd;
+        else g_complex = true;
+    } else if (t->pend == P_OUT) {
+        if (c->nredir < MAX_REDIR) {
+            c->redir_seg[c->nredir] = c->nsegs;
+            c->redir[c->nredir++] = wd;
+        } else {
+            g_complex = true;
+        }
+    } else if (t->pend == P_HEREDOC) {
+        if (t->nhd < MAX_HD) {
+            t->hd[t->nhd].seg = c->nsegs;
+            snprintf(t->hd[t->nhd].delim, sizeof t->hd[t->nhd].delim, "%s", wd);
+            t->nhd++;
+        } else {
+            g_complex = true;
+        }
     }
     t->pend = P_NONE;
 }
@@ -246,7 +266,9 @@ static void tk_end_seg(struct tok *t)
     struct gctx *c = t->c;
     tk_end_word(t);
     t->pend = P_NONE;
-    if ((c->nwords > t->cw0 || c->nredir > t->cr0) && c->nsegs < MAX_SEGS) {
+    if ((c->nwords > t->cw0 || c->nredir > t->cr0) && c->nsegs >= MAX_SEGS) {
+        g_complex = true;
+    } else if (c->nwords > t->cw0 || c->nredir > t->cr0) {
         struct gseg *g = &c->segs[c->nsegs++];
         memset(g, 0, sizeof *g);
         g->w0 = t->cw0;
@@ -305,7 +327,11 @@ static bool tk_dq_escape(struct tok *t, size_t *ip)
 static void tk_add_sub(struct tok *t, size_t off, size_t end)
 {
     struct gctx *c = t->c;
-    if (c->nsubs >= MAX_SUBS || end <= off) return;
+    if (end <= off) return;
+    if (c->nsubs >= MAX_SUBS) {
+        g_complex = true;
+        return;
+    }
     c->subs[c->nsubs].off = off;
     c->subs[c->nsubs].len = end - off;
     c->nsubs++;
@@ -558,6 +584,11 @@ static const struct wrapper wrappers[] = {
     {"timeout", " -k -s ", WF_TIMEOUT},
     {"devbuild", " --project ", 0},
     {"xargs", " -a -d -E -e -I -L -l -n -P -s ", 0},
+    {"doas", " -u -C ", 0},
+    {"busybox", " ", 0},
+    {"stdbuf", " -i -o -e ", 0},
+    {"setsid", " ", 0},
+    {"watch", " -n -d ", 0},
 };
 
 struct pinfo {
@@ -654,48 +685,99 @@ static bool comp_is_ci(const char *c, size_t n, const char *name)
 
 static bool comp_is_appdata(const char *c, size_t n)
 {
-    static const char *const names[] = {"appdata", "%appdata%", "$appdata", "${appdata}"};
+    static const char *const names[] = {"appdata", "%appdata%", "$appdata", "${appdata}",
+        "appdata}"};
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
         if (comp_is_ci(c, n, names[i])) return true;
     return false;
 }
 
-/* ~/.zclassic*, ~/.zcash-params, and %APPDATA%/Zclassic or %APPDATA%/ZcashParams. */
+/* ~/.zclassic*, ~/.zcash-params, %APPDATA%/Zclassic or %APPDATA%/ZcashParams, and on macOS
+ * ~/Library/Application Support/Zclassic or .../ZcashParams (the path words split at the space,
+ * so the two-word name is three components). */
 static bool mentions_datadir(const char *w)
 {
     const char *p = w;
     size_t n = 0;
     bool appdata = false;
+    int mac = 0; /* 1 after Library, 2 after Application, then Support sets appdata */
     while (next_comp(&p, &n)) {
         if (comp_starts_ci(p, n, ".zclassic") || comp_starts_ci(p, n, ".zcash-params"))
             return true;
         if (appdata && (comp_is_ci(p, n, "zclassic") || comp_is_ci(p, n, "zcashparams")))
             return true;
         if (comp_is_appdata(p, n)) appdata = true;
+        if (mac == 2 && comp_is_ci(p, n, "support")) appdata = true;
+        mac = comp_is_ci(p, n, "library") ? 1 : (mac == 1 && comp_is_ci(p, n, "application")) ? 2 : 0;
         p += n;
     }
     return false;
 }
 
-static bool slash_eq(char a, char b)
+/* Copy w with backslashes as '/', '//' collapsed, '.' components dropped, 'x/..' folded and
+ * letters lower-cased: NTFS and default APFS are case-insensitive, and the shell resolves the
+ * rest, so every spelling must reach the same compare. NULL when out of memory. */
+static char *norm_path(const char *w)
 {
-    return a == b || ((a == '/' || a == '\\') && (b == '/' || b == '\\'));
+    size_t n = strlen(w), o = 0;
+    char *out = malloc(n + 1); // raw-alloc-ok:build-tool
+    if (!out) {
+        g_complex = true;
+        return NULL;
+    }
+    for (size_t i = 0; i < n;) {
+        size_t j = i, cs, ce;
+        while (j < n && w[j] != '/' && w[j] != '\\') j++;
+        cs = i;
+        ce = j;
+        i = j < n ? j + 1 : n;
+        if (ce == cs) { /* empty component: '//' or a leading separator */
+            if (cs == 0) out[o++] = '/';
+            continue;
+        }
+        if (ce - cs == 1 && w[cs] == '.') continue;
+        if (ce - cs == 2 && w[cs] == '.' && w[cs + 1] == '.' && o > 0) {
+            size_t e = o, k; /* fold 'x/..' unless x is '..' or the root */
+            if (out[e - 1] == '/') e--;
+            k = e;
+            while (k > 0 && out[k - 1] != '/') k--;
+            if (e == k) continue; /* '/..' is '/' */
+            if (!(e - k == 2 && out[k] == '.' && out[k + 1] == '.')) {
+                o = k;
+                continue;
+            }
+        }
+        for (size_t k = cs; k < ce; k++) out[o++] = (char)tolower((unsigned char)w[k]);
+        if (j < n) out[o++] = '/';
+    }
+    out[o] = '\0';
+    return out;
 }
 
-/* True when pat (written with '/') occurs in w at a component boundary. dir_mode: the match may
- * be followed by a path separator or the end (a directory); otherwise it must end the word. */
-static bool path_has(const char *w, const char *pat, bool dir_mode)
+static bool path_has_norm(const char *w, const char *pat, bool dir_mode)
 {
     size_t m = strlen(pat);
     for (size_t i = 0; w[i]; i++) {
         size_t k = 0;
         if (i > 0 && !is_psep(w[i - 1])) continue;
-        while (k < m && w[i + k] && slash_eq(w[i + k], pat[k])) k++;
+        while (k < m && w[i + k] && w[i + k] == pat[k]) k++;
         if (k != m) continue;
         if (w[i + k] == '\0') return true;
-        if (dir_mode && (w[i + k] == '/' || w[i + k] == '\\')) return true;
+        if (dir_mode && w[i + k] == '/') return true;
     }
     return false;
+}
+
+/* True when pat (written lower-case with '/') occurs in w at a component boundary, after
+ * normalisation. dir_mode: the match may be followed by a path separator or the end (a
+ * directory); otherwise it must end the word. */
+static bool path_has(const char *w, const char *pat, bool dir_mode)
+{
+    char *nw = norm_path(w), *np = norm_path(pat);
+    bool r = nw && np && path_has_norm(nw, np, dir_mode);
+    free(nw);
+    free(np);
+    return r;
 }
 
 static bool is_vendor_path(const char *w)
@@ -913,6 +995,23 @@ static const char *push_rule(char **a, int na)
     return pos < 2 && !tags ? R_PUSH : NULL;
 }
 
+static const char *target_rule(const struct cmdv *v, const char *t);
+
+/* git clean, rm, mv, restore, checkout, reset delete or rewrite working-tree files: a datadir
+ * operand or a `git -C <datadir>` working directory is a datadir write. */
+static const char *git_worktree_writer(const struct cmdv *v, int si)
+{
+    static const char *const subs[] = {"clean", "rm", "mv", "restore", "checkout", "reset"};
+    if (!IN_LIST(v->a[si], subs)) return NULL;
+    for (int i = 0; i + 1 < si; i++)
+        if (strcmp(v->a[i], "-C") == 0 && mentions_datadir(v->a[i + 1])) return R_DATADIR;
+    for (int i = si + 1; i < v->na; i++) {
+        const char *r;
+        if (v->a[i][0] != '-' && (r = target_rule(v, v->a[i])) != NULL) return r;
+    }
+    return NULL;
+}
+
 static const char *check_git(const struct cmdv *v)
 {
     bool bad = false;
@@ -930,7 +1029,7 @@ static const char *check_git(const struct cmdv *v)
         for (int i = si + 1; i < v->na; i++)
             if (strcmp(v->a[i], "--author") == 0 || strncmp(v->a[i], "--author=", 9) == 0)
                 return R_IDENT;
-    return NULL;
+    return git_worktree_writer(v, si);
 }
 
 static const char *check_export(const struct cmdv *v)
@@ -1040,9 +1139,33 @@ static int method_index(const struct cmdv *v)
 
 static bool is_regtest(const struct cmdv *v);
 
-/* The whole command line mentions -regtest: a client held in a variable (C="zclassic-cli
- * -regtest ..."; $C z_sendmany) is then a regtest client. Set by ag_eval_bash. */
+/* The command line carries a -regtest word (not in a comment, not inside a longer path): a
+ * client held in a variable (C="zclassic-cli -regtest ..."; $C z_sendmany) is then a regtest
+ * client. Set by ag_eval_bash. */
 static bool g_regtest_hint;
+
+static bool regtest_word_in(const char *s)
+{
+    char q = '\0';
+    for (size_t i = 0; s[i]; i++) {
+        char ch = s[i];
+        if (q == '\0' && ch == '\\') {
+            if (s[i + 1]) i++;
+        } else if (q == '\0' && ch == '#' && (i == 0 || strchr(" \t\n;&|(", s[i - 1]))) {
+            while (s[i] && s[i] != '\n') i++;
+            if (!s[i]) break;
+        } else if (q == '\0' && (ch == '\'' || ch == '"')) {
+            q = ch;
+        } else if (q == ch) {
+            q = '\0';
+        } else if (ch == '-' && strncmp(s + i, "-regtest", 8) == 0 &&
+                   (i == 0 || strchr(" \t\n\"'=", s[i - 1])) &&
+                   (s[i + 8] == '\0' || strchr(" \t\n\"';=&|", s[i + 8]))) {
+            return true;
+        }
+    }
+    return false;
+}
 
 /* guard.spend_or_key_export: a spend or key-export method outside -regtest. */
 static const char *check_rpc(const struct cmdv *v)
@@ -1152,7 +1275,9 @@ static const char *check_gh(const struct cmdv *v)
     int np = 0;
     if (strcmp(v->cmd, "gh") != 0) return NULL;
     for (int i = 0; i < v->na; i++) {
-        if (strstr(v->a[i], "/dispatches")) return R_CI;
+        if (strstr(v->a[i], "/dispatches") || strstr(v->a[i], "/rerun") ||
+            strstr(v->a[i], "repository_dispatch"))
+            return R_CI; /* gh api: dispatch, rerun and rerun-failed-jobs endpoints */
         if (v->a[i][0] != '-' && np < 2) pos[np++] = v->a[i];
     }
     if (strcmp(pos[0], "workflow") == 0 && (strcmp(pos[1], "run") == 0 || strcmp(pos[1], "enable") == 0))
@@ -1162,13 +1287,13 @@ static const char *check_gh(const struct cmdv *v)
 
 /* ---- writers: only the written operand counts --------------------- */
 
-enum wkind { W_NONE, W_ALL, W_DEST, W_SED, W_SQL, W_TAR, W_FIND, W_DL };
+enum wkind { W_NONE, W_ALL, W_DEST, W_SED, W_SQL, W_TAR, W_FIND, W_DL, W_UNZIP };
 
 static bool is_all_writer(const char *cmd)
 {
     static const char *const names[] = {
         "rm", "rmdir", "mv", "truncate", "dd", "shred", "chmod", "chown", "touch",
-        "tee", "vi", "vim", "nano", "emacs", "ed", "sudoedit"};
+        "tee", "vi", "vim", "nano", "emacs", "ed", "sudoedit", "unlink", "mkdir"};
     return IN_LIST(cmd, names);
 }
 
@@ -1215,6 +1340,7 @@ static enum wkind writer_kind(const struct cmdv *v)
     if (IN_LIST(v->cmd, dest)) return W_DEST;
     if (IN_LIST(v->cmd, sql)) return W_SQL;
     if (IN_LIST(v->cmd, dl)) return W_DL;
+    if (strcmp(v->cmd, "unzip") == 0) return W_UNZIP;
     if (strcmp(v->cmd, "sed") == 0 && sed_inplace(v)) return W_SED;
     if (strcmp(v->cmd, "find") == 0 && find_writes(v)) return W_FIND;
     if (strcmp(v->cmd, "tar") == 0 && tar_extracts(v)) return W_TAR;
@@ -1227,10 +1353,23 @@ static bool relative_word(const char *t)
     return t[0] && !strchr("-/~$", t[0]) && strspn(t, "0123456789") != strlen(t);
 }
 
+/* True when t names the variable of a for loop that iterates a datadir ($d or ${d}). */
+static bool uses_loopvar(const char *t)
+{
+    size_t n = strlen(g_loopvar);
+    if (n == 0) return false;
+    for (const char *p = strchr(t, '$'); p; p = strchr(p + 1, '$')) {
+        const char *q = p[1] == '{' ? p + 2 : p + 1;
+        if (strncmp(q, g_loopvar, n) == 0 && !is_word_char(q[n])) return true;
+    }
+    return false;
+}
+
 static const char *target_rule(const struct cmdv *v, const char *t)
 {
     const char *r = path_rule(t);
     if (r) return r;
+    if (uses_loopvar(t)) return R_DATADIR;
     return v->in_dd && relative_word(t) ? R_DATADIR : NULL;
 }
 
@@ -1346,6 +1485,20 @@ static const char *wr_dl(const struct cmdv *v)
     return NULL;
 }
 
+/* unzip -d DIR (or -dDIR): the extraction directory; without it, the current directory. */
+static const char *wr_unzip(const struct cmdv *v)
+{
+    for (int i = 0; i < v->na; i++) {
+        const char *a = v->a[i];
+        if (strcmp(a, "-d") == 0 && i + 1 < v->na) return target_rule(v, v->a[i + 1]);
+        if (strncmp(a, "-d", 2) == 0 && a[2] && !strchr("o", a[2])) {
+            const char *r = target_rule(v, a + 2);
+            if (r) return r;
+        }
+    }
+    return v->in_dd ? R_DATADIR : NULL;
+}
+
 static const char *check_writer_paths(const struct cmdv *v)
 {
     switch (writer_kind(v)) {
@@ -1354,6 +1507,7 @@ static const char *check_writer_paths(const struct cmdv *v)
     case W_SED: return wr_sed(v);
     case W_SQL: return wr_sql(v);
     case W_DL: return wr_dl(v);
+    case W_UNZIP: return wr_unzip(v);
     default: return wr_all(v);
     }
 }
@@ -1385,15 +1539,19 @@ static const char *nested_shell(const struct cmdv *v, bool *script)
     return NULL;
 }
 
-/* Scan words a[i..] joined by spaces as one command line (ssh, eval). */
-static const char *eval_joined(const struct cmdv *v, int i)
+/* Scan words a[i..] joined by spaces as one command line (ssh, eval, powershell -Command);
+ * ps selects the PowerShell scanner. */
+static const char *eval_joined_as(const struct cmdv *v, int i, bool ps)
 {
     size_t total = 1, used = 0;
     char *buf;
     const char *r;
     for (int k = i; k < v->na; k++) total += strlen(v->a[k]) + 1;
     buf = malloc(total); // raw-alloc-ok:build-tool
-    if (!buf) return NULL;
+    if (!buf) {
+        g_complex = true;
+        return NULL;
+    }
     for (int k = i; k < v->na; k++) {
         size_t n = strlen(v->a[k]);
         if (k > i) buf[used++] = ' ';
@@ -1401,9 +1559,51 @@ static const char *eval_joined(const struct cmdv *v, int i)
         used += n;
     }
     buf[used] = '\0';
-    r = eval_buf(buf, used, v->depth + 1);
+    r = ps ? ps_eval(buf, used, v->depth + 1) : eval_buf(buf, used, v->depth + 1);
     free(buf);
     return r;
+}
+
+static const char *eval_joined(const struct cmdv *v, int i)
+{
+    return eval_joined_as(v, i, false);
+}
+
+static bool is_ps_name(const char *cmd)
+{
+    return strcasecmp(cmd, "powershell") == 0 || strcasecmp(cmd, "pwsh") == 0;
+}
+
+/* powershell / pwsh: scan the -Command text (or the first positional word) as PowerShell. An
+ * -EncodedCommand cannot be read, so it is too complex to check. */
+static const char *nested_ps(const struct cmdv *v)
+{
+    static const char *const valued[] = {"-ep", "-executionpolicy", "-wd", "-workingdirectory",
+                                         "-inputformat", "-outputformat", "-version",
+                                         "-windowstyle"};
+    for (int i = 0; i < v->na; i++) {
+        const char *a = v->a[i];
+        char low[24];
+        size_t n = strlen(a);
+        if (a[0] != '-') return eval_joined_as(v, i, true);
+        if (n >= sizeof low) continue;
+        for (size_t k = 0; k <= n; k++) low[k] = (char)tolower((unsigned char)a[k]);
+        if (strcmp(low, "-c") == 0 || strcmp(low, "-command") == 0 ||
+            strcmp(low, "-commandwithargs") == 0)
+            return eval_joined_as(v, i + 1, true);
+        if (strcmp(low, "-e") == 0 || strncmp(low, "-enc", 4) == 0) return R_COMPLEX;
+        if (IN_LIST(low, valued)) i++;
+    }
+    return NULL;
+}
+
+/* cmd /c TEXT: the command text scans like PowerShell (rd, del, move, %APPDATA% paths). */
+static const char *nested_cmdexe(const struct cmdv *v)
+{
+    for (int i = 0; i < v->na; i++)
+        if (strcasecmp(v->a[i], "/c") == 0 || strcasecmp(v->a[i], "/k") == 0)
+            return eval_joined_as(v, i + 1, true);
+    return NULL;
 }
 
 /* ssh: scan the remote command string. stdin is a script only when there is
@@ -1429,6 +1629,8 @@ static const char *check_nested(const struct cmdv *v)
     if (is_shell_name(v->cmd)) r = nested_shell(v, &script);
     else if (strcmp(v->cmd, "ssh") == 0) r = nested_ssh(v, &script);
     else if (strcmp(v->cmd, "eval") == 0) return eval_joined(v, 0);
+    else if (is_ps_name(v->cmd)) return nested_ps(v);
+    else if (strcmp(v->cmd, "cmd") == 0) return nested_cmdexe(v);
     else return NULL;
     return r ? r : (script ? eval_here(v) : NULL);
 }
@@ -1448,6 +1650,17 @@ static void track_cd(const struct cmdv *v, bool *in_dd)
     if (strcmp(v->cmd, "cd") != 0 && strcmp(v->cmd, "pushd") != 0) return;
     i = first_word(v->a, v->na, 0);
     *in_dd = i >= 0 && mentions_datadir(v->a[i]);
+}
+
+/* `for VAR in <list>`: when the list names a datadir, the body's $VAR operands do too. */
+static void note_for_loop(const struct cmdv *v)
+{
+    if (strcmp(v->cmd, "for") != 0 || v->na < 3 || strcmp(v->a[1], "in") != 0) return;
+    for (int i = 2; i < v->na; i++) {
+        if (!mentions_datadir(v->a[i])) continue;
+        snprintf(g_loopvar, sizeof g_loopvar, "%s", v->a[0]);
+        return;
+    }
 }
 
 /* Windows spells programs python.exe, git.exe, zclassic-cli.exe: drop the suffix in place. */
@@ -1470,6 +1683,7 @@ static const char *seg_check(const struct gctx *c, int si, int depth, bool *in_d
     v = (struct cmdv){c, sg, base_name(w[ci]), w + ci + 1, sg->nw - ci - 1, w, sg->nw, depth,
                       *in_dd};
     track_cd(&v, in_dd);
+    note_for_loop(&v);
     for (size_t k = 0; k < sizeof checks / sizeof checks[0]; k++) {
         const char *r = checks[k](&v);
         if (r) return r;
@@ -1497,11 +1711,18 @@ static const char *eval_buf(const char *s, size_t len, int depth)
     struct gctx *c;
     const char *r = NULL;
     bool in_dd = false;
-    if (depth > MAX_NEST) return NULL;
+    if (depth > MAX_NEST) {
+        g_complex = true;
+        return NULL;
+    }
     c = calloc(1, sizeof *c); // raw-alloc-ok:build-tool
-    if (!c) return NULL;
+    if (!c) {
+        g_complex = true;
+        return NULL;
+    }
     c->arena = malloc(len * 2 + 16); // raw-alloc-ok:build-tool
     if (!c->arena) {
+        g_complex = true;
         free(c);
         return NULL;
     }
@@ -1518,10 +1739,304 @@ static const char *eval_buf(const char *s, size_t len, int depth)
     return r;
 }
 
+static const char *finish(const char *r)
+{
+    return !r && g_complex ? R_COMPLEX : r;
+}
+
 const char *ag_eval_bash(const char *cmd)
 {
-    g_regtest_hint = strstr(cmd, "-regtest") != NULL;
-    return eval_buf(cmd, strlen(cmd), 0);
+    g_complex = false;
+    g_loopvar[0] = '\0';
+    g_regtest_hint = regtest_word_in(cmd);
+    return finish(eval_buf(cmd, strlen(cmd), 0));
+}
+
+/* ---- PowerShell and cmd.exe ---------------------------------------------------------------
+ * The PowerShell tool is a second shell on Windows. Its words split at ; | & newline and
+ * ( ) { } outside quotes, quotes are ' (data) and " (data, except $( ) bodies, which scan as
+ * commands), the escape is the backtick, and backslashes stay in the word (they are paths). The
+ * program rules are the Bash ones (python, git, gh, zclassic-cli, zclassicd), run on the
+ * lower-cased command name; the PowerShell deleters and writers add the datadir, vendor and
+ * workflow path checks. Known limits: variables, functions and aliases are not tracked, a
+ * pipeline into Set-Content (Get-Content a | Set-Content b) checks b only, and Start-Process
+ * is not unwrapped. */
+
+struct psseg {
+    char **w;
+    int n, cap;
+    bool pend_redir;
+    const char *r; /* first refusal found in this scan */
+    bool in_dd;
+    int depth;
+};
+
+static bool ps_push(struct psseg *s, char *wd)
+{
+    if (s->n == s->cap) {
+        int nc = s->cap ? s->cap * 2 : 16;
+        char **nw = realloc(s->w, (size_t)nc * sizeof *nw); // raw-alloc-ok:build-tool
+        if (!nw) {
+            free(wd);
+            g_complex = true;
+            return false;
+        }
+        s->w = nw;
+        s->cap = nc;
+    }
+    s->w[s->n++] = wd;
+    return true;
+}
+
+static bool ps_in(const char *cmd, const char *const *list, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        if (strcmp(cmd, list[i]) == 0) return true;
+    return false;
+}
+#define PS_IN(c, arr) ps_in((c), (arr), sizeof(arr) / sizeof((arr)[0]))
+
+/* The value of a -Name or -Name:value parameter (case-insensitive), or NULL. */
+static const char *ps_param(char **a, int na, const char *const *names, size_t nn)
+{
+    for (int i = 0; i < na; i++) {
+        size_t len = strcspn(a[i], ":");
+        char low[32];
+        if (a[i][0] != '-' || len >= sizeof low) continue;
+        for (size_t k = 0; k < len; k++) low[k] = (char)tolower((unsigned char)a[i][k]);
+        low[len] = '\0';
+        if (!ps_in(low, names, nn)) continue;
+        if (a[i][len] == ':' && a[i][len + 1]) return a[i] + len + 1;
+        if (i + 1 < na) return a[i + 1];
+    }
+    return NULL;
+}
+
+static const char *ps_writer(const char *name, struct cmdv *v)
+{
+    static const char *const del[] = {"remove-item", "ri", "del", "erase", "rd", "rmdir", "rm",
+                                      "clear-content", "clc", "unlink", "shred"};
+    static const char *const wr[] = {"set-content", "sc", "add-content", "ac", "out-file",
+                                     "tee-object", "tee", "new-item", "ni", "mkdir", "md",
+                                     "move-item", "mi", "move", "mv", "rename-item", "rni",
+                                     "ren", "set-itemproperty", "touch", "truncate"};
+    static const char *const cp[] = {"copy-item", "copy", "cp", "cpi", "xcopy", "robocopy"};
+    static const char *const dparams[] = {"-destination", "-destinationpath"};
+    static const char *const oparams[] = {"-outfile", "-o"};
+    static const char *const web[] = {"invoke-webrequest", "iwr", "invoke-restmethod", "irm",
+                                      "curl", "wget"};
+    bool is_del = PS_IN(name, del), is_wr = PS_IN(name, wr);
+    const char *r;
+    if (is_del || is_wr) {
+        for (int i = 0; i < v->na; i++) {
+            if (v->a[i][0] == '-' && !strchr(v->a[i], ':')) continue;
+            if ((r = target_rule(v, v->a[i])) != NULL) return r;
+            if (is_wr && ends_ci(v->a[i], ".py")) return R_PYTHON;
+        }
+        return NULL;
+    }
+    if (PS_IN(name, cp)) {
+        const char *dest = ps_param(v->a, v->na, dparams, 2);
+        for (int i = 0; !dest && i < v->na; i++) /* else the last positional */
+            if (v->a[v->na - 1 - i][0] != '-' && v->a[v->na - 1 - i][0] != '/')
+                dest = v->a[v->na - 1 - i];
+        if (!dest) return NULL;
+        if (ends_ci(dest, ".py")) return R_PYTHON;
+        return target_rule(v, dest);
+    }
+    if (PS_IN(name, web)) {
+        const char *out = ps_param(v->a, v->na, oparams, 2);
+        return out ? target_rule(v, out) : NULL;
+    }
+    if (strcmp(name, "expand-archive") == 0 || strcmp(name, "unzip") == 0) {
+        const char *d = ps_param(v->a, v->na, dparams, 2);
+        return d ? target_rule(v, d) : (v->in_dd ? R_DATADIR : NULL);
+    }
+    return NULL;
+}
+
+static const char *ps_seg(struct psseg *s)
+{
+    static const char *const checks_ps[] = {"cd", "sl", "set-location", "chdir", "pushd",
+                                            "push-location", "popd", "pop-location"};
+    char *lc;
+    struct cmdv v;
+    struct gseg zero;
+    int ci = 0;
+    const char *name, *r = NULL;
+    size_t n;
+    if (s->n == 0) return NULL;
+    if (strncasecmp(s->w[0], "$env:git_", 9) == 0 && s->n > 1 && strcmp(s->w[1], "=") == 0) {
+        static const char *const ids[] = {"author_name", "author_email", "committer_name",
+                                          "committer_email"};
+        for (size_t k = 0; k < sizeof ids / sizeof ids[0]; k++)
+            if (strcasecmp(s->w[0] + 9, ids[k]) == 0) return R_IDENT;
+    }
+    while (ci < s->n && strcmp(s->w[ci], ".") == 0) ci++;
+    if (ci >= s->n) return NULL;
+    name = s->w[ci];
+    for (const char *p = name; *p; p++)
+        if (*p == '/' || *p == '\\') name = p + 1;
+    n = strlen(name);
+    lc = malloc(n + 1); // raw-alloc-ok:build-tool
+    if (!lc) {
+        g_complex = true;
+        return NULL;
+    }
+    for (size_t k = 0; k <= n; k++) lc[k] = (char)tolower((unsigned char)name[k]);
+    strip_exe(lc);
+    memset(&zero, 0, sizeof zero);
+    v = (struct cmdv){NULL, &zero, lc, s->w + ci + 1, s->n - ci - 1, s->w + ci, s->n - ci,
+                      s->depth, s->in_dd};
+    if (PS_IN(lc, checks_ps)) {
+        struct cmdv cdv = v;
+        cdv.cmd = lc[0] == 'p' && lc[1] == 'o' ? "popd" : "cd";
+        track_cd(&cdv, &s->in_dd);
+    } else if (strcmp(lc, "iex") == 0 || strcmp(lc, "invoke-expression") == 0) {
+        r = eval_joined_as(&v, 0, true);
+    } else {
+        r = ps_writer(lc, &v);
+    }
+    for (size_t k = 0; !r && k < sizeof checks / sizeof checks[0]; k++) r = checks[k](&v);
+    free(lc);
+    return r;
+}
+
+/* End the current segment: scan its words, then drop them. */
+static void ps_end_seg(struct psseg *s)
+{
+    if (!s->r) s->r = ps_seg(s);
+    for (int i = 0; i < s->n; i++) free(s->w[i]);
+    s->n = 0;
+    s->pend_redir = false;
+}
+
+/* End the current word (text in buf[0..n), quoted: it was quoted so may be empty). */
+static void ps_end_word(struct psseg *s, char *buf, size_t *n, bool *quoted)
+{
+    char *wd;
+    if (*n == 0 && !*quoted) return;
+    buf[*n] = '\0';
+    wd = strdup(buf); // raw-alloc-ok:build-tool
+    *n = 0;
+    *quoted = false;
+    if (!wd) {
+        g_complex = true;
+        return;
+    }
+    if (s->pend_redir) {
+        if (!s->r) {
+            s->r = path_rule(wd);
+            if (!s->r && ends_ci(wd, ".py")) s->r = R_PYTHON;
+            if (!s->r && s->in_dd && relative_word(wd)) s->r = R_DATADIR;
+        }
+        s->pend_redir = false;
+        free(wd);
+        return;
+    }
+    ps_push(s, wd);
+}
+
+/* A $( ) subexpression starting at s[i] == '$': its body scans as commands; returns the index
+ * past the closing parenthesis. */
+static size_t ps_subexpr(struct psseg *st, const char *s, size_t len, size_t i)
+{
+    size_t j = i + 2;
+    int depth = 1;
+    while (j < len && depth > 0) {
+        if (s[j] == '(') depth++;
+        else if (s[j] == ')') depth--;
+        j++;
+    }
+    if (!st->r) st->r = ps_eval(s + i + 2, (j > i + 2 ? j - 1 : j) - (i + 2), st->depth + 1);
+    return j;
+}
+
+static const char *ps_eval(const char *s, size_t len, int depth)
+{
+    struct psseg st;
+    char *buf;
+    size_t n = 0, i = 0;
+    bool quoted = false;
+    if (depth > MAX_NEST) {
+        g_complex = true;
+        return NULL;
+    }
+    memset(&st, 0, sizeof st);
+    st.depth = depth;
+    buf = malloc(len + 1); // raw-alloc-ok:build-tool
+    if (!buf) {
+        g_complex = true;
+        return NULL;
+    }
+    while (i < len) {
+        char ch = s[i];
+        if (ch == ' ' || ch == '\t' || ch == '\r') {
+            ps_end_word(&st, buf, &n, &quoted);
+            i++;
+        } else if (ch == '#' && n == 0 && !quoted) {
+            while (i < len && s[i] != '\n') i++;
+        } else if (ch == '\'') {
+            quoted = true;
+            for (i++; i < len; i++) {
+                if (s[i] == '\'' && i + 1 < len && s[i + 1] == '\'') i++;
+                else if (s[i] == '\'') break;
+                buf[n++] = s[i];
+            }
+            i++;
+        } else if (ch == '"') {
+            quoted = true;
+            for (i++; i < len && s[i] != '"'; i++) {
+                if (s[i] == '`' && i + 1 < len) {
+                    buf[n++] = s[++i];
+                } else if (s[i] == '$' && i + 1 < len && s[i + 1] == '(') {
+                    size_t e = ps_subexpr(&st, s, len, i);
+                    while (i < e && i < len) buf[n++] = s[i++];
+                    i--;
+                } else {
+                    buf[n++] = s[i];
+                }
+            }
+            i++;
+        } else if (ch == '`' && i + 1 < len) {
+            buf[n++] = s[i + 1];
+            quoted = true;
+            i += 2;
+        } else if (ch == '$' && i + 1 < len && s[i + 1] == '{') {
+            while (i < len && s[i] != '}') buf[n++] = s[i++];
+            if (i < len) buf[n++] = s[i++];
+        } else if (ch == '>') {
+            if (n > 0 && strspn(buf, "0123456789") == n && !quoted) n = 0; /* 2> */
+            ps_end_word(&st, buf, &n, &quoted);
+            while (i < len && s[i] == '>') i++;
+            if (i < len && s[i] == '&') { /* 2>&1: no file */
+                i++;
+                while (i < len && isdigit((unsigned char)s[i])) i++;
+            } else {
+                st.pend_redir = true;
+            }
+        } else if (strchr(";|&\n(){}", ch)) {
+            ps_end_word(&st, buf, &n, &quoted);
+            if (!(ch == '&' && st.n == 0)) ps_end_seg(&st); /* a leading & is the call operator */
+            i++;
+        } else {
+            buf[n++] = ch;
+            i++;
+        }
+    }
+    ps_end_word(&st, buf, &n, &quoted);
+    ps_end_seg(&st);
+    free(st.w);
+    free(buf);
+    return st.r;
+}
+
+const char *ag_eval_ps(const char *cmd)
+{
+    g_complex = false;
+    g_loopvar[0] = '\0';
+    g_regtest_hint = regtest_word_in(cmd);
+    return finish(ps_eval(cmd, strlen(cmd), 0));
 }
 
 const char *ag_eval_path(const char *tool, const char *path, const char *content)
@@ -1568,6 +2083,9 @@ const char *ag_rule_text(const char *rule)
                "machines with zcutil/local-ci.sh (AGENTS.md Hard rules)"},
         {R_VENDOR, "Vendored code is verbatim: change it only through the matching "
                    "revendor.sh, never by hand (AGENTS.md Hard rules)"},
+        {R_COMPLEX, "The command is too large, too deeply nested or encoded to check, and an "
+                    "unchecked tail could hide a refused action: split it into smaller "
+                    "commands"},
         {R_SEAL, "This file is in the sealed consensus set. Consensus does not change; a "
                  "reviewed unseal is the only way (doc/agent/UNSEAL.md)"},
     };
