@@ -49,8 +49,48 @@ static void want_quoted_names(void)
     lint_run_argv(rm, true);
 }
 
+/* lint_win_quote_argv: the CreateProcess command line, compared byte for byte. */
+static void want_q(char *const argv[], size_t cap, const char *out, int len)
+{
+    char buf[2100];
+    int got = lint_win_quote_argv(argv, buf, cap);
+    if (got != len || (len >= 0 && strcmp(buf, out))) { printf("FAIL quote '%s' -> '%s' (%d, want %d)\n", argv[0], len >= 0 ? buf : "", got, len); fails++; }
+}
+
+#define Q1(arg, out) want_q((char *[]){ arg, NULL }, 2100, out, (int)strlen(out))
+
+static void want_quoting(void)
+{
+    static char big[1000];
+    memset(big, 'a', 999);
+    big[999] = '\0';
+    Q1("word", "word");
+    Q1("", "\"\"");
+    Q1("a b", "\"a b\"");
+    Q1("a\tb", "\"a\tb\"");
+    Q1("a\"b", "\"a\\\"b\"");
+    Q1("trailing\\", "trailing\\");
+    Q1("\\\"", "\"\\\\\\\"\"");
+    Q1("C:\\Program Files\\x", "\"C:\\Program Files\\x\"");
+    Q1("a b\\", "\"a b\\\\\"");
+    Q1("a\\\\b", "a\\\\b");
+    Q1("%PATH%", "%PATH%");
+    Q1("a&b|c<d>e^f", "a&b|c<d>e^f");
+    Q1("!x", "!x");
+    Q1("it's", "\"it's\"");
+    Q1("*.py", "\"*.py\"");
+    Q1("HEAD~1", "\"HEAD~1\"");
+    want_q((char *[]){ "git", "-C", "a b", "ls-files", "-z", NULL }, 2100, "git -C \"a b\" ls-files -z", 24);
+    want_q((char *[]){ big, NULL }, 1000, big, 999);
+    want_q((char *[]){ big, NULL }, 999, NULL, -1);
+    want_q((char *[]){ "abc", "d", NULL }, 5, NULL, -1);
+    want_q((char *[]){ "a b", NULL }, 5, NULL, -1);
+    want_q((char *[]){ "x", NULL }, 0, NULL, -1);
+}
+
 int main(void)
 {
+    want_quoting();
     want_sh("echo hi # jq here", "echo hi          ", 0, 0);
     want_sh("echo 'a # b' jq", "echo         jq", 0, 0);
     want_sh("echo \"say \\\" # x\" ok", "echo              ok", 0, 0);

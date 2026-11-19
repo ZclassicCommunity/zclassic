@@ -28,16 +28,33 @@ bool lint_has_prefix(const char *s, const char *p);
 bool lint_has_suffix(const char *s, const char *x);
 int lint_cmp_str(const void *a, const void *b);
 /* Child processes run from an argv array, never through a shell: no --root, tracked file name or document token
- * can break out of quoting. Windows refuses arguments cmd.exe could read as syntax. */
-#define LINT_PROC_QUIET 1   /* stdout and stderr to the null device, no pipe */
-#define LINT_PROC_MERGE 2   /* stderr joins the stdout pipe */
-#define LINT_PROC_INHERIT 4 /* no pipe: the child shares our stdout and stderr */
-struct lint_proc { FILE *fp; long pid; };
-int lint_proc_open(struct lint_proc *p, const char *cwd, char *const argv[], int flags); /* 0, or -1 */
+ * can break out of quoting. On Windows the argv is quoted into one CreateProcess command line by the MSVCRT rules
+ * (lint_win_quote_argv); a script (*.sh, or a file that starts with #!) runs as `sh.exe <script> args...` with
+ * sh.exe found on PATH, and a missing program prints "UNAVAILABLE: <name> not found on PATH". */
+#define LINT_PROC_QUIET 1     /* stdout and stderr to the null device, no pipe */
+#define LINT_PROC_MERGE 2     /* stderr joins the stdout pipe */
+#define LINT_PROC_INHERIT 4   /* no pipe: the child shares our stdout and stderr */
+#define LINT_PROC_TO_STDERR 8 /* no pipe: the child's stdout is our stderr */
+#define LINT_PROC_NOERR 16    /* the child's stderr goes to the null device */
+#define LINT_PROC_UNAVAILABLE (-2) /* lint_proc_open: the program (or sh for a script) is not on PATH */
+#ifdef _WIN32
+#define LINT_EXE ".exe"
+#else
+#define LINT_EXE ""
+#endif
+struct lint_proc { FILE *fp; long pid; void *handle; };
+int lint_proc_open(struct lint_proc *p, const char *cwd, char *const argv[], int flags); /* 0, -1 or UNAVAILABLE */
 int lint_proc_close(struct lint_proc *p);          /* exit status 0..255, -1 when it could not run or was killed */
-int lint_status_argv(const char *cwd, char *const argv[], bool quiet);  /* exit status or -1 */
-int lint_run_argv(char *const argv[], bool quiet); /* 0 on success, 2 when it exited 2 (hollow scan), else 1 */
+int lint_status_argv(const char *cwd, char *const argv[], bool quiet);  /* exit status, -1 or UNAVAILABLE */
+int lint_run_argv(char *const argv[], bool quiet); /* 0 on success, 2 when it exited 2 (hollow scan) or is unavailable, else 1 */
 char *lint_git_out(char *const args[], size_t *len); /* stdout of git -C <root> <args>; NULL on failure */
+/* MSVCRT command line of argv: an argument that is empty or holds space, tab, a quote, or a character an MSYS
+ * child would glob or unquote (' * ? [ { ~) is wrapped in double quotes; backslashes before a quote or the closing
+ * quote are doubled and " becomes \". Returns the length written to out, or -1 when it does not fit in cap.
+ * Platform-neutral so it is unit-tested everywhere. */
+int lint_win_quote_argv(char *const argv[], char *out, size_t cap);
+/* malloc'd "<root>/<rel>.exe" (Windows) or "<root>/<rel>" when that file exists, else NULL. */
+char *lint_tool_path(const char *rel);
 
 /* Git tracked-file iteration (git ls-files -z), sorted bytewise. Loaded once by lint_load_tracked(). */
 extern char **lint_files;

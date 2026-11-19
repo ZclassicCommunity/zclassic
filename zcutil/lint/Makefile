@@ -7,6 +7,9 @@
 CC ?= cc
 EXEEXT ?=
 CFLAGS ?= -O2
+ifneq ($(EXEEXT),)
+CFLAGS += -D__USE_MINGW_ANSI_STDIO=1
+endif
 OUT = ../bin/zcl-lint$(EXEEXT)
 RULES = $(wildcard rules/*.c)
 SRC = zcl-lint.c lintlib.c $(RULES)
