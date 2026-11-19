@@ -283,7 +283,7 @@ bool SendOnceBuilt(CWallet* w, const uint256& keyHash, const CTransaction& tx)
     LOCK2(cs_main, w->cs_wallet);
     std::map<uint256, CSendOnceRecord>::iterator it = w->mapSendOnce.find(keyHash);
     if (it == w->mapSendOnce.end() || it->second.state != SENDONCE_STARTED) {
-        LogPrintf("send journal: BUILT without a STARTED record for %s\n", HexStr(keyHash.begin(), keyHash.begin() + 8));
+        LogPrintf("send journal: BUILT without a STARTED record for %s\n", HexStr(keyHash.begin(), keyHash.begin() + 8)); // log-ok: the 8-byte SHA-256 prefix that z_listsendjournal returns as "keyhash"; the key itself never reaches a log
         return false;
     }
     CSendOnceRecord rec = it->second;
