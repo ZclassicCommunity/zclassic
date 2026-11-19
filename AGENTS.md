@@ -12,7 +12,7 @@ zclassicd is the ZClassic full node (C++, a Zcash-derived fork), its command-lin
 - `qa/` shell regression tests that start isolated regtest nodes. See [qa/AGENTS.md](qa/AGENTS.md).
 - `zcutil/` build, release and local CI scripts; `zcutil/dev/` the `zcl-dev` developer tool; `zcutil/tools/` vendored Z23 helper code.
 - `depends/` pinned third-party build system. `doc/` manuals. `contrib/` helper scripts.
-- `.claude/` skills for Claude Code.
+- `.claude/` agents and skills for Claude Code.
 
 ## Commands
 
