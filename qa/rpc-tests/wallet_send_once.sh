@@ -318,7 +318,7 @@ scn_refused() {
 
 # a retry after the wallet was locked again gets its operation id back, not "wallet locked"
 scn_locked() {
-    local op r
+    local op r tx
     fund || return
     cli 0 encryptwallet "pw1" >/dev/null 2>&1
     wait_dead 0 || { bad "locked: encryptwallet did not stop the node"; return; }
@@ -327,14 +327,14 @@ scn_locked() {
     ck "locked: the refused call left no record" "$(jcount)" 0
     cli 0 walletpassphrase pw1 600 >/dev/null
     op=$(jsend 1 "$KEY"); r=$(wait_op 0 "$op")
-    case $r in success*) ;; *) bad "locked: send: $r"; return ;; esac
+    case $r in success*) tx=${r#success } ;; *) bad "locked: send: $r"; return ;; esac
     cli 0 walletlock >/dev/null
     ck "locked: retry with the same key returns the stored operation id" "$(jsend 1 "$KEY")" "$op"
     ckerr "locked: a new key still needs the passphrase" "assphrase" 0 z_sendmany "$ZS" "$(rec 1)" 1 "$FEE" "another-key"
     ck "locked: one record" "$(jcount)" 1
     stop 0; start 0 "$BIN" $R1 $EXTRA || return; sync_to 0
     ck "locked: after a restart, still locked, the same operation id" "$(jsend 1 "$KEY")" "$op"
-    mine 1
+    wait_mempool 1 "$tx"; mine 1   # the miner may not have the transaction yet: it is relayed with a delay
     final_checks "locked"
 }
 
