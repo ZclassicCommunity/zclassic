@@ -40,6 +40,7 @@
 #include <strings.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #define MAX_REQUEST (1u << 20)
@@ -334,10 +335,19 @@ static void send_response(int fd, int code, const char *body, size_t n)
         }
 }
 
+#define REQUEST_MS 1000L
+static long now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
 // Read one request (head + Content-Length body). Returns false when the client went away.
 static bool read_request(int fd, buf *req, size_t *head_len, size_t *body_len)
 {
     char tmp[4096];
+    long t0 = now_ms();
     for (;;) {
         char *end = req->p ? strstr(req->p, "\r\n\r\n") : NULL;
         if (end) {
@@ -354,6 +364,11 @@ static bool read_request(int fd, buf *req, size_t *head_len, size_t *body_len)
             if (req->n >= *head_len + cl) return true;
         }
         if (req->n > MAX_REQUEST) return false;
+        // One slow or silent client must not stall the single-threaded mock: the whole request
+        // has to arrive within REQUEST_MS (a real client sends it in one go).
+        long left = REQUEST_MS - now_ms() + t0;
+        struct pollfd pf = {.fd = fd, .events = POLLIN};
+        if (left <= 0 || poll(&pf, 1, (int)left) <= 0) return false;
         ssize_t r = recv(fd, tmp, sizeof tmp, 0);
         if (r <= 0 || !buf_add(req, tmp, (size_t)r)) return false;
     }
@@ -361,7 +376,7 @@ static bool read_request(int fd, buf *req, size_t *head_len, size_t *body_len)
 
 static void serve(int fd)
 {
-    struct timeval tv = {5, 0};
+    struct timeval tv = {1, 0};
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     buf req = {0}, out = {0};
     size_t hl = 0, bl = 0;

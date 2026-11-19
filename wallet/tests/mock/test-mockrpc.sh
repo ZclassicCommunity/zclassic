@@ -77,6 +77,19 @@ lines=$(wc -l < "$work/req-$port.log" | tr -d ' ')
 check "request log has one line per POST" "$lines" 9
 contains "request log is compact JSON" "$(sed -n 1p "$work/req-$port.log")" '{"jsonrpc":"1.0","id":7,"method":"getinfo","params":[]}'
 
+# A client that connects and says nothing must not stall the server for later clients.
+if command -v nc >/dev/null 2>&1; then
+    ( sleep 4 | nc 127.0.0.1 "$port" >/dev/null 2>&1 ) &
+    silent=$!
+    sleep 0.2
+    t0=$(date +%s)
+    out=$(curl -s --max-time 4 "http://127.0.0.1:$port/")
+    t1=$(date +%s)
+    contains "a silent client does not block the next client" "$out" '"ok": true'
+    [ $((t1 - t0)) -le 2 ] && pass "the next client is answered within 2 s" || fail "the next client waited $((t1 - t0)) s behind a silent one"
+    kill "$silent" 2>/dev/null
+fi
+
 # A scenario without z_gettotalbalance: the old-daemon fallback stays reachable.
 mkdir -p "$work/fx/empty"
 start $((port + 1)) empty "$work/fx"

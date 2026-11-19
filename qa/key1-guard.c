@@ -125,6 +125,12 @@ static bool is_allowlisted(const char *region, span line)
     return ok;
 }
 
+static char *g_owned[8];
+static int g_nowned;
+static void free_owned(void) { while (g_nowned > 0) free(g_owned[--g_nowned]); }
+
+// Reads a whole file. NUL bytes become newlines, so the string-based scans below still see
+// everything after one instead of stopping at it (a NUL must not hide a later key write).
 static char *read_file(const char *path)
 {
     FILE *f = fopen(path, "rb");
@@ -135,10 +141,14 @@ static char *read_file(const char *path)
         size_t r = fread(b + n, 1, cap - n - 1, f);
         n += r;
         if (r == 0) break;
-        if (n + 1 >= cap) { cap *= 2; b = realloc(b, cap); }
+        if (n + 1 >= cap) { char *nb = realloc(b, cap * 2); if (!nb) { free(b); b = NULL; break; } b = nb; cap *= 2; }
     }
     fclose(f);
-    if (b) b[n] = '\0';
+    if (!b) return NULL;
+    b[n] = '\0';
+    for (size_t i = 0; i < n; i++)
+        if (b[i] == '\0') { b[i] = '\n'; fprintf(stderr, "KEY-1 guard: warning: NUL byte at offset %zu of %s\n", i, path); }
+    if (g_nowned < 8) g_owned[g_nowned++] = b;
     return b;
 }
 
@@ -302,6 +312,7 @@ static int self_test(const char *wallet_h)
 
 int main(int argc, char **argv)
 {
+    atexit(free_owned);
     const char *root = ".";
     bool selftest = false, write_baseline = false;
     for (int i = 1; i < argc; i++) {

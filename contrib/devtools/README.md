@@ -1,37 +1,46 @@
-Contents
-===========
-This directory contains tools for developers working on this repository.
+# contrib/devtools
 
-github-merge.sh
-==================
+Scripts for developers working on this repository. All are POSIX sh; none needs Python.
 
-A small script to automate merging pull-requests securely and sign them with GPG.
+## github-merge.sh
 
-For example:
+Merges a pull request securely: fetches the target branch and the pull request, builds the merge
+commit locally, shows the diff, asks you to verify the tree (run your test command), then asks
+whether to GPG-sign and push. Nothing can change between review and merge.
 
-  ./github-merge.sh bitcoin/bitcoin 3077
+    ./github-merge.sh <owner>/<repo> <pull request number>
 
-(in any git repository) will help you merge pull request #3077 for the
-bitcoin/bitcoin repository.
+Setup (once per repository):
 
-What it does:
-* Fetch master and the pull request.
-* Locally construct a merge commit.
-* Show the diff that merge results in.
-* Ask you to verify the resulting source tree (so you can do a make
-check or whatever).
-* Ask you whether to GPG sign the merge commit.
-* Ask you whether to push the result upstream.
+    git config githubmerge.repository <owner>/<repo>
+    git config githubmerge.testcmd "make -j4 check"      # whatever you test with
+    git config --global user.signingkey <key id>          # to sign
 
-This means that there are no potential race conditions (where a
-pullreq gets updated while you're reviewing it, but before you click
-merge), and when using GPG signatures, that even a compromised github
-couldn't mess with the sources.
+## gen-manpages.sh
 
-Setup
----------
-Configuring the github-merge tool for the bitcoin repository is done in the following way:
+Creates the manpages in `doc/man` by running the release binaries with `-help`. Needs
+[help2man](https://www.gnu.org/software/help2man/).
 
-    git config githubmerge.repository bitcoin/bitcoin
-    git config githubmerge.testcmd "make -j4 check" (adapt to whatever you want to use for testing)
-    git config --global user.signingkey mykeyid (if you want to GPG sign)
+## git-subtree-check.sh
+
+Verifies that a subtree matches the commit it claims to have been updated to. Fetch the upstream
+branch first (`src/secp256k1` from its upstream master, `src/leveldb` from the bitcoin-fork branch).
+
+    git-subtree-check.sh DIR [COMMIT]      # COMMIT defaults to HEAD
+
+## split-debug.sh
+
+Splits a binary into a stripped binary and a separate debug file linked by a debuglink.
+
+    split-debug.sh <input> <stripped-binary> <debug-binary>
+
+## check-oversize-grandfather.sh
+
+Verifies the historical oversize-transaction table described in
+[doc/oversize-grandfather.md](../../doc/oversize-grandfather.md) against the Z23 list, optionally
+against a chain scan file.
+
+    check-oversize-grandfather.sh [chain-scan-file]
+
+The vendored-source and Python/CI guards live in `zcutil/` (`zcutil/check-no-python.sh`,
+`zcutil/lint`), and `zcutil/dev/zcl-dev` selects tests for a change.

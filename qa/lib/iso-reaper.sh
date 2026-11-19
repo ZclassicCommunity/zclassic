@@ -3,7 +3,7 @@
 # its owner script to exit by ANY means (normal exit, trap, kill -9, timeout), then
 # kills what the script started and releases its port leases.
 # usage: iso-reaper.sh <owner-pid> <tag> <registry-file> <zcl-port|-> <port-owner>
-# What it kills: pids/groups in the registry (start_node), and every process whose
+# What it kills: pids/groups in the registry (start_node) that still carry the tag, and every process whose
 # environment carries ZCL_ISO_TAG=<tag> (Linux /proc, macOS ps -E): the daemons of
 # THIS script run only, including -daemon ones that left the process group.
 owner=$1; tag=$2; reg=$3; zp=$4; powner=$5
@@ -21,8 +21,19 @@ killpid() {
     kill -9 "$1" 2>/dev/null
     return 0
 }
+# owned <pid>: 0 only when the process still carries this run's ZCL_ISO_TAG, so a registry pid
+# that finished and was reused by an unrelated process is never killed. Where the environment
+# cannot be read the answer is "not ours" (nothing is killed on a guess); the registry matters
+# only for a process that dropped the tag, and the environment scan below finds the rest.
+owned() {
+    if [ $win = 1 ]; then return 0; fi   # Git Bash: native pids, killed through taskkill /T
+    if [ -r "/proc/$1/environ" ]; then
+        grep -q -a -z -x "ZCL_ISO_TAG=$tag" "/proc/$1/environ" 2>/dev/null; return $?
+    fi
+    ps -wwE -o command= -p "$1" 2>/dev/null | grep -q -F " ZCL_ISO_TAG=$tag"
+}
 if [ -f "$reg" ]; then
-    while read -r p; do [ -n "$p" ] && killpid "$p"; done <"$reg"
+    while read -r p; do [ -n "$p" ] && owned "$p" && killpid "$p"; done <"$reg"
     rm -f "$reg"
 fi
 if [ -d /proc/self ] && [ $win = 0 ]; then

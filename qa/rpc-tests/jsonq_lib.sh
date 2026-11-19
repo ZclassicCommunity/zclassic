@@ -5,7 +5,7 @@
 #   jget PATH          stdin -> value, prints the raw value  (a missing path prints "null", status 0)
 #   jgetd PATH DEFAULT stdin -> value, or DEFAULT when the path is missing or null
 #   jraw PATH          stdin -> compact JSON of the value, prints compact JSON
-#   jlen [PATH]        stdin -> number of elements/keys, length  (containers only)
+#   jlen [PATH]        stdin -> number of elements/keys, length  (containers only; a scalar or missing path prints nothing and fails)
 #   jhas PATH          stdin -> true or false, for a top-level key
 # PATH is jsonq's: dotted keys and [index], optional leading '.', e.g. result.items[1].id.
 # Malformed input makes every helper fail with a non-zero status.
@@ -46,7 +46,9 @@ jraw() {
 }
 jlen() {
     _js_o=$("$JSONQ" count "${1:-.}"); _js_r=$?
-    case $_js_r in 0) printf '%s\n' "$_js_o" ;; 1) echo 0 ;; *) return "$_js_r" ;; esac
+    # a scalar or a missing path is not a container: print nothing and fail, so that a check
+    # expecting 0 cannot pass on the wrong shape
+    case $_js_r in 0) printf '%s\n' "$_js_o" ;; *) return "$_js_r" ;; esac
 }
 
 jhas() {

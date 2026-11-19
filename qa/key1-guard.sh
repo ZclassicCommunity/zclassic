@@ -53,6 +53,10 @@ expect_fail "nsk serialized by SproutNoteData"
 printf '%s\n' 'bool CWalletDB::WriteEvil(const CKey& k) { return Write(std::string("evil"), k); }' >> "$work/r/src/wallet/walletdb.cpp"
 expect_fail "new key write in walletdb.cpp"
 
+# A NUL byte in walletdb.cpp must not hide what follows it.
+printf '\0\n%s\n' 'bool CWalletDB::WriteEvil2(const CKey& k) { return Write(std::string("evil2"), k); }' >> "$work/r/src/wallet/walletdb.cpp"
+expect_fail "key write after a NUL byte in walletdb.cpp"
+
 awk '
     /^UniValue getwalletsummary\(/ { armed = 1 }
     { print }
