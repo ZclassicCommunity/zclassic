@@ -25,6 +25,9 @@ const char *ag_eval_bash(const char *cmd);
 /* A PowerShell command (the PowerShell tool on Windows). */
 const char *ag_eval_ps(const char *cmd);
 const char *ag_eval_path(const char *tool, const char *path, const char *content);
+/* The working directory the hook reports for the call (NULL or "" when unknown): where a Bash or
+ * PowerShell command starts and what a relative Write or Edit path is joined to. */
+void ag_set_cwd(const char *cwd);
 
 /* True for a rule that warns on stderr and still allows the call. */
 bool ag_rule_is_warning(const char *rule);

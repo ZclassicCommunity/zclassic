@@ -43,7 +43,7 @@
 /* ---- tool call extraction from JSON ------------------------------ */
 
 struct call {
-    char *name, *cmd, *file, *nb, *content;
+    char *name, *cmd, *file, *nb, *content, *cwd;
     bool bad; /* a field was present but could not be decoded (bad escape, out of memory) */
 };
 
@@ -54,6 +54,7 @@ static void call_free(struct call *c)
     free(c->file);
     free(c->nb);
     free(c->content);
+    free(c->cwd);
     memset(c, 0, sizeof *c);
 }
 
@@ -141,6 +142,10 @@ static bool parse_hook(const char *text, size_t len, struct call *call)
             free(call->name);
             call->name = dec_str(text, &v);
             if (!call->name) call->bad = true;
+        } else if (strcmp(key, "cwd") == 0 && v.kind == ZJRP_STR) {
+            free(call->cwd);
+            call->cwd = dec_str(text, &v);
+            if (!call->cwd) call->bad = true;
         } else if (strcmp(key, "tool_input") == 0 && v.kind == ZJRP_OBJ_OPEN) {
             if (!parse_input(&p, text, call)) return false;
         } else if (!skip_value(&p, &v)) {
@@ -153,6 +158,7 @@ static const char *eval_call(const struct call *c)
 {
     if (!c->name) return NULL;
     if (c->bad) return R_COMPLEX; /* an undecodable field: the call cannot be checked */
+    ag_set_cwd(c->cwd);           /* NULL (replay, no cwd) clears it */
     if (strcmp(c->name, "Bash") == 0) return c->cmd ? ag_eval_bash(c->cmd) : NULL;
     if (strcmp(c->name, "PowerShell") == 0) return c->cmd ? ag_eval_ps(c->cmd) : NULL;
     if (strcmp(c->name, "NotebookEdit") == 0) return ag_eval_path(c->name, c->nb, NULL);

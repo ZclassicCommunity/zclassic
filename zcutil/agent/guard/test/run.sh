@@ -52,6 +52,11 @@ hook ps-web-spend 2 'guard.spend_or_key_export' '{"tool_name":"PowerShell","tool
 hook cmd-nested 2 'guard.datadir' '{"tool_name":"Bash","tool_input":{"command":"cmd //c \"rd /s /q %APPDATA%\\\\Zclassic\""}}'
 hook ps-joinpath 2 'guard.datadir' '{"tool_name":"PowerShell","tool_input":{"command":"Remove-Item -Recurse (Join-Path $env:APPDATA Zclassic)"}}'
 hook ps-build-ok 0 '' '{"tool_name":"PowerShell","tool_input":{"command":"Remove-Item -Recurse build\\tmp"}}'
+# the hook cwd seeds a command and joins a relative Write path
+hook cwd-write 2 'guard.datadir' '{"tool_name":"Write","tool_input":{"file_path":"zclassic.conf","content":"x"},"cwd":"/home/rhett/.zclassic"}'
+hook cwd-write-ok 0 '' '{"tool_name":"Write","tool_input":{"file_path":"zclassic.conf","content":"x"},"cwd":"/home/rhett/work/repo"}'
+hook cwd-bash 2 'guard.datadir' '{"tool_name":"Bash","tool_input":{"command":"rm -rf blocks"},"cwd":"/home/rhett/.zclassic"}'
+hook cwd-bash-ok 0 '' '{"tool_name":"Bash","tool_input":{"command":"rm -rf blocks"},"cwd":"/home/rhett/work/repo"}'
 
 # a warning must reach the model: a PreToolUse "ask" decision on stdout, exit 0 (stderr of an
 # exit-0 hook is only a debug log)

@@ -28,7 +28,7 @@
  * place: find, ls or Get-ChildItem of a datadir, an ancestor or a glob that could reach one (the
  * find -delete checks), or a name pattern such as wallet.dat or Zcl* under a non-test root;
  * `while read f; do rm "$f"` loops count the same way. A literal echo, printf, here-string or
- * heredoc piped into sh, bash, dash or zsh is scanned as commands; any other producer feeding a
+ * heredoc piped into sh, bash, dash, zsh, ksh, mksh, fish, powershell - (or read through <( ) or source) is scanned as commands; any other producer feeding a
  * shell's stdin is guard.too_complex. Spend and key-export names count only in the method position
  * (first word after the RPC client, or a JSON-RPC "method" value in a request body).
  *
@@ -82,6 +82,7 @@
  *   find x | xargs rm, ls | xargs rm     a producer is judged by its own paths and name patterns
  *                                        (a pattern opening with * is too generic); a Where-Object
  *                                        filter or a producer written as a script is not read
+ *   ls -a ~ | grep zcl | xargs rm        a producer filtered by grep, sed or awk is not read
  *   | sh, | bash, <<< (stdin script)     the text of echo, printf, cat <<EOF and a here-string is
  *                                        scanned; any other producer (curl, base64 -d, cat file)
  *                                        is too complex; `sh < file` reads the file unseen */
@@ -124,6 +125,10 @@ static int g_nvars;
 #define MAX_HS 8
 #define CWD_CAP 512
 
+/* The working directory the hook reports for the call ("" when unknown): where a top-level
+ * command starts. */
+static char g_hook_cwd[CWD_CAP];
+
 struct gseg {
     int w0, nw;
     size_t hd_off, hd_len;
@@ -149,6 +154,11 @@ struct gctx {
         size_t off, len;
     } subs[MAX_SUBS]; /* $( ) and backtick bodies inside double quotes */
     int nsubs;
+    struct {
+        int seg; /* the segment the <( ) is an operand of; -1 when that segment is empty */
+        size_t off, len;
+    } psub[MAX_SUBS]; /* process substitutions <( ) */
+    int npsub;
 };
 
 enum { P_NONE, P_OUT, P_IN, P_HEREDOC, P_HSTR };
@@ -523,7 +533,21 @@ static bool tk_step_redir(struct tok *t)
     size_t j;
     if (ch != '>' && ch != '<' && !amp_out) return false;
     if (nx == '(' && !amp_out) {
+        int before = t->c->nsegs;
         tk_end_seg(t);
+        if (ch == '<') {
+            struct gctx *c = t->c;
+            size_t e = skip_paren(t->s, t->len, t->i + 2, 0);
+            size_t end = e > t->i + 2 && t->s[e - 1] == ')' ? e - 1 : e;
+            if (c->npsub >= MAX_SUBS) {
+                g_complex = true;
+            } else {
+                c->psub[c->npsub].seg = c->nsegs > before ? before : -1;
+                c->psub[c->npsub].off = t->i + 2;
+                c->psub[c->npsub].len = end > t->i + 2 ? end - (t->i + 2) : 0;
+                c->npsub++;
+            }
+        }
         t->i += 2;
         return true;
     }
@@ -680,7 +704,8 @@ struct wrapper {
 
 static const struct wrapper wrappers[] = {
     {"sudo", " -u -g -C -h -p -r -t -U -D -R -T ", 0},
-    {"env", " -u -C -S -P ", 0},
+    {"env", " -u -C -P ", 0},
+    {"builtin", " ", 0},
     {"nice", " -n ", 0},
     {"ionice", " -c -n -p -P -u ", 0},
     {"nohup", " ", 0},
@@ -1389,8 +1414,19 @@ static bool is_python_cmd(const char *cmd)
 /* python, pipx, pip, uv run/pip/tool, and an executed *.py file. */
 static const char *check_python(const struct cmdv *v)
 {
-    if (is_python_cmd(v->cmd) || is_py_name(v->cmd)) return R_PYTHON;
-    if (strcmp(v->cmd, "uvx") == 0) return R_PYTHON;
+    static const char *const tools[] = {"ipython", "ipython3", "pytest", "py.test", "jupyter",
+                                        "jupyter-lab", "jupyter-notebook", "uvx"};
+    static const char *const runners[] = {"conda", "mamba", "micromamba", "poetry", "pipenv",
+                                          "pdm", "hatch", "rye"};
+    char first[48];
+    size_t n = strcspn(v->cmd, " \t");
+    /* env -S "python3 -c 1" leaves the whole string as the command word */
+    snprintf(first, sizeof first, "%.*s", (int)(n < sizeof first ? n : sizeof first - 1), v->cmd);
+    if (is_python_cmd(first) || is_py_name(first)) return R_PYTHON;
+    if (IN_LIST(first, tools)) return R_PYTHON;
+    if (IN_LIST(first, runners))
+        for (int i = 0; i < v->na; i++)
+            if (is_python_cmd(base_name(v->a[i])) || is_py_name(v->a[i])) return R_PYTHON;
     if (strcmp(v->cmd, "uv") == 0 && v->na > 0 &&
         (strcmp(v->a[0], "run") == 0 || strcmp(v->a[0], "pip") == 0 ||
          strcmp(v->a[0], "tool") == 0))
@@ -1448,7 +1484,7 @@ static bool config_sets_identity(char **a, int na)
 /* git config that writes a key with a side effect on identity or pushes: remote.<n>.push and
  * remote.<n>.mirror set the refspec a bare push uses, and an alias whose text sets an identity
  * key runs it later. Returns the rule id or NULL. */
-static const char *config_sets_hazard(char **a, int na)
+static const char *config_sets_hazard(char **a, int na, int depth)
 {
     const char *pos[3];
     int np = 0, k = 0;
@@ -1464,6 +1500,8 @@ static const char *config_sets_hazard(char **a, int na)
     if (strncmp(key, "remote.", 7) == 0 && (ends_ci(key, ".push") || ends_ci(key, ".mirror")))
         return R_PUSH;
     if (strncmp(key, "alias.", 6) == 0 && mentions_identity_key(pos[k + 1])) return R_IDENT;
+    if (strncmp(key, "alias.", 6) == 0 && pos[k + 1][0] == '!') /* a shell alias runs as a command */
+        return eval_buf(pos[k + 1] + 1, strlen(pos[k + 1] + 1), depth + 1);
     return NULL;
 }
 
@@ -1562,13 +1600,20 @@ static const char *check_git(const struct cmdv *v)
     if (strcmp(v->cmd, "git") != 0) return NULL;
     si = git_subcommand(v->a, v->na, &bad);
     if (bad) return R_IDENT;
+    for (int i = 0; i + 1 < (si < 0 ? v->na : si); i++) { /* git -c alias.x='!cmd' x */
+        const char *kv = v->a[i + 1], *eq = strchr(kv, '=');
+        if (strcmp(v->a[i], "-c") == 0 && strncasecmp(kv, "alias.", 6) == 0 && eq && eq[1] == '!') {
+            const char *r = eval_buf(eq + 2, strlen(eq + 2), v->depth + 1);
+            if (r) return r;
+        }
+    }
     if (si < 0) return NULL;
     sub = v->a[si];
     if (strcmp(sub, "push") == 0 || strcmp(sub, "send-pack") == 0)
         return push_rule(v->a + si + 1, v->na - si - 1);
     if (strcmp(sub, "config") == 0) {
         if (config_sets_identity(v->a + si + 1, v->na - si - 1)) return R_IDENT;
-        return config_sets_hazard(v->a + si + 1, v->na - si - 1);
+        return config_sets_hazard(v->a + si + 1, v->na - si - 1, v->depth);
     }
     if (strcmp(sub, "commit") == 0)
         for (int i = si + 1; i < v->na; i++)
@@ -1604,7 +1649,7 @@ static bool is_method(const char *s, size_t n)
 }
 
 /* A JSON-RPC body: a "method" key whose value is a refused method. */
-static bool body_has_method(const char *s, size_t len)
+static bool body_has_method_raw(const char *s, size_t len)
 {
     static const char *const skip = "\"'\\ \t\n";
     for (size_t i = 1; i + 6 <= len; i++) {
@@ -1618,6 +1663,48 @@ static bool body_has_method(const char *s, size_t len)
         if (is_method(s + j, k - j)) return true;
     }
     return false;
+}
+
+/* A JSON body with its unicode escapes (backslash, u, four hex digits) decoded: the node's UniValue
+ * decodes them, so a method name may be spelled with them. Only the ASCII range matters. */
+static char *decode_u_escapes(const char *s, size_t len, size_t *outn)
+{
+    char *d;
+    size_t n = 0;
+    if (!memchr(s, '\\', len)) return NULL;
+    d = malloc(len + 1); // raw-alloc-ok:build-tool
+    if (!d) {
+        g_complex = true;
+        return NULL;
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '\\' && i + 5 < len && s[i + 1] == 'u' && isxdigit((unsigned char)s[i + 2]) &&
+            isxdigit((unsigned char)s[i + 3]) && isxdigit((unsigned char)s[i + 4]) &&
+            isxdigit((unsigned char)s[i + 5])) {
+            char hex[5] = {s[i + 2], s[i + 3], s[i + 4], s[i + 5], '\0'};
+            unsigned long cp = strtoul(hex, NULL, 16);
+            d[n++] = cp < 0x80 && cp ? (char)cp : '?';
+            i += 5;
+        } else {
+            d[n++] = s[i];
+        }
+    }
+    d[n] = '\0';
+    *outn = n;
+    return d;
+}
+
+static bool body_has_method(const char *s, size_t len)
+{
+    size_t n = 0;
+    char *d;
+    bool hit;
+    if (body_has_method_raw(s, len)) return true;
+    d = decode_u_escapes(s, len, &n);
+    if (!d) return false;
+    hit = body_has_method_raw(d, n);
+    free(d);
+    return hit;
 }
 
 /* The whole payload is a bare method name (curl -d z_sendmany). */
@@ -2029,6 +2116,14 @@ static bool find_writes(const struct cmdv *v)
         if (strcmp(v->a[i], "-delete") == 0) return true;
         if (IN_LIST(v->a[i], execs) && i + 1 < v->na && is_all_writer(base_name(v->a[i + 1])))
             return true;
+        if (IN_LIST(v->a[i], execs) && i + 1 < v->na) { /* -exec sed -i, -exec patch */
+            const char *w = base_name(v->a[i + 1]);
+            if (strcmp(w, "patch") == 0) return true;
+            if (strcmp(w, "sed") == 0)
+                for (int k = i + 2; k < v->na; k++)
+                    if (strncmp(v->a[k], "--in-place", 10) == 0 || short_group_has(v->a[k], 'i'))
+                        return true;
+        }
     }
     return false;
 }
@@ -2379,16 +2474,86 @@ static const char *check_writer_paths(const struct cmdv *v)
     }
 }
 
-static const char *eval_here(const struct cmdv *v)
+struct sbuf {
+    char *p;
+    size_t n, cap;
+};
+
+static void sb_add(struct sbuf *b, const char *s, size_t n)
+{
+    if (!b->p && b->cap == (size_t)-1) return; /* failed earlier */
+    if (b->n + n + 1 > b->cap) {
+        size_t nc = b->cap ? b->cap * 2 : 64;
+        char *np;
+        while (nc < b->n + n + 1) nc *= 2;
+        np = realloc(b->p, nc); // raw-alloc-ok:build-tool
+        if (!np) {
+            free(b->p);
+            b->p = NULL;
+            b->cap = (size_t)-1;
+            g_complex = true;
+            return;
+        }
+        b->p = np;
+        b->cap = nc;
+    }
+    memcpy(b->p + b->n, s, n);
+    b->n += n;
+    b->p[b->n] = '\0';
+}
+
+/* Scan text as shell commands, or as PowerShell when ps. */
+static const char *eval_text(bool ps, const char *s, size_t len, int depth)
+{
+    return ps ? ps_eval(s, len, depth) : eval_buf(s, len, depth);
+}
+
+static const char *eval_here_as(const struct cmdv *v, bool ps)
 {
     if (!v->sg->hd_has) return NULL;
-    return eval_buf(v->c->src + v->sg->hd_off, v->sg->hd_len, v->depth + 1);
+    return eval_text(ps, v->c->src + v->sg->hd_off, v->sg->hd_len, v->depth + 1);
+}
+
+static const char *eval_here(const struct cmdv *v)
+{
+    return eval_here_as(v, false);
 }
 
 static bool is_shell_name(const char *cmd)
 {
-    static const char *const shells[] = {"sh", "bash", "dash", "zsh"};
+    static const char *const shells[] = {"sh", "bash", "dash", "zsh", "ksh", "mksh", "fish", "ash"};
     return IN_LIST(cmd, shells);
+}
+
+/* A shell -c string that holds the replace string of an `xargs -I` that precedes it
+ * (echo 'rm -rf ~/.zclassic' | xargs -I{} sh -c '{}'): the literal producer text is
+ * substituted, one line at a time, and scanned. */
+static const char *xargs_subst(const struct cmdv *v, const char *cmdstr)
+{
+    const char *r = NULL, *line;
+    size_t rl = strlen(g_xrepl);
+    if (!g_xargs || !rl || !strstr(cmdstr, g_xrepl) || !v->ch || !v->ch->prod_lit || !v->ch->prod)
+        return NULL;
+    line = v->ch->prod;
+    while (!r && *line) {
+        size_t n = strcspn(line, "\n");
+        struct sbuf b = {NULL, 0, 0};
+        if (n) {
+            for (const char *p = cmdstr; *p;) {
+                if (strncmp(p, g_xrepl, rl) == 0) {
+                    sb_add(&b, line, n);
+                    p += rl;
+                } else {
+                    sb_add(&b, p++, 1);
+                }
+            }
+            if (b.p) r = eval_buf(b.p, b.n, v->depth + 1);
+            else g_complex = true;
+            free(b.p);
+        }
+        line += n + (line[n] ? 1 : 0);
+    }
+    return r;
 }
 
 /* sh/bash: scan the -c string. *script is set when stdin is the script
@@ -2398,12 +2563,51 @@ static const char *nested_shell(const struct cmdv *v, bool *script)
     *script = true;
     for (int i = 0; i < v->na && v->a[i][0] == '-'; i++) {
         if (short_group_has(v->a[i], 'c') && i + 1 < v->na) {
+            const char *r = xargs_subst(v, v->a[i + 1]);
             *script = false;
-            return eval_buf(v->a[i + 1], strlen(v->a[i + 1]), v->depth + 1);
+            return r ? r : eval_buf(v->a[i + 1], strlen(v->a[i + 1]), v->depth + 1);
         }
         if (strcmp(v->a[i], "-o") == 0 || strcmp(v->a[i], "+o") == 0) i++;
     }
     return NULL;
+}
+
+static char *literal_output(const struct gctx *c, int si, char **w, int n);
+
+/* A shell that reads its script from <( ... ): the producer is scanned when it is a literal
+ * echo, printf or heredoc cat, and is too complex otherwise (bash <(curl URL)). */
+static const char *procsub_scripts(const struct cmdv *v)
+{
+    const struct gctx *c = v->c;
+    const char *r = NULL;
+    int si;
+    if (!c || v->sg < c->segs || v->sg >= c->segs + c->nsegs) return NULL;
+    si = (int)(v->sg - c->segs);
+    for (int k = 0; !r && k < c->npsub; k++) {
+        struct gctx *c2;
+        char *text = NULL;
+        if (c->psub[k].seg != si) continue;
+        c2 = calloc(1, sizeof *c2); // raw-alloc-ok:build-tool
+        if (!c2) {
+            g_complex = true;
+            return R_COMPLEX;
+        }
+        c2->arena = malloc(c->psub[k].len * 2 + 16); // raw-alloc-ok:build-tool
+        if (!c2->arena) {
+            free(c2);
+            g_complex = true;
+            return R_COMPLEX;
+        }
+        c2->src = c->src + c->psub[k].off;
+        tokenize(c2, c2->src, c->psub[k].len);
+        if (c2->nsegs == 1 && c2->nsubs == 0 && c2->npsub == 0)
+            text = literal_output(c2, 0, c2->words, c2->nwords);
+        r = text ? eval_buf(text, strlen(text), v->depth + 1) : R_COMPLEX;
+        free(text);
+        free(c2->arena);
+        free(c2);
+    }
+    return r;
 }
 
 /* Scan words a[i..] joined by spaces as one command line (ssh, eval, powershell -Command);
@@ -2494,11 +2698,14 @@ static const char *nested_ssh(const struct cmdv *v, bool *script)
 }
 
 /* sh/bash read their script from stdin when there is no -c and no script file operand, or with
- * -s (`bash -s args`) or a lone `-`. */
+ * -s (`bash -s args`) or a lone `-`. source and . read it from /dev/stdin or `-`. */
 static bool shell_stdin_is_script(const struct cmdv *v)
 {
     bool s_flag = false;
     int i = 0;
+    if (strcmp(v->cmd, "source") == 0 || strcmp(v->cmd, ".") == 0)
+        return v->na == 0 || strcmp(v->a[0], "/dev/stdin") == 0 ||
+               strcmp(v->a[0], "/dev/fd/0") == 0 || strcmp(v->a[0], "-") == 0;
     for (; i < v->na && v->a[i][0] == '-' && v->a[i][1]; i++) {
         if (strcmp(v->a[i], "--") == 0) {
             i++;
@@ -2514,8 +2721,9 @@ static bool shell_stdin_is_script(const struct cmdv *v)
 /* A shell that reads its script from stdin: a here-string is scanned as commands, and so is the
  * literal text of an echo, printf or cat of a heredoc that feeds it through a pipe. Any other
  * producer (base64 -d | sh, curl | sh, cat file | sh) cannot be read, so it is too complex.
- * check_opts: false for ssh, where the remote command (a shell) is not in v->a. */
-static const char *shell_stdin_text(const struct cmdv *v, bool check_opts)
+ * check_opts: false for ssh and PowerShell, where the options are not shell options.
+ * ps: the script is PowerShell. */
+static const char *shell_stdin_text(const struct cmdv *v, bool check_opts, bool ps)
 {
     const struct gctx *c = v->c;
     const char *r = NULL;
@@ -2523,28 +2731,58 @@ static const char *shell_stdin_text(const struct cmdv *v, bool check_opts)
     if (!c || v->sg < c->segs || v->sg >= c->segs + c->nsegs) return NULL;
     si = (int)(v->sg - c->segs);
     for (int k = 0; !r && k < c->nhs; k++)
-        if (c->hstr_seg[k] == si) r = eval_buf(c->hstr[k], strlen(c->hstr[k]), v->depth + 1);
+        if (c->hstr_seg[k] == si) r = eval_text(ps, c->hstr[k], strlen(c->hstr[k]), v->depth + 1);
     if (r) return r;
     if (!v->sg->pipe_in || v->sg->hd_has || !v->ch) return NULL;
     if (check_opts && !shell_stdin_is_script(v)) return NULL;
     if (!v->ch->prod_lit) return R_COMPLEX;
-    return v->ch->prod ? eval_buf(v->ch->prod, strlen(v->ch->prod), v->depth + 1) : NULL;
+    return v->ch->prod ? eval_text(ps, v->ch->prod, strlen(v->ch->prod), v->depth + 1) : NULL;
 }
+
+/* powershell reads its script from stdin with no command at all, a lone `-`, `-Command -` or
+ * `-File -`. */
+static bool ps_wants_stdin(const struct cmdv *v)
+{
+    for (int i = 0; i < v->na; i++) {
+        const char *a = v->a[i];
+        if (strcmp(a, "-") == 0) return true;
+        if (a[0] != '-') return false; /* a command or file operand */
+        if (strcasecmp(a, "-command") == 0 || strcasecmp(a, "-c") == 0 ||
+            strcasecmp(a, "-file") == 0 || strcasecmp(a, "-f") == 0)
+            return i + 1 >= v->na || strcmp(v->a[i + 1], "-") == 0;
+        if (strcasecmp(a, "-ep") == 0 || strcasecmp(a, "-executionpolicy") == 0 ||
+            strcasecmp(a, "-wd") == 0 || strcasecmp(a, "-workingdirectory") == 0 ||
+            strcasecmp(a, "-inputformat") == 0 || strcasecmp(a, "-outputformat") == 0 ||
+            strcasecmp(a, "-version") == 0 || strcasecmp(a, "-windowstyle") == 0)
+            i++;
+    }
+    return true;
+}
+
+static const char *ps_stdin_text(int depth);
 
 static const char *check_nested(const struct cmdv *v)
 {
     bool script = false;
     const char *r = NULL;
     if (is_shell_name(v->cmd)) r = nested_shell(v, &script);
+    else if (strcmp(v->cmd, "source") == 0 || strcmp(v->cmd, ".") == 0) script = true;
     else if (strcmp(v->cmd, "ssh") == 0) r = nested_ssh(v, &script);
     else if (strcmp(v->cmd, "eval") == 0) return eval_joined(v, 0);
-    else if (is_ps_name(v->cmd)) return nested_ps(v);
-    else if (strcmp(v->cmd, "cmd") == 0) return nested_cmdexe(v);
+    else if (is_ps_name(v->cmd)) {
+        r = nested_ps(v);
+        if (r || !ps_wants_stdin(v)) return r;
+        if (!v->ch) return ps_stdin_text(v->depth);
+        r = eval_here_as(v, true);
+        return r ? r : shell_stdin_text(v, false, true);
+    } else if (strcmp(v->cmd, "cmd") == 0) return nested_cmdexe(v);
     else return NULL;
     if (r || !script) return r;
     r = eval_here(v);
     if (r) return r;
-    return shell_stdin_text(v, is_shell_name(v->cmd));
+    if (strcmp(v->cmd, "ssh") != 0 && shell_stdin_is_script(v)) r = procsub_scripts(v);
+    if (r) return r;
+    return shell_stdin_text(v, strcmp(v->cmd, "ssh") != 0, false);
 }
 
 /* nc, ncat, socat, telnet aimed at a mainnet RPC or P2P port (8232, 8233): the request body comes
@@ -2610,12 +2848,177 @@ static const char *check_interp(const struct cmdv *v)
     return NULL;
 }
 
+/* awk 'BEGIN{system("rm -rf ~/.zclassic")}': the literal string given to system( runs as a
+ * command. */
+static const char *check_awk(const struct cmdv *v)
+{
+    static const char *const names[] = {"awk", "gawk", "mawk", "nawk"};
+    if (!IN_LIST(v->cmd, names)) return NULL;
+    for (int i = 0; i < v->na; i++) {
+        for (const char *p = v->a[i]; (p = strstr(p, "system(")) != NULL;) {
+            struct sbuf b = {NULL, 0, 0};
+            const char *r = NULL;
+            char q;
+            p += 7;
+            while (*p == ' ') p++;
+            q = *p;
+            if (q != '"' && q != '\'') continue;
+            for (p++; *p && *p != q; p++) {
+                if (*p == '\\' && p[1]) p++;
+                sb_add(&b, p, 1);
+            }
+            if (b.p) r = eval_buf(b.p, b.n, v->depth + 1);
+            free(b.p);
+            if (r) return r;
+        }
+    }
+    return NULL;
+}
+
+/* Recipe lines of makefile text (a tab line, or the text after `target: ;`) run as commands. */
+static const char *make_recipes(const char *t, size_t n, int depth)
+{
+    const char *r = NULL;
+    for (size_t i = 0; !r && i < n;) {
+        size_t e = i;
+        const char *line = t + i, *rec = NULL, *semi;
+        while (e < n && t[e] != '\n') e++;
+        semi = memchr(line, ';', e - i);
+        if (line[0] == '\t') rec = line + 1;
+        else if (semi && memchr(line, ':', (size_t)(semi - line))) rec = semi + 1;
+        if (rec) {
+            while (rec < t + e && strchr("@-+ \t", *rec)) rec++;
+            r = eval_buf(rec, (size_t)(t + e - rec), depth + 1);
+        }
+        i = e + 1;
+    }
+    return r;
+}
+/* Run fn over the text a command reads from stdin: its here-strings, its heredoc, and the literal
+ * producer of a pipe. An opaque producer gives R_COMPLEX when opaque_complex. */
+static const char *scan_stdin_texts(const struct cmdv *v, const char *(*fn)(const char *, size_t, int),
+                                    bool opaque_complex)
+{
+    const struct gctx *c = v->c;
+    const char *r = NULL;
+    int si;
+    if (!c || v->sg < c->segs || v->sg >= c->segs + c->nsegs) return NULL;
+    si = (int)(v->sg - c->segs);
+    for (int k = 0; !r && k < c->nhs; k++)
+        if (c->hstr_seg[k] == si) r = fn(c->hstr[k], strlen(c->hstr[k]), v->depth);
+    if (!r && v->sg->hd_has) r = fn(c->src + v->sg->hd_off, v->sg->hd_len, v->depth);
+    if (!r && v->sg->pipe_in && v->ch) {
+        if (v->ch->prod_lit && v->ch->prod) r = fn(v->ch->prod, strlen(v->ch->prod), v->depth);
+        else if (opaque_complex) r = R_COMPLEX;
+    }
+    return r;
+}
+
+/* make -f /dev/stdin (or -f -) reads its makefile from a here-string, heredoc or pipe. */
+static const char *check_make(const struct cmdv *v)
+{
+    bool stdin_mk = false;
+    if (strcmp(v->cmd, "make") != 0 && strcmp(v->cmd, "gmake") != 0) return NULL;
+    for (int i = 0; i + 1 < v->na; i++)
+        if ((strcmp(v->a[i], "-f") == 0 || strcmp(v->a[i], "--file") == 0) &&
+            (strcmp(v->a[i + 1], "/dev/stdin") == 0 || strcmp(v->a[i + 1], "-") == 0))
+            stdin_mk = true;
+    return stdin_mk ? scan_stdin_texts(v, make_recipes, true) : NULL;
+}
+
+/* A unified diff that names a protected path (vendor, workflows, a datadir) in its headers. */
+static const char *patch_text_rule(const char *t, size_t n, int depth)
+{
+    (void)depth;
+    for (size_t i = 0; i < n;) {
+        size_t e = i;
+        while (e < n && t[e] != '\n') e++;
+        if (e - i > 4 && (strncmp(t + i, "+++ ", 4) == 0 || strncmp(t + i, "--- ", 4) == 0 ||
+                          strncmp(t + i, "diff ", 5) == 0)) {
+            char *ln = malloc(e - i + 1); // raw-alloc-ok:build-tool
+            const char *r = NULL;
+            if (!ln) {
+                g_complex = true;
+                return R_COMPLEX;
+            }
+            memcpy(ln, t + i, e - i);
+            ln[e - i] = '\0';
+            for (char *tok = strtok(ln, " \t"); !r && tok; tok = strtok(NULL, " \t"))
+                if (!(r = path_rule(tok)) && strlen(tok) > 2 && (tok[0] == 'a' || tok[0] == 'b') &&
+                    tok[1] == '/')
+                    r = path_rule(tok + 2);
+            free(ln);
+            if (r && !ag_rule_is_warning(r)) return r;
+        }
+        i = e + 1;
+    }
+    return NULL;
+}
+
+/* patch, git apply and git am write the files a diff names: a path operand or --directory or
+ * --include that is protected, and the file headers of a diff given on stdin as text. A diff read
+ * from a file is not read. */
+static const char *check_patch(const struct cmdv *v)
+{
+    int first = 0;
+    const char *r;
+    if (strcmp(v->cmd, "git") == 0) {
+        bool bad = false;
+        int si = git_subcommand(v->a, v->na, &bad);
+        if (si < 0 || (strcmp(v->a[si], "apply") != 0 && strcmp(v->a[si], "am") != 0)) return NULL;
+        first = si + 1;
+    } else if (strcmp(v->cmd, "patch") != 0) {
+        return NULL;
+    }
+    for (int i = first; i < v->na; i++) {
+        const char *a = v->a[i], *eq = strncmp(a, "--", 2) == 0 ? strchr(a, '=') : NULL;
+        if ((r = path_rule(eq ? eq + 1 : a)) != NULL && !ag_rule_is_warning(r)) return r;
+    }
+    return scan_stdin_texts(v, patch_text_rule, false);
+}
+
+
+
+/* A wallet.dat name (wallet.dat, wallet.dat.bak, wallet-2024.dat). */
+static bool is_wallet_file(const char *w)
+{
+    const char *b = w;
+    for (const char *p = w; *p; p++)
+        if (*p == '/' || *p == '\\') b = p + 1;
+    return strncasecmp(b, "wallet", 6) == 0 && ci_has(b, ".dat");
+}
+
+/* Copying a wallet.dat out of a datadir exports every key it holds: the source of cp, rsync, scp,
+ * install and Copy-Item may not be a wallet file in a datadir. (A copy INTO a datadir is the
+ * datadir rule.) */
+static const char *check_wallet_copy(const struct cmdv *v)
+{
+    static const char *const copiers[] = {"cp", "rsync", "scp", "install", "copy-item", "copy",
+                                          "cpi", "xcopy", "robocopy"};
+    int last = -1;
+    if (!IN_LIST(v->cmd, copiers)) return NULL;
+    for (int i = 0; i < v->na; i++)
+        if (v->a[i][0] != '-' || !v->a[i][1]) last = i;
+    for (int i = 0; i < v->na; i++) {
+        const char *a = v->a[i];
+        bool dest = i == last && last > 0;
+        if (a[0] == '-' && a[1]) {
+            /* a PowerShell -Destination value or a cp -t directory is the destination */
+            if (strcasecmp(a, "-destination") == 0 || strcmp(a, "-t") == 0) i++;
+            continue;
+        }
+        if (!dest && is_wallet_file(a) && tgt(v, a, false)) return R_SPEND;
+    }
+    return NULL;
+}
+
 typedef const char *(*check_fn)(const struct cmdv *);
 
 static const check_fn checks[] = {
     check_python,       check_git,          check_export,  check_rpc, check_gh,
     check_reindex_args, check_daemon_datadir, check_writer_paths, check_nested,
-    check_raw_rpc,      check_symlink,      check_interp,
+    check_raw_rpc,      check_symlink,      check_interp,  check_awk, check_make,
+    check_wallet_copy,  check_patch,
 };
 
 /* A refusal is returned; a warning is remembered in *warn and dropped, so a warning never hides
@@ -2712,33 +3115,6 @@ static const char *var_get(const char *name, size_t nl)
     return NULL;
 }
 
-struct sbuf {
-    char *p;
-    size_t n, cap;
-};
-
-static void sb_add(struct sbuf *b, const char *s, size_t n)
-{
-    if (!b->p && b->cap == (size_t)-1) return; /* failed earlier */
-    if (b->n + n + 1 > b->cap) {
-        size_t nc = b->cap ? b->cap * 2 : 64;
-        char *np;
-        while (nc < b->n + n + 1) nc *= 2;
-        np = realloc(b->p, nc); // raw-alloc-ok:build-tool
-        if (!np) {
-            free(b->p);
-            b->p = NULL;
-            b->cap = (size_t)-1;
-            g_complex = true;
-            return;
-        }
-        b->p = np;
-        b->cap = nc;
-    }
-    memcpy(b->p + b->n, s, n);
-    b->n += n;
-    b->p[b->n] = '\0';
-}
 
 /* Name at s (after '$' or '${'): its length, or 0 when s does not start a variable name. */
 static size_t var_name_len(const char *s)
@@ -2861,7 +3237,9 @@ static bool xw_build(const struct gctx *c, const struct gseg *sg, struct xw *x)
         const char *name = w[0] == '$' ? w + 1 + (w[1] == '{' ? 1 : 0) : NULL;
         size_t nl = name ? var_name_len(name) : 0;
         bool whole = nl && (w[1] != '{' ? name[nl] == '\0' : (name[nl] == '}' && !name[nl + 1]));
-        if (e && whole && strpbrk(e, " \t")) {
+        /* the operand of a shell -c stays one word: sh -c "$x" runs the whole string */
+        bool c_arg = i > 0 && short_group_has(c->words[sg->w0 + i - 1], 'c');
+        if (e && whole && !c_arg && strpbrk(e, " \t")) {
             xw_split(x, e);
             free(e);
         } else if (e) {
@@ -2884,7 +3262,7 @@ static void note_for_loop(const struct cmdv *v)
 {
     if (strcmp(v->cmd, "for") != 0 || v->na < 3 || strcmp(v->a[1], "in") != 0) return;
     for (int i = 2; i < v->na; i++) {
-        if (!mentions_datadir(v->a[i])) continue;
+        if (!mentions_datadir(v->a[i]) && !tgt(v, v->a[i], false)) continue;
         snprintf(g_loopvar, sizeof g_loopvar, "%s", v->a[0]);
         return;
     }
@@ -2907,6 +3285,46 @@ static bool seg_names_datadir(const struct gctx *c, int si, const struct xw *x, 
     for (int k = 0; k < x->n; k++)
         if (mentions_datadir(x->w[k])) any = true;
     return any || *hs_dd;
+}
+
+/* Make word i of x the owned copy s. */
+static void xw_replace(struct xw *x, int i, char *s)
+{
+    if (!xw_grow(&x->own, &x->capown, x->nown)) {
+        free(s);
+        return;
+    }
+    x->own[x->nown++] = s;
+    x->w[i] = s;
+}
+
+/* The command word names its program in a way the guard can see through: "$(which rm)" and
+ * `command -v rm` run rm; ZCLASSIC-CLI is zclassic-cli on a case-insensitive Windows file
+ * system. */
+static void resolve_command_word(struct xw *x, int ci)
+{
+    static const char *const prefixes[] = {"$(which ", "$(command -v ", "$(type -p ",
+                                           "$(type -P ", "`which ", "`command -v "};
+    const char *w = x->w[ci];
+    char *b;
+    for (size_t k = 0; k < sizeof prefixes / sizeof prefixes[0]; k++) {
+        size_t pl = strlen(prefixes[k]);
+        if (strncmp(w, prefixes[k], pl) == 0) {
+            size_t n = strcspn(w + pl, ")` ");
+            char *d = malloc(n + 1); // raw-alloc-ok:build-tool
+            if (!d) {
+                g_complex = true;
+                return;
+            }
+            memcpy(d, w + pl, n);
+            d[n] = '\0';
+            xw_replace(x, ci, d);
+            break;
+        }
+    }
+    b = (char *)base_name(x->w[ci]);
+    if (strncasecmp(b, "zclassic", 8) == 0 || strncasecmp(b, "zcash", 5) == 0)
+        for (; *b; b++) *b = (char)tolower((unsigned char)*b);
 }
 
 /* The replace string xargs words w[from..to) set (-I STR, -ISTR, -i, -J STR, --replace[=STR]). */
@@ -3110,6 +3528,15 @@ static void note_read(const struct gctx *c, int si, const struct cmdv *v, const 
         for (int j = 0; j < nn; j++) var_set(names[j], strlen(names[j]), c->hstr[k]);
         break;
     }
+    /* while read d; do ...; done <<< ~/.zclassic: the here-string belongs to the `done` segment */
+    for (int k = 0; in_while && k < c->nhs; k++) {
+        int hs = c->hstr_seg[k];
+        if (hs <= si || hs >= c->nsegs || c->segs[hs].nw < 1 ||
+            strcmp(c->words[c->segs[hs].w0], "done") != 0 || !mentions_datadir(c->hstr[k]))
+            continue;
+        for (int j = 0; j < nn; j++) var_set(names[j], strlen(names[j]), c->hstr[k]);
+        break;
+    }
     if (in_while && c->segs[si].pipe_in && (ch->pipe_dd || ch->pipe_hit)) {
         ch->loop_fed = true;
         ch->nread = nn;
@@ -3158,6 +3585,7 @@ static const char *seg_run(const struct gctx *c, int si, int depth, struct chain
     *hit = false;
     if (pi.id_assign) return R_IDENT;
     if (ci < 0) return NULL;
+    resolve_command_word(x, ci);
     strip_exe(x->w[ci]);
     g_xargs = false;
     g_xrepl[0] = '\0';
@@ -3228,6 +3656,34 @@ static const char *redir_check(const struct gctx *c, int si, const struct chain 
     return NULL;
 }
 
+/* A script file name: running it later is how a written script becomes commands. */
+static bool is_script_name(const char *w)
+{
+    return ends_ci(w, ".sh") || ends_ci(w, ".bash") || ends_ci(w, ".zsh") || ends_ci(w, ".ps1") ||
+           ends_ci(w, ".cmd") || ends_ci(w, ".bat");
+}
+
+/* echo 'rm -rf ~/.zclassic' > x.sh (or printf, or cat <<EOF > x.sh): the literal text written to
+ * a script file is scanned as commands, since `sh x.sh` runs it a moment later. */
+static const char *script_write_check(const struct gctx *c, int si, int depth)
+{
+    const struct gseg *sg = &c->segs[si];
+    for (int k = 0; k < c->nredir; k++) {
+        char *text;
+        const char *r;
+        bool ps;
+        if (c->redir_seg[k] != si || !is_script_name(c->redir[k])) continue;
+        text = literal_output(c, si, (char **)(c->words + sg->w0), sg->nw);
+        if (!text) continue;
+        ps = !(ends_ci(c->redir[k], ".sh") || ends_ci(c->redir[k], ".bash") ||
+               ends_ci(c->redir[k], ".zsh"));
+        r = eval_text(ps, text, strlen(text), depth + 1);
+        free(text);
+        if (r) return r;
+    }
+    return NULL;
+}
+
 static const char *eval_buf(const char *s, size_t len, int depth)
 {
     struct gctx *c;
@@ -3249,11 +3705,13 @@ static const char *eval_buf(const char *s, size_t len, int depth)
         return NULL;
     }
     memset(&ch, 0, sizeof ch);
+    if (depth == 0) snprintf(ch.cwd, sizeof ch.cwd, "%s", g_hook_cwd);
     c->src = s;
     tokenize(c, s, len);
     for (int i = 0; !r && i < c->nsegs; i++) {
         r = pick(redir_check(c, i, &ch), &warn);
         if (!r) r = pick(seg_check(c, i, depth, &ch), &warn);
+        if (!r) r = pick(script_write_check(c, i, depth), &warn);
     }
     for (int i = 0; !r && i < c->nsubs; i++)
         r = pick(eval_buf(s + c->subs[i].off, c->subs[i].len, depth + 1), &warn);
@@ -3318,6 +3776,8 @@ struct psseg {
     bool st_del, st_base, st_name; /* statement facts: a deleter, a base folder, a datadir name */
     bool st_web, st_meth;          /* statement facts: a web call, a spend or export method */
     char pend_var[40];             /* `$name =` seen, its expression follows in the next segment */
+    bool prod_lit;                 /* the previous segment of a pipe printed literal text: prod */
+    char prod[2048];
 };
 
 static void ps_note(struct psseg *s, const char *r)
@@ -3501,8 +3961,10 @@ static const char *ps_start_process(const struct cmdv *v)
         memset(&xs, 0, sizeof xs);
         for (int i = 0; i < sv.na; i++) {
             const char *a = sv.a[i];
-            if (i > 0 && (strcasecmp(sv.a[i - 1], "-argumentlist") == 0 ||
-                          strcasecmp(sv.a[i - 1], "-args") == 0)) {
+            /* -ArgumentList is also the second positional: Start-Process prog 'args' */
+            if ((i > 0 && (strcasecmp(sv.a[i - 1], "-argumentlist") == 0 ||
+                           strcasecmp(sv.a[i - 1], "-args") == 0)) ||
+                (i == 0 && k >= 0 && a[0] != '-')) {
                 char *cp = strdup(a); // raw-alloc-ok:build-tool
                 if (!cp) {
                     g_complex = true;
@@ -3603,6 +4065,50 @@ static char *ps_value(char **w, int n, int from, const char *first, bool *cmd)
     return b.cap == (size_t)-1 ? NULL : b.p;
 }
 
+/* Set-Variable d value, Set-Variable -Name d -Value value, New-Variable (and the sv, nv
+ * aliases): record the variable and drop the words. False when the segment is not one, or the
+ * name or value is not a plain word. */
+static bool ps_set_variable(struct psseg *s)
+{
+    static const char *const cmds[] = {"set-variable", "sv", "new-variable", "nv"};
+    static const char *const valued[] = {"-scope", "-option", "-description", "-visibility"};
+    char lw[16], low[sizeof g_vars[0].name];
+    const char *name = NULL, *value = NULL;
+    char *x;
+    int pos = 0;
+    size_t nl;
+    if (strlen(s->w[0]) >= sizeof lw) return false;
+    for (size_t k = 0; k <= strlen(s->w[0]); k++) lw[k] = (char)tolower((unsigned char)s->w[0][k]);
+    if (!PS_IN(lw, cmds)) return false;
+    for (int i = 1; i < s->n; i++) {
+        const char *a = s->w[i];
+        if (a[0] == '-' && a[1]) {
+            char pn[16];
+            size_t n = strlen(a);
+            if (n >= sizeof pn) continue;
+            for (size_t k = 0; k <= n; k++) pn[k] = (char)tolower((unsigned char)a[k]);
+            if (strcmp(pn, "-name") == 0 && i + 1 < s->n) name = s->w[++i];
+            else if (strcmp(pn, "-value") == 0 && i + 1 < s->n) value = s->w[++i];
+            else if (PS_IN(pn, valued)) i++;
+        } else if (pos++ == 0) {
+            name = a;
+        } else if (pos == 2) {
+            value = a;
+        }
+    }
+    if (!name || !value) return false;
+    if (name[0] == '$') name++;
+    nl = strlen(name);
+    if (!nl || nl >= sizeof low) return false;
+    for (size_t k = 0; k <= nl; k++) low[k] = (char)tolower((unsigned char)name[k]);
+    x = ps_expand(value);
+    var_set(low, nl, x ? x : value);
+    free(x);
+    for (int i = 0; i < s->n; i++) free(s->w[i]);
+    s->n = 0;
+    return true;
+}
+
 /* `$name = expr`, `$name=expr` and `$name =expr` at the start of a segment: record the variable
  * and drop the words it consumed. An assignment whose expression starts in a later
  * (parenthesised) segment leaves the name pending in s->pend_var. */
@@ -3614,12 +4120,24 @@ static void ps_assign(struct psseg *s)
     char low[sizeof g_vars[0].name];
     int from;
     char *val;
+    const char *nm;
     if (s->n == 0) return;
+    if (ps_set_variable(s)) return;
     w0 = s->w[0];
-    if (w0[0] != '$' || !(nl = var_name_len(w0 + 1)) || nl >= sizeof low) return;
-    for (size_t k = 0; k < nl; k++) low[k] = (char)tolower((unsigned char)w0[1 + k]);
+    if (w0[0] != '$') return;
+    if (w0[1] == '{') { /* ${name} = expr */
+        nm = w0 + 2;
+        nl = strcspn(nm, "}");
+        if (!nl || nm[nl] != '}') return;
+        rest = nm + nl + 1;
+    } else {
+        nm = w0 + 1;
+        if (!(nl = var_name_len(nm))) return;
+        rest = nm + nl;
+    }
+    if (nl >= sizeof low) return;
+    for (size_t k = 0; k < nl; k++) low[k] = (char)tolower((unsigned char)nm[k]);
     low[nl] = '\0';
-    rest = w0 + 1 + nl;
     if (*rest == '=') {
         first = rest + 1;
         from = 1;
@@ -3655,11 +4173,65 @@ static void ps_assign(struct psseg *s)
     s->n = 0;
 }
 
+/* w with each $('a'+'b') subexpression made of quoted strings joined by + replaced by the joined
+ * text ("$env:APPDATA\$('Zcl'+'assic')" names Zclassic); NULL when nothing changed. */
+static char *ps_fold_concat(const char *w)
+{
+    struct sbuf b = {NULL, 0, 0};
+    bool changed = false;
+    if (!strstr(w, "$(")) return NULL;
+    for (const char *p = w; *p;) {
+        struct sbuf part = {NULL, 0, 0};
+        const char *q = p + 2;
+        bool ok = p[0] == '$' && p[1] == '(';
+        while (ok) {
+            char qc;
+            while (*q == ' ') q++;
+            qc = *q;
+            if (qc != '\'' && qc != '"') {
+                ok = false;
+                break;
+            }
+            for (q++; *q && *q != qc; q++) sb_add(&part, q, 1);
+            if (!*q) {
+                ok = false;
+                break;
+            }
+            q++;
+            while (*q == ' ') q++;
+            if (*q == '+') {
+                q++;
+                continue;
+            }
+            ok = *q == ')';
+            break;
+        }
+        if (ok && part.p) {
+            sb_add(&b, part.p, part.n);
+            p = q + 1;
+            changed = true;
+        } else {
+            sb_add(&b, p++, 1);
+        }
+        free(part.p);
+    }
+    if (!changed || !b.p || b.cap == (size_t)-1) {
+        if (b.cap != (size_t)-1) free(b.p);
+        return NULL;
+    }
+    return b.p;
+}
+
 /* Replace each word that holds a recorded variable by its value. */
 static void ps_expand_words(struct psseg *s)
 {
     for (int i = 0; i < s->n; i++) {
         char *x = ps_expand(s->w[i]);
+        if (x) {
+            free(s->w[i]);
+            s->w[i] = x;
+        }
+        x = ps_fold_concat(s->w[i]);
         if (x) {
             free(s->w[i]);
             s->w[i] = x;
@@ -3707,7 +4279,7 @@ static bool ps_name_word(const char *w)
 }
 
 /* Any run of word characters in w is a spend or key-export method name. */
-static bool ps_word_has_method(const char *w)
+static bool ps_word_has_method_raw(const char *w)
 {
     for (size_t i = 0; w[i];) {
         size_t j = i;
@@ -3716,6 +4288,19 @@ static bool ps_word_has_method(const char *w)
         i = j > i ? j : i + 1;
     }
     return false;
+}
+
+static bool ps_word_has_method(const char *w)
+{
+    size_t n = 0;
+    char *d;
+    bool hit;
+    if (ps_word_has_method_raw(w)) return true;
+    d = decode_u_escapes(w, strlen(w), &n);
+    if (!d) return false;
+    hit = ps_word_has_method_raw(d);
+    free(d);
+    return hit;
 }
 
 static bool ps_web_word(const char *w)
@@ -3826,7 +4411,7 @@ static bool ps_lister_hit(const struct psseg *s)
     return false;
 }
 
-static const char *ps_seg(struct psseg *s)
+static const char *ps_seg_inner(struct psseg *s)
 {
     static const char *const checks_ps[] = {"cd", "sl", "set-location", "chdir", "pushd",
                                             "push-location", "popd", "pop-location"};
@@ -3838,11 +4423,13 @@ static const char *ps_seg(struct psseg *s)
     const char *name, *r = NULL, *warn = NULL;
     size_t n;
     if (s->n == 0) return NULL;
-    if (strncasecmp(s->w[0], "$env:", 5) == 0 && s->n > 1 && strcmp(s->w[1], "=") == 0) {
+    if (strncasecmp(s->w[0], "$env:", 5) == 0) {
         static const char *const ids[] = {"git_author_name", "git_author_email",
                                           "git_committer_name", "git_committer_email", "email"};
-        for (size_t k = 0; k < sizeof ids / sizeof ids[0]; k++)
-            if (strcasecmp(s->w[0] + 5, ids[k]) == 0) return R_IDENT;
+        size_t nl = strcspn(s->w[0] + 5, "=");
+        bool assign = s->w[0][5 + nl] == '=' || (s->n > 1 && s->w[1][0] == '=');
+        for (size_t k = 0; assign && k < sizeof ids / sizeof ids[0]; k++)
+            if (strlen(ids[k]) == nl && strncasecmp(s->w[0] + 5, ids[k], nl) == 0) return R_IDENT;
     }
     while (ci < s->n && strcmp(s->w[ci], ".") == 0) ci++;
     if (ci >= s->n) return NULL;
@@ -3892,7 +4479,56 @@ static const char *ps_seg(struct psseg *s)
 #define PS_NEW_STATEMENT(st) \
     ((st).pipe_dd = (st).saw_pipe = (st).open_writer = (st).open_anc = (st).st_del = (st).st_base = \
          (st).st_name = (st).st_web = (st).st_meth = (st).pipe_hit = (st).open_eval = false, \
-     (st).pend_var[0] = '\0')
+     (st).prod_lit = false, (st).pend_var[0] = '\0')
+
+/* The text a segment prints when it is a lone word ('script text') or echo, Write-Output or
+ * Write-Host of words: what the next segment of a pipe reads (`'text' | powershell -`). */
+static void ps_set_prod(struct psseg *s)
+{
+    static const char *const printers[] = {"echo", "write-output", "write-host", "write"};
+    char lw[16];
+    int k = 0;
+    size_t used = 0;
+    if (s->n == 0) return;
+    s->prod_lit = false;
+    if (strlen(s->w[0]) < sizeof lw) {
+        for (size_t i = 0; i <= strlen(s->w[0]); i++) lw[i] = (char)tolower((unsigned char)s->w[0][i]);
+        if (PS_IN(lw, printers)) k = 1;
+    }
+    if (k == 0 && (s->n > 1 || cmdlet_like(s->w[0]))) return;
+    s->prod[0] = '\0';
+    for (int i = k; i < s->n; i++) {
+        size_t n = strlen(s->w[i]);
+        if (used + n + 2 >= sizeof s->prod) return; /* too long to keep: stays not literal */
+        if (i > k) s->prod[used++] = ' ';
+        memcpy(s->prod + used, s->w[i], n);
+        used += n;
+        s->prod[used] = '\0';
+    }
+    s->prod_lit = true;
+}
+
+/* The segment being scanned, so a nested powershell can read what is piped into it. */
+static struct psseg *g_ps;
+
+static const char *ps_seg(struct psseg *s)
+{
+    struct psseg *prev = g_ps;
+    const char *r;
+    g_ps = s;
+    r = ps_seg_inner(s);
+    g_ps = prev;
+    return r;
+}
+
+/* `<literal> | powershell -Command -`: the piped text is the script; anything computed cannot be
+ * read. */
+static const char *ps_stdin_text(int depth)
+{
+    if (!g_ps || !g_ps->saw_pipe) return NULL;
+    if (!g_ps->prod_lit) return R_COMPLEX;
+    return ps_eval(g_ps->prod, strlen(g_ps->prod), depth + 1);
+}
 
 /* End the current segment: scan its words, then drop them. */
 static void ps_end_seg(struct psseg *s)
@@ -3963,6 +4599,7 @@ static void ps_end_seg(struct psseg *s)
     if ((names || hit) && fed) ps_note(s, R_DATADIR);
     if (names) s->pipe_dd = true;
     if (hit) s->pipe_hit = true;
+    ps_set_prod(s);
     for (int i = 0; i < s->n; i++) free(s->w[i]);
     s->n = 0;
     s->pend_redir = false;
@@ -4038,6 +4675,7 @@ static const char *ps_eval(const char *s, size_t len, int depth)
         return NULL;
     }
     memset(&st, 0, sizeof st);
+    if (depth == 0) snprintf(st.cwd, sizeof st.cwd, "%s", g_hook_cwd);
     st.depth = depth;
     buf = malloc(len + 1); // raw-alloc-ok:build-tool
     if (!buf) {
@@ -4129,6 +4767,7 @@ const char *ag_eval_ps(const char *cmd)
 {
     g_complex = false;
     g_nvars = 0;
+    g_ps = NULL;
     g_xargs = false;
     g_xrepl[0] = '\0';
     g_loopvar[0] = '\0';
@@ -4136,10 +4775,39 @@ const char *ag_eval_ps(const char *cmd)
     return finish(ps_eval(cmd, strlen(cmd), 0));
 }
 
+void ag_set_cwd(const char *cwd)
+{
+    snprintf(g_hook_cwd, sizeof g_hook_cwd, "%s", cwd ? cwd : "");
+}
+
+static const char *eval_path_abs(const char *tool, const char *path, const char *content);
+
+/* A relative file_path is resolved against the working directory the hook reports. Written
+ * script content (.sh, .ps1, .cmd, .bat) is scanned as commands, since the script runs later. */
 const char *ag_eval_path(const char *tool, const char *path, const char *content)
 {
+    char *joined = NULL;
     const char *r, *warn = NULL;
     if (!path) return NULL;
+    if (g_hook_cwd[0] && relative_word(path)) joined = join_cwd(g_hook_cwd, path);
+    r = eval_path_abs(tool, joined ? joined : path, content);
+    free(joined);
+    if (r && !ag_rule_is_warning(r)) return r;
+    warn = r;
+    if (content && strcmp(tool, "Write") == 0 && is_script_name(path)) {
+        bool sh = ends_ci(path, ".sh") || ends_ci(path, ".bash") || ends_ci(path, ".zsh");
+        reset_state();
+        r = eval_text(!sh, content, strlen(content), 0);
+        if (r && strcmp(r, R_COMPLEX) == 0) r = NULL; /* a script may hold eval "$x" and the like */
+        if (r && !ag_rule_is_warning(r)) return r;
+        if (r && !warn) warn = r;
+    }
+    return warn;
+}
+
+static const char *eval_path_abs(const char *tool, const char *path, const char *content)
+{
+    const char *r, *warn = NULL;
     r = path_rule(path);
     if (r && !ag_rule_is_warning(r)) return r;
     warn = r; /* a warning must not hide a refusal below */

@@ -38,6 +38,14 @@ replay.
   profile together with a Zclassic or ZcashParams name is refused when the path cannot be resolved
   statically. Scratch names under a temp or test location, and repository clones such as
   `zclassic-c23-rust-removal`, are not datadir names.
+- Script text from a pipe, a here-string or `<( )` is read into `sh`, `bash`, `dash`, `zsh`, `ksh`,
+  `mksh`, `fish`, `ash`, `source`, `.` and `powershell -` (also `-Command -`, `-File -`) when the
+  producer is a literal `echo`, `printf` or `cat <<EOF`; any other producer (`bash <(curl URL)`) is
+  `guard.too_complex`. `xargs -I{} sh -c '{}'` fed by a literal producer is scanned per line.
+  The text `echo`ed into a `.sh`/`.ps1` file, and Write content for such a file, is scanned too.
+- The hook's `cwd` is where a command starts and what a relative Write or Edit path joins to.
+- Copying a `wallet.dat` out of a datadir (`cp`, `rsync`, `scp`, `Copy-Item`) is a key export;
+  `cat`/`xxd`/`base64` of it are not caught.
 
 ## Known limits
 
@@ -71,6 +79,9 @@ These are not closed. The list is kept in the header of `rules.c`; the main ones
   profile path are not.
 - Git Bash consumes backslashes before the guard sees them, so backslash paths inside Bash are
   matched only where they survive.
+- `ls -a ~ | grep zcl | xargs -I% rm -rf ~/%`: a producer filtered by `grep`/`sed`/`awk` is not read.
+- Writing a script with a refused action through Write is refused, but a script built by other
+  means (`sh x.sh` of a file made by a tool) is not read.
 - The mingw `.exe` is compiled with `-Werror` but not run in this tree.
 
 A false refusal stalls the worker and a guard that blocks everyday commands gets switched off, so
