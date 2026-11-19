@@ -491,10 +491,10 @@ static void cleanup(const struct cfg *c, const struct run *runs, const char *dir
 static int setup_runs(const struct cfg *c, struct run *runs, const char *dir)
 {
     for (int i = 0; i < c->n; i++) {
-        snprintf(runs[i].dir, sizeof runs[i].dir, "%s/run-%d", dir, i + 1);
-        snprintf(runs[i].log, sizeof runs[i].log, "%s/log", runs[i].dir);
-        snprintf(runs[i].work, sizeof runs[i].work, "%s/work", runs[i].dir);
-        snprintf(runs[i].tmp, sizeof runs[i].tmp, "%s/tmp", runs[i].dir);
+        if (snprintf(runs[i].dir, sizeof runs[i].dir, "%s/run-%d", dir, i + 1) >= (int)sizeof runs[i].dir) return -1;
+        if (snprintf(runs[i].log, sizeof runs[i].log, "%s/log", runs[i].dir) >= (int)sizeof runs[i].log) return -1;
+        if (snprintf(runs[i].work, sizeof runs[i].work, "%s/work", runs[i].dir) >= (int)sizeof runs[i].work) return -1;
+        if (snprintf(runs[i].tmp, sizeof runs[i].tmp, "%s/tmp", runs[i].dir) >= (int)sizeof runs[i].tmp) return -1;
         if (mkdir(runs[i].dir, 0777) != 0 || mkdir(runs[i].work, 0777) != 0 || mkdir(runs[i].tmp, 0777) != 0) return -1;
     }
     return 0;
