@@ -8,7 +8,7 @@ ZCL_TOOL("zcl_guide", build_guide,
          "{\"type\":\"object\",\"properties\":{\"paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1,\"maxItems\":8,\"description\":\"repository-relative paths\"}},\"required\":[\"paths\"],\"additionalProperties\":false}")
 ZCL_TOOL("zcl_select", build_select,
          "Which local-ci steps the diff against base needs (default origin/master).",
-         "{\"type\":\"object\",\"properties\":{\"base\":{\"type\":\"string\",\"description\":\"git ref, default origin/master\"}},\"additionalProperties\":false}")
+         "{\"type\":\"object\",\"properties\":{\"base\":{\"type\":\"string\",\"description\":\"commit id or branch name, default origin/master (HEAD~1 and HEAD^ are not accepted)\"}},\"additionalProperties\":false}")
 ZCL_TOOL("zcl_tests", build_tests,
          "The smallest focused test set (Boost suites, gtest suites, qa scripts, ci steps) for each path.",
          "{\"type\":\"object\",\"properties\":{\"paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1,\"maxItems\":8}},\"required\":[\"paths\"],\"additionalProperties\":false}")

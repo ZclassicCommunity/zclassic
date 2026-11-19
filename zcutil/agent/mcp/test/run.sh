@@ -85,9 +85,13 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"z
 grep -q 'timeout' "$work/timeout.out" || fail "a hung tool was not reported as a timeout: $(cat "$work/timeout.out")"
 grep -q '"isError":true' "$work/timeout.out" || fail "a timeout is not an isError result"
 sleep 1
-if ps -eo args 2>/dev/null | grep -q '[s]leep 37'; then
-    fail "the hung tool's process group was not killed"
-    pkill -f 'sleep 37' 2>/dev/null || true
+if ps -eo args >/dev/null 2>&1; then
+    if ps -eo args 2>/dev/null | grep -q '[s]leep 37'; then
+        fail "the hung tool's process group was not killed"
+        pkill -u "$(id -u)" -f 'sleep 37' 2>/dev/null || true
+    fi
+else
+    echo "SKIP process-group kill check: ps has no -o"
 fi
 
 

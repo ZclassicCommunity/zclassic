@@ -49,6 +49,7 @@
 #define MAX_FRAME (1u << 20)      /* one request line */
 #define MAX_CAPTURE (256u * 1024) /* child output kept */
 #define MAX_REPLY 16384u          /* one tools/call text, capped by mcp_reply_tool_text */
+#define DETAIL_TAIL 6144u          /* failure detail kept (JSON escaping can double it), well under MAX_REPLY */
 #define MAX_ARGV 48
 #define MAX_TOKEN 200
 #define MAX_PATHS 8
@@ -129,7 +130,11 @@ static bool token_ok(const char *s)
     return true;
 }
 
-/* A repository-relative path: a token, no ':' (drive letters), no leading '/', no "." or ".." part. */
+static bool ci_prefix(const char *s, const char *pre);
+
+/* A repository-relative path: a token, no colon (drive letters), no leading slash, no dot or dot-dot part,
+ * no git directory in any case. */
+
 static bool path_ok(const char *s)
 {
     if (!token_ok(s) || s[0] == '/' || strchr(s, ':')) return false;
@@ -138,6 +143,7 @@ static bool path_ok(const char *s)
         const char *e = strchr(p, '/');
         size_t n = e ? (size_t)(e - p) : strlen(p);
         if (n == 0 || (n == 1 && p[0] == '.') || (n == 2 && p[0] == '.' && p[1] == '.')) return false;
+        if (n == 4 && ci_prefix(p, ".git")) return false; /* the git directory in any case: NTFS and APFS fold it */
         if (p[n - 1] == '.') return false; /* Windows drops a trailing dot: "wallet.dat." opens wallet.dat */
         if (!e) return true;
         p = e + 1;
@@ -204,7 +210,7 @@ static bool paths_into(struct ctx *c, const struct json_value *args, struct mcp_
         const struct json_value *e = json_at(p, i);
         if (!e || e->type != JSON_STR || !path_ok(e->val.s))
             return refuse(c, why, "bad_argument",
-                          "a path must be repository-relative, [A-Za-z0-9_./=,-] only, no .. part",
+                          "a path must be repository-relative, [A-Za-z0-9_./=,-] only, no .. or .git part",
                           e && e->type == JSON_STR ? e->val.s : "paths");
         if (!av_add(&c->av, e->val.s)) return OOM(c, why);
     }
@@ -259,7 +265,7 @@ static bool code_flag_ok(const char *s)
         for (size_t i = 0; i + 1 < n; i++)
             if (!isdigit((unsigned char)s[8 + i])) return false;
         char last = s[8 + n - 1];
-        return isdigit((unsigned char)last) || strchr("dhwm", last) != NULL;
+        return isdigit((unsigned char)last) || strchr("dhw", last) != NULL;
     }
     return false;
 }
@@ -286,7 +292,7 @@ static bool code_arg(struct ctx *c, struct mcp_refusal *why, const char *sub, co
     } else {
         if (*pos >= strlen(shape)) return refuse(c, why, "bad_argument", "too many positional arguments", sub);
         if (!(shape[*pos] == 'P' ? path_ok(s) : token_ok(s)))
-            return refuse(c, why, "bad_argument", "argument must be [A-Za-z0-9_./:=,-] only, and a path has no .. part", s);
+            return refuse(c, why, "bad_argument", "argument must be [A-Za-z0-9_./:=,-] only, and a path has no .. or .git part", s);
         (*pos)++;
     }
     return av_add(&c->av, s) ? true : OOM(c, why);
@@ -336,7 +342,7 @@ static bool build_read(struct ctx *c, const struct json_value *a, struct mcp_ref
     long long off = 0, bytes = 0;
     int rp = arg_str(a, "path", &path), ro = arg_int(a, "offset", &off), rb = arg_int(a, "bytes", &bytes);
     if (rp != 1 || !path_ok(path))
-        return refuse(c, why, "bad_argument", "path must be repository-relative, no .. part", "path");
+        return refuse(c, why, "bad_argument", "path must be repository-relative, no .. or .git part", "path");
     if (secret_path(path)) return refuse(c, why, "bad_argument", "key and wallet files are refused", "path");
     if (ro < 0 || rb < 0 || (rb == 1 && bytes < 1))
         return refuse(c, why, "bad_argument", "offset must be >= 0 and bytes >= 1", "offset/bytes");
@@ -401,7 +407,7 @@ static bool build_receipt(struct ctx *c, const struct json_value *a, struct mcp_
     if (rs != 1 || !token_ok(step) || strchr(step, '/'))
         return refuse(c, why, "bad_argument", "step must be a ci step name", "step");
     if (rd < 0 || (rd == 1 && !path_ok(dir)))
-        return refuse(c, why, "bad_argument", "dir must be repository-relative, no .. part", "dir");
+        return refuse(c, why, "bad_argument", "dir must be repository-relative, no .. or .git part", "dir");
     if (!dev_base(c, why, "receipt") || !av_add(&c->av, step)) return false;
     return rd != 1 || av_add(&c->av, dir) ? true : OOM(c, why);
 }
@@ -567,19 +573,20 @@ static void win_pump(HANDLE proc, HANDLE rd[2], int timeout_s, struct mcp_buf *o
 {
     ULONGLONG deadline = GetTickCount64() + (ULONGLONG)timeout_s * 1000u;
     for (;;) {
-        if (win_sweep(rd, out, err, r)) {
-            if (!r->truncated) continue;
+        bool got = win_sweep(rd, out, err, r);
+        if (got && r->truncated) {
             TerminateProcess(proc, 1);
             return;
         }
+        if (GetTickCount64() >= deadline) { /* checked on every pass: a chatty child must not outrun the rail */
+            TerminateProcess(proc, 1);
+            r->code = -2;
+            return;
+        }
+        if (got) continue;
         if (WaitForSingleObject(proc, 0) == WAIT_OBJECT_0) {
             while (win_sweep(rd, out, err, r) && !r->truncated) { /* the last chunk can land after the exit */
             }
-            return;
-        }
-        if (GetTickCount64() >= deadline) {
-            TerminateProcess(proc, 1);
-            r->code = -2;
             return;
         }
         Sleep(10);
@@ -755,7 +762,8 @@ static void put_failure(struct mcp_buf *text, const struct run_result *r, int ti
         mcp_buf_put(&d, out->p ? out->p : "", out->len);
         mcp_buf_put(&d, err->p ? err->p : "", err->len);
     }
-    mcp_buf_json_str_n(text, d.p ? d.p : "", d.len);
+    size_t off = d.len > DETAIL_TAIL ? d.len - DETAIL_TAIL : 0; /* the tail: the reply cap must not swallow code and message */
+    mcp_buf_json_str_n(text, d.p ? d.p + off : "", d.len - off);
     mcp_buf_free(&d);
     mcp_buf_str(text, "}}");
 }

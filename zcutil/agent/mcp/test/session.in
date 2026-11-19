@@ -52,3 +52,6 @@ this frame is not json at all
 {"jsonrpc":"2.0","id":62,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":"src/wallet/Wallet.dat"}}}
 {"jsonrpc":"2.0","id":63,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":"src/wallet/wallet.dat."}}}
 {"jsonrpc":"2.0","id":64,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":"keys/node.PEM"}}}
+{"jsonrpc":"2.0","id":65,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":".GIT/config"}}}
+{"jsonrpc":"2.0","id":66,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":"src/.Git/HEAD"}}}
+{"jsonrpc":"2.0","id":67,"method":"tools/call","params":{"name":"zcl_code","arguments":{"sub":"map","args":["--since=1m"]}}}
