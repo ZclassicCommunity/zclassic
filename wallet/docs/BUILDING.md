@@ -48,11 +48,12 @@ qualification and publication finish. Consensus rules are unchanged.
   must pass [`contrib/cross/check-win-deps.sh`](../contrib/cross/check-win-deps.sh).
   The published executable is unsigned and needs no GCC/Qt/pthread/OpenSSL DLLs.
 
-The tracked [release workflow](../../.github/workflows/wallet-release-candidates.yml)
-provides the Linux/macOS environments and final-payload checks. For maintainers:
+The local CI ([doc/local-ci.md](../../doc/local-ci.md)) provides the Linux/macOS environments and
+final-payload checks, on project machines only. For maintainers:
 
 ```sh
-gh workflow run wallet-release-candidates.yml --repo ZclassicCommunity/zclassic --ref master -f platform=all
+zcutil/local-ci.sh --commit <sha> wallet-linux        # Linux bundle (after daemon-linux of the same commit)
+ZCL_CI_MAC=mac ZCL_CI_MAC_ARGS=all zcutil/local-ci.sh --commit <sha> macos <outdir>
 ```
 
 Check downloaded artifacts, not just build logs: runtime dependencies, extracted

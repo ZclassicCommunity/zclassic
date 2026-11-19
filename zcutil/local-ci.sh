@@ -1,12 +1,12 @@
 #!/bin/sh
-# Local release-candidate CI: replaces the GitHub Actions jobs on your own machines.
+# Local release-candidate CI. Builds and tests run only on project machines, with this script.
 #
 # Builds and checks the Linux and Windows daemon candidates, the Linux wallet
 # bundle and the full test suite inside an Ubuntu 20.04 (focal) root filesystem
 # that is constructed WITHOUT root and WITHOUT a container runtime (bubblewrap +
 # an unprivileged user namespace), so the binaries keep the glibc 2.31 floor and
-# the GCC 9.3 / mingw-w64 GCC 9.3 toolchain the GitHub "container: ubuntu:20.04"
-# jobs used.  macOS candidates are built by zcutil/local-ci-macos.sh on a Mac.
+# the GCC 9.3 / mingw-w64 GCC 9.3 toolchain of an ubuntu:20.04 build machine.
+# macOS candidates are built by zcutil/local-ci-macos.sh on a Mac.
 #
 # usage: zcutil/local-ci.sh [options] <command> [outdir]
 #
@@ -25,7 +25,7 @@
 #     --commit REV  commit to build (default HEAD of this checkout; it is cloned
 #                   fresh, uncommitted changes are NOT included)
 #     --tor         also run the Tor two/three-node and addrv2 tests (needs network)
-#     --flavor F    test build flavor: debug (checked libstdc++, lock-order checks, as ci.yml),
+#     --flavor F    test build flavor: debug (checked libstdc++, lock-order checks),
 #                   release (the configuration that ships; unit suites and smoke only) or both (default)
 #     --pick REV    cherry-pick REV on top of the commit in the TEST builds only (repeatable)
 #     --jobs N      make parallelism (default min(8, nproc))
@@ -111,7 +111,7 @@ hardening() {
     else echo "$out" | tee -a "$v"; check_fail "hardening check failed (zcutil/check-hardening.sh)"; fi
 }
 
-# Windows system-DLL allowlist, identical to the workflow.
+# Windows system-DLL allowlist (the only DLLs a release .exe may import).
 WIN_DLL_ALLOW='^(advapi32|bcrypt|crypt32|iphlpapi|kernel32|msvcrt|netapi32|ntdll|ole32|oleaut32|psapi|secur32|shell32|shlwapi|user32|userenv|version|winmm|ws2_32|wtsapi32)\.dll$'
 
 inner_daemon_linux() {
@@ -154,7 +154,7 @@ inner_daemon_win64() {
         x86_64-w64-mingw32-objdump -p "$binary" | awk '/DLL Name:/ { print tolower($3) }' >/tmp/imports.txt
         if grep -Ev "$WIN_DLL_ALLOW" /tmp/imports.txt; then check_fail "unexpected runtime DLL dependency in $binary"; fi
         cat /tmp/imports.txt >>"$cand/validation.txt"
-        # Beyond the workflow: exactly one embedded manifest, UTF-8 active code page.
+        # Exactly one embedded manifest, UTF-8 active code page.
         n=$(grep -a -o '<assembly[ >]' "$binary" | wc -l)
         u=$(grep -a -o 'activeCodePage[^>]*>UTF-8<' "$binary" | wc -l)
         echo "$binary: manifests=$n activeCodePage-UTF-8=$u" | tee -a "$cand/validation.txt"
@@ -172,7 +172,7 @@ inner_wallet_linux() {
     out=/out/wallet-linux-candidate; rm -rf "$out"; mkdir -p /out/logs
     log=/out/logs/wallet-linux.log; : >"$log"
     [ -f "$daemon/SOURCE_COMMIT.txt" ] || check_fail "no Linux daemon candidate in $daemon (run daemon-linux first)"
-    # The same gate the wallet workflow applies.
+    # The wallet is built only from the exact daemon candidate of this commit.
     test "$(cat "$daemon/SOURCE_COMMIT.txt")" = "$COMMIT" || check_fail "daemon candidate is for another commit"
     (cd "$daemon" && sha256sum -c SHA256SUMS.txt) || check_fail "daemon candidate checksum"
     say "wallet toolchain (static Qt 5.15.19 + OpenSSL, cached in /cache/wallet-linux-toolchain)"
@@ -195,7 +195,7 @@ inner_test_build() {
     log=$TD/logs/build.log; : >"$log"
     export CONFIGURE_FLAGS="--enable-tests --disable-man"
     if [ "$FLAVOR" = debug ]; then
-        # As ci.yml: debug depends and --enable-debug (checked C++ library, lock-order checking).
+        # Debug depends and --enable-debug (checked C++ library, lock-order checking).
         say "clean DEBUG build with tests (checked library, lock-order checks), jobs $JOBS"; export DEBUG=1
     else
         say "clean RELEASE-configured build with tests (the configuration that ships), jobs $JOBS"
@@ -572,7 +572,7 @@ cmd_one() {
         daemon-win64) stage daemon-win64 host daemon-win64 ;;
         wallet-linux)
             # The static Qt/OpenSSL toolchain lives in the cache and is mounted over the
-            # directories linux.sh builds into (the GitHub job cached the same two paths).
+            # directories linux.sh builds into (the cached toolchain).
             mkdir -p "$CACHE/wallet-linux-toolchain/qt-static" "$CACHE/wallet-linux-toolchain/openssl"
             prepare_src wallet-linux
             lb=$OUT/work/wallet-linux/src/wallet/artifacts/linux-build
@@ -591,7 +591,7 @@ cmd_one() {
 do_macos() {
     mac=${ZCL_CI_MAC:-}; [ -n "$mac" ] || die "set ZCL_CI_MAC to the ssh alias of the Mac"
     b=$OUT/source-$SHORT.bundle
-    # Bundle exactly this commit (under a temporary local ref), so the Mac needs no GitHub access.
+    # Bundle exactly this commit (under a temporary local ref), so the Mac needs no network access to the source.
     git -C "$REPO" update-ref "refs/local-ci/$SHORT" "$COMMIT"
     brc=0
     git -C "$REPO" bundle create "$b" "refs/local-ci/$SHORT" >/dev/null 2>&1 || brc=$?
