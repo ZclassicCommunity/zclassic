@@ -142,7 +142,8 @@ crash_case() {
         ck "$l: STARTED without an operation is released at start" "$(jlen)" 0
         ck "$l: nothing was sent" "$(cli 1 getrawmempool | jq length) $(zbal 0 "$ZS")" "0 4.00000000"
         r=$(jsend 1 "$KEY"); ck "$l: retry returns an operation id" "$(echo "$r" | grep -c '^opid-')" 1
-        ck "$l: retry sends" "$(wait_op 0 "$r" | cut -d' ' -f1)" success
+        res=$(wait_op 0 "$r"); ck "$l: retry sends" "$(echo "$res" | cut -d" " -f1)" success
+        wait_mempool 1 "${res#success }"
         mine 1 ;;
     builtrecord)
         ck "$l: BUILT record on disk, outcome unknown" "$(jstates)" outcome_unknown
@@ -163,7 +164,8 @@ crash_case() {
         ck "$l: expired past expiry + margin" "$(jstates)" expired
         r=$(jsend 1 "$KEY")
         ck "$l: the key was released: a new operation" "$([ "$r" != "$op" ] && echo "$r" | grep -c '^opid-')" 1
-        ck "$l: the retry sends" "$(wait_op 0 "$r" | cut -d' ' -f1)" success
+        res=$(wait_op 0 "$r"); ck "$l: the retry sends" "$(echo "$res" | cut -d" " -f1)" success
+        wait_mempool 1 "${res#success }"
         mine 1 ;;
     built|broadcast)
         txid=$(jlist | jq -r '.[0].txid')
