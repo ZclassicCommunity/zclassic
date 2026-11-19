@@ -36,6 +36,7 @@ GENERATED_TEST_FILES = $(JSON_TEST_FILES:.json=.json.h) $(RAW_TEST_FILES:.raw=.r
 BITCOIN_TESTS =\
   test/arith_uint256_tests.cpp \
   test/bignum.h \
+  test/bootstrap_resume_testutil.h \
   test/addrman_tests.cpp \
   test/allocator_tests.cpp \
   test/base32_tests.cpp \
@@ -45,6 +46,8 @@ BITCOIN_TESTS =\
   test/bip32_tests.cpp \
   test/p2p_sync_tests.cpp \
   test/bootstrap_snapshot_protocol_tests.cpp \
+  test/bootstrap_peer_board_tests.cpp \
+  test/bootstrap_resume_logic_tests.cpp \
   test/bootstrap_resume_tests.cpp \
   test/bloom_tests.cpp \
   test/blockchaininfo_tests.cpp \

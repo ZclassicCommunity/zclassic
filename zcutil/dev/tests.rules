@@ -33,7 +33,7 @@ src/crypto/*|src/hash.*	boost:crypto_tests boost:hash_tests gtest:Sha256Differen
 
 # ---- network, bootstrap, Tor
 src/net.*|src/protocol.*|src/netbase.*|src/addrman.*|src/addrv2.h	boost:p2p_sync_tests boost:netbase_tests boost:addrv2_tests boost:onion_v3_tests boost:addrman_tests boost:DoS_tests
-src/bootstrap*	boost:bootstrap_snapshot_protocol_tests boost:bootstrap_resume_tests boost:bootstrap_onion_tests boost:p2p_sync_tests
+src/bootstrap*	boost:bootstrap_snapshot_protocol_tests boost:bootstrap_resume_tests boost:bootstrap_resume_logic_tests boost:bootstrap_peer_board_tests boost:bootstrap_onion_tests boost:p2p_sync_tests
 src/torcontrol.*|src/embeddedtor.*|src/c23/tor/*	boost:torcontrol_tests boost:embeddedtor_tests boost:bootstrap_onion_tests boost:onion_v3_tests
 
 # ---- RPC and utilities
