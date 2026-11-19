@@ -26,8 +26,16 @@ int main(int argc, char** argv) {
         !actual.addData(&extracted) || expected.result() != actual.result()) return 6;
     original.close();
     extracted.close();
+    // Launch exactly as the wallet does: pinned (verified, held) until start() returns.
     QProcess daemon;
-    daemon.start(path, {QStringLiteral("--version")});
+    {
+        EmbeddedDaemonPin pin(path, cache.path());
+        if (pin.status() != EmbeddedDaemonPin::Pinned) {
+            fprintf(stderr, "Pin failed: %s\n", qPrintable(pin.error()));
+            return 9;
+        }
+        daemon.start(path, {QStringLiteral("--version")});
+    }
     if (!daemon.waitForFinished(15000) || daemon.exitCode() != 0 ||
         daemon.exitStatus() != QProcess::NormalExit) return 7;
     if (extractEmbeddedDaemon(app.arguments().at(1), cache.path(), &error) != path) return 8;

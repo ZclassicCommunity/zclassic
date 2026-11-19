@@ -153,7 +153,13 @@ MainWindow::MainWindow(QWidget *parent) :
         about.setupUi(&aboutDialog);
         Settings::saveRestore(&aboutDialog);
 
-        QString version    = QString("Version ") % QString(APP_VERSION) % " (" % QString(__DATE__) % ")";
+#ifdef ZQW_BUILD_EPOCH   // reproducible release builds: commit time instead of the compile date
+        const QString buildDate = QLocale::c().toString(
+            QDateTime::fromSecsSinceEpoch(ZQW_BUILD_EPOCH, Qt::UTC).date(), "MMM d yyyy");
+#else
+        const QString buildDate = QString(__DATE__);
+#endif
+        QString version    = QString("Version ") % QString(APP_VERSION) % " (" % buildDate % ")";
         // Say which node this wallet is talking to as well: a user reporting a problem needs
         // both versions, and the wallet and its node can differ (e.g. an external node).
         const int nv = Settings::getInstance()->getZClassicdVersion();

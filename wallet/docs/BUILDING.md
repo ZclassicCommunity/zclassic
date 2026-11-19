@@ -129,6 +129,22 @@ This exact layout is written in three places (all consistent):
 - and READ back at runtime by `src/connection.cpp:620-704`
   (`ConnectionLoader::ensureDaemonExtracted`).
 
+(On Windows the description below applies to an unsigned executable. Authenticode signing
+appends an 8-byte-aligned attribute certificate table after the footer; for a PE whose
+security data directory (index 4, a file offset) is set, the reader requires that table
+to end exactly at EOF and to start after the image, and takes the footer that ends 0..7
+zero bytes before it. A footer inside the table is not accepted. Non-PE files use EOF only.
+The daemon must also lie between the end of the PE image and the footer.)
+
+The extracted daemon (`%LOCALAPPDATA%`/cache `zclassic-node/<sha256>/`) is verified again
+right before every launch (`EmbeddedDaemonPin`, first start and crash restart): opened
+without following links, hashed through that handle, and on Windows held open with
+`FILE_SHARE_READ` only until `QProcess::start` has created the process, so it cannot be
+written, deleted or renamed in between; on POSIX the file and its directories must be
+owned by the user and not group/world-writable. On failure the node is not started and
+the reason is logged (and, on the first start, shown). Residual: on POSIX the check and the `exec` are two
+steps (a same-user or root attacker is out of scope); a bundle sibling `zclassicd` is
+covered by the bundle checksums, not by this pin.
 The reader seeks from EOF: magic = last 8 bytes, `len` = the 8 bytes before it
 (little-endian), `sha256` = the 32 bytes before that, and
 `payloadOffset = selfSize - 48 - len` (`connection.cpp:653`). It rejects
@@ -414,8 +430,16 @@ ZQWDMON1 footer of §1 (no `zclassicd.exe` next to it; extracted to `%LOCALAPPDA
 Output: `<out>/zclwallet-v2.1.2-beta13-windows-x86_64/` (the bundle, with its own
 per-file `SHA256SUMS.txt`), the `.zip`, `<out>/SHA256SUMS.txt` (hashes of the zips) and
 `<out>/build/` (logs). The bundle carries the licence files (`LICENSE`, `COPYING`,
-`THIRD-PARTY-LICENSES`, `QT-LGPL-NOTICE.md`, `THIRD-PARTY-NOTICES.txt`); zip entries get
-the commit time (or `SOURCE_DATE_EPOCH`) as their timestamp. The script fails if any PE
+`THIRD-PARTY-LICENSES`, `QT-LGPL-NOTICE.md`, `THIRD-PARTY-NOTICES.txt`) and a
+`licenses/` folder with the full texts (LGPL-3.0, GPL-3.0, OpenSSL/SSLeay, GCC Runtime
+Library Exception, MinGW-w64, winpthreads, libsodium) copied verbatim from
+`contrib/release/licenses/` (its README records where each text came from); zip entries get
+the commit time (or `SOURCE_DATE_EPOCH`) as their timestamp. `zclwallet.exe` is
+byte-reproducible: the `.pro` passes `-Wl,--no-insert-timestamp` and
+`-ffile-prefix-map` for the source and build directories, and the About date comes from
+`SOURCE_DATE_EPOCH` (commit time by default) instead of `__DATE__`; two builds of one
+commit in different directories give the same exe, and with the same
+`SOURCE_DATE_EPOCH` the same zip. The script fails if any PE
 file in the bundle imports a DLL that is neither a Windows system DLL nor in the bundle,
 or if a bundle file is missing from or changed since its `SHA256SUMS.txt`, and runs, with
 `PATH` reduced to `System32` and `Windows` and `APPDATA`/`LOCALAPPDATA`/`USERPROFILE`

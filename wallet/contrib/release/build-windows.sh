@@ -51,6 +51,11 @@ TIMEOUT=$(command -v timeout) || die "timeout(1) not found (MSYS coreutils)"
 [ "${ALLINONE:-0}" != 1 ] || command -v openssl >/dev/null || die "ALLINONE=1 needs openssl(1) for the footer hash"
 SODIUM=$(CDPATH= cd -- "$(dirname -- "$SODIUM")" && pwd)/$(basename -- "$SODIUM")
 
+# One timestamp for everything that would otherwise embed the clock: the About date in the
+# exe (via the .pro), and the zip/bundle mtimes. Default: the commit time.
+SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$wallet" log -1 --format=%ct 2>/dev/null || echo 315619200)}
+export SOURCE_DATE_EPOCH
+
 echo "== 1. build (release, Qt $(qmake -query QT_VERSION), -j$JOBS)"
 # The .pro links res/libsodium.a and depends on res/liblibsodium.a (both git-ignored).
 cp "$SODIUM" "$wallet/res/libsodium.a"
@@ -125,9 +130,18 @@ try-isolated.cmd starts the wallet in its own profile (see ZCLWALLET_PROFILE_DIR
 wallet/docs/BUILDING.md); zclwallet.exe --print-profile-paths shows where state goes.
 SHA256SUMS.txt lists every file. Needs Windows 7 or later, nothing else installed.
 Licences: LICENSE (wallet), COPYING and THIRD-PARTY-LICENSES (node),
-QT-LGPL-NOTICE.md and THIRD-PARTY-NOTICES.txt (Qt, MinGW runtime, OpenSSL).
+QT-LGPL-NOTICE.md and THIRD-PARTY-NOTICES.txt (Qt, MinGW runtime, OpenSSL, libsodium);
+the full texts (LGPL-3.0, GPL-3.0, OpenSSL, GCC Runtime Library Exception, MinGW-w64,
+winpthreads, libsodium) are in the licenses/ folder.
 EOF
 cp "$wallet/LICENSE" "$wallet/docs/QT-LGPL-NOTICE.md" "$wallet/../COPYING" "$wallet/../THIRD-PARTY-LICENSES" "$b/"
+# Full licence texts (verbatim; sources in licenses/README.md). Fail if the set is incomplete.
+mkdir "$b/licenses"
+for t in LGPL-3.0 GPL-3.0 OpenSSL-LICENSE GCC-Runtime-Library-Exception-3.1 MinGW-w64-COPYING \
+         winpthreads-COPYING libsodium-LICENSE; do
+    [ -s "$here/licenses/$t.txt" ] || die "missing licence text $here/licenses/$t.txt"
+    cp "$here/licenses/$t.txt" "$b/licenses/"
+done
 cat > "$b/THIRD-PARTY-NOTICES.txt" <<EOF
 Third-party run-time files in this folder (unmodified upstream binaries):
 - Qt $(qmake -query QT_VERSION) (Qt5*.dll, plugins): LGPLv3, (c) The Qt Company Ltd and
@@ -140,6 +154,14 @@ Third-party run-time files in this folder (unmodified upstream binaries):
   in the OpenSSL Toolkit (http://www.openssl.org/) and cryptographic software written
   by Eric Young (eay@cryptsoft.com). Used only for the https release/price checks.
 - libsodium (linked into zclwallet.exe): ISC licence.
+Full licence texts are in the licenses/ folder of this bundle:
+  licenses/LGPL-3.0.txt                          Qt (LGPLv3)
+  licenses/GPL-3.0.txt                           GPLv3, referred to by the LGPLv3; GCC runtime DLLs
+  licenses/OpenSSL-LICENSE.txt                   OpenSSL licence + original SSLeay licence
+  licenses/GCC-Runtime-Library-Exception-3.1.txt libgcc_s_seh-1.dll, libstdc++-6.dll
+  licenses/MinGW-w64-COPYING.txt                 MinGW-w64 runtime and headers
+  licenses/winpthreads-COPYING.txt               libwinpthread-1.dll
+  licenses/libsodium-LICENSE.txt                 libsodium (ISC)
 EOF
 ( cd "$b" && find . -type f ! -name SHA256SUMS.txt | sed 's|^\./||' | sort | xargs sha256sum > SHA256SUMS.txt )
 
@@ -188,7 +210,7 @@ zipdir() { # $1=dir-name under OUT -> $1.zip with the folder as the single top-l
     [ "$(find "$OUT/$1" -type f | wc -l)" -eq "$(($(wc -l < "$OUT/$1/SHA256SUMS.txt") + 1))" ] \
         || die "$1 has files not listed in SHA256SUMS.txt"
     # Reproducible entries: every mtime is the commit time (or SOURCE_DATE_EPOCH).
-    epoch=${SOURCE_DATE_EPOCH:-$(git -C "$wallet" log -1 --format=%ct 2>/dev/null || echo 315619200)}
+    epoch=$SOURCE_DATE_EPOCH
     find "$OUT/$1" -exec touch -h -d "@$epoch" {} + || die "cannot set timestamps in $1"
     command -v zip >/dev/null 2>&1 && { ( cd "$OUT" && zip -qr -X "$1.zip" "$1" ); return; }
     ps=$(command -v pwsh || command -v powershell) || die "no zip, pwsh or powershell"
