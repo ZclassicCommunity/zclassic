@@ -251,6 +251,7 @@ test_kills() {
         if ! kill -0 "$CPID" 2>/dev/null; then say "client exited by itself after $n kills"; finished=1; break; fi
         h=$(cli "$client_bin" "$cdir" getblockcount 2>/dev/null)
         if [ "$h" = "$fx_height" ]; then say "client finished the import after $n kills (kill window too long); stopping the kill loop"; finished=1; break; fi
+        killed_at=$(date +%s)
         kill_client
         n=$((n + 1))
         sq=$(served_bytes "$cyc"); cyc=$(log_lines)
@@ -260,9 +261,16 @@ test_kills() {
         # plus the last chunk of every partial file it resumed (always requested again).
         infl=$(tail -n +$((cl + 1)) "$client_log" | sed -n 's/.*, \([0-9][0-9]*\) requests in flight.*/\1/p' | tail -1)
         resumed=$(tail -n +$((cl + 1)) "$client_log" | sed -n 's/.*staging scan: .*, \([0-9][0-9]*\) partial files continue.*/\1/p' | tail -1)
-        allow=$(( (${infl:-0} + 4 + ${resumed:-0}) * chunk ))
+        # The line can be older than the kill (the manager that prints it is a thread of a loaded host), and the window
+        # opens by a request per chunk received (about 32 a second here): add the growth the line can have missed from
+        # its age in whole seconds, capped by the full window of 4 streams x 16 requests.
+        lts=$(tail -n +$((cl + 1)) "$client_log" | grep -a "requests in flight" | tail -1 | cut -c1-19)
+        age=0
+        if [ -n "$lts" ]; then lsec=$(date -d "$lts" +%s 2>/dev/null || echo "$killed_at"); age=$((killed_at - lsec)); [ $age -lt 0 ] && age=0; fi
+        infl_max=$(( ${infl:-0} + (age + 1) * 32 )); [ $infl_max -gt 64 ] && infl_max=64
+        allow=$(( (infl_max + 4 + ${resumed:-0}) * chunk ))
         lost=$((sq - (nb - prevb)))
-        say "kill $n at +${t} ms: staging $ss (this run: server queued $sq bytes, staged $((nb - prevb)), lost $lost; ${infl:-0} requests in flight, ${resumed:-0} partial files resumed, allowed $allow)"
+        say "kill $n at +${t} ms: staging $ss (this run: server queued $sq bytes, staged $((nb - prevb)), lost $lost; ${infl:-0} requests in flight in a ${age} s old status line, at most $infl_max at the kill, ${resumed:-0} partial files resumed, allowed $allow)"
         if [ "$nb" -gt 0 ]; then
             allow_total=$((allow_total + allow))
             if [ "$lost" -gt "$allow" ]; then fail "kills: run $n lost $lost bytes, more than its ${infl:-0}+4 requests in flight and ${resumed:-0} resumed partial files allow ($allow)"; fi
