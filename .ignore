@@ -42,3 +42,4 @@ config.log
 config.status
 /release
 /build
+compile_commands.json
