@@ -1,0 +1,4 @@
+usage: zcl-dev timings [--json] [--step NAME] <outdir>...
+  reads <outdir>/results.tsv (or test/, test-release/) and <outdir>/receipts.jsonl;
+  exit 0 data read, 1 MISMATCH between the two files, 2 nothing readable or bad arguments
+exit 2

@@ -1,0 +1,11 @@
+timings: read 2 of 2 outdirs
+unavailable: fixture/norcpt/receipts.jsonl: not found
+STEP                                RUNS  PASS%  SKIP    MIN(s) MEDIAN(s)    MAX(s)
+build-tests                            2   100%     0     100.0     350.0     600.0  last 100.0s vs prior median 600.0s
+test_bitcoin-full                      1   100%     0     300.0     300.0     300.0
+zcash-gtest-full                       1   100%     0     120.0     120.0     120.0
+regtest-smoke                          2   100%     0       9.0      24.5      40.0  last 9.0s vs prior median 40.0s
+wallet_tokenguard                      0    n/a     1         -         -         -
+limits: wall-clock seconds under whatever load the host had; PASS and FAIL runs both count, SKIP has no time;
+  outdirs listed as unavailable are absent from every figure, not zero; outdirs are read oldest first.
+exit 0
