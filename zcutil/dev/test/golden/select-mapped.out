@@ -1,0 +1,5 @@
+base: (stdin)  files: 2
+scope: selective
+steps: unit-a wallet-gui
+stages: daemon-linux
+scripts: qa/x.sh

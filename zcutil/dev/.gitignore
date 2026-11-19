@@ -1,0 +1,4 @@
+zcl-dev
+zcl-dev.exe
+*.o
+!Makefile

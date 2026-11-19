@@ -1,0 +1,16 @@
+zclassicd developer-tool helpers (zcutil/tools/vendor)
+
+The files under zcutil/tools/vendor/ are copied byte for byte from the Z23 repository
+(zclassic23), commit recorded in Z23_SOURCE.tsv, and are licensed under the Apache
+License, Version 2.0 (full text in LICENSE.z23):
+
+    Copyright 2026 Rhett Creighton
+
+The rest of zclassicd remains under the MIT license (see COPYING). The copyright holder
+of the vendored files and of the developer tools is the same. Individual vendored files
+keep whatever notices they carry; those are part of the byte-identical copy.
+
+Vendored files must never be edited in this tree. Provenance and identity checks:
+src/c23/tools/check-vendor.sh zcutil/tools/Z23_SOURCE.tsv. A file derived from a Z23 file
+with changes is not vendored: it lives outside vendor/ and carries the header
+"derived from Z23 <path>@<commit>, changed" (Apache License section 4(b)).
