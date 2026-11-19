@@ -202,8 +202,13 @@ class BootstrapPeerBoard
 {
 public:
     BootstrapPeerBoard(size_t nPeers, int nStreams, const BootstrapPeerPolicy& policy = BootstrapPeerPolicy());
-    //! Peer for stream `s` to (re)connect to, or -1 if no peer is usable (all ignored or banned).
-    int Assign(int s, int64_t nowMs);
+    //! Peer for stream `s` to (re)connect to, or -1 if no peer is usable (all ignored or banned). It prefers a
+    //! server that holds a pending file this stream may fetch (or has not answered yet: it has to be probed);
+    //! `anyUseful` (optional) is set false when no server has anything for the stream, in which case the caller
+    //! should wait instead of connecting.
+    int Assign(int s, int64_t nowMs, bool* anyUseful = NULL);
+    //! Where the board learns which files are not yet in place (a mask indexed by the trusted manifest).
+    void SetUnfinishedSource(const std::function<std::vector<uint8_t>()>& fn);
     void Attach(int s, int peer, int64_t nowMs);
     //! The stream's connection ended (any reason). The caller Releases its claimed files.
     void Detach(int s);
@@ -253,16 +258,26 @@ private:
     struct PeerState {
         bool ignored, banned, partial; int strikes; int failures; int64_t cooldownUntilMs; int64_t penaltyUntilMs;
         uint64_t bytes; double lastPerStream;
+        bool answered;                      // it has sent its manifest (the primary's was validated by the caller)
+        int liarStrikes;                    // times it was among the suppliers of a file that a single pinned server then got right
         std::vector<uint8_t> has;           // files it can serve (indexed by trusted manifest); empty = all
         std::deque<int64_t> connects;       // times of recent connection attempts
         PeerState() : ignored(false), banned(false), partial(false), strikes(0), failures(0), cooldownUntilMs(0),
-                      penaltyUntilMs(0), bytes(0), lastPerStream(-1) {}
+                      penaltyUntilMs(0), bytes(0), lastPerStream(-1), answered(false), liarStrikes(0) {}
     };
     static bool Usable(const PeerState& p) { return !p.ignored && !p.banned; }
     double StreamRate(const StreamState& st, int64_t nowMs, bool matureOnly) const; //!< bytes/s over the window; <0 if matureOnly and too young
     double PeerPerStreamRate(int peer, int64_t nowMs) const;        //!< mean over mature streams, <0 if none
     int AttachedLocked(int peer) const;                              //!< streams on `peer` not asked to move
-    bool PeerHasLocked(int peer, uint32_t file) const;               //!< `peer` can serve `file` (unknown = yes)
+    bool PeerHasLocked(int peer, uint32_t file) const;               //!< `peer` has answered and can serve `file`
+    bool PinBlocksLocked(uint32_t file, int peer) const;             //!< `file` is pinned to another usable peer
+    //! `peer` holds a file that is still to come (and, if `only`, is one of those) and `peer` may fetch
+    bool HoldsWorkLocked(int peer, const std::vector<uint8_t>& unfinished, const std::map<uint32_t, uint64_t>* only) const;
+    //! `peer` could take over from stream `victim`: answered, no failed connection since, not deferred, holds one
+    //! of the files the victim still has
+    bool ComparableLocked(int peer, const StreamState& victim, const std::vector<uint8_t>& unfinished, int64_t nowMs) const;
+    //! `b` may be benched: another usable peer holds every file `b` could still serve (and `file`, if >= 0)
+    bool CanBenchLocked(size_t b, const std::vector<uint8_t>* unfinished, int64_t file) const;
     bool PeerQuietLocked(int peer, int64_t nowMs) const;             //!< no stream of `peer` got a byte for stallMs
     double StreamLifeRate(const StreamState& st, int64_t nowMs) const;  //!< bytes per second since the stream attached
 
@@ -272,6 +287,8 @@ private:
     std::vector<StreamState> streams;
     std::map<uint32_t, std::set<int> > contributors; //!< file -> peers that supplied its bytes (-1 = unknown origin)
     std::map<uint32_t, int> pinned;                  //!< file -> the one peer that fetches it again from byte 0 after a shared-blame failure
+    std::map<uint32_t, std::set<int> > suspects;    //!< file -> the other suppliers of the attempt that failed, until the pinned fetch verifies
+    std::function<std::vector<uint8_t>()> unfinishedFn;
 };
 
 //! "host:port 2 streams 41.0 MiB/s 3.20 GiB, host2:port ..." for the log and getbootstrapinfo.
