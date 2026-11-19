@@ -25,6 +25,7 @@
 #                 opened again by this build (equal to a -rescan of the same wallet.dat); then 1, 2 and 3
 #                 block disconnects as the FIRST events on the older binary, followed by z_importkey with
 #                 rescan, must leave balances and notes equal; 4 disconnects are recorded (the stated limit)
+#                 and a 97-block unwind by this build, then the older binary mines on it without aborting
 #
 #   6 stalechain  kill -9 between the wallet checkpoint and the coins flush: the chain restarts below the
 #                 checkpoint; retired notes need no rescan
@@ -343,6 +344,26 @@ scn_downgrade() {
         start 6 "$BIN" -connect=0 -rescan -disablesafemode || return
         ck "downgrade $label: this build, opened again, equals a -rescan of the same wallet.dat" "$(snap 6 | zn)" "$S5"
         stop 6
+        # a deep unwind by this build that reaches no retired spend (97 blocks: the witness cache size drops to 3), then
+        # the older binary: the frozen witnesses must not outnumber the stored cache size or it aborts at its first block
+        rm -rf "$SD/node5"; cp -a "$WORK/final0" "$SD/node5"; rm -f "$SD/node5/regtest/.lock" "$SD/node5/pid"
+        start 5 "$BIN" -connect=0 -disablesafemode || return
+        j=0; while [ $j -lt 97 ]; do cli 5 invalidateblock "$(cli 5 getbestblockhash)" >/dev/null 2>&1; j=$((j + 1)); done
+        stop 5
+        start 5 "$bd" -connect=0 -disablesafemode
+        if ! alive_n 5 || ! cli 5 getblockcount >/dev/null 2>&1; then
+            bad "downgrade $label: after a 97-block unwind by this build the binary did not start: $(tail -3 "$SD/node5/stdout.log" | tr '\n' ' ')"
+        else
+            cli 5 generate 3 >/dev/null 2>&1
+            ck "downgrade $label: after a 97-block unwind: mined 3 blocks, alive" "$(cli 5 getblockcount >/dev/null 2>&1 && echo yes)" yes
+            ck "downgrade $label: after a 97-block unwind: balances and notes as the -rescan reference" "$(snap 5 | zn)" "$(printf "%s" "$REF" | zn)"
+            ck "downgrade $label: after a 97-block unwind: no assertion in the logs" "$(cat "$SD/node5/stdout.log" "$SD/node5/regtest/debug.log" | grep -ci 'assertion\|Aborted')" 0
+            stop 5
+            start 5 "$bd" -connect=0 -disablesafemode || return
+            ck "downgrade $label: after a 97-block unwind: restart, alive" "$(cli 5 getblockcount >/dev/null 2>&1 && echo yes)" yes
+            ck "downgrade $label: after a 97-block unwind: restart, balances and notes as the -rescan reference" "$(snap 5 | zn)" "$(printf "%s" "$REF" | zn)"
+            stop 5
+        fi
         # the first events on the older binary are block disconnects (an orphaned tip, invalidateblock): it pops one
         # frozen witness per block, so up to RETIRED_WITNESSES_KEPT - 1 = 3 are survived; 4 are the stated limit
         for k in 1 2 3 4; do

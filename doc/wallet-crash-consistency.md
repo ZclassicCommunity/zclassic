@@ -190,6 +190,23 @@ rescan, leave the older binaries correct (`wallet_witness_retire.sh` scenario 5,
 parent commit); so does any number of disconnects after a block was connected, because each connect
 adds a witness.
 
+**The stored cache size and the frozen list.** Older binaries assert, at every block, that
+`nWitnessCacheSize` (stored with the wallet) is at least the witness count of every note, retired ones
+included. Every disconnect lowers the cache size by one, and a retired note is skipped by the per-block
+updates, so this build cuts the frozen witnesses of every retired note to the new cache size at each
+disconnect (`DecrementNoteWitnesses`; the records are marked and written at the next checkpoint),
+raises the cache size at start-up to cover every note including the retired ones
+(`ReconcileNoteState`), and resets both together in `ClearNoteWitnessCache`. Without this, 97 to 99
+disconnects that reach no retired spend (an operator `invalidateblock` 97 deep) followed by a
+checkpoint stored a cache size of 3 next to four-witness records, and beta12 aborted with
+`Assertion 'nWitnessCacheSize >= nd->witnesses.size()'` at its first block and at every restart (only
+`-rescan` on the old binary recovered). Consequence for the stated limit: after such a deep unwind the
+frozen list is shorter than four (3 after 97 disconnects, empty after 100, which un-retires every
+note anyway), so an older binary then survives fewer disconnects-first than three; the notes are
+restored to four only when they are retired again. `wallet_witness_retire.sh` scenario 5 runs the
+97-block unwind with this build and then starts the previous release and the parent build on the
+result: they start, mine blocks, restart, and balances and notes stay equal.
+
 `ClearNoteWitnessCache` (`-rescan`, `-zapwallettxes`, the rebuild after an unwind) clears the retired
 state with the witnesses: a note that stayed retired would be skipped by the rebuild and be stored
 with no witness at all, which is the form older binaries lose track of. And a Sapling note with fewer than

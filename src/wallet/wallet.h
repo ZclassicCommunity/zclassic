@@ -84,8 +84,13 @@ static const unsigned int WITNESS_CACHE_SIZE = MAX_REORG_LENGTH + 1;
  * weighs about 4.7 KiB, a live one 77 KiB). The limit that is left: an older binary whose first events after
  * a downgrade are FOUR or more disconnects, followed by a rescan from below the note, counts those spent
  * notes as unspent until it runs with -rescan or this build opens the wallet again and repairs it.
- * Must be at most the smallest witness cache a retired note can have (a sweep retires a note only when it
- * holds this many witnesses, so nWitnessCacheSize on disk is never smaller than this).
+ * Invariant that older binaries assert (nWitnessCacheSize >= the witness count of every note, retired ones
+ * included): a sweep retires a note only when it holds this many witnesses, and from then on
+ * DecrementNoteWitnesses cuts the frozen witnesses of every retired note to the new cache size at each
+ * disconnect (the cache size drops with each one), ReconcileNoteState raises the size to cover them, and
+ * ClearNoteWitnessCache resets both. So after a deep operator unwind (97 or more disconnects that reach no
+ * retired spend) the frozen list can be SHORTER than this; it then survives fewer disconnects-first (see
+ * doc/wallet-crash-consistency.md).
  */
 static const size_t RETIRED_WITNESSES_KEPT = 4;
 /** A block update looks for newly retirable notes (CWallet::RetireSpentNotes) every this many blocks. */

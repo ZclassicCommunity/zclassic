@@ -1693,8 +1693,11 @@ bool CWallet::ReconcileNoteState(CBlockIndex*& pindexRescan)
     }
 
     // nWitnessCacheSize must stay at least as large as every cache.
+    // Retired notes count too: older binaries assert it for the frozen witnesses as well.
     size_t nMax = 0;
-    for (CWalletTx* pwtx : noteTxs) {
+    std::vector<CWalletTx*> allNoteTxs;
+    CollectNoteTxs(allNoteTxs, true);
+    for (CWalletTx* pwtx : allNoteTxs) {
         for (const auto& item : pwtx->mapSproutNoteData) nMax = std::max(nMax, item.second.witnesses.size());
         for (const auto& item : pwtx->mapSaplingNoteData) nMax = std::max(nMax, item.second.witnesses.size());
     }
@@ -2024,6 +2027,26 @@ void CWallet::DecrementNoteWitnesses(const CBlockIndex* pindex)
         }
     }
     nWitnessCacheSize = nSizeAfter;
+    // The stored invariant older binaries assert (CopyPreviousWitnesses, DecrementNoteWitnesses): no
+    // note holds more witnesses than nWitnessCacheSize. The live notes were cut above; a retired
+    // note is skipped there and keeps its frozen witnesses, so with the cache size below
+    // RETIRED_WITNESSES_KEPT (97 or more disconnects that reach no retired spend) they are cut here,
+    // newest first kept, and the record is written at the next checkpoint. (At zero the notes are
+    // empty: that takes a 100-block unwind, which brings every retired note back anyway.)
+    if (nSizeAfter < RETIRED_WITNESSES_KEPT) {
+        std::vector<CWalletTx*> allNoteTxs;
+        CollectNoteTxs(allNoteTxs, true);
+        for (CWalletTx* pwtx : allNoteTxs) {
+            bool fTrimmed = false;
+            for (auto& item : pwtx->mapSaplingNoteData) {
+                while (item.second.fRetired && (int64_t)item.second.witnesses.size() > nSizeAfter) {
+                    item.second.witnesses.pop_back();
+                    fTrimmed = true;
+                }
+            }
+            if (fTrimmed) MarkNoteTxDirty(pwtx->GetHash());
+        }
+    }
 
     // For performance reasons, we write out the witness cache in
     // CWallet::SetBestChain() (which also ensures that overall consistency

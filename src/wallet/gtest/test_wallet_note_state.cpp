@@ -1216,3 +1216,52 @@ TEST_F(CheckpointFixture, ABackfilledSproutNullifierMarksItsRecord)
     pzcashParams = savedParams;
     EXPECT_EQ(std::vector<uint256>({rh}), Checkpoint());
 }
+TEST_F(CheckpointFixture, ADeepUnwindThatReachesNoRetiredSpendKeepsEveryWitnessCountBelowTheCacheSize)
+{
+    // The previous release asserts nWitnessCacheSize >= witnesses.size() for every note, retired ones
+    // included, at every block. Every disconnect lowers the cache size by one, so the frozen witnesses
+    // of a retired note must be cut with it.
+    uint256 a = Mine(1000), b = Mine(2000); Mine(0);
+    uint256 nf = *Note(a).nullifier;
+    uint256 sp = MineSpendOf(a);
+    MineToDepth(sp, (int)WITNESS_CACHE_SIZE + 1 + (int)RETIRE_SWEEP_INTERVAL);
+    { LOCK2(cs_main, wallet->cs_wallet); ASSERT_TRUE(Note(a).fRetired); ASSERT_EQ(RETIRED_WITNESSES_KEPT, Note(a).witnesses.size()); }
+    Checkpoint();
+    auto invariant = [&](const char* when) {
+        LOCK2(cs_main, wallet->cs_wallet);
+        CWallet::Health h;
+        wallet->GetHealth(h);
+        std::vector<CWalletTx*> all;
+        wallet->CollectAll(all);
+        for (CWalletTx* pwtx : all) {
+            for (const auto& item : pwtx->mapSaplingNoteData) {
+                EXPECT_LE((int64_t)item.second.witnesses.size(), h.nWitnessCacheSize) << when;
+            }
+        }
+    };
+    invariant("before");
+    for (int i = 0; i < 97; i++) {
+        chain.DisconnectAndForget(*wallet);
+        invariant("during the unwind");
+    }
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        CWallet::Health h;
+        wallet->GetHealth(h);
+        EXPECT_EQ(3, h.nWitnessCacheSize);
+        EXPECT_TRUE(Note(a).fRetired) << "no disconnect reached the spend";
+        EXPECT_EQ(3u, Note(a).witnesses.size());
+        EXPECT_TRUE(wallet->IsSaplingSpent(nf));
+    }
+    std::vector<uint256> written = Checkpoint();
+    EXPECT_NE(written.end(), std::find(written.begin(), written.end(), a)) << "the trimmed retired record is written";
+    // the chain comes back: the note is still retired, still spent, still within the cache size
+    MineN(97);
+    invariant("after the reconnect");
+    LOCK2(cs_main, wallet->cs_wallet);
+    EXPECT_TRUE(Note(a).fRetired);
+    EXPECT_TRUE(wallet->IsSaplingSpent(nf));
+    EXPECT_LE(Note(a).witnesses.size(), RETIRED_WITNESSES_KEPT);
+    EXPECT_FALSE(Note(b).fRetired);
+}
+
