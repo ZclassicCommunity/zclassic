@@ -132,7 +132,6 @@ src/net.cpp	COnionAddrDB::Read(1)	16
 src/net.cpp	Discover(1)	16
 src/net.cpp	GetLocal(3)	16
 src/net.cpp	OpenConnectionsLoop(1)	18
-src/net.cpp	SelectOutboundCandidate(4)	17
 src/net.cpp	ThreadMessageHandler(0)	16
 src/net.cpp	ThreadSocketHandler(0)	61
 src/netbase.cpp	CNetAddr::GetGroup(0)	16

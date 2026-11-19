@@ -9,6 +9,7 @@
 
 #include "main.h"
 #include "net.h"
+#include "netoutbound.h"
 
 #include "addrman.h"
 #include "addrv2.h"
@@ -1475,72 +1476,53 @@ CAddrMan& SelectDialTable(bool fOnionProxy, uint32_t nRand)
     return addrman;
 }
 
-/** An address tried less than this many seconds ago is never dialled again, however
- *  small the table (see SelectOutboundCandidate). */
-static const int64_t OUTBOUND_MIN_REDIAL_SECONDS = 60;
-/** Draws from the table in one selection round. */
-static const int OUTBOUND_MAX_DRAWS = 300;
+namespace {
+/** The draws of one selection round, from an address table (netoutbound.h). */
+class CAddrManDrawSource : public COutboundDrawSource
+{
+public:
+    CAddrManDrawSource(CAddrMan& manIn, const std::set<std::vector<unsigned char> >& setConnectedIn,
+                       const COutboundSkip& skipIn, int64_t nANowIn)
+        : man(manIn), setConnected(setConnectedIn), skip(skipIn), nANow(nANowIn) {}
+
+    /** The address of the latest draw. */
+    CAddrInfo last;
+
+    COutboundDraw Draw() override
+    {
+        last = man.Select();
+        COutboundDraw draw;
+        draw.fValid = last.IsValid();
+        if (!draw.fValid)
+            return draw;
+        // A host in skip.hosts is our own address as our peers see it, or an -addnode
+        // host, which the addcon thread keeps connected on its own port. It, and an
+        // IPv6 address when this host has no IPv6 route, would each cost a connect
+        // timeout (or a second slot for one server) and could not help.
+        draw.fFree = setConnected.count(last.GetGroup()) || IsLocal(last) || skip.hosts.count(CNetAddr(last)) ||
+                     (skip.fNoIPv6Route && last.GetNetwork() == NET_IPV6);
+        draw.fLimited = IsLimited(last);
+        draw.nLastTry = last.nLastTry;
+        draw.fTerrible = last.IsTerrible(nANow);
+        draw.fDefaultPort = last.GetPort() == Params().GetDefaultPort();
+        return draw;
+    }
+
+private:
+    CAddrMan& man;
+    const std::set<std::vector<unsigned char> >& setConnected;
+    const COutboundSkip& skip;
+    const int64_t nANow;
+};
+} // namespace
 
 CAddrInfo SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsigned char> >& setConnected, int64_t nANow,
                                   const COutboundSkip& skip)
 {
-    int nTries = 0;
-    for (int nDraws = 0; nDraws < OUTBOUND_MAX_DRAWS; nDraws++)
-    {
-        CAddrInfo addr = man.Select();
-
-        // an empty table: nothing to choose from this round
-        if (!addr.IsValid())
-            break;
-
-        // An address on the network group of an outbound peer, or one of our own, is
-        // not a candidate, but it does not use up the round either: on a small table
-        // (a fresh node knows a handful of addresses) one such draw would otherwise
-        // end the round before the port and recency rules could let anything through.
-        if (setConnected.count(addr.GetGroup()) || IsLocal(addr))
-            continue;
-
-        // Nor is a host in skip.hosts (our own address as our peers see it, or an
-        // -addnode host, which the addcon thread keeps connected on its own port),
-        // or an IPv6 address when this host has no IPv6 route: each would cost a
-        // connect timeout (or a second slot for one server) and could not help.
-        if (skip.hosts.count(CNetAddr(addr)) || (skip.fNoIPv6Route && addr.GetNetwork() == NET_IPV6))
-            continue;
-
-        // If we didn't find an appropriate destination after trying 100 addresses fetched from addrman,
-        // stop this loop, and let the outer loop run again (which sleeps, adds seed nodes, recalculates
-        // already-connected network ranges, ...) before trying new addrman addresses.
-        nTries++;
-        if (nTries > 100)
-            break;
-
-        if (IsLimited(addr))
-            continue;
-
-        // never redial within a minute: on a small table the relaxation below would
-        // otherwise hand the same address (one that answers and drops us at once is
-        // the one the tried table keeps) to every round and starve the others
-        if (nANow - addr.nLastTry < OUTBOUND_MIN_REDIAL_SECONDS)
-            continue;
-
-        // only consider very recently tried nodes after 30 failed attempts
-        if (nANow - addr.nLastTry < 600 && nTries < 30)
-            continue;
-
-        // nor, before as many draws, an address addrman counts as terrible: not seen
-        // for a month (peers gossip addresses years old), or tried often without a
-        // success. On a small table these are most of the dead addresses, and each
-        // one dialled costs a connect timeout before a live peer is reached.
-        if (addr.IsTerrible(nANow) && nTries < 30)
-            continue;
-
-        // do not allow non-default ports, unless after 50 invalid addresses selected already
-        if (addr.GetPort() != Params().GetDefaultPort() && nTries < 50)
-            continue;
-
-        return addr;
-    }
-    return CAddrInfo();
+    CAddrManDrawSource source(man, setConnected, skip, nANow);
+    if (SelectOutboundDraw(source, nANow) < 0)
+        return CAddrInfo();
+    return source.last;
 }
 
 /** Network groups an outbound dial is in progress to (see CDialGroupReservation). */
