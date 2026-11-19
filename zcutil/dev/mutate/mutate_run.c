@@ -594,11 +594,10 @@ int mut_run(const struct mut_opts *o)
     atexit(at_exit_restore);
     rc = loop(&c);
     if (rc == 0) return finish(&c);
-    if (g.dirty && !restore_verified()) return 2;
-    if (rc == 130) {
-        (void)unlink(g.orig_path);
-        fprintf(stderr, "zcl-dev mutate: interrupted; %s restored\n", rel);
-    }
+    if (g.dirty && !restore_verified()) return 2; /* the .orig stays for `restore` */
+    (void)unlink(g.orig_path);
+    fprintf(stderr, "zcl-dev mutate: %s; %s restored (rebuild it: the last build may hold a mutant)\n",
+            rc == 130 ? "interrupted" : "stopped on an error", rel);
     return rc;
 }
 

@@ -49,9 +49,12 @@ in file order.
   by re-reading it.
 - Build and test run in their own process group, with stdin from `/dev/null` and output to a log file
   under `zcutil/gen/mutate/`; the whole group is killed on timeout, on interrupt and when the command ends.
-- SIGINT, SIGTERM and SIGHUP restore the file and exit 130; an exit handler restores too. A normal end
-  rebuilds the restored original (so no mutated binary is left behind), deletes the `.orig`, and checks
-  `git diff --quiet -- <file>`; if git still sees a change it exits 2.
+- SIGINT, SIGTERM and SIGHUP restore the file and exit 130; an exit handler restores too. An
+  interrupted run does not rebuild, so the last build output may still hold a mutant: rebuild before
+  using it. A normal end rebuilds the restored original (so no mutated binary is left behind), deletes
+  the `.orig`, and checks `git diff --quiet -- <file>`; if git still sees a change it exits 2. After a
+  SIGKILL, `restore <file>` checks the `.orig` against `git show HEAD:<file>`, writes it back, verifies
+  it and deletes the `.orig`.
 - A file listed in `zcutil/consensus.seal` gets a warning: the consensus-seal lint fails while a mutant
   is applied. Mutating a consensus file never changes consensus code in a commit; the run refuses dirty
   files and restores before it ends.
