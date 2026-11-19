@@ -504,7 +504,10 @@ int rv_rows_exist(const char *rev)
 
 enum { ROW_UNUSABLE, ROW_STALE, ROW_LIVE };
 
+/* state and rewritten are computed on first use: most rows of a long record never touch the checked range. */
 typedef struct { int state, rewritten; unsigned char *hit; } RowSet;
+
+enum { LAZY = -1 };
 
 static int row_state(const RvRow *row)
 {
@@ -590,15 +593,36 @@ static const char *reason_of(const Verdict *v)
     return "no row";
 }
 
-static const char *judge_commit(const RvRange *rg, size_t ci, const RvRows *rows, const RowSet *sets)
+/* The row tip is the checked tip or one of its ancestors. */
+static int tip_in_history(const RvRow *row, const char *checked_tip)
+{
+    const char *av[] = {"git", "merge-base", "--is-ancestor", row->tip, checked_tip, NULL};
+    return rv_git(av, NULL) == 0;
+}
+
+static int set_state(const RvRows *rows, RowSet *sets, size_t r)
+{
+    if (sets[r].state == LAZY) sets[r].state = row_state(&rows->v[r]);
+    return sets[r].state;
+}
+
+static int set_rewritten(const RvRows *rows, RowSet *sets, size_t r, const char *checked_tip)
+{
+    if (sets[r].rewritten == LAZY)
+        sets[r].rewritten = set_state(rows, sets, r) != ROW_LIVE || !tip_in_history(&rows->v[r], checked_tip);
+    return sets[r].rewritten;
+}
+
+static const char *judge_commit(const RvRange *rg, size_t ci, const RvRows *rows, RowSet *sets)
 {
     Verdict v = {0, 0, 0, 0};
     for (size_t r = 0; r < rows->n; r++)
-        if (sets[r].state != ROW_UNUSABLE && sets[r].hit[ci]) apply_row(&v, &rg->v[ci], &rows->v[r], sets[r].state);
+        if (sets[r].state != ROW_UNUSABLE && sets[r].hit[ci]) apply_row(&v, &rg->v[ci], &rows->v[r], set_state(rows, sets, r));
     const char *why = reason_of(&v);
     if (why && !strcmp(why, "no row"))
         for (size_t r = 0; r < rows->n; r++)
-            if (sets[r].rewritten && strcmp(rows->v[r].verdict, "REJECT") && base_precedes(&rows->v[r], rg->v[ci].sha)) return "stale row";
+            if (strcmp(rows->v[r].verdict, "REJECT") && base_precedes(&rows->v[r], rg->v[ci].sha) && set_rewritten(rows, sets, r, rg->tip))
+                return "stale row";
     return why;
 }
 
@@ -611,22 +635,14 @@ static void miss_add(RvResult *res, const RvCommit *c, const char *why)
     res->v[res->n++] = (RvMiss){xstrdup(c->sha), xstrdup(c->subject), why};
 }
 
-/* The row tip is the checked tip or one of its ancestors. */
-static int tip_in_history(const RvRow *row, const char *checked_tip)
-{
-    const char *av[] = {"git", "merge-base", "--is-ancestor", row->tip, checked_tip, NULL};
-    return rv_git(av, NULL) == 0;
-}
-
 static void check_commits(const RvRange *rg, const RvRows *rows, RvResult *res)
 {
     RowSet *sets = xrealloc(NULL, (rows->n + 1) * sizeof *sets);
     for (size_t r = 0; r < rows->n; r++) {
         sets[r].hit = xrealloc(NULL, rg->n + 1);
         memset(sets[r].hit, 0, rg->n + 1);
-        sets[r].state = row_state(&rows->v[r]);
-        sets[r].rewritten = sets[r].state != ROW_LIVE || !tip_in_history(&rows->v[r], rg->tip);
-        if (sets[r].state != ROW_UNUSABLE) row_hits(rg, &rows->v[r], &sets[r]);
+        sets[r].state = sets[r].rewritten = LAZY;
+        row_hits(rg, &rows->v[r], &sets[r]);
     }
     for (size_t i = 0; i < rg->n; i++) {
         if (rg->v[i].only_rows) {

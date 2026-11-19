@@ -790,12 +790,30 @@ static void judge(const Repo *r, const char *remote, const char *rref, const cha
         snprintf(why + w, cap - w, "%s%s", w ? "; " : "", msg);
 }
 
+/* A new release ref is reviewed from where it leaves the remote's master: the master tip when that is an
+ * ancestor of the pushed commit, else the merge base (a release cut at a reviewed commit older than master). */
+static char *new_ref_base(const char *remote, const char *lsha)
+{
+    char *m = trusted_master(remote);
+    if (!m) return NULL;
+    const char *mbv[] = {"git", "merge-base", m, lsha, NULL};
+    RvBuf b;
+    char *mb = NULL;
+    if (rv_git(mbv, &b) == 0) {
+        b.p[strcspn(b.p, "\r\n")] = 0;
+        if (is_sha(b.p)) mb = xstrdup(b.p);
+    }
+    rv_buf_free(&b);
+    free(m);
+    return mb;
+}
+
 /* The commit the review range starts from: the remote tip when the push fast-forwards it, else the merge base
  * (a forced push is reviewed from where history diverged), else for a NEW ref the remote's master tip. Caller
  * frees; NULL when none is known. */
 static char *review_base(const char *remote, const char *rref, const char *lsha, const char *rsha)
 {
-    if (is_zero(rsha)) return ieq_prefix(rref, "refs/heads/master") ? NULL : trusted_master(remote);
+    if (is_zero(rsha)) return ieq_prefix(rref, "refs/heads/master") ? NULL : new_ref_base(remote, lsha);
     const char *anc[] = {"git", "merge-base", "--is-ancestor", rsha, lsha, NULL}; /* argv, no shell */
     if (rv_git(anc, NULL) == 0) return xstrdup(rsha);
     const char *mbv[] = {"git", "merge-base", rsha, lsha, NULL};

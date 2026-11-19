@@ -23,7 +23,7 @@ $(BIN)/zcl-dev-review$(EXEEXT): $(SRCS) $(HDRS)
 	$(CC) $(STD) $(WARN) $(CFLAGS) -o $@ $(SRCS)
 
 $(BIN)/zcl-review-fixtures: test/fixtures.c
-	$(CC) -std=gnu17 $(WARN) $(CFLAGS) -o $@ test/fixtures.c
+	$(CC) -std=gnu17 $(WARN) $(CFLAGS) -o $@.$$$$.tmp test/fixtures.c && mv -f $@.$$$$.tmp $@
 
 check: all $(BIN)/zcl-review-fixtures
 	$(CC) -std=c2x $(WARN) -fsyntax-only zcl-dev-review.c

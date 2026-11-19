@@ -565,6 +565,11 @@ static void hook_cases(void)
     push("an earlier row does not cover a later commit", 1, "feat: second slice (no row)", "master");
     commit_record("review: record second", "rv1r", "rv3");
     push_ok("ZCL_PUSH_OK=1 with a row and no receipts is admitted through the override", 0, NULL, "master");
+    {
+        char spec[200];
+        snprintf(spec, sizeof spec, "%s:refs/heads/release/old", L("rv1r"));
+        push("a new release/* at a reviewed commit older than the master tip is admitted", 0, NULL, spec);
+    }
     edit_commit("feat: unreviewed release\n");
     lab("rv4", "HEAD");
     receipts(L("rv4"));
