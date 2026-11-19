@@ -13,7 +13,7 @@ Options: `--build-dir DIR` (default: the repo root, an in-tree build), `--out PA
 
 ## How it works
 
-It runs `make -n -B -w -C <DIR>/<subdir>` with argv (no shell) and `LC_ALL=C`; `MAKEFLAGS`, `MFLAGS` and `MAKELEVEL` are cleared. `ZCL_COMPDB_MAKE` names another make. From the output it:
+It runs `make -n -B -w -k -C <DIR>/<subdir>` with argv (no shell) and `LC_ALL=C`; `MAKEFLAGS`, `MFLAGS` and `MAKELEVEL` are cleared. `ZCL_COMPDB_MAKE` names another make. From the output it:
 
 - follows `Entering directory` and `Leaving directory` lines, so a recursive `$(MAKE) -C sub` gives the right `directory`;
 - joins backslash-continued lines and splits a recipe line on `&&`, `||` and `;` outside quotes;
@@ -27,6 +27,8 @@ The database is a JSON array of `{directory, file (absolute), arguments}` sorted
 Exit: 0 written or fresh, 1 `--check` found the file stale or missing, 2 broken invocation, no make, or hollow.
 
 ## Warning
+
+`-B` also forces make to remake the makefiles themselves. In an automake tree that can re-run `config.status --recheck` (several times; about a minute for zclassicd) and, when `Makefile.am` is newer than `Makefile.in`, automake and autoconf in the source tree. `-o Makefile` and friends do not stop it under `-B`. Run the tool on a freshly configured tree whose timestamps are consistent, with the same `CONFIG_SITE` that `configure` was given (a recheck without it can fail for a depends build), and check `git status` afterwards.
 
 `make -n` is a dry run, not a no-op. Make still evaluates `$(shell ...)`, runs recipes marked `+`, and runs `$(MAKE)` recursive recipes (with `-n` passed down). Those are make's own rules; this tool does not suppress them. Run it on a tree you would let `make` read, and never one whose Makefiles you do not trust. The build tree must already be configured (`configure` done); an unconfigured tree has no Makefile and is reported hollow.
 

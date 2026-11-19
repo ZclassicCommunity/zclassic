@@ -27,7 +27,7 @@
     } while (0)
 
 static const char *const cases[] = {"indir",     "recursive", "libtool", "ccache", "quoted",
-                                    "continued", "duplicate", "subst",   "empty",  NULL};
+                                    "continued", "duplicate", "subst",   "empty",  "vpath", NULL};
 
 typedef struct {
     char *root, *golden, *tmp;

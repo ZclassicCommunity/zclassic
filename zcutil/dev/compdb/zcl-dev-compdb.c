@@ -457,10 +457,52 @@ static void db_push(Db *db, const char *dir, const char *src, Words *args)
     e->seq = db->n++;
 }
 
+/* Automake's out-of-tree source idiom, as one word:  `test -f 'X' || echo 'P'`X
+ * The shell would give X when X exists in dir and PX otherwise. Returns that, or NULL for any other word. */
+static char *vpath_word(const char *w, const char *dir)
+{
+    static const char head[] = "`test -f '", mid[] = "' || echo '";
+    const char *x, *xe, *p, *pe;
+    char *name, *full, *res;
+    struct stat st;
+    int found;
+    size_t plen, slen;
+    if (strncmp(w, head, sizeof head - 1)) return NULL;
+    x = w + sizeof head - 1;
+    xe = strchr(x, '\'');
+    if (!xe || strncmp(xe, mid, sizeof mid - 1)) return NULL;
+    p = xe + sizeof mid - 1;
+    pe = strchr(p, '\'');
+    if (!pe || pe[1] != '`') return NULL;
+    name = xstrndup(x, (size_t)(xe - x));
+    full = join_norm(dir, name);
+    found = stat(full, &st) == 0;
+    plen = found ? 0 : (size_t)(pe - p);
+    slen = strlen(pe + 2);
+    res = xrealloc(NULL, plen + slen + 1);
+    memcpy(res, p, plen);
+    memcpy(res + plen, pe + 2, slen + 1);
+    free(name);
+    free(full);
+    return res;
+}
+
+static void resolve_vpath(Words *a, const char *dir)
+{
+    for (size_t i = 0; i < a->n; i++) {
+        char *r = a->v[i].subst ? vpath_word(a->v[i].s, dir) : NULL;
+        if (!r) continue;
+        free(a->v[i].s);
+        a->v[i].s = r;
+        a->v[i].subst = 0;
+    }
+}
+
 /* args is consumed: moved into the database or freed. */
 static void consider(Db *db, Words *a, const char *dir)
 {
     size_t src = 0;
+    resolve_vpath(a, dir);
     int candidate = a->n > 1 && (is_compiler(a->v[0].s) || a->v[0].subst);
     if (!candidate || !has_dash_c(a) || count_sources(a, &src) != 1) {
         words_free(a);
@@ -700,7 +742,7 @@ static char *read_file(const char *path, size_t *len)
     return buf_take(&b);
 }
 
-/* make -n -B -w -C dir: its stdout, or NULL on failure (*rc = -1 when make cannot run). */
+/* make -n -B -w -k -C dir: its stdout, or NULL on failure (*rc = -1 when make cannot run). */
 static char *make_dry_run(const char *dir, const char *scratch, int *rc)
 {
     const char *make = getenv("ZCL_COMPDB_MAKE");
@@ -717,9 +759,10 @@ static char *make_dry_run(const char *dir, const char *scratch, int *rc)
     argv[1] = "-n";
     argv[2] = "-B";
     argv[3] = "-w";
-    argv[4] = "-C";
-    argv[5] = (char *)dir;
-    argv[6] = NULL;
+    argv[4] = "-k";
+    argv[5] = "-C";
+    argv[6] = (char *)dir;
+    argv[7] = NULL;
     *rc = run_to_fd(argv, fileno(f));
     fclose(f);
     text = read_file(scratch, &len);

@@ -1,0 +1,7 @@
+[
+{"directory": "@W@/vpath/src", "file": "@W@/vpath/src/here.cc", "arguments": ["g++", "-c", "-o", "here.o", "here.cc"]},
+{"directory": "@W@/vpath/src", "file": "@W@/vpath/srcs/there.cc", "arguments": ["g++", "-DX", "-c", "-o", "there.o", "../srcs/there.cc"]}
+]
+--- log
+entries 2, skipped 0, duplicates 0
+exit=0
