@@ -17,6 +17,7 @@
 #define _DEFAULT_SOURCE 1
 #include <ctype.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -852,8 +853,20 @@ static int write_atomic(const char *path, const Buf *b)
     return 0;
 }
 
+/* Append one printf-formatted message line to the log (printed to stderr by main). */
+static void log_line(Buf *log, const char *fmt, ...)
+{
+    char line[8192];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    buf_puts(log, line);
+    buf_putc(log, '\n');
+}
+
 /* Build the database JSON into json; returns 0, or an exit status for a failure. */
-static int generate(const Paths *p, Buf *json)
+static int generate(const Paths *p, Buf *json, Buf *log)
 {
     int rc = 0;
     char scratch[4200];
@@ -862,33 +875,34 @@ static int generate(const Paths *p, Buf *json)
     char *text = make_dry_run(p->dir, scratch, &rc);
     if (!text || rc < 0) {
         free(text);
-        if (rc < 0) fprintf(stderr, "zcl-dev-compdb: UNAVAILABLE: cannot run make (set ZCL_COMPDB_MAKE)\n");
+        if (rc < 0) log_line(log, "zcl-dev-compdb: UNAVAILABLE: cannot run make (set ZCL_COMPDB_MAKE)");
         return 2;
     }
-    if (rc != 0) fprintf(stderr, "zcl-dev-compdb: warning: make exited %d in %s\n", rc, p->dir);
+    if (rc != 0) log_line(log, "zcl-dev-compdb: warning: make exited %d in %s", rc, p->dir);
     parse_make(text, p->dir, &db);
     free(text);
     db_finish(&db);
-    fprintf(stderr, "entries %lu, skipped %lu, duplicates %lu\n", (unsigned long)db.n, (unsigned long)db.skipped,
-            (unsigned long)db.duplicates);
+    log_line(log, "entries %lu, skipped %lu, duplicates %lu", (unsigned long)db.n, (unsigned long)db.skipped,
+             (unsigned long)db.duplicates);
     rc = db.n ? 0 : 2;
-    if (rc) fprintf(stderr, "zcl-dev-compdb: no compile commands under %s (not configured? hollow)\n", p->dir);
+    if (rc) log_line(log, "zcl-dev-compdb: no compile commands under %s (not configured? hollow)", p->dir);
     json_db(json, &db);
     db_free(&db);
     return rc;
 }
 
-static int run_compdb(const Opts *o)
+/* Generate, then write the file or (--check) compare with it. Messages go to log. */
+static int run_compdb(const Opts *o, Buf *log)
 {
     Paths p = {NULL, NULL, NULL};
     Buf json = {NULL, 0, 0};
     int rc = resolve_paths(o, &p);
-    if (!rc) rc = generate(&p, &json);
+    if (!rc) rc = generate(&p, &json, log);
     if (!rc && o->check) {
         size_t len = 0;
         char *old = read_file(p.out, &len);
         rc = old && len == json.n && !memcmp(old, json.s, len) ? 0 : 1;
-        fprintf(stderr, "%s: %s\n", p.out, rc ? "stale" : "fresh");
+        log_line(log, "%s: %s", p.out, rc ? "stale" : "fresh");
         free(old);
     } else if (!rc) {
         rc = write_atomic(p.out, &json);
@@ -989,5 +1003,9 @@ int main(int argc, char **argv)
     int r = parse_args(argc, argv, &o);
     if (r) return r - 1000;
     if (o.selftest) return selftest();
-    return run_compdb(&o);
+    Buf log = {NULL, 0, 0};
+    r = run_compdb(&o, &log);
+    if (log.s) fputs(log.s, stderr);
+    free(log.s);
+    return r;
 }

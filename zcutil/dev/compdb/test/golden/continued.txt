@@ -1,6 +1,6 @@
 [
 {"directory": "@W@/continued/src", "file": "@W@/continued/src/c.cc", "arguments": ["g++", "-DA", "-DB", "-c", "-o", "c.o", "c.cc"]}
 ]
---- stderr
+--- log
 entries 1, skipped 0, duplicates 0
 exit=0

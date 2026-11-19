@@ -19,12 +19,18 @@ $(BIN)/zcl-dev-compdb$(EXEEXT): zcl-dev-compdb.c
 	mkdir -p $(BIN)
 	$(CC) $(STD) $(WARN) $(CFLAGS) -o $@ zcl-dev-compdb.c
 
-check: $(BIN)/zcl-dev-compdb$(EXEEXT)
-	$(CC) -std=c2x $(WARN) -fsyntax-only zcl-dev-compdb.c
+TEST = $(BIN)/zcl-compdb-test$(EXEEXT)
+
+$(TEST): test/compdb_test.c zcl-dev-compdb.c
+	mkdir -p $(BIN)
+	$(CC) $(STD) $(WARN) $(CFLAGS) -o $@ test/compdb_test.c
+
+check: $(BIN)/zcl-dev-compdb$(EXEEXT) $(TEST)
+	$(CC) -std=c2x $(WARN) -fsyntax-only zcl-dev-compdb.c test/compdb_test.c
 	$(BIN)/zcl-dev-compdb$(EXEEXT) --selftest
-	sh test/run.sh $(BIN)/zcl-dev-compdb$(EXEEXT)
+	$(TEST) test/fixtures
 
 clean:
-	rm -f $(BIN)/zcl-dev-compdb $(BIN)/zcl-dev-compdb.exe
+	rm -f $(BIN)/zcl-dev-compdb $(BIN)/zcl-dev-compdb.exe $(BIN)/zcl-compdb-test $(BIN)/zcl-compdb-test.exe
 
 .PHONY: all check clean

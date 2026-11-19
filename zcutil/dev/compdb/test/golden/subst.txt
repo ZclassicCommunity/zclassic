@@ -1,6 +1,6 @@
 [
 {"directory": "@W@/subst/src", "file": "@W@/subst/src/good.cc", "arguments": ["g++", "-c", "-o", "good.o", "good.cc"]}
 ]
---- stderr
+--- log
 entries 1, skipped 1, duplicates 0
 exit=0
