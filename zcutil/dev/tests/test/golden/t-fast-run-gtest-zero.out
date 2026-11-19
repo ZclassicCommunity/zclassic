@@ -1,0 +1,7 @@
+== src/zcash-gtest --gtest_filter=FooFixture.*:FooParam.*:*/FooParam.*:FooSuite.*
+fake zcash-gtest --gtest_filter=FooFixture.*:FooParam.*:*/FooParam.*:FooSuite.*
+[==========] Running 0 tests from suites.
+[  PASSED  ] 0 tests.
+t-fast: FAIL gtest ran 0 tests: the filter matched nothing
+== exit 1
+t-fast: 1 command(s), 1 failed

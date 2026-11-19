@@ -1,0 +1,1 @@
+FAIL narrow: zcutil/dev/tests.rules:4 narrows src/main.cpp, a consensus, chain or wallet path that must stay broad

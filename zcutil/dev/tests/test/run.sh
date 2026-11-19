@@ -28,12 +28,39 @@ fakes() {
 echo "fake test_bitcoin $*"
 f=""
 for a in "$@"; do case $a in --run_test=*) f=${a#--run_test=} ;; esac; done
+case $f in *:*) [ -z "${FAKE_REJECT:-}" ] || { echo "fake: filter rejected" >&2; exit 1; } ;; esac
 oldifs=$IFS; IFS=:
 for s in $f; do [ "$s" = "${FAKE_DROP:-}" ] || echo "x.cpp(1): Entering test suite \"$s\""; done
 IFS=$oldifs
 exit "${FAKE_RC:-0}"
 FAKE
-    printf '#!/bin/sh\necho "fake zcash-gtest $*"\nexit "${FAKE_RC:-0}"\n' >"$w/src/zcash-gtest"
+    # a googletest look-alike: FooSuite and FooFixture are TEST/TEST_F suites; FooParam is TEST_P
+    # (instantiated as Inst/FooParam), so only a */FooParam.* pattern finds its test, as in real gtest
+    cat >"$w/src/zcash-gtest" <<"FAKE"
+#!/bin/sh
+echo "fake zcash-gtest $*"
+set -f
+f="*"
+for a in "$@"; do case $a in --gtest_filter=*) f=${a#--gtest_filter=} ;; esac; done
+out=""
+oldifs=$IFS; IFS=:
+for p in $f; do
+    case $p in
+        "*") out="$out FooSuite.a FooFixture.b Inst/FooParam.c/0" ;;
+        "*/FooParam.*") out="$out Inst/FooParam.c/0" ;;
+        FooParam.*) ;;
+        *.\*) s=${p%.\*}; [ "$s" = "${FAKE_GDROP:-}" ] || out="$out $s.t" ;;
+    esac
+done
+IFS=$oldifs
+n=0
+for t in $out; do n=$((n + 1)); done
+[ -z "${FAKE_ZERO:-}" ] || { out=""; n=0; }
+echo "[==========] Running $n tests from suites."
+for t in $out; do echo "[ RUN      ] $t"; echo "[       OK ] $t (0 ms)"; done
+echo "[  PASSED  ] $n tests."
+exit "${FAKE_RC:-0}"
+FAKE
     printf '#!/bin/sh\n:\n' >"$w/src/zclassicd"
     chmod +x "$w/src/test/test_bitcoin" "$w/src/zcash-gtest" "$w/src/zclassicd"
     # sources older than the binaries, as on a built tree
@@ -96,6 +123,16 @@ case_ t-fast-run-qa 0 tf qa/rpc-tests/x.sh
 case_ t-fast-run-broad 0 tf src/core/engine.cpp
 case_ t-fast-run-fail 1 env FAKE_RC=1 "$bindir/zcl-dev-t-fast" -C "$w" src/foo.cpp
 case_ t-fast-run-fallback 0 env FAKE_DROP=bar_extra "$bindir/zcl-dev-t-fast" -C "$w" src/foo.cpp src/test/bar_tests.cpp
+case_ t-fast-run-rejected 0 env FAKE_REJECT=1 "$bindir/zcl-dev-t-fast" -C "$w" src/foo.cpp src/test/bar_tests.cpp
+# gtest: TEST_P suites need the */Suite.* pattern; a run that ran nothing is a failure
+case_ t-fast-run-gtest 0 tf src/gtest/test_foo.cpp
+case_ t-fast-run-gtest-zero 1 env FAKE_ZERO=1 "$bindir/zcl-dev-t-fast" -C "$w" src/gtest/test_foo.cpp
+case_ t-fast-run-gtest-missing 1 env FAKE_GDROP=FooSuite "$bindir/zcl-dev-t-fast" -C "$w" src/gtest/test_foo.cpp
+case_ t-fast-run-gtest-broad-zero 1 env FAKE_ZERO=1 "$bindir/zcl-dev-t-fast" -C "$w" src/core/engine.cpp
+# qa argument forms: --bin/--work, a positional bindir, none; a sourced fragment runs its owner on its scenarios
+case_ t-fast-dry-qa-forms 0 tf --dry-run qa/rpc-tests/x.sh qa/rpc-tests/p.sh qa/rpc-tests/y.sh qa/rpc-tests/w_scn1.sh
+case_ t-fast-dry-qa-bindir 0 tf --dry-run --bin=build/out qa/rpc-tests/x.sh qa/rpc-tests/p.sh
+case_ tests-qa-fragment 0 t --as=tests qa/rpc-tests/w_scn1.sh
 # changed against a base commit
 printf 'int foo(void) { return 2; }\n' >"$w/src/foo.cpp"
 git -C "$w" -c user.name=t -c user.email=t@t commit -q -am change
@@ -139,6 +176,20 @@ case_ check-tests-update-baseline 0 ct --update-baseline
 case_ check-tests-after-update 0 ct
 printf '#!/bin/sh\n' >"$w/qa/rpc-tests/another.sh"
 case_ check-tests-update-refused 1 ct --update-baseline
+fresh narrowbad
+printf "src/main.*\tnarrow\n" >>"$w/zcutil/dev/tests.rules"
+case_ check-tests-narrow-forbidden 1 ct
+fresh comment
+printf "#!/bin/sh\n" >"$w/qa/rpc-tests/send.sh"
+printf "#!/bin/sh\n" >"$w/qa/rpc-tests/orphan2.sh"
+printf "    sh qa/rpc-tests/zslp_send.sh\n    run_one # orphan2.sh is mentioned in a trailing comment\n# qa/rpc-tests/orphan2.sh\n" >>"$w/zcutil/local-ci.sh"
+case_ check-tests-unreachable-word 1 ct
+fresh grown
+git -C "$w" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+printf "#!/bin/sh\n" >"$w/qa/rpc-tests/late.sh"
+printf "qa/rpc-tests/late.sh\n" >>"$w/zcutil/dev/tests.baseline"
+case_ check-tests-baseline-no-ref 0 ct
+case_ check-tests-baseline-grew 1 ct --base=HEAD
 fresh page
 for i in 1 2 3 4 5; do printf '#!/bin/sh\n' >"$w/qa/rpc-tests/orph$i.sh"; done
 case_ check-tests-page 1 env ZCL_DEV_PAGE_BYTES=200 "$bindir/zcl-dev-check-tests" -C "$w"
@@ -178,6 +229,16 @@ if [ -n "${ZCL_TESTS_BIN:-}" ] && [ -x "$ZCL_TESTS_BIN/test/test_bitcoin" ]; the
     fi
 else
     echo "skip boost-multi-filter (set ZCL_TESTS_BIN=<dir with test/test_bitcoin>)"
+fi
+# ---- the real googletest names TEST_P tests Prefix/Suite.Name/n: the emitted */Suite.* pattern must find them
+if [ -n "${ZCL_TESTS_BIN:-}" ] && [ -x "$ZCL_TESTS_BIN/zcash-gtest" ]; then
+    n=$((n + 1))
+    old=$("$ZCL_TESTS_BIN/zcash-gtest" --gtest_filter='Sha256Differential.*' 2>&1 | grep -c "Backends/Sha256Differential") || true
+    out=$("$ZCL_TESTS_BIN/zcash-gtest" --gtest_filter='Sha256Differential.*:*/Sha256Differential.*' 2>&1 | grep -c "\[ RUN .*Backends/Sha256Differential") || true
+    if [ "$old" = 0 ] && [ "$out" -gt 0 ]; then echo "ok   gtest-param-filter (Suite.* matches none of the TEST_P tests, */Suite.* runs $out)"
+    else echo "FAIL gtest-param-filter: Suite.* ran $old, with */Suite.* ran $out"; fails=$((fails + 1)); fi
+else
+    echo "skip gtest-param-filter (set ZCL_TESTS_BIN=<dir with zcash-gtest>)"
 fi
 if [ "$fails" -ne 0 ]; then echo "zcl-dev-tests: $fails of $n FAILED"; exit 1; fi
 echo "zcl-dev-tests: all $n passed"

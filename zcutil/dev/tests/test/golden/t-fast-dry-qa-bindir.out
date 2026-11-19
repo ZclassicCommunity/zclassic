@@ -1,0 +1,4 @@
+note: build needed before running: make -C src -j$(nproc) zclassicd
+note: build needed before running: (--bin=build/out: t-fast reads the binaries from that directory, so build or install them there)
+exec: sh qa/rpc-tests/p.sh build/out
+exec: sh qa/rpc-tests/x.sh --bin build/out --work zcutil/gen/t-fast-work/x

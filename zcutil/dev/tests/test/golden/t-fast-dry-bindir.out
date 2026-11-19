@@ -1,4 +1,5 @@
-note: build needed before running: make -C build/out -j$(nproc) test/test_bitcoin
-note: build needed before running: make -C build/out -j$(nproc) zcash-gtest
+note: build needed before running: make -C src -j$(nproc) test/test_bitcoin
+note: build needed before running: make -C src -j$(nproc) zcash-gtest
+note: build needed before running: (--bin=build/out: t-fast reads the binaries from that directory, so build or install them there)
 exec: build/out/test/test_bitcoin --run_test=foo_tests --log_level=test_suite
-exec: build/out/zcash-gtest --gtest_filter=FooFixture.*:FooParam.*:FooSuite.*
+exec: build/out/zcash-gtest --gtest_filter=FooFixture.*:FooParam.*:*/FooParam.*:FooSuite.*

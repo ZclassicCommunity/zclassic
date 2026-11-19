@@ -1,1 +1,3 @@
-w=1
+scn_one() { :; }
+scn_two() { :; }
+scn_load() { :; }

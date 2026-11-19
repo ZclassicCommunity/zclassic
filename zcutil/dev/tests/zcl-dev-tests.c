@@ -325,7 +325,7 @@ static void load_files(void)
 
 /* ---- the test index ------------------------------------------------------ */
 
-typedef struct { char *file; int gtest; List suites; } TFile;
+typedef struct { char *file; int gtest; List suites, psuites; } TFile; /* psuites: gtest TEST_P suites */
 static TFile *tfiles;
 static size_t ntfiles;
 static const char *const boost_dirs[] = {"src/test/", "src/wallet/test/", NULL};
@@ -387,7 +387,11 @@ static void scan_file(const char *path, int gtest, TFile *t)
             continue;
         }
         char *name = suite_of(s, gtest);
-        if (name) { list_add(&t->suites, name); free(name); }
+        if (name) {
+            list_add(&t->suites, name);
+            if (gtest && has_prefix(s, "TEST_P(")) list_add(&t->psuites, name);
+            free(name);
+        }
     }
 }
 
@@ -415,6 +419,14 @@ static int suite_known(const char *name, int gtest)
 {
     for (size_t i = 0; i < ntfiles; i++)
         if (tfiles[i].gtest == gtest && list_has(&tfiles[i].suites, name)) return 1;
+    return 0;
+}
+
+/* googletest names TEST_P tests `<Prefix>/<Suite>.<Name>/<n>`, so `Suite.*` alone matches none of them. */
+static int suite_is_param(const char *name)
+{
+    for (size_t i = 0; i < ntfiles; i++)
+        if (tfiles[i].gtest && list_has(&tfiles[i].psuites, name)) return 1;
     return 0;
 }
 
@@ -470,9 +482,53 @@ static int is_cxx_path(const char *p)
     return 0;
 }
 
+/* A sourced fragment such as wallet_matrix_scn2.sh: it only defines functions for its owner script. */
+static int is_qa_fragment(const char *p)
+{
+    const char *b = strrchr(p, '/'), *s;
+    if (!b || !has_suffix(p, ".sh")) return 0;
+    s = strstr(b, "_scn");
+    if (!s) return 0;
+    s += 4;
+    size_t d = strspn(s, "0123456789");
+    return d && !strcmp(s + d, ".sh");
+}
+
 static int is_qa_script(const char *p)
 {
-    return has_prefix(p, "qa/rpc-tests/") && has_suffix(p, ".sh") && !strchr(p + 13, '/') && !has_suffix(p, "_lib.sh");
+    return has_prefix(p, "qa/rpc-tests/") && has_suffix(p, ".sh") && !strchr(p + 13, '/') && !has_suffix(p, "_lib.sh") &&
+           !is_qa_fragment(p);
+}
+
+/* The script that sources fragment `p` (wallet_matrix_scn2.sh -> wallet_matrix.sh), or NULL. */
+static char *qa_fragment_owner(const char *p)
+{
+    const char *s = strstr(strrchr(p, '/'), "_scn");
+    char *o = xfmt("%.*s.sh", (int)(s - p), p);
+    if (list_has(&files, o)) return o;
+    free(o);
+    return NULL;
+}
+
+/* Scenario ids of owner `owner` that fragment `frag` defines: the functions the fragment declares at
+ * column 0 as `name() {`, mapped through the owner's `run_scn <id> "<title>" <function>` lines. */
+static char *qa_fragment_only(const char *owner, const char *frag)
+{
+    List fl = {0}, ol = {0}, ids = {0};
+    if (file_lines(frag, &fl) || file_lines(owner, &ol)) return NULL;
+    for (size_t i = 0; i < fl.n; i++) {
+        size_t n = ident_end(fl.v[i]);
+        if (!n || strncmp(fl.v[i] + n, "()", 2)) continue;
+        for (size_t k = 0; k < ol.n; k++) {
+            if (!has_prefix(ol.v[k], "run_scn ")) continue;
+            List w = {0};
+            split_words(ol.v[k], " \t", &w);
+            if (w.n >= 4 && !strncmp(w.v[w.n - 1], fl.v[i], n) && strlen(w.v[w.n - 1]) == n && strspn(w.v[1], "0123456789") == strlen(w.v[1]) &&
+                strcmp(w.v[1], "11")) /* scenario 11 is the load run: off by default, never selected */
+                list_add(&ids, w.v[1]);
+        }
+    }
+    return ids.n ? join(&ids, ",") : NULL;
 }
 
 static void add_tfile(Sel *s, const TFile *t)
@@ -532,6 +588,12 @@ static void select_path(Sel *s, const char *p, const Rules *rules, const Rules *
     TFile *self = tfile_find(p, 0);
     if (self) add_tfile(s, self);
     if (is_qa_script(p)) list_add(&s->qa, p);
+    if (is_qa_fragment(p)) { /* run the owner script on the scenarios this fragment defines: owner@1,2 */
+        char *o = qa_fragment_owner(p), *ids = o ? qa_fragment_only(o, p) : NULL;
+        if (ids) list_push_free(&s->qa, xfmt("%s@%s", o, ids));
+        free(o);
+        free(ids);
+    }
     for (size_t i = 0; i < rules->n; i++) {
         if (!rule_match(&rules->v[i], p)) continue;
         for (size_t t = 0; t < rules->v[i].tokens.n; t++) add_token(s, rules->v[i].tokens.v[t], &narrow);
@@ -763,6 +825,17 @@ static void check_unique(List *f)
     }
 }
 
+/* Paths whose focused set must never replace the full run: consensus, chain state, the daemon wallet,
+ * proof of work, shielded crypto and the mempool. `narrow` is for leaf encodings such as src/bech32.*. */
+static int narrow_forbidden(const char *path)
+{
+    static const char *const pre[] = {"src/consensus/", "src/main.", "src/chain.", "src/chainparams", "src/coins.", "src/txdb.", "src/wallet/",
+                                      "src/script/", "src/primitives/", "src/pow", "src/zcash/", "src/crypto/", "src/hash.", "src/txmempool.",
+                                      "src/policy/", "src/checkpoints.", "src/dbwrapper.", "src/leveldb/", "src/secp256k1/", "src/miner.", NULL};
+    for (const char *const *p = pre; *p; p++) if (has_prefix(path, *p)) return 1;
+    return 0;
+}
+
 static void check_rules_tokens(List *f, const Rules *rules)
 {
     for (size_t i = 0; i < rules->n; i++) {
@@ -775,7 +848,13 @@ static void check_rules_tokens(List *f, const Rules *rules)
             if (has_prefix(tk, "boost:")) { if (!suite_known(tk + 6, 0)) finding(f, "FAIL token: %s:%zu names unknown Boost suite %s", RULES_FILE, r->line, tk + 6); }
             else if (has_prefix(tk, "gtest:")) { if (!suite_known(tk + 6, 1)) finding(f, "FAIL token: %s:%zu names unknown gtest suite %s", RULES_FILE, r->line, tk + 6); }
             else if (has_prefix(tk, "qa:")) { if (!list_has(&files, tk + 3)) finding(f, "FAIL token: %s:%zu names missing qa script %s", RULES_FILE, r->line, tk + 3); }
-            else if (strcmp(tk, "narrow")) finding(f, "FAIL token: %s:%zu has unknown token %s", RULES_FILE, r->line, tk);
+            else if (!strcmp(tk, "narrow")) {
+                for (size_t j = 0; j < files.n; j++) {
+                    if (!rule_match(r, files.v[j]) || !narrow_forbidden(files.v[j])) continue;
+                    finding(f, "FAIL narrow: %s:%zu narrows %s, a consensus, chain or wallet path that must stay broad", RULES_FILE, r->line, files.v[j]);
+                    break;
+                }
+            } else finding(f, "FAIL token: %s:%zu has unknown token %s", RULES_FILE, r->line, tk);
         }
     }
 }
@@ -790,12 +869,31 @@ static int script_calls(const char *script, const char *target)
     if (file_lines(script, &lines)) return 0;
     for (size_t i = 0; i < lines.n; i++) {
         List w = {0};
-        split_words(lines.v[i], "\t \"'$(){}<>;|&=:,`", &w);
+        const char *ln = lines.v[i];
+        while (*ln == ' ' || *ln == '\t') ln++;
+        if (*ln == '#') continue; /* a comment is not a call */
+        split_words(ln, "\t \"'$(){}<>;|&=:,`", &w);
         for (size_t k = 0; k < w.n; k++) {
             const char *tok = strrchr(w.v[k], '/') ? strrchr(w.v[k], '/') + 1 : w.v[k];
             if (!has_suffix(tok, ".sh")) continue;
             if (!strcmp(tok, base) || (strpbrk(tok, "?*") && platform_glob_match(tok, base, false))) return 1;
         }
+    }
+    return 0;
+}
+
+/* Does `line` name `word` as a whole path component: not inside a longer name (send.sh in zslp_send.sh)
+ * and not in a trailing `# comment`. */
+static int line_names(const char *line, const char *word)
+{
+    size_t wl = strlen(word);
+    const char *end = line + strlen(line);
+    for (const char *c = line; *c; c++)
+        if (*c == '#' && (c == line || c[-1] == ' ' || c[-1] == '\t')) { end = c; break; }
+    for (const char *s = line; (s = strstr(s, word)) && s + wl <= end; s++) {
+        int pre = s == line || !(isalnum((unsigned char)s[-1]) || strchr("_-.", s[-1]));
+        int post = !(isalnum((unsigned char)s[wl]) || s[wl] == '_' || s[wl] == '-');
+        if (pre && post) return 1;
     }
     return 0;
 }
@@ -806,12 +904,13 @@ static void qa_unreachable(const Rules *rules, List *out)
 {
     Rules impact = load_rules(IMPACT_FILE);
     List ci = {0}, qa = {0}, reach = {0};
-    char *citext = file_lines(CI_FILE, &ci) ? NULL : join(&ci, "\n");
+    int have_ci = !file_lines(CI_FILE, &ci);
     qa_scripts(&qa);
     for (size_t q = 0; q < qa.n; q++) {
         const char *p = qa.v[q], *base = strrchr(p, '/') + 1;
         char *tk = xfmt("qa:%s", p);
-        int ok = citext && (strstr(citext, p) || strstr(citext, base));
+        int ok = 0;
+        for (size_t i = 0; have_ci && i < ci.n && !ok; i++) ok = line_names(ci.v[i], p) || line_names(ci.v[i], base);
         for (size_t i = 0; i < impact.n && !ok; i++) ok = list_has(&impact.v[i].tokens, p);
         for (size_t i = 0; i < rules->n && !ok; i++) ok = list_has(&rules->v[i].tokens, tk);
         if (ok) list_push(&reach, p);
@@ -830,13 +929,26 @@ static void qa_unreachable(const Rules *rules, List *out)
 
 /* The ratchet: BASELINE_FILE lists qa scripts allowed to be unreachable today. It may only shrink:
  * a new unreachable script fails, and so does a baseline entry that is reachable or gone. */
-static void check_qa_reachable(List *f, const Rules *rules, List *stale_out)
+static void check_qa_reachable(List *f, const Rules *rules, List *stale_out, const char *base_ref)
 {
     List un = {0}, base = {0}, lines = {0};
     qa_unreachable(rules, &un);
     if (!file_lines(BASELINE_FILE, &lines))
         for (size_t i = 0; i < lines.n; i++)
             if (lines.v[i][0] && lines.v[i][0] != '#') list_add(&base, lines.v[i]);
+    /* Nothing else compares the file with an earlier one: a row added by hand would hide a script. */
+    if (safe_ref(base_ref)) {
+        char cmd[512];
+        List old = {0};
+        snprintf(cmd, sizeof cmd, "git rev-parse --verify --quiet %s:%s", base_ref, BASELINE_FILE);
+        List probe = {0};
+        if (!cmd_lines(cmd, &probe)) {
+            snprintf(cmd, sizeof cmd, "git show %s:%s", base_ref, BASELINE_FILE);
+            if (!cmd_lines(cmd, &old))
+                for (size_t i = 0; i < base.n; i++)
+                    if (!list_has(&old, base.v[i])) finding(f, "FAIL baseline-grew: %s gained %s relative to %s; the baseline may only shrink", BASELINE_FILE, base.v[i], base_ref);
+        }
+    }
     for (size_t i = 0; i < un.n; i++)
         if (!list_has(&base, un.v[i])) finding(f, "FAIL unreachable-qa: %s is not named by impact.rules, tests.rules or local-ci.sh (run it from a local-ci step or a tests.rules qa: token; %s may only shrink)", un.v[i], BASELINE_FILE);
     for (size_t i = 0; i < base.n; i++)
@@ -863,12 +975,14 @@ static int update_baseline(const List *stale, size_t rose)
 static int cmd_check_tests(int argc, char **argv)
 {
     int json = 0, upd = 0;
+    const char *base_ref = "origin/master";
     size_t after = 0;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--json")) json = 1;
         else if (has_prefix(argv[i], "--after=")) parse_after(argv[i] + 8, &after);
         else if (!strcmp(argv[i], "--update-baseline")) upd = 1;
-        else die("usage: zcl-dev check-tests [--json] [--after=N] [--update-baseline]");
+        else if (has_prefix(argv[i], "--base=")) base_ref = argv[i] + 7;
+        else die("usage: zcl-dev check-tests [--json] [--after=N] [--base=ref] [--update-baseline]");
     }
     load_files();
     build_index();
@@ -885,7 +999,7 @@ static int cmd_check_tests(int argc, char **argv)
     Rules rules = load_rules(RULES_FILE);
     check_rules_tokens(&f, &rules);
     List stale = {0};
-    check_qa_reachable(&f, &rules, &stale);
+    check_qa_reachable(&f, &rules, &stale, base_ref);
     if (upd) return update_baseline(&stale, f.n - stale.n);
     if (!f.n) {
         if (json) printf("{\"total\":0,\"after\":0,\"items\":[],\"next\":null,\"boost_files\":%zu,\"gtest_files\":%zu,\"suites\":%zu}\n", nb, ng, nsuite);
@@ -973,12 +1087,13 @@ static int run_argv(const List *a, int to_stderr)
     return rc;
 }
 
-/* One command line for popen(): quoted for cmd.exe on Windows, for sh elsewhere, stderr merged. */
+/* One command line for popen(): quoted for cmd.exe on Windows, for sh elsewhere, stderr merged.
+ * cmd.exe splits an unquoted command name at '/', so argv[0] is always quoted there. */
 static char *popen_line(const List *a)
 {
 #ifdef _WIN32
     List w = {0};
-    for (size_t i = 0; i < a->n; i++) list_push_free(&w, quote_arg(a->v[i]));
+    for (size_t i = 0; i < a->n; i++) list_push_free(&w, i ? quote_arg(a->v[i]) : xfmt("\"%s\"", a->v[i]));
     char *j = join(&w, " "), *r = xfmt("\"%s 2>&1\"", j);
     free(j);
     return r;
@@ -989,11 +1104,24 @@ static char *popen_line(const List *a)
 #endif
 }
 
-/* Run argv, copy its output through, and note which `expect` suites printed their
+/* The suite of a googletest `[ RUN      ] Prefix/Suite.Name/3` line, or NULL. */
+static char *gtest_run_suite(const char *line)
+{
+    static const char run[] = "[ RUN      ] ";
+    if (strncmp(line, run, sizeof run - 1)) return NULL;
+    const char *a = line + sizeof run - 1, *dot = strchr(a, '.'), *s;
+    if (!dot) return NULL;
+    for (s = dot; s > a && s[-1] != '/'; s--) {}
+    return xfmt("%.*s", (int)(dot - s), s);
+}
+
+/* Run argv and copy its output through. Boost (`gtest` 0): note which `expect` suites printed their
  * `Entering test suite "<name>"` line. Boost 1.85 accepts --run_test=a:b, but --list_content does
  * not apply the filter, so the only reliable check that a multi-suite filter ran every suite is the
- * suite log itself; the caller reruns the missing ones one by one. */
-static int run_tee(const List *a, int to_stderr, const List *expect, List *missing)
+ * suite log itself; the caller reruns the missing ones one by one. gtest (`gtest` 1): note which
+ * suites printed a `[ RUN ]` line, and set *zero when the run reported "Running 0 tests": googletest
+ * exits 0 for a filter that matched nothing. */
+static int run_tee(const List *a, int to_stderr, const List *expect, List *missing, int gtest, int *zero)
 {
     char *cmd = popen_line(a), buf[8192];
     FILE *out = to_stderr ? stderr : stdout;
@@ -1004,6 +1132,12 @@ static int run_tee(const List *a, int to_stderr, const List *expect, List *missi
     if (!p) die("cannot run: %s", cmd);
     while (fgets(buf, sizeof buf, p)) {
         fputs(buf, out);
+        if (gtest) {
+            char *su = gtest_run_suite(buf);
+            if (su) { list_add(&seen, su); free(su); }
+            if (strstr(buf, "] Running 0 tests")) *zero = 1;
+            continue;
+        }
         if (!strstr(buf, "Entering test suite \"")) continue;
         for (size_t i = 0; i < expect->n; i++) {
             char *needle = xfmt("Entering test suite \"%s\"", expect->v[i]);
@@ -1040,14 +1174,6 @@ static void mkdir_p(const char *path)
     free(p);
 }
 
-static int file_mentions(const char *path, const char *needle)
-{
-    List l = {0};
-    if (file_lines(path, &l)) return 0;
-    for (size_t i = 0; i < l.n; i++) if (strstr(l.v[i], needle)) return 1;
-    return 0;
-}
-
 static int newer_than(const char *src, const char *bin)
 {
     struct stat a, b;
@@ -1055,14 +1181,16 @@ static int newer_than(const char *src, const char *bin)
     return a.st_mtime > b.st_mtime;
 }
 
-typedef struct { List *v; List *expect; size_t n; } Plan; /* v[i] is one argv; expect[i] lists suites to confirm ran */
+typedef struct { List *v; List *expect; int *gtest; size_t n; } Plan; /* v[i] is one argv; expect[i] lists suites to confirm ran; gtest[i] marks a googletest run */
 
 static List *plan_new(Plan *pl)
 {
     pl->v = xrealloc(pl->v, (pl->n + 1) * sizeof *pl->v);
     pl->expect = xrealloc(pl->expect, (pl->n + 1) * sizeof *pl->expect);
+    pl->gtest = xrealloc(pl->gtest, (pl->n + 1) * sizeof *pl->gtest);
     memset(&pl->v[pl->n], 0, sizeof pl->v[0]);
     memset(&pl->expect[pl->n], 0, sizeof pl->expect[0]);
+    pl->gtest[pl->n] = 0;
     return &pl->v[pl->n++];
 }
 
@@ -1089,27 +1217,60 @@ static void plan_boost(Plan *pl, const char *tb, const List *suites, int full)
 static void plan_gtest(Plan *pl, const char *tg, const List *suites, int full)
 {
     List *c = plan_new(pl);
+    pl->gtest[pl->n - 1] = 1;
     list_push(c, tg);
     if (full) return;
     List f = {0};
-    for (size_t i = 0; i < suites->n; i++) list_push_free(&f, xfmt("%s.*", suites->v[i]));
+    for (size_t i = 0; i < suites->n; i++) {
+        list_push_free(&f, xfmt("%s.*", suites->v[i]));
+        if (suite_is_param(suites->v[i])) list_push_free(&f, xfmt("*/%s.*", suites->v[i])); /* TEST_P: Prefix/Suite.* */
+        list_push(&pl->expect[pl->n - 1], suites->v[i]);
+    }
     char *j = join(&f, ":");
     list_push_free(c, xfmt("--gtest_filter=%s", j));
     free(j);
 }
 
-static void plan_qa(Plan *pl, const char *script, const char *bindir)
+/* How a qa script takes the binary directory, from its own text: `--bin <dir> --work <dir>` when it
+ * mentions --bin; a positional `<dir ...>` or `[dir ...]` when its usage line shows one (local-ci.sh
+ * calls those as `sh script <bindir>`); otherwise it takes no argument. */
+enum { QA_NONE, QA_FLAGS, QA_POSITIONAL };
+
+static int qa_form(const char *script)
 {
+    List l = {0};
+    int pos = 0;
+    if (file_lines(script, &l)) return QA_NONE;
+    for (size_t i = 0; i < l.n; i++) {
+        if (strstr(l.v[i], "--bin")) return QA_FLAGS;
+        if ((strstr(l.v[i], "usage") || strstr(l.v[i], "Usage")) && (strstr(l.v[i], "<dir") || strstr(l.v[i], "[dir"))) pos = 1;
+    }
+    return pos ? QA_POSITIONAL : QA_NONE;
+}
+
+/* `script` is a path, or `owner@1,2` for a sourced fragment: the owner runs only those scenarios. */
+static void plan_qa(Plan *pl, const char *entry, const char *bindir)
+{
+    char *script = xstrdup(entry), *only = strchr(script, '@');
+    if (only) *only++ = 0;
     List *c = plan_new(pl);
     list_push(c, "sh");
     list_push(c, script);
-    if (!file_mentions(script, "--bin")) return;
-    const char *b = strrchr(script, '/') + 1;
-    size_t n = strlen(b) - (has_suffix(b, ".sh") ? 3 : 0);
-    list_push(c, "--bin");
-    list_push(c, bindir);
-    list_push(c, "--work");
-    list_push_free(c, xfmt("%s/%.*s", WORK_DIR, (int)n, b));
+    int form = qa_form(script);
+    if (form == QA_POSITIONAL) list_push(c, bindir);
+    if (form == QA_FLAGS) {
+        const char *b = strrchr(script, '/') + 1;
+        size_t n = strlen(b) - (has_suffix(b, ".sh") ? 3 : 0);
+        list_push(c, "--bin");
+        list_push(c, bindir);
+        list_push(c, "--work");
+        list_push_free(c, xfmt("%s/%.*s", WORK_DIR, (int)n, b));
+        if (only) {
+            list_push(c, "--only");
+            list_push(c, only);
+        }
+    }
+    free(script);
 }
 
 static int cmd_t_fast(int argc, char **argv)
@@ -1159,8 +1320,9 @@ static int cmd_t_fast(int argc, char **argv)
         if (!bins[b].want) continue;
         int bad = !exists(bins[b].bin);
         for (size_t i = 0; i < srcs.n && !bad; i++) bad = newer_than(srcs.v[i], bins[b].bin);
-        if (bad) list_push_free(&need, xfmt("make -C %s -j$(nproc) %s", bindir, bins[b].target));
+        if (bad) list_push_free(&need, xfmt("make -C src -j$(nproc) %s", bins[b].target));
     }
+    if (need.n && strcmp(bindir, "src")) list_push_free(&need, xfmt("(--bin=%s: t-fast reads the binaries from that directory, so build or install them there)", bindir));
     if (need.n && !dry) {
         fprintf(stderr, "t-fast: a test binary is missing or older than a changed source; build it first (never built implicitly):\n");
         for (size_t i = 0; i < need.n; i++) fprintf(stderr, "  %s\n", need.v[i]);
@@ -1195,14 +1357,30 @@ static int cmd_t_fast(int argc, char **argv)
     for (size_t i = 0; i < notes.n; i++) fprintf(json ? stderr : stdout, "note: %s\n", notes.v[i]);
     for (size_t i = 0; i < plan.n; i++) {
         char *l = argv_line(&plan.v[i]);
-        if (!strcmp(plan.v[i].v[0], "sh") && plan.v[i].n > 5) mkdir_p(plan.v[i].v[5]);
+        if (!strcmp(plan.v[i].v[0], "sh"))
+            for (size_t k = 0; k + 1 < plan.v[i].n; k++) if (!strcmp(plan.v[i].v[k], "--work")) mkdir_p(plan.v[i].v[k + 1]);
         fprintf(json ? stderr : stdout, "== %s\n", l);
         int rc;
-        if (plan.expect[i].n) {
+        FILE *msg = json ? stderr : stdout;
+        if (plan.gtest[i]) {
+            /* googletest exits 0 when the filter matched nothing, so a run that reports 0 tests, or
+             * that never ran a selected suite, is a failure here. */
             List missing = {0};
-            rc = run_tee(&plan.v[i], json, &plan.expect[i], &missing);
+            int zero = 0;
+            rc = run_tee(&plan.v[i], json, &plan.expect[i], &missing, 1, &zero);
+            if (zero) { fprintf(msg, "t-fast: FAIL gtest ran 0 tests: the filter matched nothing\n"); rc = rc ? rc : 1; }
+            for (size_t m = 0; m < missing.n && !zero; m++) {
+                fprintf(msg, "t-fast: FAIL gtest suite %s ran no test (wrong suite name, or a TEST_P suite filtered without */%s.*)\n", missing.v[m], missing.v[m]);
+                rc = rc ? rc : 1;
+            }
+        } else if (plan.expect[i].n) {
+            List missing = {0};
+            rc = run_tee(&plan.v[i], json, &plan.expect[i], &missing, 0, NULL);
+            /* When the combined filter entered none of the suites it was rejected as a whole, so its
+             * status says nothing about them: the single runs decide. A partial run keeps its status. */
+            if (missing.n == plan.expect[i].n) rc = 0;
             for (size_t m = 0; m < missing.n; m++) {
-                fprintf(json ? stderr : stdout, "note: suite %s did not run under the a:b filter; running it alone\n", missing.v[m]);
+                fprintf(msg, "note: suite %s did not run under the a:b filter; running it alone\n", missing.v[m]);
                 List one = {0};
                 list_push(&one, tb);
                 list_push_free(&one, xfmt("--run_test=%s", missing.v[m]));

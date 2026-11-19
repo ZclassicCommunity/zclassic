@@ -16,7 +16,7 @@ zcutil/bin/zcl-dev t-fast src/test/bech32_tests.cpp
 | `zcl-dev tests [--json] <path>...` | Prints the focused set: `boost:<suite>`, `gtest:<Suite>`, `qa:<script>` lines, then `broad:` and `note:` lines. |
 | `zcl-dev t-fast [--changed[=base]] [--dry-run] [--narrow] [--no-qa] [--json] [--bin=src] [<path>...]` | Runs that set. `--changed` takes the committed diff against `base` (default `origin/master`). `--dry-run` prints the exact argv, one `exec:` line per command. |
 | `zcl-dev t-list [--json] [--after=N] [boost\|gtest\|qa\|ci]` | Every Boost suite, gtest suite, qa script and local-ci step. |
-| `zcl-dev check-tests [--json] [--after=N] [--update-baseline]` | The registration gate (below). |
+| `zcl-dev check-tests [--json] [--after=N] [--base=ref] [--update-baseline]` | The registration gate (below). |
 
 Output stays under 16 KiB. A long list ends with `-- more: rerun with --after=N`; JSON carries `total`, `after` and `next`. Exit codes: 0 ok, 1 finding or failed test, 2 broken input or an empty scan (no paths, no changed files, a hollow `check-tests`), 3 test binary missing or stale.
 
@@ -38,15 +38,15 @@ Suites are read from the sources: `BOOST_AUTO_TEST_SUITE(` and `BOOST_FIXTURE_TE
 broad: run zcutil/local-ci.sh test-changed (broad rule: src/main.cpp)
 ```
 
-and `t-fast` then runs the full `test_bitcoin` and `zcash-gtest`. `--narrow` runs only the focused set and keeps the `broad:` note. A `tests.rules` line may carry the token `narrow` to take one path out of `ALL` on purpose (today only `src/bech32.*`, address encoding). `tests` prints a note for such a path, and `local-ci.sh test-changed` stays the gate before landing.
+and `t-fast` then runs the full `test_bitcoin` and `zcash-gtest`. `--narrow` runs only the focused set and keeps the `broad:` note. A `tests.rules` line may carry the token `narrow` to take one path out of `ALL` on purpose (today only `src/bech32.*`, address encoding); `check-tests` rejects `narrow` on consensus, chain, wallet, proof-of-work, shielded-crypto and mempool paths. `tests` prints a note for such a path, and `local-ci.sh test-changed` stays the gate before landing.
 
 Qt wallet changes (`wallet/src/*`) add an informational line naming the `wallet/tests/*.pro` targets; qmake builds are out of scope.
 
 ## Running
 
 * Boost: `src/test/test_bitcoin --run_test=<s1>:<s2> --log_level=test_suite`. Boost 1.85 accepts `a:b` (the self-test checks it against a real build when `ZCL_TESTS_BIN` is set). `--list_content` does not apply the filter, so `t-fast` confirms a multi-suite run by the `Entering test suite` log lines and reruns any suite that did not enter on its own.
-* gtest: `src/zcash-gtest --gtest_filter=Suite.*:Suite2.*`.
-* qa: `sh qa/rpc-tests/<x>.sh --bin <bin> --work zcutil/gen/t-fast-work/<x>` when the script takes `--bin`, else `sh <script>`. Scripts run one after another, never in parallel, and take leased ports through `qa/lib/isolation.sh`. `--no-qa` skips them.
+* gtest: `src/zcash-gtest --gtest_filter=Suite.*:Suite2.*`; a `TEST_P` suite is named `Prefix/Suite.Name/n` by googletest, so its filter is `Suite.*:*/Suite.*`. googletest exits 0 when a filter matches nothing, so `t-fast` fails a run that reports `Running 0 tests` or never runs a selected suite.
+* qa: the argument form comes from the script text: `sh qa/rpc-tests/<x>.sh --bin <bin> --work zcutil/gen/t-fast-work/<x>` when it mentions `--bin`; `sh <script> <bin>` when its usage line takes a positional `<dir ...>` (startup_bad_home, zslp_send, wallet_tokenguard and the like); else `sh <script>`. A sourced fragment (`wallet_matrix_scn<N>.sh`) is not a script: editing it runs the owner (`wallet_matrix.sh`) with `--only` for the scenarios it defines (the load scenario 11 is never selected). Scripts run one after another, never in parallel. Most take leased ports through `qa/lib/isolation.sh`; a few (for example `startup_bad_home.sh`) do not. `--no-qa` skips them.
 * `--bin=<dir>` is the directory holding `test/test_bitcoin`, `zcash-gtest` and `zclassicd` (default `src`).
 
 `t-fast` never builds. When a needed binary is missing, or older than a changed `src/` source, it prints the exact line and exits 3 (a dry run prints it as a note and exits 0):
@@ -65,7 +65,8 @@ Prefix those with `devbuild --wait` on a maintainer host.
 * a `src/test/*_tests.cpp` (or `src/wallet/test`) is not in `BITCOIN_TESTS` of `src/Makefile.test.include`, or a `src/gtest/*.cpp` (or `src/wallet/gtest`) is not in `zcash_gtest_SOURCES` of `src/Makefile.gtest.include`; or a listed file does not exist (the test would silently never build);
 * a Boost suite name is declared in two files;
 * a `tests.rules` glob matches no file, or a token names an unknown suite, script or keyword;
-* a `qa/rpc-tests/*.sh` script (not `*_lib.sh`) is not named by `impact.rules`, `tests.rules` or `local-ci.sh`, and is not called by a script that is.
+* a `qa/rpc-tests/*.sh` script (not `*_lib.sh`, not a `_scn<N>.sh` fragment) is not named by `impact.rules`, `tests.rules` or a non-comment line of `local-ci.sh` (whole-name match, so `send.sh` is not reached by `zslp_send.sh`), and is not called by a script that is;
+* `zcutil/dev/tests.baseline` gained a row relative to `--base=<ref>` (default `origin/master`; skipped when the ref has no baseline).
 
 It exits 2 on a hollow scan (no Boost files, no gtest files or no suites found).
 

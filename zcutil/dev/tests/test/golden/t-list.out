@@ -4,7 +4,8 @@ boost foo_tests src/test/foo_tests.cpp
 gtest FooFixture src/gtest/test_foo.cpp
 gtest FooParam src/gtest/test_foo.cpp
 gtest FooSuite src/gtest/test_foo.cpp
-qa qa/rpc-tests/w_scn1.sh
+qa qa/rpc-tests/p.sh
+qa qa/rpc-tests/w.sh
 qa qa/rpc-tests/x.sh
 qa qa/rpc-tests/y.sh
 ci unit-a
