@@ -15,7 +15,7 @@ package builds the same commit.
 
 | Item | Value |
 |---|---|
-| Upstream of the pin | `https://github.com/RhettCreighton/tor.git` (a fork of the Tor Project source with an added `src/feature/dynhost`) |
+| Upstream of the pin | `https://github.com/RhettCreighton/tor.git` (a fork of the Tor Project source with an added `src/feature/dynhost`) | <!-- doc-path-ok -->
 | Commit | `f4e28103c0eb9016e0b500d02486b7a59d20ee5d` ("dynhost client: explicit-method fetch_ex with a bounded request body") |
 | Tor version string | `0.4.9.2-alpha-dev` (`AC_INIT` in `configure.ac`; `tor --version` prints it) |
 | Source archive | `https://github.com/RhettCreighton/tor/archive/f4e28103c0eb9016e0b500d02486b7a59d20ee5d.tar.gz` |
@@ -45,7 +45,7 @@ it, so every node would otherwise publish an unrelated second service.
 
 | Patch | What it does |
 |---|---|
-| `0001-dynhost-stream-shutdown.patch` | Z23 `vendor/patches/tor-dynhost-stream-shutdown.patch`, verbatim (sha256 `c4c135447e85c5934b2c8af8ea4e52566c50ab15cc4219d2dbefa3daa75599d8`, Z23 `origin/main`). Applies cleanly to the pin. Dynhost stream shutdown: refuses opens after the subsystem stops, no read of freed connections at cleanup, terminal callback/close ordering. Keeps the two projects on the same fork behaviour. |
+| `0001-dynhost-stream-shutdown.patch` | Z23 `vendor/patches/tor-dynhost-stream-shutdown.patch`, verbatim (sha256 `c4c135447e85c5934b2c8af8ea4e52566c50ab15cc4219d2dbefa3daa75599d8`, Z23 `origin/main`). Applies cleanly to the pin. Dynhost stream shutdown: refuses opens after the subsystem stops, no read of freed connections at cleanup, terminal callback/close ordering. Keeps the two projects on the same fork behaviour. | <!-- doc-path-ok -->
 | `0002-dynhost-set-enabled.patch` | Adds `void dynhost_set_enabled(int)` and `int dynhost_is_enabled(void)` (default 1: unchanged for other embedders). Off: subsystem init registers no port-80 virtual port, the subsystem option hook is a no-op, `dynhost_activate_service()` refuses and `dynhost_check_and_activate()` returns at once, so no service is created. zclassicd calls `dynhost_set_enabled(0)` before `tor_run_main()` in both child and in-process mode; `tor_api.h` does not declare it, so `src/c23/tor/zcl_tor_dispatch.c` and `zcl_tor_inproc.c` carry a local prototype. |
 | `0003-dynhost-free-reassembly-buf.patch` | `connection_free_minimal()` frees `edge_conn->dynhost_reassembly_buf`, which `dynhost_handlers.c` allocates per dynhost connection and nothing freed. |
 | `0004-dynhost-clamp-external-handler-length.patch` | Clamps the length an external dynhost handler returns to the 65536-byte buffer it was given. |
@@ -55,11 +55,11 @@ with the off switch nothing in it runs in the daemon.
 
 The archive carries no generated `configure`; `./autogen.sh` runs in the
 package preprocess step, so autoconf, automake and libtool are build-host
-requirements (same as Z23 `tools/scripts/build_tor_full.sh`).
+requirements (same as Z23 `tools/scripts/build_tor_full.sh`). <!-- doc-path-ok -->
 
 ## Configure policy
 
-From Z23 `tools/scripts/build_tor_full.sh`: `ac_cv_func_backtrace=no`,
+From Z23 `tools/scripts/build_tor_full.sh`: `ac_cv_func_backtrace=no`, <!-- doc-path-ok -->
 `--disable-asciidoc --disable-systemd --disable-seccomp --disable-lzma
 --disable-zstd --disable-libscrypt`, `ac_cv_lib_cap_cap_init=no
 ac_cv_func_cap_set_proc=no`, `--with-openssl-dir`, `--with-libevent-dir` and
@@ -148,18 +148,20 @@ sha256 `2b99312f95ab015802f37d1bf177d7ce6c0d72a160ed9991a1f796bc1d0417bc`),
 `739cf32094ec3c0ec3961000ba3135e51da288cb4800a3c6140f16074cdbf890`). A binary
 that includes this code must ship them with the release.
 
+Paths in the "Where" column are inside the Tor source archive (the pinned fork), not this repository.
+
 | Component | Licence | Where |
 |---|---|---|
 | Tor | BSD-3-Clause | `LICENSE-BSD`, text below |
-| dynhost, other new fork code | Apache-2.0 | `src/feature/dynhost`, `LICENSE` |
-| curve25519-donna, ed25519-donna | public domain | `src/ext/curve25519_donna`, `src/ext/ed25519/donna` |
-| ed25519 ref10 | public domain (SUPERCOP; not listed in THIRD-PARTY-LICENSES, unverified) | `src/ext/ed25519/ref10` |
-| keccak-tiny | CC0 | `src/ext/keccak-tiny` |
-| trunnel generated code | BSD-style | `src/ext/trunnel` |
-| SipHash (csiphash) | MIT | `src/ext/csiphash.c` |
-| strlcat, strlcpy, readpassphrase | ISC | `src/ext` |
-| mulodi | MIT / UIUC | `src/ext/mulodi` |
-| ht.h, tor_queue.h | BSD-3-Clause | `src/ext` |
+| dynhost, other new fork code | Apache-2.0 | `src/feature/dynhost`, `LICENSE` | <!-- doc-path-ok -->
+| curve25519-donna, ed25519-donna | public domain | `src/ext/curve25519_donna`, `src/ext/ed25519/donna` | <!-- doc-path-ok -->
+| ed25519 ref10 | public domain (SUPERCOP; not listed in THIRD-PARTY-LICENSES, unverified) | `src/ext/ed25519/ref10` | <!-- doc-path-ok -->
+| keccak-tiny | CC0 | `src/ext/keccak-tiny` | <!-- doc-path-ok -->
+| trunnel generated code | BSD-style | `src/ext/trunnel` | <!-- doc-path-ok -->
+| SipHash (csiphash) | MIT | `src/ext/csiphash.c` | <!-- doc-path-ok -->
+| strlcat, strlcpy, readpassphrase | ISC | `src/ext` | <!-- doc-path-ok -->
+| mulodi | MIT / UIUC | `src/ext/mulodi` | <!-- doc-path-ok -->
+| ht.h, tor_queue.h | BSD-3-Clause | `src/ext` | <!-- doc-path-ok -->
 | Equi-X, HashX (tevador) | LGPL-3.0 | NOT built (needs `--enable-gpl`) |
 | OpenSSL 3.5.9 | Apache-2.0 | depends `openssl`, linked, not in libtor.a |
 | libevent 2.1.12 | BSD-3-Clause | depends `libevent` |

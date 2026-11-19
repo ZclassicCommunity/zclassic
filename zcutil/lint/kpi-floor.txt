@@ -8,9 +8,9 @@ jq_uses	264
 banned_str	13
 files_over_1500	20
 complexity_debt	6233
-undocumented_flags	29
+undocumented_flags	16
 broken_md_links	0
-doc_path_debt	58
+doc_path_debt	0
 secret_log_sites	2
 unregistered_tests	0
 unmapped_paths	0

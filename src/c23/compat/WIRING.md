@@ -38,7 +38,7 @@ libzcash, zcash-gtest, test_bitcoin, the zcbenchmarks object in zclassicd):
 AM_CPPFLAGS += -I$(srcdir)/c23/compat
 ```
 
-and remove the depends `include/librustzcash.h` (it disappears with U9; while both
+and remove the depends `include/librustzcash.h` (in the depends prefix, not tracked) (it disappears with U9; while both <!-- doc-path-ok -->
 exist, `-I$(srcdir)/c23/compat` must come BEFORE the depends include dir). Only
 `c23/compat` goes on the C++ path. Never add `c23/glue/chain` or any `c23/vendor/...`
 include dir to C++ targets: their header names (`chainparams.h`, `crypto/sha256.h`,

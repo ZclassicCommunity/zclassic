@@ -11,7 +11,7 @@ may add.
 |---|---|
 | `kat_common.{c,h}` | ABI declarations (C), golden tokenizer, portable abort isolation (fork on POSIX, self re-exec on Windows), UTF-16 init paths on Windows |
 | `kat_jub.{c,h}` | Jubjub/BLS12-381 helpers from the vendored Z23 primitives, used only to craft inputs (re-signed signatures, `y+q` / `x+p` encodings) and to check randomized RedJubjub signatures with Rust's cofactored equation |
-| `kat_replay.c` | replays every record of `src/test/data/c23_golden` (45,991 records, 31 functions) through the C23 shim; `--prove` re-runs every prover and `--emit` writes the C23-made proofs as a case file for the Rust verifier |
+| `kat_replay.c` | replays every record of the golden corpus `src/test/data/c23_golden` (generated, not tracked here) (45,991 records, 31 functions) through the C23 shim; `--prove` re-runs every prover and `--emit` writes the C23-made proofs as a case file for the Rust verifier | <!-- doc-path-ok -->
 | `kat_mutgen.c` | writes `vectors/mutations.cases` (mutations not in the golden corpus) |
 | `kat_cases.c` | runs a case file through whichever ABI it is linked with, and `--compare`s two result files |
 | `kat_threads.c` | 16-thread concurrency check (cold warm-up before init, then check_spend / check_output / merkle_hash / ka_agree after init); meant for `-fsanitize=thread` too |

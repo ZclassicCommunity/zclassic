@@ -13,7 +13,7 @@ there is nothing to stay compatible with except Z23 itself). Where Z23's behavio
 implemented as written and listed in [section 9](#9-ambiguous-or-unintended-in-z23-notes-for-the-owner).
 
 One rule differs from Z23's original behaviour on purpose, and Z23 carries the identical change (the shared vectors
-`src/test/data/token_name_rules.txt` and Z23's `tests/fixtures/token_name_rules/token_name_rules.txt` are the same
+`src/test/data/token_name_rules.txt` and Z23's `tests/fixtures/token_name_rules/token_name_rules.txt` (Z23 tree) are the same <!-- doc-path-ok -->
 bytes): **ZNAM-OWNER-2**, the owner of a name transaction is rendered by the type of the output its first input spends
 (section 2.4, ambiguity A3). It applies from genesis: a census of the mainnet chain to block 3,323,972 found no ZNAM
 message at all, so there is no history to reinterpret.
@@ -131,7 +131,7 @@ All are evaluated in `apply_znam` (`explorer_index_overlays.c:209-260`), after `
 | SET_TEXT | name exists, owner equals the stored owner; upserts the text record (an empty value is stored, it does not delete) | `:158-170` |
 | RENEW | name exists; **anyone**; `expiry` = max(expiry, height) + 210240; sets `last_update_txid` | `:172-186` |
 
-After the model's own validation (`models/znam.c:155-183`: type `1..7`, owner and target non-empty, non-negative
+After the model's own validation (Z23 `models/znam.c:155-183`: type `1..7`, owner and target non-empty, non-negative <!-- doc-path-ok -->
 heights), run on the whole row before every save of a name. A field that is empty as a C string (the first byte is NUL)
 is NOT always refused: REGISTER, SET_RECORD and SET_TEXT build a zeroed record and refuse it, but UPDATE and TRANSFER
 overwrite one field of the row they read, and the presence check compares the whole buffer, so an empty new target or
@@ -340,7 +340,7 @@ Implemented as Z23 does it; none is changed here.
   buffer reuse: REGISTER, SET_RECORD and SET_TEXT write into a zeroed struct, so `validates_presence_of`
   (`activerecord.h:121-125`, a whole-buffer `memcmp`) refuses it, and a target that begins with NUL makes a REGISTER
   silently not register. UPDATE and TRANSFER `snprintf` the new value over the row `row_to_znam` read
-  (`models/znam.c:258-284`, `explorer_index_overlays.c:120-122,136-137`), which writes only the NUL and leaves the old
+  (Z23 `models/znam.c:258-284`, `explorer_index_overlays.c:120-122,136-137`), which writes only the NUL and leaves the old <!-- doc-path-ok -->
   bytes from index 1 on; presence passes and the row is stored as `""` (`sqlite3_bind_text` with length -1). So an owner
   can blank the target (the name then pays nobody), or TRANSFER to `"\0..."` and leave the name owned by nobody, frozen
   for good. A row with a blank owner or target fails validation on every later save: RENEW and TRANSFER of it are
@@ -349,7 +349,7 @@ Implemented as Z23 does it; none is changed here.
   `a_field_that_starts_with_nul_is_saved_as_z23_saves_it`); the first version of this port did not, and a differential
   run against Z23's own apply code found it. Probably unintended in Z23: the owner should decide whether the parser
   should refuse any field that contains a NUL.
-* **A10. SET_TEXT with an empty value** is stored as an empty row, not a deletion (`models/znam.c:551-582`); the resolver
+* **A10. SET_TEXT with an empty value** is stored as an empty row, not a deletion (Z23 `models/znam.c:551-582`); the resolver <!-- doc-path-ok -->
   treats empty as absent (`name_resolver.c:151-155`).
 * **A11. SET_TEXT `zid`** also feeds the identity projection (`explorer_index_overlays.c:201-206`); not implemented here.
 * **A12. No reorg handling in Z23's tables** (2.9). A registration in an orphaned block stays; a name can be "taken" by a

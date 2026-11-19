@@ -33,6 +33,6 @@ sh src/c23/test/phgr13-gate/run_shards.sh /scratch/gate/phgr13_gate 20 /scratch/
   /path/to/blocks 24
 ```
 
-The last line of `out/summary.txt` must read `candidate-disagreements=0`. Needs about
+The last line of `out/summary.txt` (written under the run's output directory) must read `candidate-disagreements=0`. Needs about <!-- doc-path-ok -->
 1.2 GiB per shard and about 25 minutes on 20 cores for the full mainnet scan; pass `-` for
 the blocks directory to run only the synthetic classes (a minute).

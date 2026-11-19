@@ -6,7 +6,7 @@ blocker only the daemon owner can clear** is making the embedded daemon **reprod
 ## The problem
 The RC bundle embeds a daemon built as `v2.1.2-beta5-03c27eb43-DIRTY` — from an **untagged**
 branch tip (`feature/bootstrap-param-parallel`) with **~16 uncommitted changes**
-(`bootstrap.cpp/.h`, `init.cpp`, `txdb.cpp`, untracked `mapport.cpp/.h`, `startuptimer.*`,
+(`src/bootstrap.cpp`, `src/bootstrap.h`, `init.cpp`, `txdb.cpp`, `src/mapport.cpp`, `src/mapport.h`, `startuptimer.*`,
 `test_param_presence.cpp`, `Makefile.am`/`Makefile.gtest`). It cannot be rebuilt from any commit,
 so the shipped binary doesn't match any source — a non-starter for a signed release.
 
@@ -17,7 +17,7 @@ so the shipped binary doesn't match any source — a non-starter for a signed re
    helps cold restore/import and expands the regression surface for zero steady-state benefit, so
    it's **deferred to a later release**. Drop it from the beta6 daemon.
 2. **Commit the embedded-daemon changes that beta6 actually depends on** on top of `be6f0031d` —
-   the NAT-PMP `mapport.cpp/.h` (the GUI panel drives `-natpmp=1`) and `startuptimer.*` if the
+   the NAT-PMP `src/mapport.cpp`, `src/mapport.h` (the GUI panel drives `-natpmp=1`) and `startuptimer.*` if the
    GUI's startup-timing log expects it. Leave out the bootstrap-param-parallel experiment unless
    beta6 needs it.
 3. **Bump the version:** `configure.ac` `define(_CLIENT_VERSION_BUILD, 4)` → `5`. The macro maps

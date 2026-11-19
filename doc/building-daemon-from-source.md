@@ -96,7 +96,7 @@ The three supported host triples (`depends/Makefile:148-153`):
 - `depends/x86_64-unknown-linux-gnu/share/config.site` — **EXISTS** (built).
 - `depends/x86_64-w64-mingw32/share/config.site` — **EXISTS** (built).
 - `depends/x86_64-apple-darwin11/` — contains only a stray `lib/` dir; **NO**
-  `share/config.site`, **NO** `native/bin`, and `depends/SDKs/` does **not**
+  `share/config.site` (in the depends prefix, generated from `depends/config.site.in`), **NO** `native/bin`, and `depends/SDKs/` does **not** <!-- doc-path-ok -->
   exist. macOS cross-build is **not** set up here (see §4).
 - `depends/built/{linux,win,osx triples}/` each hold the cached source/package
   tarballs, so the linux + win depends do **not** need re-downloading.
@@ -283,7 +283,7 @@ If `file` says `ELF`, you used the positional-`HOST` mistake — see §0.
 
 > **Status on this box: NOT currently buildable as-is.** The darwin depends
 > toolchain is incomplete here (`depends/x86_64-apple-darwin11/` has only a stray
-> `lib/` dir, no `share/config.site`, no `native/bin`; `depends/SDKs/` is absent).
+> `lib/` dir, no `share/config.site` (the depends prefix copy), no `native/bin`; `depends/SDKs/` is absent). <!-- doc-path-ok -->
 > `build-release.sh` has **no** `mac`/`osx`/`darwin` target. macOS releases in
 > practice are built on a Mac (see §4c), not cross-compiled here.
 
@@ -451,7 +451,7 @@ sh qa/rpc-tests/wallet_matrix.sh src
 
 The following are load-bearing build assets that currently live outside any git
 repo. A future builder cannot reproduce the portable/cross builds without them —
-they should be committed (e.g. under `zcutil/portable/` or a dedicated build-env
+they should be committed (e.g. under a new `zcutil/portable/` directory (does not exist yet) or a dedicated build-env <!-- doc-path-ok -->
 repo) with repo paths parameterized:
 
 - `/home/rhett/zclbuild/prun` — proot entrypoint (binds the repos into the
