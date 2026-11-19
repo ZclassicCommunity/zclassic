@@ -5,7 +5,7 @@
  * Each case runs the tool inside the test directory, appends "exit N" to its output and compares the result
  * with golden/<name>.txt.
  */
-#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700 /* POSIX.1-2008 with XSI: realpath */
 #define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under POSIX-only masks; ignored elsewhere */
 #include <stdio.h>
 #include <stdlib.h>

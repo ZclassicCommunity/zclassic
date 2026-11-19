@@ -7,7 +7,7 @@
  *   zcl-review-fixtures <zcl-dev-review> <golden-dir>      UPDATE=1 rewrites the golden files.
  *   zcl-review-fixtures --hook <bindir> <githooks-dir>     real git pushes through zcl-dev-hook (review gate)
  */
-#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700 /* POSIX.1-2008 with XSI: realpath */
 #define _DARWIN_C_SOURCE 1 /* macOS hides mkdtemp, sysconf names and friends under POSIX-only masks; ignored elsewhere */
 #include <ctype.h>
 #include <stdarg.h>
@@ -594,7 +594,9 @@ static void env_setup(void)
     unsetenv("GIT_DIR");
     unsetenv("GIT_WORK_TREE");
     unsetenv("GIT_INDEX_FILE");
-    if (run_in(NULL, (char *const[]){"git", "init", "-q", "-b", "master", repo, NULL}, NULL) != 0) die("git init");
+    /* git 2.25 in the CI root has no init -b */
+    if (run_in(NULL, (char *const[]){"git", "init", "-q", repo, NULL}, NULL) != 0) die("git init");
+    if (run_in(NULL, (char *const[]){"git", "-C", repo, "symbolic-ref", "HEAD", "refs/heads/master", NULL}, NULL) != 0) die("git symbolic-ref");
     free(git("config", "user.name", "Pat Human", NULL));
     free(git("config", "user.email", "pat@example.invalid", NULL));
     mkdir_p("doc/agent");
