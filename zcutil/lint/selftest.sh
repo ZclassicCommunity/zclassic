@@ -130,6 +130,9 @@ run 1 'does not match its vendored tree' vendor
 printf 'int answer(void) { return 42; }\n' > zcutil/tools/vendor/x/a.c; printf 'x\n' > zcutil/tools/vendor/x/extra.c; track
 run 1 'does not match its vendored tree' vendor
 rm zcutil/tools/vendor/x/extra.c; track
+# consensus-seal (run by `all`) needs a sealed file and a seal; both are fixed here
+mkdir -p src doc/agent && printf 'int pow;\n' > src/pow.cpp && track
+"$bin" --root . consensus-seal --reseal --reason "selftest vendor fixture" >/dev/null 2>&1; track
 # `all`, and the python hook: hollow (exit 2) when zcutil/check-no-python.sh is absent, run (and fatal) when present
 # the safety rules scan src/ and qa/: give them something to scan
 mkdir -p src qa; echo "int x;" > src/f.c; echo "echo ok" > qa/ok.sh; track
@@ -141,6 +144,72 @@ printf 'exit 0\n' > zcutil/check-no-python.sh; track
 run 0 'vendor: ok' all
 run 2 "unknown rule" bogus-rule
 
+# ---- consensus-seal: a seal by git blob id; an edit to a sealed file fails with the ritual pointer ----
+newrepo seal
+mkdir -p src/consensus src/primitives src/pow/tromp src/zcash src/script doc/agent
+printf 'int pow;\n' > src/pow.cpp; printf 'int powh;\n' > src/pow.h
+printf 'int params;\n' > src/consensus/params.cpp; printf 'int block;\n' > src/primitives/block.h
+printf 'int note;\n' > src/zcash/Note.cpp; printf 'int ne;\n' > src/zcash/NoteEncryption.cpp
+printf 'int equi;\n' > src/pow/tromp/equi.h; printf 'int net;\n' > src/net.cpp   # excluded and not sealed
+track
+run 2 'is missing; it has never been sealed' consensus-seal
+run 2 'needs --reason' consensus-seal --reseal
+run 2 'needs --reason' consensus-seal --reseal --reason ""
+run 2 'one line' consensus-seal --reseal --reason "$(printf 'a\nb')"
+run 2 'belong to consensus-seal only' all --reseal --reason "x"
+run 0 'resealed 6 files (6 changed)' consensus-seal --reseal --reason "fixture initial seal"
+ok; grep -q "^src/pow.cpp$(printf '\t')" zcutil/consensus.seal || bad "seal lacks the src/pow.cpp row"
+ok; grep -q 'equi.h\|net.cpp' zcutil/consensus.seal && bad "seal lists an unsealed path"
+run 0 'ok (6 files sealed)' consensus-seal
+printf 'int tromp = 1;\n' > src/pow/tromp/equi.h; printf 'int net = 1;\n' > src/net.cpp; track
+run 0 'ok (6 files sealed)' consensus-seal
+printf 'int pow = 1;\n' > src/pow.cpp; printf 'int proof;\n' > src/zcash/Proof.cpp; track
+run 1 'src/pow.cpp changed' consensus-seal
+run 1 'read doc/agent/UNSEAL.md' consensus-seal
+run 1 'src/zcash/Proof.cpp is consensus-sealed but has no row' consensus-seal
+run 0 'resealed 7 files (2 changed)' consensus-seal --reseal --reason "fixture: pow change"
+run 0 'ok (7 files sealed)' consensus-seal
+rm src/zcash/Note.cpp; track
+run 1 'src/zcash/Note.cpp has a seal row' consensus-seal
+run 0 'resealed 6 files (1 changed)' consensus-seal --reseal --reason "fixture: Note removed"
+run 0 'ok (6 files sealed)' consensus-seal
+ok; [ "$(grep -c '^- ' doc/agent/SEAL_LOG.md)" = 3 ] || bad "SEAL_LOG.md lacks the three reseal entries"
+# unstaged edit and untracked file under a sealed prefix: a finding, and the reseal refuses
+track; seal_before=$(cat zcutil/consensus.seal); log_before=$(cat doc/agent/SEAL_LOG.md)
+git commit -qm base; base=$(git rev-parse HEAD)
+printf 'int edited;\n' >> src/pow.cpp
+run 1 'src/pow.cpp is modified in the working tree' consensus-seal
+run 2 'not staged' consensus-seal --reseal --reason "unstaged"
+git checkout -q -- src/pow.cpp
+printf 'int fresh;\n' > src/consensus/fresh.cpp
+run 1 'src/consensus/fresh.cpp is modified in the working tree' consensus-seal
+run 2 'not staged' consensus-seal --reseal --reason "untracked"
+rm src/consensus/fresh.cpp
+run 0 'ok (6 files sealed)' consensus-seal
+ok; [ "$seal_before" = "$(cat zcutil/consensus.seal)" ] && [ "$log_before" = "$(cat doc/agent/SEAL_LOG.md)" ] || bad "a refused reseal wrote the seal or log"
+# a hand-edited seal (new blob, no log line) fails
+printf 'int powh = 1;\n' > src/pow.h
+nb=$(git hash-object src/pow.h); ob=$(grep "^src/pow.h$(printf '\t')" zcutil/consensus.seal | cut -f2)
+sed "s/$ob/$nb/" zcutil/consensus.seal > "$tmp/seal.new"; cp "$tmp/seal.new" zcutil/consensus.seal; track
+run 1 'does not match the last doc/agent/SEAL_LOG.md line' consensus-seal
+git reset -q --hard "$base"
+# an unmerged sealed path is reported once, not as "no row", and the reseal refuses and writes nothing
+git checkout -q -b side; printf 'int a;\n' >> src/pow.cpp; git commit -qam side; git checkout -q -
+printf 'int b;\n' >> src/pow.cpp; git commit -qam main2; git merge side >/dev/null 2>&1
+seal_before=$(cat zcutil/consensus.seal); log_before=$(cat doc/agent/SEAL_LOG.md)
+ok; out=$("$bin" --root . consensus-seal 2>&1); [ "$(printf '%s\n' "$out" | grep -c 'src/pow.cpp is unmerged')" = 1 ] || bad "unmerged path not reported once: $out"
+ok; printf '%s\n' "$out" | grep -q 'has no row' && bad "unmerged path reported as no row: $out"
+run 2 'is unmerged' consensus-seal --reseal --reason "conflict"
+ok; [ "$seal_before" = "$(cat zcutil/consensus.seal)" ] && [ "$log_before" = "$(cat doc/agent/SEAL_LOG.md)" ] || bad "a refused unmerged reseal wrote the seal or log"
+git merge --abort; git reset -q --hard "$base"
+# driver flags: --reason takes a value, not a flag, and only with --reseal
+run 2 '' consensus-seal --reseal --reason --update-baseline
+run 2 'only valid together with --reseal' consensus-seal --reason "x"
+printf 'bad line\n' > zcutil/consensus.seal
+run 2 'is malformed' consensus-seal
+printf 'src/pow.cpp\t%s\nsrc/pow.cpp\t%s\n' 0123456789012345678901234567890123456789 0123456789012345678901234567890123456789 > zcutil/consensus.seal
+run 2 'lists src/pow.cpp twice' consensus-seal
+
 # ---- hollow scans: a tree with nothing to scan fails (rc 2), it never passes ----
 newrepo hollow
 printf 'plain text, no scripts, no C, no markdown\n' > notes.txt
@@ -150,6 +219,7 @@ for r in no-new-jq no-new-bash banned-str md-links; do
     run 2 'hollow scan' $r --update-baseline
 done
 run 2 "has no baseline" vendor --update-baseline
+run 2 "nothing scanned" consensus-seal
 
 echo "selftest: $((n - fails))/$n checks passed"
 [ "$fails" = 0 ]

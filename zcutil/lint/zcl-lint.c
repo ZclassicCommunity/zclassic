@@ -3,8 +3,9 @@
  * Copyright 2026 Rhett Creighton - Apache License 2.0 (see LICENSE.z23, NOTICE).
  * Derived from Z23 tools/lint/lintc gates (see NOTICE); modified, not a verbatim copy.
  *
- * usage: zcl-lint [--root DIR] <rule>|all [--update-baseline]
- *   rules: see rules.def (no-new-jq no-new-bash banned-str md-links vendor no-python doc-claims doc-paths version-facts victory)
+ * usage: zcl-lint [--root DIR] <rule>|all [--update-baseline] [--reseal --reason TEXT]
+ *   rules: see rules.def (every rule name is listed there)
+ *   --reseal --reason is the consensus-seal ritual only (doc/agent/UNSEAL.md).
  * This file is only the driver. The rules live in rules/<rule>.c, the shared helpers in lintlib.{c,h}, and
  * the rule table in rules.def.
  * Baselines: <root>/zcutil/lint/<rule>.txt, rows "<path><TAB><count>", sorted by path (bytewise).
@@ -31,11 +32,14 @@ static const struct rule rules[] = {
 };
 #define NRULES (sizeof rules / sizeof rules[0])
 
+bool lint_reseal = false;          /* --reseal: consensus-seal rewrites its seal (the ritual) */
+const char *lint_reason = NULL;    /* --reason TEXT: the required reason for --reseal */
+
 static void usage(void)
 {
     fputs("usage: zcl-lint [--root DIR] ", stderr);
     for (size_t i = 0; i < NRULES; i++) fprintf(stderr, "%s|", rules[i].name);
-    fputs("all [--update-baseline]\n", stderr);
+    fputs("all [--update-baseline] [--reseal --reason TEXT]\n", stderr);
 }
 
 int main(int argc, char **argv)
@@ -45,12 +49,22 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--root") && i + 1 < argc) lint_root = argv[++i];
         else if (!strcmp(argv[i], "--update-baseline")) update = true;
+        else if (!strcmp(argv[i], "--reseal")) lint_reseal = true;
+        else if (!strcmp(argv[i], "--reason") && i + 1 < argc && argv[i + 1][0] != '-') lint_reason = argv[++i];
         else if (!want && argv[i][0] != '-') want = argv[i];
         else { want = NULL; break; }
     }
     if (!want) { usage(); return 2; }
     bool all = !strcmp(want, "all");
     if (all && update) { fprintf(stderr, "zcl-lint: --update-baseline needs one rule, not all\n"); return 2; }
+    if ((lint_reseal || lint_reason) && strcmp(want, "consensus-seal")) {
+        fprintf(stderr, "zcl-lint: --reseal and --reason belong to consensus-seal only\n");
+        return 2;
+    }
+    if (lint_reason && !lint_reseal) {
+        fprintf(stderr, "zcl-lint: --reason is only valid together with --reseal\n");
+        return 2;
+    }
     int rc = 0, ran = 0;
     for (size_t i = 0; i < NRULES; i++)
         if (all || !strcmp(want, rules[i].name)) {

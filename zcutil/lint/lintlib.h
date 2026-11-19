@@ -14,6 +14,9 @@
  * row in rules.def; it needs nothing but this header. */
 
 extern const char *lint_root;  /* --root DIR, default "." */
+/* consensus-seal ritual flags, set by the driver from --reseal and --reason (defined in zcl-lint.c). */
+extern bool lint_reseal;
+extern const char *lint_reason;
 
 /* Checked allocation helpers: abort with exit 2 on out of memory. */
 void *lint_xrealloc(void *p, size_t n);
