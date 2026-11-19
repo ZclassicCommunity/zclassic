@@ -58,7 +58,7 @@ jhas() {
 
 # Composite helpers for the tests that compared several values at once. Each reads one JSON document on
 # stdin, takes the same paths as jget, and prints what the old one-line expression printed.
-#   jarr PATH...   [raw,raw,...] compact JSON of the values (a missing path is null) (what a one-line array expression of two fields printed)
+#   jarr PATH...   [raw,raw,...] compact JSON of the values (a missing path is null), one array for several fields
 #   jcat PATH...   the values (jget) joined by single spaces
 #   jpick [FIELD]  one value per array element (its FIELD, or the element itself), one per line
 #                  (fails, printing nothing, when the document is not an array)
