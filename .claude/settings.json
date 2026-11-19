@@ -6,7 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"$CLAUDE_PROJECT_DIR/zcutil/agent/guard/zcl-agent-guard.sh\""
+            "command": "sh \"$CLAUDE_PROJECT_DIR/zcutil/agent/guard/zcl-agent-guard.sh\"",
+            "timeout": 5
           }
         ]
       }

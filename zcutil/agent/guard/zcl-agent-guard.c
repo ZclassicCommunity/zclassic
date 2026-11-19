@@ -29,6 +29,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -465,10 +468,18 @@ static int cmd_hook(void)
 {
     size_t len = 0;
     bool big = false;
-    char *in = read_stdin(&len, &big);
+    char *in;
+#ifndef _WIN32
+    /* A guard that hangs must not hold up the work: SIGALRM ends it, and the shim treats any exit
+     * other than 0 and 2 as "the guard broke" and allows the call (the hook timeout in
+     * .claude/settings.json is the second net, and it also lets the call through). */
+    alarm(4);
+#endif
+    in = read_stdin(&len, &big);
     struct call call;
     const char *r = NULL;
     bool ok, undecodable = false;
+    char *note = NULL;
     memset(&call, 0, sizeof call);
     if (big) {
         /* Input over the cap cannot be parsed, and the hook only runs for the checked tools, so
@@ -501,12 +512,18 @@ static int cmd_hook(void)
     } else {
         r = eval_call(&call);
     }
+    note = ag_note() ? strdup(ag_note()) : NULL; // raw-alloc-ok:build-tool
     call_free(&call);
     free(in);
     if (undecodable) {
         fprintf(stderr, "zcl-agent-guard refused (%s): hook input could not be decoded. %s\n", r,
                 ag_rule_text(r));
         return 2;
+    }
+    if (note) {
+        fprintf(stderr, "zcl-agent-guard note: %s\n", note);
+        free(note);
+        note = NULL;
     }
     if (!r) return 0;
     if (ag_rule_is_warning(r)) {
@@ -525,6 +542,7 @@ static int cmd_hook(void)
 static int print_verdict(const char *r, bool json)
 {
     const char *kind = !r ? "ALLOW" : ag_rule_is_warning(r) ? "WARN" : "REFUSE";
+    if (ag_note()) fprintf(stderr, "NOTE %s\n", ag_note());
     if (json) {
         printf("{\"verdict\":\"%s\"", kind);
         if (r) {

@@ -29,6 +29,10 @@ const char *ag_eval_path(const char *tool, const char *path, const char *content
  * PowerShell command starts and what a relative Write or Edit path is joined to. */
 void ag_set_cwd(const char *cwd);
 
+/* A note from the last ag_eval_* call, or NULL: the guard allowed the call but saw something worth
+ * a line on stderr (a refused-looking command inside the text of a script being written). */
+const char *ag_note(void);
+
 /* True for a rule that warns on stderr and still allows the call. */
 bool ag_rule_is_warning(const char *rule);
 /* The AGENTS.md rule text for a rule id. */

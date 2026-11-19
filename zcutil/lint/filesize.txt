@@ -18,6 +18,6 @@ wallet/src/connection.cpp	3300
 wallet/src/mainwindow.cpp	4054
 wallet/src/rpc.cpp	2570
 wallet/src/sendtab.cpp	1873
-zcutil/agent/guard/rules.c	4864
+zcutil/agent/guard/rules.c	4815
 zcutil/dev/gen/gen.c	1887
 zcutil/dev/tests/zcl-dev-tests.c	1604

@@ -13,29 +13,14 @@ bad() { echo "FAIL: $*"; fail=1; }
 hook() { # name expected-exit expected-stderr-substring json
     printf '%s' "$4" | "$g" > "$out/o" 2> "$out/e"; rc=$?
     [ "$rc" = "$2" ] || bad "$1: exit $rc, want $2"
-    [ -z "$3" ] || grep -q "$3" "$out/e" || bad "$1: stderr lacks '$3': $(cat "$out/e")"
+    [ "$3" = - ] || grep -q "$3" "$out/e" || bad "$1: stderr lacks '$3': $(cat "$out/e")"
 }
-hook bash-refuse 2 'guard.datadir' '{"tool_name":"Bash","tool_input":{"command":"rm -rf ~/.zclassic/blocks"}}'
-hook bash-text 2 'AGENTS.md' '{"tool_name":"Bash","tool_input":{"command":"python3 x.py"}}'
-hook bash-allow 0 '' '{"tool_name":"Bash","tool_input":{"command":"ls -la"}}'
-hook edit-refuse 2 'guard.vendor_edit' '{"tool_name":"Edit","tool_input":{"file_path":"zcutil/tools/vendor/tools/jsonq.c","old_string":"a","new_string":"b"}}'
-hook write-refuse 2 'guard.hosted_ci' '{"tool_name":"Write","tool_input":{"file_path":".github/workflows/ci.yml","content":"on: push"}}'
-hook multiedit-refuse 2 'guard.python' '{"tool_name":"MultiEdit","tool_input":{"file_path":"a/b.py","edits":[{"old_string":"a","new_string":"b"}]}}'
-hook seal-warn 0 'guard.consensus_seal.*UNSEAL.md' '{"tool_name":"Edit","tool_input":{"file_path":"src/pow.cpp","old_string":"a","new_string":"b"}}'
-hook key-order 2 'guard.git_push' '{"tool_input":{"command":"git push origin master"},"tool_name":"Bash","session_id":"s"}'
-hook escaped 2 'guard.python' '{"tool_name":"Bash","tool_input":{"command":"echo \"hi\"\npython3 -V"}}'
-hook read-tool 0 '' '{"tool_name":"Read","tool_input":{"file_path":"/home/x/.zclassic/debug.log"}}'
-hook garbage 2 'guard.too_complex' 'not json'
-hook empty 0 'empty hook input' ''
-hook blank 0 'empty hook input' '   '
-hook no-tool 0 '' '{"hook_event_name":"PreToolUse"}'
+# the table of hook calls (test/hooks.txt): name, exit status, stderr text (- for none), hook JSON
+tab=$(printf '\t')
+while IFS="$tab" read -r hn hrc hsub hjson; do hook "$hn" "$hrc" "$hsub" "$hjson"; done < "$here/hooks.txt"
 
 # input the guard cannot decode must refuse for a checked tool (or a call naming no tool): a
 # crafted payload must not switch the guard off by being unreadable. An unchecked tool is allowed.
-hook lone-surrogate 2 'guard.too_complex' '{"tool_name":"Bash","tool_input":{"command":"rm -rf ~/.zclassic # \ud800"}}'
-hook lone-surrogate-path 2 'guard.too_complex' '{"tool_name":"Write","tool_input":{"file_path":"a\udc00","content":"x"}}'
-hook no-tool-bad 2 'guard.too_complex' '{"tool_input":{"command":"\ud800"}}'
-hook unchecked-bad 0 '' '{"tool_name":"Read","tool_input":{"file_path":"\ud800"}}'
 printf '{"tool_name":"Bash","tool_input":{"command":"rm -rf ~/.zclassic","x":"\377"}}' |
     "$g" > "$out/o" 2> "$out/e"; rc=$?
 [ "$rc" = 2 ] && grep -q 'guard.too_complex' "$out/e" || bad "invalid UTF-8 (rc $rc): $(cat "$out/e")"
@@ -44,19 +29,9 @@ printf '{"tool_name":"Bash","tool_input":{"command":"rm -rf ~/.zclassic","x":%s}
     "$g" > "$out/o" 2> "$out/e"; rc=$?
 [ "$rc" = 2 ] && grep -q 'guard.too_complex' "$out/e" || bad "deep nesting (rc $rc): $(cat "$out/e")"
 # a Bash call that holds a refusal and an escape the guard cannot read is still refused
-hook refusal-with-escape 2 'guard.datadir' '{"tool_name":"Bash","tool_input":{"command":"rm -rf ~/.zclassic"},"x":"é"}'
 
 # a method hidden from the command line, a PowerShell web call, a nested cmd /c, a computed path
-hook xargs-client 2 'guard.spend_or_key_export' '{"tool_name":"Bash","tool_input":{"command":"xargs zclassic-cli < /tmp/a"}}'
-hook ps-web-spend 2 'guard.spend_or_key_export' '{"tool_name":"PowerShell","tool_input":{"command":"iwr http://127.0.0.1:8232 -Method Post -Body dumpprivkey"}}'
-hook cmd-nested 2 'guard.datadir' '{"tool_name":"Bash","tool_input":{"command":"cmd //c \"rd /s /q %APPDATA%\\\\Zclassic\""}}'
-hook ps-joinpath 2 'guard.datadir' '{"tool_name":"PowerShell","tool_input":{"command":"Remove-Item -Recurse (Join-Path $env:APPDATA Zclassic)"}}'
-hook ps-build-ok 0 '' '{"tool_name":"PowerShell","tool_input":{"command":"Remove-Item -Recurse build\\tmp"}}'
 # the hook cwd seeds a command and joins a relative Write path
-hook cwd-write 2 'guard.datadir' '{"tool_name":"Write","tool_input":{"file_path":"zclassic.conf","content":"x"},"cwd":"/home/rhett/.zclassic"}'
-hook cwd-write-ok 0 '' '{"tool_name":"Write","tool_input":{"file_path":"zclassic.conf","content":"x"},"cwd":"/home/rhett/work/repo"}'
-hook cwd-bash 2 'guard.datadir' '{"tool_name":"Bash","tool_input":{"command":"rm -rf blocks"},"cwd":"/home/rhett/.zclassic"}'
-hook cwd-bash-ok 0 '' '{"tool_name":"Bash","tool_input":{"command":"rm -rf blocks"},"cwd":"/home/rhett/work/repo"}'
 
 # a warning must reach the model: a PreToolUse "ask" decision on stdout, exit 0 (stderr of an
 # exit-0 hook is only a debug log)
@@ -71,11 +46,6 @@ printf '%s' '{"tool_name":"Bash","tool_input":{"command":"python3 x"}}' | "$g" >
 [ ! -s "$out/o" ] || bad "a refusal must print nothing on stdout"
 
 # the PowerShell tool is checked like Bash, with PowerShell deleters and writers
-hook ps-push 2 'guard.git_push' '{"tool_name":"PowerShell","tool_input":{"command":"git push --force origin master; python3 x"}}'
-hook ps-remove 2 'guard.datadir' '{"tool_name":"PowerShell","tool_input":{"command":"Remove-Item -Recurse $env:APPDATA\\ZClassic"}}'
-hook ps-setcontent 2 'guard.hosted_ci' '{"tool_name":"PowerShell","tool_input":{"command":"Set-Content .github\\workflows\\ci.yml x"}}'
-hook ps-allow 0 '' '{"tool_name":"PowerShell","tool_input":{"command":"Get-ChildItem build"}}'
-hook notebook-refuse 2 'guard.vendor_edit' '{"tool_name":"NotebookEdit","tool_input":{"notebook_path":"zcutil/tools/vendor/n.ipynb"}}'
 "$g" --ps 'Remove-Item -Recurse $env:APPDATA\ZClassic' > "$out/o"; rc=$?
 [ "$rc" = 1 ] && grep -q '^REFUSE guard.datadir ' "$out/o" || bad "--ps refuse (rc $rc)"
 
@@ -129,6 +99,26 @@ cp "$g" "$out/bin/zcl-agent-guard$ext"
 echo '{"tool_name":"Bash","tool_input":{"command":"rm -rf ~/.zclassic"}}' |
     sh "$out/agent/guard/zcl-agent-guard.sh" > /dev/null 2> "$out/e"; rc=$?
 [ "$rc" = 2 ] && grep -q 'guard.datadir' "$out/e" || bad "shim with binary (rc $rc)"
+
+# a guard that crashes, times out or exits oddly never blocks the work: the shim allows the call
+# with a note, and still passes a refusal (2) through
+mkdir -p "$out/r2/agent/guard" "$out/r2/bin"
+cp "$here/../zcl-agent-guard.sh" "$out/r2/agent/guard/"
+for code in 1 64 127 139 142; do
+    printf '#!/bin/sh\nexit %s\n' "$code" > "$out/r2/bin/zcl-agent-guard"
+    chmod +x "$out/r2/bin/zcl-agent-guard"
+    echo '{"tool_name":"Bash","tool_input":{"command":"ls"}}' |
+        sh "$out/r2/agent/guard/zcl-agent-guard.sh" > /dev/null 2> "$out/e"; rc=$?
+    [ "$rc" = 0 ] && grep -q "failed (exit $code)" "$out/e" || bad "shim, guard exit $code (rc $rc): $(cat "$out/e")"
+done
+printf '#!/bin/sh\necho refused >&2\nexit 2\n' > "$out/r2/bin/zcl-agent-guard"
+echo '{}' | sh "$out/r2/agent/guard/zcl-agent-guard.sh" > /dev/null 2>&1; rc=$?
+[ "$rc" = 2 ] || bad "shim must pass a refusal through (rc $rc)"
+printf '#!/bin/sh\nexit 0\n' > "$out/r2/bin/zcl-agent-guard"
+echo '{}' | sh "$out/r2/agent/guard/zcl-agent-guard.sh" > /dev/null 2>&1; rc=$?
+[ "$rc" = 0 ] || bad "shim must pass an allow through (rc $rc)"
+
+# script text written by Write is never refused: a finding is a note on stderr, exit 0
 
 [ "$fail" = 0 ] && echo "agent-guard run.sh: OK"
 exit "$fail"
