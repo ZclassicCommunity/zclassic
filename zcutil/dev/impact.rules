@@ -15,7 +15,7 @@ Makefile.am|configure.ac|autogen.sh|build-aux/*|depends/*|src/Makefile.am|src/Ma
 src/.clang-format|zcutil/check-hardening.sh|zcutil/fetch-params.sh|zcutil/zsync.sh|zcutil/cleanup-tags.sh|src/*.rc|src/windows-utf8.manifest|src/obj/*	daemon-linux daemon-win64
 
 # ---- local CI and the developer tool
-zcutil/Makefile|zcutil/local-ci.sh|zcutil/local-ci-macos.sh|zcutil/dev/*|zcutil/tools/Z23_SOURCE.tsv|zcutil/tools/LICENSE.z23|zcutil/tools/NOTICE|zcutil/tools/revendor.sh|zcutil/tools/vendor-files.txt|zcutil/tools/vendor/*	check-dev-tools
+zcutil/Makefile|zcutil/local-ci.sh|zcutil/local-ci-macos.sh|zcutil/dev/*|zcutil/agent/*|zcutil/tools/Z23_SOURCE.tsv|zcutil/tools/LICENSE.z23|zcutil/tools/NOTICE|zcutil/tools/revendor.sh|zcutil/tools/vendor-files.txt|zcutil/tools/vendor/*	check-dev-tools
 zcutil/local-ci-smoke.sh	check-dev-tools regtest-smoke
 
 # ---- C23 core

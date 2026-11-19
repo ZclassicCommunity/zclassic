@@ -1,0 +1,6 @@
+# Codex: add this table to ~/.codex/config.toml (or a project .codex/config.toml) and run Codex from
+# the zclassicd checkout. Claude Code reads the repository .mcp.json instead; both start the same
+# stdio server, which lists the same eleven read-only tools. Build it first: make -C zcutil/agent/mcp
+[mcp_servers.zcl-local]
+command = "zcutil/bin/zcl-mcp"
+args = ["--checkout=."]

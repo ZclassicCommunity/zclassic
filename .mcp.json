@@ -1,0 +1,1 @@
+{"mcpServers":{"zcl-local":{"type":"stdio","command":"zcutil/bin/zcl-mcp","args":["--checkout=${CLAUDE_PROJECT_DIR:-.}"]}}}
