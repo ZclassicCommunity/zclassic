@@ -440,7 +440,7 @@ static int resolve_topic(const char *arg, Node *nd, int *rc)
         }
     }
     if (!is_dir(nd->fs) && !(is_file(nd->fs) && !nd->tr.code && has_suffix(nd->fs, ".md"))) {
-        char nearest[TOPIC_MAX + 16];
+        char nearest[PATH_CAP + 16]; /* "code/" plus the longest topic (PATH_CAP - 1) must fit whole */
         nearest_topic(&nd->tr, nd->rel, nearest, sizeof nearest);
         *rc = fail_reply("UNKNOWN_TOPIC", "no such topic; the nearest existing topic is the evidence",
                          nearest[0] ? nearest : "(root)");

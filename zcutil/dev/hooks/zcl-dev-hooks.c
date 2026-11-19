@@ -209,14 +209,15 @@ static Repo repo_open(void)
 {
     Repo r = {0};
     Buf b;
-    if (run("git rev-parse --path-format=absolute --absolute-git-dir --git-common-dir", &b) != 0)
-        die("git rev-parse failed (git older than 2.31, or not inside a repository)");
+    if (run("git rev-parse --absolute-git-dir --git-common-dir", &b) != 0)
+        die("git rev-parse failed (git older than 2.13, or not inside a repository)");
     trim_eol(&b);
     char *nl = strchr(b.p, '\n');
     if (!nl) die("unexpected git rev-parse output");
     *nl = 0;
     r.gitdir = norm_path(b.p);
     r.common = norm_path(nl + 1);
+    if (r.common[0] != '/' && !(r.common[0] && r.common[1] == ':')) r.common = r.gitdir; /* git < 2.31 prints it relative only in the primary checkout */
     r.top = git_line("git rev-parse --show-toplevel", NULL);
     if (!r.top) die("not inside a work tree");
     norm_path(r.top);

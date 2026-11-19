@@ -1,7 +1,7 @@
 #!/bin/sh
 # Shim: the logic is C, in zcutil/bin/zcl-dev-hook (build: make -C zcutil). Linked worktrees fall back to the primary checkout build.
 top=$(git rev-parse --show-toplevel) || exit 1
-prim=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
+c=$(git rev-parse --git-common-dir); case $c in /*|?:*) prim=$(dirname "$c");; *) prim=$top;; esac  # git 2.25 has no --path-format; a relative common dir means the primary checkout
 for d in "$top" "$prim"; do
 	for x in "" .exe; do
 		[ -x "$d/zcutil/bin/zcl-dev-hook$x" ] && exec "$d/zcutil/bin/zcl-dev-hook$x" pre-commit "$@"

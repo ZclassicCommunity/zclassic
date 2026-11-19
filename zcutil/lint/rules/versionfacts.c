@@ -117,7 +117,7 @@ static int check_line(const char *path, long ln, const char *l, const char *ver,
 int lint_rule_version_facts(bool update)
 {
     (void)update; /* no baseline; the driver refuses --update-baseline for this rule */
-    char ver[64], suffix[32], plain[32];
+    char ver[128], suffix[32], plain[64];
     if (!canonical(ver, sizeof ver, suffix, sizeof suffix, plain, sizeof plain)) {
         printf("FAIL version-facts: hollow scan (configure.ac missing or without _CLIENT_VERSION_* defines)\n");
         return 2;

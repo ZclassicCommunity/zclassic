@@ -25,7 +25,7 @@ expect() {
 }
 
 repo=$work/repo
-git init -q -b master "$repo"
+git init -q "$repo" && git -C "$repo" symbolic-ref HEAD refs/heads/master  # git 2.25 in the CI root has no init -b
 git -C "$repo" config user.name tester
 git -C "$repo" config user.email t@example.invalid
 mkdir -p "$repo/zcutil/dev" "$repo/zcutil/tools/vendor" "$repo/zcutil/bin" "$repo/src"
