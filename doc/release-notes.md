@@ -113,7 +113,11 @@ RPC tuning errors and the LevelDB file budget
 - `-rpcthreads` outside 1..256, `-rpcworkqueue` outside 1..65536 and `-rpcservertimeout`
   outside 1..86400 (including non-numeric values, which parse as 0) now stop start-up with an
   explanatory error. Earlier releases clamped them silently.
-- The per-database LevelDB open-file budget now counts the zslp index store when `-zslpindex`
-  is set (three databases instead of two), and a `-dbmaxopenfiles` value above what the
-  file descriptor soft limit allows is lowered to that budget with a log warning. This matters
-  mainly on 32-bit POSIX builds with a soft limit of 1024.
+- The per-database LevelDB open-file budget now counts each optional index store: one more
+  database for `-zslpindex` and one more for `-znamindex` (up to four instead of two). A
+  `-dbmaxopenfiles` value above what the file descriptor soft limit allows is lowered to that
+  budget with a log warning. This matters mainly on 32-bit POSIX builds with a soft limit of 1024.
+- A peer-visible P2P change, not a consensus change: an `inv` or `getdata` entry with an
+  unknown type no longer aborts processing of the whole message (formatting it for the log used
+  to throw). The unknown entry is ignored and the remaining entries are handled, as in Bitcoin
+  Core. Such messages no longer produce a per-message exception line in the log.

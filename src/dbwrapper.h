@@ -23,6 +23,8 @@ static const size_t DBWRAPPER_PREALLOC_VALUE_SIZE = 1024;
 int LevelDBMaxOpenFilesForTest();
 /** Pure budget: soft fd limit (-1 on Win32), max connections, LevelDB database count, -dbmaxopenfiles (-1 if unset). */
 int ComputeLevelDBMaxOpenFiles(long soft, int maxConnections, int ndb, int override);
+/** LevelDB databases the process opens: 2 plus one each for -zslpindex and -znamindex. */
+int LevelDBDatabaseCount(bool zslpIndex, bool znamIndex);
 /** Descriptors reserved for everything that is not a LevelDB table. */
 int LevelDBFdReserve(int maxConnections);
 

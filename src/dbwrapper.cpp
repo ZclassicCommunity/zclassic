@@ -60,15 +60,20 @@ static long LevelDBSoftLimit()
 #endif
 }
 
+int LevelDBDatabaseCount(bool zslpIndex, bool znamIndex)
+{
+    // block index and chainstate, plus one store per optional index
+    return 2 + (zslpIndex ? 1 : 0) + (znamIndex ? 1 : 0);
+}
+
 static int LevelDBMaxOpenFiles()
 {
     static const int budget = []() {
         long soft = LevelDBSoftLimit();
-        // block index and chainstate, plus the zslp index store when enabled
-        int ndb = GetBoolArg("-zslpindex", false) ? 3 : 2;
+        int ndb = LevelDBDatabaseCount(GetBoolArg("-zslpindex", false), GetBoolArg("-znamindex", false));
         int requested = mapArgs.count("-dbmaxopenfiles") ? (int)GetArg("-dbmaxopenfiles", DBWRAPPER_MIN_OPEN_FILES) : -1;
         int n = ComputeLevelDBMaxOpenFiles(soft, nMaxConnections, ndb, requested);
-        if (requested >= DBWRAPPER_MIN_OPEN_FILES && requested != n && requested <= DBWRAPPER_MAX_OVERRIDE)
+        if (requested >= DBWRAPPER_MIN_OPEN_FILES && n < std::min(requested, DBWRAPPER_MAX_OVERRIDE))
             LogPrintf("WARNING: -dbmaxopenfiles=%d exceeds the file descriptor budget (fd soft limit %ld, %d databases); using %d\n", requested, soft, ndb, n);
         LogPrintf("LevelDB max_open_files=%d (fd soft limit %d)\n", n, (int)soft);
         return n;

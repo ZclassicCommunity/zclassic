@@ -302,6 +302,20 @@ BOOST_AUTO_TEST_CASE(dbwrapper_max_open_files_pure)
     BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(-1, conns, 3, 2000), 2000);
 }
 
+BOOST_AUTO_TEST_CASE(dbwrapper_database_count)
+{
+    BOOST_CHECK_EQUAL(LevelDBDatabaseCount(false, false), 2);
+    BOOST_CHECK_EQUAL(LevelDBDatabaseCount(true, false), 3);
+    BOOST_CHECK_EQUAL(LevelDBDatabaseCount(false, true), 3);
+    BOOST_CHECK_EQUAL(LevelDBDatabaseCount(true, true), 4);
+    // soft 1024 with both indexes: four databases must fit the budget
+    const int conns = 125;
+    int each = ComputeLevelDBMaxOpenFiles(1024, conns, 4, -1);
+    BOOST_CHECK_EQUAL(each, (1024 - LevelDBFdReserve(conns)) / 4);
+    BOOST_CHECK(4 * each <= 1024 - LevelDBFdReserve(conns));
+    BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(1024, conns, 4, 5000), each);
+}
+
 BOOST_AUTO_TEST_CASE(dbwrapper_reopen_roundtrip)
 {
     path ph = temp_directory_path() / UniquePath();
