@@ -311,6 +311,8 @@ bool GetNodeStateStats(NodeId nodeid, CNodeStateStats &stats);
 void Misbehaving(NodeId nodeid, int howmuch);
 /** Flush all state, indexes and buffers to disk. */
 void FlushStateToDisk();
+/** FlushStateToDisk(), reporting whether the flush succeeded (a failure aborts the node). */
+bool FlushStateToDiskChecked();
 /** Prune block files and flush state to disk. */
 void PruneAndFlush();
 
