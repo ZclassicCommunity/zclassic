@@ -17,7 +17,7 @@
 #                  legacy interval, still starts and runs.
 #
 # usage: chain_flush_interval_kill.sh --bin <dir> --work <dir> [--base port]
-# Needs jq and the Zcash parameters in ~/.zcash-params. Shell only, no Python.
+# Needs the Zcash parameters in ~/.zcash-params. Shell only, no Python.
 B=""; W=""; P=""
 while [ $# -gt 0 ]; do
     case $1 in
@@ -25,7 +25,6 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ -x "$B/zclassicd" ] && [ -n "$W" ] || { echo "usage: $0 --bin DIR --work DIR [--base port]" >&2; exit 2; }
-command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
 P=${P:-$((20000 + ($$ % 20000)))}; R=0; F=0
 rm -rf "$W"; mkdir -p "$W"; W=$(cd "$W" && pwd)
 trap '[ -f "$D/pid" ] && kill -9 "$(cat "$D/pid")" 2>/dev/null' EXIT

@@ -1,0 +1,11 @@
+# Z23 provenance manifest for developer tools. Verified by src/c23/tools/check-vendor.sh. Do not edit by hand.
+# z23_commit=1f5d0f69448c4811884b2c918ae0723ab24830da
+# requires_ancestor=55245e2bd
+# columns: zclassicd_path<TAB>z23_path<TAB>git_blob_sha1<TAB>z23_commit<TAB>manifest_sha3_256_or_unsealed
+zcutil/tools/vendor/contexts/commons/packages/zjsonp/include/zjsonp/zjsonp.h	contexts/commons/packages/zjsonp/include/zjsonp/zjsonp.h	fb8e9f1f5d9fa8bdcf6b95a4e79d9941233d0822	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
+zcutil/tools/vendor/contexts/commons/packages/zjsonp/src/zjsonp.c	contexts/commons/packages/zjsonp/src/zjsonp.c	f4cb0cd9825de116fa8249db23a5b864c948fdd7	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
+zcutil/tools/vendor/contexts/commons/packages/zutf8/include/zutf8/zutf8.h	contexts/commons/packages/zutf8/include/zutf8/zutf8.h	65b360766b3d822f581cf52765660e8cc72982cf	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
+zcutil/tools/vendor/contexts/commons/packages/zutf8/src/zutf8.c	contexts/commons/packages/zutf8/src/zutf8.c	4fc2055c15f3d6a86665a9c6d1456dd4ed61e61c	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
+zcutil/tools/vendor/tools/jsonq.c	tools/jsonq.c	0bbd3a687c1130220e5ecf2dc2fa7db3135a69d5	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
+zcutil/tools/vendor/tools/jsonq_standalone.c	tools/jsonq_standalone.c	e5b8f1e10838d1f6541c07deab2725b7728c9dcd	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed
+zcutil/tools/vendor/tools/multicall.h	tools/multicall.h	60b8f7e22b000eb0abbbd6eff39b896964c113ab	1f5d0f69448c4811884b2c918ae0723ab24830da	unsealed

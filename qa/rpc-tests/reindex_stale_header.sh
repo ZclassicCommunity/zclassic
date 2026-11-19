@@ -12,7 +12,7 @@
 #    gracefully (loads everything before the damage) and the node stays up.
 #
 # usage: reindex_stale_header.sh --bin <dir> --work <dir> [--base port]
-# Needs jq (the shared helpers use it). Never point this at a real datadir.
+# Needs jq (the shared helpers use it for money arithmetic). Never point this at a real datadir.
 BIN=""; WORK=""; PORT_BASE=""
 while [ $# -gt 0 ]; do
     case $1 in

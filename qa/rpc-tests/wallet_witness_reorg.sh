@@ -49,8 +49,8 @@ refcheck() {
     rm -rf "$SD/node3"; mkdir -p "$SD/node3/regtest"; cp "$SD/export/ref-$l.dat" "$SD/node3/regtest/wallet.dat"
     start 3 "$BIN" -connect=127.0.0.1:$((BASE + 1)) -rescan || return
     sync_to 3
-    want=$(printf 'z=%s notes=%s t=%s' "$(cli 0 z_gettotalbalance 0 | jq -r .private | f8)" "$(cli 0 z_listunspent 0 | jq -c '[.[]|(.amount*100000000|round)]|sort')" "$(bal 0 '*' 0)")
-    got=$(printf 'z=%s notes=%s t=%s' "$(cli 3 z_gettotalbalance 0 | jq -r .private | f8)" "$(cli 3 z_listunspent 0 | jq -c '[.[]|(.amount*100000000|round)]|sort')" "$(bal 3 '*' 0)")
+    want=$(printf 'z=%s notes=%s t=%s' "$(cli 0 z_gettotalbalance 0 | jget private | f8)" "$(cli 0 z_listunspent 0 | jq -c '[.[]|(.amount*100000000|round)]|sort')" "$(bal 0 '*' 0)")
+    got=$(printf 'z=%s notes=%s t=%s' "$(cli 3 z_gettotalbalance 0 | jget private | f8)" "$(cli 3 z_listunspent 0 | jq -c '[.[]|(.amount*100000000|round)]|sort')" "$(bal 3 '*' 0)")
     ck "$l: wallet equals the -rescan reference" "$got" "$want"
     stop 3
 }

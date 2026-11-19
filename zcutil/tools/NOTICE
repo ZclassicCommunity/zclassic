@@ -1,0 +1,12 @@
+zclassicd developer tools (zcutil/tools)
+
+The files under zcutil/tools/vendor/ are copied byte for byte from the Z23 repository
+(zclassic23), commit recorded in Z23_SOURCE.tsv, and are licensed under the Apache
+License, Version 2.0 (full text in LICENSE.z23):
+
+    Copyright 2026 Rhett Creighton
+
+They provide jsonq, a small JSON path query tool (no jq, no Python) that the test and
+build scripts use. The rest of zclassicd remains under the MIT license (see COPYING).
+Vendored files must never be edited in this tree. Provenance and identity checks:
+src/c23/tools/check-vendor.sh zcutil/tools/Z23_SOURCE.tsv  (make -C src check-tools-vendor).

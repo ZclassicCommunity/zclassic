@@ -24,6 +24,7 @@ while [ $# -gt 0 ]; do
 done
 [ -x "$B/zclassicd" ] && [ -n "$W" ] || { echo "usage: $0 --bin DIR --work DIR [--base port]" >&2; exit 2; }
 command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
+. "$(dirname "$0")/jsonq_lib.sh"
 P=${P:-$((20000 + ($$ % 20000)))}; R=0; F=0
 rm -rf "$W"; mkdir -p "$W/tpl"; W=$(cd "$W" && pwd)
 trap '[ -f "$D/pid" ] && kill -9 "$(cat "$D/pid")" 2>/dev/null' EXIT
@@ -59,12 +60,12 @@ check() {
     fi
     r0=$(printf '%s' "$first" | jq -r '.reindexing | type'); why0=$(printf '%s' "$first" | jq -r '.reindexreason | type')
     if [ "$r0" != boolean ] || [ "$why0" != string ]; then msgok=0; echo "FAIL $1: getblockchaininfo lacks reindexing/reindexreason ($r0/$why0)"; fi
-    if [ "$(printf '%s' "$first" | jq -r .reindexing)" = true ]; then
+    if [ "$(printf '%s' "$first" | jget reindexing)" = true ]; then
         MIDRUN=$((MIDRUN + 1))
-        [ -n "$(printf '%s' "$first" | jq -r .reindexreason)" ] || { msgok=0; echo "FAIL $1: reindexing true with no reason"; }
+        [ -n "$(printf '%s' "$first" | jget reindexreason)" ] || { msgok=0; echo "FAIL $1: reindexing true with no reason"; }
     fi
     for k in $(seq 300); do [ "$(cli getblockcount 2>/dev/null)" = "$H" ] && break; sleep 0.2; done
-    for k in $(seq 300); do [ "$(cli getblockchaininfo 2>/dev/null | jq -r .reindexing)" = false ] && break; sleep 0.2; done
+    for k in $(seq 300); do [ "$(cli getblockchaininfo 2>/dev/null | jget reindexing)" = false ] && break; sleep 0.2; done
     last=$(cli getblockchaininfo | jq -r '[.reindexing, (.reindexreason|length)] | @csv')
     [ "$last" = "false,0" ] || { msgok=0; echo "FAIL $1: after the reindex getblockchaininfo says reindexing,reasonlength = $last"; }
     hh=$(cli getblockcount); v=$(cli verifychain 4 0)

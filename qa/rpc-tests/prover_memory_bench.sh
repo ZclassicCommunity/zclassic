@@ -29,10 +29,10 @@ wait_op() {
     [ -n "$2" ] || { echo "failed (no operation id)"; return 0; }
     local t s; t=0
     while :; do
-        s=$(cli "$1" z_getoperationstatus "[\"$2\"]" | jq -c '.[0]')
-        case $(printf '%s' "$s" | jq -r .status) in
-            success) printf 'success %s\n' "$(printf '%s' "$s" | jq -r .result.txid)"; return 0 ;;
-            failed) printf 'failed %s\n' "$(printf '%s' "$s" | jq -r .error.message)"; return 0 ;;
+        s=$(cli "$1" z_getoperationstatus "[\"$2\"]" | jraw '[0]')
+        case $(printf '%s' "$s" | jget status) in
+            success) printf 'success %s\n' "$(printf '%s' "$s" | jget result.txid)"; return 0 ;;
+            failed) printf 'failed %s\n' "$(printf '%s' "$s" | jget error.message)"; return 0 ;;
         esac
         t=$((t + 1)); [ $t -lt 18000 ] || { echo "timeout"; return 1; }
         sleep 0.1

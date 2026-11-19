@@ -8,8 +8,8 @@ snap() { local n=$1
         "$(bal "$n" '*' 1)" "$(bal "$n" '*' 0)" \
         "$(cli "$n" listunspent 0 | jq -c '[.[]|.amount*100000000|round]|sort')" \
         "$(cli "$n" z_listunspent 0 | jq -c '[.[]|(.amount*100000000|round)]|sort')" \
-        "$(cli "$n" z_gettotalbalance 0 | jq -r .private | f8)" \
-        "$(cli "$n" listtransactions '*' 100000 | jq length)"
+        "$(cli "$n" z_gettotalbalance 0 | jget private | f8)" \
+        "$(cli "$n" listtransactions '*' 100000 | jlen)"
 }
 # fresh <n> [args]: an empty wallet node on the same chain
 fresh() { local n=$1; shift; start "$n" "$BIN" -connect=127.0.0.1:$((BASE + 1)) "$@" && sync_to "$n"; }
@@ -26,12 +26,12 @@ scn_sprout() {
     setup2 || return
     sp=$(cli 0 z_getnewaddress sprout); sp2=$(cli 0 z_getnewaddress sprout)
     v=$(cli 0 z_validateaddress "$sp")
-    ck "sprout address type" "$(printf %s "$v" | jq -r .type)" sprout
-    ck "sprout address ismine" "$(printf %s "$v" | jq -r .ismine)" true
+    ck "sprout address type" "$(printf %s "$v" | jget type)" sprout
+    ck "sprout address ismine" "$(printf %s "$v" | jget ismine)" true
     ck "chain is before Sapling" "$([ "$(cli 0 getblockcount)" -lt 230 ] && echo yes)" yes
     give_z 0 "$sp" 4 48656c6c6f
     ck "sprout note received (t->sprout)" "$(zbal 0 "$sp")" 4.00000000
-    ck "sprout memo" "$(cli 0 z_listreceivedbyaddress "$sp" | jq -r '.[0].memo' | cut -c1-10)" 48656c6c6f
+    ck "sprout memo" "$(cli 0 z_listreceivedbyaddress "$sp" | jget "[0].memo" | cut -c1-10)" 48656c6c6f
     ta=$(cli 0 getnewaddress)
     # The binary under test cannot create a PHGR13 proof: both spends before Sapling are
     # refused with an error that says why, and nothing changes.
@@ -86,7 +86,7 @@ scn_keys() {
     fresh 4 || return
     cli 4 z_importkey "$ZK" yes >/dev/null
     ck "z_importkey rescan yes: balance" "$(zbal 4 "$zs")" 4.00000000
-    ck "z_importkey memo kept" "$(cli 4 z_listreceivedbyaddress "$zs" | jq -r '.[0].memo' | cut -c1-10)" 48656c6c6f
+    ck "z_importkey memo kept" "$(cli 4 z_listreceivedbyaddress "$zs" | jget "[0].memo" | cut -c1-10)" 48656c6c6f
     ck "z_importkey twice is harmless" "$(cli 4 z_importkey "$ZK" no >/dev/null 2>&1; echo $?)" 0
     fresh 5 || return
     cli 5 z_importkey "$ZK" no >/dev/null
@@ -104,10 +104,10 @@ scn_keys() {
     fresh 8 || return
     cli 8 z_importviewingkey "$VK" yes >/dev/null
     obs "viewingkey_z_getbalance" "$(errtxt 8 z_getbalance "$sp" 1)"
-    ck "viewing key: z_gettotalbalance includeWatchonly" "$(cli 8 z_gettotalbalance 1 true | jq -r .private | f8)" 2.00000000
-    ck "viewing key: z_listunspent includeWatchonly" "$(cli 8 z_listunspent 1 9999999 true | jq length)" 1
-    ck "viewing key: note is not spendable" "$(cli 8 z_listunspent 1 9999999 true | jq -r '.[0].spendable')" false
-    ck "viewing key: z_listunspent without watchonly" "$(cli 8 z_listunspent 1 9999999 false | jq length)" 0
+    ck "viewing key: z_gettotalbalance includeWatchonly" "$(cli 8 z_gettotalbalance 1 true | jget private | f8)" 2.00000000
+    ck "viewing key: z_listunspent includeWatchonly" "$(cli 8 z_listunspent 1 9999999 true | jlen)" 1
+    ck "viewing key: note is not spendable" "$(cli 8 z_listunspent 1 9999999 true | jget "[0].spendable")" false
+    ck "viewing key: z_listunspent without watchonly" "$(cli 8 z_listunspent 1 9999999 false | jlen)" 0
     r=$(zsend 8 "$sp" "[{\"address\":\"$ta\",\"amount\":1}]"); case $r in failed*|rpcerror*) pass "viewing key cannot spend: $(printf %s "$r" | cut -c1-80)" ;; *) bad "viewing-key wallet spent: $r" ;; esac
     ck "z_exportviewingkey roundtrip" "$(cli 8 z_exportviewingkey "$sp" 2>&1 | head -c 12)" "$(printf %s "$VK" | head -c 12)"
     # dumpwallet / importwallet and z_exportwallet / z_importwallet
@@ -146,7 +146,7 @@ scn_encrypt() {
     sync_to 0
     ck "balance survives encryption + restart" "$(bal 0)" 5.00000000
     ck "z balance survives" "$(zbal 0 "$zs")" 4.00000000
-    ck "wallet reports locked (unlocked_until 0)" "$(cli 0 getwalletinfo | jq -r .unlocked_until)" 0
+    ck "wallet reports locked (unlocked_until 0)" "$(cli 0 getwalletinfo | jget unlocked_until)" 0
     ckerr "sendtoaddress while locked" "unlock|locked|passphrase" 0 sendtoaddress "$other" 1
     r=$(zsend 0 "$zs" "[{\"address\":\"$other\",\"amount\":1}]"); case $r in *assphrase*|*nlock*|*ocked*) pass "z_sendmany while locked fails cleanly: $(printf %s "$r" | cut -c1-90)" ;; *) bad "z_sendmany while locked: $r" ;; esac; alive "z_sendmany while locked"; cli 0 getblockcount >/dev/null 2>&1 || { say "  (daemon died; restarting it, still locked)"; start 0 "$BIN" -connect=127.0.0.1:$((BASE + 1)); }
     # the same constructor path for a Sprout from-address (no notes needed: the key lookup comes first)
@@ -165,14 +165,14 @@ scn_encrypt() {
     ckerr "dumpprivkey while locked" "unlock|locked|passphrase" 0 dumpprivkey "$ta"
     ckerr "walletpassphrase wrong" "incorrect|passphrase" 0 walletpassphrase "nope" 600
     cli 0 walletpassphrase pw1 600 >/dev/null
-    ck "unlocked_until set" "$([ "$(cli 0 getwalletinfo | jq -r .unlocked_until)" -gt 0 ] && echo yes)" yes
+    ck "unlocked_until set" "$([ "$(cli 0 getwalletinfo | jget unlocked_until)" -gt 0 ] && echo yes)" yes
     tx=$(cli 0 sendtoaddress "$other" 1); wait_mempool 1 "$tx"; f=$(fee_of 0 "$tx"); mine 1
     ck "t send unlocked" "$(bal 0)" "$(add 5 -1 "$f")"
     zconfirm 0 "$zs" "[{\"address\":\"$other\",\"amount\":1}]" >/dev/null
     ck "z send unlocked" "$(zbal 0 "$zs")" "$(add 4 -1 -$FEE)"
-    ck "new z address unlocked" "$(cli 0 z_validateaddress "$(cli 0 z_getnewaddress)" | jq -r .ismine)" true
+    ck "new z address unlocked" "$(cli 0 z_validateaddress "$(cli 0 z_getnewaddress)" | jget ismine)" true
     cli 0 walletlock >/dev/null
-    ck "walletlock" "$(cli 0 getwalletinfo | jq -r .unlocked_until)" 0
+    ck "walletlock" "$(cli 0 getwalletinfo | jget unlocked_until)" 0
     ckerr "send after walletlock" "unlock|locked|passphrase" 0 sendtoaddress "$other" 1
     # incoming funds while locked are visible
     give_z 0 "$zs" 2; ck "z note received while locked is counted" "$(zbal 0 "$zs")" "$(add 4 -1 -$FEE 2)"
@@ -180,9 +180,9 @@ scn_encrypt() {
     # passphrase change
     cli 0 walletpassphrasechange pw1 pw2 >/dev/null
     ckerr "old passphrase rejected after change" "incorrect|passphrase" 0 walletpassphrase pw1 60
-    cli 0 walletpassphrase pw2 600 >/dev/null; ck "new passphrase unlocks" "$([ "$(cli 0 getwalletinfo | jq -r .unlocked_until)" -gt 0 ] && echo yes)" yes
+    cli 0 walletpassphrase pw2 600 >/dev/null; ck "new passphrase unlocks" "$([ "$(cli 0 getwalletinfo | jget unlocked_until)" -gt 0 ] && echo yes)" yes
     # keypool
-    cli 0 keypoolrefill 25 >/dev/null; ck "keypoolrefill unlocked" "$([ "$(cli 0 getwalletinfo | jq -r .keypoolsize)" -ge 25 ] && echo yes)" yes
+    cli 0 keypoolrefill 25 >/dev/null; ck "keypoolrefill unlocked" "$([ "$(cli 0 getwalletinfo | jget keypoolsize)" -ge 25 ] && echo yes)" yes
     cli 0 walletlock >/dev/null
     n=0; while a=$(cli 0 getnewaddress 2>/dev/null) && [ -n "$a" ] && [ $n -lt 60 ]; do n=$((n + 1)); done
     obs "getnewaddress_while_locked_until_keypool_empty" "$n"
@@ -200,8 +200,8 @@ scn_encrypt() {
 scn_crash() {
     setup2 || return
     ta=$(give_t 0 5); zs=$(cli 0 z_getnewaddress); give_z 0 "$zs" 4 6162
-    ztx=$(cli 0 z_listunspent | jq -r '.[0].txid')
-    s0=$(snap 0); total0=$(cli 0 z_gettotalbalance | jq -r .total | f8)
+    ztx=$(cli 0 z_listunspent | jget "[0].txid")
+    s0=$(snap 0); total0=$(cli 0 z_gettotalbalance | jget total | f8)
     R="-connect=127.0.0.1:$((BASE + 1))"
     # clean restart
     stop 0; start 0 "$BIN" $R; ck "clean restart" "$(snap 0)" "$s0"
@@ -215,12 +215,12 @@ scn_crash() {
     other=$(cli 1 getnewaddress)
     op=$(cli 0 z_sendmany "$zs" "[{\"address\":\"$other\",\"amount\":1}]" 1 $FEE); stop 0; start 0 "$BIN" $R; sleep 2; sync_to 0
     rcv=$(cli 1 getreceivedbyaddress "$other" 0 | f8)
-    ck "restart during z_sendmany: ops are gone" "$(cli 0 z_listoperationids | jq length)" 0
+    ck "restart during z_sendmany: ops are gone" "$(cli 0 z_listoperationids | jlen)" 0
     exp=$total0; [ "$rcv" != 0.00000000 ] && exp=$(add "$total0" -1 -$FEE)
     obs "pending_op_stop_delivered" "$rcv"
     cli 1 generate 1 >/dev/null; sync_to 0
-    ck "restart during z_sendmany: no double counting" "$(cli 0 z_gettotalbalance | jq -r .private | f8)" "$([ "$rcv" = 0.00000000 ] && echo 4.00000000 || add 4 -1 -$FEE)"
-    zcur=$(cli 0 z_gettotalbalance | jq -r .private | f8)
+    ck "restart during z_sendmany: no double counting" "$(cli 0 z_gettotalbalance | jget private | f8)" "$([ "$rcv" = 0.00000000 ] && echo 4.00000000 || add 4 -1 -$FEE)"
+    zcur=$(cli 0 z_gettotalbalance | jget private | f8)
 
     # kill -9 right after a transparent send reaches the mempool
     tb=$(bal 0 '*' 0); tx=$(cli 0 sendtoaddress "$other" 1); wait_mempool 1 "$tx"; f=$(fee_of 0 "$tx")
@@ -240,7 +240,7 @@ scn_crash() {
     obs "t_send_immediate_kill9_balance_delta_before_sync" "$(add "$(bal 0 '*' 0)" "-$tb")"
     obs "t_send_immediate_kill9_tx_in_peer_mempool_after_3s" "$(sleep 3; cli 1 getrawmempool | grep -c "$tx")"
     if [ "$known" = yes ]; then
-        cli 1 sendrawtransaction "$(cli 0 gettransaction "$tx" | jq -r .hex)" >/dev/null 2>&1; wait_mempool 1 "$tx"
+        cli 1 sendrawtransaction "$(cli 0 gettransaction "$tx" | jget hex)" >/dev/null 2>&1; wait_mempool 1 "$tx"
         f=$(fee_of 0 "$tx"); exp=$(add "$tb" -0.5 "$f")
     else exp=$tb; fi
     cli 1 generate 1 >/dev/null; sync_to 0
@@ -249,13 +249,13 @@ scn_crash() {
     ck "immediate kill -9: -rescan agrees" "$(bal 0)" "$exp"
 
     # kill -9 during z_sendmany proving
-    zb=$(cli 0 z_gettotalbalance | jq -r .private | f8)
+    zb=$(cli 0 z_gettotalbalance | jget private | f8)
     cli 0 z_sendmany "$zs" "[{\"address\":\"$other\",\"amount\":0.5}]" 1 $FEE >/dev/null; sleep 1; kill9 0
     start 0 "$BIN" $R; sleep 3; sync_to 0
-    pend=$(cli 1 getrawmempool | jq length); obs "z_sendmany_proving_kill9_mempool_txs" "$pend"; cli 1 generate 1 >/dev/null; sync_to 0
-    zz=$(cli 0 z_gettotalbalance | jq -r .private | f8)
+    pend=$(cli 1 getrawmempool | jlen); obs "z_sendmany_proving_kill9_mempool_txs" "$pend"; cli 1 generate 1 >/dev/null; sync_to 0
+    zz=$(cli 0 z_gettotalbalance | jget private | f8)
     case $zz in "$zb") pass "kill -9 during proving: nothing sent, balance unchanged" ;; "$(add "$zb" -0.5 -$FEE)") pass "kill -9 during proving: tx completed, balance exact" ;; *) bad "kill -9 during proving: balance $zz from $zb" ;; esac
-    stop 0; start 0 "$BIN" $R -rescan; sync_to 0; ck "-rescan after the proving kill -9 agrees" "$(cli 0 z_gettotalbalance | jq -r .private | f8)" "$zz"
+    stop 0; start 0 "$BIN" $R -rescan; sync_to 0; ck "-rescan after the proving kill -9 agrees" "$(cli 0 z_gettotalbalance | jget private | f8)" "$zz"
     zb=$zz
 
     # kill -9 immediately after a z note is mined and connected
@@ -264,9 +264,9 @@ scn_crash() {
     kill9 0; start 0 "$BIN" $R
     obs "z_note_after_connect_kill9_immediate" "$(zbal 0 "$zs" | f8)"
     sleep 3
-    obs "z_note_after_connect_kill9_after_3s" "$(cli 0 z_gettotalbalance | jq -r .private | f8)"
+    obs "z_note_after_connect_kill9_after_3s" "$(cli 0 z_gettotalbalance | jget private | f8)"
     stop 0; start 0 "$BIN" $R -rescan; sync_to 0
-    ck "-rescan recovers the note received before the kill -9" "$(cli 0 z_gettotalbalance | jq -r .private | f8)" "$(add "$zb" 1.5)"
+    ck "-rescan recovers the note received before the kill -9" "$(cli 0 z_gettotalbalance | jget private | f8)" "$(add "$zb" 1.5)"
     ck "memo recovered" "$(cli 0 z_listreceivedbyaddress "$zs" | jq -r '[.[]|select(.memo|startswith("6364"))]|length')" 1
 
     # kill -9 while blocks (with payments to us) connect

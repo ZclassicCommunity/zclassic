@@ -1,16 +1,27 @@
 #!/bin/sh
 # Verify src/c23/vendor/ is byte-identical to the Z23 pin recorded in Z23_SOURCE.tsv.
-# usage: check-vendor.sh [c23-dir]      (default: the directory above this script)
+# usage: check-vendor.sh [c23-dir | manifest.tsv]   (default: the directory above this script)
+# A manifest path checks <dir of manifest>/vendor against that manifest (root = checkout root).
 # Optional env Z23_REPO=<path>: additionally prove the pin contains 55245e2bd.
 # Fails (non-zero) on: blob drift, missing file, unlisted file under vendor/,
 # malformed row, inconsistent commit column, or (when openssl has sha3) a
 # core/MANIFEST.sha3 digest mismatch.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
-c23=${1:-$(dirname "$here")}
-c23=$(cd "$c23" && pwd) || exit 2
-root=$(cd "$c23/../.." && pwd)
-tsv="$c23/Z23_SOURCE.tsv"
+arg=${1:-$(dirname "$here")}
+if [ -f "$arg" ]; then
+    tsv=$(cd "$(dirname "$arg")" && pwd)/$(basename "$arg")
+    c23=$(dirname "$tsv")
+    root=$c23
+    while [ ! -f "$root/configure.ac" ]; do
+        [ "$root" = / ] && { echo "FAIL: no configure.ac above $tsv" >&2; exit 2; }
+        root=$(dirname "$root")
+    done
+else
+    c23=$(cd "$arg" && pwd) || exit 2
+    root=$(cd "$c23/../.." && pwd)
+    tsv="$c23/Z23_SOURCE.tsv"
+fi
 [ -f "$tsv" ] || { echo "FAIL: missing $tsv" >&2; exit 1; }
 fail=0
 bad() { echo "FAIL: $*" >&2; fail=1; }

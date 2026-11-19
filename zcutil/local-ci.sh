@@ -255,6 +255,9 @@ step() {
 
 # Each of these is a function so `step` can run it in a subshell with set -e off.
 t_vendor()   { make -C src check-c23-vendor; }
+t_toolsvendor() { sh src/c23/tools/check-vendor.sh zcutil/tools/Z23_SOURCE.tsv; }
+t_jsonq()    { make -C zcutil/tools check; }   # builds zcutil/bin/jsonq (host cc) and runs its fixture test; the shell tests need it
+t_lint()     { make -C zcutil/lint check && make -C zcutil/lint lint; }
 t_norust()   { make -C src check-c23-no-rust; }
 t_torsyms()  { make -C src check-c23-tor-symbols TOR_LIBDIR="/w/src/depends/$HOST/lib"; }
 t_treeroot() {
@@ -312,6 +315,9 @@ inner_test_run() {
     HOST=$(./depends/config.guess)
     mkdir -p $TD/logs
     step check-c23-vendor 1800 t_vendor
+    step check-tools-vendor 300 t_toolsvendor
+    step build-jsonq 600 t_jsonq
+    step zcl-lint 600 t_lint
     step check-c23-no-rust 1800 t_norust
     step check-c23-tor-symbols 1800 t_torsyms
     step test_bitcoin-full 7200 t_testbitcoin

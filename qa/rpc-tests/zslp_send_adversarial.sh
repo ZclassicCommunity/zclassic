@@ -31,6 +31,7 @@ ZCLI=$SRC/zclassic-cli
 ZTX=$SRC/zclassic-tx
 for b in "$ZD" "$ZCLI" "$ZTX"; do [ -x "$b" ] || { echo "missing $b" >&2; exit 2; }; done
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
+. "$(dirname "$0")/jsonq_lib.sh"
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/zcl-zslp-adv.XXXXXX")
 BASE=${ZSLP_PORT_BASE:-$((49000 + ($$ % 600)))}
@@ -119,8 +120,8 @@ wait_index() {
     while :; do
         info=$(cli "$1" zslp_getindexinfo 2>/dev/null || true)
         tip=$(cli "$1" getbestblockhash)
-        if [ -n "$info" ] && [ "$(printf '%s' "$info" | jq -r '.indexedblock')" = "$tip" ] &&
-           [ "$(printf '%s' "$info" | jq -r '.synced')" = true ]; then return 0; fi
+        if [ -n "$info" ] && [ "$(printf '%s' "$info" | jget indexedblock)" = "$tip" ] &&
+           [ "$(printf '%s' "$info" | jget synced)" = true ]; then return 0; fi
         t=$((t + 1)); [ $t -lt 240 ] || fail "the index of node $1 did not reach the tip: $info"
         sleep 1
     done
@@ -163,15 +164,15 @@ expect_err() {
 }
 
 tbal() { cli "$1" zslp_listunspent 1 | jq -r --arg t "$2" '([.balances[] | select(.tokenid == $t) | .amount] | first) // "0"'; }
-status_of() { cli 2 zslp_gettransaction "$1" | jq -r .validity; }
+status_of() { cli 2 zslp_gettransaction "$1" | jget validity; }
 
 # every index: nothing invalid, unknown or burning except the transactions named in $EXPECTED_BAD
 clean_index() {
     for n in $NODES; do
         info=$(cli "$n" zslp_getindexinfo)
-        [ "$(printf '%s' "$info" | jq -r .invalidtransactions)" = "$EXPECTED_INVALID" ] || fail "node $n: invalid transactions: $info"
-        [ "$(printf '%s' "$info" | jq -r .unknowntransactions)" = 0 ] || fail "node $n: unknown transactions: $info"
-        [ "$(printf '%s' "$info" | jq -r .burntransactions)" = 0 ] || fail "node $n: burning transactions: $info"
+        [ "$(printf '%s' "$info" | jget invalidtransactions)" = "$EXPECTED_INVALID" ] || fail "node $n: invalid transactions: $info"
+        [ "$(printf '%s' "$info" | jget unknowntransactions)" = 0 ] || fail "node $n: unknown transactions: $info"
+        [ "$(printf '%s' "$info" | jget burntransactions)" = 0 ] || fail "node $n: burning transactions: $info"
     done
     ok "$1: no index shows an unexpected invalid, unknown or burning transaction"
 }
@@ -204,7 +205,7 @@ for i in 1 2 3 4; do cli 2 sendtoaddress "$M" 5 >/dev/null; done # non-coinbase 
 settle
 
 r=$(cli 0 zslp_genesis '{"ticker":"ADV","name":"Adversarial","decimals":0,"initialquantity":"1000"}')
-X=$(printf '%s' "$r" | jq -r .tokenid)
+X=$(printf '%s' "$r" | jget tokenid)
 settle
 [ "$(tbal 0 "$X")" = 1000 ] || fail "genesis balance"
 ok "wallet A created token $X (1000, baton kept)"
@@ -219,7 +220,7 @@ rc1=0; wait $p1 || rc1=$?
 rc2=0; wait $p2 || rc2=$?
 [ $((rc1 == 0)) -ne $((rc2 == 0)) ] || fail "exactly one of two racing sends must succeed: rc $rc1 / $rc2: $(cat "$TMP/race1" "$TMP/race2")"
 grep -q "insufficient confirmed token balance" "$TMP/race1" "$TMP/race2" || fail "the losing send gave another error: $(cat "$TMP/race1" "$TMP/race2")"
-[ "$(cli 0 getrawmempool | jq length)" = 1 ] || fail "racing sends left $(cli 0 getrawmempool | jq length) transactions"
+[ "$(cli 0 getrawmempool | jlen)" = 1 ] || fail "racing sends left $(cli 0 getrawmempool | jlen) transactions"
 settle
 total=$(( $(tbal 0 "$X") + $(tbal 1 "$X") ))
 [ $total = 1000 ] || fail "after the race A + B hold $total, not 1000"
@@ -230,22 +231,22 @@ ok "racing sends: one sent, the other was refused for lack of a confirmed token 
 say "== 2. ordinary ZCL paid to wallet A inside an INVALID transaction of the same token"
 # A gives away every ordinary coin, so the poisoned coin is the only one it could use for a fee
 plain=$(cli 0 listunspent 0 | jq -c '[.[] | select(.tokenbearing == false and .spendable)]')
-n=$(printf '%s' "$plain" | jq length)
+n=$(printf '%s' "$plain" | jlen)
 sum=$(printf '%s' "$plain" | jq '[.[].amount * 100000000 | round] | add')
 ins=$(printf '%s' "$plain" | jq -c '[.[] | {txid, vout}]')
 raw=$(cli 0 createrawtransaction "$ins" "{\"$M\":$(btc $((sum - 10000)))}")
-cli 0 sendrawtransaction "$(cli 0 signrawtransaction "$raw" | jq -r .hex)" >/dev/null
+cli 0 sendrawtransaction "$(cli 0 signrawtransaction "$raw" | jget hex)" >/dev/null
 settle
 [ "$(cli 0 listunspent 0 | jq '[.[] | select(.tokenbearing == false)] | length')" = 0 ] || fail "wallet A still has ordinary coins"
 ok "wallet A gave away its $n ordinary coins; it holds only token outputs and the baton"
 
 # the attacker: a SEND of token X with no token inputs (INVALID: send_ancestry_invalid) that pays A 0.5 ZCL
 u=$(cli 2 listunspent 1 | jq -c '[.[] | select(.spendable and .generated != true and .amount >= 1)] | sort_by(.amount) | .[0]')
-utxid=$(printf '%s' "$u" | jq -r .txid); uvout=$(printf '%s' "$u" | jq -r .vout)
-change=$(btc $(( $(zat "$(printf '%s' "$u" | jq -r .amount)") - 50000000 - 546 - 10000 )))
+utxid=$(printf '%s' "$u" | jget txid); uvout=$(printf '%s' "$u" | jget vout)
+change=$(btc $(( $(zat "$(printf '%s' "$u" | jget amount)") - 50000000 - 546 - 10000 )))
 raw=$(cli 2 createrawtransaction "[{\"txid\":\"$utxid\",\"vout\":$uvout}]" '{}')
 raw=$("$ZTX" -regtest "$raw" "outscript=0:0x$("$SLP" send "$X" 1000)" "outaddr=$DUST:$M" "outaddr=0.5:$A" "outaddr=$change:$M")
-P=$(cli 2 sendrawtransaction "$(cli 2 signrawtransaction "$raw" | jq -r .hex)")
+P=$(cli 2 sendrawtransaction "$(cli 2 signrawtransaction "$raw" | jget hex)")
 settle
 [ "$(status_of "$P")" = invalid ] || fail "the attacker's transaction is not INVALID: $(cli 2 zslp_gettransaction "$P")"
 EXPECTED_INVALID=1
@@ -256,24 +257,24 @@ ok "the attacker paid A 0.5 ZCL at $P:2, inside an INVALID SEND of token X; A's 
 before_tok=$(tbal 0 "$X")
 expect_err "not enough ordinary ZCL" cli 0 zslp_send "$X" "[{\"address\":\"$B\",\"amount\":\"5\"}]"
 expect_err "not enough ordinary ZCL" cli 0 zslp_mint "$X" "5"
-[ "$(cli 0 getrawmempool | jq length)" = 0 ] || fail "a refused token transaction reached the mempool"
-[ "$(cli 0 gettxout "$P" 2 | jq -r .value)" = 0.50000000 ] || fail "the poisoned coin was spent"
+[ "$(cli 0 getrawmempool | jlen)" = 0 ] || fail "a refused token transaction reached the mempool"
+[ "$(cli 0 gettxout "$P" 2 | jget value)" = 0.50000000 ] || fail "the poisoned coin was spent"
 ok "with only the poisoned coin for the fee, SEND and MINT are refused and nothing is broadcast"
 # an ordinary payment still may use it: no token rules apply to an ordinary transaction
 # a clean coin makes the token transactions possible again, without the poisoned coin
 cli 2 sendtoaddress "$A" 0.3 >/dev/null
 settle
-s=$(cli 0 zslp_send "$X" "[{\"address\":\"$B\",\"amount\":\"5\"}]" | jq -r .txid)
+s=$(cli 0 zslp_send "$X" "[{\"address\":\"$B\",\"amount\":\"5\"}]" | jget txid)
 settle
 [ "$(status_of "$s")" = valid ] || fail "the send is not valid: $(cli 2 zslp_gettransaction "$s")"
 cli 2 getrawtransaction "$s" 1 | jq -e --arg p "$P" '[.vin[] | select(.txid == $p)] | length == 0' >/dev/null ||
     fail "the send used the poisoned coin"
-mt=$(cli 0 zslp_mint "$X" "7" | jq -r .txid)
+mt=$(cli 0 zslp_mint "$X" "7" | jget txid)
 settle
 [ "$(status_of "$mt")" = valid ] || fail "the mint is not valid: $(cli 2 zslp_gettransaction "$mt")"
 cli 2 getrawtransaction "$mt" 1 | jq -e --arg p "$P" '[.vin[] | select(.txid == $p)] | length == 0' >/dev/null ||
     fail "the mint used the poisoned coin"
-[ "$(cli 0 gettxout "$P" 2 | jq -r .value)" = 0.50000000 ] || fail "the poisoned coin was spent"
+[ "$(cli 0 gettxout "$P" 2 | jget value)" = 0.50000000 ] || fail "the poisoned coin was spent"
 [ "$(tbal 0 "$X")" = $((before_tok - 5 + 7)) ] || fail "A's token balance is $(tbal 0 "$X"), expected $((before_tok - 5 + 7))"
 clean_index "poisoned fee coin"
 ok "SEND and MINT are VALID and leave the poisoned coin alone"
@@ -293,7 +294,7 @@ cli 1 importaddress "$WA" "" true >/dev/null
 wait_index 1
 seen=$(tbal 1 "$X")
 expect_err "insufficient confirmed token balance" cli 1 zslp_send "$X" "[{\"address\":\"$M\",\"amount\":\"$((bb + 1))\"}]"
-[ "$(cli 1 getrawmempool | jq length)" = 0 ] || fail "a watch-only send reached the mempool"
+[ "$(cli 1 getrawmempool | jlen)" = 0 ] || fail "a watch-only send reached the mempool"
 ok "wallet B watching $WA (zslp_listunspent now shows $seen) can still send only its own $bb"
 
 # ---- 4. a higher -minrelaytxfee -----------------------------------------------------------
@@ -303,9 +304,9 @@ start 1 -zslpindex=1 -minrelaytxfee=0.0001
 connect 1 2
 wait_tip
 r=$(cli 1 zslp_send "$X" "[{\"address\":\"$A\",\"amount\":\"3\"}]")
-h=$(printf '%s' "$r" | jq -r .txid)
+h=$(printf '%s' "$r" | jget txid)
 settle
-v1=$(zat "$(cli 2 getrawtransaction "$h" 1 | jq -r '.vout[1].value')")
+v1=$(zat "$(cli 2 getrawtransaction "$h" 1 | jget "vout[1].value")")
 [ "$v1" = 5460 ] || fail "token output value $v1, expected 5460 (the P2PKH dust threshold at 0.0001/kB)"
 [ "$(status_of "$h")" = valid ] || fail "the send is not valid"
 ok "the token outputs carry 5460 zatoshi, a default node relayed and mined the send, and it is VALID"
@@ -321,22 +322,22 @@ say "== 4b. a token output and a mint baton that pay wallet A 0 zatoshi"
 cli 2 sendtoaddress "$A" 1 >/dev/null
 settle
 u=$(cli 2 listunspent 1 | jq -c '[.[] | select(.spendable and .generated != true and .amount >= 1)] | sort_by(.amount) | .[0]')
-utxid=$(printf '%s' "$u" | jq -r .txid); uvout=$(printf '%s' "$u" | jq -r .vout)
-change=$(btc $(( $(zat "$(printf '%s' "$u" | jq -r .amount)") - 20000 )))
+utxid=$(printf '%s' "$u" | jget txid); uvout=$(printf '%s' "$u" | jget vout)
+change=$(btc $(( $(zat "$(printf '%s' "$u" | jget amount)") - 20000 )))
 raw=$(cli 2 createrawtransaction "[{\"txid\":\"$utxid\",\"vout\":$uvout}]" '{}')
 raw=$("$ZTX" -regtest "$raw" "outscript=0:0x$("$SLP" genesis ZV "Zero Value" 2 100)" "outaddr=0:$A" "outaddr=0:$A" "outaddr=$change:$M")
-Z=$(cli 2 sendrawtransaction "$(cli 2 signrawtransaction "$raw" | jq -r .hex)")
+Z=$(cli 2 sendrawtransaction "$(cli 2 signrawtransaction "$raw" | jget hex)")
 settle
 [ "$(status_of "$Z")" = valid ] || fail "the zero-value GENESIS is not valid: $(cli 2 zslp_gettransaction "$Z")"
 [ "$(tbal 0 "$Z")" = 100 ] || fail "zslp_listunspent shows $(tbal 0 "$Z") of the zero-value token, expected 100"
 cli 0 gettxout "$Z" 1 | jq -e '.value == 0' >/dev/null || fail "the token output does not carry 0 zatoshi"
 ok "wallet A holds 100 units of $Z in a 0 zatoshi output and the baton in another"
-s=$(cli 0 zslp_send "$Z" "[{\"address\":\"$B\",\"amount\":\"40\"}]" | jq -r .txid)
+s=$(cli 0 zslp_send "$Z" "[{\"address\":\"$B\",\"amount\":\"40\"}]" | jget txid)
 settle
 [ "$(status_of "$s")" = valid ] || fail "the send of the zero-value token is not valid: $(cli 2 zslp_gettransaction "$s")"
 [ "$(tbal 0 "$Z")" = 60 ] && [ "$(tbal 1 "$Z")" = 40 ] || fail "balances after the send: A $(tbal 0 "$Z"), B $(tbal 1 "$Z")"
 ok "zslp_send spent the 0 zatoshi token output (A 60, B 40)"
-mt=$(cli 0 zslp_mint "$Z" 5 | jq -r .txid)
+mt=$(cli 0 zslp_mint "$Z" 5 | jget txid)
 settle
 [ "$(status_of "$mt")" = valid ] || fail "the mint with the zero-value baton is not valid: $(cli 2 zslp_gettransaction "$mt")"
 [ "$(tbal 0 "$Z")" = 65 ] || fail "A holds $(tbal 0 "$Z") after the mint, expected 65"
@@ -353,7 +354,7 @@ refused=0; tries=0
 while :; do
     if out=$(cli 0 zslp_send "$X" "[{\"address\":\"$B\",\"amount\":\"1\"}]" 1 null true 2>&1); then
         info=$(cli 0 zslp_getindexinfo)
-        [ "$(printf '%s' "$info" | jq -r .synced)" = true ] || fail "a dry run was built while the index says it is not synced: $info"
+        [ "$(printf '%s' "$info" | jget synced)" = true ] || fail "a dry run was built while the index says it is not synced: $info"
         break
     fi
     case $out in

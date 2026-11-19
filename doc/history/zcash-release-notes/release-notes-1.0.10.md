@@ -5,7 +5,7 @@ Signature validation using libsecp256k1
 ---------------------------------------
 
 ECDSA signatures inside Zcash transactions now use validation using
-[https://github.com/bitcoin/secp256k1](libsecp256k1) instead of OpenSSL.
+[libsecp256k1](https://github.com/bitcoin/secp256k1) instead of OpenSSL.
 
 Depending on the platform, this means a significant speedup for raw signature
 validation speed. The advantage is largest on x86_64, where validation is over

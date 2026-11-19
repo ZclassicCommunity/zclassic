@@ -1,0 +1,29 @@
+# zcl-lint no-new-bash baseline: bash shebang and bashism lines in shell scripts per path.
+# Shrink-only: lower a count or delete a row when it falls; never raise one or add a path.
+# Regenerate with: zcl-lint no-new-bash --update-baseline (refused while anything rose).
+contrib/devtools/github-merge.sh	21
+contrib/init/bitcoind.init	1
+contrib/tidy_datadir.sh	1
+qa/rpc-tests/prover_memory_bench.sh	1
+qa/zcash/checksec.sh	21
+qa/zcash/performance-measurements.sh	15
+src/c23/tor/privacy_check.sh	2
+wallet/contrib/cross/build-gui-win.sh	1
+wallet/contrib/cross/build-qtbase-win.sh	1
+wallet/contrib/make-allinone.sh	1
+wallet/res/libsodium/buildlibsodium.sh	3
+wallet/res/mkicns.sh	1
+wallet/res/resize.sh	1
+wallet/src/scripts/dotranslations.sh	1
+wallet/src/scripts/mkmacdmg.sh	3
+wallet/src/scripts/mkrelease.sh	2
+wallet/src/scripts/signbinaries.sh	3
+wallet/tests/e2e/mocke2e.sh	1
+zcutil/build-linux-ci.sh	1
+zcutil/build-release.sh	3
+zcutil/build.sh	7
+zcutil/cleanup-tags.sh	1
+zcutil/fetch-params.sh	11
+zcutil/install-deps.sh	3
+zcutil/setup-mingw-toolchain.sh	1
+zcutil/zsync.sh	6

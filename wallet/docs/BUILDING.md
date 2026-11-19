@@ -74,7 +74,7 @@ It covers, in order:
 5. [Linux — plain GUI build](#4-linux--plain-gui-build-dynamic-qt)
 6. [Linux — single-file dev build (`make-allinone.sh`)](#5-linux--single-file-dev-build-make-allinonesh)
 7. [Linux — portable static-Qt release (`mkrelease.sh`)](#6-linux--portable-static-qt-release-mkreleasesh)
-8. [Windows — static-Qt cross build + manual embed](#7-windows--static-qt-cross-build-from-linux)
+8. [Windows — static-Qt cross build + manual embed](#7-windows--portable-static-build)
    - [Windows — native Qt-kit release bundle (`build-windows.sh`)](#7b-windows--native-release-bundle-with-the-qt-kit-build-windowssh)
 9. [macOS — `.app` / `.dmg` + ad-hoc codesign (correct ORDER)](#8-macos--app--dmg--ad-hoc-codesign)
 10. [Two pitfalls everyone hits: qt5-websockets & libsodium](#9-the-two-pitfalls-you-must-know)
@@ -222,7 +222,7 @@ x86_64-w64-mingw32-g++ -v 2>&1 | sed -n 's/^Thread model: //p'   # MUST print: p
 ```
 
 - A **static cross-Qt 5.15 for win32-g++**, built once by `build-qtbase-win.sh`
-  (see [§7](#7-windows--static-qt-cross-build-from-linux)). It needs the qtbase
+  (see [§7](#7-windows--portable-static-build)). It needs the qtbase
   source tarball; if you don't have it, fetch
   `qtbase-everywhere-opensource-src-5.15.x.tar.xz` from
   <https://download.qt.io/archive/qt/5.15/>.
@@ -378,7 +378,7 @@ Artifacts produced in `artifacts/`:
 
 > `mkrelease.sh` also has a **legacy Windows section** (lines 165-226) gated on
 > `MXE_PATH`. With `MXE_PATH` unset it exits cleanly after the Linux build. **Do not
-> use that MXE path** — the current Windows build is [§7](#7-windows--static-qt-cross-build-from-linux),
+> use that MXE path** — the current Windows build is [§7](#7-windows--portable-static-build),
 > which produces the single-file `.exe`, not the old multi-file zip.
 
 ---

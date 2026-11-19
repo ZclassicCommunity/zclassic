@@ -26,6 +26,7 @@ ZCLI=$SRC/zclassic-cli
 ZTX=$SRC/zclassic-tx
 for b in "$ZD" "$ZCLI" "$ZTX"; do [ -x "$b" ] || { echo "missing $b" >&2; exit 2; }; done
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
+. "$(dirname "$0")/jsonq_lib.sh"
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/zcl-tnr-e2e.XXXXXX")
 BASE=${E2E_PORT_BASE:-$((20000 + ($$ % 10000)))}
@@ -126,8 +127,8 @@ wait_index() {
         zn=$(cli znam_getindexinfo 2>/dev/null || true)
         zs=$(cli zslp_getindexinfo 2>/dev/null || true)
         if [ -n "$zn" ] && [ -n "$zs" ] &&
-           [ "$(printf '%s' "$zn" | jq -r '.indexedblock')" = "$tip" ] && [ "$(printf '%s' "$zn" | jq -r '.synced')" = true ] &&
-           [ "$(printf '%s' "$zs" | jq -r '.indexedblock')" = "$tip" ] && [ "$(printf '%s' "$zs" | jq -r '.synced')" = true ]; then return 0; fi
+           [ "$(printf '%s' "$zn" | jget indexedblock)" = "$tip" ] && [ "$(printf '%s' "$zn" | jget synced)" = true ] &&
+           [ "$(printf '%s' "$zs" | jget indexedblock)" = "$tip" ] && [ "$(printf '%s' "$zs" | jget synced)" = true ]; then return 0; fi
         t=$((t + 1)); [ $t -lt 240 ] || fail "the indexes did not reach the tip"
         sleep 1
     done
@@ -147,7 +148,7 @@ coin() {
         | [.[] | select(.spendable and .amount >= 1) | select(("\(.txid):\(.vout)") as $o | $u | index($o) | not)]
         | sort_by(.amount) | .[0]')
     [ "$u" != null ] || fail "no coin left at $1"
-    printf '%s %s %s' "$(printf '%s' "$u" | jq -r .txid)" "$(printf '%s' "$u" | jq -r .vout)" "$(printf '%s' "$u" | jq -r .amount)"
+    printf '%s %s %s' "$(printf '%s' "$u" | jget txid)" "$(printf '%s' "$u" | jget vout)" "$(printf '%s' "$u" | jget amount)"
 }
 
 # rawtx <address> <outputs...>: a transaction whose FIRST input is a coin of <address>; the outputs are zclassic-tx
@@ -161,13 +162,13 @@ rawtx() {
     raw=$(cli createrawtransaction "[{\"txid\":\"$ctxid\",\"vout\":$cvout}]" '{}')
     raw=$("$ZTX" -regtest "$raw" "$@" "outaddr=$change:$addr")
     signed=$(cli signrawtransaction "$raw")
-    [ "$(printf '%s' "$signed" | jq -r .complete)" = true ] || fail "could not sign: $signed"
-    cli sendrawtransaction "$(printf '%s' "$signed" | jq -r .hex)"
+    [ "$(printf '%s' "$signed" | jget complete)" = true ] || fail "could not sign: $signed"
+    cli sendrawtransaction "$(printf '%s' "$signed" | jget hex)"
 }
 
 mine() { cli generate 1 >/dev/null; wait_index; }
 
-nf() { cli znam_getname "$1" | jq -r ".$2"; }
+nf() { cli znam_getname "$1" | jget "$2"; }
 
 K1=$(cli getnewaddress)
 K2=$(cli getnewaddress)
@@ -177,30 +178,30 @@ for a in $K1 $K2; do
 done
 
 # a 1-of-1 multisig P2SH address of this wallet: the wallet signs for it
-PK=$(cli validateaddress "$(cli getnewaddress)" | jq -r .pubkey)
+PK=$(cli validateaddress "$(cli getnewaddress)" | jget pubkey)
 MS=$(cli addmultisigaddress 1 "[\"$PK\"]")
 case "$MS" in t*) ;; *) fail "addmultisigaddress returned '$MS'" ;; esac
-[ "$(cli validateaddress "$MS" | jq -r .isscript)" = true ] || fail "$MS is not a P2SH address"
+[ "$(cli validateaddress "$MS" | jget isscript)" = true ] || fail "$MS is not a P2SH address"
 cli sendtoaddress "$MS" 3 >/dev/null; cli sendtoaddress "$MS" 3 >/dev/null; cli sendtoaddress "$MS" 3 >/dev/null
 mine
 
 # ---- ZSLP-VOUT0 -----------------------------------------------------------
 
 say "== ZSLP-VOUT0: a GENESIS at vout[0] is a token, the same GENESIS at vout[1] is not a message"
-expect "no tokens yet" "$(cli zslp_getindexinfo | jq -r .tokens)" 0
+expect "no tokens yet" "$(cli zslp_getindexinfo | jget tokens)" 0
 G0=$(rawtx "$K1" "outscript=0:0x$("$SLP" genesis TKA "Token A" 0 1000)" "outaddr=$DUST:$K1")
 mine
-expect "the GENESIS at vout[0] makes a token" "$(cli zslp_getindexinfo | jq -r .tokens)" 1
-expect "and is a GENESIS message" "$(cli zslp_getindexinfo | jq -r .genesismessages)" 1
+expect "the GENESIS at vout[0] makes a token" "$(cli zslp_getindexinfo | jget tokens)" 1
+expect "and is a GENESIS message" "$(cli zslp_getindexinfo | jget genesismessages)" 1
 G1=$(rawtx "$K1" "outaddr=$DUST:$K1" "outscript=0:0x$("$SLP" genesis TKB "Token B" 0 1000)")
 mine
-expect "the GENESIS at vout[1] makes no token" "$(cli zslp_getindexinfo | jq -r .tokens)" 1
-expect "and is no message" "$(cli zslp_getindexinfo | jq -r .genesismessages)" 1
+expect "the GENESIS at vout[1] makes no token" "$(cli zslp_getindexinfo | jget tokens)" 1
+expect "and is no message" "$(cli zslp_getindexinfo | jget genesismessages)" 1
 expect_error "its transaction is unknown to the index" "" cli zslp_gettransaction "$G1"
 G2=$(rawtx "$K1" "outaddr=$DUST:$K1" "outaddr=$DUST:$K1" "outscript=0:0x$("$SLP" genesis TKC "Token C" 0 1000)")
 mine
-expect "the GENESIS at vout[2] makes no token either" "$(cli zslp_getindexinfo | jq -r .tokens)" 1
-expect "token A is the token of the first GENESIS" "$(cli zslp_listtokens | jq -r '.[0].tokenid')" "$G0"
+expect "the GENESIS at vout[2] makes no token either" "$(cli zslp_getindexinfo | jget tokens)" 1
+expect "token A is the token of the first GENESIS" "$(cli zslp_listtokens | jget "[0].tokenid")" "$G0"
 
 # ---- ZNAM-OWNER-2 ---------------------------------------------------------
 

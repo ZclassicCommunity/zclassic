@@ -49,7 +49,7 @@ ta=$(give_t 0 10)
 za=$(cli 0 z_getnewaddress sapling)
 give_z 0 "$za" 5
 sync_to 0
-ck "old build: wallet unencrypted before encryptwallet" "$(cli 0 getwalletinfo | jq 'has("unlocked_until")')" false
+ck "old build: wallet unencrypted before encryptwallet" "$(cli 0 getwalletinfo | jhas unlocked_until)" false
 st_plain=$(state 0 "$za"); keys_plain=$(keys 0)
 obs plain.state "$st_plain"
 ck "old build: shielded balance is 5" "$(zbal 0 "$za")" "5.00000000"
@@ -64,7 +64,7 @@ kill -0 "$pid" 2>/dev/null && bad "old build did not exit after encryptwallet"
 say "-- new build opens old-encrypted wallet"
 start 0 "$BIN" -connect=127.0.0.1:$((BASE + 1)) || exit 1
 sync_to 0
-ck "new build: wallet reports locked" "$(cli 0 getwalletinfo | jq '.unlocked_until')" 0
+ck "new build: wallet reports locked" "$(cli 0 getwalletinfo | jget unlocked_until)" 0
 ckerr "new build: dumpprivkey refused while locked" "locked|passphrase" 0 dumpprivkey "$ta"
 ckerr "new build: wrong passphrase refused" "incorrect" 0 walletpassphrase "wrong-pass" 600
 ckerr "new build: empty-ish passphrase refused" "incorrect" 0 walletpassphrase "$P1-" 600

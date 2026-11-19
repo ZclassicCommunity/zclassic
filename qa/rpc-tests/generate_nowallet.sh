@@ -5,7 +5,7 @@
 # assertion (boost::shared_ptr operator->), a plain one crashed.
 #
 # usage: generate_nowallet.sh --bin <dir> --work <dir> [--base port]
-# Needs jq and the Zcash parameters in ~/.zcash-params. Shell only, no Python.
+# Needs the Zcash parameters in ~/.zcash-params. Shell only, no Python.
 B=""; W=""; P=""
 while [ $# -gt 0 ]; do
     case $1 in
@@ -13,7 +13,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ -x "$B/zclassicd" ] && [ -n "$W" ] || { echo "usage: $0 --bin DIR --work DIR [--base port]" >&2; exit 2; }
-command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
+. "$(dirname "$0")/jsonq_lib.sh"
 P=${P:-$((20000 + ($$ % 20000)))}; R=0; F=0
 rm -rf "$W"; mkdir -p "$W"; W=$(cd "$W" && pwd)
 trap '[ -f "$D/pid" ] && kill -9 "$(cat "$D/pid")" 2>/dev/null' EXIT
@@ -47,7 +47,7 @@ r=$(cli setgenerate true 2>&1); echo "$r" | grep -q "generate method\|No coinbas
 sp
 # 2. the same node with -mineraddress can mine
 newdir ma; st -disablewallet -mineraddress=$ADDR -minetolocalwallet=0 || { bad "start -disablewallet -mineraddress"; }
-n=$(cli generate 2 2>&1 | jq -r 'length' 2>/dev/null); [ "$n" = 2 ] && [ "$(cli getblockcount)" = 2 ] && ok "generate with -disablewallet -mineraddress mines 2 blocks" || bad "generate with -mineraddress: '$n'"
+n=$(cli generate 2 2>&1 | jlen 2>/dev/null); [ "$n" = 2 ] && [ "$(cli getblockcount)" = 2 ] && ok "generate with -disablewallet -mineraddress mines 2 blocks" || bad "generate with -mineraddress: '$n'"
 cli getblocktemplate >/dev/null 2>&1; rcg=$?; kill -0 "$(cat "$D/pid")" 2>/dev/null && ok "getblocktemplate with -mineraddress answers without killing the node (rc=$rcg)" || bad "getblocktemplate with -mineraddress killed the node"
 sp
 # 3. -prune : no wallet there either

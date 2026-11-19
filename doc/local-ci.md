@@ -117,7 +117,7 @@ branch) onto the test builds only; the picks are recorded in `test*/PICKS.txt`.
 Results are in `test/` (debug) and `test-release/`.
 
 The debug stage runs:
-`check-c23-vendor`,
+`check-c23-vendor`, `check-tools-vendor`, `build-jsonq` (builds and tests `zcutil/bin/jsonq`, which the shell tests use), `zcl-lint` (zcutil/lint ratchets),
 `check-c23-no-rust`, `check-c23-tor-symbols`, the tree-root ASan/UBSan check, full
 `test_bitcoin`, full `zcash-gtest`, `src/c23/test/run.sh --linked` (golden corpus),
 `regtest-smoke.sh`, `wallet_matrix.sh` scenarios 1-9, `wallet_tokenguard.sh` (plain and
