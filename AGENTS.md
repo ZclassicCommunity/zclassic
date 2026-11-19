@@ -28,6 +28,7 @@ make -C zcutil check                                        # every developer to
 zcutil/bin/zcl-dev doctor                                   # what this host lacks to build and test, with the fix for each gap
 zcutil/bin/zcl-dev verify [--base ref]                      # one trip for committed changes: select, focused tests when built (needs the zcl-dev-t-fast alias), zcl-lint all, test-changed hint (no `tests`, `t-fast --changed` or `hooks install` line yet: they land with their tools; zcl-lint has no `fast`, so verify runs `all`); on Windows lint is UNAVAILABLE (exit 2), run it on a POSIX host
 zcutil/bin/zcl-dev code map|owner|impact|file|sym|refs ...  # code intelligence: navigate before searching
+zcutil/bin/zcl-dev compdb --build-dir <out-of-tree build dir>   # compile_commands.json for clangd from a configured build; --check tells when it is stale
 zcutil/bin/zcl-dev wiki [topic]                             # walk the docs and source trees one topic at a time
 zcutil/bin/zcl-dev lessons find <words>                     # search lessons, traps and facts (add: lessons add)
 zcutil/bin/zcl-dev know <term>                              # closed FACTS table answer, UNKNOWN when no row; know --check validates it

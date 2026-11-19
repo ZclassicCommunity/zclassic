@@ -1,0 +1,7 @@
+[
+{"directory": "@W@/indir/src", "file": "@W@/indir/src/a.cc", "arguments": ["g++", "-DFOO=1", "-I.", "-c", "-o", "a.o", "a.cc"]},
+{"directory": "@W@/indir/src", "file": "@W@/indir/src/z.c", "arguments": ["gcc", "-O2", "-c", "-o", "z.o", "z.c"]}
+]
+--- stderr
+entries 2, skipped 0, duplicates 0
+exit=0

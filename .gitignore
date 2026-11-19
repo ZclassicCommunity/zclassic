@@ -116,3 +116,4 @@ libzcashconsensus.pc
 src/c23-symbols.stamp
 zcutil/bin/
 zcutil/gen/
+/compile_commands.json
