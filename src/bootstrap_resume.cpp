@@ -665,6 +665,10 @@ std::vector<BootstrapMove> BootstrapPeerBoard::Rebalance(int64_t nowMs, const st
         if (n) {
             generous[p] = sumG / n;
             conservative[p] = sumC / n;
+        } else if (peers[p].lastPerStream > 0) {
+            // No stream of it is running now (its streams ran out of files): what it last gave a stream still
+            // tells an idle stream whether it pays to take over a slow holder's file.
+            generous[p] = conservative[p] = peers[p].lastPerStream;
         }
     }
 
@@ -744,9 +748,13 @@ std::vector<BootstrapMove> BootstrapPeerBoard::Rebalance(int64_t nowMs, const st
                 left += f->second;
             const double r = std::max(1.0, std::max(StreamRate(st, nowMs, false), StreamLifeRate(st, nowMs)));
             const double secs = left / r;
-            if (secs > pol.stealMinSeconds && bestRate >= pol.stealFactor * r && secs > victimSeconds) {
+            // Time the idle stream would save by finishing the rest of the file itself (restarting costs the
+            // victim's requests in flight, which this must outweigh): worth it only if it saves more than
+            // stealMinSeconds and the other server is clearly faster.
+            const double saved = secs - left / std::max(1.0, bestRate);
+            if (saved > pol.stealMinSeconds && bestRate >= pol.stealFactor * r && saved > victimSeconds) {
                 victim = (int)i;
-                victimSeconds = secs;
+                victimSeconds = saved;
             }
         }
         if (victim >= 0) {

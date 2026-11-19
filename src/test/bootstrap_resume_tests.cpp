@@ -1739,6 +1739,12 @@ BOOST_AUTO_TEST_CASE(a_stream_the_server_defers_moves_to_the_other_server)
 
 BOOST_AUTO_TEST_CASE(partial_files_fetched_from_one_server_continue_from_the_other)
 {
+    // no stream moves here: a moved stream drops the requests in flight, which the servers count twice
+    BootstrapPeerPolicy still;
+    still.slowFraction = 0;
+    still.stallMs = (int64_t)1 << 40;
+    still.stealFactor = 1e9;
+    PolicyGuard guard(still);
     TempDir tmp;
     const Snapshot s = MakeSnapshot(8);
     std::string error;
@@ -1974,6 +1980,34 @@ BOOST_AUTO_TEST_CASE(peer_board_does_not_steal_from_a_stream_that_just_connected
     BOOST_CHECK_EQUAL(mv[0].peer, 1);
     d.Detach(1);
     BOOST_CHECK_EQUAL(d.Assign(1, 3300), 0); // the victim's server is avoided for a while
+}
+
+BOOST_AUTO_TEST_CASE(peer_board_an_idle_stream_takes_over_a_slow_holder_when_the_fast_server_has_no_stream_left)
+{
+    // The end of a download over a fast and a slow server: the fast server's streams ran out of files and are idle,
+    // the slow server's stream still holds a big file. What the fast server gave a stream is remembered, so the
+    // idle stream takes the rest of the file instead of everything waiting for the slow server.
+    BootstrapPeerPolicy pol;
+    pol.windowMs = 1000;
+    pol.stallMs = 1000000;
+    pol.stealMinSeconds = 3;
+    pol.moveCooldownMs = 1000;
+    BootstrapPeerBoard b(2, 3, pol);
+    b.Attach(0, b.Assign(0, 0), 0);
+    b.Attach(1, b.Assign(1, 0), 0);
+    BOOST_CHECK_EQUAL(b.StreamPeer(1), 1);
+    b.NoteClaim(1, 7, (uint64_t)16 << 20, false);
+    for (int64_t t = 100; t <= 3000; t += 100) {
+        b.NoteChunk(0, 8, 100000, t); // ~1 MB/s from the fast server
+        b.NoteChunk(1, 7, 10000, t);  // ~100 kB/s from the slow one
+    }
+    b.Detach(0);
+    b.SetIdle(0, true);
+    b.SetIdle(2, true);
+    const std::vector<BootstrapMove> mv = b.Rebalance(3000);
+    BOOST_REQUIRE_EQUAL(mv.size(), 1U);
+    BOOST_CHECK_EQUAL(mv[0].stream, 1);
+    BOOST_CHECK(mv[0].reason == BMR_STEAL);
 }
 
 // ---- downloads against fake servers: liveness ----

@@ -171,14 +171,14 @@ struct BootstrapPeerPolicy {
     double slowFraction;      //!< a peer slower than this share of the best per-stream rate loses a stream
     int64_t moveCooldownMs;   //!< a moved stream is not moved again for this long
     int64_t penaltyMs;        //!< a peer a stream was moved off is avoided for new assignments this long
-    int64_t stealMinSeconds;  //!< steal a file range only if its holder needs longer than this to finish it
+    int64_t stealMinSeconds;  //!< steal the rest of a file only if finishing it elsewhere saves more than this
     double stealFactor;       //!< ... and the idle stream's peer is at least this much faster than the holder's
     int64_t failBackoffBaseMs;
     int64_t failBackoffMaxMs;
     int maxConnectsPerMinute;  //!< connection attempts one server may get in a minute (a refusing server is not hammered)
     BootstrapPeerPolicy()
         : windowMs(10000), stallMs(20000), slowFraction(0.5), moveCooldownMs(30000), penaltyMs(30000),
-          stealMinSeconds(15), stealFactor(2.0), failBackoffBaseMs(2000), failBackoffMaxMs(60000), maxConnectsPerMinute(60) {}
+          stealMinSeconds(15), stealFactor(1.5), failBackoffBaseMs(2000), failBackoffMaxMs(60000), maxConnectsPerMinute(60) {}
 };
 
 struct BootstrapPeerSnapshot {
