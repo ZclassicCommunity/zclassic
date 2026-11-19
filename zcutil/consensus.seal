@@ -1,6 +1,8 @@
 # zcutil/consensus.seal: consensus tripwire. One row per sealed file: <path>TAB<git blob sha1>.
 # Written by zcl-lint consensus-seal --reseal --reason. Do not hand-edit. Ritual: doc/agent/UNSEAL.md
 src/chainparams.cpp	f086876a524e2b9be11caddfb8e595a134ca56c2
+src/consensus/AGENTS.md	dde0e972df0dc72c605afd149f8d4a27ecfecdbe
+src/consensus/CLAUDE.md	43c994c2d3617f947bcb5adf1933e21dabe46bb5
 src/consensus/consensus.h	2955cb8636e9c6706eabb35154d9ed1ded77a41c
 src/consensus/oversize_grandfather.cpp	63cc0e38a11d7f139be3540e71954e7928d88780
 src/consensus/oversize_grandfather.h	49da3150226636f0c1378d5307f429fbc1682d11
