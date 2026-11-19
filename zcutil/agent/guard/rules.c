@@ -48,7 +48,17 @@
  *   zclassicd -regtest (no -datadir)     allowed: the node's own regtest default is not parsed
  *   git push remote <branch-alias>       only the literal name master (or a wildcard) is recognised
  *   backslash paths inside Bash          Git Bash consumes the backslash before the guard sees it
- *   PowerShell variables ($d = ...)      not tracked (Bash NAME=value is) */
+ *   PowerShell `$d += x`, splatting,     not tracked; a path built from a command's output
+ *     functions, aliases                 ((Get-Item x).FullName) is only caught by the statement
+ *                                        rule (APPDATA/HOME and a Zclassic name in one statement)
+ *   sed -i / patch / git apply on a      Bash and PowerShell writes to sealed consensus files give no
+ *     sealed consensus file              guard.consensus_seal warning (only Edit, Write, MultiEdit)
+ *   iwr -InFile body.json                a request body read from a file is not read
+ *   xargs with a method on a pipe        `printf getinfo | xargs zclassic-cli getblockcount` is
+ *                                        allowed: a visible method is the method
+ *   tar --remove-files -C <ancestor> .   the archived operands count, an ancestor given by -C does not
+ *   Windows 8.3 names                    ZCLASS~N and ZCASHP~N under AppData are matched; other
+ *                                        short forms of a profile path are not */
 
 #include <ctype.h>
 #include <stdbool.h>
@@ -774,6 +784,10 @@ static bool mentions_datadir(const char *w)
         if (comp_starts_ci(p, n, ".zclassic") || comp_starts_ci(p, n, ".zcash-params"))
             return true;
         if (appdata && (comp_is_ci(p, n, "zclassic") || comp_is_ci(p, n, "zcashparams")))
+            return true;
+        /* the Windows 8.3 short names of the two folders: ZCLASS~1, ZCASHP~1 */
+        if (appdata && n == 8 && (comp_starts_ci(p, n, "zclass~") || comp_starts_ci(p, n, "zcashp~")) &&
+            isdigit((unsigned char)p[7]))
             return true;
         if (comp_is_appdata(p, n)) appdata = true;
         if (mac == 2 && comp_is_ci(p, n, "support")) appdata = true;
@@ -1798,14 +1812,56 @@ static bool regtest_word_in(const char *s)
     return false;
 }
 
-/* guard.spend_or_key_export: a spend or key-export method outside -regtest. */
+/* Set by seg_run while a segment runs behind xargs: the words xargs reads from stdin follow the
+ * command's own, so a client whose method word is missing (or is xargs' replace string) takes its
+ * method from the data. g_xrepl is the replace string of -I/-i/-J, "" when there is none. */
+static bool g_xargs;
+static char g_xrepl[32];
+
+static bool is_client_name(const char *cmd)
+{
+    static const char *const clients[] = {"zclassic-cli", "zcash-cli"};
+    return IN_LIST(cmd, clients);
+}
+
+/* The word in the method position is not a method name: it is a variable or substitution, or the
+ * replace string of xargs, so the method comes from somewhere the guard cannot read. */
+static bool method_word_opaque(const char *w)
+{
+    return w[0] == '$' || w[0] == '`' || strstr(w, "$(") != NULL ||
+           (g_xargs && g_xrepl[0] && strstr(w, g_xrepl) != NULL);
+}
+
+/* -stdin is on under both parses: zclassic-cli then appends stdin lines to its arguments, and
+ * with no method word of its own the first line becomes the method (bitcoin-cli.cpp). */
+static bool stdin_effective(const struct cmdv *v)
+{
+    struct popts strict, lax;
+    parse_opts(v, false, &strict);
+    parse_opts(v, true, &lax);
+    return popts_bool(&strict, "-stdin", false) || popts_bool(&lax, "-stdin", false);
+}
+
+/* guard.spend_or_key_export: a spend or key-export method outside -regtest, also when the method
+ * is not visible on the command line (-stdin, xargs, a variable, a substitution). */
 static const char *check_rpc(const struct cmdv *v)
 {
     int i, j;
+    bool hidden = false;
     if (strcmp(v->cmd, "curl") == 0 || strcmp(v->cmd, "wget") == 0) return check_http(v);
     i = method_index(v, false);
     j = method_index(v, true);
-    if ((i < 0 || !is_method(v->a[i], strlen(v->a[i]))) &&
+    if ((i >= 0 && !is_method(v->a[i], strlen(v->a[i]))) ||
+        (j >= 0 && !is_method(v->a[j], strlen(v->a[j])))) {
+        /* a word is there; it is only a problem when it hides the method */
+        if (is_client_name(v->cmd) &&
+            ((i >= 0 && method_word_opaque(v->a[i])) || (j >= 0 && method_word_opaque(v->a[j]))))
+            hidden = true;
+    }
+    if (is_client_name(v->cmd) && i < 0 && j < 0 && !info_only(v) &&
+        (g_xargs || stdin_effective(v)))
+        hidden = true;
+    if (!hidden && (i < 0 || !is_method(v->a[i], strlen(v->a[i]))) &&
         (j < 0 || !is_method(v->a[j], strlen(v->a[j]))))
         return NULL;
     if (v->cmd[0] == '$' && g_regtest_hint) return NULL;
@@ -1904,6 +1960,14 @@ static bool find_writes(const struct cmdv *v)
     return false;
 }
 
+/* tar --remove-files deletes the operands it archives. */
+static bool tar_removes(const struct cmdv *v)
+{
+    for (int i = 0; i < v->na; i++)
+        if (strcmp(v->a[i], "--remove-files") == 0) return true;
+    return false;
+}
+
 static bool tar_extracts(const struct cmdv *v)
 {
     bool extract = false;
@@ -1931,6 +1995,7 @@ static enum wkind writer_kind(const struct cmdv *v)
     if (strcmp(v->cmd, "unzip") == 0) return W_UNZIP;
     if (strcmp(v->cmd, "sed") == 0 && sed_inplace(v)) return W_SED;
     if (strcmp(v->cmd, "find") == 0 && find_writes(v)) return W_FIND;
+    if (strcmp(v->cmd, "tar") == 0 && tar_removes(v)) return W_TAR;
     if (strcmp(v->cmd, "tar") == 0 && tar_extracts(v)) return W_TAR;
     return W_NONE;
 }
@@ -2329,9 +2394,13 @@ static const char *nested_ps(const struct cmdv *v)
 /* cmd /c TEXT: the command text scans like PowerShell (rd, del, move, %APPDATA% paths). */
 static const char *nested_cmdexe(const struct cmdv *v)
 {
-    for (int i = 0; i < v->na; i++)
-        if (strcasecmp(v->a[i], "/c") == 0 || strcasecmp(v->a[i], "/k") == 0)
+    for (int i = 0; i < v->na; i++) {
+        const char *a = v->a[i];
+        size_t n = strlen(a);
+        /* /c /k, Git Bash's //c //k, and glued switches (/d/c, /s/c) */
+        if (n >= 2 && (a[0] == '/') && (a[n - 2] == '/') && strchr("cCkK", a[n - 1]))
             return eval_joined_as(v, i + 1, true);
+    }
     return NULL;
 }
 
@@ -2668,6 +2737,21 @@ static bool seg_names_datadir(const struct gctx *c, int si, const struct xw *x, 
     return any || *hs_dd;
 }
 
+/* The replace string xargs words w[from..to) set (-I STR, -ISTR, -i, -J STR, --replace[=STR]). */
+static void note_xargs_repl(char **w, int from, int to)
+{
+    for (int k = from; k < to; k++) {
+        const char *a = w[k];
+        const char *s = NULL;
+        if (strcmp(a, "-I") == 0 || strcmp(a, "-J") == 0) s = k + 1 < to ? w[k + 1] : "";
+        else if (strncmp(a, "-I", 2) == 0 || strncmp(a, "-J", 2) == 0) s = a + 2;
+        else if (strcmp(a, "-i") == 0 || strcmp(a, "--replace") == 0) s = "{}";
+        else if (strncmp(a, "-i", 2) == 0) s = a + 2;
+        else if (strncmp(a, "--replace=", 10) == 0) s = a + 10;
+        if (s) snprintf(g_xrepl, sizeof g_xrepl, "%s", s);
+    }
+}
+
 static const char *seg_run(const struct gctx *c, int si, int depth, struct chain *ch,
                            struct xw *x, bool hs_dd)
 {
@@ -2680,8 +2764,13 @@ static const char *seg_run(const struct gctx *c, int si, int depth, struct chain
     if (pi.id_assign) return R_IDENT;
     if (ci < 0) return NULL;
     strip_exe(x->w[ci]);
+    g_xargs = false;
+    g_xrepl[0] = '\0';
     for (int j = 0; j < ci; j++)
-        if (strcmp(base_name(x->w[j]), "xargs") == 0) xargs = true;
+        if (strcmp(base_name(x->w[j]), "xargs") == 0) {
+            xargs = g_xargs = true;
+            note_xargs_repl(x->w, j + 1, ci);
+        }
     v = (struct cmdv){c, sg, base_name(x->w[ci]), x->w + ci + 1, x->n - ci - 1, x->w, x->n,
                       depth, false, ch->cwd};
     track_cd(&v, ch->cwd);
@@ -2794,8 +2883,14 @@ const char *ag_eval_bash(const char *cmd)
  * lower-cased command name; the PowerShell deleters and writers add the datadir, vendor and
  * workflow path checks, and the destroyers (Remove-Item, Move-Item) also refuse an ancestor of a
  * datadir. A pipeline or parenthesised segment that names a datadir into a deleter with no path of
- * its own is refused, and Start-Process unwraps to the program it starts. Known limits: variables,
- * functions and aliases are not tracked, and a pipeline into Set-Content (Get-Content a |
+ * its own is refused, and Start-Process unwraps to the program it starts.
+ *
+ * `$name = expr` (a string, Join-Path, `a + b`, an earlier variable) is recorded and expanded in
+ * later words. Join-Path and `a + b` segments, [IO.File]/[IO.Directory] writes and deletes, and
+ * the PowerShell web cmdlets are judged as whole statements (ps_note_facts). A delete whose
+ * statement mentions APPDATA, ApplicationData, HOME or the profile together with a Zclassic or
+ * ZcashParams name is refused when the path cannot be resolved. Known limits: functions, aliases,
+ * splatting and `$d += x` are not tracked, and a pipeline into Set-Content (Get-Content a |
  * Set-Content b) checks b only. */
 
 struct psseg {
@@ -2809,6 +2904,10 @@ struct psseg {
     bool pipe_dd;  /* a segment of this statement names a datadir */
     bool saw_pipe; /* a | came earlier in this statement */
     bool open_writer; /* a deleter or writer with no path operand: a later segment feeds it */
+    bool open_anc;    /* the writer is a .NET Delete or Move: a folder that holds a datadir counts too */
+    bool st_del, st_base, st_name; /* statement facts: a deleter, a base folder, a datadir name */
+    bool st_web, st_meth;          /* statement facts: a web call, a spend or export method */
+    char pend_var[40];             /* `$name =` seen, its expression follows in the next segment */
 };
 
 static void ps_note(struct psseg *s, const char *r)
@@ -3017,6 +3116,245 @@ static const char *ps_start_process(const struct cmdv *v)
     return r ? r : warn;
 }
 
+/* ---- PowerShell values: variables, Join-Path and string concatenation ---------------------- */
+
+/* w with the $name and ${name} of recorded variables replaced (PowerShell names are not case
+ * sensitive, so they are kept and looked up in lower case); NULL when nothing changed. */
+static char *ps_expand(const char *w)
+{
+    struct sbuf b = {NULL, 0, 0};
+    bool changed = false;
+    if (g_nvars == 0 || !strchr(w, '$')) return NULL;
+    for (const char *p = w; *p;) {
+        if (*p == '$') {
+            bool brace = p[1] == '{';
+            const char *s = p + 1 + (brace ? 1 : 0);
+            size_t nl = var_name_len(s);
+            const char *val = NULL;
+            if (nl && nl < sizeof g_vars[0].name && (!brace || s[nl] == '}')) {
+                char low[sizeof g_vars[0].name];
+                for (size_t k = 0; k < nl; k++) low[k] = (char)tolower((unsigned char)s[k]);
+                val = var_get(low, nl);
+            }
+            if (val && !(s[nl] == ':' && !brace)) {
+                sb_add(&b, val, strlen(val));
+                p = s + nl + (brace ? 1 : 0);
+                changed = true;
+                continue;
+            }
+        }
+        sb_add(&b, p++, 1);
+    }
+    if (!changed || !b.p || b.cap == (size_t)-1) {
+        if (b.cap != (size_t)-1) free(b.p);
+        return NULL;
+    }
+    return b.p;
+}
+
+/* A word shaped like a cmdlet name (Get-Item): it is a command, not part of a value. */
+static bool cmdlet_like(const char *w)
+{
+    const char *d = strchr(w, '-');
+    if (!d || d == w || !d[1]) return false;
+    for (const char *p = w; *p; p++)
+        if (!isalpha((unsigned char)*p) && p != d) return false;
+    return true;
+}
+
+/* The string value of `first` plus the words w[from..n) as one expression: Join-Path A B joins
+ * with a backslash, `A + B` concatenates, a leading cmdlet name is dropped and the rest joins with
+ * a backslash. *cmd is set when a cmdlet name was dropped (the words then only name what the
+ * command reads, so the value is not a path that is itself deleted). Caller frees; NULL when
+ * there is nothing. */
+static char *ps_value(char **w, int n, int from, const char *first, bool *cmd)
+{
+    struct sbuf b = {NULL, 0, 0};
+    const char *pc[64];
+    int np = 0, start = 0;
+    bool plus = false, dropped = false;
+    if (first && *first) pc[np++] = first;
+    for (int i = from; i < n && np < 64; i++) pc[np++] = w[i];
+    if (cmd) *cmd = false;
+    if (np == 0) return NULL;
+    if (strcasecmp(pc[0], "join-path") == 0 || cmdlet_like(pc[0])) {
+        dropped = true;
+        start = 1;
+    }
+    if (dropped && cmd && strcasecmp(pc[0], "join-path") != 0) *cmd = true;
+    for (int i = 0; i < np; i++)
+        if (strcmp(pc[i], "+") == 0) plus = true;
+    for (int i = start; i < np; i++) {
+        if (strcmp(pc[i], "+") == 0) continue;
+        if (dropped && pc[i][0] == '-') continue;
+        if (b.n && !plus) sb_add(&b, "\\", 1);
+        sb_add(&b, pc[i], strlen(pc[i]));
+    }
+    return b.cap == (size_t)-1 ? NULL : b.p;
+}
+
+/* `$name = expr`, `$name=expr` and `$name =expr` at the start of a segment: record the variable
+ * and drop the words it consumed. An assignment whose expression starts in a later
+ * (parenthesised) segment leaves the name pending in s->pend_var. */
+static void ps_assign(struct psseg *s)
+{
+    const char *w0, *rest, *first;
+    char *fx;
+    size_t nl;
+    char low[sizeof g_vars[0].name];
+    int from;
+    char *val;
+    if (s->n == 0) return;
+    w0 = s->w[0];
+    if (w0[0] != '$' || !(nl = var_name_len(w0 + 1)) || nl >= sizeof low) return;
+    for (size_t k = 0; k < nl; k++) low[k] = (char)tolower((unsigned char)w0[1 + k]);
+    low[nl] = '\0';
+    rest = w0 + 1 + nl;
+    if (*rest == '=') {
+        first = rest + 1;
+        from = 1;
+    } else if (!*rest && s->n > 1 && s->w[1][0] == '=') {
+        first = s->w[1] + 1;
+        from = 2;
+    } else {
+        return;
+    }
+    for (int i = from; i < s->n; i++) { /* the expression sees the variables known so far */
+        char *x = ps_expand(s->w[i]);
+        if (x) {
+            free(s->w[i]);
+            s->w[i] = x;
+        }
+    }
+    fx = *first ? ps_expand(first) : NULL;
+    val = ps_value(s->w, s->n, from, fx ? fx : first, NULL);
+    free(fx);
+    if (!val) { /* `$d = and the expression follows in the next segment */
+        snprintf(s->pend_var, sizeof s->pend_var, "%s", low);
+    } else {
+        var_set(low, nl, val);
+        free(val);
+    }
+    for (int i = 0; i < s->n; i++) free(s->w[i]); /* the consumed words are not a command */
+    s->n = 0;
+}
+
+/* Replace each word that holds a recorded variable by its value. */
+static void ps_expand_words(struct psseg *s)
+{
+    for (int i = 0; i < s->n; i++) {
+        char *x = ps_expand(s->w[i]);
+        if (x) {
+            free(s->w[i]);
+            s->w[i] = x;
+        }
+    }
+}
+
+/* ---- statement-level facts: a deleter or a web call somewhere in the statement ------------- */
+
+static bool ci_has(const char *s, const char *needle)
+{
+    size_t n = strlen(needle);
+    for (; *s; s++)
+        if (strncasecmp(s, needle, n) == 0) return true;
+    return false;
+}
+
+/* The word names a folder that holds a datadir: %APPDATA%, $env:APPDATA, ApplicationData (the
+ * GetFolderPath name), the profile or home. */
+static bool ps_base_word(const char *w)
+{
+    static const char *const t[] = {"appdata", "applicationdata", "userprofile", "$home",
+                                    "$env:home", "homepath", "~"};
+    for (size_t k = 0; k < sizeof t / sizeof t[0]; k++)
+        if (ci_has(w, t[k])) return true;
+    return false;
+}
+
+/* The word has a component that is a datadir name on its own: Zclassic, ZcashParams, .zclassic*,
+ * .zcash-params or a Windows 8.3 short name (ZCLASS~1). A scratch directory under a temp or test
+ * location does not count. */
+static bool ps_name_word(const char *w)
+{
+    const char *p = w;
+    size_t n = 0;
+    bool hit = false;
+    while (next_comp(&p, &n)) {
+        if (comp_is_ci(p, n, "zclassic") || comp_is_ci(p, n, "zcashparams") ||
+            comp_starts_ci(p, n, ".zclassic") || comp_starts_ci(p, n, ".zcash-params") ||
+            (comp_starts_ci(p, n, "zclass~") && n == 8) || (comp_starts_ci(p, n, "zcashp~") && n == 8))
+            hit = true;
+        p += n;
+    }
+    return hit && !is_test_dir(w);
+}
+
+/* Any run of word characters in w is a spend or key-export method name. */
+static bool ps_word_has_method(const char *w)
+{
+    for (size_t i = 0; w[i];) {
+        size_t j = i;
+        while (is_word_char(w[j])) j++;
+        if (j > i && is_method(w + i, j - i)) return true;
+        i = j > i ? j : i + 1;
+    }
+    return false;
+}
+
+static bool ps_web_word(const char *w)
+{
+    static const char *const names[] = {"iwr", "irm", "curl", "wget", "invoke-webrequest",
+                                        "invoke-restmethod", "curl.exe", "wget.exe"};
+    for (size_t k = 0; k < sizeof names / sizeof names[0]; k++)
+        if (strcasecmp(w, names[k]) == 0) return true;
+    return ci_has(w, "webclient") || ci_has(w, "httpclient") || ci_has(w, "webrequest") ||
+           ci_has(w, "restmethod");
+}
+
+/* A command that deletes: a PowerShell deleter, or a .NET Delete/Move (System.IO.File/Directory). */
+static bool ps_delete_word(const char *w)
+{
+    char *lc = strdup(w); // raw-alloc-ok:build-tool
+    bool r;
+    if (!lc) {
+        g_complex = true;
+        return false;
+    }
+    for (char *p = lc; *p; p++) *p = (char)tolower((unsigned char)*p);
+    strip_exe(lc);
+    r = PS_IN(lc, ps_del) || (strstr(lc, "io.") && (strstr(lc, "::delete") || strstr(lc, "::move")));
+    free(lc);
+    return r;
+}
+
+/* A .NET System.IO static call that writes or deletes its first argument. */
+static bool ps_dotnet_writer(const char *w)
+{
+    static const char *const verbs[] = {"::delete", "::move", "::copy", "::create", "::writeall",
+                                        "::appendall", "::replace", "::openwrite", "::setattributes",
+                                        "::appendtext", "::createtext"};
+    if (!ci_has(w, "[io.") && !ci_has(w, "[system.io.")) return false;
+    for (size_t k = 0; k < sizeof verbs / sizeof verbs[0]; k++)
+        if (ci_has(w, verbs[k])) return true;
+    return false;
+}
+
+/* Fold the facts of the segment's words into the statement flags, then judge the statement. */
+static void ps_note_facts(struct psseg *s)
+{
+    for (int i = 0; i < s->n; i++) {
+        const char *w = s->w[i];
+        if (ps_delete_word(w)) s->st_del = true;
+        if (ps_base_word(w)) s->st_base = true;
+        if (ps_name_word(w)) s->st_name = true;
+        if (ps_web_word(w)) s->st_web = true;
+        if (ps_word_has_method(w)) s->st_meth = true;
+    }
+    if (s->st_del && s->st_base && s->st_name) ps_note(s, R_DATADIR);
+    if (s->st_web && s->st_meth) ps_note(s, R_SPEND);
+}
+
 static const char *ps_seg(struct psseg *s)
 {
     static const char *const checks_ps[] = {"cd", "sl", "set-location", "chdir", "pushd",
@@ -3059,6 +3397,10 @@ static const char *ps_seg(struct psseg *s)
         r = eval_joined_as(&v, 0, true);
     } else if (PS_IN(lc, starts)) {
         r = ps_start_process(&v);
+    } else if (ps_dotnet_writer(lc)) {
+        /* [IO.Directory]::Delete(path, ...): the path is the next segment (the paren splits) */
+        s->open_writer = true;
+        s->open_anc = true;
     } else if ((PS_IN(lc, ps_del) || PS_IN(lc, ps_wr)) && ps_takes_stdin(&v)) {
         /* no path of its own: the pipeline (Get-ChildItem <datadir> | Remove-Item) or a later
          * parenthesised segment (Remove-Item (Get-Item <datadir>)) carries the target */
@@ -3074,12 +3416,64 @@ static const char *ps_seg(struct psseg *s)
     return r ? r : warn;
 }
 
+/* A new statement (; newline &) forgets the pipeline and the statement facts. */
+#define PS_NEW_STATEMENT(st) \
+    ((st).pipe_dd = (st).saw_pipe = (st).open_writer = (st).open_anc = (st).st_del = (st).st_base = \
+         (st).st_name = (st).st_web = (st).st_meth = false, (st).pend_var[0] = '\0')
+
 /* End the current segment: scan its words, then drop them. */
 static void ps_end_seg(struct psseg *s)
 {
-    bool names = false, fed = s->open_writer;
+    bool names = false, fed = s->open_writer, cmd = false;
+    char *val;
+    char pend[sizeof s->pend_var];
+    memcpy(pend, s->pend_var, sizeof pend);
+    s->pend_var[0] = '\0';
+    ps_assign(s);          /* `$d = expr` records d and consumes its words */
+    ps_expand_words(s);    /* known variables are replaced by their value */
+    if (pend[0] && s->n > 0) {
+        /* the expression of a `$d =` that ended the previous segment */
+        val = ps_value(s->w, s->n, 0, NULL, &cmd);
+        if (val) {
+            var_set(pend, strlen(pend), val);
+            free(val);
+        }
+    } else if (pend[0] && !s->pend_var[0]) {
+        memcpy(s->pend_var, pend, sizeof pend); /* an empty segment: keep waiting */
+    }
     for (int i = 0; i < s->n; i++)
         if (mentions_datadir(s->w[i])) names = true;
+    /* the value of a Join-Path or `a + b` segment names a datadir though no word does */
+    val = s->n > 0 ? ps_value(s->w, s->n, 0, NULL, &cmd) : NULL;
+    if (val) {
+        if (mentions_datadir(val)) names = true;
+        if (fed && s->open_anc && !cmd) { /* [IO.Directory]::Delete("<ancestor of a datadir>") */
+            struct gseg zero;
+            struct cmdv cv;
+            memset(&zero, 0, sizeof zero);
+            cv = (struct cmdv){NULL, &zero, "", NULL, 0, NULL, 0, s->depth, false, s->cwd};
+            ps_note(s, tgt(&cv, val, true));
+        }
+        free(val);
+    }
+    if (fed && s->open_anc && !s->r) { /* the arguments of a .NET call: a, b, c */
+        struct gseg zero;
+        struct cmdv cv;
+        memset(&zero, 0, sizeof zero);
+        cv = (struct cmdv){NULL, &zero, "", NULL, 0, NULL, 0, s->depth, false, s->cwd};
+        for (int i = 0; i < s->n; i++) {
+            char *cp = strdup(s->w[i]); // raw-alloc-ok:build-tool
+            if (!cp) {
+                g_complex = true;
+                break;
+            }
+            for (char *t = strtok(cp, ","); t; t = strtok(NULL, ","))
+                if (t[0] != '$' || strncasecmp(t, "$env:", 5) == 0 || strncasecmp(t, "$home", 5) == 0)
+                    ps_note(s, tgt(&cv, t, true));
+            free(cp);
+        }
+    }
+    if (s->n > 0) ps_note_facts(s);
     if (!s->r) ps_note(s, ps_seg(s));
     if (names && fed) ps_note(s, R_DATADIR);
     if (names) s->pipe_dd = true;
@@ -3103,7 +3497,9 @@ static void ps_end_word(struct psseg *s, char *buf, size_t *n, bool *quoted)
     }
     if (s->pend_redir) {
         if (!s->r) {
-            const char *r = path_rule_cwd(s->cwd, wd);
+            char *ex = ps_expand(wd);
+            const char *r = path_rule_cwd(s->cwd, ex ? ex : wd);
+            free(ex);
             if (!r && is_py_name(wd)) r = R_PYTHON;
             ps_note(s, r);
         }
@@ -3202,12 +3598,12 @@ static const char *ps_eval(const char *s, size_t len, int depth)
                 ps_end_seg(&st);
                 if (ch == '|' && i + 1 < len && s[i + 1] == '|') {
                     i++; /* || chains, no pipe */
-                    st.pipe_dd = st.saw_pipe = st.open_writer = false;
+                    st.pipe_dd = st.saw_pipe = st.open_writer = st.open_anc = false;
                 } else if (ch == '|') {
                     st.saw_pipe = true;
                 }
                 else if (ch != '(' && ch != ')' && ch != '{' && ch != '}')
-                    st.pipe_dd = st.saw_pipe = st.open_writer = false; /* ; \n & end the statement */
+                    PS_NEW_STATEMENT(st); /* ; newline & end the statement */
             }
             i++;
         } else {
@@ -3225,6 +3621,9 @@ static const char *ps_eval(const char *s, size_t len, int depth)
 const char *ag_eval_ps(const char *cmd)
 {
     g_complex = false;
+    g_nvars = 0;
+    g_xargs = false;
+    g_xrepl[0] = '\0';
     g_loopvar[0] = '\0';
     g_regtest_hint = regtest_word_in(cmd);
     return finish(ps_eval(cmd, strlen(cmd), 0));

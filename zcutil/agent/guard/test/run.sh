@@ -46,6 +46,13 @@ printf '{"tool_name":"Bash","tool_input":{"command":"rm -rf ~/.zclassic","x":%s}
 # a Bash call that holds a refusal and an escape the guard cannot read is still refused
 hook refusal-with-escape 2 'guard.datadir' '{"tool_name":"Bash","tool_input":{"command":"rm -rf ~/.zclassic"},"x":"é"}'
 
+# a method hidden from the command line, a PowerShell web call, a nested cmd /c, a computed path
+hook xargs-client 2 'guard.spend_or_key_export' '{"tool_name":"Bash","tool_input":{"command":"xargs zclassic-cli < /tmp/a"}}'
+hook ps-web-spend 2 'guard.spend_or_key_export' '{"tool_name":"PowerShell","tool_input":{"command":"iwr http://127.0.0.1:8232 -Method Post -Body dumpprivkey"}}'
+hook cmd-nested 2 'guard.datadir' '{"tool_name":"Bash","tool_input":{"command":"cmd //c \"rd /s /q %APPDATA%\\\\Zclassic\""}}'
+hook ps-joinpath 2 'guard.datadir' '{"tool_name":"PowerShell","tool_input":{"command":"Remove-Item -Recurse (Join-Path $env:APPDATA Zclassic)"}}'
+hook ps-build-ok 0 '' '{"tool_name":"PowerShell","tool_input":{"command":"Remove-Item -Recurse build\\tmp"}}'
+
 # a warning must reach the model: a PreToolUse "ask" decision on stdout, exit 0 (stderr of an
 # exit-0 hook is only a debug log)
 printf '%s' '{"tool_name":"Edit","tool_input":{"file_path":"src/pow.cpp","old_string":"a","new_string":"b"}}' |
