@@ -16,6 +16,7 @@ src/.clang-format|zcutil/check-hardening.sh|zcutil/fetch-params.sh|zcutil/zsync.
 
 # ---- local CI and the developer tool
 zcutil/Makefile|zcutil/local-ci.sh|zcutil/local-ci-macos.sh|zcutil/dev/*|zcutil/agent/*|zcutil/tools/Z23_SOURCE.tsv|zcutil/tools/LICENSE.z23|zcutil/tools/NOTICE|zcutil/tools/revendor.sh|zcutil/tools/vendor-files.txt|zcutil/tools/vendor/*	check-dev-tools
+zcutil/dev/mutate/*	check-dev-tools
 zcutil/local-ci-smoke.sh	check-dev-tools regtest-smoke
 zcutil/githooks/*	check-dev-tools
 
