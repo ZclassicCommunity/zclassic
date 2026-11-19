@@ -192,7 +192,7 @@ static int step_gate(const char *name, const char *tool, char *const argv[], str
     return rc == 0 ? 0 : rc == 1 ? 1 : 2;
 }
 
-static int step_checktests(struct result *r)
+static int step_checktests(const char *base, struct result *r)
 {
     if (!tool_exists("zcl-dev-tests") && !tool_exists("zcl-dev-check-tests")) {
         fprintf(say, "== verify: check-tests SKIPPED (%s/zcl-dev-tests is not built in this tree)\n", bindir);
@@ -204,7 +204,9 @@ static int step_checktests(struct result *r)
         *r = (struct result){"check-tests", "BROKEN", 2};
         return 2;
     }
-    return step_gate("check-tests", "zcl-dev", (char *[]){"zcl-dev", "check-tests", NULL}, r);
+    char arg[600];
+    snprintf(arg, sizeof arg, "--base=%s", base);
+    return step_gate("check-tests", "zcl-dev", (char *[]){"zcl-dev", "check-tests", arg, NULL}, r);
 }
 
 static int step_lint(struct result *r)
@@ -231,10 +233,33 @@ static void summary(const struct result *res, size_t n)
     for (size_t i = 0; i < n; i++) fprintf(say, "  %-11s %s\n", res[i].name, res[i].verdict);
 }
 
+/* The base check-tests compares the baseline with, named explicitly so it never depends on origin/master:
+ * the caller or ZCL_CI_BASE, else the merge-base of HEAD with origin/master when that resolves, else the
+ * parent of HEAD (a CI clone or bundle checkout has the commit history but no origin/master), else HEAD. */
+static int git_line(const char *cmd, char *out, size_t n)
+{
+    FILE *p = popen(cmd, "r");
+    if (!p) return 0;
+    int ok = fgets(out, (int)n, p) != NULL;
+    pclose(p);
+    out[ok ? strcspn(out, "\r\n") : 0] = 0;
+    return ok && *out && safe_ref(out);
+}
+
+static void gate_base(char *out, size_t n, const char *explicit_base)
+{
+    char buf[512];
+    if (explicit_base && *explicit_base) snprintf(out, n, "%s", explicit_base);
+    else if (git_line("git merge-base HEAD origin/master 2>" GITNULL, buf, sizeof buf)) snprintf(out, n, "%s", buf);
+    else if (git_line("git rev-parse --verify --quiet HEAD^ 2>" GITNULL, buf, sizeof buf)) snprintf(out, n, "%s", buf);
+    else snprintf(out, n, "HEAD");
+}
+
 /* The check-dev-tools gates, in order, stopping at the first one that does not pass. */
-static int verify_gates(int json)
+static int verify_gates(int json, const char *explicit_base)
 {
     struct result res[5];
+    char base[512];
     size_t n = 0;
     int code;
     child_to_stderr = json;
@@ -243,12 +268,13 @@ static int verify_gates(int json)
         return 2;
     }
     code = step_lint(&res[n++]);
-    if (!code) code = step_checktests(&res[n++]);
+    gate_base(base, sizeof base, explicit_base);
+    if (!code) code = step_checktests(base, &res[n++]);
     if (!code) code = step_gate("know", "zcl-dev", (char *[]){"zcl-dev", "know", "--check", NULL}, &res[n++]);
     if (!code) code = step_gate("rpc-parity", "zcl-dev", (char *[]){"zcl-dev", "gen", "--check", "rpc-parity", NULL}, &res[n++]);
     if (!code) code = step_gate("flags", "zcl-dev", (char *[]){"zcl-dev", "gen", "--check", "flags", NULL}, &res[n++]);
     summary(res, n);
-    if (json) print_json(res, n, code, "-");
+    if (json) print_json(res, n, code, base);
     return code;
 }
 
@@ -330,7 +356,7 @@ static int fixture_run(const struct fcase *c)
     fflush(jout);
     if (ftruncate(fileno(jout), 0) != 0) { perror("selftest: ftruncate"); return 1; }
     rewind(jout);
-    int rc = c->gates ? verify_gates(c->json) : verify(c->base, c->json);
+    int rc = c->gates ? verify_gates(c->json, strcmp(c->base, "-") ? c->base : NULL) : verify(c->base, c->json);
     fflush(jout);
     if (rc != c->want || (c->calls && !slurp_equal(calls_path, c->calls))) {
         fprintf(stderr, "selftest: %s: exit %d (want %d) or call order differs\n", c->what, rc, c->want);
@@ -378,21 +404,21 @@ static int fixture_cases(void)
     /* --gates */
     bad |= stub("zcl-lint", 0);
     unstub("zcl-dev-t-fast");
-    FX("-", 0, 1, 0, "zcl-lint all\nzcl-dev know --check\nzcl-dev gen --check rpc-parity\nzcl-dev gen --check flags\n", NULL, NULL,
+    FX("refx", 0, 1, 0, "zcl-lint all\nzcl-dev know --check\nzcl-dev gen --check rpc-parity\nzcl-dev gen --check flags\n", NULL, NULL,
        "gates, check-tests skipped by name");
     bad |= stub("zcl-dev-tests", 0);
-    FX("-", 0, 1, 2, "zcl-lint all\n", NULL, NULL, "gates: zcl-dev-tests without the check-tests alias is broken");
+    FX("refx", 0, 1, 2, "zcl-lint all\n", NULL, NULL, "gates: zcl-dev-tests without the check-tests alias is broken");
     bad |= stub("zcl-dev-check-tests", 0);
-    FX("-", 1, 1, 0, "zcl-lint all\nzcl-dev check-tests\nzcl-dev know --check\nzcl-dev gen --check rpc-parity\nzcl-dev gen --check flags\n",
-       "{\"base\":\"-\",\"exit\":0,\"steps\":[{\"step\":\"zcl-lint\",\"verdict\":\"PASS\",\"rc\":0},{\"step\":\"check-tests\",\"verdict\":\"PASS\",\"rc\":0},",
+    FX("refx", 1, 1, 0, "zcl-lint all\nzcl-dev check-tests --base=refx\nzcl-dev know --check\nzcl-dev gen --check rpc-parity\nzcl-dev gen --check flags\n",
+       "{\"base\":\"refx\",\"exit\":0,\"steps\":[{\"step\":\"zcl-lint\",\"verdict\":\"PASS\",\"rc\":0},{\"step\":\"check-tests\",\"verdict\":\"PASS\",\"rc\":0},",
        "{\"step\":\"flags\",\"verdict\":\"PASS\",\"rc\":0}]}", "gates with check-tests, json");
     bad |= stub("zcl-lint", 1);
-    FX("-", 0, 1, 1, "zcl-lint all\n", NULL, NULL, "gates stop at the lint finding");
+    FX("refx", 0, 1, 1, "zcl-lint all\n", NULL, NULL, "gates stop at the lint finding");
     bad |= stub("zcl-lint", 0) | stub("zcl-dev", 1);
-    FX("-", 0, 1, 1, "zcl-lint all\nzcl-dev check-tests\n", NULL, NULL, "gates stop at the check-tests finding");
+    FX("refx", 0, 1, 1, "zcl-lint all\nzcl-dev check-tests --base=refx\n", NULL, NULL, "gates stop at the check-tests finding");
     unstub("zcl-dev-tests");
     unstub("zcl-dev-check-tests");
-    FX("-", 0, 1, 1, "zcl-lint all\nzcl-dev know --check\n", NULL, NULL, "gates stop at the know finding");
+    FX("refx", 0, 1, 1, "zcl-lint all\nzcl-dev know --check\n", NULL, NULL, "gates stop at the know finding");
     return bad;
 }
 
@@ -467,9 +493,10 @@ static void enter_toplevel(void)
 int main(int argc, char **argv)
 {
     const char *base = getenv("ZCL_CI_BASE");
-    int json = 0, gates = 0;
+    int json = 0, gates = 0, explicit = 0;
     say = stdout;
     jout = stdout;
+    explicit = base && *base;
     if (!base || !*base) base = "origin/master";
     find_bindir(argv[0]);
     for (int i = 1; i < argc; i++) {
@@ -477,11 +504,11 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "--selftest")) return selftest();
         if (!strcmp(argv[i], "--json")) json = 1;
         else if (!strcmp(argv[i], "--gates")) gates = 1;
-        else if (!strcmp(argv[i], "--base") && i + 1 < argc) base = argv[++i];
+        else if (!strcmp(argv[i], "--base") && i + 1 < argc) { base = argv[++i]; explicit = 1; }
         else { fputs("usage: zcl-dev verify [--base REF] [--json] [--selftest]\n", stderr); return 2; }
     }
     if (!safe_ref(base)) { fprintf(stderr, "zcl-dev verify: unsafe base ref\n"); return 2; }
     if (json) say = stderr;
     enter_toplevel();
-    return gates ? verify_gates(json) : verify(base, json);
+    return gates ? verify_gates(json, explicit ? base : NULL) : verify(base, json);
 }
