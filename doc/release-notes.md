@@ -106,3 +106,14 @@ provider and the command-line tools are not built. Encrypted `wallet.dat` files 
 compatible in both directions: a wallet encrypted by an older release unlocks in this one,
 and a wallet whose passphrase was changed or whose keys were added here unlocks in an
 older release. OpenSSL 3 is licensed under Apache-2.0 (see `THIRD-PARTY-LICENSES`).
+
+RPC tuning errors and the LevelDB file budget
+---------------------------------------------
+
+- `-rpcthreads` outside 1..256, `-rpcworkqueue` outside 1..65536 and `-rpcservertimeout`
+  outside 1..86400 (including non-numeric values, which parse as 0) now stop start-up with an
+  explanatory error. Earlier releases clamped them silently.
+- The per-database LevelDB open-file budget now counts the zslp index store when `-zslpindex`
+  is set (three databases instead of two), and a `-dbmaxopenfiles` value above what the
+  file descriptor soft limit allows is lowered to that budget with a log warning. This matters
+  mainly on 32-bit POSIX builds with a soft limit of 1024.
