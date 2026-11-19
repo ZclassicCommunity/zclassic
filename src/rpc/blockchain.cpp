@@ -1352,6 +1352,11 @@ UniValue getbootstrapinfo(const UniValue& params, bool fHelp)
             "  \"mode\": \"xxx\",             (string) \"anchor\" or \"trustless\"\n"
             "  \"snapshot_version\": n,      (numeric) snapshot manifest version (1|2|3), 0 if unknown\n"
             "  \"reason\": \"xxx\",            (string) why skipped/failed (\"\" otherwise)\n"
+            "  \"servers_in_use\": n,        (numeric, only when several servers are used) servers with streams now\n"
+            "  \"servers\": [                (array, only when several servers are used) one object per server:\n"
+            "    {\"peer\": \"host:port\", \"streams\": n, \"mbps\": x.x, \"bytes_received\": n,\n"
+            "     \"state\": \"ok\"|\"shared_files\"|\"different_snapshot\"|\"banned\"}\n"
+            "  ],\n"
             "  \"verify_pending\": true|false, (boolean) an imported snapshot still awaits verification\n"
             "  \"validation_state\": \"xxx\",  (string) \"disabled\"|\"provisional\"|\"provisional_pruned\"|\n"
             "                              \"validated\"|\"failed\"\n"
@@ -1381,6 +1386,25 @@ UniValue getbootstrapinfo(const UniValue& params, bool fHelp)
     obj.push_back(Pair("mode", info.mode));
     obj.push_back(Pair("snapshot_version", info.snapshotVersion));
     obj.push_back(Pair("reason", info.reason));
+    // Additive: present only while a download uses several servers.
+    if (!info.servers.empty()) {
+        int inUse = 0;
+        UniValue arr(UniValue::VARR);
+        for (size_t i = 0; i < info.servers.size(); ++i) {
+            const BootstrapInfoServer& s = info.servers[i];
+            if (s.streams > 0)
+                ++inUse;
+            UniValue o(UniValue::VOBJ);
+            o.push_back(Pair("peer", s.peer));
+            o.push_back(Pair("streams", s.streams));
+            o.push_back(Pair("mbps", s.mibps));
+            o.push_back(Pair("bytes_received", (uint64_t)s.bytes));
+            o.push_back(Pair("state", s.state));
+            arr.push_back(o);
+        }
+        obj.push_back(Pair("servers_in_use", inUse));
+        obj.push_back(Pair("servers", arr));
+    }
 
     // Durable across restarts: derive verify_pending / validation_state / tip_hold
     // live from the on-disk markers and the validation status, so a daemon

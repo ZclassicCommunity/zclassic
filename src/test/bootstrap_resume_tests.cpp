@@ -400,6 +400,231 @@ BOOST_AUTO_TEST_CASE(binary_units_are_labelled_as_such)
 // Staging directory and scan on a real directory
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Multi-server scheduling (pure logic)
+// ---------------------------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE(peer_board_spreads_streams_round_robin)
+{
+    BootstrapPeerBoard two(2, 4);
+    BOOST_CHECK_EQUAL(two.Assign(0, 0), 0);
+    BOOST_CHECK_EQUAL(two.Assign(1, 0), 1);
+    BOOST_CHECK_EQUAL(two.Assign(2, 0), 0);
+    BOOST_CHECK_EQUAL(two.Assign(3, 0), 1);
+    // one peer: every stream goes to it, as before
+    BootstrapPeerBoard one(1, 3);
+    for (int s = 0; s < 3; ++s)
+        BOOST_CHECK_EQUAL(one.Assign(s, 0), 0);
+    BOOST_CHECK_EQUAL(one.UsablePeers(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(peer_board_never_assigns_an_ignored_or_failing_peer_first)
+{
+    BootstrapPeerBoard b(3, 3);
+    b.ManifestMismatch(0);
+    BOOST_CHECK_EQUAL(b.UsablePeers(), 2U);
+    for (int s = 0; s < 3; ++s)
+        BOOST_CHECK(b.Assign(s, 0) != 0);
+    b.ManifestMismatch(1);
+    b.ManifestMismatch(2);
+    BOOST_CHECK_EQUAL(b.UsablePeers(), 0U);
+    BOOST_CHECK_EQUAL(b.Assign(0, 0), -1);
+    BOOST_CHECK(b.Peer(0, 0).ignored);
+
+    // a peer that just failed to connect is avoided while another is usable, then tried again
+    BootstrapPeerBoard c(2, 2);
+    c.ConnectFailed(0, 0);
+    BOOST_CHECK_EQUAL(c.Assign(0, 100), 1);
+    BOOST_CHECK_EQUAL(c.Assign(1, 100), 1);
+    BootstrapPeerBoard d(2, 2);
+    d.ConnectFailed(0, 0);
+    BOOST_CHECK_EQUAL(d.Assign(0, 70000), 0); // cooldown over
+    d.ConnectFailed(0, 70000);
+    d.ConnectFailed(0, 70001);
+    d.ConnectFailed(1, 70002);
+    BOOST_CHECK(d.Assign(1, 70003) >= 0); // all failing: still picks one, never -1
+}
+
+BOOST_AUTO_TEST_CASE(peer_board_moves_a_stream_the_server_defers)
+{
+    BootstrapPeerPolicy pol;
+    pol.windowMs = 1000;
+    pol.stallMs = 2000;
+    BootstrapPeerBoard b(2, 4, pol);
+    for (int s = 0; s < 4; ++s)
+        b.Attach(s, b.Assign(s, 0), 0);
+    BOOST_CHECK_EQUAL(b.StreamPeer(1), 1);
+    // streams 0 and 2 (peer 0) are served, streams 1 and 3 (peer 1, over its cap) get nothing
+    for (int64_t t = 100; t <= 3000; t += 100) {
+        b.NoteChunk(0, 10, 1000, t);
+        b.NoteChunk(2, 11, 1000, t);
+    }
+    BOOST_CHECK(b.Rebalance(1500).empty()); // not yet stalled long enough
+    const std::vector<BootstrapMove> mv = b.Rebalance(3000);
+    BOOST_REQUIRE_EQUAL(mv.size(), 2U);
+    for (size_t i = 0; i < mv.size(); ++i) {
+        BOOST_CHECK(mv[i].stream == 1 || mv[i].stream == 3);
+        BOOST_CHECK(mv[i].reason == BMR_STALLED);
+    }
+    BOOST_CHECK(b.Rebalance(3100).empty()); // a stream already asked to move is not asked again
+    b.Detach(1);
+    BOOST_CHECK_EQUAL(b.Assign(1, 3200), 0); // the server that deferred it is avoided for a while
+    // with a single usable peer a quiet stream stays put (the receive timeout handles it)
+    BootstrapPeerBoard solo(1, 1, pol);
+    solo.Attach(0, solo.Assign(0, 0), 0);
+    BOOST_CHECK(solo.Rebalance(60000).empty());
+}
+
+BOOST_AUTO_TEST_CASE(peer_board_moves_a_stream_off_a_much_slower_server_but_keeps_one)
+{
+    BootstrapPeerPolicy pol;
+    pol.windowMs = 1000;
+    pol.moveCooldownMs = 1000;
+    pol.stallMs = 1000000;
+    BootstrapPeerBoard b(2, 4, pol);
+    for (int s = 0; s < 4; ++s)
+        b.Attach(s, b.Assign(s, 0), 0);
+    for (int64_t t = 100; t <= 2000; t += 100) {
+        b.NoteChunk(0, 10, 10000, t); // 100 kB/s on peer 0
+        b.NoteChunk(2, 11, 10000, t);
+        b.NoteChunk(1, 12, 100, t);   // 1 kB/s on peer 1
+        b.NoteChunk(3, 13, 100, t);
+    }
+    std::vector<BootstrapMove> mv = b.Rebalance(2000);
+    BOOST_REQUIRE_EQUAL(mv.size(), 1U);
+    BOOST_CHECK(mv[0].reason == BMR_SLOW);
+    BOOST_CHECK(mv[0].stream == 1 || mv[0].stream == 3);
+    const int movedStream = mv[0].stream;
+    const int stayed = movedStream == 1 ? 3 : 1;
+    b.Detach(movedStream);
+    BOOST_CHECK_EQUAL(b.Assign(movedStream, 2100), 0); // goes to the fast server
+    // the last stream on the slow server is left alone: it keeps the rate measured
+    for (int64_t t = 2100; t <= 4000; t += 100) {
+        b.NoteChunk(0, 10, 10000, t);
+        b.NoteChunk(2, 11, 10000, t);
+        b.NoteChunk(stayed, 14, 100, t);
+    }
+    BOOST_CHECK(b.Rebalance(4000).empty());
+    BOOST_CHECK(b.Peer(0, 4000).mibps > b.Peer(1, 4000).mibps);
+}
+
+BOOST_AUTO_TEST_CASE(peer_board_idle_stream_steals_from_a_much_slower_holder)
+{
+    BootstrapPeerPolicy pol;
+    pol.windowMs = 1000;
+    pol.stallMs = 1000000;
+    pol.stealMinSeconds = 15;
+    BootstrapPeerBoard b(2, 3, pol);
+    b.Attach(0, b.Assign(0, 0), 0);
+    b.Attach(1, b.Assign(1, 0), 0);
+    b.NoteClaim(0, 8, 100000, false);
+    b.NoteClaim(1, 7, 1000000, false);
+    b.SetIdle(2, true); // nothing queued for stream 2
+    for (int64_t t = 100; t <= 2000; t += 100) {
+        b.NoteChunk(0, 8, 100, t); // both servers equally slow
+        b.NoteChunk(1, 7, 100, t);
+    }
+    BOOST_CHECK(b.Rebalance(2000).empty()); // no steal while the holder is not much slower
+    for (int64_t t = 2100; t <= 4000; t += 100) {
+        b.NoteChunk(0, 8, 10000, t); // peer 0 speeds up to 100 kB/s
+        b.NoteChunk(1, 7, 10, t);
+    }
+    std::vector<BootstrapMove> mv = b.Rebalance(4000);
+    BOOST_REQUIRE_EQUAL(mv.size(), 1U);
+    BOOST_CHECK_EQUAL(mv[0].stream, 1);
+    BOOST_CHECK(mv[0].reason == BMR_STEAL);
+
+    // a nearly finished file is not worth taking over
+    BootstrapPeerBoard c(2, 3, pol);
+    c.Attach(0, c.Assign(0, 0), 0);
+    c.Attach(1, c.Assign(1, 0), 0);
+    c.NoteClaim(1, 7, 500, false);
+    c.SetIdle(2, true);
+    for (int64_t t = 100; t <= 2000; t += 100) {
+        c.NoteChunk(0, 8, 10000, t);
+        c.NoteChunk(1, 7, 10, t);
+    }
+    BOOST_CHECK(c.Rebalance(2000).empty());
+    // and nothing is stolen when no stream is idle
+    BootstrapPeerBoard d(2, 2, pol);
+    d.Attach(0, d.Assign(0, 0), 0);
+    d.Attach(1, d.Assign(1, 0), 0);
+    d.NoteClaim(1, 7, 1000000, false);
+    for (int64_t t = 100; t <= 2000; t += 100) {
+        d.NoteChunk(0, 8, 10000, t);
+        d.NoteChunk(1, 7, 10, t);
+    }
+    BOOST_CHECK(d.Rebalance(2000).empty());
+}
+
+BOOST_AUTO_TEST_CASE(peer_board_blames_the_peer_that_supplied_a_bad_file)
+{
+    // a file supplied by one peer only: that peer is benched as soon as another is usable
+    BootstrapPeerBoard b(2, 2);
+    b.Attach(0, b.Assign(0, 0), 0);
+    b.Attach(1, b.Assign(1, 0), 0);
+    b.NoteClaim(1, 5, 100, false);
+    b.NoteChunk(1, 5, 100, 10);
+    BOOST_CHECK(b.HashFailed(1, 5));
+    BOOST_CHECK(b.Peer(1, 20).banned);
+    BOOST_CHECK(!b.Peer(0, 20).banned);
+    b.Detach(1);
+    BOOST_CHECK_EQUAL(b.Assign(1, 30), 0);
+    // streams still on the benched peer are told to leave
+    BootstrapPeerBoard c(2, 2);
+    c.Attach(0, c.Assign(0, 0), 0);
+    c.Attach(1, c.Assign(1, 0), 0);
+    c.NoteClaim(0, 6, 100, false);
+    c.NoteChunk(0, 6, 100, 10);
+    c.HashFailed(0, 6); // peer 0 benched, stream 0 is on it
+    const std::vector<BootstrapMove> mv = c.Rebalance(100);
+    BOOST_REQUIRE_EQUAL(mv.size(), 1U);
+    BOOST_CHECK_EQUAL(mv[0].stream, 0);
+    BOOST_CHECK(mv[0].reason == BMR_UNUSABLE);
+
+    // the only usable peer is never benched: the plain strike limit decides
+    BootstrapPeerBoard solo(1, 1);
+    solo.Attach(0, solo.Assign(0, 0), 0);
+    solo.NoteClaim(0, 5, 100, false);
+    solo.NoteChunk(0, 5, 100, 10);
+    BOOST_CHECK(!solo.HashFailed(0, 5));
+    BOOST_CHECK(!solo.Peer(0, 20).banned);
+
+    // bytes of unknown origin already on disk: the culprit is unknown, only a second failure benches
+    BootstrapPeerBoard m(2, 2);
+    m.Attach(0, m.Assign(0, 0), 0);
+    m.Attach(1, m.Assign(1, 0), 0);
+    m.NoteClaim(0, 9, 100, true); // resumed from disk
+    m.NoteChunk(0, 9, 50, 10);
+    BOOST_CHECK(m.HashFailed(0, 9));
+    BOOST_CHECK(!m.Peer(0, 20).banned);
+    m.NoteClaim(0, 9, 100, false);
+    m.NoteChunk(0, 9, 50, 30);
+    m.NoteChunk(1, 9, 50, 30); // two suppliers
+    BOOST_CHECK(m.HashFailed(0, 9));
+    BOOST_CHECK(m.Peer(0, 40).banned); // its second failure; the other has one and stays
+    BOOST_CHECK(!m.Peer(1, 40).banned);
+    BOOST_CHECK_EQUAL(m.UsablePeers(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(progress_line_names_the_servers_only_when_there_are_several)
+{
+    BOOST_CHECK_EQUAL(BootstrapFormatProgressLine(42, 4402341478ULL, 10522669875ULL, 210.5, 4, 2),
+                      "Bootstrap snapshot:  42%  4.10 / 9.80 GiB  210.5 MiB/s  (4 streams, 2 servers)");
+    BOOST_CHECK_EQUAL(BootstrapFormatProgressLine(42, 4402341478ULL, 10522669875ULL, 210.5, 4, 1),
+                      BootstrapFormatProgressLine(42, 4402341478ULL, 10522669875ULL, 210.5, 4));
+    std::vector<std::string> names;
+    names.push_back("a:1");
+    names.push_back("b:2");
+    std::vector<BootstrapPeerSnapshot> snap(2);
+    snap[0].streams = 2;
+    snap[0].mibps = 12.5;
+    snap[1].ignored = true;
+    const std::string line = BootstrapPeerSummary(names, snap);
+    BOOST_CHECK(line.find("a:1 2 streams 12.5 MiB/s") != std::string::npos);
+    BOOST_CHECK(line.find("different snapshot") != std::string::npos);
+}
+
 BOOST_AUTO_TEST_CASE(prepare_staging_reuses_discards_and_marks)
 {
     TempDir tmp;
@@ -1329,6 +1554,220 @@ BOOST_AUTO_TEST_CASE(streams_reconnect_by_name_through_a_name_proxy)
         BOOST_CHECK_EQUAL(proxy.foreignHosts.load(), 0);
         BOOST_CHECK_EQUAL(proxy.lastHost, "snapshot.invalid");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-server download against fake servers
+// ---------------------------------------------------------------------------
+
+namespace {
+std::string PeerName(const FakeBootstrapServer& s) { return strprintf("127.0.0.1:%u", (unsigned int)s.Address().GetPort()); }
+size_t ChunksOf(const Snapshot& s)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < s.manifest.vFiles.size(); ++i)
+        n += (s.manifest.vFiles[i].nSize + TEST_CHUNK - 1) / TEST_CHUNK;
+    return n;
+}
+struct PolicyGuard {
+    explicit PolicyGuard(const BootstrapPeerPolicy& p) { BootstrapSetPeerPolicyForTests(&p); }
+    ~PolicyGuard() { BootstrapSetPeerPolicyForTests(NULL); }
+};
+} // namespace
+
+BOOST_AUTO_TEST_CASE(two_servers_both_serve_and_no_chunk_is_fetched_twice)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(14);
+    FakeBootstrapServer a(s), b(s);
+    a.chunkDelayMs = 15;
+    b.chunkDelayMs = 15;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                            std::vector<std::string>(1, PeerName(b))), error);
+    CheckAllFilesMatch(s, tmp.path / "staging");
+    BOOST_CHECK_GT(a.Log().size(), 0U);
+    BOOST_CHECK_GT(b.Log().size(), 0U);
+    BOOST_CHECK_EQUAL(a.Log().size() + b.Log().size(), ChunksOf(s));
+}
+
+BOOST_AUTO_TEST_CASE(a_server_with_a_different_snapshot_is_ignored)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(8);
+    FakeBootstrapServer a(s), b(s);
+    b.manifestFor = [&s](int) {
+        CBootstrapSnapshotManifest m = s.manifest;
+        m.nHeight += 1; // another snapshot (height), same file names
+        return m;
+    };
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                            std::vector<std::string>(1, PeerName(b))), error);
+    CheckAllFilesMatch(s, tmp.path / "staging");
+    BOOST_CHECK_EQUAL(b.Log().size(), 0U); // not one chunk asked of it
+    BOOST_CHECK_EQUAL(a.Log().size(), ChunksOf(s));
+    // the validated server itself changing its snapshot, with no other left, still ends the attempt
+    TempDir tmp2;
+    FakeBootstrapServer c(s);
+    c.manifestFor = [&s](int conn) {
+        CBootstrapSnapshotManifest m = s.manifest;
+        if (conn > 0)
+            m.nHeight += 1;
+        return m;
+    };
+    BOOST_CHECK(!DownloadBootstrapSnapshotParallel(c.Address(), PeerName(c), s.manifest, tmp2.path / "staging", 5000, 2, error));
+}
+
+BOOST_AUTO_TEST_CASE(a_server_with_another_manifest_serves_the_files_it_shares)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(12);
+    // the second server's snapshot: another file order and one file that differs (same anchor)
+    Snapshot s2 = s;
+    std::reverse(s2.manifest.vFiles.begin(), s2.manifest.vFiles.end());
+    std::reverse(s2.contents.begin(), s2.contents.end());
+    const size_t altered = 4; // index in s2; master index = 11 - 4 = 7
+    s2.contents[altered] = Bytes(s2.contents[altered].size(), 999);
+    s2.manifest.vFiles[altered].hashSha256 = Sha256Of(s2.contents[altered]);
+    BOOST_REQUIRE(SerializeHash(s2.manifest) != SerializeHash(s.manifest));
+    FakeBootstrapServer a(s), b(s2);
+    a.chunkDelayMs = 10;
+    b.chunkDelayMs = 10;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                            std::vector<std::string>(1, PeerName(b))), error);
+    CheckAllFilesMatch(s, tmp.path / "staging"); // the trusted manifest's bytes, whoever served them
+    BOOST_CHECK_GT(b.Log().size(), 0U);
+    BOOST_CHECK_EQUAL(b.RequestsFor((uint32_t)altered), 0U); // never asked for the file it does not share
+    BOOST_CHECK_GT(a.RequestsFor((uint32_t)(11 - altered)), 0U);
+    BOOST_CHECK_EQUAL(a.Log().size() + b.Log().size(), ChunksOf(s));
+}
+
+
+BOOST_AUTO_TEST_CASE(a_server_that_serves_corrupt_bytes_costs_a_retry_not_the_attempt)
+{
+    for (int corruptIsPrimary = 0; corruptIsPrimary < 2; ++corruptIsPrimary) {
+        TempDir tmp;
+        const Snapshot s = MakeSnapshot(10);
+        FakeBootstrapServer a(s), b(s);
+        FakeBootstrapServer& bad = corruptIsPrimary ? a : b;
+        FakeBootstrapServer& good = corruptIsPrimary ? b : a;
+        bad.tamper = [](int, uint32_t, uint64_t offset, std::string& data) {
+            if (offset == 0 && !data.empty())
+                data[0] ^= 1; // every file it serves is wrong
+        };
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                                std::vector<std::string>(1, PeerName(b))), error);
+        CheckAllFilesMatch(s, tmp.path / "staging");
+        BOOST_CHECK_GT(good.Log().size(), 0U);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(a_server_that_disappears_mid_download_leaves_the_rest_to_the_other)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(14);
+    FakeBootstrapServer a(s), b(s);
+    a.chunkDelayMs = 5;
+    b.chunkDelayMs = 5;
+    std::atomic<int> served(0);
+    // b answers a few requests, cutting connections in the middle of files, and then never again
+    b.dropBefore = [&served](int, uint32_t, uint64_t, int) { return served.fetch_add(1) >= 12; };
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                            std::vector<std::string>(1, PeerName(b))), error);
+    CheckAllFilesMatch(s, tmp.path / "staging");
+    BOOST_CHECK_GT(a.Log().size(), 0U);
+    // and the same when the first (validated) server is the one that goes
+    TempDir tmp2;
+    FakeBootstrapServer c(s), d(s);
+    std::atomic<int> served2(0);
+    c.dropBefore = [&served2](int, uint32_t, uint64_t, int) { return served2.fetch_add(1) >= 12; };
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(c.Address(), PeerName(c), s.manifest, tmp2.path / "staging", 5000, 4, error,
+                                                            std::vector<std::string>(1, PeerName(d))), error);
+    CheckAllFilesMatch(s, tmp2.path / "staging");
+}
+
+BOOST_AUTO_TEST_CASE(a_stream_the_server_defers_moves_to_the_other_server)
+{
+    BootstrapPeerPolicy pol;
+    pol.windowMs = 500;
+    pol.stallMs = 1000;
+    PolicyGuard guard(pol);
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(10);
+    FakeBootstrapServer a(s), b(s);
+    b.chunkDelayMs = 6000; // over its serving cap: it does not answer in time
+    std::string error;
+    const int64_t t0 = GetTimeMillis();
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                            std::vector<std::string>(1, PeerName(b))), error);
+    BOOST_CHECK_LT(GetTimeMillis() - t0, 15000); // would take minutes if its streams stayed on b
+    CheckAllFilesMatch(s, tmp.path / "staging");
+    BOOST_CHECK_GE(a.Log().size(), ChunksOf(s) - 40U);
+}
+
+BOOST_AUTO_TEST_CASE(partial_files_fetched_from_one_server_continue_from_the_other)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(8);
+    std::string error;
+    {
+        // first run: the only server cuts every connection after a handful of chunks and the attempt dies
+        FakeBootstrapServer a(s);
+        std::atomic<int> served(0);
+        a.dropBefore = [&served](int, uint32_t, uint64_t, int) { return served.fetch_add(1) >= 20; };
+        BootstrapSetWatchdogForTests(1500, 1500);
+        const bool ok = DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 2000, 2, error);
+        BootstrapSetWatchdogForTests(0, 0);
+        BOOST_CHECK(!ok);
+    }
+    // second run: two other servers finish it; what the first run stored is not fetched again
+    // what the first run left behind (verified files and aligned .part prefixes; the last chunk of a
+    // .part is always re-requested), counted from the disk so the check does not depend on timing
+    size_t stored = 0;
+    for (size_t i = 0; i < s.manifest.vFiles.size(); ++i) {
+        const boost::filesystem::path f = tmp.path / "staging" / s.manifest.vFiles[i].strPath;
+        boost::system::error_code ec;
+        if (boost::filesystem::exists(f, ec)) {
+            stored += (s.manifest.vFiles[i].nSize + TEST_CHUNK - 1) / TEST_CHUNK;
+        } else if (boost::filesystem::exists(f.string() + ".part", ec)) {
+            const uint64_t ps = boost::filesystem::file_size(f.string() + ".part", ec);
+            stored += ps / TEST_CHUNK > 0 ? ps / TEST_CHUNK - 1 : 0;
+        }
+    }
+    BOOST_CHECK_GT(stored, 0U);
+    FakeBootstrapServer b(s), c(s);
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(b.Address(), PeerName(b), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                            std::vector<std::string>(1, PeerName(c))), error);
+    CheckAllFilesMatch(s, tmp.path / "staging");
+    BOOST_CHECK_LE(b.Log().size() + c.Log().size(), ChunksOf(s) - stored);
+}
+
+
+// Read-only manifest probe, run only with ZCL_PROBE_PEER=host:port (and ZCL_PROBE_OUT=<file>): handshake and
+// manifest request, no chunk. Writes one line per file plus a header; skipped otherwise.
+BOOST_AUTO_TEST_CASE(probe_manifest_of_a_live_server)
+{
+    const char* peer = getenv("ZCL_PROBE_PEER");
+    const char* out = getenv("ZCL_PROBE_OUT");
+    if (!peer || !out)
+        return;
+    CBootstrapSnapshotManifest m;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(BootstrapProbeManifest(peer, m, error), error);
+    FILE* f = fopen(out, "w");
+    BOOST_REQUIRE(f);
+    fprintf(f, "peer %s\nversion %d network %s height %d block %s\nfiles %u bytes %llu chunk %u\nblocktip %d %s\nmanifest_hash %s\nanchor256 %s\nanchor3 %s\n",
+            peer, (int)m.nVersion, m.strNetwork.c_str(), m.nHeight, m.hashBlock.ToString().c_str(),
+            (unsigned)m.vFiles.size(), (unsigned long long)m.nSnapshotBytes, (unsigned)m.nChunkSize,
+            m.nBlockTipHeight, m.hashBlockTip.ToString().c_str(), SerializeHash(m).ToString().c_str(),
+            m.hashAnchorSha256.ToString().c_str(), m.hashAnchorSha3.ToString().c_str());
+    for (size_t i = 0; i < m.vFiles.size(); ++i)
+        fprintf(f, "F %s %llu %s\n", m.vFiles[i].strPath.c_str(), (unsigned long long)m.vFiles[i].nSize, m.vFiles[i].hashSha256.ToString().c_str());
+    fclose(f);
 }
 
 #endif // !WIN32
