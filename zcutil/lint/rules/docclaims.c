@@ -19,9 +19,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef _WIN32
-#include <sys/wait.h>
-#endif
 
 enum { MIN_DOCS = 3, MAX_ARGS = 4 };
 
@@ -111,10 +108,8 @@ static const char *eval_claim(char **a, int n, bool *malformed)
         if (n != 2 || !safe_word(a[1], "-")) return "needs one zcl-lint rule name";
         if (!strcmp(a[1], "doc-claims") || !strcmp(a[1], "all")) return "a claim cannot ask for itself or for all rules";
         *malformed = false;
-        char *bin = lint_rootpath("zcutil/bin/zcl-lint");
-        FILE *f = fopen(bin, "rb");
-        if (!f) { free(bin); return "zcutil/bin/zcl-lint is not built"; }
-        fclose(f);
+        char *bin = lint_tool_path("zcutil/bin/zcl-lint");
+        if (!bin) return "zcutil/bin/zcl-lint is not built";
         char *rargv[] = { bin, "--root", (char *)lint_root, a[1], NULL };
         int st = lint_status_argv(NULL, rargv, true);
         free(bin);

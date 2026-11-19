@@ -30,10 +30,11 @@ int lint_rule_vendor(bool update)
         char *target = lint_rootpath(lint_is_tracked(own) ? dir : lint_files[i]);
         n++;
         char *argv[] = { "sh", "--", script, target, NULL };
-        int bad_run = lint_run_argv(argv, false);
+        int st = lint_status_argv(NULL, argv, false);
         free(script);
         free(target);
-        if (bad_run) { printf("FAIL vendor: %s does not match its vendored tree\n", lint_files[i]); bad++; }
+        if (st == LINT_PROC_UNAVAILABLE) return 2; /* no sh: the check never ran, so it cannot pass */
+        if (st != 0) { printf("FAIL vendor: %s does not match its vendored tree\n", lint_files[i]); bad++; }
     }
     if (!n) { printf("FAIL vendor: no Z23_SOURCE.tsv manifest is tracked\n"); return 2; }
     if (!bad) printf("vendor: ok (%d manifests)\n", n);

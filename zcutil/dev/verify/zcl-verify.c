@@ -15,11 +15,11 @@
  *                                    ZCL_CI_BASE, then origin/master)
  *   2. zcl-dev-t-fast --changed=REF  focused unit tests; SKIPPED with a visible line when that tool is not
  *                                    built (U2 must install the zcl-dev-t-fast alias for this gate to run)
- *   3. zcl-lint all                  every lint rule and ratchet (there is no cheaper subset); zcl-lint is
- *                                    not cross-built, so on Windows this step is UNAVAILABLE: run verify on
- *                                    a POSIX host
+ *   3. zcl-lint all                  every lint rule and ratchet (there is no cheaper subset); on Windows it
+ *                                    runs zcl-lint.exe from the same bindir (Git Bash supplies sh.exe)
  *   4. a hint: the zcutil/local-ci.sh test-changed command that runs the selected CI steps
- * Tools are spawned with an argv array, never through a shell. With --json stdout holds exactly one JSON
+ * Tools are spawned with an argv array, never through a shell; on Windows through lintlib's CreateProcess path
+ * (zcutil/lint/lintlib.c), which quotes the argv by the MSVCRT rules. With --json stdout holds exactly one JSON
  * line; the child tools' output and the progress lines go to stderr.
  * Exit: 0 every step that ran passed, 1 a step found a problem, 2 broken (a required tool is missing,
  * unavailable, or select failed). A skipped optional step never hides behind a pass: the summary names it.
@@ -32,22 +32,18 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "../../lint/lintlib.h"
+
 #ifdef _WIN32
 #include <direct.h>
 #include <io.h>
-#include <process.h>
-#define EXE ".exe"
-#define popen _popen
-#define pclose _pclose
-#define GITNULL "NUL"
 #else
 #include <sys/wait.h>
 #include <unistd.h>
-#define EXE ""
-#define GITNULL "/dev/null"
 #endif
 
 static char bindir[1024] = "zcutil/bin";
+static const char *exe_ext = LINT_EXE; /* the selftest fixture swaps in its stub suffix */
 static FILE *say;   /* progress and summary lines */
 static FILE *jout;  /* the single --json line */
 static int child_to_stderr;
@@ -84,7 +80,7 @@ static int safe_ref(const char *s)
 static int tool_exists(const char *tool)
 {
     char p[1100];
-    snprintf(p, sizeof p, "%s/%s%s", bindir, tool, EXE);
+    snprintf(p, sizeof p, "%s/%s%s", bindir, tool, exe_ext);
     FILE *f = fopen(p, "rb");
     if (!f) return 0;
     fclose(f);
@@ -94,16 +90,20 @@ static int tool_exists(const char *tool)
 /* Run "<bindir>/<tool>" with the arguments in argv (NULL terminated, argv[0] is the tool name), without a
  * shell; returns the exit status, 128+signal, or -1. */
 #ifdef _WIN32
+/* CreateProcess on an MSVCRT-quoted line (a path with spaces or quotes stays one argument); a *.sh stub runs
+ * through sh.exe from PATH. */
 static int spawn_wait(const char *path, char *const argv[])
 {
-    int saved = -1;
-    if (child_to_stderr) {
-        saved = _dup(1);
-        if (saved < 0 || _dup2(2, 1) < 0) { fprintf(stderr, "zcl-dev verify: cannot redirect child output\n"); return -1; }
-    }
-    intptr_t rc = _spawnv(_P_WAIT, path, (const char *const *)argv);
-    if (saved >= 0) { _dup2(saved, 1); _close(saved); }
-    return rc == -1 ? -1 : (int)rc;
+    size_t n = 0;
+    while (argv[n]) n++;
+    char **v = malloc((n + 1) * sizeof *v);
+    if (!v) { fprintf(stderr, "zcl-dev verify: out of memory\n"); return -1; }
+    v[0] = (char *)path;
+    for (size_t i = 1; i <= n; i++) v[i] = argv[i];
+    struct lint_proc p;
+    int rc = lint_proc_open(&p, NULL, v, child_to_stderr ? LINT_PROC_TO_STDERR : LINT_PROC_INHERIT);
+    free(v);
+    return rc != 0 ? -1 : lint_proc_close(&p);
 }
 #else
 static int spawn_wait(const char *path, char *const argv[])
@@ -126,7 +126,7 @@ static int spawn_wait(const char *path, char *const argv[])
 static int run(const char *tool, char *const argv[])
 {
     char path[1100];
-    int n = snprintf(path, sizeof path, "%s/%s%s", bindir, tool, EXE);
+    int n = snprintf(path, sizeof path, "%s/%s%s", bindir, tool, exe_ext);
     if (n < 0 || (size_t)n >= sizeof path) { fprintf(stderr, "zcl-dev verify: tool path too long\n"); return -1; }
     fflush(stdout);
     fflush(stderr);
@@ -213,13 +213,8 @@ static int step_checktests(const char *base, struct result *r)
 static int step_lint(struct result *r)
 {
     if (!tool_exists("zcl-lint")) {
-#ifdef _WIN32
-        fprintf(stderr, "zcl-dev verify: zcl-lint is not built for Windows; run zcl-dev verify on a POSIX host\n");
-        *r = (struct result){"zcl-lint", "UNAVAILABLE", 2};
-#else
-        fprintf(stderr, "zcl-dev verify: %s/zcl-lint is missing; run make -C zcutil\n", bindir);
+        fprintf(stderr, "zcl-dev verify: %s/zcl-lint%s is missing; run make -C zcutil\n", bindir, exe_ext);
         *r = (struct result){"zcl-lint", "BROKEN", 2};
-#endif
         return 2;
     }
     fprintf(say, "== verify: zcl-lint all\n");
@@ -237,22 +232,27 @@ static void summary(const struct result *res, size_t n)
 /* The base check-tests compares the baseline with, named explicitly so it never depends on origin/master:
  * the caller or ZCL_CI_BASE, else the merge-base of HEAD with origin/master when that resolves, else the
  * parent of HEAD (a CI clone or bundle checkout has the commit history but no origin/master), else HEAD. */
-static int git_line(const char *cmd, char *out, size_t n)
+/* The first stdout line of a git command run from an argv (stderr to the null device); 0 when there is none.
+ * No shell is involved, so HEAD^ reaches git intact on Windows too (cmd.exe would eat the caret). */
+static int git_first_line(char *const argv[], char *out, size_t n)
 {
-    FILE *p = popen(cmd, "r");
-    if (!p) return 0;
-    int ok = fgets(out, (int)n, p) != NULL;
-    pclose(p);
+    struct lint_proc p;
+    out[0] = 0;
+    if (lint_proc_open(&p, NULL, argv, LINT_PROC_NOERR) != 0) return 0;
+    int ok = fgets(out, (int)n, p.fp) != NULL;
+    lint_proc_close(&p);
     out[ok ? strcspn(out, "\r\n") : 0] = 0;
-    return ok && *out && safe_ref(out);
+    return ok && *out;
 }
+
+static int git_line(char *const argv[], char *out, size_t n) { return git_first_line(argv, out, n) && safe_ref(out); }
 
 static void gate_base(char *out, size_t n, const char *explicit_base)
 {
     char buf[512];
     if (explicit_base && *explicit_base) snprintf(out, n, "%s", explicit_base);
-    else if (git_line("git merge-base HEAD origin/master 2>" GITNULL, buf, sizeof buf)) snprintf(out, n, "%s", buf);
-    else if (git_line("git rev-parse --verify --quiet HEAD^ 2>" GITNULL, buf, sizeof buf)) snprintf(out, n, "%s", buf);
+    else if (git_line((char *[]){"git", "merge-base", "HEAD", "origin/master", NULL}, buf, sizeof buf)) snprintf(out, n, "%s", buf);
+    else if (git_line((char *[]){"git", "rev-parse", "--verify", "--quiet", "HEAD^", NULL}, buf, sizeof buf)) snprintf(out, n, "%s", buf);
     else snprintf(out, n, "HEAD");
 }
 
@@ -299,11 +299,24 @@ static int verify(const char *base, int json)
     return code;
 }
 
-#ifndef _WIN32
 /* Fixture: stub tools in a temp bindir (its name holds a quote on purpose), checking call order, the base
  * argument, the skip of missing optional tools, the BROKEN verdicts of missing aliases, the stop on failure,
  * the exit codes and the one-line --json output. Stubs read the calls file name from the environment, so no
- * character of TMPDIR can reach a shell string. */
+ * character of TMPDIR can reach a shell string. On Windows the stubs are <tool>.sh, which the same spawn path
+ * runs through sh.exe from PATH (Git Bash), and the temp root comes from TEMP. */
+#ifdef _WIN32
+static char *fx_mkdtemp(char *t) { return _mktemp_s(t, strlen(t) + 1) == 0 && _mkdir(t) == 0 ? t : NULL; }
+#define mkdtemp fx_mkdtemp
+#define mkdir(p, m) _mkdir(p)
+#define rmdir _rmdir
+#define setenv(k, v, o) _putenv_s(k, v)
+#define ftruncate(fd, n) _chsize(fd, n)
+#define STUB_EXT ".sh"
+#define TMP_VARS "TEMP", "TMP", "TMPDIR"
+#else
+#define STUB_EXT ""
+#define TMP_VARS "TMPDIR"
+#endif
 static char calls_path[1000];
 static char tmp_root[900];
 static char fix_bin[1000];
@@ -314,8 +327,8 @@ static const char *const stub_names[] = {"zcl-dev", "zcl-dev-t-fast", "zcl-dev-t
 static int stub(const char *name, int code)
 {
     char p[1300];
-    snprintf(p, sizeof p, "%s/%s", fix_bin, name);
-    FILE *f = fopen(p, "w");
+    snprintf(p, sizeof p, "%s/%s" STUB_EXT, fix_bin, name);
+    FILE *f = fopen(p, "wb");
     if (!f) return -1;
     fprintf(f, "#!/bin/sh\necho \"%s $*\" >>\"$ZCL_VERIFY_CALLS\"\nexit %d\n", name, code);
     fclose(f);
@@ -325,7 +338,7 @@ static int stub(const char *name, int code)
 static void unstub(const char *name)
 {
     char p[1300];
-    snprintf(p, sizeof p, "%s/%s", fix_bin, name);
+    snprintf(p, sizeof p, "%s/%s" STUB_EXT, fix_bin, name);
     remove(p);
 }
 
@@ -423,12 +436,21 @@ static int fixture_cases(void)
     return bad;
 }
 
+static void fixture_tmp_root(void)
+{
+    static const char *const vars[] = { TMP_VARS };
+    const char *t = NULL;
+    for (size_t i = 0; i < sizeof vars / sizeof *vars && !(t && *t); i++) t = getenv(vars[i]);
+    snprintf(tmp_root, sizeof tmp_root, "%s/zcl-verify-st.XXXXXX", t && *t ? t : "/tmp");
+    for (char *c = tmp_root; *c; c++)
+        if (*c == '\\') *c = '/';
+}
+
 static int fixture(void)
 {
     int bad;
     char old_bin[1024];
-    const char *t = getenv("TMPDIR");
-    snprintf(tmp_root, sizeof tmp_root, "%s/zcl-verify-st.XXXXXX", t && *t ? t : "/tmp");
+    fixture_tmp_root();
     if (!mkdtemp(tmp_root)) { perror("selftest: mkdtemp"); return 1; }
     snprintf(fix_bin, sizeof fix_bin, "%s/b'in", tmp_root);
     snprintf(calls_path, sizeof calls_path, "%s/calls", tmp_root);
@@ -443,7 +465,9 @@ static int fixture(void)
         bad = 1;
     } else {
         snprintf(bindir, sizeof bindir, "%s", fix_bin);
+        exe_ext = STUB_EXT;
         bad = fixture_cases();
+        exe_ext = LINT_EXE;
     }
     /* cleanup on every path */
     if (say) fclose(say);
@@ -459,7 +483,6 @@ static int fixture(void)
     snprintf(bindir, sizeof bindir, "%s", old_bin);
     return bad;
 }
-#endif
 
 static int selftest(void)
 {
@@ -467,9 +490,7 @@ static int selftest(void)
         fputs("selftest: safe_ref failed\n", stderr);
         return 1;
     }
-#ifndef _WIN32
     if (fixture()) return 1;
-#endif
     puts("zcl-dev verify selftest: ok");
     return 0;
 }
@@ -478,12 +499,7 @@ static int selftest(void)
 static void enter_toplevel(void)
 {
     char cwd[512], top[512], full[1600];
-    FILE *p = popen("git rev-parse --show-toplevel 2>" GITNULL, "r");
-    if (!p) return;
-    if (!fgets(top, sizeof top, p)) { pclose(p); return; }
-    pclose(p);
-    top[strcspn(top, "\r\n")] = 0;
-    if (!*top) return;
+    if (!git_first_line((char *[]){"git", "rev-parse", "--show-toplevel", NULL}, top, sizeof top)) return;
     if (!is_absolute(bindir) && getcwd(cwd, sizeof cwd)) {
         snprintf(full, sizeof full, "%s/%s", cwd, bindir);
         if (strlen(full) < sizeof bindir) memcpy(bindir, full, strlen(full) + 1);

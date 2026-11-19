@@ -147,13 +147,8 @@ static void from_tests(struct metric *m)
 /* `zcl-dev check-rules` is the one authority on impact-rule coverage; count its "no rule matches" lines. */
 static void from_check_rules(struct metric *m)
 {
-#ifdef _WIN32
-    unavailable(m, "zcl-dev check-rules is not run from the Windows build of zcl-lint");
-#else
-    char *bin = lint_rootpath("zcutil/bin/zcl-dev");
-    FILE *t = fopen(bin, "rb");
-    if (!t) { free(bin); unavailable(m, "zcutil/bin/zcl-dev not built"); return; }
-    fclose(t);
+    char *bin = lint_tool_path("zcutil/bin/zcl-dev");
+    if (!bin) { unavailable(m, "zcutil/bin/zcl-dev not built"); return; }
     free(bin);
     char *argv[] = { "zcutil/bin/zcl-dev", "check-rules", NULL };
     struct lint_proc pr;
@@ -168,7 +163,6 @@ static void from_check_rules(struct metric *m)
     if (st == 0 && lines > 0) set(m, 0);
     else if (unmapped > 0) set(m, unmapped);
     else unavailable(m, "zcl-dev check-rules did not run to a verdict");
-#endif
 }
 
 static void collect(struct metric *m)

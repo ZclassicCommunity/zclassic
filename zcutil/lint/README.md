@@ -39,6 +39,21 @@ list, C/C++ and sh comment and string stripping, baseline read/write and the rat
 A rule that scans nothing fails: exit 2 and "hollow scan", never a pass. Exit codes: 0 clean, 1 findings, 2 usage, internal error
 or hollow scan. `make -C zcutil/lint check` runs the fixture selftest and `lintlib_test.c`.
 
+## Windows (Git Bash)
+
+`make -C zcutil CC=x86_64-w64-mingw32-gcc EXEEXT=.exe` builds `zcl-lint.exe` with the other tools, and
+`zcl-dev verify` runs it like every other step. Children start through `CreateProcessA`, never `cmd.exe`: the argv
+becomes one command line by the MSVCRT quoting rules (`lint_win_quote_argv`, unit-tested in `lintlib_test.c` on every
+host), so `%`, `&`, `|`, `^` and `!` are plain characters, and only an argument with an embedded CR or LF is refused.
+Programs are found on `PATH` only (`SearchPathA`, `.exe` added). A `*.sh` file, or a path whose file starts with
+`#!`, runs as `sh.exe <script> args...`. When `sh.exe` is not on `PATH` the rule prints
+`UNAVAILABLE: sh not found on PATH` and exits 2, so it never passes. On Windows only, `lint_slurp` drops a CR before an
+LF, so a `core.autocrlf=true` checkout gets the same verdicts as the LF tree.
+
+Every selftest script runs against `zcl-lint.exe` under Git Bash: `sh zcutil/lint/selftest.sh zcutil/bin/zcl-lint.exe`.
+A case that cannot run there must print `SKIP (windows): <reason>` and be listed here. Today none is skipped: all five
+scripts and the `zcl-dev verify --selftest` stub fixture (its stubs are `<tool>.sh` on Windows) pass under Git Bash.
+
 ## Safety rules (secretlog, testiso, shellport, wallclock)
 
 `secretlog` (custody) flags log and print calls in `src/` and `wallet/src/` whose arguments name a secret (`CKey`, `strWalletPass`, `seed`, `mnemonic`, `HexStr(key`, ...); override a line with `log-ok: reason` in a comment. The baseline is expected to be empty, and every row is a finding to review, not to hide.

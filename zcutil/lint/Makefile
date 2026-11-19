@@ -7,6 +7,9 @@
 CC ?= cc
 EXEEXT ?=
 CFLAGS ?= -O2
+ifneq ($(EXEEXT),)
+CFLAGS += -D__USE_MINGW_ANSI_STDIO=1
+endif
 OUT = ../bin/zcl-lint$(EXEEXT)
 RULES = $(wildcard rules/*.c)
 SRC = zcl-lint.c lintlib.c $(RULES)
@@ -31,6 +34,6 @@ lint: $(OUT)
 	$(OUT) --root ../.. all
 
 clean:
-	rm -f ../bin/zcl-lint ../bin/zcl-lint.exe
+	rm -f ../bin/zcl-lint ../bin/zcl-lint.exe ../bin/lintlib-test
 
 .PHONY: all check lint clean

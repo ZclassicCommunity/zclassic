@@ -11,12 +11,18 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#ifndef _WIN32
 #include <fcntl.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <io.h>
+#else
 #include <unistd.h>
 #include <sys/wait.h>
 #endif
@@ -46,6 +52,18 @@ char *lint_rootpath(const char *rel)
     return p;
 }
 
+#ifdef _WIN32
+/* A core.autocrlf=true checkout: drop each CR that comes before an LF, so verdicts match the LF tree. */
+static size_t fold_crlf(char *buf, size_t n)
+{
+    size_t w = 0;
+    for (size_t r = 0; r < n; r++)
+        if (!(buf[r] == '\r' && r + 1 < n && buf[r + 1] == '\n')) buf[w++] = buf[r];
+    buf[w] = '\0';
+    return w;
+}
+#endif
+
 /* Whole file into a NUL-terminated buffer; NULL when unreadable. */
 char *lint_slurp(const char *rel, size_t *len)
 {
@@ -62,6 +80,9 @@ char *lint_slurp(const char *rel, size_t *len)
     }
     fclose(f);
     buf[n] = '\0';
+#ifdef _WIN32
+    n = fold_crlf(buf, n);
+#endif
     if (len) *len = n;
     return buf;
 }
@@ -297,57 +318,96 @@ void lint_scrub_c_line(char *s, bool *blk)
 
 /* ---- child processes without a shell ------------------------------------------------------ */
 /* Arguments reach a program as an argv array on POSIX, so no root, tracked file name or document token can
- * break out of quoting. The Windows build has only a command string, so it refuses every argument that cmd.exe
- * or the CRT could read as syntax instead of quoting it. */
+ * break out of quoting. Windows has one command line per process: CreateProcess receives it quoted by the
+ * MSVCRT rules below. No cmd.exe is involved, so % & | < > ^ ! are plain characters there. */
 
-#ifdef _WIN32
-static bool win_arg_ok(const char *a)
+static bool quote_put(char *out, size_t *o, size_t cap, char c, size_t times)
 {
-    return a[0] != '\0' && strlen(a) < 1000 && !strpbrk(a, "\"'%&|<>^!`$;()\r\n\t");
+    if (*o + times >= cap) return false;
+    memset(out + *o, c, times);
+    *o += times;
+    return true;
 }
-/* "a" "b" ... (+ redirection); NULL when an argument is unsafe or the line would be truncated. */
-static char *win_line(const char *cwd, char *const argv[], int flags)
+
+/* MSVCRT splits on space and tab and unquotes "; an MSYS child (sh.exe) also unquotes ' and globs * ? [ { ~. */
+static bool quote_needed(const char *a) { return a[0] == '\0' || strpbrk(a, " \t\"'*?[{~") != NULL; }
+
+static bool quote_one(const char *a, char *out, size_t *o, size_t cap)
 {
-    size_t cap = 64;
-    for (size_t i = 0; argv[i]; i++) { if (!win_arg_ok(argv[i])) return NULL; cap += strlen(argv[i]) + 3; }
-    if (cwd) { if (!win_arg_ok(cwd)) return NULL; cap += strlen(cwd) + 12; }
-    char *s = lint_xrealloc(NULL, cap), *w = s;
-    if (cwd) w += snprintf(w, cap, "cd /d \"%s\" && ", cwd);
-    for (size_t i = 0; argv[i]; i++) w += snprintf(w, cap - (size_t)(w - s), "%s\"%s\"", i ? " " : "", argv[i]);
-    if (flags & LINT_PROC_QUIET) snprintf(w, cap - (size_t)(w - s), " >NUL 2>&1");
-    else if (flags & LINT_PROC_MERGE) snprintf(w, cap - (size_t)(w - s), " 2>&1");
-    return s;
+    if (!quote_needed(a)) {
+        size_t n = strlen(a);
+        if (*o + n >= cap) return false;
+        memcpy(out + *o, a, n);
+        *o += n;
+        return true;
+    }
+    if (!quote_put(out, o, cap, '"', 1)) return false;
+    size_t bs = 0;
+    for (; *a; a++) {
+        if (*a == '\\') { bs++; continue; }
+        size_t k = *a == '"' ? 2 * bs + 1 : bs;   /* backslashes before a quote are doubled, plus one for it */
+        if (!quote_put(out, o, cap, '\\', k) || !quote_put(out, o, cap, *a, 1)) return false;
+        bs = 0;
+    }
+    return quote_put(out, o, cap, '\\', 2 * bs) && quote_put(out, o, cap, '"', 1);
 }
-#endif
+
+int lint_win_quote_argv(char *const argv[], char *out, size_t cap)
+{
+    size_t o = 0;
+    if (!cap) return -1;
+    for (size_t i = 0; argv[i]; i++)
+        if ((i && !quote_put(out, &o, cap, ' ', 1)) || !quote_one(argv[i], out, &o, cap)) return -1;
+    out[o] = '\0';
+    return o > (size_t)INT_MAX ? -1 : (int)o;
+}
+
+char *lint_tool_path(const char *rel)
+{
+    static const char *const ext[] = { LINT_EXE, "" };
+    for (size_t i = 0; i < sizeof ext / sizeof ext[0]; i++) {
+        size_t n = strlen(rel) + strlen(ext[i]) + 1;
+        char *r = lint_xrealloc(NULL, n);
+        snprintf(r, n, "%s%s", rel, ext[i]);
+        char *p = lint_rootpath(r);
+        free(r);
+        FILE *f = fopen(p, "rb");
+        if (f) { fclose(f); return p; }
+        free(p);
+    }
+    return NULL;
+}
 
 #ifndef _WIN32
-/* In the forked child: wire stdout (and stderr) to the pipe or the null device, enter cwd, exec. Never returns. */
-static void child_exec(const char *cwd, char *const argv[], int flags, const int fd[2])
+/* In the forked child: point stdout and stderr where flags say. Exits 127 when a descriptor cannot be set. */
+static void child_redirect(int flags, const int fd[2])
 {
-    if (flags & LINT_PROC_QUIET) {
-        int nul = open("/dev/null", O_WRONLY);
-        if (nul < 0 || dup2(nul, 1) < 0 || dup2(nul, 2) < 0) _exit(127);
-    } else if (!(flags & LINT_PROC_INHERIT)) {
+    int nul = -1;
+    if ((flags & (LINT_PROC_QUIET | LINT_PROC_NOERR)) && (nul = open("/dev/null", O_WRONLY)) < 0) _exit(127);
+    if ((flags & LINT_PROC_QUIET) && dup2(nul, 1) < 0) _exit(127);
+    if ((flags & LINT_PROC_TO_STDERR) && dup2(2, 1) < 0) _exit(127);
+    if (fd[1] >= 0) {
         if (dup2(fd[1], 1) < 0) _exit(127);
         if ((flags & LINT_PROC_MERGE) && dup2(fd[1], 2) < 0) _exit(127);
         close(fd[0]);
         close(fd[1]);
     }
+    if (nul >= 0 && dup2(nul, 2) < 0) _exit(127);
+}
+
+/* In the forked child: wire stdout and stderr, enter cwd, exec. Never returns. */
+static void child_exec(const char *cwd, char *const argv[], int flags, const int fd[2])
+{
+    child_redirect(flags, fd);
     if (cwd && chdir(cwd) != 0) _exit(127);
     execvp(argv[0], argv);
     _exit(127);
 }
-#endif
 
-int lint_proc_open(struct lint_proc *p, const char *cwd, char *const argv[], int flags)
+static int posix_open(struct lint_proc *p, const char *cwd, char *const argv[], int flags)
 {
-    p->fp = NULL;
-    p->pid = -1;
-    fflush(stdout);
-    fflush(stderr);
-#ifndef _WIN32
     int fd[2] = { -1, -1 };
-    bool piped = !(flags & (LINT_PROC_QUIET | LINT_PROC_INHERIT));
+    bool piped = !(flags & (LINT_PROC_QUIET | LINT_PROC_INHERIT | LINT_PROC_TO_STDERR));
     if (piped && pipe(fd) != 0) return -1;
     pid_t pid = fork();
     if (pid == 0) child_exec(cwd, argv, flags, fd);
@@ -356,19 +416,10 @@ int lint_proc_open(struct lint_proc *p, const char *cwd, char *const argv[], int
     p->pid = (long)pid;
     if (piped && !(p->fp = fdopen(fd[0], "r"))) { close(fd[0]); lint_proc_close(p); return -1; }
     return 0;
-#else
-    char *line = win_line(cwd, argv, flags);
-    if (!line) { fprintf(stderr, "zcl-lint: refusing an argument that cmd.exe could read as syntax\n"); return -1; }
-    if (!(flags & LINT_PROC_MERGE) && (flags & (LINT_PROC_QUIET | LINT_PROC_INHERIT))) { p->pid = system(line); free(line); return p->pid == -1 ? -1 : 0; }
-    p->fp = popen(line, "r");
-    free(line);
-    return p->fp ? 0 : -1;
-#endif
 }
 
-int lint_proc_close(struct lint_proc *p)
+static int posix_close(struct lint_proc *p)
 {
-#ifndef _WIN32
     if (p->fp) { fclose(p->fp); p->fp = NULL; }
     int st = 0;
     pid_t r;
@@ -376,16 +427,219 @@ int lint_proc_close(struct lint_proc *p)
     p->pid = -1;
     if (r < 0 || !WIFEXITED(st)) return -1;
     return WEXITSTATUS(st);
+}
 #else
-    if (p->fp) { int st = pclose(p->fp); p->fp = NULL; return st; }
-    return (int)p->pid;
+/* Windows: CreateProcessA on a quoted command line, stdout through CreatePipe, the null device through
+ * CreateFile("NUL"), the working directory through lpCurrentDirectory. */
+static HANDLE win_std(DWORD which)   /* an inheritable copy of one of our standard handles, or NULL */
+{
+    HANDLE h = GetStdHandle(which), d = NULL;
+    if (h == NULL || h == INVALID_HANDLE_VALUE) return NULL;
+    if (!DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &d, 0, TRUE, DUPLICATE_SAME_ACCESS)) return NULL;
+    return d;
+}
+
+static HANDLE win_null(void)
+{
+    SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
+    HANDLE h = CreateFileA("NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
+    return h == INVALID_HANDLE_VALUE ? NULL : h;
+}
+
+struct win_io { HANDLE in, out, err, rd; }; /* the child's three handles; rd is our end of the stdout pipe */
+
+static bool win_io_open(struct win_io *io, int flags)
+{
+    SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
+    memset(io, 0, sizeof *io);
+    io->in = win_std(STD_INPUT_HANDLE);
+    if (flags & LINT_PROC_QUIET) { io->out = io->err = win_null(); return io->out != NULL; }
+    io->err = (flags & LINT_PROC_NOERR) ? win_null() : win_std(STD_ERROR_HANDLE);
+    if (flags & (LINT_PROC_INHERIT | LINT_PROC_TO_STDERR)) {
+        io->out = win_std((flags & LINT_PROC_INHERIT) ? STD_OUTPUT_HANDLE : STD_ERROR_HANDLE);
+        return true;
+    }
+    if (!CreatePipe(&io->rd, &io->out, &sa, 0)) { io->rd = io->out = NULL; return false; }
+    SetHandleInformation(io->rd, HANDLE_FLAG_INHERIT, 0);
+    if (flags & LINT_PROC_MERGE) {
+        if (io->err) CloseHandle(io->err);
+        io->err = io->out;
+    }
+    return true;
+}
+
+static void win_io_close(struct win_io *io) /* the child's ends, once it has them (or failed to start) */
+{
+    if (io->in) CloseHandle(io->in);
+    if (io->out) CloseHandle(io->out);
+    if (io->err && io->err != io->out) CloseHandle(io->err);
+}
+
+static bool win_file(const char *p)
+{
+    DWORD a = GetFileAttributesA(p);
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static bool win_shebang(const char *p)
+{
+    char h[2] = { 0, 0 };
+    FILE *f = fopen(p, "rb");
+    if (!f) return false;
+    size_t n = fread(h, 1, sizeof h, f);
+    fclose(f);
+    return n == 2 && h[0] == '#' && h[1] == '!';
+}
+
+/* name (".exe" added when it has no extension) in the directories of PATH only, never the current directory. */
+static bool win_search(const char *name, char *out, size_t cap)
+{
+    const char *path = getenv("PATH");
+    if (!path || !*path) return false;
+    DWORD n = SearchPathA(path, name, ".exe", (DWORD)cap, out, NULL);
+    return n > 0 && n < cap;
+}
+
+/* A program named by a path: relative to cwd (CreateProcess resolves it against ours), with ".exe" when that exists. */
+static void win_path(const char *cwd, const char *a0, char *out, size_t cap)
+{
+    bool abs = a0[0] == '/' || a0[0] == '\\' || (a0[0] && a0[1] == ':');
+    snprintf(out, cap, "%s%s%s", cwd && !abs ? cwd : "", cwd && !abs ? "/" : "", a0);
+    size_t n = strlen(out);
+    if (lint_has_suffix(out, ".exe") || n + 5 > cap) return;
+    memcpy(out + n, ".exe", 5);
+    if (!win_file(out)) out[n] = '\0';
+}
+
+static int win_unavailable(const char *name)
+{
+    printf("UNAVAILABLE: %s not found on PATH\n", name);
+    fflush(stdout);
+    return LINT_PROC_UNAVAILABLE;
+}
+
+/* prog: the executable to start. A script (*.sh, or a path whose file starts with #!) runs as sh.exe, and
+ * *script is set; argv[0] then stays the script's name relative to the child's working directory. */
+static int win_resolve(const char *cwd, const char *a0, char *prog, size_t cap, bool *script)
+{
+    bool has_dir = strpbrk(a0, "/\\") != NULL;
+    *script = lint_has_suffix(a0, ".sh");
+    if (has_dir) win_path(cwd, a0, prog, cap);
+    else if (!*script && !win_search(a0, prog, cap)) return win_unavailable(a0);
+    if (has_dir && !*script) *script = win_shebang(prog);
+    if (*script && !win_search("sh", prog, cap)) return win_unavailable("sh");
+    return 0;
+}
+
+static char *win_cmdline(bool script, char *const argv[])
+{
+    size_t n = 0, k = 0;
+    while (argv[n]) n++;
+    char **v = lint_xrealloc(NULL, (n + 2) * sizeof *v);
+    if (script) v[k++] = "sh";
+    for (size_t i = 0; i <= n; i++) v[k++] = argv[i];
+    enum { CMDLINE_MAX = 32767 };
+    char *line = lint_xrealloc(NULL, CMDLINE_MAX);
+    int len = lint_win_quote_argv(v, line, CMDLINE_MAX);
+    free(v);
+    if (len < 0) { free(line); return NULL; }
+    return line;
+}
+
+static bool win_create(struct lint_proc *p, const char *prog, char *line, const char *cwd, const struct win_io *io)
+{
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = io->in;
+    si.hStdOutput = io->out;
+    si.hStdError = io->err;
+    if (!CreateProcessA(prog, line, NULL, NULL, TRUE, 0, NULL, cwd, &si, &pi)) {
+        fprintf(stderr, "zcl-lint: cannot run %s (Windows error %lu)\n", prog, (unsigned long)GetLastError());
+        return false;
+    }
+    CloseHandle(pi.hThread);
+    p->handle = pi.hProcess;
+    p->pid = (long)pi.dwProcessId;
+    return true;
+}
+
+static bool win_args_ok(const char *cwd, char *const argv[])
+{
+    for (size_t i = 0; argv[i]; i++)
+        if (strpbrk(argv[i], "\r\n")) return false;
+    return !cwd || !strpbrk(cwd, "\r\n");
+}
+
+static bool win_wrap(struct lint_proc *p, HANDLE rd)
+{
+    int fd = _open_osfhandle((intptr_t)rd, _O_RDONLY | _O_BINARY);
+    if (fd < 0) { CloseHandle(rd); return false; }
+    if (!(p->fp = _fdopen(fd, "rb"))) { _close(fd); return false; }
+    return true;
+}
+
+static int win_open(struct lint_proc *p, const char *cwd, char *const argv[], int flags)
+{
+    char prog[2048];
+    bool script;
+    if (!win_args_ok(cwd, argv)) { fprintf(stderr, "zcl-lint: refusing an argument with an embedded CR or LF\n"); return -1; }
+    int rc = win_resolve(cwd, argv[0], prog, sizeof prog, &script);
+    if (rc) return rc;
+    char *line = win_cmdline(script, argv);
+    if (!line) { fprintf(stderr, "zcl-lint: command line too long for %s\n", argv[0]); return -1; }
+    struct win_io io;
+    bool ok = win_io_open(&io, flags) && win_create(p, prog, line, cwd, &io);
+    win_io_close(&io);
+    free(line);
+    if (!ok) { if (io.rd) CloseHandle(io.rd); return -1; }
+    if (io.rd && !win_wrap(p, io.rd)) { lint_proc_close(p); return -1; }
+    return 0;
+}
+
+static int win_close(struct lint_proc *p)
+{
+    if (p->fp) { fclose(p->fp); p->fp = NULL; }
+    if (!p->handle) return -1;
+    DWORD code = 0;
+    bool ok = WaitForSingleObject(p->handle, INFINITE) == WAIT_OBJECT_0 && GetExitCodeProcess(p->handle, &code);
+    CloseHandle(p->handle);
+    p->handle = NULL;
+    p->pid = -1;
+    return ok && code <= 255 ? (int)code : -1;
+}
+#endif
+
+int lint_proc_open(struct lint_proc *p, const char *cwd, char *const argv[], int flags)
+{
+    p->fp = NULL;
+    p->pid = -1;
+    p->handle = NULL;
+    fflush(stdout);
+    fflush(stderr);
+#ifdef _WIN32
+    return win_open(p, cwd, argv, flags);
+#else
+    return posix_open(p, cwd, argv, flags);
+#endif
+}
+
+int lint_proc_close(struct lint_proc *p)
+{
+#ifdef _WIN32
+    return win_close(p);
+#else
+    return posix_close(p);
 #endif
 }
 
 int lint_status_argv(const char *cwd, char *const argv[], bool quiet)
 {
     struct lint_proc p;
-    if (lint_proc_open(&p, cwd, argv, quiet ? LINT_PROC_QUIET : LINT_PROC_INHERIT) != 0) return -1;
+    int rc = lint_proc_open(&p, cwd, argv, quiet ? LINT_PROC_QUIET : LINT_PROC_INHERIT);
+    if (rc != 0) return rc;
     return lint_proc_close(&p);
 }
 
@@ -393,7 +647,7 @@ int lint_run_argv(char *const argv[], bool quiet)
 {
     int st = lint_status_argv(NULL, argv, quiet);
     if (st == 0) return 0;
-    return st == 2 ? 2 : 1; /* 2: the script reported a hollow scan */
+    return st == 2 || st == LINT_PROC_UNAVAILABLE ? 2 : 1; /* 2: the script reported a hollow scan, or cannot run */
 }
 
 /* Whole stdout of `git -C <lint_root> <args...>` (NUL-terminated, length in *len); NULL when git cannot run or
