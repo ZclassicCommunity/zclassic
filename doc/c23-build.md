@@ -75,7 +75,7 @@ ZCL_MAINNET_BLK_FILES=<copy of blkNNNNN.dat>[:...] ZCL_MAINNET_BLK_THREADS=8 \
 
 ## Parameters at startup
 
-`init.cpp` is unchanged: its SHA-256 gate runs first, then
+`init.cpp` hashes the parameter files with SHA-256 first (a file whose size and mtime match the verified-parameter cache beside the params, `-paramcache`, is not re-hashed; `sprout-verifying.key` is always hashed), then
 `librustzcash_init_zksnark_params` (now the shim) checks the three Groth16
 parameter files against the same BLAKE2b-512 digests as before and aborts with
 librustzcash's wording, prefixed `librustzcash (C23):` instead of Rust's
