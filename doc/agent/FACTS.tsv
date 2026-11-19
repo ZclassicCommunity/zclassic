@@ -2,7 +2,7 @@
 #   subject<TAB>relation<TAB>object<TAB>context<TAB>confidence<TAB>why
 # `zcl-dev know <term>` answers from these rows; `zcl-dev know --check` validates them.
 #!relations selects needs decided-by trap-of documents guards checked-by implements
-#!contexts ci consensus wallet qa build network tooling
+#!contexts ci consensus wallet qa build network tooling node storage rpc
 #!terms src/main.cpp ALL wallet_matrix leased-ports consensus zclassicd
 #!terms qa/rpc-tests/wallet_matrix.sh pid-derived-ports
 #!terms src/wallet/wallet.cpp setbestchain-lock-order src/wallet/db.cpp nosync-commit
@@ -14,6 +14,46 @@
 #!terms doc/agent/FACTS.tsv zcl-dev-know-check src/bootstrap.cpp snapshot-aggregate-caps
 #!terms wallet/src/daemonjob.h orphaned-daemon qa/rpc-tests/wallet_platform_checks.sh resync-after-hard-kill
 #!terms src/Makefile.am mingw-ansi-stdio
+#!terms banned-string-calls binary-hardening bootstrap-background-validation bootstrapstreams-option chainstate-flush-cadence
+#!terms ci-receipts clean-shutdown-marker cleanshutdownmarker-option code-intelligence compiled-param-epoch
+#!terms consensus-seal dbmaxopenfiles-option depends/patches/tor/0002-dynhost-set-enabled.patch directory-commit doc/bootstrap-snapshot-resume.md
+#!terms doc/bootstrap-snapshots.md doc-claims doc-path-existence doc/tor-provenance.md doc/wallet-crash-consistency.md
+#!terms embedded-tor-mode embedded-tor-never-without-tor fee-estimation file-commit-durability fixed-seeds-thin-table
+#!terms focused-test-selection full-validation-path getrpcinfo git-hooks-install glibc-floor
+#!terms glibc-symbol-floor header-precheck header-precheck-bounds header-precheck-failed-leading-header headers-per-message
+#!terms headers-precheck-before-cs-main hollow-scan-fails host-readiness-check http-503-overload index-atomic-block-batch
+#!terms index-refuses-prune index-rpc-disabled-answer invalidate-persists inv-tostring-throws leveldb-budget-assumes-two-databases
+#!terms leveldb-budget-range-test leveldb-fd-budget libfuzzer-opt-in listenonion-option lock-order-debug
+#!terms marker-binds-metadata-only marker-lost-on-any-warning marker-single-use marker-write-conditions maxshieldedcachesize-option
+#!terms memory-cleanse mingw-gcc-9 node-bootstrap-service-bit no-new-bash no-victory-claims
+#!terms no-wallclock-assertions one-dial-per-group onion-key-owner-only only-names-are-steps orphaned-test-daemons
+#!terms outbound-draw-bounds owner-only-secret-files p2p-message-caps param-cache-same-mtime-residual param-cache-skip-rule
+#!terms params-verify-cache pinned-consensus-vectors positive-only-memo prune-keep-window qa/lib/isolation.sh
+#!terms qa/lib/iso-reaper.sh qa/rpc-tests/chain_flush_interval_kill.sh qa/rpc-tests/getrpcinfo.sh qa/rpc-tests/prune_invalidate_reconsider.sh qa/rpc-tests/reindex_stale_header.sh
+#!terms qa/rpc-tests/rpc_busy.sh qa/rpc-tests/startup_conf_staging.sh qa/rpc-tests/token_name_rules.sh qa/rpc-tests/wallet_crash_consistency.sh qa/rpc-tests/wallet_deep_unwind.sh
+#!terms ratchet-baselines-shrink reconcile-drops-only-witnesses reindex-contiguous-records rpc-convert-params-row rpc-end-without-slot
+#!terms rpc-inflight-tracking rpc-net-lock-narrowing rpc-queue-defaults rpc-registration rpcslowlog-option
+#!terms rpc-stats-lock-isolation rpc-stats-no-parameters rpc-tuning-error-three-times rpc-tuning-validation scratch-view-connect
+#!terms secret-log-calls shared-token-vectors shell-portability shielded-verdict-cache shielded-verdict-skip
+#!terms shutdown-defers-witness-rebuild signature-cache-size snapshot-resume-decisions snapshot-wire-protocol sprout-vk-always-hashed
+#!terms src/bootstrap_resume.h src/bootstrapvalidation.cpp src/c23/tools/revendor.sh src/c23/tor/keyfile.c src/c23/tor/privacy_check.sh
+#!terms src/c23/tor/threenode.sh src/c23/Z23_SOURCE.tsv src/compat/glibc_compat.cpp src/dbwrapper.cpp src/embeddedtor.cpp
+#!terms src/equihashmemo.h src/gtest/main.cpp src/gtest/test_mainnet_blocks.cpp src/headerprecheck.cpp src/httpserver.cpp
+#!terms src/httpserver.h src/main.h src/net.cpp src/net.h src/policy/fees.h
+#!terms src/protocol.h src/rpc/client.cpp src/rpc/net.cpp src/rpc/register.h src/rpc/rpcstats.cpp
+#!terms src/rpc/rpcstats.h src/rpc/server.cpp src/rpc/zslp.cpp src/script/sigcache.h src/shieldedcache.h
+#!terms src/shutdownmarker.cpp src/support/cleanse.h src/sync.h src/test/dbwrapper_tests.cpp src/test/fuzz/README.md
+#!terms src/test/p2p_message_limits_tests.cpp src/test/test_bitcoin.cpp src/test/wire_robustness_tests.cpp src/torcontrol.cpp src/util.cpp
+#!terms src/wallet/tokenguard.cpp src/zmq/zmqnotificationinterface.h src/znam/znamindex.cpp src/zslp/zslpindex.cpp src/zslp/zslpservice.cpp
+#!terms staging-removed-without-bootstrap step-timeout-and-log-cap testcrashpoint-hook test-datadir-isolation test-isolation
+#!terms token-dust-outputs tor-dynhost-off tor-network-tests tor-only-egress tor-safecookie-auth
+#!terms tor-source-pin unmapped-path-selects-everything verifydb-short-check wallet-crash-recovery wallet-write-timing
+#!terms wire-decoder-mutation z23-source-pin zcl-dev-wiki zcutil/check-hardening.sh zcutil/dev/code/code.c
+#!terms zcutil/dev/doctor/zcl-doctor.c zcutil/dev/hooks/zcl-dev-hooks.c zcutil/dev/impact.rules zcutil/dev/tests/zcl-dev-tests.c zcutil/dev/wiki/facts.c
+#!terms zcutil/dev/wiki/wiki.c zcutil/dev/zcl-port.c zcutil/lint/lintlib.c zcutil/lint/README.md zcutil/lint/rules/banned_str.c
+#!terms zcutil/lint/rules/consensus_seal.c zcutil/lint/rules/docclaims.c zcutil/lint/rules/docpaths.c zcutil/lint/rules/no_new_bash.c zcutil/lint/rules/secretlog.c
+#!terms zcutil/lint/rules/shellport.c zcutil/lint/rules/testiso.c zcutil/lint/rules/victory.c zcutil/lint/rules/wallclock.c zcutil/tools/Z23_SOURCE.tsv
+#!terms zk-params-present zmq-notifications znam-undo-data zslp-mainnet-start-height
 src/main.cpp	selects	ALL	ci	DOCTRINE	zcutil/dev/impact.rules maps src/main.cpp to every local-ci test step, so a change there never skips consensus or wallet tests
 wallet_matrix	needs	leased-ports	qa	DOCTRINE	qa scripts take an explicit leased port base and fail fast on a bound port
 consensus	decided-by	zclassicd	consensus	DOCTRINE	zclassicd is the reference; Z23 matches it bug for bug and a divergence is fixed to match
@@ -35,3 +75,130 @@ src/bootstrap.cpp	trap-of	snapshot-aggregate-caps	network	DOCTRINE	snapshot serv
 wallet/src/daemonjob.h	guards	orphaned-daemon	wallet	OBSERVED	without the Windows job object a killed wallet leaves the embedded daemon running on its datadir
 qa/rpc-tests/wallet_platform_checks.sh	needs	resync-after-hard-kill	qa	OBSERVED	a node killed before its first chainstate flush restarts from height 0 and the test waits for the re-sync
 src/Makefile.am	needs	mingw-ansi-stdio	build	OBSERVED	MinGW C code needs -D__USE_MINGW_ANSI_STDIO=1 for %zu, set for libzcl_c23.a
+src/init.cpp	guards	param-cache-skip-rule	node	DOCTRINE	a proving-parameter re-hash is skipped only when the file size equals the compiled size, the cached size and mtime match, the cached hash equals the compiled hash, the cache epoch matches and the cache file is owner-only; the cache never supplies a hash to trust
+src/init.cpp	implements	params-verify-cache	node	DOCTRINE	the verified-params cache is <datadir>/params-verify.cache (0600); -noparamcache hashes every file, -paramcache is on by default
+src/init.cpp	trap-of	sprout-vk-always-hashed	node	DOCTRINE	sprout-verifying.key never takes the cache skip because its SHA-256 is the only pre-load integrity gate of a consensus-relevant param; the other four files may skip
+src/init.cpp	trap-of	param-cache-same-mtime-residual	node	DOCTRINE	a torn write that keeps both size and mtime is skipped and the corrupt param loads; the code records this as a bounded non-consensus residual that fails at use and self-heals through the bootstrap re-fetch
+src/init.cpp	needs	compiled-param-epoch	node	DOCTRINE	CompiledParamEpoch hashes name, sha256 and size of every compiled param spec, so a binary with a different table invalidates the whole cache (downgrade and multi-version safe)
+src/shutdownmarker.cpp	implements	clean-shutdown-marker	node	DOCTRINE	a clean Shutdown() writes <datadir>/shutdown.clean last, binding the chain tip, the coins best block and a digest of block-file and LevelDB file names, sizes and mtimes
+src/shutdownmarker.cpp	guards	marker-single-use	node	DOCTRINE	ConsumeCleanMarker removes the marker whether or not it parsed, so a crash or kill after one start leaves no marker for the next
+src/shutdownmarker.cpp	trap-of	marker-binds-metadata-only	node	DOCTRINE	the files digest covers names, sizes and mtimes, not content, so in-place bit rot that keeps size and mtime is not seen by the shortened check
+src/init.cpp	guards	verifydb-short-check	node	OBSERVED	after a matched marker the start-up VerifyDB checks the last 6 blocks at level 3, otherwise the full default depth; qa/rpc-tests/chain_clean_shutdown_marker.sh shows the full check after kill -9, a touched chainstate/CURRENT or a changed blk00000.dat
+src/init.cpp	needs	cleanshutdownmarker-option	node	DOCTRINE	-cleanshutdownmarker is on by default and ignored whenever -checkblocks or -checklevel is given, on reindex and on a bootstrap import
+src/init.cpp	guards	marker-write-conditions	node	DOCTRINE	MaybeWriteCleanShutdownMarker writes only after the chain load was verified, with no reindex or import, no raised warning, the coins best block at the tip and no bootstrap validation or install pending
+src/init.cpp	trap-of	marker-lost-on-any-warning	node	OBSERVED	strMiscWarning also carries non-fatal warnings (clock skew, unknown versions), so a run with one writes no marker; safe but less precise, found in the wave-1 review of the start-up unit
+src/headerprecheck.cpp	implements	header-precheck	network	DOCTRINE	PreverifyHeadersEquihash verifies Equihash solutions of a headers message on up to 8 threads outside cs_main and only warms the positive Equihash memo; the serial AcceptBlockHeader loop still checks every header
+src/headerprecheck.cpp	guards	header-precheck-bounds	network	DOCTRINE	the pre-pass does nothing below 8 candidate headers, on a single-core host, with -noheaderprecheck or with the memo disabled, and stops claiming headers after the first failure
+src/headerprecheck.cpp	trap-of	header-precheck-failed-leading-header	network	OBSERVED	candidate selection skips leading headers known to mapBlockIndex even when marked failed, so a peer can have up to 160 valid-Equihash headers verified that the serial loop would stop at; cost is bounded and consensus is unchanged (wave-1 review)
+src/main.cpp	needs	headers-precheck-before-cs-main	network	DOCTRINE	the headers handler calls PreverifyHeadersEquihash before it takes cs_main and the serial loop afterwards re-checks each header
+src/equihashmemo.h	guards	positive-only-memo	consensus	DOCTRINE	the Equihash memo stores only valid block hashes, a miss runs the full verifier and eviction only turns a hit into a miss; the table is 4-way set-associative with a per-process salt and holds 32768 hashes by default
+src/shieldedcache.h	guards	shielded-verdict-cache	consensus	DOCTRINE	the Sapling verdict cache is keyed by txid and consensus branch id and records successes only, so an invalid transaction cannot be accepted because of it
+src/shieldedcache.h	needs	maxshieldedcachesize-option	node	DOCTRINE	-maxshieldedcachesize sets the verdict cache in MiB at 64 bytes per entry, default 4, and 0 disables it
+src/main.cpp	needs	shielded-verdict-skip	consensus	DOCTRINE	ContextualCheckTransaction consults ShieldedVerdictContains before the Sapling proof and signature block and inserts only after it succeeded, so the second evaluation at block connection can skip it
+src/script/sigcache.h	guards	signature-cache-size	consensus	DOCTRINE	the ECDSA signature cache defaults to 40 MiB, bounded to limit DoS exposure
+src/dbwrapper.cpp	implements	leveldb-fd-budget	storage	DOCTRINE	LevelDB max_open_files per database is (RLIMIT_NOFILE soft limit minus 150 core fds, nMaxConnections and 128) divided by 2, clamped to 64..1000; Windows uses a fixed 512
+src/dbwrapper.cpp	needs	dbmaxopenfiles-option	storage	DOCTRINE	-dbmaxopenfiles overrides the derived budget and is clamped to 64..4096 but is not checked against the real fd limit
+src/dbwrapper.cpp	trap-of	leveldb-budget-assumes-two-databases	storage	OBSERVED	the budget splits the fd allowance between the block index and the chainstate, but -zslpindex opens a third CDBWrapper and the payment-disclosure store opens a raw LevelDB with the default 1000; harmless on 64-bit where tables are mmapped, over budget on a 32-bit build (wave-1 review)
+src/test/dbwrapper_tests.cpp	checked-by	leveldb-budget-range-test	storage	DOCTRINE	dbwrapper_max_open_files_budget asserts only that the budget lies in 64..1000, so an arithmetic regression inside that range is not caught
+src/rpc/rpcstats.h	implements	rpc-inflight-tracking	rpc	DOCTRINE	RpcCallBegin and RpcCallEnd keep a table of 128 in-flight calls and per-method aggregates for at most 512 method names, then count under (other)
+src/rpc/rpcstats.h	guards	rpc-stats-no-parameters	rpc	DOCTRINE	only method names and durations are recorded; parameters are never stored or logged
+src/rpc/rpcstats.h	guards	rpc-stats-lock-isolation	rpc	DOCTRINE	the stats code takes no cs_main and holds its two private mutexes never together with another lock
+src/rpc/server.cpp	implements	getrpcinfo	rpc	DOCTRINE	getrpcinfo returns active_commands (method and duration_us) and methods (count, total_us, max_us, errors)
+src/init.cpp	needs	rpcslowlog-option	rpc	DOCTRINE	-rpcslowlog=<ms> logs a WARN line with the method name for calls taking at least that long; default 1000, 0 disables
+src/rpc/rpcstats.cpp	trap-of	rpc-end-without-slot	rpc	OBSERVED	RpcCallEnd with id 0 or an unknown id counts the call under (other) with zero microseconds because it has no method name; RpcCallScope keeps the name through RpcCallAccount (wave-1 review)
+src/rpc/net.cpp	trap-of	rpc-net-lock-narrowing	rpc	OBSERVED	getconnectioncount and getpeerinfo take only cs_vNodes, not cs_main; the implementer measured 15909 ms before and 4 ms after while verifychain held cs_main (wave-1 review)
+qa/rpc-tests/getrpcinfo.sh	checked-by	getrpcinfo	qa	OBSERVED	the script drives getrpcinfo and the slow-call WARN on a two-node regtest; its WARN check prints SKIP instead of failing when no call reaches 1 ms
+src/httpserver.cpp	implements	http-503-overload	rpc	DOCTRINE	a full RPC work queue answers HTTP 503 with a JSON-RPC body naming -rpcworkqueue and -rpcthreads and logs one rate-limited line
+src/httpserver.h	needs	rpc-queue-defaults	rpc	DOCTRINE	defaults are 4 RPC threads, a work queue of 16 and a 30 s server timeout
+src/httpserver.cpp	guards	rpc-tuning-validation	rpc	DOCTRINE	ValidateRpcTuning refuses -rpcthreads outside 1..256, -rpcworkqueue outside 1..65536 and -rpcservertimeout outside 1..86400 at start-up instead of clamping
+src/httpserver.cpp	trap-of	rpc-tuning-error-three-times	rpc	OBSERVED	a tuning failure is logged by LogPrintf, shown by ThreadSafeMessageBox and then reported again by the caller as a generic HTTP start failure (wave-1 review)
+qa/rpc-tests/rpc_busy.sh	checked-by	http-503-overload	qa	OBSERVED	the script fills the work queue with bursts of 20 requests (up to 5 retries), expects the 503 body and the log line, and checks that out-of-range -rpcthreads stops start-up
+src/torcontrol.cpp	guards	onion-key-owner-only	network	DOCTRINE	the onion service private key is written through zcl_keyfile_write: owner-only, a temporary file renamed into place, never partial
+src/torcontrol.cpp	implements	tor-safecookie-auth	network	DOCTRINE	the control connection authenticates with Tor SAFECOOKIE (HMAC-SHA256 server and client hashes over the cookie and both nonces) and creates the P2P onion service with ADD_ONION
+src/embeddedtor.cpp	implements	embedded-tor-mode	network	DOCTRINE	-embeddedtormode defaults to child on Linux and to inprocess elsewhere; child keeps a Tor bug out of the process that holds the wallet
+src/init.cpp	guards	embedded-tor-never-without-tor	network	DOCTRINE	-embeddedtor with no Tor in the build, a bad mode or -onion=0 stops start-up, and a Tor that exits later shuts the node down instead of continuing in the clear
+src/init.cpp	needs	listenonion-option	network	DOCTRINE	-listenonion defaults on and -listen=0 switches it off through parameter interaction
+doc/tor-provenance.md	documents	tor-source-pin	build	DOCTRINE	records the Tor commit f4e28103c0eb9016e0b500d02486b7a59d20ee5d, the source archive sha256 and the zlib 1.3.1 pin that depends builds
+depends/patches/tor/0002-dynhost-set-enabled.patch	guards	tor-dynhost-off	build	OBSERVED	without the carried patches the Tor fork activates a second ephemeral onion service every second once it has a circuit and serves demo pages on port 80; doc/tor-provenance.md records the pre-patch observation
+src/c23/tor/keyfile.c	implements	owner-only-secret-files	build	DOCTRINE	atomic write, tighten and read of owner-only secret files; always built into zclassicd through libzcl_tor.a even without embedded Tor
+src/c23/tor/threenode.sh	checked-by	tor-network-tests	ci	DOCTRINE	the tor-twonode, tor-threenode and tor-addrv2gossip CI steps run only with --tor because they need real Tor network access
+src/c23/tor/privacy_check.sh	guards	tor-only-egress	network	DOCTRINE	a strace check that only the Tor process reaches the network when a node runs behind embedded Tor
+src/zslp/zslpindex.cpp	guards	index-atomic-block-batch	consensus	DOCTRINE	every connected block is one atomic LevelDB batch with its undo record and the new best block, so a crash leaves the store at a block boundary and a disconnect restores the prior state
+src/znam/znamindex.cpp	guards	index-atomic-block-batch	consensus	DOCTRINE	the name index applies each block with the same undo-record batch discipline as the token index
+src/init.cpp	trap-of	index-refuses-prune	node	DOCTRINE	-zslpindex and -znamindex need the full block files and refuse to start together with -prune
+src/rpc/zslp.cpp	guards	index-rpc-disabled-answer	rpc	DOCTRINE	zslp and znam RPC commands answer a disabled error naming -zslpindex=1 or -znamindex=1 unless the index runs
+src/zslp/zslpservice.cpp	needs	zslp-mainnet-start-height	node	OBSERVED	the mainnet index starts at height 650000, the first block with a ZSLP transaction, taken from real mainnet token fixtures
+src/znam/znamindex.cpp	needs	znam-undo-data	node	DOCTRINE	the name index reads block undo data to learn the owner of each spent input and fails with a named error when the undo data is not readable
+src/wallet/tokenguard.cpp	guards	token-dust-outputs	wallet	DOCTRINE	wallet spends classify dust outputs that carry token quantities or a baton and keep them out of ordinary coin selection
+qa/rpc-tests/token_name_rules.sh	checked-by	shared-token-vectors	qa	DOCTRINE	src/test/data/token_name_rules.txt is a copy shared with Z23 and checked by this script; never edit it locally
+src/protocol.h	needs	node-bootstrap-service-bit	network	DOCTRINE	NODE_BOOTSTRAP is service bit 1 << 24 and marks peers that serve bootstrap snapshots
+doc/bootstrap-snapshot-resume.md	documents	snapshot-wire-protocol	network	DOCTRINE	getbsman and getbschk framing, 1 MiB chunks, 16 chunk requests in flight, 60 s message timeout and the server limits
+src/init.cpp	needs	bootstrapstreams-option	network	DOCTRINE	-bootstrapstreams opens 4 parallel snapshot connections by default and at most 16
+src/bootstrap_resume.h	implements	snapshot-resume-decisions	network	DOCTRINE	pure decision logic for resuming an interrupted snapshot download that trusts no staged file and decides only from measured sizes and SHA-256 values
+src/bootstrapvalidation.cpp	implements	bootstrap-background-validation	network	DOCTRINE	trustless mode re-derives the UTXO set from genesis into a scratch chainstate and compares hash_serialized; a match latches validated, a mismatch discards and reindexes
+src/main.cpp	needs	scratch-view-connect	network	DOCTRINE	ConnectBlock takes fScratchView so the background replay suppresses txindex writes, block index mutation, undo writes and wallet signals
+qa/rpc-tests/startup_conf_staging.sh	checked-by	staging-removed-without-bootstrap	qa	OBSERVED	a partial snapshot kept for resume is removed at start-up under -bootstrap=0 and kept when bootstrap is on; a killed download once left up to about 11 GB of staging in the datadir
+doc/bootstrap-snapshots.md	documents	full-validation-path	network	DOCTRINE	-bootstrap=0 disables snapshot fast sync and syncs and validates from genesis, which trusts no peer
+src/sync.h	guards	lock-order-debug	build	DOCTRINE	a build with DEBUG_LOCKORDER reports lock-order violations; the local-ci debug flavor enables it
+src/util.cpp	guards	file-commit-durability	storage	DOCTRINE	FileCommit flushes and then calls fdatasync on Linux, F_FULLFSYNC on macOS and FlushFileBuffers on Windows
+src/util.cpp	guards	directory-commit	storage	DOCTRINE	DirectoryCommit fsyncs the directory so a rename into it is durable and does nothing on Windows
+src/main.h	needs	chainstate-flush-cadence	storage	DOCTRINE	the block index is written hourly (every 5 minutes in IBD), the full chain state at least daily and, at the tip, every 10 minutes by default (-dbflushinterval)
+qa/rpc-tests/chain_flush_interval_kill.sh	checked-by	chainstate-flush-cadence	qa	OBSERVED	before the periodic tip flush a kill -9 after 40 to 80 minutes restarted at the start-up height and refetched every block since
+src/util.cpp	guards	testcrashpoint-hook	qa	DOCTRINE	TestCrashPoint is inert unless -testcrashpoint is given and then _exit(77) at the named point
+doc/wallet-crash-consistency.md	documents	wallet-write-timing	wallet	DOCTRINE	what is written to wallet.dat and when, what start-up reconciliation checks, the crash points and the lost-witness flag
+src/wallet/wallet.cpp	guards	reconcile-drops-only-witnesses	wallet	DOCTRINE	ReconcileNoteState cuts or drops only cached witness data and re-derives a missing Sapling nullifier; no transaction or key is dropped to repair state
+src/wallet/wallet.cpp	guards	shutdown-defers-witness-rebuild	wallet	OBSERVED	once shutdown is requested and fNoteWitnessesLost is set, SetBestChain writes nothing so a stop never waits on a rescan from genesis; the next start repairs it (commit 9f683fe1b)
+qa/rpc-tests/wallet_crash_consistency.sh	checked-by	wallet-crash-recovery	qa	OBSERVED	kills the wallet at random points and at named crash points, restarts without -rescan and compares balances and unspent outputs with a rescanned reference; 12 seeds by default
+qa/rpc-tests/wallet_deep_unwind.sh	checked-by	shutdown-defers-witness-rebuild	qa	OBSERVED	variant 6 builds the on-disk state of a shutdown with a pending witness rebuild and compares the repair with a -rescan reference
+src/main.h	needs	prune-keep-window	storage	DOCTRINE	block files within MIN_BLOCKS_TO_KEEP (288) of the tip are never pruned
+qa/rpc-tests/prune_invalidate_reconsider.sh	checked-by	invalidate-persists	qa	DOCTRINE	an invalidated block stays failed across restarts and pruning and reconsiderblock must still leave the node consistent after its block file is pruned
+qa/rpc-tests/reindex_stale_header.sh	checked-by	reindex-contiguous-records	qa	OBSERVED	inserts a stale record header before each of many records and requires the reindex to reach the same height and best hash with contiguous records afterwards
+src/net.cpp	needs	outbound-draw-bounds	network	DOCTRINE	SelectOutboundCandidate draws at most 300 times per round and does not redial an address within 60 s; a same-group or local draw does not use up the round
+src/net.cpp	guards	one-dial-per-group	network	DOCTRINE	ReserveDialGroup lets only one outbound dial per network group be in flight
+src/net.cpp	needs	fixed-seeds-thin-table	network	OBSERVED	fixed seeds are added once while the address table holds fewer than 16 addresses; they used to wait for a full minute of empty table that a fresh node never had (commit 535dad6d7)
+src/net.h	needs	p2p-message-caps	network	DOCTRINE	a protocol message is at most 2 MiB, an inv at most 50000 entries and addr replies at most 1000 entries
+src/main.h	needs	headers-per-message	network	DOCTRINE	a headers message carries at most 160 headers (MAX_HEADERS_RESULTS)
+src/test/p2p_message_limits_tests.cpp	checked-by	p2p-message-caps	network	OBSERVED	pins size caps and ban scores of the P2P handlers by feeding whole wire messages to a CNode; the suite took 51.7 s under host load against a 12 s unloaded run
+src/test/wire_robustness_tests.cpp	checked-by	wire-decoder-mutation	network	DOCTRINE	fixed-seed mutations of valid serializations may end only in success or std::ios_base::failure; a failure prints the PRNG seed, seed object and case number
+src/test/fuzz/README.md	documents	libfuzzer-opt-in	tooling	DOCTRINE	the libFuzzer harnesses build only on request and the build script is Linux only because it links with --start-group
+src/main.cpp	trap-of	inv-tostring-throws	network	OBSERVED	CInv::ToString throws std::out_of_range for unknown inv types; the first libFuzzer crash showed it and ProcessMessages catches it, but the handler logs inv.ToString only under -debug=net
+qa/lib/isolation.sh	implements	leased-ports	qa	DOCTRINE	iso_base leases a block of free ports from zcl-port, one O_EXCL file per port, default range 12000-17900, and rebases between scenarios
+qa/lib/iso-reaper.sh	guards	orphaned-test-daemons	qa	DOCTRINE	a detached reaper kills every process tagged with ZCL_ISO_TAG after the script ends by any means including kill -9 and releases the port leases
+zcutil/dev/zcl-port.c	implements	leased-ports	qa	DOCTRINE	port leases are created with O_EXCL, record the owner pid and reclaim stale owners
+zcutil/lint/rules/testiso.c	guards	test-isolation	tooling	DOCTRINE	flags literal /tmp/, default datadirs without -datadir and fixed -port or -rpcport in qa scripts
+zcutil/local-ci.sh	guards	step-timeout-and-log-cap	ci	DOCTRINE	every step has a wall-clock timeout and a log size cap (default 256 MiB) so a hang or a runaway sanitizer fails fast
+zcutil/local-ci.sh	implements	ci-receipts	ci	DOCTRINE	every step appends one JSON line to receipts.jsonl with commit, tree, verdict, seconds, toolchain, an environment digest and the SHA-256 of its log; a receipt says what ran, not that the result is true
+zcutil/local-ci.sh	needs	only-names-are-steps	ci	DOCTRINE	--only takes step names and a name that is not a step fails at once so a typo cannot run nothing and pass
+zcutil/check-hardening.sh	guards	binary-hardening	build	DOCTRINE	release binaries must be PIE with full RELRO, a non-executable stack and stack protector on ELF, and DYNAMIC_BASE, NX_COMPAT, HIGH_ENTROPY_VA and a non-empty .reloc on PE
+zcutil/local-ci.sh	guards	glibc-floor	build	DOCTRINE	the Linux candidate may reference at most GLIBC_2.31 and is built in the ubuntu 20.04 root filesystem with GCC 9
+zcutil/local-ci.sh	needs	mingw-gcc-9	build	DOCTRINE	the Windows candidate is built with the focal mingw-w64 GCC 9.3 and a newer host toolchain changes it
+zcutil/dev/impact.rules	selects	unmapped-path-selects-everything	ci	DOCTRINE	a path without a rule selects every test step and so does a rule with the token ALL; Markdown and doc files select only check-dev-tools
+zcutil/lint/lintlib.c	guards	hollow-scan-fails	tooling	DOCTRINE	a lint rule that scans nothing exits 2 as a hollow scan and never passes
+zcutil/lint/README.md	documents	ratchet-baselines-shrink	tooling	DOCTRINE	a baseline row is path and count; a count that rises or a new path fails and update-baseline refuses while anything rose
+zcutil/lint/rules/no_new_bash.c	guards	no-new-bash	tooling	DOCTRINE	counts bash shebangs and bashisms in shell scripts against a shrink-only baseline
+zcutil/lint/rules/banned_str.c	guards	banned-string-calls	tooling	DOCTRINE	counts strcpy, strcat, sprintf, vsprintf and gets in non-vendored C and C++; a lint-ok comment exempts one line
+zcutil/lint/rules/secretlog.c	guards	secret-log-calls	wallet	DOCTRINE	flags log and print calls whose arguments name a key, seed, mnemonic or wallet passphrase; a log-ok comment overrides one line
+zcutil/lint/rules/shellport.c	guards	shell-portability	tooling	DOCTRINE	flags sed -i, stat -c, nproc, ss, readlink -f, date -d, grep -P and timeout in shell scripts; a port-ok comment exempts one line
+zcutil/lint/rules/wallclock.c	guards	no-wallclock-assertions	tooling	DOCTRINE	flags assertions decided by elapsed real time; a real-clock comment exempts one line
+zcutil/lint/rules/docpaths.c	guards	doc-path-existence	tooling	DOCTRINE	a backticked repository path in tracked Markdown that resolves to no tracked file is a finding; a doc-path-ok comment exempts one line
+zcutil/lint/rules/docclaims.c	guards	doc-claims	tooling	DOCTRINE	a claim comment with predicate file-present, file-absent, symbol-present, symbol-absent, rule-passes or step-exists must be true
+zcutil/lint/rules/victory.c	guards	no-victory-claims	tooling	DOCTRINE	paragraphs of HANDOFF.md that say fixed, cured or green need a commit id, receipt path or victory-ok reason
+zcutil/lint/rules/consensus_seal.c	guards	consensus-seal	consensus	DOCTRINE	zcutil/consensus.seal lists a git blob per sealed consensus file and the rule fails when one changed without the ritual in doc/agent/UNSEAL.md
+src/c23/Z23_SOURCE.tsv	guards	z23-source-pin	build	DOCTRINE	pins the Z23 commit of the vendored C23 core and requires 55245e2bd (canonical Fr encodings) as an ancestor
+zcutil/tools/Z23_SOURCE.tsv	guards	z23-source-pin	build	DOCTRINE	pins the Z23 commit 9a191ef7b of the vendored developer-tool sources
+src/c23/tools/revendor.sh	guards	z23-source-pin	build	DOCTRINE	refuses a pin that does not contain 55245e2bd
+zcutil/dev/wiki/wiki.c	implements	zcl-dev-wiki	tooling	DOCTRINE	a directory summary is the first paragraph of its AGENTS.md, else README.md, else a file count; replies stay under 16 KiB
+zcutil/dev/wiki/facts.c	implements	zcl-dev-know-check	tooling	DOCTRINE	know --check fails on an undeclared term, an untracked path, a duplicate row, an unused term or a table with no rows
+zcutil/dev/code/code.c	implements	code-intelligence	tooling	DOCTRINE	zcl-dev code answers map, owner, impact, cost, file, sym, refs, body and recent from the checkout
+zcutil/dev/tests/zcl-dev-tests.c	implements	focused-test-selection	tooling	DOCTRINE	t-list lists every Boost suite, gtest suite, qa script and CI step; t-fast runs the focused set for paths
+zcutil/dev/doctor/zcl-doctor.c	implements	host-readiness-check	tooling	DOCTRINE	names what a host lacks to build and test zclassicd with the fix for each gap
+zcutil/dev/hooks/zcl-dev-hooks.c	implements	git-hooks-install	tooling	DOCTRINE	installs and reports the git hooks with hook install and hook status
+src/gtest/main.cpp	needs	zk-params-present	build	DOCTRINE	zcash-gtest loads the Sprout and Sapling parameter files from the params directory and a missing file is a failure, not a skip
+src/gtest/test_mainnet_blocks.cpp	guards	pinned-consensus-vectors	consensus	DOCTRINE	differential and mainnet-block gtest cases pin consensus behaviour, so a failure there is a divergence, not a flaky test
+src/test/test_bitcoin.cpp	guards	test-datadir-isolation	qa	DOCTRINE	TestingSetup builds a temporary datadir under the system temp path and a test never reads or writes a real datadir or wallet
+src/rpc/client.cpp	needs	rpc-convert-params-row	rpc	DOCTRINE	a string argument that must be parsed as JSON needs a row in vRPCConvertParams or zclassic-cli sends it as a string
+src/rpc/register.h	implements	rpc-registration	rpc	DOCTRINE	every RPC command table is registered by a Register*RPCCommands function declared here and called from RegisterAllCoreRPCCommands
+src/compat/glibc_compat.cpp	guards	glibc-symbol-floor	build	DOCTRINE	aliases memcpy to memmove and defines __fdelt_chk as a weak alias of a bounds-checked __fdelt_warn, so the binary needs no newer glibc symbol version
+src/support/cleanse.h	guards	memory-cleanse	wallet	DOCTRINE	memory_cleanse wipes key material in a way the optimizer cannot remove
+src/zmq/zmqnotificationinterface.h	implements	zmq-notifications	rpc	DOCTRINE	CZMQNotificationInterface is a CValidationInterface that publishes block and transaction notifications over ZeroMQ when built with ENABLE_ZMQ
+src/policy/fees.h	implements	fee-estimation	node	DOCTRINE	CBlockPolicyEstimator buckets mempool transactions by fee and priority and tracks how long each bucket takes to confirm
