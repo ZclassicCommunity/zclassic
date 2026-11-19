@@ -19,6 +19,9 @@
 static const size_t DBWRAPPER_PREALLOC_KEY_SIZE = 64;
 static const size_t DBWRAPPER_PREALLOC_VALUE_SIZE = 1024;
 
+/** LevelDB max_open_files budget per database, derived from the process fd limit (see dbwrapper.cpp). */
+int LevelDBMaxOpenFilesForTest();
+
 class dbwrapper_error : public std::runtime_error
 {
 public:

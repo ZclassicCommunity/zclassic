@@ -13,6 +13,53 @@
 #include <leveldb/filter_policy.h>
 #include <memenv.h>
 #include <stdint.h>
+#include <algorithm>
+
+#ifndef WIN32
+#include <sys/resource.h>
+#endif
+
+// Defined in net.cpp (declared in net.h); extern here so dbwrapper stays free of net.h.
+extern int nMaxConnections;
+
+// Mirrors MIN_CORE_FILEDESCRIPTORS in init.cpp.
+static const int DBWRAPPER_CORE_FILEDESCRIPTORS = 150;
+
+static int ComputeLevelDBMaxOpenFiles(int& softLimit)
+{
+    softLimit = -1;
+    if (mapArgs.count("-dbmaxopenfiles"))
+        return std::max(64, std::min(4096, (int)GetArg("-dbmaxopenfiles", 64)));
+#ifdef WIN32
+    return 512; // Win32 handles: conservative fixed budget
+#else
+    struct rlimit lim;
+    int64_t s = 1024;
+    if (getrlimit(RLIMIT_NOFILE, &lim) == 0)
+        s = (lim.rlim_cur == RLIM_INFINITY || lim.rlim_cur > 65536) ? 65536 : (int64_t)lim.rlim_cur;
+    softLimit = (int)s;
+    // Reserve: core fds, peer connections, plus blk/rev files, wallet, RPC, Tor and LevelDB logs.
+    int64_t reserve = DBWRAPPER_CORE_FILEDESCRIPTORS + std::max(nMaxConnections, 0) + 128;
+    int64_t each = (s - reserve) / 2; // block index and chainstate share the budget
+    return (int)std::max<int64_t>(64, std::min<int64_t>(1000, each));
+#endif
+}
+
+static int LevelDBMaxOpenFiles()
+{
+    static const int budget = []() {
+        int softLimit = -1;
+        int n = ComputeLevelDBMaxOpenFiles(softLimit);
+        LogPrintf("LevelDB max_open_files=%d (fd soft limit %d)\n", n, softLimit);
+        return n;
+    }();
+    return budget;
+}
+
+int LevelDBMaxOpenFilesForTest()
+{
+    return LevelDBMaxOpenFiles();
+}
 
 static leveldb::Options GetOptions(size_t nCacheSize)
 {
@@ -21,7 +68,7 @@ static leveldb::Options GetOptions(size_t nCacheSize)
     options.write_buffer_size = nCacheSize / 4; // up to two write buffers may be held in memory simultaneously
     options.filter_policy = leveldb::NewBloomFilterPolicy(10);
     options.compression = leveldb::kNoCompression;
-    options.max_open_files = 64;
+    options.max_open_files = LevelDBMaxOpenFiles();
     if (leveldb::kMajorVersion > 1 || (leveldb::kMajorVersion == 1 && leveldb::kMinorVersion >= 16)) {
         // LevelDB versions before 1.16 consider short writes to be corruption. Only trigger error
         // on corruption in later versions.
