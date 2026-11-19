@@ -3170,13 +3170,13 @@ private slots:
     // push (foreign/headless/quiet) -> the normal 20s fallback poll.
     void n11_desiredPollMs() {
         // synced + healthy push -> heartbeat
-        QCOMPARE(RPC::desiredPollMs(false, true),  RPC::kHeartbeatPollMs);
+        QCOMPARE(RPC::desiredPollMs(false, true),  int(RPC::kHeartbeatPollMs));
         QCOMPARE(RPC::desiredPollMs(false, true),  120 * 1000);
         // synced + stale / no push -> normal poll fallback (PERF-5 / PERF-24)
-        QCOMPARE(RPC::desiredPollMs(false, false), Settings::updateSpeed);
+        QCOMPARE(RPC::desiredPollMs(false, false), int(Settings::updateSpeed));
         // syncing always polls fast, regardless of push health
-        QCOMPARE(RPC::desiredPollMs(true,  false), Settings::quickUpdateSpeed);
-        QCOMPARE(RPC::desiredPollMs(true,  true),  Settings::quickUpdateSpeed);
+        QCOMPARE(RPC::desiredPollMs(true,  false), int(Settings::quickUpdateSpeed));
+        QCOMPARE(RPC::desiredPollMs(true,  true),  int(Settings::quickUpdateSpeed));
     }
 
     // Debounce semantics: the production debounce window is the single-shot
@@ -3184,7 +3184,7 @@ private slots:
     // fire after the quiet point. Pin the constant + the single-shot coalescing here at
     // the QTimer level (the production timer in RPC uses exactly this shape).
     void n12_debounceCoalescesBurst() {
-        QCOMPARE(RPC::kNotifyDebounceMs, 200);
+        QCOMPARE(int(RPC::kNotifyDebounceMs), 200);
 
         int fired = 0;
         QTimer debounce;

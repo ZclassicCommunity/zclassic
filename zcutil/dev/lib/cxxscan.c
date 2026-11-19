@@ -589,23 +589,22 @@ void cxx_defs(const char *src, size_t n, CxxDefs *out)
                         CxxDef df;
                         memset(&df, 0, sizeof df);
                         df.kind = CXX_FUNC;
+                        int fits = 1; /* df.name must hold the whole name: a truncated one would alias another definition */
                         char nm[192];
                         copy_clean(nm, sizeof nm, h + ns, nl);
                         strip_targs(nm);
                         char pre[192] = "";
-                        if (!strchr(nm, ':') || 1) {
-                            for (size_t k = 0; k < sp; k++)
-                                if (stack[k].kind == 1 && strlen(pre) + strlen(stack[k].name) + 3 < sizeof pre) {
-                                    memcpy(pre + strlen(pre), stack[k].name, strlen(stack[k].name) + 1);
-                                    memcpy(pre + strlen(pre), "::", 3);
-                                }
-                        }
+                        for (size_t k = 0; k < sp; k++)
+                            if (stack[k].kind == 1 && strlen(pre) + strlen(stack[k].name) + 3 < sizeof pre) {
+                                memcpy(pre + strlen(pre), stack[k].name, strlen(stack[k].name) + 1);
+                                memcpy(pre + strlen(pre), "::", 3);
+                            }
                         if (allcaps(nm, strlen(nm))) { /* BOOST_AUTO_TEST_CASE(arg) */
                             size_t a = cand_open[pick] + 1, e = cand_close[pick];
                             size_t ae = a;
                             while (ae < e && h[ae] != ',' && h[ae] != ')') ae++;
                             copy_clean(df.alias, sizeof df.alias, h + a, ae - a);
-                            snprintf(df.name, sizeof df.name, "%s(%s)", nm, df.alias);
+                            fits = (size_t)snprintf(df.name, sizeof df.name, "%s(%s)", nm, df.alias) < sizeof df.name;
                             if (!strcmp(nm, "TEST") || !strcmp(nm, "TEST_F") || !strcmp(nm, "TEST_P") || !strcmp(nm, "TYPED_TEST")) {
                                 /* gtest: TEST(suite, name); the test name selects it */
                                 char tn[56];
@@ -613,12 +612,16 @@ void cxx_defs(const char *src, size_t n, CxxDefs *out)
                                 while (be < e && h[be] != ',' && h[be] != ')') be++;
                                 if (ae < e && h[ae] == ',' && be > ae + 1) {
                                     copy_clean(tn, sizeof tn, h + ae + 1, be - ae - 1);
-                                    snprintf(df.name, sizeof df.name, "%s(%s, %s)", nm, df.alias, tn);
+                                    fits = (size_t)snprintf(df.name, sizeof df.name, "%s(%s, %s)", nm, df.alias, tn) < sizeof df.name;
                                     snprintf(df.alias, sizeof df.alias, "%s", tn);
                                 }
                             }
                         } else {
-                            snprintf(df.name, sizeof df.name, "%s%s", pre, nm);
+                            fits = (size_t)snprintf(df.name, sizeof df.name, "%s%s", pre, nm) < sizeof df.name;
+                        }
+                        if (!fits) { /* too long to record: the brace is opaque, as for any non-definition */
+                            i = match_brace(m, n, i) + 1;
+                            continue;
                         }
                         df.start_off = hs;
                         if (pick > 0) { /* a macro prefix such as BOOST_AUTO_TEST_SUITE(x) is not part of this definition */

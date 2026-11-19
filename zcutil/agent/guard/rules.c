@@ -1279,7 +1279,7 @@ static const char *path_rule(const char *w)
  * segment of the pipeline being read names a datadir or lists/searches a place that holds one
  * (pipe_hit), the text the previous segment prints when it is a literal echo, printf or cat of a
  * heredoc (prod_lit/prod), and a `while read` loop fed by such a pipeline (loop_fed). */
-#define MAX_READ_VARS 4
+enum { MAX_READ_VARS = 4, READ_VAR_CAP = 40 }; /* names[] and chain.read_vars share the cap, so the copy is exact */
 struct chain {
     char cwd[CWD_CAP];
     bool pipe_dd;
@@ -1287,7 +1287,7 @@ struct chain {
     bool prod_lit;
     char *prod;
     bool loop_fed;
-    char read_vars[MAX_READ_VARS][40];
+    char read_vars[MAX_READ_VARS][READ_VAR_CAP];
     int nread;
 };
 
@@ -3402,7 +3402,7 @@ static void note_read(const struct gctx *c, int si, const struct cmdv *v, const 
                       int ci, struct chain *ch)
 {
     static const char *const valued = " -p -d -n -N -t -u -a ";
-    char names[MAX_READ_VARS][40];
+    char names[MAX_READ_VARS][READ_VAR_CAP];
     int nn = 0;
     bool in_while = false;
     for (int j = 0; j < ci; j++)
@@ -3433,7 +3433,7 @@ static void note_read(const struct gctx *c, int si, const struct cmdv *v, const 
         ch->loop_fed = true;
         ch->nread = nn;
         for (int j = 0; j < nn; j++)
-            snprintf(ch->read_vars[j], sizeof ch->read_vars[0], "%s", names[j]);
+            memcpy(ch->read_vars[j], names[j], READ_VAR_CAP); /* names[j] is already NUL-terminated */
     }
 }
 

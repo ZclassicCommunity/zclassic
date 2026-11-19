@@ -602,10 +602,10 @@ void ConnectionLoader::doNextDownload(std::function<void(void)> cb) {
     
     QNetworkRequest request(url);
     request.setAttribute(QNetworkRequest::FollowRedirectsAttribute, true);
-    // P1-5: a stalled socket should fail fast and retry instead of hanging forever.
-    // NOTE: in Qt 5.15 setTransferTimeout lives on QNetworkRequest / QNetworkAccessManager,
-    // NOT on QNetworkReply, so it is set here on the request before get().
+    // P1-5: a stalled socket fails fast and retries (Qt 5.15+; the CI root has 5.12, QNetworkRequest only).
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
     request.setTransferTimeout(30000);
+#endif
     currentDownload = client->get(request);
     downloadTime.start();
     
