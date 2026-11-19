@@ -205,12 +205,19 @@ TEST(SendJournal, ResolveStateMachine) {
         EXPECT_EQ((int)SENDONCE_EXPIRED, r.newState);
         f.tipHeight = 100;
     }
-    // BUILT without an expiry height: by time
+    // the margin is beyond the deepest reorg the node accepts
+    EXPECT_GT(SENDONCE_EXPIRY_MARGIN, (int)MAX_REORG_LENGTH);
+    // BUILT or COMMITTED without an expiry height: never released, however long ago and however high the tip
     {
-        EXPECT_EQ(SendOnceLabel::OUTCOME_UNKNOWN, ResolveSendOnce(Rec(SENDONCE_BUILT, 0, 5000), f).label);
-        f.now = 5000 + SENDONCE_NOEXPIRY_GRACE + 1;
-        EXPECT_EQ(SendOnceLabel::EXPIRED, ResolveSendOnce(Rec(SENDONCE_BUILT, 0, 5000), f).label);
+        f.now = 5000 + 10LL * 365 * 24 * 3600;
+        f.tipHeight = 1000000;
+        SendOnceResolution r = ResolveSendOnce(Rec(SENDONCE_BUILT, 0, 5000), f);
+        EXPECT_EQ(SendOnceLabel::OUTCOME_UNKNOWN, r.label);
+        EXPECT_EQ(0, r.newState);
+        EXPECT_FALSE(r.fErase);
+        EXPECT_EQ(SendOnceLabel::COMMITTED, ResolveSendOnce(Rec(SENDONCE_COMMITTED, 0, 5000), f).label);
         f.now = 5000;
+        f.tipHeight = 100;
     }
     // a committed send that is in neither a block nor the mempool once its expiry has passed is released too;
     // one that is in a block is final whatever the tip
@@ -224,8 +231,18 @@ TEST(SendJournal, ResolveStateMachine) {
         f.txInMempool = false; f.txMined = true;
         EXPECT_EQ(SendOnceLabel::COMMITTED, ResolveSendOnce(Rec(SENDONCE_COMMITTED, 100), f).label);
         f.txMined = false;
-        f.tipHeight = 100;
+        // in neither, still minable (tip below the expiry height): committed
+        f.tipHeight = 99;
         EXPECT_EQ(SendOnceLabel::COMMITTED, ResolveSendOnce(Rec(SENDONCE_COMMITTED, 100), f).label);
+        // in neither and past its expiry height, not yet beyond any reorg: undecided, never "committed", not released
+        f.tipHeight = 100;
+        SendOnceResolution u = ResolveSendOnce(Rec(SENDONCE_COMMITTED, 100), f);
+        EXPECT_EQ(SendOnceLabel::OUTCOME_UNKNOWN, u.label);
+        EXPECT_EQ(0, u.newState);
+        EXPECT_FALSE(u.fErase);
+        f.tipHeight = 100 + SENDONCE_EXPIRY_MARGIN;
+        EXPECT_EQ(SendOnceLabel::OUTCOME_UNKNOWN, ResolveSendOnce(Rec(SENDONCE_COMMITTED, 100), f).label);
+        f.tipHeight = 100;
     }
     // final states stay
     EXPECT_EQ(SendOnceLabel::COMMITTED, ResolveSendOnce(Rec(SENDONCE_COMMITTED), f).label);
@@ -447,31 +464,39 @@ TEST_F(SendJournalWalletTest, FailureBeforeBuildReleasesTheKey) {
     EXPECT_EQ(SendOnceBeginResult::PROCEED, SendOnceBegin(wallet, key, uint256S("88"), opid));
 }
 
-TEST_F(SendJournalWalletTest, ExpiredBuiltReleasesAndAllowsRetry) {
+TEST_F(SendJournalWalletTest, BuiltWithoutExpiryIsNeverReleased) {
     const uint256 key = SendOnceKeyHash("k3");
     const uint256 digest = uint256S("77");
     {
         LOCK2(cs_main, wallet->cs_wallet);
         SendOnceStart(wallet, key, digest, "opid-y");
     }
-    // expiry height 0 and built long ago: released by time
+    // expiry height 0 and built a year ago: nothing bounds when it could still be mined, so the key stays held
     CTransaction tx = SomeTx(0);
     ASSERT_TRUE(SendOnceBuilt(wallet, key, tx));
     {
         LOCK(wallet->cs_wallet);
         CSendOnceRecord r = wallet->mapSendOnce.begin()->second;
-        r.nTimeBuilt = GetTime() - SENDONCE_NOEXPIRY_GRACE - 10;
+        r.nTimeBuilt = GetTime() - 365LL * 24 * 3600;
         CWalletDB db(wallet->strWalletFile);
         ASSERT_TRUE(db.WriteSendOnce(key, r));
         wallet->mapSendOnce[key] = r;
     }
     LOCK2(cs_main, wallet->cs_wallet);
     std::string opid;
-    // a different request after expiry: the key is released, so it proceeds
-    EXPECT_EQ(SendOnceBeginResult::PROCEED, SendOnceBegin(wallet, key, uint256S("5555"), opid));
-    EXPECT_EQ((int)SENDONCE_EXPIRED, (int)wallet->mapSendOnce[key].state);
+    // a different request: still an error, the key is not released
+    try {
+        SendOnceBegin(wallet, key, uint256S("5555"), opid);
+        ADD_FAILURE() << "expected an error";
+    } catch (const UniValue& e) {
+        EXPECT_EQ("idempotency key reused with different parameters", find_value(e, "message").get_str());
+    }
+    // the same request: the stored operation, no second build
+    EXPECT_EQ(SendOnceBeginResult::STORED, SendOnceBegin(wallet, key, digest, opid));
+    EXPECT_EQ("opid-y", opid);
+    EXPECT_EQ((int)SENDONCE_BUILT, (int)wallet->mapSendOnce[key].state);
     UniValue st = SendOnceOperationStatus(wallet, "opid-y");
-    EXPECT_EQ("failed", find_value(st, "status").get_str());
+    EXPECT_EQ("executing", find_value(st, "status").get_str());
 }
 
 TEST_F(SendJournalWalletTest, Pruning) {

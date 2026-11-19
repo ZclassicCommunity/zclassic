@@ -40,10 +40,12 @@ class CWallet;
 //! Key: 1..128 characters of [A-Za-z0-9._:-]
 static const size_t SENDONCE_MAX_KEY_LENGTH = 128;
 static const uint32_t SENDONCE_RECORD_VERSION = 1;
-//! Blocks past a built transaction's expiry height before its key is released
-static const int SENDONCE_EXPIRY_MARGIN = 20;
-//! A built transaction without an expiry height is released after this many seconds
-static const int64_t SENDONCE_NOEXPIRY_GRACE = 7 * 24 * 3600;
+//! Blocks past a built transaction's expiry height before its key is released. It must exceed MAX_REORG_LENGTH
+//! (checked in sendjournal.cpp): a block at or below the expiry height is then too deep to be replaced, so a
+//! transaction that is not in the active chain by then can never be mined, and a retry cannot pay a second time.
+static const int SENDONCE_EXPIRY_MARGIN = 100;
+//! A built transaction without an expiry height (pre-Overwinter) is never released: nothing bounds when it could
+//! still be mined.
 //! Finished records (COMMITTED, EXPIRED) older than this are pruned
 static const int64_t SENDONCE_PRUNE_AGE = 90 * 24 * 3600;
 //! Finished records beyond this count are pruned, oldest first

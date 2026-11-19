@@ -3763,6 +3763,16 @@ UniValue z_getoperationstatus_IMPL(const UniValue& params, bool fRemoveFinishedO
 
         UniValue obj = operation->getStatus();
         std::string s = obj["status"].get_str();
+        if (s == "failed") {
+            // A keyed z_sendmany that failed after its transaction was built (the broadcast was refused) still holds
+            // that transaction: the journal, not "failed", says where it stands. A record exists only for such a
+            // send; one that failed before the build was erased.
+            UniValue stored = SendOnceOperationStatus(pwalletMain, id);
+            if (!stored.isNull()) {
+                obj = stored;
+                s = find_value(stored.get_obj(), "status").get_str();
+            }
+        }
         if (fRemoveFinishedOperations) {
             // Caller is only interested in retrieving finished results
             if ("success"==s || "failed"==s || "cancelled"==s) {
@@ -4111,10 +4121,9 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
         contextualTx.nVersion = 2; // Tx format should support vjoinsplits
     }
 
-    // Spending (signing, or decrypting shielded keys) needs the wallet keys: fail now, not in the async operation.
-    EnsureWalletIsUnlocked();
-
-    // Send journal: a key that already has a stored outcome answers with it, before anything is built
+    // Send journal: a key that already has a stored outcome answers with it, before anything is built. This comes
+    // before the wallet lock check: a retry of a send that was queued must get its operation back even if the wallet
+    // has been locked since, never an error that reads as "nothing was sent".
     uint256 sendOnceKeyHash, sendOnceDigest;
     if (fSendOnce) {
         sendOnceKeyHash = SendOnceKeyHash(sendOnceKey);
@@ -4123,6 +4132,9 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
         if (SendOnceBegin(pwalletMain, sendOnceKeyHash, sendOnceDigest, storedOpid) == SendOnceBeginResult::STORED)
             return storedOpid;
     }
+
+    // Spending (signing, or decrypting shielded keys) needs the wallet keys: fail now, not in the async operation.
+    EnsureWalletIsUnlocked();
 
     // Create operation and add to global queue
     std::shared_ptr<AsyncRPCQueue> q = getAsyncRPCQueue();
@@ -4874,7 +4886,7 @@ UniValue z_listsendjournal(const UniValue& params, bool fHelp)
             "    \"state\": \"started|committed|outcome_unknown|expired|released\",\n"
             "                              (string) where the send stands now: started (the operation is running), committed (the transaction is in the mempool\n"
             "                              or a block), outcome_unknown (built, but neither in the mempool nor in a block: a retry with the same key offers it\n"
-            "                              again and builds nothing new), expired (the tip passed its expiry height by 20 blocks and the transaction is in no block and not in the mempool: the key is released),\n"
+            "                              again and builds nothing new), expired (the tip passed its expiry height by more than the deepest possible reorg, " + strprintf("%d", SENDONCE_EXPIRY_MARGIN) + " blocks, and the transaction is in no block and not in the mempool: the key is released),\n"
             "                              released (the operation was lost before anything was built: the key is released)\n"
             "    \"stored_state\": \"started|built|committed|expired\",   (string) the state in wallet.dat\n"
             "    \"opid\": \"id\",              (string) the operation id z_sendmany returned\n"

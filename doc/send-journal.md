@@ -20,7 +20,8 @@ such a wallet.dat, report the same balances, never touch the records, and the cu
 them again afterwards (`qa/rpc-tests/wallet_send_once.sh`, scenario 9).
 
 Each write is followed by `DB_ENV->log_flush`, because the wallet environment commits with
-`DB_TXN_WRITE_NOSYNC`.
+`DB_TXN_WRITE_NOSYNC`. A failed flush counts as a failed write: a STARTED that is not durable fails
+the call (nothing is queued), a BUILT that is not durable fails the operation before the broadcast.
 
 ## Canonical request
 
@@ -40,12 +41,18 @@ The order of the recipients is part of the request.
 | state in wallet.dat | written | resolved (when looked at) |
 |---|---|---|
 | STARTED | before the operation is queued | operation live: `started`. Operation gone (restart, cancelled): `released`, record erased |
-| BUILT | after `Build()`, before broadcast; the transaction is added to the wallet right after | in a block or the mempool: `committed` (record becomes COMMITTED). Else `outcome_unknown` until the tip is more than 20 blocks past the expiry height (7 days after the build if no expiry height), then `expired` (record becomes EXPIRED) |
-| COMMITTED | after `sendrawtransaction` succeeded | in a block or the mempool: `committed`. In neither and the same expiry rule: `expired` |
+| BUILT | after `Build()`, before broadcast; the transaction is added to the wallet right after | in a block or the mempool: `committed` (record becomes COMMITTED). Else `outcome_unknown` until the tip is more than 100 blocks (more than `MAX_REORG_LENGTH`) past the expiry height, then `expired` (record becomes EXPIRED). A transaction without an expiry height is never released |
+| COMMITTED | after `sendrawtransaction` succeeded | in a block or the mempool: `committed`. In neither: `committed` while the tip is below the expiry height (it may still be mined), `outcome_unknown` once the tip has reached the expiry height (only a reorg could still mine it), then `expired` by the same rule as BUILT |
 | EXPIRED | by resolution | `expired`: the key is released |
 
 Failure before `Build()`: the record is erased (key released). Failure after BUILT (the broadcast
-failed): BUILT stays and stores the error.
+failed): BUILT stays and stores the error, and `z_getoperationstatus` answers for that operation
+from the journal (`executing` with `last_error` while the outcome is unknown), never a plain
+`failed`: the wallet holds the transaction and offers it to the mempool again at start and on a
+retry, so it may still be mined.
+
+A stored outcome is returned before the wallet lock is checked: a retry after the wallet was locked
+gets its operation id back, not "wallet locked".
 
 A call with a key whose record is `started`, `outcome_unknown` or `committed` and the same request
 returns the stored operation id; with `outcome_unknown` it first offers the stored transaction to the

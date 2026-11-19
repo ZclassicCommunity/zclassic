@@ -20,6 +20,9 @@
 
 #include <algorithm>
 
+static_assert(SENDONCE_EXPIRY_MARGIN > (int)MAX_REORG_LENGTH,
+              "a released key's transaction must be beyond any reorg: the margin must exceed MAX_REORG_LENGTH");
+
 bool IsValidSendOnceKey(const std::string& key)
 {
     if (key.empty() || key.size() > SENDONCE_MAX_KEY_LENGTH) return false;
@@ -93,12 +96,16 @@ SendOnceResolution ResolveSendOnce(const CSendOnceRecord& rec, const SendOnceFac
         // Neither in a block nor in the mempool. A built transaction cannot be mined once the tip is
         // past its expiry height (plus a margin for a reorg); a committed one that never made it
         // into a block is then as dead, and its key is released so that a retry can send.
-        const bool expired = rec.nExpiryHeight != 0
-            ? (int64_t)f.tipHeight > (int64_t)rec.nExpiryHeight + SENDONCE_EXPIRY_MARGIN
-            : f.now > rec.nTimeBuilt + SENDONCE_NOEXPIRY_GRACE;
+        // Without an expiry height nothing bounds when the transaction could still be mined: never released.
+        const bool expired = rec.nExpiryHeight != 0 &&
+            (int64_t)f.tipHeight > (int64_t)rec.nExpiryHeight + SENDONCE_EXPIRY_MARGIN;
         if (expired) {
             r.label = SendOnceLabel::EXPIRED;
             r.newState = SENDONCE_EXPIRED;
+        } else if (rec.nExpiryHeight != 0 && (int64_t)f.tipHeight >= (int64_t)rec.nExpiryHeight) {
+            // Past its expiry height: the active chain can no longer take it, only a reorg could. Neither sent
+            // nor released: never reported as committed.
+            r.label = SendOnceLabel::OUTCOME_UNKNOWN;
         } else {
             r.label = rec.state == SENDONCE_BUILT ? SendOnceLabel::OUTCOME_UNKNOWN : SendOnceLabel::COMMITTED;
         }
@@ -150,8 +157,11 @@ bool PersistRecord(CWallet* w, const uint256& h, const CSendOnceRecord* r)
             LogPrintf("send journal: could not %s the record %s\n", r ? "write" : "erase", HexStr(h.begin(), h.begin() + 8));
             return false;
         }
-        if (!bitdb.FlushLog())
+        if (!bitdb.FlushLog()) {
+            // Not durable: fail closed. A caller that goes on (broadcasting after BUILT) must not.
             LogPrintf("send journal: log flush failed after writing %s\n", HexStr(h.begin(), h.begin() + 8));
+            return false;
+        }
     }
     if (r)
         w->mapSendOnce[h] = *r;

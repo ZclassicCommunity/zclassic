@@ -15,6 +15,8 @@
 # 6  without a key nothing changes: the same RPC output shapes as the parent build (--ref-bin)
 # 7  older binaries (--old-bin, --ref-bin) open a wallet.dat that holds journal records, report the same
 #    balances, and the current binary still reads the journal afterwards
+# 10 the broadcast of a built transaction is refused: never reported as failed, retried once accepted
+# 11 a retry after the wallet was locked again returns the stored operation id
 #
 # usage: wallet_send_once.sh --bin <dir> --work <dir> [--peer-bin <dir>] [--ref-bin <dir>] [--old-bin <dir>]
 #                            [--only 1,2,...] [--base port]
@@ -40,6 +42,8 @@ trap 'stop_all' EXIT
 R1="-connect=127.0.0.1:$((BASE + 1))"
 KEY="send-once.test:key-1"
 EXTRA="-txexpirydelta=5 -disablesafemode"
+# SENDONCE_EXPIRY_MARGIN: blocks past the expiry height before a key is released (more than MAX_REORG_LENGTH)
+MARGIN=100
 
 # rec <amount>: one recipient, the miner's sapling address
 rec() { printf '[{"address":"%s","amount":%s}]' "$ZB" "$1"; }
@@ -151,7 +155,11 @@ crash_case() {
         mine 3
         ck "$l: still unknown 3 blocks on" "$(jstates)" outcome_unknown
         ck "$l: balance untouched" "$(zbal 0 "$ZS")" 4.00000000
-        h=$(cli 0 getblockcount); n=$((expiry + 21 - h)); [ $n -lt 1 ] || mine $n
+        h=$(cli 0 getblockcount); n=$((expiry + MARGIN - h)); [ $n -lt 1 ] || mine $n
+        ck "$l: still unknown at expiry + margin (a reorg could still mine it)" "$(jstates)" outcome_unknown
+        r=$(jsend 1 "$KEY")
+        ck "$l: retry at expiry + margin returns the stored operation id" "$r" "$op"
+        mine 1
         ck "$l: expired past expiry + margin" "$(jstates)" expired
         r=$(jsend 1 "$KEY")
         ck "$l: the key was released: a new operation" "$([ "$r" != "$op" ] && echo "$r" | grep -c '^opid-')" 1
@@ -187,7 +195,7 @@ scn_expire() {
     case $r in success*) tx=${r#success } ;; *) bad "send: $r"; return ;; esac
     ck "unmined: committed, in node 0's mempool only" "$(jstates) $(cli 0 getrawmempool | grep -c "$tx") $(cli 1 getrawmempool | grep -c "$tx")" "committed 1 0"
     exp=$(jlist | jq -r '.[0].expiryheight')
-    cli 1 generate $((exp + 22 - $(cli 1 getblockcount))) >/dev/null
+    cli 1 generate $((exp + MARGIN + 2 - $(cli 1 getblockcount))) >/dev/null
     rejoin; sync_to 0
     ck "unmined: dropped from the mempool at expiry" "$(cli 0 getrawmempool | grep -c "$tx")" 0
     ck "unmined: the journal released the key (expired)" "$(jstates)" expired
@@ -276,6 +284,57 @@ scn_old() {
     done
 }
 
+# the broadcast of a built transaction is refused (an absurd fee against a tiny -minrelaytxfee): the
+# operation must not read "failed" (the wallet holds the transaction and offers it again), a retry
+# builds nothing, and once the node accepts it the one transaction is mined
+scn_refused() {
+    local op r t s txid
+    fund -minrelaytxfee=0.00000001 || return
+    op=$(cli 0 z_sendmany "$ZS" "$(rec 1)" 1 0.001 "$KEY" 2>&1)
+    case $op in opid-*) ;; *) bad "refused: z_sendmany said [$op]"; return ;; esac
+    t=0; until [ "$(jlist | jq -r '.[0].error_code // empty')" != "" ]; do t=$((t + 1)); [ $t -lt 600 ] || { bad "refused: no stored broadcast error"; return; }; sleep 1; done
+    txid=$(jlist | jq -r '.[0].txid')
+    ck "refused: the broadcast error is stored, the record stays built" "$(jlist | jq -r '.[0].stored_state + " " + .[0].state')" "built outcome_unknown"
+    ck "refused: the error is the absurd fee" "$(jlist | jq -r '.[0].error' | grep -ci 'absurd')" 1
+    s=$(cli 0 z_getoperationstatus "[\"$op\"]" | jq -r '.[0].status + " " + .[0].journal + " " + (.[0].last_error.message|tostring)')
+    ck "refused: the live operation is not reported as failed" "$(echo "$s" | cut -d' ' -f1,2)" "executing outcome_unknown"
+    ck "refused: z_getoperationresult does not hand out a failure" "$(cli 0 z_getoperationresult "[\"$op\"]" | jq 'length')" 0
+    ck "refused: the operation is still in the queue" "$(cli 0 z_listoperationids | jq 'length')" 1
+    ck "refused: the built transaction is in the wallet, in no mempool" "$(cli 0 gettransaction "$txid" | jq -r .txid) $(cli 0 getrawmempool | grep -c "$txid")" "$txid 0"
+    ck "refused: retry returns the stored operation id" "$(cli 0 z_sendmany "$ZS" "$(rec 1)" 1 0.001 "$KEY" 2>&1)" "$op"
+    ck "refused: nothing new was built" "$(jlen) $(cli 0 getrawmempool | jq length)" "1 0"
+    ck "refused: balance untouched" "$(zbal 0 "$ZS")" 4.00000000
+    stop 0; start 0 "$BIN" $R1 $EXTRA || return; sync_to 0
+    ck "refused: after a restart with the normal relay fee the wallet offers it again: committed" "$(jstates) $(cli 0 getrawmempool | grep -c "$txid")" "committed 1"
+    ck "refused: the operation now answers success with the txid" "$(cli 0 z_getoperationstatus "[\"$op\"]" | jq -r '.[0].status + " " + .[0].result.txid')" "success $txid"
+    cli 0 resendwallettransactions >/dev/null; wait_mempool 1 "$txid"; mine 1
+    ck "refused: ZS debited exactly once" "$(zbal 0 "$ZS")" "$(add 4 -1 -0.001)"
+    ck "refused: ZB received exactly one note of 1" "$(zb_count) $(zb_total)" "1 1.00000000"
+    ck "refused: retry after the block: stored" "$(cli 0 z_sendmany "$ZS" "$(rec 1)" 1 0.001 "$KEY" 2>&1)" "$op"
+}
+
+# a retry after the wallet was locked again gets its operation id back, not "wallet locked"
+scn_locked() {
+    local op r
+    fund || return
+    cli 0 encryptwallet "pw1" >/dev/null 2>&1
+    wait_dead 0 || { bad "locked: encryptwallet did not stop the node"; return; }
+    start 0 "$BIN" $R1 $EXTRA || return; sync_to 0
+    ckerr "locked: a keyed send needs the passphrase" "assphrase" 0 z_sendmany "$ZS" "$(rec 1)" 1 "$FEE" "$KEY"
+    ck "locked: the refused call left no record" "$(jlen)" 0
+    cli 0 walletpassphrase pw1 600 >/dev/null
+    op=$(jsend 1 "$KEY"); r=$(wait_op 0 "$op")
+    case $r in success*) ;; *) bad "locked: send: $r"; return ;; esac
+    cli 0 walletlock >/dev/null
+    ck "locked: retry with the same key returns the stored operation id" "$(jsend 1 "$KEY")" "$op"
+    ckerr "locked: a new key still needs the passphrase" "assphrase" 0 z_sendmany "$ZS" "$(rec 1)" 1 "$FEE" "another-key"
+    ck "locked: one record" "$(jlen)" 1
+    stop 0; start 0 "$BIN" $R1 $EXTRA || return; sync_to 0
+    ck "locked: after a restart, still locked, the same operation id" "$(jsend 1 "$KEY")" "$op"
+    mine 1
+    final_checks "locked"
+}
+
 run_scn() {
     id=$1; name=$2; fn=$3
     if [ -n "$ONLY" ]; then case ",$ONLY," in *",$id,"*) ;; *) return 0 ;; esac; fi
@@ -299,6 +358,8 @@ run_scn 6 "unmined send expires, key released" scn_expire
 run_scn 7 "no key: current build" scn_nokey_new
 run_scn 8 "no key: parent build, compared" scn_nokey_ref
 run_scn 9 "older binaries and a wallet.dat with journal records" scn_old
+run_scn 10 "broadcast refused after BUILT" scn_refused
+run_scn 11 "retry after the wallet was locked" scn_locked
 
 say; say "id|scenario|result|checks"; cat "$RESULTS"
 ! grep -q "|FAIL|" "$RESULTS"
