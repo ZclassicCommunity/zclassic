@@ -536,13 +536,13 @@ ok "node 5: the index after -reindex equals the reference"
 # ---- 8. the flag-off RPC list ---------------------------------------------
 
 if [ -n "${BASELINE_SRC:-}" ]; then
-    say "== 8. flag off: the RPC list is the baseline's plus the zslp_* commands, nothing else"
+    say "== 8. flag off: the RPC list is the baseline's plus the zslp_* commands (and z_listsendjournal), nothing else"
     start 6 "$BASELINE_SRC/zclassicd"
     cli 6 help | grep -v '^$' | grep -v '^==' | sed 's/ .*//' | sort >"$TMP/help.base"
     cli 2 help | grep -v '^$' | grep -v '^==' | sed 's/ .*//' | sort >"$TMP/help.new"
     diff "$TMP/help.base" "$TMP/help.new" | grep '^[<>]' | sort >"$TMP/help.diff" || true
     [ "$(grep -c '^<' "$TMP/help.diff" || true)" = 0 ] || fail "commands vanished: $(grep '^<' "$TMP/help.diff")"
-    svc_other=$(grep '^> ' "$TMP/help.diff" | grep -v '^> zslp_' | grep -v '^> znam_' || true)
+    svc_other=$(grep '^> ' "$TMP/help.diff" | grep -v '^> zslp_' | grep -v '^> znam_' | grep -v '^> z_listsendjournal$' || true)
     [ -z "$svc_other" ] || fail "unexpected new commands: $svc_other"
     svc_new=$(grep -c "^> zslp_" "$TMP/help.diff" || true)
     if [ -n "${BASELINE_NEW_ZSLP:-}" ]; then expect "new commands" "$svc_new" "$BASELINE_NEW_ZSLP"

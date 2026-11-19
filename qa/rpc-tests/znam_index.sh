@@ -635,13 +635,13 @@ expect "znam_resolve answers again on a current node" "$(rf 0 frank address)" "$
 # ---- 9. the flag-off RPC list ---------------------------------------------
 
 if [ -n "${BASELINE_SRC:-}" ]; then
-    say "== 9. flag off: the RPC list is the baseline's plus the znam_* commands, nothing else"
+    say "== 9. flag off: the RPC list is the baseline's plus the znam_* commands (and z_listsendjournal), nothing else"
     start 6 "$BASELINE_SRC/zclassicd"
     cli 6 help | grep -v '^$' | grep -v '^==' | sed 's/ .*//' | sort >"$TMP/help.base"
     cli 2 help | grep -v '^$' | grep -v '^==' | sed 's/ .*//' | sort >"$TMP/help.new"
     diff "$TMP/help.base" "$TMP/help.new" | grep '^[<>]' | sort >"$TMP/help.diff" || true
     [ "$(grep -c '^<' "$TMP/help.diff" || true)" = 0 ] || fail "commands vanished: $(grep '^<' "$TMP/help.diff")"
-    svc_other=$(grep '^> ' "$TMP/help.diff" | grep -v '^> zslp_' | grep -v '^> znam_' || true)
+    svc_other=$(grep '^> ' "$TMP/help.diff" | grep -v '^> zslp_' | grep -v '^> znam_' | grep -v '^> z_listsendjournal$' || true)
     [ -z "$svc_other" ] || fail "unexpected new commands: $svc_other"
     svc_new=$(grep -c "^> znam_" "$TMP/help.diff" || true)
     [ "$svc_new" -le 8 ] || fail "new commands: got '$svc_new', expected at most 8"
