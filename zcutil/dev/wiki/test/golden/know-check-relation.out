@@ -1,0 +1,2 @@
+FAIL: bad/relation.tsv:5: relation noodles is not declared
+know --check: FAILED (1 problems)

@@ -1,0 +1,2 @@
+FAIL: bad/undeclared.tsv:6: term gizmos is not declared
+know --check: FAILED (1 problems)

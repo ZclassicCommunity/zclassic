@@ -1,0 +1,3 @@
+FAIL: bad/fields.tsv:5: expected 6 tab-separated fields (subject relation object context confidence why)
+FAIL: bad/fields.tsv:4: term src/core/a.c is declared but no row uses it
+know --check: FAILED (2 problems)

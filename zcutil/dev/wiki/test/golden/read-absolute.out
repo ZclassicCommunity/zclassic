@@ -1,0 +1,1 @@
+INVALID_PATH: path must be relative, without . or .. parts (/etc/passwd)

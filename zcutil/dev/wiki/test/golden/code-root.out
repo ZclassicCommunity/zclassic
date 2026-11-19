@@ -1,0 +1,8 @@
+topic: code
+title: code
+summary: 4 files
+children: 4 (showing 1-4)
+  doc/ - See the guide and the site plus the logo and https://example.org/raw and a reference then `code` stays.
+  scripts/ - 1 file
+  src/ - The daemon sources.
+  tools/ - 1 file

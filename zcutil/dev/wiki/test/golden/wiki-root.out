@@ -1,0 +1,15 @@
+topic: (root)
+title: Fixture docs
+summary: See the guide and the site plus the logo and https://example.org/raw and a reference then `code` stays.
+commands:
+  zcl-dev wiki
+  make -C tools
+  sh scripts/ok.sh
+  ./scripts/ok.sh
+  zcl-dev guide <paths>
+children: 5 (showing 1-5)
+  code/ - the source tree: zcl-dev wiki code/<dir>
+  agent/ - 2 files
+  many/ - Seventy pages.
+  guide.md - How to use the fixture.
+  setext.md - Body of setext.

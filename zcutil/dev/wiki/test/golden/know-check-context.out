@@ -1,0 +1,3 @@
+FAIL: bad/context.tsv:5: context nowhere is not declared
+FAIL: bad/context.tsv:7: context nowhere is not declared
+know --check: FAILED (2 problems)

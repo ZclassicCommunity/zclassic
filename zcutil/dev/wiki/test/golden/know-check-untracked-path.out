@@ -1,0 +1,3 @@
+FAIL: bad/untracked-path.tsv:4: term src/core/gone.c is not a tracked path
+FAIL: bad/untracked-path.tsv:4: term src/core/gone.c is declared but no row uses it
+know --check: FAILED (2 problems)

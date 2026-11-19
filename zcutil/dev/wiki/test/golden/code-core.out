@@ -1,0 +1,9 @@
+topic: code/src/core
+title: core
+summary: Ignored: AGENTS.md is absent here, README wins.
+children: 5 (showing 1-5)
+  README.md - Ignored: AGENTS.md is absent here, README wins.
+  a.c - parse widgets from bytes
+  b.c - Frobnicates the gadget table.
+  c.h - Computes the checksum of a block
+  d.cpp

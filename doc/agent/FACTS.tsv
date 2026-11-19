@@ -1,0 +1,37 @@
+# Closed facts about the zclassicd tree. One row per line:
+#   subject<TAB>relation<TAB>object<TAB>context<TAB>confidence<TAB>why
+# `zcl-dev know <term>` answers from these rows; `zcl-dev know --check` validates them.
+#!relations selects needs decided-by trap-of documents guards checked-by implements
+#!contexts ci consensus wallet qa build network tooling
+#!terms src/main.cpp ALL wallet_matrix leased-ports consensus zclassicd
+#!terms qa/rpc-tests/wallet_matrix.sh pid-derived-ports
+#!terms src/wallet/wallet.cpp setbestchain-lock-order src/wallet/db.cpp nosync-commit
+#!terms src/consensus/oversize_grandfather.cpp oversize-grandfather-table doc/oversize-grandfather.md
+#!terms src/c23/test/run.sh gnu17 src/c23/tools/check-vendor.sh vendored-c23-code
+#!terms src/c23/glue/zcl_c23_symbol_prefix.h unprefixed-globals src/init.cpp test-crash-hooks
+#!terms zcutil/local-ci.sh clearenv-rootfs setarch-no-aslr
+#!terms zcutil/dev/zcl-dev.c zcl-dev-tooling doc/agent/LESSONS.md zcl-dev-check-docs
+#!terms doc/agent/FACTS.tsv zcl-dev-know-check src/bootstrap.cpp snapshot-aggregate-caps
+#!terms wallet/src/daemonjob.h orphaned-daemon qa/rpc-tests/wallet_platform_checks.sh resync-after-hard-kill
+#!terms src/Makefile.am mingw-ansi-stdio
+src/main.cpp	selects	ALL	ci	DOCTRINE	zcutil/dev/impact.rules maps src/main.cpp to every local-ci test step, so a change there never skips consensus or wallet tests
+wallet_matrix	needs	leased-ports	qa	DOCTRINE	qa scripts take an explicit leased port base and fail fast on a bound port
+consensus	decided-by	zclassicd	consensus	DOCTRINE	zclassicd is the reference; Z23 matches it bug for bug and a divergence is fixed to match
+qa/rpc-tests/wallet_matrix.sh	trap-of	pid-derived-ports	qa	OBSERVED	ports derived from the PID collided under parallel runs several times in one release cycle
+src/wallet/wallet.cpp	trap-of	setbestchain-lock-order	wallet	OBSERVED	SetBestChain under cs_main alone deadlocked a notifier-thread write; the order is cs_main, cs_wallet, mempool.cs
+src/wallet/db.cpp	trap-of	nosync-commit	wallet	OBSERVED	the environment opens with DB_TXN_WRITE_NOSYNC, so a commit is not durable until an explicit flush
+src/consensus/oversize_grandfather.cpp	trap-of	oversize-grandfather-table	consensus	DOCTRINE	the table reproduces historical chain behaviour and is never tidied
+doc/oversize-grandfather.md	documents	oversize-grandfather-table	consensus	DOCTRINE	read it before touching the table or the Groth16 point-decode quirk
+src/c23/test/run.sh	needs	gnu17	build	OBSERVED	release builds use GCC 9, so linkable C compiles as gnu17 with zero warnings
+src/c23/tools/check-vendor.sh	guards	vendored-c23-code	build	DOCTRINE	fails on a changed blob or an unlisted file under a vendor directory
+src/c23/glue/zcl_c23_symbol_prefix.h	guards	unprefixed-globals	build	DOCTRINE	an unprefixed global in libzcl_c23.a collides with libsodium or OpenSSL at link time
+src/init.cpp	guards	test-crash-hooks	consensus	OBSERVED	-testcrashpoint and the other -test hooks are accepted on regtest only, so no production node can be told to exit
+zcutil/local-ci.sh	needs	clearenv-rootfs	ci	OBSERVED	the CI rootfs runs with --clearenv so host-only variables cannot leak into a step
+zcutil/local-ci.sh	needs	setarch-no-aslr	ci	OBSERVED	sanitizer steps run under setarch -R because high mmap entropy makes the sanitizer runtime loop
+zcutil/dev/zcl-dev.c	implements	zcl-dev-tooling	tooling	DOCTRINE	the dispatcher; each other zcl-dev subcommand is its own zcl-dev-<cmd> binary
+doc/agent/LESSONS.md	checked-by	zcl-dev-check-docs	tooling	DOCTRINE	check-docs fails when a lesson line has another shape or names an untracked path
+doc/agent/FACTS.tsv	checked-by	zcl-dev-know-check	tooling	DOCTRINE	know --check enforces the closed vocabulary, tracked paths, no duplicates and no unused terms
+src/bootstrap.cpp	trap-of	snapshot-aggregate-caps	network	DOCTRINE	snapshot serving needs process-wide caps as well as per-IP quotas; the caps are opt-in
+wallet/src/daemonjob.h	guards	orphaned-daemon	wallet	OBSERVED	without the Windows job object a killed wallet leaves the embedded daemon running on its datadir
+qa/rpc-tests/wallet_platform_checks.sh	needs	resync-after-hard-kill	qa	OBSERVED	a node killed before its first chainstate flush restarts from height 0 and the test waits for the re-sync
+src/Makefile.am	needs	mingw-ansi-stdio	build	OBSERVED	MinGW C code needs -D__USE_MINGW_ANSI_STDIO=1 for %zu, set for libzcl_c23.a

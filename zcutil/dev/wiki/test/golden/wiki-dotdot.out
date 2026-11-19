@@ -1,0 +1,1 @@
+INVALID_TOPIC: topic must be a relative path without . or .. parts (../etc)
