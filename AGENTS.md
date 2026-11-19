@@ -63,7 +63,7 @@ Run the test and read the log: an exit status behind a pipe, a hash, a green sum
 
 - Build, release, platforms: [doc/building-quickstart.md](doc/building-quickstart.md), [doc/building-daemon-from-source.md](doc/building-daemon-from-source.md), [wallet/docs/BUILDING.md](wallet/docs/BUILDING.md).
 - Local CI, step names, receipts: [doc/local-ci.md](doc/local-ci.md).
-- Agent documents: [doc/agent/README.md](doc/agent/README.md) (index), [doc/agent/WIKI.md](doc/agent/WIKI.md) (walking the docs), [doc/agent/KPI.md](doc/agent/KPI.md) (tree-health floor), [zcutil/lint/README.md](zcutil/lint/README.md) (lint rules and ratchets). The MCP server for agents is `zcutil/agent/mcp/` (`zcutil/bin/zcl-mcp`).
+- Agent documents: [doc/agent/README.md](doc/agent/README.md) (index), [doc/agent/THE_ZCLASSICD_WAY.md](doc/agent/THE_ZCLASSICD_WAY.md) (the development loop), [doc/agent/DEFENSIVE_CODING.md](doc/agent/DEFENSIVE_CODING.md) (safe coding rules), [doc/agent/CONSENSUS_PARITY.md](doc/agent/CONSENSUS_PARITY.md) (consensus evidence), [doc/agent/WIKI.md](doc/agent/WIKI.md) (walking the docs), [doc/agent/KPI.md](doc/agent/KPI.md) (tree-health floor), [zcutil/lint/README.md](zcutil/lint/README.md) (lint rules and ratchets). The MCP server for agents is `zcutil/agent/mcp/` (`zcutil/bin/zcl-mcp`).
 - C23 core and vendoring: [src/c23/README.md](src/c23/README.md), [doc/c23-build.md](doc/c23-build.md).
 - Wallet durability: [doc/wallet-crash-consistency.md](doc/wallet-crash-consistency.md). Wallet tests: [wallet/docs/TESTING.md](wallet/docs/TESTING.md).
 - Tests: [doc/unit-tests.md](doc/unit-tests.md), [qa/rpc-tests/README.md](qa/rpc-tests/README.md).
