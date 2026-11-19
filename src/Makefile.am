@@ -120,7 +120,7 @@ LIBZCASH_H = \
   zcash/Zcash.h \
   zcash/zip32.h
 
-.PHONY: FORCE check-security check-c23-vendor check-c23-no-rust check-c23-tor-symbols
+.PHONY: FORCE lint-fast check-security check-c23-vendor check-tools-vendor check-c23-no-rust check-c23-tor-symbols
 # bitcoin core #
 BITCOIN_CORE_H = \
   addrman.h \
@@ -789,6 +789,14 @@ check-c23-vendor:
 	sh $(srcdir)/c23/tools/check-vendor.sh
 	sh $(srcdir)/c23/services/tools/check-vendor.sh $(srcdir)/c23/services
 	@if test -f $(top_srcdir)/zcutil/tools/Z23_SOURCE.tsv; then sh $(srcdir)/c23/tools/check-vendor.sh $(top_srcdir)/zcutil/tools/Z23_SOURCE.tsv; fi
+
+# Same checker, developer-tools manifest (zcutil/tools: vendored jsonq).
+check-tools-vendor:
+	sh $(srcdir)/c23/tools/check-vendor.sh $(srcdir)/../zcutil/tools/Z23_SOURCE.tsv
+
+# Ratchet gates (jq, bash, banned string functions, md links, vendor); zcutil/lint/README.md.
+lint-fast:
+	$(MAKE) -C $(srcdir)/../zcutil/lint lint
 
 
 # Embedded Tor keeps Tor's own generic names (tor_*, crypto_*, ...). Prove no other

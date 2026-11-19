@@ -25,6 +25,7 @@ ZD=$SRC/zclassicd
 ZCLI=$SRC/zclassic-cli
 for b in "$ZD" "$ZCLI"; do [ -x "$b" ] || { echo "missing $b" >&2; exit 2; }; done
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
+. "$(dirname "$0")/jsonq_lib.sh"
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/zcl-stale-tip.XXXXXX")
 iso_base BASE "${E2E_PORT_BASE:-}" 128
@@ -110,9 +111,9 @@ wait_indexes() {
         while :; do
             info=$(cli "$1" "$rpc" 2>/dev/null || true)
             tip=$(cli "$1" getbestblockhash)
-            if [ -n "$info" ] && [ "$(printf '%s' "$info" | jq -r '.indexedblock')" = "$tip" ] &&
-               [ "$(printf '%s' "$info" | jq -r '.synced')" = true ] &&
-               [ -z "$(printf '%s' "$info" | jq -r '.error // empty')" ]; then break; fi
+            if [ -n "$info" ] && [ "$(printf '%s' "$info" | jget indexedblock)" = "$tip" ] &&
+               [ "$(printf '%s' "$info" | jget synced)" = true ] &&
+               [ -z "$(printf '%s' "$info" | jgetd error "")" ]; then break; fi
             t=$((t + 1)); [ $t -lt 120 ] || fail "$rpc of node $1 did not reach the tip: $info"
             sleep 1
         done

@@ -17,6 +17,7 @@ while [ $# -gt 0 ]; do
 done
 [ -x "$B/zclassicd" ] && [ -n "$W" ] || { echo "usage: $0 --bin DIR --work DIR [--base port]" >&2; exit 2; }
 command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
+. "$(dirname "$0")/jsonq_lib.sh"
 . "$(dirname "$0")/../lib/isolation.sh"
 iso_base P "$P" 16; R=0; F=0
 rm -rf "$W"; mkdir -p "$W"; W=$(cd "$W" && pwd)
@@ -25,7 +26,7 @@ A0="-regtest -server=1 -listen=0 -showmetrics=0 -debuglogfile=1 -keypool=5 -nupa
 cli() { $B/zclassic-cli -regtest -datadir=$D -rpcport=$P -rpcuser=u -rpcpassword=p "$@"; }
 st() { rm -f $D/regtest/.lock; mkdir -p $D/export; $ZCL_RUN $B/zclassicd $A0 -exportdir=$D/export -datadir=$D "$@" >> $D/out.log 2>&1 & echo $! > $D/pid; for i in $(seq 240); do cli getblockcount >/dev/null 2>&1 && return 0; kill -0 $(cat $D/pid) 2>/dev/null || { wait $(cat $D/pid); return $?; }; sleep 0.25; done; return 1; }
 sp() { cli stop >/dev/null 2>&1; while kill -0 $(cat $D/pid) 2>/dev/null; do sleep 0.2; done; }
-wop() { for i in $(seq 600); do s=$(cli z_getoperationstatus "[\"$1\"]" | jq -r ".[0].status"); case $s in success|failed) return;; esac; sleep 0.5; done; }
+wop() { for i in $(seq 600); do s=$(cli z_getoperationstatus "[\"$1\"]" | jget "[0].status"); case $s in success|failed) return;; esac; sleep 0.5; done; }
 snap() { echo "$(cli z_gettotalbalance 1 | jq -c "[.transparent,.private]") $(cli z_listunspent 1 | jq -c "[.[]|.txid[0:8]+\":\"+(.outindex // .jsoutindex|tostring)+\":\"+(.amount|tostring)]|sort") $(cli listunspent 1 | jq -c "[.[]|.txid[0:8]+\":\"+(.vout|tostring)]|sort")"; }
 cmp3() { # cmp3 <label>: plain restart, -rescan copy, second plain restart
   local base=$D; rm -rf $base.ref; cp -a $base $base.ref
@@ -37,7 +38,7 @@ cmp3() { # cmp3 <label>: plain restart, -rescan copy, second plain restart
 setup() { D=$W/$1; mkdir -p $D; printf "rpcuser=u\nrpcpassword=p\n" > $D/zclassic.conf; st || exit 1
   cli generate 110 >/dev/null; ZA=$(cli z_getnewaddress sapling); ZB=$(cli z_getnewaddress sapling); SP=$(cli z_getnewaddress sprout); TA=$(cli getnewaddress)
   cli sendtoaddress $TA 10 >/dev/null; cli generate 1 >/dev/null
-  wop $(cli z_shieldcoinbase "*" $ZA 0.0001 4 | jq -r .opid); cli generate 1 >/dev/null
+  wop $(cli z_shieldcoinbase "*" $ZA 0.0001 4 | jget opid); cli generate 1 >/dev/null
   wop $(cli z_sendmany $TA "[{\"address\":\"$SP\",\"amount\":2}]" 1 0.0001); cli generate 1 >/dev/null; }
 more() { wop $(cli z_sendmany $ZA "[{\"address\":\"$ZB\",\"amount\":1},{\"address\":\"$TA\",\"amount\":0.5}]" 1 0.0001); cli generate 1 >/dev/null
   wop $(cli z_sendmany $SP "[{\"address\":\"$TA\",\"amount\":0.3}]" 1 0.0001); cli generate 1 >/dev/null

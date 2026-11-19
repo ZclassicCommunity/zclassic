@@ -28,6 +28,7 @@ while [ $# -gt 0 ]; do
 done
 [ -x "$B/zclassicd" ] && [ -n "$W" ] || { echo "usage: $0 --bin DIR --work DIR [--base port]" >&2; exit 2; }
 command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
+. "$(dirname "$0")/jsonq_lib.sh"
 . "$(dirname "$0")/../lib/isolation.sh"
 iso_base P "$P" 16; R=0; F=0
 rm -rf "$W"; mkdir -p "$W/w" "$W/p"; W=$(cd "$W" && pwd)
@@ -61,7 +62,7 @@ H1=$(cli p getblockhash 1090); A1=$(cli p getblockhash 1100); cli p invalidatebl
 [ "$(cli p getblockcount)" = 1089 ] && ok "P invalidated block 1090: tip 1089" || bad "P tip after invalidateblock: $(cli p getblockcount)"
 cnt=0; while [ $cnt -lt 4 ]; do cli p generate 100 >/dev/null || break; cnt=$((cnt + 1)); done
 [ "$(cli p getblockcount)" = 1489 ] && ok "P mined chain B to 1489" || bad "P height $(cli p getblockcount) after mining B"
-PRUNED=$(cli p getblockchaininfo | jq -r .pruned)
+PRUNED=$(cli p getblockchaininfo | jget pruned)
 out=$(cli p getblock "$H1" 2>&1); case $out in *pruned*) ok "block 1090 of chain A is pruned on P (pruned=$PRUNED)" ;; *) bad "block 1090 still has data on P (pruned=$PRUNED): $(printf '%s' "$out" | head -c 100)" ;; esac
 [ "$(status "$A1")" = invalid ] && ok "the tip of chain A (1100, a descendant of block 1090) is reported invalid after its data was pruned" || bad "block 1090 status: $(status "$A1")"
 BTIP=$(cli p getbestblockhash)

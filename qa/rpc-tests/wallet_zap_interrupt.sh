@@ -37,8 +37,8 @@ start 0 "$BIN" -listen=0 || exit 1
 cli 0 generate 105 >/dev/null
 ZA=$(cli 0 z_getnewaddress sapling); TA=$(cli 0 getnewaddress)
 for k in 1 2 3 4 5; do cli 0 sendtoaddress "$TA" 1 >/dev/null; cli 0 generate 1 >/dev/null; done
-o=$(cli 0 z_shieldcoinbase "*" "$ZA" 0.0001 2 | jq -r .opid); wait_op 0 "$o" >/dev/null; cli 0 generate 1 >/dev/null
-WANT=$(totals); NTX=$(cli 0 getwalletinfo | jq .txcount)
+o=$(cli 0 z_shieldcoinbase "*" "$ZA" 0.0001 2 | jget opid); wait_op 0 "$o" >/dev/null; cli 0 generate 1 >/dev/null
+WANT=$(totals); NTX=$(cli 0 getwalletinfo | jget txcount)
 stop 0
 
 # 1. die during the rescan that -zapwallettxes implies (after the third transaction found again)
@@ -46,7 +46,7 @@ start_crash -zapwallettxes=2 -testcrashpoint=addtowallet-after-write:3
 ck "the node died during the -zapwallettxes rescan" "$?" 0
 start 0 "$BIN" -listen=0 || exit 1
 ck "plain start after the crash reports every balance again" "$(totals)" "$WANT"
-ck "plain start after the crash holds every transaction again" "$(cli 0 getwalletinfo | jq .txcount)" "$NTX"
+ck "plain start after the crash holds every transaction again" "$(cli 0 getwalletinfo | jget txcount)" "$NTX"
 stop 0
 start 0 "$BIN" -listen=0 || exit 1
 ck "and keeps them after one more restart" "$(totals)" "$WANT"

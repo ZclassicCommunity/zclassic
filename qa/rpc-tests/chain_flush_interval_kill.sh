@@ -17,7 +17,7 @@
 #                  legacy interval, still starts and runs.
 #
 # usage: chain_flush_interval_kill.sh --bin <dir> --work <dir> [--base port]
-# Needs jq and the Zcash parameters in ~/.zcash-params. Shell only, no Python.
+# Needs the Zcash parameters in ~/.zcash-params. Shell only, no Python.
 B=""; W=""; P=""
 while [ $# -gt 0 ]; do
     case $1 in

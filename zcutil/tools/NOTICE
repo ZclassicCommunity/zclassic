@@ -15,6 +15,6 @@ src/c23/tools/check-vendor.sh zcutil/tools/Z23_SOURCE.tsv. A file derived from a
 with changes is not vendored: it lives outside vendor/ and carries the header
 "derived from Z23 <path>@<commit>, changed" (Apache License section 4(b)).
 
-Developer tools only, never linked into zclassicd or the wallet: zcl-dev (glob matcher),
+Developer tools only, never linked into zclassicd or the wallet: zcl-dev (glob matcher), jsonq (JSON path query, replaces jq in the shell tests),
 zcl-run (process_group_exec.c, built with -include stdbool.h because the POSIX half of the
 upstream file relies on a C23 bool).

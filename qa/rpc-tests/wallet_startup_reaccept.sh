@@ -33,9 +33,9 @@ trap stop_all EXIT
 snap() {
     printf "t0=%s utxo=%s pool=%s" "$(bal "$1" "*" 0)" \
         "$(cli "$1" listunspent 0 | jq -c "[.[]|.txid[0:8]+\":\"+(.vout|tostring)]|sort")" \
-        "$(cli "$1" getrawmempool | jq -c length)"
+        "$(cli "$1" getrawmempool | jlen)"
 }
-wait_pool() { t=0; until [ "$(cli "$1" getrawmempool | jq -c length)" = "$2" ]; do t=$((t + 1)); [ $t -lt 30 ] || return 1; sleep 1; done; }
+wait_pool() { t=0; until [ "$(cli "$1" getrawmempool | jlen)" = "$2" ]; do t=$((t + 1)); [ $t -lt 30 ] || return 1; sleep 1; done; }
 
 scn_startup_reaccept() {
     start 0 "$BIN" -disablesafemode -connect=0 || return
@@ -46,7 +46,7 @@ scn_startup_reaccept() {
     cli 0 generate 31 >/dev/null
     cli 0 sendtoaddress "$(cli 0 getnewaddress)" 1 >/dev/null || bad "sendtoaddress"
     BEFORE=$(snap 0)
-    ck "one transaction pending" "$(cli 0 getrawmempool | jq -c length)" 1
+    ck "one transaction pending" "$(cli 0 getrawmempool | jlen)" 1
     stop 0
     # node 1 is a wallet-less copy of the chain at height 101
     mkdir -p "$SD/node1"; cp "$SD/node0/zclassic.conf" "$SD/node1/"; cp -a "$SD/node0/regtest" "$SD/node1/regtest"

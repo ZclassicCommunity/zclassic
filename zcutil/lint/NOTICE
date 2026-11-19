@@ -1,0 +1,11 @@
+zcl-lint (zcutil/lint)
+
+zcl-lint.c is derived from three Z23 lint gates (gate_hardening_ratchet.c, gate_no_new_bash.c,
+gate_markdown_links.c under tools/lint/lintc/ of the Z23 repository, commit named in the file header),
+changed: it is a modified derivative, not a verbatim copy. Z23 is licensed under the Apache License,
+Version 2.0 (full text in LICENSE.z23):
+
+    Copyright 2026 Rhett Creighton
+
+Per section 4(b) of that licence the file carries a "derived from Z23 <path>@<commit>, changed" header.
+The rest of zclassicd remains under the MIT license (see COPYING).

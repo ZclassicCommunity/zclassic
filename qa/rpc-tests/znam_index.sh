@@ -35,6 +35,7 @@ ZCLI=$SRC/zclassic-cli
 ZTX=$SRC/zclassic-tx
 for b in "$ZD" "$ZCLI" "$ZTX"; do [ -x "$b" ] || { echo "missing $b" >&2; exit 2; }; done
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
+. "$(dirname "$0")/jsonq_lib.sh"
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/zcl-znam-e2e.XXXXXX")
 iso_base BASE "${E2E_PORT_BASE:-}" 128
@@ -154,8 +155,8 @@ wait_index() {
     while :; do
         info=$(cli "$1" znam_getindexinfo 2>/dev/null || true)
         tip=$(cli "$1" getbestblockhash)
-        if [ -n "$info" ] && [ "$(printf '%s' "$info" | jq -r '.indexedblock')" = "$tip" ] &&
-           [ "$(printf '%s' "$info" | jq -r '.synced')" = true ]; then return 0; fi
+        if [ -n "$info" ] && [ "$(printf '%s' "$info" | jget indexedblock)" = "$tip" ] &&
+           [ "$(printf '%s' "$info" | jget synced)" = true ]; then return 0; fi
         t=$((t + 1)); [ $t -lt 240 ] || fail "the index of node $1 did not reach the tip: $info"
         sleep 1
     done
@@ -192,9 +193,9 @@ snapshot() {
 }
 
 # nf <n> <name> <field>
-nf() { cli "$1" znam_getname "$2" | jq -r ".$3"; }
+nf() { cli "$1" znam_getname "$2" | jget "$3"; }
 # rf <n> <name> <field> [recentblocks]: field of the pay-resolution
-rf() { cli "$1" znam_resolve "$2" pay ${4:-100} | jq -r ".$3"; }
+rf() { cli "$1" znam_resolve "$2" pay ${4:-100} | jget "$3"; }
 
 # ---- transactions ---------------------------------------------------------
 
@@ -213,10 +214,10 @@ otx() {
         | [.[] | select(.spendable and .amount >= 1) | select(("\(.txid):\(.vout)") as $o | $u | index($o) | not)]
         | sort_by(.amount) | .[0]')
     [ "$u" != null ] || fail "no coin left at $owner"
-    utxid=$(printf '%s' "$u" | jq -r .txid)
-    uvout=$(printf '%s' "$u" | jq -r .vout)
+    utxid=$(printf '%s' "$u" | jget txid)
+    uvout=$(printf '%s' "$u" | jget vout)
     echo "$utxid:$uvout" >>"$TMP/used"
-    change=$(btc $(( $(zat "$(printf '%s' "$u" | jq -r .amount)") - 10000 )))
+    change=$(btc $(( $(zat "$(printf '%s' "$u" | jget amount)") - 10000 )))
     raw=$(cli 0 createrawtransaction "[{\"txid\":\"$utxid\",\"vout\":$uvout}]" '{}')
     if [ "${LATE:-0}" = 1 ]; then
         raw=$("$ZTX" -regtest "$raw" "outaddr=$change:$owner" "outscript=0:0x$hex" "$@")
@@ -224,8 +225,8 @@ otx() {
         raw=$("$ZTX" -regtest "$raw" "outscript=0:0x$hex" "$@" "outaddr=$change:$owner")
     fi
     signed=$(cli 0 signrawtransaction "$raw")
-    [ "$(printf '%s' "$signed" | jq -r .complete)" = true ] || fail "could not sign a transaction: $signed"
-    cli 0 sendrawtransaction "$(printf '%s' "$signed" | jq -r .hex)"
+    [ "$(printf '%s' "$signed" | jget complete)" = true ] || fail "could not sign a transaction: $signed"
+    cli 0 sendrawtransaction "$(printf '%s' "$signed" | jget hex)"
 }
 
 # mine <txid...>: wait for node 0's mempool to hold them, mine one block, wait for node 0's index, record the snapshot
@@ -278,7 +279,7 @@ sync 1; sync 2
 # ---- 0. the index is off by default ---------------------------------------
 
 say "== 0. node 2 runs without -znamindex"
-expect "node 2 znam_getindexinfo" "$(cli 2 znam_getindexinfo | jq -r .enabled)" false
+expect "node 2 znam_getindexinfo" "$(cli 2 znam_getindexinfo | jget enabled)" false
 for c in "znam_resolve alice" "znam_getname alice" "znam_listnames" znam_listmine "znam_register alice t1x" "znam_update alice t1x" "znam_transfer alice t1x"; do
     # shellcheck disable=SC2086
     expect_error "node 2 $c" "disabled" cli 2 $c
@@ -298,20 +299,20 @@ for o in $O1 $O2 $O3 $O4 $O5; do
     c=$(cli 0 listunspent 100 9999999 | jq -c --argjson k "$k" '[.[] | select(.spendable and .amount >= 12)] | sort_by(.txid, .vout) | .[$k]')
     [ "$c" != null ] || fail "no mature coin to fund owner $k"
     k=$((k + 1))
-    ctxid=$(printf '%s' "$c" | jq -r .txid); cvout=$(printf '%s' "$c" | jq -r .vout)
+    ctxid=$(printf '%s' "$c" | jget txid); cvout=$(printf '%s' "$c" | jget vout)
     echo "$ctxid:$cvout" >>"$TMP/used"
-    back=$(btc $(( $(zat "$(printf '%s' "$c" | jq -r .amount)") - 1200000000 - 10000 )))
+    back=$(btc $(( $(zat "$(printf '%s' "$c" | jget amount)") - 1200000000 - 10000 )))
     raw=$(cli 0 createrawtransaction "[{\"txid\":\"$ctxid\",\"vout\":$cvout}]" '{}')
     raw=$("$ZTX" -regtest "$raw" "outaddr=2:$o" "outaddr=2:$o" "outaddr=2:$o" "outaddr=2:$o" "outaddr=2:$o" "outaddr=2:$o" "outaddr=$back:$MCH")
     signed=$(cli 0 signrawtransaction "$raw")
-    [ "$(printf '%s' "$signed" | jq -r .complete)" = true ] || fail "could not sign a funding transaction: $signed"
-    cli 0 sendrawtransaction "$(printf '%s' "$signed" | jq -r .hex)" >/dev/null
+    [ "$(printf '%s' "$signed" | jget complete)" = true ] || fail "could not sign a funding transaction: $signed"
+    cli 0 sendrawtransaction "$(printf '%s' "$signed" | jget hex)" >/dev/null
 done
 cli 0 generate 1 >/dev/null
 wait_index 0; wait_index 1
 snapshot 0 >"$TMP/snap.$(cli 0 getblockcount)"
-expect "node 0 index synced" "$(cli 0 znam_getindexinfo | jq -r .synced)" true
-expect "no names yet" "$(cli 0 znam_getindexinfo | jq -r .names)" 0
+expect "node 0 index synced" "$(cli 0 znam_getindexinfo | jget synced)" true
+expect "no names yet" "$(cli 0 znam_getindexinfo | jget names)" 0
 
 # ---- 1. register, resolve, update, transfer through the wallet commands -----
 
@@ -320,7 +321,7 @@ expect_error "an upper-case name is refused" "Not a valid ZNAM name" cli 0 znam_
 expect_error "a name with a look-alike Cyrillic letter is refused" "Not a valid ZNAM name" cli 0 znam_register "$(printf 'al\321\226ce')" "$T1"
 expect_error "a target that is not an address is refused" "not a t-address" cli 0 znam_register alice "not-an-address"
 expect_error "a mistyped address is refused" "valid" cli 0 znam_register alice "$(printf '%s' "$T1" | sed -e 's/x$/~/' -e 's/[^~]$/x/' -e 's/~$/y/')" taddr
-R1=$(cli 0 znam_register alice "$T1" "" "$O1" | jq -r .txid)
+R1=$(cli 0 znam_register alice "$T1" "" "$O1" | jget txid)
 expect_error "a registration of the same name waiting in the mempool blocks a second one" "already waiting in the mempool" cli 0 znam_register alice "$T2" "" "$O2"
 mine "$R1"
 expect "alice registered" "$(nf 0 alice owner)" "$O1"
@@ -328,8 +329,8 @@ expect "alice resolves to T1" "$(rf 0 alice address)" "$T1"
 expect "resolution says which tx set it" "$(rf 0 alice set_txid)" "$R1"
 expect "and at which height" "$(rf 0 alice set_height)" "$(cli 0 getblockcount)"
 expect "a fresh registration is flagged as recent" "$(rf 0 alice changed_recently)" true
-expect "with a warning" "$(cli 0 znam_resolve alice | jq -r '.warnings | length')" 1
-expect "the registration is history entry 1" "$(nf 0 alice 'history | length')" 1
+expect "with a warning" "$(cli 0 znam_resolve alice | jlen warnings)" 1
+expect "the registration is history entry 1" "$(cli 0 znam_getname alice | jlen history)" 1
 expect "the signer is the owner" "$(nf 0 alice 'history[0].signer')" "$O1"
 expect_error "a taken name cannot be registered" "already registered" cli 0 znam_register alice "$T2" "" "$O2"
 sync 1; wait_index 1
@@ -341,9 +342,9 @@ say "== 1b. update, transfer, the recent-change window"
 mine_blocks 3
 expect "3 blocks later, with a 3 block window, the change is no longer recent" "$(rf 0 alice changed_recently 3)" false
 expect "with a 4 block window it still is" "$(rf 0 alice changed_recently 4)" true
-expect "no warning outside the window" "$(cli 0 znam_resolve alice pay 3 | jq -r '.warnings | length')" 0
+expect "no warning outside the window" "$(cli 0 znam_resolve alice pay 3 | jlen warnings)" 0
 expect "a window of 0 turns the flag off" "$(rf 0 alice changed_recently 0)" false
-U1=$(cli 0 znam_update alice "$T2" | jq -r .txid)
+U1=$(cli 0 znam_update alice "$T2" | jget txid)
 mine "$U1"
 expect "alice resolves to T2 after the owner's update" "$(rf 0 alice address)" "$T2"
 expect "the answer names the update tx" "$(rf 0 alice set_txid)" "$U1"
@@ -354,24 +355,24 @@ S1=$(otx "$O3" "$("$ZS" update alice taddr "$T3")")
 mine "$S1"
 expect "a stranger's update is ignored" "$(nf 0 alice value)" "$T2"
 info=$(cli 0 znam_getindexinfo)
-expect "the ignored message is counted" "$(printf '%s' "$info" | jq -r .ignored)" 1
+expect "the ignored message is counted" "$(printf '%s' "$info" | jget ignored)" 1
 # TRANSFER to O2
-expect_error "a transfer to a P2SH address is refused" "must be a t-address" cli 0 znam_transfer alice "$(cli 0 createmultisig 1 "[\"$(cli 0 validateaddress "$O1" | jq -r .pubkey)\"]" | jq -r .address)"
+expect_error "a transfer to a P2SH address is refused" "must be a t-address" cli 0 znam_transfer alice "$(cli 0 createmultisig 1 "[\"$(cli 0 validateaddress "$O1" | jget pubkey)\"]" | jget address)"
 expect_error "a transfer to a z-address is refused" "must be a t-address" cli 0 znam_transfer alice "$ZA"
-TR=$(cli 0 znam_transfer alice "$O2" | jq -r .txid)
+TR=$(cli 0 znam_transfer alice "$O2" | jget txid)
 mine "$TR"
 expect "alice is owned by O2" "$(nf 0 alice owner)" "$O2"
 expect "the transfer is a recent change" "$(rf 0 alice changed_recently)" true
-expect "O1 owns nothing" "$(cli 0 znam_listnames "$O1" | jq -r length)" 0
-expect "O2 owns alice" "$(cli 0 znam_listnames "$O2" | jq -r '.[0].name')" alice
+expect "O1 owns nothing" "$(cli 0 znam_listnames "$O1" | jlen)" 0
+expect "O2 owns alice" "$(cli 0 znam_listnames "$O2" | jget "[0].name")" alice
 # the old owner's update is ignored, the new owner's applies (the wallet holds both keys and picks the current owner's coin)
 S2=$(otx "$O1" "$("$ZS" update alice taddr "$T3")")
 mine "$S2"
 expect "the previous owner's update is ignored" "$(nf 0 alice value)" "$T2"
-U2=$(cli 0 znam_update alice "$T4" | jq -r .txid)
+U2=$(cli 0 znam_update alice "$T4" | jget txid)
 mine "$U2"
 expect "the new owner's update applies" "$(nf 0 alice value)" "$T4"
-expect "history has four applied entries" "$(nf 0 alice 'history | length')" 4
+expect "history has four applied entries" "$(cli 0 znam_getname alice | jlen history)" 4
 expect "in order" "$(cli 0 znam_getname alice | jq -r '[.history[].command] | join(",")')" "REGISTER,UPDATE,TRANSFER,UPDATE"
 # RENEW is permissionless and not a change a payer must hear about
 RN=$(otx "$O5" "$("$ZS" renew alice)")
@@ -384,7 +385,7 @@ expect "RENEW does not move the change height" "$(rf 0 alice set_txid)" "$U2"
 say "== 2. first come, first served: two registrations of one name in one block"
 BA=$(otx "$O3" "$("$ZS" register bob taddr "$T1")")
 BB=$(otx "$O4" "$("$ZS" register bob taddr "$T2")")
-t=0; until [ "$(cli 0 getrawmempool | jq -r 'length')" -ge 2 ]; do t=$((t + 1)); [ $t -lt 30 ] || fail "mempool"; sleep 1; done
+t=0; until [ "$(cli 0 getrawmempool | jlen)" -ge 2 ]; do t=$((t + 1)); [ $t -lt 30 ] || fail "mempool"; sleep 1; done
 mine "$BA" "$BB"
 BLK=$(cli 0 getblockhash "$(cli 0 getblockcount)")
 FIRST=$(cli 0 getblock "$BLK" | jq -r --arg a "$BA" --arg b "$BB" '[.tx[] | select(. == $a or . == $b)] | first')
@@ -401,14 +402,14 @@ BLK=$(cli 0 getblockhash "$(cli 0 getblockcount)")
 FIRST=$(cli 0 getblock "$BLK" | jq -r --arg a "$CA" --arg b "$CB" '[.tx[] | select(. == $a or . == $b)] | first')
 if [ "$FIRST" = "$CA" ]; then WANT=$O3; else WANT=$O4; fi
 expect "carol belongs to whoever is first in the block" "$(nf 0 carol owner)" "$WANT"
-expect "the loser's registration changed nothing" "$(cli 0 znam_getindexinfo | jq -r '.appliedbycommand.REGISTER')" 3
+expect "the loser's registration changed nothing" "$(cli 0 znam_getindexinfo | jget appliedbycommand.REGISTER)" 3
 # the other order, forced: CB (higher priority) should lead; if the miner still put CA first the rule is the same
 say "   carol: first in block was $( [ "$FIRST" = "$CB" ] && echo the prioritised tx || echo the other tx )"
 
 # ---- 3. malformed records and the one-message rule ------------------------
 
 say "== 3. records Z23 ignores, and the first-OP_RETURN rule"
-MSGS0=$(cli 0 znam_getindexinfo | jq -r .messages)
+MSGS0=$(cli 0 znam_getindexinfo | jget messages)
 DAVE=$("$ZS" register dave taddr "$T1")
 # version 2 (the version push is the 2nd field), an upper-case name (push 04 "dave" -> "Dave"), a record cut short
 BADV=$(otx "$O3" "$(printf '%s' "$DAVE" | sed 's/^6a045a4e414d0101/6a045a4e414d0102/')")
@@ -416,7 +417,7 @@ BADN=$(otx "$O3" "$(printf '%s' "$DAVE" | sed 's/0464617665/0444617665/')")
 TRUNC=$(otx "$O3" "$(printf '%s' "$DAVE" | sed 's/..$//')")
 mine "$BADV" "$BADN" "$TRUNC"
 expect_error "dave is not registered (version 2, an upper-case name, a truncated record)" "No such name" cli 0 znam_getname dave
-expect "none of the three parsed" "$(cli 0 znam_getindexinfo | jq -r .messages)" "$MSGS0"
+expect "none of the three parsed" "$(cli 0 znam_getindexinfo | jget messages)" "$MSGS0"
 # a record whose first OP_RETURN is not ZNAM: the second output is never read
 TWO=$(otx "$O3" "6a03787878" "outscript=0:0x$DAVE")
 mine "$TWO"
@@ -435,17 +436,17 @@ expect "an OP_RETURN at vout[1] is read" "$(nf 0 late owner)" "$O4"
 # ---- 4. pay a name, end to end through RPC ---------------------------------
 
 say "== 4. pay a name: resolve, then send to the resolved ADDRESS"
-SH=$(cli 0 znam_register shop "$T3" "" "$O5" | jq -r .txid)
+SH=$(cli 0 znam_register shop "$T3" "" "$O5" | jget txid)
 mine "$SH"
 expect "shop resolves to T3" "$(rf 0 shop address)" "$T3"
 expect "kind transparent" "$(rf 0 shop kind)" transparent
-expect "a z-address name" "$(cli 0 znam_register zshop "$ZA" | jq -r .name)" zshop
+expect "a z-address name" "$(cli 0 znam_register zshop "$ZA" | jget name)" zshop
 mine_blocks 1
 expect "zshop resolves to a sapling address" "$(rf 0 zshop kind)" sapling
-expect "which z_validateaddress accepts" "$(cli 1 z_validateaddress "$(rf 0 zshop address)" | jq -r .isvalid)" true
+expect "which z_validateaddress accepts" "$(cli 1 z_validateaddress "$(rf 0 zshop address)" | jget isvalid)" true
 expect_error "sendtoaddress does not take a name" "Invalid ZClassic address" cli 0 sendtoaddress shop 1
 R=$(cli 0 znam_resolve shop)
-ADDR=$(printf '%s' "$R" | jq -r .address)
+ADDR=$(printf '%s' "$R" | jget address)
 before=$(cli 1 getreceivedbyaddress "$T3" 0)
 PAY=$(cli 0 sendtoaddress "$ADDR" 1)
 mine "$PAY"
@@ -453,14 +454,14 @@ sync 1
 expect "the payment reached the resolved address" "$(cli 1 getreceivedbyaddress "$T3" 1)" "$(awk -v b="$before" 'BEGIN { printf "%.8f", b + 1 }')"
 expect "the transaction carries no name (no OP_RETURN)" "$(cli 0 getrawtransaction "$PAY" 1 | jq -r '[.vout[].scriptPubKey.type] | index("nulldata")')" null
 # the owner changes the address: the next resolution says so, with the new set_txid
-U3=$(cli 0 znam_update shop "$T4" | jq -r .txid)
+U3=$(cli 0 znam_update shop "$T4" | jget txid)
 mine "$U3"
 R2=$(cli 0 znam_resolve shop)
-expect "shop now resolves to T4" "$(printf '%s' "$R2" | jq -r .address)" "$T4"
-expect "flagged as changed recently" "$(printf '%s' "$R2" | jq -r .changed_recently)" true
-expect "naming the update tx" "$(printf '%s' "$R2" | jq -r .set_txid)" "$U3"
-expect "and saying how long ago" "$(printf '%s' "$R2" | jq -r .blocks_since_change)" 0
-[ "$(printf '%s' "$R2" | jq -r .address)" != "$ADDR" ] || fail "the address did not change"
+expect "shop now resolves to T4" "$(printf '%s' "$R2" | jget address)" "$T4"
+expect "flagged as changed recently" "$(printf '%s' "$R2" | jget changed_recently)" true
+expect "naming the update tx" "$(printf '%s' "$R2" | jget set_txid)" "$U3"
+expect "and saying how long ago" "$(printf '%s' "$R2" | jget blocks_since_change)" 0
+[ "$(printf '%s' "$R2" | jget address)" != "$ADDR" ] || fail "the address did not change"
 ok "an address resolved earlier is not the one resolved now: a payer who confirms the address sees the difference"
 
 # ---- 5. node 1's index agrees ---------------------------------------------
@@ -477,8 +478,8 @@ expect "node 1 sees the same owner of shop" "$(nf 1 shop owner)" "$O5"
 
 say "== 6. reorg the chain out one block at a time"
 TIPH=$(cli 0 getblockcount)
-ABLK=$(cli 0 gettransaction "$R1" | jq -r .blockhash)
-AH=$(cli 0 getblock "$ABLK" | jq -r .height)
+ABLK=$(cli 0 gettransaction "$R1" | jget blockhash)
+AH=$(cli 0 getblock "$ABLK" | jget height)
 h=$TIPH
 while [ "$h" -ge "$AH" ]; do
     cli 0 invalidateblock "$(cli 0 getblockhash "$h")"
@@ -490,8 +491,8 @@ while [ "$h" -ge "$AH" ]; do
 done
 ok "all $((TIPH - AH + 1)) reorg steps: the index is exactly the snapshot taken when the chain was at that height"
 expect_error "alice is gone with her registration block" "No such name" cli 0 znam_getname alice
-expect "no names left" "$(cli 0 znam_getindexinfo | jq -r .names)" 0
-expect "resolving it says absent" "$(cli 0 znam_resolve alice | jq -r .error_code)" NAME_ABSENT
+expect "no names left" "$(cli 0 znam_getindexinfo | jget names)" 0
+expect "resolving it says absent" "$(cli 0 znam_resolve alice | jget error_code)" NAME_ABSENT
 # the same blocks come back: the index follows forward to the same state
 cli 0 reconsiderblock "$ABLK" >/dev/null
 t=0; until [ "$(cli 0 getblockcount)" = "$TIPH" ]; do t=$((t + 1)); [ $t -lt 120 ] || fail "the chain did not come back"; sleep 1; done
@@ -511,13 +512,13 @@ build_interrupted() { # <node> <how: kill|stop>
     start "$n" "$ZD" -znamindex=1 -znamindexdelayms=300 -connect=127.0.0.1:$((BASE + 0))
     sync "$n"
     t=0
-    until [ "$(cli "$n" znam_getindexinfo | jq -r '.indexedheight // 0')" -ge 20 ]; do
+    until [ "$(cli "$n" znam_getindexinfo | jgetd indexedheight 0)" -ge 20 ]; do
         t=$((t + 1)); [ $t -lt 240 ] || fail "node $n did not start indexing"
         sleep 1
     done
     mid=$(cli "$n" znam_getindexinfo)
-    [ "$(printf '%s' "$mid" | jq -r .synced)" = false ] || fail "the index finished before it could be interrupted"
-    say "   interrupting node $n ($how) at indexed height $(printf '%s' "$mid" | jq -r .indexedheight) of $CH"
+    [ "$(printf '%s' "$mid" | jget synced)" = false ] || fail "the index finished before it could be interrupted"
+    say "   interrupting node $n ($how) at indexed height $(printf '%s' "$mid" | jget indexedheight) of $CH"
     if [ "$how" = kill ]; then kill9 "$n"; else stop "$n"; fi
     start "$n" "$ZD" -znamindex=1 -connect=127.0.0.1:$((BASE + 0))
     # kill -9 loses the unflushed chainstate, so the node restarts behind node 0 and catches up again, and the
@@ -568,7 +569,7 @@ done
 wait_index 0; wait_index 1
 expect_error "alice is not on the new chain (node 0)" "No such name" cli 0 znam_getname alice
 expect_error "alice is not on the new chain (node 1)" "No such name" cli 1 znam_getname alice
-expect "node 1 followed with its index: no names" "$(cli 1 znam_getindexinfo | jq -r .names)" 0
+expect "node 1 followed with its index: no names" "$(cli 1 znam_getindexinfo | jget names)" 0
 t=0
 until [ "$(cli 2 getbestblockhash)" = "$(cli 0 getbestblockhash)" ]; do
     t=$((t + 1)); [ $t -lt 120 ] || fail "node 2 did not follow the reorg"; sleep 1
@@ -577,7 +578,7 @@ ok "node 2 (no index) followed the same reorg"
 # The old chain's transactions go back to the mempool and are mined again by the next block (they are still valid),
 # so alice may well be registered again by the same first-in-block rule. A new name shows the new chain accepts
 # registrations and the index follows them.
-R9=$(cli 0 znam_register frank "$T4" "" "$O3" | jq -r .txid)
+R9=$(cli 0 znam_register frank "$T4" "" "$O3" | jget txid)
 mine "$R9"
 expect "frank, registered on the new chain, belongs to its registrant" "$(nf 0 frank owner)" "$O3"
 stop 7
@@ -621,7 +622,7 @@ expect "frank was not touched by the refused transfers" "$(nf 0 frank owner)" "$
 stop 1; stop 0
 start 0 "$ZD" -znamindex=1 -mocktime=$(( $(date +%s) + 7 * 86400 ))
 wait_index 0
-expect "the index says synced with the old local tip" "$(cli 0 znam_getindexinfo | jq -r .synced)" true
+expect "the index says synced with the old local tip" "$(cli 0 znam_getindexinfo | jget synced)" true
 expect_error "znam_resolve refuses while the node is catching up" "still catching up" cli 0 znam_resolve frank pay
 expect_error "znam_register refuses while the node is catching up" "still catching up" cli 0 znam_register zlate "$T1"
 expect_error "znam_update refuses while the node is catching up" "still catching up" cli 0 znam_update frank "$T1"

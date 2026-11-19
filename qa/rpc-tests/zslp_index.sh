@@ -37,6 +37,7 @@ ZCLI=$SRC/zclassic-cli
 ZTX=$SRC/zclassic-tx
 for b in "$ZD" "$ZCLI" "$ZTX"; do [ -x "$b" ] || { echo "missing $b" >&2; exit 2; }; done
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
+. "$(dirname "$0")/jsonq_lib.sh"
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/zcl-zslp-e2e.XXXXXX")
 iso_base BASE "${E2E_PORT_BASE:-}" 128
@@ -157,8 +158,8 @@ wait_index() {
     while :; do
         info=$(cli "$1" zslp_getindexinfo 2>/dev/null || true)
         tip=$(cli "$1" getbestblockhash)
-        if [ -n "$info" ] && [ "$(printf '%s' "$info" | jq -r '.indexedblock')" = "$tip" ] &&
-           [ "$(printf '%s' "$info" | jq -r '.synced')" = true ]; then return 0; fi
+        if [ -n "$info" ] && [ "$(printf '%s' "$info" | jget indexedblock)" = "$tip" ] &&
+           [ "$(printf '%s' "$info" | jget synced)" = true ]; then return 0; fi
         t=$((t + 1)); [ $t -lt 240 ] || fail "the index of node $1 did not reach the tip: $info"
         sleep 1
     done
@@ -180,8 +181,8 @@ tx() {
         | [.[] | select(.spendable and .amount >= 1 and (.tokenbearing | not)) | select(("\(.txid):\(.vout)") as $o | $u | index($o) | not)]
         | sort_by(.amount) | .[0]')
     [ "$u" != null ] || fail "the miner has no coin to fund a transaction"
-    utxid=$(printf '%s' "$u" | jq -r .txid)
-    uvout=$(printf '%s' "$u" | jq -r .vout)
+    utxid=$(printf '%s' "$u" | jget txid)
+    uvout=$(printf '%s' "$u" | jget vout)
     echo "$utxid:$uvout" >>"$TMP/used"
     ins="[{\"txid\":\"$utxid\",\"vout\":$uvout}"
     ntok=0
@@ -189,12 +190,12 @@ tx() {
     ins="$ins]"
     nd=0
     for a in "$@"; do case $a in outaddr=*) nd=$((nd + 1)) ;; esac; done
-    change=$(btc $(( $(zat "$(printf '%s' "$u" | jq -r .amount)") + 546 * ntok - 10000 - 546 * nd )))
+    change=$(btc $(( $(zat "$(printf '%s' "$u" | jget amount)") + 546 * ntok - 10000 - 546 * nd )))
     raw=$(cli 0 createrawtransaction "$ins" '{}')
     raw=$("$ZTX" -regtest "$raw" "$@" "outaddr=$change:$M0")
     signed=$(cli 0 signrawtransaction "$raw")
-    [ "$(printf '%s' "$signed" | jq -r .complete)" = true ] || fail "could not sign a transaction: $signed"
-    cli 0 sendrawtransaction "$(printf '%s' "$signed" | jq -r .hex)"
+    [ "$(printf '%s' "$signed" | jget complete)" = true ] || fail "could not sign a transaction: $signed"
+    cli 0 sendrawtransaction "$(printf '%s' "$signed" | jget hex)"
 }
 
 # mine <txid>: wait for node 0's mempool to hold it, mine one block, wait for node 0's index,
@@ -237,10 +238,10 @@ snapshot() {
 bal() { cli "$1" zslp_getbalances "$2" | jq -r --arg t "$3" '([.balances[] | select(.tokenid == $t) | .amount] | first) // "0"'; }
 
 # tok <n> <tokenid> <field>
-tok() { cli "$1" zslp_gettoken "$2" | jq -r ".$3"; }
+tok() { cli "$1" zslp_gettoken "$2" | jget "$3"; }
 
 # txf <n> <txid> <field>
-txf() { cli "$1" zslp_gettransaction "$2" | jq -r ".$3"; }
+txf() { cli "$1" zslp_gettransaction "$2" | jget "$3"; }
 
 expect() { # <label> <got> <want>
     [ "$2" = "$3" ] || fail "$1: got '$2', expected '$3'"
@@ -290,9 +291,9 @@ done
 ok "no zslpindex directory is created while the flag is off"
 
 info=$(cli 0 zslp_getindexinfo)
-expect "node 0 index running" "$(printf '%s' "$info" | jq -r .running)" true
-expect "node 0 index synced at the tip" "$(printf '%s' "$info" | jq -r .synced)" true
-expect "node 0 no tokens yet" "$(printf '%s' "$info" | jq -r .tokens)" 0
+expect "node 0 index running" "$(printf '%s' "$info" | jget running)" true
+expect "node 0 index synced at the tip" "$(printf '%s' "$info" | jget synced)" true
+expect "node 0 no tokens yet" "$(printf '%s' "$info" | jget tokens)" 0
 snapshot 0 >"$TMP/snap.$(cli 0 getblockcount)"
 echo "" >"$TMP/tokens.$(cli 0 getblockcount)"
 
@@ -309,7 +310,7 @@ expect "decimals" "$(tok 0 "$G" decimals)" 2
 expect "totalminted" "$(tok 0 "$G" totalminted)" "1000.00"
 expect "holder M1" "$(bal 0 "$M1" "$G")" "1000.00"
 expect "baton is G:2" "$(cli 0 zslp_gettoken "$G" | jq -r '.mintbaton | "\(.txid):\(.vout)"')" "$G:2"
-expect "token count" "$(cli 0 zslp_getindexinfo | jq -r .tokens)" 1
+expect "token count" "$(cli 0 zslp_getindexinfo | jget tokens)" 1
 
 # 400.00 to A (node 1's wallet), 500.00 to M3, 100.00 burned
 S1=$(tx "$G:1" "outscript=0:0x$("$SLP" send "$G" 40000 50000)" "outaddr=$DUST:$A" "outaddr=$DUST:$M3")
@@ -324,18 +325,18 @@ expect "circulating" "$(tok 0 "$G" circulating)" "900.00"
 sync 1; wait_index 1
 expect "node 1 sees A's balance" "$(bal 1 "$A" "$G")" "400.00"
 lu=$(cli 1 zslp_listunspent)
-expect "node 1 wallet lists one token output" "$(printf '%s' "$lu" | jq -r '.outputs | length')" 1
-expect "its amount" "$(printf '%s' "$lu" | jq -r '.outputs[0].amount')" "400.00"
-expect "its token" "$(printf '%s' "$lu" | jq -r '.outputs[0].ticker')" TOK
-expect "it is protected" "$(printf '%s' "$lu" | jq -r '.outputs[0].protected')" true
-expect "wallet balance row" "$(printf '%s' "$lu" | jq -r '.balances[0].amount')" "400.00"
+expect "node 1 wallet lists one token output" "$(printf '%s' "$lu" | jlen outputs)" 1
+expect "its amount" "$(printf '%s' "$lu" | jget "outputs[0].amount")" "400.00"
+expect "its token" "$(printf '%s' "$lu" | jget "outputs[0].ticker")" TOK
+expect "it is protected" "$(printf '%s' "$lu" | jget "outputs[0].protected")" true
+expect "wallet balance row" "$(printf '%s' "$lu" | jget "balances[0].amount")" "400.00"
 
 # MINT 250.00 more, the baton moves to M2 again
 MT=$(tx "$G:2" "outscript=0:0x$("$SLP" mint "$G" 2 25000)" "outaddr=$DUST:$M4" "outaddr=$DUST:$M2")
 mine "$MT"
 expect "MINT validity" "$(txf 0 "$MT" validity)" valid
 expect "totalminted after MINT" "$(tok 0 "$G" totalminted)" "1250.00"
-expect "baton moved" "$(cli 0 zslp_gettoken "$G" | jq -r '.mintbaton.txid')" "$MT"
+expect "baton moved" "$(cli 0 zslp_gettoken "$G" | jget mintbaton.txid)" "$MT"
 expect "holder M4" "$(bal 0 "$M4" "$G")" "250.00"
 
 # ---- 2. invalid and burning transactions ----------------------------------
@@ -345,7 +346,7 @@ say "== 2. zero quantity, over-spend, wrong token id, burn by an ordinary spend"
 SZ=$(tx "$MT:1" "outscript=0:0x$("$SLP" send "$G" 0 25000)" "outaddr=$DUST:$M3" "outaddr=$DUST:$M4")
 mine "$SZ"
 expect "zero-slot SEND validity" "$(txf 0 "$SZ" validity)" valid
-expect "zero slot creates nothing" "$(cli 0 zslp_gettransaction "$SZ" | jq -r '.outputs | length')" 1
+expect "zero slot creates nothing" "$(cli 0 zslp_gettransaction "$SZ" | jlen outputs)" 1
 expect "zero slot holder" "$(bal 0 "$M3" "$G")" "500.00"
 expect "the 250.00 moved to M4's new output" "$(bal 0 "$M4" "$G")" "250.00"
 # a MINT of zero keeps the baton moving and mints nothing
@@ -354,7 +355,7 @@ mine "$MZ"
 expect "zero MINT validity" "$(txf 0 "$MZ" validity)" valid
 expect "zero MINT minted" "$(txf 0 "$MZ" mintedamount)" "0.00"
 expect "zero MINT: totalminted unchanged" "$(tok 0 "$G" totalminted)" "1250.00"
-expect "zero MINT: baton moved" "$(cli 0 zslp_gettoken "$G" | jq -r '.mintbaton.txid')" "$MZ"
+expect "zero MINT: baton moved" "$(cli 0 zslp_gettoken "$G" | jget mintbaton.txid)" "$MZ"
 
 # SEND 600.00 out of the 500.00 held at M3: invalid, the input is burned
 OV=$(tx "$S1:2" "outscript=0:0x$("$SLP" send "$G" 60000)" "outaddr=$DUST:$M3")
@@ -368,7 +369,7 @@ expect "over-spend burned 500.00 by spending" "$(tok 0 "$G" burnedbyspending)" "
 H=$(tx "" "outscript=0:0x$("$SLP" genesis HHH "Other" 0 7777)" "outaddr=$DUST:$M1")
 TOKENS="$G $H"
 mine "$H"
-expect "token count 2" "$(cli 0 zslp_getindexinfo | jq -r .tokens)" 2
+expect "token count 2" "$(cli 0 zslp_getindexinfo | jget tokens)" 2
 WR=$(tx "$SZ:2" "outscript=0:0x$("$SLP" send "$H" 250)" "outaddr=$DUST:$M3")
 mine "$WR"
 expect "wrong-token validity" "$(txf 0 "$WR" validity)" invalid
@@ -410,7 +411,7 @@ mine "$TOP"
 expect "output sum above INT64_MAX is UNKNOWN" "$(txf 0 "$TOP" validity)" unknown
 expect "supply of MAX is fully burned, exactly" "$(tok 0 "$MAXG" circulating)" 0
 info=$(cli 0 zslp_getindexinfo)
-expect "unknown transactions counted" "$(printf '%s' "$info" | jq -r .unknowntransactions)" 2
+expect "unknown transactions counted" "$(printf '%s' "$info" | jget unknowntransactions)" 2
 
 # invariant: for every token the holders add up to the circulating supply
 for t in $TOKENS; do
@@ -430,8 +431,8 @@ ok "node 1 (synced over the network) indexes exactly what node 0 does"
 
 say "== 4. reorg the chain out one block at a time"
 TIPH=$(cli 0 getblockcount)
-HBLK=$(cli 0 gettransaction "$H" | jq -r .blockhash)
-HH=$(cli 0 getblock "$HBLK" | jq -r .height)
+HBLK=$(cli 0 gettransaction "$H" | jget blockhash)
+HH=$(cli 0 getblock "$HBLK" | jget height)
 h=$TIPH
 while [ "$h" -ge "$HH" ]; do
     cli 0 invalidateblock "$(cli 0 getblockhash "$h")"
@@ -456,7 +457,7 @@ until [ "$(cli 0 getbestblockhash)" = "$(cli 7 getbestblockhash)" ] && [ "$(cli 
 done
 wait_index 0; wait_index 1
 expect_error "H's GENESIS is not on the new chain (node 0)" "No ZSLP token" cli 0 zslp_gettoken "$H"
-expect "node 1 followed the reorg with its index: token count" "$(cli 1 zslp_getindexinfo | jq -r .tokens)" 1
+expect "node 1 followed the reorg with its index: token count" "$(cli 1 zslp_getindexinfo | jget tokens)" 1
 expect "node 1: balance of A unchanged" "$(bal 1 "$A" "$G")" "400.00"
 expect "node 0 and node 1 agree on the token list" \
     "$(cli 0 zslp_listtokens | jq -S -c .)" "$(cli 1 zslp_listtokens | jq -S -c .)"
@@ -472,7 +473,7 @@ start 0 "$ZD" -zslpindex=1
 start 1 "$ZD" -zslpindex=1 -connect=127.0.0.1:$((BASE + 0))
 wait_index 0; wait_index 1
 expect_error "H's GENESIS is gone after the restart (node 0)" "No ZSLP token" cli 0 zslp_gettoken "$H"
-expect "node 0 index synced after the restart" "$(cli 0 zslp_getindexinfo | jq -r .synced)" true
+expect "node 0 index synced after the restart" "$(cli 0 zslp_getindexinfo | jget synced)" true
 ok "both indexes survived a restart on the new chain"
 
 say "== 6. a fresh index built from the chain, interrupted by kill -9 and by a clean stop"
@@ -486,10 +487,10 @@ MB=$(tx "$G2:2" "outscript=0:0x$("$SLP" mint "$G2" 2 123456)" "outaddr=$DUST:$M3
 mine "$MB"
 for i in 1 2 3 4 5 6; do cli 0 generate 1 >/dev/null; wait_index 0; done
 snapshot 0 >"$TMP/ref.snap"
-GBLK=$(cli 0 gettransaction "$G" | jq -r .blockhash)
-GHT=$(cli 0 getblock "$GBLK" | jq -r .height)
-G2BLK=$(cli 0 gettransaction "$G2" | jq -r .blockhash)
-FH=$(cli 0 getblock "$G2BLK" | jq -r .height)
+GBLK=$(cli 0 gettransaction "$G" | jget blockhash)
+GHT=$(cli 0 getblock "$GBLK" | jget height)
+G2BLK=$(cli 0 gettransaction "$G2" | jget blockhash)
+FH=$(cli 0 getblock "$G2BLK" | jget height)
 CH=$(cli 0 getblockcount)
 say "   chain height $CH, GENESIS of G at $GHT, GENESIS of G2 at $FH"
 
@@ -498,13 +499,13 @@ build_interrupted() { # <node> <how: kill|stop>
     start "$n" "$ZD" -zslpindex=1 -zslpindexstart=$((GHT - 1)) -zslpindexdelayms=700 -connect=127.0.0.1:$((BASE + 0))
     sync "$n"
     t=0
-    until [ "$(cli "$n" zslp_getindexinfo | jq -r '.indexedheight // 0')" -ge $((FH + 2)) ]; do
+    until [ "$(cli "$n" zslp_getindexinfo | jgetd indexedheight 0)" -ge $((FH + 2)) ]; do
         t=$((t + 1)); [ $t -lt 180 ] || fail "node $n did not start indexing"
         sleep 1
     done
     mid=$(cli "$n" zslp_getindexinfo)
-    [ "$(printf '%s' "$mid" | jq -r .synced)" = false ] || fail "the index finished before it could be interrupted"
-    say "   interrupting node $n ($how) at indexed height $(printf '%s' "$mid" | jq -r .indexedheight) of $CH"
+    [ "$(printf '%s' "$mid" | jget synced)" = false ] || fail "the index finished before it could be interrupted"
+    say "   interrupting node $n ($how) at indexed height $(printf '%s' "$mid" | jget indexedheight) of $CH"
     if [ "$how" = kill ]; then kill9 "$n"; else stop "$n"; fi
     start "$n" "$ZD" -zslpindex=1 -zslpindexstart=$((GHT - 1)) -connect=127.0.0.1:$((BASE + 0))
     # kill -9 loses the unflushed chainstate, so the node restarts behind node 0 and catches up again, and the
