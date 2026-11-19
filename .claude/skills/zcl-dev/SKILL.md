@@ -5,6 +5,8 @@ description: Use when changing zclassicd (daemon, C23 core, qa scripts, local CI
 
 # zcl-dev
 
+Agents and skills: `.claude/agents/zcl-unit-haiku.md` (small well-specified units), `.claude/agents/zcl-implement.md` (harder units), `.claude/agents/zcl-scout.md` (read-only scout), `.claude/agents/zcl-review.md` (independent reviewer), `.claude/skills/zcl-lane/SKILL.md` (parallel units), `.claude/skills/zcl-review/SKILL.md` (review and verdict).
+
 Start with the contract: `AGENTS.md` (hard rules: no consensus change, verbatim vendored code, no Python/Rust/GitHub CI, custody, gnu17 portability, review).
 
 1. Brief for your files: `make -C zcutil && zcutil/bin/zcl-dev guide <paths>`.
