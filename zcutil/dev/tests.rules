@@ -32,7 +32,7 @@ src/zcash/*	gtest:joinsplit gtest:noteencryption gtest:merkletree gtest:SaplingN
 src/crypto/*|src/hash.*	boost:crypto_tests boost:hash_tests gtest:Sha256Differential gtest:Sha256Backend
 
 # ---- network, bootstrap, Tor
-src/net.*|src/protocol.*|src/netbase.*|src/addrman.*|src/addrv2.h	boost:p2p_sync_tests boost:netbase_tests boost:addrv2_tests boost:onion_v3_tests boost:addrman_tests boost:DoS_tests
+src/net.*|src/protocol.*|src/netbase.*|src/addrman.*|src/addrv2.h	boost:p2p_sync_tests boost:netbase_tests boost:addrv2_tests boost:onion_v3_tests boost:addrman_tests boost:net_ban_tests boost:DoS_tests qa:qa/rpc-tests/banlist_persist.sh
 src/bootstrap*	boost:bootstrap_snapshot_protocol_tests boost:bootstrap_resume_tests boost:bootstrap_onion_tests boost:p2p_sync_tests
 src/torcontrol.*|src/embeddedtor.*|src/c23/tor/*	boost:torcontrol_tests boost:embeddedtor_tests boost:bootstrap_onion_tests boost:onion_v3_tests
 

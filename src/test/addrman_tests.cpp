@@ -6,8 +6,20 @@
 #include <string>
 #include <boost/test/unit_test.hpp>
 
+#include "chainparams.h"
 #include "hash.h"
+#include "net.h"
 #include "random.h"
+#include "util.h"
+#include "utiltime.h"
+
+#include <climits>
+#include <fstream>
+#include <iterator>
+#include <set>
+
+#include <boost/filesystem.hpp>
+#include <boost/foreach.hpp>
 
 using namespace std;
 
@@ -544,6 +556,284 @@ BOOST_AUTO_TEST_CASE(addrman_select_sparse_table)
         BOOST_REQUIRE_EQUAL(addrman.Select().ToString(), addr.ToString());
     // and a new-only selection finds nothing there, at once
     BOOST_CHECK_EQUAL(addrman.Select(true).ToString(), CAddrInfo().ToString());
+}
+
+// ---- peers.dat salvage -------------------------------------------------------------------
+
+namespace {
+
+/** Isolated datadir for peers.dat; restores the process-wide datadir state afterwards. */
+struct PeersDatDir {
+    boost::filesystem::path dir;
+
+    PeersDatDir()
+    {
+        ClearDatadirCache();
+        dir = GetTempPath() / strprintf("addrman_salvage_%lu_%i", (unsigned long)GetTime(), (int)GetRand(100000));
+        boost::filesystem::create_directories(dir);
+        mapArgs["-datadir"] = dir.string();
+    }
+    ~PeersDatDir()
+    {
+        mapArgs.erase("-datadir");
+        ClearDatadirCache();
+        boost::filesystem::remove_all(dir);
+    }
+
+    boost::filesystem::path File() const { return dir / "peers.dat"; }
+    boost::filesystem::path Corrupt() const { return dir / "peers.dat.corrupt"; }
+
+    std::vector<char> Slurp(const boost::filesystem::path& p) const
+    {
+        std::ifstream in(p.string().c_str(), std::ios::binary);
+        return std::vector<char>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }
+    void Spit(const std::vector<char>& v) const
+    {
+        std::ofstream out(File().string().c_str(), std::ios::binary | std::ios::trunc);
+        out.write(v.empty() ? "" : &v[0], v.size());
+    }
+    void Spit(const std::vector<char>& v, size_t n) const { Spit(std::vector<char>(v.begin(), v.begin() + n)); }
+};
+
+/** The records of a peers.dat image, parsed independently of CAddrMan. */
+struct PeersImage {
+    std::vector<char> raw;
+    int nNew, nTried;
+    size_t recSize, recStart;
+    std::vector<CAddrInfo> recs;
+
+    explicit PeersImage(const std::vector<char>& rawIn) : raw(rawIn), nNew(0), nTried(0), recSize(0), recStart(50)
+    {
+        CDataStream ss(&raw[4], &raw[0] + raw.size(), SER_DISK, CLIENT_VERSION);
+        unsigned char ver, keySize;
+        uint256 key;
+        int nUB;
+        ss >> ver >> keySize >> key >> nNew >> nTried >> nUB;
+        for (int i = 0; i < nNew + nTried; i++) {
+            size_t before = ss.size();
+            CAddrInfo info;
+            ss >> info;
+            recSize = before - ss.size();
+            recs.push_back(info);
+        }
+    }
+    size_t Offset(size_t record) const { return recStart + record * recSize; }
+};
+
+CAddress SaltAddr(int i)
+{
+    CAddress a(CService(strprintf("%u.%u.1.1", 20 + (i % 100), 1 + i / 100), 8033), NODE_NETWORK);
+    a.nTime = GetAdjustedTime() - 100;
+    return a;
+}
+
+CNetAddr SaltSource(int i)
+{
+    return CNetAddr(strprintf("%u.%u.9.9", 130 + (i % 60), 1 + i / 60));
+}
+
+/** 500 addresses, 100 of them tried; written to peers.dat. */
+void WriteSampleAddrman(CAddrManTest& am)
+{
+    am.MakeDeterministic();
+    for (int i = 0; i < 500; i++)
+        am.Add(SaltAddr(i), SaltSource(i));
+    for (int i = 0; i < 500; i += 5)
+        am.Good(SaltAddr(i));
+    CAddrDB adb;
+    BOOST_REQUIRE(adb.Write(am));
+}
+
+std::set<std::string> Held(const CAddrMan& am, bool* pAnyTried = NULL)
+{
+    std::set<std::string> s;
+    bool tried = false;
+    BOOST_FOREACH (const CAddrInfo& e, am.GetEntries()) {
+        s.insert(e.ToStringIPPort());
+        tried = tried || e.IsTried();
+    }
+    if (pAnyTried)
+        *pAnyTried = tried;
+    return s;
+}
+
+std::set<std::string> Prefix(const PeersImage& img, size_t n)
+{
+    std::set<std::string> s;
+    for (size_t i = 0; i < n && i < img.recs.size(); i++)
+        s.insert(img.recs[i].ToStringIPPort());
+    return s;
+}
+
+/** Serialize/Unserialize assert on and re-derive the internal counters: a damaged table would fail here. */
+void CheckConsistent(const CAddrMan& am)
+{
+    CDataStream ss(SER_DISK, CLIENT_VERSION);
+    ss << am;
+    CAddrMan back;
+    ss >> back;
+    BOOST_CHECK_EQUAL(back.size(), am.size());
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(addrman_salvage_intact_file_unchanged)
+{
+    PeersDatDir dir;
+    CAddrManTest am;
+    WriteSampleAddrman(am);
+
+    CAddrMan loaded;
+    CAddrDB adb;
+    BOOST_CHECK(adb.Read(loaded));
+    BOOST_CHECK_EQUAL(loaded.size(), am.size());
+    BOOST_CHECK(Held(loaded) == Held(am));
+    size_t nTriedBefore = 0, nTriedAfter = 0;
+    BOOST_FOREACH (const CAddrInfo& e, am.GetEntries()) nTriedBefore += e.IsTried();
+    BOOST_FOREACH (const CAddrInfo& e, loaded.GetEntries()) nTriedAfter += e.IsTried();
+    BOOST_CHECK(nTriedBefore > 0);
+    BOOST_CHECK_EQUAL(nTriedBefore, nTriedAfter); // tried flags survive an intact file
+    BOOST_CHECK(!boost::filesystem::exists(dir.Corrupt()));
+}
+
+BOOST_AUTO_TEST_CASE(addrman_salvage_truncated)
+{
+    PeersDatDir dir;
+    CAddrManTest am;
+    WriteSampleAddrman(am);
+    const PeersImage img(dir.Slurp(dir.File()));
+    BOOST_REQUIRE(img.nNew > 20 && img.nTried > 10);
+    const size_t nBucketStart = img.Offset(img.nNew + img.nTried);
+
+    struct Cut { size_t offset; size_t complete; const char* where; };
+    const Cut cuts[] = {
+        {img.Offset(10) + img.recSize / 2, 10, "inside the new section"},
+        {img.Offset(img.nNew + 3) + 7, (size_t)img.nNew + 3, "inside the tried section"},
+        {nBucketStart + 100, (size_t)(img.nNew + img.nTried), "inside the bucket section"},
+        {img.raw.size() - 1, (size_t)(img.nNew + img.nTried), "one byte short"},
+    };
+    BOOST_FOREACH (const Cut& c, cuts) {
+        dir.Spit(img.raw, c.offset);
+        CAddrMan loaded;
+        CAddrDB adb;
+        BOOST_CHECK_MESSAGE(adb.Read(loaded), "salvage " << c.where);
+        bool anyTried = true;
+        BOOST_CHECK_MESSAGE(Held(loaded, &anyTried) == Prefix(img, c.complete), "records kept " << c.where
+                            << ": " << loaded.size() << " of " << c.complete);
+        BOOST_CHECK(!anyTried);
+        CheckConsistent(loaded);
+        BOOST_CHECK(boost::filesystem::exists(dir.Corrupt()));
+        BOOST_CHECK(!boost::filesystem::exists(dir.File()));
+        std::cout << "salvage " << c.where << ": kept " << loaded.size() << " of " << (img.nNew + img.nTried) << std::endl;
+        boost::filesystem::remove(dir.Corrupt());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(addrman_salvage_flipped_byte)
+{
+    PeersDatDir dir;
+    CAddrManTest am;
+    WriteSampleAddrman(am);
+    const PeersImage img(dir.Slurp(dir.File()));
+
+    const size_t k = 300; // a record in the middle of the file
+    std::vector<char> bad = img.raw;
+    bad[img.Offset(k) + 3] ^= 0x40;
+    dir.Spit(bad);
+
+    CAddrMan loaded;
+    CAddrDB adb;
+    BOOST_CHECK(adb.Read(loaded));
+    bool anyTried = true;
+    std::set<std::string> held = Held(loaded, &anyTried);
+    BOOST_CHECK(!anyTried);
+    BOOST_FOREACH (const std::string& s, Prefix(img, k))
+        BOOST_CHECK_MESSAGE(held.count(s), "record before the flipped one lost: " << s);
+    BOOST_CHECK(dir.Slurp(dir.Corrupt()) == bad); // the damaged bytes are kept as found
+    BOOST_CHECK(!boost::filesystem::exists(dir.File()));
+    CheckConsistent(loaded);
+    std::cout << "salvage after a flipped byte in record " << k << ": kept " << loaded.size() << " of " << img.recs.size() << std::endl;
+}
+
+BOOST_AUTO_TEST_CASE(addrman_salvage_refuses_foreign_and_tiny_files)
+{
+    PeersDatDir dir;
+    CAddrManTest am;
+    WriteSampleAddrman(am);
+    std::vector<char> raw = dir.Slurp(dir.File());
+
+    std::vector<char> foreign = raw;
+    foreign[0] ^= 0x01; // wrong network magic
+    dir.Spit(foreign);
+    CAddrMan loaded;
+    CAddrDB adb;
+    BOOST_CHECK(!adb.Read(loaded));
+    BOOST_CHECK_EQUAL(loaded.size(), 0u);
+    BOOST_CHECK(dir.Slurp(dir.File()) == foreign); // untouched, not renamed
+    BOOST_CHECK(!boost::filesystem::exists(dir.Corrupt()));
+
+    dir.Spit(raw, 31);
+    BOOST_CHECK(!adb.Read(loaded));
+    dir.Spit(raw, 0);
+    BOOST_CHECK(!adb.Read(loaded));
+    BOOST_CHECK(!boost::filesystem::exists(dir.Corrupt()));
+}
+
+BOOST_AUTO_TEST_CASE(addrman_salvage_hostile_header)
+{
+    PeersDatDir dir;
+    const int badCounts[] = {INT_MAX, -1};
+    BOOST_FOREACH (int nNew, badCounts) {
+        for (unsigned char keySize : {(unsigned char)32, (unsigned char)31}) {
+            CDataStream ss(SER_DISK, CLIENT_VERSION);
+            ss << FLATDATA(Params().MessageStart());
+            ss << (unsigned char)1 << keySize;
+            for (int i = 0; i < keySize; i++)
+                ss << (unsigned char)i;
+            ss << nNew << (int)0 << (int)((1 << 10) ^ (1 << 30));
+            ss << Hash(ss.begin(), ss.end());
+            dir.Spit(std::vector<char>(ss.begin(), ss.end()));
+
+            CAddrMan loaded;
+            CAddrDB adb;
+            BOOST_CHECK(!adb.Read(loaded));
+            BOOST_CHECK_EQUAL(loaded.size(), 0u);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(addrman_salvage_random_corruption)
+{
+    PeersDatDir dir;
+    CAddrManTest am;
+    WriteSampleAddrman(am);
+    const std::vector<char> raw = dir.Slurp(dir.File());
+
+    uint64_t state = 0x2545F4914F6CDD1DULL; // fixed seed: the same 2000 corruptions every run
+    size_t nSalvaged = 0, nRefused = 0;
+    for (int iter = 0; iter < 2000; iter++) {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        std::vector<char> bad = raw;
+        bad[(state >> 33) % bad.size()] ^= (char)(1 + ((state >> 20) % 255));
+        dir.Spit(bad);
+
+        CAddrMan loaded;
+        CAddrDB adb;
+        if (adb.Read(loaded)) {
+            nSalvaged++;
+            bool anyTried = false;
+            Held(loaded, &anyTried);
+            BOOST_REQUIRE(!anyTried); // one flipped byte always breaks the checksum, so every entry is demoted
+            CheckConsistent(loaded);
+        } else {
+            nRefused++;
+            BOOST_REQUIRE_EQUAL(loaded.size(), 0u);
+        }
+        boost::filesystem::remove(dir.Corrupt());
+    }
+    std::cout << "2000 single-byte corruptions: " << nSalvaged << " salvaged, " << nRefused << " refused" << std::endl;
+    BOOST_CHECK(nSalvaged > 1500);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -130,6 +130,48 @@ void CAddrMan::Delete(int nId)
     nNew--;
 }
 
+int CAddrMan::PruneUnreferenced()
+{
+    int nLostUnk = 0;
+    for (std::map<int, CAddrInfo>::const_iterator it = mapInfo.begin(); it != mapInfo.end(); ) {
+        if (it->second.fInTried == false && it->second.nRefCount == 0) {
+            std::map<int, CAddrInfo>::const_iterator itCopy = it++;
+            Delete(itCopy->first);
+            nLostUnk++;
+        } else {
+            it++;
+        }
+    }
+    return nLostUnk;
+}
+
+bool CAddrMan::AddSalvaged(CAddrInfo info, bool fTried)
+{
+    if (mapAddr.count(info))
+        return false; // duplicate record
+    info.nRefCount = 0;
+    info.fInTried = false;
+    if (!fTried)
+        info.nLastSuccess = 0; // a demoted entry carries no success time from an unverified file
+
+    int nId = nIdCount++;
+    CAddrInfo& slot = mapInfo[nId] = info;
+    mapAddr[slot] = nId;
+    slot.nRandomPos = vRandom.size();
+    vRandom.push_back(nId);
+    nNew++;
+
+    int nUBucket = slot.GetNewBucket(nKey);
+    int nUBucketPos = slot.GetBucketPosition(nKey, true, nUBucket);
+    if (vvNew[nUBucket][nUBucketPos] != -1)
+        return false; // collision: left unreferenced, pruned afterwards
+    vvNew[nUBucket][nUBucketPos] = nId;
+    slot.nRefCount = 1;
+    if (fTried && slot.nLastSuccess)
+        MakeTried(slot, nId);
+    return true;
+}
+
 void CAddrMan::ClearNew(int nUBucket, int nUBucketPos)
 {
     // if there is an entry in the specified bucket, delete it.

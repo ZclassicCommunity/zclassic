@@ -72,6 +72,7 @@ BITCOIN_TESTS =\
   test/miner_tests.cpp \
   test/mruset_tests.cpp \
   test/multisig_tests.cpp \
+  test/net_ban_tests.cpp \
   test/netbase_tests.cpp \
   test/addrv2_tests.cpp \
   test/onion_v3_tests.cpp \
