@@ -16,7 +16,8 @@
 #   skew      one server capped at 1/8 of the other: the fast one serves most bytes and the total rate
 #             approaches the sum of the two caps.
 #   kill      one server is killed mid-download: the client finishes from the other.
-#   diff      one server serves a different snapshot: ignored, nothing mixed.
+#   diff      a server on another chain tip sharing no file: used for nothing; the result is the primary's snapshot.
+#   share     a server on another chain tip sharing the block files: those come from both servers.
 #   resume    the client is killed mid-download (files partly from both servers), restarted, finishes.
 #   single    an explicit single -bootstrappeer puts all streams on it (as before).
 # Every finished download must end on the server's best block with the same UTXO-set commitment.
@@ -60,7 +61,7 @@ stop_node() { cli "$1" "$2" stop >/dev/null 2>&1; i=0; while [ $i -lt 90 ] && [ 
 now_ms() { date +%s%3N; }
 json_num() { sed -n "s/.*\"$1\": *\\([0-9.]*\\).*/\\1/p" | head -1; }
 
-srcdir=$work/src; serve1=$work/serve1; serve2=$work/serve2; serve_diff=$work/serve_diff; sdir1=$work/server1; sdir2=$work/server2; cdir=$work/client
+srcdir=$work/src; serve1=$work/serve1; serve2=$work/serve2; serve_diff=$work/serve_diff; serve_share=$work/serve_share; sdir1=$work/server1; sdir2=$work/server2; cdir=$work/client
 make_fixture() {
     say "building the regtest fixture ($files padding files of ~$filemib MiB, two copies)"
     mkconf "$srcdir" "$gr"
@@ -92,9 +93,16 @@ make_fixture() {
         -datadir="$srcdir" -port=$gp -listen=0 -connect=0 -daemon >/dev/null 2>&1 || return 1
     wait_rpc "$bin" "$srcdir" || return 1
     cli "$bin" "$srcdir" generate 3 >/dev/null || return 1
+    info=$(cli "$bin" "$srcdir" gettxoutsetinfo) || return 1
+    d_height=$(echo "$info" | sed -n 's/.*"height": *\([0-9]*\).*/\1/p' | head -1)
+    d_best=$(echo "$info" | sed -n 's/.*"bestblock": *"\([0-9a-f]*\)".*/\1/p' | head -1)
+    d_commit=$(echo "$info" | sed -n 's/.*"hash_chainstate_full": *"\([0-9a-f]*\)".*/\1/p' | head -1)
+    [ -n "$d_height" ] && [ -n "$d_best" ] && [ -n "$d_commit" ] || { echo "no txoutsetinfo for the other tip: $info"; return 1; }
+    echo "$d_height $d_best $d_commit" >"$work/serve_diff.meta"; echo "$d_height $d_best $d_commit" >"$work/serve_share.meta"
     stop_node "$bin" "$srcdir"
     mkdir -p "$serve_diff" && cp -a "$srcdir/regtest/blocks" "$serve_diff/blocks" && cp -a "$srcdir/regtest/chainstate" "$serve_diff/chainstate" || return 1
     rm -f "$serve_diff/blocks/index/LOCK" "$serve_diff/chainstate/LOCK"
+    cp -a "$serve_diff" "$serve_share" && i=1 && while [ $i -le "$files" ]; do cp -a "$serve1/blocks/blk$(printf '%05d' "$i").dat" "$serve_share/blocks/" || return 1; i=$((i + 1)); done
     echo "$fx_height $fx_best $fx_commit" >"$work/serve1.meta"; echo "$fx_height $fx_best $fx_commit" >"$work/serve2.meta"
     snapshot_bytes=$(find "$serve1" -type f -printf '%s\n' | awk '{s += $1} END {print s}')
     say "fixture: height $fx_height best $fx_best commitment $fx_commit; $snapshot_bytes bytes"
@@ -108,7 +116,7 @@ start_server() { # <n 1|2> <kbps> [extra]
         -bootstrapserve=1 -bootstrapsourcedir="$sv" -bootstrapservemaxtotalkbps=$k \
         -debug=net -bootstrapservemaxbytesperday=0 "$@" >/dev/null 2>&1 &
     eval "SPID$n=$!"
-    wait_rpc "$bin" "$sd" 60 || { fail "server $n did not start (see $sd/regtest/debug.log)"; return 1; }
+    wait_rpc "$bin" "$sd" 60 || { fail "server $n did not start (see $sd/regtest/debug.log)"; tail -5 "$sd/regtest/debug.log"; return 1; }
 }
 stop_server() { # <n>
     eval "sd=\$sdir$1; p=\$SPID$1"
@@ -162,6 +170,10 @@ download() { # <peers> [extra client args]
     t0=$(now_ms); start_client "$@"
     wait_imported || { fail "client did not finish (see $client_log)"; tail -15 "$client_log"; return 1; }
     DL_MS=$(( $(now_ms) - t0 ))
+    DL_CPU=$(awk '{printf "%.1f", ($14 + $15) / 100}' /proc/$CPID/stat 2>/dev/null)
+    DL_RB=$(sed -n "s/^rchar: //p" /proc/$CPID/io 2>/dev/null)
+    DL_WB=$(sed -n "s/^wchar: //p" /proc/$CPID/io 2>/dev/null)
+    { echo "== download $*"; grep -a "Bootstrap:" "$client_log"; } >>"$work/client-bootstrap.log" 2>/dev/null
     return 0
 }
 
@@ -172,19 +184,37 @@ test_speed() {
     if [ -n "$basebin" ]; then client_bin=$basebin; fi
     download "1" || { stop_server 1; client_bin=$bin; return 1; }
     client_bin=$bin
-    one_ms=$DL_MS; one_b=$(served_bytes 1 $l1)
+    one_ms=$DL_MS; one_b=$(served_bytes 1 $l1); one_cpu=$DL_CPU
     check_imported "speed (one server)"; end_client; stop_server 1
     fresh_client; start_server 1 $kbps && start_server 2 $kbps || return 1
     l1=$(log_lines 1); l2=$(log_lines 2)
     download "1 2" || { stop_server 1; stop_server 2; return 1; }
     two_ms=$DL_MS; b1=$(served_bytes 1 $l1); b2=$(served_bytes 2 $l2)
     check_imported "speed (two servers)"
-    say "RESULT speed: one server $((one_ms / 1000)).$((one_ms % 1000 / 100)) s ($one_b bytes); two servers $((two_ms / 1000)).$((two_ms % 1000 / 100)) s (server 1 $b1 bytes, server 2 $b2 bytes); speedup $(awk -v a=$one_ms -v b=$two_ms 'BEGIN {printf "%.2f", a / b}')x"
+    say "RESULT speed: one server $((one_ms / 1000)).$((one_ms % 1000 / 100)) s ($one_b bytes, client CPU ${one_cpu:-?} s); two servers $((two_ms / 1000)).$((two_ms % 1000 / 100)) s (server 1 $b1 bytes, server 2 $b2 bytes); speedup $(awk -v a=$one_ms -v b=$two_ms 'BEGIN {printf "%.2f", a / b}')x"
     [ "$b1" -gt 0 ] && [ "$b2" -gt 0 ] && pass "speed: both servers served bytes" || fail "speed: a server served nothing"
     total=$((b1 + b2))
-    [ "$total" -le $((snapshot_bytes + snapshot_bytes / 20)) ] && pass "speed: $total bytes served in total for a $snapshot_bytes byte snapshot (no byte fetched twice)" || fail "speed: $total bytes served for a $snapshot_bytes byte snapshot"
+    # Bytes served beyond the snapshot are the in-flight windows (16 chunks of 1 MiB) of streams moved off a
+    # server; every such move is logged, so the waste must be explained by the moves (plus 2% slack).
+    moves=$(grep -ac 'moves off' "$client_log"); moves=${moves:-0}
+    allowed=$((snapshot_bytes + snapshot_bytes / 50 + moves * 16 * 1048576))
+    [ "$total" -le "$allowed" ] && pass "speed: $total bytes served in total for a $snapshot_bytes byte snapshot ($moves stream moves, bound $allowed)" || fail "speed: $total bytes served for a $snapshot_bytes byte snapshot ($moves stream moves, bound $allowed)"
     grep -a 'bytes by server\|from 2 servers' "$client_log" | tail -2
     end_client; stop_server 1; stop_server 2
+}
+
+# One uncapped (or --kbps capped) server, one client run with --base-bin (default --bin): the download time and
+# the client's CPU, for comparing two binaries on the same fixture. Not part of "all".
+test_one() {
+    say "== one server, one client ($client_bin) =="
+    fresh_client; start_server 1 $kbps || return 1
+    l1=$(log_lines 1)
+    if [ -n "$basebin" ]; then client_bin=$basebin; fi
+    download "1" || { stop_server 1; client_bin=$bin; return 1; }
+    check_imported "one"
+    dl=$(grep -a 'download complete' "$client_log" | tail -1 | sed 's/.*complete: //')
+    say "RESULT one: $((DL_MS / 1000)).$((DL_MS % 1000 / 100)) s to height, client CPU ${DL_CPU:-?} s, file bytes read ${DL_RB:-?} written ${DL_WB:-?}, $(served_bytes 1 $l1) bytes served; $dl"
+    end_client; stop_server 1; client_bin=$bin
 }
 
 test_both() {
@@ -242,20 +272,32 @@ test_kill() {
     end_client; stop_server 1
 }
 
-test_diff() {
-    say "== server 2 serves a different snapshot (three blocks further) =="
-    # a server on another chain tip: other height, best block and commitment. It is never used, and
-    # the result is exactly server 1's snapshot.
-    saved2=$serve2; serve2=$serve_diff
+# Server 2 holds another chain tip (three blocks further): another height, best block and commitment.
+# The download is always server 1's snapshot; server 2 may supply only files whose path, size and
+# SHA-256 equal server 1's manifest entries, and the result must equal server 1's chain.
+other_tip() { # <label> <serve dir of server 2> <log message expected>
+    lbl=$1; saved2=$serve2; serve2=$2; want_msg=$3
     fresh_client; start_server 1 $kbps && start_server 2 $kbps || { serve2=$saved2; return 1; }
-    l2=$(log_lines 2)
+    l1=$(log_lines 1); l2=$(log_lines 2)
     download "1 2" || { serve2=$saved2; stop_server 1; stop_server 2; return 1; }
-    check_imported "diff"
-    b2=$(served_bytes 2 $l2)
-    grep -aq 'serves a different snapshot' "$client_log" && pass "diff: the client noticed and ignored it" || fail "diff: no message about the different snapshot"
-    [ "$b2" -eq 0 ] && pass "diff: server 2 served no snapshot chunk" || fail "diff: server 2 served $b2 bytes"
+    check_imported "$lbl"
+    b1=$(served_bytes 1 $l1); b2=$(served_bytes 2 $l2)
+    grep -aq "$want_msg" "$client_log" && pass "$lbl: the client logged '$want_msg'" || fail "$lbl: no '$want_msg' message"
+    say "RESULT $lbl: server 1 served $b1 bytes, server 2 (other tip) served $b2 bytes, snapshot $snapshot_bytes"
+    OT_B1=$b1; OT_B2=$b2
     end_client; stop_server 1; stop_server 2
     serve2=$saved2
+}
+test_diff() {
+    say "== server 2 on another chain tip sharing (almost) no file =="
+    other_tip diff "$serve_diff" "serves a different snapshot" || return 1
+    [ "$OT_B2" -le $((snapshot_bytes / 20)) ] && pass "diff: server 2 supplied almost nothing ($OT_B2 bytes)" || fail "diff: server 2 served $OT_B2 bytes"
+}
+test_share() {
+    say "== server 2 on another chain tip sharing the padding (block) files =="
+    other_tip share "$serve_share" "has a different manifest but" || return 1
+    [ "$OT_B1" -gt 0 ] && [ "$OT_B2" -gt 0 ] && pass "share: the shared files came from both servers" || fail "share: server 1 served $OT_B1, server 2 served $OT_B2"
+    [ "$OT_B1" -le $((snapshot_bytes + snapshot_bytes / 20)) ] || fail "share: server 1 served more than the snapshot"
 }
 
 test_resume() {
@@ -296,11 +338,13 @@ test_single() {
 }
 
 make_fixture || { echo "multi-server-test: could not build the fixture"; exit 1; }
+case ",$modes," in *,one,*) test_one ;; esac
 want speed && test_speed
 want both && test_both
 want skew && test_skew
 want kill && test_kill
 want diff && test_diff
+want share && test_share
 want resume && test_resume
 want single && test_single
 
