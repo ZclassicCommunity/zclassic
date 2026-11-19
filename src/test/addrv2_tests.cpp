@@ -787,6 +787,43 @@ BOOST_AUTO_TEST_CASE(outbound_candidate_small_table)
     SetLimited(NET_IPV6, l6);
 }
 
+// An address not seen for more than a month (peers gossip ones years old) is passed over
+// while a fresh one is there to dial, but is still dialled when nothing else is.
+BOOST_AUTO_TEST_CASE(outbound_candidate_skips_terrible)
+{
+    bool l4 = IsLimited(NET_IPV4), l6 = IsLimited(NET_IPV6);
+    SetLimited(NET_IPV4, false);
+    SetLimited(NET_IPV6, false);
+    const unsigned short port = Params().GetDefaultPort();
+    const int64_t now = GetAdjustedTime();
+    const CNetAddr source("93.184.216.1");
+    CAddress ancient = MakeV4("94.185.1.2", port, 1, now - 40 * 24 * 60 * 60);
+    CAddress fresh = MakeV4("95.186.3.4", port, 1, now - 3600);
+    std::set<std::vector<unsigned char> > setConnected;
+    {
+        CAddrMan man;
+        BOOST_REQUIRE(man.Add(ancient, source));
+        BOOST_REQUIRE(man.Add(fresh, source));
+        BOOST_REQUIRE(CAddrInfo(ancient, source).IsTerrible(now));
+        BOOST_REQUIRE(!CAddrInfo(fresh, source).IsTerrible(now));
+        int nFresh = 0;
+        for (int i = 0; i < 40; i++) {
+            CAddress pick = SelectOutboundCandidate(man, setConnected, now);
+            if (pick == fresh)
+                nFresh++;
+        }
+        // the ancient one only after 30 straight draws of it, about 2^-30 a call
+        BOOST_CHECK_EQUAL(nFresh, 40);
+    }
+    {
+        CAddrMan man;
+        BOOST_REQUIRE(man.Add(ancient, source));
+        BOOST_CHECK(SelectOutboundCandidate(man, setConnected, now) == ancient);
+    }
+    SetLimited(NET_IPV4, l4);
+    SetLimited(NET_IPV6, l6);
+}
+
 // Concurrent dialers: a group being dialled is held by one dialer, counts as connected
 // for the others (so the one-outbound-peer-per-group rule holds while dials overlap),
 // and is free again when the dial ends. The extra dialers run only below the target.

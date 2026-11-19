@@ -1479,6 +1479,13 @@ CAddress SelectOutboundCandidate(CAddrMan& man, const std::set<std::vector<unsig
         if (nANow - addr.nLastTry < 600 && nTries < 30)
             continue;
 
+        // nor, before as many draws, an address addrman counts as terrible: not seen
+        // for a month (peers gossip addresses years old), or tried often without a
+        // success. On a small table these are most of the dead addresses, and each
+        // one dialled costs a connect timeout before a live peer is reached.
+        if (addr.IsTerrible(nANow) && nTries < 30)
+            continue;
+
         // do not allow non-default ports, unless after 50 invalid addresses selected already
         if (addr.GetPort() != Params().GetDefaultPort() && nTries < 50)
             continue;
