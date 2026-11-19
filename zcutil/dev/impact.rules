@@ -64,6 +64,7 @@ wallet/contrib/*	wallet-linux
 qa/key1-guard.c|qa/key1-guard.sh|qa/key1-walletdb-baseline.txt	key1-guard check-dev-tools
 zcutil/check-no-python.sh	check-no-python check-dev-tools
 zcutil/embedded-tor-check.sh	check-dev-tools
+zcutil/consensus.seal	zcl-lint check-dev-tools
 zcutil/lint/*	zcl-lint check-dev-tools
 zcutil/tools/Makefile|zcutil/tools/.gitignore|zcutil/tools/test-jsonq.sh	build-jsonq check-dev-tools
 qa/lib/*|qa/rpc-tests/jsonq_lib.sh	ALL
