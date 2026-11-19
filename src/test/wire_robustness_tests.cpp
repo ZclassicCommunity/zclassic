@@ -14,6 +14,8 @@
 //
 
 #include "bloom.h"
+#include "crypto/common.h"
+#include "crypto/sha256.h"
 #include "chainparams.h"
 #include "merkleblock.h"
 #include "netbase.h"
@@ -365,6 +367,37 @@ BOOST_AUTO_TEST_CASE(mutated_inputs_only_fail_with_ios_failure)
     BOOST_TEST_MESSAGE("wire_robustness: " << total << " mutations, " << accepted << " decoded, "
                        << (total - accepted) << " rejected, " << elapsed / 1000 << " ms");
     BOOST_CHECK_EQUAL(failures, 0u);
+}
+
+BOOST_AUTO_TEST_CASE(mutation_stream_is_pinned)
+{
+    // The PRNG seed names the cases: the same seed must keep giving the same
+    // mutated inputs, mode by mode, whatever shape Mutate takes. SHA256 over
+    // (mode, length, bytes) of the first 200 mutations of every seed.
+    std::vector<Seed> seeds = BuildSeeds();
+    Rng rng(WIRE_PRNG_SEED);
+    CSHA256 h;
+    size_t modes[6] = {0, 0, 0, 0, 0, 0};
+    for (size_t si = 0; si < seeds.size(); si++) {
+        for (int c = 0; c < 200; c++) {
+            int mode = -1;
+            Bytes m = Mutate(rng, seeds[si].bytes, seeds, mode);
+            BOOST_REQUIRE(mode >= 0 && mode < 6);
+            modes[mode]++;
+            unsigned char hdr[9];
+            hdr[0] = (unsigned char)mode;
+            WriteLE64(hdr + 1, (uint64_t)m.size());
+            h.Write(hdr, sizeof(hdr));
+            if (!m.empty())
+                h.Write(&m[0], m.size());
+        }
+    }
+    uint256 digest;
+    h.Finalize(digest.begin());
+    BOOST_TEST_MESSAGE("mutation stream: " << seeds.size() << " seeds, modes " << modes[0] << "/" << modes[1] << "/"
+                       << modes[2] << "/" << modes[3] << "/" << modes[4] << "/" << modes[5] << ", sha256 "
+                       << digest.GetHex());
+    BOOST_CHECK_EQUAL(digest.GetHex(), "96f88a2bc55d2b2a60c98afc2ec76330b185d6dc0a5a993c5c376362be5c469b");
 }
 
 BOOST_AUTO_TEST_CASE(compact_size_bounds)
