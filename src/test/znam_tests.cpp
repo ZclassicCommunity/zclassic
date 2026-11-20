@@ -11,6 +11,8 @@
 #include "key_io.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
+#include "streams.h"
+#include "version.h"
 #include "script/script.h"
 #include "test/test_bitcoin.h"
 #include "tinyformat.h"
@@ -19,7 +21,9 @@
 
 #include "c23/services/glue/zcl_znam_index.h"
 
+#include <boost/scoped_ptr.hpp>
 #include <boost/test/unit_test.hpp>
+#include <fstream>
 #include <algorithm>
 #include <map>
 #include <set>
@@ -267,7 +271,7 @@ BOOST_AUTO_TEST_CASE(parser_rejects_what_z23_rejects)
                                      std::string(128, 'v').c_str(), big, sizeof(big)), 0u);
 }
 
-BOOST_AUTO_TEST_CASE(owner_is_the_first_inputs_address_in_p2pkh_form)
+BOOST_AUTO_TEST_CASE(owner_is_the_first_inputs_address_by_script_type)
 {
     uint8_t h[20];
     std::vector<unsigned char> hash(20, 0x42);
@@ -283,11 +287,15 @@ BOOST_AUTO_TEST_CASE(owner_is_the_first_inputs_address_in_p2pkh_form)
     CScript almost = P2PKH(0x42);
     almost << OP_NOP;
     BOOST_CHECK(!zcl_znam_owner_hash(&almost[0], almost.size(), h));
-    // A P2SH output yields the SAME owner text as the P2PKH output with the same hash (Z23 renders both as P2PKH, A3)
+    // Rule ZNAM-OWNER-2: a P2SH output yields the P2SH address, the P2PKH output with the same hash the P2PKH one
+    // (before the rule Z23 rendered both as P2PKH, ambiguity A3)
     unsigned char hh[20];
     memset(hh, 0x42, 20);
     BOOST_CHECK_EQUAL(OwnerFromHash160(hh), OwnerOf(0x42));
+    BOOST_CHECK_EQUAL(OwnerFromScriptHash160(hh), P2shAddr(0x42));
     BOOST_CHECK(OwnerOf(0x42) != P2shAddr(0x42));
+    BOOST_CHECK_EQUAL(zcl_znam_owner_hash(&p2pkh[0], p2pkh.size(), h), 1);
+    BOOST_CHECK_EQUAL(zcl_znam_owner_hash(&p2sh[0], p2sh.size(), h), 2);
 }
 
 // ---- the rules -------------------------------------------------------------------
@@ -462,7 +470,7 @@ BOOST_AUTO_TEST_CASE(transfer_to_a_text_that_is_not_an_owner_loses_the_name)
     BOOST_CHECK_EQUAL(c.OwnerNow("alice"), "not an address");
     c.Add({Op(Update("alice", TAddr(0x12).c_str()), 0xa1)});
     BOOST_CHECK_EQUAL(c.ValueNow("alice"), TAddr(0x11));
-    // a P2SH owner string never matches a derived owner either
+    // a P2SH owner string never matches an owner derived from a key (P2PKH) output
     c.Add({Op(Register("bob", TAddr(0x11).c_str()), 0xa1)});
     c.Add({Op(Transfer("bob", P2shAddr(0xa1).c_str()), 0xa1)});
     c.Add({Op(Update("bob", TAddr(0x12).c_str()), 0xa1)});
@@ -876,6 +884,129 @@ BOOST_AUTO_TEST_CASE(resolve_record_types_and_validation)
     // an expired registration still resolves, with a warning
     r = Resolve(c.idx, "onionname", 0, 1 + 210240 + 5, 100);
     BOOST_CHECK(r.expired);
+}
+
+// ---- token-name-rules parity vectors ---------------------------------------------------------
+// src/test/data/token_name_rules.txt is shared byte for byte with Z23 (tests/fixtures/token_name_rules/token_name_rules.txt): every
+// record is read by both implementations and must give the same answer. The file is read at run time (the tests run
+// from the source tree); a missing file fails the test, it is never skipped.
+
+namespace {
+
+bool OpenVectors(std::ifstream& in)
+{
+    const char* env = getenv("TOKEN_NAME_RULES_VECTORS");
+    const char* const candidates[] = {"src/test/data/token_name_rules.txt", "test/data/token_name_rules.txt",
+                                      "../src/test/data/token_name_rules.txt", "data/token_name_rules.txt"};
+    if (env && *env) {
+        in.open(env);
+        return in.is_open();
+    }
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        in.open(candidates[i]);
+        if (in.is_open())
+            return true;
+        in.clear();
+    }
+    return false;
+}
+
+std::vector<std::string> SplitBar(const std::string& line)
+{
+    std::vector<std::string> v;
+    size_t s = 0;
+    for (;;) {
+        size_t p = line.find('|', s);
+        if (p == std::string::npos) {
+            v.push_back(line.substr(s));
+            return v;
+        }
+        v.push_back(line.substr(s, p - s));
+        s = p + 1;
+    }
+}
+
+CTransaction TxFromHex(const std::string& hex)
+{
+    BOOST_REQUIRE(IsHex(hex));
+    CDataStream ss(ParseHex(hex), SER_NETWORK, PROTOCOL_VERSION);
+    CTransaction tx;
+    ss >> tx;
+    BOOST_REQUIRE_EQUAL(ss.size(), 0u);
+    return tx;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(token_name_rules_vectors)
+{
+    std::ifstream in;
+    BOOST_REQUIRE_MESSAGE(OpenVectors(in), "token_name_rules.txt not found (run the tests from the source tree)");
+    std::string line, scenario;
+    boost::scoped_ptr<Chain> chain;
+    size_t records = 0;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#')
+            continue;
+        const std::vector<std::string> f = SplitBar(line);
+        if (f[0] != "znam")
+            continue;
+        BOOST_REQUIRE_EQUAL(f.size(), 6u);
+        if (f[1] != scenario || !chain) {
+            scenario = f[1];
+            chain.reset(new Chain());
+        }
+        const CTransaction tx = TxFromHex(f[4]);
+        const std::vector<unsigned char> prev = ParseHex(f[3]);
+        CBlock b;
+        b.hashPrevBlock = chain->hashes.empty() ? uint256() : chain->hashes.back();
+        b.vtx.push_back(Coinbase((int)chain->hashes.size() + 1));
+        b.vtx.push_back(tx);
+        OwnerFn fn = [prev](size_t i, std::string& o) -> int {
+            if (i != 1)
+                return 0;
+            return OwnerFromScript(prev.empty() ? NULL : &prev[0], prev.size(), o);
+        };
+        const uint256 h = uint256S(strprintf("%x", 0x100000 + (unsigned)chain->hashes.size()));
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(chain->idx.ApplyBlock(b, fn, h, (int)chain->hashes.size() + 1, true, err), err);
+        chain->hashes.push_back(h);
+
+        // expectation: <name>=<owner>/<type>:<value> or <name>=-
+        const std::string& want = f[5];
+        const size_t eq = want.find('=');
+        BOOST_REQUIRE(eq != std::string::npos);
+        const std::string name = want.substr(0, eq);
+        Entry e;
+        std::string got;
+        if (chain->Get(name.c_str(), e))
+            got = name + "=" + e.owner + "/" + strprintf("%d", e.type) + ":" + e.value;
+        else
+            got = name + "=-";
+        BOOST_CHECK_MESSAGE(got == want, "vector " + f[1] + " step " + f[2] + ": got " + got + " want " + want);
+        records++;
+    }
+    BOOST_CHECK_GE(records, 20u);
+}
+
+BOOST_AUTO_TEST_CASE(owner_rule_znam_owner_2)
+{
+    // The owner text is chosen by the type of the spent output: the same 20 bytes as a key hash and as a script hash
+    // are two different owners (before the rule Z23 and this index rendered both as the P2PKH address).
+    std::vector<unsigned char> hash(20, 0x42);
+    const CScript p2pkh = P2PKH(0x42);
+    const CScript p2sh = CScript() << OP_HASH160 << hash << OP_EQUAL;
+    std::string a, b;
+    BOOST_CHECK_EQUAL(OwnerFromScript(&p2pkh[0], p2pkh.size(), a), 1);
+    BOOST_CHECK_EQUAL(OwnerFromScript(&p2sh[0], p2sh.size(), b), 1);
+    BOOST_CHECK_EQUAL(a, OwnerOf(0x42));
+    BOOST_CHECK_EQUAL(b, P2shAddr(0x42));
+    BOOST_CHECK(a != b);
+    CScript almost = p2sh;
+    almost << OP_NOP;
+    std::string none = "x";
+    BOOST_CHECK_EQUAL(OwnerFromScript(&almost[0], almost.size(), none), 0);
+    BOOST_CHECK_EQUAL(OwnerFromScript(NULL, 0, none), 0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

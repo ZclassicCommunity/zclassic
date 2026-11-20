@@ -1,11 +1,14 @@
 #!/bin/sh
 # Helpers for wallet_matrix.sh (sourced). POSIX sh, jq, no Python.
+. "$(dirname "$0")/jsonq_lib.sh"
 # Topology per scenario: node 0 = wallet under test ($BIN), node 1 = miner/peer
 # ($PEER_BIN, defaults to $BIN). The subject node does not mine (except where a
 # scenario says so), so its balances are exactly controllable.
 
 NU_ARGS="-nuparams=5ba81b19:1 -nuparams=76b809bb:1"
 FEE=0.0001
+
+. "$(dirname "$0")/../lib/isolation.sh"
 
 say() { printf '%s\n' "$*"; }
 
@@ -53,7 +56,7 @@ start() {
     if [ ! -f "$dir/zclassic.conf" ]; then
         { echo "regtest=1"; echo "rpcuser=wm"; echo "rpcpassword=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"; } >"$dir/zclassic.conf"
     fi
-    "$bd/zclassicd" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 \
+    $ZCL_RUN "$bd/zclassicd" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 \
         -listen=1 -bind=127.0.0.1 -port=$((BASE + n)) \
         -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -rpcport=$((BASE + 100 + n)) \
         -dnsseed=0 -discover=0 -listenonion=0 -upnp=0 -keypool=10 -debuglogfile=1 -exportdir="$SD/export" \
@@ -107,10 +110,10 @@ wait_op() {
     [ -n "$2" ] || { echo "failed (no operation id)"; return 0; }
     local t s; t=0
     while :; do
-        s=$(cli "$1" z_getoperationstatus "[\"$2\"]" | jq -c '.[0]')
-        case $(printf '%s' "$s" | jq -r .status) in
-            success) printf 'success %s\n' "$(printf '%s' "$s" | jq -r .result.txid)"; return 0 ;;
-            failed) printf 'failed %s\n' "$(printf '%s' "$s" | jq -r .error.message)"; return 0 ;;
+        s=$(cli "$1" z_getoperationstatus "[\"$2\"]" | jraw '[0]')
+        case $(printf '%s' "$s" | jget status) in
+            success) printf 'success %s\n' "$(printf '%s' "$s" | jget result.txid)"; return 0 ;;
+            failed) printf 'failed %s\n' "$(printf '%s' "$s" | jget error.message)"; return 0 ;;
         esac
         t=$((t + 1)); [ $t -lt 1800 ] || { echo "timeout"; return 1; }
         sleep 1

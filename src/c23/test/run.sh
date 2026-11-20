@@ -108,7 +108,7 @@ if [ -z "$linked" ] && { has_step build || [ ! -f "$lib" ]; }; then
         objs="$objs $out/obj/g_$gf.o"
     done
     # The shim exactly as the daemon builds it (production flags, -Werror, no test hook).
-    for cf in librustzcash_compat witness_codec zip32_codec; do
+    for cf in librustzcash_compat witness_codec zip32_codec zcl_params_lazy; do
         compile "$compat/$cf.c" "$out/obj/c_$cf.o" -Wall -Wextra -Werror
         objs="$objs $out/obj/c_$cf.o"
     done
@@ -162,7 +162,7 @@ if has_step replay; then
     [ "$r" -eq 0 ] || rc=1
 fi
 if has_step mutations; then
-    echo "== mutations (expected = Rust librustzcash output) =="
+    echo "== mutations (expected = Rust librustzcash output; ZCL_PARAMS_VERIFY=boot, as Rust hashes at init) =="
     vec=$here/vectors
     "$out/kat_mutgen$exe" --golden "$golden" --out "$out/mutations.cases" >"$out/mutgen.log" 2>&1 || { cat "$out/mutgen.log"; exit 2; }
     if ! cmp -s "$out/mutations.cases" "$vec/mutations.cases"; then
@@ -171,7 +171,7 @@ if has_step mutations; then
     fi
     pdir=$out/pdir
     sh "$here/make-pdir.sh" "$params" "$pdir" || exit 2
-    "$out/kat_cases$exe" --cases "$vec/mutations.cases" --params "$params" --pdir "$pdir" \
+    ZCL_PARAMS_VERIFY=boot "$out/kat_cases$exe" --cases "$vec/mutations.cases" --params "$params" --pdir "$pdir" \
         >"$out/mutations.c23.out" 2>"$out/mutations.c23.err"
     "$out/kat_cases$exe" --compare "$vec/mutations.cases" "$vec/mutations.rust.out" "$out/mutations.c23.out" \
         >"$out/mutations.compare" 2>&1

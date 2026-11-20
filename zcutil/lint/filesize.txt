@@ -1,0 +1,23 @@
+# zcl-lint filesize baseline: line counts of files over the 1500-line limit per path.
+# Shrink-only: lower a count or delete a row when it falls; never raise one or add a path.
+# Regenerate with: zcl-lint filesize --update-baseline (refused while anything rose).
+src/bootstrap.cpp	6454
+src/c23/compat/librustzcash_compat.c	1887
+src/init.cpp	3865
+src/main.cpp	8174
+src/net.cpp	2793
+src/netbase.cpp	1625
+src/test/bootstrap_snapshot_protocol_tests.cpp	2617
+src/test/rpc_wallet_tests.cpp	2151
+src/test/rust_oracle/gen_golden.cpp	2984
+src/wallet/gtest/test_wallet.cpp	3362
+src/wallet/rpcwallet.cpp	5011
+src/wallet/wallet.cpp	6470
+src/wallet/wallet.h	1987
+wallet/src/connection.cpp	3306
+wallet/src/mainwindow.cpp	4061
+wallet/src/rpc.cpp	2846
+wallet/src/sendtab.cpp	1881
+zcutil/agent/guard/rules.c	4811
+zcutil/dev/gen/gen.c	1887
+zcutil/dev/tests/zcl-dev-tests.c	1604

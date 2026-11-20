@@ -1,0 +1,9 @@
+path: src/core.cpp
+function: Blob::Get
+matches: 1
+lines: 83-87
+template <typename T, int N>
+int Blob<T, N>::Get() const
+{
+    return N;
+}

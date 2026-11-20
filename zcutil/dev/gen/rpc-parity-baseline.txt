@@ -1,0 +1,5 @@
+# Known vRPCConvertParams rows beyond the usage line: <command>:<index><TAB><reason>. Shrink-only:
+# `zcl-dev gen --check rpc-parity` fails for a new mismatch, and for a row whose mismatch is gone.
+# These rows are inherited and harmless (the extra index only converts an argument the actor rejects).
+stop:0	kept: stop accepts and ignores the deprecated detach boolean (src/rpc/server.cpp), so index 0 is a real, if unused, argument
+zcbenchmark:2	kept: params[2] is read for the JS hex and thread-count benchmark types; only the usage line omits it

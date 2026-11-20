@@ -1397,6 +1397,30 @@ BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_rejects_bad_metadata)
     BOOST_CHECK(error.find("duplicate") != std::string::npos);
 }
 
+BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_rejects_case_folded_duplicates_and_part_names)
+{
+    std::string error;
+    // two names that differ only in case are one file on a case-insensitive disk
+    CBootstrapSnapshotManifest manifest = ValidBootstrapManifest();
+    manifest.vFiles.push_back(manifest.vFiles[0]);
+    std::string& dup = manifest.vFiles.back().strPath;
+    for (size_t i = dup.rfind('/') + 1; i < dup.size(); ++i)
+        if (dup[i] >= 'a' && dup[i] <= 'z')
+            dup[i] = (char)(dup[i] - 'a' + 'A');
+    BOOST_REQUIRE(dup != manifest.vFiles[0].strPath);
+    manifest.nSnapshotBytes += manifest.vFiles[0].nSize;
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error));
+    BOOST_CHECK_MESSAGE(error.find("duplicate") != std::string::npos, error);
+    // a name ending in .part would collide with the staging file of another
+    manifest = ValidBootstrapManifest();
+    manifest.vFiles[0].strPath += ".part";
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error));
+    BOOST_CHECK_MESSAGE(error.find(".part") != std::string::npos, error);
+    manifest = ValidBootstrapManifest();
+    manifest.vFiles[0].strPath += ".PART";
+    BOOST_CHECK(!ValidateBootstrapSnapshotManifest(manifest, error));
+}
+
 BOOST_AUTO_TEST_CASE(bootstrap_manifest_validation_matches_compiled_anchor)
 {
     // The validator matches a manifest against the compiled fast-sync anchor SET

@@ -53,6 +53,8 @@ contains(CONFIG, zqw_portable) {
 SOURCES += \
     src/embeddeddaemon.cpp \
     src/startupaccess.cpp \
+    src/launchprobe.cpp \
+    src/portprobe_win.cpp \
     src/main.cpp \
     src/mainwindow.cpp \
     src/rpc.cpp \
@@ -68,6 +70,7 @@ SOURCES += \
     src/turnstile.cpp \
     src/qrcodelabel.cpp \
     src/connection.cpp \
+    src/connection_cookie.cpp \
     src/fillediconlabel.cpp \
     src/addressbook.cpp \
     src/logger.cpp \
@@ -88,6 +91,10 @@ HEADERS += \
     src/embeddeddaemon.h \
     src/daemonjob.h \
     src/profilepaths.h \
+    src/profilefailure.h \
+    src/stopretry.h \
+    src/closeflow.h \
+    src/cookiestale.h \
     src/notifyserver.h \
     src/securerandom.h \
     src/privatefile.h \
@@ -98,6 +105,8 @@ HEADERS += \
     src/walletbackup.h \
     src/repairlocation.h \
     src/startupaccess.h \
+    src/launchprobe.h \
+    src/portprobe_win.h \
     src/mainwindow.h \
     src/precompiled.h \
     src/rpc.h \
@@ -123,6 +132,8 @@ HEADERS += \
     src/tokenssendmodel.h \
     src/tokenssend.h \
     src/pollguard.h \
+    src/sendflow.h \
+    src/wallethealth.h \
     src/tokensview.h \
     src/namesmodel.h \
     src/namepaybox.h \
@@ -180,7 +191,7 @@ qnx: target.path = /tmp/$${TARGET}/bin
 else: unix:!android: target.path = /opt/$${TARGET}/bin
 !isEmpty(target.path): INSTALLS += target
 
-win32: LIBS += -L$$PWD/res/ -llibsodium
+win32: LIBS += -L$$PWD/res/ -llibsodium -lws2_32
 else:unix: LIBS += -L$$PWD/res/ -lsodium
 
 INCLUDEPATH += $$PWD/res
@@ -191,3 +202,20 @@ else:unix: PRE_TARGETDEPS += $$PWD/res/libsodium.a
 
 # Windows 7+ metadata APIs used for handle-based startup access checks.
 win32: DEFINES += _WIN32_WINNT=0x0601 WINVER=0x0601
+
+# Byte-reproducible Windows release exe: MinGW's linker stamps the link time into the
+# PE header, __FILE__ and debug info carry the source and build directories, and the
+# About box used __DATE__. Two builds of one commit in different directories must give
+# the same zclwallet.exe. SOURCE_DATE_EPOCH (seconds; exported by
+# contrib/release/build-windows.sh) replaces the compile date.
+win32-g++:CONFIG(release, debug|release) {
+    QMAKE_LFLAGS += -Wl,--no-insert-timestamp
+    # Sources are also reached by a path relative to the build directory (../wallet/...).
+    ZQW_REL = $$relative_path($$PWD, $$OUT_PWD)
+    ZQW_MAPS = -ffile-prefix-map=$$PWD=. -ffile-prefix-map=$$OUT_PWD=/build
+    !isEmpty(ZQW_REL):!equals(ZQW_REL, .): ZQW_MAPS += -ffile-prefix-map=$${ZQW_REL}=.
+    QMAKE_CFLAGS += $$ZQW_MAPS
+    QMAKE_CXXFLAGS += $$ZQW_MAPS
+    ZQW_SDE = $$(SOURCE_DATE_EPOCH)
+    !isEmpty(ZQW_SDE): DEFINES += ZQW_BUILD_EPOCH=$${ZQW_SDE}LL
+}

@@ -1,5 +1,4 @@
-Building Zcash
+Installing ZClassic
 
-See the Zcash github wiki (https://github.com/zcash/zcash/wiki) for instructions on building zcashd,
-the intended-for-services, no-graphical-interface, reference
-implementation of Zcash.
+Prebuilt binaries: GitHub Releases, https://github.com/ZclassicCommunity/zclassic/releases
+Build from source: see BUILD.md.

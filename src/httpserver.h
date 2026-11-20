@@ -29,6 +29,12 @@ void RestoreLibeventLogging();
  * Call this before RegisterHTTPHandler or EventBase().
  */
 bool InitHTTPServer();
+/** Check the RPC tuning options (-rpcthreads, -rpcworkqueue, -rpcservertimeout).
+ * On failure, err names the option, the value and the accepted range.
+ */
+bool ValidateRpcTuning(int64_t threads, int64_t workqueue, int64_t timeout, std::string& err);
+/** JSON-RPC body sent with HTTP 503 when the work queue is full. */
+std::string BuildBusyReply(int depth, int threads);
 /** Start HTTP server.
  * This is separate from InitHTTPServer to give users race-condition-free time
  * to register their handlers between InitHTTPServer and StartHTTPServer.

@@ -13,6 +13,8 @@
 
 #include <boost/assign/std/vector.hpp> // for 'operator+=()'
 #include <boost/assert.hpp>
+#include <algorithm>
+#include <map>
 #include <boost/test/unit_test.hpp>
                     
 using namespace std;
@@ -263,6 +265,96 @@ BOOST_AUTO_TEST_CASE(dbwrapper_environmental_errors)
     }
     BOOST_CHECK(thrown);
     remove_all(dir);
+}
+
+BOOST_AUTO_TEST_CASE(dbwrapper_max_open_files_budget)
+{
+    int n = LevelDBMaxOpenFilesForTest();
+#ifdef WIN32
+    BOOST_CHECK_EQUAL(n, 512);
+#else
+    BOOST_CHECK(n >= 64 && n <= 1000);
+#endif
+    BOOST_CHECK_EQUAL(n, LevelDBMaxOpenFilesForTest()); // computed once
+}
+
+BOOST_AUTO_TEST_CASE(dbwrapper_max_open_files_pure)
+{
+    const int conns = 125;
+    const long reserve = LevelDBFdReserve(conns);
+    for (long soft : {1024L, 4096L, 65536L}) {
+        long e2 = std::max(64L, std::min(1000L, (soft - reserve) / 2));
+        long e3 = std::max(64L, std::min(1000L, (soft - reserve) / 3));
+        BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(soft, conns, 2, -1), e2);
+        BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(soft, conns, 3, -1), e3);
+    }
+    // soft 1024: two databases and three databases differ (the 32-bit -zslpindex case)
+    BOOST_CHECK(ComputeLevelDBMaxOpenFiles(1024, conns, 3, -1) < ComputeLevelDBMaxOpenFiles(1024, conns, 2, -1));
+    // an override above the budget is clamped to it; below the budget it is kept
+    BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(1024, conns, 3, 4000), (1024 - reserve) / 3);
+    BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(65536, conns, 3, 2000), 2000);
+    BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(65536, conns, 3, 9999), 4096);
+    // an override below 64 goes to 64
+    BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(65536, conns, 2, 10), 64);
+    BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(65536, conns, 2, 0), 64);
+    // win32 (soft < 0): fixed budget, override only bounded
+    BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(-1, conns, 3, -1), 512);
+    BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(-1, conns, 3, 2000), 2000);
+}
+
+BOOST_AUTO_TEST_CASE(dbwrapper_database_count)
+{
+    BOOST_CHECK_EQUAL(LevelDBDatabaseCount(false, false), 2);
+    BOOST_CHECK_EQUAL(LevelDBDatabaseCount(true, false), 3);
+    BOOST_CHECK_EQUAL(LevelDBDatabaseCount(false, true), 3);
+    BOOST_CHECK_EQUAL(LevelDBDatabaseCount(true, true), 4);
+    // soft 1024 with both indexes: four databases must fit the budget
+    const int conns = 125;
+    int each = ComputeLevelDBMaxOpenFiles(1024, conns, 4, -1);
+    BOOST_CHECK_EQUAL(each, (1024 - LevelDBFdReserve(conns)) / 4);
+    BOOST_CHECK(4 * each <= 1024 - LevelDBFdReserve(conns));
+    BOOST_CHECK_EQUAL(ComputeLevelDBMaxOpenFiles(1024, conns, 4, 5000), each);
+}
+
+BOOST_AUTO_TEST_CASE(dbwrapper_reopen_roundtrip)
+{
+    path ph = temp_directory_path() / UniquePath();
+    const int nKeys = 20000;
+    std::map<uint256, uint256> expected;
+    {
+        CDBWrapper dbw(ph, (1 << 20), false, true);
+        for (int b = 0; b < 8; b++) {
+            CDBBatch batch(dbw);
+            for (int i = 0; i < nKeys / 8; i++) {
+                uint256 k = GetRandHash();
+                uint256 v = GetRandHash();
+                expected[k] = v;
+                batch.Write(k, v);
+            }
+            BOOST_CHECK(dbw.WriteBatch(batch, b == 7));
+        }
+    }
+    {
+        CDBWrapper dbw(ph, (1 << 20), false, false);
+        for (std::map<uint256, uint256>::const_iterator it = expected.begin(); it != expected.end(); ++it) {
+            uint256 v;
+            BOOST_CHECK(dbw.Read(it->first, v));
+            BOOST_CHECK(v == it->second);
+        }
+        size_t seen = 0;
+        CDBIterator* it = dbw.NewIterator();
+        for (it->SeekToFirst(); it->Valid(); it->Next()) {
+            uint256 k, v;
+            BOOST_CHECK(it->GetKey(k));
+            BOOST_CHECK(it->GetValue(v));
+            std::map<uint256, uint256>::const_iterator e = expected.find(k);
+            BOOST_CHECK(e != expected.end() && e->second == v);
+            seen++;
+        }
+        BOOST_CHECK_EQUAL(seen, expected.size());
+        delete it;
+    }
+    boost::filesystem::remove_all(ph);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -48,11 +48,12 @@ qualification and publication finish. Consensus rules are unchanged.
   must pass [`contrib/cross/check-win-deps.sh`](../contrib/cross/check-win-deps.sh).
   The published executable is unsigned and needs no GCC/Qt/pthread/OpenSSL DLLs.
 
-The tracked [release workflow](../../.github/workflows/wallet-release-candidates.yml)
-provides the Linux/macOS environments and final-payload checks. For maintainers:
+The local CI ([doc/local-ci.md](../../doc/local-ci.md)) provides the Linux/macOS environments and
+final-payload checks, on project machines only. For maintainers:
 
 ```sh
-gh workflow run wallet-release-candidates.yml --repo ZclassicCommunity/zclassic --ref master -f platform=all
+zcutil/local-ci.sh --commit <sha> wallet-linux        # Linux bundle (after daemon-linux of the same commit)
+ZCL_CI_MAC=mac ZCL_CI_MAC_ARGS=all zcutil/local-ci.sh --commit <sha> macos <outdir>
 ```
 
 Check downloaded artifacts, not just build logs: runtime dependencies, extracted
@@ -74,7 +75,7 @@ It covers, in order:
 5. [Linux — plain GUI build](#4-linux--plain-gui-build-dynamic-qt)
 6. [Linux — single-file dev build (`make-allinone.sh`)](#5-linux--single-file-dev-build-make-allinonesh)
 7. [Linux — portable static-Qt release (`mkrelease.sh`)](#6-linux--portable-static-qt-release-mkreleasesh)
-8. [Windows — static-Qt cross build + manual embed](#7-windows--static-qt-cross-build-from-linux)
+8. [Windows — static-Qt cross build + manual embed](#7-windows--portable-static-build)
    - [Windows — native Qt-kit release bundle (`build-windows.sh`)](#7b-windows--native-release-bundle-with-the-qt-kit-build-windowssh)
 9. [macOS — `.app` / `.dmg` + ad-hoc codesign (correct ORDER)](#8-macos--app--dmg--ad-hoc-codesign)
 10. [Two pitfalls everyone hits: qt5-websockets & libsodium](#9-the-two-pitfalls-you-must-know)
@@ -129,6 +130,22 @@ This exact layout is written in three places (all consistent):
 - and READ back at runtime by `src/connection.cpp:620-704`
   (`ConnectionLoader::ensureDaemonExtracted`).
 
+(On Windows the description below applies to an unsigned executable. Authenticode signing
+appends an 8-byte-aligned attribute certificate table after the footer; for a PE whose
+security data directory (index 4, a file offset) is set, the reader requires that table
+to end exactly at EOF and to start after the image, and takes the footer that ends 0..7
+zero bytes before it. A footer inside the table is not accepted. Non-PE files use EOF only.
+The daemon must also lie between the end of the PE image and the footer.)
+
+The extracted daemon (`%LOCALAPPDATA%`/cache `zclassic-node/<sha256>/`) is verified again
+right before every launch (`EmbeddedDaemonPin`, first start and crash restart): opened
+without following links, hashed through that handle, and on Windows held open with
+`FILE_SHARE_READ` only until `QProcess::start` has created the process, so it cannot be
+written, deleted or renamed in between; on POSIX the file and its directories must be
+owned by the user and not group/world-writable. On failure the node is not started and
+the reason is logged (and, on the first start, shown). Residual: on POSIX the check and the `exec` are two
+steps (a same-user or root attacker is out of scope); a bundle sibling `zclassicd` is
+covered by the bundle checksums, not by this pin.
 The reader seeks from EOF: magic = last 8 bytes, `len` = the 8 bytes before it
 (little-endian), `sha256` = the 32 bytes before that, and
 `payloadOffset = selfSize - 48 - len` (`connection.cpp:653`). It rejects
@@ -165,7 +182,6 @@ embedded copy:
 ## 2. Prerequisites
 
 ### Common (all platforms)
-- `python3` (used for the footer-embed / footer-verify steps)
 - A built **`zclassicd`** to embed — see [§3](#3-build-the-daemon-zclassicd-to-embed).
 
 ### Linux — dynamic dev build
@@ -175,7 +191,7 @@ A clean Ubuntu/Debian box needs at least:
 sudo apt update
 sudo apt install -y build-essential autoconf automake libtool pkg-config \
     qtbase5-dev qttools5-dev-tools qt5-qmake qtbase5-dev-tools \
-    wget curl python3 file binutils
+    wget curl file binutils
 ```
 
 > The libsodium static archive is built **from source by the build itself** (no
@@ -206,7 +222,7 @@ x86_64-w64-mingw32-g++ -v 2>&1 | sed -n 's/^Thread model: //p'   # MUST print: p
 ```
 
 - A **static cross-Qt 5.15 for win32-g++**, built once by `build-qtbase-win.sh`
-  (see [§7](#7-windows--static-qt-cross-build-from-linux)). It needs the qtbase
+  (see [§7](#7-windows--portable-static-build)). It needs the qtbase
   source tarball; if you don't have it, fetch
   `qtbase-everywhere-opensource-src-5.15.x.tar.xz` from
   <https://download.qt.io/archive/qt/5.15/>.
@@ -299,8 +315,8 @@ What it does (`contrib/make-allinone.sh`):
 - `make distclean; rm -f .qmake.stash Makefile`, then `qmake … CONFIG+=release`
   + `make -j$(nproc)` (lines 42-48).
 - **Aborts** if `ldd ./zclwallet` shows `Qt5WebSockets` (lines 51-59).
-- Appends `[daemon][sha256:32][len:8 LE][ZQWDMON1:8]` via a Python heredoc
-  (lines 64-72), then re-reads and validates the footer (lines 77-111).
+- Appends `[daemon][sha256:32][len:8 LE][ZQWDMON1:8]` with `contrib/embed-footer.sh append`, then
+  re-reads and validates the footer with `contrib/embed-footer.sh verify` (POSIX sh + openssl).
 
 **Test the embedded daemon** (run from a dir with no sibling daemon):
 
@@ -362,7 +378,7 @@ Artifacts produced in `artifacts/`:
 
 > `mkrelease.sh` also has a **legacy Windows section** (lines 165-226) gated on
 > `MXE_PATH`. With `MXE_PATH` unset it exits cleanly after the Linux build. **Do not
-> use that MXE path** — the current Windows build is [§7](#7-windows--static-qt-cross-build-from-linux),
+> use that MXE path** — the current Windows build is [§7](#7-windows--portable-static-build),
 > which produces the single-file `.exe`, not the old multi-file zip.
 
 ---
@@ -414,8 +430,16 @@ ZQWDMON1 footer of §1 (no `zclassicd.exe` next to it; extracted to `%LOCALAPPDA
 Output: `<out>/zclwallet-v2.1.2-beta13-windows-x86_64/` (the bundle, with its own
 per-file `SHA256SUMS.txt`), the `.zip`, `<out>/SHA256SUMS.txt` (hashes of the zips) and
 `<out>/build/` (logs). The bundle carries the licence files (`LICENSE`, `COPYING`,
-`THIRD-PARTY-LICENSES`, `QT-LGPL-NOTICE.md`, `THIRD-PARTY-NOTICES.txt`); zip entries get
-the commit time (or `SOURCE_DATE_EPOCH`) as their timestamp. The script fails if any PE
+`THIRD-PARTY-LICENSES`, `QT-LGPL-NOTICE.md`, `THIRD-PARTY-NOTICES.txt`) and a
+`licenses/` folder with the full texts (LGPL-3.0, GPL-3.0, OpenSSL/SSLeay, GCC Runtime
+Library Exception, MinGW-w64, winpthreads, libsodium) copied verbatim from
+`contrib/release/licenses/` (its README records where each text came from); zip entries get
+the commit time (or `SOURCE_DATE_EPOCH`) as their timestamp. `zclwallet.exe` is
+byte-reproducible: the `.pro` passes `-Wl,--no-insert-timestamp` and
+`-ffile-prefix-map` for the source and build directories, and the About date comes from
+`SOURCE_DATE_EPOCH` (commit time by default) instead of `__DATE__`; two builds of one
+commit in different directories give the same exe, and with the same
+`SOURCE_DATE_EPOCH` the same zip. The script fails if any PE
 file in the bundle imports a DLL that is neither a Windows system DLL nor in the bundle,
 or if a bundle file is missing from or changed since its `SHA256SUMS.txt`, and runs, with
 `PATH` reduced to `System32` and `Windows` and `APPDATA`/`LOCALAPPDATA`/`USERPROFILE`
@@ -592,15 +616,8 @@ readelf -h <linux-bundle> >/dev/null && echo "valid ELF"
 file <win-bundle>            # expect: PE32+ executable (GUI) x86-64 ... for MS Windows
 
 # --- footer round-trips (sha matches, embedded daemon is the right kind) ---
-python3 - <bundle> <<'PYEOF'
-import os, struct, hashlib, sys
-p = sys.argv[1]; sz = os.path.getsize(p)
-with open(p, 'rb') as f:
-    f.seek(-48, 2); h = f.read(32); dl = struct.unpack('<Q', f.read(8))[0]; m = f.read(8)
-    f.seek(sz - 48 - dl); d = f.read(dl)
-print('magic', m, 'len', dl, 'gui_size', sz-48-dl,
-      'sha_ok', hashlib.sha256(d).digest() == h, 'head', d[:2])  # head: b'\x7fE'=ELF, b'MZ'=PE
-PYEOF
+sh wallet/contrib/embed-footer.sh verify <bundle>   # magic, length and sha256 of the embedded daemon
+tail -c +$(( $(wc -c < <bundle>) - 48 - <daemon-length> + 1 )) <bundle> | head -c 2 | od -An -c   #  E = ELF daemon, M Z = PE
 
 # --- no Qt .so leaked into a static release (must be EMPTY) ---
 ldd <linux-bundle> | grep -i qt
@@ -630,9 +647,8 @@ committed so this guide is fully reproducible without tribal knowledge:
 |---|---|---|
 | `/home/rhett/build-qtbase-win.sh` | cross-builds static qtbase 5.15.x for win32-g++ | `contrib/cross/build-qtbase-win.sh` |
 | `/home/rhett/build-gui-win.sh` | cross-builds `release/zclwallet.exe` (does NOT embed) | `contrib/cross/build-gui-win.sh` |
-| *(missing)* a shared `embed-daemon.py` | the ZQWDMON1 footer append, identical to `mkrelease.sh:100-108`; today the Windows embed is a manual one-liner | `contrib/embed-daemon.py` (used by Linux/Windows/all-in-one) |
 | *(missing)* codesign step in `mkmacdmg.sh` | `codesign --force --deep -s - zclwallet.app` AFTER `macdeployqt`, BEFORE `create-dmg` | edit `src/scripts/mkmacdmg.sh` after line 85 (macdeployqt), before line 91 (create-dmg) |
-| `/home/rhett/zclbuild/*` (proot builder: `prun`, `focal/build/{02-openssl-qt.sh,03-daemon.sh,04-gui-bundle.sh,05-static-helpers.sh,build.sh}`) | the only way to produce the portable glibc-2.31 static-Qt Linux single file + `.deb` | a dedicated build-env repo, or `contrib/portable-builder/` |
+| `/home/rhett/zclbuild/*` (proot builder: `prun`, `focal/build/{02-openssl-qt.sh,03-daemon.sh,04-gui-bundle.sh,05-static-helpers.sh,build.sh}`) | the only way to produce the portable glibc-2.31 static-Qt Linux single file + `.deb` | a dedicated build-env repo, or a new `contrib/portable-builder/` (does not exist yet) | <!-- doc-path-ok -->
 
 In-repo and already tracked (reference, do **not** re-commit): `src/scripts/mkrelease.sh`,
 `contrib/make-allinone.sh`, `res/libsodium/buildlibsodium.sh`, `src/scripts/dotranslations.sh`,

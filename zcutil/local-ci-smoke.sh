@@ -12,7 +12,7 @@
 #            --work <empty dir> [--port-base 43900]
 # Needs the Zcash Sapling parameters in the default parameter directory.
 set -u
-bin=""; work=""; base=43900
+bin=""; work=""; base=""
 while [ $# -gt 0 ]; do
     case $1 in
         --bin) bin=$2; shift 2 ;;
@@ -27,6 +27,8 @@ mkdir -p "$work" && work=$(cd "$work" && pwd) || exit 2
 [ -z "$(ls -A "$work")" ] || { echo "local-ci-smoke: $work is not empty" >&2; exit 2; }
 bin=$(cd "$bin" && pwd)
 dd=$work/data; mkdir -p "$dd"
+. "$(dirname "$0")/../qa/lib/isolation.sh"
+iso_base base "$base" 16
 rpcport=$((base + 1)); p2p=$base
 pw=smoke$$
 printf 'rpcuser=smoke\nrpcpassword=%s\nrpcport=%s\n' "$pw" "$rpcport" >"$dd/zclassic.conf"
@@ -44,7 +46,7 @@ cleanup() {
     i=0; while [ $i -lt 30 ] && kill -0 "$pid" 2>/dev/null; do sleep 1; i=$((i + 1)); done
 }
 
-"$bin/zclassicd$exe" -regtest -datadir="$(nat "$dd")" -port=$p2p -dnsseed=0 -bootstrap=0 -upnp=0 -listen=0 \
+$ZCL_RUN "$bin/zclassicd$exe" -regtest -datadir="$(nat "$dd")" -port=$p2p -dnsseed=0 -bootstrap=0 -upnp=0 -listen=0 \
     -listenonion=0 -discover=0 -bind=127.0.0.1 -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 \
     -nuparams=5ba81b19:1 -nuparams=76b809bb:1 -debuglogfile=1 -printtoconsole=0 -showmetrics=0 \
     >"$work/stdout.log" 2>&1 &

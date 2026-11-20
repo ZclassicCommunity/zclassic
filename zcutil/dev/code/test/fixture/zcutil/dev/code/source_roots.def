@@ -1,0 +1,7 @@
+group	wallet	src/wallet/
+group	tests	src/test/
+group	core	src/
+vendored	src/vendor/
+include	src
+automake	src/Makefile.am
+automake	src/Makefile.test.include

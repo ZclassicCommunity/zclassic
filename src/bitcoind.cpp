@@ -220,13 +220,13 @@ bool AppInit(int argc, char* argv[])
                    "option you needed to change.\n"
                    "\n"
                    "You can look at the example configuration file for suggestions of default\n"
-                   "options that you may want to change. It should be in one of these locations,\n"
-                   "depending on how you installed ZClassic:\n") +
+                   "options that you may want to change. It is shipped in the source\n"
+                   "tree and in the repository:\n") +
                  _("- Source code:  %s\n"
-                   "- .deb package: %s\n")).c_str(),
+                   "- Online:       %s\n")).c_str(),
                 GetConfigFile().string().c_str(),
                 "contrib/examples/zclassic.conf",
-                "/usr/share/doc/zcash/examples/zclassic.conf");
+                "https://github.com/ZclassicCommunity/zclassic/blob/master/contrib/examples/zclassic.conf");
             return false;
         } catch (const std::exception& e) {
             fprintf(stderr,"Error reading configuration file: %s\n", e.what());

@@ -10,6 +10,7 @@
 
 #include <boost/optional.hpp>
 #include <stdint.h>
+#include <string>
 
 class CBlockIndex;
 class CChainParams;
@@ -22,6 +23,13 @@ struct CBlockTemplate
     std::vector<CAmount> vTxFees;
     std::vector<int64_t> vTxSigOps;
 };
+
+/** Error text when no coinbase script can be produced: no wallet (-disablewallet), a wallet whose
+ *  key pool is empty (locked), or no usable -mineraddress. A missing script must never be dereferenced. */
+inline std::string NoCoinbaseScriptMessage()
+{
+    return "No coinbase script available: mining requires a wallet with a free key (not -disablewallet; unlock an encrypted wallet or refill its key pool) or a valid -mineraddress";
+}
 
 /** Generate a new block, without valid proof-of-work */
 CBlockTemplate* CreateNewBlock(const CScript& scriptPubKeyIn);

@@ -1,0 +1,2 @@
+FAIL: no rule matches src/extra/c.h
+check-rules: FAILED (1 problems)

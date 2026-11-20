@@ -23,7 +23,7 @@
 # acceptance of a PHGR13 JoinSplit created by an older binary is exercised.
 # Never point this at a real datadir; it creates and deletes its own.
 set -u
-bin=""; peer=""; work=""; base=38232
+bin=""; peer=""; work=""; base=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --bin) bin=$2; shift 2 ;;
@@ -40,6 +40,8 @@ work=$(cd "$work" && pwd)
 [ -z "$(ls -A "$work")" ] || { echo "regtest-smoke: $work is not empty" >&2; exit 2; }
 
 OW=120; SAP=140
+. "$(dirname "$0")/../../../qa/lib/isolation.sh"
+iso_base base "$base" 16
 pa=$base; ra=$((base + 1)); pb=$((base + 2)); rb=$((base + 3))
 da=$work/a; db=$work/b
 common="-regtest -dnsseed=0 -bootstrap=0 -upnp=0 -listenonion=0 -discover=0 -bind=127.0.0.1 -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -nuparams=5ba81b19:$OW -nuparams=76b809bb:$SAP -debug=zc23 -debuglogfile=1 -printtoconsole=0 -showmetrics=0"

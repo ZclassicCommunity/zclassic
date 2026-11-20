@@ -1,23 +1,25 @@
 #!/bin/sh
-# Local release-candidate CI for macOS (the `macos` jobs of
-# .github/workflows/daemon-release-candidates.yml and wallet-release-candidates.yml).
+# Local release-candidate CI for macOS (the macOS stages of zcutil/local-ci.sh:
+# daemon candidate, wallet-platform tests, wallet bundle). Own machines only.
 # Run it ON the Mac; the source arrives as a git bundle, nothing is fetched from
 # GitHub.  zcutil/local-ci.sh `macos` copies the bundle and this script over ssh and
 # runs it for you.
 #
-# usage: sh local-ci-macos.sh --bundle <file.bundle> --commit <sha> --out <dir> [daemon|wallet|all]
+# usage: sh local-ci-macos.sh --bundle <file.bundle> --commit <sha> --out <dir> [dev-tools|daemon|wallet-tests|wallet|all]
 #
 #   daemon  static macOS daemon with embedded Tor, otool allowlist, --version,
 #           regtest smoke, bounded embedded-Tor check  -> <out>/daemon-macos-arm64
+#   wallet-tests  Homebrew Qt 5: build the GUI, the logic tests and the widget tests
+#           (qmake, offscreen platform) and run them; no daemon needed
 #   wallet  pinned static Qt 5.15.19 + the wallet bundle -> <out>/wallet-macos-candidate
 #           (needs <out>/daemon-macos-arm64 of the same commit; builds Qt once, ~1 h)
-#   all     daemon, then wallet
+#   all     dev-tools (the check-dev-tools step of local-ci.sh), daemon, wallet-tests, then wallet
 #
 # Everything lives under $ZCL_CI_ROOT (default ~/work/zc23-localci): work/ (fresh clone per
 # run), cache/ (depends sources+built, Qt toolchain).  Other directories are never touched,
 # and no daemon other than the one this script started is ever signalled.
 # Prerequisites (Homebrew): autoconf automake libtool pkg-config coreutils; for the wallet
-# also libsodium.  Env: ZCL_CI_JOBS (default 4), ZCL_CI_PORT_BASE (default 41200),
+# also libsodium (and qt@5 for wallet-tests).  Env: ZCL_CI_JOBS (default 4), ZCL_CI_PORT_BASE (default: leased ports),
 # ZCL_CI_EXPECT_VERSION (default derived from src/clientversion.h).
 set -eu
 
@@ -27,12 +29,12 @@ while [ $# -gt 0 ]; do
         --bundle) bundle=$2; shift 2 ;;
         --commit) commit=$2; shift 2 ;;
         --out) out=$2; shift 2 ;;
-        daemon|wallet|all) what=$1; shift ;;
-        -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+        dev-tools|daemon|wallet-tests|wallet|all) what=$1; shift ;;
+        -h|--help) sed -n "2,23p" "$0"; exit 0 ;;
         *) echo "local-ci-macos: unknown argument $1" >&2; exit 2 ;;
     esac
 done
-[ -f "$bundle" ] && [ -n "$commit" ] && [ -n "$out" ] || { sed -n '2,12p' "$0" >&2; exit 2; }
+[ -f "$bundle" ] && [ -n "$commit" ] && [ -n "$out" ] || { sed -n "2,12p" "$0" >&2; exit 2; }
 [ "$(uname -s)" = Darwin ] || { echo "local-ci-macos: run this on a Mac" >&2; exit 2; }
 
 ROOT=${ZCL_CI_ROOT:-$HOME/work/zc23-localci}
@@ -40,7 +42,7 @@ mkdir -p "$ROOT/work" "$ROOT/cache/depends-sources" "$ROOT/cache/depends-built" 
 bundle=$(cd "$(dirname "$bundle")" && pwd)/$(basename "$bundle")
 out=$(cd "$out" && pwd)
 JOBS=${ZCL_CI_JOBS:-4}
-PORT_BASE=${ZCL_CI_PORT_BASE:-41200}
+PORT_BASE=${ZCL_CI_PORT_BASE:-}   # empty: the smoke test leases its ports (qa/lib/isolation.sh)
 export SOURCES_PATH="$ROOT/cache/depends-sources" BASE_CACHE="$ROOT/cache/depends-built"
 # Fixed absolute path so depends/Qt prefixes stay valid between runs.
 SRC=$ROOT/work/src
@@ -82,7 +84,7 @@ do_daemon() {
     cand=$out/daemon-macos-arm64; rm -rf "$cand"; mkdir -p "$cand" "$out/logs"
     log=$out/logs/daemon-macos.log
     say "build static macOS daemon with embedded Tor (jobs $JOBS)"
-    # Same invocation as the workflow ("linux" is the native-host target of build-release.sh).
+    # "linux" is the native-host target of build-release.sh.
     bash zcutil/build-release.sh linux -j"$JOBS" -k >"$log" 2>&1 || { tail -40 "$log"; die "build failed (log $log)"; }
     host=$(./depends/config.guess)
     cp release/"$host"/zclassic* "$cand"/
@@ -109,19 +111,47 @@ do_daemon() {
     else
         say "fetch Zcash parameters"; bash zcutil/fetch-params.sh || die "fetch-params"
     fi
-    say "regtest smoke (ports from $PORT_BASE)"
+    say "regtest smoke (ports ${PORT_BASE:+from $PORT_BASE}${PORT_BASE:-leased})"
     rm -rf "$out/smoke"
-    sh src/c23/test/regtest-smoke.sh --bin "$cand" --work "$out/smoke" --port-base "$PORT_BASE" >"$out/logs/smoke-macos.log" 2>&1 \
+    sh src/c23/test/regtest-smoke.sh --bin "$cand" --work "$out/smoke" ${PORT_BASE:+--port-base "$PORT_BASE"} >"$out/logs/smoke-macos.log" 2>&1 \
         || { tail -30 "$out/logs/smoke-macos.log"; die "regtest smoke failed"; }
     tail -3 "$out/logs/smoke-macos.log"
     say "bounded embedded Tor check"
     rm -rf "$out/tor-check"
-    sh .github/scripts/embedded-tor-check.sh "$cand" "$out/tor-check" 240 >"$out/logs/tor-check-macos.log" 2>&1 \
+    sh zcutil/embedded-tor-check.sh "$cand" "$out/tor-check" 240 >"$out/logs/tor-check-macos.log" 2>&1 \
         || { tail -30 "$out/logs/tor-check-macos.log"; die "embedded Tor check failed"; }
     tail -2 "$out/logs/tor-check-macos.log"
     l=$(leftovers)
     [ -z "$l" ] || { echo "$l"; die "leftover zclassicd of this run"; }
     say "daemon OK: $cand"
+}
+
+# Wallet GUI + isolated logic/widget tests with Homebrew Qt 5 (qmake, offscreen platform).
+do_wallet_tests() {
+    say "wallet-tests: $commit"
+    command -v brew >/dev/null 2>&1 && brew --prefix libsodium >/dev/null 2>&1 && brew --prefix qt@5 >/dev/null 2>&1 \
+        || die "brew install qt@5 libsodium first"
+    checkout
+    cd "$SRC/wallet"
+    mkdir -p "$out/logs"
+    PATH="$(brew --prefix qt@5)/bin:$PATH"; export PATH
+    cp "$(brew --prefix libsodium)/lib/libsodium.a" res/libsodium.a
+    mkdir -p artifacts/gui artifacts/logic artifacts/widget
+    log=$out/logs/wallet-tests-macos.log; : >"$log"
+    say "build the GUI and the isolated tests (jobs $JOBS)"
+    { (cd artifacts/gui && qmake ../../zcl-qt-wallet.pro CONFIG+=release && make -j"$JOBS") \
+        && (cd artifacts/logic && qmake ../../tests/tests.pro CONFIG+=release && make -j"$JOBS") \
+        && (cd artifacts/widget && qmake ../../tests/widget/tst_widget.pro CONFIG+=release && make -j"$JOBS"); } >>"$log" 2>&1 \
+        || { tail -40 "$log"; die "wallet build failed (log $log)"; }
+    say "run the isolated tests"
+    export QT_QPA_PLATFORM=offscreen ZCL_SHOTS_DIR="$PWD/artifacts/shots"
+    artifacts/logic/tst_logic -o artifacts/logic-results.txt,txt >>"$log" 2>&1 || { tail -40 "$log"; die "tst_logic failed"; }
+    artifacts/widget/tst_widget -o artifacts/widget-results.txt,txt >>"$log" 2>&1 || { tail -40 "$log"; die "tst_widget failed"; }
+    rm -rf "$out/wallet-tests-macos"; mkdir -p "$out/wallet-tests-macos"
+    cp artifacts/logic-results.txt artifacts/widget-results.txt "$out/wallet-tests-macos"/
+    git -C "$SRC" rev-parse HEAD >"$out/wallet-tests-macos/SOURCE_COMMIT.txt"
+    grep -h '^Totals' artifacts/logic-results.txt artifacts/widget-results.txt
+    say "wallet-tests OK: $out/wallet-tests-macos"
 }
 
 do_wallet() {
@@ -153,6 +183,7 @@ do_wallet() {
 
 case $what in
     daemon) do_daemon ;;
+    wallet-tests) do_wallet_tests ;;
     wallet) do_wallet ;;
-    all) do_daemon; do_wallet ;;
+    dev-tools|all) say "dev-tools: $commit"; checkout; cd "$SRC"; mkdir -p "$out/logs"; { make -C zcutil -j"$JOBS" && MAKEFLAGS= make -C zcutil check && zcutil/bin/zcl-dev verify --gates; } >"$out/logs/dev-tools-macos.log" 2>&1 || { tail -40 "$out/logs/dev-tools-macos.log"; die "check-dev-tools failed (log $out/logs/dev-tools-macos.log)"; }; tail -3 "$out/logs/dev-tools-macos.log"; say "dev-tools OK"; [ "$what" = dev-tools ] || { do_daemon; do_wallet_tests; do_wallet; } ;;
 esac

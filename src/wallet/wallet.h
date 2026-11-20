@@ -19,6 +19,7 @@
 #include "util.h"
 #include "utilstrencodings.h"
 #include "validationinterface.h"
+#include "wallet/sendjournal.h"
 #include "wallet/crypter.h"
 #include "wallet/tokenguard.h"
 #include "wallet/wallet_ismine.h"
@@ -68,6 +69,32 @@ static const unsigned int MAX_FREE_TRANSACTION_CREATE_SIZE = 1000;
 //  Should be large enough that we can expect not to reorg beyond our cache
 //  unless there is some exceptional network disruption.
 static const unsigned int WITNESS_CACHE_SIZE = MAX_REORG_LENGTH + 1;
+/**
+ * How many witnesses (the newest ones) a retired Sapling note keeps in wallet.dat, with witnessHeight -1.
+ *
+ * Why any: released binaries (v2.1.2-beta12 and before) erase the nullifier of a note whose witness list is
+ * empty whenever a rescan looks at its transaction (z_importkey, importwallet), and the spent note then reads
+ * as unspent. They move the height of a note to the tip with every connected block (and copy one witness per
+ * block, never below one) and pop one witness per disconnected block, so a record with W witnesses survives
+ * W - 1 disconnects that come before any connect. Four survive the orphaned tips and short reorgs that a node
+ * sees in practice (up to three blocks); one survived none (measured: disconnect, then rescan, 347 notes
+ * instead of 107).
+ *
+ * The cost: about 0.78 KiB per witness, 3.1 KiB per retired note on top of the record (a retired record
+ * weighs about 4.7 KiB, a live one 77 KiB). The limit that is left: an older binary whose first events after
+ * a downgrade are FOUR or more disconnects, followed by a rescan from below the note, counts those spent
+ * notes as unspent until it runs with -rescan or this build opens the wallet again and repairs it.
+ * Invariant that older binaries assert (nWitnessCacheSize >= the witness count of every note, retired ones
+ * included): a sweep retires a note only when it holds this many witnesses, and from then on
+ * DecrementNoteWitnesses cuts the frozen witnesses of every retired note to the new cache size at each
+ * disconnect (the cache size drops with each one), ReconcileNoteState raises the size to cover them, and
+ * ClearNoteWitnessCache resets both. So after a deep operator unwind (97 or more disconnects that reach no
+ * retired spend) the frozen list can be SHORTER than this; it then survives fewer disconnects-first (see
+ * doc/wallet-crash-consistency.md).
+ */
+static const size_t RETIRED_WITNESSES_KEPT = 4;
+/** A block update looks for newly retirable notes (CWallet::RetireSpentNotes) every this many blocks. */
+static const unsigned int RETIRE_SWEEP_INTERVAL = 10;
 //! Most new tips at which the wallet re-offers its transactions after a disconnect (CWallet::UpdatedBlockTip)
 static const int REACCEPT_TIPS_AFTER_UNWIND = 20;
 //! nReacceptTipsLeft after a start-up (import, rescan) offer that refused some: the
@@ -264,6 +291,16 @@ public:
      */
     boost::optional<CAmount> value;
 
+    /**
+     * The note was spent by a wallet transaction buried deeper than WITNESS_CACHE_SIZE
+     * blocks (see CWallet::RetireSpentNotes). Its witnessHeight is -1, its witness list holds at
+     * most RETIRED_WITNESSES_KEPT frozen witnesses (Sapling; none for Sprout and for test-build wallets), and no block
+     * update touches it. MEMORY-ONLY, like 'value': never serialized, so wallet.dat keeps the
+     * same layout (a retired note is stored as one witness or none, witnessHeight=-1, nullifier
+     * kept) and the flag is rebuilt from the chain at load.
+     */
+    bool fRetired {false};
+
     SproutNoteData() : address(), nullifier(), witnessHeight {-1}, value(boost::none) { }
     SproutNoteData(libzcash::SproutPaymentAddress a) :
             address {a}, nullifier(), witnessHeight {-1}, value(boost::none) { }
@@ -336,6 +373,9 @@ public:
      * serialized, boost::none until the note is first decrypted.
      */
     boost::optional<libzcash::SaplingPaymentAddress> address;
+
+    /** Memory-only, see SproutNoteData::fRetired. */
+    bool fRetired {false};
 
     ADD_SERIALIZE_METHODS;
 
@@ -877,6 +917,45 @@ public:
      */
     bool ReconcileNoteState(CBlockIndex*& pindexRescan);
 
+    /**
+     * Retire the notes whose nullifier is spent by a wallet transaction that is more than
+     * WITNESS_CACHE_SIZE blocks deep in the active chain. One reorganisation step cannot undo such
+     * a spend (the node refuses more than MAX_REORG_LENGTH = WITNESS_CACHE_SIZE - 1 disconnects
+     * per step), so the note needs no witness and no block update. The limit is per step, not
+     * per spend: chained reorgs, an operator invalidateblock and a chain rewound at start-up can
+     * go further, and safety rests on UnretireNotesSpentFrom, which every disconnect that reaches
+     * a recorded spend height calls (the note comes back unspent, the witness rebuild is armed).
+     *
+     * Stored form (what an older binary sees): witnessHeight -1 and, for a Sapling note, up to
+     * RETIRED_WITNESSES_KEPT (4) frozen
+     * witnesses (the newest) so that released binaries keep deriving its nullifier; a Sprout note, and
+     * a note of a test build, keep none. All of them (four, fewer, none) are recognised. Returns the number of stored note
+     * records this call changed. Idempotent; it also normalises a retired note an older binary
+     * rewrote with a witness height. fStoredForm (start-up): a note already in the stored form
+     * and spent by a mined wallet transaction is retired at any depth, for a chain that starts
+     * below the last checkpoint. Takes cs_main and cs_wallet.
+     */
+    size_t RetireSpentNotes(bool fStoredForm = false);
+    /** RetireSpentNotes for a caller that holds cs_main and cs_wallet. */
+    size_t RetireSpentNotesLocked(bool fStoredForm = false);
+
+    /** Number of notes currently retired (memory only; rebuilt by RetireSpentNotes). */
+    size_t CountRetiredNotes() const;
+
+    /**
+     * Record that this wallet transaction's note data changed since it was last written to wallet.dat,
+     * so the next SetBestChain writes it. EVERY code path that changes a note record (witnesses,
+     * witnessHeight, nullifier, the retired state) must call this or MarkNoteTxsDirty: a change
+     * that is not marked reaches wallet.dat only when something else rewrites the transaction.
+     * Conservative on purpose: marking a transaction whose data did not change costs one write.
+     * Requires cs_wallet.
+     */
+    void MarkNoteTxDirty(const uint256& hash);
+    /** Same for a batch of collected note transactions. */
+    void MarkNoteTxsDirty(const std::vector<CWalletTx*>& txs);
+    /** Number of note transactions the next SetBestChain would write. */
+    size_t CountDirtyNoteTxs() const;
+
 protected:
     /**
      * pindex is the new tip being connected.
@@ -945,15 +1024,46 @@ protected:
      * before the next witness update (CollectNoteTxs).
      */
     std::set<uint256> setNoteTxIndex;
+    /**
+     * The wallet transactions that carry note data and all of whose notes are retired
+     * (see RetireSpentNotes). Together with setNoteTxIndex (which therefore holds only the
+     * transactions with at least one live note) it covers every note transaction; each hash is in
+     * one of the two. Block updates look at setNoteTxIndex only, so their cost follows the
+     * unspent notes, not every note ever received.
+     */
+    std::set<uint256> setNoteTxRetired;
+    /**
+     * Wallet transactions whose note data (witnesses, witnessHeight, nullifier, ...) changed since
+     * SetBestChain last wrote them: the checkpoint writes these and nothing else (see
+     * MarkNoteTxDirty). Memory only: what is loaded from wallet.dat is clean. A transaction may be
+     * listed without having note data or after it left the wallet; the checkpoint skips those.
+     */
+    std::set<uint256> setNoteTxDirty;
+    /**
+     * (height of the block, txid) of the wallet transactions whose spend retired a note, so a
+     * disconnect that reaches that height (chained reorgs, an operator invalidateblock/parkblock,
+     * a chain rewound at start-up: the node's reorg limit is per step) brings those notes back (UnretireNotesSpentFrom).
+     */
+    std::set<std::pair<int, uint256>> setRetiredSpends;
+    /** Tip height of the last RetireSpentNotes sweep made from a block update. */
+    int nRetireSweepHeight = -1;
     size_t nNoteTxIndexWalletSize = 0;
     void NoteTxIndexAdd(const uint256& hash, const CWalletTx& wtx);
     /**
-     * Fill out with the mapWallet entries that currently carry note data,
-     * in txid order (the same relative order as a full mapWallet walk).
+     * Fill out with the mapWallet entries that currently carry note data
+     * (live notes only, unless fIncludeRetired), in txid order (the same
+     * relative order as a full mapWallet walk).
      * Requires cs_wallet. The pointers stay valid until mapWallet is next
      * inserted into or erased from.
      */
-    void CollectNoteTxs(std::vector<CWalletTx*>& out);
+    void CollectNoteTxs(std::vector<CWalletTx*>& out, bool fIncludeRetired = false);
+    /**
+     * A disconnect reached the block at nHeight: every note retired by a spend in that block or
+     * above is live again. Its witness is gone, so the rebuild (fNoteWitnessesLost) is armed.
+     */
+    void UnretireNotesSpentFrom(int nHeight);
+    /** The same for the notes retired by one wallet transaction (it left the wallet). */
+    void UnretireNotesSpentBy(const uint256& hashSpender);
 
     /**
      * Wallet transactions as (nOrderPos, txid), which is the order
@@ -978,38 +1088,48 @@ protected:
     bool LatestOrderedSmartTime(const CWalletTx* pwtxSkip, int64_t nLatestTolerated, int64_t& nSmartTimeRet);
 
     template <typename WalletDB>
-    void SetBestChainINTERNAL(WalletDB& walletdb, const CBlockLocator& loc) {
+    bool SetBestChainINTERNAL(WalletDB& walletdb, const CBlockLocator& loc) {
         TestCrashPoint("setbestchain-begin");
         if (!walletdb.TxnBegin()) {
             // This needs to be done atomically, so don't do it at all
             LogPrintf("SetBestChain(): Couldn't start atomic write\n");
-            return;
+            return false;
         }
+        // The note transactions that were written in this database transaction: they are clean
+        // only once it commits.
+        std::vector<uint256> vWritten;
         try {
-            for (std::pair<const uint256, CWalletTx>& wtxItem : mapWallet) {
-                auto wtx = wtxItem.second;
-                // We skip transactions for which mapSproutNoteData and mapSaplingNoteData
-                // are empty. This covers transactions that have no Sprout or Sapling data
-                // (i.e. are purely transparent), as well as shielding and unshielding
-                // transactions in which we only have transparent addresses involved.
-                if (!(wtx.mapSproutNoteData.empty() && wtx.mapSaplingNoteData.empty())) {
-                    if (!walletdb.WriteTx(wtxItem.first, wtx)) {
-                        LogPrintf("SetBestChain(): Failed to write CWalletTx, aborting atomic write\n");
-                        walletdb.TxnAbort();
-                        return;
-                    }
+            // Only transactions whose note data changed since they were last written, in txid
+            // order, by reference (the writer serializes a const transaction). Transactions
+            // without Sprout or Sapling data (purely transparent ones, shielding and
+            // unshielding transactions in which only transparent addresses are ours) are never
+            // written here, and a retired note's transaction only when its record changed.
+            for (const uint256& hash : setNoteTxDirty) {
+                std::map<uint256, CWalletTx>::const_iterator mi = mapWallet.find(hash);
+                if (mi == mapWallet.end()) {
+                    continue; // left the wallet
                 }
+                const CWalletTx& wtx = mi->second;
+                if (wtx.mapSproutNoteData.empty() && wtx.mapSaplingNoteData.empty()) {
+                    continue;
+                }
+                if (!walletdb.WriteTx(hash, wtx)) {
+                    LogPrintf("SetBestChain(): Failed to write CWalletTx, aborting atomic write\n");
+                    walletdb.TxnAbort();
+                    return false;
+                }
+                vWritten.push_back(hash);
             }
             TestCrashPoint("setbestchain-after-txs");
             if (!walletdb.WriteWitnessCacheSize(nWitnessCacheSize)) {
                 LogPrintf("SetBestChain(): Failed to write nWitnessCacheSize, aborting atomic write\n");
                 walletdb.TxnAbort();
-                return;
+                return false;
             }
             if (!walletdb.WriteBestBlock(loc)) {
                 LogPrintf("SetBestChain(): Failed to write best block, aborting atomic write\n");
                 walletdb.TxnAbort();
-                return;
+                return false;
             }
             TestCrashPoint("setbestchain-after-locator");
         } catch (const std::exception &exc) {
@@ -1017,14 +1137,29 @@ protected:
             LogPrintf("SetBestChain(): Unexpected error during atomic write:\n");
             LogPrintf("%s\n", exc.what());
             walletdb.TxnAbort();
-            return;
+            return false;
         }
         if (!walletdb.TxnCommit()) {
             // Couldn't commit all to db, but in-memory state is fine
             LogPrintf("SetBestChain(): Couldn't commit atomic write\n");
-            return;
+            return false;
+        }
+        // Durable together with the locator: only now are those records clean (on any failure
+        // above they stay marked and the next checkpoint writes them again). Entries for
+        // transactions without note data or that left the wallet are dropped with them.
+        for (const uint256& hash : vWritten) {
+            setNoteTxDirty.erase(hash);
+        }
+        for (std::set<uint256>::iterator it = setNoteTxDirty.begin(); it != setNoteTxDirty.end();) {
+            std::map<uint256, CWalletTx>::const_iterator mi = mapWallet.find(*it);
+            if (mi == mapWallet.end() || (mi->second.mapSproutNoteData.empty() && mi->second.mapSaplingNoteData.empty())) {
+                it = setNoteTxDirty.erase(it);
+            } else {
+                ++it;
+            }
         }
         TestCrashPoint("setbestchain-after-commit");
+        return true;
     }
 
 private:
@@ -1153,6 +1288,10 @@ public:
         fNoteWitnessesLost = false;
         nReacceptTipsLeft = 0;
         setNoteTxIndex.clear();
+        setNoteTxRetired.clear();
+        setNoteTxDirty.clear();
+        setRetiredSpends.clear();
+        nRetireSweepHeight = -1;
         nNoteTxIndexWalletSize = 0;
     }
 
@@ -1210,6 +1349,10 @@ public:
 
     std::map<uint256, CWalletTx> mapWallet;
 
+    //! Send journal records ("sendonce" in wallet.dat) by SHA-256 of the idempotency key; guarded by cs_wallet
+    std::map<uint256, CSendOnceRecord> mapSendOnce;
+    bool LoadSendOnce(const uint256& keyHash, const CSendOnceRecord& rec) { mapSendOnce[keyHash] = rec; return true; }
+
     int64_t nOrderPosNext;
     std::map<uint256, int> mapRequestCount;
 
@@ -1234,6 +1377,45 @@ public:
     bool IsSpent(const uint256& hash, unsigned int n) const;
     bool IsSproutSpent(const uint256& nullifier) const;
     bool IsSaplingSpent(const uint256& nullifier) const;
+    //! Height of the last best-block locator written to wallet.dat (-1: none yet). Memory only.
+    std::atomic<int> nCheckpointHeight{-1};
+    //! Failed checkpoint writes since start, whether the latest failed, time of the last catch-up attempt. Memory only.
+    std::atomic<int> nCheckpointFailures{0};
+    std::atomic<bool> fCheckpointFailed{false};
+    std::atomic<int64_t> nTimeCatchupCheckpoint{0};
+    void NoteCheckpointResult(bool fWritten);
+    void CheckpointIfLagging(const CBlockIndex* pindex); //! checkpoint once caught up if the stored one lags
+
+    //! Per-pool note and witness counts (see CWallet::GetHealth).
+    struct PoolHealth {
+        size_t nUnspent = 0;       //!< notes no active transaction spends
+        size_t nSpent = 0;         //!< notes a non-conflicted transaction spends
+        size_t nReady = 0;         //!< unspent, confirmed, witness cache present and at the chain tip
+        size_t nMissing = 0;       //!< unspent, confirmed, no witness cache
+        size_t nStale = 0;         //!< unspent, confirmed, witness cache not at the chain tip
+        size_t nUnconfirmed = 0;   //!< unspent, not in a block (no witness is due yet)
+        size_t nDead = 0;          //!< notes of a transaction in neither the chain nor the mempool (not counted above)
+        size_t nWitnessEntries = 0;//!< witnesses held by unspent notes (sum of cache lengths)
+        size_t nSpentWitnessEntries = 0; //!< witnesses still held by spent notes
+    };
+    struct Health {
+        PoolHealth sapling, sprout;
+        int64_t nWitnessCacheSize = 0;
+        bool fWitnessRebuildPending = false;
+        int nCheckpointHeight = -1;
+        int nCheckpointFailures = 0;
+        bool fCheckpointFailed = false;
+        int nTipHeight = -1;
+        size_t nPendingInMempool = 0;   //!< unmined sends in the mempool
+        size_t nPendingNotInMempool = 0;//!< unmined sends in neither chain nor mempool, not conflicted
+        size_t nExpiringSoon = 0;       //!< unmined sends (in the mempool or not) that expire within TX_EXPIRING_SOON_THRESHOLD blocks
+        size_t nExpired = 0;            //!< unmined sends that can no longer be mined
+        size_t nConflicted = 0;         //!< unmined sends a mined transaction conflicts with
+    };
+    //! One pass over mapWallet; cs_main and cs_wallet must be held. Never decrypts, never writes.
+    void GetHealth(Health& h) const;
+    //! "mined", "pending", "expiringsoon", "expired" or "conflicted" (cs_main held)
+    const char* TxStatus(const CWalletTx& wtx) const;
 
     bool IsLockedCoin(uint256 hash, unsigned int n) const;
     void LockCoin(COutPoint& output);

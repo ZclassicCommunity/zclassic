@@ -1,0 +1,37 @@
+bash-refuse	2	guard.datadir	{"tool_name":"Bash","tool_input":{"command":"rm -rf ~/.zclassic/blocks"}}
+bash-text	2	AGENTS.md	{"tool_name":"Bash","tool_input":{"command":"python3 x.py"}}
+bash-allow	0	-	{"tool_name":"Bash","tool_input":{"command":"ls -la"}}
+edit-refuse	2	guard.vendor_edit	{"tool_name":"Edit","tool_input":{"file_path":"zcutil/tools/vendor/tools/jsonq.c","old_string":"a","new_string":"b"}}
+write-refuse	2	guard.hosted_ci	{"tool_name":"Write","tool_input":{"file_path":".github/workflows/ci.yml","content":"on: push"}}
+multiedit-refuse	2	guard.python	{"tool_name":"MultiEdit","tool_input":{"file_path":"a/b.py","edits":[{"old_string":"a","new_string":"b"}]}}
+seal-warn	0	guard.consensus_seal.*UNSEAL.md	{"tool_name":"Edit","tool_input":{"file_path":"src/pow.cpp","old_string":"a","new_string":"b"}}
+key-order	2	guard.git_push	{"tool_input":{"command":"git push origin master"},"tool_name":"Bash","session_id":"s"}
+escaped	2	guard.python	{"tool_name":"Bash","tool_input":{"command":"echo \"hi\"\npython3 -c 1"}}
+read-tool	0	-	{"tool_name":"Read","tool_input":{"file_path":"/home/x/.zclassic/debug.log"}}
+garbage	2	guard.too_complex	not json
+empty	0	empty hook input	
+blank	0	empty hook input	   
+no-tool	0	-	{"hook_event_name":"PreToolUse"}
+lone-surrogate	2	guard.too_complex	{"tool_name":"Bash","tool_input":{"command":"rm -rf ~/.zclassic # \ud800"}}
+lone-surrogate-path	2	guard.too_complex	{"tool_name":"Write","tool_input":{"file_path":"a\udc00","content":"x"}}
+no-tool-bad	2	guard.too_complex	{"tool_input":{"command":"\ud800"}}
+unchecked-bad	0	-	{"tool_name":"Read","tool_input":{"file_path":"\ud800"}}
+refusal-with-escape	2	guard.datadir	{"tool_name":"Bash","tool_input":{"command":"rm -rf ~/.zclassic"},"x":"é"}
+xargs-client	2	guard.spend_or_key_export	{"tool_name":"Bash","tool_input":{"command":"xargs zclassic-cli < /tmp/a"}}
+ps-web-spend	2	guard.spend_or_key_export	{"tool_name":"PowerShell","tool_input":{"command":"iwr http://127.0.0.1:8232 -Method Post -Body dumpprivkey"}}
+cmd-nested	2	guard.datadir	{"tool_name":"Bash","tool_input":{"command":"cmd //c \"rd /s /q %APPDATA%\\\\Zclassic\""}}
+ps-joinpath	2	guard.datadir	{"tool_name":"PowerShell","tool_input":{"command":"Remove-Item -Recurse (Join-Path $env:APPDATA Zclassic)"}}
+ps-build-ok	0	-	{"tool_name":"PowerShell","tool_input":{"command":"Remove-Item -Recurse build\\tmp"}}
+cwd-write	2	guard.datadir	{"tool_name":"Write","tool_input":{"file_path":"zclassic.conf","content":"x"},"cwd":"/home/rhett/.zclassic"}
+cwd-write-ok	0	-	{"tool_name":"Write","tool_input":{"file_path":"zclassic.conf","content":"x"},"cwd":"/home/rhett/work/repo"}
+cwd-bash	2	guard.datadir	{"tool_name":"Bash","tool_input":{"command":"rm -rf blocks"},"cwd":"/home/rhett/.zclassic"}
+cwd-bash-ok	0	-	{"tool_name":"Bash","tool_input":{"command":"rm -rf blocks"},"cwd":"/home/rhett/work/repo"}
+ps-push	2	guard.git_push	{"tool_name":"PowerShell","tool_input":{"command":"git push --force origin master; python3 x"}}
+ps-remove	2	guard.datadir	{"tool_name":"PowerShell","tool_input":{"command":"Remove-Item -Recurse $env:APPDATA\\ZClassic"}}
+ps-setcontent	2	guard.hosted_ci	{"tool_name":"PowerShell","tool_input":{"command":"Set-Content .github\\workflows\\ci.yml x"}}
+ps-allow	0	-	{"tool_name":"PowerShell","tool_input":{"command":"Get-ChildItem build"}}
+notebook-refuse	2	guard.vendor_edit	{"tool_name":"NotebookEdit","tool_input":{"notebook_path":"zcutil/tools/vendor/n.ipynb"}}
+write-script-note	0	script text holds something	{"tool_name":"Write","tool_input":{"file_path":"qa/x.sh","content":"rm -rf ~/.zclassic\n"}}
+write-script-regtest	0	-	{"tool_name":"Write","tool_input":{"file_path":"qa/x.sh","content":"cli() { \"$bin/zclassic-cli\" -regtest -datadir=\"$dd\" \"$@\"; }\ncli sendtoaddress tmX 1\nrm \"$h/.zcash-params/x\"\n"}}
+write-vendor-still	2	guard.vendor_edit	{"tool_name":"Write","tool_input":{"file_path":"zcutil/tools/vendor/x.sh","content":"echo hi\n"}}
+bash-heredoc-script	0	script text holds something	{"tool_name":"Bash","tool_input":{"command":"cat > /tmp/x.sh <<EOF\nrm -rf ~/.zclassic\nEOF"}}

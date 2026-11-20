@@ -13,6 +13,78 @@
 #include <leveldb/filter_policy.h>
 #include <memenv.h>
 #include <stdint.h>
+#include <algorithm>
+
+#ifndef WIN32
+#include <sys/resource.h>
+#endif
+
+// Defined in net.cpp (declared in net.h); extern here so dbwrapper stays free of net.h.
+extern int nMaxConnections;
+
+// Mirrors MIN_CORE_FILEDESCRIPTORS in init.cpp.
+static const int DBWRAPPER_CORE_FILEDESCRIPTORS = 150;
+
+static const int DBWRAPPER_MIN_OPEN_FILES = 64;
+static const int DBWRAPPER_MAX_OPEN_FILES = 1000;
+static const int DBWRAPPER_MAX_OVERRIDE = 4096;
+static const int DBWRAPPER_WIN32_OPEN_FILES = 512;
+
+int LevelDBFdReserve(int maxConnections)
+{
+    // Core fds, peer connections, plus blk/rev files, wallet, RPC, Tor and LevelDB logs.
+    return DBWRAPPER_CORE_FILEDESCRIPTORS + std::max(maxConnections, 0) + 128;
+}
+
+int ComputeLevelDBMaxOpenFiles(long soft, int maxConnections, int ndb, int override)
+{
+    if (soft < 0) // Win32 handles: conservative fixed budget
+        return override < 0 ? DBWRAPPER_WIN32_OPEN_FILES : std::max(DBWRAPPER_MIN_OPEN_FILES, std::min(DBWRAPPER_MAX_OVERRIDE, override));
+    long each = (soft - LevelDBFdReserve(maxConnections)) / std::max(ndb, 1);
+    long budget = std::max<long>(DBWRAPPER_MIN_OPEN_FILES, std::min<long>(DBWRAPPER_MAX_OPEN_FILES, each));
+    if (override < 0)
+        return (int)budget;
+    long n = std::max(DBWRAPPER_MIN_OPEN_FILES, std::min(DBWRAPPER_MAX_OVERRIDE, override));
+    return (int)std::min(n, std::max<long>(DBWRAPPER_MIN_OPEN_FILES, each));
+}
+
+static long LevelDBSoftLimit()
+{
+#ifdef WIN32
+    return -1;
+#else
+    struct rlimit lim;
+    if (getrlimit(RLIMIT_NOFILE, &lim) != 0)
+        return 1024;
+    return (lim.rlim_cur == RLIM_INFINITY || lim.rlim_cur > 65536) ? 65536 : (long)lim.rlim_cur;
+#endif
+}
+
+int LevelDBDatabaseCount(bool zslpIndex, bool znamIndex)
+{
+    // block index and chainstate, plus one store per optional index
+    return 2 + (zslpIndex ? 1 : 0) + (znamIndex ? 1 : 0);
+}
+
+static int LevelDBMaxOpenFiles()
+{
+    static const int budget = []() {
+        long soft = LevelDBSoftLimit();
+        int ndb = LevelDBDatabaseCount(GetBoolArg("-zslpindex", false), GetBoolArg("-znamindex", false));
+        int requested = mapArgs.count("-dbmaxopenfiles") ? (int)GetArg("-dbmaxopenfiles", DBWRAPPER_MIN_OPEN_FILES) : -1;
+        int n = ComputeLevelDBMaxOpenFiles(soft, nMaxConnections, ndb, requested);
+        if (requested >= DBWRAPPER_MIN_OPEN_FILES && n < std::min(requested, DBWRAPPER_MAX_OVERRIDE))
+            LogPrintf("WARNING: -dbmaxopenfiles=%d exceeds the file descriptor budget (fd soft limit %ld, %d databases); using %d\n", requested, soft, ndb, n);
+        LogPrintf("LevelDB max_open_files=%d (fd soft limit %d)\n", n, (int)soft);
+        return n;
+    }();
+    return budget;
+}
+
+int LevelDBMaxOpenFilesForTest()
+{
+    return LevelDBMaxOpenFiles();
+}
 
 static leveldb::Options GetOptions(size_t nCacheSize)
 {
@@ -21,7 +93,7 @@ static leveldb::Options GetOptions(size_t nCacheSize)
     options.write_buffer_size = nCacheSize / 4; // up to two write buffers may be held in memory simultaneously
     options.filter_policy = leveldb::NewBloomFilterPolicy(10);
     options.compression = leveldb::kNoCompression;
-    options.max_open_files = 64;
+    options.max_open_files = LevelDBMaxOpenFiles();
     if (leveldb::kMajorVersion > 1 || (leveldb::kMajorVersion == 1 && leveldb::kMinorVersion >= 16)) {
         // LevelDB versions before 1.16 consider short writes to be corruption. Only trigger error
         // on corruption in later versions.

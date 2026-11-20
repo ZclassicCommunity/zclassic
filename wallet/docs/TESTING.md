@@ -18,7 +18,7 @@ drop-in for `zclassicd`**, reused by every layer.
 | **L1 — Integration / widget** | QtTest with `-platform offscreen`; links the full app **minus `main.cpp`**, points the **real** `RPC` at the localhost mock via the public `rpc->setConnection()` (`rpc.h:40`). Drives widgets in-process (`setChecked`/`click`/`keyClicks`). | Same `tests/` tree, second target. A `QTimer::singleShot(0)` modal-dismisser reads dialog state *before* closing and injects Yes/No. | **Every privacy dialog/caption/warning** — PUBLIC receive caption, de-shield warning, memo reply-to consent, Sprout-button-disabled, backup nag — because it needs neither a daemon nor any X input tool. |
 | **L2/L3 — E2E** | The **existing Xvfb harness** (`uxmatrix.sh`/`run.sh`/`shot.sh`) booting the **real unmodified bundle** with `--no-embedded` against the localhost mock. | Real Xvfb :99 + isolated datadir/ports. Asserts via log-grep + `xwininfo` + screenshot. | The real `ConnectionLoader` handshake, staged banners, splash, graceful quit, and on-disk effects (wallet.dat copy, file perms, no-secrets-in-log). |
 
-**The localhost mock** is one ~120-line `python3 http.server` (python3 is in the rootfs),
+**The localhost mock** is one single-file C23 program (`tests/mock/mockrpc.c`, built with `cc -std=c2x`),
 scenario-driven by an env var, one flat-JSON-per-method fixture dir per scenario, ignoring
 Basic auth. Same artifact for L1 and L2/L3 — build once, reuse everywhere. It records request
 bodies so tests can assert the `z_sendmany` change-routing payload.
@@ -49,7 +49,7 @@ daemon. On Windows the daemon is also bound to a kill-on-close job object
 disarmed as soon as an orderly `stop` has been sent so it can never cut a shutdown short.
 
 ## Prioritized build plan
-0. **Phase 0 (S) — 3 mechanical, behavior-preserving seams** (unblocks exhaustive L0): (A) delete the unused `#include "mainwindow.h"` at `settings.cpp:1`; (B) extract `isPublicTx()` + the change-to-shielded decision into header-only `src/txclassify.h` and swap the call sites in `sendtab.cpp`; (C) extract the backup-nag gate into a free `bool shouldPromptBackup(alreadyShownSession, isSyncing, balTotal, alreadyBackedUp)` called at `rpc.cpp:1124`.
+0. **Phase 0 (S) — 3 mechanical, behavior-preserving seams** (unblocks exhaustive L0): (A) delete the unused `#include "mainwindow.h"` at `settings.cpp:1`; (B) extract `isPublicTx()` + the change-to-shielded decision into a new header-only `src/txclassify.h` (planned, does not exist yet) and swap the call sites in `sendtab.cpp`; (C) extract the backup-nag gate into a free `bool shouldPromptBackup(alreadyShownSession, isSyncing, balTotal, alreadyBackedUp)` called at `rpc.cpp:1124`. <!-- doc-path-ok -->
 1. **Phase 1 (M) — L0 `tst_logic`** with 4 shims (sodium-free `precompiled.h`; full `ToFields`/`Tx`; full 8-field `TransactionItem`; `AddressBook` stub). Covers ~18 checklist items, zero flakiness.
 2. **Phase 2 (S) — the localhost JSON-RPC mock + fixtures** (the reusable asset for L1 + E2E).
 3. **Phase 3 (L) — L1 `tst_widget`** (full app minus `main.cpp` + `libsodium.a` + `qoffscreen` plugin import + the modal-dismisser). The privacy-dialog core.

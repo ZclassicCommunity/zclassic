@@ -1,0 +1,2 @@
+{"ok":true,"row":"@c2..@c3\t<id>\thuman:pat human\tother person\tACCEPT\t<date>\t","commit":"git commit -m \"review: record @c2..@c3\" -- doc/agent/REVIEWS.tsv"}
+exit=0

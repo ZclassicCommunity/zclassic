@@ -49,6 +49,8 @@ DEPENDPATH  += $$PWD/../../res
 SOURCES += \
     ../../src/embeddeddaemon.cpp \
     ../../src/startupaccess.cpp \
+    ../../src/launchprobe.cpp \
+    ../../src/portprobe_win.cpp \
     ../../src/mainwindow.cpp \
     ../../src/rpc.cpp \
     ../../src/balancestablemodel.cpp \
@@ -63,6 +65,7 @@ SOURCES += \
     ../../src/turnstile.cpp \
     ../../src/qrcodelabel.cpp \
     ../../src/connection.cpp \
+    ../../src/connection_cookie.cpp \
     ../../src/fillediconlabel.cpp \
     ../../src/addressbook.cpp \
     ../../src/logger.cpp \
@@ -89,6 +92,8 @@ HEADERS += \
     ../../src/notifyserver.h \
     ../../src/tokensmodel.h \
     ../../src/pollguard.h \
+    ../../src/sendflow.h \
+    ../../src/wallethealth.h \
     ../../src/tokensview.h \
     ../../src/tokenssend.h \
     ../../src/logger.h \
@@ -131,3 +136,4 @@ static {
 
 # Windows 7+ metadata APIs used for handle-based startup access checks.
 win32: DEFINES += _WIN32_WINNT=0x0601 WINVER=0x0601
+win32: LIBS += -lws2_32

@@ -279,9 +279,9 @@ if [ "$MODE" = child ]; then
     done
     TORPID_E=$(grep -o 'embedded Tor started (child process, pid [0-9]*' "$E/regtest/debug.log" | grep -o '[0-9]*$' | head -1)
     [ -n "$TORPID_E" ] && kill -9 "$TORPID_E"
-    wait_gone "$PID_E" 60; RC_E=$?
-    grep -q 'embedded Tor has exited; shutting down' "$E/regtest/debug.log" && [ "$RC_E" = 0 ]
-    check $? "E: killing its Tor child (pid ${TORPID_E:-none}) shuts the node down"
+    i=0; while [ $i -lt 60 ] && ! grep -q 'embedded Tor restarted (attempt 1)' "$E/regtest/debug.log"; do sleep 1; i=$((i + 1)); done
+    grep -q 'embedded Tor restarted (attempt 1)' "$E/regtest/debug.log" && "$CLI" -datadir="$E" getblockcount >/dev/null 2>&1
+    check $? "E: killing its Tor child (pid ${TORPID_E:-none}) restarts Tor in place and the node keeps running"
     kill "$PID_E" 2>/dev/null
 fi
 

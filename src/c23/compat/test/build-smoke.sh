@@ -59,12 +59,12 @@ for gf in zcl_c23_stubs zcl_c23_tree_selftest zcl_c23_test_glue; do
     objs="$objs $out/g_$gf.o"
 done
 # Production compile of the shim: must be clean under -Werror.
-for cf in librustzcash_compat witness_codec zip32_codec; do
+for cf in librustzcash_compat witness_codec zip32_codec zcl_params_lazy; do
     compile "$compat/$cf.c" "$out/p_$cf.o" -Werror
 done
 # Test compile (test hook enabled) for the smoke link.
 tobjs=""
-for cf in librustzcash_compat witness_codec zip32_codec; do
+for cf in librustzcash_compat witness_codec zip32_codec zcl_params_lazy; do
     compile "$compat/$cf.c" "$out/t_$cf.o" -Werror -DZCL_C23_COMPAT_TESTING
     tobjs="$tobjs $out/t_$cf.o"
 done
@@ -81,7 +81,7 @@ echo "linked $out/compat_smoke$exe ($n vendored .c + glue + compat)"
 
 # Undefined symbols left for the platform (libc/pthread/bcrypt) by the
 # production shim + vendor + test glue set.
-pobjs="$out/p_librustzcash_compat.o $out/p_witness_codec.o $out/p_zip32_codec.o"
+pobjs="$out/p_librustzcash_compat.o $out/p_witness_codec.o $out/p_zip32_codec.o $out/p_zcl_params_lazy.o"
 # shellcheck disable=SC2086
 nm -g --defined-only $objs $pobjs "$out/s_stub.o" 2>/dev/null | awk 'NF==3{print $3}' | sort -u >"$out/defined.txt"
 # shellcheck disable=SC2086

@@ -1,0 +1,12 @@
+timings: read 2 of 2 outdirs
+MISMATCH fixture/mismatch: step unit-a results.tsv=PASS receipts.jsonl=FAIL
+STEP                                RUNS  PASS%  SKIP    MIN(s) MEDIAN(s)    MAX(s)
+build-tests                            2   100%     0      50.0     325.0     600.0  last 50.0s vs prior median 600.0s
+test_bitcoin-full                      1   100%     0     300.0     300.0     300.0
+zcash-gtest-full                       1   100%     0     120.0     120.0     120.0
+regtest-smoke                          1   100%     0      40.0      40.0      40.0
+unit-a                                 1   100%     0       7.0       7.0       7.0
+wallet_tokenguard                      0    n/a     1         -         -         -
+limits: wall-clock seconds under whatever load the host had; PASS and FAIL runs both count, SKIP has no time;
+  outdirs listed as unavailable are absent from every figure, not zero; outdirs are read oldest first.
+exit 1

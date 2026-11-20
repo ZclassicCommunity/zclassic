@@ -1,12 +1,12 @@
 #!/bin/sh
-# Local release-candidate CI: replaces the GitHub Actions jobs on your own machines.
+# Local release-candidate CI. Builds and tests run only on project machines, with this script.
 #
 # Builds and checks the Linux and Windows daemon candidates, the Linux wallet
 # bundle and the full test suite inside an Ubuntu 20.04 (focal) root filesystem
 # that is constructed WITHOUT root and WITHOUT a container runtime (bubblewrap +
 # an unprivileged user namespace), so the binaries keep the glibc 2.31 floor and
-# the GCC 9.3 / mingw-w64 GCC 9.3 toolchain the GitHub "container: ubuntu:20.04"
-# jobs used.  macOS candidates are built by zcutil/local-ci-macos.sh on a Mac.
+# the GCC 9.3 / mingw-w64 GCC 9.3 toolchain of an ubuntu:20.04 build machine.
+# macOS candidates are built by zcutil/local-ci-macos.sh on a Mac.
 #
 # usage: zcutil/local-ci.sh [options] <command> [outdir]
 #
@@ -17,6 +17,9 @@
 #     wallet-linux  Linux wallet bundle         -> <outdir>/wallet-linux-candidate
 #                   (consumes <outdir>/daemon-linux-x86_64 of the SAME commit)
 #     test          clean test build + every local test; one summary table
+#     test-changed  `test` restricted (as --only) to the steps `zcl-dev select` picks for
+#                   the commits between ZCL_CI_BASE (default origin/master) and --commit
+#     dry           three fake steps through the real step/receipt code, no root filesystem
 #     macos         run local-ci-macos.sh on the Mac named by ZCL_CI_MAC (ssh alias)
 #     all           daemon-linux daemon-win64 wallet-linux test (+ macos if ZCL_CI_MAC set)
 #     shell         interactive shell in the focal environment (for debugging)
@@ -25,8 +28,10 @@
 #     --commit REV  commit to build (default HEAD of this checkout; it is cloned
 #                   fresh, uncommitted changes are NOT included)
 #     --tor         also run the Tor two/three-node and addrv2 tests (needs network)
-#     --flavor F    test build flavor: debug (checked libstdc++, lock-order checks, as ci.yml),
+#     --flavor F    test build flavor: debug (checked libstdc++, lock-order checks),
 #                   release (the configuration that ships; unit suites and smoke only) or both (default)
+#     --only LIST   comma list of `test` step names to run (see zcl-dev select); the build
+#                   always runs; other steps are neither run nor recorded
 #     --pick REV    cherry-pick REV on top of the commit in the TEST builds only (repeatable)
 #     --jobs N      make parallelism (default min(8, nproc))
 #
@@ -44,6 +49,9 @@
 #     ZCL_CI_LOG_CAP   most bytes kept of one step log (default 268435456); a step that fills it fails
 #     ZCL_CI_NOASLR    0 = do not run the sanitizer step under `setarch -R`
 #
+# Output: logs under <outdir>/logs and <outdir>/test*/logs, and one JSON receipt per step in
+# <outdir>/receipts.jsonl (doc/local-ci.md); `zcutil/bin/zcl-dev receipt <step> <outdir>` prints one.
+#
 # Exit status: 0 only when every requested command and check passed.
 # Heavy commands belong behind the host broker, for example:
 #   devbuild --wait --project z23 --class normal --cpu-limit 8 zcutil/local-ci.sh all
@@ -57,7 +65,7 @@ FOCAL_VER=20.04.5
 FOCAL_TGZ=ubuntu-base-$FOCAL_VER-base-amd64.tar.gz
 FOCAL_URL=https://cdimage.ubuntu.com/ubuntu-base/releases/20.04/release
 FOCAL_SHA256=60e216b60947653dc8989be3821380268315b99b2959c29882781541bfe5a426
-DAEMON_PKGS="build-essential libtool autotools-dev automake pkg-config bsdmainutils curl ca-certificates git ccache bison python3"
+DAEMON_PKGS="build-essential libtool autotools-dev automake pkg-config bsdmainutils curl ca-certificates git ccache bison"
 MINGW_PKGS="g++-mingw-w64-x86-64"
 WALLET_PKGS="ca-certificates curl git build-essential perl pkg-config xz-utils libsodium-dev libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxi-dev libxrender-dev libxcb1-dev libxcb-util0-dev libxcb-glx0-dev libxcb-keysyms1-dev libxcb-image0-dev libxcb-shm0-dev libxcb-icccm4-dev libxcb-sync-dev libxcb-xfixes0-dev libxcb-shape0-dev libxcb-randr0-dev libxcb-render-util0-dev libxcb-xinerama0-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev"
 # Test-only extras: tools the shell tests call, and Qt for the wallet logic/widget tests.
@@ -65,6 +73,44 @@ TEST_PKGS="file procps iproute2 jq bc rsync strace qtbase5-dev libqt5svg5-dev qt
 
 die() { echo "local-ci: $*" >&2; exit 1; }
 say() { echo "== local-ci: $*"; }
+
+# ---------------------------------------------------------------- receipts
+# receipt <stage> <step> <verdict> <seconds> <started-epoch> <logfile>
+# appends one JSON line to $RCPT_OUT/receipts.jsonl (no-op when RCPT_OUT is unset).  Fields:
+# commit, tree (git tree hash), stage, step, verdict, seconds, started (UTC), os, arch (no host
+# name), gcc, mingw, glibc (versions as seen where the step ran), env_names + env_sha256 (the
+# names of the build-relevant variables that are set, and a SHA-256 over their NAME=value lines;
+# values are never written), log_sha256.  POSIX sh and the usual sha256sum/shasum only.
+RCPT_VARS="CONFIGURE_FLAGS DEBUG HOST CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS MAKEFLAGS ZQW_STATIC_GOMP E2E_NODE_ARGS"
+
+sha256_stdin() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi
+}
+json_str() { printf '%s' "$1" | tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+tool_ver() { if command -v "$1" >/dev/null 2>&1; then "$@" 2>&1 | sed -n 1p; fi; }
+
+receipt() {
+    [ -n "${RCPT_OUT:-}" ] || return 0
+    r_stage=$1; r_step=$2; r_verdict=$3; r_secs=$4; r_start=$5; r_log=$6
+    r_when=$(date -u -d "@$r_start" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$r_start" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)
+    if [ -n "${RCPT_ENVFILE:-}" ] && [ -f "$RCPT_ENVFILE" ]; then
+        r_gcc=$(sed -n 3p "$RCPT_ENVFILE"); r_mingw=$(sed -n 4p "$RCPT_ENVFILE"); r_glibc=$(sed -n 5p "$RCPT_ENVFILE")
+    else
+        r_gcc=$(tool_ver gcc --version); r_mingw=$(tool_ver x86_64-w64-mingw32-g++ --version); r_glibc=$(tool_ver ldd --version)
+    fi
+    r_names=$( { for n in $RCPT_VARS; do eval "[ -n \"\${$n+x}\" ]" && echo "$n"; done
+                 env | sed -n 's/^\(ZCL_CI_[A-Za-z0-9_]*\)=.*/\1/p'; } | sort -u)
+    r_pairs=$(for n in $r_names; do eval "printf '%s=%s\\n' \"$n\" \"\${$n}\""; done)
+    r_envsha=$(printf '%s\n' "$r_pairs" | sha256_stdin)
+    r_list=""
+    for n in $r_names; do r_list="$r_list${r_list:+,}\"$n\""; done
+    r_logsha=""
+    [ ! -f "$r_log" ] || r_logsha=$(sha256_stdin <"$r_log")
+    printf '{"commit":"%s","tree":"%s","stage":"%s","step":"%s","verdict":"%s","seconds":%s,"started":"%s","os":"%s","arch":"%s","gcc":"%s","mingw":"%s","glibc":"%s","env_names":[%s],"env_sha256":"%s","log_sha256":"%s"}\n' \
+        "${RCPT_COMMIT:-}" "${RCPT_TREE:-}" "$(json_str "$r_stage")" "$(json_str "$r_step")" "$r_verdict" "$r_secs" "$r_when" \
+        "$(uname -s)" "$(uname -m)" "$(json_str "$r_gcc")" "$(json_str "$r_mingw")" "$(json_str "$r_glibc")" \
+        "$r_list" "$r_envsha" "$r_logsha" >>"$RCPT_OUT/receipts.jsonl"
+}
 
 # ------------------------------------------------------------------- inner
 # Everything below `inner_*` runs INSIDE the focal environment as (mapped) root,
@@ -81,6 +127,7 @@ inner_common() {
     JOBS=${ZCL_CI_JOBS:-8}
     COMMIT=$(git rev-parse HEAD)
     TD=/out/${ZCL_CI_TESTDIR:-test}; FLAVOR=${ZCL_CI_FLAVOR:-debug}
+    RCPT_OUT=/out; RCPT_COMMIT=$COMMIT; RCPT_TREE=$(git rev-parse "HEAD^{tree}")
 }
 
 expected_version() {
@@ -111,7 +158,7 @@ hardening() {
     else echo "$out" | tee -a "$v"; check_fail "hardening check failed (zcutil/check-hardening.sh)"; fi
 }
 
-# Windows system-DLL allowlist, identical to the workflow.
+# Windows system-DLL allowlist (the only DLLs a release .exe may import).
 WIN_DLL_ALLOW='^(advapi32|bcrypt|crypt32|iphlpapi|kernel32|msvcrt|netapi32|ntdll|ole32|oleaut32|psapi|secur32|shell32|shlwapi|user32|userenv|version|winmm|ws2_32|wtsapi32)\.dll$'
 
 inner_daemon_linux() {
@@ -154,7 +201,7 @@ inner_daemon_win64() {
         x86_64-w64-mingw32-objdump -p "$binary" | awk '/DLL Name:/ { print tolower($3) }' >/tmp/imports.txt
         if grep -Ev "$WIN_DLL_ALLOW" /tmp/imports.txt; then check_fail "unexpected runtime DLL dependency in $binary"; fi
         cat /tmp/imports.txt >>"$cand/validation.txt"
-        # Beyond the workflow: exactly one embedded manifest, UTF-8 active code page.
+        # Exactly one embedded manifest, UTF-8 active code page.
         n=$(grep -a -o '<assembly[ >]' "$binary" | wc -l)
         u=$(grep -a -o 'activeCodePage[^>]*>UTF-8<' "$binary" | wc -l)
         echo "$binary: manifests=$n activeCodePage-UTF-8=$u" | tee -a "$cand/validation.txt"
@@ -172,7 +219,7 @@ inner_wallet_linux() {
     out=/out/wallet-linux-candidate; rm -rf "$out"; mkdir -p /out/logs
     log=/out/logs/wallet-linux.log; : >"$log"
     [ -f "$daemon/SOURCE_COMMIT.txt" ] || check_fail "no Linux daemon candidate in $daemon (run daemon-linux first)"
-    # The same gate the wallet workflow applies.
+    # The wallet is built only from the exact daemon candidate of this commit.
     test "$(cat "$daemon/SOURCE_COMMIT.txt")" = "$COMMIT" || check_fail "daemon candidate is for another commit"
     (cd "$daemon" && sha256sum -c SHA256SUMS.txt) || check_fail "daemon candidate checksum"
     say "wallet toolchain (static Qt 5.15.19 + OpenSSL, cached in /cache/wallet-linux-toolchain)"
@@ -195,7 +242,7 @@ inner_test_build() {
     log=$TD/logs/build.log; : >"$log"
     export CONFIGURE_FLAGS="--enable-tests --disable-man"
     if [ "$FLAVOR" = debug ]; then
-        # As ci.yml: debug depends and --enable-debug (checked C++ library, lock-order checking).
+        # Debug depends and --enable-debug (checked C++ library, lock-order checking).
         say "clean DEBUG build with tests (checked library, lock-order checks), jobs $JOBS"; export DEBUG=1
     else
         say "clean RELEASE-configured build with tests (the configuration that ships), jobs $JOBS"
@@ -203,9 +250,17 @@ inner_test_build() {
     t0=$(date +%s)
     if run_logged "$log" ./zcutil/build.sh -j"$JOBS"; then rc=0; else rc=1; fi
     printf 'build-tests\t%s\t%s\n' "$([ $rc -eq 0 ] && echo PASS || echo FAIL)" "$(( $(date +%s) - t0 ))" >>$TD/results.tsv
+    receipt "test-build/$FLAVOR" build-tests "$([ $rc -eq 0 ] && echo PASS || echo FAIL)" "$(( $(date +%s) - t0 ))" "$t0" "$log"
     [ $rc -eq 0 ] || exit 1
     say "Zcash parameters"
-    run_logged "$log" ./zcutil/fetch-params.sh || { printf 'fetch-params\tFAIL\t0\n' >>$TD/results.tsv; exit 1; }
+    t0=$(date +%s)
+    if run_logged "$log" ./zcutil/fetch-params.sh; then
+        receipt "test-build/$FLAVOR" fetch-params PASS "$(( $(date +%s) - t0 ))" "$t0" "$log"
+    else
+        printf 'fetch-params\tFAIL\t0\n' >>$TD/results.tsv
+        receipt "test-build/$FLAVOR" fetch-params FAIL "$(( $(date +%s) - t0 ))" "$t0" "$log"
+        exit 1
+    fi
 }
 
 # Run a command with address-space randomisation off when the kernel allows it.  Sanitizer
@@ -228,6 +283,9 @@ noaslr() {
 #   ZCL_CI_LOG_CAP         most bytes kept of a step log (default 268435456 = 256 MiB)
 step() {
     name=$1; dflt=$2; shift 2
+    if [ -n "${ZCL_CI_ONLY:-}" ]; then
+        case ",$ZCL_CI_ONLY," in *",$name,"*) ;; *) return 0 ;; esac
+    fi
     key=$(printf '%s' "$name" | tr 'a-z.-' 'A-Z__')
     eval "limit=\${ZCL_CI_TIMEOUT_$key:-\${ZCL_CI_STEP_TIMEOUT:-$dflt}}"
     cap=${ZCL_CI_LOG_CAP:-268435456}
@@ -236,7 +294,8 @@ step() {
     rm -f "$rcf"
     set +e
     # head -c ends the pipe at the cap: the step then dies of SIGPIPE on its next write.
-    { timeout -k 30 "$limit" sh /ci/local-ci.sh __inner "$@" 2>&1; echo $? >"$rcf"; } | head -c "$cap" >"$log"
+    # STEP_RUN is `sh /ci/local-ci.sh __inner` inside the rootfs; `dry` points it at this checkout.
+    { timeout -k 30 "$limit" ${STEP_RUN:-sh /ci/local-ci.sh __inner} "$@" 2>&1; echo $? >"$rcf"; } | head -c "$cap" >"$log"
     rc=$(cat "$rcf" 2>/dev/null); [ -n "$rc" ] || rc=1
     set -e
     secs=$(( $(date +%s) - t0 ))
@@ -250,12 +309,24 @@ step() {
     [ "$rc" -eq 0 ] || st=FAIL
     [ "$rc" -ne 77 ] || st=SKIP
     printf '%s\t%s\t%s\n' "$name" "$st" "$secs" >>$TD/results.tsv
+    receipt "test-run/$FLAVOR" "$name" "$st" "$secs" "$t0" "$log"
     echo "[$st] $name (${secs}s, rc $rc${note:+, $note})"
 }
 
 # Each of these is a function so `step` can run it in a subshell with set -e off.
+t_devtools() { MAKEFLAGS= make -C zcutil check && zcutil/bin/zcl-dev verify --gates; }   # selftests serial (they run tools make still links), then the gates
 t_vendor()   { make -C src check-c23-vendor; }
+t_toolsvendor() { sh src/c23/tools/check-vendor.sh zcutil/tools/Z23_SOURCE.tsv; }
+t_jsonq()    { make -C zcutil/tools check; }   # builds zcutil/bin/jsonq (host cc) and runs its fixture test; the shell tests need it
+t_lint()     { make -C zcutil/lint check && make -C zcutil/lint lint; }
 t_norust()   { make -C src check-c23-no-rust; }
+# Source-tree gates and the C23/sh replacements of the former Python tools (all need only cc, sh, curl).
+t_nopython()    { sh zcutil/check-no-python.sh --self-test && sh zcutil/check-no-python.sh; }
+t_key1()        { sh qa/key1-guard.sh /w/src; }
+t_seeds()       { sh contrib/seeds/test-generate-seeds.sh /w/src; }
+t_zmqsub()      { sh contrib/zmq/test-zmq-sub.sh "/w/src/depends/$HOST" 38960; }
+t_footer()      { sh wallet/contrib/embed-footer.sh selftest; }
+t_mockrpc()     { sh wallet/tests/mock/test-mockrpc.sh 38950; }
 t_torsyms()  { make -C src check-c23-tor-symbols TOR_LIBDIR="/w/src/depends/$HOST/lib"; }
 t_treeroot() {
     cc -std=c2x -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Isrc \
@@ -270,16 +341,16 @@ t_c23linked() {
 t_smoke() {
     rm -rf $TD/smoke
     if [ -d /prev ]; then
-        sh src/c23/test/regtest-smoke.sh --bin /w/src/src --work $TD/smoke --peer-bin /prev --port-base 38232
+        sh src/c23/test/regtest-smoke.sh --bin /w/src/src --work $TD/smoke --peer-bin /prev
     else
-        sh src/c23/test/regtest-smoke.sh --bin /w/src/src --work $TD/smoke --port-base 38232
+        sh src/c23/test/regtest-smoke.sh --bin /w/src/src --work $TD/smoke
     fi
 }
 t_matrix() {
     rm -rf $TD/matrix
     if [ -d /prev ]; then peer="--peer-bin /prev"; else peer=""; fi
     # shellcheck disable=SC2086
-    sh qa/rpc-tests/wallet_matrix.sh --bin /w/src/src --work $TD/matrix --only 1,2,3,4,5,6,7,8,9 --base 30000 $peer
+    sh qa/rpc-tests/wallet_matrix.sh --bin /w/src/src --work $TD/matrix --only 1,2,3,4,5,6,7,8,9 $peer
 }
 t_txutil()      { sh qa/rpc-tests/zclassic_tx_util.sh /w/src/src; }
 t_badhome()     { sh qa/rpc-tests/startup_bad_home.sh /w/src/src; }
@@ -311,8 +382,18 @@ inner_test_run() {
     inner_common
     HOST=$(./depends/config.guess)
     mkdir -p $TD/logs
+    step check-dev-tools 600 t_devtools
     step check-c23-vendor 1800 t_vendor
+    step check-tools-vendor 300 t_toolsvendor
+    step build-jsonq 600 t_jsonq
+    step zcl-lint 600 t_lint
     step check-c23-no-rust 1800 t_norust
+    step check-no-python 300 t_nopython
+    step key1-guard 300 t_key1
+    step seed-generator 300 t_seeds
+    step zmq-sub-example 300 t_zmqsub
+    step wallet-embed-footer 300 t_footer
+    step wallet-mockrpc 300 t_mockrpc
     step check-c23-tor-symbols 1800 t_torsyms
     step test_bitcoin-full 7200 t_testbitcoin
     step zcash-gtest-full 7200 t_gtest
@@ -337,6 +418,10 @@ inner_test_tor() {
     step tor-addrv2gossip 3600 t_tor addrv2gossip.sh
 }
 # (steps run as `local-ci.sh __inner <t_function> [args]` so `timeout` can wrap them)
+# Fake steps for `dry` (plumbing check, no root filesystem).
+t_dry_pass() { echo "dry pass"; }
+t_dry_fail() { echo "dry fail"; return 1; }
+t_dry_skip() { echo "dry skip"; return 77; }
 
 # ------------------------------------------------------------------- outer
 OUTER_ONLY=1
@@ -349,6 +434,7 @@ if [ "${1:-}" = "__inner" ]; then
         test-build)   inner_test_build ;;
         test-run)     inner_test_run ;;
         test-tor)     inner_test_tor ;;
+        t_dry_*) fn=$2; shift 2; "$fn" "$@"; exit $? ;;
         t_*) fn=$2; shift 2; inner_common; HOST=$(./depends/config.guess); "$fn" "$@"; exit $? ;;
         *) die "unknown inner stage ${2:-}" ;;
     esac
@@ -362,14 +448,22 @@ while [ $# -gt 0 ]; do
         --commit) COMMIT_REV=$2; shift 2 ;;
         --tor) TOR=1; shift ;;
         --flavor) FLAVOR=$2; shift 2 ;;
+        --only) case $2 in ""|*[!A-Za-z0-9_.,-]*) die "--only takes a comma list of step names" ;; esac; ZCL_CI_ONLY=$2; export ZCL_CI_ONLY; shift 2 ;;
         --pick) PICKS="$PICKS $2"; shift 2 ;;
         --jobs) JOBS=$2; shift 2 ;;
-        -h|--help) sed -n '2,49p' "$SELF"; exit 0 ;;
+        -h|--help) sed -n '2,/^set -eu/p' "$SELF" | sed '$d'; exit 0 ;;
         -*) die "unknown option $1" ;;
         *) break ;;
     esac
 done
-CMD=${1:-}; [ -n "$CMD" ] || { sed -n '2,49p' "$SELF"; exit 2; }
+CMD=${1:-}; [ -n "$CMD" ] || { sed -n '2,/^set -eu/p' "$SELF" | sed '$d'; exit 2; }
+# --only (or an inherited ZCL_CI_ONLY): every name must be a step, or a typo would run nothing and pass.
+if [ -n "${ZCL_CI_ONLY:-}" ]; then
+    case $ZCL_CI_ONLY in *[!A-Za-z0-9_.,-]*) die "ZCL_CI_ONLY takes a comma list of step names" ;; esac
+    for n in $(printf '%s' "$ZCL_CI_ONLY" | tr ',' ' '); do
+        grep -q "^ *step $n " "$SELF" || die "--only: $n is not a step of local-ci.sh"
+    done
+fi
 ENVDIR=${ZCL_CI_ENV:-$HOME/work/zc23-localci-env}
 CACHE=${ZCL_CI_CACHE:-$HOME/work/zc23-localci-cache}
 if [ -z "$JOBS" ]; then JOBS=$(getconf _NPROCESSORS_ONLN); [ "$JOBS" -le 8 ] || JOBS=8; fi
@@ -397,6 +491,12 @@ enter() {
     extra=${EXTRA_BINDS:-}
     [ -z "$GOLDEN" ] || extra="$extra --ro-bind $GOLDEN /golden"
     [ -z "${ZCL_CI_PREV_BIN:-}" ] || extra="$extra --ro-bind $ZCL_CI_PREV_BIN /prev"
+    # Port leases (qa/lib/isolation.sh, zcutil/dev/zcl-port) must be shared by every run on this
+    # host, so the sandbox sees the host's lease directory (the sandbox /tmp is private).
+    if [ "$net" != none ]; then
+        pd=${ZCL_PORT_DIR:-/tmp/zcl-port-$(id -u)}
+        mkdir -p "$pd" && chmod 700 "$pd" && extra="$extra --bind $pd /zcl-port --setenv ZCL_PORT_DIR /zcl-port"
+    fi
     mkdir -p "$CACHE/zcash-params" "$CACHE/home-tmp"
     # step limits and the log cap reach the steps (--clearenv drops everything else)
     passenv=""
@@ -422,6 +522,7 @@ enter() {
         $passenv \
         --setenv ZCL_CI_TESTDIR "$TESTDIR" --setenv ZCL_CI_FLAVOR "$FLAVOR_CUR" \
         --setenv ZCL_CI_JOBS "$JOBS" --setenv ZCL_CI_EXPECT_VERSION "${ZCL_CI_EXPECT_VERSION:-}" \
+        --setenv ZCL_CI_ONLY "${ZCL_CI_ONLY:-}" \
         --chdir /w "$@"
 }
 
@@ -465,7 +566,43 @@ stage() {
         ( enter "$w" "$net" sh /ci/local-ci.sh __inner "$inner" )
     } 9>"$CACHE/.lock" || st_rc=$?
     echo "== local-ci: $inner finished in $(( $(date +%s) - t0 ))s (rc $st_rc)"
+    case $inner in
+        daemon-linux|daemon-win64|wallet-linux)
+            RCPT_OUT=$OUT; RCPT_COMMIT=$COMMIT; RCPT_TREE=$(git -C "$REPO" rev-parse "$COMMIT^{tree}")
+            RCPT_ENVFILE=$ENVDIR/root/ZCL-CI-ENV.txt
+            receipt stage "$inner" "$([ "$st_rc" -eq 0 ] && echo PASS || echo FAIL)" "$(( $(date +%s) - t0 ))" "$t0" "$OUT/logs/$inner.log" ;;
+    esac
     return $st_rc
+}
+
+# do_dry: three fake steps through the real step() and receipt() code, no root filesystem.
+# Used to check the plumbing (--only filter, results.tsv, receipts.jsonl) in seconds.
+do_dry() {
+    TD=$OUT/dry; FLAVOR=debug; STEP_RUN="sh $SELF __inner"
+    mkdir -p "$TD/logs"; : >"$TD/results.tsv"
+    RCPT_OUT=$OUT; RCPT_COMMIT=$COMMIT; RCPT_TREE=$(git -C "$REPO" rev-parse "$COMMIT^{tree}"); RCPT_ENVFILE=
+    step dry-pass 60 t_dry_pass
+    step dry-fail 60 t_dry_fail
+    step dry-skip 60 t_dry_skip
+    say "dry results in $TD/results.tsv, receipts in $OUT/receipts.jsonl"
+}
+
+# do_test_changed: `test` restricted to the steps zcl-dev select maps from the diff.
+do_test_changed() {
+    zd=$REPO/zcutil/bin/zcl-dev
+    [ -x "$zd" ] || make -C "$REPO/zcutil/dev" >/dev/null || die "cannot build zcutil/bin/zcl-dev"
+    base=${ZCL_CI_BASE:-origin/master}
+    names=$(git -C "$REPO" diff --name-only "$base...$COMMIT") || die "git diff $base...$COMMIT failed"
+    sel=$(printf '%s\n' "$names" | "$zd" -C "$REPO" select --steps --stdin) || die "zcl-dev select failed"
+    say "zcl-dev select ($base...$SHORT): $sel"
+    stages=$(printf '%s\n' "$names" | "$zd" -C "$REPO" select --stdin | sed -n 's/^stages: //p')
+    [ -z "$stages" ] || say "also needed, run separately: $stages"
+    case $sel in
+        NONE) say "no test step selected"; return 0 ;;
+        ALL) ZCL_CI_ONLY=; export ZCL_CI_ONLY ;;
+        *) ZCL_CI_ONLY=$sel; export ZCL_CI_ONLY ;;
+    esac
+    do_test
 }
 
 do_env_setup() {
@@ -572,7 +709,7 @@ cmd_one() {
         daemon-win64) stage daemon-win64 host daemon-win64 ;;
         wallet-linux)
             # The static Qt/OpenSSL toolchain lives in the cache and is mounted over the
-            # directories linux.sh builds into (the GitHub job cached the same two paths).
+            # directories linux.sh builds into (the cached toolchain).
             mkdir -p "$CACHE/wallet-linux-toolchain/qt-static" "$CACHE/wallet-linux-toolchain/openssl"
             prepare_src wallet-linux
             lb=$OUT/work/wallet-linux/src/wallet/artifacts/linux-build
@@ -580,6 +717,8 @@ cmd_one() {
             EXTRA_BINDS="--bind $CACHE/wallet-linux-toolchain/qt-static /w/src/wallet/artifacts/linux-build/qt-static --bind $CACHE/wallet-linux-toolchain/openssl /w/src/wallet/artifacts/linux-build/openssl"
             stage wallet-linux host wallet-linux keep ;;
         test) do_test ;;
+        test-changed) do_test_changed ;;
+        dry) do_dry ;;
         macos) do_macos ;;
         retry-step) need_env; [ -n "${RETRY_FN:-}" ] || die "usage: RETRY_FN=t_treeroot local-ci.sh retry-step"; stage test none "$RETRY_FN" keep ;;
         clean) rm -rf "${OUT:?}/work"; say "removed $OUT/work" ;;
@@ -591,7 +730,7 @@ cmd_one() {
 do_macos() {
     mac=${ZCL_CI_MAC:-}; [ -n "$mac" ] || die "set ZCL_CI_MAC to the ssh alias of the Mac"
     b=$OUT/source-$SHORT.bundle
-    # Bundle exactly this commit (under a temporary local ref), so the Mac needs no GitHub access.
+    # Bundle exactly this commit (under a temporary local ref), so the Mac needs no network access to the source.
     git -C "$REPO" update-ref "refs/local-ci/$SHORT" "$COMMIT"
     brc=0
     git -C "$REPO" bundle create "$b" "refs/local-ci/$SHORT" >/dev/null 2>&1 || brc=$?

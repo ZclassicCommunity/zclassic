@@ -1,0 +1,212 @@
+# Ordinary developer commands: every line must be ALLOWED by the guard. A false refusal stalls the
+# worker and gets the guard switched off, so this list is as important as the refusal table.
+#   B <command>   Bash tool only        S <command>   PowerShell tool only
+#   * <command>   both the Bash and the PowerShell scan
+# <NL> inside a command is a newline. Lines starting with # are comments.
+# builds and tests
+* make -j8
+* make -C zcutil check
+* make -C zcutil/agent/guard check CC=clang
+* make -C zcutil CC=x86_64-w64-mingw32-gcc EXEEXT=.exe
+B make -j"$(nproc)" -C src
+* make check
+* make clean
+* make test_bitcoin
+B ./zcutil/build.sh -j8
+B ./src/test/test_bitcoin --run_test=wallet_tests
+B build/bin/test_bitcoin --run_test=sighash_tests
+B sh zcutil/local-ci.sh
+B sh zcutil/local-ci.sh --quick
+B bash zcutil/local-ci.sh --base origin/master
+B sh zcutil/local-ci-smoke.sh
+B ZCL_CI_BASE=origin/master sh zcutil/local-ci.sh
+* devbuild --wait make -j8
+* devbuild --wait sh zcutil/local-ci.sh
+B devbuild --wait make -j16 -C zcutil check
+# test scripts with --bin and --work
+B ./qa/rpc-tests/backupwallet_atomic.sh --bin build/bin --work /tmp/zt.$$
+B sh qa/rpc-tests/wallet_matrix.sh --bin=build/bin --work=/tmp/wm
+B sh qa/rpc-tests/chain_reindex_resume.sh --bin build/bin --work "$TMPDIR/cr"
+B bash qa/rpc-tests/wallet_matrix_scn1.sh --bin /home/rhett/build/bin --work /tmp/scn1
+B ./src/c23/test/regtest-smoke.sh --bin build/bin --work /tmp/smoke
+B sh qa/rpc-tests/zslp_send.sh --bin build/bin --work "$(mktemp -d)"
+B ./qa/pull-tester/rpc-tests.sh --bin build/bin
+# regtest client calls, including sends and key exports
+* zclassic-cli -regtest getinfo
+* zclassic-cli -regtest -datadir=/tmp/zt.1 getblockcount
+* zclassic-cli -regtest generate 101
+* zclassic-cli -regtest sendtoaddress tmX 1
+* zclassic-cli -regtest -datadir=/tmp/zt.1 sendtoaddress tmXabc 0.5
+B zclassic-cli -regtest -datadir="$dd" sendtoaddress tmX 1
+B "$bin/zclassic-cli" -regtest -datadir="$dd" sendtoaddress tmX 1
+B "$bin/zclassic-cli" -regtest -datadir="$dd" dumpprivkey tmX
+B zclassic-cli -regtest z_sendmany "$from" '[{"address":"x","amount":1}]'
+* zclassic-cli -regtest -datadir=/tmp/zt.1 z_exportkey zregtestsapling1abc
+* zclassic-cli -regtest -datadir=/tmp/zt.1 z_exportwallet /tmp/zt.1/w.txt
+* zclassic-cli -regtest -rpcport=18023 dumpwallet /tmp/zt.1/dump.txt
+* zclassic-cli -regtest walletpassphrase pw 60
+* zclassic-cli -regtest backupwallet /tmp/zt.1/b.dat
+B cli() { "$bin/zclassic-cli" -regtest -datadir="$dd" "$@"; }
+B cli() { "$bin/zclassic-cli" -datadir="$work" "$@" 2>&1; }
+B zclassicd -regtest -datadir=/tmp/zt.1 -daemon
+B zclassicd -regtest -datadir="$dd" -reindex
+B zclassicd -regtest -datadir="$work/n0" -rescan
+B build/bin/zclassicd -regtest -datadir=build/tmp/n1 -printtoconsole
+B "$bin/zclassicd" -datadir="$work" -printtoconsole=0 > "$work/stdout.log" 2>&1 &
+B zclassic-cli -datadir=$HOME/.zclassic getblockcount
+* zclassic-cli getinfo
+* zclassic-cli getblockchaininfo
+B zclassic-cli -regtest -datadir=$TMPDIR/n0 stop
+B curl -s --user u:p http://127.0.0.1:8023 -d '{"method":"getblockcount"}'
+B curl --data-binary '{"method":"sendtoaddress"}' http://127.0.0.1:18023
+B curl -s -d '{"method":"dumpprivkey","params":["tmX"]}' http://127.0.0.1:18023/
+S Invoke-RestMethod -Uri http://127.0.0.1:18023 -Method Post -Body '{"method":"getblockcount"}'
+S $body = @{jsonrpc='1.0';method='sendtoaddress';params=@('tmX',1)} | ConvertTo-Json; Invoke-RestMethod -Uri http://127.0.0.1:18023 -Method Post -Body $body
+S $body = @{method='getblockcount'} | ConvertTo-Json; Invoke-RestMethod -Uri http://127.0.0.1:8023 -Method Post -Body $body
+S $body = @{method='dumpprivkey'; params=@('tmX')} | ConvertTo-Json; Invoke-RestMethod -Uri http://127.0.0.1:18023 -Method Post -Body $body
+S & zclassic-cli.exe -regtest -datadir=$env:TEMP\n0 getinfo
+S & zclassic-cli.exe -regtest -datadir=$env:TEMP\n0 sendtoaddress tmX 1
+S zclassic-cli -regtest @('sendtoaddress','tmX','1')
+S Start-Process -FilePath zclassic-cli.exe -ArgumentList @('-regtest','getinfo') -NoNewWindow
+# git
+* git status
+* git diff --stat
+* git log --oneline -5
+* git add zcutil/agent/guard/rules.c
+* git commit -m "fix(guard): scan less"
+* git commit -m "document rm -rf ~/.zclassic and dumpprivkey handling"
+B git commit -m "$(cat <<'EOF'<NL>fix(guard): scan less<NL><NL>Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com><NL>EOF<NL>)"
+* git commit --amend --no-edit
+* git fetch origin
+* git fetch origin master
+* git checkout -b factory/guard2
+* git checkout master
+* git branch -a
+* git branch -D factory/old
+* git merge origin/master
+* git rebase origin/master
+* git push origin factory/guard2
+* git push -u origin HEAD
+* git push origin HEAD:factory/guard2
+* git push origin factory/guard2:factory/guard2
+* git push --force-with-lease origin factory/guard2
+* git worktree add ../w -b factory/w HEAD
+* git worktree remove ../w
+* git reset --hard HEAD~1
+* git checkout -- zcutil/agent/guard/rules.c
+* git stash list
+* git grep -n datadir -- src
+* git ls-files -- '*.sh'
+B git init -q /tmp/zt/repo && git -C /tmp/zt/repo config user.email t@example.invalid && git -C /tmp/zt/repo config user.name t
+B cd "$(mktemp -d)" && git init -q . && git config user.name tester && git config user.email t@t
+B git -C "$TMPDIR/fx" -c user.name=t -c user.email=t@t commit -q -m x
+# removal of build and temp directories
+* rm -rf build
+* rm -rf build/tmp zcutil/bin zcutil/gen
+B rm -rf /tmp/zt.1234
+B rm -rf "$work" "$TMPDIR/zt"
+B rm -rf "$D/.zclassic"
+B rm -rf /tmp/zt/.zclassic
+B D=$(mktemp -d); rm -rf "$D/.zclassic"
+B rm "$h/.zcash-params/x"
+B rm -f /tmp/zcl-guard.*/o
+B rm -rf ./build
+B cd /tmp && rm -rf zt-*
+B rm -rf src/c23/build
+B rm -rf ~/work/zc23-factory/guard2/build
+B rm -rf "$HOME/work/zc23-factory/x"
+B HOME=/tmp/h ./zcutil/fetch-params.sh
+B HOME=$(mktemp -d) sh qa/rpc-tests/params-smoke.sh
+S Remove-Item -Recurse -Force build
+S Remove-Item -Recurse -Force $env:TEMP\zt
+S Remove-Item -Recurse -Force "$env:TEMP\zcl-test-1"
+S Remove-Item build\tmp -Recurse
+S New-Item -ItemType Directory $env:TEMP\zt
+S $d = New-Item -ItemType Directory (Join-Path $env:TEMP zt); zclassicd.exe -regtest "-datadir=$d"
+S $d = Join-Path $env:TEMP zt; zclassicd.exe -regtest "-datadir=$d"
+# remote work
+B ssh z23-r1 'make -C ~/work/zc23-factory/guard2/zcutil check'
+B ssh z23-r1 "cd ~/work/zc23-factory/guard2 && make -j8 -C zcutil"
+B ssh z23-r2 'devbuild --wait make -j16'
+B ssh z23-r1 'git -C ~/work/zc23-factory/repo.git worktree add ~/work/zc23-factory/x -b factory/x HEAD'
+B ssh mac 'cd ~/zclassic && make -j8'
+B ssh z23-r1 'sh ~/work/zc23-factory/guard2/zcutil/local-ci.sh'
+B ssh z23-r1 -- 'make -C ~/work/zc23-factory/guard2/zcutil check'
+B ssh z23-r1 -- make -j8
+B ssh z23-r1 'zclassic-cli getblockcount'
+B ssh z23-r1 'tail -n 50 ~/.zclassic/debug.log'
+B scp zcutil/agent/guard/rules.c z23-r1:work/zc23-factory/guard2/zcutil/agent/guard/
+B rsync -a src/ z23-r1:work/src/
+S ssh z23-r1 'make -C ~/work/zc23-factory/guard2/zcutil check'
+S ssh z23-r1 -- make -j8
+# reading, searching, editing
+* cat zcutil/agent/guard/README.md
+B grep -rn 'zclassic-cli' qa/rpc-tests | head
+B grep -rn dumpprivkey src/ | head
+B sed -n 1,40p src/init.cpp
+B sed -i 's/foo/bar/' zcutil/agent/guard/rules.c
+B find . -name '*.o' -delete
+B find build -type f -name '*.o' -exec rm {} +
+B find . -name '*.o' | xargs rm -f
+B tar czf /tmp/x.tgz zcutil
+B tar czf /tmp/x.tgz -C ~/work/zc23-factory guard2
+B gcc -std=gnu17 -Wall -o /tmp/a zcutil/agent/guard/rules.c
+B x86_64-w64-mingw32-gcc -o /tmp/a.exe t.c
+B clang -fsyntax-only t.c
+B sqlq build/x.db 'select 1'
+B build/bin/jsonq .a < x.json
+B curl -fsSL https://example.com/x -o /tmp/x
+B command -v python3
+B which python3 || true
+B ls -la ~/.zclassic
+B ls ~/.zcash-params
+B du -sh ~/.zclassic
+B tail -n 50 ~/.zclassic/debug.log
+B cp ~/.zclassic/zclassic.conf /tmp/zclassic.conf.copy
+B chmod +x zcutil/x.sh
+B export PATH=$PATH:~/bin
+B ps aux | grep zclassicd
+B pkill -f 'zclassicd -regtest'
+B kill $(cat /tmp/zt/zclassicd.pid)
+B mkdir -p /tmp/zt && cp -r qa /tmp/zt
+B gh pr list
+B gh run list
+S Get-ChildItem zcutil\bin
+S Get-Content src\init.cpp | Select-String datadir
+S Select-String -Path qa\rpc-tests\*.sh -Pattern dumpprivkey
+S Get-ChildItem $env:APPDATA\Zclassic
+S Test-Path ~/.zclassic
+S Copy-Item zcutil\bin\zcl-agent-guard.exe $env:TEMP\g.exe
+S Set-Content -Path notes.txt -Value x
+S & .\zcutil\bin\zcl-agent-guard.exe --bash 'ls'
+S git commit -m "fix: spend and export stay on regtest"
+# the fleet commits as the owner with -c on hosts that carry no identity
+* git -c user.name="Rhett Creighton" -c user.email=2388024+RhettCreighton@users.noreply.github.com commit -S -m "fix: x"
+B git -C "$W" -c user.email=owner@example.org -c user.name=Owner commit -m x
+B cd ~/work/zc23-factory/guard2 && git add -A && git -c user.name=Owner -c user.email=o@example.org commit -m "fix"
+
+# a call that asks only for the interpreter version runs no Python
+* python3 --version
+B command -v python3 && python3 --version >/dev/null 2>&1 && echo present
+# review round 2: Start-Process of the node with its own flags, push after a checkout, copies, feature
+# branch deletes and forces, remote PowerShell
+S Start-Process -FilePath zclassicd.exe -ArgumentList "-regtest"
+S Start-Process -FilePath zclassicd.exe -ArgumentList "-regtest","-datadir=$env:TEMP\n0" -PassThru
+S Start-Process -FilePath .\build\zclassicd.exe -ArgumentList '-regtest' -NoNewWindow
+S Start-Process -FilePath "$PWD\build\zclassicd.exe" -ArgumentList "-regtest" -PassThru
+S Start-Process zclassicd.exe -ArgumentList '-regtest'
+B git checkout -b factory/x && git commit -am y && git push -u origin HEAD
+B git switch -c x && git push origin HEAD
+B git checkout -b f; git push
+B git checkout feat && git push
+B zclassicd -reindex -datadir=/data/replay-copy
+B zclassicd -reindex-chainstate -datadir="$BENCH_DIR"
+B zclassicd -printtoconsole -datadir=$HOME/.zclassic-test
+B zclassicd -daemon
+B git push origin :feature
+B git push origin --delete factory/old
+B git push origin +factory/x
+B git push --force origin factory/x
+B ssh h 'Remove-Item -Recurse -Force build'
+B ssh h 'Get-ChildItem build | Remove-Item -Recurse'
+B ssh h '.\zclassic-cli.exe -regtest getinfo'

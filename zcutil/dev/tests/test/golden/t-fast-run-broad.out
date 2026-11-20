@@ -1,0 +1,16 @@
+note: broad: run zcutil/local-ci.sh test-changed (broad rule: src/core/engine.cpp); running the full test_bitcoin and zcash-gtest
+== src/test/test_bitcoin --log_level=test_suite
+fake test_bitcoin --log_level=test_suite
+== exit 0
+== src/zcash-gtest
+fake zcash-gtest 
+[==========] Running 3 tests from suites.
+[ RUN      ] FooSuite.a
+[       OK ] FooSuite.a (0 ms)
+[ RUN      ] FooFixture.b
+[       OK ] FooFixture.b (0 ms)
+[ RUN      ] Inst/FooParam.c/0
+[       OK ] Inst/FooParam.c/0 (0 ms)
+[  PASSED  ] 3 tests.
+== exit 0
+t-fast: 2 command(s), 0 failed

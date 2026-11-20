@@ -79,16 +79,22 @@ bool BootstrapResumeScan(const CBootstrapSnapshotManifest& manifest, const boost
                          BootstrapResumeStats& stats, std::string& error);
 
 /** Download a manifest's files into `staging` over up to `nStreams` parallel connections to
- *  `peerAddress`, reusing what BootstrapResumeScan finds there. A failed stream is retried with
+ *  `peerAddress` (whose manifest the caller validated), reusing what BootstrapResumeScan finds there.
+ *  `alternates` are further servers of the SAME snapshot: streams are spread over all of them and move
+ *  to the faster ones; a server with another manifest serves only the files whose path, size and SHA-256 equal the trusted manifest's (none shared: ignored). A failed stream is retried with
  *  backoff while the others continue; see the definition for the fatal conditions. */
 bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::string& peer,
                                        const CBootstrapSnapshotManifest& manifest,
                                        const boost::filesystem::path& staging, int timeout_ms, int nStreams,
-                                       std::string& error);
+                                       std::string& error,
+                                       const std::vector<std::string>& alternates = std::vector<std::string>());
 /** Test hook: shorten the parallel downloader's whole-attempt watchdogs (no byte at all for
  *  `stallFailMs`; aggregate rate below the minimum throughput over `aggregateWindowMs`).
  *  A value <= 0 restores the five-minute default. */
 void BootstrapSetWatchdogForTests(int64_t stallFailMs, int64_t aggregateWindowMs);
+struct BootstrapPeerPolicy;
+/** Test hook: the multi-server scheduler thresholds (NULL restores the defaults). */
+void BootstrapSetPeerPolicyForTests(const BootstrapPeerPolicy* policy);
 // True if the datadir holds only a genesis-height chainstate (initialized but
 // never synced past genesis); such a datadir carries no real chain.
 bool IsGenesisOnlyChainDatadir(const boost::filesystem::path& data_dir, std::string& error);
@@ -150,7 +156,12 @@ bool ImportBootstrapDatadir(const boost::filesystem::path& source_root,
                             std::string& error);
 bool BootstrapFromPeer(const std::string& peer,
                        const boost::filesystem::path& data_dir,
-                       std::string& error);
+                       std::string& error,
+                       const std::vector<std::string>& alternates = std::vector<std::string>());
+//! The other servers of a peer list: what BootstrapFromPeer may spread its streams over besides `primary`.
+std::vector<std::string> BootstrapAlternatesFor(const std::vector<std::string>& all, const std::string& primary);
+//! Handshake and manifest request only (no chunk): fetch what `peer` would serve. For the probe test.
+bool BootstrapProbeManifest(const std::string& peer, CBootstrapSnapshotManifest& manifest, std::string& error);
 
 //! Best-effort decentralized discovery of NODE_BOOTSTRAP peers from the active
 //! network's DNS/fixed seeds, via a bounded bootstrap-handshake + getaddr/addr
@@ -182,7 +193,7 @@ std::vector<std::string> SelectBootstrapPeers(const std::vector<std::string>& cl
 bool BootstrapOnionOnlyActive();
 
 //! True when the arguments say that no connection may leave the node directly
-//! (-proxy, or an -onlynet list without ipv4/ipv6). The Zcash parameter fetch
+//! (-proxy, or an -onlynet list without ipv4/ipv6). The zk-SNARK parameter fetch
 //! of init runs before the proxies are set up and would dial the bootstrap
 //! peers directly, so it must be skipped then.
 bool ZcashParamFetchWouldBypassProxy();
@@ -265,8 +276,8 @@ boost::filesystem::path BootstrapServeBlockTipPath(const boost::filesystem::path
 //! retained yet, the source is a v2 self-snapshot, or the tip matches an anchor.
 bool BootstrapServeSnapshotMatchesCompiledAnchor(std::string& warning);
 
-// --- Zcash parameter (.params) distribution over the bootstrap protocol ---
-//! Compiled SHA-256 spec for one Zcash zk-SNARK parameter file. This is the
+// --- zk-SNARK parameter (.params) distribution over the bootstrap protocol ---
+//! Compiled SHA-256 spec for one zk-SNARK parameter file. This is the
 //! single source of truth used both by the bootstrap-snapshot protocol (which
 //! verifies downloaded chunks) and by InitSanityCheck (which validates the
 //! installed files at startup).
@@ -286,7 +297,7 @@ bool GetZcashParamManifest(CBootstrapSnapshotManifest& manifest, std::string& er
 bool ReadZcashParamChunk(const CBootstrapSnapshotChunkRequest& request,
                          CBootstrapSnapshotChunk& chunk,
                          std::string& error);
-//! Download any missing/invalid Zcash parameters from `peer` into the params
+//! Download any missing/invalid zk-SNARK parameters from `peer` into the params
 //! dir, verifying each against its compiled SHA-256 before installing. The peer
 //! is untrusted: only files matching a compiled hash are accepted.
 bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error);
@@ -343,6 +354,25 @@ void BootstrapTrustlessPendingClear(const boost::filesystem::path& data_dir);
 bool WriteBootstrapAnchorPending(const boost::filesystem::path& data_dir, int height, const uint256& hashBlock);
 bool BootstrapAnchorPendingExists(const boost::filesystem::path& data_dir);
 void BootstrapAnchorPendingClear(const boost::filesystem::path& data_dir);
+//! What a start finds of a bootstrap install that was interrupted (see
+//! RecoverInterruptedBootstrapInstall).
+enum BootstrapInstallRecovery {
+    BIR_NONE,                //!< no pending-verification marker: nothing was interrupted
+    BIR_STALE_MARKER,        //!< the marker was written but nothing was installed: marker cleared
+    BIR_ROLLED_BACK,         //!< one of blocks/ chainstate/ was moved back into its staging directory
+    BIR_INSTALLED,           //!< blocks/ and chainstate/ are both installed; verification is still due
+    BIR_REFUSE,              //!< partial install with no staging directory to return it to: left untouched
+};
+//! Called at start, before the datadir is judged for a bootstrap. The pending marker is
+//! written before the install moves blocks/ and chainstate/ out of the staging directory
+//! (one rename each, blocks/ first), so a marker with a half-installed datadir is
+//! evidence that the install, and nothing else, created it. A half-installed datadir is
+//! rolled back by renaming the installed directory back into the staging directory it
+//! came from (nothing is deleted; the next install re-verifies every staged file) and
+//! the marker is cleared. A complete install keeps its marker for the verification that
+//! the caller runs after the databases open. Any other half-installed datadir (no such
+//! staging directory) is refused, not deleted: error says why.
+BootstrapInstallRecovery RecoverInterruptedBootstrapInstall(const boost::filesystem::path& data_dir, std::string& error);
 //! Read the (height, hash) recorded in the anchor-pending marker. For a v3 growable
 //! import this is the GROWN BUNDLE TIP (so the post-import forward-connect can find it
 //! without relying on pindexBestHeader, which LoadBlockIndexDB leaves at the anchor for
@@ -356,6 +386,16 @@ bool GetBootstrapAnchorPending(const boost::filesystem::path& data_dir, int& hei
 //! init.cpp orchestration). All reads/writes go through a single internal
 //! CCriticalSection so the GUI can poll it freely without observing a torn read.
 //! Purely informational — reading or writing it NEVER mutates the datadir.
+//! One snapshot server of a multi-server download (additive getbootstrapinfo field "servers").
+struct BootstrapInfoServer {
+    std::string peer;         //!< "host:port"
+    int streams;              //!< streams connected to it now
+    double mibps;             //!< its current rate (MiB/s)
+    uint64_t bytes;           //!< payload bytes received from it this attempt
+    std::string state;        //!< "ok"|"shared_files"|"different_snapshot"|"banned"
+    BootstrapInfoServer() : streams(0), mibps(0.0), bytes(0), state("ok") {}
+};
+
 struct BootstrapInfo {
     std::string phase;        //!< "idle"|"active"|"succeeded"|"skipped"|"failed"|"normal_sync"
     int percent;              //!< 0-100, meaningful only while phase=="active"
@@ -371,6 +411,7 @@ struct BootstrapInfo {
     std::string mode;         //!< "anchor"|"trustless"
     int snapshotVersion;      //!< snapshot manifest version actually in play (1|2|3), 0 if unknown
     std::string reason;       //!< why skipped/failed (mirrors init.cpp bootstrap_error)
+    std::vector<BootstrapInfoServer> servers; //!< per-server streams/rate/bytes when several servers are in use
 
     BootstrapInfo()
         : phase("idle"), percent(0), bytesReceived(0), bytesTotal(0), mbps(0.0),
@@ -385,6 +426,9 @@ BootstrapInfo GetBootstrapInfo();
 void SetBootstrapInfoPhase(const std::string& phase, const std::string& reason);
 //! Set live download progress; also stamps phase="active". Pass -1 / "" for any
 //! field that is not known at the call site to leave the prior value in place.
+//! Replace the per-server breakdown (empty = a single server).
+void SetBootstrapInfoServers(const std::vector<BootstrapInfoServer>& servers);
+
 void SetBootstrapInfoProgress(int percent, uint64_t bytesReceived, uint64_t bytesTotal,
                               double mbps, int streams, const std::string& peer,
                               int peerIndex, int peerCount, int attempt, int attemptMax,

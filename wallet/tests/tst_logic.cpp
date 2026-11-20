@@ -30,10 +30,13 @@
 #include <QTcpServer>
 #include "repairlocation.h"
 #include "profilepaths.h"
+#include "profilefailure.h"
+#include "cookiestale.h"
 #include "daemonjob.h"
 #include <QTemporaryDir>
 #include "walletbackup.h"
 #include "embeddeddaemon.h"
+#include "launchprobe.h"       // launch path: first-probe skip, warmup poll interval (real)
 #include "releaseversion.h"
 #include "fastsync.h"
 #include "syncstate.h"
@@ -48,6 +51,8 @@
 #include "addressbook.h"       // shim
 #include "privacybadgedelegate.h"   // PRIV-13/14: classify/labelFor/colorFor (real)
 #include "securerandom.h"      // CONF-1/NOTIFY-SRV: CSPRNG secret generation (real)
+#include "sendflow.h"          // send once: the pure rules (real)
+#include "wallethealth.h"      // the wallet health line: the pure rules (real)
 #include <QSet>
 #include <QRegularExpression>
 #include <QFileInfo>
@@ -144,7 +149,7 @@ static bool isLongWarmupPhase(const QString& status) {
     static const char* kPhases[] = {
         "Verifying blocks", "Activating best chain", "Rewinding",
         "Loading block index", "Pruning blockstore", "Rescanning",
-        "Zapping", "Upgrading",
+        "Zapping", "Upgrading", "Reindexing",
     };
     for (const char* p : kPhases)
         if (status.contains(QLatin1String(p), Qt::CaseInsensitive)) return true;
@@ -880,7 +885,15 @@ private slots:
         QVERIFY(walletReleaseOrder("2.1.2-beta999999999999").isNull());
         QVERIFY(walletReleaseOrder("").isNull());
     }
+    void launchProbe_skipInitialProbe();
+    void launchProbe_loopbackPortFree();
+    void launchProbe_warmupPollMs();
+    void launchProbe_confNamesRpcNetwork();
+    void launchProbe_every();
     void embeddedDaemon_integrity();
+    void embeddedDaemon_footerLocation();
+    void embeddedDaemon_pinsLaunchedFile();
+    void embeddedDaemon_malformedPe();
     void initTestCase();
     void cleanupTestCase();
 
@@ -956,6 +969,11 @@ private slots:
 
     // --- First-run trust: send-gate staleness predicate (pure) ---
     void sendgate_staleWhenPollStops();               // Settings::syncGateIsStale boundary
+    void cookie_staleRequestIsRetriedNotHealed();
+    void cookie_retryIsBoundedAndNeverForConfCredentials();
+    void profilefailure_boxIsSkippedWhereItCouldAbortOrBlock();
+    void profilefailure_headlessModesKeepStderrOnly();
+    void profilefailure_messageSaysWhatAndWhatToDo();
     void profile_unsetKeepsDefaults();
     void profile_setRedirectsEveryPath();
     void profile_settingsAreIniInsideProfile();
@@ -963,6 +981,16 @@ private slots:
     void profile_blankValueFailsClosed();
     void daemonjob_everyLaunchPathUsesTheJob();
     void daemonjob_armedAfterEveryStart();
+    void sendflow_keysAreValidAndDistinct();
+    void sendflow_classifyTheAnswerToTheCall();
+    void sendflow_retryPaceIsBounded();
+    void sendflow_whatTheUserIsToldAboutAKeyedSend();
+    void sendflow_anUnkeyedSendOnAnOlderNode();
+    void sendflow_theJournalIsOnlyAskedWhenItDecides();
+    void sendflow_parseWhatTheNodeSays();
+    void sendflow_ownWordingIsNotRewritten();
+    void health_aHealthyWalletSaysNothing();
+    void health_eachAttentionStateIsReported();
 
 private:
     QString sandboxAppData() const {
@@ -1365,6 +1393,375 @@ void TestLogic::embeddedDaemon_integrity() {
     QVERIFY(write(source, "ZQWDMON1"));
     QVERIFY(extractEmbeddedDaemon(source, temp.path(), &error).isEmpty());
 }
+// ---------------------------------------------------------------------------
+// Embedded-daemon footer: synthetic unsigned/"signed" PE fixtures and malformed
+// variants. A "signed" file is [PE headers][daemon][footer][0..7 zero pad][table],
+// the table named by data directory 4 (a FILE OFFSET), as Authenticode lays it out.
+// ---------------------------------------------------------------------------
+namespace {
+QByteArray le(quint64 value, int bytes) {
+    QByteArray out;
+    for (int i = 0; i < bytes; ++i) out += char((value >> (8 * i)) & 255);
+    return out;
+}
+// Minimal PE32+: MZ header, PE signature, file header, 240-byte optional header,
+// no sections; SizeOfHeaders = 0x200 so the image ends at 0x200.
+QByteArray fixturePe(quint32 certOffset, quint32 certSize, quint32 dirCount = 16) {
+    QByteArray h(0x200, '\0');
+    h.replace(0, 2, "MZ");
+    h.replace(0x3c, 4, le(0x40, 4));
+    h.replace(0x40, 4, QByteArray("PE\0\0", 4));
+    h.replace(0x44, 2, le(0x8664, 2));             // machine
+    h.replace(0x46, 2, le(0, 2));                  // NumberOfSections
+    h.replace(0x54, 2, le(240, 2));                // SizeOfOptionalHeader
+    const int opt = 0x58;
+    h.replace(opt, 2, le(0x20b, 2));               // PE32+
+    h.replace(opt + 60, 4, le(0x200, 4));          // SizeOfHeaders
+    h.replace(opt + 108, 4, le(dirCount, 4));      // NumberOfRvaAndSizes
+    h.replace(opt + 112 + 4 * 8, 4, le(certOffset, 4));
+    h.replace(opt + 112 + 4 * 8 + 4, 4, le(certSize, 4));
+    return h;
+}
+// length < 0: the real length. rawLength: written verbatim when not empty.
+QByteArray fixtureFooter(const QByteArray& payload, qint64 length = -1,
+                         const QByteArray& hash = QByteArray(),
+                         const QByteArray& rawLength = QByteArray()) {
+    QByteArray f = hash.isEmpty() ? QCryptographicHash::hash(payload, QCryptographicHash::Sha256) : hash;
+    f += rawLength.isEmpty() ? le(quint64(length < 0 ? payload.size() : length), 8) : rawLength;
+    f += "ZQWDMON1";
+    return f;
+}
+// Signed layout. padOverride < 0: pad to 8-byte alignment like signtool.
+QByteArray fixtureSigned(const QByteArray& payload, int tableSize = 64, int padOverride = -1,
+                         const QByteArray& footer = QByteArray()) {
+    const QByteArray foot = footer.isEmpty() ? fixtureFooter(payload) : footer;
+    QByteArray body = payload + foot;
+    const int pad = padOverride >= 0 ? padOverride : int((8 - (0x200 + body.size()) % 8) % 8);
+    const quint32 tableOffset = quint32(0x200 + body.size() + pad);
+    body += QByteArray(pad, '\0');
+    return fixturePe(tableOffset, quint32(tableSize)) + body + QByteArray(tableSize, 'C');
+}
+quint32 le32(const QByteArray& b, int o) {
+    quint32 v = 0;
+    for (int i = 3; i >= 0; --i) v = (v << 8) | quint32(uchar(b.at(o + i)));
+    return v;
+}
+bool fixtureWrite(const QString& path, const QByteArray& bytes) {
+    QFile f(path);
+    return f.open(QIODevice::WriteOnly) && f.write(bytes) == bytes.size();
+}
+// Extract `bundle` into a fresh cache; returns the extracted bytes (null on failure).
+QByteArray fixtureExtract(const QByteArray& bundle, QString* error) {
+    QTemporaryDir dir;
+    if (!dir.isValid() || !fixtureWrite(dir.filePath("bundle"), bundle)) {
+        *error = "fixture error";
+        return QByteArray();
+    }
+    const QString path = extractEmbeddedDaemon(dir.filePath("bundle"), dir.filePath("cache"), error);
+    if (path.isEmpty()) return QByteArray();
+    QFile f(path);
+    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+}
+} // namespace
+
+void TestLogic::embeddedDaemon_footerLocation() {
+    QByteArray payload;
+    for (int i = 0; i < 5000; ++i) payload += char((i * 31 + 7) & 255);
+    QString error;
+    // Unsigned PE: footer at EOF.
+    QVERIFY2(fixtureExtract(fixturePe(0, 0) + payload + fixtureFooter(payload), &error) == payload,
+             qPrintable(error));
+    // Signed: footer, zero pad to 8, then the certificate table. Try every alignment.
+    for (int extra = 0; extra < 9; ++extra) {
+        const QByteArray p = payload + QByteArray(extra, 'x');
+        QVERIFY2(fixtureExtract(fixtureSigned(p), &error) == p, qPrintable(error));
+    }
+    // Explicit pad lengths 0..7 and a large table.
+    for (int pad = 0; pad < 8; ++pad)
+        QVERIFY2(fixtureExtract(fixtureSigned(payload, 4096, pad), &error) == payload,
+                 qPrintable(error));
+    // Pad of 8 or more is not something a signer produces: reject.
+    QVERIFY(fixtureExtract(fixtureSigned(payload, 64, 8), &error).isEmpty());
+    // Non-zero bytes between footer and table: reject.
+    {
+        QByteArray f = fixtureSigned(payload, 64, 3);
+        f[0x200 + payload.size() + 48 + 1] = 'Z';
+        QVERIFY(fixtureExtract(f, &error).isEmpty());
+    }
+    // Signed file with no footer before the table: reject, even when the table itself
+    // ends in a complete footer (the footer must precede the table, not sit in it).
+    {
+        QByteArray table(56, 'T');
+        table += fixtureFooter(payload);
+        const quint32 off = quint32(0x200 + payload.size());
+        QVERIFY(fixtureExtract(fixturePe(off, quint32(table.size())) + payload + table, &error).isEmpty());
+        QVERIFY(error.contains("footer"));
+    }
+    // A PE with no certificate table but a footer that is not last: reject.
+    QVERIFY(fixtureExtract(fixturePe(0, 0) + payload + fixtureFooter(payload) + QByteArray(8, 'X'),
+                           &error).isEmpty());
+    // Fewer than five data directories: no certificate table is declared.
+    QVERIFY(fixtureExtract(fixturePe(0, 0, 4) + payload + fixtureFooter(payload), &error) == payload);
+    // Certificate table declared inconsistently: ends before EOF, runs past EOF,
+    // starts past EOF, zero size with a footer that is not last, starts inside the image.
+    {
+        const QByteArray ok = fixtureSigned(payload, 64, 0);
+        const quint32 off = quint32(0x200 + payload.size() + 48);
+        QVERIFY(fixtureExtract(fixturePe(off, 32) + ok.mid(0x200), &error).isEmpty());
+        QVERIFY(error.contains("certificate"));
+        QVERIFY(fixtureExtract(fixturePe(off, 128) + ok.mid(0x200), &error).isEmpty());
+        QVERIFY(fixtureExtract(fixturePe(off + 4096, 64) + ok.mid(0x200), &error).isEmpty());
+        QVERIFY(fixtureExtract(fixturePe(off, 0) + ok.mid(0x200), &error).isEmpty());
+        QVERIFY(fixtureExtract(fixturePe(0x100, quint32(ok.size() - 0x100)) + ok.mid(0x200), &error).isEmpty());
+    }
+    // Truncations: every cut inside the footer and the certificate table, both layouts.
+    {
+        const QByteArray unsignedBundle = fixturePe(0, 0) + payload + fixtureFooter(payload);
+        for (int cut = 1; cut <= 60; ++cut)
+            QVERIFY(fixtureExtract(unsignedBundle.left(unsignedBundle.size() - cut), &error).isEmpty());
+        const QByteArray signedBundle = fixtureSigned(payload);
+        for (int cut = 1; cut <= 70; ++cut)
+            QVERIFY(fixtureExtract(signedBundle.left(signedBundle.size() - cut), &error).isEmpty());
+        QVERIFY(fixtureExtract(QByteArray("MZ"), &error).isEmpty());
+        QVERIFY(fixtureExtract(fixturePe(0, 0).left(100), &error).isEmpty());
+        QVERIFY(fixtureExtract(QByteArray(), &error).isEmpty());
+    }
+    // Wrong hash, in both layouts.
+    {
+        const QByteArray wrong = QCryptographicHash::hash("other", QCryptographicHash::Sha256);
+        QVERIFY(fixtureExtract(fixturePe(0, 0) + payload + fixtureFooter(payload, -1, wrong), &error).isEmpty());
+        QVERIFY(error.contains("hash mismatch"));
+        QVERIFY(fixtureExtract(fixtureSigned(payload, 64, -1, fixtureFooter(payload, -1, wrong)), &error).isEmpty());
+        QVERIFY(error.contains("hash mismatch"));
+        QByteArray flipped = fixtureSigned(payload);
+        flipped[0x200 + 17] = char(flipped.at(0x200 + 17) ^ 1);
+        QVERIFY(fixtureExtract(flipped, &error).isEmpty());
+        QVERIFY(error.contains("hash mismatch"));
+    }
+    // Wrong lengths: zero, past the file, past the room after the image (would overlap
+    // the PE headers), 2^64-1, over the 512 MiB limit. A shorter one is a hash error.
+    {
+        const QByteArray head = fixturePe(0, 0);
+        const QList<QByteArray> bad = {
+            le(0, 8), le(quint64(payload.size() + 1), 8), le(quint64(payload.size() + 0x200), 8),
+            QByteArray(8, char(0xff)), le(quint64(1) << 30, 8)};
+        for (const QByteArray& raw : bad) {
+            const QByteArray foot = fixtureFooter(payload, -1, QByteArray(), raw);
+            QVERIFY(fixtureExtract(head + payload + foot, &error).isEmpty());
+            QVERIFY2(error.contains("length"), qPrintable(error));
+            QVERIFY(fixtureExtract(fixtureSigned(payload, 64, -1, foot), &error).isEmpty());
+            QVERIFY2(error.contains("length"), qPrintable(error));
+        }
+        QVERIFY(fixtureExtract(head + payload + fixtureFooter(payload, payload.size() - 1), &error).isEmpty());
+        QVERIFY(error.contains("hash mismatch"));
+        // A length that exactly fills the room up to the image end is legal.
+        QVERIFY2(fixtureExtract(head + payload + fixtureFooter(payload), &error) == payload,
+                 qPrintable(error));
+    }
+    // The footer magic inside the daemon bytes, even a complete decoy footer at the end
+    // of the daemon, must not confuse the locator: only the last footer counts.
+    {
+        const QByteArray tricky = payload.left(1000) + fixtureFooter("decoy") + payload.mid(1000) +
+                                  "ZQWDMON1" + fixtureFooter("other-decoy");
+        QVERIFY2(fixtureExtract(fixturePe(0, 0) + tricky + fixtureFooter(tricky), &error) == tricky,
+                 qPrintable(error));
+        QVERIFY2(fixtureExtract(fixtureSigned(tricky, 64, -1), &error) == tricky, qPrintable(error));
+        QVERIFY2(fixtureExtract(tricky + fixtureFooter(tricky), &error) == tricky, qPrintable(error));
+    }
+    // Non-PE inputs (ELF, Mach-O, plain data) keep the end-of-file rule only.
+    {
+        const QByteArray elf = QByteArray("\x7f" "ELF") + QByteArray(100, 'e');
+        QVERIFY(fixtureExtract(elf + payload + fixtureFooter(payload), &error) == payload);
+        QVERIFY(fixtureExtract(elf + payload + fixtureFooter(payload) + QByteArray(8, '\0'), &error).isEmpty());
+    }
+    // A length that reaches back before offset 0 on a non-PE file.
+    QVERIFY(fixtureExtract(fixtureFooter("abc", 10000), &error).isEmpty());
+}
+
+void TestLogic::embeddedDaemon_pinsLaunchedFile() {
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    // This very test executable is the "daemon": a real program that exits 0 for
+    // -help, so a pinned file must still be launchable.
+    QFile self(QCoreApplication::applicationFilePath());
+    QVERIFY(self.open(QIODevice::ReadOnly));
+    const QByteArray bytes = self.readAll();
+    self.close();
+    const QString hex = QString::fromLatin1(
+        QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+    const QString dir = QDir(temp.path()).filePath("zclassic-node/" + hex);
+    QVERIFY(QDir().mkpath(dir));
+#ifdef Q_OS_WIN
+    const QString program = QDir(dir).filePath("zqw-zclassicd.exe");
+#else
+    const QString program = QDir(dir).filePath("zqw-zclassicd");
+    const auto ownerOnly = QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner;
+    QVERIFY(QFile::setPermissions(QDir(temp.path()).filePath("zclassic-node"), ownerOnly));
+    QVERIFY(QFile::setPermissions(dir, ownerOnly));
+#endif
+    auto write = [](const QString& path, const QByteArray& data) {
+        QFile f(path);
+        return f.open(QIODevice::WriteOnly) && f.write(data) == data.size();
+    };
+    QVERIFY(write(program, bytes));
+#ifndef Q_OS_WIN
+    QVERIFY(QFile::setPermissions(program, ownerOnly));
+#endif
+    // Not in the cache: nothing to pin.
+    {
+        EmbeddedDaemonPin outside(QCoreApplication::applicationFilePath(), temp.path());
+        QCOMPARE(outside.status(), EmbeddedDaemonPin::NotCached);
+        EmbeddedDaemonPin empty(QString(), temp.path());
+        QCOMPARE(empty.status(), EmbeddedDaemonPin::NotCached);
+    }
+    // Verified and held: the same file can be launched while pinned.
+    {
+        EmbeddedDaemonPin pin(program, temp.path());
+        QVERIFY2(pin.status() == EmbeddedDaemonPin::Pinned, qPrintable(pin.error()));
+#ifdef Q_OS_WIN
+        // The check-to-launch window is closed: no write, delete or rename of the file
+        // or of the directory holding it while the pin is alive.
+        QFile writer(program);
+        QVERIFY(!writer.open(QIODevice::WriteOnly | QIODevice::Append));
+        QVERIFY(!QFile::remove(program));
+        QVERIFY(!QFile::rename(program, program + ".moved"));
+        QVERIFY(!QDir().rename(dir, dir + "-moved"));
+        QVERIFY(QFileInfo::exists(program));
+#endif
+        QProcess process;
+        process.start(program, {QStringLiteral("-help")});
+        QVERIFY(process.waitForStarted(15000));
+        QVERIFY(process.waitForFinished(30000));
+    }
+    // Released: the file can be replaced again, and a swapped file is refused.
+    QVERIFY(write(program, QByteArray(bytes.size(), 'x')));
+    {
+        EmbeddedDaemonPin pin(program, temp.path());
+        QCOMPARE(pin.status(), EmbeddedDaemonPin::Failed);
+        QVERIFY(pin.error().contains("hash mismatch"));
+    }
+    // Same size, one byte changed: refused.
+    {
+        QByteArray changed = bytes;
+        changed[changed.size() / 2] = char(changed.at(changed.size() / 2) ^ 1);
+        QVERIFY(write(program, changed));
+        QCOMPARE(EmbeddedDaemonPin(program, temp.path()).status(), EmbeddedDaemonPin::Failed);
+    }
+    // Missing file and a non-content-addressed directory: refused, never launched.
+    QVERIFY(QFile::remove(program));
+    {
+        QCOMPARE(EmbeddedDaemonPin(program, temp.path()).status(), EmbeddedDaemonPin::Failed);
+        const QString bad = QDir(temp.path()).filePath("zclassic-node/not-a-digest");
+        QVERIFY(QDir().mkpath(bad));
+        QVERIFY(write(QDir(bad).filePath("zqw-zclassicd"), bytes));
+        QCOMPARE(EmbeddedDaemonPin(QDir(bad).filePath("zqw-zclassicd"), temp.path()).status(),
+                 EmbeddedDaemonPin::Failed);
+    }
+#ifndef Q_OS_WIN
+    // POSIX: a group-writable program, a symbolic link or a group-writable directory
+    // is refused.
+    QVERIFY(write(program, bytes));
+    QVERIFY(QFile::setPermissions(program, ownerOnly | QFileDevice::WriteGroup));
+    QCOMPARE(EmbeddedDaemonPin(program, temp.path()).status(), EmbeddedDaemonPin::Failed);
+    QVERIFY(QFile::remove(program));
+    QVERIFY(write(QDir(temp.path()).filePath("real"), bytes));
+    QVERIFY(QFile::link(QDir(temp.path()).filePath("real"), program));
+    QCOMPARE(EmbeddedDaemonPin(program, temp.path()).status(), EmbeddedDaemonPin::Failed);
+    QVERIFY(QFile::remove(program));
+    QVERIFY(write(program, bytes));
+    QVERIFY(QFile::setPermissions(program, ownerOnly));
+    QVERIFY(QFile::setPermissions(dir, ownerOnly | QFileDevice::WriteGroup));
+    QCOMPARE(EmbeddedDaemonPin(program, temp.path()).status(), EmbeddedDaemonPin::Failed);
+#endif
+}
+
+// Malformed or hostile PE headers in the bundle: every damaged header is refused with
+// an error (never read out of bounds, never treated as "no certificate"), section
+// sizes cannot overflow, the daemon may not overlap the PE image, and the PE32
+// optional-header layout is located like PE32+.
+void TestLogic::embeddedDaemon_malformedPe() {
+    QByteArray payload;
+    for (int i = 0; i < 3000; ++i) payload += char((i * 13 + 5) & 255);
+    const QByteArray foot = fixtureFooter(payload);
+    QString error;
+    auto patched = [](QByteArray h, int offset, quint64 value, int bytes) {
+        h.replace(offset, bytes, le(value, bytes));
+        return h;
+    };
+    const int opt = 0x58, sect = 0x58 + 240;
+    // Unknown optional-header magic, optional header too small, PE32+ magic with a
+    // header too small for its data directories, too many sections.
+    for (const QByteArray& h : {patched(fixturePe(0, 0), opt, 0x10c, 2),
+                                patched(fixturePe(0, 0), 0x54, 64, 2),
+                                patched(fixturePe(0, 0), 0x54, 100, 2),
+                                patched(fixturePe(0, 0), 0x46, 97, 2)}) {
+        QVERIFY(fixtureExtract(h + payload + foot, &error).isEmpty());
+        QVERIFY2(error.contains("Malformed PE"), qPrintable(error));
+    }
+    // Section table runs past the end of the file.
+    QVERIFY(fixtureExtract(patched(fixturePe(0, 0), 0x46, 96, 2), &error).isEmpty());
+    QVERIFY2(error.contains("Malformed PE"), qPrintable(error));
+    // A section whose raw data covers the daemon: the daemon would overlap the image.
+    {
+        QByteArray h = patched(fixturePe(0, 0), 0x46, 1, 2);
+        h = patched(h, sect + 20, 0x200, 4);                       // PointerToRawData
+        h = patched(h, sect + 16, quint64(payload.size()), 4);     // SizeOfRawData
+        QVERIFY(fixtureExtract(h + payload + foot, &error).isEmpty());
+        QVERIFY2(error.contains("length"), qPrintable(error));
+        // The same section ending exactly where the daemon starts is fine.
+        h = patched(h, sect + 16, 0, 4);
+        QVERIFY2(fixtureExtract(h + payload + foot, &error) == payload, qPrintable(error));
+    }
+    // Pointer + size that would overflow 32 bits: no wrap-around, refused.
+    {
+        QByteArray h = patched(fixturePe(0, 0), 0x46, 1, 2);
+        h = patched(h, sect + 20, 0xffffffffu, 4);
+        h = patched(h, sect + 16, 0xffffffffu, 4);
+        QVERIFY(fixtureExtract(h + payload + foot, &error).isEmpty());
+        QVERIFY2(error.contains("length"), qPrintable(error));
+        const QByteArray ok = fixtureSigned(payload);
+        QByteArray s = patched(ok.left(0x200), 0x46, 1, 2);
+        s = patched(s, sect + 20, 0xffffffffu, 4);
+        s = patched(s, sect + 16, 0xffffffffu, 4);
+        QVERIFY(fixtureExtract(s + ok.mid(0x200), &error).isEmpty());
+        QVERIFY2(error.contains("certificate"), qPrintable(error));
+    }
+    // A certificate table that starts inside a section is inconsistent.
+    {
+        const QByteArray ok = fixtureSigned(payload, 64);
+        const quint32 tableOffset = quint32(le32(ok, opt + 112 + 32));
+        QByteArray h = patched(ok.left(0x200), 0x46, 1, 2);
+        h = patched(h, sect + 20, 0x200, 4);
+        h = patched(h, sect + 16, tableOffset - 0x200 + 8, 4);
+        QVERIFY(fixtureExtract(h + ok.mid(0x200), &error).isEmpty());
+        QVERIFY2(error.contains("certificate"), qPrintable(error));
+    }
+    // A security directory beyond NumberOfRvaAndSizes is ignored: the end-of-file rule
+    // applies, so a signed layout is refused and an unsigned one accepted.
+    {
+        const QByteArray ok = fixtureSigned(payload, 64);
+        QVERIFY(fixtureExtract(patched(ok.left(0x200), opt + 108, 4, 4) + ok.mid(0x200), &error).isEmpty());
+        QVERIFY(fixtureExtract(fixturePe(0x400, 64, 4) + payload + foot, &error) == payload);
+    }
+    // e_lfanew far past the end of the file: not a PE, end-of-file rule, no crash.
+    QVERIFY(fixtureExtract(patched(fixturePe(0, 0), 0x3c, 0xfffffff0u, 4) + payload + foot, &error) == payload);
+    // PE32 (magic 0x10b): data directories start at 96, the count at 92.
+    {
+        const QByteArray ok = fixtureSigned(payload, 64);
+        const quint64 tableOffset = le32(ok, opt + 112 + 32), tableSize = le32(ok, opt + 112 + 36);
+        QByteArray h(0x200, 0);
+        h.replace(0, opt, ok.left(opt));
+        h = patched(h, 0x54, 224, 2);
+        h = patched(h, opt, 0x10b, 2);
+        h = patched(h, opt + 60, 0x200, 4);
+        h = patched(h, opt + 92, 16, 4);
+        h = patched(h, opt + 96 + 32, tableOffset, 4);
+        h = patched(h, opt + 96 + 36, tableSize, 4);
+        QVERIFY2(fixtureExtract(h + ok.mid(0x200), &error) == payload, qPrintable(error));
+        QVERIFY(fixtureExtract(patched(h, opt + 96 + 36, tableSize + 8, 4) + ok.mid(0x200), &error).isEmpty());
+    }
+}
+
 void TestLogic::sentTxStore_invalidHistoryPreserved() {
     Settings::getInstance()->setTestnet(false);
     QSettings().setValue("options/savesenttx", true);
@@ -1436,6 +1833,7 @@ void TestLogic::longWarmupPhase_data() {
     QTest::newRow("loading index")   << QString("Loading block index...") << true;
     QTest::newRow("rescanning")      << QString("Rescanning... 42%")      << true;
     QTest::newRow("upgrading")       << QString("Upgrading database")     << true;
+    QTest::newRow("reindexing")      << QString("Reindexing the block database: the block index is empty...") << true;
     QTest::newRow("case insens")     << QString("REWINDING blocks")       << true;
 }
 
@@ -2048,6 +2446,114 @@ void TestLogic::sendgate_staleWhenPollStops() {
     QVERIFY(Settings::syncGateIsStale(now, now - 10 * W));
 }
 
+// First launch: the node binds its RPC port before it writes the auth cookie, so a first
+// request can carry no/older credentials and get a 401 that is NOT a real desync. Only
+// that case is retried; a 401 that carried the current cookie keeps the heal path.
+void TestLogic::cookie_staleRequestIsRetriedNotHealed() {
+    const QString cookie = "__cookie__:AbCd1234";
+    // fresh profile: request went out with empty creds, cookie now exists -> retry
+    QVERIFY(CookieStale::sentCredsAreStale("", "", cookie));
+    // request carried an older cookie, node has since written a new one -> retry
+    QVERIFY(CookieStale::sentCredsAreStale("__cookie__", "OldOld", cookie));
+    // request carried exactly the current cookie: genuine mismatch -> heal path
+    QVERIFY(!CookieStale::sentCredsAreStale("__cookie__", "AbCd1234", cookie));
+    // no cookie on disk: nothing newer to retry with -> heal path as before
+    QVERIFY(!CookieStale::sentCredsAreStale("", "", QString()));
+    QVERIFY(!CookieStale::sentCredsAreStale("zcl-qt-wallet", "secret", QString()));
+    // a cookie value containing ':' is compared whole
+    QVERIFY(!CookieStale::sentCredsAreStale("__cookie__", "a:b", "__cookie__:a:b"));
+}
+
+// The retry is bounded and has memory, so it can never starve the heal (a leftover .cookie
+// from a killed node plus a node that keeps answering 401 must reach the heal, not spin).
+void TestLogic::cookie_retryIsBoundedAndNeverForConfCredentials() {
+    using CookieStale::shouldRetry;
+    CookieStale::RetryState st;
+    // conf rpcuser/rpcpassword (not from the cookie path) + a different cookie on disk:
+    // the first 401 falls through to the heal and nothing is remembered
+    QVERIFY(!shouldRetry(false, "zcl-qt-wallet", "confpass", "__cookie__:Leftover", st));
+    QCOMPARE(st.retries, 0);
+    // empty credentials (cookie not yet written when the request went out): retried once
+    QVERIFY(shouldRetry(false, "", "", "__cookie__:First", st));
+    QCOMPARE(st.retries, 1);
+    // the retry carried that cookie (cookie auth) and still got 401: unchanged cookie -> heal
+    QVERIFY(!shouldRetry(true, "__cookie__", "First", "__cookie__:First", st));
+    // the request carried an older cookie than the one on disk, but that very cookie was
+    // already retried against: heal, no loop
+    QVERIFY(!shouldRetry(true, "__cookie__", "Old", "__cookie__:First", st));
+    // a genuinely newer cookie (node restarted again) is retried once more...
+    QVERIFY(shouldRetry(true, "__cookie__", "First", "__cookie__:Second", st));
+    QCOMPARE(st.retries, 2);
+    // ...but the hard cap is two retries per loader
+    QVERIFY(!shouldRetry(true, "__cookie__", "Second", "__cookie__:Third", st));
+    QCOMPARE(st.retries, CookieStale::kMaxRetries);
+    // no cookie on disk: never a retry
+    CookieStale::RetryState fresh;
+    QVERIFY(!shouldRetry(false, "", "", QString(), fresh));
+    // the state keeps only a hash, never the cookie
+    QCOMPARE(st.lastHash.size(), 32);
+}
+
+// The profile-folder message box is skipped where it would abort or block forever.
+void TestLogic::profilefailure_boxIsSkippedWhereItCouldAbortOrBlock() {
+    using ProfileFailure::boxPossible;
+    QVERIFY(!boxPossible("offscreen", ":0", true, true));
+    QVERIFY(!boxPossible("offscreen:fontdir=/x", ":0", true, true));
+    QVERIFY(!boxPossible("minimal", ":0", true, true));
+    QVERIFY(!boxPossible("", ":99", false, true));        // DISPLAY set but no X socket: would abort (134)
+    QVERIFY(!boxPossible("", "", false, true));           // no DISPLAY
+    QVERIFY(!boxPossible("", "remote:0", true, true));    // not a local display: do not risk it
+    QVERIFY(boxPossible("", ":0", true, true));
+    QVERIFY(boxPossible("xcb", ":1.0", true, true));
+    QVERIFY(boxPossible("", QString(), true, false));     // macOS: no display check
+    QVERIFY(!ProfileFailure::x11SocketFor("remote:0"));
+    QVERIFY(!ProfileFailure::x11SocketFor(":notanumber"));
+}
+
+// A bad profile dir must be visible (Windows GUI has no console) but headless modes
+// keep stderr + exit code only; the message names the folder and the remedy, and the
+// helper never creates the directory.
+void TestLogic::profilefailure_headlessModesKeepStderrOnly() {
+    auto headless = [](std::initializer_list<const char*> a) {
+        QList<QByteArray> store; store << "zclwallet";
+        for (const char* s : a) store << s;
+        QVector<char*> v; for (QByteArray& b : store) v << b.data();
+        return ProfileFailure::isHeadlessInvocation(v.size(), v.data());
+    };
+    QVERIFY(!headless({}));
+    QVERIFY(!headless({"--profile-dir", "C:/nope"}));
+    QVERIFY(!headless({"zclassic:t1abc"}));
+    QVERIFY(headless({"--print-profile-paths"}));
+    QVERIFY(headless({"--profile-dir", "x", "--notify", "id"}));
+    QVERIFY(headless({"--headless"}));
+    QVERIFY(headless({"--help"}));
+}
+
+void TestLogic::profilefailure_messageSaysWhatAndWhatToDo() {
+    QTemporaryDir tmp; QVERIFY(tmp.isValid());
+    const QString missing = tmp.filePath("typo-profile");
+    const QString t = ProfileFailure::dialogText(missing);
+    QVERIFY(t.contains(QDir::toNativeSeparators(missing)));
+    QVERIFY(t.contains("does not exist"));
+    QVERIFY(t.contains("Create that folder"));
+    QVERIFY(t.contains("remove"));
+    QVERIFY(ProfileFailure::stderrLine(missing).contains("must name an existing directory"));
+    // set-but-empty is equally visible and says so
+    const QString e = ProfileFailure::dialogText(QString());
+    QVERIFY(e.contains("empty"));
+    QVERIFY(e.contains("existing folder"));
+    // the Qt box carries the text and is an error box
+    std::unique_ptr<QMessageBox> box(ProfileFailure::makeBox(missing));
+    QCOMPARE(box->text(), t);
+    QCOMPARE(box->icon(), QMessageBox::Critical);
+    // nothing was created
+    QVERIFY(!QFileInfo::exists(missing));
+    qputenv("ZCLWALLET_PROFILE_DIR", missing.toLocal8Bit());
+    QVERIFY(!ProfilePaths::valid());
+    QVERIFY(!QFileInfo::exists(missing));
+    qunsetenv("ZCLWALLET_PROFILE_DIR");
+}
+
 // ---- Profile override (ZCLWALLET_PROFILE_DIR) -------------------------------------
 // Unset => helpers return exactly the pre-override locations; set => every helper
 // resolves inside the profile; settings become IniFormat files inside it.
@@ -2243,6 +2749,355 @@ void TestLogic::daemonjob_armedAfterEveryStart() {
     QCOMPARE(DaemonJob::start(&bad, "Z:/definitely/not/here.exe", {}), 0ul);
     QVERIFY2(DaemonJob::entries().size() <= before, "failed launch must not record a job");
 #endif
+}
+
+
+// ---- send once (src/sendflow.h): the rules that decide what the user is told about a send ----
+
+void TestLogic::sendflow_keysAreValidAndDistinct() {
+    QSet<QString> seen;
+    const QRegularExpression ok("^[A-Za-z0-9._:-]{1,128}$");
+    for (int i = 0; i < 200; ++i) {
+        const QString k = sendflow::newKey();
+        QVERIFY2(ok.match(k).hasMatch(), qPrintable(k));
+        QVERIFY2(k.size() >= 32, "enough entropy: a 128-bit floor needs at least 22 base62 characters");
+        QVERIFY2(!seen.contains(k), "a key must never repeat");
+        seen.insert(k);
+    }
+}
+
+void TestLogic::sendflow_classifyTheAnswerToTheCall() {
+    using sendflow::CallClass;
+    QString msg;
+    // no usable answer at all: may or may not have been queued
+    QCOMPARE(sendflow::classifyCall(nlohmann::json::parse("garbage", nullptr, false), 0, true, &msg), CallClass::Ambiguous);
+    QCOMPARE(sendflow::classifyCall(nlohmann::json("Unknown error"), 0, true, &msg), CallClass::Ambiguous);
+    QCOMPARE(sendflow::classifyCall(nlohmann::json::object(), 502, true, &msg), CallClass::Ambiguous);
+    QCOMPARE(sendflow::classifyCall(nlohmann::json::object(), 503, true, &msg), CallClass::Ambiguous);
+    // the node answered with a JSON-RPC error: nothing was queued
+    nlohmann::json e = {{"result", nullptr}, {"error", {{"code", -6}, {"message", "Insufficient funds"}}}};
+    QCOMPARE(sendflow::classifyCall(e, 500, true, &msg), CallClass::Definitive);
+    QCOMPARE(msg, QString("Insufficient funds"));
+    // the credentials were refused before the call was looked at
+    QCOMPARE(sendflow::classifyCall(nlohmann::json::object(), 401, true, &msg), CallClass::Definitive);
+    QVERIFY(msg.contains("401"));
+    // an older node: its usage text for too many parameters (and only when the key was sent)
+    nlohmann::json old = {{"error", {{"code", -1}, {"message", "z_sendmany \"fromaddress\" [{\"address\":... ,\"amount\":...},...] ( minconf ) ( fee )\n\nSend multiple times."}}}};
+    QCOMPARE(sendflow::classifyCall(old, 500, true, &msg), CallClass::KeyUnsupported);
+    QCOMPARE(sendflow::classifyCall(old, 500, false, &msg), CallClass::Definitive);
+    // a node that knows the key and refuses something else about the call is final, never a reason to drop the key
+    nlohmann::json newer = {{"error", {{"code", -1}, {"message", "z_sendmany \"fromaddress\" ... ( \"idempotency_key\" )\n\nusage"}}}};
+    QCOMPARE(sendflow::classifyCall(newer, 500, true, &msg), CallClass::Definitive);
+    nlohmann::json badKey = {{"error", {{"code", -8}, {"message", "Invalid parameter, idempotency_key must be 1 to 128 characters"}}}};
+    QCOMPARE(sendflow::classifyCall(badKey, 500, true, &msg), CallClass::Definitive);
+    // an error from another call is not the old node's usage text
+    nlohmann::json other = {{"error", {{"code", -4}, {"message", "Wallet is locked"}}}};
+    QCOMPARE(sendflow::classifyCall(other, 500, true, &msg), CallClass::Definitive);
+    // a node that is still starting did not look at the call: a keyed call is asked again; without a key, as before
+    nlohmann::json warm = {{"error", {{"code", -28}, {"message", "Loading block index..."}}}};
+    QCOMPARE(sendflow::classifyCall(warm, 500, true, &msg), CallClass::Ambiguous);
+    QCOMPARE(sendflow::classifyCall(warm, 500, false, &msg), CallClass::Definitive);
+}
+
+void TestLogic::sendflow_retryPaceIsBounded() {
+    QCOMPARE(sendflow::retryDelayMs(1), 1000);
+    QCOMPARE(sendflow::retryDelayMs(2), 2000);
+    QCOMPARE(sendflow::retryDelayMs(3), 4000);
+    QCOMPARE(sendflow::retryDelayMs(4), 8000);
+    QCOMPARE(sendflow::retryDelayMs(5), 15000);
+    QCOMPARE(sendflow::retryDelayMs(500), 15000);
+    QCOMPARE(sendflow::retryDelayMs(0), 1000);
+    QCOMPARE(sendflow::retryDelayMs(3, 20), 80);
+    // the whole window stays far below the time after which a node releases an unmined key (20 blocks past expiry)
+    qint64 total = 0;
+    for (int a = 1; a < sendflow::kMaxSendAttempts; ++a) total += sendflow::retryDelayMs(a);
+    QVERIFY(total < 20 * 60 * 1000);
+}
+
+namespace {
+sendflow::QueueEntry Q(const char* status, const char* txid = "", const char* err = "", bool lastErr = false) {
+    sendflow::QueueEntry q; q.present = true; q.status = status; q.txid = txid; q.error = err; q.hasLastError = lastErr; return q;
+}
+sendflow::JournalEntry J(const char* state, const char* txid = "") {
+    sendflow::JournalEntry j; j.present = true; j.state = state; j.txid = txid; return j;
+}
+}
+
+void TestLogic::sendflow_whatTheUserIsToldAboutAKeyedSend() {
+    using sendflow::State;
+    const sendflow::QueueEntry none;
+    const sendflow::JournalEntry nojournal;
+    // live operation
+    QCOMPARE(sendflow::resolve(true, Q("queued"), false, nojournal).state, State::Sending);
+    QCOMPARE(sendflow::resolve(true, Q("executing"), false, nojournal).state, State::Sending);
+    auto done = sendflow::resolve(true, Q("success", "tx1"), false, nojournal);
+    QCOMPARE(done.state, State::Sent); QCOMPARE(done.txid, QString("tx1"));
+    // the broadcast failed after the build: the journal still holds it
+    auto v = sendflow::resolve(true, Q("failed", "", "refused"), true, J("outcome_unknown", "tx2"));
+    QCOMPARE(v.state, State::Unknown); QCOMPARE(v.txid, QString("tx2"));
+    QVERIFY(v.text.contains("Outcome unknown")); QVERIFY(v.text.contains("will not send again"));
+    // ...and later the journal settles it
+    QCOMPARE(sendflow::resolve(true, Q("failed", "", "refused"), true, J("committed", "tx2")).state, State::Sent);
+    QCOMPARE(sendflow::resolve(true, Q("failed", "", "refused"), true, J("committed", "tx2")).txid, QString("tx2"));
+    auto ex = sendflow::resolve(true, Q("failed", "", "refused"), true, J("expired"));
+    QCOMPARE(ex.state, State::Expired); QVERIFY(ex.text.contains("Funds are available again"));
+    // failed before anything was built: the record is erased, the reason is the node's
+    auto f = sendflow::resolve(true, Q("failed", "", "Insufficient funds"), true, nojournal);
+    QCOMPARE(f.state, State::Failed); QCOMPARE(f.text, QString("Insufficient funds"));
+    auto rel = sendflow::resolve(true, Q("failed", "", "boom"), true, J("released"));
+    QCOMPARE(rel.state, State::Failed); QCOMPARE(rel.text, QString("boom"));
+    // gone from the queue (restart)
+    QCOMPARE(sendflow::resolve(true, none, true, J("committed", "tx3")).state, State::Sent);
+    QCOMPARE(sendflow::resolve(true, none, true, J("outcome_unknown", "tx3")).state, State::Unknown);
+    QCOMPARE(sendflow::resolve(true, none, true, J("expired")).state, State::Expired);
+    QCOMPARE(sendflow::resolve(true, none, true, J("started")).state, State::Sending);
+    QCOMPARE(sendflow::resolve(true, none, true, J("released")).state, State::Failed);
+    auto gone = sendflow::resolve(true, none, true, nojournal);
+    QCOMPARE(gone.state, State::Failed); QVERIFY(gone.text.contains("Nothing was sent"));
+    // the node answers for the id from its journal (built, not in a block or the mempool): the txid rides on it
+    QCOMPARE(sendflow::resolve(true, Q("executing", "tx4", "", true), false, nojournal).state, State::Unknown);
+    QCOMPARE(sendflow::resolve(true, Q("executing", "", "", true), false, nojournal).state, State::Unknown);
+}
+
+void TestLogic::sendflow_anUnkeyedSendOnAnOlderNode() {
+    using sendflow::State;
+    const sendflow::JournalEntry nojournal;
+    QCOMPARE(sendflow::resolve(false, Q("executing"), false, nojournal).state, State::Sending);
+    QCOMPARE(sendflow::resolve(false, Q("success", "tx"), false, nojournal).state, State::Sent);
+    QCOMPARE(sendflow::resolve(false, Q("failed", "", "nope"), false, nojournal).state, State::Failed);
+    // the queue forgot it: the wallet cannot tell, and says so instead of "failed"
+    auto lost = sendflow::resolve(false, sendflow::QueueEntry(), false, nojournal);
+    QCOMPARE(lost.state, State::Lost);
+    QVERIFY(lost.text.contains("Check your transactions before sending again"));
+    // a journal is never consulted for a send that has no key
+    QVERIFY(!sendflow::needsJournal(false, sendflow::QueueEntry(), false));
+    QVERIFY(!sendflow::needsJournal(false, Q("failed"), true));
+}
+
+void TestLogic::sendflow_theJournalIsOnlyAskedWhenItDecides() {
+    QVERIFY(!sendflow::needsJournal(true, Q("executing"), false));
+    QVERIFY(!sendflow::needsJournal(true, Q("success", "tx"), false));
+    QVERIFY(sendflow::needsJournal(true, Q("failed"), false));
+    QVERIFY(sendflow::needsJournal(true, sendflow::QueueEntry(), false));
+    QVERIFY(sendflow::needsJournal(true, Q("executing"), true));      // already of unknown outcome
+}
+
+void TestLogic::sendflow_parseWhatTheNodeSays() {
+    auto q = sendflow::parseQueueEntry(nlohmann::json::parse(
+        R"({"id":"opid-1","status":"success","result":{"txid":"aa"}})"));
+    QVERIFY(q.present); QCOMPARE(q.status, QString("success")); QCOMPARE(q.txid, QString("aa"));
+    auto f = sendflow::parseQueueEntry(nlohmann::json::parse(
+        R"({"id":"opid-1","status":"failed","error":{"code":-4,"message":"boom"}})"));
+    QCOMPARE(f.error, QString("boom"));
+    auto b = sendflow::parseQueueEntry(nlohmann::json::parse(
+        R"({"id":"opid-1","status":"executing","txid":"bb","expiryheight":9,"last_error":{"code":-1,"message":"m"}})"));
+    QCOMPARE(b.txid, QString("bb")); QVERIFY(b.hasLastError);
+    QVERIFY(!sendflow::parseQueueEntry(nlohmann::json("x")).present);
+    QVERIFY(!sendflow::parseJournalEntry(nlohmann::json::array()).present);
+    auto j = sendflow::parseJournalEntry(nlohmann::json::parse(R"({"opid":"o","state":"committed","txid":"cc","stored_state":"committed"})"));
+    QVERIFY(j.present); QCOMPARE(j.state, QString("committed")); QCOMPARE(j.txid, QString("cc"));
+    // wrong types never throw
+    auto w = sendflow::parseQueueEntry(nlohmann::json::parse(R"({"status":5,"result":3,"error":"x"})"));
+    QVERIFY(w.present); QVERIFY(w.status.isEmpty());
+}
+
+void TestLogic::sendflow_ownWordingIsNotRewritten() {
+    for (const QString& s : { sendflow::unknownText(), sendflow::expiredText(), sendflow::lostText(),
+                              sendflow::interruptedText(), sendflow::gaveUpText(), sendflow::oldNodeAmbiguousText() })
+        QVERIFY(sendflow::isFlowText(s));
+    QVERIFY(!sendflow::isFlowText("Insufficient funds"));
+    // none of them invites the user to simply try again, except the ones where nothing was sent
+    QVERIFY(!sendflow::unknownText().contains("try again", Qt::CaseInsensitive));
+    QVERIFY(!sendflow::gaveUpText().contains("try again", Qt::CaseInsensitive));
+    // a refused repeat keeps the node's reason and is never "try again"
+    const QString rr = sendflow::retryRefusedText("Wallet is locked");
+    QVERIFY(sendflow::isFlowText(rr));
+    QVERIFY(rr.contains("Wallet is locked"));
+    QVERIFY(!rr.contains("try again", Qt::CaseInsensitive));
+}
+
+
+// ---- wallet health line (src/wallethealth.h) ----
+
+namespace {
+nlohmann::json healthInfo(nlohmann::json patch = nlohmann::json::object()) {
+    nlohmann::json pool = {{"notes_unspent", 3}, {"notes_spent", 9}, {"witness_ready", 3}, {"witness_missing", 0}, {"witness_stale", 0},
+                           {"unconfirmed", 0}, {"unmined_dead", 0}, {"witnesses_held_unspent", 3}, {"witnesses_held_spent", 0}};
+    nlohmann::json h = {{"tip_height", 2000000}, {"checkpoint_height", 1999990}, {"witness_cache_size", 100},
+                        {"witness_rebuild_pending", false}, {"sapling", pool}, {"sprout", pool},
+                        {"pending_sends", {{"in_mempool", 0}, {"not_in_mempool", 0}, {"expiring_soon", 0}, {"expired", 0}, {"conflicted", 0}}}};
+    for (auto it = patch.begin(); it != patch.end(); ++it) {
+        if (it.key() == "pending_sends") for (auto p = it->begin(); p != it->end(); ++p) h["pending_sends"][p.key()] = p.value();
+        else if (it.key() == "sapling") for (auto p = it->begin(); p != it->end(); ++p) h["sapling"][p.key()] = p.value();
+        else h[it.key()] = it.value();
+    }
+    return {{"walletversion", 60000}, {"balance", 1.5}, {"health", h}};
+}
+}
+
+void TestLogic::health_aHealthyWalletSaysNothing() {
+    QVERIFY(!wallethealth::assess(healthInfo(), true).any());
+    QVERIFY(!wallethealth::assess(healthInfo(), false).any());
+    // a normal pending send (in the mempool) is not a concern
+    QVERIFY(!wallethealth::assess(healthInfo({{"pending_sends", {{"in_mempool", 2}}}}), true).any());
+    // a checkpoint that has not been written yet
+    QVERIFY(!wallethealth::assess(healthInfo({{"checkpoint_height", -1}}), true).any());
+    // an older node has no health object; garbage never throws
+    QVERIFY(!wallethealth::assess(nlohmann::json{{"balance", 1.0}}, true).any());
+    QVERIFY(!wallethealth::assess(nlohmann::json::array(), true).any());
+    QVERIFY(!wallethealth::assess(nlohmann::json(), true).any());
+    QVERIFY(!wallethealth::assess(nlohmann::json{{"health", "oops"}}, true).any());
+    QVERIFY(!wallethealth::assess(nlohmann::json{{"health", {{"sapling", 3}, {"pending_sends", "x"}, {"tip_height", "high"}}}}, true).any());
+}
+
+void TestLogic::health_eachAttentionStateIsReported() {
+    auto one = [](nlohmann::json patch, bool synced, const char* needle) {
+        const auto r = wallethealth::assess(healthInfo(patch), synced);
+        return r.lines.size() == 1 && r.lines[0].contains(needle);
+    };
+    QVERIFY(one({{"witness_rebuild_pending", true}}, true, "being rebuilt"));
+    QVERIFY(one({{"witness_rebuild_pending", true}}, false, "being rebuilt"));          // also while catching up
+    QVERIFY(one({{"sapling", {{"witness_missing", 2}}}}, true, "2 shielded note(s) cannot be spent yet"));
+    QVERIFY(one({{"checkpoint_height", 1998000}}, true, "2000 blocks ago"));
+    QVERIFY(one({{"checkpoint_failed", true}, {"checkpoint_failures", 1}}, true, "could not be saved"));
+    // pinned: the line is part of the synced block, so it is silent while the node still catches up
+    QVERIFY(!wallethealth::assess(healthInfo({{"checkpoint_failed", true}}), false).any());
+    // a failed write is reported once, not together with the lag it causes
+    QVERIFY(one({{"checkpoint_failed", true}, {"checkpoint_height", 1998000}}, true, "could not be saved"));
+    QVERIFY(one({{"pending_sends", {{"not_in_mempool", 1}}}}, true, "not in the node's mempool"));
+    QVERIFY(one({{"pending_sends", {{"expiring_soon", 3}}}}, true, "will expire within a few blocks"));
+    QVERIFY(one({{"pending_sends", {{"expired", 1}}}}, true, "funds are back in your balance") ||
+            one({{"pending_sends", {{"expired", 1}}}}, true, "back in your balance"));
+    QVERIFY(one({{"pending_sends", {{"conflicted", 4}}}}, true, "will never confirm"));
+    // the boundary: exactly the lag is fine, one block more is not
+    QVERIFY(!wallethealth::assess(healthInfo({{"checkpoint_height", 2000000 - wallethealth::kCheckpointLagBlocks}}), true).any());
+    QVERIFY(wallethealth::assess(healthInfo({{"checkpoint_height", 2000000 - wallethealth::kCheckpointLagBlocks - 1}}), true).any());
+    // while the node is still catching up the checkpoint and the proofs are legitimately behind: no noise
+    QVERIFY(!wallethealth::assess(healthInfo({{"checkpoint_height", 1000}}), false).any());
+    QVERIFY(!wallethealth::assess(healthInfo({{"sapling", {{"witness_missing", 7}}}}), false).any());
+    // several at once: one line each, one summary
+    const auto many = wallethealth::assess(healthInfo({{"witness_rebuild_pending", true}, {"pending_sends", {{"expired", 1}, {"conflicted", 1}}}}), true);
+    QCOMPARE(many.lines.size(), 3);
+    QVERIFY(many.summary().contains("3"));
+    QVERIFY(many.tooltip().contains("being rebuilt") && many.tooltip().contains("never confirm"));
+}
+
+
+// The first getinfo of a launch is skipped only when its refusal is certain.
+static int g_portFreeCalls = 0;
+static int g_confReads = 0;
+static bool fakePortFree(quint16) { ++g_portFreeCalls; return true; }
+static bool fakePortBusy(quint16) { ++g_portFreeCalls; return false; }
+static bool fakeConfPlain(const QString&) { ++g_confReads; return false; }
+static bool fakeConfNamesRpc(const QString&) { ++g_confReads; return true; }
+
+static LaunchProbe::ProbeInputs probeInputs(bool useEmbedded, bool externalDaemon, bool nodeSpawned,
+                                            const QString& host, const QString& port)
+{
+    return {useEmbedded, externalDaemon, nodeSpawned, host, port, []() { return QStringLiteral("zclassic.conf"); }};
+}
+
+void TestLogic::launchProbe_skipInitialProbe() {
+    using LaunchProbe::skipInitialProbe;
+    const QString lo = QStringLiteral("127.0.0.1");
+    const auto ok = probeInputs(true, false, false, lo, "8023");
+    QVERIFY(skipInitialProbe(ok, true, fakePortFree, fakeConfPlain));
+    QVERIFY(!skipInitialProbe(ok, true, fakePortBusy, fakeConfPlain));
+    // A conf with rpcallowip or rpcbind (the node then binds 0.0.0.0 / [::]) never
+    // skips, and the port is not even bound.
+    g_portFreeCalls = 0;
+    QVERIFY(!skipInitialProbe(ok, true, fakePortFree, fakeConfNamesRpc));
+    QCOMPARE(g_portFreeCalls, 0);
+    // Off Windows the probe always runs: no conf read, no bind.
+    g_portFreeCalls = 0; g_confReads = 0;
+    QVERIFY(!skipInitialProbe(ok, false, fakePortFree, fakeConfPlain));
+    // Every other condition keeps the probe, and neither reads the conf nor binds the port.
+    QVERIFY(!skipInitialProbe(probeInputs(false, false, false, lo, "8023"), true, fakePortFree, fakeConfPlain)); // external node mode
+    QVERIFY(!skipInitialProbe(probeInputs(true, true, false, lo, "8023"), true, fakePortFree, fakeConfPlain));   // conf names a daemon
+    QVERIFY(!skipInitialProbe(probeInputs(true, false, true, lo, "8023"), true, fakePortFree, fakeConfPlain));   // node already spawned
+    QVERIFY(!skipInitialProbe(probeInputs(true, false, false, "localhost", "8023"), true, fakePortFree, fakeConfPlain));
+    QVERIFY(!skipInitialProbe(probeInputs(true, false, false, "192.168.1.5", "8023"), true, fakePortFree, fakeConfPlain));
+    QVERIFY(!skipInitialProbe(probeInputs(true, false, false, lo, ""), true, fakePortFree, fakeConfPlain));
+    QVERIFY(!skipInitialProbe(probeInputs(true, false, false, lo, "0"), true, fakePortFree, fakeConfPlain));
+    QVERIFY(!skipInitialProbe(probeInputs(true, false, false, lo, "65536"), true, fakePortFree, fakeConfPlain));
+    QVERIFY(!skipInitialProbe(probeInputs(true, false, false, lo, "80x"), true, fakePortFree, fakeConfPlain));
+    QCOMPARE(g_portFreeCalls, 0);
+    QCOMPARE(g_confReads, 0);
+    // The default platform flag is Windows-only.
+#ifdef Q_OS_WIN
+    QVERIFY(LaunchProbe::kSkipSupported);
+#else
+    QVERIFY(!LaunchProbe::kSkipSupported);
+    QVERIFY(!skipInitialProbe(ok));
+#endif
+}
+
+void TestLogic::launchProbe_confNamesRpcNetwork() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    auto conf = [&](const QString& name, const QByteArray& body) {
+        const QString path = dir.filePath(name);
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly)) return QString();
+        f.write(body);
+        return path;
+    };
+    using LaunchProbe::confNamesRpcNetwork;
+    QVERIFY(!confNamesRpcNetwork(conf("plain.conf", "server=1\nrpcport=8023\n# rpcallowip=0.0.0.0/0\n#rpcbind=0.0.0.0\n")));
+    QVERIFY(confNamesRpcNetwork(conf("allow.conf", "server=1\nrpcallowip=192.168.1.0/24\n")));
+    QVERIFY(confNamesRpcNetwork(conf("bind.conf", "  rpcbind = 0.0.0.0\r\n")));
+    QVERIFY(!confNamesRpcNetwork(conf("other.conf", "rpcallowipx=1\nmyrpcbind=1\n")));
+    // Doubt keeps the probe: no conf path, or a conf that cannot be read.
+    QVERIFY(confNamesRpcNetwork(QString()));
+    QVERIFY(confNamesRpcNetwork(dir.filePath("missing.conf")));
+}
+
+void TestLogic::launchProbe_loopbackPortFree() {
+    // Listeners of every shape a node can open: loopback (its default), IPv4 any and
+    // the dual-stack any (rpcallowip without rpcbind). Each must make the port busy.
+    // Off Windows the answer is always "not free", so the probe always runs there.
+    const QHostAddress shapes[] = {QHostAddress(QHostAddress::LocalHost),
+                                   QHostAddress(QHostAddress::AnyIPv4),
+                                   QHostAddress(QHostAddress::Any)};
+    for (const QHostAddress& shape : shapes) {
+        QTcpServer server;
+        QVERIFY2(server.listen(shape, 0), qPrintable(shape.toString()));
+        const quint16 port = server.serverPort();
+        QVERIFY(!LaunchProbe::loopbackPortFree(port));
+        QVERIFY(!LaunchProbe::skipInitialProbe(probeInputs(true, false, false, "127.0.0.1", QString::number(port)),
+                                               LaunchProbe::kSkipSupported, LaunchProbe::loopbackPortFree, fakeConfPlain));
+        server.close();
+#ifdef Q_OS_WIN
+        QVERIFY(LaunchProbe::loopbackPortFree(port));
+        QVERIFY(LaunchProbe::loopbackPortFree(port)); // the probe released the port again
+#else
+        QVERIFY(!LaunchProbe::loopbackPortFree(port));
+#endif
+    }
+    QVERIFY(!LaunchProbe::loopbackPortFree(0));
+}
+
+void TestLogic::launchProbe_every() {
+    LaunchProbe::Every every;
+    int runs = 0;
+    QVERIFY(every.run(1000, [&]() { ++runs; }));
+    QVERIFY(!every.run(1000, [&]() { ++runs; }));
+    QVERIFY(!every.run(1000, [&]() { ++runs; }));
+    QCOMPARE(runs, 1);
+    QTest::qWait(30);
+    QVERIFY(every.run(20, [&]() { ++runs; }));
+    QCOMPARE(runs, 2);
+}
+
+
+void TestLogic::launchProbe_warmupPollMs() {
+    QCOMPARE(LaunchProbe::warmupPollMs(0), 100);
+    QCOMPARE(LaunchProbe::warmupPollMs(1999), 100);
+    QCOMPARE(LaunchProbe::warmupPollMs(2000), 250);
+    QCOMPARE(LaunchProbe::warmupPollMs(29999), 250);
+    QCOMPARE(LaunchProbe::warmupPollMs(30000), 1000);
+    QCOMPARE(LaunchProbe::warmupPollMs(600000), 1000);
+    QCOMPARE(LaunchProbe::warmupPollMs(-1), 1000);   // unknown spawn time: the long interval
 }
 
 QTEST_MAIN(TestLogic)

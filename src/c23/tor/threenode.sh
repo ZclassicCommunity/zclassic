@@ -212,7 +212,7 @@ height_is cli_c 8 300; check $? "C: followed to height $(cli_c getblockcount)"
 # Nobody was banned and nobody was refused as "local".
 for n in A B C; do
     d=$A; [ $n = B ] && d=$B; [ $n = C ] && d=$C
-    ! grep -qi 'banned\|Warning: not banning' "$d/regtest/debug.log"
+    ! grep -i 'banned\|Warning: not banning' "$d/regtest/debug.log" | grep -qv 'Loaded 0 banned node'
     check $? "$n: no ban line in debug.log"
 done
 [ "$(cli_c listbanned | grep -c '"address"')" = 0 ]; check $? "C: ban list empty"

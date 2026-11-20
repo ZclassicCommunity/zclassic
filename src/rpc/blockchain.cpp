@@ -119,7 +119,10 @@ UniValue blockheaderToJSON(const CBlockIndex* blockindex)
     result.push_back(Pair("finalsaplingroot", blockindex->hashFinalSaplingRoot.GetHex()));
     result.push_back(Pair("time", (int64_t)blockindex->nTime));
     result.push_back(Pair("nonce", blockindex->nNonce.GetHex()));
-    result.push_back(Pair("solution", HexStr(blockindex->nSolution)));
+    std::vector<unsigned char> solution;
+    if (!blockindex->GetSolution(solution))
+        throw JSONRPCError(RPC_DATABASE_ERROR, "Block index solution unavailable for " + blockindex->GetBlockHash().GetHex());
+    result.push_back(Pair("solution", HexStr(solution)));
     result.push_back(Pair("bits", strprintf("%08x", blockindex->nBits)));
     result.push_back(Pair("difficulty", GetDifficulty(blockindex)));
     result.push_back(Pair("chainwork", blockindex->nChainWork.GetHex()));
@@ -759,6 +762,8 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
             "  \"headers\": xxxxxx,        (numeric) the current number of headers we have validated\n"
             "  \"initialblockdownload\": true|false, (boolean) whether the node considers itself in initial block download\n"
             "  \"syncphase\": \"xxxx\",  (string) synced|waiting_for_peers|downloading_headers|downloading_blocks|reindexing|importing\n"
+            "  \"reindexing\": true|false,  (boolean) the block index and chain state are being rebuilt from the block files\n"
+            "  \"reindexreason\": \"...\",  (string) why, when reindexing\n"
             "  \"connections\": n,        (numeric) number of peer connections\n"
             "  \"bestblockhash\": \"...\", (string) the hash of the currently best block\n"
             "  \"mediantime\" : ttt,       (numeric) The median block time of the current best block\n"
@@ -851,6 +856,8 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
         obj.push_back(Pair("syncphase", std::string(ClassifySyncPhase(fIBD, fReindex, fImporting, nConnections,
                                                                        (int)chainActive.Height(), nEstimatedHeight))));
         obj.push_back(Pair("connections", nConnections));
+        obj.push_back(Pair("reindexing", fReindex));
+        obj.push_back(Pair("reindexreason", fReindex ? strReindexReason : std::string()));
     }
     obj.push_back(Pair("bestblockhash",         chainActive.Tip()->GetBlockHash().GetHex()));
     obj.push_back(Pair("mediantime",            (int64_t)chainActive.Tip()->GetMedianTimePast()));
@@ -1348,6 +1355,11 @@ UniValue getbootstrapinfo(const UniValue& params, bool fHelp)
             "  \"mode\": \"xxx\",             (string) \"anchor\" or \"trustless\"\n"
             "  \"snapshot_version\": n,      (numeric) snapshot manifest version (1|2|3), 0 if unknown\n"
             "  \"reason\": \"xxx\",            (string) why skipped/failed (\"\" otherwise)\n"
+            "  \"servers_in_use\": n,        (numeric, only when several servers are used) servers with streams now\n"
+            "  \"servers\": [                (array, only when several servers are used) one object per server:\n"
+            "    {\"peer\": \"host:port\", \"streams\": n, \"mbps\": x.x, \"bytes_received\": n,\n"
+            "     \"state\": \"ok\"|\"shared_files\"|\"different_snapshot\"|\"banned\"}\n"
+            "  ],\n"
             "  \"verify_pending\": true|false, (boolean) an imported snapshot still awaits verification\n"
             "  \"validation_state\": \"xxx\",  (string) \"disabled\"|\"provisional\"|\"provisional_pruned\"|\n"
             "                              \"validated\"|\"failed\"\n"
@@ -1377,6 +1389,25 @@ UniValue getbootstrapinfo(const UniValue& params, bool fHelp)
     obj.push_back(Pair("mode", info.mode));
     obj.push_back(Pair("snapshot_version", info.snapshotVersion));
     obj.push_back(Pair("reason", info.reason));
+    // Additive: present only while a download uses several servers.
+    if (!info.servers.empty()) {
+        int inUse = 0;
+        UniValue arr(UniValue::VARR);
+        for (size_t i = 0; i < info.servers.size(); ++i) {
+            const BootstrapInfoServer& s = info.servers[i];
+            if (s.streams > 0)
+                ++inUse;
+            UniValue o(UniValue::VOBJ);
+            o.push_back(Pair("peer", s.peer));
+            o.push_back(Pair("streams", s.streams));
+            o.push_back(Pair("mbps", s.mibps));
+            o.push_back(Pair("bytes_received", (uint64_t)s.bytes));
+            o.push_back(Pair("state", s.state));
+            arr.push_back(o);
+        }
+        obj.push_back(Pair("servers_in_use", inUse));
+        obj.push_back(Pair("servers", arr));
+    }
 
     // Durable across restarts: derive verify_pending / validation_state / tip_hold
     // live from the on-disk markers and the validation status, so a daemon

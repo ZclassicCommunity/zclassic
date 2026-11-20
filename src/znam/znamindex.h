@@ -116,8 +116,17 @@ struct IndexStats {
     IndexStats() : names(0), messages(0), applied(0), ignored(0) { for (int i = 0; i < 7; i++) byCommand[i] = 0; }
 };
 
-/** The address text of a 20-byte hash the way Z23 renders an owner: ALWAYS as a P2PKH address. */
+/** The P2PKH address text of a 20-byte key hash. */
 std::string OwnerFromHash160(const unsigned char hash160[20]);
+
+/** The P2SH address text of a 20-byte script hash. */
+std::string OwnerFromScriptHash160(const unsigned char hash160[20]);
+
+/** Owner rule ZNAM-OWNER-2 (token-name-rules): the owner of a transaction is the address of the output its first
+ *  input spends, rendered by the TYPE of that output: an exact P2PKH script is the P2PKH address, an exact P2SH script
+ *  is the P2SH address (a key hash and a script hash of the same 20 bytes are two owners). Returns 1 and sets `owner`,
+ *  or 0 for any other script (no owner: the message is ignored). Before this rule both forms were a P2PKH address. */
+int OwnerFromScript(const unsigned char* script, size_t len, std::string& owner);
 
 /** Where ApplyBlock learns the owner of transaction `txIndex`: the address of the output its first input spends.
  *  Returns 1 and sets `owner`, 0 when there is none (coinbase, or an output that is neither P2PKH nor P2SH), or -1

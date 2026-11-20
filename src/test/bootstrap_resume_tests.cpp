@@ -2,612 +2,13 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-// Tests for resuming an interrupted bootstrap snapshot download:
-//  - the pure decision logic (staging identity, marker, per-file verdicts, work
-//    queue, reconnect backoff, binary-unit formatting),
-//  - the staging directory handling and the staged-file scan on a real directory,
-//  - the parallel downloader against an in-process fake bootstrap server that can
-//    cut connections, tamper with data and change its manifest.
-// Nothing here weakens the verification contract: every reused byte is checked
-// against the per-file SHA-256 of the manifest the (fake) peer serves.
+// Bootstrap resume tests, part 3 of 3: the parallel downloader against an in-process fake bootstrap
+// server that can cut connections, tamper with data and change its manifest, with one server and with
+// several. Nothing here weakens the verification contract: every reused byte is checked against the
+// per-file SHA-256 of the manifest the (fake) peer serves.
+// Each part is its own Boost suite.
 
-#include "bootstrap.h"
-#include "bootstrap_resume.h"
-
-#include "chainparams.h"
-#include "crypto/sha256.h"
-#include "hash.h"
-#include "net.h"
-#include "netbase.h"
-#include "protocol.h"
-#include "streams.h"
-#include "test/test_bitcoin.h"
-#include "util.h"
-#include "utilstrencodings.h"
-#include "version.h"
-
-#include <algorithm>
-#include <atomic>
-#include <chrono>
-#include <functional>
-#include <map>
-#include <mutex>
-#include <set>
-#include <thread>
-
-#ifndef WIN32
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
-
-#include <boost/filesystem.hpp>
-#include <boost/filesystem/fstream.hpp>
-#include <boost/test/unit_test.hpp>
-
-namespace fs = boost::filesystem;
-
-namespace {
-
-uint256 Sha256Of(const std::string& data)
-{
-    CSHA256 hasher;
-    if (!data.empty())
-        hasher.Write((const unsigned char*)data.data(), data.size());
-    unsigned char digest[CSHA256::OUTPUT_SIZE];
-    hasher.Finalize(digest);
-    return uint256S("0x" + HexStr(digest, digest + CSHA256::OUTPUT_SIZE));
-}
-
-// Deterministic pseudo-random bytes; distinct seeds give distinct contents.
-std::string Bytes(size_t n, unsigned int seed)
-{
-    std::string s;
-    s.resize(n);
-    unsigned int x = seed * 2654435761u + 1u;
-    for (size_t i = 0; i < n; ++i) {
-        x = x * 1664525u + 1013904223u;
-        s[i] = (char)((x >> 16) & 0xff);
-    }
-    return s;
-}
-
-void WriteFile(const fs::path& path, const std::string& contents)
-{
-    fs::create_directories(path.parent_path());
-    fs::ofstream f(path, std::ios::binary);
-    f.write(contents.data(), contents.size());
-}
-
-std::string ReadFile(const fs::path& path)
-{
-    fs::ifstream f(path, std::ios::binary);
-    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-}
-
-struct TempDir {
-    fs::path path;
-    TempDir() : path(fs::temp_directory_path() / UniquePath("bootstrap-resume-test-%%%%-%%%%-%%%%")) { fs::create_directories(path); }
-    ~TempDir() { boost::system::error_code ec; fs::remove_all(path, ec); }
-};
-
-const uint32_t TEST_CHUNK = 16 * 1024;
-
-// A synthetic snapshot: chainstate/ and blocks/ files of assorted sizes (one empty).
-struct Snapshot {
-    CBootstrapSnapshotManifest manifest;
-    std::vector<std::string> contents;
-};
-
-Snapshot MakeSnapshot(int nFiles, int firstSeed = 1)
-{
-    Snapshot s;
-    CBootstrapSnapshotManifest& m = s.manifest;
-    m.SetNull();
-    m.nVersion = 1;
-    m.strNetwork = Params().NetworkIDString();
-    m.nHeight = 3126937;
-    m.hashBlock = uint256S("0000000000000000000000000000000000000000000000000000000000abcdef");
-    m.hashAnchorSha256 = uint256S("1111111111111111111111111111111111111111111111111111111111111111");
-    m.hashAnchorSha3 = uint256S("2222222222222222222222222222222222222222222222222222222222222222");
-    m.nChunkSize = TEST_CHUNK;
-    for (int i = 0; i < nFiles; ++i) {
-        CBootstrapSnapshotFile f;
-        const size_t size = (i == 1) ? 0 : (size_t)(TEST_CHUNK * 2 + 777 + ((i * 7919) % 150000));
-        f.strPath = (i % 3 == 0) ? strprintf("chainstate/%06d.ldb", i) : strprintf("blocks/blk%05d.dat", i);
-        s.contents.push_back(Bytes(size, firstSeed + i));
-        f.nSize = size;
-        f.hashSha256 = Sha256Of(s.contents.back());
-        m.nSnapshotBytes += size;
-        m.vFiles.push_back(f);
-    }
-    return s;
-}
-
-} // namespace
-
-BOOST_FIXTURE_TEST_SUITE(bootstrap_resume_tests, BasicTestingSetup)
-
-// ---------------------------------------------------------------------------
-// Pure logic
-// ---------------------------------------------------------------------------
-
-BOOST_AUTO_TEST_CASE(staging_identity_is_stable_for_an_anchor)
-{
-    const Snapshot a = MakeSnapshot(6);
-    const std::string name = BootstrapStagingDirName(a.manifest);
-    BOOST_CHECK_EQUAL(name.compare(0, strlen(BOOTSTRAP_STAGING_PREFIX), BOOTSTRAP_STAGING_PREFIX), 0);
-    BOOST_CHECK_EQUAL(name.size(), strlen(BOOTSTRAP_STAGING_PREFIX) + 16);
-    // not a function of time or process: same manifest, same name
-    BOOST_CHECK_EQUAL(name, BootstrapStagingDirName(MakeSnapshot(6).manifest));
-
-    // a growing server (more files, a v3 block-bundle tip) keeps the anchor identity ...
-    Snapshot grown = MakeSnapshot(9);
-    BOOST_CHECK(BootstrapStagingIdentity(grown.manifest) == BootstrapStagingIdentity(a.manifest));
-    BOOST_CHECK_EQUAL(BootstrapStagingDirName(grown.manifest), name);
-    grown.manifest.nVersion = 3;
-    grown.manifest.nBlockTipHeight = grown.manifest.nHeight + 4000;
-    grown.manifest.hashBlockTip = uint256S("00000000000000000000000000000000000000000000000000000000000d00d");
-    grown.manifest.hashChainstateSerialized = uint256S("33");
-    BOOST_CHECK_EQUAL(BootstrapStagingDirName(grown.manifest), name);
-    // ... while the full manifest id changes with every file-list change
-    BOOST_CHECK(BootstrapManifestId(grown.manifest) != BootstrapManifestId(a.manifest));
-    BOOST_CHECK(BootstrapManifestId(a.manifest) == BootstrapManifestId(MakeSnapshot(6).manifest));
-
-    // a different anchor is a different snapshot
-    Snapshot other = MakeSnapshot(6);
-    other.manifest.nHeight += 1;
-    BOOST_CHECK(BootstrapStagingIdentity(other.manifest) != BootstrapStagingIdentity(a.manifest));
-    other = MakeSnapshot(6);
-    other.manifest.hashBlock = uint256S("99");
-    BOOST_CHECK(BootstrapStagingIdentity(other.manifest) != BootstrapStagingIdentity(a.manifest));
-    other = MakeSnapshot(6);
-    other.manifest.hashAnchorSha256 = uint256S("98");
-    BOOST_CHECK(BootstrapStagingIdentity(other.manifest) != BootstrapStagingIdentity(a.manifest));
-
-    // a v2 self-snapshot has no compiled anchor: its own commitment is part of its identity
-    Snapshot v2a = MakeSnapshot(6), v2b = MakeSnapshot(6);
-    v2a.manifest.nVersion = v2b.manifest.nVersion = 2;
-    v2a.manifest.hashChainstateSerialized = uint256S("aa");
-    v2b.manifest.hashChainstateSerialized = uint256S("bb");
-    BOOST_CHECK(BootstrapStagingIdentity(v2a.manifest) != BootstrapStagingIdentity(v2b.manifest));
-}
-
-BOOST_AUTO_TEST_CASE(staging_marker_roundtrip_and_rejects_garbage)
-{
-    const Snapshot s = MakeSnapshot(4);
-    BootstrapStagingMarker m;
-    m.nVersion = BOOTSTRAP_STAGING_MARKER_VERSION;
-    m.identity = BootstrapStagingIdentity(s.manifest);
-    m.manifestId = BootstrapManifestId(s.manifest);
-    const std::string text = FormatBootstrapStagingMarker(m);
-    BootstrapStagingMarker parsed;
-    BOOST_REQUIRE(ParseBootstrapStagingMarker(text, parsed));
-    BOOST_CHECK(parsed.identity == m.identity);
-    BOOST_CHECK(parsed.manifestId == m.manifestId);
-
-    BootstrapStagingMarker junk;
-    BOOST_CHECK(!ParseBootstrapStagingMarker("", junk));
-    BOOST_CHECK(!ParseBootstrapStagingMarker("hello", junk));
-    BOOST_CHECK(!ParseBootstrapStagingMarker(text.substr(0, text.size() / 2), junk));
-    BOOST_CHECK(!ParseBootstrapStagingMarker(std::string(text.size(), '\0'), junk));
-    BOOST_CHECK(!ParseBootstrapStagingMarker(std::string(5000, 'a'), junk));
-    std::string wrongVersion = text;
-    wrongVersion.replace(wrongVersion.find(" 1\n"), 3, " 9\n");
-    BOOST_CHECK(!ParseBootstrapStagingMarker(wrongVersion, junk));
-    std::string notHex = text;
-    notHex[notHex.find("identity ") + 9] = 'g';
-    BOOST_CHECK(!ParseBootstrapStagingMarker(notHex, junk));
-    BootstrapStagingMarker nullId = m;
-    nullId.identity.SetNull();
-    BOOST_CHECK(!ParseBootstrapStagingMarker(FormatBootstrapStagingMarker(nullId), junk));
-}
-
-BOOST_AUTO_TEST_CASE(staging_reuse_verdicts)
-{
-    const Snapshot s = MakeSnapshot(5);
-    const uint256 id = BootstrapStagingIdentity(s.manifest);
-    const uint256 man = BootstrapManifestId(s.manifest);
-    BootstrapStagingMarker m;
-    m.nVersion = BOOTSTRAP_STAGING_MARKER_VERSION;
-    m.identity = id;
-    m.manifestId = man;
-    BOOST_CHECK_EQUAL(BootstrapDecideStagingReuse(false, false, BootstrapStagingMarker(), id, man), BSV_FRESH);
-    BOOST_CHECK_EQUAL(BootstrapDecideStagingReuse(true, true, m, id, man), BSV_REUSE_SAME_MANIFEST);
-    BootstrapStagingMarker grown = m;
-    grown.manifestId = uint256S("77");
-    BOOST_CHECK_EQUAL(BootstrapDecideStagingReuse(true, true, grown, id, man), BSV_REUSE_SAME_ANCHOR);
-    BootstrapStagingMarker other = m;
-    other.identity = uint256S("88");
-    BOOST_CHECK_EQUAL(BootstrapDecideStagingReuse(true, true, other, id, man), BSV_DISCARD_OTHER_SNAPSHOT);
-    BOOST_CHECK_EQUAL(BootstrapDecideStagingReuse(true, false, m, id, man), BSV_DISCARD_BAD_MARKER);
-    // a directory that is not there is never reused, whatever the marker says
-    BOOST_CHECK_EQUAL(BootstrapDecideStagingReuse(false, true, m, id, man), BSV_FRESH);
-}
-
-BOOST_AUTO_TEST_CASE(resume_offsets_are_chunk_aligned)
-{
-    const uint32_t C = 1024 * 1024;
-    BOOST_CHECK_EQUAL(BootstrapResumeOffset(0, 10 * C, C), 0);
-    BOOST_CHECK_EQUAL(BootstrapResumeOffset(C - 1, 10 * C, C), 0);          // less than one whole chunk: start over
-    BOOST_CHECK_EQUAL(BootstrapResumeOffset(C, 10 * C, C), C);
-    BOOST_CHECK_EQUAL(BootstrapResumeOffset(3 * C + 12345, 10 * C, C), 3 * C); // torn trailing chunk is re-fetched
-    BOOST_CHECK_EQUAL(BootstrapResumeOffset(9 * C, 10 * C, C), 9 * C);
-    // a .part as big as the file still re-requests the last chunk, so it takes the normal verify path
-    BOOST_CHECK_EQUAL(BootstrapResumeOffset(10 * C, 10 * C, C), 9 * C);
-    BOOST_CHECK_EQUAL(BootstrapResumeOffset(10 * C - 5, 10 * C, C), 9 * C);
-    BOOST_CHECK_EQUAL(BootstrapResumeOffset(10 * C + 1, 10 * C, C), 0);     // longer than the file: unusable
-    BOOST_CHECK_EQUAL(BootstrapResumeOffset(5 * C, 5 * C + 1, C), 5 * C);   // file is 5 chunks and a byte
-    BOOST_CHECK_EQUAL(BootstrapResumeOffset(100, 0, C), 0);
-    BOOST_CHECK_EQUAL(BootstrapResumeOffset(100, 100, 0), 0);
-    // a one-chunk file never resumes mid-file
-    BOOST_CHECK_EQUAL(BootstrapResumeOffset(C - 1, C, C), 0);
-}
-
-BOOST_AUTO_TEST_CASE(staged_file_decisions)
-{
-    const uint32_t C = 1024;
-    const uint64_t size = 10 * C + 100;
-    BootstrapStagedFileFacts f;
-
-    // nothing on disk
-    BootstrapStagedDecision d = BootstrapDecideStagedFile(size, C, f);
-    BOOST_CHECK_EQUAL(d.action, BSA_FETCH_ALL);
-    BOOST_CHECK(!d.discardFinal && !d.discardPart);
-
-    // complete and matching
-    f.finalExists = true; f.finalSize = size; f.finalHashOk = true;
-    d = BootstrapDecideStagedFile(size, C, f);
-    BOOST_CHECK_EQUAL(d.action, BSA_KEEP);
-    BOOST_CHECK(!d.discardFinal && !d.discardPart);
-    // a leftover .part beside a verified file is garbage
-    f.partExists = true; f.partSize = 5 * C;
-    d = BootstrapDecideStagedFile(size, C, f);
-    BOOST_CHECK_EQUAL(d.action, BSA_KEEP);
-    BOOST_CHECK(d.discardPart);
-
-    // right size, wrong hash: never trusted, deleted, fetched again from the start
-    f = BootstrapStagedFileFacts();
-    f.finalExists = true; f.finalSize = size; f.finalHashOk = false;
-    d = BootstrapDecideStagedFile(size, C, f);
-    BOOST_CHECK_EQUAL(d.action, BSA_FETCH_ALL);
-    BOOST_CHECK(d.discardFinal);
-    BOOST_CHECK_EQUAL(d.resumeOffset, 0);
-    // wrong size
-    f.finalSize = size - 1; f.finalHashOk = true; // even a (nonsensical) true hash flag cannot save a wrong size
-    d = BootstrapDecideStagedFile(size, C, f);
-    BOOST_CHECK_EQUAL(d.action, BSA_FETCH_ALL);
-    BOOST_CHECK(d.discardFinal);
-    // a .part beside a bad final file has no provenance either
-    f.partExists = true; f.partSize = 4 * C;
-    d = BootstrapDecideStagedFile(size, C, f);
-    BOOST_CHECK_EQUAL(d.action, BSA_FETCH_ALL);
-    BOOST_CHECK(d.discardFinal && d.discardPart);
-
-    // partial file
-    f = BootstrapStagedFileFacts();
-    f.partExists = true; f.partSize = 4 * C + 17;
-    d = BootstrapDecideStagedFile(size, C, f);
-    BOOST_CHECK_EQUAL(d.action, BSA_RESUME_PART);
-    BOOST_CHECK_EQUAL(d.resumeOffset, 4 * C);
-    BOOST_CHECK(!d.discardPart && !d.discardFinal);
-    // too short to be worth keeping
-    f.partSize = C - 1;
-    d = BootstrapDecideStagedFile(size, C, f);
-    BOOST_CHECK_EQUAL(d.action, BSA_FETCH_ALL);
-    BOOST_CHECK(d.discardPart);
-    // longer than the file
-    f.partSize = size + 1;
-    d = BootstrapDecideStagedFile(size, C, f);
-    BOOST_CHECK_EQUAL(d.action, BSA_FETCH_ALL);
-    BOOST_CHECK(d.discardPart);
-    // full size: continue at the last chunk
-    f.partSize = size;
-    d = BootstrapDecideStagedFile(size, C, f);
-    BOOST_CHECK_EQUAL(d.action, BSA_RESUME_PART);
-    BOOST_CHECK_EQUAL(d.resumeOffset, 10 * C);
-}
-
-BOOST_AUTO_TEST_CASE(work_queue_hands_back_unfinished_files)
-{
-    std::vector<uint32_t> files;
-    files.push_back(7); files.push_back(3); files.push_back(9);
-    BootstrapWorkQueue q(files);
-    BOOST_CHECK(!q.AllDone());
-    uint32_t a = 0, b = 0, c = 0, d = 0;
-    BOOST_REQUIRE(q.Claim(a)); BOOST_CHECK_EQUAL(a, 7);
-    BOOST_REQUIRE(q.Claim(b)); BOOST_CHECK_EQUAL(b, 3);
-    BOOST_CHECK_EQUAL(q.PendingCount(), 1);
-    BOOST_CHECK_EQUAL(q.ClaimedCount(), 2);
-    // a stream dies holding file 3: it comes back first, before untouched files
-    q.Release(b);
-    BOOST_CHECK_EQUAL(q.ClaimedCount(), 1);
-    BOOST_REQUIRE(q.Claim(c)); BOOST_CHECK_EQUAL(c, 3);
-    q.Complete(a);
-    q.Complete(c);
-    BOOST_CHECK_EQUAL(q.DoneCount(), 2);
-    BOOST_CHECK(!q.AllDone());
-    BOOST_REQUIRE(q.Claim(d)); BOOST_CHECK_EQUAL(d, 9);
-    BOOST_CHECK(!q.HasPending());
-    BOOST_CHECK(!q.AllDone());          // still in flight
-    uint32_t none = 0;
-    BOOST_CHECK(!q.Claim(none));
-    q.Complete(d);
-    BOOST_CHECK(q.AllDone());
-    // completing or releasing something that was never claimed changes nothing
-    q.Release(1234);
-    q.Complete(1234);
-    BOOST_CHECK(q.AllDone());
-    BOOST_CHECK_EQUAL(q.DoneCount(), 3);
-
-    // a failed verification forces a restart from byte 0 and counts strikes
-    BootstrapWorkQueue q2(files);
-    BOOST_CHECK(!q2.MustRestart(7));
-    BOOST_CHECK_EQUAL(q2.AddStrike(7), 1);
-    BOOST_CHECK(q2.MustRestart(7));
-    BOOST_CHECK(!q2.MustRestart(3));
-    BOOST_CHECK_EQUAL(q2.AddStrike(7), 2);
-}
-
-BOOST_AUTO_TEST_CASE(reconnect_backoff_grows_and_is_capped)
-{
-    BOOST_CHECK_EQUAL(BootstrapReconnectDelayMs(0, 123), 0);
-    BOOST_CHECK_EQUAL(BootstrapReconnectDelayMs(-4, 123), 0);
-    int64_t previousBase = 0;
-    const int64_t bases[] = {1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000};
-    for (int failures = 1; failures <= 8; ++failures) {
-        const int64_t base = bases[failures - 1];
-        for (unsigned int seed = 0; seed < 5000; seed += 37) {
-            const int64_t delay = BootstrapReconnectDelayMs(failures, seed);
-            BOOST_CHECK_MESSAGE(delay >= base - base / 4 && delay <= base + base / 4,
-                                "failures=" << failures << " seed=" << seed << " delay=" << delay);
-        }
-        BOOST_CHECK(base >= previousBase);
-        previousBase = base;
-    }
-    // jitter really differs between streams
-    std::set<int64_t> distinct;
-    for (unsigned int seed = 0; seed < 64; ++seed)
-        distinct.insert(BootstrapReconnectDelayMs(3, seed * 977));
-    BOOST_CHECK(distinct.size() > 8);
-    BOOST_CHECK_EQUAL(BootstrapReconnectDelayMs(1000000, 1) <= 37500, true);
-}
-
-BOOST_AUTO_TEST_CASE(binary_units_are_labelled_as_such)
-{
-    // the figure from the field report: an 11.2 GB snapshot is 10.43 GiB
-    BOOST_CHECK_EQUAL(BootstrapFormatGiB(11200000000ULL), "10.43 GiB");
-    BOOST_CHECK_EQUAL(BootstrapFormatGiB(1073741824ULL), "1.00 GiB");
-    BOOST_CHECK_EQUAL(BootstrapFormatGiB(0), "0.00 GiB");
-    BOOST_CHECK_EQUAL(BootstrapFormatGiB(1610612736ULL), "1.50 GiB");
-
-    BOOST_CHECK_EQUAL(BootstrapFormatProgressLine(42, 4402341478ULL, 10522669875ULL, 210.5, 4),
-                      "Bootstrap snapshot:  42%  4.10 / 9.80 GiB  210.5 MiB/s  (4 streams)");
-    BOOST_CHECK_EQUAL(BootstrapFormatProgressLine(7, 784334336ULL, 11200000000ULL, 12.0, 0),
-                      "Bootstrap snapshot:   7%  0.73 / 10.43 GiB  12.0 MiB/s");
-    BOOST_CHECK_EQUAL(BootstrapFormatProgressLine(100, 1073741824ULL, 1073741824ULL, 0.0, 1),
-                      "Bootstrap snapshot: 100%  1.00 / 1.00 GiB  0.0 MiB/s  (1 streams)");
-    // the legacy single-digit prefix the wallet parses is unchanged: "Bootstrap snapshot:" then the percent
-    const std::string line = BootstrapFormatProgressLine(5, 1, 2, 3.0, 4);
-    BOOST_CHECK_EQUAL(line.compare(0, 20, "Bootstrap snapshot: "), 0);
-    BOOST_CHECK(line.find("GB ") == std::string::npos);
-    BOOST_CHECK(line.find("MB/s") == std::string::npos);
-}
-
-// ---------------------------------------------------------------------------
-// Staging directory and scan on a real directory
-// ---------------------------------------------------------------------------
-
-BOOST_AUTO_TEST_CASE(prepare_staging_reuses_discards_and_marks)
-{
-    TempDir tmp;
-    const fs::path datadir = tmp.path;
-    const Snapshot s = MakeSnapshot(6);
-    fs::path staging;
-    BootstrapStagingVerdict verdict;
-    std::string error;
-
-    // leftovers: a per-epoch directory of the old naming scheme, and an unrelated directory
-    fs::create_directories(datadir / "bootstrap-peer-staging-1700000000" / "blocks");
-    WriteFile(datadir / "bootstrap-peer-staging-1700000000" / "blocks" / "x", "old");
-    fs::create_directories(datadir / "other");
-
-    BOOST_REQUIRE(BootstrapPrepareStaging(datadir, s.manifest, staging, verdict, error));
-    BOOST_CHECK_EQUAL(verdict, BSV_FRESH);
-    BOOST_CHECK_EQUAL(staging.filename().string(), BootstrapStagingDirName(s.manifest));
-    BOOST_CHECK(fs::is_regular_file(staging / BOOTSTRAP_STAGING_MARKER));
-    BOOST_CHECK(!fs::exists(datadir / "bootstrap-peer-staging-1700000000")); // stale directory removed
-    BOOST_CHECK(fs::exists(datadir / "other"));                               // unrelated left alone
-
-    // some progress, then "the process dies" and starts again
-    WriteFile(staging / "blocks" / "blk00002.dat", s.contents[2]);
-    BOOST_REQUIRE(BootstrapPrepareStaging(datadir, s.manifest, staging, verdict, error));
-    BOOST_CHECK_EQUAL(verdict, BSV_REUSE_SAME_MANIFEST);
-    BOOST_CHECK(fs::exists(staging / "blocks" / "blk00002.dat"));
-
-    // the server grew: same anchor, more files: the directory (and its files) are reused
-    Snapshot grown = MakeSnapshot(8);
-    BOOST_REQUIRE(BootstrapPrepareStaging(datadir, grown.manifest, staging, verdict, error));
-    BOOST_CHECK_EQUAL(verdict, BSV_REUSE_SAME_ANCHOR);
-    BOOST_CHECK(fs::exists(staging / "blocks" / "blk00002.dat"));
-    BOOST_CHECK_EQUAL(staging.filename().string(), BootstrapStagingDirName(s.manifest));
-    BOOST_REQUIRE(BootstrapPrepareStaging(datadir, grown.manifest, staging, verdict, error));
-    BOOST_CHECK_EQUAL(verdict, BSV_REUSE_SAME_MANIFEST); // the marker now names the grown manifest
-
-    // a new snapshot (different anchor): the old staging directory is discarded
-    Snapshot next = MakeSnapshot(6);
-    next.manifest.nHeight += 100000;
-    next.manifest.hashBlock = uint256S("5678");
-    fs::path nextStaging;
-    BOOST_REQUIRE(BootstrapPrepareStaging(datadir, next.manifest, nextStaging, verdict, error));
-    BOOST_CHECK_EQUAL(verdict, BSV_FRESH);
-    BOOST_CHECK(nextStaging != staging);
-    BOOST_CHECK(!fs::exists(staging));
-    BOOST_CHECK(fs::is_directory(nextStaging));
-    BOOST_CHECK(!fs::exists(nextStaging / "blocks" / "blk00002.dat"));
-
-    // a directory with the right name but no/garbled marker is not trusted
-    WriteFile(nextStaging / "blocks" / "blk00004.dat", "whatever");
-    WriteFile(nextStaging / BOOTSTRAP_STAGING_MARKER, "garbage");
-    BOOST_REQUIRE(BootstrapPrepareStaging(datadir, next.manifest, nextStaging, verdict, error));
-    BOOST_CHECK_EQUAL(verdict, BSV_DISCARD_BAD_MARKER);
-    BOOST_CHECK(!fs::exists(nextStaging / "blocks" / "blk00004.dat"));
-    BOOST_CHECK(fs::is_regular_file(nextStaging / BOOTSTRAP_STAGING_MARKER));
-    fs::remove(nextStaging / BOOTSTRAP_STAGING_MARKER);
-    WriteFile(nextStaging / "blocks" / "blk00004.dat", "whatever");
-    BOOST_REQUIRE(BootstrapPrepareStaging(datadir, next.manifest, nextStaging, verdict, error));
-    BOOST_CHECK_EQUAL(verdict, BSV_DISCARD_BAD_MARKER);
-    BOOST_CHECK(!fs::exists(nextStaging / "blocks" / "blk00004.dat"));
-
-    // a plain file squatting on the directory name is replaced
-    fs::remove_all(nextStaging);
-    WriteFile(nextStaging, "i am a file");
-    BOOST_REQUIRE(BootstrapPrepareStaging(datadir, next.manifest, nextStaging, verdict, error));
-    BOOST_CHECK_EQUAL(verdict, BSV_FRESH);
-    BOOST_CHECK(fs::is_directory(nextStaging));
-
-    // nobody needs the staging directories once the node has a real chain
-    BOOST_CHECK_EQUAL(RemoveStaleBootstrapStaging(datadir), 1);
-    BOOST_CHECK(!fs::exists(nextStaging));
-}
-
-#ifndef WIN32
-BOOST_AUTO_TEST_CASE(prepare_staging_never_opens_a_marker_that_is_not_a_regular_file)
-{
-    // A FIFO in place of the marker would block the startup thread in fopen(): it is
-    // never opened, and the directory counts as having no valid marker.
-    TempDir tmp;
-    const Snapshot s = MakeSnapshot(3);
-    const fs::path dir = tmp.path / BootstrapStagingDirName(s.manifest);
-    fs::create_directories(dir / "blocks");
-    WriteFile(dir / "blocks" / "x", "x");
-    BOOST_REQUIRE_EQUAL(mkfifo((dir / BOOTSTRAP_STAGING_MARKER).string().c_str(), 0600), 0);
-    fs::path staging;
-    BootstrapStagingVerdict verdict;
-    std::string error;
-    BOOST_REQUIRE_MESSAGE(BootstrapPrepareStaging(tmp.path, s.manifest, staging, verdict, error), error);
-    BOOST_CHECK_EQUAL(verdict, BSV_DISCARD_BAD_MARKER);
-    BOOST_CHECK(fs::is_regular_file(fs::symlink_status(staging / BOOTSTRAP_STAGING_MARKER)));
-    BOOST_CHECK(!fs::exists(staging / "blocks" / "x"));
-}
-#endif
-
-BOOST_AUTO_TEST_CASE(scan_keeps_verified_resumes_partial_and_deletes_the_rest)
-{
-    TempDir tmp;
-    const fs::path staging = tmp.path / "staging";
-    const Snapshot s = MakeSnapshot(10);
-    const CBootstrapSnapshotManifest& m = s.manifest;
-    fs::create_directories(staging);
-
-    // 0: complete and right.  1: the empty file (handled by the downloader).
-    WriteFile(staging / m.vFiles[0].strPath, s.contents[0]);
-    // 2: complete size, one flipped bit
-    std::string flipped = s.contents[2];
-    flipped[flipped.size() / 2] ^= 0x01;
-    WriteFile(staging / m.vFiles[2].strPath, flipped);
-    // 3: truncated "final" file
-    WriteFile(staging / m.vFiles[3].strPath, s.contents[3].substr(0, s.contents[3].size() - 10));
-    // 4: partial, three whole chunks and a torn fourth
-    WriteFile(staging / (m.vFiles[4].strPath + ".part"), s.contents[4].substr(0, 3 * TEST_CHUNK + 100));
-    // 5: partial but shorter than a chunk
-    WriteFile(staging / (m.vFiles[5].strPath + ".part"), s.contents[5].substr(0, 100));
-    // 6: complete-looking .part with no final file
-    WriteFile(staging / (m.vFiles[6].strPath + ".part"), s.contents[6]);
-    // 7: both a verified final file and a stale .part
-    WriteFile(staging / m.vFiles[7].strPath, s.contents[7]);
-    WriteFile(staging / (m.vFiles[7].strPath + ".part"), "stale");
-    // 8: a .part longer than the file
-    WriteFile(staging / (m.vFiles[8].strPath + ".part"), s.contents[8] + "extra");
-    // 9: nothing.  Strays: unknown file in a known dir, unknown top-level entries.
-    WriteFile(staging / "blocks" / "unknown.dat", "x");
-    WriteFile(staging / "chainstate" / "LOCK", "x");
-    WriteFile(staging / "wallet.dat", "x");
-    WriteFile(staging / BOOTSTRAP_STAGING_MARKER, "marker survives the scan");
-
-    std::vector<uint32_t> pending;
-    uint64_t completed = 0;
-    BootstrapResumeStats stats;
-    std::string error;
-    BOOST_REQUIRE_MESSAGE(BootstrapResumeScan(m, staging, pending, completed, stats, error), error);
-
-    BOOST_CHECK_EQUAL(stats.filesKept, 2);       // files 0 and 7
-    BOOST_CHECK_EQUAL(stats.bytesKept, s.contents[0].size() + s.contents[7].size());
-    BOOST_CHECK_EQUAL(stats.filesResumed, 2);    // files 4 and 6
-    BOOST_CHECK_EQUAL(stats.filesDiscarded, 2);  // files 2 and 3
-    BOOST_CHECK_EQUAL(stats.strayRemoved, 3);
-    BOOST_CHECK_EQUAL(stats.bytesHashed, s.contents[0].size() + s.contents[2].size() + s.contents[7].size());
-
-    std::set<uint32_t> pend(pending.begin(), pending.end());
-    const uint32_t expectPending[] = {2, 3, 4, 5, 6, 8, 9};
-    BOOST_CHECK_EQUAL(pend.size(), sizeof(expectPending) / sizeof(expectPending[0]));
-    for (size_t i = 0; i < sizeof(expectPending) / sizeof(expectPending[0]); ++i)
-        BOOST_CHECK_MESSAGE(pend.count(expectPending[i]), "file " << expectPending[i] << " should be pending");
-    BOOST_CHECK(!pend.count(0));
-    BOOST_CHECK(!pend.count(7));
-    BOOST_CHECK(!pend.count(1)); // zero-length: nothing to fetch
-
-    // completed = verified bytes + the chunk-aligned bytes of partial files that will continue
-    const uint64_t last6 = ((s.contents[6].size() - 1) / TEST_CHUNK) * TEST_CHUNK;
-    BOOST_CHECK_EQUAL(completed, s.contents[0].size() + s.contents[7].size() + 3 * TEST_CHUNK + last6);
-
-    BOOST_CHECK(fs::exists(staging / m.vFiles[0].strPath));
-    BOOST_CHECK(!fs::exists(staging / m.vFiles[2].strPath));      // corrupt file deleted, not trusted
-    BOOST_CHECK(!fs::exists(staging / m.vFiles[3].strPath));
-    BOOST_CHECK(fs::exists(staging / (m.vFiles[4].strPath + ".part")));
-    BOOST_CHECK(!fs::exists(staging / (m.vFiles[5].strPath + ".part")));
-    BOOST_CHECK(fs::exists(staging / (m.vFiles[6].strPath + ".part")));
-    BOOST_CHECK(!fs::exists(staging / (m.vFiles[7].strPath + ".part")));
-    BOOST_CHECK(!fs::exists(staging / (m.vFiles[8].strPath + ".part")));
-    BOOST_CHECK(!fs::exists(staging / "blocks" / "unknown.dat"));
-    BOOST_CHECK(!fs::exists(staging / "chainstate" / "LOCK"));
-    BOOST_CHECK(!fs::exists(staging / "wallet.dat"));
-    BOOST_CHECK(fs::exists(staging / BOOTSTRAP_STAGING_MARKER));
-
-    // a second scan finds the same thing (nothing left to delete)
-    BootstrapResumeStats again;
-    std::vector<uint32_t> pending2;
-    uint64_t completed2 = 0;
-    BOOST_REQUIRE(BootstrapResumeScan(m, staging, pending2, completed2, again, error));
-    BOOST_CHECK_EQUAL(again.filesDiscarded, 0);
-    BOOST_CHECK_EQUAL(again.strayRemoved, 0);
-    BOOST_CHECK_EQUAL(completed2, completed);
-
-    // an unsafe manifest path is refused outright
-    CBootstrapSnapshotManifest evil = m;
-    evil.vFiles[0].strPath = "../../etc/passwd";
-    BOOST_CHECK(!BootstrapResumeScan(evil, staging, pending2, completed2, again, error));
-#ifndef WIN32
-    // Symlinks in staging are never followed: each link is unlinked and its target is
-    // left alone, and a link standing in for a manifest file means that file is fetched
-    // again. A directory where a manifest file belongs is removed too (it could never be
-    // replaced by the verified file, so keeping it would fail every later attempt).
-    const fs::path outsideDir = tmp.path / "outside";
-    fs::create_directories(outsideDir);
-    WriteFile(outsideDir / "keep.dat", s.contents[0]);
-    fs::create_directory_symlink(outsideDir, staging / "blocks" / "linkdir");
-    fs::remove(staging / m.vFiles[0].strPath);
-    fs::create_symlink(outsideDir / "keep.dat", staging / m.vFiles[0].strPath);
-    fs::remove(staging / m.vFiles[7].strPath);
-    fs::create_directories(staging / m.vFiles[7].strPath / "sub");
-    WriteFile(staging / m.vFiles[7].strPath / "sub" / "x", "x");
-    BootstrapResumeStats links;
-    BOOST_REQUIRE_MESSAGE(BootstrapResumeScan(m, staging, pending2, completed2, links, error), error);
-    BOOST_CHECK_EQUAL(links.strayRemoved, 3);
-    BOOST_CHECK_EQUAL(links.filesKept, 0);
-    BOOST_CHECK(!fs::exists(fs::symlink_status(staging / "blocks" / "linkdir")));
-    BOOST_CHECK(!fs::exists(fs::symlink_status(staging / m.vFiles[0].strPath)));
-    BOOST_CHECK(!fs::exists(fs::symlink_status(staging / m.vFiles[7].strPath)));
-    BOOST_CHECK(fs::is_regular_file(fs::symlink_status(outsideDir / "keep.dat")));
-    BOOST_CHECK(ReadFile(outsideDir / "keep.dat") == s.contents[0]);
-    BOOST_CHECK(fs::exists(staging / (m.vFiles[4].strPath + ".part"))); // unrelated progress survives
-    const std::set<uint32_t> pendLinks(pending2.begin(), pending2.end());
-    BOOST_CHECK(pendLinks.count(0));
-    BOOST_CHECK(pendLinks.count(7));
-#endif
-}
+#include "test/bootstrap_resume_testutil.h"
 
 #ifndef WIN32
 
@@ -906,6 +307,9 @@ void CheckAllFilesMatch(const Snapshot& s, const fs::path& staging)
 
 } // namespace
 
+BOOST_FIXTURE_TEST_SUITE(bootstrap_resume_tests, BasicTestingSetup)
+
+
 BOOST_AUTO_TEST_CASE(parallel_download_fetches_everything_over_four_streams)
 {
     TempDir tmp;
@@ -1067,7 +471,12 @@ BOOST_AUTO_TEST_CASE(a_manifest_that_changes_mid_download_ends_the_attempt_but_k
     server.manifestFor = [&s](int conn) {
         CBootstrapSnapshotManifest m = s.manifest;
         if (conn >= 1)
+        {
             m.hashBlock = uint256S("deadbeef");
+            // rebuilt: no file of the new snapshot equals one of the trusted manifest
+            for (size_t i = 0; i < m.vFiles.size(); ++i)
+                m.vFiles[i].hashSha256 = Sha256Of("rebuilt " + m.vFiles[i].strPath);
+        }
         return m;
     };
     std::string error;
@@ -1106,7 +515,7 @@ BOOST_AUTO_TEST_CASE(a_dead_peer_fails_over_quickly_and_keeps_the_staging_direct
     BOOST_CHECK(!DownloadBootstrapSnapshotParallel(dead, "dead", s.manifest, staging, 5000, 2, error));
     BOOST_CHECK_MESSAGE(error.find("delivered no data") != std::string::npos, error);
     // not the five-minute stall timeout: the next bootstrap peer is tried within seconds
-    BOOST_CHECK_LT(GetTimeMillis() - t0, 30000);
+    BOOST_CHECK_LT(GetTimeMillis() - t0, 30000); // real-clock: the property under test is that a dead peer is given up on within seconds, not after the five-minute stall timeout
     BOOST_CHECK(fs::exists(staging / s.manifest.vFiles[0].strPath)); // earlier progress untouched
 }
 
@@ -1145,7 +554,7 @@ BOOST_AUTO_TEST_CASE(a_peer_that_serves_one_chunk_per_connection_is_given_up_on)
     BOOST_CHECK(!ok);
     BOOST_CHECK_MESSAGE(error.find("too slow") != std::string::npos, error);
     // the workers sit in a 5 s receive: the manager's decision reaches them at once
-    BOOST_CHECK_LT(GetTimeMillis() - t0, 4500);
+    BOOST_CHECK_LT(GetTimeMillis() - t0, 4500); // real-clock: the property under test is that the watchdog decision reaches the workers at once; the bound is far below the 5 s receive timeout
 }
 
 // A peer that trickles one byte every 100 ms inside a single message keeps
@@ -1163,7 +572,7 @@ BOOST_AUTO_TEST_CASE(a_trickling_peer_cannot_hold_the_attempt_after_the_watchdog
     BootstrapSetWatchdogForTests(0, 0);
     BOOST_CHECK(!ok);
     BOOST_CHECK_MESSAGE(error.find("no progress") != std::string::npos, error);
-    BOOST_CHECK_LT(GetTimeMillis() - t0, 6000);
+    BOOST_CHECK_LT(GetTimeMillis() - t0, 6000); // real-clock: the property under test is that a trickling peer cannot hold the attempt past the watchdog (1.5 s), bounded well below the stall timeout
 }
 
 // A minimal SOCKS5 server that only does what a name proxy does: it takes the
@@ -1171,7 +580,7 @@ BOOST_AUTO_TEST_CASE(a_trickling_peer_cannot_hold_the_attempt_after_the_watchdog
 class FakeNameProxy
 {
 public:
-    FakeNameProxy(uint16_t targetPort) : target(targetPort), listenFd(-1), port(0), stopping(false), requests(0)
+    FakeNameProxy(uint16_t targetPort) : target(targetPort), listenFd(-1), port(0), stopping(false), requests(0), unnamedRequests(0), foreignHosts(0)
     {
         listenFd = socket(AF_INET, SOCK_STREAM, 0);
         BOOST_REQUIRE(listenFd >= 0);
@@ -1214,7 +623,10 @@ public:
                 handlers[i].join();
     }
     uint16_t Port() const { return port; }
-    std::atomic<int> requests;
+    std::atomic<int> requests;          // CONNECT requests that named a host
+    std::atomic<int> unnamedRequests;   // CONNECT requests that carried an address instead of a name
+    std::atomic<int> foreignHosts;      // named requests whose host is not expectedHost
+    std::string expectedHost;           // set before the first connection
     std::string lastHost;
 
 private:
@@ -1237,14 +649,20 @@ private:
         const unsigned char choose[2] = {5, 0};
         if (send(fd, choose, 2, MSG_NOSIGNAL) != 2)
             return;
-        if (!RecvAll(fd, b, 5) || b[3] != 3) // ATYP must be a domain name
+        if (!RecvAll(fd, b, 5))
             return;
+        if (b[3] != 3) { // ATYP must be a domain name
+            unnamedRequests.fetch_add(1);
+            return;
+        }
         const size_t hostLen = b[4];
         if (!RecvAll(fd, b + 5, hostLen + 2))
             return;
         {
             std::lock_guard<std::mutex> lock(mtx);
             lastHost.assign((const char*)b + 5, hostLen);
+            if (lastHost != expectedHost)
+                foreignHosts.fetch_add(1);
         }
         requests.fetch_add(1);
         const int up = socket(AF_INET, SOCK_STREAM, 0);
@@ -1302,6 +720,7 @@ BOOST_AUTO_TEST_CASE(streams_reconnect_by_name_through_a_name_proxy)
         const Snapshot s = MakeSnapshot(5);
         FakeBootstrapServer server(s);
         FakeNameProxy proxy(server.Address().GetPort());
+        proxy.expectedHost = "snapshot.invalid";
         BOOST_REQUIRE(SetNameProxy(proxyType(CService("127.0.0.1", proxy.Port()))));
         std::string error;
         const bool ok = DownloadBootstrapSnapshotParallel(CService("0.0.0.0", 0),
@@ -1310,11 +729,397 @@ BOOST_AUTO_TEST_CASE(streams_reconnect_by_name_through_a_name_proxy)
         ClearProxies();
         BOOST_REQUIRE_MESSAGE(ok, error);
         CheckAllFilesMatch(s, tmp.path / "staging");
-        BOOST_CHECK_GE(proxy.requests.load(), streams);
+        // The number of connections is not fixed: a stream opens one only while files are still
+        // pending, so with a small snapshot the first stream can fetch every file before the other
+        // streams look at the queue (nStreams is also capped by the file count). What must hold is that
+        // at least one connection was made and that EVERY connection went through the proxy by name.
+        BOOST_CHECK_GE(proxy.requests.load(), 1);
+        BOOST_CHECK_EQUAL(proxy.unnamedRequests.load(), 0);
+        BOOST_CHECK_EQUAL(proxy.foreignHosts.load(), 0);
         BOOST_CHECK_EQUAL(proxy.lastHost, "snapshot.invalid");
     }
 }
 
-#endif // !WIN32
+// ---------------------------------------------------------------------------
+// Multi-server download against fake servers
+// ---------------------------------------------------------------------------
 
+namespace {
+std::string PeerName(const FakeBootstrapServer& s) { return strprintf("127.0.0.1:%u", (unsigned int)s.Address().GetPort()); }
+size_t ChunksOf(const Snapshot& s)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < s.manifest.vFiles.size(); ++i)
+        n += (s.manifest.vFiles[i].nSize + TEST_CHUNK - 1) / TEST_CHUNK;
+    return n;
+}
+struct PolicyGuard {
+    explicit PolicyGuard(const BootstrapPeerPolicy& p) { BootstrapSetPeerPolicyForTests(&p); }
+    ~PolicyGuard() { BootstrapSetPeerPolicyForTests(NULL); }
+};
+} // namespace
+
+BOOST_AUTO_TEST_CASE(two_servers_both_serve_and_no_chunk_is_fetched_twice)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(14);
+    FakeBootstrapServer a(s), b(s);
+    a.chunkDelayMs = 15;
+    b.chunkDelayMs = 15;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                            std::vector<std::string>(1, PeerName(b))), error);
+    CheckAllFilesMatch(s, tmp.path / "staging");
+    BOOST_CHECK_GT(a.Log().size(), 0U);
+    BOOST_CHECK_GT(b.Log().size(), 0U);
+    BOOST_CHECK_EQUAL(a.Log().size() + b.Log().size(), ChunksOf(s));
+}
+
+// A manifest of another snapshot (height, block) that shares no file with the trusted one.
+static CBootstrapSnapshotManifest ManifestSharingNothing(const CBootstrapSnapshotManifest& m)
+{
+    CBootstrapSnapshotManifest o = m;
+    o.nHeight += 1;
+    for (size_t i = 0; i < o.vFiles.size(); ++i)
+        o.vFiles[i].hashSha256 = Sha256Of(std::string("other snapshot file ") + itostr((int)i));
+    return o;
+}
+
+BOOST_AUTO_TEST_CASE(a_server_with_a_different_snapshot_sharing_no_file_is_ignored)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(8);
+    FakeBootstrapServer a(s), b(s);
+    b.manifestFor = [&s](int) { return ManifestSharingNothing(s.manifest); };
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                            std::vector<std::string>(1, PeerName(b))), error);
+    CheckAllFilesMatch(s, tmp.path / "staging");
+    BOOST_CHECK_EQUAL(b.Log().size(), 0U); // not one chunk asked of it
+    BOOST_CHECK_EQUAL(a.Log().size(), ChunksOf(s));
+    // the validated server itself changing to another snapshot, with no other left, still ends the attempt
+    TempDir tmp2;
+    FakeBootstrapServer c(s);
+    c.manifestFor = [&s](int conn) { return conn > 0 ? ManifestSharingNothing(s.manifest) : s.manifest; };
+    BOOST_CHECK(!DownloadBootstrapSnapshotParallel(c.Address(), PeerName(c), s.manifest, tmp2.path / "staging", 5000, 2, error));
+}
+
+BOOST_AUTO_TEST_CASE(a_server_at_another_height_serves_the_files_identical_to_the_trusted_manifest)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(8);
+    FakeBootstrapServer a(s), b(s);
+    a.chunkDelayMs = 10;
+    b.chunkDelayMs = 10;
+    b.manifestFor = [&s](int) {
+        CBootstrapSnapshotManifest m = s.manifest;
+        m.nHeight += 1; // another snapshot (height); every file is the same bytes
+        return m;
+    };
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                            std::vector<std::string>(1, PeerName(b))), error);
+    CheckAllFilesMatch(s, tmp.path / "staging");
+    BOOST_CHECK_GT(a.Log().size(), 0U);
+    BOOST_CHECK_GT(b.Log().size(), 0U); // shared files come from both servers
+    BOOST_CHECK_EQUAL(a.Log().size() + b.Log().size(), ChunksOf(s));
+}
+
+BOOST_AUTO_TEST_CASE(a_server_with_another_manifest_serves_the_files_it_shares)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(12);
+    // the second server's snapshot: another file order and one file that differs (same anchor)
+    Snapshot s2 = s;
+    std::reverse(s2.manifest.vFiles.begin(), s2.manifest.vFiles.end());
+    std::reverse(s2.contents.begin(), s2.contents.end());
+    const size_t altered = 4; // index in s2; master index = 11 - 4 = 7
+    s2.contents[altered] = Bytes(s2.contents[altered].size(), 999);
+    s2.manifest.vFiles[altered].hashSha256 = Sha256Of(s2.contents[altered]);
+    BOOST_REQUIRE(SerializeHash(s2.manifest) != SerializeHash(s.manifest));
+    FakeBootstrapServer a(s), b(s2);
+    a.chunkDelayMs = 10;
+    b.chunkDelayMs = 10;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                            std::vector<std::string>(1, PeerName(b))), error);
+    CheckAllFilesMatch(s, tmp.path / "staging"); // the trusted manifest's bytes, whoever served them
+    BOOST_CHECK_GT(b.Log().size(), 0U);
+    BOOST_CHECK_EQUAL(b.RequestsFor((uint32_t)altered), 0U); // never asked for the file it does not share
+    BOOST_CHECK_GT(a.RequestsFor((uint32_t)(11 - altered)), 0U);
+    BOOST_CHECK_EQUAL(a.Log().size() + b.Log().size(), ChunksOf(s));
+}
+
+
+BOOST_AUTO_TEST_CASE(a_server_that_serves_corrupt_bytes_costs_a_retry_not_the_attempt)
+{
+    for (int corruptIsPrimary = 0; corruptIsPrimary < 2; ++corruptIsPrimary) {
+        TempDir tmp;
+        const Snapshot s = MakeSnapshot(10);
+        FakeBootstrapServer a(s), b(s);
+        FakeBootstrapServer& bad = corruptIsPrimary ? a : b;
+        FakeBootstrapServer& good = corruptIsPrimary ? b : a;
+        bad.tamper = [](int, uint32_t, uint64_t offset, std::string& data) {
+            if (offset == 0 && !data.empty())
+                data[0] ^= 1; // every file it serves is wrong
+        };
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                                std::vector<std::string>(1, PeerName(b))), error);
+        CheckAllFilesMatch(s, tmp.path / "staging");
+        BOOST_CHECK_GT(good.Log().size(), 0U);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(a_server_that_disappears_mid_download_leaves_the_rest_to_the_other)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(14);
+    FakeBootstrapServer a(s), b(s);
+    a.chunkDelayMs = 5;
+    b.chunkDelayMs = 5;
+    std::atomic<int> served(0);
+    // b answers a few requests, cutting connections in the middle of files, and then never again
+    b.dropBefore = [&served](int, uint32_t, uint64_t, int) { return served.fetch_add(1) >= 12; };
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                            std::vector<std::string>(1, PeerName(b))), error);
+    CheckAllFilesMatch(s, tmp.path / "staging");
+    BOOST_CHECK_GT(a.Log().size(), 0U);
+    // and the same when the first (validated) server is the one that goes
+    TempDir tmp2;
+    FakeBootstrapServer c(s), d(s);
+    std::atomic<int> served2(0);
+    c.dropBefore = [&served2](int, uint32_t, uint64_t, int) { return served2.fetch_add(1) >= 12; };
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(c.Address(), PeerName(c), s.manifest, tmp2.path / "staging", 5000, 4, error,
+                                                            std::vector<std::string>(1, PeerName(d))), error);
+    CheckAllFilesMatch(s, tmp2.path / "staging");
+}
+
+BOOST_AUTO_TEST_CASE(a_stream_the_server_defers_moves_to_the_other_server)
+{
+    BootstrapPeerPolicy pol;
+    pol.windowMs = 500;
+    pol.stallMs = 1000;
+    PolicyGuard guard(pol);
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(10);
+    FakeBootstrapServer a(s), b(s);
+    b.chunkDelayMs = 6000; // over its serving cap: it does not answer in time
+    std::string error;
+    const int64_t t0 = GetTimeMillis();
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                            std::vector<std::string>(1, PeerName(b))), error);
+    BOOST_CHECK_LT(GetTimeMillis() - t0, 45000); // real-clock: the property under test is fail-over speed: it would take minutes if its streams stayed on b (loaded hosts need slack)
+    CheckAllFilesMatch(s, tmp.path / "staging");
+    BOOST_CHECK_GE(a.Log().size(), ChunksOf(s) - 40U);
+}
+
+BOOST_AUTO_TEST_CASE(partial_files_fetched_from_one_server_continue_from_the_other)
+{
+    // no stream moves here: a moved stream drops the requests in flight, which the servers count twice
+    BootstrapPeerPolicy still;
+    still.slowFraction = 0;
+    still.stallMs = (int64_t)1 << 40;
+    still.stealFactor = 1e9;
+    PolicyGuard guard(still);
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(8);
+    std::string error;
+    {
+        // first run: the only server cuts every connection after a handful of chunks and the attempt dies
+        FakeBootstrapServer a(s);
+        std::atomic<int> served(0);
+        a.dropBefore = [&served](int, uint32_t, uint64_t, int) { return served.fetch_add(1) >= 20; };
+        BootstrapSetWatchdogForTests(1500, 1500);
+        const bool ok = DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 2000, 2, error);
+        BootstrapSetWatchdogForTests(0, 0);
+        BOOST_CHECK(!ok);
+    }
+    // second run: two other servers finish it; what the first run stored is not fetched again
+    // what the first run left behind (verified files and aligned .part prefixes; the last chunk of a
+    // .part is always re-requested), counted from the disk so the check does not depend on timing
+    size_t stored = 0;
+    for (size_t i = 0; i < s.manifest.vFiles.size(); ++i) {
+        const boost::filesystem::path f = tmp.path / "staging" / s.manifest.vFiles[i].strPath;
+        boost::system::error_code ec;
+        if (boost::filesystem::exists(f, ec)) {
+            stored += (s.manifest.vFiles[i].nSize + TEST_CHUNK - 1) / TEST_CHUNK;
+        } else if (boost::filesystem::exists(f.string() + ".part", ec)) {
+            const uint64_t ps = boost::filesystem::file_size(f.string() + ".part", ec);
+            stored += ps / TEST_CHUNK > 0 ? ps / TEST_CHUNK - 1 : 0;
+        }
+    }
+    BOOST_CHECK_GT(stored, 0U);
+    FakeBootstrapServer b(s), c(s);
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(b.Address(), PeerName(b), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                            std::vector<std::string>(1, PeerName(c))), error);
+    CheckAllFilesMatch(s, tmp.path / "staging");
+    BOOST_CHECK_LE(b.Log().size() + c.Log().size(), ChunksOf(s) - stored);
+}
+
+
+BOOST_AUTO_TEST_CASE(a_fast_secondary_holding_few_files_does_not_make_the_download_slower)
+{
+    BootstrapPeerPolicy pol; // what -bootstrapschedwindowms=1000 sets
+    pol.windowMs = 1000;
+    pol.stallMs = 2000;
+    pol.moveCooldownMs = pol.penaltyMs = 3000;
+    pol.stealMinSeconds = 1;
+    PolicyGuard guard(pol);
+    const Snapshot s = MakeSnapshot(60);
+    int64_t alone = 0, both = 0;
+    {
+        TempDir tmp;
+        FakeBootstrapServer a(s);
+        a.chunkDelayMs = 40;
+        std::string error;
+        const int64_t t0 = GetTimeMillis();
+        BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error), error);
+        alone = GetTimeMillis() - t0;
+    }
+    {
+        TempDir tmp;
+        FakeBootstrapServer a(s), b(s);
+        a.chunkDelayMs = 40;
+        b.chunkDelayMs = 2;
+        CBootstrapSnapshotManifest other = s.manifest; // another height: shares only the first 8 files
+        for (size_t i = 8; i < other.vFiles.size(); ++i)
+            other.vFiles[i].hashSha256 = uint256S(strprintf("0x%x", (unsigned)(1000 + i)));
+        b.manifestFor = [&](int) { return other; };
+        std::string error;
+        const int64_t t0 = GetTimeMillis();
+        BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 5000, 4, error,
+                                                                std::vector<std::string>(1, PeerName(b))), error);
+        both = GetTimeMillis() - t0;
+        CheckAllFilesMatch(s, tmp.path / "staging");
+        // The primary must get all its streams: with the secondary out of files, no stream may sit on it (that was
+        // the failure: the primary never got its 4th stream). Wall times are far too noisy on a loaded host for a
+        // tight comparison, so the time check below only catches a stall.
+        BOOST_CHECK_GE(a.maxLive.load(), 4);
+        BOOST_TEST_MESSAGE("partial secondary: alone " << alone << " ms, with a fast partial secondary " << both << " ms; a connections="
+                           << a.connections.load() << " b connections=" << b.connections.load());
+    }
+    // twice as long and three seconds of noise: a stall, not jitter
+    BOOST_CHECK_MESSAGE(both <= alone * 2 + 3000, "a fast partial secondary made it slower: " << both << " ms vs " << alone << " ms alone");
+}
+
+// ---- downloads against fake servers: liveness ----
+
+BOOST_AUTO_TEST_CASE(a_secondary_that_lies_mid_file_and_hands_over_does_not_cost_the_attempt)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(10);
+    FakeBootstrapServer a(s), b(s);
+    a.chunkDelayMs = 4; // honest primary, a little slower
+    // the secondary: an honest first chunk, wrong bytes after it, and it never serves a file's last chunk, so
+    // the honest primary always finishes the files the secondary touched
+    b.tamper = [](int, uint32_t, uint64_t offset, std::string& data) {
+        if (offset >= TEST_CHUNK && !data.empty())
+            data[0] ^= 1;
+    };
+    b.dropBefore = [&s](int, uint32_t file, uint64_t offset, int) {
+        return offset + TEST_CHUNK >= s.contents[file].size();
+    };
+    BootstrapSetWatchdogForTests(30000, 30000);
+    std::string error;
+    const bool ok = DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 3000, 4, error,
+                                                      std::vector<std::string>(1, PeerName(b)));
+    BootstrapSetWatchdogForTests(0, 0);
+    BOOST_CHECK_MESSAGE(ok, "download with an honest, reachable primary failed: " << error);
+    if (ok)
+        CheckAllFilesMatch(s, tmp.path / "staging");
+}
+
+BOOST_AUTO_TEST_CASE(a_resumed_prefix_written_by_a_lying_server_is_fetched_again_from_one_server)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(6);
+    std::string error;
+    {
+        // first run: the only server writes wrong bytes after the first chunk of every file and never serves a
+        // last chunk, so the attempt ends and leaves torn .part files behind
+        FakeBootstrapServer liar(s);
+        liar.tamper = [](int, uint32_t, uint64_t offset, std::string& data) {
+            if (offset >= TEST_CHUNK && !data.empty())
+                data[0] ^= 1;
+        };
+        liar.dropBefore = [&s](int, uint32_t file, uint64_t offset, int) { return offset + TEST_CHUNK >= s.contents[file].size(); };
+        BootstrapSetWatchdogForTests(2000, 2000);
+        const bool ok = DownloadBootstrapSnapshotParallel(liar.Address(), PeerName(liar), s.manifest, tmp.path / "staging", 1500, 2, error);
+        BootstrapSetWatchdogForTests(0, 0);
+        BOOST_CHECK(!ok);
+    }
+    // second run: two honest servers. Each resumed .part fails its hash (unknown origin); the file is fetched again
+    // from byte 0 from one of them and nobody is benched or the attempt lost.
+    error.clear();
+    FakeBootstrapServer a(s), b(s);
+    const bool ok2 = DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 3000, 4, error,
+                                                       std::vector<std::string>(1, PeerName(b)));
+    BootstrapSetWatchdogForTests(0, 0);
+    BOOST_CHECK_MESSAGE(ok2, error);
+    if (ok2)
+        CheckAllFilesMatch(s, tmp.path / "staging");
+}
+
+BOOST_AUTO_TEST_CASE(a_primary_that_refreshes_its_snapshot_ends_the_attempt_at_once)
+{
+    // The only server refreshes its snapshot: later connections get a manifest that differs in ONE file (as a
+    // growing block bundle tail would). The attempt ends at once ("manifest differs"); the caller retries with
+    // the new manifest. It must not idle until a watchdog or reconnect in a storm.
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(10);
+    FakeBootstrapServer a(s);
+    CBootstrapSnapshotManifest changed = s.manifest;
+    const uint32_t last = (uint32_t)changed.vFiles.size() - 1;
+    changed.vFiles[last].hashSha256 = uint256S("0x77");
+    a.manifestFor = [&](int conn) { return conn < 4 ? s.manifest : changed; };
+    a.dropBefore = [](int conn, uint32_t, uint64_t, int seq) { return conn < 4 && seq == 2; };
+    BootstrapSetWatchdogForTests(6000, 6000);
+    std::string error;
+    const int64_t t0 = GetTimeMillis();
+    const bool ok = DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 3000, 4, error);
+    const int64_t ms = GetTimeMillis() - t0;
+    BootstrapSetWatchdogForTests(0, 0);
+    BOOST_CHECK(!ok);
+    BOOST_CHECK_MESSAGE(error.find("differs from the master manifest") != std::string::npos, error);
+    BOOST_CHECK_MESSAGE(ms < 3000, "the attempt idled " << ms << " ms over " << a.connections.load() << " connections before ending (" << error << ")"); // real-clock: the property under test is that a changed manifest ends the attempt at once instead of idling to the stall timeout
+    BOOST_CHECK_LT(a.connections.load(), 12);
+}
+
+BOOST_AUTO_TEST_CASE(after_a_refresh_of_the_primary_the_next_attempt_keeps_the_shared_files)
+{
+    TempDir tmp;
+    const Snapshot s = MakeSnapshot(10);
+    // the refreshed snapshot: the last file grew (here: other bytes), the other nine are the same
+    Snapshot s2 = s;
+    const size_t last = s2.contents.size() - 1;
+    s2.contents[last] = Bytes(s2.contents[last].size(), 77);
+    s2.manifest.vFiles[last].hashSha256 = Sha256Of(s2.contents[last]);
+    std::string error;
+    {
+        FakeBootstrapServer a(s);
+        a.chunkDelayMs = 3;
+        a.manifestFor = [&](int conn) { return conn < 2 ? s.manifest : s2.manifest; };
+        a.dropBefore = [](int conn, uint32_t, uint64_t, int seq) { return conn < 2 && seq == 7; };
+        BootstrapSetWatchdogForTests(20000, 20000);
+        const bool ok = DownloadBootstrapSnapshotParallel(a.Address(), PeerName(a), s.manifest, tmp.path / "staging", 3000, 2, error);
+        BootstrapSetWatchdogForTests(0, 0);
+        BOOST_CHECK(!ok);
+        BOOST_CHECK_MESSAGE(error.find("differs from the master manifest") != std::string::npos, error);
+    }
+    size_t staged = 0;
+    for (size_t i = 0; i + 1 < s.manifest.vFiles.size(); ++i)
+        if (fs::exists(tmp.path / "staging" / s.manifest.vFiles[i].strPath))
+            ++staged;
+    // the caller starts again with the new manifest: the staged files that are still the same are reused
+    error.clear();
+    FakeBootstrapServer b(s2);
+    BOOST_REQUIRE_MESSAGE(DownloadBootstrapSnapshotParallel(b.Address(), PeerName(b), s2.manifest, tmp.path / "staging", 5000, 4, error), error);
+    CheckAllFilesMatch(s2, tmp.path / "staging");
+    BOOST_CHECK_MESSAGE(staged > 0, "the first attempt staged no complete file; the test proves nothing");
+    BOOST_CHECK_LT(b.Log().size(), ChunksOf(s2)); // the staged files were not fetched again
+}
 BOOST_AUTO_TEST_SUITE_END()
+
+#endif // !WIN32

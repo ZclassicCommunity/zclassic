@@ -124,7 +124,7 @@ Wladimir J. van der Laan (6):
       build: Enable C++11 build, require C++11 compiler
       build: update ax_cxx_compile_stdcxx to serial 4
       test: Remove java comparison tool
-      build: Remove check for `openssl/ec.h`
+      build: Remove check for `openssl/ec.h` <!-- doc-path-ok -->
       devtools: Check for high-entropy ASLR in 64-bit PE executables
       build: supply `-Wl,--high-entropy-va`
 

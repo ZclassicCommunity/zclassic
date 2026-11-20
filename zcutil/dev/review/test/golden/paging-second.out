@@ -1,0 +1,8 @@
+exit=1
+lines=37
+under 16 KiB
+review: 80 of 80 commits in @c2..@many_tip have no accepte
+  <sha7> change 46 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  <sha7> change 79 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  @many_tip change 80 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+record: zcl-dev review record --reviewer <name> --verdict AC

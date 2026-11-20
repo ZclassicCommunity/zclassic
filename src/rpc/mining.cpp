@@ -189,8 +189,8 @@ UniValue generate(const UniValue& params, bool fHelp)
     GetMainSignals().ScriptForMining(coinbaseScript);
 
     //throw an error if no script was provided
-    if (!coinbaseScript->reserveScript.size())
-        throw JSONRPCError(RPC_INTERNAL_ERROR, "No coinbase script available (mining requires a wallet or -mineraddress)");
+    if (!coinbaseScript || !coinbaseScript->reserveScript.size())
+        throw JSONRPCError(RPC_INVALID_REQUEST, NoCoinbaseScriptMessage());
 
     {   // Don't keep cs_main locked
         LOCK(cs_main);
@@ -299,6 +299,14 @@ UniValue setgenerate(const UniValue& params, bool fHelp)
         nGenProcLimit = params[1].get_int();
         if (nGenProcLimit == 0)
             fGenerate = false;
+    }
+
+    if (fGenerate) {
+        // Fail here, not in the miner thread where nobody sees the error.
+        boost::shared_ptr<CReserveScript> coinbaseScript;
+        GetMainSignals().ScriptForMining(coinbaseScript);
+        if (!coinbaseScript || !coinbaseScript->reserveScript.size())
+            throw JSONRPCError(RPC_INVALID_REQUEST, NoCoinbaseScriptMessage());
     }
 
     mapArgs["-gen"] = (fGenerate ? "1" : "0");
@@ -623,8 +631,8 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
         GetMainSignals().ScriptForMining(coinbaseScript);
 
         // Throw an error if no script was provided
-        if (!coinbaseScript->reserveScript.size())
-            throw JSONRPCError(RPC_INTERNAL_ERROR, "No coinbase script available (mining requires a wallet or -mineraddress)");
+        if (!coinbaseScript || !coinbaseScript->reserveScript.size())
+            throw JSONRPCError(RPC_INVALID_REQUEST, NoCoinbaseScriptMessage());
 
         pblocktemplate = CreateNewBlock(coinbaseScript->reserveScript);
         if (!pblocktemplate)

@@ -145,8 +145,9 @@ public:
         vSeeds.clear();
 
         vSeeds.push_back(CDNSSeedData("zclnet.net", "dnsseed.zclnet.net"));
-        vSeeds.push_back(CDNSSeedData("zslp.org", "dnsseed.zslp.org"));
-        // The community DNS seeds above are frequently unreachable, which can leave
+        // (dnsseed.zslp.org was dropped: zslp.org no longer resolves, NXDOMAIN, and
+        // its failed lookup held up the seeds below by one to three seconds.)
+        // The community DNS seed above is frequently unreachable, which can leave
         // a fresh node with no addresses to dial. Seed the known-good bootstrap
         // servers directly: CDNSSeedData accepts a literal IP (LookupHost resolves
         // it as-is), so the seeding path always yields at least these live peers.
@@ -239,12 +240,16 @@ public:
         // remains 8033 for ordinary block/header synchronization.
         vBootstrapPeers.push_back("74.50.74.102:8035");
         vBootstrapPeers.push_back("205.209.104.118:8035");
+        vBootstrapPeers.push_back("64.20.43.62:8035");
+        vBootstrapPeers.push_back("64.20.37.202:8035");
 
-        // The same two nodes as persistent Tor v3 onion services forwarding
+        // The same four nodes as persistent Tor v3 onion services forwarding
         // port 8035. Used only by an onion-only node (see SelectBootstrapPeers)
         // so it never dials the clearnet addresses above through Tor exits.
         vOnionBootstrapPeers.push_back("pbngomf4ur6vae7hye4ktx4mcd3cuhtf2n6spk2c36norcmhoamnrwad.onion:8035");   // 74.50.74.102
         vOnionBootstrapPeers.push_back("zuhvxm6knr6geljjcsbxviap2toee2sjxmepn4eojxmomakluh25xqid.onion:8035");   // 205.209.104.118
+        vOnionBootstrapPeers.push_back("n2qcjag2q5namcwbwisgrrosbx45x2krnr7xuty2dnczxmrnvpo3r6qd.onion:8035");   // 64.20.43.62
+        vOnionBootstrapPeers.push_back("uvzr67bpaiaozsr2u7hj5s72k7wjpiuvggekpygzhipx7kdqh7h43iid.onion:8035");   // 64.20.37.202
 
         // Founders reward script expects a vector of 2-of-3 multisig addresses
         vFoundersRewardAddress = {
@@ -597,7 +602,7 @@ void SelectParams(CBaseChainParams::Network network) {
     SelectBaseParams(network);
     pCurrentParams = &Params(network);
 
-    // Some python qa rpc tests need to enforce the coinbase consensus rule
+    // Some qa rpc tests need to enforce the coinbase consensus rule
     if (network == CBaseChainParams::REGTEST && mapArgs.count("-regtestprotectcoinbase")) {
         regTestParams.SetRegTestCoinbaseMustBeProtected();
     }

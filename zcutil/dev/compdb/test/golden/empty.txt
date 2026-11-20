@@ -1,0 +1,4 @@
+--- log
+entries 0, skipped 0, duplicates 0
+zcl-dev-compdb: no compile commands under @W@/empty/src (not configured? hollow)
+exit=2

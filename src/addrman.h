@@ -227,6 +227,12 @@ protected:
     //! Delete an entry. It must not be in tried, and have refcount 0.
     void Delete(int nId);
 
+    //! Delete the "new" entries that hold no bucket slot (collisions); returns how many.
+    int PruneUnreferenced();
+
+    //! Insert one record of a damaged file as a "new" entry (or tried when fTried and it fits); false if dropped.
+    bool AddSalvaged(CAddrInfo info, bool fTried);
+
     //! Clear a position in a "new" table. This is the only place where entries are actually deleted.
     void ClearNew(int nUBucket, int nUBucketPos);
 
@@ -236,8 +242,8 @@ protected:
     //! Add an entry to the "new" table.
     bool Add_(const CAddress &addr, const CNetAddr& source, int64_t nTimePenalty);
 
-    //! Mark an entry as attempted to connect.
-    void Attempt_(const CService &addr, int64_t nTime);
+    //! Mark an entry as attempted to connect; fCountFailure: count it in nAttempts.
+    void Attempt_(const CService &addr, int64_t nTime, bool fCountFailure);
 
     //! Select an address to connect to, if newOnly is set to true, only the new table is selected from.
     CAddrInfo Select_(bool newOnly);
@@ -425,20 +431,62 @@ public:
         }
 
         // Prune new entries with refcount 0 (as a result of collisions).
-        int nLostUnk = 0;
-        for (std::map<int, CAddrInfo>::const_iterator it = mapInfo.begin(); it != mapInfo.end(); ) {
-            if (it->second.fInTried == false && it->second.nRefCount == 0) {
-                std::map<int, CAddrInfo>::const_iterator itCopy = it++;
-                Delete(itCopy->first);
-                nLostUnk++;
-            } else {
-                it++;
-            }
-        }
+        int nLostUnk = PruneUnreferenced();
         if (nLost + nLostUnk > 0) {
             LogPrint("addrman", "addrman lost %i new and %i tried addresses due to collisions\n", nLostUnk, nLost);
         }
 
+        Check();
+    }
+
+    /**
+     * Read what is still readable of a damaged serialization (same layout as Serialize,
+     * stream positioned at the version byte). The header gets the checks Unserialize
+     * makes; a bad header throws and keeps nothing. Records are then read one at a
+     * time and reading stops at the first one that cannot be completed. The bucket
+     * positions are never read: every entry is placed afresh from its source group.
+     * With fDemoteTried the tried flag and success time (trust-bearing) are discarded
+     * and every record comes back "new". At most 2 * ADDRMAN_GETADDR_MAX are kept.
+     * nKept counts the entries now held, nDropped the header's records that are not.
+     */
+    template<typename Stream>
+    void UnserializeSalvage(Stream& s, bool fDemoteTried, size_t& nKept, size_t& nDropped)
+    {
+        LOCK(cs);
+
+        Clear();
+        nKept = 0;
+        nDropped = 0;
+
+        unsigned char nVersion;
+        s >> nVersion;
+        unsigned char nKeySize;
+        s >> nKeySize;
+        if (nKeySize != 32) throw std::ios_base::failure("Incorrect keysize in addrman salvage");
+        s >> nKey;
+        int nNewHdr = 0, nTriedHdr = 0, nUBuckets = 0;
+        s >> nNewHdr;
+        s >> nTriedHdr;
+        s >> nUBuckets;
+        if (nNewHdr < 0 || nNewHdr > ADDRMAN_NEW_BUCKET_COUNT * ADDRMAN_BUCKET_SIZE)
+            throw std::ios_base::failure("Corrupt CAddrMan salvage, nNew exceeds limit.");
+        if (nTriedHdr < 0 || nTriedHdr > ADDRMAN_TRIED_BUCKET_COUNT * ADDRMAN_BUCKET_SIZE)
+            throw std::ios_base::failure("Corrupt CAddrMan salvage, nTried exceeds limit.");
+
+        const size_t nTotal = (size_t)nNewHdr + (size_t)nTriedHdr;
+        try {
+            for (size_t n = 0; n < nTotal && vRandom.size() < 2 * ADDRMAN_GETADDR_MAX; n++) {
+                CAddrInfo info;
+                s >> info;
+                AddSalvaged(info, n >= (size_t)nNewHdr && !fDemoteTried);
+            }
+        } catch (const std::exception&) {
+            // the rest of the file is unusable; keep the complete records read so far
+        }
+
+        PruneUnreferenced();
+        nKept = vRandom.size();
+        nDropped = nTotal > nKept ? nTotal - nKept : 0;
         Check();
     }
 
@@ -555,13 +603,14 @@ public:
         }
     }
 
-    //! Mark an entry as connection attempted to.
-    void Attempt(const CService &addr, int64_t nTime = GetAdjustedTime())
+    //! Mark an entry as connection attempted to. With fCountFailure false only nLastTry is
+    //! updated, not nAttempts (a dial cut short by our own shorter timeout says little).
+    void Attempt(const CService &addr, int64_t nTime = GetAdjustedTime(), bool fCountFailure = true)
     {
         {
             LOCK(cs);
             Check();
-            Attempt_(addr, nTime);
+            Attempt_(addr, nTime, fCountFailure);
             Check();
         }
     }

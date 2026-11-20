@@ -1,0 +1,16 @@
+== src/test/test_bitcoin --run_test=foo_tests --log_level=test_suite
+fake test_bitcoin --run_test=foo_tests --log_level=test_suite
+x.cpp(1): Entering test suite "foo_tests"
+== exit 1
+== src/zcash-gtest --gtest_filter=FooFixture.*:FooParam.*:*/FooParam.*:FooSuite.*
+fake zcash-gtest --gtest_filter=FooFixture.*:FooParam.*:*/FooParam.*:FooSuite.*
+[==========] Running 3 tests from suites.
+[ RUN      ] FooFixture.t
+[       OK ] FooFixture.t (0 ms)
+[ RUN      ] Inst/FooParam.c/0
+[       OK ] Inst/FooParam.c/0 (0 ms)
+[ RUN      ] FooSuite.t
+[       OK ] FooSuite.t (0 ms)
+[  PASSED  ] 3 tests.
+== exit 1
+t-fast: 2 command(s), 2 failed

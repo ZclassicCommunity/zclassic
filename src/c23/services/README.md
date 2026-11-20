@@ -156,8 +156,7 @@ src/zcash-gtest --gtest_filter='TokenGuard*'
 BASELINE_SRC=<dir-of-unguarded-build>/src sh qa/rpc-tests/wallet_tokenguard.sh
 ```
 
-`qa/rpc-tests/wallet_tokenguard.sh` is a shell script, not a `test_framework` test,
-because the framework needs Python 2.
+`qa/rpc-tests/wallet_tokenguard.sh` is a shell script, like every test in `qa/rpc-tests`.
 
 ## Re-vendoring
 

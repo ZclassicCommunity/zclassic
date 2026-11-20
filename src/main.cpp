@@ -19,13 +19,16 @@
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
 #include "deprecation.h"
+#include "headerprecheck.h"
 #include "init.h"
 #include "merkleblock.h"
 #include "metrics.h"
 #include "net.h"
+#include "p2pserve.h"
 #include "pow.h"
 #include "parkedblockindex.h"
 #include "rpc/server.h"
+#include "shieldedcache.h"
 #include "txdb.h"
 #include "txmempool.h"
 #include "ui_interface.h"
@@ -71,6 +74,7 @@ int nScriptCheckThreads = 0;
 bool fExperimentalMode = false;
 bool fImporting = false;
 bool fReindex = false;
+std::string strReindexReason;
 bool fReindexChainState = false;
 bool fBlockIndexFromSnapshot = false;
 bool fTxIndex = false;
@@ -323,6 +327,8 @@ struct CNodeState {
     //! Whether this is an inbound connection (we did not dial it). Used by the
     //! peer-aware finalization gate to weight independent OUTBOUND corroboration.
     bool fInbound;
+    //! When (GetTime() seconds) we last answered this peer's mempool request, or 0.
+    int64_t nLastMempoolServed;
 
     CNodeState() {
         fCurrentlyConnected = false;
@@ -339,6 +345,7 @@ struct CNodeState {
         nBlocksInFlightValidHeaders = 0;
         fPreferredDownload = false;
         fInbound = false;
+        nLastMempoolServed = 0;
     }
 };
 
@@ -1087,6 +1094,13 @@ bool ContextualCheckTransaction(
     if (!tx.vShieldedSpend.empty() ||
         !tx.vShieldedOutput.empty())
     {
+        // The Sapling checks below are a pure function of the transaction
+        // bytes (txid) and the branch id (dataToBeSigned). A transaction that
+        // already passed them under this branch id, typically on entering the
+        // mempool, is not verified again; failures are never cached
+        // (shieldedcache.h).
+        const uint32_t saplingBranchId = CurrentEpochBranchId(nHeight, Params().GetConsensus());
+        if (!ShieldedVerdictContains(tx.GetHash(), saplingBranchId)) {
         auto ctx = librustzcash_sapling_verification_ctx_init();
 
         for (const SpendDescription &spend : tx.vShieldedSpend) {
@@ -1135,6 +1149,8 @@ bool ContextualCheckTransaction(
         }
 
         librustzcash_sapling_verification_ctx_free(ctx);
+        ShieldedVerdictInsert(tx.GetHash(), saplingBranchId);
+        }
     }
     return true;
 }
@@ -1885,12 +1901,34 @@ CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
     }
 }
 
+/** Largest size of one blk?????.dat. Regtest only (init.cpp rejects the option elsewhere): lets qa scripts
+ *  roll over and prune block files without writing hundreds of MiB. */
+static unsigned int MaxBlockFileSize()
+{
+    if (mapArgs.count("-testmaxblockfilesize"))
+        return (unsigned int)std::max<int64_t>(4096, std::min<int64_t>(GetArg("-testmaxblockfilesize", MAX_BLOCKFILE_SIZE), MAX_BLOCKFILE_SIZE));
+    return MAX_BLOCKFILE_SIZE;
+}
+
 int64_t BlockIndexWriteInterval(bool fInitialBlockDownload)
 {
     // Regtest only (init.cpp rejects it elsewhere): lets qa scripts reach a block-index write without a full flush.
     if (mapArgs.count("-testblockindexinterval"))
         return GetArg("-testblockindexinterval", DATABASE_WRITE_INTERVAL);
     return fInitialBlockDownload ? DATABASE_WRITE_INTERVAL_IBD : DATABASE_WRITE_INTERVAL;
+}
+
+int64_t ChainstateFlushInterval(bool fInitialBlockDownload)
+{
+    // During initial block download the large coins cache is what makes the sync fast: flush only when it
+    // is full (or after the legacy 24 h). At the tip every flush is small, so keep the durable height close.
+    if (fInitialBlockDownload)
+        return DATABASE_FLUSH_INTERVAL;
+    int64_t n = GetArg("-dbflushinterval", DATABASE_FLUSH_INTERVAL_TIP);
+    // 0 (or negative) keeps the legacy interval, and no value may exceed it.
+    if (n <= 0 || n > (int64_t)DATABASE_FLUSH_INTERVAL)
+        return DATABASE_FLUSH_INTERVAL;
+    return n;
 }
 
 bool HeadersRequestTimedOut(int64_t nNow, int64_t nRequestedAt, int64_t nTimeoutSeconds)
@@ -2857,6 +2895,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
                 return error("ConnectBlock(): FindUndoPos failed");
             if (!UndoWriteToDisk(blockundo, pos, pindex->pprev->GetBlockHash(), chainparams.MessageStart()))
                 return AbortNode(state, "Failed to write undo data");
+            TestCrashPoint("connect-after-undo-write");
 
             // update nUndoPos in block index
             pindex->nUndoPos = pos.nPos;
@@ -2955,7 +2994,7 @@ bool static FlushStateToDisk(CValidationState &state, FlushStateMode mode) {
     // It's been a while since we wrote the block index to disk. Do this frequently, so we don't need to redownload after a crash.
     bool fPeriodicWrite = mode == FLUSH_STATE_PERIODIC && nNow > nLastWrite + BlockIndexWriteInterval(IsInitialBlockDownload()) * 1000000;
     // It's been very long since we flushed the cache. Do this infrequently, to optimize cache usage.
-    bool fPeriodicFlush = mode == FLUSH_STATE_PERIODIC && nNow > nLastFlush + (int64_t)DATABASE_FLUSH_INTERVAL * 1000000;
+    bool fPeriodicFlush = mode == FLUSH_STATE_PERIODIC && nNow > nLastFlush + ChainstateFlushInterval(IsInitialBlockDownload()) * 1000000;
     // Combine all conditions that result in a full cache flush.
     bool fDoFullFlush = (mode == FLUSH_STATE_ALWAYS) || fCacheLarge || fCacheCritical || fPeriodicFlush || fFlushForPrune;
     // Write blocks and block index to disk.
@@ -2982,6 +3021,7 @@ bool static FlushStateToDisk(CValidationState &state, FlushStateMode mode) {
             if (!pblocktree->WriteBatchSync(vFiles, nLastBlockFile, vBlocks)) {
                 return AbortNode(state, "Files to write to block index database");
             }
+            TestCrashPoint("flush-after-blockindex");
         }
         // Finally remove any pruned files
         if (fFlushForPrune)
@@ -3024,10 +3064,8 @@ bool static FlushStateToDisk(CValidationState &state, FlushStateMode mode) {
     return true;
 }
 
-void FlushStateToDisk() {
-    CValidationState state;
-    FlushStateToDisk(state, FLUSH_STATE_ALWAYS);
-}
+bool FlushStateToDiskChecked() { CValidationState state; return FlushStateToDisk(state, FLUSH_STATE_ALWAYS); }
+void FlushStateToDisk() { FlushStateToDiskChecked(); }
 
 void PruneAndFlush() {
     CValidationState state;
@@ -4630,7 +4668,7 @@ bool FindBlockPos(CValidationState &state, CDiskBlockPos &pos, unsigned int nAdd
     }
 
     if (!fKnown) {
-        while (vinfoBlockFile[nFile].nSize + nAddSize >= MAX_BLOCKFILE_SIZE) {
+        while (vinfoBlockFile[nFile].nSize + nAddSize >= MaxBlockFileSize()) {
             nFile++;
             if (vinfoBlockFile.size() <= nFile) {
                 vinfoBlockFile.resize(nFile + 1);
@@ -5043,6 +5081,7 @@ bool AcceptBlock(CBlock& block, CValidationState& state, CBlockIndex** ppindex, 
         if (dbp == NULL)
             if (!WriteBlockToDisk(block, blockPos, chainparams.MessageStart()))
                 AbortNode(state, "Failed to write block");
+        TestCrashPoint("acceptblock-after-write"); // block bytes on disk, index entry not yet updated
         if (!ReceivedBlockTransactions(block, state, pindex, blockPos))
             return error("AcceptBlock(): ReceivedBlockTransactions failed");
     } catch (const std::runtime_error& e) {
@@ -6679,6 +6718,33 @@ static void ProcessAddrList(CNode* pfrom, vector<CAddress>& vAddr)
         pfrom->fGetAddr = false;
 }
 
+/** A mempool request inside the peer's cooldown is ignored: no reply, no ban score. Requires cs_main. */
+static bool MempoolRequestThrottled(CNode* pfrom)
+{
+    AssertLockHeld(cs_main);
+    CNodeState* state = State(pfrom->GetId());
+    if (state == NULL || pfrom->fWhitelisted)
+        return false;
+    int64_t nNow = GetTime();
+    if (MempoolRequestInCooldown(state->nLastMempoolServed, nNow)) {
+        LogPrint("net", "mempool request ignored, last served %ds ago (cooldown %ds) peer=%d\n",
+                 nNow - state->nLastMempoolServed, MEMPOOL_REQUEST_COOLDOWN, pfrom->id);
+        return true;
+    }
+    state->nLastMempoolServed = nNow;
+    return false;
+}
+
+static void ProcessMempoolMessage(CNode* pfrom)
+{
+    int currentHeight = GetHeight();
+
+    LOCK2(cs_main, pfrom->cs_filter);
+    if (MempoolRequestThrottled(pfrom))
+        return;
+    ServeMempool(pfrom, currentHeight);
+}
+
 bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t nTimeReceived)
 {
     const CChainParams& chainparams = Params();
@@ -6751,7 +6817,7 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
             return true;
         }
 
-        pfrom->addrLocal = addrMe;
+        pfrom->SetAddrLocal(addrMe);
         if (pfrom->fInbound && addrMe.IsRoutable())
         {
             SeenLocal(addrMe);
@@ -6785,7 +6851,7 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
                     LogPrintf("ProcessMessages: advertizing address %s\n", addr.ToString());
                     pfrom->PushAddress(addr);
                 } else if (IsPeerAddrLocalGood(pfrom)) {
-                    addr.SetIP(pfrom->addrLocal);
+                    addr.SetIP(pfrom->GetAddrLocal());
                     LogPrintf("ProcessMessages: advertizing address %s\n", addr.ToString());
                     pfrom->PushAddress(addr);
                 }
@@ -6960,8 +7026,8 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
         CBootstrapSnapshotManifest manifest;
         std::string err;
         if (!GetZcashParamManifest(manifest, err)) {
-            LogPrint("net", "could not build zcash param manifest for peer=%d: %s\n", pfrom->id, err);
-            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("zcash params unavailable"));
+            LogPrint("net", "could not build zk-SNARK parameter manifest for peer=%d: %s\n", pfrom->id, err);
+            pfrom->PushMessage("reject", strCommand, REJECT_INVALID, string("zk-SNARK parameters unavailable"));
             return true;
         }
         pfrom->PushMessage(NetMsgType::BSPMAN, manifest);
@@ -6990,7 +7056,7 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
             return error("bspman has trailing bytes from peer=%d", pfrom->id);
         }
 
-        LogPrint("net", "received unsolicited zcash param manifest from peer=%d\n", pfrom->id);
+        LogPrint("net", "received unsolicited zk-SNARK parameter manifest from peer=%d\n", pfrom->id);
     }
 
     else if (strCommand == NetMsgType::GETBSPCHK)
@@ -6999,16 +7065,16 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
             pfrom, vRecv, strCommand,
             pfrom->fBootstrapParamManifestSent,
             EnqueueBootstrapParamChunkRequest,
-            "zcash param", "zcash param manifest required",
-            "invalid zcash param chunk length", "invalid zcash param chunk offset",
-            "invalid zcash param chunk request");
+            "zk-SNARK parameter", "zk-SNARK parameter manifest required",
+            "invalid zk-SNARK parameter chunk length", "invalid zk-SNARK parameter chunk offset",
+            "invalid zk-SNARK parameter chunk request");
     }
 
     else if (strCommand == NetMsgType::BSPCHK)
     {
         return RecvBootstrapChunk(
             pfrom, vRecv, strCommand,
-            "zcash param", "invalid zcash param chunk size");
+            "zk-SNARK parameter", "invalid zk-SNARK parameter chunk size");
     }
 
 
@@ -7155,89 +7221,11 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
 
 
     else if (strCommand == "getblocks")
-    {
-        CBlockLocator locator;
-        uint256 hashStop;
-        vRecv >> locator >> hashStop;
-
-        LOCK(cs_main);
-
-        // Find the last block the caller has in the main chain
-        const CBlockIndex* pindex = FindForkInGlobalIndex(chainActive, locator);
-
-        // Send the rest of the chain
-        if (pindex)
-            pindex = chainActive.Next(pindex);
-        int nLimit = 500;
-        LogPrint("net", "getblocks %d to %s limit %d from peer=%d\n", (pindex ? pindex->nHeight : -1), hashStop.IsNull() ? "end" : hashStop.ToString(), nLimit, pfrom->id);
-        for (; pindex; pindex = chainActive.Next(pindex))
-        {
-            if (pindex->GetBlockHash() == hashStop)
-            {
-                LogPrint("net", "  getblocks stopping at %d %s\n", pindex->nHeight, pindex->GetBlockHash().ToString());
-                break;
-            }
-            // If pruning, don't inv blocks unless we have on disk and are likely to still have
-            // for some reasonable time window (1 hour) that block relay might require.
-            const int nPrunedBlocksLikelyToHave = MIN_BLOCKS_TO_KEEP - 3600 / chainparams.GetConsensus().PoWTargetSpacing(pindex->nHeight);
-            if (fPruneMode && (!(pindex->nStatus & BLOCK_HAVE_DATA) || pindex->nHeight <= chainActive.Tip()->nHeight - nPrunedBlocksLikelyToHave))
-            {
-                LogPrint("net", " getblocks stopping, pruned or too old block at %d %s\n", pindex->nHeight, pindex->GetBlockHash().ToString());
-                break;
-            }
-            pfrom->PushInventory(CInv(MSG_BLOCK, pindex->GetBlockHash()));
-            if (--nLimit <= 0)
-            {
-                // When this block is requested, we'll send an inv that'll
-                // trigger the peer to getblocks the next batch of inventory.
-                LogPrint("net", "  getblocks stopping at limit %d %s\n", pindex->nHeight, pindex->GetBlockHash().ToString());
-                pfrom->hashContinue = pindex->GetBlockHash();
-                break;
-            }
-        }
-    }
+        ServeGetBlocks(pfrom, vRecv, chainparams);
 
 
     else if (strCommand == "getheaders")
-    {
-        CBlockLocator locator;
-        uint256 hashStop;
-        vRecv >> locator >> hashStop;
-
-        LOCK(cs_main);
-
-        if (IsInitialBlockDownload())
-            return true;
-
-        const CBlockIndex* pindex = NULL;
-        if (locator.IsNull())
-        {
-            // If locator is null, return the hashStop block
-            BlockMap::iterator mi = mapBlockIndex.find(hashStop);
-            if (mi == mapBlockIndex.end())
-                return true;
-            pindex = (*mi).second;
-        }
-        else
-        {
-            // Find the last block the caller has in the main chain
-            pindex = FindForkInGlobalIndex(chainActive, locator);
-            if (pindex)
-                pindex = chainActive.Next(pindex);
-        }
-
-        // we must use CBlocks, as CBlockHeaders won't include the 0x00 nTx count at the end
-        vector<CBlock> vHeaders;
-        int nLimit = MAX_HEADERS_RESULTS;
-        LogPrint("net", "getheaders %d to %s from peer=%d\n", (pindex ? pindex->nHeight : -1), hashStop.ToString(), pfrom->id);
-        for (; pindex; pindex = chainActive.Next(pindex))
-        {
-            vHeaders.push_back(pindex->GetBlockHeader());
-            if (--nLimit <= 0 || pindex->GetBlockHash() == hashStop)
-                break;
-        }
-        pfrom->PushMessage("headers", vHeaders);
-    }
+        ServeGetHeaders(pfrom, vRecv);
 
 
     else if (strCommand == "tx")
@@ -7396,6 +7384,11 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
             ReadCompactSize(vRecv); // ignore tx count; assume it is 0.
         }
 
+        // Warm the positive-only Equihash memo on worker threads, outside
+        // cs_main; the loop below still checks every header (headerprecheck.h).
+        if (nCount > 0)
+            PreverifyHeadersEquihash(headers);
+
         LOCK(cs_main);
 
         if (nCount == 0) {
@@ -7509,35 +7502,7 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, int64_t
 
 
     else if (strCommand == "mempool")
-    {
-        int currentHeight = GetHeight();
-
-        LOCK2(cs_main, pfrom->cs_filter);
-
-        std::vector<uint256> vtxid;
-        mempool.queryHashes(vtxid);
-        vector<CInv> vInv;
-        BOOST_FOREACH(uint256& hash, vtxid) {
-            CTransaction tx;
-            bool fInMemPool = mempool.lookup(hash, tx);
-            if (fInMemPool && IsExpiringSoonTx(tx, currentHeight + 1)) {
-                continue;
-            }
-
-            CInv inv(MSG_TX, hash);
-            if (pfrom->pfilter) {
-                if (!fInMemPool) continue; // another thread removed since queryHashes, maybe...
-                if (!pfrom->pfilter->IsRelevantAndUpdate(tx)) continue;
-            }
-            vInv.push_back(inv);
-            if (vInv.size() == MAX_INV_SZ) {
-                pfrom->PushMessage("inv", vInv);
-                vInv.clear();
-            }
-        }
-        if (vInv.size() > 0)
-            pfrom->PushMessage("inv", vInv);
-    }
+        ProcessMempoolMessage(pfrom);
 
 
     else if (strCommand == "ping")

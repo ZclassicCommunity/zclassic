@@ -1,0 +1,8 @@
+path: src/test/foo_tests.cpp
+function: second_case
+matches: 1
+lines: 13-16
+TEST_F(Fix, second_case)
+{
+    ASSERT_EQ(2, 2);
+}

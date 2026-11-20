@@ -1,0 +1,16 @@
+path: src/common.h
+agents: AGENTS.md
+tests: Tests: run the fixture suites.
+rule  src/* -> unit-a
+listed-in  libfx_core.a
+compiled-via-includes-by  libfx_core.a
+compiled-via-includes-by  fxd
+compiled-via-includes-by  test/test_fx
+compiled-via-includes-by  libfx_wallet.a
+relinks-via-includes-by  fxd
+relinks-via-includes-by  test/test_fx
+guide  ci steps (ALL, broad rule: src/common.h): unit-a
+guide  lessons (doc/agent/LESSONS.md):
+guide    DONE src/core.cpp - keep raw strings out of the brace matcher.
+guide  traps (doc/agent/TRAPS.md):
+guide    (1) Core

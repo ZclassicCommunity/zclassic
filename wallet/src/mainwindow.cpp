@@ -19,6 +19,7 @@
 #include "turnstile.h"
 #include "senttxstore.h"
 #include "connection.h"
+#include "closeflow.h"
 #include "tokensview.h"
 #include "namesview.h"
 
@@ -153,7 +154,13 @@ MainWindow::MainWindow(QWidget *parent) :
         about.setupUi(&aboutDialog);
         Settings::saveRestore(&aboutDialog);
 
-        QString version    = QString("Version ") % QString(APP_VERSION) % " (" % QString(__DATE__) % ")";
+#ifdef ZQW_BUILD_EPOCH   // reproducible release builds: commit time instead of the compile date
+        const QString buildDate = QLocale::c().toString(
+            QDateTime::fromSecsSinceEpoch(ZQW_BUILD_EPOCH, Qt::UTC).date(), "MMM d yyyy");
+#else
+        const QString buildDate = QString(__DATE__);
+#endif
+        QString version    = QString("Version ") % QString(APP_VERSION) % " (" % buildDate % ")";
         // Say which node this wallet is talking to as well: a user reporting a problem needs
         // both versions, and the wallet and its node can differ (e.g. an external node).
         const int nv = Settings::getInstance()->getZClassicdVersion();
@@ -376,13 +383,12 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         return;
     }
 
-    // Real shutdown. Let the RPC know to shut down any running service.
+    // Real shutdown: show the closing state at once, re-send stop until accepted, stop the node.
     quitting = true;
+    CloseFlow::Assist closeAssist(this, rpc);
     rpc->shutdownZClassicd();
 
-    // Bubble up
-    if (event)
-        QMainWindow::closeEvent(event);
+    if (event) QMainWindow::closeEvent(event);   // bubble up
 
     // quit-on-last-window-closed is now disabled for the WHOLE GUI lifetime (set
     // in main(); never re-enabled by applyTraySetting), so closing the window no
@@ -739,6 +745,13 @@ void MainWindow::setupStatusBar() {
 
     statusLabel = new QLabel();
     ui->statusBar->addPermanentWidget(statusLabel);
+
+    // Wallet health: only visible when getwalletinfo reports something that needs attention (RPC::refreshWalletHealth).
+    healthLabel = new QLabel();
+    healthLabel->setObjectName("healthLabel");
+    healthLabel->setStyleSheet("QLabel { color: #d9822b; }");
+    ui->statusBar->addPermanentWidget(healthLabel);
+    healthLabel->setVisible(false);
 
     statusIcon = new QLabel();
     ui->statusBar->addPermanentWidget(statusIcon);
@@ -2567,7 +2580,7 @@ void MainWindow::payZClassicURI(QString uri) {
     }
 
     // Extract the address
-    qDebug() << "Recieved URI " << uri;
+    qDebug() << "Received a payment URI";   // never log it: it carries the address, amount and memo
     uri = uri.right(uri.length() - QString("zclassic:").length());
 
     QRegExp re("([a-zA-Z0-9]+)");

@@ -1,0 +1,3 @@
+2 matches, showing 2
+doc/agent/LESSONS.md:3: OPEN src/core/a.c — a first lesson about widgets and a Deadlock in parsing.
+doc/agent/TRAPS.md:7: - Do not deadlock the gadget table.

@@ -21,6 +21,8 @@
 #include <deque>
 #include <exception>
 #include <future>
+#include <list>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -347,6 +349,21 @@ bool CCoinsViewDB::GetStats(CCoinsStats &stats) const {
     return true;
 }
 
+// An entry loaded from disk holds no solution in memory; a rewrite (its status
+// changed) copies the stored one, so a record never loses its solution. Fails,
+// failing the whole batch, rather than write an empty solution.
+static bool AttachStoredSolution(CBlockTreeDB& db, const CBlockIndex* pindex, CDiskBlockIndex& di)
+{
+    if (!pindex->fSolutionOnDisk)
+        return true;
+    const uint256 hash = pindex->GetBlockHash();
+    CDiskBlockIndex stored;
+    if (!db.ReadDiskBlockIndex(hash, stored) || stored.nSolution.empty())
+        return error("WriteBatchSync: stored solution of block %s unreadable; index entry not rewritten", hash.ToString());
+    di.nSolution.swap(stored.nSolution);
+    return true;
+}
+
 bool CBlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*> >& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo) {
     CDBBatch batch(*this);
     for (std::vector<std::pair<int, const CBlockFileInfo*> >::const_iterator it=fileInfo.begin(); it != fileInfo.end(); it++) {
@@ -354,9 +371,107 @@ bool CBlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockF
     }
     batch.Write(DB_LAST_BLOCK, nLastFile);
     for (std::vector<const CBlockIndex*>::const_iterator it=blockinfo.begin(); it != blockinfo.end(); it++) {
-        batch.Write(make_pair(DB_BLOCK_INDEX, (*it)->GetBlockHash()), CDiskBlockIndex(*it));
+        CDiskBlockIndex di(*it);
+        if (!AttachStoredSolution(*this, *it, di))
+            return false;
+        batch.Write(make_pair(DB_BLOCK_INDEX, (*it)->GetBlockHash()), di);
     }
     return WriteBatch(batch, true);
+}
+
+namespace {
+
+// Bounded LRU of solutions by block hash. A block hash commits to its solution,
+// so an entry can never go stale. The mutex is never held across a database read.
+class SolutionCache
+{
+public:
+    bool Get(const uint256& hash, std::vector<unsigned char>& out)
+    {
+        std::lock_guard<std::mutex> lock(cs);
+        auto it = index.find(hash);
+        if (it == index.end()) {
+            misses++;
+            return false;
+        }
+        order.splice(order.begin(), order, it->second);
+        out = it->second->second;
+        hits++;
+        return true;
+    }
+
+    void Put(const uint256& hash, const std::vector<unsigned char>& solution)
+    {
+        std::lock_guard<std::mutex> lock(cs);
+        if (index.count(hash))
+            return;
+        order.emplace_front(hash, solution);
+        index[hash] = order.begin();
+        if (order.size() > BLOCK_INDEX_SOLUTION_CACHE_SIZE) {
+            index.erase(order.back().first);
+            order.pop_back();
+        }
+    }
+
+    BlockIndexSolutionCacheStats Stats()
+    {
+        std::lock_guard<std::mutex> lock(cs);
+        return BlockIndexSolutionCacheStats{hits, misses, order.size()};
+    }
+
+    void Clear()
+    {
+        std::lock_guard<std::mutex> lock(cs);
+        order.clear();
+        index.clear();
+        hits = misses = 0;
+    }
+
+private:
+    typedef std::list<std::pair<uint256, std::vector<unsigned char> > > Order;
+    std::mutex cs;
+    Order order;
+    std::map<uint256, Order::iterator> index;
+    uint64_t hits = 0;
+    uint64_t misses = 0;
+};
+
+SolutionCache& TheSolutionCache()
+{
+    static SolutionCache cache;
+    return cache;
+}
+
+} // namespace
+
+bool ReadBlockIndexSolution(const uint256& hash, std::vector<unsigned char>& out)
+{
+    if (TheSolutionCache().Get(hash, out))
+        return true;
+    if (pblocktree == NULL)
+        return error("%s: block tree not open; solution of %s unavailable", __func__, hash.ToString());
+    CDiskBlockIndex disk;
+    try {
+        if (!pblocktree->ReadDiskBlockIndex(hash, disk))
+            return error("%s: no block index record for %s", __func__, hash.ToString());
+    } catch (const std::exception& e) {
+        return error("%s: reading block index record %s: %s", __func__, hash.ToString(), e.what());
+    }
+    if (disk.nSolution.empty() || disk.GetBlockHash() != hash)
+        return error("%s: block index record %s holds no matching solution", __func__, hash.ToString());
+    TheSolutionCache().Put(hash, disk.nSolution);
+    out.swap(disk.nSolution);
+    return true;
+}
+
+BlockIndexSolutionCacheStats GetBlockIndexSolutionCacheStats()
+{
+    return TheSolutionCache().Stats();
+}
+
+void ClearBlockIndexSolutionCacheForTest()
+{
+    TheSolutionCache().Clear();
 }
 
 bool CBlockTreeDB::EraseBatchSync(const std::vector<const CBlockIndex*>& blockinfo) {
@@ -429,6 +544,9 @@ ParsedIndexBatch ParseIndexBatch(const RawIndexBatch& raw, const Consensus::Para
         out.parsed[i] = 1;
         out.hash[i] = out.disk[i].GetBlockHash();
         out.powOk[i] = CheckProofOfWork(out.hash[i], out.disk[i].nBits, consensus);
+        // The index keeps no solution (fSolutionOnDisk): free it here, on the worker,
+        // not when the consumer drops the batch (3.3 M frees on the load thread).
+        std::vector<unsigned char>().swap(out.disk[i].nSolution);
     }
     return out;
 }
@@ -478,7 +596,10 @@ bool CBlockTreeDB::LoadBlockIndexGuts()
             pindexNew->nTime          = diskindex.nTime;
             pindexNew->nBits          = diskindex.nBits;
             pindexNew->nNonce         = diskindex.nNonce;
-            pindexNew->nSolution      = std::move(diskindex.nSolution);
+            // The solution stays on disk (millions of 400-1344 byte vectors);
+            // GetSolution() reads it back by hash when a header is served.
+            std::vector<unsigned char>().swap(pindexNew->nSolution);
+            pindexNew->fSolutionOnDisk = true;
             pindexNew->nStatus        = diskindex.nStatus;
             pindexNew->nCachedBranchId = diskindex.nCachedBranchId;
             pindexNew->nTx            = diskindex.nTx;

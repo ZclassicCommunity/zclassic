@@ -1,0 +1,3 @@
+note: broad: run zcutil/local-ci.sh test-changed (broad rule: src/core/engine.cpp); running the full test_bitcoin and zcash-gtest
+exec: src/test/test_bitcoin --log_level=test_suite
+exec: src/zcash-gtest

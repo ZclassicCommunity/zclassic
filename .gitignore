@@ -114,3 +114,6 @@ libzcashconsensus.pc
 
 # C23 crypto core build stamp
 src/c23-symbols.stamp
+zcutil/bin/
+zcutil/gen/
+/compile_commands.json

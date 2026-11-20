@@ -62,6 +62,26 @@ std::string OwnerFromHash160(const unsigned char hash160[20])
     return EncodeDestination(CKeyID(h));
 }
 
+std::string OwnerFromScriptHash160(const unsigned char hash160[20])
+{
+    uint160 h;
+    memcpy(h.begin(), hash160, 20);
+    return EncodeDestination(CScriptID(h));
+}
+
+int OwnerFromScript(const unsigned char* script, size_t len, std::string& owner)
+{
+    unsigned char h[20];
+    const int kind = zcl_znam_owner_hash(script, len, h);
+    if (kind == 1)
+        owner = OwnerFromHash160(h);
+    else if (kind == 2)
+        owner = OwnerFromScriptHash160(h);
+    else
+        return 0;
+    return 1;
+}
+
 // ---- encoding -------------------------------------------------------------
 
 namespace {

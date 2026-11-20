@@ -54,9 +54,43 @@
 #include <string>
 #include <vector>
 
+#ifdef WIN32
+#include <windows.h>
+#include <psapi.h>
+#else
+#include <sys/resource.h>
+#endif
+
 extern ZCJoinSplit* params;
 
 namespace {
+
+// Peak resident set size of this process in MiB. getrusage reports KiB on
+// Linux but bytes on macOS; Windows uses the process working-set peak.
+double PeakRssMiB()
+{
+#ifdef WIN32
+    // psapi.dll is loaded by name: the tree targets _WIN32_WINNT 0x0501, which does not declare the kernel32
+    // forwarders, and this keeps the gtest link line unchanged.
+    typedef BOOL(WINAPI * GetProcessMemoryInfoFn)(HANDLE, PPROCESS_MEMORY_COUNTERS, DWORD);
+    HMODULE psapi = LoadLibraryA("psapi.dll");
+    if (!psapi) return 0.0;
+    GetProcessMemoryInfoFn getInfo = reinterpret_cast<GetProcessMemoryInfoFn>(reinterpret_cast<void*>(GetProcAddress(psapi, "GetProcessMemoryInfo")));
+    PROCESS_MEMORY_COUNTERS pmc;
+    double mib = 0.0;
+    if (getInfo && getInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) mib = pmc.PeakWorkingSetSize / 1048576.0;
+    FreeLibrary(psapi);
+    return mib;
+#else
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return 0.0;
+#ifdef __APPLE__
+    return ru.ru_maxrss / 1048576.0;
+#else
+    return ru.ru_maxrss / 1024.0;
+#endif
+#endif
+}
 
 int EnvInt(const char* name, int def)
 {
@@ -222,6 +256,11 @@ TEST(WalletPerf, DISABLED_Bench)
     const int nOuts = EnvInt("WPERF_OUTS", 20);
     const int nPrefill = EnvInt("WPERF_PREFILL", 30000);
     const int nFillBlocks = 20;
+    // Percentage of the Sapling notes spent by one block right after the fill; the foreign blocks that
+    // follow bury the spends (WPERF_BLOCKS above 110 retires them), and the checkpoint is also timed as
+    // the previous release did it (every note transaction copied and written). 0: as before.
+    const int nSpentPct = EnvInt("WPERF_SPENT_PCT", 0);
+    std::map<int, uint256> noteTx;
 
     RegtestActivateSapling();
     const char* base = getenv("WPERF_DIR");
@@ -271,6 +310,7 @@ TEST(WalletPerf, DISABLED_Bench)
                 CAmount v = 1000 + i;
                 mtx.vShieldedOutput.push_back(SaplingOutputTo(rng, addrs[i % nIvks], v));
                 nExpectSapling += v;
+                noteTx[i] = CTransaction(mtx).GetHash();
                 block.vtx.push_back(CTransaction(mtx));
             }
             for (int i = b; i < nSprout; i += nFillBlocks) {
@@ -286,6 +326,41 @@ TEST(WalletPerf, DISABLED_Bench)
             chain.Connect(wallet, block, timer, "fill");
         }
 
+        // One block that spends nSpentPct percent of the Sapling notes.
+        const int nSpend = nNotes * nSpentPct / 100;
+        if (nSpend > 0) {
+            CBlock block;
+            block.vtx.push_back(CTransaction(BaseTx(rng)));
+            for (int i = 0; i < nSpend; i++) {
+                CMutableTransaction mtx = BaseTx(rng);
+                SpendDescription sd;
+                {
+                    LOCK(wallet.cs_wallet);
+                    sd.nullifier = *wallet.mapWallet.at(noteTx.at(i)).mapSaplingNoteData.begin()->second.nullifier;
+                }
+                mtx.vShieldedSpend.push_back(sd);
+                block.vtx.push_back(CTransaction(mtx));
+            }
+            chain.Connect(wallet, block, timer, "spend");
+        }
+
+        // The checkpoint of the previous release: every note transaction copied and written, in one
+        // database transaction with the cache size and the locator.
+        auto oldStyleCheckpoint = [&](const CBlockLocator& loc) {
+            LOCK2(cs_main, wallet.cs_wallet);
+            CWalletDB walletdb("wallet.dat");
+            ASSERT_TRUE(walletdb.TxnBegin());
+            for (std::pair<const uint256, CWalletTx>& wtxItem : wallet.mapWallet) {
+                auto wtx = wtxItem.second;
+                if (!(wtx.mapSproutNoteData.empty() && wtx.mapSaplingNoteData.empty())) {
+                    ASSERT_TRUE(walletdb.WriteTx(wtxItem.first, wtx));
+                }
+            }
+            ASSERT_TRUE(walletdb.WriteWitnessCacheSize(wallet.nWitnessCacheSize));
+            ASSERT_TRUE(walletdb.WriteBestBlock(loc));
+            ASSERT_TRUE(walletdb.TxnCommit());
+        };
+
         // Foreign blocks: nothing in them is ours.
         auto foreign = master.Derive(0x7fffffff | ZIP32_HARDENED_KEY_LIMIT).DefaultAddress();
         for (int b = 0; b < nBlocks; b++) {
@@ -294,12 +369,37 @@ TEST(WalletPerf, DISABLED_Bench)
             CMutableTransaction mtx = BaseTx(rng);
             for (int i = 0; i < nOuts; i++) mtx.vShieldedOutput.push_back(SaplingOutputTo(rng, foreign, 1));
             block.vtx.push_back(CTransaction(mtx));
-            chain.Connect(wallet, block, timer, "foreign");
+            // with spends: the blocks before the spends are 100 deep, and the last ten after it
+            const std::string tag = nSpend == 0 ? "foreign" : (b < 90 ? "foreign (spends < 100 deep)" : (b >= nBlocks - 10 ? "foreign (spends buried)" : "foreign (between)"));
+            chain.Connect(wallet, block, timer, tag);
             if (b % 40 == 39) {
                 CBlockLocator loc;
                 { LOCK(cs_main); loc = chainActive.GetLocator(); }
-                WPERF_TIME(timer, "SetBestChain", wallet.SetBestChain(loc));
+                WPERF_TIME(timer, nSpend == 0 ? "SetBestChain" : "SetBestChain (every 40 blocks)", wallet.SetBestChain(loc));
             }
+        }
+        if (nSpend > 0) {
+            CBlockLocator loc;
+            { LOCK(cs_main); loc = chainActive.GetLocator(); }
+            size_t nDirty;
+            { LOCK(wallet.cs_wallet); nDirty = wallet.CountDirtyNoteTxs(); }
+            printf("[wperf] spent notes %d of %d; retired %u; marked at the end of the run %u\n", nSpend, nNotes,
+                   (unsigned)wallet.CountRetiredNotes(), (unsigned)nDirty);
+            WPERF_TIME(timer, "checkpoint, after a block, previous release", oldStyleCheckpoint(loc));
+            WPERF_TIME(timer, "checkpoint, after a block, this build", wallet.SetBestChain(loc));
+            WPERF_TIME(timer, "checkpoint, nothing changed, previous release", oldStyleCheckpoint(loc));
+            WPERF_TIME(timer, "checkpoint, nothing changed, this build", wallet.SetBestChain(loc));
+            CBlock block;
+            block.vtx.push_back(CTransaction(BaseTx(rng)));
+            CMutableTransaction mtx = BaseTx(rng);
+            for (int i = 0; i < nOuts; i++) mtx.vShieldedOutput.push_back(SaplingOutputTo(rng, foreign, 1));
+            block.vtx.push_back(CTransaction(mtx));
+            chain.Connect(wallet, block, timer, "foreign (one more)");
+            { LOCK(cs_main); loc = chainActive.GetLocator(); }
+            { LOCK(wallet.cs_wallet); nDirty = wallet.CountDirtyNoteTxs(); }
+            printf("[wperf] one block later: %u note transactions marked of %u wallet transactions\n", (unsigned)nDirty, (unsigned)wallet.mapWallet.size());
+            WPERF_TIME(timer, "checkpoint, one block later, previous release", oldStyleCheckpoint(loc));
+            WPERF_TIME(timer, "checkpoint, one block later, this build", wallet.SetBestChain(loc));
         }
 
         // Start-up check of the persisted note state: with the locator one block behind the tip every
@@ -346,9 +446,12 @@ TEST(WalletPerf, DISABLED_Bench)
                 EXPECT_EQ((size_t)nTtx, vCoins.size());
             }
         }
-        EXPECT_EQ((size_t)nNotes, saplingEntries.size());
+        // the spent notes (the first nSpend) are not listed any more
+        CAmount nExpectUnspent = nExpectSapling;
+        for (int i = 0; i < nSpend; i++) nExpectUnspent -= 1000 + i;
+        EXPECT_EQ((size_t)(nNotes - nSpend), saplingEntries.size());
         EXPECT_EQ((size_t)nSprout * 2, sproutEntries.size());
-        EXPECT_EQ(nExpectSapling, nSaplingCached);
+        EXPECT_EQ(nExpectUnspent, nSaplingCached);
         EXPECT_EQ((CAmount)nSprout * 20, nSproutCached);
         EXPECT_EQ(nExpectTransparent, nBalance);
         digest = StateDigest(wallet, saplingEntries, nSaplingCached + nSproutCached + nBalance);
@@ -362,20 +465,44 @@ TEST(WalletPerf, DISABLED_Bench)
         bool fFirstRun = false;
         DBErrors err = DB_LOAD_OK;
         WPERF_TIME(timer, "LoadWallet", err = reloaded.LoadWallet(fFirstRun));
-        EXPECT_EQ(DB_LOAD_OK, err);
-        EXPECT_EQ((size_t)(nNotes + nSprout + nTtx), reloaded.mapWallet.size());
+        if (nSpentPct == 0) {
+            EXPECT_EQ(DB_LOAD_OK, err);
+            EXPECT_EQ((size_t)(nNotes + nSprout + nTtx), reloaded.mapWallet.size());
+        } else {
+            // the spending transactions of this benchmark carry no real proofs and fail
+            // CheckTransaction when read back: a non-critical error, the rest is loaded
+            EXPECT_TRUE(err == DB_LOAD_OK || err == DB_NONCRITICAL_ERROR);
+        }
+        {
+            // what the note records weigh in wallet.dat: live ones (a full witness cache) and retired ones
+            size_t nLive = 0, nRetired = 0, bLive = 0, bRetired = 0;
+            for (const auto& item : reloaded.mapWallet) {
+                if (item.second.mapSaplingNoteData.empty()) continue;
+                CDataStream ss(SER_DISK, CLIENT_VERSION);
+                ss << item.second;
+                if (item.second.mapSaplingNoteData.begin()->second.witnessHeight == -1) { nRetired++; bRetired += ss.size(); } // the retired form: height -1, at most one frozen witness
+                else { nLive++; bLive += ss.size(); }
+            }
+            printf("[wperf] note records read back: %u live, with a full witness cache, %.1f KiB each (%.1f MiB); %u retired (height -1, frozen witnesses), %.2f KiB each (%.2f MiB)\n",
+                   (unsigned)nLive, nLive ? bLive / 1024.0 / nLive : 0.0, bLive / 1048576.0,
+                   (unsigned)nRetired, nRetired ? bRetired / 1024.0 / nRetired : 0.0, bRetired / 1048576.0);
+        }
     }
 
     printf("[wperf] notes=%d sprout=%d ttx=%d ivks=%d blocks=%d outs=%d prefill=%d\n",
            nNotes, nSprout, nTtx, nIvks, nBlocks, nOuts, nPrefill);
     timer.Print();
     printf("[wperf] wallet.dat bytes %llu\n", (unsigned long long)boost::filesystem::file_size(dir / "wallet.dat"));
+    {
+        printf("[wperf] peak RSS %.1f MiB\n", PeakRssMiB());
+    }
     printf("[wperf] state digest %s\n", digest.c_str());
 
     chain.Clear();
     bitdb.Flush(true);
     bitdb.Reset();
-    if (!getenv("WPERF_KEEP")) boost::filesystem::remove_all(dir);
+    boost::system::error_code ec;
+    if (!getenv("WPERF_KEEP")) boost::filesystem::remove_all(dir, ec);
     else printf("[wperf] kept datadir %s\n", dir.string().c_str());
     RegtestDeactivateSapling();
 }

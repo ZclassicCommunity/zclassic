@@ -593,16 +593,18 @@ struct Spent {
     OutInfo rec;
 };
 
-/** The first output whose script starts with OP_RETURN carries the candidate message (the wallet token guard
- *  and Z23's explorer read the same output; on mainnet it is always vout[0]). */
+/** Rule ZSLP-VOUT0 (token-name-rules, shared with Z23; the SLP specification's own rule): the candidate message is
+ *  vout[0] and only vout[0], and only when its script starts with OP_RETURN. An SLP message in any other output (for
+ *  instance behind a payment output) is not a message, and so is one behind another OP_RETURN. On mainnet no
+ *  message was ever outside vout[0] (census to block 3,323,972: none of 4,302), so the rule applies from genesis.
+ *  The wallet token guard still protects the outputs of a message at the first OP_RETURN wherever it is (a superset:
+ *  it can only withhold more coins, never fewer). */
 int MessageOutput(const CTransaction& tx)
 {
-    for (size_t i = 0; i < tx.vout.size(); i++) {
-        const CScript& s = tx.vout[i].scriptPubKey;
-        if (!s.empty() && s[0] == OP_RETURN)
-            return (int)i;
-    }
-    return -1;
+    if (tx.vout.empty())
+        return -1;
+    const CScript& s = tx.vout[0].scriptPubKey;
+    return (!s.empty() && s[0] == OP_RETURN) ? 0 : -1;
 }
 
 bool ProcessTx(Journal& j, IndexStats& st, const CTransaction& tx, int height, std::string& err)

@@ -8,6 +8,7 @@
 #include "notifyserver.h"   // NOTIFY-SRV connector mode (--notify)
 #include "guistartup.h"     // [gui-startup] client-side startup timing milestones
 #include "profilepaths.h"   // ZCLWALLET_PROFILE_DIR isolation override
+#include "profilefailure.h" // visible message for a bad profile dir
 
 #include "version.h"
 
@@ -491,8 +492,7 @@ int main(int argc, char* argv[])
     // resolves a path. A set-but-missing profile dir is fatal: never fall back to the
     // real profile when isolation was requested.
     if (!ProfilePaths::consumeArgs(argc, argv) || !ProfilePaths::valid()) {
-        fprintf(stderr, "zclwallet: --profile-dir / ZCLWALLET_PROFILE_DIR must name an existing directory (%s)\n",
-                ProfilePaths::dir().toLocal8Bit().constData());
+        ProfileFailure::report(argc, argv);   // stderr line always; a message box unless headless
         return 2;
     }
     ProfilePaths::pin();

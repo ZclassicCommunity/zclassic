@@ -24,7 +24,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/wallet_matrix_lib.sh"
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 RESULTS=$WORK/results.txt; OBS_LOG=$WORK/obs.txt; : >"$RESULTS"; : >"$OBS_LOG"
-BASE=${PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${PORT_BASE:-}" 112
 trap stop_all EXIT
 NODE_ARGS="-disablesafemode -parkdeepreorg=0 -connect=0"
 
@@ -41,7 +41,7 @@ reorg_setup() {
     start 0 "$BIN" $NODE_ARGS || return 1
     cli 0 generate 110 >/dev/null
     Z1=$(cli 0 z_getnewaddress sapling); Z2=$(cli 0 z_getnewaddress sapling)
-    r=$(wait_op 0 "$(cli 0 z_shieldcoinbase "*" "$Z1" 0.0001 0 | jq -r .opid)"); case $r in success*) ;; *) bad "shieldcoinbase: $r" ;; esac
+    r=$(wait_op 0 "$(cli 0 z_shieldcoinbase "*" "$Z1" 0.0001 0 | jget opid)"); case $r in success*) ;; *) bad "shieldcoinbase: $r" ;; esac
     cli 0 generate 1 >/dev/null
     r=$(zsend 0 "$Z1" "[{\"address\":\"$Z2\",\"amount\":3}]"); case $r in success*) ;; *) bad "first send: $r" ;; esac
     cli 0 generate 1 >/dev/null
@@ -84,7 +84,7 @@ run_scn() {
     st=PASS; [ "$nf" = 0 ] && [ "$np" -gt 0 ] || st=FAIL
     echo "$id|$name|$st|$np pass $nf fail" >>"$RESULTS"
     say "   -> $st ($np pass, $nf fail)"
-    BASE=$((BASE + 7)); [ $BASE -lt 60000 ] || BASE=20000
+    iso_rebase BASE 112 7
 }
 
 
@@ -118,7 +118,7 @@ scn_reorg2() {
     start 1 "$BIN" -disablesafemode -parkdeepreorg=0 -connect=127.0.0.1:$((BASE + 0)) || return 1
     cli 0 generate 150 >/dev/null; r2_wait_tip
     Z1=$(cli 0 z_getnewaddress sapling); Z2=$(cli 0 z_getnewaddress sapling); T=$(cli 0 getnewaddress)
-    r=$(wait_op 0 "$(cli 0 z_shieldcoinbase "*" "$Z1" 0.0001 0 | jq -r .opid)"); case $r in success*) ;; *) bad "shieldcoinbase: $r" ;; esac
+    r=$(wait_op 0 "$(cli 0 z_shieldcoinbase "*" "$Z1" 0.0001 0 | jget opid)"); case $r in success*) ;; *) bad "shieldcoinbase: $r" ;; esac
     cli 0 generate 1 >/dev/null; r2_wait_tip
     r2_send "$Z1" "$Z2" 3; cli 0 generate 1 >/dev/null; r2_wait_tip
     stop 1; stop 0

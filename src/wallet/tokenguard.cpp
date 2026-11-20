@@ -59,8 +59,7 @@ std::string TokenGuardExcludedNote(const CTokenGuardReport& report)
 {
     if (report.nExcluded == 0)
         return "";
-    // No currency unit: CURRENCY_UNIT is still "ZEC" in this tree, and the
-    // messages this is appended to print bare amounts too.
+    // No currency unit: the messages this is appended to print bare amounts too.
     return strprintf(" (%u token-bearing output%s holding %s %s protected and %s not used: "
                      "spending %s as ordinary funds would burn the ZSLP tokens or mint baton %s)",
                      report.nExcluded, report.nExcluded == 1 ? "" : "s",

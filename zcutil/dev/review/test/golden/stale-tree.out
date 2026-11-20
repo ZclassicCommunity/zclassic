@@ -1,0 +1,5 @@
+review: 2 of 2 commits in @base..@tip_tree have no accepted review:
+  @c1 feat: one (stale row)
+  @c2 fix: two (stale row)
+record: zcl-dev review record --reviewer <name> --verdict ACCEPT @base..@tip_tree
+exit=1

@@ -1,0 +1,57 @@
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"golden","version":"1"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"ping"}
+{"jsonrpc":"2.0","id":3,"method":"tools/list"}
+{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"zcl_guide","arguments":{"paths":["src/wallet/wallet.cpp"]}}}
+{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"zcl_select","arguments":{"base":"HEAD"}}}
+{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"zcl_tests","arguments":{"paths":["src/core.cpp","src/a.h"]}}}
+{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"zcl_code","arguments":{"sub":"map"}}}
+{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"zcl_code","arguments":{"sub":"owner","args":["src/wallet/wallet.cpp"]}}}
+{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"zcl_code","arguments":{"sub":"impact","args":["src/common.h","--tests","--depth=1"]}}}
+{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"zcl_code","arguments":{"sub":"file","args":["src/core.cpp"]}}}
+{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"zcl_code","arguments":{"sub":"sym","args":["Counter"]}}}
+{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"zcl_code","arguments":{"sub":"refs","args":["Counter"]}}}
+{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"zcl_code","arguments":{"sub":"cost","args":["src/common.h"]}}}
+{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"zcl_code","arguments":{"sub":"recent","args":["--since=7d"]}}}
+{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"zcl_code","arguments":{"sub":"body","args":["src/core.cpp","Counter::Next"]}}}
+{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"zcl_wiki","arguments":{}}}
+{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"zcl_wiki","arguments":{"topic":"agent","after":0}}}
+{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":"AGENTS.md","offset":2,"bytes":20}}}
+{"jsonrpc":"2.0","id":25,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":"src/wallet/wallet.dat"}}}
+{"jsonrpc":"2.0","id":26,"method":"tools/call","params":{"name":"zcl_lessons","arguments":{"q":"raw strings"}}}
+{"jsonrpc":"2.0","id":27,"method":"tools/call","params":{"name":"zcl_know","arguments":{"term":"widgets"}}}
+{"jsonrpc":"2.0","id":28,"method":"tools/call","params":{"name":"zcl_lint","arguments":{"rule":"no-python"}}}
+{"jsonrpc":"2.0","id":29,"method":"tools/call","params":{"name":"zcl_receipt","arguments":{"step":"unit-a"}}}
+{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"zcl_receipt","arguments":{"step":"missing-step"}}}
+{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"zcl_code","arguments":{"sub":"owner","args":["../outside"]}}}
+{"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"zcl_code","arguments":{"sub":"refs","args":["-rf"]}}}
+{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"zcl_code","arguments":{"sub":"impact","args":["src/a.h","--exec=x"]}}}
+{"jsonrpc":"2.0","id":43,"method":"tools/call","params":{"name":"zcl_code","arguments":{"sub":"sym","args":["a;b"]}}}
+{"jsonrpc":"2.0","id":44,"method":"tools/call","params":{"name":"zcl_lint","arguments":{"rule":"no-python --update-baseline"}}}
+{"jsonrpc":"2.0","id":45,"method":"tools/call","params":{"name":"zcl_lint","arguments":{"rule":"all"}}}
+{"jsonrpc":"2.0","id":46,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":"/etc/passwd"}}}
+{"jsonrpc":"2.0","id":47,"method":"tools/call","params":{"name":"zcl_guide","arguments":{"paths":[]}}}
+{"jsonrpc":"2.0","id":48,"method":"tools/call","params":{"name":"zcl_select","arguments":{"base":"--output=x"}}}
+{"jsonrpc":"2.0","id":49,"method":"tools/call","params":{"name":"zcl_receipt","arguments":{"step":"a","dir":"../.."}}}
+{"jsonrpc":"2.0","id":50,"method":"tools/call","params":{"name":"zcl_lessons","arguments":{"q":"a b c d e f g h i"}}}
+{"jsonrpc":"2.0","id":51,"method":"tools/call","params":{"name":"zcl_know","arguments":{"term":"$(id)"}}}
+{"jsonrpc":"2.0","id":52,"method":"tools/call","params":{"name":"no_such_tool","arguments":{}}}
+{"jsonrpc":"2.0","id":53,"method":"tools/call","params":{"name":"zcl_run","arguments":{"cmd":"id"}}}
+{"jsonrpc":"2.0","id":54,"method":"no/such/method"}
+{"jsonrpc":"2.0","id":55,"method":"tools/call","params":{"arguments":{}}}
+{"this is": "not a request"}
+[1,2,3]
+{"jsonrpc":"2.0","id":56,"method":"tools/call","params":{"name":"zcl_wiki","arguments":{"after":-1}}}
+{"jsonrpc":"2.0","id":57,"method":"tools/call","params":{"name":"zcl_wiki","arguments":{"topic":42}}}
+{"jsonrpc":"2.0","id":58,"method":"tools/call","params":{"name":"zcl_wiki","arguments":{"topic":"nothing/here"}}}
+{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"zcl_know","arguments":{"term":"x"
+this frame is not json at all
+{"jsonrpc":"2.0","id":59,"method":"tools/call","params":{"name":"zcl_know","arguments":{"term":"ok"}}}
+{"jsonrpc":"2.0","id":60,"method":"tools/call","params":{"name":"zcl_lint","arguments":{"rule":"filesize"}}}
+{"jsonrpc":"2.0","id":61,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":"src/wallet/WALLET.DAT"}}}
+{"jsonrpc":"2.0","id":62,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":"src/wallet/Wallet.dat"}}}
+{"jsonrpc":"2.0","id":63,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":"src/wallet/wallet.dat."}}}
+{"jsonrpc":"2.0","id":64,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":"keys/node.PEM"}}}
+{"jsonrpc":"2.0","id":65,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":".GIT/config"}}}
+{"jsonrpc":"2.0","id":66,"method":"tools/call","params":{"name":"zcl_read","arguments":{"path":"src/.Git/HEAD"}}}
+{"jsonrpc":"2.0","id":67,"method":"tools/call","params":{"name":"zcl_code","arguments":{"sub":"map","args":["--since=1m"]}}}

@@ -106,3 +106,39 @@ provider and the command-line tools are not built. Encrypted `wallet.dat` files 
 compatible in both directions: a wallet encrypted by an older release unlocks in this one,
 and a wallet whose passphrase was changed or whose keys were added here unlocks in an
 older release. OpenSSL 3 is licensed under Apache-2.0 (see `THIRD-PARTY-LICENSES`).
+
+RPC tuning errors and the LevelDB file budget
+---------------------------------------------
+
+- `-rpcthreads` outside 1..256, `-rpcworkqueue` outside 1..65536 and `-rpcservertimeout`
+  outside 1..86400 (including non-numeric values, which parse as 0) now stop start-up with an
+  explanatory error. Earlier releases clamped them silently.
+- The per-database LevelDB open-file budget now counts each optional index store: one more
+  database for `-zslpindex` and one more for `-znamindex` (up to four instead of two). A
+  `-dbmaxopenfiles` value above what the file descriptor soft limit allows is lowered to that
+  budget with a log warning. This matters mainly on 32-bit POSIX builds with a soft limit of 1024.
+- A peer-visible P2P change, not a consensus change: an `inv` or `getdata` entry with an
+  unknown type no longer aborts processing of the whole message (formatting it for the log used
+  to throw). The unknown entry is ignored and the remaining entries are handled, as in Bitcoin
+  Core. Such messages no longer produce a per-message exception line in the log.
+
+Startup
+-------
+
+- The verified-parameters cache now lives beside the parameters, as
+  `zclassic-params-verify.cache` in the params directory (`~/.zcash-params`), so a new
+  datadir, wallet profile or test node no longer re-hashes about 780 MB of zk parameters
+  on its first start. The old `params-verify.cache` in the datadir is read only while the
+  new file is absent and is never written again. A read-only params directory only costs
+  the re-hash; `-noparamcache` still hashes every file.
+
+
+Limits on two peer requests
+---------------------------
+
+- A `getblocks` or `getheaders` request whose block locator has more than 101 entries is
+  no longer served: the peer is disconnected, without a ban score (an honest locator has
+  under 40 entries even at height 5,000,000). A peer's second
+  `mempool` request within 60 seconds is ignored, without a reply or a ban score;
+  whitelisted peers are exempt. Neither changes consensus or which blocks and
+  transactions are accepted.

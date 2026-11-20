@@ -1,0 +1,3 @@
+{"commit":"c0ffee","tree":"t1","stage":"test-run/debug","step":"unit-a","verdict":"PASS","seconds":10,"started":"2026-11-19T00:00:00Z","env_names":["CC"],"log_sha256":"11"}
+{"stage":"test-run/debug","meta":{"step":"unit-z","verdict":"PASS","seconds":5}}
+{"stage":"test-run/debug","note":"x,\"step\":\"unit-y\",\"verdict\":\"PASS\",\"seconds\":7"}

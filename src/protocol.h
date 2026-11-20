@@ -350,7 +350,7 @@ extern const char* GETBSMAN;
 extern const char* BSMAN;
 extern const char* GETBSCHK;
 extern const char* BSCHK;
-// Zcash zk-SNARK parameter distribution (sapling/sprout .params), so a fresh
+// zk-SNARK parameter distribution (sapling/sprout .params), so a fresh
 // node can fetch the required proving/verifying parameters from a peer instead
 // of an external download.
 extern const char* GETBSPMAN;

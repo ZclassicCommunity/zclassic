@@ -1,0 +1,10 @@
+topic: code/src
+title: src
+summary: The daemon sources.
+children: 6 (showing 1-6)
+  core/ - Ignored: AGENTS.md is absent here, README wins.
+  tools/ - 1 file
+  AGENTS.md - The daemon sources.
+  big.txt
+  blob.dat
+  utf8.txt

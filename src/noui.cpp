@@ -36,6 +36,9 @@ static bool noui_ThreadSafeMessageBox(const std::string& message, const std::str
     if (!fSecure)
         LogPrintf("%s: %s\n", strCaption, message);
     fprintf(stderr, "%s: %s\n", strCaption.c_str(), message.c_str());
+    // A redirected stderr is fully buffered on Windows: without a flush an operator who sends
+    // it to a file would see a warning or error only after the node has exited.
+    fflush(stderr);
     return false;
 }
 

@@ -1,3 +1,4 @@
+#include "sendflow.h"
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "addressbook.h"
@@ -1593,6 +1594,10 @@ void MainWindow::sendButton() {
                     details = QObject::tr("Operation id: ") % opid % "\n\n" + details;
                 msg.setDetailedText(details);
                 msg.exec();
+            },
+            [=] (QString, QString text) {
+                // Transient states: "Sending...", "Outcome unknown: the wallet will not send again; checking"
+                ui->statusBar->showMessage(text);
             }
         );
     }        
@@ -1824,6 +1829,9 @@ void MainWindow::showSendSuccess(QString txid) {
 // The raw daemon text is preserved by the caller under "Show Details" -- this only
 // produces the friendly HEADLINE, and never hides the underlying error.
 QString MainWindow::humaneSendError(const QString& raw) {
+    // Our own wording (expired, outcome unknown, lost): it says exactly what to do and must not become "you can try again".
+    if (sendflow::isFlowText(raw))
+        return raw;
     const QString e = raw.toLower();
 
     // Order matters: check the most specific causes before the generic ones.

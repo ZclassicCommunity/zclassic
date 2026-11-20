@@ -1,0 +1,4 @@
+review: 1 of 3 commits in @base..@later_tip have no accepted review:
+  @later_tip feat: after the review (no row)
+record: zcl-dev review record --reviewer <name> --verdict ACCEPT @base..@later_tip
+exit=1

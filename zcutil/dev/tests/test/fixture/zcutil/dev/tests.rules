@@ -1,0 +1,3 @@
+# tests rules for the fixture
+src/core/*	boost:bar_tests gtest:FooSuite
+src/narrow.cpp	boost:foo_tests narrow

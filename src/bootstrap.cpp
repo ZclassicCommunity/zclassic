@@ -134,6 +134,12 @@ void SetBootstrapInfoPhase(const std::string& phase, const std::string& reason)
     g_bootstrapInfo.reason = reason;
 }
 
+void SetBootstrapInfoServers(const std::vector<BootstrapInfoServer>& servers)
+{
+    LOCK(g_bootstrapInfoCs);
+    g_bootstrapInfo.servers = servers;
+}
+
 void SetBootstrapInfoProgress(int percent, uint64_t bytesReceived, uint64_t bytesTotal,
                               double mbps, int streams, const std::string& peer,
                               int peerIndex, int peerCount, int attempt, int attemptMax,
@@ -548,12 +554,13 @@ static bool StatOpenBootstrapSnapshotFile(FILE* fp, uint64_t& size, std::time_t&
 // chunks aligned to chunkSize; this captures the identical post-open checks
 // (range within fileSize with no overflow, offset alignment, exact expected
 // length). `label` selects the byte-identical error-string prefix used by each
-// caller ("bootstrap" vs "zcash param").
+// caller ("bootstrap" vs "zk-SNARK parameter").
 static bool ValidateBootstrapChunkRange(uint64_t offset, uint64_t length, uint64_t fileSize,
                                         uint64_t chunkSize, const char* label, std::string& error);
 static bool InstallStagedBootstrapChainData(const boost::filesystem::path& staging,
                                             const boost::filesystem::path& data_dir,
                                             std::string& error);
+static void BootstrapFsyncDir(const boost::filesystem::path& dir);
 
 // Portable 64-bit seek. fseek()'s `long` second argument wraps on 32-bit
 // platforms and on Windows (where `long` is 32 bits), so bootstrap files
@@ -1435,11 +1442,21 @@ static bool InstallStagedBootstrapChainData(const boost::filesystem::path& stagi
             return false;
         }
 
+        // Both renames are persisted in order (each parent directory is synced before the next
+        // step), so after a power loss the datadir shows blocks/ alone or both, never
+        // chainstate/ alone; RecoverInterruptedBootstrapInstall reads that.
         boost::filesystem::rename(staging / "blocks", blocks_dir);
         installed_blocks = true;
+        BootstrapFsyncDir(data_dir);
+        BootstrapFsyncDir(staging);
+        TestCrashPoint("bootstrap-install-after-blocks-rename");
         boost::filesystem::rename(staging / "chainstate", chainstate_dir);
         installed_chainstate = true;
+        BootstrapFsyncDir(data_dir);
+        BootstrapFsyncDir(staging);
+        TestCrashPoint("bootstrap-install-after-chainstate-rename");
         boost::filesystem::remove_all(staging);
+        BootstrapFsyncDir(data_dir);
         return true;
     } catch (const boost::filesystem::filesystem_error& e) {
         try {
@@ -1470,6 +1487,38 @@ static bool WriteBootstrapChunkToFile(const boost::filesystem::path& path, const
     return true;
 }
 
+// Hash-while-writing support. A file's SHA-256 is computed over its bytes as they arrive, so finishing
+// it costs no second read. A resumed .part is hashed once up to the offset the download continues from.
+// Anything unusual (a short prefix, a chunk that is not the next one) just turns the incremental hash off
+// for that file, which is then verified by re-reading it exactly as before.
+static bool HashBootstrapPrefix(const boost::filesystem::path& path, uint64_t length, CSHA256& hasher)
+{
+    FILE* f = fopen(path.string().c_str(), "rb");
+    if (!f)
+        return false;
+    std::vector<unsigned char> buffer(1024 * 1024);
+    uint64_t left = length;
+    bool ok = true;
+    while (left > 0) {
+        const size_t want = (size_t)std::min<uint64_t>(left, buffer.size());
+        if (fread(buffer.data(), 1, want, f) != want) {
+            ok = false;
+            break;
+        }
+        hasher.Write(buffer.data(), want);
+        left -= want;
+    }
+    fclose(f);
+    return ok;
+}
+
+static uint256 FinishBootstrapHasher(CSHA256& hasher)
+{
+    unsigned char digest[CSHA256::OUTPUT_SIZE];
+    hasher.Finalize(digest);
+    return uint256S("0x" + HexStr(digest, digest + CSHA256::OUTPUT_SIZE));
+}
+
 static bool VerifyBootstrapDownloadedFile(const boost::filesystem::path& path, const CBootstrapSnapshotFile& file, std::string& error)
 {
     uint256 hash;
@@ -1491,6 +1540,8 @@ static bool VerifyBootstrapDownloadedFile(const boost::filesystem::path& path, c
 // high-latency links. It must not exceed the server's per-peer queue limit
 // (MAX_BOOTSTRAP_CHUNK_REQUESTS_PER_PEER in net.cpp).
 static const size_t BOOTSTRAP_PIPELINE_DEPTH = 16;
+// Requests the window starts with; see DownloadBootstrapFileSubset.
+static const size_t BOOTSTRAP_PIPELINE_START = 2;
 
 // Parallel download streams (connections) the client opens to the bootstrap
 // peer. A single TCP flow is loss-limited: its congestion window collapses on
@@ -1885,6 +1936,48 @@ static void LogBootstrapResumeStats(const BootstrapResumeStats& s)
 
 // Where a stream gets its files from. The legacy single-socket path and the
 // parallel streams share one implementation (a BootstrapWorkQueue).
+// A server whose manifest differs from the trusted one (another block bundle tail or block index) can still
+// serve every file it lists with the same path, size and SHA-256 as the trusted manifest: those bytes are
+// exactly what the trusted manifest asks for and are verified against it like any other. This maps the
+// trusted manifest's file indexes to the server's own and back.
+struct BootstrapRemoteIndex {
+    std::vector<uint32_t> toRemote;           //!< trusted index -> the server's index (UINT32_MAX: it has no such file)
+    std::map<uint32_t, uint32_t> toMaster;    //!< the server's index -> trusted index
+    std::vector<uint8_t> has;                 //!< per trusted index: the server can serve it
+    size_t shared;
+    BootstrapRemoteIndex() : shared(0) {}
+};
+
+// False if `remote` is for another network or chunk size, or shares no file with the trusted manifest.
+static bool BootstrapBuildRemoteIndex(const CBootstrapSnapshotManifest& master, const CBootstrapSnapshotManifest& remote, BootstrapRemoteIndex& out)
+{
+    // Another height, block or commitment is fine: the snapshot being downloaded is always the trusted
+    // one; this server only supplies files that are byte-identical (same path, size and SHA-256) to the
+    // trusted manifest's own, e.g. the append-only block files two snapshots have in common. Nothing else
+    // of its snapshot is ever taken. Requests are chunk-aligned, so the chunk size must agree.
+    if (remote.strNetwork != master.strNetwork || remote.nChunkSize != master.nChunkSize)
+        return false;
+    std::map<std::string, uint32_t> byPath;
+    for (size_t i = 0; i < remote.vFiles.size(); ++i)
+        byPath[remote.vFiles[i].strPath] = (uint32_t)i;
+    out = BootstrapRemoteIndex();
+    out.toRemote.assign(master.vFiles.size(), UINT32_MAX);
+    out.has.assign(master.vFiles.size(), 0);
+    for (size_t i = 0; i < master.vFiles.size(); ++i) {
+        std::map<std::string, uint32_t>::const_iterator it = byPath.find(master.vFiles[i].strPath);
+        if (it == byPath.end())
+            continue;
+        const CBootstrapSnapshotFile& r = remote.vFiles[it->second];
+        if (r.nSize != master.vFiles[i].nSize || r.hashSha256 != master.vFiles[i].hashSha256)
+            continue;
+        out.toRemote[i] = it->second;
+        out.toMaster[it->second] = (uint32_t)i;
+        out.has[i] = 1;
+        ++out.shared;
+    }
+    return out.shared > 0;
+}
+
 class BootstrapFileFeed
 {
 public:
@@ -1896,6 +1989,8 @@ public:
     virtual void Complete(uint32_t idx) = 0;
     //! A file failed its SHA-256 check; returns the number of failures so far.
     virtual int Strike(uint32_t idx) = 0;
+    //! `bytes` of file `idx` arrived (verified later, as a whole file).
+    virtual void NoteChunk(uint32_t idx, uint64_t bytes) { (void)idx; (void)bytes; }
 };
 
 class BootstrapQueueFeed : public BootstrapFileFeed
@@ -1905,7 +2000,7 @@ public:
         : queue(q), manifest(m), staging(s) {}
     bool Claim(uint32_t& idx, uint64_t& startOffset) override
     {
-        if (!queue.Claim(idx))
+        if (!ClaimFromQueue(idx))
             return false;
         startOffset = 0;
         const CBootstrapSnapshotFile& file = manifest.vFiles[idx];
@@ -1927,8 +2022,12 @@ public:
     void Complete(uint32_t idx) override { queue.Complete(idx); }
     int Strike(uint32_t idx) override { return queue.AddStrike(idx); }
 
-private:
+protected:
+    //! Which pending file to take (a server that shares only some files overrides this).
+    virtual bool ClaimFromQueue(uint32_t& idx) { return queue.Claim(idx); }
     BootstrapWorkQueue& queue;
+
+private:
     const CBootstrapSnapshotManifest& manifest;
     const boost::filesystem::path staging;
 };
@@ -1936,9 +2035,83 @@ private:
 // A file that fails its SHA-256 twice is not a local glitch: the peer is serving
 // bytes that do not match its own manifest, so stop trying this peer.
 static const int BOOTSTRAP_MAX_FILE_HASH_STRIKES = 2;
+
+// The feed of one stream of the multi-peer downloader: the shared queue plus the
+// peer board, which learns what each stream fetched (rates, who supplied which
+// file) and is told when a file failed verification. With one usable peer it
+// answers exactly like the plain queue feed.
+class BootstrapPeerFeed : public BootstrapQueueFeed
+{
+public:
+    BootstrapPeerFeed(BootstrapWorkQueue& q, const CBootstrapSnapshotManifest& m, const boost::filesystem::path& s,
+                      BootstrapPeerBoard& b, int streamId, const std::vector<uint8_t>* onlyFiles = NULL)
+        : BootstrapQueueFeed(q, m, s), board(b), stream(streamId), man(m), allowed(onlyFiles) {}
+    bool Claim(uint32_t& idx, uint64_t& startOffset) override
+    {
+        if (!BootstrapQueueFeed::Claim(idx, startOffset))
+            return false;
+        const uint64_t size = man.vFiles[idx].nSize;
+        board.NoteClaim(stream, idx, size > startOffset ? size - startOffset : 0, startOffset > 0);
+        return true;
+    }
+    void Release(uint32_t idx) override
+    {
+        board.NoteRelease(stream, idx);
+        BootstrapQueueFeed::Release(idx);
+    }
+    void Complete(uint32_t idx) override
+    {
+        board.NoteComplete(stream, idx);
+        BootstrapQueueFeed::Complete(idx);
+    }
+    int Strike(uint32_t idx) override
+    {
+        const int strikes = BootstrapQueueFeed::Strike(idx); // the file restarts from byte 0 either way
+        // Another usable peer left: the peers that supplied the file are blamed (and benched when
+        // it is clear who), this failure costs a retry and not the attempt.
+        const std::vector<uint8_t> unfinished = queue.UnfinishedMask(man.vFiles.size());
+        return board.HashFailed(stream, idx, &unfinished) ? std::min(strikes, BOOTSTRAP_MAX_FILE_HASH_STRIKES - 1) : strikes;
+    }
+    void NoteChunk(uint32_t idx, uint64_t bytes) override { board.NoteChunk(stream, idx, bytes, GetTimeMillis()); }
+
+protected:
+    bool ClaimFromQueue(uint32_t& idx) override
+    {
+        // A file that failed its hash with mixed suppliers is pinned to one server and fetched again from byte 0
+        // by it alone; the streams of the other servers leave it be.
+        std::vector<uint8_t> mask = allowed ? *allowed : std::vector<uint8_t>(man.vFiles.size(), 1);
+        board.MaskPinned(stream, mask);
+        return queue.ClaimAllowed(mask, idx);
+    }
+
+private:
+    BootstrapPeerBoard& board;
+    const int stream;
+    const CBootstrapSnapshotManifest& man;
+    const std::vector<uint8_t>* allowed;
+};
+
+// Flush a staged file to disk and say whether it worked (FileCommit ignores the results). A file whose
+// data could not be flushed is not trusted: the caller fails the file instead of renaming it into place.
+static bool BootstrapCommitFile(FILE* fp)
+{
+    if (fflush(fp) != 0)
+        return false;
+#ifdef WIN32
+    HANDLE hFile = (HANDLE)_get_osfhandle(_fileno(fp));
+    return hFile != INVALID_HANDLE_VALUE && FlushFileBuffers(hFile) != 0;
+#elif defined(__APPLE__) && defined(F_FULLFSYNC)
+    return fcntl(fileno(fp), F_FULLFSYNC, 0) != -1;
+#elif defined(__linux__) || defined(__NetBSD__)
+    return fdatasync(fileno(fp)) == 0;
+#else
+    return fsync(fileno(fp)) == 0;
+#endif
+}
+
 // fsync a partially written file every this many chunks so a power loss costs
 // bounded re-download (a kill -9 loses nothing: the data is in the page cache).
-static const unsigned int BOOTSTRAP_PART_SYNC_CHUNKS = 16;
+static const unsigned int BOOTSTRAP_PART_SYNC_CHUNKS = 64;
 
 // Download the chunks for the files a feed hands out, over a single connection,
 // using a pipelined request window. Writes each file to a .part path, verifies
@@ -1952,8 +2125,10 @@ static const unsigned int BOOTSTRAP_PART_SYNC_CHUNKS = 16;
 // `fatal` (optional) is set when retrying cannot help (local I/O error, shutdown,
 // a file that keeps failing its hash); `bytesReceived` (optional) reports the
 // payload bytes this call took in.
-static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, BootstrapFileFeed& feed, int timeout_ms, std::atomic<uint64_t>& progressBytes, std::atomic<bool>& abortFlag, bool logProgress, std::string& error, bool* fatal = NULL, uint64_t* bytesReceived = NULL)
+static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, BootstrapFileFeed& feed, int timeout_ms, std::atomic<uint64_t>& progressBytes, std::atomic<bool>& abortFlag, bool logProgress, std::string& error, bool* fatal = NULL, uint64_t* bytesReceived = NULL, const BootstrapRemoteIndex* remote = NULL, std::atomic<int>* inflightOut = NULL)
 {
+    if (inflightOut)
+        inflightOut->store(0);
     if (fatal)
         *fatal = false;
     if (bytesReceived)
@@ -1983,7 +2158,7 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
                     haveCur = false;
                     continue;
                 }
-                request.nFileIndex = curIdx;
+                request.nFileIndex = remote ? remote->toRemote[curIdx] : curIdx;
                 request.nOffset = curOffset;
                 request.nLength = (uint32_t)std::min<uint64_t>(manifest.nChunkSize, f.nSize - curOffset);
                 curOffset += request.nLength;
@@ -1993,7 +2168,11 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
 
     std::deque<CBootstrapSnapshotChunkRequest> inflight;
     bool ok = true;
-    for (size_t i = 0; i < BOOTSTRAP_PIPELINE_DEPTH; ++i) {
+    // The window opens slowly: BOOTSTRAP_PIPELINE_START requests first, one more for every chunk that arrives
+    // until it holds BOOTSTRAP_PIPELINE_DEPTH. A full window is what hides latency on a long path, and it is
+    // reached within a few round trips; but a connection that is cut right after it started (a killed client, a
+    // stream moved to another server) no longer throws away a whole window the server had queued for it.
+    for (size_t i = 0; i < BOOTSTRAP_PIPELINE_START; ++i) {
         CBootstrapSnapshotChunkRequest request;
         if (!nextRequest(request)) {
             break;
@@ -2004,11 +2183,16 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
         }
         inflight.push_back(request);
     }
+    if (inflightOut)
+        inflightOut->store((int)inflight.size());
 
     FILE* fp = NULL;
     boost::filesystem::path open_path;
     boost::filesystem::path open_part;
     unsigned int chunks_since_sync = 0;
+    CSHA256 fileHasher;          // over the bytes of the open file written so far
+    uint64_t fileHashed = 0;     // how many bytes fileHasher has seen (the next chunk must start there)
+    bool fileHashValid = false;
     uint64_t stream_received = 0;
     int last_logged_percent = -1;
     uint64_t last_reported_bytes = 0;
@@ -2048,7 +2232,7 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
             break;
         }
 
-        const CBootstrapSnapshotChunkRequest request = inflight.front();
+        CBootstrapSnapshotChunkRequest request = inflight.front();
         inflight.pop_front();
         if (chunk.nFileIndex != request.nFileIndex ||
             chunk.nOffset != request.nOffset ||
@@ -2056,6 +2240,15 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
             error = "bootstrap peer returned an unexpected chunk";
             ok = false;
             break;
+        }
+        if (remote) { // the server numbers its files its own way: back to the trusted manifest's index
+            std::map<uint32_t, uint32_t>::const_iterator mi = remote->toMaster.find(request.nFileIndex);
+            if (mi == remote->toMaster.end()) {
+                error = "bootstrap peer returned a chunk of a file it was not asked for";
+                ok = false;
+                break;
+            }
+            request.nFileIndex = mi->second;
         }
 
         const CBootstrapSnapshotFile& file = manifest.vFiles[request.nFileIndex];
@@ -2081,6 +2274,14 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
                 ok = false;
                 break;
             }
+            fileHasher = CSHA256();
+            fileHashed = request.nOffset;
+            fileHashValid = true;
+            if (request.nOffset > 0) {
+                // continuing a partial file: its prefix (what is on disk now, torn or not) is hashed once
+                fflush(fp);
+                fileHashValid = HashBootstrapPrefix(open_part, request.nOffset, fileHasher);
+            }
         }
 
         if (!WriteBootstrapChunkToFile(open_part, chunk, fp, error)) {
@@ -2088,7 +2289,17 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
             ok = false;
             break;
         }
+        if (fileHashValid) {
+            if (chunk.nOffset == fileHashed) {
+                if (!chunk.vData.empty())
+                    fileHasher.Write(&chunk.vData[0], chunk.vData.size());
+                fileHashed += chunk.vData.size();
+            } else {
+                fileHashValid = false;
+            }
+        }
         stream_received += chunk.vData.size();
+        feed.NoteChunk(request.nFileIndex, chunk.vData.size());
         if (bytesReceived)
             *bytesReceived = stream_received;
         const uint64_t total_received =
@@ -2103,7 +2314,12 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
 
         // Finalize the file once its final chunk has been written.
         if (request.nOffset + request.nLength >= file.nSize) {
-            FileCommit(fp);
+            if (!BootstrapCommitFile(fp)) {
+                error = strprintf("could not flush bootstrap staging file to disk: %s", open_part.string());
+                setFatal();
+                ok = false;
+                break;
+            }
             const bool closed = (fclose(fp) == 0);
             fp = NULL;
             if (!closed) {
@@ -2112,7 +2328,19 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
                 ok = false;
                 break;
             }
-            if (!VerifyBootstrapDownloadedFile(open_part, file, error)) {
+            bool verified;
+            boost::system::error_code szec;
+            if (fileHashValid && fileHashed == file.nSize && boost::filesystem::file_size(open_part, szec) == file.nSize && !szec) {
+                const uint256 got = FinishBootstrapHasher(fileHasher);
+                verified = (got == file.hashSha256);
+                if (!verified)
+                    error = strprintf("bootstrap downloaded file hash mismatch for %s: computed=%s expected=%s",
+                                      file.strPath, got.ToString(), file.hashSha256.ToString());
+            } else {
+                verified = VerifyBootstrapDownloadedFile(open_part, file, error);
+            }
+            fileHashValid = false;
+            if (!verified) {
                 // Wrong bytes: drop the file (a resumed .part may have been torn by
                 // an earlier crash) and re-fetch it from byte 0.
                 boost::system::error_code rmec;
@@ -2137,7 +2365,12 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
             outstanding.erase(request.nFileIndex);
             feed.Complete(request.nFileIndex);
         } else if (++chunks_since_sync >= BOOTSTRAP_PART_SYNC_CHUNKS) {
-            FileCommit(fp);
+            if (!BootstrapCommitFile(fp)) {
+                error = strprintf("could not flush bootstrap staging file to disk: %s", open_part.string());
+                setFatal();
+                ok = false;
+                break;
+            }
             chunks_since_sync = 0;
         }
 
@@ -2186,20 +2419,29 @@ static bool DownloadBootstrapFileSubset(SOCKET socket, const CBootstrapSnapshotM
         }
 
         // Refill the pipeline window.
-        CBootstrapSnapshotChunkRequest refill;
-        if (nextRequest(refill)) {
+        const size_t refills = inflight.size() + 1 < BOOTSTRAP_PIPELINE_DEPTH ? 2 : 1; // 2 while the window is still opening
+        for (size_t r = 0; r < refills && ok; ++r) {
+            CBootstrapSnapshotChunkRequest refill;
+            if (!nextRequest(refill))
+                break;
             if (!SendBootstrapChunkRequest(socket, refill, timeout_ms, error)) {
                 ok = false;
                 break;
             }
             inflight.push_back(refill);
         }
+        if (!ok)
+            break;
+        if (inflightOut)
+            inflightOut->store((int)inflight.size());
     }
 
     if (fp) {
         fclose(fp);
         fp = NULL;
     }
+    if (inflightOut)
+        inflightOut->store(0);
     // Whatever this stream claimed but did not finish goes back for another turn;
     // its .part keeps the chunks already written.
     for (std::set<uint32_t>::const_iterator it = outstanding.begin(); it != outstanding.end(); ++it)
@@ -2242,7 +2484,7 @@ bool DownloadBootstrapSnapshot(SOCKET socket, const CBootstrapSnapshotManifest& 
 // divergent manifest on a second connection is rejected before any chunk from
 // that stream is trusted. `manifestMismatch` (optional) is set when the failure
 // is the manifest differing, which retrying the same peer cannot fix.
-static bool OpenBootstrapStreamAndVerifyManifest(const CService& peerAddress, const std::string& peer, int timeout_ms, const CBootstrapSnapshotManifest& masterManifest, SOCKET& outSocket, std::string& error, bool* manifestMismatch = NULL)
+static bool OpenBootstrapStreamAndVerifyManifest(const CService& peerAddress, const std::string& peer, int timeout_ms, const CBootstrapSnapshotManifest& masterManifest, SOCKET& outSocket, std::string& error, bool* manifestMismatch = NULL, CBootstrapSnapshotManifest* remoteManifest = NULL)
 {
     if (manifestMismatch)
         *manifestMismatch = false;
@@ -2282,6 +2524,13 @@ static bool OpenBootstrapStreamAndVerifyManifest(const CService& peerAddress, co
         return false;
     }
     if (SerializeHash(manifest) != SerializeHash(masterManifest)) {
+        if (remoteManifest) { // the caller decides what a differing manifest still allows: keep the connection
+            *remoteManifest = manifest;
+            if (manifestMismatch)
+                *manifestMismatch = true;
+            outSocket = socket;
+            return true;
+        }
         error = "bootstrap stream served a manifest that differs from the master manifest";
         if (manifestMismatch)
             *manifestMismatch = true;
@@ -2300,6 +2549,12 @@ static int64_t g_bootstrapStallFailMs = 5 * 60 * 1000;
 // per reconnect cannot hold the attempt, and the failover to the next peer,
 // off for ever.
 static int64_t g_bootstrapAggregateWindowMs = 5 * 60 * 1000;
+
+static BootstrapPeerPolicy g_bootstrapPeerPolicy;
+void BootstrapSetPeerPolicyForTests(const BootstrapPeerPolicy* policy)
+{
+    g_bootstrapPeerPolicy = policy ? *policy : BootstrapPeerPolicy();
+}
 
 void BootstrapSetWatchdogForTests(int64_t stallFailMs, int64_t aggregateWindowMs)
 {
@@ -2321,27 +2576,68 @@ static void BootstrapInterruptibleSleep(int64_t ms, const std::atomic<bool>& abo
     }
 }
 
-// Parallel snapshot download: `nStreams` independent connections to the same
-// peer pull files from one shared queue. Defeats single-flow loss-limiting on
-// lossy WAN paths (each flow gets its own congestion window, so aggregate
-// throughput scales ~N x). A stream that fails (timeout, reset, a server that
-// evicted it) hands its unfinished files back to the queue, waits a growing,
-// jittered delay and reconnects: the others keep going and the configured
-// parallelism comes back as soon as the server accepts the stream again. Only a
-// fatal condition (local I/O error, a file that repeatedly fails its hash, a
-// peer whose manifest changed, shutdown, five minutes without a single byte, or
-// a whole-attempt rate below the minimum throughput over five minutes)
-// ends the attempt, and even then the staging directory is kept for the next
-// try. Correctness still rests on the per-file hashes plus the post-import
-// chainstate commitment check, exactly as the single-stream path.
-bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::string& peer, const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, int timeout_ms, int nStreams, std::string& error)
+// Parallel snapshot download: `nStreams` independent connections pull files from
+// one shared queue. Defeats single-flow loss-limiting on lossy WAN paths (each
+// flow gets its own congestion window, so aggregate throughput scales ~N x).
+//
+// Peers. `peer` is the one whose manifest the caller validated; `alternates` are
+// further servers that may hold the same files. Streams start spread over
+// all of them (round robin). A server that answers with another manifest ((another height, block, commitment or file list) serves
+// only the files whose path, size and SHA-256 are those of the validated
+// manifest (its network and chunk size must agree); with none shared it is
+// ignored. The validated server itself serving another manifest ends the
+// attempt at once: the caller retries with the new manifest and keeps what is staged. So two servers
+// can never mix snapshots, and every byte is checked against the validated manifest.
+// The streams then adapt (BootstrapPeerBoard): a stream that gets nothing (a
+// server over its serving cap defers a request by simply not answering it), or
+// whose server gives much less per stream than another, moves to the better
+// server; when the queue runs dry, an idle stream takes the unfinished files of
+// a much slower holder. Files are the unit of work and a partial file continues
+// from its last whole chunk (a .part), so what a moved stream already fetched is
+// kept, whichever server it came from; only requests still in flight are lost.
+// A server whose bytes fail the manifest hashes costs a retry: a server that alone
+// supplied the failing file is benched (never the only holder of a file still to
+// come); with mixed suppliers nobody is blamed and the file is fetched again from
+// byte 0 from one server (the primary if it can), never acceptance.
+//
+// A stream that fails (timeout, reset, a server that evicted it) hands its
+// unfinished files back to the queue, waits a growing, jittered delay and
+// reconnects, preferring a server that has not just failed: the others keep
+// going. Only a fatal condition (local I/O error, a file that repeatedly fails
+// its hash with no other server to ask, every server unusable, shutdown, five
+// minutes without a single byte, or a whole-attempt rate below the minimum
+// throughput over five minutes) ends the attempt, and even then the staging
+// directory is kept for the next try. Correctness still rests on the per-file
+// hashes plus the post-import chainstate commitment check, exactly as the
+// single-stream path.
+bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::string& peer, const CBootstrapSnapshotManifest& manifest, const boost::filesystem::path& staging, int timeout_ms, int nStreams, std::string& error, const std::vector<std::string>& alternates)
 {
-    LogPrintf("Bootstrap: downloading snapshot from peer %s over up to %d parallel streams: %u files, %s (%llu bytes) (height %d)\n",
-        peer, nStreams,
-        (unsigned int)manifest.vFiles.size(),
-        BootstrapFormatGiB(manifest.nSnapshotBytes),
-        (unsigned long long)manifest.nSnapshotBytes,
-        manifest.nHeight);
+    // peers[0] is the validated one; duplicates of any entry are dropped.
+    std::vector<std::string> peerNames(1, peer);
+    std::vector<CService> peerAddrs(1, peerAddress);
+    for (size_t i = 0; i < alternates.size(); ++i) {
+        if (std::find(peerNames.begin(), peerNames.end(), alternates[i]) == peerNames.end()) {
+            peerNames.push_back(alternates[i]);
+            peerAddrs.push_back(CService()); // connected by name each time
+        }
+    }
+    const int nPeers = (int)peerNames.size();
+    if (nPeers > 1) {
+        std::string list = peerNames[0];
+        for (int i = 1; i < nPeers; ++i)
+            list += ", " + peerNames[i];
+        LogPrintf("Bootstrap: downloading snapshot over up to %d parallel streams from %d servers (%s): %u files, %s (%llu bytes) (height %d)\n",
+                  nStreams, nPeers, list,
+                  (unsigned int)manifest.vFiles.size(), BootstrapFormatGiB(manifest.nSnapshotBytes),
+                  (unsigned long long)manifest.nSnapshotBytes, manifest.nHeight);
+    } else {
+        LogPrintf("Bootstrap: downloading snapshot from peer %s over up to %d parallel streams: %u files, %s (%llu bytes) (height %d)\n",
+            peer, nStreams,
+            (unsigned int)manifest.vFiles.size(),
+            BootstrapFormatGiB(manifest.nSnapshotBytes),
+            (unsigned long long)manifest.nSnapshotBytes,
+            manifest.nHeight);
+    }
 
     std::vector<uint32_t> files;
     uint64_t completed = 0;
@@ -2365,14 +2661,28 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
         nStreams = (int)files.size();
     }
 
+    SetBootstrapInfoServers(std::vector<BootstrapInfoServer>()); // a new attempt: no breakdown yet
     BootstrapWorkQueue queue(files);
-    BootstrapQueueFeed feed(queue, manifest, staging);
+    BootstrapPeerBoard board((size_t)nPeers, nStreams, g_bootstrapPeerPolicy);
+    board.SetUnfinishedSource([&queue, &manifest]() { return queue.UnfinishedMask(manifest.vFiles.size()); });
+    board.SetPendingSource([&queue, &manifest]() { return queue.PendingMask(manifest.vFiles.size()); });
     std::atomic<uint64_t> progressBytes(completed);
     std::atomic<bool> abortFlag(false);
     std::atomic<int> activeStreams(0);
     std::atomic<bool> peerAnswered(false); // some stream completed handshake and manifest
     std::atomic<int> liveWorkers(nStreams);
     std::atomic<uint64_t> reconnects(0);
+    // Per stream: `cancel` interrupts its blocking socket wait (set for the attempt ending or for
+    // a deliberate move); `moved` says it was the move.
+    std::unique_ptr<std::atomic<bool>[]> cancel(new std::atomic<bool>[nStreams]);
+    std::unique_ptr<std::atomic<bool>[]> moved(new std::atomic<bool>[nStreams]);
+    std::unique_ptr<std::atomic<int>[]> inflightN(new std::atomic<int>[nStreams]); // requests in flight per stream
+    for (int i = 0; i < nStreams; ++i)
+        inflightN[i].store(0);
+    for (int i = 0; i < nStreams; ++i) {
+        cancel[i].store(false);
+        moved[i].store(false);
+    }
     CCriticalSection csErr;
     std::string firstError;
 
@@ -2384,15 +2694,19 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
             }
         }
         abortFlag.store(true, std::memory_order_relaxed);
+        for (int i = 0; i < nStreams; ++i)
+            cancel[i].store(true, std::memory_order_relaxed);
     };
 
     boost::thread_group workers;
     for (int w = 0; w < nStreams; ++w) {
         workers.create_thread([&, w]() {
-            t_bootstrapCancel = &abortFlag;
+            t_bootstrapCancel = &cancel[w];
             try {
                 unsigned int seed = (unsigned int)(GetTimeMicros() & 0xffffffffu) ^ (unsigned int)(w * 2654435761u);
                 int failures = 0;
+                int gaveNothing = 0; // consecutive connections that had no file for this server
+                int idleN = 0;       // consecutive pauses because no server had anything for this stream
                 while (!abortFlag.load(std::memory_order_relaxed) && !queue.AllDone()) {
                     if (ShutdownRequested()) {
                         recordError("bootstrap snapshot download aborted: shutdown requested");
@@ -2400,8 +2714,39 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
                     }
                     if (!queue.HasPending()) {
                         // Everything left is in flight on other streams; stay ready
-                        // to take over files they hand back.
+                        // to take over files they hand back (or that are taken from them).
+                        board.SetIdle(w, true);
                         MilliSleep(200);
+                        continue;
+                    }
+                    board.SetIdle(w, false);
+                    bool anyUseful = true;
+                    const int pi = board.Assign(w, GetTimeMillis(), &anyUseful);
+                    if (pi < 0) {
+                        recordError("no usable bootstrap server left: every one served a different snapshot or bytes that failed verification");
+                        break;
+                    }
+                    if (!anyUseful) {
+                        // No server holds a pending file this stream may fetch (they are all in flight on other streams,
+                        // or pinned to a server that is not answering): wait a growing while instead of connecting to
+                        // find out. Only when no server has anything; with one that has, Assign has sent the stream there.
+                        board.Detach(w);
+                        const int64_t idleWait = std::min<int64_t>(8000, (int64_t)250 << std::min(idleN, 5));
+                        ++idleN;
+                        BootstrapInterruptibleSleep(idleWait, abortFlag, queue);
+                        continue;
+                    }
+                    idleN = 0;
+                    moved[w].store(false);
+                    // Clear, then look at the abort flag again: an abort landing in between sets abortFlag before it sets
+                    // cancel, so it is never lost.
+                    cancel[w].store(false);
+                    if (abortFlag.load(std::memory_order_relaxed))
+                        cancel[w].store(true);
+                    if (!board.AllowConnect(pi, GetTimeMillis())) {
+                        // This server had its share of connection attempts this minute: wait, do not hammer it.
+                        board.Detach(w);
+                        BootstrapInterruptibleSleep(1000, abortFlag, queue);
                         continue;
                     }
                     SOCKET s = INVALID_SOCKET;
@@ -2409,22 +2754,92 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
                     bool fatal = false;
                     uint64_t got = 0;
                     bool mismatch = false;
-                    if (OpenBootstrapStreamAndVerifyManifest(peerAddress, peer, timeout_ms, manifest, s, e, &mismatch)) {
+                    bool wasMoved = false;
+                    bool differentSnapshot = false;
+                    bool primaryChanged = false;
+                    CBootstrapSnapshotManifest remoteMan;
+                    std::shared_ptr<BootstrapRemoteIndex> rix;
+                    bool opened = OpenBootstrapStreamAndVerifyManifest(peerAddrs[pi], peerNames[pi], timeout_ms, manifest, s, e, &mismatch, &remoteMan);
+                    if (opened && mismatch && pi == 0) {
+                        // The validated server itself changed its snapshot (it refreshed it): end the attempt at once; the
+                        // caller starts again with the new manifest and keeps every file already staged.
+                        CloseSocket(s);
+                        opened = false;
+                        primaryChanged = true;
+                        e = "bootstrap stream served a manifest that differs from the master manifest";
+                    } else if (opened && mismatch) {
+                        // Another manifest: it may still hold files identical to the trusted one's.
+                        rix.reset(new BootstrapRemoteIndex());
+                        if (BootstrapBuildRemoteIndex(manifest, remoteMan, *rix)) {
+                            board.SetPartial(pi, true);
+                            board.SetPeerHas(pi, rix->has);
+                            LogPrintf("Bootstrap: server %s has a different manifest but %u of %u files identical to the trusted one; fetching those from it\n",
+                                      peerNames[pi], (unsigned int)rix->shared, (unsigned int)manifest.vFiles.size());
+                        } else {
+                            CloseSocket(s);
+                            opened = false;
+                            differentSnapshot = true;
+                            e = "bootstrap stream served a manifest that differs from the master manifest";
+                        }
+                    } else if (opened) {
+                        board.SetPartial(pi, false);
+                        board.SetPeerHas(pi, std::vector<uint8_t>());
+                    }
+                    if (opened) {
                         peerAnswered.store(true, std::memory_order_relaxed);
+                        board.ConnectOk(pi);
+                        board.Attach(w, pi, GetTimeMillis());
                         const int active = activeStreams.fetch_add(1) + 1;
-                        if (failures > 0)
+                        if (nPeers > 1)
+                            LogPrintf("Bootstrap: stream %d connected to %s (%d/%d streams active)\n", w, peerNames[pi], active, nStreams);
+                        else if (failures > 0)
                             LogPrintf("Bootstrap: stream %d reconnected (%d/%d streams active)\n", w, active, nStreams);
+                        BootstrapPeerFeed feed(queue, manifest, staging, board, w, rix ? &rix->has : NULL);
                         const bool ok = DownloadBootstrapFileSubset(s, manifest, staging, feed, timeout_ms,
-                                                                    progressBytes, abortFlag, /*logProgress=*/false,
-                                                                    e, &fatal, &got);
+                                                                    progressBytes, cancel[w], /*logProgress=*/false,
+                                                                    e, &fatal, &got, rix.get(), &inflightN[w]);
                         activeStreams.fetch_sub(1);
+                        board.Detach(w);
                         CloseSocket(s);
                         if (ok) {
                             failures = 0;
+                            if (got == 0) {
+                                // Nothing pending that this connection may fetch (the server holds none of the files left, or
+                                // they are pinned to another server): leave it alone for a growing while instead of
+                                // reconnecting every few hundred ms.
+                                // The deferral outlasts the pause, so the stream is not sent straight back; Assign now picks
+                                // among the servers that do have something and the pause is short.
+                                const int64_t wait = std::min<int64_t>(8000, (int64_t)250 << std::min(gaveNothing, 5));
+                                ++gaveNothing;
+                                board.Defer(pi, GetTimeMillis() + 2 * wait + 1000);
+                                BootstrapInterruptibleSleep(50, abortFlag, queue);
+                            } else {
+                                gaveNothing = 0;
+                            }
                             continue; // queue drained for this stream (or taken by others)
                         }
+                        wasMoved = moved[w].load() && !abortFlag.load(std::memory_order_relaxed);
+                        if (wasMoved) {
+                            // Deliberately taken off this server: not a failure. What it fetched stays
+                            // in the .part files; the remaining requests of its window are dropped.
+                            failures = 0;
+                            continue;
+                        }
+                        if (got == 0)
+                            board.ConnectFailed(pi, GetTimeMillis()); // accepted, then served nothing
                     } else {
-                        fatal = mismatch;
+                        board.Detach(w);
+                        if (primaryChanged) {
+                            fatal = true;
+                            LogPrintf("Bootstrap: server %s changed its snapshot while it was being downloaded; ending this attempt\n", peerNames[pi]);
+                        } else if (differentSnapshot) {
+                            board.ManifestMismatch(pi);
+                            LogPrintf("Bootstrap: server %s serves a different snapshot than the one being downloaded; not using it\n", peerNames[pi]);
+                            // The last usable server changing its snapshot ends the attempt, as before.
+                            fatal = board.UsablePeers() == 0;
+                        } else {
+                            board.ConnectFailed(pi, GetTimeMillis());
+                        }
                     }
                     if (fatal) {
                         recordError(e);
@@ -2445,10 +2860,13 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
                         break;
                     }
                     seed = seed * 1664525u + 1013904223u;
-                    const int64_t delay = BootstrapReconnectDelayMs(failures, seed >> 8);
+                    int64_t delay = BootstrapReconnectDelayMs(failures, seed >> 8);
+                    // Another server that has not just failed takes this stream at once.
+                    if (board.UsablePeers() > 1 && failures <= 1)
+                        delay = std::min<int64_t>(delay, 250);
                     reconnects.fetch_add(1);
-                    LogPrintf("Bootstrap: stream %d failed (%s); reconnecting in %.1f s (%d/%d streams active)\n",
-                              w, e, delay / 1000.0, activeStreams.load(), nStreams);
+                    LogPrintf("Bootstrap: stream %d failed on %s (%s); reconnecting in %.1f s (%d/%d streams active)\n",
+                              w, peerNames[pi], e, delay / 1000.0, activeStreams.load(), nStreams);
                     BootstrapInterruptibleSleep(delay, abortFlag, queue);
                 }
             } catch (const std::exception& ex) {
@@ -2456,6 +2874,7 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
             } catch (...) {
                 recordError(strprintf("bootstrap stream %d unknown exception", w));
             }
+            board.Detach(w);
             liveWorkers.fetch_sub(1, std::memory_order_release);
         });
     }
@@ -2467,6 +2886,7 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
     int64_t last_emit_ms = 0;
     int last_emit_decile = -1;
     int last_active = -1;
+    int last_logged_inflight = 0;
     uint64_t stall_bytes = completed;
     const int64_t download_started = GetTimeMillis();
     int64_t last_progress_ms = download_started;
@@ -2494,24 +2914,58 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
                                 total_received, report_ms)) {
             recordError("bootstrap snapshot download too slow (peer stalled or throttling); aborting");
         }
+        // Move streams that are stalled or on a much slower server; an idle stream takes the unfinished
+        // files of a slow holder.
+        if (!abortFlag.load()) {
+            // A pending file no usable server can serve any more ends the attempt (the next one starts over).
+            if (!board.EveryFileHasHolder(queue.UnfinishedMask(manifest.vFiles.size())))
+                recordError("no usable bootstrap server can serve every remaining file");
+            const std::vector<BootstrapMove> mv = board.Rebalance(report_ms, [&](const BootstrapMove& m) {
+                moved[m.stream].store(true);
+                cancel[m.stream].store(true);
+            });
+            for (size_t i = 0; i < mv.size(); ++i) {
+                const int ps = mv[i].peer;
+                LogPrintf("Bootstrap: stream %d moves off %s (%s)\n", mv[i].stream,
+                          ps >= 0 ? peerNames[ps] : std::string("?"),
+                          mv[i].reason == BMR_STALLED ? "no data: the server is deferring it" :
+                          mv[i].reason == BMR_SLOW ? "much slower than another server" :
+                          mv[i].reason == BMR_STEAL ? "an idle stream takes over its unfinished files" : "server not usable");
+            }
+        }
         if (active != last_active) {
             LogPrintf("Bootstrap: %d/%d streams active (%llu files done, %llu pending)\n", active, nStreams,
                       (unsigned long long)queue.DoneCount(), (unsigned long long)(queue.PendingCount() + queue.ClaimedCount()));
             last_active = active;
         }
+        int inflightTotal = 0;
+        for (int i = 0; i < nStreams; ++i)
+            inflightTotal += inflightN[i].load();
+        // The status line also says how many requests are in flight (what a killed client would lose); it is
+        // repeated when that moves by 4 or more so the last line before a kill is never far off.
         if (percent != last_logged_percent ||
-            (total_received != last_reported_bytes && report_ms - last_report_ms >= 1000)) {
+            (total_received != last_reported_bytes && report_ms - last_report_ms >= 1000) ||
+            std::abs(inflightTotal - last_logged_inflight) >= 4) {
             last_logged_percent = percent;
             last_reported_bytes = total_received;
             last_report_ms = report_ms;
+            last_logged_inflight = inflightTotal;
             const int64_t elapsed_ms = std::max<int64_t>(1, report_ms - download_started);
             const double mibps = (total_received > completed ? (total_received - completed) / 1048576.0 : 0.0) / (elapsed_ms / 1000.0);
-            LogPrintf("Bootstrap: downloaded %d%% (%llu/%llu bytes, %.1f MiB/s, %d/%d streams)\n",
+            std::vector<BootstrapPeerSnapshot> snap;
+            int servers = 0;
+            for (int p = 0; p < nPeers; ++p) {
+                snap.push_back(board.Peer(p, report_ms));
+                if (snap.back().streams > 0)
+                    ++servers;
+            }
+            LogPrintf("Bootstrap: downloaded %d%% (%llu/%llu bytes, %.1f MiB/s, %d/%d streams, %d requests in flight)%s%s\n",
                 percent,
                 (unsigned long long)total_received,
                 (unsigned long long)manifest.nSnapshotBytes,
-                mibps, active, nStreams);
-            const std::string progress = BootstrapFormatProgressLine(percent, total_received, manifest.nSnapshotBytes, mibps, active);
+                mibps, active, nStreams, inflightTotal,
+                nPeers > 1 ? " by server: " : "", nPeers > 1 ? BootstrapPeerSummary(peerNames, snap).c_str() : "");
+            const std::string progress = BootstrapFormatProgressLine(percent, total_received, manifest.nSnapshotBytes, mibps, active, nPeers > 1 ? servers : 0);
             // Always feed InitMessage (RPC warmup status -> GUI getinfo). The
             // GUI parses "Bootstrap snapshot: NN%" out of this; keep the prefix
             // in sync with zcl-qt-wallet src/connection.cpp. noui_InitMessage
@@ -2522,6 +2976,19 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
             SetBootstrapInfoProgress(percent, total_received, manifest.nSnapshotBytes,
                                      mibps, active, peer, 0, 0, 0, 0, "",
                                      manifest.nVersion);
+            if (nPeers > 1) {
+                std::vector<BootstrapInfoServer> info;
+                for (int p = 0; p < nPeers; ++p) {
+                    BootstrapInfoServer is;
+                    is.peer = peerNames[p];
+                    is.streams = snap[p].streams;
+                    is.mibps = snap[p].mibps;
+                    is.bytes = snap[p].bytes;
+                    is.state = snap[p].ignored ? "different_snapshot" : snap[p].banned ? "banned" : snap[p].partial ? "shared_files" : "ok";
+                    info.push_back(is);
+                }
+                SetBootstrapInfoServers(info);
+            }
             if (!BootstrapMetricsScreenActive()) {
                 EmitBootstrapProgress(progress, percent, percent >= 100, last_emit_ms, last_emit_decile);
             }
@@ -2554,6 +3021,16 @@ bool DownloadBootstrapSnapshotParallel(const CService& peerAddress, const std::s
     LogPrintf("Bootstrap: download complete: %s fetched in %.1f s (%.1f MiB/s), %llu stream reconnects\n",
               BootstrapFormatGiB(fetched), elapsed_ms / 1000.0, (fetched / 1048576.0) / (elapsed_ms / 1000.0),
               (unsigned long long)reconnects.load());
+    if (nPeers > 1) {
+        std::vector<BootstrapPeerSnapshot> snap;
+        for (int p = 0; p < nPeers; ++p)
+            snap.push_back(board.Peer(p, GetTimeMillis()));
+        // `streams`/rates are gone by now; the byte totals say who served what.
+        std::string by;
+        for (int p = 0; p < nPeers; ++p)
+            by += strprintf("%s%s %s", p ? ", " : "", peerNames[p], BootstrapFormatGiB(snap[p].bytes));
+        LogPrintf("Bootstrap: bytes by server: %s\n", by);
+    }
     return true;
 }
 
@@ -3907,6 +4384,84 @@ std::vector<boost::filesystem::path> ListBootstrapStagingDirs(const boost::files
     return dirs;
 }
 
+static bool BootstrapPathPresent(const boost::filesystem::path& p)
+{
+    boost::system::error_code ec;
+    return boost::filesystem::symlink_status(p, ec).type() != boost::filesystem::file_not_found;
+}
+
+static bool BootstrapIsRealDirectory(const boost::filesystem::path& p)
+{
+    boost::system::error_code ec;
+    return boost::filesystem::is_directory(boost::filesystem::symlink_status(p, ec));
+}
+
+BootstrapInstallRecovery RecoverInterruptedBootstrapInstall(const boost::filesystem::path& data_dir, std::string& error)
+{
+    error.clear();
+    if (!BootstrapAnchorPendingExists(data_dir) && !BootstrapTrustlessPendingExists(data_dir))
+        return BIR_NONE;
+    const boost::filesystem::path blocks = data_dir / "blocks";
+    const boost::filesystem::path chainstate = data_dir / "chainstate";
+    const bool haveBlocks = BootstrapPathPresent(blocks);
+    const bool haveChainstate = BootstrapPathPresent(chainstate);
+
+    if (haveBlocks && haveChainstate) {
+        // Both renames happened. What is left of the staging directory is the husk of the
+        // finished install (or the install died inside its remove_all); the snapshot is
+        // in the datadir and its verification, keyed on the marker, still has to run.
+        RemoveStaleBootstrapStaging(data_dir);
+        return BIR_INSTALLED;
+    }
+    if (!haveBlocks && !haveChainstate) {
+        // The marker is written before the first rename: the install never started.
+        BootstrapAnchorPendingClear(data_dir);
+        BootstrapTrustlessPendingClear(data_dir);
+        BootstrapFsyncDir(data_dir);
+        return BIR_STALE_MARKER;
+    }
+
+    // Exactly one directory is installed. Evidence that the install put it there: the
+    // marker, plus a staging directory that holds the other one and lacks this one (the
+    // rename moved it out). Move it back; its files are verified again by the next install.
+    const char* present = haveBlocks ? "blocks" : "chainstate";
+    const char* absent = haveBlocks ? "chainstate" : "blocks";
+    std::vector<boost::filesystem::path> candidates;
+    const std::vector<boost::filesystem::path> stagingDirs = ListBootstrapStagingDirs(data_dir);
+    for (size_t i = 0; i < stagingDirs.size(); ++i) {
+        const boost::filesystem::path& dir = stagingDirs[i];
+        boost::system::error_code ec;
+        if (BootstrapIsRealDirectory(dir) &&
+            boost::filesystem::symlink_status(dir / BOOTSTRAP_STAGING_MARKER, ec).type() == boost::filesystem::regular_file &&
+            BootstrapIsRealDirectory(dir / absent) && !BootstrapPathPresent(dir / present))
+            candidates.push_back(dir);
+    }
+    if (candidates.size() != 1 || !BootstrapIsRealDirectory(data_dir / present)) {
+        error = strprintf("%s was left by an interrupted bootstrap install without %s/, and the downloaded snapshot it came "
+                          "from (a bootstrap-peer-staging-* directory holding %s/) cannot be found uniquely in %s (%u found); "
+                          "it is left untouched. If it holds no chain data you need, remove blocks/ and chainstate/ from "
+                          "the datadir and start again",
+                          (data_dir / present).string(), absent, absent, data_dir.string(), (unsigned int)candidates.size());
+        return BIR_REFUSE;
+    }
+    boost::system::error_code ec;
+    boost::filesystem::rename(data_dir / present, candidates[0] / present, ec);
+    if (ec) {
+        error = strprintf("could not move the half-installed %s back into %s: %s", (data_dir / present).string(),
+                          candidates[0].string(), ec.message());
+        return BIR_REFUSE;
+    }
+    BootstrapFsyncDir(data_dir);
+    BootstrapFsyncDir(candidates[0]);
+    LogPrintf("Bootstrap: an install was interrupted after moving %s/; moved it back into %s, the next install checks every file again\n",
+              present, candidates[0].filename().string());
+    TestCrashPoint("bootstrap-recover-after-rollback");
+    BootstrapAnchorPendingClear(data_dir);
+    BootstrapTrustlessPendingClear(data_dir);
+    BootstrapFsyncDir(data_dir);
+    return BIR_ROLLED_BACK;
+}
+
 bool BootstrapPrepareStaging(const boost::filesystem::path& data_dir, const CBootstrapSnapshotManifest& manifest,
                              boost::filesystem::path& staging, BootstrapStagingVerdict& verdict, std::string& error)
 {
@@ -3983,7 +4538,7 @@ bool BootstrapPrepareStaging(const boost::filesystem::path& data_dir, const CBoo
     return true;
 }
 
-bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& data_dir, std::string& error)
+bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& data_dir, std::string& error, const std::vector<std::string>& alternates)
 {
     if (!IsBootstrapFreshChainDatadir(data_dir, error)) {
         return false;
@@ -4057,20 +4612,32 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
         int nStreams = (int)GetArg("-bootstrapstreams", BOOTSTRAP_DEFAULT_STREAMS);
         if (nStreams < 1) nStreams = 1;
         if (nStreams > BOOTSTRAP_MAX_STREAMS) nStreams = BOOTSTRAP_MAX_STREAMS;
+        // Test-only: scale the multi-server scheduler to a short measuring window (default 10 s) so a small
+        // regtest snapshot exercises it. Never needed in production.
+        if (GetArg("-bootstrapschedwindowms", 0) > 0) {
+            BootstrapPeerPolicy sched;
+            sched.windowMs = GetArg("-bootstrapschedwindowms", 0);
+            sched.stallMs = sched.windowMs * 2;
+            sched.moveCooldownMs = sched.penaltyMs = sched.windowMs * 3;
+            sched.stealMinSeconds = std::max<int64_t>(1, sched.windowMs * 3 / 2000);
+            BootstrapSetPeerPolicyForTests(&sched);
+        }
 
         // Stream failures are handled inside the downloader (the failed stream
         // reconnects, the others keep going). If it still gives up, the staging
         // directory is KEPT: the next attempt (or the next start) continues from
         // the verified files and partial files it holds.
-        if (!DownloadBootstrapSnapshotParallel(peerAddress, peer, manifest, staging, BOOTSTRAP_NET_TIMEOUT_MS, nStreams, error)) {
+        if (!DownloadBootstrapSnapshotParallel(peerAddress, peer, manifest, staging, BOOTSTRAP_NET_TIMEOUT_MS, nStreams, error, alternates)) {
             LogPrintf("Bootstrap: download did not complete (%s); keeping %s so the next attempt can resume\n",
                       error, staging.string());
             return false;
         }
 
         // Files that sat on disk across a restart get one more full verification
-        // right before they are installed (the download itself verifies each file
-        // as it arrives; this closes the gap for the resumed ones).
+        // right before they are installed. A file downloaded in this run is hashed
+        // as its chunks arrive (never read back), and is checked for a complete,
+        // successful flush to disk before it is renamed into place; the audit is
+        // what covers the ones that were not hashed in this run.
         if (fResumed) {
             std::vector<uint32_t> auditPending;
             uint64_t auditCompleted = 0;
@@ -4149,6 +4716,7 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
         // by the normal forward block-validation path. So v3 (and v1) take the anchor
         // path; only nVersion==2 in trustless mode is the trustless case.
         const bool fTrustlessV2 = (fTrustless && manifest.nVersion == 2);
+        TestCrashPoint("bootstrap-install-before-marker");
         if (fTrustlessV2) {
             if (!WriteBootstrapTrustlessPending(data_dir, manifest.nHeight, manifest.hashBlock,
                                                 manifest.hashChainstateSerialized)) {
@@ -4176,6 +4744,7 @@ bool BootstrapFromPeer(const std::string& peer, const boost::filesystem::path& d
             }
         }
 
+        TestCrashPoint("bootstrap-install-after-marker");
         if (!InstallStagedBootstrapChainData(staging, data_dir, error)) {
             // The install failed and cleaned up any partial data; drop the marker
             // we just wrote so a restart does not try to verify a snapshot that
@@ -4645,7 +5214,7 @@ bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::str
     return true;
 }
 
-// --- Zcash zk-SNARK parameter distribution -------------------------------
+// --- zk-SNARK parameter distribution -------------------------------
 //
 // The parameter files are fixed and identical for every node, with hashes that
 // also gate startup in InitSanityCheck. A fresh node can fetch them from a peer
@@ -4653,7 +5222,7 @@ bool GetBootstrapSnapshotManifest(CBootstrapSnapshotManifest& manifest, std::str
 // compiled in, the serving peer is untrusted (only content matching a compiled
 // hash is installed).
 
-// Single source of truth for the compiled Zcash parameter SHA-256s.
+// Single source of truth for the compiled zk-SNARK parameter SHA-256s.
 // Listed in compiled order, which is also the served manifest order. Also
 // re-used by InitSanityCheck via GetZcashParamSpecs() so the startup hash
 // check and the bootstrap-protocol hash check can never disagree.
@@ -4667,7 +5236,7 @@ static const size_t ZCASH_PARAM_FILE_COUNT = sizeof(ZCASH_PARAM_FILES_RAW) / siz
 
 // Served when present, never required, fetched or checked at startup. Releases
 // up to beta12 still refuse to start without sprout-proving.key and fetch any
-// missing parameter from the compiled bootstrap peers (z.cash no longer serves
+// missing parameter from the compiled bootstrap peers (the original Zcash host no longer serves
 // that file). A node that still holds a correct copy keeps advertising it so a
 // fresh install of an older release can still start; the fetching node checks
 // the content against its own compiled SHA-256, as for every other file.
@@ -4791,7 +5360,7 @@ bool GetZcashParamManifest(CBootstrapSnapshotManifest& manifest, std::string& er
         }
         file.hashSha256 = ZcashParamExpectedHash(param);
         if (file.nSize > std::numeric_limits<uint64_t>::max() - total) {
-            error = "zcash parameter byte size overflow";
+            error = "zk-SNARK parameter byte size overflow";
             return false;
         }
         manifest.vFiles.push_back(file);
@@ -4799,7 +5368,7 @@ bool GetZcashParamManifest(CBootstrapSnapshotManifest& manifest, std::string& er
     }
 
     if (manifest.vFiles.empty()) {
-        error = "no zcash parameters available to serve";
+        error = "no zk-SNARK parameters available to serve";
         return false;
     }
     manifest.nSnapshotBytes = total;
@@ -4814,7 +5383,7 @@ bool ReadZcashParamChunk(const CBootstrapSnapshotChunkRequest& request, CBootstr
         return false;
     }
     if (request.nLength == 0 || request.nLength > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
-        error = strprintf("invalid zcash param chunk length: %u", request.nLength);
+        error = strprintf("invalid zk-SNARK parameter chunk length: %u", request.nLength);
         return false;
     }
 
@@ -4823,20 +5392,20 @@ bool ReadZcashParamChunk(const CBootstrapSnapshotChunkRequest& request, CBootstr
         return false;
     }
     if (request.nFileIndex >= manifest.vFiles.size()) {
-        error = strprintf("zcash param chunk file index out of range: %u", request.nFileIndex);
+        error = strprintf("zk-SNARK parameter chunk file index out of range: %u", request.nFileIndex);
         return false;
     }
 
     const CBootstrapSnapshotFile& file = manifest.vFiles[request.nFileIndex];
     if (!FindZcashParam(file.strPath)) {
-        error = strprintf("unknown zcash param file: %s", file.strPath);
+        error = strprintf("unknown zk-SNARK parameter file: %s", file.strPath);
         return false;
     }
 
     const boost::filesystem::path path = ZC_GetParamsDir() / file.strPath;
     FILE* fp = fopen(path.string().c_str(), "rb");
     if (!fp) {
-        error = strprintf("could not open zcash param file: %s", path.string());
+        error = strprintf("could not open zk-SNARK parameter file: %s", path.string());
         return false;
     }
     uint64_t file_size = 0;
@@ -4849,17 +5418,17 @@ bool ReadZcashParamChunk(const CBootstrapSnapshotChunkRequest& request, CBootstr
     std::time_t file_mtime_unused = 0;
     if (!StatOpenBootstrapSnapshotFile(fp, file_size, file_mtime_unused) || file_size != file.nSize) {
         fclose(fp);
-        error = strprintf("zcash param file changed: %s", file.strPath);
+        error = strprintf("zk-SNARK parameter file changed: %s", file.strPath);
         return false;
     }
     if (!ValidateBootstrapChunkRange(request.nOffset, request.nLength, file.nSize,
-                                     BOOTSTRAP_SNAPSHOT_CHUNK_SIZE, "zcash param", error)) {
+                                     BOOTSTRAP_SNAPSHOT_CHUNK_SIZE, "zk-SNARK parameter", error)) {
         fclose(fp);
         return false;
     }
     if (!BootstrapFseek64(fp, (int64_t)request.nOffset)) {
         fclose(fp);
-        error = strprintf("could not seek zcash param file: %s", file.strPath);
+        error = strprintf("could not seek zk-SNARK parameter file: %s", file.strPath);
         return false;
     }
 
@@ -4870,7 +5439,7 @@ bool ReadZcashParamChunk(const CBootstrapSnapshotChunkRequest& request, CBootstr
     const size_t nRead = fread(&chunk.vData[0], 1, request.nLength, fp);
     fclose(fp);
     if (nRead != request.nLength) {
-        error = strprintf("could not read requested zcash param chunk: %s", file.strPath);
+        error = strprintf("could not read requested zk-SNARK parameter chunk: %s", file.strPath);
         return false;
     }
     return true;
@@ -4881,7 +5450,7 @@ static bool DownloadZcashParamFile(SOCKET socket, uint32_t file_index, uint64_t 
     boost::filesystem::create_directories(part_path.parent_path());
     FILE* fp = fopen(part_path.string().c_str(), "wb");
     if (!fp) {
-        error = strprintf("could not create zcash param staging file: %s", part_path.string());
+        error = strprintf("could not create zk-SNARK parameter staging file: %s", part_path.string());
         return false;
     }
 
@@ -4927,14 +5496,14 @@ static bool DownloadZcashParamFile(SOCKET socket, uint32_t file_index, uint64_t 
         try {
             chunkPayload >> chunk;
         } catch (const std::exception& e) {
-            error = strprintf("could not decode zcash param chunk: %s", e.what());
+            error = strprintf("could not decode zk-SNARK parameter chunk: %s", e.what());
             ok = false;
             break;
         }
         const CBootstrapSnapshotChunkRequest req = inflight.front();
         inflight.pop_front();
         if (chunk.nFileIndex != req.nFileIndex || chunk.nOffset != req.nOffset || chunk.vData.size() != req.nLength) {
-            error = "zcash param peer returned an unexpected chunk";
+            error = "zk-SNARK parameter peer returned an unexpected chunk";
             ok = false;
             break;
         }
@@ -4945,7 +5514,7 @@ static bool DownloadZcashParamFile(SOCKET socket, uint32_t file_index, uint64_t 
         received += chunk.vData.size();
         if (BootstrapDownloadTooSlow(throughputWindowStartMs, throughputBytesAtWindowStart,
                                      received, GetTimeMillis())) {
-            error = "zcash param download too slow (peer stalled or throttling); aborting";
+            error = "zk-SNARK parameter download too slow (peer stalled or throttling); aborting";
             ok = false;
             break;
         }
@@ -4980,7 +5549,7 @@ static bool DownloadZcashParamFile(SOCKET socket, uint32_t file_index, uint64_t 
         FileCommit(fp);
     }
     if (fclose(fp) != 0 && ok) {
-        error = strprintf("could not close zcash param staging file: %s", part_path.string());
+        error = strprintf("could not close zk-SNARK parameter staging file: %s", part_path.string());
         return false;
     }
     return ok;
@@ -5000,7 +5569,7 @@ bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error)
     SOCKET socket = INVALID_SOCKET;
     bool proxyConnectionFailed = false;
     if (!ConnectSocketByName(peerAddress, socket, peer.c_str(), Params().GetDefaultPort(), nConnectTimeout, &proxyConnectionFailed)) {
-        error = proxyConnectionFailed ? "zcash param peer proxy connection failed" : strprintf("could not connect to zcash param peer: %s", peer);
+        error = proxyConnectionFailed ? "zk-SNARK parameter peer proxy connection failed" : strprintf("could not connect to zk-SNARK parameter peer: %s", peer);
         return false;
     }
 
@@ -5024,7 +5593,7 @@ bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error)
             manifestPayload >> manifest;
         } catch (const std::exception& e) {
             CloseSocket(socket);
-            error = strprintf("could not decode zcash param manifest: %s", e.what());
+            error = strprintf("could not decode zk-SNARK parameter manifest: %s", e.what());
             return false;
         }
         // Require the exact compiled chunk size (see ValidateBootstrapSnapshotManifest):
@@ -5033,7 +5602,7 @@ bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error)
         // up-front reject rather than a mid-download stall.
         if (manifest.nChunkSize != BOOTSTRAP_SNAPSHOT_CHUNK_SIZE) {
             CloseSocket(socket);
-            error = "zcash param manifest has invalid chunk size";
+            error = "zk-SNARK parameter manifest has invalid chunk size";
             return false;
         }
 
@@ -5064,12 +5633,12 @@ bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error)
                 }
             }
             if (!found) {
-                error = strprintf("zcash param peer does not serve %s", param.name);
+                error = strprintf("zk-SNARK parameter peer does not serve %s", param.name);
                 ok = false;
                 break;
             }
             if (size != param.nSize) {
-                error = strprintf("zcash param peer advertised invalid size for %s: got %llu expected %llu",
+                error = strprintf("zk-SNARK parameter peer advertised invalid size for %s: got %llu expected %llu",
                     param.name,
                     (unsigned long long)size,
                     (unsigned long long)param.nSize);
@@ -5077,7 +5646,7 @@ bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error)
                 break;
             }
 
-            LogPrintf("Zcash params: downloading %s (%llu bytes) from peer %s\n", param.name, (unsigned long long)size, peer);
+            LogPrintf("zk-SNARK parameters: downloading %s (%llu bytes) from peer %s\n", param.name, (unsigned long long)size, peer);
             const boost::filesystem::path part = boost::filesystem::path(dest.string() + ".part");
             boost::filesystem::remove(part);
             if (!DownloadZcashParamFile(socket, index, size, manifest.nChunkSize, part, param.name, BOOTSTRAP_NET_TIMEOUT_MS, error)) {
@@ -5094,12 +5663,12 @@ bool FetchZcashParamsFromPeer(const std::string& peer, std::string& error)
             }
             if (have != expected) {
                 boost::filesystem::remove(part);
-                error = strprintf("zcash param hash mismatch for %s: got %s expected %s", param.name, have.ToString(), expected.ToString());
+                error = strprintf("zk-SNARK parameter hash mismatch for %s: got %s expected %s", param.name, have.ToString(), expected.ToString());
                 ok = false;
                 break;
             }
             boost::filesystem::rename(part, dest);
-            LogPrintf("Zcash params: installed %s\n", param.name);
+            LogPrintf("zk-SNARK parameters: installed %s\n", param.name);
         }
     } catch (const boost::filesystem::filesystem_error& e) {
         CloseSocket(socket);
@@ -5391,7 +5960,16 @@ bool ValidateBootstrapSnapshotManifest(const CBootstrapSnapshotManifest& manifes
             error = strprintf("Bootstrap manifest has unsafe file path: %s", it->strPath);
             return false;
         }
-        if (!seen_paths.insert(relative.generic_string()).second) {
+        // Case-folded: two names that differ only in case are one file on a case-insensitive disk (Windows, macOS).
+        std::string folded = relative.generic_string();
+        for (size_t c = 0; c < folded.size(); ++c)
+            if (folded[c] >= 'A' && folded[c] <= 'Z')
+                folded[c] = (char)(folded[c] - 'A' + 'a');
+        if (folded.size() >= 5 && folded.compare(folded.size() - 5, 5, ".part") == 0) {
+            error = strprintf("Bootstrap manifest has a file path ending in .part: %s", it->strPath);
+            return false;
+        }
+        if (!seen_paths.insert(folded).second) {
             error = strprintf("Bootstrap manifest has duplicate file path: %s", it->strPath);
             return false;
         }
@@ -5461,11 +6039,11 @@ bool EnqueueBootstrapParamChunkRequest(CNode* pfrom, const CBootstrapSnapshotChu
         return false;
     }
     if (request.nLength == 0 || request.nLength > BOOTSTRAP_SNAPSHOT_MAX_CHUNK_SIZE) {
-        error = strprintf("invalid zcash param chunk length: %u", request.nLength);
+        error = strprintf("invalid zk-SNARK parameter chunk length: %u", request.nLength);
         return false;
     }
     if (request.nOffset % BOOTSTRAP_SNAPSHOT_CHUNK_SIZE != 0) {
-        error = "zcash param chunk offset is not aligned";
+        error = "zk-SNARK parameter chunk offset is not aligned";
         return false;
     }
 
@@ -5782,7 +6360,7 @@ bool SendQueuedBootstrapSnapshotChunk(CNode* pto)
         // each reads from its own backing file set.
         const char* getCmd = (kind == CNode::BOOTSTRAP_CHUNK_PARAMS) ? NetMsgType::GETBSPCHK : NetMsgType::GETBSCHK;
         const char* respCmd = (kind == CNode::BOOTSTRAP_CHUNK_PARAMS) ? NetMsgType::BSPCHK : NetMsgType::BSCHK;
-        const char* chunkLabel = (kind == CNode::BOOTSTRAP_CHUNK_PARAMS) ? "zcash param" : "bootstrap snapshot";
+        const char* chunkLabel = (kind == CNode::BOOTSTRAP_CHUNK_PARAMS) ? "zk-SNARK parameter" : "bootstrap snapshot";
 
         // Apply the per-IP daily serve quota only once we have a request to
         // serve, so peers with no bootstrap traffic never touch the quota lock.
@@ -5835,6 +6413,42 @@ bool SendQueuedBootstrapSnapshotChunk(CNode* pto)
         pto->PushMessage(respCmd, chunk);
         BootstrapServeChargeBytes(ip, pto->fWhitelisted, GetTimeMillis(), chunk.vData.size());
         BootstrapServeGlobalCharge(pto->id, pto->fWhitelisted, chunk.vData.size(), GetTimeMillis());
+    }
+    return true;
+}
+
+std::vector<std::string> BootstrapAlternatesFor(const std::vector<std::string>& all, const std::string& primary)
+{
+    std::vector<std::string> out;
+    for (size_t i = 0; i < all.size(); ++i)
+        if (all[i] != primary && std::find(out.begin(), out.end(), all[i]) == out.end())
+            out.push_back(all[i]);
+    return out;
+}
+
+// Read-only probe: handshake and the manifest request only, no chunk. Used by the manifest probe test.
+bool BootstrapProbeManifest(const std::string& peer, CBootstrapSnapshotManifest& manifest, std::string& error)
+{
+    CService peerAddress;
+    SOCKET socket = INVALID_SOCKET;
+    bool proxyFailed = false;
+    if (!ConnectSocketByName(peerAddress, socket, peer.c_str(), Params().GetDefaultPort(), nConnectTimeout, &proxyFailed)) {
+        error = strprintf("could not connect to %s", peer);
+        return false;
+    }
+    bool ok = BootstrapHandshake(socket, peerAddress, BOOTSTRAP_NET_TIMEOUT_MS, error);
+    CDataStream empty(SER_NETWORK, PROTOCOL_VERSION);
+    CDataStream payload(SER_NETWORK, PROTOCOL_VERSION);
+    ok = ok && SendBootstrapMessage(socket, NetMsgType::GETBSMAN, empty, BOOTSTRAP_NET_TIMEOUT_MS, error) &&
+         ReceiveExpectedBootstrapMessage(socket, NetMsgType::BSMAN, payload, BOOTSTRAP_NET_TIMEOUT_MS, error);
+    CloseSocket(socket);
+    if (!ok)
+        return false;
+    try {
+        payload >> manifest;
+    } catch (const std::exception& e) {
+        error = strprintf("could not decode manifest: %s", e.what());
+        return false;
     }
     return true;
 }

@@ -12,6 +12,12 @@ The rule set is Z23's current one, implemented bug for bug (the owner's decision
 there is nothing to stay compatible with except Z23 itself). Where Z23's behaviour looks ambiguous or unintended it is
 implemented as written and listed in [section 9](#9-ambiguous-or-unintended-in-z23-notes-for-the-owner).
 
+One rule differs from Z23's original behaviour on purpose, and Z23 carries the identical change (the shared vectors
+`src/test/data/token_name_rules.txt` and Z23's `tests/fixtures/token_name_rules/token_name_rules.txt` (Z23 tree) are the same <!-- doc-path-ok -->
+bytes): **ZNAM-OWNER-2**, the owner of a name transaction is rendered by the type of the output its first input spends
+(section 2.4, ambiguity A3). It applies from genesis: a census of the mainnet chain to block 3,323,972 found no ZNAM
+message at all, so there is no history to reinterpret.
+
 Citations are `file:line` in the Z23 repository at commit `5e21cefb3` (the pin of `src/c23/services/Z23_SOURCE.tsv`). Every
 file cited was compared with Z23 `origin/main` (`83931c0e3`, 2026-11-17): the git blob ids are identical.
 
@@ -102,11 +108,15 @@ The owner of a name is the address of the output that the transaction's **first 
 * the first input must not be the coinbase null prevout, and the spent output must be an exact P2PKH script (25 bytes) or
   an exact P2SH script (23 bytes). A bare public key output, a multisig, or anything else has no owner, and the message is
   ignored (REGISTER, UPDATE, TRANSFER, SET_RECORD, SET_TEXT; RENEW needs no owner);
-* the owner is rendered as a **P2PKH address** with the chain's P2PKH prefix, **for both forms** (`DEST_KEY_ID` at
-  `explorer_index_overlays.c:69-72`): a P2SH spend yields the P2PKH text of the script hash (A3);
+* rule **ZNAM-OWNER-2**: the owner is rendered by the **type** of that output: an exact P2PKH script is the chain's
+  **P2PKH address** (`t1...` on mainnet), an exact P2SH script is the chain's **P2SH address** (`t3...`). A key hash and a
+  script hash of the same 20 bytes are two different owners (A3). Before this rule both forms were rendered as the
+  P2PKH address (`DEST_KEY_ID`), which let a P2SH spend act as the key owner and left a P2SH-registered name unchangeable;
 * only the first input matters. Other inputs may belong to anyone, and are not looked at.
 
-So owning a name means controlling the key behind the first input's output. Nothing in the record names the signer.
+So owning a name means controlling the output, key or script, behind the first input. Nothing in the record names the
+signer. A TRANSFER stores its text as written, so a name is handed to a P2SH owner by transferring it to the `t3...`
+address; that owner then signs with a P2SH first input.
 
 ### 2.5 The commands
 
@@ -121,7 +131,7 @@ All are evaluated in `apply_znam` (`explorer_index_overlays.c:209-260`), after `
 | SET_TEXT | name exists, owner equals the stored owner; upserts the text record (an empty value is stored, it does not delete) | `:158-170` |
 | RENEW | name exists; **anyone**; `expiry` = max(expiry, height) + 210240; sets `last_update_txid` | `:172-186` |
 
-After the model's own validation (`models/znam.c:155-183`: type `1..7`, owner and target non-empty, non-negative
+After the model's own validation (Z23 `models/znam.c:155-183`: type `1..7`, owner and target non-empty, non-negative <!-- doc-path-ok -->
 heights), run on the whole row before every save of a name. A field that is empty as a C string (the first byte is NUL)
 is NOT always refused: REGISTER, SET_RECORD and SET_TEXT build a zeroed record and refuse it, but UPDATE and TRANSFER
 overwrite one field of the row they read, and the presence check compares the whole buffer, so an empty new target or
@@ -305,12 +315,14 @@ Implemented as Z23 does it; none is changed here.
   (`zdir.h:36`). The comment says registrations are "live on mainnet", which contradicts "no records exist on mainnet".
   Decide whether the parser should become strict before any record exists.
 * **A2. No normalisation, no confusable policy, no reserved names, one-character names.** See 2.3.
-* **A3. A P2SH-funded record is owned by the P2PKH text of the script hash.** `explorer_index_overlays.c:69-72` always uses
-  `DEST_KEY_ID`. A name registered from a P2SH input can never be changed (no key hashes to the script hash), and a
-  later TRANSFER to a real P2SH address string (`t3...`) also never matches. The reverse also holds: a
-  P2SH output whose script hash equals HASH160 of a registrant's public key (possible when the key bytes, read as a
-  script, evaluate true) is spent with that key as the redeem script, and the index reads the spender as the key's
-  owner. Both Z23 and this glue read the owner this way; not changed here.
+* **A3. (fixed by rule ZNAM-OWNER-2, shared with Z23) A P2SH-funded record was owned by the P2PKH text of the script
+  hash.** `explorer_index_overlays.c` always used `DEST_KEY_ID`. A name registered from a P2SH input could never be
+  changed (no key hashes to the script hash), and a later TRANSFER to a real P2SH address string (`t3...`) never matched.
+  The reverse also held: a P2SH output whose script hash equals HASH160 of a registrant's public key (a 2^80 collision
+  between a key and a script that one party prepares, or a key whose bytes read as a script that evaluates true) is spent
+  with the redeem script, and the index read the spender as the key's owner. Now the owner text carries the script
+  type (P2PKH `t1...`, P2SH `t3...`), so the two never match. Regtest and vectors: `qa/rpc-tests/token_name_rules.sh`,
+  `src/test/data/token_name_rules.txt`.
 * **A4. Only the first input counts.** A transaction that merely has an owner's coin first is a valid owner transaction;
   other inputs may belong to anyone. Wallets that reorder inputs (privacy mixers, coin-selection libraries) can change
   the owner of a record without meaning to.
@@ -328,7 +340,7 @@ Implemented as Z23 does it; none is changed here.
   buffer reuse: REGISTER, SET_RECORD and SET_TEXT write into a zeroed struct, so `validates_presence_of`
   (`activerecord.h:121-125`, a whole-buffer `memcmp`) refuses it, and a target that begins with NUL makes a REGISTER
   silently not register. UPDATE and TRANSFER `snprintf` the new value over the row `row_to_znam` read
-  (`models/znam.c:258-284`, `explorer_index_overlays.c:120-122,136-137`), which writes only the NUL and leaves the old
+  (Z23 `models/znam.c:258-284`, `explorer_index_overlays.c:120-122,136-137`), which writes only the NUL and leaves the old <!-- doc-path-ok -->
   bytes from index 1 on; presence passes and the row is stored as `""` (`sqlite3_bind_text` with length -1). So an owner
   can blank the target (the name then pays nobody), or TRANSFER to `"\0..."` and leave the name owned by nobody, frozen
   for good. A row with a blank owner or target fails validation on every later save: RENEW and TRANSFER of it are
@@ -337,7 +349,7 @@ Implemented as Z23 does it; none is changed here.
   `a_field_that_starts_with_nul_is_saved_as_z23_saves_it`); the first version of this port did not, and a differential
   run against Z23's own apply code found it. Probably unintended in Z23: the owner should decide whether the parser
   should refuse any field that contains a NUL.
-* **A10. SET_TEXT with an empty value** is stored as an empty row, not a deletion (`models/znam.c:551-582`); the resolver
+* **A10. SET_TEXT with an empty value** is stored as an empty row, not a deletion (Z23 `models/znam.c:551-582`); the resolver <!-- doc-path-ok -->
   treats empty as absent (`name_resolver.c:151-155`).
 * **A11. SET_TEXT `zid`** also feeds the identity projection (`explorer_index_overlays.c:201-206`); not implemented here.
 * **A12. No reorg handling in Z23's tables** (2.9). A registration in an orphaned block stays; a name can be "taken" by a

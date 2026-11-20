@@ -16,8 +16,8 @@ No transaction after height 1,968,856 exceeds 102,000 bytes.
 
 ## The rule
 
-Same rule as Z23 (`core/consensus/src/tx_structural.c`,
-`core/consensus/src/oversize_grandfather_table.inc`):
+Same rule as Z23 (Z23 `core/consensus/src/tx_structural.c`, <!-- doc-path-ok -->
+Z23 `core/consensus/src/oversize_grandfather_table.inc`; here `src/consensus/z23/oversize_grandfather_table.inc`): <!-- doc-path-ok -->
 
 A transaction whose serialized size is greater than `MAX_TX_SIZE_AFTER_SAPLING` is
 still rejected with `bad-txns-oversize`, except when all of these hold:
@@ -51,18 +51,18 @@ Z23 file (Apache License 2.0, Copyright 2026 Rhett Creighton; licence text in
 
 | | |
 |---|---|
-| Z23 path | `core/consensus/src/oversize_grandfather_table.inc` |
+| Z23 path | `core/consensus/src/oversize_grandfather_table.inc` | <!-- doc-path-ok -->
 | Z23 commit | `03a8b1d4c9ff43f47215c5d493585641cf86c3d0` (same blob at Z23 `origin/main` 76ffcc4885843f63df1f69fc8c531911ba5f1181) |
 | git blob | `1deee007953f53931b5736498c13b1436d64fde3` |
 | sha3-256 | `443a7deeae3a1239bce85df59e19cb374529cbaaa9895e0ebdda21777f509d35` (Z23 `core/MANIFEST.sha3`) |
 
 `src/test/data/oversize_grandfather_txids.txt` is Z23's
-`tools/data/oversize_grandfather_txids.txt` (blob
+Z23 `tools/data/oversize_grandfather_txids.txt` (blob <!-- doc-path-ok -->
 `641f7ffdc7544a868f31bf250df8bd63c9570bd0`, same commit): the committed
 `height txid size` list the table was generated from.
 `src/test/data/oversize_tx_478544.hex` is the raw first oversize transaction
 (txid `e3eeb123...c79700`, 125,811 bytes, block 478,544), extracted from Z23's
-`tests/harness/src/fixture_tx_oversize_478544.c` (blob
+Z23 `tests/harness/src/fixture_tx_oversize_478544.c` (blob <!-- doc-path-ok -->
 `c66545824fb653a2d737798ee69ff0d583c34bcf`); its double SHA-256 is the txid above.
 
 Do not edit the `.inc`. To refresh it, copy the new Z23 file, update the blob

@@ -1,7 +1,7 @@
 Format: http://svn.debian.org/wsvn/dep/web/deps/dep5.mdwn?rev=174
-Upstream-Name: Zcash
-Upstream-Contact: Zcash Company <team@z.cash>
-Source: https://github.com/zcash/zcash
+Upstream-Name: ZClassic
+Upstream-Contact: https://github.com/ZclassicCommunity/zclassic/issues
+Source: https://github.com/ZclassicCommunity/zclassic
 
 Files: *
 Copyright: 2016-2019, The Zcash developers
@@ -57,12 +57,14 @@ Files: depends/sources/zlib-*.tar.gz
 Copyright: 1995-2024, Jean-loup Gailly and Mark Adler
 License: Zlib
 
-Files: src/c23/vendor/*, src/c23/services/vendor/*
+Files: src/c23/vendor/*, src/c23/services/vendor/*, zcutil/tools/vendor/*
 Copyright: The Z23 authors, see src/c23/LICENSE.z23
 License: Apache-2.0
-Comment: Vendored verbatim from Z23 at the commits in src/c23/Z23_SOURCE.tsv and
- src/c23/services/Z23_SOURCE.tsv; the licence text is src/c23/LICENSE.z23 and
- src/c23/services/LICENSE.z23.
+Comment: Vendored verbatim from Z23 at the commits in src/c23/Z23_SOURCE.tsv,
+ src/c23/services/Z23_SOURCE.tsv and zcutil/tools/Z23_SOURCE.tsv; the licence text is
+ src/c23/LICENSE.z23, src/c23/services/LICENSE.z23 and zcutil/tools/LICENSE.z23.
+ zcutil/tools/vendor holds the developer tools: the jsonq JSON query tool with its zjsonp/zutf8
+ parser, process_group_exec (built as zcl-run) and the glob matcher used by zcl-dev.
 
 Files: depends/sources/zeromq-*.tar.gz
 Copyright:

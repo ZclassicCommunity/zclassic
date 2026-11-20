@@ -38,7 +38,7 @@ libzcash, zcash-gtest, test_bitcoin, the zcbenchmarks object in zclassicd):
 AM_CPPFLAGS += -I$(srcdir)/c23/compat
 ```
 
-and remove the depends `include/librustzcash.h` (it disappears with U9; while both
+and remove the depends `include/librustzcash.h` (in the depends prefix, not tracked) (it disappears with U9; while both <!-- doc-path-ok -->
 exist, `-I$(srcdir)/c23/compat` must come BEFORE the depends include dir). Only
 `c23/compat` goes on the C++ path. Never add `c23/glue/chain` or any `c23/vendor/...`
 include dir to C++ targets: their header names (`chainparams.h`, `crypto/sha256.h`,
@@ -99,7 +99,16 @@ does what librustzcash does (rustzcash.rs:191-280):
    automatic, a send also limits the proofs it makes at once (`ProverWorkerLimit`); see
    `doc/perf/prover-memory.md`.
 
-Measured on Windows (gcc 16, warm page cache): init 0.84 s. Proving never reads a file
+   Steps 3 and 5 above are the `ZCL_PARAMS_VERIFY=boot` path. By default (lazy mode,
+   `compat/zcl_params_lazy.{h,c}`, which also holds the file reading and hashing used in
+   both modes) step 3 hashes only the Sapling pair, with the same aborts, and checks the
+   Sprout file's size; step 5 keeps no raw bytes and records the three paths instead. The
+   first proof of a send then reads and re-verifies the Sapling pair before parsing it (a
+   changed file makes the proof return false), and `librustzcash_sprout_prove` first calls
+   `zcl_c23_sprout_params_ready`, which hashes the Sprout file once per process and
+   aborts the proof on a wrong digest (the ABI has no failure value).
+
+Measured on Windows (gcc 16, warm page cache, boot mode): init 0.84 s. In boot mode proving never reads a file
 again, so the first spend proof of a send costs the same as any other.
 
 Logging: call `zcl_c23_log_refresh()` after argument parsing (c23/glue/WIRING.md).

@@ -1,0 +1,8 @@
+symbol: a_value
+matches: 5
+shown: 5
+src/a.h:5  int a_value();
+src/core.cpp:69  int a_value() { return fx::Default(); }
+src/main.cpp:3  int main(int argc, char **argv) { return a_value() + wallet_value() + argc; }
+src/test/foo_tests.cpp:6  BOOST_CHECK_EQUAL(a_value(), 1);
+src/wallet/wallet.cpp:3  int wallet_value() { return a_value() + 1; }

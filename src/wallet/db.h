@@ -30,8 +30,12 @@ private:
     // Don't change into boost::filesystem::path, as that can result in
     // shutdown problems/crashes caused by a static initialized internal pointer.
     std::string strPath;
+    // Berkeley DB error log (<datadir>/db.log) handed to set_errfile; Berkeley
+    // DB never closes it, so we own it and close it once dbenv is closed.
+    FILE* errfile;
 
     void EnvShutdown();
+    void CloseErrFile();
 
 public:
     mutable CCriticalSection cs_db;
@@ -69,6 +73,8 @@ public:
     bool Open(const boost::filesystem::path& path);
     void Close();
     void Flush(bool fShutdown);
+    //! Forces the transaction log to disk (the environment commits with DB_TXN_WRITE_NOSYNC). False on failure.
+    bool FlushLog();
     void CheckpointLSN(const std::string& strFile);
 
     void CloseDb(const std::string& strFile);

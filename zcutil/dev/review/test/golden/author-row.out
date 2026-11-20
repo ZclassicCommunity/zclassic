@@ -1,0 +1,4 @@
+review: 1 of 2 commits in @base..@tip_author have no accepted review:
+  @c2 fix: two (reviewer is author)
+record: zcl-dev review record --reviewer <name> --verdict ACCEPT @base..@tip_author
+exit=1

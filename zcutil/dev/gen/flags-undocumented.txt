@@ -1,0 +1,21 @@
+# Read-but-undocumented command-line flags: <flag><TAB><reason>. Shrink-only: `zcl-dev gen --check flags`
+# fails for a new undocumented flag, and for a row that is documented or no longer read here.
+# `zcl-dev gen --check flags --update-baseline` drops stale rows and never adds one.
+# Reasons: unsupported-warning / rejected-with-error (the flag is read only to refuse it), test-only,
+# regtest-only, help-alias (documented by -?), typo (a defect), undocumented (user-facing, should be documented).
+-benchmark	unsupported-warning: read only to warn to use -debug=bench
+-bootstrapvalidationtestforcefail	regtest-only: forces bootstrap validation failure in tests
+-debugnet	unsupported-warning: read only to warn to use -debug=net
+-developerencryptwallet	rejected-with-error: needs -experimentalfeatures
+-equihashdifferential	test-only: equihash cross-check hook
+-equihashmemo	test-only: equihash memoisation hook
+-mocktime	test-only: regression-test clock
+-paymentdisclosure	rejected-with-error: needs -experimentalfeatures
+-regtestprotectcoinbase	regtest-only: qa tests need the protected-coinbase rule
+-rpcssl	unsupported: zclassic-cli reads it to reject SSL
+-socks	rejected-with-error: SOCKS version cannot be set
+-tor	rejected-with-error: use -onion
+-version	help-alias: zclassic-cli prints its usage for -version
+-zmergetoaddress	rejected-with-error: needs -experimentalfeatures
+-znamindexdelayms	test-only: slows the znam index for qa/rpc-tests/znam_index.sh
+-zslpindexdelayms	test-only: slows the zslp index for qa/rpc-tests/zslp_index.sh

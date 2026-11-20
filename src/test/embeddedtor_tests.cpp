@@ -20,6 +20,9 @@
 #include <boost/test/unit_test.hpp>
 
 #ifndef WIN32
+#include <signal.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -263,5 +266,95 @@ BOOST_AUTO_TEST_CASE(onion_keyfile_owner_only)
     boost::filesystem::remove_all(dir);
 }
 #endif // !WIN32
+
+#if defined(ENABLE_EMBEDDED_TOR) && !defined(WIN32)
+/** zclassicd to run as the Tor child: $ZCL_TEST_ZCLASSICD, else ../zclassicd beside test_bitcoin. */
+static std::string ZclassicdForTest()
+{
+    const char* env = getenv("ZCL_TEST_ZCLASSICD");
+    boost::filesystem::path exe;
+    if (env && *env) {
+        exe = env;
+    } else {
+        const boost::unit_test::master_test_suite_t& suite = boost::unit_test::framework::master_test_suite();
+        if (suite.argc < 1)
+            return std::string();
+        exe = boost::filesystem::absolute(suite.argv[0]).parent_path().parent_path() / "zclassicd";
+    }
+    return access(exe.string().c_str(), X_OK) == 0 ? boost::filesystem::absolute(exe).string() : std::string();
+}
+
+/** Send PROTOCOLINFO to the control port; true when Tor answers 250. */
+static bool ControlPortAnswers(uint16_t port)
+{
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET)
+        return false;
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    struct timeval tv = {5, 0};
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    bool ok = false;
+    if (connect(s, (struct sockaddr*)&sa, sizeof(sa)) == 0) {
+        const char cmd[] = "PROTOCOLINFO 1\r\n";
+        char buf[64] = "";
+        if (send(s, cmd, sizeof(cmd) - 1, 0) == (ssize_t)(sizeof(cmd) - 1)) {
+            ssize_t n = recv(s, buf, sizeof(buf) - 1, 0);
+            ok = n >= 3 && strncmp(buf, "250", 3) == 0;
+        }
+    }
+    CloseSocket(s);
+    return ok;
+}
+
+BOOST_AUTO_TEST_CASE(embeddedtor_child_killed_then_restarted)
+{
+    const std::string exe = ZclassicdForTest();
+    if (exe.empty()) {
+        BOOST_TEST_MESSAGE("skipped: no zclassicd to run as the Tor child (set ZCL_TEST_ZCLASSICD)");
+        return;
+    }
+    boost::filesystem::path dir = boost::filesystem::temp_directory_path() /
+                                  UniquePath("zcl-torrestart-%%%%-%%%%-%%%%");
+    BOOST_REQUIRE(boost::filesystem::create_directories(dir));
+    SetEmbeddedTorTestOptions(exe, true); // DisableNetwork: nothing leaves loopback
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(StartEmbeddedTor(dir.string(), EMBEDDED_TOR_CHILD, err), err);
+    BOOST_CHECK(EmbeddedTorAlive());
+    const long pid = EmbeddedTorChildPid();
+    BOOST_REQUIRE(pid > 0);
+    BOOST_CHECK(ControlPortAnswers(EmbeddedTorControlPort()));
+
+    // The child is killed: no longer alive within 5 s, still published until stopped.
+    BOOST_REQUIRE_EQUAL(kill((pid_t)pid, SIGKILL), 0);
+    const int64_t nKilled = GetTimeMillis();
+    while (EmbeddedTorAlive() && GetTimeMillis() - nKilled < 5000)
+        MilliSleep(50);
+    BOOST_CHECK(!EmbeddedTorAlive());
+    BOOST_CHECK(EmbeddedTorRunning());
+
+    // Stopping is idempotent and leaves nothing running.
+    StopEmbeddedTor();
+    BOOST_CHECK(!EmbeddedTorRunning());
+    BOOST_CHECK_EQUAL(EmbeddedTorControlPort(), 0);
+    BOOST_CHECK_EQUAL(EmbeddedTorChildPid(), 0);
+    StopEmbeddedTor();
+    BOOST_CHECK(!EmbeddedTorRunning());
+
+    // A fresh start on the same state directory works and answers on its control port.
+    BOOST_REQUIRE_MESSAGE(StartEmbeddedTor(dir.string(), EMBEDDED_TOR_CHILD, err), err);
+    BOOST_CHECK(EmbeddedTorAlive());
+    BOOST_CHECK(EmbeddedTorChildPid() > 0 && EmbeddedTorChildPid() != pid);
+    BOOST_CHECK(!EmbeddedTorCookiePath().empty());
+    BOOST_CHECK(ControlPortAnswers(EmbeddedTorControlPort()));
+    StopEmbeddedTor();
+    BOOST_CHECK(!EmbeddedTorRunning());
+    SetEmbeddedTorTestOptions("", false);
+    boost::filesystem::remove_all(dir);
+}
+#endif // ENABLE_EMBEDDED_TOR && !WIN32
 
 BOOST_AUTO_TEST_SUITE_END()

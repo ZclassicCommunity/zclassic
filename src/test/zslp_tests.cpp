@@ -24,6 +24,7 @@
 
 #include <boost/filesystem.hpp>
 #include <boost/test/unit_test.hpp>
+#include <fstream>
 #include <set>
 #include <univalue.h>
 
@@ -799,15 +800,15 @@ BOOST_AUTO_TEST_CASE(review_adversarial_rules)
     c.Pop();
 }
 
-// Which output carries the message: the FIRST OP_RETURN output, wherever it is, as Z23.s ledger reads it
-// (explorer_index.c index_op_return) and as the wallet token guard reads it (tokenguard.cpp, reading B).
-// The SLP Token Type 1 spec puts the message at vout[0] only. This pins the current choice.
+// Which output carries the message: rule ZSLP-VOUT0 (token-name-rules, shared with Z23): vout[0] and only vout[0],
+// the SLP Token Type 1 specification's rule. Before the rule the FIRST OP_RETURN output counted wherever it was.
+// The wallet token guard (tokenguard.cpp, reading B) still protects the first OP_RETURN's outputs: a superset.
 BOOST_AUTO_TEST_CASE(review_message_position)
 {
     Chain c;
     CTransaction g = Tx(kNoInputs, {GenesisMsg(10, 0), P2PKH(0xa1)});
     c.Add(One(g));
-    // message at vout[1] after a P2PKH vout[0]: indexed (tokens go to vout 1 = the OP_RETURN itself)
+    // message at vout[1] after a P2PKH vout[0]: not a message
     CTransaction late = Tx(kNoInputs, {P2PKH(0xa2), GenesisMsg(5, 0, "LATE"), P2PKH(0xa3)}, 31);
     // a non-SLP OP_RETURN first, then an SLP one: not indexed
     CTransaction second = Tx(kNoInputs, {CScript() << OP_RETURN << std::vector<unsigned char>(4, 0x41),
@@ -816,8 +817,57 @@ BOOST_AUTO_TEST_CASE(review_message_position)
     v.push_back(late); v.push_back(second);
     c.Add(v);
     TxInfo ti;
-    BOOST_CHECK(c.idx.GetTx(late.GetHash(), ti));
+    BOOST_CHECK(c.idx.GetTx(g.GetHash(), ti));
+    BOOST_CHECK(!c.idx.GetTx(late.GetHash(), ti));
     BOOST_CHECK(!c.idx.GetTx(second.GetHash(), ti));
+    BOOST_CHECK_EQUAL(c.idx.GetStats().nGenesis, 1u);
+}
+
+// token-name-rules parity vectors: src/test/data/token_name_rules.txt is shared byte for byte with Z23
+// (tests/fixtures/token_name_rules/token_name_rules.txt); every slp record is read by both implementations and must give the same
+// answer. The file is read at run time (the tests run from the source tree); a missing file fails, never skips.
+BOOST_AUTO_TEST_CASE(token_name_rules_vectors)
+{
+    std::ifstream in;
+    {
+        const char* env = getenv("TOKEN_NAME_RULES_VECTORS");
+        const char* const candidates[] = {"src/test/data/token_name_rules.txt", "test/data/token_name_rules.txt",
+                                          "../src/test/data/token_name_rules.txt", "data/token_name_rules.txt"};
+        if (env && *env)
+            in.open(env);
+        else
+            for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]) && !in.is_open(); i++) {
+                in.clear();
+                in.open(candidates[i]);
+            }
+    }
+    BOOST_REQUIRE_MESSAGE(in.is_open(), "token_name_rules.txt not found (run the tests from the source tree)");
+    std::string line;
+    size_t records = 0, accepted = 0;
+    while (std::getline(in, line)) {
+        if (line.compare(0, 4, "slp|") != 0)
+            continue;
+        const size_t p1 = line.find('|', 4), p2 = line.find('|', p1 + 1);
+        BOOST_REQUIRE(p1 != std::string::npos && p2 != std::string::npos);
+        const std::string id = line.substr(4, p1 - 4), hex = line.substr(p1 + 1, p2 - p1 - 1), want = line.substr(p2 + 1);
+        BOOST_REQUIRE(IsHex(hex));
+        CDataStream ss(ParseHex(hex), SER_NETWORK, PROTOCOL_VERSION);
+        CTransaction tx;
+        ss >> tx;
+        BOOST_REQUIRE_EQUAL(ss.size(), 0u);
+        Chain c;
+        c.Add(One(tx));
+        TxInfo ti;
+        std::string got = "none";
+        if (c.idx.GetTx(tx.GetHash(), ti))
+            got = ti.type == 1 ? "genesis" : ti.type == 2 ? "mint" : ti.type == 3 ? "send" : "other";
+        BOOST_CHECK_MESSAGE(got == want, "vector " + id + ": got " + got + " want " + want);
+        records++;
+        if (want != "none")
+            accepted++;
+    }
+    BOOST_CHECK_GE(records, 15u);
+    BOOST_CHECK_GE(accepted, 5u);
 }
 
 // Random connect/disconnect sequences: after every disconnect the store equals the snapshot taken when

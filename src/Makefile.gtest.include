@@ -26,6 +26,7 @@ zcash_gtest_SOURCES += \
 	gtest/test_joinsplit.cpp \
 	gtest/test_keys.cpp \
 	gtest/test_keystore.cpp \
+	gtest/test_leveldb_crc32c.cpp \
 	gtest/test_noteencryption.cpp \
 	gtest/test_mempool.cpp \
 	gtest/test_merkletree.cpp \
@@ -43,8 +44,10 @@ zcash_gtest_SOURCES += \
 	gtest/test_txid.cpp \
 	gtest/test_libzcash_utils.cpp \
 	gtest/test_param_presence.cpp \
+	gtest/test_c23_params_residency.cpp \
 	gtest/test_pedersen_hash.cpp \
 	gtest/test_checkblock.cpp \
+	gtest/test_secp256k1_verify_parity.cpp \
 	gtest/test_sha256_differential.cpp \
 	gtest/sha256_reference.h \
 	gtest/test_zip32.cpp \
@@ -59,6 +62,8 @@ zcash_gtest_SOURCES += \
 	wallet/gtest/test_wallet.cpp \
 	wallet/gtest/test_wallet_oversize.cpp \
 	wallet/gtest/test_wallet_note_state.cpp \
+	wallet/gtest/test_wallet_health.cpp \
+	wallet/gtest/test_wallet_sendjournal.cpp \
 	wallet/gtest/test_wallet_perf.cpp \
 	wallet/gtest/test_wallet_witness_index.cpp
 endif
@@ -81,6 +86,8 @@ zcash_gtest_LDADD += $(LIBZCASH_CONSENSUS) $(BDB_LIBS) $(SSL_LIBS) $(CRYPTO_LIBS
 
 zcash_gtest_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -static
 EXTRA_zcash_gtest_DEPENDENCIES = c23-symbols.stamp
+# The secp256k1 parity corpus also runs the script JSON vectors; Makefile.test.include generates the headers.
+gtest/zcash_gtest-test_secp256k1_verify_parity.$(OBJEXT): test/data/script_valid.json.h test/data/script_invalid.json.h
 
 zcash-gtest_check: zcash-gtest FORCE
 	./zcash-gtest

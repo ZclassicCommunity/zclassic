@@ -1,0 +1,4 @@
+symbol: a_value
+scanned-files: 10
+definitions: 1
+func  a_value  src/core.cpp  69-69

@@ -5,7 +5,37 @@
 
 #include "chain.h"
 
+#include "tinyformat.h"
+#include "txdb.h"
+
+#include <stdexcept>
+
 using namespace std;
+
+bool CBlockIndex::GetSolution(std::vector<unsigned char>& out) const
+{
+    if (!fSolutionOnDisk) {
+        out = nSolution;
+        return true;
+    }
+    return ReadBlockIndexSolution(GetBlockHash(), out);
+}
+
+CBlockHeader CBlockIndex::GetBlockHeader() const
+{
+    CBlockHeader block;
+    block.nVersion       = nVersion;
+    if (pprev)
+        block.hashPrevBlock = pprev->GetBlockHash();
+    block.hashMerkleRoot = hashMerkleRoot;
+    block.hashFinalSaplingRoot   = hashFinalSaplingRoot;
+    block.nTime          = nTime;
+    block.nBits          = nBits;
+    block.nNonce         = nNonce;
+    if (!GetSolution(block.nSolution))
+        throw std::runtime_error(strprintf("block index solution unavailable for %s", GetBlockHash().ToString()));
+    return block;
+}
 
 /**
  * CChain implementation

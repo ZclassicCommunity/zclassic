@@ -120,10 +120,11 @@ LIBZCASH_H = \
   zcash/Zcash.h \
   zcash/zip32.h
 
-.PHONY: FORCE check-security check-c23-vendor check-c23-no-rust check-c23-tor-symbols
+.PHONY: FORCE lint-fast check-security check-c23-vendor check-tools-vendor check-c23-no-rust check-c23-tor-symbols
 # bitcoin core #
 BITCOIN_CORE_H = \
   addrman.h \
+  banlist.h \
   amount.h \
   arith_uint256.h \
   asyncrpcoperation.h \
@@ -163,6 +164,9 @@ BITCOIN_CORE_H = \
   httprpc.h \
   httpserver.h \
   init.h \
+  phasetimer.h \
+  paramcache.h \
+  shutdownmarker.h \
   startuptimer.h \
   key.h \
   key_io.h \
@@ -179,10 +183,13 @@ BITCOIN_CORE_H = \
   net.h \
   addrv2.h \
   netbase.h \
+  netoutbound.h \
   noui.h \
+  p2pserve.h \
   policy/fees.h \
   pow.h \
   equihashmemo.h \
+  headerprecheck.h \
   prevector.h \
   primitives/block.h \
   primitives/transaction.h \
@@ -192,7 +199,9 @@ BITCOIN_CORE_H = \
   reverselock.h \
   rpc/client.h \
   rpc/protocol.h \
+  rpc/rpcstats.h \
   rpc/server.h \
+  rpc/nodestatus.h \
   rpc/register.h \
   scheduler.h \
   script/sighashtype.h \
@@ -201,6 +210,7 @@ BITCOIN_CORE_H = \
   script/script_error.h \
   script/sigcache.h \
   script/sign.h \
+  shieldedcache.h \
   script/standard.h \
   script/script_flags.h \
   script/sigencoding.cpp \
@@ -213,10 +223,12 @@ BITCOIN_CORE_H = \
   support/events.h \
   support/pagelocker.h \
   sync.h \
+  syncphase.h \
   threadsafety.h \
   timedata.h \
   tinyformat.h \
   torcontrol.h \
+  torwatch.h \
   transaction_builder.h \
   txdb.h \
   txmempool.h \
@@ -240,6 +252,7 @@ BITCOIN_CORE_H = \
   wallet/paymentdisclosuredb.h \
   wallet/rpcwallet.h \
   wallet/tokenguard.h \
+  wallet/sendjournal.h \
   wallet/zslpsend.h \
   zslp/zslpbuild.h \
   zslp/zslpindex.h \
@@ -305,9 +318,12 @@ libbitcoin_server_a_SOURCES = \
   deprecation.cpp \
   embeddedtor.cpp \
   equihashmemo.cpp \
+  headerprecheck.cpp \
   httprpc.cpp \
   httpserver.cpp \
   init.cpp \
+  paramcache.cpp \
+  shutdownmarker.cpp \
   startuptimer.cpp \
   dbwrapper.cpp \
   main.cpp \
@@ -316,7 +332,11 @@ libbitcoin_server_a_SOURCES = \
   metrics.cpp \
   miner.cpp \
   net.cpp \
+  netoutbound.cpp \
+  banlist.cpp \
+  peersdat.cpp \
   noui.cpp \
+  p2pserve.cpp \
   policy/fees.cpp \
   pow.cpp \
   rest.cpp \
@@ -324,6 +344,8 @@ libbitcoin_server_a_SOURCES = \
   rpc/mining.cpp \
   rpc/misc.cpp \
   rpc/net.cpp \
+  rpc/nodestatus.cpp \
+  rpc/rpcstats.cpp \
   rpc/rawtransaction.cpp \
   rpc/server.cpp \
   rpc/zslp.cpp \
@@ -334,8 +356,11 @@ libbitcoin_server_a_SOURCES = \
   znam/znamresolve.cpp \
   znam/znamservice.cpp \
   script/sigcache.cpp \
+  shieldedcache.cpp \
+  syncphase.cpp \
   timedata.cpp \
   torcontrol.cpp \
+  torwatch.cpp \
   txdb.cpp \
   txmempool.cpp \
   validationinterface.cpp \
@@ -369,9 +394,11 @@ libbitcoin_wallet_a_SOURCES = \
   wallet/rpcwallet.cpp \
   wallet/rpczslp.cpp \
   wallet/tokenguard.cpp \
+  wallet/sendjournal.cpp \
   wallet/zslpsend.cpp \
   zslp/zslpbuild.cpp \
   wallet/wallet.cpp \
+  wallet/walletcheckpoint.cpp \
   wallet/wallet_ismine.cpp \
   wallet/walletdb.cpp \
   $(BITCOIN_CORE_H) \
@@ -676,6 +703,8 @@ libzcl_c23_a_SOURCES = \
   c23/compat/witness_codec.c \
   c23/compat/zcl_c23_phgr13.c \
   c23/compat/zip32_codec.c \
+  c23/compat/zcl_params_lazy.c \
+  c23/compat/zcl_params_lazy.h \
   c23/sprout_prover/sprout_circuit.c \
   c23/sprout_prover/sprout_par.c \
   c23/sprout_prover/sprout_prove.c \
@@ -788,6 +817,15 @@ EXTRA_zclassic_cli_DEPENDENCIES = c23-symbols.stamp
 check-c23-vendor:
 	sh $(srcdir)/c23/tools/check-vendor.sh
 	sh $(srcdir)/c23/services/tools/check-vendor.sh $(srcdir)/c23/services
+	@if test -f $(top_srcdir)/zcutil/tools/Z23_SOURCE.tsv; then sh $(srcdir)/c23/tools/check-vendor.sh $(top_srcdir)/zcutil/tools/Z23_SOURCE.tsv; fi
+
+# Same checker, developer-tools manifest (zcutil/tools: vendored jsonq).
+check-tools-vendor:
+	sh $(srcdir)/c23/tools/check-vendor.sh $(srcdir)/../zcutil/tools/Z23_SOURCE.tsv
+
+# Ratchet gates (jq, bash, banned string functions, md links, vendor); zcutil/lint/README.md.
+lint-fast:
+	$(MAKE) -C $(srcdir)/../zcutil/lint lint
 
 
 # Embedded Tor keeps Tor's own generic names (tor_*, crypto_*, ...). Prove no other

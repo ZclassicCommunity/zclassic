@@ -749,6 +749,19 @@ static void test_witness_codec(const struct path *p, uint64_t pos)
           "witness: sibling >= q at entry 3 reported before the bad length at 5 (Rust order)");
 }
 
+/* ZCL_PARAMS_VERIFY=boot keeps the keys from init (as Rust); the default lazy
+ * mode holds nothing until the first proof. */
+static void check_residency_after_init(void)
+{
+    const char *mode = getenv("ZCL_PARAMS_VERIFY");
+    bool boot = mode && strcmp(mode, "boot") == 0;
+    check(strcmp(zcl_c23_proving_status(), boot ? "resident" : "registered") == 0,
+          boot ? "proving keys resident from init (as Rust)"
+               : "lazy mode: nothing loaded before the first proof");
+    check(zcl_c23_params_bytes_resident() == (boot ? (size_t)(47958396u + 3592860u) : 0u),
+          "raw parameter bytes held after init match the mode");
+}
+
 static void test_end_to_end(void)
 {
     struct keyrow a, b;
@@ -776,8 +789,7 @@ static void test_end_to_end(void)
     rand_bytes(sighash, 32);
     void *z = librustzcash_sapling_proving_ctx_init();
     check(z != NULL, "proving_ctx_init never returns NULL");
-    check(strcmp(zcl_c23_proving_status(), "resident") == 0,
-          "proving keys resident from init (as Rust)");
+    check_residency_after_init();
     check(!librustzcash_sapling_binding_sig(z, 1, sighash, sig0),
           "binding_sig, zero descriptions, valueBalance 1 -> false");
     check(librustzcash_sapling_binding_sig(z, 0, sighash, sig0),

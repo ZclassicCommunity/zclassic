@@ -1,0 +1,83 @@
+# zcl-dev impact rules.  One rule per line:  glob|glob<TAB>token token ...
+#
+# A glob (Z23 platform_glob_match, '*' crosses '/') is matched against a repo-relative path.
+# A token with a '/' is a qa script to run; any other token is a step of zcutil/local-ci.sh
+# (daemon-linux, daemon-win64 and wallet-linux are stages, the rest are steps of `test`).
+# '-' means "needs nothing"; 'ALL' selects every `test` step, as an unmapped path does.  Use
+# ALL for consensus, chain state, the daemon wallet and the build system: a subset there could
+# skip the consensus or wallet tests.  A changed path takes the union over every rule it matches.
+# Markdown and doc/ files select the docs check (check-dev-tools) only and need no rule.
+# An unmapped path selects EVERYTHING.  `zcl-dev check-rules` fails when a tracked file under
+# src/, wallet/src, qa/ or zcutil/ matches no rule, or when a rule matches no tracked file.
+
+# ---- build system and release scripts
+Makefile.am|configure.ac|autogen.sh|build-aux/*|depends/*|src/Makefile.am|src/Makefile.test.include|src/Makefile.gtest.include|src/config/*|share/*|libzcashconsensus.pc.in|zcutil/build.sh|zcutil/build-release.sh|zcutil/build-linux-ci.sh|zcutil/install-deps.sh|zcutil/setup-mingw-toolchain.sh	ALL daemon-linux daemon-win64
+src/.clang-format|zcutil/check-hardening.sh|zcutil/fetch-params.sh|zcutil/zsync.sh|zcutil/cleanup-tags.sh|src/*.rc|src/windows-utf8.manifest|src/obj/*	daemon-linux daemon-win64
+
+# ---- local CI and the developer tool
+zcutil/Makefile|zcutil/local-ci.sh|zcutil/local-ci-macos.sh|zcutil/dev/*|zcutil/agent/*|zcutil/tools/Z23_SOURCE.tsv|zcutil/tools/LICENSE.z23|zcutil/tools/NOTICE|zcutil/tools/revendor.sh|zcutil/tools/vendor-files.txt|zcutil/tools/vendor/*	check-dev-tools
+zcutil/dev/mutate/*	check-dev-tools
+zcutil/local-ci-smoke.sh	check-dev-tools regtest-smoke
+zcutil/githooks/*	check-dev-tools
+zcutil/dev/review/*|doc/agent/REVIEWS.tsv	check-dev-tools
+
+# ---- C23 core
+src/c23/vendor/*|src/c23/services/vendor/*|src/c23/Z23_SOURCE.tsv|src/c23/services/Z23_SOURCE.tsv|src/c23/LICENSE.z23|src/c23/NOTICE|src/c23/services/LICENSE.z23|src/c23/services/NOTICE|src/c23/tools/*|src/c23/services/tools/*	check-c23-vendor check-c23-no-rust c23-run-linked test_bitcoin-full
+src/c23/glue/*|src/c23/compat/*|src/c23/equihash/*|src/c23/sprout_prover/*|src/c23/services/glue/*|src/c23/vendor-equihash-pending/*	check-c23-no-rust c23-run-linked test_bitcoin-full zcash-gtest-full regtest-smoke daemon-win64
+src/c23/test/*|src/c23/bench/*	c23-run-linked regtest-smoke
+src/c23/tor/*	check-c23-tor-symbols tor-twonode tor-threenode tor-addrv2gossip
+src/zcash/tree_root.c|src/test/tree_root_c_tests.c	tree-root-asan test_bitcoin-full
+
+# ---- consensus, chain state and block storage
+src/consensus/*|src/pow/*|src/pow.cpp|src/pow.h|src/script/*|src/primitives/*|src/arith_uint256.*|src/uint256.*|src/uint252.h|src/equihashmemo.*|src/crypto/*|src/zcash/*|src/hash.*|src/key.*|src/key_io.*|src/pubkey.*|src/keystore.*|src/base58.*|src/bech32.*|src/secp256k1/*|src/chainparams.*|src/chainparamsseeds.h	ALL
+src/main.cpp|src/main.h|src/chain.*|src/checkpoints.*|src/coins.*|src/txdb.*|src/undo.h|src/parkedblockindex.h|src/dbwrapper.*|src/leveldb/*|src/txmempool.*|src/policy/*|src/miner.*|src/merkleblock.*|src/bloom.*|src/checkqueue.h|src/deprecation.*|src/transaction_builder.*	ALL qa/rpc-tests/chain_reindex_resume.sh qa/rpc-tests/chain_invalidate_kill.sh qa/rpc-tests/chain_flush_interval_kill.sh qa/rpc-tests/chain_crash_sweep.sh qa/rpc-tests/invalidateblock_restart.sh qa/rpc-tests/reindex_stale_header.sh qa/rpc-tests/prune_invalidate_reconsider.sh qa/rpc-tests/mempool_cap.sh
+qa/rpc-tests/chain_*|qa/rpc-tests/invalidateblock_restart.sh|qa/rpc-tests/reindex_stale_header.sh|qa/rpc-tests/prune_invalidate_reconsider.sh|qa/rpc-tests/mempool_cap.sh|qa/rpc-tests/generate_nowallet.sh|qa/rpc-tests/replay_blocknotify.sh	regtest-smoke
+qa/rpc-tests/blockindex_header_restart.sh|src/chain.*|src/txdb.*|src/rpc/blockchain.cpp	regtest-smoke qa/rpc-tests/blockindex_header_restart.sh
+src/zmq/*	test_bitcoin-full regtest-smoke
+
+# ---- network and address manager
+src/p2pserve.*	test_bitcoin-full regtest-smoke
+src/addrman.*|src/banlist.*|src/peersdat.*|src/addrv2.h|src/net.*|src/netoutbound.*|src/netbase.*|src/protocol.*|src/mapport.*|src/timedata.*|src/limitedmap.h|src/mruset.h|src/torcontrol.*|src/embeddedtor.*|src/torwatch.*|qa/rpc-tests/tor_restart.sh|src/chainparamsbase.*|src/compat.h|src/compat/*	test_bitcoin-full zcash-gtest-full regtest-smoke wallet_matrix-1-9 tor-twonode tor-threenode tor-addrv2gossip qa/rpc-tests/rpc_bind_conflict.sh qa/rpc-tests/tor_restart.sh
+
+# ---- node startup, RPC, tools
+src/init.cpp|src/init.h|src/bitcoind.cpp|src/noui.*|src/ui_interface.h|src/util.*|src/utilstrencodings.*|src/utilmoneystr.*|src/utiltime.*|src/clientversion.*|src/version.h|src/random.*|src/support/*|src/scheduler.*|src/sync.*|src/threadsafety.h|src/reverselock.h|src/prevector.h|src/memusage.h|src/serialize.h|src/streams.h|src/tinyformat.h|src/startuptimer.*|src/metrics.*|src/amount.*|src/univalue/*	test_bitcoin-full zcash-gtest-full regtest-smoke startup-bad-home qa/rpc-tests/startup_bad_home.sh qa/rpc-tests/startup_conf_staging.sh qa/rpc-tests/rpc_bind_conflict.sh
+src/paramcache.*	test_bitcoin-full regtest-smoke startup-bad-home qa/rpc-tests/startup_bad_home.sh
+src/rpc/*|src/httprpc.*|src/httpserver.*|src/rest.cpp|src/asyncrpc*|src/validationinterface.*|src/core_io.h|src/core_memusage.h|src/core_read.cpp|src/core_write.cpp|src/compressor.*|src/utiltest.*|src/zcbenchmarks.*|src/bitcoin-cli.cpp	test_bitcoin-full zcash-gtest-full regtest-smoke zclassic-tx-util
+src/bitcoin-tx.cpp|qa/rpc-tests/zclassic_tx_util.sh|qa/rpc-tests/data/*	zclassic-tx-util qa/rpc-tests/zclassic_tx_util.sh
+qa/rpc-tests/startup_*|qa/rpc-tests/rpc_bind_conflict.sh	startup-bad-home qa/rpc-tests/startup_bad_home.sh qa/rpc-tests/startup_conf_staging.sh
+
+# ---- wallet (daemon side)
+src/wallet/*|src/coincontrol.h	ALL qa/rpc-tests/wallet_crash_consistency.sh qa/rpc-tests/wallet_crash_targeted.sh qa/rpc-tests/wallet_reorg_balance.sh qa/rpc-tests/wallet_platform_checks.sh qa/rpc-tests/backupwallet_atomic.sh qa/rpc-tests/wallet_health.sh qa/rpc-tests/wallet_send_once.sh qa/rpc-tests/wallet_send_once_kill9.sh qa/rpc-tests/wallet_witness_retire.sh qa/rpc-tests/wallet_checkpoint_after_catchup.sh
+qa/rpc-tests/wallet_*|qa/rpc-tests/backupwallet_*	wallet_matrix-1-9 wallet_tokenguard test_bitcoin-full zcash-gtest-full qa/rpc-tests/wallet_crash_consistency.sh qa/rpc-tests/wallet_crash_targeted.sh qa/rpc-tests/wallet_reorg_balance.sh qa/rpc-tests/wallet_platform_checks.sh qa/rpc-tests/backupwallet_atomic.sh qa/rpc-tests/wallet_health.sh qa/rpc-tests/wallet_send_once.sh qa/rpc-tests/wallet_send_once_kill9.sh qa/rpc-tests/wallet_witness_retire.sh qa/rpc-tests/wallet_checkpoint_after_catchup.sh
+
+# ---- bootstrap snapshots
+src/bootstrap*|qa/bootstrap-resume/*|qa/rpc-tests/bootstrap_import_invalidation.sh	test_bitcoin-full regtest-smoke qa/bootstrap-resume/resume-test.sh qa/bootstrap-resume/multi-server-test.sh qa/bootstrap-resume/install-kill-test.sh qa/rpc-tests/bootstrap_import_invalidation.sh
+
+# ---- tokens and names
+src/zslp/*|src/znam/*|qa/zslp/*|qa/rpc-tests/zslp_*|qa/rpc-tests/znam_*|qa/rpc-tests/token_name_rules.sh	zslp_index wallet_tokenguard wallet_tokenguard-sapling test_bitcoin-full qa/rpc-tests/zslp_index.sh qa/rpc-tests/znam_index.sh
+
+# ---- unit test sources and fixtures
+src/test/*|src/gtest/*|src/utiltest.*	test_bitcoin-full zcash-gtest-full
+
+# ---- qa scripts that no CI step runs yet
+qa/rpc-tests/README.md|qa/rpc-tests/prover_memory_bench.sh|qa/zcash/*	check-dev-tools
+
+# ---- Qt wallet
+wallet/src/*|wallet/tests/*|wallet/res/*|wallet/singleapplication/*|wallet/zcl-qt-wallet.pro|wallet/application.qrc|wallet/zclwallet_*|wallet/wsclient.html|wallet/public_key.asc|wallet/LICENSE*|wallet/.gitignore	wallet-qt-logic-widget wallet-linux
+wallet/contrib/*	wallet-linux
+
+# ---- tooling merged from the developer-tool branches
+qa/key1-guard.c|qa/key1-guard.sh|qa/key1-walletdb-baseline.txt	key1-guard check-dev-tools
+zcutil/check-no-python.sh	check-no-python check-dev-tools
+zcutil/embedded-tor-check.sh	check-dev-tools
+zcutil/consensus.seal	zcl-lint check-dev-tools
+zcutil/lint/*	zcl-lint check-dev-tools
+zcutil/tools/Makefile|zcutil/tools/.gitignore|zcutil/tools/test-jsonq.sh	build-jsonq check-dev-tools
+qa/lib/*|qa/rpc-tests/jsonq_lib.sh	ALL
+
+# ---- units ported from Z23 (validation caches, clean-shutdown marker, RPC observability, HTTP overload)
+src/headerprecheck.*|src/shieldedcache.*|src/shutdownmarker.*|src/phasetimer.h	ALL qa/rpc-tests/chain_clean_shutdown_marker.sh qa/rpc-tests/datadir_lock_message.sh
+qa/rpc-tests/datadir_lock_message.sh|qa/rpc-tests/getrpcinfo.sh|qa/rpc-tests/nodestatus.sh|qa/rpc-tests/rpc_busy.sh	regtest-smoke
+src/rpc/*|src/syncphase.*|src/httpserver.*|src/httprpc.*	qa/rpc-tests/getrpcinfo.sh qa/rpc-tests/rpc_busy.sh qa/rpc-tests/nodestatus.sh
+# ---- agent entry points and skills (documents; the docs and wiring checks)
+.claude/*	check-dev-tools

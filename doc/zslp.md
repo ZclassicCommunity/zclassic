@@ -41,9 +41,12 @@ the daemon reports the index as enabled.
 
 ## What is indexed
 
-Every connected block. For each transaction the index looks at the first output whose
-script starts with `OP_RETURN` (on mainnet that is always `vout[0]`; the wallet's token
-guard reads the same output) and parses it with Z23's own SLP parser:
+Every connected block. For each transaction the index looks at `vout[0]` only (rule **ZSLP-VOUT0**, the SLP
+specification's rule, shared with Z23): when its script starts with `OP_RETURN` it is parsed with Z23's own SLP parser.
+An SLP message in any other output, for example behind a payment output or behind another `OP_RETURN`, is not a message
+and moves no token. It applies from genesis: a census of the mainnet chain to block 3,323,972 found all 4,302 SLP messages
+in `vout[0]` and none elsewhere, so no history changes meaning. (The wallet's token guard still protects the outputs of
+a message at the first `OP_RETURN` wherever it is; that can only withhold more coins, never fewer.)
 
 | message | token outputs |
 |---|---|
@@ -146,7 +149,7 @@ vout[1..n]   token outputs, 546 zatoshi each (more if -minrelaytxfee makes 546 d
 vout[n+1]    the ZCL change, LAST (a token output is named by its position, so it must not shift)
 ```
 
-This is Z23's layout (`contexts/market/services/src/zslp_command_service.c`: OP_RETURN at
+This is Z23's layout (Z23 `contexts/market/services/src/zslp_command_service.c`: OP_RETURN at <!-- doc-path-ok -->
 vout[0], dust 546, token change to the first token input's address, baton at vout[2], the
 SLP messages from the same builder) and the SLP Token Type 1 layout. The message bytes are
 made by the vendored Z23 builders, never by new encoding code. A SEND carries 1 to 19
@@ -162,7 +165,7 @@ existing token guard; no other token's output and no baton can be taken as fee. 
 tokens and no ordinary ZCL gets "not enough ordinary ZCL", not a burned token. For a send or
 mint of token T the fee selection also leaves out every ordinary coin that was created by a
 transaction of T whose own status is not VALID: Z23's rules (`validity_note_input_baton` in
-`contexts/market/models/src/zslp_validity.c`) make a SEND or MINT invalid, burning its token
+Z23 `contexts/market/models/src/zslp_validity.c`) make a SEND or MINT invalid, burning its token <!-- doc-path-ok -->
 inputs, when ANY input comes from such a transaction, and anyone can pay a wallet ZCL inside
 one (`qa/rpc-tests/zslp_send_adversarial.sh` does exactly that).
 
@@ -206,7 +209,7 @@ flow is not touched. With the index off the button is not there.
 | layer | what | where |
 |---|---|---|
 | **verbatim Z23** | the SLP wire parser and its codec, byte-identical, hashes pinned | `src/c23/services/vendor/**`, `Z23_SOURCE.tsv` |
-| **glue (C)** | `zcl_slp_parse_message` forwards to the vendored parser. `zcl_slp_evaluate` carries the *decision rules* of Z23's `contexts/market/models/src/zslp_validity.c` (`validity_inputs_total`, `validity_validate_genesis/_mint/_send`, `validate_message`) with the SQLite reads and writes taken out; the reason strings are Z23's. This is a port, not a copy: Z23's file is welded to its SQL tables and cannot be vendored as it is | `src/c23/services/glue/zcl_slp_index.{h,c}` |
+| **glue (C)** | `zcl_slp_parse_message` forwards to the vendored parser. `zcl_slp_evaluate` carries the *decision rules* of Z23's `contexts/market/models/src/zslp_validity.c` (Z23 tree) (`validity_inputs_total`, `validity_validate_genesis/_mint/_send`, `validate_message`) with the SQLite reads and writes taken out; the reason strings are Z23's. This is a port, not a copy: Z23's file is welded to its SQL tables and cannot be vendored as it is | `src/c23/services/glue/zcl_slp_index.{h,c}` | <!-- doc-path-ok -->
 | **new C++** | the store, the per-block undo, the chain follower, the RPC; for sending: exact amount parsing, Z23's creation rules, the output order, the dry run (`ZslpIndex::EvaluateTx`), the wallet side (input choice, build, check, commit), the four RPCs, the GUI | `src/zslp/` (`zslpbuild.*`, `zslpindex.*`), `src/wallet/zslpsend.*`, `src/wallet/rpczslp.cpp`, `src/rpc/zslp.cpp`, `wallet/src/tokens*.{h,cpp}` |
 
 Nothing new was vendored for sending: the message builders (`slp_build_genesis`, `_mint`,
@@ -246,8 +249,8 @@ MIT as zclassicd.
 - Not compatible with `-prune`.
 - The index trusts the node's own chain. It is a convenience view, not a proof: verify a
   token that matters against the chain.
-- If a message is not at the first `OP_RETURN` output the answer follows that output;
-  Z23's wallet code reads `vout[0]`. On mainnet the two are the same.
+- A message is read from `vout[0]` only (ZSLP-VOUT0). Z23's explorer index and ledger apply the identical rule; the shared
+  vectors are `src/test/data/token_name_rules.txt`.
 
 ## Mainnet check
 

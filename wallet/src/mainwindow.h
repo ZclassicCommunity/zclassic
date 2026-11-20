@@ -165,6 +165,7 @@ public:
 
     QLabel*             statusLabel;
     QLabel*             statusIcon;
+    QLabel*             healthLabel      = nullptr;   // wallet needs attention (getwalletinfo health); hidden when all is well
     QLabel*             loadingLabel;
     QWidget*            zclassicdtab;
 

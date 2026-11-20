@@ -1,0 +1,2 @@
+FAIL: zcutil/dev/impact.rules:5: rule matches no tracked file
+check-rules: FAILED (1 problems)

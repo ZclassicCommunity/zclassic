@@ -31,7 +31,7 @@
 # Never point this at a real datadir; it creates and deletes its own under --work.
 set -u
 
-bin=""; work=""; base=50100; modes="all"; kills=32; files=24; filemib=24; kbps=262144
+bin=""; work=""; base=""; modes="all"; kills=32; files=24; filemib=24; kbps=262144
 oldserver=""; oldclient=""; serverargs=""; slots=3
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -56,6 +56,9 @@ mkdir -p "$work" || exit 2
 work=$(cd "$work" && pwd)
 [ -z "$(ls -A "$work")" ] || { echo "resume-test: $work is not empty" >&2; exit 2; }
 
+. "$(dirname "$0")/../lib/isolation.sh"
+. "$(dirname "$0")/../rpc-tests/jsonq_lib.sh"
+iso_base base "$base" 16
 sp=$base; sr=$((base + 1)); cp=$((base + 2)); cr=$((base + 3)); op=$((base + 4)); orp=$((base + 5)); gp=$((base + 6)); gr=$((base + 7))
 common="-regtest -dnsseed=0 -upnp=0 -listenonion=0 -discover=0 -bind=127.0.0.1 -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -debuglogfile=1 -printtoconsole=0 -showmetrics=0 -disablewallet"
 failures=0
@@ -93,12 +96,22 @@ rand_range() { # <lo> <hi> : integer in [lo, hi]
     r=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
     echo $(($1 + r % ($2 - $1 + 1)))
 }
+# epoch_utc "YYYY-MM-DD HH:MM:SS": seconds since the epoch of a UTC log timestamp (portable; date -d is GNU only).
+# The node writes its debug.log timestamps in UTC. Prints nothing when the text is not a timestamp.
+epoch_utc() {
+    awk -v s="$1" 'BEGIN {
+        if (split(s, a, /[- :]/) != 6) exit
+        y = a[1] + 0; m = a[2] + 0; d = a[3] + 0
+        if (m <= 2) y--
+        era = int(y / 400); yoe = y - era * 400
+        mp = (m + 9) % 12; doy = int((153 * mp + 2) / 5) + d - 1
+        doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+        printf "%d\n", (era * 146097 + doe - 719468) * 86400 + a[4] * 3600 + a[5] * 60 + a[6]
+    }'
+}
 sleep_ms() { # <ms>
     s=$(($1 / 1000)); m=$(($1 % 1000))
     sleep "$s.$(printf '%03d' "$m")"
-}
-json_num() { # <key> : reads JSON from stdin
-    sed -n "s/.*\"$1\": *\\([0-9.]*\\).*/\\1/p" | head -1
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -109,15 +122,15 @@ make_fixture() {
     say "building the regtest fixture (chain, serve dir, $files padding files of ~$filemib MiB)"
     mkconf "$srcdir" "$gr"
     # shellcheck disable=SC2086
-    "$bin/zclassicd" -regtest -dnsseed=0 -upnp=0 -listenonion=0 -discover=0 -bind=127.0.0.1 -rpcbind=127.0.0.1 \
+    $ZCL_RUN "$bin/zclassicd" -regtest -dnsseed=0 -upnp=0 -listenonion=0 -discover=0 -bind=127.0.0.1 -rpcbind=127.0.0.1 \
         -rpcallowip=127.0.0.1 -debuglogfile=1 -printtoconsole=0 -showmetrics=0 -bootstrap=0 \
         -datadir="$srcdir" -port=$gp -listen=0 -connect=0 -daemon >/dev/null 2>&1 || return 1
     wait_rpc "$bin" "$srcdir" || return 1
     cli "$bin" "$srcdir" generate 220 >/dev/null || return 1
     info=$(cli "$bin" "$srcdir" gettxoutsetinfo) || return 1
-    fx_height=$(echo "$info" | sed -n 's/.*"height": *\([0-9]*\).*/\1/p' | head -1)
-    fx_best=$(echo "$info" | sed -n 's/.*"bestblock": *"\([0-9a-f]*\)".*/\1/p' | head -1)
-    fx_commit=$(echo "$info" | sed -n 's/.*"hash_chainstate_full": *"\([0-9a-f]*\)".*/\1/p' | head -1)
+    fx_height=$(echo "$info" | jgetd height "")
+    fx_best=$(echo "$info" | jgetd bestblock "")
+    fx_commit=$(echo "$info" | jgetd hash_chainstate_full "")
     [ -n "$fx_height" ] && [ -n "$fx_best" ] && [ -n "$fx_commit" ] || { echo "no txoutsetinfo: $info"; return 1; }
     stop_node "$bin" "$srcdir"
     mkdir -p "$serve"
@@ -147,7 +160,7 @@ server_bin=$bin
 start_server() { # [extra args]
     mkconf "$sdir" "$sr"
     # shellcheck disable=SC2086
-    "$server_bin/zclassicd" $common -bootstrap=0 -datadir="$sdir" -port=$sp -listen=1 -connect=0 \
+    $ZCL_RUN "$server_bin/zclassicd" $common -bootstrap=0 -datadir="$sdir" -port=$sp -listen=1 -connect=0 \
         -bootstrapserve=1 -bootstrapsourcedir="$serve" -bootstrapservemaxtotalkbps=$kbps \
         -debug=net -bootstrapservemaxbytesperday=0 $serverargs "$@" >/dev/null 2>&1 &
     SPID=$!
@@ -161,7 +174,7 @@ client_bin=$bin
 start_client() { # [extra args]; leaves the pid in CPID
     mkconf "$cdir" "$cr"
     # shellcheck disable=SC2086
-    "$client_bin/zclassicd" $common -datadir="$cdir" -port=$cp -listen=0 -connect=0 -bootstrap=1 \
+    $ZCL_RUN "$client_bin/zclassicd" $common -datadir="$cdir" -port=$cp -listen=0 -connect=0 -bootstrap=1 \
         -bootstrapmode=trustless -bootstrappeer=127.0.0.1:$sp "$@" >/dev/null 2>&1 &
     CPID=$!
 }
@@ -216,8 +229,8 @@ sample_streams() { # <seconds> ; prints "t=<s> percent=<p> streams=<n>" every 0.
     end=$(($(now_ms) + $1 * 1000)); t0=$(now_ms)
     while [ "$(now_ms)" -lt "$end" ]; do
         j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null) || { sleep 0.2; continue; }
-        act=0; echo "$j" | grep -q '"phase": *"active"' && act=1
-        echo "t=$((($(now_ms) - t0) / 1000)).$((($(now_ms) - t0) % 1000 / 100)) percent=$(echo "$j" | json_num percent) streams=$(echo "$j" | json_num streams) active=$act"
+        act=0; [ "$(echo "$j" | jgetd phase "")" = active ] && act=1
+        echo "t=$((($(now_ms) - t0) / 1000)).$((($(now_ms) - t0) % 1000 / 100)) percent=$(echo "$j" | jgetd percent "") streams=$(echo "$j" | jgetd streams "") active=$act"
         [ "$act" = 1 ] || break
         sleep 0.5
     done
@@ -226,34 +239,78 @@ sample_streams() { # <seconds> ; prints "t=<s> percent=<p> streams=<n>" every 0.
 # ---------------------------------------------------------------------------------------------
 # tests
 # ---------------------------------------------------------------------------------------------
+restart_args() { # a node killed after its install was verified (blocks/ and chainstate/, no pending marker) has finished
+    # its bootstrap: restart it as a user would, without asking to bootstrap into that chain again (an explicit
+    # -bootstrappeer on a datadir that holds a chain is refused by design). A kill during the install itself (marker
+    # present, or one of the directories missing) is restarted with the same arguments and must recover by itself.
+    if [ -e "$cdir/regtest/blocks" ] && [ -e "$cdir/regtest/chainstate" ] &&
+       [ ! -e "$cdir/regtest/bootstrap-trustless-pending" ] && [ ! -e "$cdir/regtest/bootstrap-anchor-pending" ]; then
+        echo "-bootstrap=0"
+    fi
+}
 test_kills() {
     say "== kill -9 at $kills random instants, restart each time =="
     fresh_client; start_server || return 1
-    from=$(log_lines)
+    from=$(log_lines); cyc=$from; prevb=0
+    chunk=1048576 # the snapshot chunk size
+    allow_total=0
     n=0; finished=0
     while [ $n -lt "$kills" ]; do
-        start_client
+        ra=$(restart_args); [ -z "$ra" ] || say "the previous run had finished its bootstrap; restarting it without -bootstrap"
+        cl=$(wc -l <"$client_log" 2>/dev/null || echo 0)
+        start_client $ra
         t=$(rand_ms_for_kill)
         sleep_ms "$t"
         if ! kill -0 "$CPID" 2>/dev/null; then say "client exited by itself after $n kills"; finished=1; break; fi
         h=$(cli "$client_bin" "$cdir" getblockcount 2>/dev/null)
         if [ "$h" = "$fx_height" ]; then say "client finished the import after $n kills (kill window too long); stopping the kill loop"; finished=1; break; fi
+        killed_at=$(date +%s)
         kill_client
         n=$((n + 1))
-        say "kill $n at +${t} ms: staging $(staging_state)"
+        sq=$(served_bytes "$cyc"); cyc=$(log_lines)
+        ss=$(staging_state); nb=${ss##*bytes=}
+        # What a killed run loses is what was in flight at the kill (requests the server had queued that the client
+        # never stored; the LAST status line before the kill says how many were in flight; lines repeat when that moves by 4)
+        # plus the last chunk of every partial file it resumed (always requested again).
+        infl=$(tail -n +$((cl + 1)) "$client_log" | sed -n 's/.*, \([0-9][0-9]*\) requests in flight.*/\1/p' | tail -1)
+        resumed=$(tail -n +$((cl + 1)) "$client_log" | sed -n 's/.*staging scan: .*, \([0-9][0-9]*\) partial files continue.*/\1/p' | tail -1)
+        # The line can be older than the kill (the manager that prints it is a thread of a loaded host), and the window
+        # opens by a request per chunk received (about 32 a second here): add the growth the line can have missed from
+        # its age in whole seconds, capped by the full window of 4 streams x 16 requests.
+        lts=$(tail -n +$((cl + 1)) "$client_log" | grep -a "requests in flight" | tail -1 | cut -c1-19)
+        age=0
+        if [ -n "$lts" ]; then lsec=$(epoch_utc "$lts"); [ -n "$lsec" ] || lsec=$killed_at; age=$((killed_at - lsec)); [ $age -lt 0 ] && age=0; fi
+        infl_max=$(( ${infl:-0} + (age + 1) * 32 )); [ $infl_max -gt 64 ] && infl_max=64
+        allow=$(( (infl_max + 4 + ${resumed:-0}) * chunk ))
+        lost=$((sq - (nb - prevb)))
+        say "kill $n at +${t} ms: staging $ss (this run: server queued $sq bytes, staged $((nb - prevb)), lost $lost; ${infl:-0} requests in flight in a ${age} s old status line, at most $infl_max at the kill, ${resumed:-0} partial files resumed, allowed $allow)"
+        if [ "$nb" -gt 0 ]; then
+            allow_total=$((allow_total + allow))
+            if [ "$lost" -gt "$allow" ]; then fail "kills: run $n lost $lost bytes, more than its ${infl:-0}+4 requests in flight and ${resumed:-0} resumed partial files allow ($allow)"; fi
+            prevb=$nb
+        else
+            prevb=0
+        fi
     done
+    cl=$(wc -l <"$client_log" 2>/dev/null || echo 0)
     if [ $finished -eq 0 ]; then
-        start_client
-        if ! wait_imported "$client_bin"; then fail "kills: client never reached height $fx_height"; tail -20 "$client_log"; end_client; stop_server; return 1; fi
+        start_client $(restart_args)
+        if ! wait_imported "$client_bin"; then
+            fail "kills: client never reached height $fx_height (datadir: $(ls -A "$cdir/regtest" | tr -s "[:space:]" " "))"; tail -20 "$client_log"; end_client; stop_server; return 1
+        fi
     fi
     check_imported "kills (${n} kills)"
     served=$(served_bytes "$from")
     ratio=$(awk -v a="$served" -v b="$snapshot_bytes" 'BEGIN {printf "%.3f", a / b}')
     say "server served $served bytes in total for $n kills; snapshot is $snapshot_bytes bytes (ratio $ratio)"
-    # one copy plus the chunks lost to torn tails and the unfinished chunks in flight at each kill
-    limit=$(awk -v b="$snapshot_bytes" -v n="$n" 'BEGIN {printf "%d", b * 1.35 + n * 20 * 1048576}')
+    # one copy plus what the killed runs could lose (the per-run allowances above) plus the last chunk of each
+    # partial file the final run resumed; no multiplier
+    resumed=$(tail -n +$((cl + 1)) "$client_log" | sed -n 's/.*staging scan: .*, \([0-9][0-9]*\) partial files continue.*/\1/p' | tail -1)
+    limit=$((snapshot_bytes + allow_total + ${resumed:-0} * chunk))
     if [ "$served" -le "$limit" ]; then pass "kills: total bytes served stayed within bound ($served <= $limit)"; else fail "kills: served $served > bound $limit"; fi
-    if grep -aq 'hash mismatch' "$client_log"; then say "note: a staged file failed verification during the kill loop (expected after a torn write):"; grep -a 'hash mismatch\|corrupt or the wrong size' "$client_log" | head -5; fi
+    # No torn write is injected here (kill -9 leaves the page cache intact and a resume starts at a whole chunk),
+    # so a staged file that fails its hash is a bug.
+    if grep -aq 'hash mismatch' "$client_log"; then fail "kills: a staged file failed verification although no torn write was injected"; grep -a 'hash mismatch' "$client_log" | head -3; else pass "kills: no staged file failed verification"; fi
     if ls -d "$cdir"/regtest/bootstrap-peer-staging-* >/dev/null 2>&1; then fail "kills: staging directory still present after a successful import"; else pass "kills: staging directory removed after the import"; fi
     grep -a 'staging scan\|staging directory\|pre-install audit\|download complete' "$client_log" | tail -6
     end_client; stop_server
@@ -269,7 +326,7 @@ test_single() {
     pct=0
     while [ "$pct" -lt 30 ]; do
         j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null)
-        pct=$(echo "$j" | json_num percent); pct=${pct:-0}
+        pct=$(echo "$j" | jgetd percent ""); pct=${pct:-0}
         kill -0 "$CPID" 2>/dev/null || { fail "single: client exited early"; stop_server; return 1; }
         sleep 0.2
     done
@@ -298,7 +355,7 @@ test_corrupt() {
     pct=0
     while [ "$pct" -lt 40 ]; do
         j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null)
-        pct=$(echo "$j" | json_num percent); pct=${pct:-0}
+        pct=$(echo "$j" | jgetd percent ""); pct=${pct:-0}
         kill -0 "$CPID" 2>/dev/null || { fail "corrupt: client exited early"; stop_server; return 1; }
         sleep 0.2
     done
@@ -330,7 +387,7 @@ test_manifest() {
     pct=0
     while [ "$pct" -lt 35 ]; do
         j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null)
-        pct=$(echo "$j" | json_num percent); pct=${pct:-0}
+        pct=$(echo "$j" | jgetd percent ""); pct=${pct:-0}
         kill -0 "$CPID" 2>/dev/null || { fail "manifest: client exited early"; stop_server; return 1; }
         sleep 0.2
     done
@@ -357,7 +414,7 @@ test_manifest() {
     pct=0
     while [ "$pct" -lt 25 ]; do
         j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null)
-        pct=$(echo "$j" | json_num percent); pct=${pct:-0}
+        pct=$(echo "$j" | jgetd percent ""); pct=${pct:-0}
         kill -0 "$CPID" 2>/dev/null || { fail "manifest: client exited early (2)"; stop_server; return 1; }
         sleep 0.2
     done
@@ -384,12 +441,12 @@ test_stream() {
     # wait until 4 streams are up
     i=0
     while [ $i -lt 200 ]; do
-        s=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null | json_num streams)
+        s=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null | jgetd streams "")
         [ "${s:-0}" -ge 4 ] && break
         sleep 0.2; i=$((i + 1))
     done
     say "streams before the cut: ${s:-0}"
-    victim=$(cli "$server_bin" "$sdir" getpeerinfo | sed -n 's/.*"addr": *"\(127.0.0.1:[0-9]*\)".*/\1/p' | head -1)
+    victim=$(cli "$server_bin" "$sdir" getpeerinfo | jpick addr | grep -E '^127\.0\.0\.1:[0-9]+$' | head -1)
     [ -n "$victim" ] || { fail "stream: no client connection found at the server"; kill_client; stop_server; return 1; }
     cli "$server_bin" "$sdir" disconnectnode "$victim" >/dev/null 2>&1
     say "disconnected $victim at the server; sampling streams for 25 s (t=seconds percent streams)"
@@ -402,13 +459,20 @@ test_stream() {
     last=$(act_streams | tail -1)
     rec=$(act_streams | tail -n +3 | sort -n | tail -1)
     done_early=$(tail -1 "$work/stream-samples.txt" | grep -c 'active=0$' || true)
-    peers=$(cli "$server_bin" "$sdir" getpeerinfo | grep -c '"addr": *"127.0.0.1')
+    # A stream the cut just sent back to reconnect is counted by the client a moment before the server sees its
+    # connection: look again for a few seconds before judging the server-side count.
+    peers=0; k=0
+    while [ $k -lt 12 ]; do
+        peers=$(cli "$server_bin" "$sdir" getpeerinfo | jpick addr | grep -c '^127\.0\.0\.1')
+        [ "${peers:-0}" -ge 4 ] && break
+        sleep 0.5; k=$((k + 1))
+    done
     # The server-side count is only comparable while the client still runs all four
     # streams: near the end of a download fewer files than streams are left and the
     # streams close one by one, so the download can end (or taper) between the last
     # sample and the getpeerinfo above. Ask the client again after reading the server.
     j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null) || j=""
-    still4=0; echo "$j" | grep -q '"phase": *"active"' && [ "$(echo "$j" | json_num streams)" -ge 4 ] 2>/dev/null && [ "${last:-0}" -ge 4 ] && still4=1
+    still4=0; [ "$(echo "$j" | jgetd phase "")" = active ] && [ "$(echo "$j" | jgetd streams "")" -ge 4 ] 2>/dev/null && [ "${last:-0}" -ge 4 ] && still4=1
     say "streams: min after cut ${min:-?}, recovered to ${rec:-?}, last while downloading ${last:-?}; client connections now at the server: $peers"
     if grep -aq 'reconnecting\|stream .* failed' "$client_log"; then say "client log:"; grep -a 'stream [0-9]* failed\|stream [0-9]* reconnected\|reconnecting with verified files' "$client_log" | head -4; fi
     echo "$last" >"$work/stream-last.txt"
@@ -449,7 +513,7 @@ test_interop() {
         pct=0
         while [ "$pct" -lt 30 ]; do
             j=$(cli "$client_bin" "$cdir" getbootstrapinfo 2>/dev/null)
-            pct=$(echo "$j" | json_num percent); pct=${pct:-0}
+            pct=$(echo "$j" | jgetd percent ""); pct=${pct:-0}
             kill -0 "$CPID" 2>/dev/null || break
             sleep 0.2
         done
@@ -503,6 +567,8 @@ want stream && test_stream
 want slots && test_slots
 want interop && test_interop
 
+# manual, never run by a gate: one real mainnet bootstrap from the public snapshot servers (downloads about 10 GiB)
+echo "resume-test: real-network check, run by hand: sh $(dirname "$0")/mainnet-e2e.sh --bin <dir> --work <empty dir>"
 if [ $failures -eq 0 ]; then
     echo "resume-test: ALL PASSED"
     exit 0

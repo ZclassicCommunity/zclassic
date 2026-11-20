@@ -48,6 +48,28 @@ BOOST_AUTO_TEST_CASE(block_index_write_interval)
     BOOST_CHECK(BlockIndexWriteInterval(true) < BlockIndexWriteInterval(false));
 }
 
+BOOST_AUTO_TEST_CASE(chainstate_flush_interval)
+{
+    // At the tip the coins are flushed every few minutes (a kill then costs minutes of blocks, not up to a
+    // day of them); initial block download keeps the long interval so the big coins cache keeps its speed.
+    mapArgs.erase("-dbflushinterval");
+    BOOST_CHECK_EQUAL(ChainstateFlushInterval(true), (int64_t)DATABASE_FLUSH_INTERVAL);
+    BOOST_CHECK_EQUAL(ChainstateFlushInterval(false), (int64_t)DATABASE_FLUSH_INTERVAL_TIP);
+    BOOST_CHECK(ChainstateFlushInterval(false) <= 15 * 60);
+    BOOST_CHECK(ChainstateFlushInterval(false) < ChainstateFlushInterval(true));
+    mapArgs["-dbflushinterval"] = "30";
+    BOOST_CHECK_EQUAL(ChainstateFlushInterval(false), 30);
+    BOOST_CHECK_EQUAL(ChainstateFlushInterval(true), (int64_t)DATABASE_FLUSH_INTERVAL); // IBD ignores it
+    // 0, negative and over-long values mean the legacy once-a-day interval, never longer
+    mapArgs["-dbflushinterval"] = "0";
+    BOOST_CHECK_EQUAL(ChainstateFlushInterval(false), (int64_t)DATABASE_FLUSH_INTERVAL);
+    mapArgs["-dbflushinterval"] = "-5";
+    BOOST_CHECK_EQUAL(ChainstateFlushInterval(false), (int64_t)DATABASE_FLUSH_INTERVAL);
+    mapArgs["-dbflushinterval"] = "99999999";
+    BOOST_CHECK_EQUAL(ChainstateFlushInterval(false), (int64_t)DATABASE_FLUSH_INTERVAL);
+    mapArgs.erase("-dbflushinterval");
+}
+
 BOOST_AUTO_TEST_CASE(sync_phase_classification)
 {
     // Not in IBD: synced regardless of anything else.

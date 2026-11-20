@@ -1,0 +1,2 @@
+FAIL: doc/agent/LESSONS.md:5: src/missing.c is not a tracked path
+check-docs: FAILED (1 problems)

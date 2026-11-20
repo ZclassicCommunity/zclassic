@@ -3,7 +3,7 @@
 The verifier is part of `libzcl_c23.a`; there is no separate Equihash library.
 
 - Vendored Z23 files (byte-identical, listed in `src/c23/Z23_SOURCE.tsv`, checked by
-  `src/c23/tools/check-vendor.sh`): `crypto/equihash.{c,h}`, `crypto/blake2b_avx2.c`.
+  `src/c23/tools/check-vendor.sh`): `crypto/equihash.{c,h}`, `crypto/blake2b_avx2.c` (under `src/c23/vendor/core/modules/crypto/src/`). <!-- doc-path-ok -->
   `blake2b.{c,h}` and `simd_dispatch.{c,h}` are the copies the Sapling code already
   uses (same blobs); nothing is compiled twice.
 - `zc23_equihash.{c,h}`: the C ABI between zclassicd (`pow.cpp`) and the verifier.

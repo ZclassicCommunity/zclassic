@@ -1,0 +1,5 @@
+broad: run zcutil/local-ci.sh test-changed (unmapped source path: src/main.cpp)
+boost:foo_tests
+note: impact.rules marks ALL (broad rule: src/narrow.cpp) but tests.rules narrows it to the focused set; run zcutil/local-ci.sh test-changed before landing
+note: ignored a `narrow` row in zcutil/dev/tests.rules for src/main.cpp: not on the narrow allowlist, so the full run stays
+note: no focused tests for 1 path(s): src/main.cpp

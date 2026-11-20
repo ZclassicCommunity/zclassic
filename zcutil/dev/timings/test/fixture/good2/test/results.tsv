@@ -1,0 +1,5 @@
+build-tests	PASS	640
+test_bitcoin-full	PASS	320
+zcash-gtest-full	FAIL	90
+regtest-smoke	PASS	44
+wallet_tokenguard	PASS	15

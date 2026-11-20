@@ -1,0 +1,57 @@
+# zcl-dev tests rules.  One rule per line:  glob|glob<TAB>token token ...
+#
+# A glob (platform_glob_match, * crosses /) is matched against a repo-relative path.  Tokens:
+#   boost:<suite>   a Boost.Test suite of src/test or src/wallet/test (zcl-dev t-list boost)
+#   gtest:<Suite>   a googletest suite of src/gtest or src/wallet/gtest (zcl-dev t-list gtest)
+#   qa:<script>     a qa/rpc-tests script, run by t-fast through its own --bin/--work arguments
+#   narrow          this path is NOT broad even though impact.rules marks it ALL (use sparingly:
+#                   `zcl-dev tests` still prints a note, and local-ci test-changed stays the gate)
+# These rules add to the automatic ones: a test file maps to its own suites, and src/foo.cpp or
+# src/x/foo.h maps to src/test/foo_tests.cpp and src/gtest/test_foo.cpp (also beside the source).
+# `zcl-dev check-tests` fails on a dead glob or a token that names nothing.
+
+# ---- address and key encoding
+src/bech32.*	boost:bech32_tests narrow
+src/key_io.*|src/key.*|src/pubkey.*|src/base58.*	boost:key_tests boost:base58_tests boost:bech32_tests boost:bip32_tests
+
+# ---- script, transactions, blocks
+src/script/*	boost:script_tests boost:script_P2SH_tests boost:scriptnum_tests boost:sigencoding_tests boost:sighash_tests boost:sighashtype_tests boost:sigopcount_tests boost:checkdatasig_tests boost:multisig_tests boost:transaction_tests
+src/primitives/*|src/consensus/*	boost:transaction_tests boost:CheckBlock_tests boost:main_tests gtest:CheckBlock gtest:checktransaction_tests gtest:Transaction gtest:Validation
+src/main.*|src/chain.*|src/parkedblockindex.h	boost:findmostwork_tests boost:parkedblockindex_tests boost:skiplist_tests boost:DoS_tests boost:main_tests boost:coins_tests qa:qa/rpc-tests/chain_crash_sweep.sh
+src/coins.*|src/txdb.*|src/dbwrapper.*	boost:coins_tests boost:dbwrapper_tests
+src/chain.*|src/txdb.*|src/rpc/blockchain.cpp	boost:blockindex_solution_tests qa:qa/rpc-tests/blockindex_header_restart.sh
+src/merkleblock.*|src/bloom.*	boost:pmt_tests boost:bloom_tests
+
+# ---- mempool and policy
+src/txmempool.*|src/policy/*	boost:mempool_tests boost:mempool_cap_tests boost:policyestimator_tests gtest:Mempool qa:qa/rpc-tests/mempool_cap.sh
+
+# ---- proof of work
+src/pow.*|src/pow/*|src/equihashmemo.*|src/c23/equihash/*	boost:equihash_tests boost:pow_tests boost:equihashmemo_tests gtest:equihash_tests gtest:EquihashC23 gtest:PoW
+
+# ---- shielded and crypto
+src/zcash/*	gtest:joinsplit gtest:noteencryption gtest:merkletree gtest:SaplingNote gtest:PedersenHash gtest:ZIP32 gtest:phgr13 gtest:libzcash_utils
+src/c23/compat/zcl_params_lazy.*|src/c23/compat/librustzcash_compat.c	gtest:C23ParamsResidency gtest:TransactionBuilder gtest:joinsplit
+src/crypto/*|src/hash.*	boost:crypto_tests boost:hash_tests gtest:Sha256Differential gtest:Sha256Backend
+
+# ---- network, bootstrap, Tor
+src/bootstrap*	boost:bootstrap_snapshot_protocol_tests boost:bootstrap_resume_tests boost:bootstrap_resume_logic_tests boost:bootstrap_peer_board_tests boost:bootstrap_onion_tests boost:p2p_sync_tests
+src/p2pserve.*	boost:p2p_message_limits_tests boost:DoS_tests boost:p2p_sync_tests
+src/net.*|src/netoutbound.*|src/protocol.*|src/netbase.*|src/addrman.*|src/banlist.*|src/peersdat.*|src/addrv2.h	boost:netoutbound_tests boost:p2p_sync_tests boost:netbase_tests boost:addrv2_tests boost:onion_v3_tests boost:addrman_tests boost:net_ban_tests boost:DoS_tests
+src/torcontrol.*|src/embeddedtor.*|src/torwatch.*|src/c23/tor/*	boost:torcontrol_tests boost:embeddedtor_tests boost:torwatch_tests boost:bootstrap_onion_tests boost:onion_v3_tests
+
+# ---- RPC and utilities
+src/syncphase.*|src/rpc/*|src/httprpc.*|src/httpserver.*|src/asyncrpc*	boost:rpc_tests gtest:rpc gtest:HTTPRPC gtest:AsyncRPCOperationId
+src/util.*|src/utilstrencodings.*|src/utiltime.*|src/utilmoneystr.*	boost:util_tests boost:getarg_tests boost:base32_tests boost:base64_tests boost:convertbits_tests
+src/init.cpp|src/paramcache.*	boost:paramcache_tests boost:shutdownmarker_tests qa:qa/rpc-tests/chain_clean_shutdown_marker.sh
+src/serialize.h|src/streams.h|src/prevector.h|src/uint256.*|src/arith_uint256.*	boost:serialize_tests boost:PrevectorTests boost:uint256_tests boost:arith_uint256_tests
+
+# ---- tokens and names
+src/zslp/*|src/rpc/zslp.cpp|src/wallet/zslp*|src/wallet/rpczslp.cpp	boost:zslp_tests boost:zslpbuild_tests gtest:TokenGuardTest gtest:TokenGuardClassify
+src/znam/*|src/rpc/znam.cpp	boost:znam_tests boost:zslp_tests
+
+# ---- wallet (daemon side)
+src/wallet/*|src/coincontrol.h	boost:wallet_tests boost:accounting_tests boost:rpc_wallet_tests gtest:WalletTests gtest:WalletWitnessIndex gtest:WalletTxOrder gtest:StateFixture gtest:WalletOversizeTest gtest:BackupWalletTest gtest:TokenGuardTest gtest:wallet_zkeys_tests
+src/wallet/walletdb.cpp|src/wallet/db.*	qa:qa/rpc-tests/backupwallet_atomic.sh
+
+# ---- data-driven vectors
+src/test/data/*	boost:base58_tests boost:script_tests boost:sighash_tests boost:transaction_tests boost:key_tests boost:zslp_tests boost:znam_tests

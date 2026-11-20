@@ -19,7 +19,7 @@ CONFIG  -= app_bundle
 # We run guiless via QT_QPA_PLATFORM=offscreen (no X server needed). svg is needed
 # by privacybadgedelegate.cpp (QSvgRenderer for the tinted badge icons).
 QT      += core testlib widgets network gui svg
-win32: LIBS += -ladvapi32
+win32: LIBS += -ladvapi32 -lws2_32
 
 # PRIV-13/14: compile the privacybadgedelegate test seams (testClassify/...). The
 # define gates ONLY the static forwarding accessors in privacybadgedelegate.h; it
@@ -59,6 +59,8 @@ HEADERS += ../src/privacybadgedelegate.h
 # but linking the whole TU keeps the tested logic byte-identical to production.
 SOURCES += \
     ../src/embeddeddaemon.cpp \
+    ../src/launchprobe.cpp \
+    ../src/portprobe_win.cpp \
     ../src/settings.cpp \
     ../src/senttxstore.cpp \
     ../src/addresscombo.cpp \

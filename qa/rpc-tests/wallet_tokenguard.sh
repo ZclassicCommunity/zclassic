@@ -25,6 +25,7 @@
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
+. "$HERE/../lib/isolation.sh"
 TOP=$(cd "$HERE/../.." && pwd)
 SRC=${1:-$TOP/src}
 SVC=$TOP/src/c23/services
@@ -33,9 +34,10 @@ ZCLI=$SRC/zclassic-cli
 ZTX=$SRC/zclassic-tx
 for b in "$ZD" "$ZCLI" "$ZTX"; do [ -x "$b" ] || { echo "missing $b" >&2; exit 2; }; done
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
+. "$(dirname "$0")/jsonq_lib.sh"
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/zcl-tokenguard-e2e.XXXXXX")
-BASE=${E2E_PORT_BASE:-$((20000 + ($$ % 20000)))}
+iso_base BASE "${E2E_PORT_BASE:-}" 128
 PIDS=""
 MN=0
 CHECKS=0
@@ -83,7 +85,7 @@ start() {
             echo "rpcpassword=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
         } >"$dir/zclassic.conf"
     fi
-    "$bin" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 \
+    $ZCL_RUN "$bin" -datadir="$dir" -regtest -server=1 -daemon=0 -showmetrics=0 \
         -listen=1 -bind=127.0.0.1 -port=$((BASE + n)) \
         -rpcbind=127.0.0.1 -rpcallowip=127.0.0.1 -rpcport=$((BASE + 100 + n)) \
         -dnsseed=0 -discover=0 -listenonion=0 -upnp=0 -keypool=5 -debuglogfile=1 -exportdir="$TMP/export" \
@@ -151,17 +153,17 @@ slp_tx() {
         | [.[] | select(.spendable and .amount >= 1) | select(("\(.txid):\(.vout)") as $o | $u | index($o) | not)]
         | sort_by(.amount) | .[0]')
     [ "$u" != null ] || fail "miner has no coin to fund a token transaction"
-    utxid=$(printf '%s' "$u" | jq -r .txid)
-    uvout=$(printf '%s' "$u" | jq -r .vout)
+    utxid=$(printf '%s' "$u" | jget txid)
+    uvout=$(printf '%s' "$u" | jget vout)
     echo "$utxid:$uvout" >>"$TMP/used"
     nd=0
     for a in "$@"; do case $a in outaddr=*) nd=$((nd + 1)) ;; esac; done
-    change=$(btc $(( $(zat "$(printf '%s' "$u" | jq -r .amount)") - 10000 - 546 * nd )))
+    change=$(btc $(( $(zat "$(printf '%s' "$u" | jget amount)") - 10000 - 546 * nd )))
     raw=$(cli "$MN" createrawtransaction "[{\"txid\":\"$utxid\",\"vout\":$uvout}]" '{}')
     raw=$("$ZTX" -regtest "$raw" "$@" "outaddr=$change:$MINER")
     signed=$(cli "$MN" signrawtransaction "$raw")
-    [ "$(printf '%s' "$signed" | jq -r .complete)" = true ] || fail "could not sign a token transaction"
-    cli "$MN" sendrawtransaction "$(printf '%s' "$signed" | jq -r .hex)"
+    [ "$(printf '%s' "$signed" | jget complete)" = true ] || fail "could not sign a token transaction"
+    cli "$MN" sendrawtransaction "$(printf '%s' "$signed" | jget hex)"
 }
 
 # inputs <n> <txid>: the outpoints a wallet transaction spends, one per line
@@ -169,7 +171,7 @@ inputs() {
     # A transaction an async operation just broadcast reaches the wallet a
     # moment later (the wallet is notified from another thread): wait for it.
     tries=0
-    until hex=$(cli "$1" gettransaction "$2" 2>/dev/null | jq -r .hex) && [ -n "$hex" ]; do
+    until hex=$(cli "$1" gettransaction "$2" 2>/dev/null | jget hex) && [ -n "$hex" ]; do
         tries=$((tries + 1)); [ $tries -lt 60 ] || return 1
         sleep 1
     done
@@ -191,10 +193,10 @@ no_token_inputs() {
 wait_op() {
     t=0
     while :; do
-        s=$(cli "$1" z_getoperationstatus "[\"$2\"]" | jq -c '.[0]')
-        case $(printf '%s' "$s" | jq -r .status) in
-            success) printf 'success %s\n' "$(printf '%s' "$s" | jq -r .result.txid)"; return 0 ;;
-            failed) printf 'failed %s\n' "$(printf '%s' "$s" | jq -r .error.message)"; return 0 ;;
+        s=$(cli "$1" z_getoperationstatus "[\"$2\"]" | jraw '[0]')
+        case $(printf '%s' "$s" | jget status) in
+            success) printf 'success %s\n' "$(printf '%s' "$s" | jget result.txid)"; return 0 ;;
+            failed) printf 'failed %s\n' "$(printf '%s' "$s" | jget error.message)"; return 0 ;;
         esac
         t=$((t + 1)); [ $t -lt 300 ] || fail "operation $2 did not finish"
         sleep 1
@@ -235,7 +237,7 @@ stage() {
     : >"$TMP/protected"; : >"$TMP/ordinary"
     for amt in 1.0 2.0 0.5; do
         t=$(cli "$MN" sendtoaddress "$A" $amt)
-        v=$(cli "$MN" gettransaction "$t" | jq -r .hex | decode "$MN" |
+        v=$(cli "$MN" gettransaction "$t" | jget hex | decode "$MN" |
             jq -r --arg a "$A" '.vout[] | select(.scriptPubKey.addresses[0] == $a) | .n')
         echo "$t:$v" >>"$TMP/ordinary"
     done
@@ -271,7 +273,7 @@ if [ -n "${BASELINE_SRC:-}" ]; then
     MINER=$(cli "$MN" getnewaddress)
     A=$(cli 5 getnewaddress)
     stage 5
-    [ "$(cli 5 listunspent 0 | jq length)" = 13 ] || fail "control: stage is not the same"
+    [ "$(cli 5 listunspent 0 | jlen)" = 13 ] || fail "control: stage is not the same"
     [ "$(cli 5 listunspent 0 | jq 'map(has("tokenbearing")) | any')" = false ] || fail "control: the baseline already has a tokenbearing field"
     op=$(cli 5 z_sendmany "$A" "[{\"address\":\"$MINER\",\"amount\":0.4}]" 1 0.0001)
     r=$(wait_op 5 "$op")
@@ -281,10 +283,10 @@ if [ -n "${BASELINE_SRC:-}" ]; then
     say "  CONTROL unguarded baseline: z_sendmany of 0.4 spent $burned of the 8 token-bearing outputs as ordinary coin"
     confirm 5 "${r#success }"
     m=$(cli 5 z_mergetoaddress '["ANY_TADDR"]' "$MINER")
-    r=$(wait_op 5 "$(printf '%s' "$m" | jq -r .opid)")
+    r=$(wait_op 5 "$(printf '%s' "$m" | jget opid)")
     case $r in success*) ;; *) fail "control: z_mergetoaddress did not complete: $r" ;; esac
     burned2=$(inputs 5 "${r#success }" | grep -Fx -f "$TMP/protected" | wc -l | tr -d ' ')
-    say "  CONTROL unguarded baseline: z_mergetoaddress then spent $burned2 more; $(cli 5 listunspent 0 | jq length) outputs left of 13"
+    say "  CONTROL unguarded baseline: z_mergetoaddress then spent $burned2 more; $(cli 5 listunspent 0 | jlen) outputs left of 13"
     [ $((burned + burned2)) = 8 ] || fail "control: expected the baseline to burn all 8 token outputs, it burned $((burned + burned2))"
     stop 5
     stop 6
@@ -307,7 +309,7 @@ say "   mint    $M"
 say "   send    $S"
 
 # The classifier in the tool agrees with what the stage believes it built.
-gs=$(cli "$MN" gettransaction "$G" | jq -r .hex | decode "$MN" | jq -r '.vout[0].scriptPubKey.hex')
+gs=$(cli "$MN" gettransaction "$G" | jget hex | decode "$MN" | jget "vout[0].scriptPubKey.hex")
 [ "$("$SLP" roles 4 "$gs" | tr '\n' ' ')" = "1 token 2 baton " ] || fail "slpscript roles disagrees on the genesis transaction"
 ok "the mined GENESIS OP_RETURN classifies as: vout 1 token, vout 2 baton"
 
@@ -315,7 +317,7 @@ ok "the mined GENESIS OP_RETURN classifies as: vout 1 token, vout 2 baton"
 
 say "== 1. listunspent, getbalance"
 LU=$(cli 1 listunspent 0)
-[ "$(printf '%s' "$LU" | jq length)" = 13 ] || fail "listunspent has $(printf '%s' "$LU" | jq length) entries, expected 13"
+[ "$(printf '%s' "$LU" | jlen)" = 13 ] || fail "listunspent has $(printf '%s' "$LU" | jlen) entries, expected 13"
 ok "listunspent lists all 13 outputs (8 token-bearing, 5 ordinary)"
 [ "$(printf '%s' "$LU" | jq 'all(.[]; (.tokenbearing | type) == "boolean")')" = true ] || fail "an entry lacks a boolean tokenbearing"
 [ "$(printf '%s' "$LU" | jq -c '[.[] | keys_unsorted | map(select(. != "account"))] | unique')" = '[["txid","vout","generated","address","scriptPubKey","amount","confirmations","spendable","tokenbearing"]]' ] ||
@@ -327,7 +329,7 @@ BAL=$(zat "$(cli 1 getbalance)")
 SUM=$(printf '%s' "$LU" | jq '[.[].amount * 100000000 | round] | add')
 [ "$BAL" = "$SUM" ] && [ "$BAL" = $((350000000 + 10 * 546)) ] || fail "getbalance $BAL, listunspent sum $SUM, expected $((350000000 + 10 * 546))"
 ok "getbalance = sum of listunspent = 3.50005460 (token dust still counted)"
-[ "$(zat "$(cli 1 z_gettotalbalance 0 | jq -r .transparent)")" = "$BAL" ] || fail "z_gettotalbalance transparent differs"
+[ "$(zat "$(cli 1 z_gettotalbalance 0 | jget transparent)")" = "$BAL" ] || fail "z_gettotalbalance transparent differs"
 [ "$(zat "$(cli 1 z_getbalance "$A" 0)")" = "$BAL" ] || fail "z_getbalance A differs"
 ok "z_gettotalbalance and z_getbalance agree with it"
 
@@ -341,7 +343,7 @@ r=$(wait_op 1 "$op"); case $r in success*) ;; *) fail "z_sendmany: $r" ;; esac
 t=${r#success }
 no_token_inputs "z_sendmany from the t-addr" "$(inputs 1 "$t")"
 # Which builder made it: v1 before Overwinter, v4 (TransactionBuilder) with Sapling active.
-say "       (transaction format: $(cli 1 gettransaction "$t" | jq -r .hex | decode 1 | jq -c '{version, overwintered}'))"
+say "       (transaction format: $(cli 1 gettransaction "$t" | jget hex | decode 1 | jq -c '{version, overwintered}'))"
 confirm 1 "$t"
 
 t=$(cli 1 sendtoaddress "$MINER" 1.2)
@@ -354,14 +356,14 @@ confirm 1 "$t"
 
 raw=$(cli 1 createrawtransaction '[]' "{\"$MINER\":0.25}")
 f=$(cli 1 fundrawtransaction "$raw")
-no_token_inputs "fundrawtransaction (no inputs given)" "$(inputs_of_hex 1 "$(printf '%s' "$f" | jq -r .hex)")"
+no_token_inputs "fundrawtransaction (no inputs given)" "$(inputs_of_hex 1 "$(printf '%s' "$f" | jget hex)")"
 
 # A token input the caller put in the transaction: refused, then allowed on request.
 raw=$(cli 1 createrawtransaction "[{\"txid\":\"$G\",\"vout\":1}]" "{\"$MINER\":0.25}")
 expect_error "fundrawtransaction with a token input, no override" "$G:1 carries ZSLP tokens or a mint baton and is protected" cli 1 fundrawtransaction "$raw"
 expect_error "fundrawtransaction with a token input, allowtokeninputs=false" "carries ZSLP tokens" cli 1 fundrawtransaction "$raw" false
 f=$(cli 1 fundrawtransaction "$raw" true)
-fin=$(inputs_of_hex 1 "$(printf '%s' "$f" | jq -r .hex)")
+fin=$(inputs_of_hex 1 "$(printf '%s' "$f" | jget hex)")
 printf '%s\n' "$fin" | grep -qFx "$G:1" || fail "fundrawtransaction override dropped the input it was given"
 [ "$(printf '%s\n' "$fin" | grep -Fx -f "$TMP/protected" | wc -l | tr -d ' ')" = 1 ] || fail "fundrawtransaction override added a token input of its own: $fin"
 ok "fundrawtransaction allowtokeninputs=true: keeps the one token input it was given, adds only ordinary inputs ($(printf '%s\n' "$fin" | wc -l | tr -d ' ') inputs)"
@@ -369,16 +371,16 @@ ok "fundrawtransaction allowtokeninputs=true: keeps the one token input it was g
 # Fee selection: a payment that needs every remaining ordinary zatoshi.
 # z_mergetoaddress sweeps all transparent funds of the wallet.
 m=$(cli 1 z_mergetoaddress '["ANY_TADDR"]' "$MINER")
-r=$(wait_op 1 "$(printf '%s' "$m" | jq -r .opid)"); case $r in success*) ;; *) fail "z_mergetoaddress: $r" ;; esac
+r=$(wait_op 1 "$(printf '%s' "$m" | jget opid)"); case $r in success*) ;; *) fail "z_mergetoaddress: $r" ;; esac
 t=${r#success }
-no_token_inputs "z_mergetoaddress ANY_TADDR ($(printf '%s' "$m" | jq -r .mergingUTXOs) utxos merged)" "$(inputs 1 "$t")"
+no_token_inputs "z_mergetoaddress ANY_TADDR ($(printf '%s' "$m" | jget mergingUTXOs) utxos merged)" "$(inputs 1 "$t")"
 confirm 1 "$t"
 
 # ---- 3. only token dust is left --------------------------------------------
 
 say "== 3. the wallet has spent every ordinary coin; only token outputs remain"
 [ "$(flagged 1)" = "$(cat "$TMP/protected")" ] || fail "token outputs changed: $(flagged 1 | tr '\n' ' ')"
-[ "$(cli 1 listunspent 0 | jq length)" = 8 ] || fail "expected exactly the 8 token outputs to remain, have $(cli 1 listunspent 0 | jq -c '[.[] | {txid, vout, amount, tokenbearing}]')"
+[ "$(cli 1 listunspent 0 | jlen)" = 8 ] || fail "expected exactly the 8 token outputs to remain, have $(cli 1 listunspent 0 | jq -c '[.[] | {txid, vout, amount, tokenbearing}]')"
 ok "all 8 token-bearing outputs are still unspent, and nothing else is left"
 [ "$(zat "$(cli 1 getbalance)")" = $((8 * 546)) ] || fail "balance is $(cli 1 getbalance), expected 0.00004368"
 ok "getbalance = 0.00004368 (8 x 546 zatoshi of token dust)"
@@ -403,7 +405,7 @@ stop 1
 start 1 "$ZD" -connect=127.0.0.1:$((BASE + MN))
 sync 1
 [ "$(flagged 1)" = "$(cat "$TMP/protected")" ] || fail "after restart: $(flagged 1 | tr '\n' ' ')"
-[ "$(cli 1 listlockunspent | jq length)" = 0 ] || fail "protection must not use the lock list"
+[ "$(cli 1 listlockunspent | jlen)" = 0 ] || fail "protection must not use the lock list"
 ok "after a restart the same 8 outputs are flagged, and listlockunspent is empty"
 expect_error "sendtoaddress after restart" "Insufficient funds ($NOTE" cli 1 sendtoaddress "$MINER" 0.00001
 
@@ -436,7 +438,7 @@ stop 2
 say "== 6. new empty wallet, import the key, rescan from genesis"
 start 3 "$ZD" -connect=127.0.0.1:$((BASE + MN))
 sync 3
-[ "$(cli 3 listunspent 0 | jq length)" = 0 ] || fail "new wallet is not empty"
+[ "$(cli 3 listunspent 0 | jlen)" = 0 ] || fail "new wallet is not empty"
 cli 3 importprivkey "$WIF" "" true >/dev/null
 [ "$(flagged 3)" = "$(cat "$TMP/protected")" ] || fail "rescanned wallet: $(flagged 3 | tr '\n' ' ')"
 ok "the rescanned wallet flags the same 8 outputs"
@@ -454,9 +456,9 @@ set -- $coin
 raw=$(cli 3 createrawtransaction "[{\"txid\":\"$S\",\"vout\":1},{\"txid\":\"$1\",\"vout\":$2}]" '{}')
 raw=$("$ZTX" -regtest "$raw" "outscript=0:0x$("$SLP" send "$G" 400)" "outaddr=$DUST:$MINER" "outaddr=0.0998:$A")
 signed=$(cli 3 signrawtransaction "$raw")
-[ "$(printf '%s' "$signed" | jq -r .complete)" = true ] || fail "signrawtransaction refused an explicit token input"
+[ "$(printf '%s' "$signed" | jget complete)" = true ] || fail "signrawtransaction refused an explicit token input"
 # (not $t: the wait loops in confirm and sync use that name as a counter)
-stx=$(cli 3 sendrawtransaction "$(printf '%s' "$signed" | jq -r .hex)")
+stx=$(cli 3 sendrawtransaction "$(printf '%s' "$signed" | jget hex)")
 confirm 3 "$stx"
 ok "createrawtransaction + signrawtransaction + sendrawtransaction spent $S:1 in a token SEND (tx $stx)"
 grep -vFx "$S:1" "$TMP/protected" >"$TMP/protected.new"; mv "$TMP/protected.new" "$TMP/protected"

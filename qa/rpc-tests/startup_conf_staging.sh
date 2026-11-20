@@ -9,7 +9,7 @@
 # usage: sh qa/rpc-tests/startup_conf_staging.sh --bin <dir with zclassicd, zclassic-cli>
 #            --work <empty scratch dir> [--port-base <n>]
 set -u
-bin=""; work=""; base=51300
+bin=""; work=""; base=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --bin) bin=$2; shift 2 ;;
@@ -22,6 +22,8 @@ done
     echo "usage: startup_conf_staging.sh --bin <dir> --work <dir> [--port-base <n>]" >&2; exit 2; }
 mkdir -p "$work" || exit 2
 work=$(cd "$work" && pwd)
+. "$(dirname "$0")/../lib/isolation.sh"
+iso_base base "$base" 16
 [ -z "$(ls -A "$work")" ] || { echo "startup-test: $work is not empty" >&2; exit 2; }
 
 dd=$work/node

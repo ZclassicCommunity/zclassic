@@ -43,6 +43,7 @@
 #include "validationinterface.h"
 #include "transaction_builder.h"
 #ifdef ENABLE_WALLET
+#include "wallet/sendjournal.h"
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
 #endif
@@ -82,6 +83,9 @@
 #include "crypto/sha256.h"
 #include "utilstrencodings.h"
 #include "startuptimer.h"
+#include "phasetimer.h"
+#include "paramcache.h"
+#include "shutdownmarker.h"
 #include "zslp/zslpservice.h"
 #include "znam/znamservice.h"
 
@@ -246,9 +250,128 @@ static std::atomic<bool> fWinShutdownDone(false);
 static bool fWalletInitComplete = false;
 #endif
 
+/** True once this process holds the datadir lock (and so owns the pid file and may write the
+ *  clean-shutdown marker). A second launch that loses the lock must touch neither. */
+static bool fDatadirLockHeld = false;
+/** The clean-shutdown marker consumed at startup, and whether the block and database files
+ *  still matched it before any database was opened (see shutdownmarker.h). */
+static ShutdownBinding g_markerBinding;
+static bool fMarkerConsumed = false;
+static bool fMarkerFilesMatch = false;
+/** True once the chain databases were opened and passed this start's VerifyDB. */
+static bool fChainLoadVerified = false;
+
+/** Write the clean-shutdown marker after the chain databases are closed, only when this stop is
+ *  verifiably clean: the startup load finished, no reindex, import or bootstrap validation is in
+ *  flight, nothing raised a fatal warning (AbortNode and thread exceptions set strMiscWarning),
+ *  and the flushed coins best block is the chain tip. */
+/** Why the bootstrap state forbids a clean-shutdown marker, or NULL. */
+static const char* BootstrapCleanMarkerBlocker()
+{
+    const int bvState = GetBootstrapValidationStatus().state;
+    if (bvState != BVS_DISABLED && bvState != BVS_VALIDATED)
+        return "bootstrap validation in progress";
+    if (BootstrapAnchorPendingExists(GetDataDir()) || BootstrapTrustlessPendingExists(GetDataDir()))
+        return "bootstrap install pending";
+    return NULL;
+}
+
+/** Why this stop may not write a clean-shutdown marker, or NULL when it may. The checks run in
+ *  this order and stop at the first that fails. */
+static const char* CleanMarkerBlocker(bool fTipCaptured, const ShutdownBinding& binding)
+{
+    if (!fTipCaptured || !fChainLoadVerified)
+        return "chain databases were not loaded and verified";
+    if (fReindex || fReindexChainState || fImporting || mapArgs.count("-reindex") || mapArgs.count("-reindex-chainstate"))
+        return "reindex or block import in progress";
+    if (!strMiscWarning.empty())
+        return "a fatal error or warning was raised";
+    if (binding.coinsBest != binding.tipHash)
+        return "coins database is not at the chain tip";
+    return BootstrapCleanMarkerBlocker();
+}
+
+static void MaybeWriteCleanShutdownMarker(bool fTipCaptured, ShutdownBinding binding)
+{
+    if (!fDatadirLockHeld || !ParamsAreSelected())
+        return;
+    const char* why = CleanMarkerBlocker(fTipCaptured, binding);
+    if (why) {
+        LogPrintf("Shutdown: no clean shutdown marker: %s\n", why);
+        return;
+    }
+    binding.filesDigest = ComputeFilesDigest(GetDataDir());
+    if (WriteCleanMarker(GetDataDir(), binding))
+        LogPrintf("Shutdown: wrote clean shutdown marker at height %d\n", binding.tipHeight);
+}
+
+#ifndef WIN32
+/** Second half of the "cannot lock the data directory" message, from the holder's pid file. */
+static std::string DescribeLockHolder(const boost::filesystem::path& pidfile)
+{
+    long pid = 0;
+    FILE* f = fopen(pidfile.string().c_str(), "r");
+    if (f) {
+        char buf[32] = {0};
+        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        buf[n] = '\0';
+        char* end = NULL;
+        errno = 0;
+        long v = strtol(buf, &end, 10);
+        if (errno == 0 && end != buf && v > 0 && (*end == '\0' || *end == '\n'))
+            pid = v;
+    }
+    if (pid <= 0)
+        return _("ZClassic is probably already running (pid unknown).");
+    if (kill((pid_t)pid, 0) == 0 || errno == EPERM)
+        return strprintf(_("ZClassic is already running as pid %d."), pid);
+    return strprintf(_("The lock is held but pid %d is not running; another process holds it or the filesystem does not release locks (network share)."), pid);
+}
+#endif
+
+/** Under cs_main: flush the chain state (and the wallet checkpoint at the same tip), capture the
+ *  tip and coins best block for the clean-shutdown marker, then close the chain databases. */
+static void ShutdownFlushAndCloseChain(bool& fTipCaptured, ShutdownBinding& binding)
+{
+    LOCK(cs_main);
+    {
+        PhaseTimer t("Shutdown", "flush-state");
+        if (pcoinsTip != NULL) {
+            FlushStateToDisk();
+#ifdef ENABLE_WALLET
+            // The coin database was just flushed to this tip. Write the wallet's checkpoint (note
+            // witnesses, nullifiers and the best-block locator, atomically) at the same point, so
+            // the next start does not have to rely on rescanning from an older locator.
+            if (pwalletMain && fWalletInitComplete && chainActive.Tip()) {
+                pwalletMain->SetBestChain(chainActive.GetLocator());
+            }
+#endif
+            if (chainActive.Tip()) {
+                binding.tipHash = chainActive.Tip()->GetBlockHash();
+                binding.tipHeight = chainActive.Height();
+                binding.coinsBest = pcoinsTip->GetBestBlock();
+                fTipCaptured = true;
+            }
+        }
+    }
+    {
+        PhaseTimer t("Shutdown", "db-close");
+        delete pcoinsTip;
+        pcoinsTip = NULL;
+        delete pcoinscatcher;
+        pcoinscatcher = NULL;
+        delete pcoinsdbview;
+        pcoinsdbview = NULL;
+        delete pblocktree;
+        pblocktree = NULL;
+    }
+}
+
 void Shutdown()
 {
     LogPrintf("%s: In progress...\n", __func__);
+    const int64_t nShutdownStart = GetTimeMillis();
     static CCriticalSection cs_Shutdown;
     TRY_LOCK(cs_Shutdown, lockShutdown);
     if (!lockShutdown)
@@ -261,95 +384,106 @@ void Shutdown()
     RenameThread("zcl-shutoff");
     mempool.AddTransactionsUpdated(1);
 
-    StopHTTPRPC();
-    StopREST();
-    StopRPC();
-    StopHTTPServer();
+    {
+        PhaseTimer t("Shutdown", "rpc-http-stop");
+        StopHTTPRPC();
+        StopREST();
+        StopRPC();
+        StopHTTPServer();
+    }
 #ifdef ENABLE_WALLET
-    if (pwalletMain)
-        pwalletMain->Flush(false);
+    {
+        PhaseTimer t("Shutdown", "wallet-flush");
+        if (pwalletMain)
+            pwalletMain->Flush(false);
+    }
 #endif
+    {
+        PhaseTimer t("Shutdown", "node-stop");
 #ifdef ENABLE_MINING
-    // AppInit() can fail (unusable data or params directory, bad option) before SelectParams(); no miner
-    // threads exist then and Params() would assert.
-    if (ParamsAreSelected())
-        GenerateBitcoins(false, 0, Params());
+        // AppInit() can fail (unusable data or params directory, bad option) before SelectParams(); no miner
+        // threads exist then and Params() would assert.
+        if (ParamsAreSelected())
+            GenerateBitcoins(false, 0, Params());
 #endif
-    StopNode();
-    StopTorControl();
-    // After the P2P threads and the control client are gone, and before the
-    // datadir lock is released at exit. No-op unless -embeddedtor started it,
-    // including when AppInit2() failed part of the way.
-    StopEmbeddedTor();
-    StopMapPort();
-    UnregisterNodeSignals(GetNodeSignals());
-
-    // Stop the trustless-bootstrap background validator BEFORE the chain DBs are
-    // freed below. It is not in the init thread_group, so the init-failure path
-    // (which skips thread_group join) would otherwise let it race into freed
-    // pblocktree/pcoinsTip. No-op when no trustless snapshot is being validated.
-    InterruptBootstrapValidation();
-
-    // Likewise stop the -bootstrapserve=auto self-snapshot freeze worker before
-    // the chain DBs are freed: it takes cs_main and reads chainActive/
-    // mapBlockIndex/pcoinsTip, so it must not outlive them. No-op when no freeze
-    // is in flight (and when -bootstrapserve=auto is not in use).
-    InterruptBootstrapServeFreeze();
-
-    // The ZSLP index worker reads blocks and takes cs_main: stop it before the chain DBs are freed below.
-    zslp::StopService();
-    znam::StopService();
-
-    if (fFeeEstimatesInitialized)
+        StopNode();
+    }
     {
-        boost::filesystem::path est_path = GetDataDir() / FEE_ESTIMATES_FILENAME;
-        CAutoFile est_fileout(fopen(est_path.string().c_str(), "wb"), SER_DISK, CLIENT_VERSION);
-        if (!est_fileout.IsNull())
-            mempool.WriteFeeEstimates(est_fileout);
-        else
-            LogPrintf("%s: Failed to write fee estimates to %s\n", __func__, est_path.string());
-        fFeeEstimatesInitialized = false;
+        PhaseTimer t("Shutdown", "tor-stop");
+        StopTorControl();
+        // After the P2P threads and the control client are gone, and before the
+        // datadir lock is released at exit. No-op unless -embeddedtor started it,
+        // including when AppInit2() failed part of the way.
+        StopEmbeddedTor();
+        StopMapPort();
+        UnregisterNodeSignals(GetNodeSignals());
     }
 
     {
-        LOCK(cs_main);
-        if (pcoinsTip != NULL) {
-            FlushStateToDisk();
-#ifdef ENABLE_WALLET
-            // The coin database was just flushed to this tip. Write the wallet's checkpoint (note
-            // witnesses, nullifiers and the best-block locator, atomically) at the same point, so
-            // the next start does not have to rely on rescanning from an older locator.
-            if (pwalletMain && fWalletInitComplete && chainActive.Tip()) {
-                pwalletMain->SetBestChain(chainActive.GetLocator());
-            }
-#endif
+        PhaseTimer t("Shutdown", "bootstrap-interrupt");
+        // Stop the trustless-bootstrap background validator BEFORE the chain DBs are
+        // freed below. It is not in the init thread_group, so the init-failure path
+        // (which skips thread_group join) would otherwise let it race into freed
+        // pblocktree/pcoinsTip. No-op when no trustless snapshot is being validated.
+        InterruptBootstrapValidation();
+
+        // Likewise stop the -bootstrapserve=auto self-snapshot freeze worker before
+        // the chain DBs are freed: it takes cs_main and reads chainActive/
+        // mapBlockIndex/pcoinsTip, so it must not outlive them. No-op when no freeze
+        // is in flight (and when -bootstrapserve=auto is not in use).
+        InterruptBootstrapServeFreeze();
+    }
+
+    {
+        PhaseTimer t("Shutdown", "services-stop");
+        // The ZSLP index worker reads blocks and takes cs_main: stop it before the chain DBs are freed below.
+        zslp::StopService();
+        znam::StopService();
+    }
+
+    {
+        PhaseTimer t("Shutdown", "fee-estimates");
+        if (fFeeEstimatesInitialized)
+        {
+            boost::filesystem::path est_path = GetDataDir() / FEE_ESTIMATES_FILENAME;
+            CAutoFile est_fileout(fopen(est_path.string().c_str(), "wb"), SER_DISK, CLIENT_VERSION);
+            if (!est_fileout.IsNull())
+                mempool.WriteFeeEstimates(est_fileout);
+            else
+                LogPrintf("%s: Failed to write fee estimates to %s\n", __func__, est_path.string());
+            fFeeEstimatesInitialized = false;
         }
-        delete pcoinsTip;
-        pcoinsTip = NULL;
-        delete pcoinscatcher;
-        pcoinscatcher = NULL;
-        delete pcoinsdbview;
-        pcoinsdbview = NULL;
-        delete pblocktree;
-        pblocktree = NULL;
     }
+
+    // Chain tip and coins best block as flushed below, for the clean-shutdown marker.
+    bool fMarkerTipCaptured = false;
+    ShutdownBinding markerBinding;
+    ShutdownFlushAndCloseChain(fMarkerTipCaptured, markerBinding);
+    MaybeWriteCleanShutdownMarker(fMarkerTipCaptured, markerBinding);
 #ifdef ENABLE_WALLET
-    if (pwalletMain)
-        pwalletMain->Flush(true);
+    {
+        PhaseTimer t("Shutdown", "wallet-final-flush");
+        if (pwalletMain)
+            pwalletMain->Flush(true);
+    }
 #endif
 
 #if ENABLE_ZMQ
-    if (pzmqNotificationInterface) {
-        UnregisterValidationInterface(pzmqNotificationInterface);
-        delete pzmqNotificationInterface;
-        pzmqNotificationInterface = NULL;
+    {
+        PhaseTimer t("Shutdown", "zmq");
+        if (pzmqNotificationInterface) {
+            UnregisterValidationInterface(pzmqNotificationInterface);
+            delete pzmqNotificationInterface;
+            pzmqNotificationInterface = NULL;
+        }
     }
 #endif
 
 #ifndef WIN32
     // The pid file is written only after the network is selected; the net-specific data directory
-    // (and so GetPidFile()) is not available before that.
-    if (ParamsAreSelected()) {
+    // (and so GetPidFile()) is not available before that. A launch that lost the datadir lock never
+    // wrote it: the pid file there belongs to the process that holds the lock.
+    if (ParamsAreSelected() && fDatadirLockHeld) {
         try {
             boost::filesystem::remove(GetPidFile());
         } catch (const boost::filesystem::filesystem_error& e) {
@@ -357,16 +491,19 @@ void Shutdown()
         }
     }
 #endif
-    UnregisterAllValidationInterfaces();
+    {
+        PhaseTimer t("Shutdown", "params-free");
+        UnregisterAllValidationInterfaces();
 #ifdef ENABLE_WALLET
-    delete pwalletMain;
-    pwalletMain = NULL;
+        delete pwalletMain;
+        pwalletMain = NULL;
 #endif
-    delete pzcashParams;
-    pzcashParams = NULL;
-    globalVerifyHandle.reset();
-    ECC_Stop();
-    LogPrintf("%s: done\n", __func__);
+        delete pzcashParams;
+        pzcashParams = NULL;
+        globalVerifyHandle.reset();
+        ECC_Stop();
+    }
+    LogPrintf("%s: done (%d ms)\n", __func__, GetTimeMillis() - nShutdownStart);
 #ifdef WIN32
     fWinShutdownDone = true;
 #endif
@@ -472,6 +609,21 @@ bool static InitWarning(const std::string &str)
     return true;
 }
 
+/**
+ * Tell the operator that a reindex is about to run without them having asked for it in this start
+ * (the block index was found empty next to block files, or an earlier -reindex was cut short): the
+ * debug log is off by default, so a node that silently spent hours rebuilding looked hung.
+ * The text goes to the RPC warmup status (what the Qt wallet's start-up screen shows), to stderr as a
+ * warning, and into getblockchaininfo ("reindexing", "reindexreason") once the RPC server answers.
+ */
+static void AnnounceAutomaticReindex(const std::string& reason)
+{
+    strReindexReason = reason;
+    const std::string msg = strprintf(_("Reindexing the block database: %s. This rebuilds the block index and chain state from the block files already on disk and can take several hours; the node is not stuck. It is safe to stop and restart the node at any time: an interrupted reindex starts again from the beginning by itself."), reason);
+    uiInterface.InitMessage(msg);
+    InitWarning(msg);
+}
+
 bool static Bind(const CService &addr, unsigned int flags) {
     if (!(flags & BF_EXPLICIT) && IsLimited(addr))
         return false;
@@ -512,6 +664,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-blocknotify=<cmd>", _("Execute command when the best block changes (%s in cmd is replaced by block hash)"));
     strUsage += HelpMessageOpt("-checkblocks=<n>", strprintf(_("How many blocks to check at startup (default: %u, 0 = all)"), 288));
     strUsage += HelpMessageOpt("-checklevel=<n>", strprintf(_("How thorough the block verification of -checkblocks is (0-4, default: %u)"), 3));
+    strUsage += HelpMessageOpt("-cleanshutdownmarker", strprintf(_("After a verified clean shutdown with unchanged block and database files, check only the last 6 blocks at startup (level 3); a crash, kill or any change runs the full -checkblocks check. Ignored when -checkblocks or -checklevel is given (default: %u)"), 1));
     strUsage += HelpMessageOpt("-conf=<file>", strprintf(_("Specify configuration file (default: %s)"), "zclassic.conf"));
     if (mode == HMM_BITCOIND)
     {
@@ -522,12 +675,22 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-datadir=<dir>", _("Specify data directory"));
     strUsage += HelpMessageOpt("-exportdir=<dir>", _("Specify directory to be used when exporting data and wallet backups (default: the \"backups\" directory inside the data directory)"));
     strUsage += HelpMessageOpt("-dbcache=<n>", strprintf(_("Set database cache size in megabytes (%d to %d, default: %d)"), nMinDbCache, nMaxDbCache, nDefaultDbCache));
+    strUsage += HelpMessageOpt("-dbflushinterval=<n>", strprintf(_("At the chain tip, write the chain state (coins, block index, block files) to disk at most every <n> seconds, so a crash or kill loses at most that much of the durable height; 0 means once a day (default: %u). Initial block download flushes only when the cache is full"), DATABASE_FLUSH_INTERVAL_TIP));
+    strUsage += HelpMessageOpt("-headerprecheck", strprintf(_("Run cheap checks on received block headers before full header validation; the same headers are accepted either way (default: %u)"), 1));
+    strUsage += HelpMessageOpt("-equihashimpl=<impl>", _("Equihash solution verifier: c23 or cpp (default: c23)"));
+    strUsage += HelpMessageOpt("-finalizationdelay=<n>", _("Local policy: seconds a block must have been known before auto-finalization may pin it (default: 1800, 900 after Buttercup)"));
+    strUsage += HelpMessageOpt("-finalizationminpeers=<n>", strprintf(_("Local policy: independent outbound peers that must corroborate a block before auto-finalization (minimum 1, default: %u)"), DEFAULT_FINALIZATION_MIN_PEERS));
+    strUsage += HelpMessageOpt("-finalizationrequirepeers", _("Local policy: hold auto-finalization until live peers corroborate the chain; -finalizationrequirepeers=0 removes the gate (default: 1)"));
     strUsage += HelpMessageOpt("-loadblock=<file>", _("Imports blocks from external blk000??.dat file") + " " + _("on startup"));
     strUsage += HelpMessageOpt("-maxorphantx=<n>", strprintf(_("Keep at most <n> unconnectable transactions in memory (default: %u)"), DEFAULT_MAX_ORPHAN_TRANSACTIONS));
+    strUsage += HelpMessageOpt("-maxreorgdepth=<n>", strprintf(_("Local policy: depth in blocks behind the tip at which auto-finalization pins a block; a negative value disables auto-finalization (default: %u)"), DEFAULT_MAX_REORG_DEPTH));
     strUsage += HelpMessageOpt("-mempoolmaxbytes=<n>", strprintf(_("Maximum total size in bytes of transactions held in the mempool; a new transaction that would exceed it is refused with reason \"mempool full\" and nothing is evicted (default: %u, minimum: %u)"), DEFAULT_MEMPOOL_MAX_BYTES, MIN_MEMPOOL_MAX_BYTES));
+    strUsage += HelpMessageOpt("-maxshieldedcachesize=<n>", strprintf(_("Limit the cache of verified shielded proofs and signatures to <n> MiB (0 disables, default: %u)"), 4));
     strUsage += HelpMessageOpt("-mempooltxinputlimit=<n>", _("[DEPRECATED FROM OVERWINTER] Set the maximum number of transparent inputs in a transaction that the mempool will accept (default: 0 = no limit applied)"));
     strUsage += HelpMessageOpt("-par=<n>", strprintf(_("Set the number of script verification threads (%u to %d, 0 = auto, <0 = leave that many cores free, default: %d)"),
         -GetNumCores(), MAX_SCRIPTCHECK_THREADS, DEFAULT_SCRIPTCHECK_THREADS));
+    strUsage += HelpMessageOpt("-paramcache", _("Keep a cache of verified proving-parameter files in the parameter directory so a match need not be re-hashed at startup; -noparamcache hashes every file (default: 1)"));
+    strUsage += HelpMessageOpt("-parkdeepreorg", _("Park the competing chain of a reorg deeper than one block until it has enough work to take over (default: 1)"));
 #ifdef ZCL_C23_HAVE_PROVER_THREADS
     strUsage += HelpMessageOpt("-proverthreads=<n>", _("Set the number of threads used to create Sapling proofs (1 to 64, 0 = auto: the lesser of 8 and the hardware threads, default: 0). Left automatic, a send also makes only as many proofs at once as fit in about 340 MB or an eighth of physical memory, whichever is less; an explicit value lifts that limit"));
 #endif
@@ -594,6 +757,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-proxyrandomize", strprintf(_("Randomize credentials for every proxy connection. This enables Tor stream isolation (default: %u)"), 1));
     strUsage += HelpMessageOpt("-seednode=<ip>", _("Connect to a node to retrieve peer addresses, and disconnect"));
     strUsage += HelpMessageOpt("-timeout=<n>", strprintf(_("Specify connection timeout in milliseconds (minimum: 1, default: %d)"), DEFAULT_CONNECT_TIMEOUT));
+    strUsage += HelpMessageOpt("-uacomment=<cmt>", _("Append a comment to the user agent string; may be given more than once (letters, digits and a few symbols only)"));
     strUsage += HelpMessageOpt("-torcontrol=<ip>:<port>", strprintf(_("Tor control port to use if onion listening enabled (default: %s)"), DEFAULT_TOR_CONTROL));
     strUsage += HelpMessageOpt("-torpassword=<pass>", _("Tor control port password (default: empty)"));
     strUsage += HelpMessageOpt("-whitebind=<addr>", _("Bind to given address and whitelist peers connecting to it. Use [host]:port notation for IPv6"));
@@ -639,6 +803,9 @@ std::string HelpMessage(HelpMessageMode mode)
     if (showDebug)
     {
         strUsage += HelpMessageOpt("-checkpoints", strprintf("Disable expensive verification for known chain history (default: %u)", 1));
+        strUsage += HelpMessageOpt("-dbmaxopenfiles=<n>", "Maximum number of files each LevelDB database (block index, chainstate) keeps open (default: derived from the file descriptor budget). Each open table keeps its index and bloom filter blocks in memory outside -dbcache");
+        strUsage += HelpMessageOpt("-checkblockindex", "Run block index consistency checks (default: 0, 1 in regtest)");
+        strUsage += HelpMessageOpt("-checkmempool=<n>", "Run mempool consistency checks on one in <n> operations, 0 = never (default: 0, 1 in regtest)");
         strUsage += HelpMessageOpt("-dblogsize=<n>", strprintf("Flush database activity from memory pool to disk log every <n> megabytes (default: %u)", 100));
         strUsage += HelpMessageOpt("-disablesafemode", strprintf("Disable safemode, override a real safe mode event (default: %u)", 0));
         strUsage += HelpMessageOpt("-testsafemode", strprintf("Force safe mode (default: %u)", 0));
@@ -647,6 +814,9 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-flushwallet", strprintf("Run a thread to flush wallet periodically (default: %u)", 1));
         strUsage += HelpMessageOpt("-testsetchaininterval=<n>", strprintf("Test only: write the wallet checkpoint (locator and note state) at most every <n> seconds while running (default: %u)", DATABASE_WRITE_INTERVAL));
         strUsage += HelpMessageOpt("-testblockindexinterval=<n>", "Test only: write the block index at most every <n> seconds while running (default: 3600, 300 during initial block download)");
+        strUsage += HelpMessageOpt("-testprunetarget=<bytes>", "Test only (regtest): prune block files down to this many bytes, below the 550 MiB minimum of -prune");
+        strUsage += HelpMessageOpt("-testmaxblockfilesize=<bytes>", "Test only (regtest): start a new block file after this many bytes (at least 4096; default: 134217728)");
+        strUsage += HelpMessageOpt("-bootstrapschedwindowms=<ms>", "Test only: scale the multi-server bootstrap download scheduler to this measuring window in milliseconds, so a small snapshot exercises it (default: off, the scheduler uses its 10 s window)");
         strUsage += HelpMessageOpt("-testcrashpoint=<name>[:<n>]", "Test only: _exit(77) the <n>th time the named wallet or chain-state write point is reached; the name any matches every point (default: off)");
         strUsage += HelpMessageOpt("-stopafterblockimport", strprintf("Stop running after importing blocks from disk (default: %u)", 0));
         strUsage += HelpMessageOpt("-nuparams=hexBranchId:activationHeight", "Use given activation height for specified network upgrade (regtest-only)");
@@ -663,6 +833,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-logtimestamps", strprintf(_("Prepend debug output with timestamp (default: %u)"), 1));
     if (showDebug)
     {
+        strUsage += HelpMessageOpt("-logtimemicros", strprintf("Add microsecond precision to debug timestamps (default: %u)", DEFAULT_LOGTIMEMICROS));
         strUsage += HelpMessageOpt("-limitfreerelay=<n>", strprintf("Continuously rate-limit free transactions to <n>*1000 bytes per minute (default: %u)", 15));
         strUsage += HelpMessageOpt("-relaypriority", strprintf("Require high priority for relaying free or low-fee transactions (default: %u)", 0));
         strUsage += HelpMessageOpt("-maxsigcachesize=<n>", strprintf("Limit size of signature cache to <n> MiB (default: %u)", DEFAULT_MAX_SIG_CACHE_SIZE));
@@ -678,7 +849,6 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-regtest", "Enter regression test mode, which uses a special chain in which blocks can be solved instantly. "
             "This is intended for regression testing tools and app development.");
     }
-    // strUsage += HelpMessageOpt("-shrinkdebugfile", _("Shrink debug.log file on client startup (default: 1 when no -debug)"));
     strUsage += HelpMessageOpt("-testnet", _("Use the test network"));
 
     strUsage += HelpMessageGroup(_("Node relay options:"));
@@ -712,18 +882,19 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-server", _("Accept command line and JSON-RPC commands"));
     strUsage += HelpMessageOpt("-rest", strprintf(_("Accept public REST requests (default: %u)"), 0));
     strUsage += HelpMessageOpt("-rpcbind=<addr>", _("Bind to given address to listen for JSON-RPC connections. Use [host]:port notation for IPv6. This option can be specified multiple times (default: bind to localhost only, ::1 and 127.0.0.1; this option is ignored unless -rpcallowip is also given, and -rpcallowip without -rpcbind binds all interfaces)"));
+    strUsage += HelpMessageOpt("-rpccookiefile=<file>", _("Location of the JSON-RPC auth cookie; a relative path is under the data directory (default: .cookie)"));
     strUsage += HelpMessageOpt("-rpcuser=<user>", _("Username for JSON-RPC connections"));
     strUsage += HelpMessageOpt("-rpcpassword=<pw>", _("Password for JSON-RPC connections"));
     strUsage += HelpMessageOpt("-rpcport=<port>", strprintf(_("Listen for JSON-RPC connections on <port> (default: %u or testnet: %u)"), 8023, 18023));
     strUsage += HelpMessageOpt("-rpcallowip=<ip>", _("Allow JSON-RPC connections from specified source. Valid for <ip> are a single IP (e.g. 1.2.3.4), a network/netmask (e.g. 1.2.3.4/255.255.255.0) or a network/CIDR (e.g. 1.2.3.4/24). This option can be specified multiple times"));
+    strUsage += HelpMessageOpt("-rpcslowlog=<ms>", strprintf(_("Log JSON-RPC calls that take at least <ms> milliseconds (0 disables, default: %u)"), 1000));
     strUsage += HelpMessageOpt("-rpcthreads=<n>", strprintf(_("Set the number of threads to service RPC calls (default: %d)"), DEFAULT_HTTP_THREADS));
+    //strUsage += HelpMessageOpt("-rpcasyncthreads=<n>", strprintf(_("Set the number of threads to service Async RPC calls (default: %d)"), 1)); // disabled until we can lock notes
     if (showDebug) {
         strUsage += HelpMessageOpt("-rpcworkqueue=<n>", strprintf("Set the depth of the work queue to service RPC calls (default: %d)", DEFAULT_HTTP_WORKQUEUE));
         strUsage += HelpMessageOpt("-rpcservertimeout=<n>", strprintf("Timeout during HTTP requests (default: %d)", DEFAULT_HTTP_SERVER_TIMEOUT));
     }
 
-    // Disabled until we can lock notes
-    //strUsage += HelpMessageOpt("-rpcasyncthreads=<n>", strprintf(_("Set the number of threads to service Async RPC calls (default: %d)"), 1));
 
     if (mode == HMM_BITCOIND) {
         strUsage += HelpMessageGroup(_("Metrics Options (only if -daemon and -printtoconsole are not set):"));
@@ -755,7 +926,6 @@ struct CImportingNow
         fImporting = false;
     }
 };
-
 
 // If we're using -prune with -reindex, then delete block files that will be ignored by the
 // reindex.  Since reindexing works by starting at block file 0 and looping until a blockfile
@@ -920,160 +1090,6 @@ static bool check_file_hash(const std::string& path, const std::string& hash)
     }
     return true;
 }
-
-// ---------------------------------------------------------------------------
-// Verified-params cache (params-verify.cache, 0600 in DATADIR)
-//
-// PURPOSE: turn the dominant cold-start cost -- re-hashing ~1.69 GB of zk-SNARK
-// params on EVERY launch (param-hash-loop ~= 5.1 s / 80.8% of AppInit2) -- into
-// ~stat-cost on the common, unchanged case, WITHOUT ever loading an unverified
-// param.
-//
-// SAFETY INVARIANT (load-bearing): a re-hash is SKIPPED for a param ONLY when
-// ALL of these hold, otherwise we run the FULL check_file_hash exactly as today:
-//   (a) file_size(path) == spec.nSize                 (the COMPILED size)
-//   (b) cache record exists with size==cur_size AND mtime==cur_mtime
-//   (c) record.verifiedHash == spec.sha256hex          (the LIVE COMPILED hash)
-//   (d) cache file's binary-epoch == this binary's compiled-table epoch
-//   (e) cache file is owner-only (st_uid==geteuid, no group/other write bits)
-// The cache NEVER supplies a hash to trust: (c) compares the cached hash to the
-// compiled constant (.rodata, not attacker-writable). The cache only answers
-// "did THIS (size,mtime) already hash to the value the binary already requires".
-// Forging a skip-and-load of malicious identical-size content requires a SHA-256
-// second preimage (infeasible). A different-uid planted cache is rejected by (e).
-//
-// KNOWN, ACCEPTED RESIDUAL: a bit-rot/torn write that preserves BOTH size AND
-// mtime is skipped and the corrupt param loads -- a regression of today's
-// every-launch hash. This is BOUNDED and NON-CONSENSUS: zk params are firewalled
-// from block/tx/PoW; a corrupt param makes a shielded proof FAIL/REJECT (never
-// forges one or forks the chain), fails LOUDLY at use, and self-heals via the
-// existing bootstrap re-fetch. Pass -noparamcache to force today's full hash.
-namespace {
-
-struct ParamCacheRecord {
-    uint64_t size;
-    int64_t  mtime;            // std::time_t, 1s granularity (boost last_write_time)
-    std::string verifiedHash;  // 64-hex lowercase
-};
-
-// Cheap epoch over the COMPILED spec table: name|hash|size per file. A binary
-// with any different compiled hash/size yields a different epoch, invalidating
-// the entire cache (Model 4: downgrade / multi-version).
-static std::string CompiledParamEpoch()
-{
-    std::string acc;
-    BOOST_FOREACH(const ZcashParamSpec& s, GetZcashParamSpecs()) {
-        acc += s.name;
-        acc += '|';
-        acc += s.sha256hex;
-        acc += '|';
-        acc += std::to_string((unsigned long long)s.nSize);
-        acc += '\n';
-    }
-    unsigned char digest[CSHA256::OUTPUT_SIZE];
-    CSHA256().Write(reinterpret_cast<const unsigned char*>(acc.data()), acc.size()).Finalize(digest);
-    return HexStr(digest, digest + sizeof(digest));
-}
-
-static boost::filesystem::path ParamVerifyCachePath()
-{
-    return GetDataDir() / "params-verify.cache";
-}
-
-// Returns true and fills `out` ONLY if the cache file is present, owner-only
-// (st_uid==geteuid, no group/other WRITE bits), strictly well-formed, and its
-// stored epoch equals the freshly-computed compiled epoch. ANY doubt => false
-// (caller treats as a cold cache and full-hashes every file).
-static bool LoadVerifiedParamCache(std::map<std::string, ParamCacheRecord>& out)
-{
-    out.clear();
-    const boost::filesystem::path p = ParamVerifyCachePath();
-#ifndef WIN32
-    // Mandatory on-READ ownership/mode gate: a cache writable by anyone other
-    // than us (group/other-writable, or owned by a different uid) is ignored.
-    // 0600-on-write is not enough; an attacker of a DIFFERENT uid must never be
-    // able to plant a honored cache in a misconfigured/shared DATADIR.
-    struct stat st;
-    if (::stat(p.string().c_str(), &st) != 0) return false;
-    if (!S_ISREG(st.st_mode)) return false;
-    if (st.st_uid != geteuid()) return false;
-    if (st.st_mode & (S_IWGRP | S_IWOTH)) return false;
-#endif
-    std::ifstream in(p.string().c_str());
-    if (!in.good()) return false;
-
-    std::string line;
-    bool epochOk = false;
-    const std::string wantEpoch = CompiledParamEpoch();
-    std::map<std::string, ParamCacheRecord> recs;
-    while (std::getline(in, line)) {
-        if (line.empty()) continue;
-        std::istringstream ls(line);
-        std::string key;
-        if (!(ls >> key)) return false;
-        if (key == "v") {
-            std::string v;
-            if (!(ls >> v) || v != "1") return false;  // unknown format => fail closed
-        } else if (key == "epoch") {
-            std::string e;
-            if (!(ls >> e) || e.size() != 64) return false;
-            epochOk = (e == wantEpoch);                 // mismatch => discard whole cache
-        } else if (key == "p") {
-            std::string name, hash;
-            unsigned long long sz; long long mt;
-            if (!(ls >> name >> sz >> mt >> hash)) return false;
-            if (hash.size() != 64) return false;
-            for (char c : hash)
-                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
-            if (recs.count(name)) return false;          // duplicate => malformed
-            ParamCacheRecord r;
-            r.size = (uint64_t)sz;
-            r.mtime = (int64_t)mt;
-            r.verifiedHash = hash;
-            recs[name] = r;
-        } else {
-            return false;                                // unknown key => fail closed
-        }
-    }
-    if (!epochOk) return false;                          // missing or wrong epoch line
-    out.swap(recs);
-    return true;
-}
-
-// Atomically rewrite the whole cache 0600 in DATADIR: tmp (O_CREAT|O_WRONLY|
-// O_TRUNC, 0600) -> FileCommit(fdatasync) -> RenameOver. A kill mid-write can
-// never leave a half-record a future parse misreads as a valid skip.
-static void StoreVerifiedParamCache(const std::map<std::string, ParamCacheRecord>& recs)
-{
-    const boost::filesystem::path finalPath = ParamVerifyCachePath();
-    const boost::filesystem::path tmpPath = finalPath.string() + ".tmp";
-#ifndef WIN32
-    int fd = ::open(tmpPath.string().c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0600);
-    if (fd < 0) return;
-    FILE* f = fdopen(fd, "wb");
-    if (!f) { ::close(fd); return; }
-#else
-    FILE* f = fopen(tmpPath.string().c_str(), "wb");
-    if (!f) return;
-#endif
-    fprintf(f, "v 1\n");
-    fprintf(f, "epoch %s\n", CompiledParamEpoch().c_str());
-    for (std::map<std::string, ParamCacheRecord>::const_iterator it = recs.begin();
-         it != recs.end(); ++it) {
-        fprintf(f, "p %s %llu %lld %s\n",
-                it->first.c_str(),
-                (unsigned long long)it->second.size,
-                (long long)it->second.mtime,
-                it->second.verifiedHash.c_str());
-    }
-    FileCommit(f);
-    fclose(f);
-    if (!RenameOver(tmpPath, finalPath)) {
-        boost::filesystem::remove(tmpPath);
-    }
-}
-
-} // anonymous namespace
 
 static bool VerifyImportedBootstrapAnchor(std::string& error)
 {
@@ -1326,24 +1342,12 @@ static void InterruptBootstrapServeFreeze()
     g_serveFreezeInProgress.store(false);
 }
 
-
-
 /** Sanity checks
  *  Ensure that Bitcoin is running in a usable environment with all
  *  necessary library support.
  */
-/** Scheduled every few seconds while -embeddedtor is on (see Step 6). */
-static void EmbeddedTorWatchdog()
-{
-    if (ShutdownRequested() || !EmbeddedTorRunning() || EmbeddedTorAlive())
-        return;
-    LogPrintf("tor: the embedded Tor has exited; shutting down (-embeddedtor never continues without Tor)\n");
-    StartShutdown();
-}
-
 bool InitSanityCheck(void)
 {
-
     boost::filesystem::path sapling_output = ZC_GetParamsDir() / "sapling-output.params";
     boost::filesystem::path sapling_spend = ZC_GetParamsDir() / "sapling-spend.params";
     boost::filesystem::path sprout_groth16 = ZC_GetParamsDir() / "sprout-groth16.params";
@@ -1368,16 +1372,16 @@ bool InitSanityCheck(void)
     // dial the bootstrap peers directly and expose the node's address.
     const bool fParamFetchAllowed = GetBoolArg("-bootstrap", true) && !ZcashParamFetchWouldBypassProxy();
     if (!ZcashParamsPresent() && GetBoolArg("-bootstrap", true) && !fParamFetchAllowed)
-        LogPrintf("Zcash parameters are missing; not fetching them from a bootstrap peer before the proxy is set up (-proxy, or -onlynet without ipv4/ipv6): run zcutil/fetch-params.sh\n");
+        LogPrintf("zk-SNARK parameters are missing; not fetching them from a bootstrap peer before the proxy is set up (-proxy, or -onlynet without ipv4/ipv6): run zcutil/fetch-params.sh\n");
     if (!ZcashParamsPresent() && fParamFetchAllowed) {
         std::string paramError = "no bootstrap peer configured";
         BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
-            fprintf(stdout, "Fetching Zcash parameters from peer %s...\n", peer.c_str());
-            LogPrintf("Fetching Zcash parameters from bootstrap peer %s...\n", peer);
+            fprintf(stdout, "Fetching zk-SNARK parameters from peer %s...\n", peer.c_str());
+            LogPrintf("Fetching zk-SNARK parameters from bootstrap peer %s...\n", peer);
             if (FetchZcashParamsFromPeer(peer, paramError)) {
                 break;
             }
-            LogPrintf("Zcash param fetch from %s failed: %s\n", peer, paramError);
+            LogPrintf("zk-SNARK parameter fetch from %s failed: %s\n", peer, paramError);
         }
         // If it still failed, the existence check below reports the error.
     }
@@ -1389,13 +1393,12 @@ bool InitSanityCheck(void)
         boost::filesystem::exists(sprout_groth16)
     )) {
         InitError(strprintf(
-            "Zcash parameter files are missing from %s. Run zcutil/fetch-params.sh before starting zclassicd, or pass -bootstrappeer=<host> to fetch them from a peer.",
+            "zk-SNARK parameter files are missing from %s. Run zcutil/fetch-params.sh before starting zclassicd, or pass -bootstrappeer=<host> to fetch them from a peer.",
             ZC_GetParamsDir().string()));
         return false;
     }
 
-
-    // Validate every required Zcash parameter file against the single
+    // Validate every required zk-SNARK parameter file against the single
     // compiled SHA-256 table in bootstrap.cpp. Keeping one source of truth
     // means a future hash update can't silently disagree between startup
     // validation and the bootstrap-snapshot fetch path. This GetZcashParamSpecs()
@@ -1415,20 +1418,20 @@ bool InitSanityCheck(void)
     const std::vector<ZcashParamSpec>& zcash_param_specs = GetZcashParamSpecs();
     bool fParamRefetched = false;
 
-    // Verified-params cache (see helpers above check_file_hash). Load once; an
-    // empty map (missing/garbage/foreign-owner/epoch-mismatch cache, or the
-    // -noparamcache escape hatch) means every file is full-hashed exactly as
+    // Verified-params cache (paramcache.h), beside the params. Load once; an
+    // empty map (missing/garbage/foreign-owner/epoch- or params-dir-mismatch
+    // cache, or -noparamcache) means every file is full-hashed exactly as
     // before. A SKIP is permitted ONLY when current size==compiled size AND a
     // record's (size,mtime) matches the file AND record.verifiedHash equals the
     // LIVE compiled spec.sha256hex -- the cache can never widen what counts as
     // valid, only avoid recomputing a match it already proved.
     const bool fUseParamCache = GetBoolArg("-paramcache", true) && !GetBoolArg("-noparamcache", false);
-    std::map<std::string, ParamCacheRecord> paramCache;
+    ParamCacheRecords paramCache;
+    ParamCacheSource paramCacheSource = PARAMCACHE_NONE;
     if (fUseParamCache) {
-        (void)LoadVerifiedParamCache(paramCache); // empty on any doubt
+        paramCacheSource = LoadVerifiedParamCache(ZC_GetParamsDir(), GetDataDir(), paramCache); // empty on any doubt
     }
-    std::map<std::string, ParamCacheRecord> verifiedRecords;
-    bool fCacheDirty = false;
+    ParamCacheRecords verifiedRecords;
     int nSkipped = 0, nHashed = 0;
 
     for (size_t i = 0; i < zcash_param_specs.size(); ++i) {
@@ -1451,7 +1454,7 @@ bool InitSanityCheck(void)
             boost::system::error_code ec1, ec2;
             const uintmax_t curSize = boost::filesystem::file_size(path, ec1);
             const std::time_t curMtime = boost::filesystem::last_write_time(path, ec2);
-            std::map<std::string, ParamCacheRecord>::const_iterator it = paramCache.find(spec.name);
+            ParamCacheRecords::const_iterator it = paramCache.find(spec.name);
             std::string compiledHash(spec.sha256hex);
             std::transform(compiledHash.begin(), compiledHash.end(), compiledHash.begin(), ::tolower);
             if (!ec1 && !ec2 &&
@@ -1473,13 +1476,13 @@ bool InitSanityCheck(void)
                 fParamRefetched = true;
                 std::string paramError = "no bootstrap peer configured";
                 BOOST_FOREACH(const std::string& peer, GetBootstrapPeerList()) {
-                    fprintf(stdout, "Re-fetching corrupted Zcash parameter from peer %s...\n", peer.c_str());
+                    fprintf(stdout, "Re-fetching corrupted zk-SNARK parameter from peer %s...\n", peer.c_str());
                     LogPrintf("Param hash mismatch for %s; re-fetching from bootstrap peer %s...\n",
                               spec.name, peer);
                     if (FetchZcashParamsFromPeer(peer, paramError)) {
                         break;
                     }
-                    LogPrintf("Zcash param re-fetch from %s failed: %s\n", peer, paramError);
+                    LogPrintf("zk-SNARK parameter re-fetch from %s failed: %s\n", peer, paramError);
                 }
                 // Restart the verification from the first file: the re-fetch
                 // re-hashes and may have repaired any of them. Drop staged
@@ -1510,16 +1513,15 @@ bool InitSanityCheck(void)
                 r.verifiedHash = compiledHash;
                 verifiedRecords[spec.name] = r;
             }
-            fCacheDirty = true;
             ++nHashed;
         }
     }
 
-    // Persist the cache only when something was (re)hashed or the on-disk set
-    // differs from what we verified this run (also rewrites a stale/cold cache).
+    // Persist when this run's records differ from the primary file (cold, legacy or changed);
+    // an unchanged primary, which other nodes may share, is not rewritten.
     if (fUseParamCache &&
-        (fCacheDirty || verifiedRecords.size() != paramCache.size())) {
-        StoreVerifiedParamCache(verifiedRecords);
+        (paramCacheSource != PARAMCACHE_PRIMARY || verifiedRecords != paramCache)) {
+        StoreVerifiedParamCache(ZC_GetParamsDir(), verifiedRecords);
     }
     LogPrintf("param-cache: %d skipped, %d hashed (cache %s)\n",
               nSkipped, nHashed, fUseParamCache ? "on" : "off");
@@ -1565,7 +1567,6 @@ bool InitSanityCheck(void)
     return true;
 }
 
-
 static void ZC_LoadParams(
     const CChainParams& chainparams
 )
@@ -1586,7 +1587,7 @@ static void ZC_LoadParams(
         boost::filesystem::exists(sprout_groth16)
     )) {
         uiInterface.ThreadSafeMessageBox(strprintf(
-            _("Cannot find the Zcash network parameters in the following directory:\n"
+            _("Cannot find the zk-SNARK parameters in the following directory:\n"
               "%s\n"
               "Please run 'zclassic-fetch-params' or './zcutil/fetch-params.sh' and then restart."),
                 ZC_GetParamsDir()),
@@ -1614,7 +1615,6 @@ static void ZC_LoadParams(
      LogPrintf("Loading Sapling (Spend) parameters from %s\n", sapling_spend.string().c_str());
      LogPrintf("Loading Sapling (Output) parameters from %s\n", sapling_output.string().c_str());
      LogPrintf("Loading Sapling (Sprout Groth16) parameters from %s\n", sprout_groth16.string().c_str());
-
 
     gettimeofday(&tv_start, 0);
 
@@ -1772,6 +1772,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // Set this early so that parameter interactions go to console
     fPrintToConsole = GetBoolArg("-printtoconsole", false);
     fLogTimestamps = GetBoolArg("-logtimestamps", true);
+    fLogTimeMicros = GetBoolArg("-logtimemicros", DEFAULT_LOGTIMEMICROS);
     fPrintToDebugLog = GetBoolArg("-debuglogfile", false);
     fLogIPs = GetBoolArg("-logips", false);
 
@@ -1952,8 +1953,16 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         return InitError(_("Prune cannot be configured with a negative value."));
     }
     nPruneTarget = (uint64_t) nSignedPruneTarget;
+    // Regtest only: a prune target in bytes below the 550 MiB minimum, so qa scripts can prune a small chain.
+    const bool fTestPruneTarget = mapArgs.count("-testprunetarget") > 0;
+    if (fTestPruneTarget) {
+        const int64_t nTestTarget = GetArg("-testprunetarget", 0);
+        if (nTestTarget <= 0)
+            return InitError("-testprunetarget must be a positive number of bytes.");
+        nPruneTarget = (uint64_t) nTestTarget;
+    }
     if (nPruneTarget) {
-        if (nPruneTarget < MIN_DISK_SPACE_FOR_BLOCK_FILES) {
+        if (nPruneTarget < MIN_DISK_SPACE_FOR_BLOCK_FILES && !fTestPruneTarget) {
             return InitError(strprintf(_("Prune configured below the minimum of %d MB.  Please use a higher number."), MIN_DISK_SPACE_FOR_BLOCK_FILES / 1024 / 1024));
         }
         LogPrintf("Prune configured to target %uMiB on disk for block and undo files.\n", nPruneTarget / 1024 / 1024);
@@ -2013,7 +2022,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     {
         CAmount nMaxFee = 0;
         if (!ParseMoney(mapArgs["-maxtxfee"], nMaxFee))
-            return InitError(strprintf(_("Invalid amount for -maxtxfee=<amount>: '%s'"), mapArgs["-maptxfee"]));
+            return InitError(strprintf(_("Invalid amount for -maxtxfee=<amount>: '%s'"), mapArgs["-maxtxfee"]));
         if (nMaxFee > nHighTransactionMaxFeeWarning)
             InitWarning(_("Warning: -maxtxfee is set very high! Fees this large could be paid on a single transaction."));
         maxTxFee = nMaxFee;
@@ -2082,9 +2091,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     // The crash and checkpoint-interval hooks exist for qa/rpc-tests/wallet_crash_consistency.sh.
     // A stray line in zclassic.conf must not make a real node exit at a wallet write point.
-    if ((mapArgs.count("-testcrashpoint") || mapArgs.count("-testsetchaininterval") || mapArgs.count("-testblockindexinterval")) &&
+    if ((mapArgs.count("-testcrashpoint") || mapArgs.count("-testsetchaininterval") || mapArgs.count("-testblockindexinterval") || mapArgs.count("-testprunetarget") || mapArgs.count("-testmaxblockfilesize")) &&
         Params().NetworkIDString() != "regtest") {
-        return InitError("-testcrashpoint, -testsetchaininterval and -testblockindexinterval may only be used on regtest.");
+        return InitError("-testcrashpoint, -testsetchaininterval, -testblockindexinterval, -testprunetarget and -testmaxblockfilesize may only be used on regtest.");
     }
 
     if (!mapMultiArgs["-nuparams"].empty()) {
@@ -2175,7 +2184,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     // Split the former coarse "ecc+sodium+sanity" mark: this isolates ECC_Start()'s
     // secp256k1 table precompute from InitSanityCheck() (which hashes the ~1.69 GB
-    // of Zcash params). Proves which half the ~8.9s actually lives in.
+    // of zk-SNARK params). Proves which half the ~8.9s actually lives in.
     g_startupTimer.mark("ecc-start");
 
     // Sanity check
@@ -2192,25 +2201,40 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // Make sure only a single Bitcoin process is using the data directory.
     boost::filesystem::path pathLockFile = GetDataDir() / ".lock";
     FILE* file = fopen(pathLockFile.string().c_str(), "a"); // empty lock file; created if it doesn't exist.
-    if (file) fclose(file);
+    if (!file) {
+        const int err = errno;
+        return InitError(strprintf(_("Cannot obtain a lock on data directory %s.") + " " +
+                                   _("Cannot create or open lock file %s: %s."),
+                                   strDataDir, pathLockFile.string(), strerror(err)));
+    }
+    fclose(file);
 
     try {
         static boost::interprocess::file_lock lock(pathLockFile.string().c_str());
-        if (!lock.try_lock())
+        if (!lock.try_lock()) {
+#ifndef WIN32
+            return InitError(strprintf(_("Cannot obtain a lock on data directory %s.") + " %s", strDataDir, DescribeLockHolder(GetPidFile())));
+#else
             return InitError(strprintf(_("Cannot obtain a lock on data directory %s. ZClassic is probably already running."), strDataDir));
+#endif
+        }
     } catch(const boost::interprocess::interprocess_exception& e) {
-        return InitError(strprintf(_("Cannot obtain a lock on data directory %s. ZClassic is probably already running.") + " %s.", strDataDir, e.what()));
+        return InitError(strprintf(_("Cannot obtain a lock on data directory %s. ZClassic is probably already running.") + " %s (native error %d).", strDataDir, e.what(), e.get_native_error()));
     }
+    fDatadirLockHeld = true;
 
 #ifndef WIN32
     CreatePidFile(GetPidFile(), getpid());
 #endif
+    // Single use: read and remove the previous run's clean-shutdown marker before any database
+    // is opened, and fingerprint the block and database files now, before LevelDB rewrites them.
+    fMarkerConsumed = ConsumeCleanMarker(GetDataDir(), g_markerBinding);
+    if (fMarkerConsumed)
+        fMarkerFilesMatch = ComputeFilesDigest(GetDataDir()) == g_markerBinding.filesDigest;
     // Never open a mixed database pair after an interrupted GUI repair.
     const auto repairJournal = GetDataDir() / "chain-repair-pending.json";
     if (boost::filesystem::exists(repairJournal) || boost::filesystem::is_symlink(repairJournal))
         return InitError(_("An interrupted blockchain repair needs recovery. Open the ZClassic wallet to restore the previous chain before starting the node. Do not delete the repair journal or blockchain backups."));
-    // if (GetBoolArg("-shrinkdebugfile", !fDebug))
-    //     ShrinkDebugFile();
 
     if (fPrintToDebugLog)
         OpenDebugLog();
@@ -2248,13 +2272,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         threadGroup.create_thread(&ThreadShowMetricsScreen);
     }
 
-
     g_startupTimer.mark("datadir-lock+threads");
     // Initialize Zclassic circuit parameters
     ZcParamsLoader zcParamsLoader;
     zcParamsLoader.Start(chainparams);
     g_startupTimer.mark("zk-snark params (started)");
-
 
     /* Start the RPC server already.  It will be started in "warmup" mode
      * and not really process calls already (but it will signify connections
@@ -2387,7 +2409,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             SetProxy(NET_ONION, addrEmbedded);
             SetLimited(NET_ONION, false);
         }
-        if (IsLimited(NET_IPV4) && IsLimited(NET_IPV6) && !HaveNameProxy()) {
+        const bool fTorClearnetProxies = IsLimited(NET_IPV4) && IsLimited(NET_IPV6) && !HaveNameProxy();
+        if (fTorClearnetProxies) {
             // Onion-only node (-onlynet=onion) without -proxy: host names
             // (DNS seeds, -addnode, -seednode, -connect) must never reach the
             // system resolver. Hand them to Tor instead.
@@ -2415,10 +2438,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 LogPrintf("tor: onion-only node without -bind, listening on 127.0.0.1 only\n");
             }
         }
-        // A node that asked for Tor never continues without it: if Tor exits
-        // on its own, shut down instead of leaving its loopback ports free
-        // for another local process to take over.
-        scheduler.scheduleEvery(&EmbeddedTorWatchdog, 5);
+        // A Tor that exits is restarted in place and the node keeps running;
+        // meanwhile the proxies above fail closed (src/embeddedtor.cpp).
+        EmbeddedTorWatchStart(threadGroup, scheduler, strTorDataDir, embeddedTorMode, onionArg == "", fTorClearnetProxies, proxyRandomize);
     }
 
     // see Step 2: parameter interactions for more information about these
@@ -2612,27 +2634,32 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // genesisBackupDir restore handles failure with no extra code.
     bool fStubRecovery = false;
     {
-        // D1 crash recovery: InstallStagedBootstrapChainData renames blocks/ then
-        // chainstate/ non-atomically, AFTER the anchor/trustless pending marker has
-        // been written and fsync'd. A kill between the two renames leaves blocks/
-        // present but chainstate/ absent — an incomplete install. On the next start
-        // that blocks-only datadir is NOT genesis-only (IsGenesisOnlyChainDatadir
-        // returns false for a missing/over-size chainstate or a blocks/-only dir),
-        // so without this guard BootstrapDatadirEligible would classify it as real
-        // chain data and silently skip re-bootstrapping, while the verify step never
-        // runs (chainstate/ is gone). Detect the incomplete install by: a pending
-        // marker EXISTS but the installed snapshot paths do NOT, and treat it as a
-        // FAILED import — remove the partial chain data, clear the marker, and let
-        // eligibility re-run below so the node re-bootstraps into a fresh datadir.
-        if ((BootstrapAnchorPendingExists(GetDataDir()) ||
-             BootstrapTrustlessPendingExists(GetDataDir())) &&
-            !BootstrapSnapshotPathsExist(GetDataDir())) {
-            LogPrintf("Bootstrap: a pending-import marker is present but the installed "
-                      "snapshot is incomplete (blocks/ or chainstate/ missing); treating "
-                      "the prior import as failed and re-bootstrapping\n");
-            RemoveFailedPeerBootstrapChainData(GetDataDir());
-            BootstrapAnchorPendingClear(GetDataDir());
-            BootstrapTrustlessPendingClear(GetDataDir());
+        // Crash recovery for the install step. BootstrapFromPeer writes the pending marker
+        // (fsync'd), then InstallStagedBootstrapChainData renames blocks/ and chainstate/ out of
+        // the staging directory one after the other. A kill at any point leaves one of:
+        // nothing installed (stale marker: cleared), blocks/ alone (moved back into its staging
+        // directory, so the next install re-verifies every file; nothing is deleted), or both
+        // (installed, verification still due: the marker-keyed verification below runs, and the
+        // datadir must not be judged for a new bootstrap, which would refuse it as "not fresh").
+        // blocks/ and chainstate/ without the marker are the user's chain data and stay refused.
+        bool fInstallPendingVerify = false;
+        {
+            std::string recoverError;
+            switch (RecoverInterruptedBootstrapInstall(GetDataDir(), recoverError)) {
+            case BIR_NONE:
+                break;
+            case BIR_STALE_MARKER:
+            case BIR_ROLLED_BACK:
+                LogPrintf("Bootstrap: recovered from an interrupted install; re-bootstrapping\n");
+                RemoveFailedPeerBootstrapChainData(GetDataDir());
+                break;
+            case BIR_INSTALLED:
+                LogPrintf("Bootstrap: an installed snapshot was not verified before the last shutdown; verifying it after the databases open\n");
+                fInstallPendingVerify = true;
+                break;
+            case BIR_REFUSE:
+                return InitError(recoverError);
+            }
         }
         const bool explicit_peer = mapArgs.count("-bootstrappeer");
         const bool enabled = GetBoolArg("-bootstrap", true) && !GetBootstrapPeerList().empty();
@@ -2645,7 +2672,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             return InitError(_("-bootstrappeer cannot be used with -bootstrapdatadir, -reindex, -reindex-chainstate, or -loadblock"));
         }
 
-        if (enabled && !conflicts) {
+        if (enabled && !conflicts && !fInstallPendingVerify) {
             const CFastSyncAnchorData& anchor = Params().FastSyncAnchor();
             // Option B: trustless mode accepts a peer's self-snapshot at its own
             // tip and verifies it by background re-derivation, so it does NOT
@@ -2756,7 +2783,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     if (ShutdownRequested())
                         return false;
                     if (explicit_peer)
-                        return InitError(bootstrap_error);
+                        return InitError(bootstrap_error + "; no interrupted bootstrap install was found (the bootstrap pending marker is absent), so this is existing chain data and it is left untouched");
                 }
             }
             if (fDatadirEligible) {
@@ -2794,7 +2821,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                                                  peerIndex, nBootstrapPeers,
                                                  attempt, nBootstrapAttempts,
                                                  fTrustlessMode ? "trustless" : "anchor", 0);
-                        if (BootstrapFromPeer(peer, GetDataDir(), bootstrap_error)) {
+                        if (BootstrapFromPeer(peer, GetDataDir(), bootstrap_error, BootstrapAlternatesFor(bootstrapPeers, peer))) {
                             bootstrap_snapshot_ran = true;
                             break;
                         }
@@ -2935,6 +2962,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     g_startupTimer.mark("network+bootstrap");
     // ********************************************************* Step 7: load block chain
 
+    // A bootstrap import above may have replaced blocks/ or chainstate/: the marker vouches only
+    // for files still exactly as the clean stop left them.
+    if (fMarkerFilesMatch && ComputeFilesDigest(GetDataDir()) != g_markerBinding.filesDigest)
+        fMarkerFilesMatch = false;
     fReindex = GetBoolArg("-reindex", false);
     fReindexChainState = GetBoolArg("-reindex-chainstate", false);
     if (fReindexChainState && fReindex) {
@@ -3040,6 +3071,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 // (flag found) run it again from the start with a wiped chainstate: the half-built
                 // one may be torn and no longer matches the index that is not loaded.
                 if (fReindex) {
+                    if (strReindexReason.empty())
+                        strReindexReason = "requested with -reindex (or by the start-up repair path)";
                     pblocktree->WriteReindexing(true);
                 } else {
                     bool fWasReindexing = false;
@@ -3058,9 +3091,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                         boost::filesystem::file_size(pathFirstBlockFile, ecFirstBlockFile) > 0 && !ecFirstBlockFile;
                     if (fWasReindexing) {
                         LogPrintf("An earlier -reindex did not finish: starting it again\n");
+                        AnnounceAutomaticReindex(_("an earlier -reindex did not finish, so it starts again from the beginning"));
                         fReindex = true;
                     } else if (!pblocktree->ReadLastBlockFile(nLastBlockFileRecorded) && fFirstBlockFileHoldsData) {
                         LogPrintf("The block index is empty but the block files hold blocks (an interrupted -reindex, or a removed index): reindexing them\n");
+                        AnnounceAutomaticReindex(_("the block index is empty but the block files hold blocks (an interrupted -reindex, or a removed index)"));
                         pblocktree->WriteReindexing(true);
                         fReindex = true;
                     }
@@ -3147,11 +3182,39 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     LogPrintf("Prune: pruned datadir may not have more than %d blocks; -checkblocks=%d may fail\n",
                         MIN_BLOCKS_TO_KEEP, GetArg("-checkblocks", 288));
                 }
-                if (!CVerifyDB().VerifyDB(pcoinsdbview, GetArg("-checklevel", 3),
-                              GetArg("-checkblocks", 288))) {
-                    strLoadError = _("Corrupted block database detected");
-                    break;
+                // Clean stop matched (same tip and coins best block; file names, sizes and mtimes, not
+                // contents): check the newest 6 blocks at the same level. Blocks connected during earlier
+                // short starts are not re-checked at full depth until a start without a matching marker.
+                const char* fullWhy = NULL;
+                if (!GetBoolArg("-cleanshutdownmarker", true))
+                    fullWhy = "disabled";
+                else if (!fMarkerConsumed)
+                    fullWhy = "no marker";
+                else if (!fMarkerFilesMatch)
+                    fullWhy = "files changed";
+                else if (fReindex || fReindexChainState || fBlockIndexFromSnapshot || mapArgs.count("-checkblocks") || mapArgs.count("-checklevel"))
+                    fullWhy = "explicit check, reindex or bootstrap";
+                else if (!chainActive.Tip() || chainActive.Tip()->GetBlockHash() != g_markerBinding.tipHash ||
+                         chainActive.Height() != g_markerBinding.tipHeight ||
+                         pcoinsTip->GetBestBlock() != g_markerBinding.coinsBest)
+                    fullWhy = "tip mismatch";
+                // Single use within this process too: a reload after a failure runs the full check.
+                fMarkerConsumed = false;
+                if (!fullWhy) {
+                    LogPrintf("VerifyDB: clean shutdown marker matched; checking last 6 blocks\n");
+                    if (!CVerifyDB().VerifyDB(pcoinsdbview, 3, 6)) {
+                        strLoadError = _("Corrupted block database detected");
+                        break;
+                    }
+                } else {
+                    LogPrintf("VerifyDB: full startup check (%s)\n", fullWhy);
+                    if (!CVerifyDB().VerifyDB(pcoinsdbview, GetArg("-checklevel", 3),
+                                  GetArg("-checkblocks", 288))) {
+                        strLoadError = _("Corrupted block database detected");
+                        break;
+                    }
                 }
+                fChainLoadVerified = true;
                 g_startupTimer.mark(".verifydb");
             } catch (const dbwrapper_error& e) {
                 LogPrintf("%s\n", e.what());
@@ -3244,6 +3307,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 ArmBootstrapTipHold(bvHeight, bvHash);
             }
         }
+        TestCrashPoint("bootstrap-install-before-marker-clear");
         BootstrapTrustlessPendingClear(GetDataDir());
         LogPrintf("Bootstrap snapshot provisionally accepted at height %d (%s); background validation will confirm it\n",
             bvHeight, bvHash.ToString());
@@ -3274,6 +3338,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         GetBootstrapAnchorPending(GetDataDir(), advertisedTipHeight, advertisedTipHash);
         // Verified: clear the marker so subsequent restarts skip the (now
         // redundant) re-verification.
+        TestCrashPoint("bootstrap-install-before-marker-clear");
         BootstrapAnchorPendingClear(GetDataDir());
         LogPrintf("Bootstrap snapshot verified at height %d (%s); server advertised post-anchor tip height %d (%s)\n",
             chainActive.Height(),
@@ -3410,14 +3475,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     fFeeEstimatesInitialized = true;
     g_startupTimer.mark("fee estimates");
 
-
     // ********************************************************* Step 8: load wallet
 #ifdef ENABLE_WALLET
     if (fDisableWallet) {
         pwalletMain = NULL;
         LogPrintf("Wallet disabled!\n");
     } else {
-
         // needed to restore wallet transaction meta data after -zapwallettxes
         std::vector<CWalletTx> vWtx;
 
@@ -3514,9 +3577,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         {
             CWalletDB walletdb(strWalletFile);
             CBlockLocator locator;
-            if (walletdb.ReadBestBlock(locator))
+            if (walletdb.ReadBestBlock(locator)) {
                 pindexRescan = FindForkInGlobalIndex(chainActive, locator);
-            else
+                if (pindexRescan) pwalletMain->nCheckpointHeight = pindexRescan->nHeight;
+            } else
                 pindexRescan = chainActive.Genesis();
         }
         // The note state that was read back (witness caches, nullifiers) is checked against the
@@ -3770,6 +3834,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     if (pwalletMain) {
         // Add wallet transactions that aren't already in a block to mapTransactions
         pwalletMain->ReacceptWalletTransactions();
+
+        // Send journal: resolve what the last run left (a lost operation releases its key, a built
+        // transaction that is in the mempool or a block is committed), prune old records
+        SendOnceResolveAtStart(pwalletMain);
 
         // Run a thread to flush wallet periodically
         threadGroup.create_thread(boost::bind(&ThreadFlushWalletDB, boost::ref(pwalletMain->strWalletFile)));
