@@ -69,6 +69,7 @@ SOURCES += \
     src/phrase.cpp \
     src/backuppage.cpp \
     src/backupwiring.cpp \
+    src/homebalance.cpp \
     src/3rdparty/qrcode/BitBuffer.cpp \
     src/3rdparty/qrcode/QrCode.cpp \
     src/3rdparty/qrcode/QrSegment.cpp \

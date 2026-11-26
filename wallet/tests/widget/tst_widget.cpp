@@ -5239,6 +5239,33 @@ private slots:
         settleAndDelete(w);
     }
 
+    // A node that drops must not take the balance off the screen: the last known balance stays,
+    // greyed and dated. A dash only when no balance was ever recorded.
+    void home_lastKnownBalanceStaysWhenTheNodeDrops() {
+        const QStringList keys = { "cache/balShielded", "cache/balTransparent", "cache/balTotal", "cache/lastSyncEpoch" };
+        for (const QString& k : keys) QSettings().remove(k);
+        MainWindow* w = makeWindow();
+        auto* balance = w->findChild<QLabel*>("homeHeroPrivate");
+        auto* total = w->findChild<QLabel*>("homeHeroTotal");
+        auto* note = w->findChild<QLabel*>("homeHeroQualifier");
+        QVERIFY(balance != nullptr && total != nullptr && note != nullptr);
+        w->getRPC()->noConnection();
+        QCOMPARE(balance->text(), QString::fromUtf8("\xE2\x80\x94"));   // nothing recorded: unknown, said as such
+        QVERIFY(note->text().contains("funds are not affected"));
+
+        QSettings().setValue("cache/balShielded", 12.5);
+        QSettings().setValue("cache/balTotal", 15.5);
+        QSettings().setValue("cache/lastSyncEpoch", (qint64) 1700000000);
+        w->getRPC()->noConnection();
+        QVERIFY2(balance->text().startsWith("12.5"), qPrintable(balance->text()));
+        QVERIFY2(total->text().contains("15.5"), qPrintable(total->text()));
+        QVERIFY(note->text().contains("Last known balance, from"));
+        QVERIFY(!note->isHidden());
+        QVERIFY(!balance->property("heroconfident").toBool());   // never the confident green
+        for (const QString& k : keys) QSettings().remove(k);
+        settleAndDelete(w);
+    }
+
     // While the node is still catching up, a stale checkpoint and missing proofs are normal and stay quiet.
     void health_quietWhileSyncing() {
         HealthNode node;

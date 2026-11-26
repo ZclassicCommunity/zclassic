@@ -1280,10 +1280,10 @@ void MainWindow::updateHomeFixIt(double transparent, bool fromCache) {
 }
 
 void MainWindow::showHeroUnavailable() {
-    // With no node connection the wallet cannot know the balance. The full-teardown path
-    // used to paint "0 ZCL", "Total: 0 ZCL" and "Your private balance - receive ZCL to get
-    // started", which to someone who had just seen 600 ZCL reads as funds lost. Say what
-    // is true: unknown, and nothing has happened to the funds.
+    // With no node connection the wallet cannot know the balance. Painting "0 ZCL" here read
+    // as funds lost to someone who had just seen 600 ZCL. Keep the last known balance on
+    // screen (homebalance.cpp); only with none recorded say what is true: unknown, funds safe.
+    if (showLastKnownBalance()) return;
     heroPrivateFull = QStringLiteral("—");
     heroTotalFull   = tr("Balance unavailable until the node is connected");
     relayoutHero();

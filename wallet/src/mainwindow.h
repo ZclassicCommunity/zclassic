@@ -264,6 +264,7 @@ public:
     // its "receive ZCL to get started" helper (which read as "your funds are gone") with a
     // dash and an explicit note that funds are unaffected.
     void showHeroUnavailable();
+    bool showLastKnownBalance();   // homebalance.cpp: the cached balance, greyed and dated
 
     // PRIV-28 eager Sapling provisioning: ensure at least one Sapling z-address
     // exists so the send/shield path never has to block on key generation (the

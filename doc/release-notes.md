@@ -28,6 +28,8 @@ The GUI wallet has a side menu instead of tabs, Receive with Private and Transpa
 and a list of your addresses, and Settings, Address book and Backup as pages. Activity now
 lists up to 1000 transparent transactions; it used to show only the 10 latest. Icons load
 with a transparent background on every desktop.
+When the node drops or restarts, Home keeps the last known balance on screen, greyed and
+dated, instead of replacing it with a dash.
 
 Peer-aware auto-finalization (reduced chain-split risk)
 -------------------------------------------------------
