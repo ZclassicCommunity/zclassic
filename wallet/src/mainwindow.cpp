@@ -457,7 +457,7 @@ void MainWindow::setupTrayIcon() {
     if (trayIcon != nullptr)
         return;
 
-    trayIcon = new QSystemTrayIcon(QIcon(":/icons/res/icon.ico"), this);
+    trayIcon = new QSystemTrayIcon(QIcon(":/icons/res/icon.png"), this);
     trayIcon->setToolTip("ZclWallet");
 
     auto trayMenu = new QMenu(this);
