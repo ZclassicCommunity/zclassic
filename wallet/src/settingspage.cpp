@@ -322,14 +322,14 @@ void MainWindow::saveSettingsNetwork() {
     const bool torWanted = f->chkTor->isChecked();
     if (!settingsUsingTor && torWanted) {
         Settings::addToZClassicConf(settingsConfLocation, "proxy=127.0.0.1:9050");
-        rpc->getConnection()->config->proxy = "proxy=127.0.0.1:9050";
+        if (rpc->getConnection()) rpc->getConnection()->config->proxy = "proxy=127.0.0.1:9050";   // not connected yet during start-up
         QMessageBox::information(this, tr("Enable Tor"),
             tr("Connection over Tor has been enabled. To use this feature, you need to restart ZclWallet."),
             QMessageBox::Ok);
     }
     if (settingsUsingTor && !torWanted) {
         Settings::removeFromZClassicConf(settingsConfLocation, "proxy");
-        rpc->getConnection()->config->proxy.clear();
+        if (rpc->getConnection()) rpc->getConnection()->config->proxy.clear();
         QMessageBox::information(this, tr("Disable Tor"),
             tr("Connection over Tor has been disabled. To fully disconnect from Tor, you need to restart ZclWallet."),
             QMessageBox::Ok);

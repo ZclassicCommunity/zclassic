@@ -3470,6 +3470,13 @@ private slots:
 
         // A never-used transparent address is offered instead of minting a new key
         // on every visit; T1 holds coins, so it is never re-offered.
+        // Until the node has said which addresses were ever paid, none is offered (the
+        // caller makes a new one); an address that was paid once and is empty again is
+        // never offered, whatever the short transaction list shows.
+        QCOMPARE(w->unusedTAddress(), QString());
+        w->getRPC()->testSetReceivedTAddresses({ T1, T2 });
+        QCOMPARE(w->unusedTAddress(), QString());
+        w->getRPC()->testSetReceivedTAddresses({ T1 });
         QCOMPARE(w->unusedTAddress(), T2);
 
         // Transparent tab: the transparent addresses only, shown with the PUBLIC callout.
@@ -3601,8 +3608,8 @@ private slots:
         hover();   // still over the icon: same card, not a second one
         QCOMPARE(AddressPopup::current(), first);
         // Leaving both the icon and the card closes it.
-        const QPoint far = first->frameGeometry().bottomRight() + QPoint(200, 200);
-        QMouseEvent away(QEvent::MouseMove, first->mapFromGlobal(far), far,
+        const QPoint farAway = first->frameGeometry().bottomRight() + QPoint(200, 200);
+        QMouseEvent away(QEvent::MouseMove, first->mapFromGlobal(farAway), farAway,
                          Qt::NoButton, Qt::NoButton, Qt::NoModifier);
         QApplication::sendEvent(first, &away);
         qApp->processEvents();
@@ -4100,6 +4107,19 @@ private slots:
         QVERIFY(card->isVisibleTo(w));
         QCOMPARE(list->topLevelItemCount(), 1);   // only the address with money
         QCOMPARE(list->topLevelItem(0)->text(0), OLD);
+
+        // Money outside the phrase: writing the phrase down does not stop the Home reminder,
+        // which then says what is left to do.
+        const json info = json{ {"available", true}, {"fingerprint", "fp-move"},
+                                {"not_covered", json::array({ OLD.toStdString(), EMPTY.toStdString() })} };
+        Settings::getInstance()->setWalletBackedUp(false);
+        BackupPage::setWrittenDown("fp-move");
+        w->applyPhraseInfo(info);
+        QVERIFY(!Settings::getInstance()->isWalletBackedUp());
+        QVERIFY(w->backupReminderText().contains("older addresses"));
+        QSettings().remove("backup/phrase/fp-move");
+        w->applyPhraseInfo(info);
+        QCOMPARE(list->topLevelItemCount(), 1);
 
         w->getRPC()->testSetNextZaddrResult(NEWZ);
         auto* move = qobject_cast<QToolButton*>(list->itemWidget(list->topLevelItem(0), 2));

@@ -86,13 +86,21 @@ QString MainWindow::currentReceiveAddress() const {
 
 // ---- transparent address reuse -------------------------------------------------
 
-// A transparent address to offer for receiving that was never used: no balance, no
-// unspent output and no transaction in the history. Empty when none is left (the
-// caller then makes a new one). Transparent addresses must not be reused.
+// A transparent address to offer for receiving that was never used: the node never
+// saw a payment to it (listreceivedbyaddress), and it has no balance, no unspent
+// output and no transaction in the history. Empty when none is left, or while the
+// node has not said yet which addresses were paid (the caller then makes a new
+// one). Transparent addresses must not be reused.
 QString MainWindow::unusedTAddress() const {
     if (rpc == nullptr || rpc->getAllTAddresses() == nullptr)
         return QString();
-    QSet<QString> used;
+    const QSet<QString>* received = rpc->getReceivedTAddresses();
+    if (received == nullptr)
+        return QString();   // not known yet: a new address is always safe
+    QSet<QString> used = *received;
+    if (const auto* seen = rpc->getUsedAddresses())
+        for (auto it = seen->constBegin(); it != seen->constEnd(); ++it)
+            used.insert(it.key());
     if (const TxTableModel* txs = rpc->getTransactionsModel()) {
         for (int r = 0; r < txs->rowCount(QModelIndex()); ++r)
             used.insert(txs->getAddr(r));
@@ -103,7 +111,7 @@ QString MainWindow::unusedTAddress() const {
     }
     const auto* bals = rpc->getAllBalances();
     const auto& taddrs = *rpc->getAllTAddresses();
-    for (int i = taddrs.size() - 1; i >= 0; --i) {   // newest keys come last
+    for (int i = taddrs.size() - 1; i >= 0; --i) {
         const QString& a = taddrs.at(i);
         if (!used.contains(a) && (bals == nullptr || bals->value(a) == 0.0))
             return a;

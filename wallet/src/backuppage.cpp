@@ -263,6 +263,7 @@ void BackupPage::setPhraseInfo(bool available, const QString& fingerprint, const
     _fingerprint = fingerprint;
     _notCovered = notCovered;
     _showBtn->setVisible(available);
+    noteBackedUp();
     updateStatus();
     refreshNotCovered();
 }
@@ -366,6 +367,7 @@ void BackupPage::runCheck() {
         return;
     }
     setWrittenDown(_shownFingerprint);
+    noteBackedUp();
     hideWords();
     updateStatus();
 }
@@ -397,6 +399,7 @@ void BackupPage::confirmRestore() {
 }
 
 void BackupPage::setRestoring(bool busy) {
+    _restoring = busy;
     _restoreBusy->setVisible(busy);
     _restoreField->setReadOnly(busy);
     if (busy) {
@@ -419,5 +422,15 @@ bool BackupPage::isWrittenDown(const QString& fingerprint) {
 void BackupPage::setWrittenDown(const QString& fingerprint) {
     if (fingerprint.isEmpty()) return;
     QSettings().setValue("backup/phrase/" + fingerprint, true);
-    Settings::getInstance()->setWalletBackedUp(true);   // the Home reminder stops too
+}
+
+bool BackupPage::coversEverything() const {
+    for (const QString& addr : _notCovered)
+        if (!balanceOf || balanceOf(addr) != 0.0) return false;
+    return true;
+}
+
+void BackupPage::noteBackedUp() {
+    if (_available && isWrittenDown(_fingerprint) && coversEverything())
+        Settings::getInstance()->setWalletBackedUp(true);
 }

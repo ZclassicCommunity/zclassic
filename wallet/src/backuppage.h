@@ -32,7 +32,7 @@ public:
     std::function<void()>                 onShowPhrase;   // fetch the words -> showWords()
     std::function<void(const QString&)>   onRestore;      // the user confirmed a valid phrase
     std::function<void(const QString&)>   onMove;         // pre-fill Send from this address
-    std::function<double(const QString&)> balanceOf;
+    std::function<double(const QString&)> balanceOf;      // negative: not known yet
 
     // From the node. setSupported(false): a node without the phrase RPCs; only the
     // file card shows, as before.
@@ -43,6 +43,12 @@ public:
     void hideWords();
     void setRestoring(bool busy);
     void clearRestoreField();
+    bool isRestoring() const { return _restoring; }
+    // The current phrase was written down and checked.
+    bool isPhraseWritten() const { return isWrittenDown(_fingerprint); }
+    // No older address outside the phrase holds money. A balance that is not known
+    // yet counts as money: the Home reminder must not stop on a guess.
+    bool coversEverything() const;
     void addFileActions(QAction* backup, QAction* exportKeys, QAction* importKeys);
     void refreshNotCovered();
 
@@ -50,6 +56,12 @@ public:
     // restore): QSettings "backup/phrase/<fingerprint>".
     static bool isWrittenDown(const QString& fingerprint);
     static void setWrittenDown(const QString& fingerprint);
+
+private:
+    // Stops the Home backup reminder once the phrase is written down AND covers all
+    // the money here; with money on older addresses the reminder stays.
+    void noteBackedUp();
+    bool _restoring = false;
 
 private:
     QGroupBox* buildPhraseCard();

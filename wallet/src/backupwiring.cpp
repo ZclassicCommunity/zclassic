@@ -54,12 +54,15 @@ void MainWindow::buildBackupPage() {
     backupPage->onRestore    = [this](const QString& phrase) { restoreFromPhrase(phrase); };
     backupPage->onMove       = [this](const QString& addr) { moveToPhraseAddress(addr); };
     backupPage->balanceOf    = [this](const QString& addr) {
-        return (rpc && rpc->getAllBalances()) ? rpc->getAllBalances()->value(addr) : 0.0;
+        return (rpc && rpc->getAllBalances()) ? rpc->getAllBalances()->value(addr) : -1.0;   // -1: not loaded yet
     };
     ui->tabWidget->addTab(backupPage, tr("Backup"));
-    // The words stay on screen only while the page is shown.
+    // The words stay on screen only while the page is shown; so does a phrase typed
+    // in to restore (unless that restore is running).
     QObject::connect(ui->tabWidget, &QTabWidget::currentChanged, this, [this](int) {
-        if (ui->tabWidget->currentWidget() != backupPage) backupPage->hideWords();
+        if (ui->tabWidget->currentWidget() == backupPage) return;
+        backupPage->hideWords();
+        if (!backupPage->isRestoring()) backupPage->clearRestoreField();
     });
 }
 
@@ -107,6 +110,9 @@ void MainWindow::applyPhraseToHome() {
 
 // The reminder's words: the phrase when the node has one, else the wallet.dat copy.
 QString MainWindow::backupReminderText() const {
+    if (phraseSupported && backupPage && backupPage->isPhraseWritten())
+        return tr("Some older addresses hold money that your recovery phrase doesn't cover. "
+                  "Move it on the Backup page, or keep a copy of wallet.dat.");
     if (phraseSupported)
         return tr("Write down your recovery phrase. If this computer is lost and you have "
                   "no backup, your coins are gone forever.");
@@ -118,7 +124,8 @@ QString MainWindow::backupReminderText() const {
 void MainWindow::showRecoveryPhrase() {
     if (!rpc || !rpc->getConnection()) return;
     rpc->getConnection()->doRPC(rpcCall("z_getrecoveryphrase"), [this](json reply) {
-        if (!reply.is_object()) return;
+        // The reply can arrive after the user left the page: the words must not wait there.
+        if (!reply.is_object() || ui->tabWidget->currentWidget() != backupPage) return;
         const QStringList words = Phrase::split(QString::fromStdString(reply.value("phrase", std::string())));
         backupPage->showWords(words, QString::fromStdString(reply.value("fingerprint", std::string())));
     }, [this](QNetworkReply* r, const json& parsed) {
@@ -138,8 +145,15 @@ void MainWindow::restoreFromPhrase(const QString& phrase) {
         backupPage->setRestoring(false);
         backupPage->clearRestoreField();
         showImportProgress(false);
-        if (reply.is_object())
-            BackupPage::setWrittenDown(QString::fromStdString(reply.value("fingerprint", std::string())));
+        if (!reply.is_object()) {
+            rpc->refresh(true);
+            refreshPhraseInfo();
+            return;
+        }
+        // The user holds this phrase. Whether the Home reminder stops is decided when
+        // the node reports what the new phrase covers (the addresses that were here
+        // before the restore are not in it).
+        BackupPage::setWrittenDown(QString::fromStdString(reply.value("fingerprint", std::string())));
         const int found = stringList(reply.value("transparent", json::array())).size()
                         + stringList(reply.value("sapling", json::array())).size();
         ui->statusBar->showMessage(found == 1 ? tr("Restore finished: 1 address with history found.")
@@ -156,9 +170,14 @@ void MainWindow::restoreFromPhrase(const QString& phrase) {
 
 // "Move": fill Send with this address as Pay from, a fresh address of the phrase
 // as Pay to and "Send all". Nothing is sent: the user reviews and presses Send.
-// Old Sprout money goes to a new private (Sapling) address.
+// Old Sprout money cannot be sent to a Sapling address in one transaction (the node
+// refuses it), so it goes through the existing Sprout migration instead.
 void MainWindow::moveToPhraseAddress(const QString& from) {
     if (!rpc) return;
+    if (Settings::getInstance()->isSproutAddress(from)) {
+        turnstileDoMigration(from);
+        return;
+    }
     auto fill = [this, from](json reply) {
         if (!reply.is_string()) return;
         const QString to = QString::fromStdString(reply.get<std::string>());
