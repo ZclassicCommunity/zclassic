@@ -18,6 +18,16 @@ not cover: older random keys, imported keys, Sprout), `z_getrecoveryphrase` and
 and keeps every key already in the wallet (the previous seed stays as a `retiredseed`
 record). The GUI wallet shows the phrase, checks it, and restores from it on a new
 Backup page. Older nodes ignore the new record and still open the wallet.
+The phrase works in the ZClassic wallet only: it is not a standard BIP39 seed phrase, so
+other wallet apps derive different keys from the same words.
+
+Wallet look and navigation
+--------------------------
+
+The GUI wallet has a side menu instead of tabs, Receive with Private and Transparent tabs
+and a list of your addresses, and Settings, Address book and Backup as pages. Activity now
+lists up to 1000 transparent transactions; it used to show only the 10 latest. Icons load
+with a transparent background on every desktop.
 
 Peer-aware auto-finalization (reduced chain-split risk)
 -------------------------------------------------------

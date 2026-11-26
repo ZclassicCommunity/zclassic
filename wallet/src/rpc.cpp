@@ -580,7 +580,10 @@ void RPC::getTransactions(const std::function<void(json)>& cb) {
     json payload = {
         {"jsonrpc", "1.0"},
         {"id", "someid"},
-        {"method", "listtransactions"}
+        {"method", "listtransactions"},
+        // Without a count the node returns only the 10 latest transactions, so older
+        // transparent payments never showed in Activity.
+        {"params", {"*", 1000}}
     };
 
     conn->doRPCWithDefaultErrorHandling(payload, cb);

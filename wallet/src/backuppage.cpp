@@ -71,7 +71,8 @@ QGroupBox* BackupPage::buildPhraseCard() {
     auto* box = new QVBoxLayout(_phraseCard);
     box->setSpacing(10);
     box->addWidget(caption(tr("24 words that bring back this wallet on any computer. "
-                              "Write them on paper and keep it safe: anyone with them can spend your money."),
+                              "Write them on paper and keep it safe: anyone with them can spend your money. "
+                              "They work in the ZClassic wallet only, not in other wallet apps."),
                            _phraseCard));
     _status = new QLabel(_phraseCard);
     _status->setObjectName("backupStatus");
