@@ -145,7 +145,7 @@ RPC::~RPC() {
 void RPC::setEZClassicd(QProcess* p) {
     ezclassicd = p;
 
-    if (ezclassicd && ui->tabWidget->widget(4) == nullptr) {
+    if (ezclassicd && ui->tabWidget->indexOf(main->zclassicdtab) < 0) {   // not attached yet
         ui->tabWidget->addTab(main->zclassicdtab, "zclassicd");
     }
 
@@ -362,11 +362,11 @@ void RPC::setConnection(Connection* c) {
     // now-common path, ezclassicd stays null) never got the tab and Advanced was a
     // silent no-op. All fields on the page are RPC-derived (getinfo connections,
     // getnetworksolps, getblockchaininfo, getpeerinfo) and valid for any node; none
-    // read the QProcess. Keep the widget(4)==nullptr guard — it is the genuine
-    // no-double-add sentinel (tab_5/index 4 is the only widget at index>=4, the sole
-    // removeTab is the ctor, the sole adds are here + the now-redundant setEZClassicd
-    // path) and also honors "do not re-add after close" if a close path is ever added.
-    if (main->zclassicdtab != nullptr && ui->tabWidget->widget(4) == nullptr) {
+    // read the QProcess. The guard is the no-double-add sentinel: attach only when the
+    // page is not in the tab widget yet. It checks the page itself, not index 4, because
+    // the Address book and Settings pages now follow Activity (the sole removeTab is the
+    // ctor; the sole adds are here and setEZClassicd).
+    if (main->zclassicdtab != nullptr && ui->tabWidget->indexOf(main->zclassicdtab) < 0) {
         ui->tabWidget->addTab(main->zclassicdtab, "zclassicd");
     }
 

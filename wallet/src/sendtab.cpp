@@ -297,7 +297,7 @@ void MainWindow::addAddressSection() {
 
     auto Address1 = new QLineEdit(verticalGroupBox);
     Address1->setObjectName(QString("Address") % QString::number(itemNumber));
-    Address1->setPlaceholderText(tr("Paste a z-address (private) or t-address (public)"));
+    setupRecipientAddressField(Address1);   // placeholder + "i" for a long address
     QObject::connect(Address1, &QLineEdit::textChanged, [=] (auto text) {
         this->addressChanged(itemNumber, text);
     });
@@ -307,7 +307,7 @@ void MainWindow::addAddressSection() {
 
     auto addressBook1 = new QPushButton(verticalGroupBox);
     addressBook1->setObjectName(QStringLiteral("AddressBook") % QString::number(itemNumber));
-    addressBook1->setText(tr("Address Book"));
+    styleAddressBookButton(addressBook1);   // icon-only; the rail says "Address book"
     QObject::connect(addressBook1, &QPushButton::clicked, [=] () {
         AddressBook::open(this, Address1);
     });

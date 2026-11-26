@@ -1,4 +1,5 @@
 #include "txtablemodel.h"
+#include "timeformat.h"
 #include "settings.h"
 #include "rpc.h"
 #include "privacybadgedelegate.h"
@@ -102,7 +103,10 @@ bool TxTableModel::exportToCsv(QString fileName) const {
     // Write out each row
     for (int row = 0; row < modeldata->length(); row++) {
         for (int col = 0; col < headers.length(); col++) {
-            out << "\"" << data(index(row, col), Qt::DisplayRole).toString() << "\",";
+            const QString cell = col == 2   // the export keeps one fixed date format, whatever the Time format
+                ? QDateTime::fromMSecsSinceEpoch(modeldata->at(row).datetime * (qint64)1000).toLocalTime().toString("yyyy-MM-dd hh:mm")
+                : data(index(row, col), Qt::DisplayRole).toString();
+            out << "\"" << cell << "\",";
         }
         // Memo
         out << "\"" << modeldata->at(row).memo << "\"";
@@ -206,8 +210,7 @@ void TxTableModel::updateAllData() {
                     else 
                         return addr;
                 }
-        case 2: return QDateTime::fromMSecsSinceEpoch(modeldata->at(index.row()).datetime * (qint64)1000)
-                        .toLocalTime().toString("yyyy-MM-dd hh:mm");   // compact, scannable, sorts right; full ts in tooltip
+        case 2: return TimeFormat::format(modeldata->at(index.row()).datetime);   // Settings > Time format
         case 3: return Settings::getZCLDisplayFormat(modeldata->at(index.row()).amount);
         }
     } 

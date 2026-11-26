@@ -161,8 +161,7 @@ void ConnectionLoader::loadConnection() {
             // window up; warmup continues in the background.
             main->logger->write("Startup splash dismissed; warmup continues in background");
         });
-        d->show();
-        d->raise();
+        // No startup window: the main window shows this progress (banner + status bar).
         return;
     }
 

@@ -135,36 +135,9 @@ void AddressBook::open(MainWindow* parent, QLineEdit* target) {
 
     // Import Button
     QObject::connect(ab.btnImport, &QPushButton::clicked, [&] () {
-        // Get the import file name.
-        auto fileName = QFileDialog::getOpenFileUrl(&d, QObject::tr("Import Address Book"), QUrl(), 
-            "CSV file (*.csv)");
-        if (fileName.isEmpty())
-            return;
-
-        QFile file(fileName.toLocalFile());
-        if (!file.open(QIODevice::ReadOnly)) {
-            QMessageBox::information(&d, QObject::tr("Unable to open file"), file.errorString());
-            return;
-        }        
-
-        QTextStream in(&file);
-        QString line;
-        int numImported = 0;
-        while (in.readLineInto(&line)) {
-            QStringList items = line.split(",");
-            if (items.size() != 2)
-                continue;
-
-            if (!Settings::isValidAddress(items.at(0)))
-                continue;
-
-            // Add label, address.
-            model.addNewLabel(items.at(1), items.at(0));
-            numImported++;
-        }
-
-        QMessageBox::information(&d, QObject::tr("Address Book Import Done"),
-            QObject::tr("Imported %1 new Address book entries").arg(numImported));
+        AddressBook::importFromCsv(&d, [&](const QString& label, const QString& addr) {
+            model.addNewLabel(label, addr);
+        });
     });
 
     auto fnSetTargetLabelAddr = [=] (QLineEdit* target, QString label, QString addr) {
@@ -351,3 +324,33 @@ QString AddressBook::addressFromAddressLabel(const QString& lblAddr) {
 }
 
 AddressBook* AddressBook::instance = nullptr;
+
+// Ask for a CSV file of "address,label" lines and add each valid one through add.
+// Shared by the Address book page and the picker dialog. Returns how many were added.
+int AddressBook::importFromCsv(QWidget* parent, const std::function<void(const QString&, const QString&)>& add) {
+    auto fileName = QFileDialog::getOpenFileUrl(parent, QObject::tr("Import Address Book"), QUrl(),
+        "CSV file (*.csv)");
+    if (fileName.isEmpty())
+        return 0;
+
+    QFile file(fileName.toLocalFile());
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::information(parent, QObject::tr("Unable to open file"), file.errorString());
+        return 0;
+    }
+
+    QTextStream in(&file);
+    QString line;
+    int numImported = 0;
+    while (in.readLineInto(&line)) {
+        QStringList items = line.split(",");
+        if (items.size() != 2 || !Settings::isValidAddress(items.at(0)))
+            continue;
+        add(items.at(1), items.at(0));   // label, address
+        numImported++;
+    }
+
+    QMessageBox::information(parent, QObject::tr("Address Book Import Done"),
+        QObject::tr("Imported %1 new Address book entries").arg(numImported));
+    return numImported;
+}
