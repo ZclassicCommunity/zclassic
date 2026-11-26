@@ -1,3 +1,5 @@
+B=$work/b; mkdir_node "$B"; copy_chain "$A" "$B"; dd=$B; extra="-mocktime=$(($(date +%s) + 259200))"   # born 3 days after every block, as a new wallet on mainnet: a rescan that skips blocks older than the wallet finds nothing
+start || { echo "recovery-phrase: node B did not start"; exit 1; }; extra=""
 #!/bin/sh
 # TEST-ONLY. The 24-word recovery phrase, against real regtest daemons in throwaway datadirs:
 #   1. a new wallet's phrase covers every address it makes (z_getphraseinfo not_covered is empty);
@@ -39,7 +41,7 @@ ok() { echo "recovery-phrase: PASS $*"; }
 bad() { echo "recovery-phrase: FAIL $*"; failures=$((failures + 1)); }
 ck() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: got [$2] want [$3]"; fi; }
 
-dd=""; daemon="$bin/zclassicd"
+dd=""; daemon="$bin/zclassicd"; extra=""
 cli() { "$bin/zclassic-cli" -regtest -datadir="$dd" -rpcclienttimeout=600 "$@"; }
 mkdir_node() { # <dir>
     mkdir -p "$1/regtest"
@@ -48,7 +50,7 @@ mkdir_node() { # <dir>
 start() {
     "$daemon" -regtest -dnsseed=0 -debuglogfile=1 -nuparams=5ba81b19:1 -nuparams=76b809bb:1 -upnp=0 -listenonion=0 -discover=0 -bind=127.0.0.1 -rpcbind=127.0.0.1 \
         -rpcallowip=127.0.0.1 -printtoconsole=0 -showmetrics=0 -bootstrap=0 \
-        -datadir="$dd" -port=$base -listen=0 -connect=0 -daemon >/dev/null 2>&1 || return 1
+        -datadir="$dd" -port=$base -listen=0 -connect=0 $extra -daemon >/dev/null 2>&1 || return 1
     i=0
     while [ $i -lt 120 ]; do cli getblockcount >/dev/null 2>&1 && return 0; sleep 1; i=$((i + 1)); done
     return 1
@@ -116,8 +118,8 @@ ck "Sapling address funded" "$bal_z1" "3.00000000"
 stop
 
 # ---- 3. restore into a fresh wallet ---------------------------------------------------------
-B=$work/b; mkdir_node "$B"; copy_chain "$A" "$B"; dd=$B
-start || { echo "recovery-phrase: node B did not start"; exit 1; }
+B=$work/b; mkdir_node "$B"; copy_chain "$A" "$B"; dd=$B; extra="-mocktime=$(($(date +%s) + 259200))"   # born 3 days after every block, like a new wallet on mainnet: a rescan that skips blocks older than the wallet finds nothing
+start || { echo "recovery-phrase: node B did not start"; exit 1; }; extra=""
 own=$(cli getaddressesbyaccount "" | jget '[0]')
 fpb=$(cli z_getphraseinfo | jget fingerprint)
 [ "$fpb" != "$fp" ] && ok "fresh wallet has its own seed" || bad "fresh wallet has the same seed"

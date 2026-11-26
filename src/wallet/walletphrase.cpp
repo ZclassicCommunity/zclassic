@@ -24,6 +24,14 @@ const uint32_t SAPLING_BATCH = 5; // restore: Sapling accounts derived per round
 const int64_t SAPLING_GAP = 3;    // ... and when one of the newest three was used
 const int MAX_ROUNDS = 20;        // restore: rescans at most
 
+// True while RestoreFromPhrase runs (under cs_wallet). Keys derived then may be as old
+// as the chain, so they are stamped with the earliest birthday instead of today.
+bool fRestoring = false;
+struct RestoringScope {
+    RestoringScope() { fRestoring = true; }
+    ~RestoringScope() { fRestoring = false; }
+};
+
 // The account number of a Sapling keypath "m/32'/<coin>'/<account>'", or -1.
 int64_t SaplingAccount(const std::string& keypath, uint32_t coinType)
 {
@@ -186,6 +194,7 @@ bool DeriveTransparentKey(const CWallet& w, CKey& secret, CKeyMetadata& meta)
         secret = child.key;
         meta.hdKeypath = phrase::TransparentKeypath(coin, (uint32_t)next);
         meta.seedFp = fp;
+        if (fRestoring) meta.nCreateTime = 1;   // unknown birthday; 0 would mean 'no value'
         return true;
     }
     return false;
@@ -267,6 +276,13 @@ PhraseRestoreResult RestoreFromPhrase(CWallet& w, const HDSeed& seed, int startH
         throw std::runtime_error("start height is out of range");
 
     SwapSeed(w, seed);
+    // The phrase's keys may be as old as the chain. ScanForWalletTransactions skips
+    // every block older than the wallet's first key, and a fresh wallet's first key
+    // was made today: without this a restore into a new wallet scans nothing and
+    // shows a zero balance. Keys derived during the restore carry the same birthday
+    // in the wallet file, so a later -rescan covers the whole chain as well.
+    RestoringScope restoring;
+    w.nTimeFirstKey = 1;   // 0 would be considered 'no value'
     KeepKeyPoolOnPhrase(w);
     uint32_t target = SAPLING_BATCH;
     DeriveSaplingAccounts(w, target);
