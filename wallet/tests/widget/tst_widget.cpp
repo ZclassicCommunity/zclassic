@@ -3619,6 +3619,9 @@ private slots:
 
     // ---- Address book page: add, search, send to ---------------------------------
     void addressBookPage_addSearchAndSendTo() {
+        // The address book is kept on disk: drop what an earlier run of this test left there.
+        AddressBook::getInstance()->removeAddressLabel("Alice", "t1Puwyjt8X8r9B4yr9PvVJ93Vu5phobsGqJ");
+        AddressBook::getInstance()->removeAddressLabel("Bob", "zs10m00rvkhfm4f7n23e4sxsx275r7ptnggx39ygl0vy46j9mdll5c97gl6dxgpk0njuptg2mn9w5s");
         const QString prevSheet = qApp->styleSheet();
         const QPalette prevPalette = qApp->palette();
         MainWindow* w = makeWindow();
