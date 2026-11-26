@@ -324,3 +324,11 @@ Merging the eight wave 3 units (`own/zcl-unit-and-security`, `w3-crc32c-arm`, `w
 - filesize `src/c23/compat/librustzcash_compat.c`: 1895 -> 1887 (measured; the row follows the lazy-parameter rewrite of that file).
 
 Nothing else was baselined: the new options, RPC and files carry their help text, registration, conversion and `impact.rules` rows.
+
+## Recovery phrase (wallet/recovery-phrase)
+
+- kpi-floor `shell_lines`: 24451 -> 24645, exactly the new `qa/rpc-tests/wallet_recovery_phrase.sh` (194 lines; leased ports,
+  `jsonq_lib.sh` helpers, no `jq`). It is debt, to be paid by porting it to C23 with the other regtest scripts.
+
+Nothing else was baselined: the new files sit under every size, complexity and length limit, the three new RPCs carry help text,
+registration and a conversion row, and the new paths have `impact.rules` and `tests.rules` rows.

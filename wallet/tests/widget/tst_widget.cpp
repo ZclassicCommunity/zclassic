@@ -73,6 +73,9 @@
 #include <QClipboard>
 #include "addresscell.h"
 #include "timeformat.h"
+#include "phrase.h"
+#include "backuppage.h"
+#include <QPlainTextEdit>
 #include <QMouseEvent>
 #include <QTextDocumentFragment>
 #include <memory>
@@ -3768,6 +3771,20 @@ private slots:
         w->findChild<QAction*>("actionSettings")->trigger();
         shot("07-settings.png");
 
+        // Backup: the phrase shown (made-up seed bytes 0..31), one older address to move.
+        QByteArray demoSeed;
+        for (int i = 0; i < 32; ++i) demoSeed.append(char(i));
+        w->applyPhraseInfo(json{ {"available", true}, {"fingerprint", "fp-showcase"},
+                                 {"not_covered", json::array({ T1.toStdString() })} });
+        w->ui->tabWidget->setCurrentIndex(w->ui->tabWidget->indexOf(w->backupPage));
+        w->backupPage->showWords(Phrase::fromEntropy(demoSeed), "fp-showcase");
+        shot("09-backup.png");
+        w->backupPage->hideWords();
+        w->backupPage->findChild<QPlainTextEdit*>("restorePhrase")->setPlainText(
+            QStringList(Phrase::fromEntropy(demoSeed).mid(0, 12)).join(' '));
+        w->backupPage->findChild<QScrollArea*>("backupScroll")->verticalScrollBar()->setValue(10000);
+        shot("10-backup-restore.png");
+
         // The More menu (File and Help items), drawn on the window background.
         QTimer::singleShot(50, [&]() {
             if (auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget())) {
@@ -3825,6 +3842,7 @@ private slots:
         QVERIFY(w->findChild<QPushButton*>("navRailSettings")->isEnabled());
         QVERIFY(w->findChild<QPushButton*>("navRailAddressBook")->isEnabled());   // local data
         QVERIFY(w->findChild<QPushButton*>("navRailMore")->isEnabled());
+        QVERIFY(!w->findChild<QPushButton*>("navRailBackup")->isEnabled());   // needs the node
 
         // A long Pay-from address no longer sets the Send page's minimum width: the
         // combo sizes from a short minimum and shows the address shortened.
@@ -3836,7 +3854,7 @@ private slots:
 
     // ---- The rail's "More" holds every File and Help item, each once -----------
     // With the menu bar gone, nothing it offered may be lost: More must list the
-    // File and Help actions (the backup that both menus carried, only once), and
+    // File and Help actions, each once (the backup and key items moved to the Backup page), and
     // end with Exit.
     void rail_moreMenuHoldsFileAndHelpItems() {
         const QString prevSheet = qApp->styleSheet();
@@ -3858,15 +3876,20 @@ private slots:
         });
         more->click();
         const QStringList expected = {
-            w->ui->actionPay_URI->text(), w->ui->actionBackup_wallet_dat->text(),
-            w->ui->actionExport_transactions->text(), w->ui->actionImport_Private_Key->text(),
-            w->ui->actionExport_All_Private_Keys->text(), w->ui->actionTurnstile_Migration->text(),
+            w->ui->actionPay_URI->text(),
+            w->ui->actionExport_transactions->text(), w->ui->actionTurnstile_Migration->text(),
             w->ui->actionCheck_for_Updates->text(), w->ui->actionAbout->text(),
             w->ui->actionExit->text() };
         for (QString e : expected) {
             e.remove(QLatin1Char('&'));
             QVERIFY2(items.count(e) == 1, qPrintable(QString("\"%1\" appears %2 times in More: %3")
                 .arg(e).arg(items.count(e)).arg(items.join(" | "))));
+        }
+        // The backup, key export and key import moved to the Backup page.
+        for (QAction* moved : { w->ui->actionBackup_wallet_dat, w->ui->actionImport_Private_Key,
+                                w->ui->actionExport_All_Private_Keys }) {
+            const QString t = moved->text().remove(QLatin1Char('&'));
+            QVERIFY2(!items.contains(t), qPrintable(QString("\"%1\" is still in More").arg(t)));
         }
         QCOMPARE(items.last(), QString(w->ui->actionExit->text()).remove(QLatin1Char('&')));
         QCOMPARE(items.size(), QSet<QString>(items.begin(), items.end()).size());   // nothing twice
@@ -3888,7 +3911,12 @@ private slots:
                  "the window has no menu bar; its items live in the nav rail");
         QVERIFY(w->findChild<QPushButton*>("navRailMore") != nullptr);
         w->resize(1100, 760);
+        // The Backup page as a phrase-capable node shows it: status, the words, restore.
+        w->backupPage->setPhraseInfo(true, "fp-dup", {});
+        w->backupPage->showWords(Phrase::fromEntropy(QByteArray(32, '\x7f')), "fp-dup");
         for (int page = 0; page < w->ui->tabWidget->count(); ++page) {   // every page, Settings too
+            if (w->ui->tabWidget->widget(page) == w->backupPage)   // leaving the page hides the words
+                w->backupPage->showWords(Phrase::fromEntropy(QByteArray(32, '\x7f')), "fp-dup");
             w->ui->tabWidget->setCurrentIndex(page);
             qApp->processEvents();
             QMap<QString, QString> seen;   // text -> objectName of the first holder
@@ -3911,6 +3939,196 @@ private slots:
         settleAndDelete(w);
         qApp->setStyleSheet(prevSheet);
         qApp->setPalette(prevPalette);
+    }
+
+    // ---- Recovery phrase: the words, the checksum and the Restore field's hints ----
+    // Vectors from BIP39 (entropy -> words); the 32 bytes are the wallet seed.
+    void phrase_wordsChecksumAndHints() {
+        QCOMPARE(Phrase::wordList().size(), 2048);
+        const QStringList zeros = Phrase::fromEntropy(QByteArray(32, '\0'));
+        QCOMPARE(zeros.join(' '), QString("abandon ").repeated(23) + "art");
+        const QString legal = "legal winner thank year wave sausage worth useful legal winner thank year "
+                              "wave sausage worth useful legal winner thank year wave sausage worth title";
+        QCOMPARE(Phrase::fromEntropy(QByteArray(32, '\x7f')).join(' '), legal);
+        QVERIFY(Phrase::fromEntropy(QByteArray(16, '\0')).isEmpty());   // 24 words only
+
+        using C = Phrase::Check;
+        QCOMPARE(Phrase::check("").state, C::Empty);
+        QCOMPARE(Phrase::check(legal).state, C::Valid);
+        QCOMPARE(Phrase::check("  " + legal.toUpper().replace(" ", "\n  ") + " ").state, C::Valid);   // any case, any spacing
+        const C twelve = Phrase::check(QStringList(legal.split(' ').mid(0, 12)).join(' '));
+        QCOMPARE(twelve.state, C::Incomplete);
+        QCOMPARE(Phrase::hint(twelve), QString("12 of 24 words"));
+        QCOMPARE(Phrase::check("legal winn").state, C::Incomplete);   // still typing the last word
+        QStringList typo = legal.split(' ');
+        typo[6] = "wurth";
+        const C unknown = Phrase::check(typo.join(' '));
+        QCOMPARE(unknown.state, C::UnknownWord);
+        QCOMPARE(unknown.word, 7);
+        QVERIFY2(Phrase::hint(unknown).startsWith("Word 7 isn't in the list"), qPrintable(Phrase::hint(unknown)));
+        typo[6] = "abandonn";
+        QCOMPARE(Phrase::check(typo.join(' ')).suggestion, QString("abandon"));
+        const C bad = Phrase::check(QString("abandon ").repeated(24).trimmed());
+        QCOMPARE(bad.state, C::BadChecksum);
+        QCOMPARE(Phrase::hint(bad), QString("These words don't check out — look for a typo"));
+        QCOMPARE(Phrase::check(legal + " legal").state, C::TooMany);
+    }
+
+    // ---- Backup page: show and hide the words, then check three of them --------
+    void backupPage_showHideAndCheckThePhrase() {
+        MainWindow* w = makeWindow();
+        BackupPage* page = w->backupPage;
+        QVERIFY(page != nullptr);
+        Settings::getInstance()->setWalletBackedUp(false);
+        w->applyPhraseInfo(json{ {"available", true}, {"fingerprint", "fp-check"},
+                                 {"not_covered", json::array()} });
+        w->ui->tabWidget->setCurrentIndex(w->ui->tabWidget->indexOf(page));
+        QVERIFY(page->findChild<QGroupBox*>("phraseCard")->isVisibleTo(w));
+        auto* status = page->findChild<QLabel*>("backupStatus");
+        QCOMPARE(status->text(), QString("Not written down yet"));
+        // Home's reminder now points at the phrase, and its button opens this page.
+        auto reminder = [w]() -> QString {   // Home's backup reminder line
+            for (QLabel* l : w->findChildren<QLabel*>("homeFixItText"))
+                if (l->text().contains("recovery phrase")) return l->text();
+            return QString();
+        };
+        QVERIFY(!reminder().isEmpty());
+        QVERIFY(!reminder().contains("no recovery phrase"));
+
+        const QStringList words = Phrase::fromEntropy(QByteArray(32, '\x7f'));
+        auto* grid = page->findChild<QWidget*>("phraseGrid");
+        auto* show = page->findChild<QPushButton*>("phraseShow");
+        QVERIFY(!grid->isVisibleTo(w));
+        page->showWords(words, "fp-check");
+        QVERIFY(grid->isVisibleTo(w));
+        QCOMPARE(show->text(), QString("Hide phrase"));
+        const QList<QLabel*> cells = grid->findChildren<QLabel*>("phraseWord");
+        QCOMPARE(cells.size(), 24);
+        QVERIFY(cells.first()->text().contains("1</span>") && cells.first()->text().endsWith("legal"));
+        QVERIFY(cells.first()->textInteractionFlags() == Qt::NoTextInteraction);   // nothing to select and copy
+        show->click();   // Hide
+        QVERIFY(!grid->isVisibleTo(w));
+        for (QLabel* c : cells) QVERIFY(c->text().isEmpty());
+        // Leaving the page hides the words too.
+        page->showWords(words, "fp-check");
+        w->ui->tabWidget->setCurrentIndex(0);
+        QVERIFY(cells.first()->text().isEmpty());
+        w->ui->tabWidget->setCurrentIndex(w->ui->tabWidget->indexOf(page));
+
+        // "I wrote it down": three positions to type back; a wrong word is refused.
+        page->showWords(words, "fp-check");
+        page->findChild<QPushButton*>("phraseWrote")->click();
+        QVERIFY(!grid->isVisibleTo(w));
+        auto* step = page->findChild<QWidget*>("phraseCheck");
+        QVERIFY(step->isVisibleTo(w));
+        const QList<QLabel*> asked = step->findChildren<QLabel*>("phraseCheckLabel");
+        const QList<QLineEdit*> inputs = step->findChildren<QLineEdit*>("phraseCheckInput");
+        QCOMPARE(asked.size(), 3);
+        for (int i = 0; i < 3; ++i) inputs.at(i)->setText("zoo");
+        step->findChild<QPushButton*>("phraseCheckButton")->click();
+        QVERIFY(!BackupPage::isWrittenDown("fp-check"));
+        QVERIFY(step->findChild<QLabel*>("backupStatus")->text().contains("doesn't match"));
+        for (int i = 0; i < 3; ++i) {
+            const int pos = asked.at(i)->text().section(' ', 1).toInt();
+            QVERIFY(pos >= 1 && pos <= 24);
+            inputs.at(i)->setText(" " + words.at(pos - 1).toUpper() + " ");
+        }
+        step->findChild<QPushButton*>("phraseCheckButton")->click();
+        QVERIFY(BackupPage::isWrittenDown("fp-check"));
+        QVERIFY(Settings::getInstance()->isWalletBackedUp());   // the Home reminder stops
+        QCOMPARE(status->text(), QString("Written down"));
+        QVERIFY(!step->isVisibleTo(w));
+        QSettings().remove("backup/phrase/fp-check");
+        Settings::getInstance()->setWalletBackedUp(false);
+
+        // The reminder's button opens the Backup page.
+        w->ui->tabWidget->setCurrentIndex(0);
+        for (QPushButton* b : w->findChildren<QPushButton*>("homeFixItBtn"))
+            if (b->text() == "Back up my wallet") b->click();
+        QCOMPARE(w->ui->tabWidget->currentWidget(), static_cast<QWidget*>(page));
+        settleAndDelete(w);
+    }
+
+    // ---- Backup page: Restore is enabled only for 24 words that check out -------
+    void backupPage_restoreOnlyForAValidPhrase() {
+        MainWindow* w = makeWindow();
+        BackupPage* page = w->backupPage;
+        w->applyPhraseInfo(json{ {"available", true}, {"fingerprint", "fp-restore"},
+                                 {"not_covered", json::array()} });
+        auto* field = page->findChild<QPlainTextEdit*>("restorePhrase");
+        auto* hint = page->findChild<QLabel*>("restoreHint");
+        auto* restore = page->findChild<QPushButton*>("restoreButton");
+        QVERIFY(field && hint && restore);
+        QVERIFY(!restore->isEnabled());
+        const QStringList legal = Phrase::fromEntropy(QByteArray(32, '\x7f'));
+        field->setPlainText(QStringList(legal.mid(0, 12)).join(' '));
+        QCOMPARE(hint->text(), QString("12 of 24 words"));
+        QVERIFY(!restore->isEnabled());
+        QStringList typo = legal;
+        typo[6] = "wurth";
+        field->setPlainText(typo.join(' '));
+        QVERIFY(hint->text().startsWith("Word 7 isn't in the list"));
+        QVERIFY(!restore->isEnabled());
+        field->setPlainText(QString("abandon ").repeated(24));
+        QCOMPARE(hint->text(), QString("These words don't check out — look for a typo"));
+        QVERIFY(!restore->isEnabled());
+        field->setPlainText(legal.join(' '));
+        QVERIFY(restore->isEnabled());
+        page->setRestoring(true);   // while the node rescans: no second restore
+        QVERIFY(!restore->isEnabled() && field->isReadOnly());
+        page->setRestoring(false);
+        QVERIFY(restore->isEnabled());
+        settleAndDelete(w);
+    }
+
+    // ---- Backup page: money the phrase doesn't cover; Move only fills in Send ----
+    void backupPage_moveOnlyPrefillsSend() {
+        MainWindow* w = makeWindow();
+        const QString OLD = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        const QString EMPTY = "t1Puwyjt8X8r9B4yr9PvVJ93Vu5phobsGqJ";
+        const QString NEWZ = "zs10m00rvkhfm4f7n23e4sxsx275r7ptnggx39ygl0vy46j9mdll5c97gl6dxgpk0njuptg2mn9w5s";
+        auto* bals = new QMap<QString, double>();
+        (*bals)[OLD] = 12.5; (*bals)[EMPTY] = 0.0;
+        w->getRPC()->testSetBalances(bals);
+        w->applyPhraseInfo(json{ {"available", true}, {"fingerprint", "fp-move"},
+                                 {"not_covered", json::array({ OLD.toStdString(), EMPTY.toStdString() })} });
+        BackupPage* page = w->backupPage;
+        w->ui->tabWidget->setCurrentIndex(w->ui->tabWidget->indexOf(page));
+        QVERIFY(page->findChild<QLabel*>("backupStatus")->text().contains("2 older addresses"));
+        auto* card = page->findChild<QGroupBox*>("notCoveredCard");
+        auto* list = page->findChild<QTreeWidget*>("notCoveredList");
+        QVERIFY(card->isVisibleTo(w));
+        QCOMPARE(list->topLevelItemCount(), 1);   // only the address with money
+        QCOMPARE(list->topLevelItem(0)->text(0), OLD);
+
+        w->getRPC()->testSetNextZaddrResult(NEWZ);
+        auto* move = qobject_cast<QToolButton*>(list->itemWidget(list->topLevelItem(0), 2));
+        QVERIFY(move && move->objectName() == "notCoveredMove");
+        move->click();
+        qApp->processEvents();
+        QCOMPARE(w->ui->tabWidget->currentIndex(), 1);   // Send, for the user to review
+        QCOMPARE(w->ui->inputsCombo->currentText(), OLD);
+        QCOMPARE(w->ui->Address1->text(), NEWZ);
+        QVERIFY(w->ui->Max1->isChecked());
+        QVERIFY(QApplication::activeModalWidget() == nullptr);   // no confirmation, nothing sent
+        settleAndDelete(w);
+    }
+
+    // ---- Backup page with an older node: only the wallet file and keys ----------
+    void backupPage_olderNodeShowsOnlyTheFiles() {
+        MainWindow* w = makeWindow();
+        BackupPage* page = w->backupPage;
+        w->ui->tabWidget->setCurrentIndex(w->ui->tabWidget->indexOf(page));
+        QVERIFY(!w->phraseSupported);
+        QVERIFY(!page->findChild<QGroupBox*>("phraseCard")->isVisibleTo(w));
+        QVERIFY(!page->findChild<QGroupBox*>("restoreCard")->isVisibleTo(w));
+        QVERIFY(page->findChild<QGroupBox*>("backupFilesCard")->isVisibleTo(w));
+        QCOMPARE(page->findChildren<QPushButton*>("backupFileButton").size(), 3);
+        bool oldWording = false;   // today's wording
+        for (QLabel* l : w->findChildren<QLabel*>("homeFixItText"))
+            oldWording = oldWording || l->text().contains("no recovery phrase");
+        QVERIFY(oldWording);
+        settleAndDelete(w);
     }
 
     // ======================================================================

@@ -66,6 +66,9 @@ SOURCES += \
     src/timeformat.cpp \
     src/settingspage.cpp \
     src/addressbookpage.cpp \
+    src/phrase.cpp \
+    src/backuppage.cpp \
+    src/backupwiring.cpp \
     src/3rdparty/qrcode/BitBuffer.cpp \
     src/3rdparty/qrcode/QrCode.cpp \
     src/3rdparty/qrcode/QrSegment.cpp \
@@ -120,6 +123,8 @@ HEADERS += \
     src/privacybadgedelegate.h \
     src/addresscell.h \
     src/timeformat.h \
+    src/phrase.h \
+    src/backuppage.h \
     src/3rdparty/qrcode/BitBuffer.hpp \
     src/3rdparty/qrcode/QrCode.hpp \
     src/3rdparty/qrcode/QrSegment.hpp \

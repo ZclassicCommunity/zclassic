@@ -28,6 +28,7 @@ class QLayout;
 class QLineEdit;
 class QComboBox;
 class QDialog;
+class BackupPage;
 class Ui_Settings;
 
 using json = nlohmann::json;
@@ -319,6 +320,21 @@ public:
     // percent); false hides it. No-op until setupHomeDashboard() has built it. Single
     // writer: only the import flow toggles it (importPrivKeys start, doImport finish).
     void showImportProgress(bool active);
+
+    // backuppage.cpp / backupwiring.cpp: the Backup page (recovery phrase, restore,
+    // money the phrase doesn't cover, wallet file and keys). phraseSupported is true
+    // once the node answered z_getphraseinfo (older nodes don't have it).
+    BackupPage*  backupPage      = nullptr;
+    bool         phraseSupported = false;
+    void buildBackupPage();
+    void openBackupPage();
+    void refreshPhraseInfo();
+    void applyPhraseInfo(const json& reply);
+    void applyPhraseToHome();
+    QString backupReminderText() const;
+    void showRecoveryPhrase();
+    void restoreFromPhrase(const QString& phrase);
+    void moveToPhraseAddress(const QString& from);
 
     // RUNTIME actionable dialog (edit #5). Reached from the sync poller (rpc.cpp) when an
     // ATTACHED FOREIGN node (one this wallet did NOT start: rpc->isEmbedded()==false) has

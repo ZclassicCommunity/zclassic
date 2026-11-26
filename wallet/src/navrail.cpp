@@ -11,6 +11,7 @@
 #include "addresscell.h"
 #include "rpc.h"
 #include "timeformat.h"
+#include "backuppage.h"
 
 #include <QAbstractButton>
 #include <QButtonGroup>
@@ -106,6 +107,7 @@ void MainWindow::styleAddressBookButton(QPushButton* button) {
 void MainWindow::setupNavRail() {
     ui->tabWidget->tabBar()->hide();
     buildAddressBookPage();   // pages like the others, reached from the rail
+    buildBackupPage();
     buildSettingsPage();
     ui->tabWidget->setDocumentMode(true);   // page content sits flush to the rail
 
@@ -209,6 +211,11 @@ void MainWindow::addRailShortcuts(QWidget* rail, QVBoxLayout* railLayout) {
     bookBtn->setCheckable(true);   // a page of its own (addressbookpage.cpp)
     navRailGroup->addButton(bookBtn, ui->tabWidget->indexOf(addressBookPage));
     QObject::connect(bookBtn, &QPushButton::clicked, this, &MainWindow::openAddressBookPage);
+    auto* backupBtn = makeRailItem(rail, railLayout, tr("Backup"),
+                                   ":/icons/res/icons/nav-backup.svg", "navRailBackup", true);
+    backupBtn->setCheckable(true);   // a page of its own (backuppage.cpp)
+    navRailGroup->addButton(backupBtn, ui->tabWidget->indexOf(backupPage));
+    QObject::connect(backupBtn, &QPushButton::clicked, this, &MainWindow::openBackupPage);
     auto* settingsBtn = makeRailItem(rail, railLayout, tr("Settings"),
                                      ":/icons/res/icons/nav-settings.svg", "navRailSettings", true);
     settingsBtn->setCheckable(true);   // a page of its own (settingspage.cpp)
@@ -258,13 +265,18 @@ void MainWindow::syncNavRailToTab(int idx) {
     }
 }
 
-// More = the File menu (without Exit), then Help, then Exit. Rebuilt on each
+// More = the File menu (without Exit and the Backup page items), then Help, then Exit. Rebuilt on each
 // open so actions added later appear; an item both menus carry (the backup) is
 // listed once. The QActions are the menu bar's own, so handlers and shortcuts hold.
 void MainWindow::fillMoreMenu(QMenu* menu) {
     emit ui->menuFile->aboutToShow();   // refresh labels such as Exit's wording
     menu->clear();
     QSet<QString> seen;
+    // The backup, key export and key import live on the Backup page; their
+    // shortcuts still work (hideMenuBarKeepShortcuts).
+    for (QAction* onBackupPage : { ui->actionBackup_wallet_dat, ui->actionExport_All_Private_Keys,
+                                   ui->actionImport_Private_Key })
+        seen.insert(onBackupPage->text().remove(QLatin1Char('&')));
     addMenuActionsOnce(menu, ui->menuFile, seen);
     addMenuActionsOnce(menu, ui->menuHelp, seen);
     if (!menu->actions().isEmpty() && !menu->actions().last()->isSeparator())
@@ -351,7 +363,7 @@ void MainWindow::setupRecipientAddressField(QLineEdit* field) {
 // (Exit, repair, About) stay available. All open as soon as the node answers.
 void MainWindow::lockUntilConnected() {
     QList<QAbstractButton*> locked;
-    for (int id : {1, 2, 3, kNodeButtonId})
+    for (int id : {1, 2, 3, ui->tabWidget->indexOf(backupPage), kNodeButtonId})
         if (QAbstractButton* b = navRailGroup->button(id)) locked << b;
 
     for (QAbstractButton* b : locked) {
@@ -366,6 +378,7 @@ void MainWindow::lockUntilConnected() {
             b->setEnabled(true);
             b->setToolTip(b->text().trimmed());
         }
+        refreshPhraseInfo();   // the Backup page and Home reminder learn about the phrase
         waiting->deleteLater();
     });
     waiting->start();

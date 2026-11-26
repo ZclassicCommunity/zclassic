@@ -18,6 +18,7 @@
         <file>res/icons/nav-activity.svg</file>
         <file>res/icons/nav-book.svg</file>
         <file>res/icons/nav-settings.svg</file>
+        <file>res/icons/nav-backup.svg</file>
         <file>res/icons/nav-node.svg</file>
         <file>res/icons/nav-more.svg</file>
         <file>res/icons/book-light.svg</file>
@@ -33,6 +34,7 @@
         <file>res/zclassicdlogo.gif</file>
         <file>res/logobig.gif</file>
         <file>res/zcl-mark.png</file>
+        <file>res/bip39-english.txt</file>
     </qresource>
     <qresource prefix="/translations">
         <file>res/zcl_qt_wallet_es.qm</file>

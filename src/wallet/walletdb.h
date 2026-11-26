@@ -184,6 +184,10 @@ public:
 
     bool WriteHDSeed(const HDSeed& seed);
     bool WriteCryptedHDSeed(const uint256& seedFp, const std::vector<unsigned char>& vchCryptedSecret);
+    //! A restore from a recovery phrase swaps the seed: the old one moves to a
+    //! "retiredseed" record (kept, never loaded as the wallet's seed) and its
+    //! "hdseed" record goes, so exactly one "hdseed" record remains.
+    bool RetireHDSeed(const HDSeed& seed);
     //! write the hdchain model (external chain child index counter)
     bool WriteHDChain(const CHDChain& chain);
 

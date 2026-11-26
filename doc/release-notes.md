@@ -4,6 +4,21 @@ release-notes at release time)
 Notable changes
 ===============
 
+Wallet recovery phrase
+----------------------
+
+The wallet's HD seed can now be written down as 24 words (the BIP39 English list and
+checksum; the words are the 32-byte seed itself, so an existing wallet keeps its seed and
+its Sapling addresses). New transparent addresses and transparent change now come from the
+seed too (BIP44 path m/44'/147'/0'/0/i), so one phrase covers every new address.
+At start-up the key pool drops keys that do not come from the seed (the keys stay in the
+wallet) and refills from it. New RPCs: `z_getphraseinfo` (which addresses the phrase does
+not cover: older random keys, imported keys, Sprout), `z_getrecoveryphrase` and
+`z_restorefromphrase "phrase" ( startheight )`, which makes the phrase the seed, rescans
+and keeps every key already in the wallet (the previous seed stays as a `retiredseed`
+record). The GUI wallet shows the phrase, checks it, and restores from it on a new
+Backup page. Older nodes ignore the new record and still open the wallet.
+
 Peer-aware auto-finalization (reduced chain-split risk)
 -------------------------------------------------------
 

@@ -134,6 +134,8 @@ public:
     bool SetHDSeed(const HDSeed& seed);
     bool HaveHDSeed() const;
     bool GetHDSeed(HDSeed& seedOut) const;
+    //! Swap in another seed (restore from a recovery phrase); the wallet keeps every key it holds.
+    bool ReplaceHDSeed(const HDSeed& seed);
 
     bool AddKeyPubKey(const CKey& key, const CPubKey &pubkey);
     bool HaveKey(const CKeyID &address) const

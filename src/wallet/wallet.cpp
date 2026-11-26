@@ -25,6 +25,7 @@
 #include "zcash/Note.hpp"
 #include "crypter.h"
 #include "zcash/zip32.h"
+#include "wallet/walletphrase.h"
 
 #include <assert.h>
 
@@ -235,9 +236,9 @@ CPubKey CWallet::GenerateNewKey()
 {
     AssertLockHeld(cs_wallet); // mapKeyMetadata
     bool fCompressed = CanSupportFeature(FEATURE_COMPRPUBKEY); // default to compressed public keys if we want 0.6.0 wallets
-
-    CKey secret;
-    secret.MakeNewKey(fCompressed);
+    CKey secret;   // from the recovery phrase seed when the wallet has one (walletphrase.cpp)
+    CKeyMetadata metadata(GetTime());
+    if (!fCompressed || !DeriveTransparentKey(*this, secret, metadata)) secret.MakeNewKey(fCompressed);
 
     // Compressed public keys were introduced in version 0.6.0
     if (fCompressed)
@@ -245,10 +246,9 @@ CPubKey CWallet::GenerateNewKey()
 
     CPubKey pubkey = secret.GetPubKey();
     assert(secret.VerifyPubKey(pubkey));
-
     // Create new metadata
-    int64_t nCreationTime = GetTime();
-    mapKeyMetadata[pubkey.GetID()] = CKeyMetadata(nCreationTime);
+    int64_t nCreationTime = metadata.nCreateTime;
+    mapKeyMetadata[pubkey.GetID()] = metadata;
     if (!nTimeFirstKey || nCreationTime < nTimeFirstKey)
         nTimeFirstKey = nCreationTime;
 

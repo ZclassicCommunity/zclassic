@@ -35,6 +35,15 @@ bool CBasicKeyStore::SetHDSeed(const HDSeed& seed)
     return true;
 }
 
+bool CBasicKeyStore::ReplaceHDSeed(const HDSeed& seed)
+{
+    LOCK(cs_SpendingKeyStore);
+    if (seed.IsNull())
+        return false;
+    hdSeed = seed;
+    return true;
+}
+
 bool CBasicKeyStore::HaveHDSeed() const
 {
     LOCK(cs_SpendingKeyStore);

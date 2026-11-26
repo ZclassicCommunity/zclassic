@@ -1072,11 +1072,7 @@ void MainWindow::setupHomeDashboard() {
     backupV->setContentsMargins(18, 16, 18, 16);
     backupV->setSpacing(8);
 
-    homeBackupText = new QLabel(
-        tr("Back up your wallet. This wallet has no recovery phrase — if this "
-           "computer is lost or its disk fails and you have no backup, your coins "
-           "are gone forever."),
-        homeBackupCard);
+    homeBackupText = new QLabel(backupReminderText(), homeBackupCard);   // backupwiring.cpp
     homeBackupText->setObjectName("homeFixItText");   // reuse the amber-body qss rule
     homeBackupText->setWordWrap(true);
 
@@ -2071,8 +2067,8 @@ void MainWindow::balancesReady() {
 
 // P0-2: First-run / until-backed-up fund-safety prompt.
 //
-// The ZClassic wallet is wallet.dat FILE-based: there is NO BIP39 seed phrase.
-// If the user loses wallet.dat (disk failure, reinstall, lost laptop) and has
+// With an older node the wallet is wallet.dat FILE-based, with no recovery phrase;
+// a node with z_getphraseinfo has one (backupwiring.cpp). If the user loses wallet.dat and has
 // no backup, the coins are gone forever. This prompt nags on every launch
 // until the user backs up (file copy) or exports their private keys, then it
 // is silenced permanently via the persisted "options/walletbackedup" flag.
@@ -2125,12 +2121,14 @@ void MainWindow::promptWalletBackup() {
     box.setWindowTitle(tr("Back up your wallet"));
     box.setIcon(QMessageBox::Warning);
     box.setText(tr("Back up your wallet"));
-    box.setInformativeText(tr(
-        "Your ZClassic lives in one file on this computer (wallet.dat). There is "
-        "<b>no recovery phrase</b>. If this computer is lost or its disk fails and "
-        "you have no backup, your coins are gone forever.<br><br>"
-        "It takes one click. Keep the copy somewhere safe — a USB stick or another "
-        "computer."));
+    box.setInformativeText(phraseSupported   // a node with a recovery phrase: write it down
+        ? tr("Write down your 24-word recovery phrase. If this computer is lost and you "
+             "have no backup, your coins are gone forever.")
+        : tr("Your ZClassic lives in one file on this computer (wallet.dat). There is "
+             "<b>no recovery phrase</b>. If this computer is lost or its disk fails and "
+             "you have no backup, your coins are gone forever.<br><br>"
+             "It takes one click. Keep the copy somewhere safe — a USB stick or another "
+             "computer."));
 
     QPushButton* backupBtn = box.addButton(tr("Back up my wallet"), QMessageBox::AcceptRole);
     QPushButton* laterBtn  = box.addButton(tr("Maybe later"), QMessageBox::RejectRole);
@@ -2138,8 +2136,8 @@ void MainWindow::promptWalletBackup() {
     box.setEscapeButton(laterBtn);
 
     box.exec();
-    if (box.clickedButton() == backupBtn)
-        backupWallet();   // the one safe copy + the one warm closure; sets the flag on success
+    if (box.clickedButton() == backupBtn)   // the phrase page, or the one safe wallet.dat copy
+        phraseSupported ? openBackupPage() : backupWallet();
     // "Maybe later" / closed: do nothing. The flag stays unset, so the non-blocking
     // Home card keeps the gentle reminder. No scare modal.
 }

@@ -611,3 +611,18 @@ QScrollBar#fieldScroll::add-line, QScrollBar#fieldScroll::sub-line { width: 0px;
 
 /* Settings page: option explanations are quieter than the option names. */
 QLabel#settingsCaption { color: #9aa59d; font-size: 11pt; }
+
+/* Backup page: status lines in the privacy tones, the phrase as a quiet grid. */
+QLabel#backupStatus, QLabel#restoreHint { font-size: 12pt; }
+QLabel#backupStatus[tone="ok"], QLabel#restoreHint[tone="ok"]     { color: #5fd38d; }
+QLabel#backupStatus[tone="warn"], QLabel#restoreHint[tone="warn"] { color: #f0b878; }
+QLabel#backupStatus[tone="dim"], QLabel#restoreHint[tone="dim"]   { color: #9aa59d; }
+QWidget#phraseGrid QLabel#phraseWord {
+    background-color: #181e1a; border: 1px solid #232b26; border-radius: 8px;
+    padding: 6px 10px; font-family: "DejaVu Sans Mono", "Ubuntu Mono", monospace; font-size: 12pt;
+}
+QPlainTextEdit#restorePhrase {
+    background-color: #181e1a; border: 1px solid #232b26; border-radius: 10px;
+    padding: 6px 8px; font-family: "DejaVu Sans Mono", "Ubuntu Mono", monospace; font-size: 12pt;
+}
+QPlainTextEdit#restorePhrase:focus { border-color: #1f8f4e; }
