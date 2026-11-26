@@ -274,7 +274,7 @@ public:
         translator.load(QString(":/translations/res/zcl_qt_wallet_") + locale);
         a.installTranslator(&translator);
 
-        QIcon icon(":/icons/res/icon.ico");
+        QIcon icon(":/icons/res/icon.png");
         QApplication::setWindowIcon(icon);
 
         // ---- Modern theme (Quiet+ redesign, Phase 1) ----

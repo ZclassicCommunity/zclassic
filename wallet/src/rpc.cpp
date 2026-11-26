@@ -2651,7 +2651,7 @@ void RPC::shutdownZClassicd(bool waitForCheckpoint) {
     QDialog d(main);
     Ui_ConnectionDialog connD;
     connD.setupUi(&d);
-    connD.topIcon->setBasePixmap(QIcon(":/icons/res/icon.ico").pixmap(256, 256));
+    connD.topIcon->setBasePixmap(QIcon(":/icons/res/icon.png").pixmap(256, 256));
     connD.status->setText(waitForCheckpoint ? QObject::tr("Preparing faster checkpoint sync…")
                                           : QObject::tr("Please wait for ZclWallet to exit"));
     connD.statusDetail->setText(waitForCheckpoint ? QObject::tr("Saving your wallet before switching sync methods…")
