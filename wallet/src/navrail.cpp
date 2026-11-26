@@ -379,6 +379,7 @@ void MainWindow::lockUntilConnected() {
             b->setToolTip(b->text().trimmed());
         }
         refreshPhraseInfo();   // the Backup page and Home reminder learn about the phrase
+        refreshReceivedTAddresses();   // Receive learns which transparent addresses were paid
         waiting->deleteLater();
     });
     waiting->start();

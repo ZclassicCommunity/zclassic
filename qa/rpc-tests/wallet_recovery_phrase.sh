@@ -1,5 +1,3 @@
-B=$work/b; mkdir_node "$B"; copy_chain "$A" "$B"; dd=$B; extra="-mocktime=$(($(date +%s) + 259200))"   # born 3 days after every block, as a new wallet on mainnet: a rescan that skips blocks older than the wallet finds nothing
-start || { echo "recovery-phrase: node B did not start"; exit 1; }; extra=""
 #!/bin/sh
 # TEST-ONLY. The 24-word recovery phrase, against real regtest daemons in throwaway datadirs:
 #   1. a new wallet's phrase covers every address it makes (z_getphraseinfo not_covered is empty);

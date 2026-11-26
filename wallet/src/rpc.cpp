@@ -580,10 +580,7 @@ void RPC::getTransactions(const std::function<void(json)>& cb) {
     json payload = {
         {"jsonrpc", "1.0"},
         {"id", "someid"},
-        {"method", "listtransactions"},
-        // Without a count the node returns only the 10 latest transactions, so older
-        // transparent payments never showed in Activity.
-        {"params", {"*", 1000}}
+        {"method", "listtransactions"}, {"params", {"*", 1000}}   // no count means the 10 latest only
     };
 
     conn->doRPCWithDefaultErrorHandling(payload, cb);
@@ -1600,34 +1597,6 @@ void RPC::refreshAddresses() {
                 taddresses->append(QString::fromStdString(reply.get<json::string_t>()));
             });
         }
-
-        // Which of them ever received a payment. The transaction list holds only the
-        // latest transactions, so it cannot say that an address was never used; the
-        // Receive page must not offer a transparent address twice (receivepage.cpp).
-        // Coinbase payments are not counted by the node here; balances and unspent
-        // outputs are checked as well.
-        json payload = {
-            {"jsonrpc", "1.0"},
-            {"id", "someid"},
-            {"method", "listreceivedbyaddress"},
-            {"params", {0, true}}
-        };
-        conn->doRPCWithDefaultErrorHandling(payload, [=] (json received) {
-            if (!received.is_array()) return;
-            QSet<QString> seen;
-            for (auto& it : received) {
-                if (!it.is_object()) continue;
-                const auto addr = it.find("address");   // this json library has no contains()
-                const auto amount = it.find("amount");
-                const auto txids = it.find("txids");
-                if (addr == it.end() || !addr->is_string()) continue;
-                const bool paid = (amount != it.end() && amount->is_number() && amount->get<double>() > 0)
-                               || (txids != it.end() && txids->is_array() && !txids->empty());
-                if (paid) seen.insert(QString::fromStdString(addr->get<std::string>()));
-            }
-            receivedTAddrs = seen;
-            receivedTAddrsKnown = true;
-        });
     });
 }
 
@@ -2682,7 +2651,7 @@ void RPC::shutdownZClassicd(bool waitForCheckpoint) {
     QDialog d(main);
     Ui_ConnectionDialog connD;
     connD.setupUi(&d);
-    connD.topIcon->setBasePixmap(QIcon(":/icons/res/icon.png").pixmap(256, 256));
+    connD.topIcon->setBasePixmap(QIcon(":/icons/res/icon.ico").pixmap(256, 256));
     connD.status->setText(waitForCheckpoint ? QObject::tr("Preparing faster checkpoint sync…")
                                           : QObject::tr("Please wait for ZclWallet to exit"));
     connD.statusDetail->setText(waitForCheckpoint ? QObject::tr("Saving your wallet before switching sync methods…")

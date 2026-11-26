@@ -86,6 +86,38 @@ QString MainWindow::currentReceiveAddress() const {
 
 // ---- transparent address reuse -------------------------------------------------
 
+// Was this row of listreceivedbyaddress ever paid? (This json library has no contains().)
+static bool rowWasPaid(const json& row) {
+    const auto amount = row.find("amount");
+    const auto txids = row.find("txids");
+    return (amount != row.end() && amount->is_number() && amount->get<double>() > 0)
+        || (txids != row.end() && txids->is_array() && !txids->empty());
+}
+
+// Ask the node which transparent addresses ever received a payment. The transaction
+// list holds only the latest transactions, so it cannot say an address was never
+// used. The node does not count coinbase payments here; balances, unspent outputs
+// and the transaction list are checked as well. A failed call leaves the answer
+// unknown (or as it was).
+void MainWindow::refreshReceivedTAddresses() {
+    if (rpc == nullptr || rpc->getConnection() == nullptr)
+        return;
+    const json payload = { {"jsonrpc", "1.0"}, {"id", "someid"},
+                           {"method", "listreceivedbyaddress"}, {"params", {0, true}} };
+    rpc->getConnection()->doRPC(payload, [this](json reply) {
+        if (!reply.is_array()) return;
+        QSet<QString> paid;
+        for (const auto& row : reply) {
+            if (!row.is_object()) continue;
+            const auto addr = row.find("address");
+            if (addr != row.end() && addr->is_string() && rowWasPaid(row))
+                paid.insert(QString::fromStdString(addr->get<std::string>()));
+        }
+        receivedTAddrs = paid;
+        receivedTAddrsKnown = true;
+    }, [](QNetworkReply*, const json&) {});
+}
+
 // A transparent address to offer for receiving that was never used: the node never
 // saw a payment to it (listreceivedbyaddress), and it has no balance, no unspent
 // output and no transaction in the history. Empty when none is left, or while the
@@ -94,10 +126,9 @@ QString MainWindow::currentReceiveAddress() const {
 QString MainWindow::unusedTAddress() const {
     if (rpc == nullptr || rpc->getAllTAddresses() == nullptr)
         return QString();
-    const QSet<QString>* received = rpc->getReceivedTAddresses();
-    if (received == nullptr)
+    if (!receivedTAddrsKnown)
         return QString();   // not known yet: a new address is always safe
-    QSet<QString> used = *received;
+    QSet<QString> used = receivedTAddrs;
     if (const auto* seen = rpc->getUsedAddresses())
         for (auto it = seen->constBegin(); it != seen->constEnd(); ++it)
             used.insert(it.key());
@@ -123,6 +154,7 @@ QString MainWindow::unusedTAddress() const {
 // left, makeNew mints one (the Transparent tab no longer makes a key per visit).
 void MainWindow::showUnusedTAddress(const std::function<void()>& makeNew) {
     const QString unused = unusedTAddress();
+    refreshReceivedTAddresses();   // for the next visit
     if (unused.isEmpty()) {
         makeNew();
         return;

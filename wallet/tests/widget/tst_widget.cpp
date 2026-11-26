@@ -3474,9 +3474,9 @@ private slots:
         // caller makes a new one); an address that was paid once and is empty again is
         // never offered, whatever the short transaction list shows.
         QCOMPARE(w->unusedTAddress(), QString());
-        w->getRPC()->testSetReceivedTAddresses({ T1, T2 });
+        w->receivedTAddrs = QSet<QString>{ T1, T2 }; w->receivedTAddrsKnown = true;
         QCOMPARE(w->unusedTAddress(), QString());
-        w->getRPC()->testSetReceivedTAddresses({ T1 });
+        w->receivedTAddrs = QSet<QString>{ T1 };
         QCOMPARE(w->unusedTAddress(), T2);
 
         // Transparent tab: the transparent addresses only, shown with the PUBLIC callout.
@@ -3899,7 +3899,7 @@ private slots:
             QVERIFY2(!items.contains(t), qPrintable(QString("\"%1\" is still in More").arg(t)));
         }
         QCOMPARE(items.last(), QString(w->ui->actionExit->text()).remove(QLatin1Char('&')));
-        QCOMPARE(items.size(), QSet<QString>(items.begin(), items.end()).size());   // nothing twice
+        { QSet<QString> once; for (const QString& s : items) once.insert(s); QCOMPARE(items.size(), once.size()); }   // nothing twice (Qt 5.12 has no QSet range constructor)
         settleAndDelete(w);
         qApp->setStyleSheet(prevSheet);
         qApp->setPalette(prevPalette);

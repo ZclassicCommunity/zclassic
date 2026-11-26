@@ -2,7 +2,6 @@
 #define RPCCLIENT_H
 
 #include "precompiled.h"
-#include <QSet>
 
 #include "balancestablemodel.h"
 #include "txtablemodel.h"
@@ -94,9 +93,6 @@ public:
     const QList<UnspentOutput>*       getUTXOs()             { return utxos; }
     const QMap<QString, double>*      getAllBalances()       { return allBalances; }
     const QMap<QString, bool>*        getUsedAddresses()     { return usedAddresses; }
-    // Transparent addresses that ever received a payment (listreceivedbyaddress 0 true);
-    // nullptr until the node has answered once.
-    const QSet<QString>*              getReceivedTAddresses() { return receivedTAddrsKnown ? &receivedTAddrs : nullptr; }
 
 #ifdef ZCL_WIDGET_TEST
     // TEST-ONLY SEAMS (L1 widget tests). Compiled in ONLY under ZCL_WIDGET_TEST;
@@ -107,7 +103,6 @@ public:
     void testSetBalances(QMap<QString, double>* b) { delete allBalances; allBalances = b; }
     void testSetZAddresses(QList<QString>* z)       { delete zaddresses; zaddresses = z; }
     void testSetTAddresses(QList<QString>* t)       { delete taddresses; taddresses = t; }
-    void testSetReceivedTAddresses(const QSet<QString>& r) { receivedTAddrs = r; receivedTAddrsKnown = true; }
     // Install the wallet's UTXO set so confirmedSpendableZat() (the confirmed,
     // non-coinbase change basis) can be driven without a daemon.
     void testSetUTXOs(QList<UnspentOutput>* u)      { delete utxos; utxos = u; }
@@ -431,8 +426,6 @@ private:
     QList<UnspentOutput>*       utxos                       = nullptr;
     QMap<QString, double>*      allBalances                 = nullptr;
     QMap<QString, bool>*        usedAddresses               = nullptr;
-    QSet<QString>               receivedTAddrs;
-    bool                        receivedTAddrsKnown         = false;
     QList<QString>*             zaddresses                  = nullptr;
     QList<QString>*             taddresses                  = nullptr;
     
