@@ -14,6 +14,7 @@
 #include "rpc.h"
 #include "balancestablemodel.h"
 #include "privacybadgedelegate.h"
+#include "addresscell.h"
 #include "settings.h"
 #include "version.h"
 #include "turnstile.h"
@@ -42,6 +43,7 @@
 #include <QSignalBlocker>
 #include <QFileInfo>     // showExternalNodeAuthFailed: open the conf's folder
 #include <QScrollArea>
+#include <QScreen>
 
 using json = nlohmann::json;
 
@@ -269,8 +271,18 @@ MainWindow::MainWindow(QWidget *parent) :
         layout->addWidget(scroll);
     }
 
-    // Scrollable pages retain readable controls even on small, scaled displays.
-    setMinimumSize(360, 320);
+    // Minimum window size: the nav rail plus a page at its comfortable width, so the
+    // window can never be squeezed into a clipped sliver. On a screen smaller than
+    // that (small or heavily scaled displays) the floor shrinks to fit the screen,
+    // and the scrollable pages keep every control reachable.
+    {
+        QSize floor(920, 620);
+        if (const QScreen* screen = QGuiApplication::primaryScreen()) {
+            const QSize avail = screen->availableGeometry().size();
+            floor = floor.boundedTo(QSize(avail.width() * 9 / 10, avail.height() * 9 / 10));
+        }
+        setMinimumSize(floor.expandedTo(QSize(360, 320)));
+    }
 
     rpc = new RPC(this);
 
@@ -778,8 +790,10 @@ void MainWindow::setStartupDetails(const QString& details) {
 
 void MainWindow::setupSyncBanner() {
     syncBanner = new QWidget(ui->tab);
+    syncBanner->setObjectName("syncBanner");                 // bannerSheet() selector
+    syncBanner->setAttribute(Qt::WA_StyledBackground, true); // paint its tinted card
     auto* bannerColumn = new QVBoxLayout(syncBanner);
-    bannerColumn->setContentsMargins(8, 6, 8, 6);
+    bannerColumn->setContentsMargins(14, 10, 14, 10);
     auto* bannerLayout = new QHBoxLayout();
     bannerColumn->addLayout(bannerLayout);
     bannerLayout->setContentsMargins(8, 6, 8, 6);
@@ -986,6 +1000,10 @@ void MainWindow::setupHomeDashboard() {
     });
 
     summaryVBox->insertWidget(insertAt++, actions);
+    // Send and Receive are one click away in the nav rail, with the same names;
+    // a second pair on Home would only repeat them. Kept built (updateHomeFixIt
+    // still drives them) but not shown.
+    actions->setVisible(false);
 
     // ALWAYS-AVAILABLE backup front door (Krug/Sierra ROOT-CAUSE fix). The amber
     // backup CARD only appears once synced && balance>0 (showBackupNag), so a careful
@@ -1014,7 +1032,7 @@ void MainWindow::setupHomeDashboard() {
     homeFixItCard->setObjectName("homeFixItCard");
     homeFixItCard->setFrameShape(QFrame::NoFrame);
     auto* cardV = new QVBoxLayout(homeFixItCard);
-    cardV->setContentsMargins(12, 12, 12, 12);
+    cardV->setContentsMargins(18, 16, 18, 16);
     cardV->setSpacing(8);
 
     homeFixItText = new QLabel(QString(), homeFixItCard);
@@ -1051,7 +1069,7 @@ void MainWindow::setupHomeDashboard() {
     homeBackupCard->setObjectName("homeFixItCard");   // reuse the amber-card qss rule
     homeBackupCard->setFrameShape(QFrame::NoFrame);
     auto* backupV = new QVBoxLayout(homeBackupCard);
-    backupV->setContentsMargins(12, 12, 12, 12);
+    backupV->setContentsMargins(18, 16, 18, 16);
     backupV->setSpacing(8);
 
     homeBackupText = new QLabel(
@@ -1099,7 +1117,7 @@ void MainWindow::setupHomeDashboard() {
     homeImportCard->setObjectName("homeFixItCard");   // reuse amber-card qss rule
     homeImportCard->setFrameShape(QFrame::NoFrame);
     auto* importV = new QVBoxLayout(homeImportCard);
-    importV->setContentsMargins(12, 12, 12, 12);
+    importV->setContentsMargins(18, 16, 18, 16);
     importV->setSpacing(8);
 
     auto* importText = new QLabel(
@@ -1473,150 +1491,6 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
     relayoutHero();
 }
 
-void MainWindow::setupNavRail() {
-    // 1) Hide the tab bar — pages stay; index selection still works.
-    ui->tabWidget->tabBar()->hide();
-    // The pane border/top-padding was sized for the (now hidden) tab strip; with
-    // the rail driving navigation, drop the document-mode chrome so page content
-    // sits flush against the rail.
-    ui->tabWidget->setDocumentMode(true);
-
-    // 2) Build the rail frame + its vertical layout.
-    auto* navRail = new QFrame(ui->centralWidget);
-    navRail->setObjectName("navRail");
-    navRail->setFrameShape(QFrame::NoFrame);
-    navRail->setMinimumWidth(168);
-    navRail->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
-
-    auto* railLayout = new QVBoxLayout(navRail);
-    railLayout->setContentsMargins(8, 16, 8, 16);
-    railLayout->setSpacing(6);
-
-    // 3) Exclusive group so exactly one destination is highlighted at a time.
-    navRailGroup = new QButtonGroup(this);
-    navRailGroup->setExclusive(true);
-
-    // Helper: a large, flat, checkable rail button bound to a tab index.
-    auto makeRailButton = [&](const QString& label, int tabIndex,
-                              const QString& extraObjName = QString()) -> QPushButton* {
-        auto* btn = new QPushButton(label, navRail);
-        btn->setObjectName(extraObjName.isEmpty() ? "navRailButton" : extraObjName);
-        btn->setCheckable(true);
-        btn->setFlat(true);
-        btn->setCursor(Qt::PointingHandCursor);
-        btn->setProperty("navrail", true);   // qss hook: QPushButton[navrail="true"]
-        btn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        navRailGroup->addButton(btn, tabIndex);
-        railLayout->addWidget(btn);
-        QObject::connect(btn, &QPushButton::clicked, [this, tabIndex]() {
-            ui->tabWidget->setCurrentIndex(tabIndex);
-        });
-        return btn;
-    };
-
-    // 4) Primary destinations, in human order. Indices are the LIVE tabWidget
-    //    indices at this point (zclassicd already removed): Balance 0, Send 1,
-    //    Receive 2, Transactions 3.
-    makeRailButton(tr("Home"),     0);   // Balance
-    makeRailButton(tr("Send"),     1);
-    makeRailButton(tr("Receive"),  2);
-    makeRailButton(tr("Activity"), 3);   // Transactions
-
-    // Spacer pushes the demoted "Advanced" gear to the BOTTOM of the rail.
-    railLayout->addStretch(1);
-
-    // 5) Demoted node-stats page ("zclassicd") as a small gear at the bottom.
-    //    That page is added to the tabWidget LATER (rpc.cpp, when the embedded
-    //    node starts) and lives at whatever index it then occupies, so resolve
-    //    its index dynamically on click. It is NOT in the exclusive primary
-    //    group's check-sync set above; we give it its own checkable button and
-    //    add it to the same group so selecting it clears the others.
-    auto* advBtn = new QPushButton(tr("⚙  Advanced"), navRail);
-    advBtn->setObjectName("navRailAdvanced");
-    advBtn->setCheckable(true);
-    advBtn->setFlat(true);
-    advBtn->setCursor(Qt::PointingHandCursor);
-    advBtn->setProperty("navrail", true);
-    advBtn->setProperty("navrailadv", true);   // qss hook for the smaller gear
-    advBtn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    // Use a high group id so it never collides with a primary tab index.
-    navRailGroup->addButton(advBtn, 1000);
-    railLayout->addWidget(advBtn);
-    QObject::connect(advBtn, &QPushButton::clicked, [this]() {
-        // Find the zclassicd page in the live tabWidget; switch to it if present.
-        int idx = ui->tabWidget->indexOf(zclassicdtab);
-        if (idx >= 0) {
-            ui->tabWidget->setCurrentIndex(idx);
-            return;
-        }
-
-        // ADVANCED-TAB-FIX: the tab is added on the live-connection attach
-        // (RPC::setConnection). In the sub-second cold-open window BEFORE that
-        // attach fires, the tab is still absent (indexOf == -1). Never leave the
-        // click a SILENT no-op (Krug: don't-make-me-think): give honest feedback,
-        // then re-sync the rail's checked state so the gear does not get stuck
-        // "checked" while a primary tab (e.g. Balances) is still shown. We mirror
-        // the currentChanged sync handler below: under a QSignalBlocker, re-check
-        // the button for the current tab so the rail reflects reality.
-        ui->statusBar->showMessage(
-            tr("Advanced (node stats) opens once you're connected to a node."), 3000);
-        if (navRailGroup) {
-            QAbstractButton* match = navRailGroup->button(ui->tabWidget->currentIndex());
-            if (match) {
-                QSignalBlocker block(navRailGroup);
-                match->setChecked(true);
-            }
-        }
-    });
-
-    // 6) Keep the rail's checked state synced to the CURRENT tab index, from any
-    //    source (rail click, code-driven setCurrentIndex in sendButton/receive
-    //    flows, or the zclassicd tab being added/removed at runtime).
-    QObject::connect(ui->tabWidget, &QTabWidget::currentChanged, this, [this](int idx) {
-        if (!navRailGroup) return;
-        int advIdx = ui->tabWidget->indexOf(zclassicdtab);
-        QAbstractButton* match = nullptr;
-        if (advIdx >= 0 && idx == advIdx) {
-            match = navRailGroup->button(1000);          // Advanced
-        } else {
-            match = navRailGroup->button(idx);            // a primary destination
-        }
-        if (match && !match->isChecked()) {
-            // Toggle without re-emitting a navigation click.
-            QSignalBlocker block(navRailGroup);
-            match->setChecked(true);
-        }
-    });
-
-    // 7) Re-parent: make the central layout horizontal — [ navRail | tabWidget ].
-    //    gridLayout_3 currently holds tabWidget at (0,0). Move it to (0,1) and
-    //    drop the rail in at (0,0). We move the EXISTING tabWidget, not a copy.
-    auto* central = qobject_cast<QGridLayout*>(ui->centralWidget->layout());
-    if (central) {
-        central->removeWidget(ui->tabWidget);
-        central->setContentsMargins(0, 0, 0, 0);
-        central->setSpacing(0);
-        central->addWidget(navRail,       0, 0);
-        central->addWidget(ui->tabWidget, 0, 1);
-        central->setColumnStretch(0, 0);   // rail: fixed width
-        central->setColumnStretch(1, 1);   // content: takes the rest
-    } else {
-        // Fallback (shouldn't happen given the .ui): wrap in a fresh HBox.
-        auto* hbox = new QHBoxLayout(ui->centralWidget);
-        hbox->setContentsMargins(0, 0, 0, 0);
-        hbox->setSpacing(0);
-        hbox->addWidget(navRail);
-        hbox->addWidget(ui->tabWidget, 1);
-    }
-
-    // 8) Open on Home (Balance, index 0) — not Receive. Check the Home button to
-    //    match. (The .ui's currentIndex=2 default is overridden here and by the
-    //    ctor's setCurrentIndex(0).)
-    ui->tabWidget->setCurrentIndex(0);
-    if (auto* home = navRailGroup->button(0))
-        home->setChecked(true);
-}
-
 // PR-1 (snappiness): apply the banner stylesheet ONLY when it actually changes.
 // setStyleSheet() forces QStyleSheetStyle to re-parse the sheet and unpolish/
 // repolish the widget subtree + a relayout even when the string is byte-identical
@@ -1646,7 +1520,7 @@ void MainWindow::setSyncStatus(bool isSyncing, int blockNumber, int estimatedHei
         syncStatusLabel->setText(tr("Your computer's date or time looks wrong\n"
             "Wallet is up to date at block %1, but block times look off. Please correct "
             "the clock in your system settings.").arg(Settings::getHeightString(blockNumber)));
-        applyBannerStyle("QWidget { background-color: #d9822b; } QLabel { color: white; }");
+        applyBannerStyle(bannerSheet(BannerTone::Warn));
         return;
     }
 
@@ -1678,7 +1552,7 @@ void MainWindow::setSyncStatus(bool isSyncing, int blockNumber, int estimatedHei
             syncQuietPill->setText(pill);
             syncQuietPill->setVisible(true);
         }
-        applyBannerStyle("QWidget { background-color: transparent; }");
+        applyBannerStyle(bannerSheet(BannerTone::Rest));
         return;
     }
 
@@ -1707,7 +1581,7 @@ void MainWindow::setSyncStatus(bool isSyncing, int blockNumber, int estimatedHei
             .arg(SyncState::formatAge(tipAge));
     syncStatusLabel->setText(syncText);
     syncStatusLabel->setToolTip(tr("Downloading and validating blocks. The latest network height is still being discovered; a reliable completion time is not available."));
-    applyBannerStyle("QWidget { background-color: #d9822b; } QLabel { color: white; }");
+    applyBannerStyle(bannerSheet(BannerTone::Warn));
 }
 
 // P0-6: called from rpc.cpp's noConnection() so the user sees a clear,
@@ -1722,7 +1596,7 @@ void MainWindow::setSyncStatusConnecting() {
     syncStatusLabel->setText(connectionStartupError.isEmpty()
         ? (connectionStartupProgress.isEmpty() ? tr("Connecting to your ZClassic node…")
             : connectionStartupProgress) : connectionStartupError);
-    applyBannerStyle("QWidget { background-color: #555555; } QLabel { color: white; }");
+    applyBannerStyle(bannerSheet(BannerTone::Neutral));
 }
 
 // C9: called from rpc.cpp when the node is "syncing" but has 0 peers. A fresh
@@ -1747,7 +1621,7 @@ void MainWindow::setSyncStatusWaitingForPeers(bool longStretch, int blockNumber,
             "internet connection and firewall.") % where);
     else
         syncStatusLabel->setText(tr("Connecting to the ZClassic network… no peers yet") % where);
-    applyBannerStyle("QWidget { background-color: #d9822b; } QLabel { color: white; }");
+    applyBannerStyle(bannerSheet(BannerTone::Warn));
 }
 
 // The first few peerless polls of a start: say the neutral thing. The status bar reads the same
@@ -1761,7 +1635,7 @@ void MainWindow::setSyncStatusNetworkConnecting(int blockNumber, qint64 tipAge) 
     syncProgressBar->setVisible(false);
     syncProgressBar->setRange(0, 100);
     syncStatusLabel->setText(tr("Connecting to the ZClassic network…"));
-    applyBannerStyle("QWidget { background-color: #555555; } QLabel { color: white; }");
+    applyBannerStyle(bannerSheet(BannerTone::Neutral));
 }
 
 // Bootstrap snapshot download in progress: show real determinate progress instead of
@@ -1795,7 +1669,7 @@ void MainWindow::setSyncStatusBootstrapSnapshot(int pct, qint64 received, qint64
     }
 
     syncStatusLabel->setText(tr("Downloading blockchain snapshot… %1%").arg(pct) % detail);
-    applyBannerStyle("QWidget { background-color: #d9822b; } QLabel { color: white; }");
+    applyBannerStyle(bannerSheet(BannerTone::Warn));
 }
 
 // SELF-HEAL (B-side): non-blocking validation banner. An empty message clears it
@@ -1811,7 +1685,7 @@ void MainWindow::setBootstrapValidationBanner(const QString& msg) {
     syncStatusLabel->setVisible(true);
     syncProgressBar->setVisible(false);
     syncStatusLabel->setText(msg);
-    applyBannerStyle("QWidget { background-color: #2c5d8f; } QLabel { color: white; }");
+    applyBannerStyle(bannerSheet(BannerTone::Info));
 }
 
 // Non-modal notification. Prefer a system-tray balloon (visible even when the main
@@ -1880,7 +1754,7 @@ void MainWindow::autoHealStubChain() {
     if (syncStatusLabel != nullptr) {
         syncProgressBar->setVisible(false);
         syncStatusLabel->setText(tr("Re-downloading blockchain…"));
-        applyBannerStyle("QWidget { background-color: #2c5d8f; } QLabel { color: white; }");
+        applyBannerStyle(bannerSheet(BannerTone::Info));
     }
     notify(tr("Re-downloading blockchain"),
         tr("ZClassic couldn't find any peers and the local copy is incomplete, so it is "
@@ -2120,263 +1994,9 @@ void MainWindow::showNodeNotRespondingRetry() {
     quitApp();
 }
 
-void MainWindow::setupSettingsModal() {    
-    // Set up File -> Settings action
-    QObject::connect(ui->actionSettings, &QAction::triggered, [=]() {
-        QDialog settingsDialog(this);
-        Ui_Settings settings;
-        settings.setupUi(&settingsDialog);
-        Settings::saveRestore(&settingsDialog);
-        // The Options tab holds a dozen wrapped explanations; below this size they are
-        // cut off mid-sentence. This floor also overrides a small size remembered from
-        // an older release by saveRestore().
-        settingsDialog.setMinimumSize(620, 600);
-        if (settingsDialog.width() < 620 || settingsDialog.height() < 600)
-            settingsDialog.resize(qMax(settingsDialog.width(), 620), qMax(settingsDialog.height(), 600));
-        // Put the Options and Troubleshooting pages in scroll areas. A tab page cannot ask
-        // its dialog for more height, so on a small screen the wrapped explanations were
-        // squeezed to a line and a half and cut off mid-sentence; in a scroll area every
-        // sentence is shown in full and the page scrolls instead.
-        for (int pageIdx = 1; pageIdx <= 2; ++pageIdx) {
-            QWidget* page = settings.tabWidget->widget(pageIdx);
-            const QString title = settings.tabWidget->tabText(pageIdx);
-            auto* area = new QScrollArea(settings.tabWidget);
-            area->setFrameShape(QFrame::NoFrame);
-            area->setWidgetResizable(true);
-            area->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-            settings.tabWidget->removeTab(pageIdx);
-            area->setWidget(page);
-            settings.tabWidget->insertTab(pageIdx, area, title);
-        }
-
-        // Setup save sent check box
-        QObject::connect(settings.chkSaveTxs, &QCheckBox::stateChanged, [=](auto checked) {
-            Settings::getInstance()->setSaveZtxs(checked);
-        });
-
-        // Setup clear button
-        QObject::connect(settings.btnClearSaved, &QCheckBox::clicked, [=]() {
-            // DATA-LOSS FIX: the old `if (QMessageBox::warning(...))` ran the irreversible
-            // delete for EVERY button — Yes returns 0x4000 and Cancel returns 0x400000, both
-            // non-zero/truthy, and Cancel is also the Esc/X escape button. So Cancel, Esc and
-            // the window-X all deleted the saved history with no way to back out. Capture the
-            // result and gate on equality so ONLY "Yes" deletes.
-            auto ans = QMessageBox::warning(this, tr("Clear saved history?"),
-                tr("Shielded z-Address transactions are stored locally in your wallet, outside zclassicd. You may delete this saved information safely any time for your privacy.\nDo you want to delete the saved shielded transactions now?"),
-                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
-            if (ans == QMessageBox::Yes) {
-                    SentTxStore::deleteHistory();
-                    // Also drop the cached last-known balances (same local data).
-                    QSettings().remove("cache");
-                    // Reload after the clear button so existing txs disappear
-                    rpc->refresh(true);
-            }
-        });
-
-        // Save sent transactions
-        settings.chkSaveTxs->setChecked(Settings::getInstance()->getSaveZtxs());
-
-        // Keep running in the background (tray-resident). Disable + explain when
-        // there is no system tray available so the user isn't offered a no-op.
-        settings.chkKeepInTray->setChecked(Settings::getInstance()->getKeepInTray());
-        if (!QSystemTrayIcon::isSystemTrayAvailable()) {
-            settings.chkKeepInTray->setEnabled(false);
-            settings.chkKeepInTray->setToolTip(tr("Your desktop doesn't provide a system tray, so this option isn't available."));
-        }
-
-        // Help the network: open our P2P port automatically via NAT-PMP/PCP
-        // (no UPnP). Default OFF. Only meaningful with the embedded daemon, since
-        // the flag is passed at daemon launch; disable + explain otherwise.
-        settings.chkNatpmp->setChecked(Settings::getInstance()->getOpenPortNatpmp());
-        if (!rpc->isEmbedded()) {
-            settings.chkNatpmp->setEnabled(false);
-            settings.chkNatpmp->setToolTip(tr("Automatic port opening is available only when running an embedded zclassicd."));
-        }
-
-        // Custom fees
-        settings.chkCustomFees->setChecked(Settings::getInstance()->getAllowCustomFees());
-
-        // Auto shielding
-        settings.chkAutoShield->setChecked(Settings::getInstance()->getAutoShield());
-
-        // Use Tor
-        bool isUsingTor = false;
-        if (rpc->getConnection() != nullptr) {
-            isUsingTor = !rpc->getConnection()->config->proxy.isEmpty();
-        }
-        settings.chkTor->setChecked(isUsingTor);
-        if (rpc->getEZClassicD() == nullptr) {
-            settings.chkTor->setEnabled(false);
-            settings.lblTor->setEnabled(false);
-            QString tooltip = tr("Tor configuration is available only when running an embedded zclassicd.");
-            settings.chkTor->setToolTip(tooltip);
-            settings.lblTor->setToolTip(tooltip);
-        }
-
-        // Connection Settings
-        QIntValidator validator(0, 65535);
-        settings.port->setValidator(&validator);
-
-        // If values are coming from zclassic.conf, then disable all the fields — BUT only
-        // when that conf actually holds usable creds. A conf can exist yet carry none (e.g.
-        // "server=1" only, with a running node's creds on its command line); in that case
-        // leave the fields EDITABLE so the user can supply them (never a dead end).
-        auto zclassicConfLocation = Settings::getInstance()->getZClassicdConfLocation();
-        bool confLocked = !zclassicConfLocation.isEmpty() && confHasUsableCreds(zclassicConfLocation);
-        if (confLocked) {
-            settings.confMsg->setText("Settings are being read from \n" + zclassicConfLocation);
-            settings.hostname->setEnabled(false);
-            settings.port->setEnabled(false);
-            settings.rpcuser->setEnabled(false);
-            settings.rpcpassword->setEnabled(false);
-        }
-        else if (!zclassicConfLocation.isEmpty()) {
-            // Conf exists but has no usable creds: editable, with reassuring guidance.
-            settings.confMsg->setText(tr(
-                "A ZClassic node is already running, but its sign-in details aren't saved here.\n"
-                "Enter its RPC username and password and ZClassic will connect."));
-            settings.hostname->setEnabled(true);
-            settings.port->setEnabled(true);
-            settings.rpcuser->setEnabled(true);
-            settings.rpcpassword->setEnabled(true);
-        }
-        else {
-            settings.confMsg->setText("No local zclassic.conf found. Please configure connection manually.");
-            settings.hostname->setEnabled(true);
-            settings.port->setEnabled(true);
-            settings.rpcuser->setEnabled(true);
-            settings.rpcpassword->setEnabled(true);
-        }
-
-        // Load current values into the dialog        
-        auto conf = Settings::getInstance()->getSettings();
-        settings.hostname->setText(conf.host);
-        settings.port->setText(conf.port);
-        settings.rpcuser->setText(conf.rpcuser);
-        settings.rpcpassword->setText(conf.rpcpassword);
-
-        // Connection tab by default -- unless the wallet runs its own built-in node. Then
-        // the connection fields are blank (cookie auth, nothing to type) and meaningless,
-        // so lead with the Options tab, which is what people open Settings for, and say
-        // plainly why the connection tab is empty.
-        settings.tabWidget->setCurrentIndex(0);
-        if (rpc->isEmbedded()) {
-            settings.confMsg->setText(tr(
-                "This wallet runs its own built-in ZClassic node and connects to it "
-                "automatically, so there is nothing to fill in on this tab.\n"
-                "Node settings file: %1").arg(QDir::toNativeSeparators(zclassicConfLocation)));
-            settings.confMsg->setWordWrap(true);
-            settings.hostname->setEnabled(false);
-            settings.port->setEnabled(false);
-            settings.rpcuser->setEnabled(false);
-            settings.rpcpassword->setEnabled(false);
-            settings.tabWidget->setCurrentIndex(1);
-        }
-
-        // Enable the troubleshooting options only if using embedded zclassicd
-        if (!rpc->isEmbedded()) {
-            settings.chkRescan->setEnabled(false);
-            settings.chkRescan->setToolTip(tr("You're using an external zclassicd. Please restart zclassicd with -rescan"));
-
-            settings.chkReindex->setEnabled(false);
-            settings.chkReindex->setToolTip(tr("You're using an external zclassicd. Please restart zclassicd with -reindex"));
-        }
-
-        if (settingsDialog.exec() == QDialog::Accepted) {
-            // Custom fees
-            bool customFees = settings.chkCustomFees->isChecked();
-            Settings::getInstance()->setAllowCustomFees(customFees);
-            ui->minerFeeAmt->setReadOnly(!customFees);
-            if (!customFees)
-                ui->minerFeeAmt->setText(Settings::getDecimalString(Settings::getMinerFee()));
-
-            // Auto shield
-            Settings::getInstance()->setAutoShield(settings.chkAutoShield->isChecked());
-
-            // Keep running in the background (tray-resident). Apply immediately
-            // so the change takes effect this session, no restart needed.
-            bool keepInTray = settings.chkKeepInTray->isChecked();
-            Settings::getInstance()->setKeepInTray(keepInTray);
-            applyTraySetting(keepInTray);
-
-            // Help the network: open my port automatically (NAT-PMP/PCP, no UPnP).
-            // The daemon reads -natpmp only at launch, so a change takes effect on
-            // the next restart. Tell the user only when the value actually changed.
-            bool wasNatpmp = Settings::getInstance()->getOpenPortNatpmp();
-            bool natpmp = settings.chkNatpmp->isChecked();
-            if (natpmp != wasNatpmp) {
-                Settings::getInstance()->setOpenPortNatpmp(natpmp);
-                QMessageBox::information(this, tr("Open port automatically"),
-                    natpmp
-                        ? tr("Automatic port opening will be enabled the next time ZclWallet starts its node. This asks your router to make you reachable to other peers (NAT-PMP/PCP, never UPnP).")
-                        : tr("Automatic port opening will be disabled the next time ZclWallet starts its node."),
-                    QMessageBox::Ok);
-            }
-
-            if (!isUsingTor && settings.chkTor->isChecked()) {
-                // If "use tor" was previously unchecked and now checked
-                Settings::addToZClassicConf(zclassicConfLocation, "proxy=127.0.0.1:9050");
-                rpc->getConnection()->config->proxy = "proxy=127.0.0.1:9050";
-
-                QMessageBox::information(this, tr("Enable Tor"), 
-                    tr("Connection over Tor has been enabled. To use this feature, you need to restart ZclWallet."), 
-                    QMessageBox::Ok);
-            }
-
-            if (isUsingTor && !settings.chkTor->isChecked()) {
-                // If "use tor" was previously checked and now is unchecked
-                Settings::removeFromZClassicConf(zclassicConfLocation, "proxy");
-                rpc->getConnection()->config->proxy.clear();
-
-                QMessageBox::information(this, tr("Disable Tor"),
-                    tr("Connection over Tor has been disabled. To fully disconnect from Tor, you need to restart ZclWallet."),
-                    QMessageBox::Ok);
-            }
-
-            // Persist + reconnect whenever the cred fields were EDITABLE this dialog — i.e.
-            // no conf at all, OR a conf with no usable creds (confLocked false). Without this
-            // the creds a user typed for a cred-less-conf node would never be saved, so the
-            // dead end would persist even with editable fields. The saved creds are picked up
-            // by autoDetectZClassicConf's QSettings fallback on the very next connect.
-            if (!confLocked) {
-                // Save settings
-                Settings::getInstance()->saveSettings(
-                    settings.hostname->text(),
-                    settings.port->text(),
-                    settings.rpcuser->text(),
-                    settings.rpcpassword->text());
-
-                auto cl = new ConnectionLoader(this, rpc);
-                cl->loadConnection();
-            }
-
-            // Check to see if rescan or reindex have been enabled
-            bool showRestartInfo = false;
-            if (settings.chkRescan->isChecked()) {
-                Settings::addToZClassicConf(zclassicConfLocation, "rescan=1");
-                showRestartInfo = true;
-            }
-
-            if (settings.chkReindex->isChecked()) {
-                Settings::addToZClassicConf(zclassicConfLocation, "reindex=1");
-                showRestartInfo = true;
-            }
-
-            if (showRestartInfo) {
-                auto desc = tr("ZclWallet needs to restart to rescan/reindex. ZclWallet will now close, please restart ZclWallet to continue");
-
-                QMessageBox::information(this, tr("Restart ZclWallet"), desc, QMessageBox::Ok);
-                // NO-OP-IN-TRAY FIX: in the default tray-resident/embedded config (the only
-                // config where Rescan/Reindex are even enabled), close() merely HIDES to the
-                // tray — closeEvent ignores it before rpc->shutdownZClassicd(), so the daemon
-                // never stops and never re-reads rescan=1/reindex=1, making the whole feature a
-                // silent no-op. quitApp() sets quitting=true so closeEvent actually shuts the
-                // node down; the next launch then performs the rescan/reindex (matches the copy).
-                // Context 'this': Qt auto-cancels the timer if the window is destroyed first.
-                QTimer::singleShot(1, this, [=]() { this->quitApp(); });
-            }
-        }
-    });
+void MainWindow::setupSettingsModal() {
+    // Settings is a page of its own now (settingspage.cpp); Edit > Settings and Ctrl+P open it.
+    QObject::connect(ui->actionSettings, &QAction::triggered, this, &MainWindow::openSettingsPage);
 }
 
 void MainWindow::addressBook() {
@@ -2390,7 +2010,7 @@ void MainWindow::addressBook() {
     };
 
     // If there was no target, then just run with no target.
-    AddressBook::open(this);
+    openAddressBookPage();   // a page of its own (addressbookpage.cpp)
 }
 
 
@@ -3087,7 +2707,7 @@ void MainWindow::setupBalancesTab() {
     // monospace/tabular/sign-tinted render. (setItemDelegateForColumn works
     // before or after the model is set in RPC::RPC.)
     ui->balancesTable->setItemDelegateForColumn(
-        0, new PrivacyBadgeDelegate(PrivacyBadgeDelegate::Mode::Address, ui->balancesTable));
+        0, new AddressCellDelegate(ui->balancesTable));
     ui->balancesTable->setItemDelegateForColumn(
         1, new PrivacyBadgeDelegate(PrivacyBadgeDelegate::Mode::Amount, ui->balancesTable));
 
@@ -3300,7 +2920,7 @@ void MainWindow::setupTransactionsTab() {
     // delegate reads the sibling Type cell); the amount column gets the
     // monospace/tabular/sign-tinted render.
     ui->transactionsTable->setItemDelegateForColumn(
-        1, new PrivacyBadgeDelegate(PrivacyBadgeDelegate::Mode::Address, ui->transactionsTable));
+        1, new AddressCellDelegate(ui->transactionsTable));
     ui->transactionsTable->setItemDelegateForColumn(
         3, new PrivacyBadgeDelegate(PrivacyBadgeDelegate::Mode::Amount, ui->transactionsTable));
 
@@ -3483,30 +3103,16 @@ void MainWindow::setupRecieveTab() {
 
     // Connect t-addr radio button
     QObject::connect(ui->rdioTAddr, &QRadioButton::toggled, [=] (bool checked) {
-        // Whenever the t-address is selected, we generate a new address, because we don't
-        // want to reuse t-addrs
+        // Offer a never-used t-address (t-addrs must not be reused) and mint a new
+        // one only when none is left; "New address" always makes a new one.
         if (checked && this->rpc->getUTXOs() != nullptr) {
             updateTAddrCombo(checked);
-            addNewTAddr();
+            showUnusedTAddress(addNewTAddr);
         }
         if (checked) {
-            // Transparent addresses are PUBLIC -- make that impossible to miss, but as
-            // a calm CALLOUT (Polish P1), not a red crash message. Amber = PUBLIC
-            // everywhere; red is reserved for de-shield. The qss [callout="public"]
-            // rule supplies the tinted bg + amber left-accent + lighter body color;
-            // a warning-triangle icon + a bold "PUBLIC" carry the emphasis. The copy
-            // ("Transparent address.", "PUBLIC", "permanently visible") is preserved
-            // for the D-series assertions.
-            ui->lblSproutWarning->setProperty("callout", "public");
-            ui->lblSproutWarning->setStyleSheet("");   // drop the legacy inline color:red
-            ui->lblSproutWarning->setText(tr(
-                "<html><head/><body><p>⚠  <b>Transparent address.</b> This address and any "
-                "balance it holds are <b>PUBLIC</b> and permanently visible to everyone "
-                "on the blockchain. For privacy, receive to a shielded (z) address "
-                "instead.</p></body></html>"));
-            ui->lblSproutWarning->style()->unpolish(ui->lblSproutWarning);
-            ui->lblSproutWarning->style()->polish(ui->lblSproutWarning);
-            ui->lblSproutWarning->setVisible(true);
+            // Transparent addresses are PUBLIC -- make that impossible to miss, as a
+            // calm amber CALLOUT (red is reserved for de-shield).
+            showPublicReceiveCallout();
         }
     });
 
@@ -3536,6 +3142,7 @@ void MainWindow::setupRecieveTab() {
                 "<a href=\"https://z.cash/support/security/announcements/security-announcement-2019-03-19/\">"
                 "<span style=\" text-decoration: underline; color:#0000ff;\">Security Announcement</span></a>."
                 "</p></body></html>"));
+            ui->lblSproutWarning->setProperty("showsPublic", false);
         }
         ui->lblSproutWarning->setVisible(showWarning);
     });
@@ -3589,6 +3196,7 @@ void MainWindow::setupRecieveTab() {
 
             // And then select the first one
             ui->listRecieveAddresses->setCurrentIndex(0);
+            refreshReceiveAddressList();
         }
     });
 
@@ -3599,6 +3207,9 @@ void MainWindow::setupRecieveTab() {
     // selected address into txtRecieve + the QR.
     QObject::connect(ui->listRecieveAddresses,
         QOverload<int>::of(&QComboBox::currentIndexChanged), [=] (int index) {
+        // A new selection here (New address, type switch, tab entry) replaces any
+        // address picked from the "Your addresses" list.
+        receiveShownAddr.clear();
         QString addr = ui->listRecieveAddresses->itemText(index);
         if (addr.isEmpty()) {
             // Calm loading state instead of a blank field+QR (reads as "broken"); the
@@ -3634,7 +3245,7 @@ void MainWindow::setupRecieveTab() {
 // memo-drop. This is the symmetric inverse of payZClassicURI — a scanned request re-enters Send.
 QString MainWindow::buildReceivePaymentUri() {
     if (!txtReceiveAmount) return QString();
-    QString addr = ui->listRecieveAddresses->currentText();   // raw addr (combo '(' split)
+    QString addr = currentReceiveAddress();   // raw addr (list pick, else combo '(' split)
     if (addr.isEmpty()) return QString();
     double amt = txtReceiveAmount->text().trimmed().toDouble();
     if (amt <= 0) return QString();                            // no amount -> no request URI
@@ -3656,7 +3267,7 @@ QString MainWindow::buildReceivePaymentUri() {
 // Refresh the Receive QR + the request-payload affordances from the current address + request
 // fields. Presentation only — never mutates the combo or txtRecieve's raw-address plain text.
 void MainWindow::updateReceiveQRandPayload() {
-    QString addr = ui->listRecieveAddresses->currentText();   // raw addr
+    QString addr = currentReceiveAddress();   // raw addr (list pick, else combo)
     bool haveAddr = !addr.isEmpty();
     bool isZ = haveAddr && Settings::isZAddress(addr);
 
@@ -3676,6 +3287,8 @@ void MainWindow::updateReceiveQRandPayload() {
     if (!haveAddr) { ui->qrcodeDisplay->clear(); return; }
     // Bake the amount/memo into the QR when a request is set; else the bare address.
     ui->qrcodeDisplay->setQrcodeString(haveRequest ? uri : addr);
+
+    updateReceivePrivacySignal(isZ);
 }
 
 // Phase-3c (Quiet+): restructure the Receive page so it is PRIVATE BY DEFAULT.
@@ -3744,11 +3357,11 @@ void MainWindow::setupReceivePrivacyDisclosure() {
     auto* advCaption = new QLabel(receiveAdvancedPanel);
     advCaption->setObjectName("lblReceiveAdvancedCaption");
     advCaption->setWordWrap(true);
+    // Short on purpose: picking t-Addr shows the full PUBLIC callout above, so this
+    // line must not repeat it.
     advCaption->setText(tr(
-        "⚠  Transparent (t) addresses are PUBLIC: the address and any balance it "
-        "holds are permanently visible to everyone on the blockchain. For privacy, "
-        "receive to a shielded (z) address instead. Legacy Sprout is shown only for "
-        "funds you already hold."));
+        "Use a public address only for a sender who cannot pay a private one. "
+        "Legacy Sprout appears only for funds you already hold."));
 
     auto* radiosRow = new QHBoxLayout();
     radiosRow->setContentsMargins(0, 0, 0, 0);
@@ -3789,7 +3402,7 @@ void MainWindow::setupReceivePrivacyDisclosure() {
         "Reveals the spending key for the selected address. Anyone with this key can "
         "spend its funds — only do this on a private screen."));
     QObject::connect(btnExportKey, &QPushButton::clicked, [this]() {
-        QString addr = ui->listRecieveAddresses->currentText();
+        QString addr = currentReceiveAddress();
         if (addr.isEmpty())
             return;
         this->exportKeys(addr);   // opens the advanced export dialog (amber intro + in-screen security note)
@@ -3812,7 +3425,7 @@ void MainWindow::setupReceivePrivacyDisclosure() {
         QObject::connect(btnCopy, &QPushButton::clicked, [this, btnCopy]() {
             QString addr = ui->txtRecieve->toPlainText().trimmed();
             if (!Settings::isValidAddress(addr))
-                addr = ui->listRecieveAddresses->currentText();
+                addr = currentReceiveAddress();
             // Guard on VALIDITY, not just non-emptiness: during the warmup window txtRecieve
             // holds the "Preparing your address…" placeholder (non-empty), which must never be
             // copied as if it were an address.
@@ -3951,6 +3564,8 @@ void MainWindow::setupReceivePrivacyDisclosure() {
     ui->rdioZSAddr->setVisible(false);
     ui->lblSproutWarning->setVisible(false);   // no scary caption at rest
 
+    layoutReceivePage(groupLayout, lblReceiveHeadline, lblReceiveSubhead, reqRow, lblReqCap);
+
     // Sprout funds are unknown until rpc is live (returns false now, re-evaluated
     // on every Receive tab-switch); hides the legacy-Sprout radio when not held.
     refreshReceiveAdvancedOptions();
@@ -3966,8 +3581,10 @@ void MainWindow::setReceiveAdvancedExpanded(bool expanded) {
         btnReceiveAdvanced->setChecked(expanded);
         btnReceiveAdvanced->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
     }
+    // The address-type tabs replaced the disclosure: its panel (radios, caption) is
+    // the hidden state machine and is never shown.
     if (receiveAdvancedPanel)
-        receiveAdvancedPanel->setVisible(expanded);
+        receiveAdvancedPanel->setVisible(false);
 
     if (!expanded) {
         // Returning to private: re-select Sapling (clears the PUBLIC caption via the
@@ -4002,6 +3619,7 @@ bool MainWindow::walletHasLegacySprout() const {
 void MainWindow::refreshReceiveAdvancedOptions() {
     const bool hasSprout = walletHasLegacySprout();
     ui->rdioZAddr->setVisible(hasSprout);
+    if (receiveTabLegacy) receiveTabLegacy->setVisible(hasSprout);
     // If Sprout funds vanished while it was selected, fall back to private.
     if (!hasSprout && ui->rdioZAddr->isChecked())
         ui->rdioZSAddr->setChecked(true);

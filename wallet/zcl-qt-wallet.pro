@@ -57,9 +57,15 @@ SOURCES += \
     src/portprobe_win.cpp \
     src/main.cpp \
     src/mainwindow.cpp \
+    src/navrail.cpp \
+    src/receivepage.cpp \
     src/rpc.cpp \
     src/balancestablemodel.cpp \
     src/privacybadgedelegate.cpp \
+    src/addresscell.cpp \
+    src/timeformat.cpp \
+    src/settingspage.cpp \
+    src/addressbookpage.cpp \
     src/3rdparty/qrcode/BitBuffer.cpp \
     src/3rdparty/qrcode/QrCode.cpp \
     src/3rdparty/qrcode/QrSegment.cpp \
@@ -112,6 +118,8 @@ HEADERS += \
     src/rpc.h \
     src/balancestablemodel.h \
     src/privacybadgedelegate.h \
+    src/addresscell.h \
+    src/timeformat.h \
     src/3rdparty/qrcode/BitBuffer.hpp \
     src/3rdparty/qrcode/QrCode.hpp \
     src/3rdparty/qrcode/QrSegment.hpp \

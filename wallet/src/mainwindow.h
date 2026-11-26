@@ -7,6 +7,7 @@
 #include <QProgressBar>
 #include <QElapsedTimer>
 #include <QSharedPointer>
+#include <QSet>
 
 // Forward declare to break circular dependency.
 class RPC;
@@ -17,6 +18,17 @@ class QPushButton;
 class QToolButton;
 class QWidget;
 class QCheckBox;
+class QTreeWidget;
+class QGroupBox;
+class QVBoxLayout;
+class QHBoxLayout;
+class QFrame;
+class QLabel;
+class QLayout;
+class QLineEdit;
+class QComboBox;
+class QDialog;
+class Ui_Settings;
 
 using json = nlohmann::json;
 
@@ -162,6 +174,23 @@ public:
     QLineEdit*          txtReceiveMemo        = nullptr;   // optional z-only note for the sender
     QPushButton*        btnReceiveCopyRequest = nullptr;   // "Copy payment request" (shown when amount>0)
     bool                receiveAdvancedExpanded = false;
+    // "Your addresses": every z and t address in this wallet (funded or not), so a
+    // freshly made address is never invisible. Clicking a row shows it for sharing.
+    QTreeWidget*        receiveAddressList    = nullptr;
+    QGroupBox*          receiveAddressesBox   = nullptr;
+    QString             receiveShownAddr;     // address on display; "" = the combo's selection
+    // Address-type tabs on Receive; they drive the (hidden) radios.
+    QPushButton*        receiveTabPrivate     = nullptr;
+    QPushButton*        receiveTabPublic      = nullptr;
+    QPushButton*        receiveTabLegacy      = nullptr;   // only while Sprout funds are held
+    QString             unusedTAddress() const;            // a never-used t-addr, or ""
+    // "Your addresses" search, balance order and 10-per-page pager.
+    QLineEdit*          receiveSearch         = nullptr;
+    QComboBox*          receiveSort           = nullptr;
+    QPushButton*        receivePrev           = nullptr;
+    QPushButton*        receiveNext           = nullptr;
+    QLabel*             receivePageLabel      = nullptr;
+    int                 receivePage           = 0;
 
     QLabel*             statusLabel;
     QLabel*             statusIcon;
@@ -188,6 +217,11 @@ public:
     // no-op. Pure main-thread; no async/lifecycle involvement.
     QString             lastBannerSheet;
     void applyBannerStyle(const QString& sheet);
+    // Tinted card for each sync-banner state (navrail.cpp).
+    enum class BannerTone { Rest, Neutral, Warn, Info };
+    static QString bannerSheet(BannerTone tone);
+    static void styleAddressBookButton(QPushButton* button);   // icon-only, tooltip
+    void setupRecipientAddressField(QLineEdit* field);        // placeholder + "i"
 
     // tipAge: seconds since the newest block (-1 unknown); kind: SyncState::Kind (-1 none).
     void setSyncStatus(bool isSyncing, int blockNumber, int estimatedHeight, double progress,
@@ -230,6 +264,9 @@ public:
     // synchronous mid-send create is only a last resort). Idempotent + one-shot per
     // run. Public so the RPC address-refresh path can call it once addresses load.
     void ensureSaplingProvisioned();
+    // Rebuild the Receive page's "Your addresses" list from the wallet's address and
+    // balance data. Public so the RPC address-refresh path can call it.
+    void refreshReceiveAddressList();
     // longStretch=true after a LONG peerless stretch (~3min): adds a stronger
     // "check your internet / try again later" hint (SELF-HEAL SYNCED-ZERO-PEERS).
     void setSyncStatusWaitingForPeers(bool longStretch = false, int blockNumber = 0, qint64 tipAge = -1);
@@ -356,6 +393,44 @@ private:
     void setupZClassicdTab();
 
     void setupSettingsModal();
+    // settingspage.cpp: Settings as a page (cards built from the Settings form).
+    QWidget*     settingsPage             = nullptr;
+    QDialog*     settingsHost             = nullptr;   // hidden; set up the form
+    Ui_Settings* settingsForm             = nullptr;
+    QWidget*     settingsConnectionFields = nullptr;
+    bool         settingsUsingTor         = false;
+    bool         settingsConfLocked       = false;
+    QString      settingsConfLocation;
+    void buildSettingsPage();
+    QGroupBox* settingsCard(const QString& title, QVBoxLayout** body);
+    void addSettingsRow(QVBoxLayout* body, QCheckBox* box, const QString& title, QLabel* caption, const QString& text);
+    QGroupBox* buildSettingsPrivacyCard();
+    QGroupBox* buildSettingsAppCard();
+    QGroupBox* buildSettingsConnectionCard();
+    QGroupBox* buildSettingsTroubleshootingCard();
+    QHBoxLayout* buildSettingsActions();
+    void wireSettingsForm();
+    void openSettingsPage();
+    void loadSettingsForm();
+    void loadSettingsConnection();
+    void saveSettingsForm();
+    void saveSettingsNetwork();
+    void saveSettingsRestart();
+    // addressbookpage.cpp: the Address book as a page.
+    QWidget*     addressBookPage = nullptr;
+    QLineEdit*   bookLabel       = nullptr;
+    QLineEdit*   bookAddress     = nullptr;
+    QLineEdit*   bookSearch      = nullptr;
+    QTreeWidget* bookList        = nullptr;
+    QGroupBox*   bookListCard    = nullptr;
+    void buildAddressBookPage();
+    QGroupBox* buildAddressBookAddCard();
+    QGroupBox* buildAddressBookListCard();
+    void openAddressBookPage();
+    void addAddressBookEntry();
+    void addressBookChanged();
+    void refreshAddressBookPage();
+    void addAddressBookRow(const QString& label, const QString& addr);
     void setupStatusBar();
     void setupSyncBanner();
 
@@ -365,6 +440,22 @@ private:
     // pages/objectNames are kept intact underneath; only its tabBar is hidden,
     // so every page stays index-selectable (L0/L1 tests untouched).
     void setupNavRail();
+    // navrail.cpp: the pieces setupNavRail() is built from.
+    void addNavBrand(QWidget* rail, QVBoxLayout* railLayout);
+    QPushButton* makeRailItem(QWidget* rail, QVBoxLayout* railLayout, const QString& label,
+                              const QString& icon, const QString& objName, bool secondary);
+    void addRailPage(QWidget* rail, QVBoxLayout* railLayout, const QString& label,
+                     const QString& icon, int tabIndex);
+    void addRailShortcuts(QWidget* rail, QVBoxLayout* railLayout);
+    void openNodePage();
+    void syncNavRailToTab(int idx);
+    void fillMoreMenu(QMenu* menu);
+    void addMenuActionsOnce(QMenu* target, QMenu* source, QSet<QString>& seen);
+    void placeNavRail(QFrame* navRail);
+    void hideMenuBarKeepShortcuts();
+    void applyPageGutters();
+    void tidySendPage();
+    void lockUntilConnected();
     QButtonGroup* navRailGroup = nullptr;
 
     // Phase-3b redesign (Quiet+): build the Home DASHBOARD programmatically on the
@@ -533,9 +624,29 @@ private:
     // Built programmatically (no structural .ui churn); reuses lblSproutWarning
     // for the red PUBLIC caption exactly as before.
     void setupReceivePrivacyDisclosure();
+    void showPublicReceiveCallout();   // amber PUBLIC caption for a transparent address
+    // receivepage.cpp: tabs, share card and "Your addresses".
+    void updateReceivePrivacySignal(bool isZ);
+    void showUnusedTAddress(const std::function<void()>& makeNew);
+    void layoutReceivePage(QVBoxLayout* groupLayout, QLabel* headline, QLabel* subhead,
+                           QLayout* requestRow, QLabel* requestCaption);
+    QWidget* buildReceiveTypeTabs();
+    QPushButton* makeReceiveTab(QWidget* parent, QHBoxLayout* row, QButtonGroup* group,
+                                const QString& label, const char* objName, const QString& tip);
+    void followReceiveRadio(QPushButton* tab, bool checked);
+    QHBoxLayout* buildReceiveShareRow(QLayout* requestRow);
+    QGroupBox* buildReceiveAddressesCard();
+    void addReceiveAddressRow(const QString& addr, double balance, bool current);
+    QHBoxLayout* buildReceiveListTools();
+    QHBoxLayout* buildReceivePager();
+    QList<QPair<QString, double>> searchAndSortReceiveRows(const QList<QPair<QString, double>>& all) const;
+    void updateReceivePager(int pages);
+    void setReceiveListTitle(int kind, int shown, int total);
+    QToolButton* makeRowButton(QWidget* parent, const char* icon, const QString& tip, const char* objName);
     // Receive payment-request helpers (presentation only; never mutate the combo / raw address).
     QString buildReceivePaymentUri();   // zclassic:<addr>?amt=&memo= or "" when no amount set
     void    updateReceiveQRandPayload();
+    QString currentReceiveAddress() const;   // address on display (list pick, else combo)
     // Show/hide the advanced disclosure panel; keeps the toggle arrow + collapsed
     // state in sync and, when collapsing, returns to the private (Sapling) view.
     void setReceiveAdvancedExpanded(bool expanded);
