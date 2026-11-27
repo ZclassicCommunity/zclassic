@@ -628,7 +628,7 @@ QPlainTextEdit#restorePhrase {
 QPlainTextEdit#restorePhrase:focus { border-color: #1f8f4e; }
 
 /* ---- Node page (nodepage.cpp) ---- */
-QScrollArea#nodeScroll, QWidget#nodeBody { background: transparent; border: none; }
+QScrollArea#nodeScroll, QScrollArea#nodeScroll > QWidget, QWidget#nodeBody { background: transparent; border: none; }
 QFrame#nodeTile {
     background-color: #121714; border: 1px solid #232b26; border-radius: 14px;
 }

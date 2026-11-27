@@ -3726,6 +3726,10 @@ private slots:
         QVERIFY(w->grab().save(QDir(dir).filePath("12-node-default-size.png")));
         w->resize(920, 620); QTest::qWait(200);
         QVERIFY(w->grab().save(QDir(dir).filePath("13-node-smallest.png")));
+        for (const QSize& size : { QSize(1400, 900), QSize(1920, 1080), QSize(2560, 1440) }) {
+            w->resize(size); QTest::qWait(200);
+            QVERIFY(w->grab().save(QDir(dir).filePath(QString("14-node-%1x%2.png").arg(size.width()).arg(size.height()))));
+        }
         settleAndDelete(w);
         qApp->setStyleSheet(prevSheet);
         qApp->setPalette(prevPalette);
@@ -5318,12 +5322,19 @@ private slots:
 
         // Nothing is cut off at the right edge, at the window's default and smallest sizes.
         auto* scroll = p->findChild<QScrollArea*>("nodeScroll");
-        for (const QSize& size : { QSize(1050, 685), QSize(920, 620), QSize(1400, 900) }) {
+        for (const QSize& size : { QSize(920, 620), QSize(1050, 685), QSize(1180, 760), QSize(1400, 900),
+                                   QSize(1650, 845), QSize(1920, 1080), QSize(2560, 1440) }) {
             w->resize(size);
             QTest::qWait(120);
             QVERIFY2(scroll->widget()->width() <= scroll->viewport()->width(),
                      qPrintable(QString("%1x%2: page %3 wider than its view %4").arg(size.width()).arg(size.height())
                                 .arg(scroll->widget()->width()).arg(scroll->viewport()->width())));
+            // every tile shows its whole number and caption (nothing elided or clipped)
+            for (const char* name : { "nodeTileValue", "nodeTileValueLead", "nodeTileCaption" })
+                for (QLabel* l : p->findChildren<QLabel*>(name))
+                    QVERIFY2(l->width() >= l->sizeHint().width(),
+                             qPrintable(QString("%1x%2: '%3' is %4 wide, needs %5").arg(size.width()).arg(size.height())
+                                        .arg(l->text()).arg(l->width()).arg(l->sizeHint().width())));
         }
 
         // The network-help panel moved into the page.

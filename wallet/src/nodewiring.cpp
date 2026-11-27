@@ -305,11 +305,6 @@ void MainWindow::buildNodePage() {
     ui->groupBox_5->hide();
     nodePage = new NodePage(zclassicdtab);
     zclassicdtab->layout()->addWidget(nodePage);
-    if (netHelpBlurbLabel) {   // its link was default blue on the dark card
-        QPalette pal = netHelpBlurbLabel->palette();
-        pal.setColor(QPalette::Link, QColor(0x5f, 0xd3, 0x8d));
-        netHelpBlurbLabel->setPalette(pal);
-    }
     nodePage->adoptHelpPanel(netHelpPanel);
     QObject::connect(ui->tabWidget, &QTabWidget::currentChanged, this, [this](int) {
         if (ui->tabWidget->currentWidget() == zclassicdtab) refreshNodePage();

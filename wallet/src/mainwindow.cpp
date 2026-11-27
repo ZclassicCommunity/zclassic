@@ -2850,7 +2850,7 @@ void MainWindow::setupNetworkHelpPanel() {
         "To also accept incoming connections from other wallets, turn on automatic "
         "port opening below, or forward port "
         "<b>%1</b> to this computer on your router "
-        "(<a href=\"https://portforward.com/\">how do I forward a port?</a>).")
+        "(<a style=\"color:#5fd38d\" href=\"https://portforward.com/\">how do I forward a port?</a>).")
         .arg(Settings::getInstance()->isTestnet() ? 18033 : 8033));
 
     // One-click discoverable front door for the NAT-PMP/PCP auto-port-opening that
