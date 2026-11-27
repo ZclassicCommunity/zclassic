@@ -2864,7 +2864,7 @@ void MainWindow::setupNetworkHelpPanel() {
     // enables/disables it honestly each poll (embedded-only, exactly like the
     // Settings chkNatpmp) -- we cannot gate on rpc->isEmbedded() at build time
     // because setupZClassicdTab() runs BEFORE `rpc = new RPC(this)`.
-    netHelpNatpmpChk = new QCheckBox(tr("Help the network — open my port automatically"), netHelpPanel);
+    netHelpNatpmpChk = new QCheckBox(tr("Open my port automatically"), netHelpPanel);
     netHelpNatpmpChk->setChecked(Settings::getInstance()->getOpenPortNatpmp());
     netHelpNatpmpChk->setToolTip(tr("Asks your router to forward this node's port using NAT-PMP/PCP (never UPnP), opening only this node's own port. Takes effect the next time ZclWallet starts its node."));
     QObject::connect(netHelpNatpmpChk, &QCheckBox::toggled, this, [this](bool on) {

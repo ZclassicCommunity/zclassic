@@ -7,7 +7,9 @@
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
-#include <QHeaderView>
+#include <QClipboard>
+#include <QFontMetrics>
+#include <QGuiApplication>
 #include <QLabel>
 #include <QLineEdit>
 #include <QLocale>
@@ -15,7 +17,8 @@
 #include <QPainterPath>
 #include <QPushButton>
 #include <QScrollArea>
-#include <QTreeWidget>
+#include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 namespace {
@@ -203,6 +206,7 @@ void NodePage::resizeEvent(QResizeEvent* event) {
     int fourAcross = 3 * 14 + 24;   // gaps, the scroll bar and its margin
     for (QWidget* t : _tiles) fourAcross += t->minimumSizeHint().width();
     reflow(width() >= fourAcross ? 4 : 2, width() >= 880);
+    QTimer::singleShot(0, this, [this]() { fitHashes(); });   // once the new widths are laid out
 }
 
 QGroupBox* NodePage::buildChartCard() {
@@ -232,19 +236,9 @@ QGroupBox* NodePage::buildBlocksCard() {
     card->setObjectName("nodeBlocksCard");
     auto* v = new QVBoxLayout(card);
     v->setSpacing(10);
-    _blocks = new QTreeWidget(card);
-    _blocks->setObjectName("nodeBlocks");
-    _blocks->setColumnCount(5);
-    _blocks->setHeaderLabels({ tr("Height"), tr("Mined"), tr("Transactions"), tr("Size"), tr("Block hash") });
-    _blocks->setRootIsDecorated(false);
-    _blocks->setUniformRowHeights(true);
-    _blocks->setSelectionMode(QAbstractItemView::NoSelection);
-    _blocks->setFocusPolicy(Qt::NoFocus);
-    _blocks->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    _blocks->header()->setStretchLastSection(true);
-    for (int c = 0; c < 4; ++c) _blocks->header()->setSectionResizeMode(c, QHeaderView::ResizeToContents);
-    _blocks->setFixedHeight(60);
-    v->addWidget(_blocks);
+    _blocksBox = new QVBoxLayout();
+    _blocksBox->setSpacing(0);
+    v->addLayout(_blocksBox);
 
     auto* row = new QHBoxLayout();
     row->setSpacing(8);
@@ -307,8 +301,8 @@ void NodePage::refreshAges() {
         _heightNote->setText(tr("Syncing · %1").arg(age));
     else
         _heightNote->setText(tr("Synced · %1").arg(age));
-    for (int i = 0; i < _blocks->topLevelItemCount() && i < _rows.size(); ++i)
-        _blocks->topLevelItem(i)->setText(1, formatAge(now - _rows.at(i).time));
+    for (int i = 0; i < _blockMeta.size() && i < _rows.size(); ++i)
+        _blockMeta.at(i)->setText(blockMeta(_rows.at(i), now));
 }
 
 void NodePage::setPeers(int total, int inbound) {
@@ -331,22 +325,77 @@ void NodePage::setHashrateSeries(const QVector<QPair<qint64, double>>& points) {
     _chart->setSeries(points);
 }
 
+// "13 s ago · 2 transactions · 682 bytes"
+QString NodePage::blockMeta(const NodeBlockRow& r, qint64 now) {
+    const QString size = r.size >= 10240 ? tr("%1 KB").arg(QString::number(r.size / 1024.0, 'f', 1))
+                                         : tr("%1 bytes").arg(formatCount(r.size));
+    return tr("%1 · %2 · %3").arg(formatAge(now - r.time))
+        .arg(r.txs == 1 ? tr("1 transaction") : tr("%1 transactions").arg(r.txs)).arg(size);
+}
+
+// One block is two lines: its height with when it was mined, how many transactions and
+// its size; then the whole hash. A table lost its last columns on a narrow window; these
+// rows wrap instead, so no window size hides anything.
 void NodePage::setBlocks(const QList<NodeBlockRow>& rows) {
     _rows = rows;
-    _blocks->clear();
-    for (const NodeBlockRow& r : rows) {
-        auto* item = new QTreeWidgetItem(_blocks);
-        item->setText(0, formatCount(r.height));
-        item->setText(2, QString::number(r.txs));
-        item->setText(3, r.size >= 10240 ? tr("%1 KB").arg(QString::number(r.size / 1024.0, 'f', 1))
-                                         : tr("%1 bytes").arg(formatCount(r.size)));
-        item->setText(4, r.hash);
-        item->setToolTip(4, r.hash);
-        for (int c : { 0, 2, 3 }) item->setTextAlignment(c, Qt::AlignRight | Qt::AlignVCenter);
+    _blockMeta.clear();
+    _blockHash.clear();
+    while (QLayoutItem* it = _blocksBox->takeAt(0)) {
+        delete it->widget();
+        delete it;
     }
-    const int rowH = rows.isEmpty() ? 0 : qMax(_blocks->sizeHintForRow(0), 30);
-    _blocks->setFixedHeight(_blocks->header()->sizeHint().height() + rows.size() * rowH + 8);
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    for (const NodeBlockRow& r : rows) {
+        auto* row = new QFrame(this);
+        row->setObjectName("nodeBlockRow");
+        auto* v = new QVBoxLayout(row);
+        v->setContentsMargins(4, 8, 4, 8);
+        v->setSpacing(2);
+        auto* top = new QHBoxLayout();
+        top->setSpacing(12);
+        auto* height = new QLabel(formatCount(r.height), row);
+        height->setObjectName("nodeBlockHeight");
+        auto* meta = new QLabel(blockMeta(r, now), row);
+        meta->setObjectName("nodeBlockMeta");
+        meta->setWordWrap(true);
+        auto* copy = new QToolButton(row);
+        copy->setObjectName("nodeBlockCopy");
+        copy->setIcon(QIcon(":/icons/res/icons/copy-light.svg"));
+        copy->setIconSize(QSize(16, 16));
+        copy->setAutoRaise(true);
+        copy->setCursor(Qt::PointingHandCursor);
+        copy->setToolTip(tr("Copy this block's hash"));
+        const QString hash = r.hash;
+        QObject::connect(copy, &QToolButton::clicked, this, [hash]() { QGuiApplication::clipboard()->setText(hash); });
+        top->addWidget(height);
+        top->addWidget(meta, 1);
+        top->addWidget(copy);
+        v->addLayout(top);
+        auto* hashLabel = new QLabel(r.hash, row);
+        hashLabel->setObjectName("nodeBlockHash");
+        hashLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        hashLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);   // never widens the page
+        hashLabel->setMinimumWidth(0);
+        v->addWidget(hashLabel);
+        _blocksBox->addWidget(row);
+        _blockMeta << meta;
+        _blockHash << hashLabel;
+    }
+    QTimer::singleShot(0, this, [this]() { fitHashes(); });
     refreshAges();
+}
+
+// A hash is 64 characters with no place to break: show it whole on one line when the row
+// is wide enough, otherwise as two halves. It is never cut short.
+void NodePage::fitHashes() {
+    for (int i = 0; i < _blockHash.size() && i < _rows.size(); ++i) {
+        QLabel* label = _blockHash.at(i);
+        const QString hash = _rows.at(i).hash;
+        label->ensurePolished();
+        const bool fits = QFontMetrics(label->font()).horizontalAdvance(hash) <= label->width();
+        const QString text = fits ? hash : hash.left(hash.size() / 2) + QLatin1Char('\n') + hash.mid(hash.size() / 2);
+        if (label->text() != text) label->setText(text);
+    }
 }
 
 void NodePage::setFacts(const QList<QPair<QString, QString>>& facts) {

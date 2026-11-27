@@ -3726,6 +3726,12 @@ private slots:
         QVERIFY(w->grab().save(QDir(dir).filePath("12-node-default-size.png")));
         w->resize(920, 620); QTest::qWait(200);
         QVERIFY(w->grab().save(QDir(dir).filePath("13-node-smallest.png")));
+        w->setMinimumSize(0, 0);   // a small screen lowers the window's minimum (navrail.cpp)
+        for (const QSize& size : { QSize(800, 560), QSize(680, 480) }) {
+            w->resize(size); QTest::qWait(200);
+            QVERIFY(w->grab().save(QDir(dir).filePath(QString("15-node-%1x%2.png").arg(size.width()).arg(size.height()))));
+            QVERIFY(w->nodePage->findChild<QWidget*>("nodeBody")->grab().save(QDir(dir).filePath(QString("16-node-whole-page-%1.png").arg(size.width()))));
+        }
         for (const QSize& size : { QSize(1400, 900), QSize(1920, 1080), QSize(2560, 1440) }) {
             w->resize(size); QTest::qWait(200);
             QVERIFY(w->grab().save(QDir(dir).filePath(QString("14-node-%1x%2.png").arg(size.width()).arg(size.height()))));
@@ -5299,12 +5305,12 @@ private slots:
         QVERIFY2(notes.join('|').contains("Synced") && notes.join('|').contains("5 outgoing") && notes.join('|').contains("3 incoming"),
                  qPrintable(notes.join('|')));
 
-        auto* blocks = p->findChild<QTreeWidget*>("nodeBlocks");
-        QTRY_COMPARE_WITH_TIMEOUT(blocks->topLevelItemCount(), 6, 5000);
-        QCOMPARE(blocks->topLevelItem(0)->text(0), QString("3,333,515"));
-        QCOMPARE(blocks->topLevelItem(5)->text(0), QString("3,333,510"));
-        QCOMPARE(blocks->topLevelItem(0)->text(2), QString("2"));
-        QVERIFY(blocks->topLevelItem(0)->text(1).endsWith("s ago"));
+        auto heights = [p]() { QStringList v; for (QLabel* l : p->findChildren<QLabel*>("nodeBlockHeight")) v << l->text(); return v; };
+        QTRY_COMPARE_WITH_TIMEOUT(heights().size(), 6, 5000);
+        QCOMPARE(heights().first(), QString("3,333,515"));
+        QCOMPARE(heights().last(), QString("3,333,510"));
+        const QString meta0 = p->findChildren<QLabel*>("nodeBlockMeta").first()->text();
+        QVERIFY2(meta0.contains("s ago") && meta0.contains("2 transactions") && meta0.contains("bytes"), qPrintable(meta0));
 
         auto facts = [p]() { QStringList f; for (QLabel* l : p->findChildren<QLabel*>("nodeFactValue")) f << l->text(); return f.join('|'); };
         QTRY_VERIFY2_WITH_TIMEOUT(facts().contains("block 4,067,000"), qPrintable(facts()), 8000);   // found by bisection
@@ -5322,13 +5328,24 @@ private slots:
 
         // Nothing is cut off at the right edge, at the window's default and smallest sizes.
         auto* scroll = p->findChild<QScrollArea*>("nodeScroll");
-        for (const QSize& size : { QSize(920, 620), QSize(1050, 685), QSize(1180, 760), QSize(1400, 900),
+        w->setMinimumSize(0, 0);   // a small screen lowers the window's minimum, so go below 920x620 too
+        for (const QSize& size : { QSize(640, 480), QSize(680, 480), QSize(800, 560), QSize(920, 620), QSize(1050, 685), QSize(1180, 760), QSize(1400, 900),
                                    QSize(1650, 845), QSize(1920, 1080), QSize(2560, 1440) }) {
             w->resize(size);
             QTest::qWait(120);
             QVERIFY2(scroll->widget()->width() <= scroll->viewport()->width(),
                      qPrintable(QString("%1x%2: page %3 wider than its view %4").arg(size.width()).arg(size.height())
                                 .arg(scroll->widget()->width()).arg(scroll->viewport()->width())));
+            // every block shows its whole hash: on one line, or as two halves on a narrow window
+            const QList<QLabel*> hashes = p->findChildren<QLabel*>("nodeBlockHash");
+            QCOMPARE(hashes.size(), 6);
+            for (QLabel* l : hashes) {
+                QCOMPARE(QString(l->text()).remove('\n').size(), 64);
+                int widest = 0;
+                for (const QString& line : l->text().split('\n')) widest = qMax(widest, l->fontMetrics().horizontalAdvance(line));
+                QVERIFY2(widest <= l->width(), qPrintable(QString("%1x%2: a hash line needs %3 px of %4")
+                         .arg(size.width()).arg(size.height()).arg(widest).arg(l->width())));
+            }
             // every tile shows its whole number and caption (nothing elided or clipped)
             for (const char* name : { "nodeTileValue", "nodeTileValueLead", "nodeTileCaption" })
                 for (QLabel* l : p->findChildren<QLabel*>(name))

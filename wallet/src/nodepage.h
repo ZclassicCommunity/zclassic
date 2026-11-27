@@ -24,7 +24,6 @@ class QGridLayout;
 class QGroupBox;
 class QLabel;
 class QLineEdit;
-class QTreeWidget;
 class QVBoxLayout;
 
 // One row of "Latest blocks".
@@ -88,6 +87,8 @@ private:
     QWidget*   makeTile(const QString& caption, QLabel*& value, QLabel*& note);
     void       runLookup();
     void       reflow(int tileColumns, bool chartBesideFacts);
+    void       fitHashes();
+    static QString blockMeta(const NodeBlockRow& row, qint64 now);
 
     QLabel* _heightValue = nullptr;  QLabel* _heightNote = nullptr;
     QLabel* _peersValue = nullptr;   QLabel* _peersNote = nullptr;
@@ -96,7 +97,9 @@ private:
     HashrateChart* _chart = nullptr;
     QLabel*      _chartNote = nullptr;
     QGridLayout* _factsGrid = nullptr;
-    QTreeWidget* _blocks = nullptr;
+    QVBoxLayout* _blocksBox = nullptr;
+    QList<QLabel*> _blockMeta;
+    QList<QLabel*> _blockHash;
     QLineEdit*   _lookupField = nullptr;
     QLabel*      _lookupResult = nullptr;
     QGroupBox*   _helpCard = nullptr;

@@ -642,3 +642,10 @@ QGroupBox QLabel#nodeFactValue { color: #e8ece9; font-size: 12pt; font-weight: 6
 QGroupBox QLabel#nodeLookupResult { font-size: 12pt; color: #e8ece9; }
 QGroupBox QLabel#nodeLookupResult[tone="warn"] { color: #f0b878; }
 QTreeWidget#nodeBlocks { font-size: 12pt; }
+QFrame#nodeBlockRow { border: none; border-bottom: 1px solid #1c231f; background: transparent; }
+QGroupBox QLabel#nodeBlockHeight { color: #e8ece9; font-size: 13pt; font-weight: 700; }
+QGroupBox QLabel#nodeBlockMeta { color: #c9d1cb; font-size: 12pt; }
+QGroupBox QLabel#nodeBlockHash {
+    color: #9aa59d; font-size: 11pt; font-family: "Consolas", "Menlo", "DejaVu Sans Mono", "Ubuntu Mono", monospace;
+}
+QToolButton#nodeBlockCopy { border: none; background: transparent; padding: 2px; }
