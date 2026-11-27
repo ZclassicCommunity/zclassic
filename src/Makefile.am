@@ -250,6 +250,8 @@ BITCOIN_CORE_H = \
   wallet/db.h \
   wallet/paymentdisclosure.h \
   wallet/paymentdisclosuredb.h \
+  wallet/bip39_english.h \
+  wallet/phrase.h \
   wallet/rpcwallet.h \
   wallet/tokenguard.h \
   wallet/sendjournal.h \
@@ -263,6 +265,7 @@ BITCOIN_CORE_H = \
   wallet/wallet.h \
   wallet/wallet_ismine.h \
   wallet/walletdb.h \
+  wallet/walletphrase.h \
   zmq/zmqabstractnotifier.h \
   zmq/zmqconfig.h\
   zmq/zmqnotificationinterface.h \
@@ -391,6 +394,7 @@ libbitcoin_wallet_a_SOURCES = \
   wallet/paymentdisclosuredb.cpp \
   wallet/rpcdisclosure.cpp \
   wallet/rpcdump.cpp \
+  wallet/rpcphrase.cpp \
   wallet/rpcwallet.cpp \
   wallet/rpczslp.cpp \
   wallet/tokenguard.cpp \
@@ -401,6 +405,8 @@ libbitcoin_wallet_a_SOURCES = \
   wallet/walletcheckpoint.cpp \
   wallet/wallet_ismine.cpp \
   wallet/walletdb.cpp \
+  wallet/phrase.cpp \
+  wallet/walletphrase.cpp \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
 

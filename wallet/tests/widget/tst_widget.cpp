@@ -63,6 +63,21 @@
 #include <QPalette>
 #include <QColor>
 #include <QStyle>
+#include <QTreeWidget>
+#include <QGroupBox>
+#include <QMenuBar>
+#include <QMenu>
+#include <QStatusBar>
+#include <QStandardItemModel>
+#include <QTableView>
+#include <QClipboard>
+#include "addresscell.h"
+#include "timeformat.h"
+#include "phrase.h"
+#include "backuppage.h"
+#include <QPlainTextEdit>
+#include <QMouseEvent>
+#include <QTextDocumentFragment>
 #include <memory>
 #include <future>
 
@@ -86,6 +101,7 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "rpc.h"
+#include "addressbook.h"
 #include "senttxstore.h"
 #include "settings.h"
 #include "connection.h"
@@ -1161,30 +1177,31 @@ private slots:
         delete w;
     }
 
-    // ---- D2: expanding the disclosure reveals t-Addr -> PUBLIC caption -----
-    // Driving the disclosure exactly as a user would: expand it, then select the
-    // transparent option, and assert the red PUBLIC caption (reusing
-    // lblSproutWarning) with the correct copy. FAILS if expanding stops revealing
-    // t-Addr, or if selecting t-Addr stops warning that it is PUBLIC.
+    // ---- D2: the Transparent tab -> PUBLIC caption -------------------------
+    // Driving the address-type tabs exactly as a user would: click Transparent and
+    // assert the PUBLIC caption (reusing lblSproutWarning) with the correct copy,
+    // and that the green Private badge steps aside. Clicking Private again returns
+    // to the private default. FAILS if the Transparent tab stops warning that it
+    // is PUBLIC, or if the tabs drift from the radio state machine.
     void d2_advancedRevealsTransparentPublicWarning() {
         MainWindow* w = makeWindow();
         auto* ui = w->ui;
 
-        // Expand "Other address types (advanced)" via its public toggle, the same
-        // signal a user click emits.
-        w->btnReceiveAdvanced->setChecked(true);
-        QVERIFY2(!w->receiveAdvancedPanel->isHidden(),
-                 "expanding the disclosure must REVEAL the advanced panel");
-        QVERIFY2(!ui->rdioTAddr->isHidden(),
-                 "expanding the disclosure must reveal the transparent (t-Addr) option");
-        // The green private badge steps aside while in advanced mode.
-        QVERIFY2(w->lblReceivePrivate->isHidden(),
-                 "the 'Private' badge must hide while the advanced panel is open");
+        QVERIFY2(w->receiveTabPrivate && w->receiveTabPublic,
+                 "Receive must offer Private and Transparent tabs");
+        QVERIFY2(w->receiveTabPrivate->isChecked(), "the Private tab is selected at rest");
+        QVERIFY2(w->btnReceiveAdvanced->isHidden(),
+                 "the old 'Other address types (advanced)' toggle is replaced by the tabs");
 
-        // Now SELECT the transparent option -> the red PUBLIC caption appears.
-        ui->rdioTAddr->setChecked(true);
+        // The user's click on Transparent.
+        w->receiveTabPublic->click();
+        QVERIFY2(ui->rdioTAddr->isChecked(), "the Transparent tab must select the t-Addr state");
+        QVERIFY2(w->receiveTabPublic->isChecked(), "the Transparent tab shows as selected");
+        // The green private badge steps aside for a transparent address.
+        QVERIFY2(w->lblReceivePrivate->isHidden(),
+                 "the 'Private' badge must hide on the Transparent tab");
         QVERIFY2(!ui->lblSproutWarning->isHidden(),
-                 "selecting t-Addr must reveal the PUBLIC warning caption");
+                 "the Transparent tab must reveal the PUBLIC warning caption");
 
         const QString t = ui->lblSproutWarning->text();
         QVERIFY2(t.contains("Transparent address.", Qt::CaseSensitive),
@@ -1193,6 +1210,12 @@ private slots:
                  qPrintable("warning text missing 'PUBLIC': " + t));
         QVERIFY2(t.contains("permanently visible", Qt::CaseSensitive),
                  qPrintable("warning text missing 'permanently visible': " + t));
+
+        // Back to Private: caption cleared, badge back, Sapling selected.
+        w->receiveTabPrivate->click();
+        QVERIFY2(ui->rdioZSAddr->isChecked(), "the Private tab must return to Sapling");
+        QVERIFY2(ui->lblSproutWarning->isHidden(), "the Private tab must clear the PUBLIC caption");
+        QVERIFY2(!w->lblReceivePrivate->isHidden(), "the Private tab must restore the badge");
 
         delete w;
     }
@@ -1508,39 +1531,37 @@ private slots:
     // tab page those were squeezed to a line and a half and cut off mid-sentence. Every
     // explanation must have its full wrapped height (the page scrolls instead).
     void ux6_settingsOptionsAreNotCutOff() {
+        const QString prevSheet = qApp->styleSheet();
+        const QPalette prevPalette = qApp->palette();
         MainWindow* w = makeWindow();
+        applyProductionTheme();
+        // Settings is a page now; Edit > Settings (Ctrl+P) opens it.
         QAction* act = w->findChild<QAction*>("actionSettings");
         QVERIFY(act);
-        QString cut = QStringLiteral("settings dialog never appeared");
-        const int gen = ++_modalGen;
-        std::function<void(int)> poll = [&](int tries) {
-            if (gen != _modalGen) return;
-            QWidget* dlg = QApplication::activeModalWidget();
-            if (!dlg || dlg->objectName() != "Settings") {
-                if (tries > 0) QTimer::singleShot(10, [&, tries]() { poll(tries - 1); });
-                return;
-            }
-            cut.clear();
-            for (int page = 1; page <= 2; ++page) {
-                auto* tabs = dlg->findChild<QTabWidget*>("tabWidget");
-                tabs->setCurrentIndex(page);
-                QApplication::processEvents();
-                QWidget* pw = tabs->currentWidget();
-                if (auto* sa = qobject_cast<QScrollArea*>(pw)) pw = sa->widget();
-                for (QLabel* l : pw->findChildren<QLabel*>()) {
-                    if (!l->wordWrap() || l->text().isEmpty()) continue;
-                    const int need = l->heightForWidth(l->width());
-                    if (l->height() + 1 < need)
-                        cut += QString("page%1 %2 h=%3 need=%4; ").arg(page).arg(l->objectName()).arg(l->height()).arg(need);
-                }
-            }
-            static_cast<QDialog*>(dlg)->reject();
-        };
-        QTimer::singleShot(0, [&]() { poll(300); });
+        w->resize(1100, 760);
         act->trigger();
-        ++_modalGen;
+        qApp->processEvents();
+        QWidget* page = w->findChild<QWidget*>("settingsPage");
+        QVERIFY(page != nullptr);
+        QCOMPARE(w->ui->tabWidget->currentWidget(), page);
+        QVERIFY(QApplication::activeModalWidget() == nullptr);   // no dialog any more
+        // Every option keeps its control and a short explanation, none cut off.
+        for (const char* name : { "chkAutoShield", "chkCustomFees", "chkSaveTxs", "chkTor",
+                                  "chkKeepInTray", "chkNatpmp", "chkRescan", "chkReindex" })
+            QVERIFY2(page->findChild<QCheckBox*>(name) && page->findChild<QCheckBox*>(name)->isVisibleTo(w), name);
+        QString cut;
+        for (QLabel* l : page->findChildren<QLabel*>()) {
+            if (!l->isVisibleTo(w) || !l->wordWrap() || l->text().isEmpty()) continue;
+            const int need = l->heightForWidth(l->width());
+            if (l->height() + 1 < need)
+                cut += QString("%1 h=%2 need=%3; ").arg(l->objectName()).arg(l->height()).arg(need);
+        }
         QVERIFY2(cut.isEmpty(), qPrintable("settings text cut off: " + cut));
+        const QString shots = qEnvironmentVariable("ZCL_SHOTS_DIR");
+        if (!shots.isEmpty() && QDir().mkpath(shots)) QVERIFY(w->grab().save(shots + "/settings-page.png"));
         settleAndDelete(w);
+        qApp->setStyleSheet(prevSheet);
+        qApp->setPalette(prevPalette);
     }
 
     // Double-clicking an Activity row with no memo used to do nothing. It must answer.
@@ -3396,6 +3417,743 @@ private slots:
         }
     }
 
+    // ---- Receive "Your addresses": every wallet address, funded or not ---------
+    // A freshly made address has no balance, so the Home balance list never shows
+    // it. The Receive list must, with private addresses first, and picking a row
+    // must show that address with the matching privacy signal.
+    void receive_yourAddressesListsEveryAddress() {
+        const QString prevSheet = qApp->styleSheet();
+        const QPalette prevPalette = qApp->palette();
+        MainWindow* w = makeWindow();
+        applyProductionTheme();
+        const QString Z1 = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        const QString Z2 = "zs10m00rvkhfm4f7n23e4sxsx275r7ptnggx39ygl0vy46j9mdll5c97gl6dxgpk0njuptg2mn9w5s";
+        const QString T1 = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+        const QString T2 = "t1Puwyjt8X8r9B4yr9PvVJ93Vu5phobsGqJ";   // valid checksum, dummy key hash
+        w->getRPC()->testSetZAddresses(new QList<QString>{ Z2, Z1 });
+        w->getRPC()->testSetTAddresses(new QList<QString>{ T2, T1 });
+        auto* bals = new QMap<QString, double>();
+        (*bals)[Z1] = 12.5;
+        (*bals)[T1] = 3.0;            // Z2 and T2 never received anything
+        w->getRPC()->testSetBalances(bals);
+        w->ui->tabWidget->setCurrentIndex(2);
+        w->refreshReceiveAddressList();
+        qApp->processEvents();
+
+        QTreeWidget* list = w->receiveAddressList;
+        QVERIFY(list != nullptr);
+        auto addrAt = [&](int i) { return list->topLevelItem(i)->data(0, Qt::UserRole).toString(); };
+        const QString shots = qEnvironmentVariable("ZCL_SHOTS_DIR");
+        if (!shots.isEmpty()) QVERIFY(QDir().mkpath(shots));
+        w->resize(1100, 820);
+
+        // Private tab: the private addresses only, the empty one included, larger
+        // balance first.
+        QVERIFY(w->receiveTabPrivate->isChecked());
+        QCOMPARE(list->topLevelItemCount(), 2);
+        QCOMPARE(addrAt(0), Z1);
+        QCOMPARE(addrAt(1), Z2);
+        QVERIFY2(w->receiveAddressesBox->title().contains("(2)"), qPrintable(w->receiveAddressesBox->title()));
+
+        // Every row carries its Export-key button (copy lives in the address cell).
+        QWidget* rowActions = list->itemWidget(list->topLevelItem(1), 2);
+        QVERIFY(rowActions != nullptr);
+        QVERIFY(rowActions->findChild<QToolButton*>("rowExportKey") != nullptr);
+
+        // Picking the empty private row shows it with the private badge.
+        list->setCurrentItem(list->topLevelItem(1));
+        qApp->processEvents();
+        QCOMPARE(w->ui->txtRecieve->toPlainText(), Z2);
+        QVERIFY(!w->lblReceivePrivate->isHidden());
+        QVERIFY(w->ui->lblSproutWarning->isHidden());
+        if (!shots.isEmpty()) QVERIFY(w->grab().save(shots + "/receive-list.png"));
+
+        // A never-used transparent address is offered instead of minting a new key
+        // on every visit; T1 holds coins, so it is never re-offered.
+        // Until the node has said which addresses were ever paid, none is offered (the
+        // caller makes a new one); an address that was paid once and is empty again is
+        // never offered, whatever the short transaction list shows.
+        QCOMPARE(w->unusedTAddress(), QString());
+        w->receivedTAddrs = QSet<QString>{ T1, T2 }; w->receivedTAddrsKnown = true;
+        QCOMPARE(w->unusedTAddress(), QString());
+        w->receivedTAddrs = QSet<QString>{ T1 };
+        QCOMPARE(w->unusedTAddress(), T2);
+
+        // Transparent tab: the transparent addresses only, shown with the PUBLIC callout.
+        w->receiveTabPublic->click();
+        qApp->processEvents();
+        QCOMPARE(list->topLevelItemCount(), 2);
+        QCOMPARE(addrAt(0), T1);
+        QCOMPARE(addrAt(1), T2);
+        list->setCurrentItem(list->topLevelItem(1));
+        qApp->processEvents();
+        QCOMPARE(w->ui->txtRecieve->toPlainText(), T2);
+        QVERIFY(w->lblReceivePrivate->isHidden());
+        QVERIFY(!w->ui->lblSproutWarning->isHidden());
+        QVERIFY(w->ui->lblSproutWarning->text().contains("PUBLIC"));
+        if (!shots.isEmpty()) QVERIFY(w->grab().save(shots + "/receive-list-public.png"));
+        settleAndDelete(w);
+        qApp->setStyleSheet(prevSheet);
+        qApp->setPalette(prevPalette);
+    }
+
+    // ---- "Your addresses": search, balance order, 10 per page ------------------
+    void receive_addressListSearchSortAndPages() {
+        const QString prevSheet = qApp->styleSheet();
+        const QPalette prevPalette = qApp->palette();
+        MainWindow* w = makeWindow();
+        applyProductionTheme();
+        // Twelve checksum-valid dummy t-addresses; address i holds i ZCL.
+        const QStringList T = {
+            "t1KLY4Ts1qDcuoFyQ97n9kU66AftbgbwwfU", "t1KRqwQhktLV4BjbNLiuH6pb3AMoszZKcQB",
+            "t1KX9pMYVwTMCaDDLYL2QTB5zA3jAQyaqPZ", "t1KcThJPEzaDLxgqJjw9XoXaw9jeSk6Auw8",
+            "t1KhmaFDz3h5VMATGwYGf9t5t9RZj9Lt9zi", "t1Ko5TC4j6owdje5F99PnWEaq97V1SAQhkp",
+            "t1KtPL8uU9von87hDLkWurb5n8oQHpXErx9", "t1KyhD5kDD3fvWbKBYMe3Cwaj8VKa9mrk5d",
+            "t1L5162axGAY4u4w9jxmAZJ5g8BErbyLkNF", "t1LAJxyRhKHQDHYZ7wZtHuead7sA8vUUN39",
+            "t1LFcqvGSNQGMg2B69B1RG15a7Z5RGAKhbj", "t1LLvis7BRX8W4Vo4Ln8YcMaX7EzhcfzRmo" };
+        auto* bals = new QMap<QString, double>();
+        for (int i = 0; i < T.size(); ++i) (*bals)[T[i]] = i;
+        w->getRPC()->testSetZAddresses(new QList<QString>());
+        w->getRPC()->testSetTAddresses(new QList<QString>(T));
+        w->getRPC()->testSetBalances(bals);
+        w->resize(1100, 900);
+        w->ui->tabWidget->setCurrentIndex(2);
+        w->receiveTabPublic->click();
+        qApp->processEvents();
+        QTreeWidget* list = w->receiveAddressList;
+        auto addrAt = [&](int i) { return list->topLevelItem(i)->data(0, Qt::UserRole).toString(); };
+
+        // Page 1: ten rows, highest balance first, pager shown.
+        QCOMPARE(list->topLevelItemCount(), 10);
+        QCOMPARE(addrAt(0), T[11]);
+        QVERIFY(w->receivePageLabel->isVisibleTo(w));
+        QCOMPARE(w->receivePageLabel->text(), QString("Page 1 of 2"));
+        QVERIFY(!w->receivePrev->isEnabled());
+        const QString shots = qEnvironmentVariable("ZCL_SHOTS_DIR");
+        if (!shots.isEmpty() && QDir().mkpath(shots)) QVERIFY(w->grab().save(shots + "/receive-pages.png"));
+        // Page 2: the last two.
+        w->receiveNext->click();
+        QCOMPARE(list->topLevelItemCount(), 2);
+        QCOMPARE(w->receivePageLabel->text(), QString("Page 2 of 2"));
+        QVERIFY(!w->receiveNext->isEnabled());
+        // Lowest balance first starts again at page 1.
+        w->receiveSort->setCurrentIndex(1);
+        QCOMPARE(w->receivePageLabel->text(), QString("Page 1 of 2"));
+        QCOMPARE(addrAt(0), T[0]);
+        // Search narrows the list; one page hides the pager; the title says "1 of 12".
+        w->receiveSearch->setText("t1LLv");
+        QCOMPARE(list->topLevelItemCount(), 1);
+        QCOMPARE(addrAt(0), T[11]);
+        QVERIFY(!w->receivePageLabel->isVisibleTo(w));
+        QVERIFY2(w->receiveAddressesBox->title().contains("1 of 12"), qPrintable(w->receiveAddressesBox->title()));
+        settleAndDelete(w);
+        qApp->setStyleSheet(prevSheet);
+        qApp->setPalette(prevPalette);
+    }
+
+    // ---- Address cells: Copy when the address fits, "i" + full card when cut ---
+    void addressCell_copyWhenShownFullyElseFullAddressCard() {
+        const QString T = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+        const QString Z = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        QStandardItemModel model(2, 1);
+        model.setItem(0, 0, new QStandardItem(T));
+        model.setItem(1, 0, new QStandardItem(Z));
+        QTableView view;
+        view.setModel(&model);
+        auto* cell = new AddressCellDelegate(&view);
+        view.setItemDelegateForColumn(0, cell);
+        view.resize(760, 200);
+        view.setColumnWidth(0, 700);
+        view.show();
+        qApp->processEvents();
+        auto optionFor = [&](int row) {
+            QStyleOptionViewItem opt;
+            opt.rect = view.visualRect(model.index(row, 0));
+            opt.font = view.font();
+            return opt;
+        };
+        QVERIFY2(!cell->addressTextElided(optionFor(0), model.index(0, 0)), "the t-address fits in 700px");
+        QVERIFY2(cell->addressTextElided(optionFor(1), model.index(1, 0)), "the z-address is cut with …");
+
+        // Fits: the icon copies at once.
+        QGuiApplication::clipboard()->clear();
+        QTest::mouseClick(view.viewport(), Qt::LeftButton, Qt::NoModifier,
+                          AddressCellDelegate::iconRect(optionFor(0).rect).center());
+        QCOMPARE(QGuiApplication::clipboard()->text(), T);
+        QVERIFY2(!view.selectionModel()->hasSelection(), "clicking Copy must not select (highlight) the row");
+
+        // Cut: the icon opens the full address with its own Copy button.
+        QTest::mouseClick(view.viewport(), Qt::LeftButton, Qt::NoModifier,
+                          AddressCellDelegate::iconRect(optionFor(1).rect).center());
+        qApp->processEvents();
+        auto* popup = view.findChild<QFrame*>("addressPopup");
+        QVERIFY(popup != nullptr && popup->isVisible());
+        QCOMPARE(popup->findChild<QLabel*>("addressPopupText")->text(), Z);
+        popup->findChild<QPushButton*>("addressPopupCopy")->click();
+        QCOMPARE(QGuiApplication::clipboard()->text(), Z);
+        popup->close();
+        qApp->processEvents();
+
+        // Pointing at the "i" opens the card at once (no tooltip delay), and only one.
+        const QPoint iconAt = AddressCellDelegate::iconRect(optionFor(1).rect).center();
+        auto hover = [&]() {
+            QMouseEvent move(QEvent::MouseMove, iconAt, view.viewport()->mapToGlobal(iconAt),
+                             Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(view.viewport(), &move);
+        };
+        hover();
+        AddressPopup* first = AddressPopup::current();
+        QVERIFY2(first && first->isVisible(), "hovering the i must open the card immediately");
+        QCOMPARE(first->address(), Z);
+        hover();   // still over the icon: same card, not a second one
+        QCOMPARE(AddressPopup::current(), first);
+        // Leaving both the icon and the card closes it.
+        const QPoint farAway = first->frameGeometry().bottomRight() + QPoint(200, 200);
+        QMouseEvent away(QEvent::MouseMove, first->mapFromGlobal(farAway), farAway,
+                         Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(first, &away);
+        qApp->processEvents();
+        QVERIFY2(AddressPopup::current() == nullptr || !AddressPopup::current()->isVisible(),
+                 "the card closes once the pointer leaves it and the icon");
+    }
+
+    // ---- Address book page: add, search, send to ---------------------------------
+    void addressBookPage_addSearchAndSendTo() {
+        // The address book is kept on disk: drop what an earlier run of this test left there.
+        AddressBook::getInstance()->removeAddressLabel("Alice", "t1Puwyjt8X8r9B4yr9PvVJ93Vu5phobsGqJ");
+        AddressBook::getInstance()->removeAddressLabel("Bob", "zs10m00rvkhfm4f7n23e4sxsx275r7ptnggx39ygl0vy46j9mdll5c97gl6dxgpk0njuptg2mn9w5s");
+        const QString prevSheet = qApp->styleSheet();
+        const QPalette prevPalette = qApp->palette();
+        MainWindow* w = makeWindow();
+        applyProductionTheme();
+        w->resize(1100, 760);
+        QAction* act = w->findChild<QAction*>("action_Address_Book");
+        QVERIFY(act);
+        act->trigger();   // Edit > Address book / Ctrl+B open the page, not a dialog
+        qApp->processEvents();
+        QWidget* page = w->findChild<QWidget*>("addressBookPage");
+        QVERIFY(page && w->ui->tabWidget->currentWidget() == page);
+        QVERIFY(QApplication::activeModalWidget() == nullptr);
+
+        const QString T = "t1Puwyjt8X8r9B4yr9PvVJ93Vu5phobsGqJ";
+        const QString Z = "zs10m00rvkhfm4f7n23e4sxsx275r7ptnggx39ygl0vy46j9mdll5c97gl6dxgpk0njuptg2mn9w5s";
+        auto* label = page->findChild<QLineEdit*>("bookLabel");
+        auto* addr = page->findChild<QLineEdit*>("bookAddress");
+        auto* add = page->findChild<QPushButton*>("bookAdd");
+        auto* list = page->findChild<QTreeWidget*>("bookList");
+        QVERIFY(label && addr && add && list);
+        const int before = list->topLevelItemCount();
+        label->setText("Alice"); addr->setText(T); add->click();
+        label->setText("Bob");   addr->setText(Z); add->click();
+        QCOMPARE(list->topLevelItemCount(), before + 2);
+        QVERIFY(label->text().isEmpty() && addr->text().isEmpty());
+
+        page->findChild<QLineEdit*>("bookSearch")->setText("bob");
+        QCOMPARE(list->topLevelItemCount(), 1);
+        QCOMPARE(list->topLevelItem(0)->text(1), Z);
+        const QString shots = qEnvironmentVariable("ZCL_SHOTS_DIR");
+        page->findChild<QLineEdit*>("bookSearch")->clear();
+        if (!shots.isEmpty() && QDir().mkpath(shots)) QVERIFY(w->grab().save(shots + "/addressbook-page.png"));
+
+        // Send to fills Pay to with the picker's "label/address" form and opens Send.
+        for (int i = 0; i < list->topLevelItemCount(); ++i) {
+            if (list->topLevelItem(i)->text(1) != T) continue;
+            list->itemWidget(list->topLevelItem(i), 2)->findChild<QToolButton*>("bookSendTo")->click();
+        }
+        QCOMPARE(w->ui->tabWidget->currentIndex(), 1);
+        QCOMPARE(w->ui->Address1->text(), QString("Alice/") + T);
+        settleAndDelete(w);
+        qApp->setStyleSheet(prevSheet);
+        qApp->setPalette(prevPalette);
+    }
+
+    // ---- Pay to: a thin scroll bar only while the address does not fit -------------
+    void payTo_scrollBarOnlyWhileAddressIsCut() {
+        QLineEdit field;
+        attachAddressScroll(&field);
+        field.resize(260, 40);
+        field.show();
+        field.setText("zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u");
+        qApp->processEvents();
+        auto* bar = field.findChild<QScrollBar*>("fieldScroll");
+        QVERIFY(bar && bar->isVisible());
+        QVERIFY(bar->maximum() > 0);
+        qApp->processEvents();
+        QVERIFY2(bar->value() > bar->maximum() / 2, "after typing, the bar shows the end of the address");
+        bar->setValue(0);   // drag to the start: the start of the address is shown
+        QVERIFY(field.cursorPosition() <= 1);
+        field.resize(1400, 40);   // wide enough for the whole address
+        qApp->processEvents();
+        QVERIFY2(!bar->isVisible(), "the bar hides once the whole address fits");
+    }
+
+    // ---- Node opens once connected, with Address book and Settings pages present ---
+    // The node page used to be attached only when tab slot 4 was free; the Address book
+    // and Settings pages took that slot, so Node said "opens once connected" forever.
+    void nodePage_opensOnceConnected() {
+        FakeNode node;
+        MainWindow* w = makeWindow();
+        QVERIFY(w->ui->tabWidget->indexOf(w->zclassicdtab) < 0);   // not before a connection
+        installMockConnection(w, node.port());
+        QTRY_VERIFY_WITH_TIMEOUT(w->ui->tabWidget->indexOf(w->zclassicdtab) >= 0, 5000);
+        auto* nodeBtn = w->findChild<QPushButton*>("navRailAdvanced");
+        QTRY_VERIFY_WITH_TIMEOUT(nodeBtn->isEnabled(), 5000);   // the startup lock lifts
+        nodeBtn->click();
+        QCOMPARE(w->ui->tabWidget->currentWidget(), w->zclassicdtab);
+        QVERIFY(nodeBtn->isChecked());
+        settleAndDelete(w);
+    }
+
+    // ---- Showcase: one clean screenshot per screen (capture aid, test data only) ---
+    // Runs only with ZCL_SHOWCASE_DIR set; every address and amount here is made up.
+    void showcase_screenshots() {
+        const QString dir = qEnvironmentVariable("ZCL_SHOWCASE_DIR");
+        if (dir.isEmpty()) QSKIP("set ZCL_SHOWCASE_DIR to capture the showcase");
+        QVERIFY(QDir().mkpath(dir));
+        const QString prevSheet = qApp->styleSheet();
+        const QPalette prevPalette = qApp->palette();
+        MainWindow* w = makeWindow();
+        applyProductionTheme();
+        w->resize(1180, 760);
+        const QString Z1 = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        const QString Z2 = "zs10m00rvkhfm4f7n23e4sxsx275r7ptnggx39ygl0vy46j9mdll5c97gl6dxgpk0njuptg2mn9w5s";
+        const QString T1 = "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi";
+        const QString T2 = "t1Puwyjt8X8r9B4yr9PvVJ93Vu5phobsGqJ";
+        w->getRPC()->testSetZAddresses(new QList<QString>{ Z1, Z2 });
+        w->getRPC()->testSetTAddresses(new QList<QString>{ T1, T2 });
+        auto* bals = new QMap<QString, double>();
+        (*bals)[Z1] = 1250.75; (*bals)[T1] = 3.0;
+        w->getRPC()->testSetBalances(bals);
+        w->getRPC()->testSetUTXOs(new QList<UnspentOutput>());
+        w->getRPC()->testUpdateUI(false);   // fill Home's address list
+        FakeNode node;                      // a node "connection" lifts the startup lock
+        attachNode(w, node);
+        QTest::qWait(700);
+        auto shot = [&](const QString& name) {
+            qApp->processEvents();
+            QVERIFY(w->grab().save(QDir(dir).filePath(name)));
+        };
+
+        // Home, synced, private balance as the hero.
+        w->ui->balSheilded->setText(Settings::getZCLDisplayFormat(1250.75));
+        w->ui->balTransparent->setText(Settings::getZCLDisplayFormat(0.0));
+        w->ui->balTotal->setText(Settings::getZCLDisplayFormat(1250.75));
+        w->updateHomeFixIt(0.0);
+        w->setSyncStatus(false, 3332900, 3332900, 1.0, 90, SyncState::Synced);
+        w->ui->tabWidget->setCurrentIndex(0);
+        shot("01-home.png");
+
+        // Send.
+        w->ui->tabWidget->setCurrentIndex(1);
+        w->ui->Address1->setText(Z2);
+        shot("02-send.png");
+
+        // Receive: Private and Transparent tabs.
+        w->ui->tabWidget->setCurrentIndex(2);
+        w->refreshReceiveAddressList();
+        if (w->receiveAddressList->topLevelItemCount() > 0)
+            w->receiveAddressList->setCurrentItem(w->receiveAddressList->topLevelItem(0));
+        shot("03-receive-private.png");
+        w->receiveTabPublic->click();
+        if (w->receiveAddressList->topLevelItemCount() > 1)
+            w->receiveAddressList->setCurrentItem(w->receiveAddressList->topLevelItem(1));
+        shot("04-receive-transparent.png");
+
+        // Activity with a few transactions, in "how long ago" time.
+        const qint64 now = QDateTime::currentSecsSinceEpoch();
+        QList<TransactionItem> txs;
+        txs.append(TransactionItem{ "receive", now - 42,   Z1, "aa01", 250.0,  3,   "", "", "" });
+        txs.append(TransactionItem{ "send",    now - 3700, Z2, "aa02", -12.5,  40,  "", "", "" });
+        txs.append(TransactionItem{ "receive", now - 2 * 86400, T1, "aa03", 3.0, 900, "", "", "" });
+        auto* model = dynamic_cast<TxTableModel*>(w->ui->transactionsTable->model());
+        if (model) model->addTData(txs);
+        const TimeFormat::Mode before = TimeFormat::current();
+        TimeFormat::set(TimeFormat::Relative);
+        w->ui->tabWidget->setCurrentIndex(3);
+        shot("05-activity.png");
+        TimeFormat::set(before);
+
+        // Address book and Settings pages.
+        AddressBook::getInstance()->addAddressLabel("Alice", T2);
+        AddressBook::getInstance()->addAddressLabel("Bob", Z2);
+        w->findChild<QAction*>("action_Address_Book")->trigger();
+        shot("06-address-book.png");
+        w->findChild<QAction*>("actionSettings")->trigger();
+        shot("07-settings.png");
+
+        // Backup: the phrase shown (made-up seed bytes 0..31), one older address to move.
+        QByteArray demoSeed;
+        for (int i = 0; i < 32; ++i) demoSeed.append(char(i));
+        w->applyPhraseInfo(json{ {"available", true}, {"fingerprint", "fp-showcase"},
+                                 {"not_covered", json::array({ T1.toStdString() })} });
+        w->ui->tabWidget->setCurrentIndex(w->ui->tabWidget->indexOf(w->backupPage));
+        w->backupPage->showWords(Phrase::fromEntropy(demoSeed), "fp-showcase");
+        shot("09-backup.png");
+        w->backupPage->hideWords();
+        w->backupPage->findChild<QPlainTextEdit*>("restorePhrase")->setPlainText(
+            QStringList(Phrase::fromEntropy(demoSeed).mid(0, 12)).join(' '));
+        w->backupPage->findChild<QScrollArea*>("backupScroll")->verticalScrollBar()->setValue(10000);
+        shot("10-backup-restore.png");
+
+        // The More menu (File and Help items), drawn on the window background.
+        QTimer::singleShot(50, [&]() {
+            if (auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget())) {
+                QPixmap pm(menu->size());
+                pm.fill(QColor("#0b0e0c"));
+                menu->render(&pm);
+                pm.save(QDir(dir).filePath("08-more-menu.png"));
+                menu->close();
+            }
+        });
+        w->findChild<QPushButton*>("navRailMore")->click();
+
+        settleAndDelete(w);
+        qApp->setStyleSheet(prevSheet);
+        qApp->setPalette(prevPalette);
+    }
+
+    // ---- Settings > Time format ---------------------------------------------------
+    void timeFormat_clockAndHowLongAgo() {
+        QCOMPARE(TimeFormat::relative(0), QString("just now"));
+        QCOMPARE(TimeFormat::relative(5), QString("5s ago"));
+        QCOMPARE(TimeFormat::relative(59), QString("59s ago"));
+        QCOMPARE(TimeFormat::relative(60), QString("1m ago"));
+        QCOMPARE(TimeFormat::relative(7 * 3600 + 5), QString("7h ago"));
+        QCOMPARE(TimeFormat::relative(86400), QString("1d ago"));
+        QCOMPARE(TimeFormat::relative(400 * 86400LL), QString("1y ago"));
+        const qint64 now = QDateTime::currentSecsSinceEpoch();
+        const TimeFormat::Mode before = TimeFormat::current();
+        TimeFormat::set(TimeFormat::Clock12);
+        const QString clock = TimeFormat::format(now);
+        QVERIFY2(clock.endsWith("AM") || clock.endsWith("PM"), qPrintable(clock));
+        TimeFormat::set(TimeFormat::Relative);
+        QCOMPARE(TimeFormat::format(now - 90), QString("1m ago"));
+        TimeFormat::set(TimeFormat::Standard);
+        QCOMPARE(TimeFormat::format(now).size(), QString("2026-11-26 14:05").size());
+        TimeFormat::set(before);
+    }
+
+    // ---- Startup: node-dependent entries wait for the node; Send cannot widen ------
+    void startup_lockedUntilNodeAndSendFitsWidth() {
+        MainWindow* w = makeWindow();
+        // makeWindow never connects a node: Send/Receive/Activity/Node wait.
+        for (const char* name : { "navRailAdvanced" })
+            QVERIFY2(!w->findChild<QPushButton*>(name)->isEnabled(), name);
+        auto railButton = [&](const QString& label) -> QPushButton* {
+            for (auto* b : w->findChildren<QPushButton*>("navRailButton"))
+                if (b->text().trimmed() == label) return b;
+            return nullptr;
+        };
+        QPushButton* send = railButton("Send");
+        QVERIFY(send && !send->isEnabled());
+        QVERIFY(send->toolTip().contains("node"));
+        // Home, Settings and More (Exit, repair, About) stay usable while it loads.
+        QVERIFY(railButton("Home") && railButton("Home")->isEnabled());
+        QVERIFY(w->findChild<QPushButton*>("navRailSettings")->isEnabled());
+        QVERIFY(w->findChild<QPushButton*>("navRailAddressBook")->isEnabled());   // local data
+        QVERIFY(w->findChild<QPushButton*>("navRailMore")->isEnabled());
+        QVERIFY(!w->findChild<QPushButton*>("navRailBackup")->isEnabled());   // needs the node
+
+        // A long Pay-from address no longer sets the Send page's minimum width: the
+        // combo sizes from a short minimum and shows the address shortened.
+        QCOMPARE(w->ui->inputsCombo->sizeAdjustPolicy(), QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        QVERIFY(w->ui->inputsCombo->minimumContentsLength() <= 20);
+        QVERIFY(w->ui->sendTotalsLine->wordWrap());
+        settleAndDelete(w);
+    }
+
+    // ---- The rail's "More" holds every File and Help item, each once -----------
+    // With the menu bar gone, nothing it offered may be lost: More must list the
+    // File and Help actions, each once (the backup and key items moved to the Backup page), and
+    // end with Exit.
+    void rail_moreMenuHoldsFileAndHelpItems() {
+        const QString prevSheet = qApp->styleSheet();
+        const QPalette prevPalette = qApp->palette();
+        MainWindow* w = makeWindow();
+        applyProductionTheme();
+        auto* more = w->findChild<QPushButton*>("navRailMore");
+        QVERIFY(more != nullptr);
+        QStringList items;
+        const QString shots = qEnvironmentVariable("ZCL_SHOTS_DIR");
+        QTimer::singleShot(50, [&]() {
+            auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+            if (menu == nullptr) return;
+            for (QAction* a : menu->actions())
+                if (!a->isSeparator()) items << a->text().remove(QLatin1Char('&'));
+            if (!shots.isEmpty() && QDir().mkpath(shots))
+                menu->grab().save(shots + "/more-menu.png");
+            menu->close();
+        });
+        more->click();
+        const QStringList expected = {
+            w->ui->actionPay_URI->text(),
+            w->ui->actionExport_transactions->text(), w->ui->actionTurnstile_Migration->text(),
+            w->ui->actionCheck_for_Updates->text(), w->ui->actionAbout->text(),
+            w->ui->actionExit->text() };
+        for (QString e : expected) {
+            e.remove(QLatin1Char('&'));
+            QVERIFY2(items.count(e) == 1, qPrintable(QString("\"%1\" appears %2 times in More: %3")
+                .arg(e).arg(items.count(e)).arg(items.join(" | "))));
+        }
+        // The backup, key export and key import moved to the Backup page.
+        for (QAction* moved : { w->ui->actionBackup_wallet_dat, w->ui->actionImport_Private_Key,
+                                w->ui->actionExport_All_Private_Keys }) {
+            const QString t = moved->text().remove(QLatin1Char('&'));
+            QVERIFY2(!items.contains(t), qPrintable(QString("\"%1\" is still in More").arg(t)));
+        }
+        QCOMPARE(items.last(), QString(w->ui->actionExit->text()).remove(QLatin1Char('&')));
+        { QSet<QString> once; for (const QString& s : items) once.insert(s); QCOMPARE(items.size(), once.size()); }   // nothing twice (Qt 5.12 has no QSet range constructor)
+        settleAndDelete(w);
+        qApp->setStyleSheet(prevSheet);
+        qApp->setPalette(prevPalette);
+    }
+
+    // ---- One label, one place: no text appears twice on a screen ---------------
+    // Each page plus the always-visible nav rail must not show the same words
+    // twice (two "Send" buttons, the same address in two boxes, …). Counts every
+    // visible label, button and group title; ignores placeholders and tooltips.
+    void ui_noDuplicateTextOnAnyPage() {
+        const QString prevSheet = qApp->styleSheet();
+        const QPalette prevPalette = qApp->palette();
+        MainWindow* w = makeWindow();
+        applyProductionTheme();
+        QVERIFY2(w->ui->menuBar->isHidden() || w->ui->menuBar->isNativeMenuBar(),
+                 "the window has no menu bar; its items live in the nav rail");
+        QVERIFY(w->findChild<QPushButton*>("navRailMore") != nullptr);
+        w->resize(1100, 760);
+        // The Backup page as a phrase-capable node shows it: status, the words, restore.
+        w->backupPage->setPhraseInfo(true, "fp-dup", {});
+        w->backupPage->showWords(Phrase::fromEntropy(QByteArray(32, '\x7f')), "fp-dup");
+        for (int page = 0; page < w->ui->tabWidget->count(); ++page) {   // every page, Settings too
+            if (w->ui->tabWidget->widget(page) == w->backupPage)   // leaving the page hides the words
+                w->backupPage->showWords(Phrase::fromEntropy(QByteArray(32, '\x7f')), "fp-dup");
+            w->ui->tabWidget->setCurrentIndex(page);
+            qApp->processEvents();
+            QMap<QString, QString> seen;   // text -> objectName of the first holder
+            for (QWidget* widget : w->findChildren<QWidget*>()) {
+                if (!widget->isVisibleTo(w)) continue;
+                QString text;
+                if (auto* l = qobject_cast<QLabel*>(widget)) text = l->text();
+                else if (auto* b = qobject_cast<QAbstractButton*>(widget)) text = b->text();
+                else if (auto* g = qobject_cast<QGroupBox*>(widget)) text = g->title();
+                text = QTextDocumentFragment::fromHtml(text).toPlainText();
+                text.remove(QLatin1Char('&'));
+                text = text.simplified();
+                // A unit beside each amount field ("ZCL") is part of that field, not a repeat.
+                if (text.isEmpty() || text == QLatin1String("ZCL")) continue;
+                QVERIFY2(!seen.contains(text), qPrintable(QString("page %1 shows \"%2\" twice (%3 and %4)")
+                    .arg(page).arg(text).arg(seen.value(text)).arg(widget->objectName())));
+                seen.insert(text, widget->objectName());
+            }
+        }
+        settleAndDelete(w);
+        qApp->setStyleSheet(prevSheet);
+        qApp->setPalette(prevPalette);
+    }
+
+    // ---- Recovery phrase: the words, the checksum and the Restore field's hints ----
+    // Vectors from BIP39 (entropy -> words); the 32 bytes are the wallet seed.
+    void phrase_wordsChecksumAndHints() {
+        QCOMPARE(Phrase::wordList().size(), 2048);
+        const QStringList zeros = Phrase::fromEntropy(QByteArray(32, '\0'));
+        QCOMPARE(zeros.join(' '), QString("abandon ").repeated(23) + "art");
+        const QString legal = "legal winner thank year wave sausage worth useful legal winner thank year "
+                              "wave sausage worth useful legal winner thank year wave sausage worth title";
+        QCOMPARE(Phrase::fromEntropy(QByteArray(32, '\x7f')).join(' '), legal);
+        QVERIFY(Phrase::fromEntropy(QByteArray(16, '\0')).isEmpty());   // 24 words only
+
+        using C = Phrase::Check;
+        QCOMPARE(Phrase::check("").state, C::Empty);
+        QCOMPARE(Phrase::check(legal).state, C::Valid);
+        QCOMPARE(Phrase::check("  " + legal.toUpper().replace(" ", "\n  ") + " ").state, C::Valid);   // any case, any spacing
+        const C twelve = Phrase::check(QStringList(legal.split(' ').mid(0, 12)).join(' '));
+        QCOMPARE(twelve.state, C::Incomplete);
+        QCOMPARE(Phrase::hint(twelve), QString("12 of 24 words"));
+        QCOMPARE(Phrase::check("legal winn").state, C::Incomplete);   // still typing the last word
+        QStringList typo = legal.split(' ');
+        typo[6] = "wurth";
+        const C unknown = Phrase::check(typo.join(' '));
+        QCOMPARE(unknown.state, C::UnknownWord);
+        QCOMPARE(unknown.word, 7);
+        QVERIFY2(Phrase::hint(unknown).startsWith("Word 7 isn't in the list"), qPrintable(Phrase::hint(unknown)));
+        typo[6] = "abandonn";
+        QCOMPARE(Phrase::check(typo.join(' ')).suggestion, QString("abandon"));
+        const C bad = Phrase::check(QString("abandon ").repeated(24).trimmed());
+        QCOMPARE(bad.state, C::BadChecksum);
+        QCOMPARE(Phrase::hint(bad), QString("These words don't check out — look for a typo"));
+        QCOMPARE(Phrase::check(legal + " legal").state, C::TooMany);
+    }
+
+    // ---- Backup page: show and hide the words, then check three of them --------
+    void backupPage_showHideAndCheckThePhrase() {
+        MainWindow* w = makeWindow();
+        BackupPage* page = w->backupPage;
+        QVERIFY(page != nullptr);
+        Settings::getInstance()->setWalletBackedUp(false);
+        w->applyPhraseInfo(json{ {"available", true}, {"fingerprint", "fp-check"},
+                                 {"not_covered", json::array()} });
+        w->ui->tabWidget->setCurrentIndex(w->ui->tabWidget->indexOf(page));
+        QVERIFY(page->findChild<QGroupBox*>("phraseCard")->isVisibleTo(w));
+        auto* status = page->findChild<QLabel*>("backupStatus");
+        QCOMPARE(status->text(), QString("Not written down yet"));
+        // Home's reminder now points at the phrase, and its button opens this page.
+        auto reminder = [w]() -> QString {   // Home's backup reminder line
+            for (QLabel* l : w->findChildren<QLabel*>("homeFixItText"))
+                if (l->text().contains("recovery phrase")) return l->text();
+            return QString();
+        };
+        QVERIFY(!reminder().isEmpty());
+        QVERIFY(!reminder().contains("no recovery phrase"));
+
+        const QStringList words = Phrase::fromEntropy(QByteArray(32, '\x7f'));
+        auto* grid = page->findChild<QWidget*>("phraseGrid");
+        auto* show = page->findChild<QPushButton*>("phraseShow");
+        QVERIFY(!grid->isVisibleTo(w));
+        page->showWords(words, "fp-check");
+        QVERIFY(grid->isVisibleTo(w));
+        QCOMPARE(show->text(), QString("Hide phrase"));
+        const QList<QLabel*> cells = grid->findChildren<QLabel*>("phraseWord");
+        QCOMPARE(cells.size(), 24);
+        QVERIFY(cells.first()->text().contains("1</span>") && cells.first()->text().endsWith("legal"));
+        QVERIFY(cells.first()->textInteractionFlags() == Qt::NoTextInteraction);   // nothing to select and copy
+        show->click();   // Hide
+        QVERIFY(!grid->isVisibleTo(w));
+        for (QLabel* c : cells) QVERIFY(c->text().isEmpty());
+        // Leaving the page hides the words too.
+        page->showWords(words, "fp-check");
+        w->ui->tabWidget->setCurrentIndex(0);
+        QVERIFY(cells.first()->text().isEmpty());
+        w->ui->tabWidget->setCurrentIndex(w->ui->tabWidget->indexOf(page));
+
+        // "I wrote it down": three positions to type back; a wrong word is refused.
+        page->showWords(words, "fp-check");
+        page->findChild<QPushButton*>("phraseWrote")->click();
+        QVERIFY(!grid->isVisibleTo(w));
+        auto* step = page->findChild<QWidget*>("phraseCheck");
+        QVERIFY(step->isVisibleTo(w));
+        const QList<QLabel*> asked = step->findChildren<QLabel*>("phraseCheckLabel");
+        const QList<QLineEdit*> inputs = step->findChildren<QLineEdit*>("phraseCheckInput");
+        QCOMPARE(asked.size(), 3);
+        for (int i = 0; i < 3; ++i) inputs.at(i)->setText("zoo");
+        step->findChild<QPushButton*>("phraseCheckButton")->click();
+        QVERIFY(!BackupPage::isWrittenDown("fp-check"));
+        QVERIFY(step->findChild<QLabel*>("backupStatus")->text().contains("doesn't match"));
+        for (int i = 0; i < 3; ++i) {
+            const int pos = asked.at(i)->text().section(' ', 1).toInt();
+            QVERIFY(pos >= 1 && pos <= 24);
+            inputs.at(i)->setText(" " + words.at(pos - 1).toUpper() + " ");
+        }
+        step->findChild<QPushButton*>("phraseCheckButton")->click();
+        QVERIFY(BackupPage::isWrittenDown("fp-check"));
+        QVERIFY(Settings::getInstance()->isWalletBackedUp());   // the Home reminder stops
+        QCOMPARE(status->text(), QString("Written down"));
+        QVERIFY(!step->isVisibleTo(w));
+        QSettings().remove("backup/phrase/fp-check");
+        Settings::getInstance()->setWalletBackedUp(false);
+
+        // The reminder's button opens the Backup page.
+        w->ui->tabWidget->setCurrentIndex(0);
+        for (QPushButton* b : w->findChildren<QPushButton*>("homeFixItBtn"))
+            if (b->text() == "Back up my wallet") b->click();
+        QCOMPARE(w->ui->tabWidget->currentWidget(), static_cast<QWidget*>(page));
+        settleAndDelete(w);
+    }
+
+    // ---- Backup page: Restore is enabled only for 24 words that check out -------
+    void backupPage_restoreOnlyForAValidPhrase() {
+        MainWindow* w = makeWindow();
+        BackupPage* page = w->backupPage;
+        w->applyPhraseInfo(json{ {"available", true}, {"fingerprint", "fp-restore"},
+                                 {"not_covered", json::array()} });
+        auto* field = page->findChild<QPlainTextEdit*>("restorePhrase");
+        auto* hint = page->findChild<QLabel*>("restoreHint");
+        auto* restore = page->findChild<QPushButton*>("restoreButton");
+        QVERIFY(field && hint && restore);
+        QVERIFY(!restore->isEnabled());
+        const QStringList legal = Phrase::fromEntropy(QByteArray(32, '\x7f'));
+        field->setPlainText(QStringList(legal.mid(0, 12)).join(' '));
+        QCOMPARE(hint->text(), QString("12 of 24 words"));
+        QVERIFY(!restore->isEnabled());
+        QStringList typo = legal;
+        typo[6] = "wurth";
+        field->setPlainText(typo.join(' '));
+        QVERIFY(hint->text().startsWith("Word 7 isn't in the list"));
+        QVERIFY(!restore->isEnabled());
+        field->setPlainText(QString("abandon ").repeated(24));
+        QCOMPARE(hint->text(), QString("These words don't check out — look for a typo"));
+        QVERIFY(!restore->isEnabled());
+        field->setPlainText(legal.join(' '));
+        QVERIFY(restore->isEnabled());
+        page->setRestoring(true);   // while the node rescans: no second restore
+        QVERIFY(!restore->isEnabled() && field->isReadOnly());
+        page->setRestoring(false);
+        QVERIFY(restore->isEnabled());
+        settleAndDelete(w);
+    }
+
+    // ---- Backup page: money the phrase doesn't cover; Move only fills in Send ----
+    void backupPage_moveOnlyPrefillsSend() {
+        MainWindow* w = makeWindow();
+        const QString OLD = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        const QString EMPTY = "t1Puwyjt8X8r9B4yr9PvVJ93Vu5phobsGqJ";
+        const QString NEWZ = "zs10m00rvkhfm4f7n23e4sxsx275r7ptnggx39ygl0vy46j9mdll5c97gl6dxgpk0njuptg2mn9w5s";
+        auto* bals = new QMap<QString, double>();
+        (*bals)[OLD] = 12.5; (*bals)[EMPTY] = 0.0;
+        w->getRPC()->testSetBalances(bals);
+        w->applyPhraseInfo(json{ {"available", true}, {"fingerprint", "fp-move"},
+                                 {"not_covered", json::array({ OLD.toStdString(), EMPTY.toStdString() })} });
+        BackupPage* page = w->backupPage;
+        w->ui->tabWidget->setCurrentIndex(w->ui->tabWidget->indexOf(page));
+        QVERIFY(page->findChild<QLabel*>("backupStatus")->text().contains("2 older addresses"));
+        auto* card = page->findChild<QGroupBox*>("notCoveredCard");
+        auto* list = page->findChild<QTreeWidget*>("notCoveredList");
+        QVERIFY(card->isVisibleTo(w));
+        QCOMPARE(list->topLevelItemCount(), 1);   // only the address with money
+        QCOMPARE(list->topLevelItem(0)->text(0), OLD);
+
+        // Money outside the phrase: writing the phrase down does not stop the Home reminder,
+        // which then says what is left to do.
+        const json info = json{ {"available", true}, {"fingerprint", "fp-move"},
+                                {"not_covered", json::array({ OLD.toStdString(), EMPTY.toStdString() })} };
+        Settings::getInstance()->setWalletBackedUp(false);
+        BackupPage::setWrittenDown("fp-move");
+        w->applyPhraseInfo(info);
+        QVERIFY(!Settings::getInstance()->isWalletBackedUp());
+        QVERIFY(w->backupReminderText().contains("older addresses"));
+        QSettings().remove("backup/phrase/fp-move");
+        w->applyPhraseInfo(info);
+        QCOMPARE(list->topLevelItemCount(), 1);
+
+        w->getRPC()->testSetNextZaddrResult(NEWZ);
+        auto* move = qobject_cast<QToolButton*>(list->itemWidget(list->topLevelItem(0), 2));
+        QVERIFY(move && move->objectName() == "notCoveredMove");
+        move->click();
+        qApp->processEvents();
+        QCOMPARE(w->ui->tabWidget->currentIndex(), 1);   // Send, for the user to review
+        QCOMPARE(w->ui->inputsCombo->currentText(), OLD);
+        QCOMPARE(w->ui->Address1->text(), NEWZ);
+        QVERIFY(w->ui->Max1->isChecked());
+        QVERIFY(QApplication::activeModalWidget() == nullptr);   // no confirmation, nothing sent
+        settleAndDelete(w);
+    }
+
+    // ---- Backup page with an older node: only the wallet file and keys ----------
+    void backupPage_olderNodeShowsOnlyTheFiles() {
+        MainWindow* w = makeWindow();
+        BackupPage* page = w->backupPage;
+        w->ui->tabWidget->setCurrentIndex(w->ui->tabWidget->indexOf(page));
+        QVERIFY(!w->phraseSupported);
+        QVERIFY(!page->findChild<QGroupBox*>("phraseCard")->isVisibleTo(w));
+        QVERIFY(!page->findChild<QGroupBox*>("restoreCard")->isVisibleTo(w));
+        QVERIFY(page->findChild<QGroupBox*>("backupFilesCard")->isVisibleTo(w));
+        QCOMPARE(page->findChildren<QPushButton*>("backupFileButton").size(), 3);
+        bool oldWording = false;   // today's wording
+        for (QLabel* l : w->findChildren<QLabel*>("homeFixItText"))
+            oldWording = oldWording || l->text().contains("no recovery phrase");
+        QVERIFY(oldWording);
+        settleAndDelete(w);
+    }
+
     // ======================================================================
     // PERF / LATENCY HARNESS  (instant-update path)
     // ----------------------------------------------------------------------
@@ -3674,8 +4432,8 @@ private:
     void applyProductionTheme() {
         QApplication::setStyle("Fusion");
         QPalette pal;
-        const QColor base("#0f1115"), surface("#1d2027"), text("#e6e6e6"),
-                     dim("#9aa0a6"), accent("#1f7a1f");
+        const QColor base("#0b0e0c"), surface("#181e1a"), text("#e8ece9"),
+                     dim("#9aa59d"), accent("#1f8f4e");
         pal.setColor(QPalette::Window,          base);
         pal.setColor(QPalette::WindowText,      text);
         pal.setColor(QPalette::Base,            surface);
@@ -4481,6 +5239,33 @@ private slots:
         QVERIFY(w->healthLabel->isVisibleTo(w));
         w->getRPC()->noConnection();
         QVERIFY(!w->healthLabel->isVisibleTo(w));
+        settleAndDelete(w);
+    }
+
+    // A node that drops must not take the balance off the screen: the last known balance stays,
+    // greyed and dated. A dash only when no balance was ever recorded.
+    void home_lastKnownBalanceStaysWhenTheNodeDrops() {
+        const QStringList keys = { "cache/balShielded", "cache/balTransparent", "cache/balTotal", "cache/lastSyncEpoch" };
+        for (const QString& k : keys) QSettings().remove(k);
+        MainWindow* w = makeWindow();
+        auto* balance = w->findChild<QLabel*>("homeHeroPrivate");
+        auto* total = w->findChild<QLabel*>("homeHeroTotal");
+        auto* note = w->findChild<QLabel*>("homeHeroQualifier");
+        QVERIFY(balance != nullptr && total != nullptr && note != nullptr);
+        w->getRPC()->noConnection();
+        QCOMPARE(balance->text(), QString::fromUtf8("\xE2\x80\x94"));   // nothing recorded: unknown, said as such
+        QVERIFY(note->text().contains("funds are not affected"));
+
+        QSettings().setValue("cache/balShielded", 12.5);
+        QSettings().setValue("cache/balTotal", 15.5);
+        QSettings().setValue("cache/lastSyncEpoch", (qint64) 1700000000);
+        w->getRPC()->noConnection();
+        QVERIFY2(balance->text().startsWith("12.5"), qPrintable(balance->text()));
+        QVERIFY2(total->text().contains("15.5"), qPrintable(total->text()));
+        QVERIFY(note->text().contains("Last known balance, from"));
+        QVERIFY(!note->isHidden());
+        QVERIFY(!balance->property("heroconfident").toBool());   // never the confident green
+        for (const QString& k : keys) QSettings().remove(k);
         settleAndDelete(w);
     }
 

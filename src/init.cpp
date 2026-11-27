@@ -46,6 +46,7 @@
 #include "wallet/sendjournal.h"
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
+#include "wallet/walletphrase.h"
 #endif
 #include <stdint.h>
 #include <stdio.h>
@@ -3543,10 +3544,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
 
         if (!pwalletMain->HaveHDSeed())
-        {
-            // generate a new HD seed
-            pwalletMain->GenerateNewSeed();
-        }
+            pwalletMain->GenerateNewSeed();   // generate a new HD seed
+        KeepKeyPoolOnPhrase(*pwalletMain);   // new receive addresses come from the recovery phrase
 
         if (fFirstRun)
         {

@@ -52,6 +52,7 @@ src/znam/*|src/rpc/znam.cpp	boost:znam_tests boost:zslp_tests
 # ---- wallet (daemon side)
 src/wallet/*|src/coincontrol.h	boost:wallet_tests boost:accounting_tests boost:rpc_wallet_tests gtest:WalletTests gtest:WalletWitnessIndex gtest:WalletTxOrder gtest:StateFixture gtest:WalletOversizeTest gtest:BackupWalletTest gtest:TokenGuardTest gtest:wallet_zkeys_tests
 src/wallet/walletdb.cpp|src/wallet/db.*	qa:qa/rpc-tests/backupwallet_atomic.sh
+src/wallet/phrase.*|src/wallet/walletphrase.*|src/wallet/rpcphrase.cpp|src/wallet/bip39_english.h|src/keystore.*	gtest:wallet_phrase qa:qa/rpc-tests/wallet_recovery_phrase.sh
 
 # ---- data-driven vectors
 src/test/data/*	boost:base58_tests boost:script_tests boost:sighash_tests boost:transaction_tests boost:key_tests boost:zslp_tests boost:znam_tests

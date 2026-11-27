@@ -274,7 +274,7 @@ public:
         translator.load(QString(":/translations/res/zcl_qt_wallet_") + locale);
         a.installTranslator(&translator);
 
-        QIcon icon(":/icons/res/icon.ico");
+        QIcon icon(":/icons/res/icon.png");
         QApplication::setWindowIcon(icon);
 
         // ---- Modern theme (Quiet+ redesign, Phase 1) ----
@@ -296,8 +296,8 @@ public:
         // (tooltips, disabled text, selection) so nothing falls back to a light look.
         {
             QPalette pal;
-            const QColor base("#15171c"), surface("#1d2027"), text("#e6e6e6"),
-                         dim("#9aa0a6"), accent("#1f7a1f");
+            const QColor base("#0b0e0c"), surface("#181e1a"), text("#e8ece9"),
+                         dim("#9aa59d"), accent("#1f8f4e");
             pal.setColor(QPalette::Window,          base);
             pal.setColor(QPalette::WindowText,      text);
             pal.setColor(QPalette::Base,            surface);

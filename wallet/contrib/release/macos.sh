@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-release_version=2.1.2-beta13
+release_version=2.1.2-beta14
 # The native daemon build tree (static-library and exact-build audit) is optional:
 # a CI job that only downloads the daemon artifact has no build tree. Without it
 # the daemon is still pinned by ZCL_DAEMON_SHA256 and the artifact's SOURCE_COMMIT,
@@ -51,7 +51,7 @@ if [ "$audit" = 1 ]; then
         exit 1
     }
 fi
-"$ZCL_DAEMON" --version | grep -F '2.1.2-beta13'
+"$ZCL_DAEMON" --version | grep -F '2.1.2-beta14'
 cp "$ZCL_DAEMON" zclwallet.app/Contents/MacOS/zclassicd
 if [ "$static_qt" = 0 ]; then
     "$qt/bin/macdeployqt" zclwallet.app -verbose=2
@@ -176,7 +176,7 @@ mv zclwallet.app dmg-root/ZclWallet.app
 ln -s /Applications dmg-root/Applications
 output="$root/artifacts/release/zclwallet-v${release_version}-macos-arm64.dmg"
 [ ! -e "$output" ]
-hdiutil create -volname ZClassic-beta13 -srcfolder dmg-root -format UDZO "$output"
+hdiutil create -volname ZClassic-beta14 -srcfolder dmg-root -format UDZO "$output"
 hdiutil verify "$output"
 chmod 644 "$output"
 cd "$root/artifacts/release"

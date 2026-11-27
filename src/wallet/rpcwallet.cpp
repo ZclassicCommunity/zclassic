@@ -30,8 +30,8 @@
 #include "wallet/asyncrpcoperation_mergetoaddress.h"
 #include "wallet/asyncrpcoperation_sendmany.h"
 #include "wallet/asyncrpcoperation_shieldcoinbase.h"
+#include "wallet/rpcwallet.h"
 #include "wallet/sendjournal.h"
-
 #include "sodium.h"
 
 #include <stdint.h>
@@ -5006,6 +5006,6 @@ static const CRPCCommand commands[] =
 
 void RegisterWalletRPCCommands(CRPCTable &tableRPC)
 {
-    for (unsigned int vcidx = 0; vcidx < ARRAYLEN(commands); vcidx++)
-        tableRPC.appendCommand(commands[vcidx].name, &commands[vcidx]);
+    for (unsigned int vcidx = 0; vcidx < ARRAYLEN(commands); vcidx++) tableRPC.appendCommand(commands[vcidx].name, &commands[vcidx]);
+    RegisterPhraseRPCCommands(tableRPC);   // rpcphrase.cpp
 }

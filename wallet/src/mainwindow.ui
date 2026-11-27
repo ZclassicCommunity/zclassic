@@ -15,7 +15,7 @@
   </property>
   <property name="windowIcon">
    <iconset resource="../application.qrc">
-    <normaloff>:/icons/res/icon.ico</normaloff>:/icons/res/icon.ico</iconset>
+    <normaloff>:/icons/res/icon.png</normaloff>:/icons/res/icon.png</iconset>
   </property>
   <widget class="QWidget" name="centralWidget">
    <layout class="QGridLayout" name="gridLayout_3">

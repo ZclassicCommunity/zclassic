@@ -33,6 +33,7 @@ class AddressBook {
 public:    
     // Method that opens the AddressBook dialog window. 
     static void open(MainWindow* parent, QLineEdit* target = nullptr);
+    static int  importFromCsv(QWidget* parent, const std::function<void(const QString&, const QString&)>& add);
 
     static AddressBook* getInstance(); 
     static QString addLabelToAddress(QString addr);

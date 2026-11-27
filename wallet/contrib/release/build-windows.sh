@@ -11,7 +11,7 @@
 #   DAEMON_DIR   reviewed zclassicd.exe, zclassic-cli.exe, zclassic-tx.exe
 #   OUT_DIR      must not exist or be empty
 #
-# Environment: JOBS (default nproc), VERSION (default 2.1.2-beta13), OPENSSL_DIR
+# Environment: JOBS (default nproc), VERSION (default 2.1.2-beta14), OPENSSL_DIR
 # (dir holding libssl-1_1-x64.dll + libcrypto-1_1-x64.dll; default: the Qt
 # installer's Tools/OpenSSL/Win_x64/bin), ALLINONE=1 (also build the variant whose
 # zclwallet.exe carries the daemon in the ZQWDMON1 footer), SKIP_PROBE=1.
@@ -22,7 +22,7 @@ set -eu
 
 [ "$#" -eq 5 ] || { sed -n '2,22p' "$0" >&2; exit 2; }
 QT=$(cygpath -u "$1") MINGW=$(cygpath -u "$2") SODIUM=$(cygpath -u "$3") DAEMONS=$(cygpath -u "$4") OUT=$(cygpath -u "$5")
-VERSION=${VERSION:-2.1.2-beta13}
+VERSION=${VERSION:-2.1.2-beta14}
 JOBS=${JOBS:-$(nproc)}
 NAME=zclwallet-v$VERSION-windows-x86_64
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

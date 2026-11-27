@@ -19,7 +19,7 @@ void FilledIconLabel::resizeEvent(QResizeEvent*) {
     QPixmap scaled = basePm.scaled(sz, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 
     QPixmap p(sz);
-    p.fill(Qt::white);
+    p.fill(Qt::transparent);
     QPainter painter(&p);
     painter.drawPixmap((sz.width() - scaled.width()) / 2, (sz.height() - scaled.height()) / 2, scaled);
     

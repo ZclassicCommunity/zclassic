@@ -227,11 +227,24 @@ QFont PrivacyBadgeDelegate::monoFont() {
     // A fixed-pitch font with tabular figures so amount columns line up. Prefer
     // the platform's canonical monospace; QFontDatabase::systemFont guarantees a
     // real fixed font even on the minimal static bundle / offscreen QPA.
-    QFont f = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    f.setStyleHint(QFont::Monospace);
-    // Tabular figures: keep digit advances equal even in proportional fallbacks.
-    f.setStyleStrategy(QFont::PreferDefault);
-    return f;
+    // Resolved once: this runs on every cell paint.
+    static const QFont resolved = []() {
+        QFont f = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+        // Some desktops report a fixed font Qt cannot resolve and fall back to a
+        // serif face; name a clean sans monospace first when one is installed.
+        const QStringList preferred = {
+            QStringLiteral("DejaVu Sans Mono"), QStringLiteral("Ubuntu Mono"),
+            QStringLiteral("Liberation Mono"), QStringLiteral("Menlo"), QStringLiteral("Consolas") };
+        const QStringList installed = QFontDatabase().families();
+        for (const QString& family : preferred) {
+            if (installed.contains(family)) { f.setFamily(family); break; }
+        }
+        f.setStyleHint(QFont::Monospace);
+        // Tabular figures: keep digit advances equal even in proportional fallbacks.
+        f.setStyleStrategy(QFont::PreferDefault);
+        return f;
+    }();
+    return resolved;
 }
 
 // ---------------------------------------------------------------------------
@@ -261,7 +274,8 @@ void PrivacyBadgeDelegate::paint(QPainter* painter, const QStyleOptionViewItem& 
     }
 
     const bool selected = (opt.state & QStyle::State_Selected);
-    const QRect cell = opt.rect.adjusted(8, 0, -8, 0);   // match qss item padding feel
+    // match qss item padding feel; a subclass may reserve a trailing icon slot
+    const QRect cell = opt.rect.adjusted(8, 0, -8 - _trailingReserve, 0);
 
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing, true);
@@ -390,4 +404,28 @@ QSize PrivacyBadgeDelegate::sizeHint(const QStyleOptionViewItem& option,
         s.setWidth(qMax(s.width(), QFontMetrics(f).horizontalAdvance(t) + 20));
     }
     return s;
+}
+
+// Would paint() cut this address cell's text with "…"? Same geometry as paint():
+// item padding, the reserved trailing slot, then the pill and its gap.
+bool PrivacyBadgeDelegate::addressTextElided(const QStyleOptionViewItem& option,
+                                             const QModelIndex& index) const {
+    const QString rawText = index.data(Qt::DisplayRole).toString();
+    int textLeft = option.rect.left() + 8;
+    const Kind kind = classifyForIndex(index, rawText);
+    if (kind != Kind::None) {
+        QFont pf = option.font;
+        if (pf.pointSizeF() > 0) pf.setPointSizeF(pf.pointSizeF() * 0.82);
+        pf.setBold(true);
+        const QFontMetrics pfm(pf);
+        const int pillH  = qMax(kPillHMin, pfm.height() + 6);
+        const int pillW  = kPillPadH + (pillH - 8) + kIconGap + pfm.horizontalAdvance(labelFor(kind)) + kPillPadH;
+        textLeft += pillW + kPillGap;
+    }
+    const int available = option.rect.right() - 8 - _trailingReserve - textLeft;
+    return QFontMetrics(option.font).horizontalAdvance(rawText) > available;
+}
+
+QString PrivacyBadgeDelegate::addressFromDisplay(const QString& displayText) {
+    return extractAddress(displayText);
 }

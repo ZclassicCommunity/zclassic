@@ -69,9 +69,18 @@ public:
     static QFont   testMonoFont()                                       { return monoFont(); }
 #endif
 
+    // Address column helpers for subclasses that add a trailing icon slot
+    // (AddressCellDelegate): reserve that many px at the right of every cell, ask
+    // whether paint() will cut the text with "…", and recover the bare address.
+    void setTrailingReserve(int px) { _trailingReserve = px; }
+    int  trailingReserve() const    { return _trailingReserve; }
+    bool addressTextElided(const QStyleOptionViewItem& option, const QModelIndex& index) const;
+    static QString addressFromDisplay(const QString& displayText);
+
 private:
 
     Mode _mode;
+    int  _trailingReserve = 0;
 
     // Classify a display string (which may carry an addressbook "label (addr)"
     // suffix) into a badge kind. Prefers Settings::isZAddress/isTAddress/

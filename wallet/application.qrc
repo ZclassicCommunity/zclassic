@@ -9,13 +9,33 @@
         <file>res/connected.gif</file>
         <file>res/loading.gif</file>
         <file>res/icon.ico</file>
+        <file>res/icon.png</file>
         <file>res/icons/shield-lock.svg</file>
         <file>res/icons/eye.svg</file>
         <file>res/icons/eye-off.svg</file>
+        <file>res/icons/nav-home.svg</file>
+        <file>res/icons/nav-send.svg</file>
+        <file>res/icons/nav-receive.svg</file>
+        <file>res/icons/nav-activity.svg</file>
+        <file>res/icons/nav-book.svg</file>
+        <file>res/icons/nav-settings.svg</file>
+        <file>res/icons/nav-backup.svg</file>
+        <file>res/icons/nav-node.svg</file>
+        <file>res/icons/nav-more.svg</file>
+        <file>res/icons/book-light.svg</file>
+        <file>res/icons/copy-light.svg</file>
+        <file>res/icons/key-light.svg</file>
+        <file>res/icons/info-light.svg</file>
+        <file>res/icons/chevron-down.svg</file>
+        <file>res/icons/send-light.svg</file>
+        <file>res/icons/trash-light.svg</file>
+        <file>res/icons/check-green.svg</file>
     </qresource>
     <qresource prefix="/img">
         <file>res/zclassicdlogo.gif</file>
         <file>res/logobig.gif</file>
+        <file>res/zcl-mark.png</file>
+        <file>res/bip39-english.txt</file>
     </qresource>
     <qresource prefix="/translations">
         <file>res/zcl_qt_wallet_es.qm</file>

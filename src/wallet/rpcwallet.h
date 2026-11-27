@@ -8,5 +8,7 @@
 class CRPCTable;
 
 void RegisterWalletRPCCommands(CRPCTable &tableRPC);
+// The recovery phrase RPCs (rpcphrase.cpp); RegisterWalletRPCCommands calls it.
+void RegisterPhraseRPCCommands(CRPCTable &tableRPC);
 
 #endif //BITCOIN_WALLET_RPCWALLET_H

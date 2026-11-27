@@ -52,9 +52,19 @@ SOURCES += \
     ../../src/launchprobe.cpp \
     ../../src/portprobe_win.cpp \
     ../../src/mainwindow.cpp \
+    ../../src/navrail.cpp \
+    ../../src/receivepage.cpp \
     ../../src/rpc.cpp \
     ../../src/balancestablemodel.cpp \
     ../../src/privacybadgedelegate.cpp \
+    ../../src/addresscell.cpp \
+    ../../src/timeformat.cpp \
+    ../../src/settingspage.cpp \
+    ../../src/addressbookpage.cpp \
+    ../../src/phrase.cpp \
+    ../../src/backuppage.cpp \
+    ../../src/backupwiring.cpp \
+    ../../src/homebalance.cpp \
     ../../src/3rdparty/qrcode/BitBuffer.cpp \
     ../../src/3rdparty/qrcode/QrCode.cpp \
     ../../src/3rdparty/qrcode/QrSegment.cpp \
@@ -86,6 +96,10 @@ SOURCES += \
 HEADERS += \
     ../../src/mainwindow.h \
     ../../src/privacybadgedelegate.h \
+    ../../src/addresscell.h \
+    ../../src/timeformat.h \
+    ../../src/phrase.h \
+    ../../src/backuppage.h \
     ../../src/qrcodelabel.h \
     ../../src/fillediconlabel.h \
     ../../src/addresscombo.h \

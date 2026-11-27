@@ -19,11 +19,11 @@
 //! These need to be macros, as clientversion.cpp's and bitcoin*-res.rc's voodoo requires it
 //! Fallback values for builds without config.h (HAVE_CONFIG_H); the autotools
 //! build overrides these from configure.ac. Keep them in sync with configure.ac
-//! (build N renders as "<rev>-beta(N+1)", so beta13 == build 12).
+//! (build N renders as "<rev>-beta(N+1)", so beta14 == build 13).
 #define CLIENT_VERSION_MAJOR 2
 #define CLIENT_VERSION_MINOR 1
 #define CLIENT_VERSION_REVISION 2
-#define CLIENT_VERSION_BUILD 12
+#define CLIENT_VERSION_BUILD 13
 
 //! Set to true for release, false for prerelease or test build
 #define CLIENT_VERSION_IS_RELEASE true

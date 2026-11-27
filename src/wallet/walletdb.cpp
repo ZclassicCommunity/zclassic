@@ -889,7 +889,7 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
 static bool IsKeyType(string strType)
 {
     return (strType== "key" || strType == "wkey" ||
-            strType == "hdseed" || strType == "chdseed" ||
+            strType == "hdseed" || strType == "chdseed" || strType == "retiredseed" ||
             strType == "zkey" || strType == "czkey" ||
             strType == "sapzkey" || strType == "csapzkey" ||
             strType == "vkey" ||
@@ -1339,6 +1339,13 @@ bool CWalletDB::WriteCryptedHDSeed(const uint256& seedFp, const std::vector<unsi
 {
     nWalletDBUpdated++;
     return Write(std::make_pair(std::string("chdseed"), seedFp), vchCryptedSecret);
+}
+
+bool CWalletDB::RetireHDSeed(const HDSeed& seed)
+{
+    nWalletDBUpdated++;
+    return Write(std::make_pair(std::string("retiredseed"), seed.Fingerprint()), seed.RawSeed())
+        && Erase(std::make_pair(std::string("hdseed"), seed.Fingerprint()));
 }
 
 bool CWalletDB::WriteHDChain(const CHDChain& chain)
