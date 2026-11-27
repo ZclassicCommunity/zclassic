@@ -185,7 +185,7 @@ public:
     QPushButton*        receiveTabPublic      = nullptr;
     QPushButton*        receiveTabLegacy      = nullptr;   // only while Sprout funds are held
     QString             unusedTAddress() const;            // a never-used t-addr, or ""
-    // Transparent addresses the node says were ever paid (listreceivedbyaddress 0 true);
+    // Transparent addresses the node says were ever paid (listreceivedbyaddress);
     // not known until the node has answered once.
     void                refreshReceivedTAddresses();
     QSet<QString>       receivedTAddrs;

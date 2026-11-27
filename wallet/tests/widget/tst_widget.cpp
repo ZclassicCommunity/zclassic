@@ -85,6 +85,7 @@
 #include <QSignalSpy>
 
 // PERF harness (perf16/perf22) extra includes.
+#include <QCryptographicHash>
 #include <QElapsedTimer>
 #include <QVector>
 #include <QProcess>
@@ -4104,7 +4105,7 @@ private slots:
                                  {"not_covered", json::array({ OLD.toStdString(), EMPTY.toStdString() })} });
         BackupPage* page = w->backupPage;
         w->ui->tabWidget->setCurrentIndex(w->ui->tabWidget->indexOf(page));
-        QVERIFY(page->findChild<QLabel*>("backupStatus")->text().contains("2 older addresses"));
+        QVERIFY(page->findChild<QLabel*>("backupStatus")->text().contains("1 older address with money"));
         auto* card = page->findChild<QGroupBox*>("notCoveredCard");
         auto* list = page->findChild<QTreeWidget*>("notCoveredList");
         QVERIFY(card->isVisibleTo(w));
@@ -5239,6 +5240,52 @@ private slots:
         QVERIFY(w->healthLabel->isVisibleTo(w));
         w->getRPC()->noConnection();
         QVERIFY(!w->healthLabel->isVisibleTo(w));
+        settleAndDelete(w);
+    }
+
+    // A wallet from the years when the GUI made a transparent key about every block holds tens of
+    // thousands of transparent addresses (53,766 in one real wallet). Opening Receive validated
+    // every one of them: about 1 s the first time and 0.5 s each time after. Bounds are loose
+    // (the fixed page takes a few ms) so a loaded machine does not fail them.
+    static QString fakeTAddr(int i) {
+        QByteArray p; p.append('\x1C'); p.append('\xB8');
+        p += QCryptographicHash::hash(QByteArray::number(i), QCryptographicHash::Sha1);
+        p += QCryptographicHash::hash(QCryptographicHash::hash(p, QCryptographicHash::Sha256), QCryptographicHash::Sha256).left(4);
+        static const char* A = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        std::vector<unsigned char> d(p.size() * 138 / 100 + 1, 0);
+        for (unsigned char byte : p) { int c = byte; for (auto it = d.rbegin(); it != d.rend(); ++it) { c += 256 * (*it); *it = c % 58; c /= 58; } }
+        auto it = d.begin(); while (it != d.end() && *it == 0) ++it;
+        QString s; for (; it != d.end(); ++it) s += QLatin1Char(A[*it]);
+        return s;
+    }
+    void receive_staysFastWithManyTransparentAddresses() {
+        MainWindow* w = makeWindow();
+        const int N = 53766;
+        auto* t = new QList<QString>(); nlohmann::json nc = nlohmann::json::array();
+        for (int i = 0; i < N; ++i) { t->append(fakeTAddr(i)); nc.push_back(t->last().toStdString()); }
+        QVERIFY(Settings::isTAddress(t->first()) && Settings::getInstance()->isValidAddress(t->first()));
+        w->getRPC()->testSetZAddresses(new QList<QString>{ "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u" });
+        w->getRPC()->testSetTAddresses(t);
+        auto* bals = new QMap<QString, double>(); (*bals)[t->at(5)] = 1.0; w->getRPC()->testSetBalances(bals);
+        QElapsedTimer e; e.start();
+        auto lap = [&e](const char* what, qint64 limitMs) {
+            qApp->processEvents();
+            const qint64 ms = e.restart();
+            QVERIFY2(ms < limitMs, qPrintable(QString("%1 took %2 ms").arg(what).arg(ms)));
+        };
+        w->ui->tabWidget->setCurrentIndex(2); lap("open Receive (first)", 250);
+        w->ui->tabWidget->setCurrentIndex(0); lap("back to Home", 250);
+        w->ui->tabWidget->setCurrentIndex(2); lap("open Receive (again)", 150);
+        w->receivedTAddrs = QSet<QString>{ t->at(5) }; w->receivedTAddrsKnown = true;
+        (void)w->unusedTAddress(); lap("unusedTAddress", 150);
+        w->receiveTabPublic->click(); lap("Transparent tab", 250);
+        w->receiveTabPrivate->click(); lap("Private tab", 150);
+        w->refreshReceiveAddressList(); lap("refreshReceiveAddressList", 150);
+        w->applyPhraseInfo(nlohmann::json{ {"available", true}, {"fingerprint", "fp-perf"}, {"not_covered", nc} }); lap("phrase info with 53,766 uncovered addresses", 400);
+        w->ui->tabWidget->setCurrentIndex(w->ui->tabWidget->indexOf(w->backupPage)); lap("open Backup", 250);
+        QVERIFY(w->backupPage->findChild<QLabel*>("backupStatus")->text().contains("1 older address with money"));   // not "53766 older addresses"
+        w->ui->tabWidget->setCurrentIndex(1); lap("open Send", 250);
+        w->ui->tabWidget->setCurrentIndex(3); lap("open Activity", 250);
         settleAndDelete(w);
     }
 

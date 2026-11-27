@@ -378,7 +378,10 @@ void MainWindow::lockUntilConnected() {
             b->setEnabled(true);
             b->setToolTip(b->text().trimmed());
         }
-        refreshPhraseInfo();   // the Backup page and Home reminder learn about the phrase
+        // The Backup page and Home reminder learn about the phrase, a moment later: in a wallet
+        // with tens of thousands of old addresses the node takes about a second to answer and
+        // holds the wallet lock, which would delay the first balance on screen.
+        QTimer::singleShot(2500, this, [this]() { refreshPhraseInfo(); });
         refreshReceivedTAddresses();   // Receive learns which transparent addresses were paid
         waiting->deleteLater();
     });
