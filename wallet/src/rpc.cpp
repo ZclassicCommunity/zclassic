@@ -1582,7 +1582,7 @@ void RPC::refreshAddresses() {
     getTAddresses([=] (json reply) {
         for (auto& it : reply.get<json::array_t>()) {   
             auto addr = QString::fromStdString(it.get<json::string_t>());
-            if (Settings::isTAddress(addr))
+            if (addr.startsWith(QLatin1Char('t')))   // the node only lists its own valid addresses; a checksum per address stalls a 50,000-address wallet
                 taddresses->push_back(addr);
         }
 

@@ -1,7 +1,12 @@
 # ZClassic Wallet and Node
 
-**Beta13 is a new wallet and a new command-line node (both v2.1.2-beta13) for Windows, Linux and macOS.**
-There is no Rust and no libsnark any more: the shielded cryptography is the C23 core in `src/c23`.
+**Beta14 is a wallet update (wallet and command-line node both v2.1.2-beta14) for Windows, Linux and macOS.**
+The wallet has a new look with a side menu, a 24-word recovery phrase that covers every new address,
+and it stays fast in old wallets that hold tens of thousands of addresses. No consensus rule,
+checkpoint or activation height is changed. Details: [beta14 notes](doc/release-notes-beta14.md).
+
+Beta13, the release before it, replaced the node's cryptography:
+there is no Rust and no libsnark any more: the shielded cryptography is the C23 core in `src/c23`.
 Start-up and balance queries are faster, shielded sends use less memory, wallet state survives
 hard kills and chain reorganisations with correct balances, and syncing from genesis works again.
 No consensus rule, checkpoint, activation height or the IBD proof-skip is changed. One owner-approved
@@ -33,13 +38,22 @@ Pre-built release binaries are published on **[GitHub Releases](https://github.c
 
 | Desktop wallets | Download |
 |---|---|
-| Windows x86_64, beta13 single executable (node embedded) | [Windows wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta13/zclwallet-v2.1.2-beta13-win64.exe) |
-| Linux x86_64, glibc 2.31+ and X11/XCB libraries | [Linux wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta13/zclwallet-v2.1.2-beta13-linux-x86_64) |
-| macOS 14+, Apple Silicon | [macOS wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta13/zclwallet-v2.1.2-beta13-macos-arm64.dmg) |
+| Windows x86_64, beta14 single executable (node embedded) | [Windows wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta14/zclwallet-v2.1.2-beta14-win64.exe) |
+| Linux x86_64, glibc 2.31+ and X11/XCB libraries | [Linux wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta14/zclwallet-v2.1.2-beta14-linux-x86_64) |
+| macOS 14+, Apple Silicon | [macOS wallet](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta14/zclwallet-v2.1.2-beta14-macos-arm64.dmg) |
 
-Close your older wallet normally, keep your existing wallet and data directory, and open the beta13 wallet.
+Close your older wallet normally, keep your existing wallet and data directory, and open the beta14 wallet.
 
-What beta13 changes for users (details in the [beta13 notes](doc/release-notes-beta13.md)):
+What beta14 changes for users (details in the [beta14 notes](doc/release-notes-beta14.md)):
+- **Recovery phrase.** The wallet can show 24 words that bring back every address it makes from now on, checks that you wrote them down, and can restore from them. The words work in the ZClassic wallet only, not in other wallet apps. Addresses made before this release, imported keys and Sprout addresses are not covered: the Backup page lists the ones that hold money and helps move it, and a copy of `wallet.dat` still keeps everything.
+- **New look.** A side menu instead of tabs; Receive with Private and Transparent tabs and a list of your addresses; Settings, Address book and Backup as pages; icons with transparent backgrounds.
+- **Your balance stays on screen.** When the node restarts or drops, Home keeps the last known balance, greyed and dated, instead of a dash.
+- **Activity shows older transparent transactions** (up to 1000; it showed only the 10 latest).
+- **Transparent addresses are not reused.** Receive offers an address that was never paid instead of making a new key on every visit.
+- **Fast in old wallets.** In a wallet with 53,766 transparent addresses, opening Receive took about 1 second; it now takes a few milliseconds.
+
+
+What beta13 changed for users (details in the [beta13 notes](doc/release-notes-beta13.md)):
 - No Rust or libsnark; `sprout-proving.key`, libgmp and OpenMP are no longer needed. New Sprout proofs can no longer be created; existing ones are still verified.
 - Proof verification about 2x faster; start-up of a full mainnet node about 24 s to 8 s; `z_getbalance` with 3,252 notes 1.29 s to 0.012 s.
 - Peak memory for a 20-40 note shielded send about 850 MB to about 390 MB.
@@ -55,17 +69,17 @@ Known issue: a pruned node cannot reorganise onto a reconsidered fork more than 
 
 For developers: the source tree has no Python and no hosted CI; the developer tools (`zcl-dev`, `zcl-lint` and others) are written in C. See `AGENTS.md` and `doc/agent/`.
 
-The Windows wallet is one file: run `zclwallet-v2.1.2-beta13-win64.exe`; no installer, no extra DLLs. Windows binaries are unsigned and may trigger SmartScreen ("More info", then "Run anyway"). The Mac wallet and node are ad-hoc signed, not Apple-notarized; they were tested natively on macOS 26 only.
+The Windows wallet is one file: run `zclwallet-v2.1.2-beta14-win64.exe`; no installer, no extra DLLs. Windows binaries are unsigned and may trigger SmartScreen ("More info", then "Run anyway"). The Mac wallet and node are ad-hoc signed, not Apple-notarized; they were tested natively on macOS 26 only.
 
-| Command-line node beta13 | Download |
+| Command-line node beta14 | Download |
 |---|---|
-| Windows x86_64 | [Windows node ZIP](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta13/zclassicd-v2.1.2-beta13-win64.zip) |
-| Linux x86_64, glibc 2.31+ | [Linux node archive](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta13/zclassicd-v2.1.2-beta13-linux-x86_64.tar.gz) |
-| macOS Apple Silicon | [Mac node archive](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta13/zclassicd-v2.1.2-beta13-macos-arm64.tar.gz) |
+| Windows x86_64 | [Windows node ZIP](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta14/zclassicd-v2.1.2-beta14-win64.zip) |
+| Linux x86_64, glibc 2.31+ | [Linux node archive](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta14/zclassicd-v2.1.2-beta14-linux-x86_64.tar.gz) |
+| macOS Apple Silicon | [Mac node archive](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta14/zclassicd-v2.1.2-beta14-macos-arm64.tar.gz) |
 
-See the [release notes](doc/release-notes-beta13.md),
-[checksums](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta13/SHA256SUMS.txt),
-[build record](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta13/BUILDINFO.txt) and [wallet instructions](wallet/README.md). Each node archive contains
+See the [release notes](doc/release-notes-beta14.md),
+[checksums](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta14/SHA256SUMS.txt),
+[build record](https://github.com/ZclassicCommunity/zclassic/releases/download/v2.1.2-beta14/BUILDINFO.txt) and [wallet instructions](wallet/README.md). Each node archive contains
 `zclassicd`, `zclassic-cli` and `zclassic-tx`.
 Back up your wallet before upgrading; do not delete or reindex your data directory.
 

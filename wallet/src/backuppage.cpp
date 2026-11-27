@@ -277,10 +277,22 @@ void BackupPage::updateStatus() {
     }
     const bool written = isWrittenDown(_fingerprint);
     QString text = written ? tr("Written down") : tr("Not written down yet");
-    if (!_notCovered.isEmpty())
-        text += QStringLiteral(" · ") + (_notCovered.size() == 1
-            ? tr("1 older address isn't in it, so keep a wallet.dat copy too.")
-            : tr("%1 older addresses aren't in it, so keep a wallet.dat copy too.").arg(_notCovered.size()));
+    if (!_notCovered.isEmpty()) {
+        // Count the ones that hold money: an old wallet can have tens of thousands of empty
+        // older addresses, and "53766 older addresses" says nothing the user can act on.
+        int funded = 0;
+        bool known = balanceOf != nullptr;
+        for (const QString& addr : _notCovered) {
+            const double bal = balanceOf ? balanceOf(addr) : -1.0;
+            if (bal < 0) { known = false; break; }
+            if (bal > 0) ++funded;
+        }
+        text += QStringLiteral(" · ") + (
+              !known      ? tr("Older addresses aren't in it, so keep a wallet.dat copy too.")
+            : funded == 0 ? tr("Older addresses aren't in it; none of them holds money.")
+            : funded == 1 ? tr("1 older address with money isn't in it, so keep a wallet.dat copy too.")
+            :               tr("%1 older addresses with money aren't in it, so keep a wallet.dat copy too.").arg(funded));
+    }
     _status->setText(text);
     setTone(_status, written ? "ok" : "warn");
 }
