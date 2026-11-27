@@ -2850,7 +2850,7 @@ void MainWindow::setupNetworkHelpPanel() {
         "To also accept incoming connections from other wallets, turn on automatic "
         "port opening below, or forward port "
         "<b>%1</b> to this computer on your router "
-        "(<a href=\"https://portforward.com/\">how do I forward a port?</a>).")
+        "(<a style=\"color:#5fd38d\" href=\"https://portforward.com/\">how do I forward a port?</a>).")
         .arg(Settings::getInstance()->isTestnet() ? 18033 : 8033));
 
     // One-click discoverable front door for the NAT-PMP/PCP auto-port-opening that
@@ -2864,7 +2864,7 @@ void MainWindow::setupNetworkHelpPanel() {
     // enables/disables it honestly each poll (embedded-only, exactly like the
     // Settings chkNatpmp) -- we cannot gate on rpc->isEmbedded() at build time
     // because setupZClassicdTab() runs BEFORE `rpc = new RPC(this)`.
-    netHelpNatpmpChk = new QCheckBox(tr("Help the network — open my port automatically"), netHelpPanel);
+    netHelpNatpmpChk = new QCheckBox(tr("Open my port automatically"), netHelpPanel);
     netHelpNatpmpChk->setChecked(Settings::getInstance()->getOpenPortNatpmp());
     netHelpNatpmpChk->setToolTip(tr("Asks your router to forward this node's port using NAT-PMP/PCP (never UPnP), opening only this node's own port. Takes effect the next time ZclWallet starts its node."));
     QObject::connect(netHelpNatpmpChk, &QCheckBox::toggled, this, [this](bool on) {

@@ -626,3 +626,26 @@ QPlainTextEdit#restorePhrase {
     padding: 6px 8px; font-family: "DejaVu Sans Mono", "Ubuntu Mono", monospace; font-size: 12pt;
 }
 QPlainTextEdit#restorePhrase:focus { border-color: #1f8f4e; }
+
+/* ---- Node page (nodepage.cpp) ---- */
+QScrollArea#nodeScroll, QScrollArea#nodeScroll > QWidget, QWidget#nodeBody { background: transparent; border: none; }
+QFrame#nodeTile {
+    background-color: #121714; border: 1px solid #232b26; border-radius: 14px;
+}
+QLabel#nodeTileCaption { color: #9aa59d; font-size: 11pt; font-weight: 700; }
+QLabel#nodeTileValue, QLabel#nodeTileValueLead { color: #e8ece9; font-size: 18pt; font-weight: 700; }
+QLabel#nodeTileValueLead { color: #5fd38d; }
+QLabel#nodeTileNote { color: #9aa59d; font-size: 11pt; font-weight: 500; }
+QGroupBox QLabel#nodeDim { color: #9aa59d; font-size: 11pt; }
+QGroupBox QLabel#nodeFactName { color: #9aa59d; font-size: 12pt; }
+QGroupBox QLabel#nodeFactValue { color: #e8ece9; font-size: 12pt; font-weight: 600; }
+QGroupBox QLabel#nodeLookupResult { font-size: 12pt; color: #e8ece9; }
+QGroupBox QLabel#nodeLookupResult[tone="warn"] { color: #f0b878; }
+QTreeWidget#nodeBlocks { font-size: 12pt; }
+QFrame#nodeBlockRow { border: none; border-bottom: 1px solid #1c231f; background: transparent; }
+QGroupBox QLabel#nodeBlockHeight { color: #e8ece9; font-size: 13pt; font-weight: 700; }
+QGroupBox QLabel#nodeBlockMeta { color: #c9d1cb; font-size: 12pt; }
+QGroupBox QLabel#nodeBlockHash {
+    color: #9aa59d; font-size: 11pt; font-family: "Consolas", "Menlo", "DejaVu Sans Mono", "Ubuntu Mono", monospace;
+}
+QToolButton#nodeBlockCopy { border: none; background: transparent; padding: 2px; }

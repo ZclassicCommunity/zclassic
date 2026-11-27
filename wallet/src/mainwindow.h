@@ -29,6 +29,7 @@ class QLineEdit;
 class QComboBox;
 class QDialog;
 class BackupPage;
+class NodePage;
 class Ui_Settings;
 
 using json = nlohmann::json;
@@ -331,6 +332,9 @@ public:
     // money the phrase doesn't cover, wallet file and keys). phraseSupported is true
     // once the node answered z_getphraseinfo (older nodes don't have it).
     BackupPage*  backupPage      = nullptr;
+    NodePage*    nodePage        = nullptr;     // nodepage.cpp; built by buildNodePage() (nodewiring.cpp)
+    void         buildNodePage();
+    void         refreshNodePage();
     bool         phraseSupported = false;
     void buildBackupPage();
     void openBackupPage();
