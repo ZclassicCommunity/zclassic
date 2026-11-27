@@ -1723,7 +1723,7 @@ void MainWindow::updateSendPrivacyBadge() {
 
     QString text, tone;
     if (!anyRecipient || tx.fromAddr.isEmpty()) {
-        text = tr("Set who you are paying to see if this send is private");
+        text = tr("Enter who you are paying to see whether this send is private");
         tone = QString();   // neutral
     } else {
         switch (sendCategoryOf(tx)) {

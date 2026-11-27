@@ -3706,6 +3706,35 @@ private slots:
         settleAndDelete(w);
     }
 
+    // Send and Receive with made-up data (capture aid; runs only with ZCL_SHOWCASE_DIR set).
+    void showcase_sendAndReceive() {
+        const QString dir = qEnvironmentVariable("ZCL_SHOWCASE_DIR");
+        if (dir.isEmpty()) QSKIP("set ZCL_SHOWCASE_DIR to capture Send and Receive");
+        QVERIFY(QDir().mkpath(dir));
+        const QString prevSheet = qApp->styleSheet();
+        const QPalette prevPalette = qApp->palette();
+        MainWindow* w = makeWindow();
+        applyProductionTheme();
+        w->show();
+        const QString Z1 = "zs1gv64eu0v2wx7raxqxlmj354y9ycznwaau9kduljzczxztvs4qcl00kn2sjxtejvrxnkucw5xx9u";
+        const QString Z2 = "zs10m00rvkhfm4f7n23e4sxsx275r7ptnggx39ygl0vy46j9mdll5c97gl6dxgpk0njuptg2mn9w5s";
+        w->getRPC()->testSetZAddresses(new QList<QString>{ Z1, Z2 });
+        w->getRPC()->testSetTAddresses(new QList<QString>{ "t1HsdDMzmJfq4vc7T17XYjEkLMLvbgM1fCi" });
+        auto* bals = new QMap<QString, double>(); (*bals)[Z1] = 1250.75; w->getRPC()->testSetBalances(bals);
+        w->ui->inputsCombo->addItem(Z1 + "(1250.75 ZCL)", 1250.75);
+        w->ui->sendAddressBalance->setText("1250.75 ZCL");
+        for (const QSize& size : { QSize(1050, 685), QSize(920, 620), QSize(1400, 900) }) {
+            w->resize(size);
+            w->ui->tabWidget->setCurrentIndex(1); QTest::qWait(250);
+            QVERIFY(w->grab().save(QDir(dir).filePath(QString("21-send-%1x%2.png").arg(size.width()).arg(size.height()))));
+            w->ui->tabWidget->setCurrentIndex(2); QTest::qWait(250);
+            QVERIFY(w->grab().save(QDir(dir).filePath(QString("22-receive-%1x%2.png").arg(size.width()).arg(size.height()))));
+        }
+        settleAndDelete(w);
+        qApp->setStyleSheet(prevSheet);
+        qApp->setPalette(prevPalette);
+    }
+
     // The Node page with made-up data (capture aid; runs only with ZCL_SHOWCASE_DIR set).
     void showcase_nodePage() {
         const QString dir = qEnvironmentVariable("ZCL_SHOWCASE_DIR");

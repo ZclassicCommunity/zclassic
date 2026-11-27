@@ -194,9 +194,9 @@ void MainWindow::layoutReceivePage(QVBoxLayout* groupLayout, QLabel* headline, Q
     subhead->setVisible(false);
     requestCaption->setVisible(false);    // the placeholder says it
     btnReceiveAdvanced->setVisible(false);   // replaced by the tabs
-    txtReceiveAmount->setPlaceholderText(tr("Request amount (optional)"));
+    txtReceiveAmount->setPlaceholderText(tr("Amount (optional)"));
     txtReceiveAmount->setMaximumWidth(260);
-    txtReceiveMemo->setPlaceholderText(tr("Note for the sender (optional)"));
+    txtReceiveMemo->setPlaceholderText(tr("Note (optional)"));
     ui->listRecieveAddresses->setVisible(false);   // the list below is the picker
     ui->lblReceiveAddressCaption->setVisible(false);
     ui->btnRecieveNewAddr->setText(tr("New address"));
@@ -345,7 +345,7 @@ QGroupBox* MainWindow::buildReceiveAddressesCard() {
     box->setSpacing(8);
     auto* hint = new QLabel(tr(
         "Every address of this type in your wallet, including empty ones. Click one to "
-        "show its QR code. Back up again after making new addresses."), receiveAddressesBox);
+        "show its QR code."), receiveAddressesBox);
     hint->setObjectName("lblReceiveListHint");
     hint->setWordWrap(true);
     box->addWidget(hint);
