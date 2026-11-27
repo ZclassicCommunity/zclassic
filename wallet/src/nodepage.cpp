@@ -4,6 +4,7 @@
 #include "nodepage.h"
 
 #include <QDateTime>
+#include <QEvent>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -151,6 +152,11 @@ NodePage::NodePage(QWidget* parent) : QWidget(parent) {
     col->addStretch(1);
 
     scroll->setWidget(body);
+    // Belt and braces: whatever a child widget asks for, the page is never laid out wider
+    // than its view. It scrolls down, never sideways.
+    _view = scroll->viewport();
+    _body = body;
+    _view->installEventFilter(this);
     outer->addWidget(scroll);
     setDisconnected();
 }
@@ -199,6 +205,12 @@ void NodePage::reflow(int tileColumns, bool chartBesideFacts) {
         for (int c = 0; c < 4; ++c) _tilesGrid->setColumnStretch(c, c < tileColumns ? 1 : 0);
     }
     if (_mid) _mid->setDirection(chartBesideFacts ? QBoxLayout::LeftToRight : QBoxLayout::TopToBottom);
+}
+
+bool NodePage::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == _view && event->type() == QEvent::Resize && _body)
+        _body->setMaximumWidth(_view->width());
+    return QWidget::eventFilter(watched, event);
 }
 
 void NodePage::resizeEvent(QResizeEvent* event) {
@@ -426,6 +438,13 @@ void NodePage::setLookupResult(const QString& text, bool found) {
 
 void NodePage::adoptHelpPanel(QWidget* panel) {
     if (panel == nullptr) return;
+    // Its status lines are long sentences set by rpc.cpp. On one line each they set the
+    // minimum width of the whole page (1290 px on a real wallet), which pushed the tiles
+    // and the chart off the right edge: every label in the panel wraps.
+    for (QLabel* label : panel->findChildren<QLabel*>()) {
+        label->setWordWrap(true);
+        label->setMinimumWidth(0);
+    }
     panel->setParent(_helpCard);
     _helpBox->addWidget(panel);
     panel->show();

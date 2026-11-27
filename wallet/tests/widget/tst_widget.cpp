@@ -5328,6 +5328,11 @@ private slots:
 
         // Nothing is cut off at the right edge, at the window's default and smallest sizes.
         auto* scroll = p->findChild<QScrollArea*>("nodeScroll");
+        // The network-help lines as a live node fills them (rpc.cpp): long, and they must wrap. Left on one
+        // line they made the whole page 1290 px wide in a 790 px view on a real wallet.
+        w->netHelpStatusLabel->setText(QString::fromUtf8("P2P: ON · port 8033 · 5 peers (0 inbound)"));
+        w->netHelpReachLabel->setText(QString::fromUtf8("Inbound connections: none yet — automatic port opening is on; "
+            "waiting for the first inbound peer. (If your router doesn't support it, forward port 8033 manually.)"));
         w->setMinimumSize(0, 0);   // a small screen lowers the window's minimum, so go below 920x620 too
         for (const QSize& size : { QSize(640, 480), QSize(680, 480), QSize(800, 560), QSize(920, 620), QSize(1050, 685), QSize(1180, 760), QSize(1400, 900),
                                    QSize(1650, 845), QSize(1920, 1080), QSize(2560, 1440) }) {

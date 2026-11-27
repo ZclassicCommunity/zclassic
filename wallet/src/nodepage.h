@@ -78,6 +78,7 @@ public:
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     QWidget*   buildTiles();
@@ -107,6 +108,8 @@ private:
     QGridLayout* _tilesGrid = nullptr;
     QBoxLayout*  _mid = nullptr;
     QList<QWidget*> _tiles;
+    QWidget*     _view = nullptr;    // the scroll area's viewport
+    QWidget*     _body = nullptr;    // the page inside it
     int          _tileColumns = 0;
 
     int    _height = -1;
