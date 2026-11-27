@@ -5304,7 +5304,7 @@ private slots:
 
         auto facts = [p]() { QStringList f; for (QLabel* l : p->findChildren<QLabel*>("nodeFactValue")) f << l->text(); return f.join('|'); };
         QTRY_VERIFY2_WITH_TIMEOUT(facts().contains("block 4,067,000"), qPrintable(facts()), 8000);   // found by bisection
-        QVERIFY2(facts().contains("0.390625") && facts().contains("2.1.2-beta14") && facts().contains("1234567.89"), qPrintable(facts()));
+        QVERIFY2(facts().contains("0.390625") && facts().contains("2.1.2-beta14") && facts().contains("1,234,567 ZCL"), qPrintable(facts()));
         QTRY_VERIFY_WITH_TIMEOUT(p->findChild<HashrateChart*>("nodeChart")->pointCount() >= 30, 8000);
 
         auto* field = p->findChild<QLineEdit*>("nodeLookup");

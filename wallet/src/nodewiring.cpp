@@ -249,8 +249,8 @@ private:
             facts << qMakePair(tr("Block time"), tr("%1 s lately · target 75 s")
                 .arg(QString::number(_avgSpacing, 'f', 0)));
         if (_sapling >= 0)
-            facts << qMakePair(tr("In private addresses"), Settings::getZCLDisplayFormat(_sapling)
-                + (_sprout > 0 ? tr(" (plus %1 in legacy Sprout)").arg(Settings::getZCLDisplayFormat(_sprout)) : QString()));
+            facts << qMakePair(tr("In private addresses"), tr("%1 ZCL").arg(NodePage::formatCount(qint64(_sapling)))
+                + (_sprout > 0 ? tr(" (plus %1 in legacy Sprout)").arg(tr("%1 ZCL").arg(NodePage::formatCount(qint64(_sprout)))) : QString()));
         if (_mempool >= 0)
             facts << qMakePair(tr("Waiting transactions"), _mempool == 0 ? tr("none") : QString::number(_mempool));
         if (_genesisTime > 0) {
