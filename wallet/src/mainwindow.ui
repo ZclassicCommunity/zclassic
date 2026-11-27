@@ -246,7 +246,7 @@
         <item>
          <widget class="QLabel" name="sendPrivacyBadge">
           <property name="text">
-           <string>Set who you are paying to see if this send is private</string>
+           <string>Enter who you are paying to see whether this send is private</string>
           </property>
           <property name="wordWrap">
            <bool>true</bool>

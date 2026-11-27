@@ -2,7 +2,7 @@
 # Run in Ubuntu 20.04: do not raise the released glibc floor accidentally.
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-release_version=2.1.2-beta14
+release_version=2.1.2-beta15
 cd "$root"
 mkdir -p artifacts/linux-build artifacts/release
 work="$root/artifacts/linux-build"
@@ -52,7 +52,7 @@ cd "$work"
 : "${ZCL_DAEMON_SHA256:?Supply the verified daemon SHA256}"
 daemon="$ZCL_DAEMON"
 printf '%s  %s\n' "$ZCL_DAEMON_SHA256" "$daemon" | sha256sum -c -
-"$daemon" --version | grep -F '2.1.2-beta14'
+"$daemon" --version | grep -F '2.1.2-beta15'
 # Check both executable compatibility floors and document runtime libraries.
 for binary in "$work/gui/zclwallet" "$daemon"; do
     readelf -h "$binary" >/dev/null

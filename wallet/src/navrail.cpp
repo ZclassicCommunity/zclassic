@@ -351,6 +351,11 @@ void MainWindow::tidySendPage() {
     attachAddressInfo(ui->inputsCombo);
     attachAddressScroll(ui->Address1);
     ui->sendTotalsLine->setWordWrap(true);
+    // The Pay from card hugs its two rows instead of taking a share of the page's spare
+    // height, and Add Recipient sits at the left, under the fields it adds to.
+    ui->groupBox_4->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+    ui->horizontalSpacer_2->changeSize(0, 0, QSizePolicy::Fixed, QSizePolicy::Fixed);
+    ui->horizontalLayout_7->invalidate();
 }
 
 // Every recipient row's Pay to field (Send's first row and each added one).

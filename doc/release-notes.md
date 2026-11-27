@@ -143,13 +143,3 @@ Limits on two peer requests
   whitelisted peers are exempt. Neither changes consensus or which blocks and
   transactions are accepted.
 
-Node page in the wallet
------------------------
-
-The wallet's Node page is rebuilt. It showed a logo and three bare rows; it now shows the
-block height with how long ago the last block came, peers (outgoing and incoming), the
-network hashrate and difficulty, a chart of the network hashrate over the last 24 hours,
-the latest blocks with a block lookup by height or hash, and facts read from the node: the
-block reward, the next halving, the recent block time, how much ZCL sits in private
-addresses, waiting transactions, how long the chain has run and the node version. It asks
-the node only while the page is shown, with read-only calls.
