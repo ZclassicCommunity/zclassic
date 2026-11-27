@@ -633,7 +633,7 @@ QFrame#nodeTile {
     background-color: #121714; border: 1px solid #232b26; border-radius: 14px;
 }
 QLabel#nodeTileCaption { color: #9aa59d; font-size: 11pt; font-weight: 700; }
-QLabel#nodeTileValue, QLabel#nodeTileValueLead { color: #e8ece9; font-size: 22pt; font-weight: 700; }
+QLabel#nodeTileValue, QLabel#nodeTileValueLead { color: #e8ece9; font-size: 18pt; font-weight: 700; }
 QLabel#nodeTileValueLead { color: #5fd38d; }
 QLabel#nodeTileNote { color: #9aa59d; font-size: 11pt; font-weight: 500; }
 QGroupBox QLabel#nodeDim { color: #9aa59d; font-size: 11pt; }

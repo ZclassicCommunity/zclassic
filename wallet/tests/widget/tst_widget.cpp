@@ -3722,6 +3722,10 @@ private slots:
         showcaseFillNodePage(w);
         QTest::qWait(300);
         QVERIFY(w->grab().save(QDir(dir).filePath("11-node.png")));
+        w->resize(1050, 685); QTest::qWait(200);
+        QVERIFY(w->grab().save(QDir(dir).filePath("12-node-default-size.png")));
+        w->resize(920, 620); QTest::qWait(200);
+        QVERIFY(w->grab().save(QDir(dir).filePath("13-node-smallest.png")));
         settleAndDelete(w);
         qApp->setStyleSheet(prevSheet);
         qApp->setPalette(prevPalette);
@@ -5311,6 +5315,16 @@ private slots:
         field->setText("notablock");
         p->findChild<QPushButton*>("nodeLookupButton")->click();
         QTRY_VERIFY2_WITH_TIMEOUT(result->text().startsWith("No block found"), qPrintable(result->text()), 5000);
+
+        // Nothing is cut off at the right edge, at the window's default and smallest sizes.
+        auto* scroll = p->findChild<QScrollArea*>("nodeScroll");
+        for (const QSize& size : { QSize(1050, 685), QSize(920, 620), QSize(1400, 900) }) {
+            w->resize(size);
+            QTest::qWait(120);
+            QVERIFY2(scroll->widget()->width() <= scroll->viewport()->width(),
+                     qPrintable(QString("%1x%2: page %3 wider than its view %4").arg(size.width()).arg(size.height())
+                                .arg(scroll->widget()->width()).arg(scroll->viewport()->width())));
+        }
 
         // The network-help panel moved into the page.
         QVERIFY(p->isAncestorOf(w->netHelpPanel));

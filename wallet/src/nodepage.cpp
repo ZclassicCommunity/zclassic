@@ -133,11 +133,11 @@ NodePage::NodePage(QWidget* parent) : QWidget(parent) {
     col->setSpacing(14);
 
     col->addWidget(buildTiles());
-    auto* mid = new QHBoxLayout();
-    mid->setSpacing(14);
-    mid->addWidget(buildChartCard(), 5);
-    mid->addWidget(buildFactsCard(), 4);
-    col->addLayout(mid);
+    _mid = new QBoxLayout(QBoxLayout::LeftToRight);
+    _mid->setSpacing(14);
+    _mid->addWidget(buildChartCard(), 5);
+    _mid->addWidget(buildFactsCard(), 4);
+    col->addLayout(_mid);
     col->addWidget(buildBlocksCard());
 
     _helpCard = new QGroupBox(tr("Your node and the network"), body);
@@ -165,6 +165,7 @@ QWidget* NodePage::makeTile(const QString& caption, QLabel*& value, QLabel*& not
     value->setTextInteractionFlags(Qt::TextSelectableByMouse);
     note = new QLabel(tile);
     note->setObjectName("nodeTileNote");
+    note->setWordWrap(true);   // a long note wraps instead of widening the tile
     v->addWidget(cap);
     v->addWidget(value);
     v->addWidget(note);
@@ -173,15 +174,35 @@ QWidget* NodePage::makeTile(const QString& caption, QLabel*& value, QLabel*& not
 
 QWidget* NodePage::buildTiles() {
     auto* row = new QWidget(this);
-    auto* h = new QHBoxLayout(row);
-    h->setContentsMargins(0, 0, 0, 0);
-    h->setSpacing(14);
-    h->addWidget(makeTile(tr("Block height"), _heightValue, _heightNote), 1);
-    h->addWidget(makeTile(tr("Peers"), _peersValue, _peersNote), 1);
-    h->addWidget(makeTile(tr("Network hashrate"), _rateValue, _rateNote), 1);
-    h->addWidget(makeTile(tr("Difficulty"), _diffValue, _diffNote), 1);
+    _tilesGrid = new QGridLayout(row);
+    _tilesGrid->setContentsMargins(0, 0, 0, 0);
+    _tilesGrid->setSpacing(14);
+    _tiles << makeTile(tr("Block height"), _heightValue, _heightNote)
+           << makeTile(tr("Peers"), _peersValue, _peersNote)
+           << makeTile(tr("Network hashrate"), _rateValue, _rateNote)
+           << makeTile(tr("Difficulty"), _diffValue, _diffNote);
     _heightValue->setObjectName("nodeTileValueLead");
+    reflow(4, true);
     return row;
+}
+
+// A page too narrow for four tiles in a row shows them two by two, and a narrower one puts
+// the facts under the chart, so nothing is cut off at the right edge.
+void NodePage::reflow(int tileColumns, bool chartBesideFacts) {
+    if (tileColumns != _tileColumns) {
+        _tileColumns = tileColumns;
+        for (QWidget* t : _tiles) _tilesGrid->removeWidget(t);
+        for (int i = 0; i < _tiles.size(); ++i) _tilesGrid->addWidget(_tiles.at(i), i / tileColumns, i % tileColumns);
+        for (int c = 0; c < 4; ++c) _tilesGrid->setColumnStretch(c, c < tileColumns ? 1 : 0);
+    }
+    if (_mid) _mid->setDirection(chartBesideFacts ? QBoxLayout::LeftToRight : QBoxLayout::TopToBottom);
+}
+
+void NodePage::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    int fourAcross = 3 * 14 + 24;   // gaps, the scroll bar and its margin
+    for (QWidget* t : _tiles) fourAcross += t->minimumSizeHint().width();
+    reflow(width() >= fourAcross ? 4 : 2, width() >= 880);
 }
 
 QGroupBox* NodePage::buildChartCard() {

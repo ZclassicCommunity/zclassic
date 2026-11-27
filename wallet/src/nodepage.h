@@ -19,6 +19,7 @@
 
 #include <functional>
 
+class QBoxLayout;
 class QGridLayout;
 class QGroupBox;
 class QLabel;
@@ -76,6 +77,9 @@ public:
     static QString formatCount(qint64 n);
     static QString formatAge(qint64 seconds);
 
+protected:
+    void resizeEvent(QResizeEvent* event) override;
+
 private:
     QWidget*   buildTiles();
     QGroupBox* buildChartCard();
@@ -83,6 +87,7 @@ private:
     QGroupBox* buildBlocksCard();
     QWidget*   makeTile(const QString& caption, QLabel*& value, QLabel*& note);
     void       runLookup();
+    void       reflow(int tileColumns, bool chartBesideFacts);
 
     QLabel* _heightValue = nullptr;  QLabel* _heightNote = nullptr;
     QLabel* _peersValue = nullptr;   QLabel* _peersNote = nullptr;
@@ -96,6 +101,10 @@ private:
     QLabel*      _lookupResult = nullptr;
     QGroupBox*   _helpCard = nullptr;
     QVBoxLayout* _helpBox = nullptr;
+    QGridLayout* _tilesGrid = nullptr;
+    QBoxLayout*  _mid = nullptr;
+    QList<QWidget*> _tiles;
+    int          _tileColumns = 0;
 
     int    _height = -1;
     int    _headers = -1;
