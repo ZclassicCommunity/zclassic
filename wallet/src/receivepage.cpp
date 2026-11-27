@@ -43,6 +43,23 @@ bool addressIsKind(const QString& addr, ReceiveKind kind) {
     const bool sapling = Settings::getInstance()->isSaplingAddress(addr);
     return Settings::isZAddress(addr) && (kind == ReceiveKind::Legacy ? !sapling : sapling);
 }
+
+// The wallet's addresses of one kind, each with its balance. The node's lists are already
+// split by type (rpc.cpp keeps only transparent addresses in the t-list), so the private and
+// legacy views never look at the t-list and the transparent view does not validate it again.
+// A wallet can hold tens of thousands of transparent addresses; checking each one's checksum
+// made every visit to the Receive page take half a second.
+QList<QPair<QString, double>> addressesOfKind(RPC* rpc, ReceiveKind kind) {
+    QList<QPair<QString, double>> all;
+    const auto* bals = rpc->getAllBalances();
+    const bool transparent = kind == ReceiveKind::Transparent;
+    const QList<QString>* list = transparent ? rpc->getAllTAddresses() : rpc->getAllZAddresses();
+    if (list == nullptr) return all;
+    all.reserve(list->size());
+    for (const auto& a : *list)
+        if (transparent || addressIsKind(a, kind)) all.append(qMakePair(a, bals ? bals->value(a) : 0.0));
+    return all;
+}
 }   // namespace
 
 // ---- privacy signal ----------------------------------------------------------
@@ -441,18 +458,7 @@ void MainWindow::refreshReceiveAddressList() {
     if (receiveTabPublic && receiveTabPublic->isChecked()) kind = ReceiveKind::Transparent;
     else if (receiveTabLegacy && receiveTabLegacy->isChecked()) kind = ReceiveKind::Legacy;
 
-    const auto* bals = rpc->getAllBalances();
-    QList<QPair<QString, double>> all;
-    // The node's lists are already split by type (rpc.cpp keeps only transparent addresses in
-    // the t-list), so the private and legacy views never look at the t-list and the transparent
-    // view does not validate it again. A wallet can hold tens of thousands of transparent
-    // addresses; checking each one's checksum made every visit to this page take half a second.
-    const bool transparent = kind == ReceiveKind::Transparent;
-    if (const QList<QString>* list = transparent ? rpc->getAllTAddresses() : rpc->getAllZAddresses()) {
-        all.reserve(list->size());
-        for (const auto& a : *list)
-            if (transparent || addressIsKind(a, kind)) all.append(qMakePair(a, bals ? bals->value(a) : 0.0));
-    }
+    const QList<QPair<QString, double>> all = addressesOfKind(rpc, kind);
     const QList<QPair<QString, double>> rows = searchAndSortReceiveRows(all);
     const int pages = qMax(1, (rows.size() + kReceivePageSize - 1) / kReceivePageSize);
     receivePage = qBound(0, receivePage, pages - 1);
