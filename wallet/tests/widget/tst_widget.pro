@@ -65,6 +65,8 @@ SOURCES += \
     ../../src/backuppage.cpp \
     ../../src/backupwiring.cpp \
     ../../src/homebalance.cpp \
+    ../../src/nodepage.cpp \
+    ../../src/nodewiring.cpp \
     ../../src/3rdparty/qrcode/BitBuffer.cpp \
     ../../src/3rdparty/qrcode/QrCode.cpp \
     ../../src/3rdparty/qrcode/QrSegment.cpp \
@@ -100,6 +102,7 @@ HEADERS += \
     ../../src/timeformat.h \
     ../../src/phrase.h \
     ../../src/backuppage.h \
+    ../../src/nodepage.h \
     ../../src/qrcodelabel.h \
     ../../src/fillediconlabel.h \
     ../../src/addresscombo.h \

@@ -108,6 +108,7 @@ void MainWindow::setupNavRail() {
     ui->tabWidget->tabBar()->hide();
     buildAddressBookPage();   // pages like the others, reached from the rail
     buildBackupPage();
+    buildNodePage();
     buildSettingsPage();
     ui->tabWidget->setDocumentMode(true);   // page content sits flush to the rail
 

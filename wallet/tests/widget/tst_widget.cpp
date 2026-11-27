@@ -75,6 +75,7 @@
 #include "timeformat.h"
 #include "phrase.h"
 #include "backuppage.h"
+#include "nodepage.h"
 #include <QPlainTextEdit>
 #include <QMouseEvent>
 #include <QTextDocumentFragment>
@@ -3705,6 +3706,27 @@ private slots:
         settleAndDelete(w);
     }
 
+    // The Node page with made-up data (capture aid; runs only with ZCL_SHOWCASE_DIR set).
+    void showcase_nodePage() {
+        const QString dir = qEnvironmentVariable("ZCL_SHOWCASE_DIR");
+        if (dir.isEmpty()) QSKIP("set ZCL_SHOWCASE_DIR to capture the node page");
+        QVERIFY(QDir().mkpath(dir));
+        const QString prevSheet = qApp->styleSheet();
+        const QPalette prevPalette = qApp->palette();
+        MainWindow* w = makeWindow();
+        applyProductionTheme();
+        w->resize(1180, 1120);
+        w->show();
+        if (w->ui->tabWidget->indexOf(w->zclassicdtab) < 0) w->ui->tabWidget->addTab(w->zclassicdtab, "zclassicd");
+        w->ui->tabWidget->setCurrentIndex(w->ui->tabWidget->indexOf(w->zclassicdtab));
+        showcaseFillNodePage(w);
+        QTest::qWait(300);
+        QVERIFY(w->grab().save(QDir(dir).filePath("11-node.png")));
+        settleAndDelete(w);
+        qApp->setStyleSheet(prevSheet);
+        qApp->setPalette(prevPalette);
+    }
+
     // ---- Showcase: one clean screenshot per screen (capture aid, test data only) ---
     // Runs only with ZCL_SHOWCASE_DIR set; every address and amount here is made up.
     void showcase_screenshots() {
@@ -4430,6 +4452,27 @@ private:
     // Apply the SHIPPED production dark theme (Fusion + dark palette + dark.qss from
     // the qrc) to the running QApplication so grabbed shots match production, not the
     // default light Fusion look. Mirrors src/main.cpp's theme setup.
+    // Made-up node data for showcase_nodePage.
+    void showcaseFillNodePage(MainWindow* w) {
+        if (w->ui->tabWidget->indexOf(w->zclassicdtab) < 0) w->ui->tabWidget->addTab(w->zclassicdtab, "zclassicd");
+        NodePage* p = w->nodePage;
+        const qint64 now = QDateTime::currentSecsSinceEpoch();
+        p->setTip(3333515, 3333515, now - 12, false);
+        p->setPeers(8, 3);
+        p->setHashrate(14536);
+        p->setDifficulty(136.41);
+        QVector<QPair<qint64, double>> series;
+        for (int i = 35; i >= 0; --i) series.append(qMakePair(qint64(i) * 2400, 14000.0 + 2500.0 * std::sin(i / 4.0) + 60.0 * i));
+        p->setHashrateSeries(series);
+        QList<NodeBlockRow> rows;
+        for (int i = 0; i < 6; ++i) { NodeBlockRow r; r.height = 3333515 - i; r.time = now - 12 - i * 74; r.txs = 1 + (i * 3) % 4; r.size = 682 + i * 911;
+            r.hash = QString("00000cd1e4617c38846b455ca57cd11aa74040e26b8a5e552297581d3c10%1").arg(3636 + i); rows.append(r); }
+        p->setBlocks(rows);
+        p->setFacts({ {"Block reward", "0.390625 ZCL"}, {"Next halving", "block 4,067,000 · about 637 days"},
+                      {"Block time", "74 s lately · target 75 s"}, {"In private addresses", "1,234,567.89 ZCL"},
+                      {"Waiting transactions", "none"}, {"Running since", "6 Nov 2016 · 3,672 days"}, {"Node version", "2.1.2-beta14"} });
+    }
+
     void applyProductionTheme() {
         QApplication::setStyle("Fusion");
         QPalette pal;
@@ -5155,6 +5198,48 @@ private:
         }
     };
 
+    // A node that answers what the Node page asks, with the shapes zclassicd gives.
+    class ChainNode : public FakeNode {
+    public:
+        int tip = 3333515;
+        qint64 tipTime = QDateTime::currentSecsSinceEpoch() - 12;
+        int halvingAt = 4067000;
+    protected:
+        nlohmann::json block(int h) const {
+            return {{"hash", QString("00000cd1e4617c38846b455ca57cd11aa74040e26b8a5e552297581d%1").arg(h, 8, 10, QChar('0')).toStdString()},
+                    {"height", h}, {"size", 682 + h % 7}, {"time", tipTime - qint64(tip - h) * 75}, {"difficulty", 134.96},
+                    {"tx", nlohmann::json::array({"aa", "bb"})}};
+        }
+        void handle(const Req& r, QTcpSocket* s) override {
+            if (r.method == "getblockchaininfo") {
+                result(s, {{"chain", "main"}, {"blocks", tip}, {"headers", tip}, {"tiptime", tipTime}, {"difficulty", 136.4069},
+                           {"valuePools", nlohmann::json::array({ {{"id", "sprout"}, {"chainValue", 13164.12}},
+                                                                  {{"id", "sapling"}, {"chainValue", 1234567.89}} })}});
+            } else if (r.method == "getpeerinfo") {
+                nlohmann::json peers = nlohmann::json::array();
+                for (int i = 0; i < 8; ++i) peers.push_back({{"id", i}, {"inbound", i < 3}});
+                result(s, peers);
+            } else if (r.method == "getnetworksolps") {
+                result(s, r.params.size() >= 2 ? 14000 + r.params[1].get<int>() % 900 : 14536);
+            } else if (r.method == "getmempoolinfo") {
+                result(s, {{"size", 4}, {"bytes", 2000}});
+            } else if (r.method == "getnetworkinfo") {
+                result(s, {{"subversion", "/MagicBean:2.1.2-beta14/"}, {"connections", 8}});
+            } else if (r.method == "getblocksubsidy") {
+                const int h = r.params.empty() ? tip : r.params[0].get<int>();
+                result(s, {{"miner", h < halvingAt ? 0.390625 : 0.1953125}, {"founders", 0.0}});
+            } else if (r.method == "getblock") {
+                const QString q = QString::fromStdString(r.params.at(0).get<std::string>());
+                bool isHeight = false;
+                const int h = q.toInt(&isHeight);
+                if (isHeight && h >= 0 && h <= tip) result(s, block(h));
+                else rpcError(s, -8, "Block height out of range");
+            } else {
+                FakeNode::handle(r, s);
+            }
+        }
+    };
+
     static nlohmann::json walletInfoWith(const char* path, nlohmann::json value) {
         nlohmann::json pool = {{"notes_unspent", 3}, {"notes_spent", 9}, {"witness_ready", 3}, {"witness_missing", 0}, {"witness_stale", 0},
                                {"unconfirmed", 0}, {"unmined_dead", 0}, {"witnesses_held_unspent", 3}, {"witnesses_held_spent", 0}};
@@ -5179,6 +5264,59 @@ private:
     }
 
 private slots:
+    // The Node page shows what the node says: height, peers, hashrate, difficulty, the last day's
+    // hashrate, the latest blocks, facts read from the node (reward, the next halving found by
+    // asking), and a block lookup. Nothing is asked while another page is shown.
+    void nodePage_showsWhatTheNodeSays() {
+        ChainNode node;
+        MainWindow* w = makeWindow();
+        w->show();
+        NodePage* p = w->nodePage;
+        QVERIFY(p != nullptr);
+        QVERIFY(w->ui->zclassicdlogo->isHidden() && w->ui->groupBox_5->isHidden());   // the old logo and bare rows are gone
+        installMockConnection(w, node.port());
+        QTRY_VERIFY_WITH_TIMEOUT(w->ui->tabWidget->indexOf(w->zclassicdtab) >= 0, 5000);
+        QTest::qWait(200);
+        QCOMPARE(node.count("getpeerinfo") + node.count("getmempoolinfo") + node.count("getblocksubsidy"), 0);   // page not shown yet
+
+        w->ui->tabWidget->setCurrentIndex(w->ui->tabWidget->indexOf(w->zclassicdtab));
+        auto text = [p](const char* name) { return p->findChild<QLabel*>(name)->text(); };
+        QTRY_COMPARE_WITH_TIMEOUT(text("nodeTileValueLead"), QString("3,333,515"), 5000);
+        QStringList tiles;
+        for (QLabel* l : p->findChildren<QLabel*>("nodeTileValue")) tiles << l->text();
+        QTRY_VERIFY_WITH_TIMEOUT(([&]() { tiles.clear(); for (QLabel* l : p->findChildren<QLabel*>("nodeTileValue")) tiles << l->text();
+                                          return tiles.contains("8") && tiles.contains("14.5 kSol/s") && tiles.contains("136.4"); })(), 5000);
+        QStringList notes;
+        for (QLabel* l : p->findChildren<QLabel*>("nodeTileNote")) notes << l->text();
+        QVERIFY2(notes.join('|').contains("Synced") && notes.join('|').contains("5 outgoing") && notes.join('|').contains("3 incoming"),
+                 qPrintable(notes.join('|')));
+
+        auto* blocks = p->findChild<QTreeWidget*>("nodeBlocks");
+        QTRY_COMPARE_WITH_TIMEOUT(blocks->topLevelItemCount(), 6, 5000);
+        QCOMPARE(blocks->topLevelItem(0)->text(0), QString("3,333,515"));
+        QCOMPARE(blocks->topLevelItem(5)->text(0), QString("3,333,510"));
+        QCOMPARE(blocks->topLevelItem(0)->text(2), QString("2"));
+        QVERIFY(blocks->topLevelItem(0)->text(1).endsWith("s ago"));
+
+        auto facts = [p]() { QStringList f; for (QLabel* l : p->findChildren<QLabel*>("nodeFactValue")) f << l->text(); return f.join('|'); };
+        QTRY_VERIFY2_WITH_TIMEOUT(facts().contains("block 4,067,000"), qPrintable(facts()), 8000);   // found by bisection
+        QVERIFY2(facts().contains("0.390625") && facts().contains("2.1.2-beta14") && facts().contains("1234567.89"), qPrintable(facts()));
+        QTRY_VERIFY_WITH_TIMEOUT(p->findChild<HashrateChart*>("nodeChart")->pointCount() >= 30, 8000);
+
+        auto* field = p->findChild<QLineEdit*>("nodeLookup");
+        auto* result = p->findChild<QLabel*>("nodeLookupResult");
+        field->setText("100");
+        p->findChild<QPushButton*>("nodeLookupButton")->click();
+        QTRY_VERIFY2_WITH_TIMEOUT(result->text().startsWith("Block 100"), qPrintable(result->text()), 5000);
+        field->setText("notablock");
+        p->findChild<QPushButton*>("nodeLookupButton")->click();
+        QTRY_VERIFY2_WITH_TIMEOUT(result->text().startsWith("No block found"), qPrintable(result->text()), 5000);
+
+        // The network-help panel moved into the page.
+        QVERIFY(p->isAncestorOf(w->netHelpPanel));
+        settleAndDelete(w);
+    }
+
     void health_lineAppearsOnlyWhenSomethingNeedsAttention_data() {
         QTest::addColumn<QString>("path");
         QTest::addColumn<QString>("value");     // json text
